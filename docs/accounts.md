@@ -50,26 +50,34 @@ Two things generalise from it:
   uses."* Prose that names a defect is not a defect report. Nothing reads it and
   nothing fails because of it.
 
-The crate splits an account's data into two places with very different
+The crate splits an account's data into three places with very different
 sensitivity:
 
 | what | where | why |
 |---|---|---|
-| the Microsoft **refresh** token | the OS keychain, via [`store`] | it is a long-lived bearer credential; it must never sit on disk as plaintext |
+| the Microsoft **refresh** token | the OS keychain, under `dev.lodestone.ms-refresh-token`, via [`store`] | it is a long-lived bearer credential; it must never sit on disk as plaintext |
+| the derived Minecraft **session** (services access token + profile) | the OS keychain too, under a separate service `dev.lodestone.mc-session`, via [`store::CachedSession`] | also a bearer credential, so the same class of storage as the refresh token — kept under a different service so either can be cleared independently |
 | username, profile UUID, skin URL, last-used time, which account is selected | a plain JSON file, [`metadata`] | an account switcher needs to draw its whole list on every launch, and must not have to unlock the keychain (and potentially prompt the user) just to render a menu |
 
-The Minecraft *services* access token (the JWT actually used to join a
-server) is **not** persisted at all, in either place. It is short-lived
-(~24 h) and cheap to re-derive from the refresh token via
-[`flow::refresh_token`] + [`flow::session_from_ms_token`], so persisting it
-would only be one more place a credential could leak for no benefit.
+The Minecraft *services* access token used to be re-derived from the refresh
+token on **every** join (via [`flow::refresh_token`] +
+[`flow::session_from_ms_token`]) and never persisted — cheap in theory, but
+the refresh token rotates on every redemption, so every join was one more
+chance to orphan the account if the downstream chain failed partway. It is
+now cached ([`store::CachedSession`]) alongside its real expiry (read from
+Mojang's own response, not assumed), and [`login::try_cached_session`]'s fast
+path uses it — and skips redeeming the refresh token altogether — whenever
+it is still valid outside a 5-minute safety margin. See that function's own
+doc for the exact margin/expiry handling.
 
 ## How it works
 
 ### Secrets: `store::AccountSecrets`
 
 [`store::SecretStore`] is a trait — `save_refresh_token`/`load_refresh_token`/
-`delete_refresh_token`, each keyed by the account's profile `Uuid`. Two
+`delete_refresh_token` for the refresh token, and the equivalent
+`save_session`/`load_session`/`delete_session` trio for the cached
+[`store::CachedSession`], each keyed by the account's profile `Uuid`. Two
 implementations:
 
 - [`store::KeychainStore`] — the real backend, a thin wrapper over the
@@ -256,18 +264,26 @@ actually happen.
 connect path would need; [`login`] is that sequence,
 built so nothing in it blocks:
 
-- [`login::try_cached_session`] tries the selected account's cached refresh
-  token. It makes **no network call at all** when there's nothing to try (no
-  selected account, or no stored token for it) — the same "nothing to do,
-  don't touch the network" fast path
-  [`migrate::migrate_legacy_cache`] uses, which is what makes both
+- [`login::try_cached_session`] first checks for a still-valid cached
+  [`store::CachedSession`] (real `expires_at` minus a 5-minute margin,
+  `login::SESSION_EXPIRY_MARGIN_SECS`) and returns it directly when found —
+  **no network call at all**, and critically, the refresh token is not even
+  read, let alone redeemed (redemption rotates it, so skipping it here is a
+  durability win, not just latency). Only when that cache is cold, expired,
+  or unusable does it fall through to the selected account's cached refresh
+  token. That fallback still makes **no network call at all** when there's
+  nothing to try (no selected account, or no stored token for it) — the same
+  "nothing to do, don't touch the network" fast path
+  [`migrate::migrate_legacy_cache`] uses, which is what makes all of this
   hermetically testable. A transport/parse failure while refreshing is
   propagated rather than silently treated as "no cached token" — if Microsoft
   is unreachable, starting an interactive flow won't fare any better either,
   and hiding that behind a prompt the user also can't complete would be worse
   than just saying so. Only [`AuthError::RefreshTokenInvalid`] (OAuth's
   `invalid_grant` — the token itself is dead, not the network) becomes "no
-  cached token, go interactive."
+  cached token, go interactive." A successful redemption (or a fresh
+  [`login::finish_interactive`] sign-in) writes the derived session back to
+  the cache before returning, so the *next* join takes the fast path above.
 - If that returns either non-`Ready` outcome — `NoAccountSelected` or
   `SessionExpired` — the caller starts an interactive
   device-code login the existing way (`flow::PendingLogin::begin`, already
@@ -469,6 +485,18 @@ That last link is the owner's own interactive check, against a real online-mode
 server with the account signed in. No test in this repo may reach
 `sessionserver.mojang.com`, and none does.
 
+**Also unverified for the same reason: the join-before-key packet ordering**
+in `lodestone-client::driver::Driver::begin_encryption` (`join_server` must
+complete before the `EncryptionResponse`/key packet is sent, matching
+`ClientHandshakePacketListenerImpl.handleHello` — see that function's own doc
+for why sending the key packet first races our `join_server` POST against a
+hosting server's own `hasJoined` check and is what `velocity.error.online-mode-only`
+actually is). A live gate for it needs a real authenticated session, i.e. the
+same `LODESTONE_MS_CLIENT_ID` gap above, plus a running online-mode server —
+neither was available in the environment that last touched this doc. The fix
+itself is grounded in reading both sides of the vanilla handshake source
+directly, not in a live capture.
+
 ## The account list screen
 
 `crates/lodestone-shell/src/menu/accounts.rs`'s `AccountsNav` draws the account
@@ -560,10 +588,12 @@ own doc comment.
 
 - `LODESTONE_DATA_DIR` — overrides the whole data directory (same variable
   `lodestone-shell` reads), which moves `profiles.json` too.
-- No environment variable controls the keychain *service name* — it is the
-  constant `"dev.lodestone.ms-refresh-token"` in `store.rs`. Changing it
-  orphans any already-stored tokens (they'd sit under the old service name);
-  treat it like a schema version.
+- No environment variable controls either keychain *service name* — the
+  refresh token's is the constant `"dev.lodestone.ms-refresh-token"` in
+  `store.rs`, and the cached session's is `"dev.lodestone.mc-session"`, right
+  beside it. Changing either orphans whatever is already stored under the old
+  name (refresh tokens and cached sessions independently, since they are
+  different services); treat either like a schema version.
 - `RUST_LOG`/`tracing-subscriber` filtering controls whether the
   `AccountSecrets::open()` fallback warning and the migration `info!` line
   are visible — nothing here is gated behind a separate flag.
@@ -613,6 +643,7 @@ own doc comment.
 [`store::MemoryStore`]: ../crates/lodestone-auth/src/store.rs
 [`store::AccountSecrets`]: ../crates/lodestone-auth/src/store.rs
 [`store::StorageMode`]: ../crates/lodestone-auth/src/store.rs
+[`store::CachedSession`]: ../crates/lodestone-auth/src/store.rs
 [`metadata`]: ../crates/lodestone-auth/src/metadata.rs
 [`metadata::AccountProfile`]: ../crates/lodestone-auth/src/metadata.rs
 [`metadata::AccountsMetadata`]: ../crates/lodestone-auth/src/metadata.rs
@@ -622,6 +653,7 @@ own doc comment.
 [`paths::legacy_token_cache_path()`]: ../crates/lodestone-auth/src/paths.rs
 [`login`]: ../crates/lodestone-auth/src/login.rs
 [`login::try_cached_session`]: ../crates/lodestone-auth/src/login.rs
+[`login::SESSION_EXPIRY_MARGIN_SECS`]: ../crates/lodestone-auth/src/login.rs
 [`login::finish_interactive`]: ../crates/lodestone-auth/src/login.rs
 [`login::resolve_client_id`]: ../crates/lodestone-auth/src/login.rs
 [`XstsErrorKind`]: ../crates/lodestone-auth/src/error.rs

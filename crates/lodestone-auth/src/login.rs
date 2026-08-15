@@ -17,7 +17,30 @@
 use crate::error::{AuthError, Result};
 use crate::flow::{self, MsToken, Session};
 use crate::metadata::{AccountProfile, AccountsMetadata};
-use crate::store::SecretStore;
+use crate::migrate::unix_now;
+use crate::store::{CachedSession, SecretStore};
+
+/// Slack subtracted from a cached session's real `expires_at` when deciding
+/// whether it is still usable, so a token that would expire *during* the
+/// join that follows (the encryption handshake, then the session-server
+/// `join` call) is not handed out as if it were good. 5 minutes is a chosen
+/// safety margin, not a spec value or a measurement — Mojang publishes no
+/// guidance on how long a join can take — sized to comfortably outlast that
+/// handful of round trips on a slow connection while staying a small
+/// fraction of the token's real ~24h lifetime, so it costs almost none of
+/// the cache's usefulness.
+const SESSION_EXPIRY_MARGIN_SECS: u64 = 5 * 60;
+
+/// The pure decision behind the fast path in [`try_cached_session`]: is
+/// `expires_at` still usable at `now`, once [`SESSION_EXPIRY_MARGIN_SECS`] is
+/// subtracted? Split out (same reasoning as [`resolve_client_id_from`]) so
+/// the exact boundary — is equality inside or outside the margin? — is
+/// tested against synthetic timestamps rather than the real wall clock,
+/// which this repo's own evidence standards flag as an unreliable thing to
+/// assert an exact instant against.
+fn session_is_still_usable(expires_at: u64, now: u64) -> bool {
+    expires_at > now.saturating_add(SESSION_EXPIRY_MARGIN_SECS)
+}
 
 /// The environment variable naming this build's registered Azure public-client
 /// id.
@@ -65,8 +88,13 @@ fn resolve_client_id_from(value: Option<&std::ffi::OsStr>) -> Result<String> {
 /// different values. A caller that genuinely does not care can match both arms.
 #[derive(Debug)]
 pub enum CachedSessionOutcome {
-    /// A cached refresh token was silently refreshed into a usable session.
-    /// The rotated refresh token has already been written back to `secrets`.
+    /// A usable session, reached one of two ways: a still-valid cached
+    /// [`crate::store::CachedSession`] (no network call at all — see the
+    /// fast path at the top of [`try_cached_session`]), or, when that cache
+    /// was cold/expired/unusable, a fresh refresh-token redemption through
+    /// the full XBL/XSTS/Mojang-login/profile chain. In the latter case the
+    /// rotated refresh token and the newly-derived session have both already
+    /// been written back to `secrets` before this is returned.
     Ready(Session),
     /// [`AccountsMetadata::selected`] is `None` — there is no account to try,
     /// and **no network call was made**. The remedy is a first interactive
@@ -132,6 +160,54 @@ pub async fn try_cached_session(
         .iter()
         .find(|p| p.profile_id == profile_id)
         .map(|p| p.username.clone());
+
+    // Fast path: a still-valid cached session skips the refresh-token
+    // redemption *and* the whole XBL/XSTS/Mojang-login/profile chain below —
+    // no network call at all. This is the durability win, not just a
+    // latency one: the refresh token rotates every time it is redeemed, so
+    // avoiding a redemption whenever the cached access token is still good
+    // means normal play redeems it far less often, which is strictly safer
+    // against the orphaning failure mode `try_cached_session`'s doc above
+    // already guards (a redemption whose downstream chain then fails).
+    match secrets.load_session(profile_id) {
+        Ok(Some(cached)) if session_is_still_usable(cached.expires_at, unix_now()) => {
+            if let Some(session) = cached.to_session() {
+                return Ok(CachedSessionOutcome::Ready(session));
+            }
+            // `to_session` only fails on a corrupt `profile_id`, which
+            // `KeychainStore::load_session` cannot itself detect (it only
+            // sees a JSON parse succeed or fail) — this is the one
+            // corruption shape that gets past deserialisation and must be
+            // caught here instead. Degrade visibly and fall through to a
+            // full sign-in rather than propagating an error that would
+            // block the join.
+            tracing::warn!(
+                target: "auth",
+                profile = %profile_id,
+                "cached session for this profile had an unparseable profile id; \
+                 re-running the full sign-in chain"
+            );
+        }
+        Ok(Some(_)) => {
+            tracing::debug!(
+                target: "auth",
+                profile = %profile_id,
+                margin_secs = SESSION_EXPIRY_MARGIN_SECS,
+                "cached Minecraft session is within its expiry margin; \
+                 redeeming the refresh token and re-running the chain"
+            );
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(
+                target: "auth",
+                profile = %profile_id,
+                error = %e,
+                "could not read the cached session; re-running the full sign-in chain"
+            );
+        }
+    }
+
     let Some(refresh) = secrets.load_refresh_token(profile_id)? else {
         return Ok(CachedSessionOutcome::SessionExpired {
             profile_id,
@@ -160,6 +236,21 @@ pub async fn try_cached_session(
             // something else.
             secrets.save_refresh_token(profile_id, &ms_token.refresh_token)?;
             let session = flow::session_from_ms_token(client, &ms_token.access_token).await?;
+            // Cache the derived session so the *next* join can take the fast
+            // path above and skip this whole chain (and the refresh-token
+            // redemption that gated it) entirely. Best-effort: a failure to
+            // cache must not fail a join that otherwise succeeded — it only
+            // means the next join redeems the refresh token again, which is
+            // exactly today's behaviour.
+            if let Err(e) = secrets.save_session(profile_id, &CachedSession::from_session(&session)) {
+                tracing::warn!(
+                    target: "auth",
+                    profile = %profile_id,
+                    error = %e,
+                    "could not cache the derived session; the next join will redeem the \
+                     refresh token again"
+                );
+            }
             Ok(CachedSessionOutcome::Ready(session))
         }
         Err(AuthError::RefreshTokenInvalid) => Ok(CachedSessionOutcome::SessionExpired {
@@ -299,6 +390,18 @@ pub async fn finish_interactive(
 ) -> Result<Session> {
     let session = flow::session_from_ms_token(client, &ms_token.access_token).await?;
     secrets.save_refresh_token(session.profile.id, &ms_token.refresh_token)?;
+    // Same best-effort cache write as `try_cached_session`'s refresh arm, so
+    // an account's very first join after signing in already leaves a warm
+    // cache behind for the second one.
+    if let Err(e) = secrets.save_session(session.profile.id, &CachedSession::from_session(&session)) {
+        tracing::warn!(
+            target: "auth",
+            profile = %session.profile.id,
+            error = %e,
+            "could not cache the derived session; the next join will redeem the refresh \
+             token again"
+        );
+    }
     metadata.upsert(AccountProfile {
         profile_id: session.profile.id,
         username: session.profile.name.clone(),
@@ -472,15 +575,227 @@ mod tests {
         assert_eq!(account, id.to_string());
     }
 
-    /// The remainder — a stored token actually being refreshed, and
-    /// `finish_interactive`'s full chain — needs a live Microsoft token and
-    /// is, like the rest of `flow.rs`, exercised only by the live gate in
+    /// What remains unverified without a live account: a stored refresh
+    /// token actually being *redeemed* (the `flow::refresh_token` /
+    /// `flow::session_from_ms_token` HTTP chain itself), and
+    /// `finish_interactive`'s full chain. Both are, like the rest of
+    /// `flow.rs`, exercised only by the live gate in
     /// `tests/device_code_live.rs`. Present so the gap shows up in `cargo
     /// test` output rather than silently.
     ///
-    /// `resolve_selected_account`'s `Online` arm is in that same set: producing
-    /// it requires a real refresh token for a real Microsoft account that owns
-    /// Minecraft, so no hermetic test in this crate can reach it.
+    /// The *cache-hit* path — a still-valid `CachedSession` short-circuiting
+    /// both of those — is **not** in this gap any more: it needs no network
+    /// at all and is covered by the tests below.
     #[test]
-    fn the_refresh_and_interactive_completion_paths_are_unverified_without_live_credentials() {}
+    fn the_refresh_redemption_and_interactive_completion_paths_are_unverified_without_live_credentials(
+    ) {
+    }
+
+    // -- session cache: the fast path in `try_cached_session` --------------
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Wraps a [`MemoryStore`] and counts calls to `load_refresh_token` —
+    /// the operation that gates redeeming the refresh token (and therefore
+    /// the whole downstream network chain). A test asserting "no network
+    /// call happened" is only as good as evidence the counter would have
+    /// caught one; this is that evidence, not an inference from "the test
+    /// didn't hang".
+    #[derive(Debug, Default)]
+    struct CountingStore {
+        inner: MemoryStore,
+        load_refresh_calls: AtomicUsize,
+    }
+
+    impl CountingStore {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn load_refresh_calls(&self) -> usize {
+            self.load_refresh_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl SecretStore for CountingStore {
+        fn save_refresh_token(&self, profile: uuid::Uuid, token: &str) -> Result<()> {
+            self.inner.save_refresh_token(profile, token)
+        }
+
+        fn load_refresh_token(&self, profile: uuid::Uuid) -> Result<Option<String>> {
+            self.load_refresh_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.load_refresh_token(profile)
+        }
+
+        fn delete_refresh_token(&self, profile: uuid::Uuid) -> Result<()> {
+            self.inner.delete_refresh_token(profile)
+        }
+
+        fn save_session(&self, profile: uuid::Uuid, session: &CachedSession) -> Result<()> {
+            self.inner.save_session(profile, session)
+        }
+
+        fn load_session(&self, profile: uuid::Uuid) -> Result<Option<CachedSession>> {
+            self.inner.load_session(profile)
+        }
+
+        fn delete_session(&self, profile: uuid::Uuid) -> Result<()> {
+            self.inner.delete_session(profile)
+        }
+    }
+
+    fn cached_session_for(id: uuid::Uuid, expires_at: u64) -> CachedSession {
+        CachedSession::from_session(&Session {
+            access_token: "cached-mc-access-token".to_owned(),
+            profile: flow::Profile {
+                name: "Alice".to_owned(),
+                id,
+                skin: None,
+            },
+            expires_at,
+        })
+    }
+
+    fn selected(id: uuid::Uuid) -> AccountsMetadata {
+        let mut metadata = AccountsMetadata::default();
+        metadata.upsert(AccountProfile {
+            profile_id: id,
+            username: "Alice".to_owned(),
+            skin_url: None,
+            last_used: 0,
+        });
+        metadata.selected = Some(id);
+        metadata
+    }
+
+    /// The core durability + latency claim: a cached session comfortably
+    /// past the expiry margin is returned as `Ready` *and*
+    /// `load_refresh_token` is never called — proven by a counter, not by
+    /// the absence of a hang. Deliberately seeds **no** refresh token at
+    /// all: if the fast path failed to short-circuit, `load_refresh_token`
+    /// would return `None` and this would observably become
+    /// `SessionExpired` instead of `Ready`, so the wrong hypothesis is
+    /// falsifiable here, not just untested.
+    #[tokio::test]
+    async fn a_warm_cache_returns_ready_and_never_touches_the_refresh_token_store() {
+        crate::install_crypto_provider();
+        let client = reqwest::Client::new();
+        let id = uuid::Uuid::new_v4();
+        let store = CountingStore::new();
+        store
+            .save_session(id, &cached_session_for(id, unix_now() + 10_000))
+            .unwrap();
+
+        let outcome = try_cached_session(&client, "test-client-id", &store, &selected(id))
+            .await
+            .unwrap();
+        let CachedSessionOutcome::Ready(session) = outcome else {
+            panic!("expected Ready from a warm cache, got {outcome:?}");
+        };
+        assert_eq!(session.access_token, "cached-mc-access-token");
+        assert_eq!(
+            store.load_refresh_calls(),
+            0,
+            "a warm cache must never read the refresh-token store"
+        );
+    }
+
+    /// The first-join control for the test above: with **no** cache at all,
+    /// the same call must fall through and the counter must move — proving
+    /// the counter is actually capable of observing a call, not merely
+    /// reading zero because it never runs.
+    #[tokio::test]
+    async fn an_absent_cache_falls_through_and_the_counter_proves_it_moved() {
+        crate::install_crypto_provider();
+        let client = reqwest::Client::new();
+        let id = uuid::Uuid::new_v4();
+        let store = CountingStore::new();
+
+        let outcome = try_cached_session(&client, "test-client-id", &store, &selected(id))
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, CachedSessionOutcome::SessionExpired { .. }),
+            "no cache and no refresh token must be SessionExpired, got {outcome:?}"
+        );
+        assert_eq!(
+            store.load_refresh_calls(),
+            1,
+            "an absent cache must fall through to the refresh-token store exactly once"
+        );
+    }
+
+    /// A cached session inside the expiry margin is unusable and must fall
+    /// through exactly like the absent-cache case — the margin exists
+    /// precisely to make this arm unreachable near expiry.
+    #[tokio::test]
+    async fn a_cached_session_inside_the_margin_falls_through_like_no_cache_at_all() {
+        crate::install_crypto_provider();
+        let client = reqwest::Client::new();
+        let id = uuid::Uuid::new_v4();
+        let store = CountingStore::new();
+        // 60s from now, well inside the 5-minute margin.
+        store
+            .save_session(id, &cached_session_for(id, unix_now() + 60))
+            .unwrap();
+
+        let outcome = try_cached_session(&client, "test-client-id", &store, &selected(id))
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, CachedSessionOutcome::SessionExpired { .. }),
+            "a within-margin cache must not be used, got {outcome:?}"
+        );
+        assert_eq!(store.load_refresh_calls(), 1);
+    }
+
+    /// A cached session with an unparseable `profile_id` degrades to "no
+    /// usable cache" rather than propagating an error that would block the
+    /// join — the corruption shape `CachedSession::to_session` returns
+    /// `None` for.
+    #[tokio::test]
+    async fn a_cached_session_with_a_corrupt_profile_id_degrades_and_falls_through() {
+        crate::install_crypto_provider();
+        let client = reqwest::Client::new();
+        let id = uuid::Uuid::new_v4();
+        let store = CountingStore::new();
+        let mut corrupt = cached_session_for(id, unix_now() + 10_000);
+        corrupt.profile_id = "not-a-uuid".to_owned();
+        store.save_session(id, &corrupt).unwrap();
+
+        let outcome = try_cached_session(&client, "test-client-id", &store, &selected(id))
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, CachedSessionOutcome::SessionExpired { .. }),
+            "a corrupt cached profile id must degrade to falling through, got {outcome:?}"
+        );
+        assert_eq!(store.load_refresh_calls(), 1, "the degradation must still reach the refresh-token store");
+    }
+
+    /// The pure boundary decision, tested against synthetic timestamps
+    /// rather than the real wall clock — this repo's evidence standards
+    /// flag exact-instant wall-clock assertions as unreliable, and the
+    /// inclusive/exclusive question at the boundary is exactly the kind of
+    /// off-by-one a synthetic input can pin down where a live clock cannot.
+    #[test]
+    fn the_margin_boundary_is_exclusive() {
+        let now = 1_700_000_000_u64;
+        assert!(
+            !session_is_still_usable(now + SESSION_EXPIRY_MARGIN_SECS, now),
+            "expiring exactly at the margin must not count as usable"
+        );
+        assert!(
+            session_is_still_usable(now + SESSION_EXPIRY_MARGIN_SECS + 1, now),
+            "one second past the margin must count as usable"
+        );
+        assert!(
+            !session_is_still_usable(now, now),
+            "already expired must not count as usable"
+        );
+        assert!(
+            !session_is_still_usable(0, now),
+            "a zero/epoch expiry (never cached) must not count as usable"
+        );
+    }
 }

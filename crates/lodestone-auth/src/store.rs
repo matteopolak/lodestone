@@ -1,11 +1,19 @@
-//! Where the Microsoft **refresh** token actually lives (issue #64).
+//! Where the Microsoft **refresh** token, and the session derived from it,
+//! actually live (issue #64, extended for the session cache below).
 //!
-//! The Minecraft services access token is short-lived (~24 h) and is always
-//! re-derived from the refresh token via [`crate::flow::refresh_token`] +
-//! [`crate::flow::session_from_ms_token`] — it is never persisted. Only the
-//! refresh token needs long-term storage, and it goes into the real OS
-//! credential store: macOS Keychain, Windows Credential Manager, or a Linux
-//! Secret Service keyring, all behind the `keyring` crate's `Entry` type.
+//! The Minecraft services access token is short-lived (its real lifetime
+//! comes back with it — see [`crate::flow::Session::expires_at`] — typically,
+//! but not assumed to always be, ~24h) and was previously re-derived from the
+//! refresh token via [`crate::flow::refresh_token`] +
+//! [`crate::flow::session_from_ms_token`] on *every* join, never persisted.
+//! It now is: [`CachedSession`] holds it (plus the profile it belongs to),
+//! keyed the same way the refresh token is, so a join with a still-valid
+//! cache skips that whole chain — and the refresh-token redemption that used
+//! to gate it — entirely. Both go into the real OS credential store: macOS
+//! Keychain, Windows Credential Manager, or a Linux Secret Service keyring,
+//! all behind the `keyring` crate's `Entry` type, under two separate
+//! services ([`KEYCHAIN_SERVICE`] and [`SESSION_KEYCHAIN_SERVICE`]) so either
+//! can be cleared independently.
 //!
 //! Entries are keyed by **profile UUID** (`docs/accounts.md`), one credential
 //! per Microsoft account, so multiple accounts coexist — the whole point of
@@ -47,16 +55,122 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::Result;
 
-/// The keychain "service" every entry is grouped under; the per-entry
-/// "account" (in Keychain Access's terminology) is the profile UUID. Using a
-/// reverse-DNS-shaped constant, rather than a bare name like `"lodestone"`,
-/// keeps this from colliding with an unrelated app's entries on a shared
-/// Secret Service keyring.
+/// The keychain "service" every refresh-token entry is grouped under; the
+/// per-entry "account" (in Keychain Access's terminology) is the profile
+/// UUID. Using a reverse-DNS-shaped constant, rather than a bare name like
+/// `"lodestone"`, keeps this from colliding with an unrelated app's entries
+/// on a shared Secret Service keyring.
 const KEYCHAIN_SERVICE: &str = "dev.lodestone.ms-refresh-token";
+
+/// The keychain "service" cached-session entries are grouped under —
+/// deliberately a separate service from [`KEYCHAIN_SERVICE`] rather than a
+/// second entry under the same one, so the refresh token and the derived
+/// session can be cleared independently (e.g. a corrupt cached session must
+/// not take the refresh token down with it when deleted).
+const SESSION_KEYCHAIN_SERVICE: &str = "dev.lodestone.mc-session";
+
+/// A cached, already-derived Minecraft session — the product of
+/// `crate::login::try_cached_session`'s XBL -> XSTS -> Minecraft-services ->
+/// profile chain, persisted so a join with a still-valid cache can skip that
+/// whole chain, *and* the refresh-token redemption that gates it.
+///
+/// `access_token` is a bearer credential exactly like the Microsoft refresh
+/// token it is derived from, so it lives in the same class of storage (the OS
+/// keychain via [`KeychainStore`]/[`AccountSecrets`]) rather than a plaintext
+/// file — see `crate::cache`'s module doc for why that plaintext path is
+/// legacy and must not be resurrected for this either.
+///
+/// The profile fields duplicate what `crate::metadata::AccountsMetadata`
+/// already knows, on purpose: a cache hit reconstructs a full
+/// `crate::flow::Session` ([`Self::to_session`]) without depending on
+/// `profiles.json` staying in sync, or existing at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedSession {
+    /// The Minecraft services access token.
+    pub access_token: String,
+    /// Unix timestamp (seconds) this token stops being valid — copied
+    /// straight from [`crate::flow::Session::expires_at`], which is itself
+    /// read from Mojang's real response, never invented here.
+    pub expires_at: u64,
+    /// [`crate::flow::Profile::id`], stored as text: `keyring`'s backend and
+    /// `serde_json` both want a plain string, and round-tripping through
+    /// `Uuid`'s `Display`/`FromStr` needs no extra dependency on this crate's
+    /// `uuid` feature set (which does not enable `serde`).
+    pub profile_id: String,
+    /// [`crate::flow::Profile::name`].
+    pub profile_name: String,
+    /// [`crate::flow::ProfileSkin::url`], if the profile has an active skin.
+    pub skin_url: Option<String>,
+    /// `"Classic"` or `"Slim"` — [`crate::flow::SkinVariant`] spelled as a
+    /// plain string for the same reason `profile_id` is: kept independent of
+    /// `serde` support on `flow`'s own types, which exist for the network
+    /// wire, not for this cache.
+    pub skin_variant: Option<String>,
+}
+
+impl CachedSession {
+    /// Captures a derived [`crate::flow::Session`] as a storable value.
+    #[must_use]
+    pub fn from_session(session: &crate::flow::Session) -> Self {
+        Self {
+            access_token: session.access_token.clone(),
+            expires_at: session.expires_at,
+            profile_id: session.profile.id.to_string(),
+            profile_name: session.profile.name.clone(),
+            skin_url: session.profile.skin.as_ref().map(|s| s.url.clone()),
+            skin_variant: session
+                .profile
+                .skin
+                .as_ref()
+                .map(|s| skin_variant_tag(s.variant).to_owned()),
+        }
+    }
+
+    /// The inverse of [`Self::from_session`]. `None` only if `profile_id` is
+    /// not a valid UUID — corruption to be treated as "no usable cache",
+    /// never a panic; a caller degrades to redoing the full sign-in chain.
+    #[must_use]
+    pub fn to_session(&self) -> Option<crate::flow::Session> {
+        let id = Uuid::parse_str(&self.profile_id).ok()?;
+        let skin = self.skin_url.clone().map(|url| crate::flow::ProfileSkin {
+            url,
+            variant: self
+                .skin_variant
+                .as_deref()
+                .map(skin_variant_from_tag)
+                .unwrap_or(crate::flow::SkinVariant::Classic),
+        });
+        Some(crate::flow::Session {
+            access_token: self.access_token.clone(),
+            profile: crate::flow::Profile {
+                name: self.profile_name.clone(),
+                id,
+                skin,
+            },
+            expires_at: self.expires_at,
+        })
+    }
+}
+
+fn skin_variant_tag(variant: crate::flow::SkinVariant) -> &'static str {
+    match variant {
+        crate::flow::SkinVariant::Classic => "Classic",
+        crate::flow::SkinVariant::Slim => "Slim",
+    }
+}
+
+fn skin_variant_from_tag(tag: &str) -> crate::flow::SkinVariant {
+    if tag == "Slim" {
+        crate::flow::SkinVariant::Slim
+    } else {
+        crate::flow::SkinVariant::Classic
+    }
+}
 
 /// A place refresh tokens are kept, keyed by profile UUID. Behind a trait so
 /// hermetic tests exercise [`MemoryStore`] and never require a real OS
@@ -82,6 +196,34 @@ pub trait SecretStore: std::fmt::Debug + Send + Sync {
     /// # Errors
     /// Returns [`crate::AuthError`] for any failure other than "no entry".
     fn delete_refresh_token(&self, profile: Uuid) -> Result<()>;
+
+    /// Stores (overwriting any existing) cached session for `profile`.
+    ///
+    /// # Errors
+    /// Returns [`crate::AuthError`] if the underlying store rejects the
+    /// write (locked, denied, or a platform failure).
+    fn save_session(&self, profile: Uuid, session: &CachedSession) -> Result<()>;
+
+    /// Loads the cached session for `profile`. `Ok(None)` covers both "no
+    /// entry" and "the stored value could not be parsed" — a corrupt cache
+    /// entry must degrade to "there is no usable cache" (and the caller
+    /// re-running the full sign-in chain), never propagate as an error that
+    /// could block a join outright. A backend that treats the two
+    /// differently should log the parse failure itself before returning
+    /// `Ok(None)`, so the degradation is still visible in the log even
+    /// though it is not visible to the caller as an `Err`.
+    ///
+    /// # Errors
+    /// Returns [`crate::AuthError`] for a transport/platform failure reaching
+    /// the store at all (locked, denied) — never for a parse failure once the
+    /// entry was read.
+    fn load_session(&self, profile: Uuid) -> Result<Option<CachedSession>>;
+
+    /// Deletes the cached session for `profile`. Idempotent.
+    ///
+    /// # Errors
+    /// Returns [`crate::AuthError`] for any failure other than "no entry".
+    fn delete_session(&self, profile: Uuid) -> Result<()>;
 }
 
 /// How [`AccountSecrets`] is actually protecting tokens right now. Exists so
@@ -118,8 +260,15 @@ impl std::fmt::Display for StorageMode {
 
 /// In-memory [`SecretStore`]. Used both for hermetic tests and as the
 /// automatic fallback backend when the real keychain cannot be reached.
+///
+/// Two independent maps, matching [`KeychainStore`]'s two separate keychain
+/// services: a refresh token and a cached session for the same profile can be
+/// present, absent, or cleared independently.
 #[derive(Debug, Default)]
-pub struct MemoryStore(Mutex<HashMap<Uuid, String>>);
+pub struct MemoryStore {
+    refresh_tokens: Mutex<HashMap<Uuid, String>>,
+    sessions: Mutex<HashMap<Uuid, CachedSession>>,
+}
 
 impl MemoryStore {
     /// Creates an empty in-memory store.
@@ -128,25 +277,47 @@ impl MemoryStore {
         Self::default()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, String>> {
+    fn refresh_tokens(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, String>> {
         // A poisoned lock (a panic while held) still holds perfectly good
         // data; recovering it is strictly better than a second panic here.
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.refresh_tokens
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn sessions(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, CachedSession>> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
 impl SecretStore for MemoryStore {
     fn save_refresh_token(&self, profile: Uuid, token: &str) -> Result<()> {
-        self.lock().insert(profile, token.to_owned());
+        self.refresh_tokens().insert(profile, token.to_owned());
         Ok(())
     }
 
     fn load_refresh_token(&self, profile: Uuid) -> Result<Option<String>> {
-        Ok(self.lock().get(&profile).cloned())
+        Ok(self.refresh_tokens().get(&profile).cloned())
     }
 
     fn delete_refresh_token(&self, profile: Uuid) -> Result<()> {
-        self.lock().remove(&profile);
+        self.refresh_tokens().remove(&profile);
+        Ok(())
+    }
+
+    fn save_session(&self, profile: Uuid, session: &CachedSession) -> Result<()> {
+        self.sessions().insert(profile, session.clone());
+        Ok(())
+    }
+
+    fn load_session(&self, profile: Uuid) -> Result<Option<CachedSession>> {
+        Ok(self.sessions().get(&profile).cloned())
+    }
+
+    fn delete_session(&self, profile: Uuid) -> Result<()> {
+        self.sessions().remove(&profile);
         Ok(())
     }
 }
@@ -160,6 +331,10 @@ pub struct KeychainStore;
 impl KeychainStore {
     fn entry(profile: Uuid) -> keyring::Result<keyring::Entry> {
         keyring::Entry::new(KEYCHAIN_SERVICE, &profile.to_string())
+    }
+
+    fn session_entry(profile: Uuid) -> keyring::Result<keyring::Entry> {
+        keyring::Entry::new(SESSION_KEYCHAIN_SERVICE, &profile.to_string())
     }
 }
 
@@ -179,6 +354,48 @@ impl SecretStore for KeychainStore {
 
     fn delete_refresh_token(&self, profile: Uuid) -> Result<()> {
         match Self::entry(profile)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn save_session(&self, profile: Uuid, session: &CachedSession) -> Result<()> {
+        // A JSON-serialise failure here would mean `CachedSession` itself
+        // cannot round-trip, which is a programmer error in this crate, not a
+        // storage failure — `unwrap_or_default` would silently write `"{}"`
+        // and the next read would fail to parse it back into a profile id,
+        // degrading exactly as a genuinely corrupt entry would. There is no
+        // externally-triggerable way to reach this arm.
+        let text = serde_json::to_string(session)?;
+        Self::session_entry(profile)?.set_password(&text)?;
+        Ok(())
+    }
+
+    fn load_session(&self, profile: Uuid) -> Result<Option<CachedSession>> {
+        match Self::session_entry(profile)?.get_password() {
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(session) => Ok(Some(session)),
+                Err(e) => {
+                    // Degrade to "no usable cache" rather than propagating —
+                    // see the trait doc — but log so the degradation is
+                    // visible rather than a silent extra round trip nobody
+                    // can explain.
+                    tracing::warn!(
+                        target: "auth",
+                        profile = %profile,
+                        error = %e,
+                        "cached session for this profile could not be parsed; treating as absent"
+                    );
+                    Ok(None)
+                }
+            },
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn delete_session(&self, profile: Uuid) -> Result<()> {
+        match Self::session_entry(profile)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(e.into()),
         }
@@ -283,6 +500,30 @@ impl AccountSecrets {
     pub fn delete_refresh_token(&self, profile: Uuid) -> Result<()> {
         self.backend.delete_refresh_token(profile)
     }
+
+    /// See [`SecretStore::save_session`].
+    ///
+    /// # Errors
+    /// See [`SecretStore::save_session`].
+    pub fn save_session(&self, profile: Uuid, session: &CachedSession) -> Result<()> {
+        self.backend.save_session(profile, session)
+    }
+
+    /// See [`SecretStore::load_session`].
+    ///
+    /// # Errors
+    /// See [`SecretStore::load_session`].
+    pub fn load_session(&self, profile: Uuid) -> Result<Option<CachedSession>> {
+        self.backend.load_session(profile)
+    }
+
+    /// See [`SecretStore::delete_session`].
+    ///
+    /// # Errors
+    /// See [`SecretStore::delete_session`].
+    pub fn delete_session(&self, profile: Uuid) -> Result<()> {
+        self.backend.delete_session(profile)
+    }
 }
 
 /// Issue #73: without this, `AccountSecrets` — the façade every real caller
@@ -307,6 +548,18 @@ impl SecretStore for AccountSecrets {
 
     fn delete_refresh_token(&self, profile: Uuid) -> Result<()> {
         self.backend.delete_refresh_token(profile)
+    }
+
+    fn save_session(&self, profile: Uuid, session: &CachedSession) -> Result<()> {
+        self.backend.save_session(profile, session)
+    }
+
+    fn load_session(&self, profile: Uuid) -> Result<Option<CachedSession>> {
+        self.backend.load_session(profile)
+    }
+
+    fn delete_session(&self, profile: Uuid) -> Result<()> {
+        self.backend.delete_session(profile)
     }
 }
 
@@ -436,5 +689,154 @@ mod tests {
         assert_eq!(secrets.load_refresh_token(profile).unwrap(), None);
 
         println!("real_keychain_round_trips_a_throwaway_token: PASSED against the real OS keychain");
+    }
+
+    // -- CachedSession ------------------------------------------------------
+
+    fn sample_session(id: Uuid) -> crate::flow::Session {
+        crate::flow::Session {
+            access_token: "mc-access-token".to_owned(),
+            profile: crate::flow::Profile {
+                name: "Notch".to_owned(),
+                id,
+                skin: Some(crate::flow::ProfileSkin {
+                    url: "https://textures.minecraft.net/texture/abc123".to_owned(),
+                    variant: crate::flow::SkinVariant::Slim,
+                }),
+            },
+            expires_at: 1_700_100_000,
+        }
+    }
+
+    /// `to_session(from_session(x))` must reproduce every field, including
+    /// the skin variant — an enum with no numeric "obviously wrong" value, so
+    /// this picks `Slim` specifically (not the `Classic` default a bug could
+    /// silently fall back to) to make a transposition or a dropped field
+    /// visible rather than coincidentally passing.
+    #[test]
+    fn cached_session_round_trips_every_field_including_a_non_default_skin_variant() {
+        let id = Uuid::new_v4();
+        let session = sample_session(id);
+        let cached = CachedSession::from_session(&session);
+        assert_eq!(cached.profile_id, id.to_string());
+        assert_eq!(cached.access_token, "mc-access-token");
+        assert_eq!(cached.expires_at, 1_700_100_000);
+        assert_eq!(cached.skin_variant.as_deref(), Some("Slim"));
+
+        let restored = cached.to_session().expect("valid profile id must restore");
+        assert_eq!(restored.access_token, session.access_token);
+        assert_eq!(restored.expires_at, session.expires_at);
+        assert_eq!(restored.profile.id, session.profile.id);
+        assert_eq!(restored.profile.name, session.profile.name);
+        let restored_skin = restored.profile.skin.expect("skin must survive the round trip");
+        let original_skin = session.profile.skin.expect("fixture always sets a skin");
+        assert_eq!(restored_skin.url, original_skin.url);
+        assert_eq!(restored_skin.variant, original_skin.variant);
+    }
+
+    /// A profile with no active skin must round-trip to `None`, not to a
+    /// skin with an empty URL — the two are different values and only one of
+    /// them is "no skin set".
+    #[test]
+    fn cached_session_round_trips_a_missing_skin_as_none() {
+        let id = Uuid::new_v4();
+        let mut session = sample_session(id);
+        session.profile.skin = None;
+        let cached = CachedSession::from_session(&session);
+        assert_eq!(cached.skin_url, None);
+        assert_eq!(cached.skin_variant, None);
+        let restored = cached.to_session().unwrap();
+        assert_eq!(restored.profile.skin, None);
+    }
+
+    /// A corrupted `profile_id` must degrade to "no usable cache"
+    /// ([`None`]), never panic — this is the exact shape a hand-edited or
+    /// bit-rotted keychain entry could produce.
+    #[test]
+    fn cached_session_with_an_invalid_profile_id_fails_to_restore_rather_than_panicking() {
+        let mut cached = CachedSession::from_session(&sample_session(Uuid::new_v4()));
+        cached.profile_id = "not-a-uuid".to_owned();
+        assert_eq!(cached.to_session(), None);
+    }
+
+    #[test]
+    fn memory_store_round_trips_a_session_independently_of_the_refresh_token() {
+        let store = MemoryStore::new();
+        let id = Uuid::new_v4();
+        let cached = CachedSession::from_session(&sample_session(id));
+
+        assert_eq!(store.load_session(id).unwrap(), None);
+        store.save_session(id, &cached).unwrap();
+        assert_eq!(store.load_session(id).unwrap(), Some(cached));
+        // The refresh-token map must be untouched by a session write — the
+        // two are separate stores precisely so one can be cleared without
+        // the other, and this is the control that they are not secretly
+        // sharing state.
+        assert_eq!(store.load_refresh_token(id).unwrap(), None);
+
+        store.delete_session(id).unwrap();
+        assert_eq!(store.load_session(id).unwrap(), None);
+        // Deleting an absent session must not error — same idempotence
+        // contract as the refresh-token store.
+        store.delete_session(id).unwrap();
+    }
+
+    #[test]
+    fn memory_store_keeps_separate_profiles_sessions_separate() {
+        let store = MemoryStore::new();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let session_a = CachedSession::from_session(&sample_session(a));
+        let mut session_b = CachedSession::from_session(&sample_session(b));
+        session_b.access_token = "different-token".to_owned();
+
+        store.save_session(a, &session_a).unwrap();
+        store.save_session(b, &session_b).unwrap();
+        assert_eq!(store.load_session(a).unwrap().unwrap().access_token, "mc-access-token");
+        assert_eq!(store.load_session(b).unwrap().unwrap().access_token, "different-token");
+    }
+
+    #[test]
+    fn account_secrets_forwards_session_storage_through_the_trait_object() {
+        let secrets = AccountSecrets::with_backend(Box::new(MemoryStore::new()), StorageMode::Keychain);
+        let id = Uuid::new_v4();
+        let cached = CachedSession::from_session(&sample_session(id));
+
+        fn save_through_trait_object(store: &dyn SecretStore, profile: Uuid, session: &CachedSession) {
+            store.save_session(profile, session).unwrap();
+        }
+        save_through_trait_object(&secrets, id, &cached);
+        assert_eq!(secrets.load_session(id).unwrap(), Some(cached));
+    }
+
+    /// The real-keychain counterpart to
+    /// [`real_keychain_round_trips_a_throwaway_token`], for the session
+    /// service. Same safety property: a random UUID, an obviously-fake
+    /// token, created and deleted within the test.
+    ///
+    /// Run explicitly: `cargo test -p lodestone-auth --no-fail-fast -- --ignored --nocapture`
+    #[test]
+    #[ignore = "touches the real OS keychain; run with -- --ignored --nocapture"]
+    fn real_keychain_round_trips_a_throwaway_session() {
+        let secrets = AccountSecrets::open();
+        if !matches!(secrets.mode(), StorageMode::Keychain) {
+            eprintln!(
+                "skipping real_keychain_round_trips_a_throwaway_session: no real keychain \
+                 available on this machine ({})",
+                secrets.mode()
+            );
+            return;
+        }
+
+        let profile = Uuid::new_v4();
+        let cached = CachedSession::from_session(&sample_session(profile));
+
+        assert_eq!(secrets.load_session(profile).unwrap(), None);
+        secrets.save_session(profile, &cached).unwrap();
+        assert_eq!(secrets.load_session(profile).unwrap(), Some(cached));
+        secrets.delete_session(profile).unwrap();
+        assert_eq!(secrets.load_session(profile).unwrap(), None);
+
+        println!("real_keychain_round_trips_a_throwaway_session: PASSED against the real OS keychain");
     }
 }

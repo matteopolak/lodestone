@@ -55,6 +55,19 @@ pub async fn migrate_legacy_cache(
     let session = flow::session_from_ms_token(client, &refreshed.access_token).await?;
 
     secrets.save_refresh_token(session.profile.id, &refreshed.refresh_token)?;
+    // Best-effort, same as `crate::login`'s two call sites: leaves the
+    // migrated account with an already-warm session cache instead of making
+    // its very next join redo this whole chain immediately after migrating.
+    if let Err(e) =
+        secrets.save_session(session.profile.id, &crate::store::CachedSession::from_session(&session))
+    {
+        tracing::warn!(
+            target: "auth",
+            profile = %session.profile.id,
+            error = %e,
+            "could not cache the derived session after migrating the legacy token cache"
+        );
+    }
     metadata.upsert(AccountProfile {
         profile_id: session.profile.id,
         username: session.profile.name.clone(),

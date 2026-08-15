@@ -806,6 +806,19 @@ fn remove_highlighted(st: &mut State, path: &Path) {
         st.save_error = Some(format!("could not remove the stored credential: {e}"));
         return;
     }
+    // The cached Minecraft session (`lodestone_auth::store::CachedSession`)
+    // lives under a separate keychain entry from the refresh token — see
+    // that module's doc for why — so removing an account has to clear it
+    // explicitly too, or a re-added account that happens to land on the same
+    // profile UUID would start from a stale (if still unexpired) cached
+    // session belonging to the removed one. Best-effort, same as the
+    // refresh-token delete above: `delete_session` is idempotent, and not
+    // blocking the account removal on this succeeding matches how the rest
+    // of this crate treats the session cache as an optimisation, never a
+    // correctness dependency.
+    if let Err(e) = secrets.delete_session(id) {
+        tracing::warn!(profile = %id, error = %e, "could not remove the cached session for this account");
+    }
     }
     st.metadata.remove(id);
     st.save_error = st.metadata.save_to(path).err().map(|e| e.to_string());
