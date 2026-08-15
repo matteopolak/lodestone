@@ -28,6 +28,36 @@ use crate::codec::Codec;
 use crate::error::{NetError, Result};
 use crate::transport::Transport;
 
+/// Diagnostic instrument for the wasm32 join stall (browser singleplayer sitting
+/// on "Joining world…" against a near-full `memory_pair` duplex).
+///
+/// A single global, monotonic sequence shared by every [`Connection`] on the
+/// thread — there are exactly two on a wasm32 singleplayer session (the
+/// server's write-heavy half and the client's read-heavy half), one process,
+/// one thread. Interleaved `write:start`/`write:done`/`read:polled` lines
+/// sharing this sequence are what proved the mechanism: the reader kept being
+/// scheduled and kept draining (`read:polled` lines interleave with a pending
+/// `write:start` and the write eventually completes) for hundreds of columns,
+/// right up until the reader's own `read:polling` line stops appearing at all —
+/// not because the duplex ran dry, but because the *caller* stopped asking to
+/// read. The actual cause lived one layer up, in `lodestone-shell`'s
+/// `net.rs`: an un-cfg-gated `tokio::time::timeout` around the client's inbound
+/// `ClientEvent` drain hangs forever on its first poll on `wasm32` (no timer
+/// driver is ever entered there), which backs up the bounded event channel,
+/// which stops `Driver::run` from reading further packets, which is what
+/// finally starves this duplex. Left in at `debug` level (silent at the
+/// `Info` level `web/src/main.rs` configures) rather than removed, because
+/// this class of stall reappears one layer at a time and the next instance
+/// will want the same seq-numbered write/read trace. A counter, not a
+/// duration, per this repo's own rule about timings taken on a shared machine.
+#[cfg(target_arch = "wasm32")]
+static NETBUF_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(target_arch = "wasm32")]
+fn netbuf_seq() -> u64 {
+    NETBUF_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Size of the scratch buffer used per read from the transport.
 const READ_CHUNK: usize = 8 * 1024;
 
@@ -106,7 +136,13 @@ impl<T: Transport> Connection<T> {
 
         let mut frame = Vec::new();
         self.codec.encode(body.as_slice(), &mut frame)?;
+        #[cfg(target_arch = "wasm32")]
+        let (seq, len) = (netbuf_seq(), frame.len());
+        #[cfg(target_arch = "wasm32")]
+        tracing::debug!(target: "netbuf", seq, len, "write:start");
         self.transport.write_all(&frame).await?;
+        #[cfg(target_arch = "wasm32")]
+        tracing::debug!(target: "netbuf", seq, done_seq = netbuf_seq(), len, "write:done");
         self.transport.flush().await?;
         Ok(())
     }
@@ -122,7 +158,13 @@ impl<T: Transport> Connection<T> {
                 return Ok(Some(body));
             }
 
+            #[cfg(target_arch = "wasm32")]
+            let poll_seq = netbuf_seq();
+            #[cfg(target_arch = "wasm32")]
+            tracing::debug!(target: "netbuf", seq = poll_seq, "read:polling");
             let n = self.transport.read(&mut self.scratch).await?;
+            #[cfg(target_arch = "wasm32")]
+            tracing::debug!(target: "netbuf", seq = poll_seq, done_seq = netbuf_seq(), n, "read:polled");
             if n == 0 {
                 let buffered = self.codec.buffered_len();
                 if buffered == 0 {
@@ -279,7 +321,7 @@ impl Connection<TcpStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::memory_pair;
+    use crate::transport::{DEFAULT_MEMORY_BUFFER, memory_pair};
 
     #[tokio::test]
     async fn write_then_read_uncompressed() {
@@ -466,6 +508,91 @@ mod tests {
             server.read_packet().await,
             Err(NetError::UnexpectedClose(_))
         ));
+    }
+
+    /// Reproduces the shape of the browser join stall this repo localised to
+    /// `write_packet`'s `write_all` against a near-full `memory_pair` duplex
+    /// (real `LEVEL_CHUNK_WITH_LIGHT` packets at `view_radius = 9` measured
+    /// ~55-63 KiB against the 64 KiB `DEFAULT_MEMORY_BUFFER`) — but for
+    /// `write_packet`/`read_packet` themselves, not for the wasm32-only bug
+    /// that turned out to be the actual cause. The real defect was one layer
+    /// up (`lodestone-shell`'s `net.rs`: an un-cfg-gated `tokio::time::timeout`
+    /// with no timer driver on `wasm32`, which stopped the reader from ever
+    /// calling back in, which is what starved this duplex) — nothing wrong
+    /// with the framing/backpressure code lived here. This test still earns
+    /// its place as the buffer-contention regression guard `DESIGN.md`'s
+    /// evidence standards ask for: it proves the *other* candidate mechanism
+    /// (a genuinely undersized buffer, or a broken `write_all` retry loop)
+    /// stays fixed, by sending a batch whose largest member is bigger than
+    /// `DEFAULT_MEMORY_BUFFER` **itself** — only true incremental streaming
+    /// (write what fits, wait for the reader to drain, write more) can ever
+    /// deliver that; a `write_all` that assumed one poll would suffice could
+    /// not.
+    ///
+    /// Pairwise-distinct sizes (never two equal, per this repo's own
+    /// transposition rule) so a swapped or truncated frame cannot hide behind
+    /// two packets that happened to be the same length.
+    #[tokio::test]
+    async fn a_batch_larger_than_the_buffer_drains_through_memory_pair() {
+        let (server_io, client_io) = memory_pair();
+        let mut server = Connection::new(server_io);
+        let mut client = Connection::new(client_io);
+
+        // Climbs from 50 KiB (inside the localisation's measured range) past
+        // 70 KiB — i.e. past `DEFAULT_MEMORY_BUFFER` (64 KiB) outright — over
+        // 40 pairwise-distinct sizes.
+        let sizes: Vec<usize> = (0..40).map(|i: usize| 50_000 + i * 733).collect();
+        assert!(
+            sizes.iter().any(|&s| s > DEFAULT_MEMORY_BUFFER),
+            "fixture must include a packet larger than the buffer itself, \
+             or a `write_all` that merely fits everything in one poll would \
+             pass this test for the wrong reason"
+        );
+        // And distinct, or a transposition between two same-sized packets
+        // survives a byte-perfect round trip undetected (this repo's own
+        // transposition rule).
+        assert_eq!(
+            sizes.iter().collect::<std::collections::HashSet<_>>().len(),
+            sizes.len(),
+            "fixture sizes must be pairwise-distinct"
+        );
+
+        let write_sizes = sizes.clone();
+        let writer = tokio::spawn(async move {
+            for (i, &size) in write_sizes.iter().enumerate() {
+                // Fill with the index so a payload cannot be mistaken for a
+                // neighbour's even if two happened to share a length.
+                let payload = vec![(i % 256) as u8; size];
+                server
+                    .write_packet(i32::try_from(i).unwrap(), &payload)
+                    .await
+                    .expect("write_packet must stream a frame larger than the buffer");
+            }
+        });
+
+        let mut mismatches: Vec<String> = Vec::new();
+        for (i, &expected_size) in sizes.iter().enumerate() {
+            let (id, fields) = client
+                .read_packet()
+                .await
+                .expect("transport error while draining the batch")
+                .unwrap_or_else(|| panic!("packet {i} never arrived (buffer/backpressure regression)"));
+            if id != i32::try_from(i).unwrap() {
+                mismatches.push(format!("packet {i}: id {id} != {i}"));
+            }
+            if fields.len() != expected_size {
+                mismatches.push(format!(
+                    "packet {i}: len {} != expected {expected_size}",
+                    fields.len()
+                ));
+            }
+            if fields.iter().any(|&b| b != (i % 256) as u8) {
+                mismatches.push(format!("packet {i}: payload byte mismatch"));
+            }
+        }
+        assert!(mismatches.is_empty(), "mismatches: {mismatches:#?}");
+
+        writer.await.expect("writer task must not panic");
     }
 
     #[tokio::test]
