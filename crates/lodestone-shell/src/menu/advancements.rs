@@ -55,12 +55,21 @@
 //! are shrunk to their intersection with the viewport in the same
 //! [`clip_sprite_quad`] shape [`push_sprite_clipped`] already uses for a
 //! frame, so the two clipping paths agree rather than growing a second
-//! convention. The two 3-D paths (a block item's isometric mini-model, a
-//! chest-shaped special-renderer icon) have no axis-aligned destination rect
-//! to shrink the same way — the geometry is an already-posed mesh, not a
-//! quad — so those are dropped whole rather than clipped when the icon's own
-//! bounding square is not wholly inside the viewport, which can only ever
-//! draw *fewer* pixels than vanilla, never spill past the edge.
+//! convention. The two 3-D paths are not `GuiSpriteQuad`-shaped, but they are
+//! not both equally clippable either. A block item's isometric mini-model
+//! ([`draw_stack_clipped`]'s `model_verts` stream) is already posed into GUI
+//! *pixel* space on the CPU (`gui_item_pose`; the GPU-side `gui_ortho`
+//! projection never touches these vertices), so its triangles genuinely
+//! straddle `clip` in the same coordinate space `clip` is expressed in and
+//! [`clip_model_triangles`] cuts them with a real polygon clip
+//! (Sutherland-Hodgman) rather than dropping them — this is the fix for the
+//! reported bug, block icons vanishing at the tree's edge while item icons
+//! clip cleanly. A chest-shaped special-renderer icon is the one case left
+//! unclipped: its mesh is built from a placement matrix inside the GPU-side
+//! icon pass with no CPU vertex list to cut, so it alone is still dropped
+//! whole when the icon's own bounding square is not wholly inside the
+//! viewport — which can only ever draw *fewer* pixels than vanilla, never
+//! spill past the edge.
 //!
 //! **Vanilla draws the connector lines behind every widget, and so do we.**
 //! `AdvancementTab.extractContents` calls `root.extractConnectivity` (both
@@ -108,7 +117,7 @@
 
 use lodestone_assets::ItemAtlas;
 use lodestone_game::item::ItemStack;
-use lodestone_render::{BlockModels, GuiSpriteQuad};
+use lodestone_render::{BlockModels, GuiSpriteQuad, ModelVertex};
 
 use crate::container::builder::Builder;
 use crate::container::{ContainerBackground, ContainerGeometry, Rect};
@@ -1488,14 +1497,24 @@ fn rect_wholly_inside(outer: Rect, inner: Rect) -> bool {
 /// `GuiSpriteQuad`-shaped (an axis-aligned destination rect, sampled
 /// uniformly) exactly like a frame sprite, so [`clip_quads_from`] reuses
 /// [`clip_sprite_quad`] itself for the first two and a plain [`clamp_to`]
-/// for the third (no UV to preserve there). The two 3-D streams are not:
-/// the geometry is an already-posed isometric mesh, with no destination
-/// rect to shrink, so an icon that straddles the edge on either of those
-/// paths is dropped whole instead — strictly *fewer* pixels than vanilla
-/// ever draws, never a spill past the edge, which is the containment
-/// property this exists to guarantee. Every advancement icon actually
-/// shipped is small (`ICON_SIZE`) and inset well inside its `26 x 26`
-/// frame, so this only ever triggers at the very edge of a scrolled tree.
+/// for the third (no UV to preserve there).
+///
+/// **The block-item mesh is a third shape, and it is not axis-aligned — but
+/// it is not un-clippable either.** [`push_item_model`](crate::hud::item_icon)
+/// (via `lodestone_render::gui_item_pose`) already poses every
+/// [`ModelVertex`] into **GUI pixel space** on the CPU, before this ever
+/// reaches the GPU — `gui_ortho` (model-pixel-space -> NDC) is a
+/// shader-side `view_proj` uniform, never applied here — so
+/// `position[0]`/`position[1]` are already in the exact pixel coordinates
+/// `clip` is expressed in, and a straddling triangle can be *cut* the same
+/// way a straddling sprite quad is, via [`clip_model_triangles`]. Only the
+/// **special-renderer** stream (a block-entity icon such as a chest) has no
+/// CPU vertex list at all — its mesh is built from a placement matrix inside
+/// the GPU-side icon pass, outside this module's ownership — so that one
+/// alone is still dropped whole when its `ICON_SIZE` bounding square is not
+/// wholly inside `clip`: strictly *fewer* pixels than vanilla ever draws,
+/// never a spill past the edge, which is the containment property this
+/// exists to guarantee.
 fn draw_stack_clipped(
     b: &mut Builder<'_>,
     assets: &IconAssets<'_>,
@@ -1514,16 +1533,107 @@ fn draw_stack_clipped(
     );
     b.draw_stack(assets, stack, x, y);
 
-    if (b.model_verts.len() > before.3 || b.special.len() > before.4)
+    clip_model_triangles(&mut b.model_verts, before.3, clip);
+
+    if b.special.len() > before.4
         && !rect_wholly_inside(clip, Rect { x, y, w: ICON_SIZE, h: ICON_SIZE })
     {
-        b.model_verts.truncate(before.3);
         b.special.truncate(before.4);
     }
 
     clip_quads_from(&mut b.item_verts, before.1, crate::hud::SPRITE_FLOATS_PER_VERTEX, true, canvas, clip);
     clip_quads_from(&mut b.glint_verts, before.2, crate::hud::SPRITE_FLOATS_PER_VERTEX, true, canvas, clip);
     clip_quads_from(&mut b.verts, before.0, COLOUR_FLOATS_PER_VERTEX, false, canvas, clip);
+}
+
+/// Clips every already-emitted block-model triangle on `verts[from..]` to
+/// `clip`, in place, by polygon-clipping each triangle against the clip
+/// rect's four edges ([`clip_triangle`], Sutherland-Hodgman) and
+/// fan-triangulating whatever convex polygon survives. `verts[from..]` is a
+/// flat triangle list — [`push_item_model`](crate::hud::item_icon) already
+/// resolves `mesh.indices` into one, so every run of three is one triangle
+/// with no shared index buffer to keep in step.
+///
+/// This is the same "already-written vertices, clip after the fact" shape as
+/// [`clip_quads_from`], but does not need that function's NDC round-trip
+/// (`canvas`/`px`/`py`): a [`ModelVertex`]'s `position` is GUI pixel space
+/// already (see [`draw_stack_clipped`]'s doc), not NDC.
+fn clip_model_triangles(verts: &mut Vec<ModelVertex>, from: usize, clip: Rect) {
+    let tail = verts.split_off(from);
+    for tri in tail.chunks_exact(3) {
+        let poly = clip_triangle(tri[0], tri[1], tri[2], clip);
+        // Fan triangulation about the polygon's first vertex — valid because
+        // Sutherland-Hodgman always returns a convex polygon.
+        for i in 1..poly.len().saturating_sub(1) {
+            verts.push(poly[0]);
+            verts.push(poly[i]);
+            verts.push(poly[i + 1]);
+        }
+    }
+}
+
+/// Sutherland-Hodgman: clips one triangle against `clip`'s four half-planes
+/// in turn (left, right, top, bottom), returning the surviving convex
+/// polygon — empty when the triangle is wholly outside, the original three
+/// vertices (in the same winding) when wholly inside, and 3..=7 vertices for
+/// a genuine straddle. Each half-plane is `sign * position[axis] >=
+/// sign * boundary`, so flipping `sign` turns a "greater-than" test into a
+/// "less-than" one against the same `boundary` value.
+#[must_use]
+fn clip_triangle(a: ModelVertex, b: ModelVertex, c: ModelVertex, clip: Rect) -> Vec<ModelVertex> {
+    let mut poly = vec![a, b, c];
+    let edges: [(usize, f32, f32); 4] = [
+        (0, 1.0, clip.x),
+        (0, -1.0, clip.x + clip.w),
+        (1, 1.0, clip.y),
+        (1, -1.0, clip.y + clip.h),
+    ];
+    for (axis, sign, boundary) in edges {
+        if poly.is_empty() {
+            break;
+        }
+        let inside = |v: &ModelVertex| sign * v.position[axis] >= sign * boundary;
+        let mut out = Vec::with_capacity(poly.len() + 1);
+        for i in 0..poly.len() {
+            let cur = poly[i];
+            let prev = poly[(i + poly.len() - 1) % poly.len()];
+            let (cur_in, prev_in) = (inside(&cur), inside(&prev));
+            if cur_in != prev_in {
+                out.push(lerp_model_vertex(prev, cur, axis, boundary));
+            }
+            if cur_in {
+                out.push(cur);
+            }
+        }
+        poly = out;
+    }
+    poly
+}
+
+/// The point on segment `prev -> cur` where `position[axis]` crosses
+/// `boundary`, with every continuous attribute (`position`, `uv`, `ao`)
+/// linearly interpolated to match — valid with no perspective correction
+/// because nothing between here and the GPU's `gui_ortho` divides by `w`;
+/// this is a plain affine cut. The packed integer fields
+/// (`light`/`tint`/`anim`/`cutout_bypass`/`tint_rgb_override`) are constant
+/// across every vertex of one baked quad — they encode per-face/per-block
+/// state, never a per-vertex gradient — so a cut vertex just inherits them
+/// from `prev` (`..prev`) rather than interpolating a value that cannot
+/// disagree with itself.
+#[must_use]
+fn lerp_model_vertex(prev: ModelVertex, cur: ModelVertex, axis: usize, boundary: f32) -> ModelVertex {
+    let t = (boundary - prev.position[axis]) / (cur.position[axis] - prev.position[axis]);
+    let lerp = |p: f32, c: f32| p + (c - p) * t;
+    ModelVertex {
+        position: [
+            lerp(prev.position[0], cur.position[0]),
+            lerp(prev.position[1], cur.position[1]),
+            lerp(prev.position[2], cur.position[2]),
+        ],
+        uv: [lerp(prev.uv[0], cur.uv[0]), lerp(prev.uv[1], cur.uv[1])],
+        ao: lerp(prev.ao, cur.ao),
+        ..prev
+    }
 }
 
 /// Clips every already-emitted flat quad on `verts[from..]` to `clip`, in
@@ -1979,6 +2089,157 @@ mod tests {
             mismatches.is_empty(),
             "a fully-inside icon must be pixel-identical to the unclamped draw, \
              but (index, clipped, unclamped) differ at {mismatches:?}"
+        );
+    }
+
+    // -- block-icon clipping: the reported bug -------------------------------
+
+    /// A 16x16 axis-aligned quad (two triangles, vertex 0/1/2 then 0/2/3 —
+    /// the same winding [`push_item_model`](crate::hud::item_icon) leaves
+    /// its own quads in) posed at `(x, y)` in GUI pixel space, with `uv`
+    /// mapped **linearly** across the rect (`(0,0)` at the top-left corner,
+    /// `(1,1)` at the bottom-right) so a clip's surviving UV range can be
+    /// checked against a predicted fraction, not just its surviving
+    /// position. `light`/`tint`/`anim`/`cutout_bypass`/`tint_rgb_override`
+    /// are all set to distinguishable non-default values so a test can
+    /// confirm they survive a cut unchanged rather than silently zeroing.
+    fn model_quad(x: f32, y: f32, w: f32, h: f32) -> Vec<ModelVertex> {
+        let corner = |u: f32, v: f32| ModelVertex {
+            position: [x + u * w, y + v * h, 0.0],
+            uv: [u, v],
+            ao: 1.0,
+            light: 0xAB,
+            tint: 7,
+            anim: 0,
+            cutout_bypass: 0,
+            tint_rgb_override: [11, 22, 33, 255],
+        };
+        let (v0, v1, v2, v3) = (corner(0.0, 0.0), corner(1.0, 0.0), corner(1.0, 1.0), corner(0.0, 1.0));
+        vec![v0, v1, v2, v0, v2, v3]
+    }
+
+    /// The shoelace area of every triangle in `verts` (a flat triangle
+    /// list), summed — the same "read the geometry back, do not trust a
+    /// vertex count" principle [`decode_colour_px`] uses, generalised to an
+    /// area rather than a set of points so a *partial* survivor can be told
+    /// apart from a full or an empty one by a single predicted number.
+    fn triangle_list_area(verts: &[ModelVertex]) -> f32 {
+        verts
+            .chunks_exact(3)
+            .map(|tri| {
+                let [ax, ay] = [tri[0].position[0], tri[0].position[1]];
+                let [bx, by] = [tri[1].position[0], tri[1].position[1]];
+                let [cx, cy] = [tri[2].position[0], tri[2].position[1]];
+                ((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)).abs() * 0.5
+            })
+            .sum()
+    }
+
+    /// The magnitude assertion for the reported bug itself: a block-model
+    /// icon that only *just* crosses into the viewport must draw a
+    /// **predicted partial** area — not the full `16x16 = 256` (the
+    /// unclamped control) and not `0` (the pre-fix "drop the mesh whole"
+    /// behaviour) — mirroring
+    /// `a_frame_straddling_the_viewport_edge_draws_only_its_visible_sliver`'s
+    /// shape for the flat-sprite path. The quad spans `x: 110..126`, cut by
+    /// `clip`'s right edge at `x = 113`, so the surviving strip is exactly
+    /// `3 x 16 = 48`.
+    #[test]
+    fn a_block_icon_straddling_the_viewport_edge_draws_a_predicted_partial_area() {
+        let clip = Rect { x: 0.0, y: 0.0, w: 113.0, h: 113.0 };
+        let quad = model_quad(110.0, 50.0, 16.0, 16.0);
+
+        let mut clipped = quad.clone();
+        clip_model_triangles(&mut clipped, 0, clip);
+
+        let clipped_area = triangle_list_area(&clipped);
+        assert!(
+            (clipped_area - 48.0).abs() < 0.01,
+            "expected the 3x16=48 surviving strip, got {clipped_area}"
+        );
+
+        // Controls: the two wrong hypotheses this test exists to rule out.
+        let full_area = triangle_list_area(&quad);
+        assert!(
+            (full_area - 256.0).abs() < 0.01,
+            "control: the unclamped mesh must cover the full 16x16=256, got {full_area}"
+        );
+        assert!(
+            clipped_area > 0.0,
+            "the icon was dropped whole — the pre-fix bug this test exists to catch"
+        );
+        assert!(
+            clipped_area < full_area,
+            "the icon drew unclamped — the clip had no effect"
+        );
+
+        // Containment: no surviving vertex may sit past the clip's right edge.
+        let escaped: Vec<[f32; 3]> = clipped
+            .iter()
+            .map(|v| v.position)
+            .filter(|p| p[0] > clip.x + clip.w + 1e-4)
+            .collect();
+        assert!(escaped.is_empty(), "vertices escaped the viewport: {escaped:?}");
+
+        // Not merely snapped/scaled: the cut vertices' U must read back as
+        // the true fraction-of-width at the cut (110..113 is 3/16 = 0.1875
+        // of the quad), not 1.0 (which a "stretch the visible sliver back to
+        // the full sprite" bug would produce) or 0.0 (a "snap to the left
+        // edge" bug).
+        let cut_us: Vec<f32> = clipped
+            .iter()
+            .filter(|v| (v.position[0] - clip.x - clip.w).abs() < 1e-3)
+            .map(|v| v.uv[0])
+            .collect();
+        assert!(!cut_us.is_empty(), "the clip produced no vertex exactly on the cut edge");
+        for u in cut_us {
+            assert!(
+                (u - 0.1875).abs() < 1e-4,
+                "a cut vertex's U must read back as 0.1875 (the true 3/16 fraction), got {u}"
+            );
+        }
+
+        // The packed per-face attributes must survive the cut unchanged —
+        // `lerp_model_vertex`'s `..prev` half, not just its interpolated half.
+        for v in &clipped {
+            assert_eq!(v.light, 0xAB, "light must not change across a cut");
+            assert_eq!(v.tint, 7, "tint must not change across a cut");
+            assert_eq!(v.tint_rgb_override, [11, 22, 33, 255], "tint_rgb_override must not change across a cut");
+        }
+    }
+
+    /// The completeness control the straddling gate above needs: a
+    /// wholly-inside mesh must survive with its area (and vertex count)
+    /// completely unchanged, mirroring
+    /// `clip_sprite_quad_leaves_a_wholly_contained_quad_unchanged`. A clip
+    /// that always shrank geometry, straddling or not, would still pass a
+    /// gate that only ever checked "not the full unclamped area".
+    #[test]
+    fn clip_model_triangles_leaves_a_wholly_contained_mesh_unchanged() {
+        let clip = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
+        let quad = model_quad(10.0, 10.0, 16.0, 16.0);
+        let mut clipped = quad.clone();
+        clip_model_triangles(&mut clipped, 0, clip);
+        assert_eq!(clipped, quad, "a wholly-inside mesh must be pixel-identical to the unclamped mesh");
+    }
+
+    /// The reciprocal control: a mesh wholly outside `clip` must vanish
+    /// entirely (empty, not zero-area triangles left lying around), and the
+    /// same mesh moved back onto the clip rect must survive — proving the
+    /// rejection above is measuring position, not always answering empty,
+    /// mirroring `clip_sprite_quad_drops_a_quad_wholly_outside`.
+    #[test]
+    fn clip_model_triangles_drops_a_mesh_wholly_outside() {
+        let clip = Rect { x: 0.0, y: 0.0, w: 113.0, h: 113.0 };
+        let mut far = model_quad(500.0, 500.0, 16.0, 16.0);
+        clip_model_triangles(&mut far, 0, clip);
+        assert!(far.is_empty(), "a wholly-outside mesh must leave no vertices behind");
+
+        let mut overlapping = model_quad(100.0, 100.0, 16.0, 16.0);
+        clip_model_triangles(&mut overlapping, 0, clip);
+        assert!(
+            !overlapping.is_empty(),
+            "control: a mesh moved onto the clip rect must survive"
         );
     }
 
