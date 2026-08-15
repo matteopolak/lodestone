@@ -865,16 +865,21 @@ impl WindowApp {
         // `rows_per_page` before `chat_lines` is even fetched. Reused
         // verbatim for `hud_frame.chat_options`, so the two cannot read two
         // different snapshots of the options mid-frame.
-        let chat_opts_raw = self.nav.options();
+        // `chat_opts`, not `chat_opts_raw` — `menu::nav::tests::
+        // app_rs_still_threads_every_chat_option_into_the_hud_frame` greps this
+        // file's own source text for the literal `chat_opts.<field>` per chat
+        // setting, so the wiring detector needs this exact local name to keep
+        // seeing every field it checks.
+        let chat_opts = self.nav.options();
         let chat_display_opts = crate::hud::ChatDisplayOptions {
-            scale: chat_opts_raw.chat_scale,
-            width_pct: chat_opts_raw.chat_width,
-            height_pct_unfocused: chat_opts_raw.chat_height_unfocused,
-            height_pct_focused: chat_opts_raw.chat_height_focused,
-            line_spacing: chat_opts_raw.chat_line_spacing,
-            text_opacity: chat_opts_raw.chat_opacity,
-            background_opacity: chat_opts_raw.chat_background_opacity,
-            colors: chat_opts_raw.chat_colors,
+            scale: chat_opts.chat_scale,
+            width_pct: chat_opts.chat_width,
+            height_pct_unfocused: chat_opts.chat_height_unfocused,
+            height_pct_focused: chat_opts.chat_height_focused,
+            line_spacing: chat_opts.chat_line_spacing,
+            text_opacity: chat_opts.chat_opacity,
+            background_opacity: chat_opts.chat_background_opacity,
+            colors: chat_opts.chat_colors,
         };
         let chat_rows_per_page = crate::hud::chat_lines_per_page(
             chat_display_opts,
