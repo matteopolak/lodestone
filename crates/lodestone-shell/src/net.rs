@@ -121,6 +121,7 @@ use lodestone_game::menu::Menu;
 use lodestone_game::scoreboard::Scoreboard;
 use lodestone_game::tablist::TabList;
 use lodestone_model::Vec3f;
+use lodestone_model::action::ResourcePackResponseKind;
 use lodestone_model::event::SoundCategory;
 // `SectionLight` is imported anonymously: it is the trait carrying
 // `sky_light`/`block_light` on `WorldSectionLight`, and naming it would collide
@@ -2865,6 +2866,14 @@ async fn run_async(
                 tokio::time::timeout(Duration::from_millis(15), events.recv()).await;
             match netbuf_timeout_result {
                 Ok(Some(event)) => {
+                    // Issue #613: answered here, before generic `forward`ing,
+                    // because `handle` (the only thing that can send an
+                    // outbound action) is in scope in this loop and not
+                    // inside `forward` itself. See `auto_resource_pack_response`'s
+                    // own doc for what this is and why.
+                    if let Some(action) = auto_resource_pack_response(&event) {
+                        let _ = handle.send_action(action);
+                    }
                     if forward(
                         &tx,
                         &weather,
@@ -3110,6 +3119,31 @@ async fn open_lan_world(
         },
         save,
     ))
+}
+
+/// Issue #613: `ClientAction::ResourcePackResponse` had a real encoder
+/// (`ClientboundResourcePackPushPacket`/`Pop` already decode into
+/// `ClientEvent::ResourcePackPushed`/`Popped`) and **zero producers** —
+/// `SetFlying`'s own island shape, except a server-marked `required` pack
+/// disconnects a client that never answers
+/// (`ServerCommonPacketListenerImpl.handleResourcePackResponse` never runs,
+/// so vanilla treats the pack as permanently pending and eventually kicks the
+/// player). No resource-pack screen exists yet to let the player accept or
+/// decline, so this always declines — a real client with no such screen
+/// would do the same rather than hang the connection. `ResourcePackPopped`
+/// has nothing to answer and returns `None`.
+///
+/// Factored out of the net loop (rather than inlined at its one call site) so
+/// it is unit-testable without the async loop and the live `ClientHandle`
+/// around it.
+fn auto_resource_pack_response(event: &ClientEvent) -> Option<ClientAction> {
+    match event {
+        ClientEvent::ResourcePackPushed { id, .. } => Some(ClientAction::ResourcePackResponse {
+            id: *id,
+            response: ResourcePackResponseKind::Declined,
+        }),
+        _ => None,
+    }
 }
 
 /// Forward one event; `Err` signals the loop to stop.
@@ -3519,6 +3553,40 @@ mod tests {
     // `crate::offline_identity`'s module docs and
     // `tests/no_production_source_names_testsupport.rs`.
     use lodestone_testsupport::unique_username;
+
+    /// Issue #613: a pushed resource pack must get an immediate, correctly-id'd
+    /// decline — the producer half of `ClientAction::ResourcePackResponse`,
+    /// which had an encoder and no producer at all before this.
+    #[test]
+    fn a_pushed_resource_pack_is_auto_declined_with_the_pushed_id() {
+        let id = uuid::Uuid::from_u128(0x617);
+        let event = ClientEvent::ResourcePackPushed {
+            id,
+            url: "https://example.invalid/pack.zip".to_owned(),
+            hash: String::new(),
+            required: true,
+            prompt: None,
+        };
+        match auto_resource_pack_response(&event) {
+            Some(ClientAction::ResourcePackResponse { id: answered, response }) => {
+                assert_eq!(answered, id, "the response must name the pack that was pushed");
+                assert_eq!(response, ResourcePackResponseKind::Declined);
+            }
+            other => panic!("expected an auto-decline, got {other:?}"),
+        }
+    }
+
+    /// The companion control: an unrelated event (and `ResourcePackPopped`,
+    /// which has nothing to answer) must not produce a response — proving the
+    /// match above is actually discriminating on the event, not returning
+    /// `Some` unconditionally.
+    #[test]
+    fn an_unrelated_event_and_a_pack_pop_get_no_auto_response() {
+        assert!(auto_resource_pack_response(&ClientEvent::WinGame).is_none());
+        assert!(
+            auto_resource_pack_response(&ClientEvent::ResourcePackPopped { id: None }).is_none()
+        );
+    }
 
     /// The island assertion for the signed-in-account wiring, and the reason it
     /// is worth having at all: every piece of online-mode support existed and was
