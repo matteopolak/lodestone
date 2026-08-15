@@ -70,6 +70,17 @@ const KNOWN_DIRECT_SEND_FILES: &[&str] = &[
     // A real bypass, but a settings re-declaration rather than a gameplay verb, so
     // there is nothing for a filter to police.
     "lodestone-shell/src/app/session.rs",
+    // The anvil rename box's responder — `ClientAction::RenameItem`, one site in the
+    // `KeyOutcome::AnvilRename` arm. Vanilla's `EditBox::setResponder` fires
+    // `onNameChanged` after **every** keystroke, and `ActionQueue` drains only inside
+    // the tick loop, so queuing it would let the container click that takes the result
+    // overtake the rename that names it. Same justification as the two
+    // `container_input.rs` sites above, which this arm is the keyboard half of.
+    //
+    // Listed as a real bypass rather than resolved: making it filterable means giving
+    // `ActionQueue` an ordering guarantee against direct container sends, which is a
+    // change to the queue's contract and not to this call site.
+    "lodestone-shell/src/app/lifecycle.rs",
 ];
 
 fn crates_dir() -> PathBuf {
