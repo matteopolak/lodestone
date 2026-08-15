@@ -347,6 +347,13 @@ impl WorldStateHandle {
         self.with(|state| state.rules.spawn_mobs())
     }
 
+    /// `spawner_blocks_work` — whether a `minecraft:spawner` block entity may
+    /// fire. Read by `crate::tick::run_tick_loop`'s spawner-block tick pass.
+    #[must_use]
+    pub fn spawner_blocks_work(&self) -> bool {
+        self.with(|state| state.rules.spawner_blocks_work())
+    }
+
     /// `mob_griefing` — whether a mob may change the world.
     #[must_use]
     pub fn mob_griefing(&self) -> bool {

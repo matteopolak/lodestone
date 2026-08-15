@@ -257,6 +257,10 @@ pub mod light;
 /// the server's deterministic RNG for the empty loot context.
 pub mod loot;
 mod mob_spawn;
+/// Mob spawner blocks (`minecraft:spawner`): the delay/reroll cadence and the
+/// trigger→entity decision `BaseSpawner.serverTick` reduces to, driven by
+/// `tick::run_tick_loop` against the block entities `chunk_nbt` loads.
+pub mod mob_spawner;
 mod mobs;
 /// Natural mob spawning against a live world (issues #221/#222): the per-species
 /// `SpawnPlacements` table, a per-column light cache over the real light engine,

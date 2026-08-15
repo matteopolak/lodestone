@@ -86,7 +86,9 @@ pub enum BlockEntity {
         /// The container's own slots, in menu order.
         slots: Vec<Option<ItemStack>>,
     },
-    /// A block entity this crate has no simulation for (spawner, vault, …).
+    /// A block entity this crate has no simulation for (vault, decorated pot,
+    /// …). `minecraft:spawner` used to be in this bucket; it is now
+    /// [`BlockEntity::Spawner`].
     /// The vanilla id and the full NBT compound are preserved verbatim so the entity
     /// round-trips through a save/load cycle unchanged.
     Opaque { id: String, nbt: Nbt },
@@ -97,6 +99,13 @@ pub enum BlockEntity {
     /// from vanilla, and — importantly — exactly how far command blocks got in
     /// this pass and what still has to wire them into a running tick loop.
     CommandBlock(crate::command_block::CommandBlockData),
+    /// `minecraft:spawner`. See `crate::mob_spawner`'s own doc for the
+    /// decision this state feeds, and `crate::tick::run_tick_loop` for the
+    /// driver — this registry's own [`tick_all`](BlockEntityRegistry::tick_all)
+    /// does **not** advance a spawner, the same way it does not run the
+    /// natural-spawn cycle: a spawner needs the player list and the live entity
+    /// set, neither of which this registry has a handle to.
+    Spawner(crate::mob_spawner::SpawnerState),
 }
 
 /// Slot count of vanilla's `generic_9x3` menu — a chest, trapped chest or
@@ -178,6 +187,7 @@ impl BlockEntity {
             // the three command-block *blocks* it is attached to — unlike
             // `Furnace`, there is no per-instance kind to switch on here.
             BlockEntity::CommandBlock(_) => "minecraft:command_block",
+            BlockEntity::Spawner(_) => "minecraft:spawner",
         }
     }
 
@@ -193,7 +203,8 @@ impl BlockEntity {
             // scope note in the module doc no longer covers these three.
             BlockEntity::Container { slots, .. } => Some(slots),
             BlockEntity::Composter(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
-            | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_) => {
+            | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
+            | BlockEntity::Spawner(_) => {
                 None
             }
         }
@@ -247,7 +258,10 @@ impl BlockEntity {
             // A command block opens its own dedicated GUI
             // (`Player.openCommandBlock`), not an `AbstractContainerMenu` —
             // there is no vanilla menu identifier for it at all.
-            | BlockEntity::CommandBlock(_) => None,
+            | BlockEntity::CommandBlock(_)
+            // A spawner has no `AbstractContainerMenu` either — right-clicking
+            // one in survival does nothing at all in vanilla.
+            | BlockEntity::Spawner(_) => None,
         }
     }
 
@@ -265,7 +279,7 @@ impl BlockEntity {
             BlockEntity::Hopper(h) => h.slots().to_vec(),
             BlockEntity::Container { slots, .. } => slots.clone(),
             BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
-            | BlockEntity::CommandBlock(_) => Vec::new(),
+            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) => Vec::new(),
         }
     }
 
@@ -296,7 +310,7 @@ impl BlockEntity {
                 }
             }
             BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
-            | BlockEntity::CommandBlock(_) => {}
+            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) => {}
         }
     }
 
@@ -314,7 +328,7 @@ impl BlockEntity {
             BlockEntity::Furnace(f) => (0..4).map(|i| f.container_data(i)).collect(),
             BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Container { .. } | BlockEntity::Opaque { .. }
-            | BlockEntity::CommandBlock(_) => {
+            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) => {
                 Vec::new()
             }
         }
@@ -343,7 +357,15 @@ impl BlockEntity {
             // (`crate::command_block::{on_power_changed, tick,
             // next_chain_position}`), never by a plain once-a-tick advance —
             // see that module's own doc for why nothing calls those yet.
-            BlockEntity::Container { .. } | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_) => {}
+            //
+            // A spawner needs the player list and the live entity set to
+            // decide anything (`crate::mob_spawner::SpawnerState::tick`'s own
+            // `SpawnCtx`), neither of which this method — or this whole
+            // registry — has a handle to. `crate::tick::run_tick_loop` drives
+            // it directly instead, the same reason the natural-spawn cycle
+            // does not live in this registry either.
+            BlockEntity::Container { .. } | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
+            | BlockEntity::Spawner(_) => {}
         }
     }
 }

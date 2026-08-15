@@ -38,12 +38,14 @@
 //!
 //! | items | behaviour | modelled here |
 //! |---|---|---|
-//! | arrow, tipped/spectral arrow, egg (+2 chicken-colour variants), snowball, experience bottle, splash/lingering potion, firework rocket, fire charge, wind charge | fires as a projectile entity | **no** — `crate::mobs::MobSim::spawn_projectile_from` exists for a *shooter's* projectile, but `ProjectileItem.createDispenseConfig`'s per-item power/uncertainty/pickup-type table is unported, and the potion-carrying items additionally need a potion-contents item component `lodestone_model::ItemComponents` does not have |
+//! | arrow, tipped/spectral arrow | fires as a projectile entity | **yes** ([`arrow_entity_type`]/[`projectile_dispense_position`]/[`projectile_velocity`], `crate::mobs::MobSim::spawn_projectile`) |
+//! | egg (+2 chicken-colour variants), snowball, experience bottle, splash/lingering potion, firework rocket, fire charge, wind charge | fires as a projectile entity | **no** — each needs its own `ProjectileItem.createDispenseConfig` power/uncertainty (unlike the arrow family, these do not all share `DEFAULT`), and the potion-carrying items additionally need a potion-contents item component `lodestone_model::ItemComponents` does not have |
 //! | armor stand | spawns one, facing the dispenser's own facing | **no** — `MobSim::spawn_species` is built for `Mob`-shaped entities with goals/AI; [`crate::boat`]'s own doc names the exact hazard for a non-`Mob` `LivingEntity` routed through it ("gives a boat a mob's component set, produces a boat that *wanders*") and an armor stand is not a `Mob` either, so this is left unmodelled rather than risking a wandering prop |
 //! | chest | fills a nearby saddled chest-carrying animal, else plain-tosses | no — entity query |
 //! | every boat/chest-boat/raft (18 items) | places a riding entity just outside the dispenser's own face, on the water surface ahead (or on the ground beneath, if the cell ahead is air over water) | **yes** ([`boat_dispense`]) |
-//! | lava/water/powder-snow/fish/axolotl/sulfur-cube/tadpole bucket | empties into the world ahead | **no** — no item ever triggers a fluid *placement* anywhere in this crate; `crate::fluid` only ticks a fluid already in the world, it has no place/pickup entry point at all |
-//! | bucket | picks a fluid up | **no** — same reason |
+//! | lava/water bucket | empties into the world ahead | **yes** (`crate::fluid::bucket_empty_item_kind`/`bucket_empty_state`/`is_bucket_emptiable_target`) — only onto an air cell (vanilla additionally empties onto anything `canBeReplaced`, e.g. tall grass; see that module's own doc for why under-emptying rather than over-emptying is the safe direction here) |
+//! | powder-snow/fish/axolotl/sulfur-cube/tadpole bucket | empties into the world ahead | **no** — each needs an entity (a real fish/axolotl) or an extra mechanic (powder snow's freezing) beyond plain fluid placement |
+//! | bucket | picks a fluid up | **yes**, water/lava only (`crate::fluid::bucket_pickup_kind`/`filled_bucket_item`) — a fish/axolotl/powder-snow cell is not a plain fluid source, so picking one up still does nothing here |
 //! | flint and steel | ignites the block ahead (`FlintAndSteelDispenseItemBehavior`) | **partial** ([`flint_and_steel_ignite`]) — the fire-placement arm only; the sulfur-cube-entity-priming arm needs an entity query this crate has none of, and the TNT-block-priming arm needs a primed-TNT entity (see the TNT row) |
 //! | bone meal | grows the crop/water plant ahead (`BoneMealItem.growCrop`) | **yes**, via `crate::bone_meal::apply_bone_meal` — `growWaterPlant` (seagrass/coral) is that module's own pre-existing named gap, not a new one this wiring introduces |
 //! | TNT | spawns a primed-TNT entity | **yes** — `crate::mobs::MobSim::spawn_tnt`, wired into this arm in `tick.rs`'s `TICK_DISPENSER_FIRE` drain |
@@ -63,12 +65,13 @@
 //!
 //! So this module now models the shared mechanics (the `TRIGGERED` redstone
 //! state machine, the plain-toss math, and the dropper's container push) plus
-//! seven of the ~35 special behaviours (spawn eggs, boats, minecarts, TNT,
-//! bone meal, the fire-placement half of flint and steel, and — via
-//! `crate::hopper` — a dropper's container push); every skip above names its
-//! own missing mechanism rather than leaving "no" unexplained, per this
-//! issue's own trap about not treating "dispenser ejects an item" as done
-//! until the table is at least enumerated.
+//! ten of the ~35 special behaviours (spawn eggs, boats, minecarts, TNT, bone
+//! meal, the fire-placement half of flint and steel, arrows, and lava/water
+//! bucket fill and pickup, plus — via `crate::hopper` — a dropper's
+//! container push); every skip above names its own missing mechanism rather
+//! than leaving "no" unexplained, per this issue's own trap about not
+//! treating "dispenser ejects an item" as done until the table is at least
+//! enumerated.
 //!
 //! # What this needs of the execution model
 //!
@@ -89,8 +92,10 @@
 //!   plain-tosses, **never** consulting the behaviour table below, matching
 //!   `DropperBlock.getDispenseMethod`'s own hardcoded `DefaultDispenseItemBehavior`.
 //!   A dispenser instead matches the item against [`spawn_egg_position`],
-//!   [`boat_dispense`], `crate::bone_meal::apply_bone_meal` and
-//!   [`flint_and_steel_ignite`] in turn, falling to [`plain_toss`] through
+//!   [`boat_dispense`], `crate::bone_meal::apply_bone_meal`,
+//!   [`flint_and_steel_ignite`], [`arrow_entity_type`] and
+//!   `crate::fluid::bucket_empty_item_kind`/`bucket_pickup_kind` in turn,
+//!   falling to [`plain_toss`] through
 //!   `MobSim::spawn_item` — the same entry point `crate::block_drops` uses for
 //!   a broken block's loot — when none matches or a matched behaviour reports
 //!   no effect. An empty container (`random_slot` returns `None`) is a silent
@@ -278,6 +283,66 @@ pub fn facing_name(state: &str) -> &'static str {
 /// as everywhere else in this crate's RNG-threaded code.
 fn triangle(mean: f64, spread: f64, next_f64: &mut impl FnMut() -> f64) -> f64 {
     mean + spread * (next_f64() - next_f64())
+}
+
+/// `ArrowItem`/`TippedArrowItem`/`SpectralArrowItem`'s entity id — all three
+/// implement `ProjectileItem` and none overrides `createDispenseConfig`, so
+/// all three fire with [`ARROW_DISPENSE_POWER`]/[`ARROW_DISPENSE_UNCERTAINTY`]
+/// (`ProjectileItem.DispenseConfig.DEFAULT`). A tipped arrow's potion effect
+/// is not modelled — `lodestone_model::ItemComponents` has no
+/// `minecraft:potion_contents` for a projectile to carry, so it dispenses as
+/// a plain, effectless `minecraft:arrow`, same entity type vanilla itself
+/// uses (`TippedArrowItem` still `extends ArrowItem` and does not override
+/// `createArrow`/`asProjectile`).
+#[must_use]
+pub fn arrow_entity_type(item: &str) -> Option<&'static str> {
+    match item {
+        "minecraft:arrow" | "minecraft:tipped_arrow" => Some("minecraft:arrow"),
+        "minecraft:spectral_arrow" => Some("minecraft:spectral_arrow"),
+        _ => None,
+    }
+}
+
+/// `ProjectileItem.DispenseConfig.DEFAULT`'s `power` — every arrow item.
+pub const ARROW_DISPENSE_POWER: f64 = 1.1;
+/// `ProjectileItem.DispenseConfig.DEFAULT`'s `uncertainty` — every arrow item.
+pub const ARROW_DISPENSE_UNCERTAINTY: f64 = 6.0;
+
+/// `ProjectileItem.DispenseConfig.DEFAULT`'s `positionFunction`:
+/// `DispenserBlock.getDispensePosition(source, 0.7, Vec3(0, 0.1, 0))` — the
+/// same `0.7`-scaled point [`dispense_position`] already computes, offset
+/// `0.1` higher. A projectile's own spawn point therefore sits above a
+/// plain-tossed item's, which uses the zero-offset overload.
+#[must_use]
+pub fn projectile_dispense_position(center: (f64, f64, f64), face: Direction) -> (f64, f64, f64) {
+    let (px, py, pz) = dispense_position(center, face);
+    (px, py + 0.1, pz)
+}
+
+/// `Projectile.getMovementToShoot(xd, yd, zd, pow, uncertainty)`
+/// (`Projectile.java:130-139`), with `(xd, yd, zd)` fixed to the dispenser's
+/// own facing unit vector — `ProjectileDispenseBehavior.execute` passes
+/// `direction.getStepX/Y/Z()`, never a drawn or aimed direction, so
+/// `.normalize()` on that input is always a no-op and is skipped here.
+///
+/// `next_f64` draws three [`triangle`] samples, in axis order (x, y, z) —
+/// same "the draw order is the spec" caution as [`plain_toss`]'s own doc.
+#[must_use]
+pub fn projectile_velocity(
+    face: Direction,
+    power: f64,
+    uncertainty: f64,
+    next_f64: &mut impl FnMut() -> f64,
+) -> (f64, f64, f64) {
+    let (dx, dy, dz) = step(face);
+    // `0.0172275` is `Projectile.java`'s own literal — the per-unit-uncertainty
+    // spread each axis draws its noise from.
+    let spread = 0.017_227_5 * uncertainty;
+    (
+        (dx + triangle(0.0, spread, next_f64)) * power,
+        (dy + triangle(0.0, spread, next_f64)) * power,
+        (dz + triangle(0.0, spread, next_f64)) * power,
+    )
 }
 
 /// `DefaultDispenseItemBehavior.DEFAULT_ACCURACY` (`:12`) — the deviation
