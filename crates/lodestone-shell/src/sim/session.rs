@@ -974,6 +974,20 @@ impl Sim {
         })
     }
 
+    /// The [`Self::held_item_overlay`] sibling that keeps a hex colour:
+    /// [`lodestone_game::player_state::HeldItemHighlight::name_spans`] instead
+    /// of `name`, for the reason [`Self::action_bar_overlay`] gives.
+    #[must_use]
+    pub fn held_item_overlay_spans(&self) -> Option<(Vec<TextSpan>, f32)> {
+        self.read(|w| {
+            let overlay = w
+                .get::<lodestone_ecs::session::HeldItemOverlay>(self.local)
+                .expect("the local player always carries HeldItemOverlay");
+            let spans = overlay.0.name_spans()?;
+            Some((spans.to_vec(), overlay.0.alpha()))
+        })
+    }
+
     /// `Player.hasInfiniteMaterials()` — `Abilities.instabuild`
     /// (`Player.java`; `AnvilMenu.mayPickup` and
     /// `EnchantmentScreen.java` both gate on it). Used by
