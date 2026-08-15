@@ -701,6 +701,10 @@ pub const MAIN_BUTTONS: [MainButton; 9] = [
     MainButton::Accounts,
 ];
 
+/// Whether this build can end its own process, which is what **Quit Game**
+/// means. False in a browser tab — see [`MainButton::enabled_on`].
+pub const CAN_EXIT_PROCESS: bool = !cfg!(target_arch = "wasm32");
+
 impl MainButton {
     /// The label drawn on the button, or narrated for an icon-only one.
     ///
@@ -728,20 +732,40 @@ impl MainButton {
     /// vanilla's `widget/button_disabled` sprite with a dimmed label and makes
     /// keyboard navigation step over the row — see [`MainButton`]'s docs for why
     /// each disabled one is still present.
+    ///
+    /// Delegates to [`Self::enabled_on`] with this build's real answer for
+    /// whether a process exists to end.
     #[must_use]
     pub fn enabled(self) -> bool {
-        matches!(
-            self,
+        self.enabled_on(CAN_EXIT_PROCESS)
+    }
+
+    /// [`Self::enabled`] with the host capability passed in rather than read
+    /// from `cfg!`, so **both** arms are reachable from a test on either
+    /// target. A `cfg!` read inline here would make the browser's answer
+    /// unobservable from the native suite, which is the whole corpus — and a
+    /// rule no gate can exercise is documentation of intent, not a guard.
+    #[must_use]
+    pub fn enabled_on(self, can_exit_process: bool) -> bool {
+        match self {
+            // A browser tab has no process to end. `event_loop.exit()` — what
+            // `quit_requested` latches into — stops the loop and leaves a dead
+            // canvas rather than closing anything, and `window.close()` is
+            // refused for any page the script did not itself open. So the row
+            // is present and greyed, exactly as `Realms` and `Friends` are:
+            // the state vanilla itself ships for a feature that is unavailable
+            // rather than absent.
+            MainButton::Quit => can_exit_process,
             MainButton::Singleplayer
-                | MainButton::Multiplayer
-                | MainButton::Options
-                | MainButton::Quit
-                | MainButton::Accounts
-                // Issue #415/#55: both destination screens are built now —
-                // see the variants' own docs.
-                | MainButton::Language
-                | MainButton::Accessibility
-        )
+            | MainButton::Multiplayer
+            | MainButton::Options
+            | MainButton::Accounts
+            // Both destination screens are built now — see the variants' own
+            // docs.
+            | MainButton::Language
+            | MainButton::Accessibility => true,
+            MainButton::Realms | MainButton::Friends => false,
+        }
     }
 
     /// The GUI sprite drawn centred in the button instead of a label —
@@ -5669,6 +5693,48 @@ mod tests {
     /// there must leave in **one** step, straight back to the title — not
     /// two, via the root grid — which is what an empty page stack
     /// (`SettingsNav::open_at`) buys over the grid button's push-from-Root.
+    /// **Quit Game** is present-and-greyed in a browser tab and live
+    /// everywhere else, and the whole row set is otherwise identical between
+    /// the two hosts.
+    ///
+    /// Both arms are driven through [`MainButton::enabled_on`] rather than
+    /// `enabled()`, because the native suite is the only suite: an inline
+    /// `cfg!` would make the browser's answer unobservable here, and the arm
+    /// nobody can run is the arm that rots. The assertion is on a **collected**
+    /// difference set, not one `assert!` per row inside the loop — a loop-body
+    /// assert aborts on the first mismatch, so a neuter proves exactly one row
+    /// and leaves the rest as arguments rather than observations.
+    #[test]
+    fn quit_game_is_the_only_row_a_browser_disables() {
+        let differing: Vec<MainButton> = MAIN_BUTTONS
+            .iter()
+            .copied()
+            .filter(|b| b.enabled_on(true) != b.enabled_on(false))
+            .collect();
+        assert_eq!(
+            differing,
+            vec![MainButton::Quit],
+            "exactly one row may depend on whether a process can be ended"
+        );
+
+        assert!(
+            MainButton::Quit.enabled_on(true),
+            "a native build must be able to quit"
+        );
+        assert!(
+            !MainButton::Quit.enabled_on(false),
+            "a browser tab has no process to end, so the row must be greyed \
+             rather than latching a quit that only stops the event loop"
+        );
+        // Present, not removed: a button missing from its vanilla position is a
+        // layout that reads wrong. This is what separates "disabled" from
+        // "absent", and it is the half a `retain`-shaped fix would break.
+        assert!(
+            MAIN_BUTTONS.contains(&MainButton::Quit),
+            "the row must still occupy its vanilla slot on every host"
+        );
+    }
+
     #[test]
     fn language_and_accessibility_icons_open_their_page_directly_and_escape_is_one_step() {
         use crate::menu::options::SettingsPage;
