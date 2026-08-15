@@ -318,6 +318,51 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueue<T> {
         }
         out
     }
+
+    /// Removes and returns the first pending tick at `pos` whose `kind`
+    /// satisfies `matches`, regardless of `trigger_tick` — i.e. **interrupts**
+    /// a pending tick rather than waiting for it to come due.
+    ///
+    /// This is the queue-side half of vanilla's `PistonMovingBlockEntity
+    /// .finalTick()`/`preRemoveSideEffects` reaching a moving block entity
+    /// *before* its own scheduled commit fires: `crate::piston`'s pending
+    /// commit lives in this queue (see `piston::finish_kind`'s own doc
+    /// comment — there is no per-position block-entity map on this reaction
+    /// surface, so "read the moving block entity at this cell" already means
+    /// "find the pending commit at this cell"), so interrupting it means
+    /// removing that entry from *here*, not from a store that does not
+    /// exist. `kind` is matched by predicate rather than equality because a
+    /// piston's finish kind is a full serialised record
+    /// ([`super::piston::finish_kind`]), not a fixed string — the same
+    /// reason [`Self::has_scheduled`] cannot be reused for this lookup.
+    ///
+    /// `BinaryHeap` has no O(log n) removal for an interior element, so this
+    /// is O(n) in the number of pending ticks — bounded by how much redstone
+    /// is mid-flight, never by world size, and the same cost class
+    /// `drain_due`'s own `Vec` pop-and-rebuild already pays per call.
+    pub fn take_matching(
+        &mut self,
+        pos: (i32, i32, i32),
+        mut matches: impl FnMut(&T) -> bool,
+    ) -> Option<ScheduledTick<T>> {
+        let entries: Vec<ScheduledTick<T>> = std::mem::take(&mut self.heap)
+            .into_vec()
+            .into_iter()
+            .map(|e| e.0)
+            .collect();
+        let mut found = None;
+        let mut rebuilt = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if found.is_none() && entry.pos == pos && matches(&entry.kind) {
+                self.scheduled.remove(&(entry.pos, entry.kind.clone()));
+                found = Some(entry);
+            } else {
+                rebuilt.push(HeapEntry(entry));
+            }
+        }
+        self.heap = BinaryHeap::from(rebuilt);
+        found
+    }
 }
 
 /// The world's two scheduled-tick queues, plus the game tick their
@@ -561,6 +606,65 @@ mod tests {
         let drained = q.drain_due(100, 100);
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].priority, TickPriority::Normal, "original priority must survive");
+    }
+
+    /// [`ScheduledTickQueue::take_matching`] removes only the entry whose
+    /// `pos` **and** predicate both match, leaves every other pending tick —
+    /// including a same-position tick of a *different* kind and a
+    /// same-kind-shaped tick at a *different* position — untouched, and the
+    /// removed entry no longer drains later. All three are collected and
+    /// asserted together rather than three separate `assert!`s, since a
+    /// version that also deletes a neighbour would only be caught by
+    /// checking what is left, not by checking what was returned.
+    #[test]
+    fn take_matching_removes_only_the_one_entry_it_names() {
+        let mut q: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        q.schedule((0, 0, 0), "redstone:piston_finish|south|true|true|x".to_string(), 50, TickPriority::Normal);
+        q.schedule((0, 0, 0), "redstone:repeater".to_string(), 60, TickPriority::Normal);
+        q.schedule((1, 0, 0), "redstone:piston_finish|south|true|true|x".to_string(), 70, TickPriority::Normal);
+
+        let taken = q.take_matching((0, 0, 0), |k| k.starts_with("redstone:piston_finish"));
+        assert!(taken.is_some(), "must find the matching entry at (0,0,0)");
+        let taken = taken.unwrap();
+        assert_eq!(taken.pos, (0, 0, 0));
+        assert_eq!(taken.trigger_tick, 50);
+
+        let mut remaining: Vec<((i32, i32, i32), String)> =
+            q.iter().map(|t| (t.pos, t.kind.clone())).collect();
+        remaining.sort();
+        assert_eq!(
+            remaining,
+            vec![
+                ((0, 0, 0), "redstone:repeater".to_string()),
+                ((1, 0, 0), "redstone:piston_finish|south|true|true|x".to_string()),
+            ],
+            "the same-position different-kind entry and the same-kind different-position entry \
+             must both survive"
+        );
+
+        // The taken entry must no longer be reachable through the ordinary
+        // drain path either -- proves this is a removal, not a copy.
+        let drained = q.drain_due(1000, 100);
+        assert_eq!(drained.len(), 2, "only the two untaken entries may still drain");
+        assert!(
+            drained.iter().all(|t| t.trigger_tick != 50),
+            "the taken entry's trigger_tick must not appear in a later drain"
+        );
+    }
+
+    /// Negative control: a predicate that matches nothing, or a position
+    /// that holds nothing, returns `None` and leaves the queue exactly as it
+    /// was -- proving `take_matching` cannot silently remove the wrong
+    /// entry when its own premise (something is actually there) is false.
+    #[test]
+    fn take_matching_returns_none_and_leaves_the_queue_intact_when_nothing_matches() {
+        let mut q: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        q.schedule((0, 0, 0), "redstone:repeater".to_string(), 50, TickPriority::Normal);
+
+        assert!(q.take_matching((0, 0, 0), |k| k.starts_with("redstone:piston_finish")).is_none());
+        assert!(q.take_matching((5, 5, 5), |_| true).is_none());
+        assert_eq!(q.len(), 1, "the untouched entry must still be queued");
+        assert!(q.has_scheduled((0, 0, 0), &"redstone:repeater".to_string()));
     }
 
     /// Negative control for the dedup test above, proving the detector

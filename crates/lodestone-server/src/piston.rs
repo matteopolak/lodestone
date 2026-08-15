@@ -1055,6 +1055,52 @@ pub fn finish_move(start: &MoveStart) -> Vec<MoveWrite> {
         .collect()
 }
 
+// --- interruption -----------------------------------------------------
+
+/// `PistonMovingBlockEntity.finalTick()` — the write a pending commit performs
+/// when it is interrupted *before* its own [`PISTON_MOVE_DELAY`] elapses,
+/// because a fresh move started at the same piston while the previous one was
+/// still animating.
+///
+/// **Not the same write [`finish_move`] performs on ordinary completion.**
+/// `finalTick`'s branch on `isSourcePiston` is the whole of the difference:
+///
+/// * `entity.source` (`isSourcePiston`) → **air**. The cell was going to
+///   become the piston's own head (an extension's arm cell) or the piston's
+///   own retracted base (a retraction's base cell); interrupted before that
+///   ever lands, vanilla drops it rather than materialising it. This is the
+///   half that makes a piston caught mid-extend-then-immediately-retracted
+///   never show a head at all — confirmed against the live 26.2 oracle (see
+///   `redstone_piston_order_oracle_gate.rs`): interrupting an extending arm
+///   cell leaves it reading `minecraft:air`, never `minecraft:piston_head`.
+/// * otherwise → `entity.moved_state`, same as [`finish_move`]. Vanilla wraps
+///   this in `Block.updateFromNeighbourShapes`, which this crate does not
+///   model (no neighbour-shape system — see this module's own "How to change
+///   it" section on why `finish_move` already takes the same reduction); the
+///   moved state itself is unaffected by that gap for every family this crate
+///   pushes.
+///
+/// The caller decides *which* pending entity to interrupt — see
+/// [`crate::scheduled_tick::ScheduledTickQueue::take_matching`], which is
+/// where the corresponding scheduled commit is removed so it cannot also fire
+/// later against a cell this function has already rewritten. Vanilla's own
+/// interrupt site (`PistonBaseBlock.triggerEvent`'s `b0 == 1 || b0 == 2`
+/// branch) only ever inspects the piston's own **arm** cell
+/// (`pos.relative(direction)`) — never a cell further out that a run may have
+/// pushed a block into. A block already carried past the arm keeps its own,
+/// independent countdown and commits on schedule regardless of what happens
+/// to the piston that pushed it; also confirmed live (the pushed block's own
+/// moving entity, positioned two cells from the base, was untouched by the
+/// arm's interruption and committed to `minecraft:dirt` on its own timer).
+#[must_use]
+pub fn interrupt(pos: BlockPos, entity: &MovingBlockEntity) -> MoveWrite {
+    if entity.source {
+        MoveWrite { pos, to: "minecraft:air".to_string() }
+    } else {
+        MoveWrite { pos, to: entity.moved_state.clone() }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1986,5 +2032,131 @@ mod tests {
         // The alphabetical ordering a hand-count produces is
         // down/east/north/south/up/west, which puts EAST at 1 rather than 5.
         assert_ne!(of(Direction::East), 1, "this is not the alphabetical ordering");
+    }
+
+    /// [`interrupt`]'s `source` arm: a piston's own arm cell, caught before its
+    /// extend commits, evaporates to air rather than materialising the head or
+    /// the retracted base it was about to become. Live-measured (the 26.2
+    /// oracle, `redstone_piston_order_oracle_gate.rs`): retracting a piston
+    /// while its own arm still holds an *extending* `source` entity left that
+    /// cell reading `minecraft:air`, never `minecraft:piston_head`.
+    ///
+    /// Two shapes of `source` entity are checked — an extension's arm (holding
+    /// the not-yet-placed head) and a retraction's base (holding the
+    /// not-yet-restored plain piston) — because [`begin_move`] constructs them
+    /// from two different branches and a fix to one could leave the other
+    /// alone.
+    #[test]
+    fn interrupting_a_source_entity_writes_air_never_the_moved_state() {
+        let extending_head = MovingBlockEntity {
+            moved_state: format!("{PISTON_HEAD}[facing=east,short=false,type=normal]"),
+            direction: Direction::East,
+            extending: true,
+            source: true,
+        };
+        let retracting_base = MovingBlockEntity {
+            moved_state: "minecraft:piston[facing=south,extended=false]".to_string(),
+            direction: Direction::South,
+            extending: false,
+            source: true,
+        };
+        for (label, entity) in [("extending arm", &extending_head), ("retracting base", &retracting_base)] {
+            let write = interrupt(at(9, 9, 9), entity);
+            assert_eq!(
+                write,
+                MoveWrite { pos: at(9, 9, 9), to: "minecraft:air".to_string() },
+                "{label}: a source entity interrupted mid-animation must evaporate to air, not \
+                 land at its moved_state {:?}",
+                entity.moved_state
+            );
+        }
+    }
+
+    /// [`interrupt`]'s non-`source` arm: a block a piston is carrying (not the
+    /// piston's own cell) is unaffected by an interruption elsewhere on the
+    /// same piston and still commits to its `moved_state` — the same value
+    /// [`finish_move`] would write on ordinary completion. Live-measured: the
+    /// pushed block's own moving entity, two cells from the piston base,
+    /// continued its own countdown and committed to `minecraft:dirt`
+    /// regardless of the arm's interruption happening one cell closer.
+    #[test]
+    fn interrupting_a_carried_block_writes_its_moved_state_same_as_ordinary_completion() {
+        let carried = MovingBlockEntity {
+            moved_state: "minecraft:dirt".to_string(),
+            direction: Direction::South,
+            extending: true,
+            source: false,
+        };
+        let write = interrupt(at(3, 4, 5), &carried);
+        assert_eq!(write, MoveWrite { pos: at(3, 4, 5), to: "minecraft:dirt".to_string() });
+
+        // Control: this must be the *same* value `finish_move` reaches through
+        // its own, independent path -- proving `interrupt`'s non-source arm is
+        // not a different, coincidentally-matching computation.
+        let start = MoveStart {
+            moving: vec![(at(3, 4, 5), moving_piston_state(Direction::South, false), carried)],
+            cleared: Vec::new(),
+            base_now: None,
+        };
+        assert_eq!(finish_move(&start), vec![write], "interrupt and ordinary completion must agree");
+    }
+
+    /// End-to-end over [`ScheduledTickQueue::take_matching`]: a piston's move
+    /// schedules its commit exactly as `begin_move` always has, and
+    /// interrupting it removes *that* entry so the ordinary drain can never
+    /// also fire it later against a cell `interrupt` has already rewritten.
+    /// The negative control is a *second*, unrelated piston commit at a
+    /// different position, which `take_matching` must leave alone -- the
+    /// same "removed only the one entry it names" property
+    /// `scheduled_tick.rs`'s own gate for this method checks in isolation,
+    /// exercised here through the real serialisation `finish_kind` produces
+    /// rather than a hand-built string.
+    #[test]
+    fn interrupting_a_pending_commit_cancels_it_so_the_ordinary_drain_cannot_also_fire_it() {
+        use crate::scheduled_tick::{ScheduledTickQueue, TickPriority};
+
+        let arm_pos = at(1, 1, 1);
+        let other_pos = at(9, 1, 1);
+        let entity = MovingBlockEntity {
+            moved_state: format!("{PISTON_HEAD}[facing=east,short=false,type=normal]"),
+            direction: Direction::East,
+            extending: true,
+            source: true,
+        };
+        let other_entity = MovingBlockEntity {
+            moved_state: "minecraft:dirt".to_string(),
+            direction: Direction::East,
+            extending: true,
+            source: false,
+        };
+
+        let mut ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        ticks.schedule(
+            (arm_pos.x, arm_pos.y, arm_pos.z),
+            finish_kind(&entity),
+            10 + PISTON_MOVE_DELAY,
+            TickPriority::Normal,
+        );
+        ticks.schedule(
+            (other_pos.x, other_pos.y, other_pos.z),
+            finish_kind(&other_entity),
+            10 + PISTON_MOVE_DELAY,
+            TickPriority::Normal,
+        );
+
+        let taken = ticks
+            .take_matching((arm_pos.x, arm_pos.y, arm_pos.z), |kind| is_finish_kind(kind))
+            .expect("PREMISE FAILED: the scheduled commit at arm_pos must be found");
+        let parsed = parse_finish_kind(&taken.kind).expect("must round-trip back to the entity");
+        assert_eq!(parsed, entity, "the interrupted entry must be the one begin_move scheduled");
+        let write = interrupt(arm_pos, &parsed);
+        assert_eq!(write.to, "minecraft:air");
+
+        // The ordinary drain, run past the original due tick, must produce
+        // only the *other* piston's commit -- the interrupted one is gone,
+        // not merely reordered.
+        let drained = ticks.drain_due(10 + PISTON_MOVE_DELAY, 100);
+        assert_eq!(drained.len(), 1, "CONTROL FAILED: exactly the untaken commit must remain");
+        assert_eq!(drained[0].pos, (other_pos.x, other_pos.y, other_pos.z));
     }
 }
