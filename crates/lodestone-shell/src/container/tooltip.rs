@@ -54,6 +54,7 @@
 
 use lodestone_game::item::ItemStack;
 use lodestone_game::menu::Menu;
+use lodestone_model::text::TextSpan;
 
 use super::builder::Builder;
 
@@ -109,10 +110,20 @@ const DARK_PURPLE: [f32; 4] = [170.0 / 255.0, 0.0, 170.0 / 255.0, 1.0];
 /// One tooltip line: its text and its colour.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct TooltipLine {
-    /// The text, already resolved to words.
+    /// The text, already resolved to words. Still populated when
+    /// [`Self::spans`] is `Some` (as the plain concatenation) so width
+    /// measurement and any caller that only wants the words keep working
+    /// unchanged; the draw loop prefers `spans` when present.
     pub text: String,
-    /// The colour to draw it in.
+    /// The colour to draw it in when [`Self::spans`] is `None` — every line
+    /// except the title, which is a fixed English literal or a potion name
+    /// composed by this module, never a server-authored [`Text`] tree.
     pub colour: [f32; 4],
+    /// The styled runs behind `text`, when the line was built from a real
+    /// [`Text`] tree that might carry a hex colour — currently only the
+    /// title line, via [`lodestone_game::item::styled_hover_name_spans`].
+    /// `None` for every other line, which draws flat in `colour` instead.
+    pub spans: Option<Vec<TextSpan>>,
 }
 
 /// The lines vanilla would show for `stack` — `ItemStack.getTooltipLines`, in its
@@ -128,10 +139,7 @@ pub(super) struct TooltipLine {
 /// table reaches this module. `item.durability` is `"Durability: %s / %s"` and
 /// `item.components` is `"%s Component(s)"` in `en_us.json`.
 pub(super) fn tooltip_lines(stack: &ItemStack, advanced: bool) -> Vec<TooltipLine> {
-    let mut lines = vec![TooltipLine {
-        text: hover_name(stack),
-        colour: NAME_COLOUR,
-    }];
+    let mut lines = vec![title_line(stack)];
     // `PotionContents.addToTooltip`/`ItemEnchantments.addToTooltip` both run
     // unconditionally — neither is gated behind `isAdvanced()` the way
     // durability/id/component-count are, so these lines belong before the
@@ -154,17 +162,20 @@ pub(super) fn tooltip_lines(stack: &ItemStack, advanced: bool) -> Vec<TooltipLin
         lines.push(TooltipLine {
             text: format!("Durability: {} / {}", max - damage, max),
             colour: DARK_GRAY,
+            spans: None,
         });
     }
     lines.push(TooltipLine {
         text: stack.item().to_string(),
         colour: DARK_GRAY,
+        spans: None,
     });
     let components = stack.components().len();
     if components > 0 {
         lines.push(TooltipLine {
             text: format!("{components} Component(s)"),
             colour: DARK_GRAY,
+            spans: None,
         });
     }
     lines
@@ -188,18 +199,45 @@ pub(super) fn tooltip_lines(stack: &ItemStack, advanced: bool) -> Vec<TooltipLin
 /// A custom name still wins outright: `ItemStack.getHoverName()` checks
 /// `DataComponents.CUSTOM_NAME` before ever calling `Item.getName`, and
 /// `PotionItem`/`TippedArrowItem` only override the latter.
-fn hover_name(stack: &ItemStack) -> String {
+///
+/// Returns the full [`TooltipLine`] rather than a bare `String` so the
+/// [`styled_hover_name_spans`](lodestone_game::item::styled_hover_name_spans)
+/// case can carry its spans alongside the plain text: `text` still comes from
+/// [`styled_hover_name`](lodestone_game::item::styled_hover_name) (so
+/// `emit_tooltip_for_stack`'s box-width walk, which measures every line
+/// through the same `§`-aware `font.width`, is unaffected), and `spans` is
+/// `Some` only when the title actually came from a `Text` tree that might
+/// carry a hex colour — never for the composed potion title, which this
+/// module builds as a plain literal and can never disagree with itself on
+/// colour.
+fn title_line(stack: &ItemStack) -> TooltipLine {
     if stack.custom_name().is_none()
         && let Some(potion_id) = stack.potion_effect_id()
         && let Some(name) = lodestone_data::potion::potion_item_display_name(stack.item().path(), potion_id)
     {
-        return name.to_string();
+        return TooltipLine {
+            text: name.to_string(),
+            colour: NAME_COLOUR,
+            spans: None,
+        };
     }
     // `&|_| None`: no language table here, so a non-potion item resolves through
     // `base_display_name`'s humanised fallback — "Diamond Sword" for
     // `minecraft:diamond_sword`. Right for every vanilla item whose id is its
     // name in snake_case, which is nearly all of them.
-    lodestone_game::item::styled_hover_name(stack, &|_| None)
+    TooltipLine {
+        text: lodestone_game::item::styled_hover_name(stack, &|_| None),
+        colour: NAME_COLOUR,
+        spans: Some(lodestone_game::item::styled_hover_name_spans(stack, &|_| None)),
+    }
+}
+
+/// Test/back-compat accessor: the title line's plain text alone, matching
+/// [`title_line`]'s `text` field exactly (see that function's own doc for why
+/// the two never disagree on wording, only on whether spans ride along).
+#[cfg(test)]
+fn hover_name(stack: &ItemStack) -> String {
+    title_line(stack).text
 }
 
 /// `PotionContents.addPotionTooltip` (`PotionContents.java`) for a potion-family
@@ -235,6 +273,7 @@ fn potion_lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
         lines.push(TooltipLine {
             text: "No Effects".to_string(),
             colour: GRAY,
+            spans: None,
         });
         return lines;
     }
@@ -250,6 +289,7 @@ fn potion_lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
         lines.push(TooltipLine {
             text,
             colour: if entry.harmful { RED } else { BLUE },
+            spans: None,
         });
     }
     let modifiers = lodestone_data::potion::potion_attribute_modifiers(potion_id);
@@ -257,10 +297,12 @@ fn potion_lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
         lines.push(TooltipLine {
             text: String::new(),
             colour: NAME_COLOUR,
+            spans: None,
         });
         lines.push(TooltipLine {
             text: "When Applied:".to_string(),
             colour: DARK_PURPLE,
+            spans: None,
         });
         for modifier in &modifiers {
             let magnitude = format_attribute_amount(modifier.amount.abs(), modifier.percent);
@@ -269,6 +311,7 @@ fn potion_lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
             lines.push(TooltipLine {
                 text: format!("{sign}{magnitude}{suffix} {}", modifier.attribute_name),
                 colour: if modifier.amount < 0.0 { RED } else { BLUE },
+                spans: None,
             });
         }
     }
@@ -325,6 +368,7 @@ fn enchantment_lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
     }
     vec![TooltipLine {
         text,
+        spans: None,
         colour: if lodestone_data::enchantment::is_curse(authored.path) { RED } else { GRAY },
     }]
 }
@@ -521,7 +565,14 @@ pub(super) fn emit_tooltip_for_stack(
 
     let mut y = ty;
     for (i, line) in lines.iter().enumerate() {
-        b.shadowed_label(&line.text, tx, y, 1.0, line.colour);
+        // `spans` is `Some` only for a title built from a real `Text` tree
+        // (see `title_line`'s doc) — draw those through the span-aware path
+        // so a hex-coloured custom item name survives; every other line is a
+        // plain literal this module composed itself and draws flat as before.
+        match &line.spans {
+            Some(spans) => b.shadowed_label_spans(spans, tx, y, 1.0, line.colour),
+            None => b.shadowed_label(&line.text, tx, y, 1.0, line.colour),
+        }
         y += LINE_PITCH;
         if i == 0 {
             y += TITLE_GAP;

@@ -6,6 +6,8 @@
 use lodestone_assets::ResourceLocation;
 use lodestone_render::{GuiSpriteQuad, ModelVertex};
 
+use lodestone_model::text::TextSpan;
+
 use crate::hud::HotbarSlot;
 use crate::hud::VanillaFont;
 use crate::hud::item_icon::{self, ColourStream, IconAssets, IconSink, SpecialIconDraw};
@@ -167,6 +169,25 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The [`Self::shadowed_label`] sibling for a styled [`TextSpan`] list —
+    /// the structured draw a caller holding [`Text`](lodestone_model::Text)
+    /// output should prefer, for the same reason `hud::Builder::text_spans`
+    /// exists over `text_legacy`: flattening to a `§`-coded `String` first
+    /// drops any [`TextColor::Rgb`](lodestone_model::text::TextColor::Rgb),
+    /// silently, before this module ever sees it. `c`'s RGB is the base
+    /// colour an unstyled span (or `§r`) draws in; its alpha scales every run.
+    pub(crate) fn shadowed_label_spans(&mut self, spans: &[TextSpan], x: f32, y: f32, scale: f32, c: [f32; 4]) {
+        let base = [c[0], c[1], c[2]];
+        let alpha = c[3];
+        match self.font {
+            Some(f) => {
+                let mut cs = self.colour();
+                f.draw_spans(&mut cs, spans, x, y, scale, base, alpha);
+            }
+            None => self.colour().spans(spans, x, y, scale, base, alpha),
+        }
+    }
+
     /// A handle onto the colour stream, for the shared pixel-space primitives.
     fn colour(&mut self) -> ColourStream<'_> {
         ColourStream {
@@ -257,7 +278,7 @@ impl<'a> Builder<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::icon_record;
+    use super::{Builder, icon_record};
 
     /// The `stack -> HotbarSlot` hop: `icon_record` is what every container
     /// surface (chest, furnace, recipe panel, creative menu) actually reads
@@ -282,5 +303,81 @@ mod tests {
         let stick = ItemStack::new("minecraft:stick".parse().expect("static id parses"), 1);
         let record = icon_record(&stick).expect("stick is a valid ResourceLocation");
         assert!(!record.enchanted, "a plain stick must not set enchanted");
+    }
+
+    /// [`Builder::shadowed_label_spans`] — the tooltip title's real draw
+    /// call (`container::tooltip::emit_tooltip_for_stack`) — must put a
+    /// hex, a named and an inline-`§`-coded run into pairwise-distinct
+    /// vertex RGBs, on the jar-less path (`font: None`) this unit test can
+    /// exercise without a real `client.jar`. A control through
+    /// [`Builder::shadowed_label`] (the `String`/`Text::to_legacy_string`
+    /// path `styled_hover_name` used before its spans sibling existed)
+    /// proves the loss really lives where issue #656 says it does.
+    #[test]
+    fn shadowed_label_spans_carries_hex_named_and_inline_legacy_colour_to_distinct_vertices() {
+        use lodestone_model::text::{Text, TextColor, TextContent, TextStyle};
+
+        let hex = Text {
+            content: TextContent::Literal("Hex".to_string()),
+            style: TextStyle {
+                color: Some(TextColor::Rgb(0x1a_2b3c)),
+                ..TextStyle::default()
+            },
+            ..Text::default()
+        };
+        let inline_legacy = Text::literal("\u{00a7}cRed");
+        let named = Text {
+            content: TextContent::Literal("Gray".to_string()),
+            style: TextStyle {
+                color: Some(TextColor::Gray),
+                ..TextStyle::default()
+            },
+            ..Text::default()
+        };
+        let root = Text {
+            extra: vec![hex, inline_legacy, named],
+            ..Text::default()
+        };
+        let spans = root.to_spans();
+        assert_eq!(spans.len(), 3, "sanity: three runs in, three runs out — {spans:?}");
+
+        let mut b = Builder::new(200.0, 100.0, None);
+        b.shadowed_label_spans(&spans, 0.0, 0.0, 1.0, [1.0, 1.0, 1.0, 1.0]);
+        assert!(!b.verts.is_empty(), "sanity: the label must draw something at all");
+
+        let byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        let has_colour = |verts: &[f32], rgb: (u8, u8, u8)| {
+            verts
+                .chunks_exact(6)
+                .any(|v| (byte(v[2]), byte(v[3]), byte(v[4])) == rgb)
+        };
+        let expected = [
+            ("hex", (0x1a_u8, 0x2b_u8, 0x3c_u8)),
+            ("inline §c", (0xff_u8, 0x55_u8, 0x55_u8)),
+            ("named gray", (0xaa_u8, 0xaa_u8, 0xaa_u8)),
+        ];
+        let missing: Vec<&str> = expected
+            .iter()
+            .filter(|(_, rgb)| !has_colour(&b.verts, *rgb))
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these colours never reached a vertex: {missing:?} (full expected set: {expected:?})"
+        );
+
+        // Control: the same three-way name, but through
+        // `shadowed_label`/`Text::to_legacy_string`, which has no
+        // representation for `TextColor::Rgb`. Must show the loss, or the
+        // assertion above proves nothing about which call actually carries
+        // the colour.
+        let flattened = root.to_legacy_string();
+        let mut legacy_b = Builder::new(200.0, 100.0, None);
+        legacy_b.shadowed_label(&flattened, 0.0, 0.0, 1.0, [1.0, 1.0, 1.0, 1.0]);
+        assert!(
+            !has_colour(&legacy_b.verts, (0x1a, 0x2b, 0x3c)),
+            "control failed: the legacy-string path was expected to lose the hex colour \
+             (that is the bug), but it drew it anyway — this test's premise is wrong"
+        );
     }
 }

@@ -1437,6 +1437,16 @@ pub fn tick_hud_overlays(
         held_item
             .0
             .tick(identity.as_ref().map(|(item, name)| (item, name.as_str())));
+        // The span-carrying sibling (`HeldItemHighlight::set_spans`'s own
+        // doc): same stack, same `&|_| None` translation gap, computed
+        // alongside `tick`'s legacy string so a hex-coloured custom item name
+        // reaches the draw site instead of being dropped by
+        // `styled_hover_name`'s `to_legacy_string` flattening.
+        held_item.0.set_spans(
+            selected
+                .map(|stack| lodestone_game::item::styled_hover_name_spans(stack, &|_| None))
+                .unwrap_or_default(),
+        );
     }
 }
 

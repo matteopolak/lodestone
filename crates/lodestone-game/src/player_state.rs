@@ -5,7 +5,7 @@
 //! adapter lowers `set_health`, `set_experience`, `player_abilities`,
 //! `change_difficulty`, the title packets, and friends into mutations here.
 
-use lodestone_model::{ClientEvent, Difficulty, GameMode, Identifier, Text};
+use lodestone_model::{ClientEvent, Difficulty, GameMode, Identifier, Text, TextSpan};
 
 /// Player vitals and progression shown on the HUD.
 #[derive(Debug, Clone, PartialEq)]
@@ -447,6 +447,13 @@ impl ActionBar {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HeldItemHighlight {
     last: Option<(Identifier, String)>,
+    /// The span-carrying twin of `last`'s name half, set by
+    /// [`Self::set_spans`] — kept out of `last`'s tuple deliberately, so the
+    /// retrigger/identity comparison in [`Self::tick`] keeps comparing the
+    /// plain string it always has (a `Vec<TextSpan>` carries no meaningfully
+    /// different identity for that purpose) and `tick`'s signature, and every
+    /// existing caller of it, stays unchanged.
+    spans: Vec<TextSpan>,
     timer: i32,
 }
 
@@ -504,6 +511,31 @@ impl HeldItemHighlight {
             return None;
         }
         self.last.as_ref().map(|(_, name)| name.as_str())
+    }
+
+    /// Sets the span-carrying draw text alongside whatever [`Self::tick`]
+    /// last decided — call every tick with
+    /// [`lodestone_game::item::styled_hover_name_spans`]'s output for the
+    /// same stack `tick`'s `name` argument was built from
+    /// ([`lodestone_game::item::styled_hover_name`]'s spans sibling), so a
+    /// hex-coloured custom item name survives to [`Self::name_spans`]
+    /// instead of being flattened away the way the legacy `name` string
+    /// necessarily is. A caller that never calls this simply never gets
+    /// `Some` from `name_spans` — [`Self::name`] keeps working exactly as
+    /// before either way.
+    pub fn set_spans(&mut self, spans: Vec<TextSpan>) {
+        self.spans = spans;
+    }
+
+    /// The [`Self::name`] sibling that keeps a hex colour: the spans
+    /// [`Self::set_spans`] was last given, under the same visibility gate
+    /// `name` uses (`Some` only while [`Self::alpha`] would be positive).
+    #[must_use]
+    pub fn name_spans(&self) -> Option<&[TextSpan]> {
+        if self.timer <= 0 {
+            return None;
+        }
+        Some(&self.spans)
     }
 
     /// The current opacity, `0.0..=1.0`. `0.0` means "draw nothing" — the

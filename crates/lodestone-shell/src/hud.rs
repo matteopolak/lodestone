@@ -1392,6 +1392,14 @@ pub struct HudFrame<'a> {
     /// [`Self::can_hurt_player`] and the draw site is in
     /// [`HudGeometry::build_inner`].
     pub held_item: Option<(String, f32)>,
+    /// The [`Self::held_item`] sibling that keeps [`TextColor::Rgb`]: spans
+    /// from `lodestone_game::item::styled_hover_name_spans` rather than
+    /// `styled_hover_name`'s `§`-coded `String`, for the reason [`Self::title`]
+    /// gives — `to_legacy_string` has no representation for a hex colour, so a
+    /// custom item name naming one arrived here flattened to white. When
+    /// non-empty this is drawn **instead of** `held_item`, not composited with
+    /// it, matching [`Self::chat_spans`]'s own convention.
+    pub held_item_spans: Option<(Vec<TextSpan>, f32)>,
     /// `(recipes, tags)` loaded into the local recipe corpus (see
     /// `crate::resources::load_recipe_book`), appended to the debug overlay as
     /// one extra line when `Some`. `None` before the corpus has loaded or on a
@@ -1500,6 +1508,7 @@ impl<'a> HudFrame<'a> {
             title: None,
             action_bar: None,
             held_item: None,
+            held_item_spans: None,
             recipe_stats: None,
             border_debug: None,
             spawn_debug: None,
@@ -2932,7 +2941,16 @@ impl HudGeometry {
         // the XP level number's fix (issue #256) already established two
         // blocks up in [`sprite_vitals`]. Using `scale` here would repeat
         // that exact defect on a second piece of HUD text.
-        if let Some((name, alpha)) = frame.held_item.as_ref().filter(|(_, a)| *a > 0.0) {
+        // `held_item_spans` is the hex-carrying sibling (see its own doc) and
+        // wins when non-empty, matching `chat_spans`'s convention; a caller
+        // that has not been threaded through to the spans source yet still
+        // draws via the legacy `held_item` path below.
+        if let Some((spans, alpha)) = frame.held_item_spans.as_ref().filter(|(_, a)| *a > 0.0) {
+            let tw = b.spans_width(spans, 1.0);
+            let x = (b.w - tw) * 0.5;
+            let y = b.h - 59.0 + if frame.can_hurt_player { 0.0 } else { 14.0 };
+            b.text_spans(spans, x, y, 1.0, [1.0, 1.0, 1.0], *alpha);
+        } else if let Some((name, alpha)) = frame.held_item.as_ref().filter(|(_, a)| *a > 0.0) {
             let tw = b.legacy_width(name, 1.0);
             let x = (b.w - tw) * 0.5;
             // `extractSelectedItemName`: `y = guiHeight - 59`, then `y += 14` when
@@ -7650,6 +7668,117 @@ mod tests {
                 crosshair: false,
                 show_debug: false,
                 chat: &chat_legacy,
+                ..HudFrame::new(&stats)
+            },
+            640,
+            480,
+        );
+        let legacy_byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        let legacy_has_colour = |rgb: (u8, u8, u8)| {
+            legacy_geo
+                .verts
+                .chunks_exact(6)
+                .any(|v| (legacy_byte(v[2]), legacy_byte(v[3]), legacy_byte(v[4])) == rgb)
+        };
+        assert!(
+            !legacy_has_colour((0x1a, 0x2b, 0x3c)),
+            "control failed: the legacy-string path was expected to lose the hex colour \
+             (that is the bug), but it drew it anyway — this test's premise is wrong"
+        );
+    }
+
+    /// The held-item name highlight's own version of the chat gate just
+    /// above: `lodestone_game::item::styled_hover_name_spans` (issue #656's
+    /// second remaining `to_legacy_string` caller) feeding
+    /// `HudFrame::held_item_spans` must reach three pairwise-distinct vertex
+    /// RGBs, and the legacy `HudFrame::held_item` path built from the same
+    /// tree via `styled_hover_name`/`to_legacy_string` must lose the hex —
+    /// the control that proves the assertion above is measuring the right
+    /// path, not a coincidence.
+    #[test]
+    fn held_item_spans_carry_hex_named_and_inline_legacy_colour_to_distinct_vertices() {
+        use lodestone_model::text::Text;
+
+        let hex = Text {
+            content: lodestone_model::text::TextContent::Literal("Hex".to_string()),
+            style: TextStyle {
+                color: Some(TextColor::Rgb(0x1a_2b3c)),
+                ..TextStyle::default()
+            },
+            ..Text::default()
+        };
+        // The inline convention: a server-authored item name whose colour
+        // lives inside the literal text as a `§c` code rather than as a
+        // component-level style — the second clause `Text::to_spans` handles
+        // and `styled_hover_name_spans` inherits for free.
+        let inline_legacy = Text::literal("\u{00a7}cRed");
+        let named = Text {
+            content: lodestone_model::text::TextContent::Literal("Gray".to_string()),
+            style: TextStyle {
+                color: Some(TextColor::Gray),
+                ..TextStyle::default()
+            },
+            ..Text::default()
+        };
+        let root = Text {
+            extra: vec![hex, inline_legacy, named],
+            ..Text::default()
+        };
+        let spans = root.to_spans();
+        assert_eq!(
+            spans.len(),
+            3,
+            "sanity: three runs in, three runs out — {spans:?}"
+        );
+
+        let stats = DebugStats::default();
+        let geo = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                held_item_spans: Some((spans.clone(), 1.0)),
+                ..HudFrame::new(&stats)
+            },
+            640,
+            480,
+        );
+        assert!(
+            geo.vertex_count() > 0,
+            "sanity: the label must draw something at all"
+        );
+
+        let byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        let has_colour = |rgb: (u8, u8, u8)| {
+            geo.verts
+                .chunks_exact(6)
+                .any(|v| (byte(v[2]), byte(v[3]), byte(v[4])) == rgb)
+        };
+        let expected = [
+            ("hex", (0x1a_u8, 0x2b_u8, 0x3c_u8)),
+            ("inline §c", (0xff_u8, 0x55_u8, 0x55_u8)),
+            ("named gray", (0xaa_u8, 0xaa_u8, 0xaa_u8)),
+        ];
+        let missing: Vec<&str> = expected
+            .iter()
+            .filter(|(_, rgb)| !has_colour(*rgb))
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these colours never reached a vertex: {missing:?} (full expected set: {expected:?})"
+        );
+
+        // Control: the same three-way name, but through the lossy
+        // `held_item: Option<(String, f32)>` path — `styled_hover_name`'s
+        // `Text::to_legacy_string`, which has no representation for
+        // `TextColor::Rgb`. This must show the loss, or the assertion above
+        // proves nothing about which field actually carries the colour.
+        let flattened = root.to_legacy_string();
+        let legacy_geo = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                held_item: Some((flattened, 1.0)),
                 ..HudFrame::new(&stats)
             },
             640,

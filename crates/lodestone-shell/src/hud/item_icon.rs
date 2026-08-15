@@ -907,6 +907,42 @@ impl ColourStream<'_> {
             cursor += advance;
         }
     }
+
+    /// The jar-less sibling of [`text`](Self::text) for a styled
+    /// [`TextSpan`](lodestone_model::text::TextSpan) list: same fixed-advance
+    /// 5×7 glyphs, but each character coloured by its own span's
+    /// [`TextColor`](lodestone_model::text::TextColor) — falling back to
+    /// `base` when a span carries none — instead of one flat colour for the
+    /// whole string.
+    ///
+    /// Without this, a jar-less caller holding spans would have to flatten
+    /// them to a `§`-coded string first to reuse `text`, which is exactly the
+    /// `Text::to_legacy_string`-style loss this whole change exists to avoid:
+    /// a [`TextColor::Rgb`](lodestone_model::text::TextColor::Rgb) has no
+    /// legacy code and no glyph-level colour to fall back to either, so it
+    /// would render in `base` even on a jar-less run. Spans carry the colour
+    /// straight through instead. Mirrors
+    /// `hud::Builder::text_spans`'s own jar-less fallback; see
+    /// `container::builder::Builder::shadowed_label_spans`, its caller.
+    pub(crate) fn spans(
+        &mut self,
+        spans: &[lodestone_model::text::TextSpan],
+        x: f32,
+        y: f32,
+        scale: f32,
+        base: [f32; 3],
+        alpha: f32,
+    ) {
+        let advance = (font::GLYPH_W as f32 + 1.0) * scale;
+        let mut cursor = x;
+        for span in spans {
+            let rgb = span.style.color.map_or(base, vanilla_font::text_color_rgb);
+            for ch in span.text.chars() {
+                self.glyph(ch, cursor, y, scale, [rgb[0], rgb[1], rgb[2], alpha]);
+                cursor += advance;
+            }
+        }
+    }
 }
 
 /// Width in pixels of `s` at `scale` in the shell's fixed-width bitmap font,
