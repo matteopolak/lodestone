@@ -1,0 +1,79 @@
+Lodestone
+Copyright (c) 2026 the Lodestone contributors
+
+Lodestone is licensed under either of:
+
+  * MIT license (see LICENSE-MIT)
+  * Apache License, Version 2.0 (see LICENSE-APACHE)
+
+at your option, matching the `license` field declared in this workspace's
+Cargo manifests.
+
+================================================================================
+Trademark notice
+================================================================================
+
+Lodestone is an independent, unofficial project. It is not affiliated with,
+endorsed by, sponsored by, or otherwise associated with Mojang Studios,
+Microsoft, or the Minecraft brand. "Minecraft" is a trademark of Mojang
+Synergies AB. Any reference to "Minecraft" in this repository's protocol
+identifiers, ported data, code comments, or documentation is descriptive
+(identifying the game this software interoperates with) and is not a claim
+of affiliation, sponsorship, or endorsement. See docs/legal-notices.md for
+detail on where and why those references appear.
+
+================================================================================
+Third-party design references
+================================================================================
+
+No third-party project's source code is vendored, copied, or redistributed
+in this repository (see docs/legal-notices.md for how that was checked).
+Two open-source Minecraft-compatible Rust projects are cited, by name and
+by symbol, as engineering references in code comments and in docs/ — this
+section records that fact and each project's license so a reader (or
+counsel) does not have to reconstruct it from source-tree greps:
+
+  * azalea (https://github.com/azalea-rs/azalea) — MIT license. Cited
+    throughout crates/lodestone-ecs and docs/bevy-migration.md as a design
+    reference for this workspace's own, independently written, ECS-based
+    client architecture (schedule shape, resource ownership patterns).
+    Not a dependency of this workspace; no azalea source is present here.
+
+  * ferrumc (https://github.com/ferrumc-rs/ferrumc) — MIT license. Named
+    in DESIGN.md among prior art surveyed while designing the protocol
+    version seam. Not a dependency of this workspace; no ferrumc source
+    is present here.
+
+  * Pumpkin (https://github.com/Pumpkin-MC/Pumpkin) — GPL-3.0 license, a
+    copyleft license, unlike the two above. docs/plans/worldgen-rewrite.md
+    records a detailed read of Pumpkin's source at a pinned commit and
+    recommends adopting specific *engineering shapes* (a flattened density
+    graph, thread-local buffer pools, a staged per-chunk dependency graph)
+    for Lodestone's own, separately written, world-generation engine; it
+    explicitly rejects using any of Pumpkin's placement/feature *behaviour*
+    as an authority, in favour of this repository's own JVM oracles (see
+    "Data sources" below). No Pumpkin source is vendored here, and none of
+    the plan's named constructs (e.g. its `F64_BUFFER_POOL`, `FlatCache`,
+    `StagedChunkEnum`) appear verbatim in this workspace's Rust source as
+    of this NOTICE. Because Pumpkin is copyleft, its architectural
+    influence on this repository — even absent literal copying — is the
+    one third-party reference in this file that specifically warrants
+    counsel's review before any of that plan is implemented.
+
+================================================================================
+Data sources
+================================================================================
+
+Behavioural parity with Minecraft is established by:
+
+  * Mojang's own published data generators (packets.json, registries.json,
+    blocks.json) and the game's real, unmodified server jar, run headless
+    and read through its public API surface (never modified, never
+    redistributed) by the oracle programs under */oracle-java/ and
+    scripts/*-oracle/ in this repository (all Java source, all authored
+    for this project — see docs/legal-notices.md).
+  * A decompiled reference under .cache/, used for behaviour verification
+    only, gitignored, and never committed to this repository.
+
+No Mojang-authored source code, compiled class, or jar is checked into
+this repository.

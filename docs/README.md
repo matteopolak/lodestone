@@ -790,6 +790,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   per-entity-kind slice): `MobSim::try_leash`, `MobSim::try_leash_to_fence`,
   `MobSim::tick_leashes`, plus the `LeashHolder`/`LeashOutcome` types and a
   `leash_holder` field on `SimMob`.
+- [Legal notices and attribution](./legal-notices.md) — The record behind this
+  repository's `README.md` disclaimer, `NOTICE`, `LICENSE-MIT`, and `LICENSE-APACHE`
+  files: what an IP/attribution audit found, on what evidence, and which questions are
+  for counsel rather than for an agent working in this repo. This doc is the "why" for
+  those files; it is not itself a legal opinion, and nothing in it should be read as
+  one.
 - [The light ramp: vanilla's lightmap curve](./light-ramp.md) — The scalar every
   terrain, fluid, entity and particle fragment multiplies its texel by, as a function
   of the server's packed sky/block light byte and the time of day. Vanilla calls it a
