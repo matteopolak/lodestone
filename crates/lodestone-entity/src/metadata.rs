@@ -421,6 +421,84 @@ impl MobFlags {
     }
 }
 
+/// The bit meanings inside `ArmorStand.DATA_CLIENT_FLAGS` — the byte that shares
+/// [`MobFlags`]'s metadata index (15) on 26.2, `BYTE`-for-`BYTE`, with
+/// unrelated bit meanings. `0x04` is `showArms` here and `aggressive` in
+/// [`MobFlags`]; a version adapter that cannot establish the concrete entity is
+/// an `ArmorStand` must withhold this byte entirely rather than guess (see
+/// [`MobFlags`]'s own doc for why the index collides and why `is_living` cannot
+/// resolve it).
+///
+/// # Why this exists: the "hologram" case
+///
+/// A server-side "hologram" — invisible, nametagged floating text, the
+/// standard plugin trick — is an armour stand with
+/// [`SharedEntityFlags::invisible`] set, a custom name, `CustomNameVisible`
+/// set, and usually [`marker`](Self::marker) plus
+/// [`no_base_plate`](Self::no_base_plate) so nothing about the stand itself is
+/// visible or interactable. Every one of those is a *conjunction*: decoding
+/// only the shared-flags invisible bit and the custom-name pair (already wired
+/// before this type existed) gives an invisible, nametagged stand that still
+/// shows its base plate and, if `arms`/`small` were ever wired without this
+/// byte, would desync from what the stand actually looked like — the
+/// conjunction trap CLAUDE.md's evidence section warns about: implementing one
+/// clause looks finished because the sibling clause it does implement is
+/// genuinely correct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ArmorStandFlags {
+    /// The raw byte value.
+    pub bits: u8,
+}
+
+impl ArmorStandFlags {
+    const SMALL: u8 = 0x01;
+    const SHOW_ARMS: u8 = 0x04;
+    const NO_BASEPLATE: u8 = 0x08;
+    const MARKER: u8 = 0x10;
+
+    /// Wraps a raw byte.
+    #[must_use]
+    pub const fn from_bits(bits: u8) -> Self {
+        Self { bits }
+    }
+
+    /// `ArmorStand.isSmall()` — `(flags & 1) != 0`. Halves the model scale and
+    /// the arm/leg pose geometry vanilla applies.
+    #[must_use]
+    pub const fn small(self) -> bool {
+        self.bits & Self::SMALL != 0
+    }
+
+    /// `ArmorStand.showArms()` — `(flags & 4) != 0`. Without it a stand draws
+    /// no arms at all, which is vanilla's own default (a bare torso/legs); this
+    /// is the *other* `0x04` bit at this wire index, unrelated to
+    /// [`MobFlags::aggressive`].
+    #[must_use]
+    pub const fn show_arms(self) -> bool {
+        self.bits & Self::SHOW_ARMS != 0
+    }
+
+    /// Whether the base plate is hidden — `(flags & 8) != 0`. Named after the
+    /// wire bit and the NBT tag that sets it (`ArmorStand.java` saves it as
+    /// `"NoBasePlate"`), **not** after vanilla's own `showBasePlate()` accessor,
+    /// which reads the same bit inverted (`(flags & 8) == 0`); this method's
+    /// polarity matches the bit, not that accessor's name.
+    #[must_use]
+    pub const fn no_base_plate(self) -> bool {
+        self.bits & Self::NO_BASEPLATE != 0
+    }
+
+    /// `ArmorStand.isMarker()` — `(flags & 16) != 0`. A marker stand has no
+    /// hitbox and ignores piston pushes (`ArmorStand.getPistonPushReaction`);
+    /// most "hologram" setups set this alongside
+    /// [`SharedEntityFlags::invisible`] so nothing about the stand can be hit
+    /// or collided with, only its floating name tag remains.
+    #[must_use]
+    pub const fn marker(self) -> bool {
+        self.bits & Self::MARKER != 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,6 +613,57 @@ mod tests {
         // the former and never the former's namesake in the other byte.
         assert!(!LivingEntityFlags::from_bits(0x04).using_item());
         assert!(!MobFlags::from_bits(0x01).aggressive());
+    }
+
+    /// The fourth byte's turn at the same trap, and the collision that actually
+    /// exists on the wire (not merely a hypothetical): `0x04` is `aggressive` in
+    /// [`MobFlags`] and `showArms` in [`ArmorStandFlags`], both `BYTE` at
+    /// metadata index 15. A decorative armour stand with arms shown must never
+    /// read as an aggressive mob, and vice versa.
+    #[test]
+    fn mob_flags_and_armor_stand_flags_disagree_on_the_same_bit() {
+        assert!(MobFlags::from_bits(0x04).aggressive());
+        assert!(ArmorStandFlags::from_bits(0x04).show_arms());
+        // Neither type's accessor for the *other* meaning fires off this byte —
+        // `ArmorStandFlags` has no `aggressive()` and `MobFlags` has no
+        // `show_arms()`, so the only way to conflate them is to decode through
+        // the wrong type entirely, which is exactly what the version adapter's
+        // `class`/`mob` guard exists to prevent.
+        assert!(!ArmorStandFlags::from_bits(0x00).show_arms());
+        assert!(!MobFlags::from_bits(0x00).aggressive());
+    }
+
+    #[test]
+    fn armor_stand_flags_decode_each_bit_independently() {
+        assert!(ArmorStandFlags::from_bits(0x01).small());
+        assert!(ArmorStandFlags::from_bits(0x04).show_arms());
+        assert!(ArmorStandFlags::from_bits(0x08).no_base_plate());
+        assert!(ArmorStandFlags::from_bits(0x10).marker());
+        assert!(!ArmorStandFlags::from_bits(0x00).small());
+        assert!(!ArmorStandFlags::from_bits(0x00).show_arms());
+        assert!(!ArmorStandFlags::from_bits(0x00).no_base_plate());
+        assert!(!ArmorStandFlags::from_bits(0x00).marker());
+        // All four at once (0x1D = small | show_arms | no_base_plate | marker,
+        // deliberately skipping bit 0x02 which vanilla leaves unused at this
+        // index), so no accessor is secretly reading the whole byte or another
+        // bit.
+        let all = ArmorStandFlags::from_bits(0x1D);
+        assert!(all.small() && all.show_arms() && all.no_base_plate() && all.marker());
+    }
+
+    /// The typical "hologram" configuration: invisible (a *different* byte,
+    /// [`SharedEntityFlags`], covered by its own test) plus marker and
+    /// no-base-plate on this byte, arms and small left off. Values are
+    /// deliberately pairwise-distinct-shaped (only two of four bits set, not
+    /// all-or-nothing) so a transposition with [`MobFlags`]'s bits cannot
+    /// survive unnoticed.
+    #[test]
+    fn a_typical_hologram_stand_sets_marker_and_no_base_plate_only() {
+        let hologram = ArmorStandFlags::from_bits(0x18); // marker | no_base_plate
+        assert!(hologram.marker());
+        assert!(hologram.no_base_plate());
+        assert!(!hologram.small());
+        assert!(!hologram.show_arms());
     }
 
     #[test]

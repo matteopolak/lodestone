@@ -398,6 +398,49 @@ pub struct MobState {
     pub aggressive: bool,
 }
 
+/// The armour-stand client-flags byte's decoded state —
+/// `ArmorStand.DATA_CLIENT_FLAGS`
+/// ([`lodestone_model::event::EntityMetadataUpdate::armor_stand_flags`]).
+///
+/// # Why this is not a field on [`MobState`]
+///
+/// Same shape as [`MobState`] itself versus [`crate::entity::ItemUse`]: this
+/// comes from *the other claimant* of the exact same metadata index (15), the
+/// same serializer (`BYTE`), and unrelated bit meanings — `0x04` is
+/// `Mob.isAggressive()` in [`MobState`] and `ArmorStand.showArms()` here. The
+/// v770 adapter withholds one or the other depending on which concrete type it
+/// established (`class == ArmorStand` vs. `mob`), so at most one of
+/// [`MobState`]/[`ArmorStandFlags`] is ever present on a given entity — they are
+/// not two views of the same fact, they are two different facts that happen to
+/// share a wire byte.
+///
+/// # Why a client needs this: the "hologram" case
+///
+/// A server-side "hologram" — invisible, nametagged floating text — is an
+/// armour stand with [`EntityFlags`]'s invisible bit set, [`CustomName`] and
+/// [`CustomNameVisible`], and usually [`marker`](Self::marker) plus
+/// [`no_base_plate`](Self::no_base_plate) so nothing about the stand itself can
+/// be seen or hit. The first three were already wired before this component
+/// existed (`crate::ingest::apply_entity_metadata`'s existing `flags`/
+/// `custom_name`/`custom_name_visible` arms); this is the missing clause —
+/// without it a "hologram" armour stand still shows its base plate, and no
+/// consumer can tell a marker stand (no hitbox) from an ordinary one.
+///
+/// **Absent** until the first metadata packet carrying the byte, like
+/// [`MobState`] — and absent forever for every entity that is not an
+/// `ArmorStand`, because the adapter withholds the byte for those.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ArmorStandFlags {
+    /// `ArmorStand.isSmall()` — halves the model scale.
+    pub small: bool,
+    /// `ArmorStand.showArms()` — without it vanilla draws no arms at all.
+    pub show_arms: bool,
+    /// Whether the base plate is hidden.
+    pub no_base_plate: bool,
+    /// `ArmorStand.isMarker()` — no hitbox, ignores piston pushes.
+    pub marker: bool,
+}
+
 /// Whether the entity is a baby (ageable mobs only). **Absent** until reported.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Baby(pub bool);

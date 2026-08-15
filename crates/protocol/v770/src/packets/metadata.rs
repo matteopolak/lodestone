@@ -326,6 +326,13 @@ pub enum MetadataClass {
     /// [`IDX_CRYSTAL_BEAM_TARGET`]'s own doc for why the index alone already
     /// disambiguates it.)
     EndCrystal,
+    /// `ArmorStand` — gates index 15's `BYTE` against `Mob.DATA_MOB_FLAGS_ID`,
+    /// the other claimant at that index (see [`IDX_MOB_FLAGS`]). Unlike the
+    /// `Sheep`/`Horse`/`Tamable` variant classes, this is not a cosmetic
+    /// appearance — it is the small/show-arms/no-base-plate/marker byte a
+    /// "hologram" (an invisible, nametagged armour stand) needs alongside the
+    /// shared-flags invisible bit and the custom-name pair.
+    ArmorStand,
 }
 
 /// Classifies a resolved entity-type identifier into the [`MetadataClass`] whose
@@ -348,6 +355,7 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
         | "minecraft:zombie_nautilus" => Some(MetadataClass::Tamable),
         "minecraft:ender_dragon" => Some(MetadataClass::Dragon),
         "minecraft:end_crystal" => Some(MetadataClass::EndCrystal),
+        "minecraft:armor_stand" => Some(MetadataClass::ArmorStand),
         _ => None,
     }
 }
@@ -737,6 +745,15 @@ pub fn read_entity_metadata(
             // `0x04` for "show arms". See `IDX_MOB_FLAGS`. Ungated, every armour
             // stand with arms would report itself aggressive.
             (IDX_MOB_FLAGS, Value::Byte(b)) if mob => md.mob_flags = Some(b as u8),
+            // The *other* claimant of index 15: `ArmorStand.DATA_CLIENT_FLAGS`,
+            // gated on `class` rather than `mob` because `mob` is exactly what
+            // this claimant is not — see `IDX_MOB_FLAGS`'s doc. This is the byte
+            // a "hologram" (an invisible, nametagged armour stand) needs for its
+            // marker/no-base-plate/show-arms cosmetics; see
+            // `lodestone_entity::metadata::ArmorStandFlags`.
+            (IDX_MOB_FLAGS, Value::Byte(b)) if class == Some(MetadataClass::ArmorStand) => {
+                md.armor_stand_flags = Some(b as u8);
+            }
             // Gated on the class for the reason [`IDX_EXPERIENCE_ORB_VALUE`] gives:
             // four other entity types put an unrelated `INT` at this index, and a
             // primed TNT's fuse countdown reaching an orb sprite is exactly the
@@ -953,12 +970,27 @@ mod tests {
         }
     }
 
-    /// A **living non-mob** — a player, an armour stand, a mannequin. The
-    /// population index 15's guard exists to exclude, and the reason that guard
-    /// cannot be `living`.
+    /// A **living non-mob whose class this decoder does not resolve** — a
+    /// player or a mannequin, not an armour stand (which has its own fixture,
+    /// [`an_armor_stand`], now that its class is [`MetadataClass::ArmorStand`]).
+    /// The population index 15's `mob` guard excludes, and the reason that
+    /// guard cannot be `living`: a record shaped exactly like this is what an
+    /// armour stand's own `TrackedEntity` used to be, before this module could
+    /// tell the two apart.
     fn a_living_non_mob() -> TrackedEntity {
         TrackedEntity {
             class: None,
+            living: true,
+            mob: false,
+        }
+    }
+
+    /// An armour stand: living, not a `Mob`, and — the fact that lets index 15
+    /// resolve to `armor_stand_flags` instead of being dropped — its own
+    /// [`MetadataClass::ArmorStand`].
+    fn an_armor_stand() -> TrackedEntity {
+        TrackedEntity {
+            class: Some(MetadataClass::ArmorStand),
             living: true,
             mob: false,
         }
@@ -1326,12 +1358,19 @@ mod tests {
     ///
     /// Without the `if mob` guard this test fails with `left: Some(4), right:
     /// None` — run and watched.
+    ///
+    /// The subject here is deliberately **not** an armour stand — it has its
+    /// own class now ([`MetadataClass::ArmorStand`], see
+    /// `decodes_armor_stand_flags_at_index_15_for_an_armor_stand` below) — but a
+    /// living non-mob whose class this decoder does not resolve at all (a
+    /// player, a mannequin). The byte must still be consumed for alignment and
+    /// still must not surface as `mob_flags`.
     #[test]
-    fn index_15_on_a_living_non_mob_is_consumed_but_not_surfaced() {
+    fn index_15_on_an_unresolved_living_non_mob_is_consumed_but_not_surfaced() {
         let mut bytes = Vec::new();
         bytes.push(IDX_MOB_FLAGS);
         bytes.extend(varint(SER_BYTE));
-        bytes.push(0x04); // an armour stand showing its arms
+        bytes.push(0x04);
         // A following field must still decode cleanly: the unmatched byte is
         // consumed for *alignment*, not skipped.
         bytes.push(IDX_HEALTH);
@@ -1345,16 +1384,57 @@ mod tests {
         reader.ensure_empty().expect("no trailing bytes");
         assert_eq!(
             md.mob_flags, None,
-            "an armour stand's show-arms bit must not surface as mob flags"
+            "an unresolved living non-mob's byte must not surface as mob flags"
+        );
+        assert_eq!(
+            md.armor_stand_flags, None,
+            "and must not surface as armour-stand flags either — we do not know \
+             which of the two claimants at this index this byte actually is"
         );
         assert_eq!(md.health, Some(6.5), "the following field must still align");
     }
 
-    /// The two `mob` polarities over one fixture, so neither is a lone assertion
-    /// about a shape that might differ between the two paths. Mirrors
-    /// `the_living_guard_is_the_only_difference_between_the_two_decodes`.
+    /// Index 15, `BYTE`, on an **`ArmorStand`** decodes to `armor_stand_flags` —
+    /// the byte a "hologram" needs for its marker/no-base-plate/show-arms
+    /// cosmetics, alongside the shared-flags invisible bit and the custom-name
+    /// pair. Before this arm existed the byte reached the final `_ => {}` arm
+    /// and every armour stand's own cosmetics were silently dropped, even
+    /// though the wire carried them end to end (`a_living_non_mob`, this
+    /// module's stand-in for "an armour stand" before its class existed,
+    /// documents the exact symptom this fixes).
     #[test]
-    fn the_mob_guard_is_the_only_difference_between_the_two_decodes() {
+    fn decodes_armor_stand_flags_at_index_15_for_an_armor_stand() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_MOB_FLAGS);
+        bytes.extend(varint(SER_BYTE));
+        bytes.push(0x18); // marker | no_base_plate, arms/small left off
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, an_armor_stand())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.armor_stand_flags, Some(0x18));
+        // And it did not land in either of the byte's other claimants.
+        assert_eq!(md.mob_flags, None);
+        assert_eq!(md.living_flags, None);
+    }
+
+    /// The three-way fork over one fixture byte, so no one path's result is a
+    /// lone assertion about a shape that might differ between the others.
+    /// Mirrors `the_living_guard_is_the_only_difference_between_the_two_decodes`.
+    ///
+    /// This is also the control that proves `decodes_armor_stand_flags_…` above
+    /// is not vacuous: before `armor_stand_flags` existed, this same test
+    /// (`the_mob_guard_is_the_only_difference_between_the_two_decodes`) asserted
+    /// `as_stand.is_empty()` — using the armour-stand-shaped byte's *absence*
+    /// from the decoded update as its own negative control. That premise is
+    /// exactly what this change invalidates (CLAUDE.md: "a gate that uses an
+    /// unimplemented thing as its negative stand-in goes vacuous the moment
+    /// someone implements it"), so the assertion is now the opposite: an
+    /// armour stand's decode is **not** empty either.
+    #[test]
+    fn the_class_guard_disambiguates_index_15_between_mob_and_armor_stand() {
         let mut bytes = Vec::new();
         bytes.push(IDX_MOB_FLAGS);
         bytes.extend(varint(SER_BYTE));
@@ -1370,17 +1450,27 @@ mod tests {
             md
         };
         let as_mob = decode(a_mob());
-        let as_stand = decode(a_living_non_mob());
+        let as_stand = decode(an_armor_stand());
+        let as_unresolved = decode(a_living_non_mob());
         assert_eq!(as_mob.mob_flags, Some(0x04));
+        assert_eq!(as_mob.armor_stand_flags, None);
         assert_eq!(as_stand.mob_flags, None);
+        assert_eq!(as_stand.armor_stand_flags, Some(0x04));
+        assert_eq!(as_unresolved.mob_flags, None);
+        assert_eq!(as_unresolved.armor_stand_flags, None);
         assert!(
             !as_mob.is_empty(),
             "a mob's flags byte is a reportable field"
         );
         assert!(
-            as_stand.is_empty(),
-            "with nothing else in the list, an armour stand's index-15 byte leaves \
-             the update empty — so `handle_set_entity_data` emits no event at all"
+            !as_stand.is_empty(),
+            "an armour stand's flags byte is now a reportable field too"
+        );
+        assert!(
+            as_unresolved.is_empty(),
+            "with nothing else in the list and no resolvable class, the byte still \
+             leaves the update empty — so `handle_set_entity_data` emits no event \
+             for a type this decoder cannot classify at all"
         );
     }
 
@@ -2004,6 +2094,10 @@ mod tests {
         assert_eq!(metadata_class("minecraft:parrot"), Some(MetadataClass::Tamable));
         assert_eq!(metadata_class("minecraft:ender_dragon"), Some(MetadataClass::Dragon));
         assert_eq!(metadata_class("minecraft:end_crystal"), Some(MetadataClass::EndCrystal));
+        assert_eq!(
+            metadata_class("minecraft:armor_stand"),
+            Some(MetadataClass::ArmorStand)
+        );
         assert_eq!(metadata_class("minecraft:cow"), None);
         assert_eq!(metadata_class("minecraft:villager"), None);
     }
@@ -2219,6 +2313,12 @@ mod tests {
             ),
             (IDX_HEALTH, "IDX_HEALTH", "LivingEntity.DATA_HEALTH_ID", SER_FLOAT),
             (IDX_MOB_FLAGS, "IDX_MOB_FLAGS", "Mob.DATA_MOB_FLAGS_ID", SER_BYTE),
+            (
+                IDX_MOB_FLAGS,
+                "IDX_MOB_FLAGS",
+                "ArmorStand.DATA_CLIENT_FLAGS",
+                SER_BYTE,
+            ),
             (IDX_BABY, "IDX_BABY", "AgeableMob.DATA_BABY_ID", SER_BOOLEAN),
             (IDX_SHEEP_WOOL, "IDX_SHEEP_WOOL", "Sheep.DATA_WOOL_ID", SER_BYTE),
             (
