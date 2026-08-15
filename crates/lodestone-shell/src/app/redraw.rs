@@ -860,15 +860,70 @@ impl WindowApp {
         // and the survival gauges. Locals are collected up-front so their
         // borrows outlive the frame struct.
         let chat_open = self.ui.is_chat_open();
+        // Built up front (not down where `hud_frame.chat_options` used to
+        // build its own copy) because the scroll window below needs
+        // `rows_per_page` before `chat_lines` is even fetched. Reused
+        // verbatim for `hud_frame.chat_options`, so the two cannot read two
+        // different snapshots of the options mid-frame.
+        let chat_opts_raw = self.nav.options();
+        let chat_display_opts = crate::hud::ChatDisplayOptions {
+            scale: chat_opts_raw.chat_scale,
+            width_pct: chat_opts_raw.chat_width,
+            height_pct_unfocused: chat_opts_raw.chat_height_unfocused,
+            height_pct_focused: chat_opts_raw.chat_height_focused,
+            line_spacing: chat_opts_raw.chat_line_spacing,
+            text_opacity: chat_opts_raw.chat_opacity,
+            background_opacity: chat_opts_raw.chat_background_opacity,
+            colors: chat_opts_raw.chat_colors,
+        };
+        let chat_rows_per_page = crate::hud::chat_lines_per_page(
+            chat_display_opts,
+            crate::hud::chat_pose_scale(chat_display_opts),
+            chat_open,
+        );
         // Pull enough history for the HUD to fade/scroll; it caps and ages them.
+        // Open, this needs the *full* history (capped at the feed's own
+        // 100-entry limit — `lodestone_game::chat::ChatFeed`'s own cap) so the
+        // scroll window and the new-arrival sync below have everything to
+        // work with. Closed cannot be scrolled at all (there is no
+        // `ChatScreen` to hold a position while the box is not up), so the
+        // small fixed fetch from before this feature is untouched and
+        // unaffected by anything below.
         // The feed hands back owned legacy strings (flattened from the canonical
         // `ChatFeed`'s `Text` at read time); borrow them into the `&str` slice
         // the HUD frame takes, keeping both locals alive for the frame's scope.
-        let chat_owned: Vec<(String, f32)> = self.sim.recent_chat(if chat_open { 20 } else { 10 });
-        let chat_lines: Vec<(&str, f32)> = chat_owned
+        let chat_owned: Vec<(String, f32)> = self.sim.recent_chat(if chat_open { 100 } else { 10 });
+        // `ChatScroll::sync` only reads `history` on the open branch, so
+        // building this unconditionally (rather than gating the clone on
+        // `chat_open`) costs nothing extra on the closed path (10 short
+        // strings) and keeps the call site to one line.
+        let chat_history_strings: Vec<String> = chat_owned.iter().map(|(l, _)| l.clone()).collect();
+        // Reproduces `ChatComponent.addMessageToDisplayQueue`'s "a new
+        // message while scrolled does not jump the view" behaviour, and
+        // `ChatScreen.removed`'s `resetChatScroll()` when closed — see
+        // `ChatScroll::sync`'s own doc for why both live in one call here
+        // rather than a separate close hook.
+        self.chat_input
+            .scroll_mut()
+            .sync(chat_open, &chat_history_strings, chat_rows_per_page);
+        let (chat_win_start, chat_win_end) = if chat_open {
+            self.chat_input
+                .scroll()
+                .window_range(chat_owned.len(), chat_rows_per_page)
+        } else {
+            (0, chat_owned.len())
+        };
+        let chat_lines: Vec<(&str, f32)> = chat_owned[chat_win_start..chat_win_end]
             .iter()
             .map(|(line, age)| (line.as_str(), *age))
             .collect();
+        // `None` while closed — vanilla's own scrollbar draws only in the
+        // `isForeground` (open) display mode.
+        let chat_scrollbar_view = chat_open.then(|| crate::hud::ChatScrollbar {
+            scrolled: self.chat_input.scroll().scrolled(),
+            total: chat_owned.len(),
+            new_message_since_scroll: self.chat_input.scroll().new_message_since_scroll(),
+        });
         // Rows, header and footer together — the whole `PlayerTabOverlay` frame.
         // Read only while the overlay is up, because it is a world clone.
         let tab_view = self.tab_held.then(|| self.sim.tab_list_view());
@@ -955,17 +1010,13 @@ impl WindowApp {
         // Without this the whole chat-option chain is an island: the fields are
         // persisted, `ChatDisplayOptions` is read by the draw, and the live
         // client would still show vanilla defaults forever.
-        let chat_opts = self.nav.options();
-        hud_frame.chat_options = crate::hud::ChatDisplayOptions {
-            scale: chat_opts.chat_scale,
-            width_pct: chat_opts.chat_width,
-            height_pct_unfocused: chat_opts.chat_height_unfocused,
-            height_pct_focused: chat_opts.chat_height_focused,
-            line_spacing: chat_opts.chat_line_spacing,
-            text_opacity: chat_opts.chat_opacity,
-            background_opacity: chat_opts.chat_background_opacity,
-            colors: chat_opts.chat_colors,
-        };
+        //
+        // `chat_display_opts`, not a fresh `self.nav.options()` read — built
+        // once, above, so the scroll-window math earlier in this function and
+        // this draw-facing copy cannot disagree about the frame's own chat
+        // settings.
+        hud_frame.chat_options = chat_display_opts;
+        hud_frame.chat_scrollbar = chat_scrollbar_view;
         hud_frame.players = tab_view.as_ref();
         hud_frame.sidebar = sidebar.as_ref();
         hud_frame.boss_bars = &boss_bars;
