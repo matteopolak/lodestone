@@ -2630,6 +2630,147 @@ fn a_crafting_panel_does_not_restore_the_furnace_books_settings() {
     );
 }
 
+/// The owner's report: right-clicking a server-side "server selector" opens a
+/// container, selecting a row makes the **server** close it, and our client
+/// showed the player's own inventory instead of returning to gameplay —
+/// vanilla shows no screen at all.
+///
+/// Drives the real chain a server-initiated close takes: a real `WindowApp`,
+/// a real server-opened (non-zero window id) menu folded through the same
+/// `NetIngest` schedule the net thread runs (`ScreenOpened` + a matching
+/// `ContainerContent`, exactly as `lodestone-ecs`'s own
+/// `menu_family_events_reach_session_menus_through_the_real_schedule` proves
+/// reaches `SessionMenus`), then a server `ScreenClosed` for the same window
+/// — and `drive_ui_from_session`, the method `redraw()` calls every frame,
+/// which is where `UiState::reconcile_server_menu_window` now lives.
+///
+/// The `open_container()` call below stands in for `redraw()`'s own
+/// `Sim::open_menu().is_some() && is_playing()` branch (untouched by this
+/// fix, and not itself under test here — the recipe-book tests above already
+/// drive it the same indirect way for the same reason: no GPU in this
+/// harness).
+#[test]
+fn server_initiated_container_close_returns_to_gameplay_not_the_player_inventory() {
+    use crate::net::NetUpdate;
+    use lodestone_client::ClientEvent;
+    use lodestone_model::Text;
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    app.sim.step(1.0 / 20.0);
+    app.ui.enter_dev_world();
+
+    let ingest = |app: &WindowApp, event: ClientEvent| {
+        app.sim.net().expect("net attached above").ingest_session_event(event);
+    };
+
+    // A real 9x3 chest: 27 container slots + 36 player-inventory slots, the
+    // same shape `lodestone-ecs`'s own menu-family test uses.
+    ingest(
+        &app,
+        ClientEvent::ScreenOpened {
+            window_id: 5,
+            menu_type: "minecraft:generic_9x3".parse().expect("valid resource key"),
+            title: Text::literal("Chest"),
+        },
+    );
+    ingest(
+        &app,
+        ClientEvent::ContainerContent {
+            window_id: 5,
+            state_id: 1,
+            items: vec![None; 63],
+            carried_item: None,
+        },
+    );
+    assert_eq!(
+        app.sim.open_menu().map(|open| open.window_id),
+        Some(5),
+        "precondition: a real server menu is open before the close"
+    );
+
+    // Stand-in for `redraw()`'s open branch (see this test's own doc).
+    app.ui.open_container();
+    app.drive_ui_from_session();
+    assert!(
+        app.active_container_menu().is_some(),
+        "precondition: the container screen is actually showing the server's \
+         menu before it closes"
+    );
+
+    // The server closes window 5 — `ClientboundContainerClosePacket` decoded
+    // into `ClientEvent::ScreenClosed`.
+    ingest(&app, ClientEvent::ScreenClosed { window_id: 5 });
+    assert_eq!(
+        app.sim.open_menu(),
+        None,
+        "control: the menu-state half of the close (vanilla's `containerMenu \
+         = inventoryMenu`) must actually have landed, or this test cannot \
+         tell that half apart from the screen half under test"
+    );
+
+    app.drive_ui_from_session();
+
+    // The exact expected UI state, not merely "the container screen is
+    // gone": `active_container_menu` is `None` (**no** screen), matching
+    // vanilla's unconditional `Minecraft.gui.setScreen(null)` — not the
+    // player's own inventory, which is what the bug showed instead
+    // (`active_container_menu`'s window-0 fallback firing off a stale
+    // `Screen::Container` the close never reset).
+    assert_eq!(
+        app.active_container_menu(),
+        None,
+        "a server-initiated close must show no screen at all, not the \
+         player's own inventory"
+    );
+    assert!(
+        app.ui.is_playing(),
+        "and the screen itself must have returned to Playing"
+    );
+}
+
+/// Negative control for the gate above: the player's own `E`-opened
+/// inventory — which never has a server window id at all — must **not** be
+/// closed by [`UiState::reconcile_server_menu_window`]. A level check on "no
+/// window id right now" would close this the very next frame; only an edge
+/// on a real `Some -> None` transition may.
+#[test]
+fn opening_the_local_inventory_with_no_server_window_is_not_closed_by_the_server_reconciler() {
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    feed.send(crate::net::NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    app.sim.step(1.0 / 20.0);
+    app.ui.enter_dev_world();
+
+    // `E` with nothing else open: no server window, ever.
+    app.ui.open_container();
+    assert_eq!(app.sim.open_menu(), None, "precondition: no server menu exists");
+
+    // Several frames, matching the steady state a player leaving their own
+    // inventory open would sit in.
+    for _ in 0..3 {
+        app.drive_ui_from_session();
+    }
+
+    assert!(
+        app.ui.is_container_open(),
+        "the local inventory must stay open with no server window ever having existed"
+    );
+    assert!(
+        app.active_container_menu().is_some(),
+        "and it must still be showing the player's own menu"
+    );
+}
+
 /// **Issue #436's `SessionGameRules` island, closed through production code.**
 ///
 /// `doImmediateRespawn` is the most user-visible game rule there is: vanilla

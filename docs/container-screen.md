@@ -692,6 +692,23 @@ default builds all the geometry correctly and draws none of it.
   label blanked, so it can tell "20 px off" from "not drawn". It also asserts the
   premise (nothing else in the screen paints in the label colour) rather than
   assuming it.
+* **`Screen::Container` opening and closing are not symmetric, and a
+  server-initiated close needs its own reconciliation.** `WindowApp::redraw`
+  opens the screen off `Sim::open_menu().is_some()`, but a server
+  `CONTAINER_CLOSE` only resets the *menu* model
+  (`lodestone_game::menus::Menus::apply`'s `ScreenClosed` arm clears
+  `SessionMenus`'s `opened`) — it does not by itself touch the screen. Without
+  a matching close reconciliation, `active_container_menu`'s window-0 fallback
+  (`crate::app::container_input::WindowApp::active_container_menu`) kept
+  drawing the *player's own inventory* once the real window's model state was
+  gone, because the screen was still `Container` and no server menu was left
+  to prefer. `UiState::reconcile_server_menu_window`
+  (`crate::app::session::WindowApp::drive_ui_from_session`) is the fix: it
+  tracks the last-seen window id and closes the screen only on a real
+  `Some -> None` edge, never on a level check — a level check would also close
+  the player's own `E`-opened inventory, which has no window id at all. See
+  its own doc comment for vanilla's exact two-clause close
+  (`LocalPlayer.clientSideCloseContainer`).
 
 ## Configuration
 

@@ -419,6 +419,12 @@ pub struct UiState {
     /// That fix. Only read on that screen; reset by [`Self::begin`] so a
     /// second session never inherits the previous one's last phase.
     connect_phase: loading::ConnectPhase,
+    /// The window id of the server (or local-menu) window this frame last
+    /// knew to be open — [`Self::reconcile_server_menu_window`]'s own edge
+    /// tracker. `None` both before any server window has ever opened and
+    /// while the player's own `E`-opened inventory is the only thing on
+    /// screen, since that has no window id at all.
+    container_server_window: Option<i32>,
 }
 
 impl Default for UiState {
@@ -431,6 +437,7 @@ impl Default for UiState {
             settings_return: Screen::MainMenu,
             death_message: None,
             connect_phase: loading::ConnectPhase::default(),
+            container_server_window: None,
         }
     }
 }
@@ -973,6 +980,53 @@ impl UiState {
     pub fn close_container(&mut self) {
         if self.screen == Screen::Container {
             self.screen = Screen::Playing;
+        }
+    }
+
+    /// Reconciles the container screen against the session's real open-window
+    /// id, closing the screen the moment a server (or local-menu) window that
+    /// was open goes away on its own — a **server-initiated** close, as
+    /// opposed to the player's own Escape/`E`/close-button, which already call
+    /// [`Self::close_container`] directly.
+    ///
+    /// Vanilla's own close is three clauses, not one:
+    /// `ClientPacketListener.handleContainerClose` calls
+    /// `LocalPlayer.clientSideCloseContainer`, which (1) calls
+    /// `Player.closeContainer`, resetting `containerMenu` back to
+    /// `inventoryMenu` — a **model** fact, not a screen — and (2) separately,
+    /// unconditionally calls `Minecraft.gui.setScreen(null)`, which is the
+    /// actual "go back to gameplay with no screen at all" clause. Our
+    /// `ClientEvent::ScreenClosed` fold (`lodestone_game::menus::Menus::apply`,
+    /// reached through `lodestone-ecs`'s session ingest) already does clause
+    /// (1) correctly — it clears `SessionMenus`'s `opened` — but nothing did
+    /// clause (2): `WindowApp::redraw` only ever *opened*
+    /// [`Screen::Container`] when `Sim::open_menu()` went from `None` to
+    /// `Some` (see its own call to [`Self::open_container`]), and never the
+    /// reverse. With the screen left on `Container` and the model's `opened`
+    /// now `None`, `active_container_menu`'s player-inventory fallback (window
+    /// id 0, since the player inventory *is* window 0 in vanilla too) kept
+    /// drawing — the reported symptom, opening the player's own inventory
+    /// right after a server closed something else.
+    ///
+    /// This has to be edge-triggered on the window id transitioning from
+    /// `Some` to `None`, not level-triggered on "no window id right now":
+    /// the player's own `E` press opens [`Screen::Container`] with **no**
+    /// window id at all (vanilla never asks the server to open your own
+    /// inventory), so a level check would close it again the very next frame.
+    /// Tracking the last-seen window id here — rather than inside `Sim`,
+    /// which deliberately holds no wire edge-tracker of its own — is what
+    /// makes the two cases distinguishable.
+    ///
+    /// Called from `WindowApp::drive_ui_from_session`, ahead of that
+    /// function's own generic cursor-grab reconciliation — closing the
+    /// screen here is enough for `wants_cursor_grab` to pick the change up
+    /// the same way it already does for every other screen transition that
+    /// function makes.
+    pub(crate) fn reconcile_server_menu_window(&mut self, window_id: Option<i32>) {
+        let closed = self.container_server_window.is_some() && window_id.is_none();
+        self.container_server_window = window_id;
+        if closed {
+            self.close_container();
         }
     }
 

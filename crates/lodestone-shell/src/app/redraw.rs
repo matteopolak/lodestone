@@ -11,6 +11,8 @@ impl WindowApp {
         // `u64` comparison under a short read guard and nothing else.
         self.sync_recipe_book();
         // Reconcile the menu with the live session before we borrow GPU state.
+        // (This also reconciles a server-initiated container close back to
+        // `Screen::Playing` — see `drive_ui_from_session`'s own tail.)
         self.drive_ui_from_session();
         if self.sim.open_menu().is_some() && self.ui.is_playing() {
             self.ui.open_container();

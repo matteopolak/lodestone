@@ -202,6 +202,20 @@ impl WindowApp {
         // `is_dead` are above, so a menu already open catches up the instant
         // the server confirms the bind rather than needing to be reopened.
         self.nav.set_lan_published(self.sim.is_lan_published());
+        // A server-initiated container close: `Sim::open_menu` is the same
+        // ground truth `redraw` reads a few lines below to *open*
+        // `Screen::Container` (`Sim::open_menu().is_some() && is_playing()`),
+        // reconciled the other way here. `ClientEvent::ScreenClosed` already
+        // resets the *menu* model (`lodestone_game::menus::Menus::apply`,
+        // folded through `lodestone-ecs`'s session ingest) the instant the
+        // server sends `CONTAINER_CLOSE`, but nothing reset the *screen* —
+        // see `UiState::reconcile_server_menu_window`'s own doc for the full
+        // vanilla chain (`clientSideCloseContainer`'s two clauses) and why
+        // this has to be edge-triggered on the window id rather than a level
+        // check on "no window right now", which would also fire for the
+        // player's own `E`-opened inventory.
+        self.ui
+            .reconcile_server_menu_window(self.sim.open_menu().map(|open| open.window_id));
         // A transition may have changed grab intent (Connected → Playing grabs;
         // Ended/Death → menu-owned screens release). Only touch the OS grab
         // when it disagrees.
