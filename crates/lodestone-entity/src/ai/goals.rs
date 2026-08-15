@@ -711,17 +711,47 @@ impl Goal for EndermanLookForPlayerGoal {
             let before_increment = self.teleport_time;
             self.teleport_time += 1;
             if before_increment >= 30 {
-                // Vanilla `EnderMan::teleportTowards`: 16 blocks past the
-                // target, along the target -> enderman direction.
+                // Vanilla `EnderMan::teleportTowards`:
+                //
+                // ```text
+                // dir = normalize(this.pos - entity.pos)   // enderman -> target, reversed
+                // xx = this.getX() + (random - 0.5) * 8.0 - dir.x * 16.0
+                // yy = this.getY() + (randomInt(16) - 8)   - dir.y * 16.0
+                // zz = this.getZ() + (random - 0.5) * 8.0 - dir.z * 16.0
+                // ```
+                //
+                // The offset is anchored on the enderman's **own** position
+                // and displaced by a fixed 16 blocks toward the target, not
+                // anchored on the target's position — a previous version of
+                // this port computed `target + normalize(pos - target) * 16`,
+                // which lands at a fixed 16-block radius from the target
+                // regardless of how far the enderman started, and is a much
+                // *smaller* jump than vanilla's whenever the starting
+                // distance exceeds 16 blocks (the only case this branch ever
+                // runs, since it is gated on `distance_sqr(...) > 256.0`).
+                // For a 100-block gap, vanilla closes it to 84; the earlier
+                // formula jumped straight to a fixed 16, an enormous
+                // over-correction in the *other* direction for any distance
+                // much larger than 16.
+                //
+                // Y uses `getY(0.5)` (a mid-body point) against the target's
+                // eye height in vanilla; this seam has no eye-height API, so
+                // both sides use the plain feet [`MobController::position`]
+                // — a materially smaller divergence than the position bug
+                // above, since it only skews the vertical component of one
+                // direction vector, not the whole destination.
                 let pos = mob.position();
                 let dir = Vec3::new(pos.x - target.x, pos.y - target.y, pos.z - target.z);
                 let len = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
                 if len > 1.0e-6 {
-                    let scale = 16.0 / len;
+                    let (nx, ny, nz) = (dir.x / len, dir.y / len, dir.z / len);
+                    let jx = (mob.next_f64() - 0.5) * 8.0;
+                    let jy = f64::from(mob.next_i32(16) - 8);
+                    let jz = (mob.next_f64() - 0.5) * 8.0;
                     mob.teleport_to(Vec3::new(
-                        target.x + dir.x * scale,
-                        target.y + dir.y * scale,
-                        target.z + dir.z * scale,
+                        pos.x + jx - nx * 16.0,
+                        pos.y + jy - ny * 16.0,
+                        pos.z + jz - nz * 16.0,
                     ));
                 }
                 self.teleport_time = 0;
@@ -1640,6 +1670,8 @@ mod tests {
         stopped_navigation: u32,
         stared_at: bool,
         looked_at: Option<Vec3>,
+        angry: Option<Vec3>,
+        teleported: Vec<Vec3>,
     }
     impl MobController for ScriptMob {
         fn next_f32(&mut self) -> f32 {
@@ -1749,6 +1781,12 @@ mod tests {
         }
         fn set_swell_dir(&mut self, dir: i32) {
             self.swell_dir = dir;
+        }
+        fn angry_target(&self) -> Option<Vec3> {
+            self.angry
+        }
+        fn teleport_to(&mut self, target: Vec3) {
+            self.teleported.push(target);
         }
     }
 
@@ -1961,6 +1999,205 @@ mod tests {
             mob.looked_at,
             Some(Vec3::new(6.0, 64.0, 0.0)),
             "tick() must aim the look control at the remembered target every tick"
+        );
+    }
+
+    // ---- EndermanLookForPlayerGoal ---------------------------------------
+    //
+    // Unlike `EndermanFreezeWhenLookedAt` above, nothing previously exercised
+    // this goal's own state machine directly — only the roster's multiset
+    // gate (which checks the *table row*, not runtime behaviour) and, at a
+    // much higher level, `lodestone-server`'s `feed_perception` wiring. This
+    // block is the first thing that drives `can_use`/`start`/`tick` for real
+    // and predicts an exact promotion tick and an exact teleport
+    // destination, the same "magnitude, not just direction" standard the
+    // rest of this file already holds combat and movement goals to.
+
+    /// A stared-at candidate is not acquired immediately — vanilla's
+    /// `aggroTime = adjustedTickDelay(5)` must count all the way down first.
+    /// Ticks 1-4 must leave `attack_target` untouched; only the 5th promotes
+    /// it, at which point it must be exactly the candidate `can_use` found
+    /// (`nearest_player`, since nothing here is angry yet).
+    #[test]
+    fn look_for_player_acquires_only_after_the_five_tick_aggro_delay() {
+        let mut goal = EndermanLookForPlayerGoal::new();
+        let candidate = Vec3::new(6.0, 64.0, 0.0);
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            player: Some(candidate),
+            stared_at: true,
+            ..Default::default()
+        };
+        assert!(
+            goal.can_use(&mut mob),
+            "a stared-at mob with a nearby player must find a pending candidate"
+        );
+        goal.start(&mut mob);
+        assert_eq!(
+            mob.attack, None,
+            "start() must not acquire immediately — only arm the aggro delay"
+        );
+        for n in 1..=4 {
+            goal.tick(&mut mob);
+            assert_eq!(mob.attack, None, "must still be counting down at tick {n}");
+        }
+        goal.tick(&mut mob);
+        assert_eq!(
+            mob.attack,
+            Some(candidate),
+            "the 5th tick must promote the pending candidate to the live attack target"
+        );
+    }
+
+    /// The anger-gated half of `isAngerInducing`: with no stare at all, a mob
+    /// already holding a persistent grudge (`angry_target`) still finds and
+    /// acquires a candidate — vanilla's `isAngryAt` disjunct in
+    /// `isAngerInducing`, ported as `is_being_stared_at() ||
+    /// angry_target().is_some()`.
+    #[test]
+    fn look_for_player_acquires_from_a_grudge_alone_with_no_stare() {
+        let mut goal = EndermanLookForPlayerGoal::new();
+        let grudge = Vec3::new(9.0, 64.0, 0.0);
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            player: None,
+            stared_at: false,
+            angry: Some(grudge),
+            ..Default::default()
+        };
+        assert!(
+            goal.can_use(&mut mob),
+            "an angry mob with no player in view must still find its grudge holder"
+        );
+        goal.start(&mut mob);
+        for _ in 0..5 {
+            goal.tick(&mut mob);
+        }
+        assert_eq!(mob.attack, Some(grudge));
+    }
+
+    /// Once acquired, a target staring back from close range (`distanceToSqr
+    /// < 16.0`, i.e. under 4 blocks) triggers the "teleport away" blink —
+    /// and the *promotion* tick itself must not also fire it (vanilla's
+    /// `tick()` is `if (pendingTarget != null) {...} else {...}`, an
+    /// either/or, not a fallthrough).
+    #[test]
+    fn look_for_player_teleports_away_when_stared_at_up_close() {
+        let mut goal = EndermanLookForPlayerGoal::new();
+        let close = Vec3::new(3.0, 64.0, 0.0); // distSqr 9 < 16
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            player: Some(close),
+            stared_at: true,
+            ..Default::default()
+        };
+        goal.can_use(&mut mob);
+        goal.start(&mut mob);
+        for _ in 0..5 {
+            goal.tick(&mut mob);
+        }
+        assert_eq!(mob.attack, Some(close), "precondition: must have acquired");
+        assert!(
+            mob.teleported.is_empty(),
+            "the promotion tick itself must not also run the teleport branch"
+        );
+
+        goal.tick(&mut mob);
+        assert_eq!(
+            mob.teleported.len(),
+            1,
+            "a close, still-staring target must trigger exactly one blink"
+        );
+    }
+
+    /// A target far outside follow-adjacent range (`distanceToSqr > 256.0`,
+    /// over 16 blocks) that is *not* staring triggers "teleport towards"
+    /// once the 30-tick throttle opens — never before it, and landing at the
+    /// **exact** predicted destination (vanilla's own jitter formula, fed
+    /// through `ScriptMob`'s fixed RNG stubs: `next_f64() == 0.0` always,
+    /// `next_i32(_) == 0` always).
+    ///
+    /// Hand-derived: enderman at `(0, 64, 0)`, target at `(20, 64, 0)`.
+    /// `dir = normalize(pos - target) = (-1, 0, 0)`. `jx = (0.0 - 0.5) * 8.0
+    /// = -4.0`, `jy = 0 - 8 = -8`, `jz = -4.0`. `x' = 0 + (-4.0) - (-1 * 16)
+    /// = 12.0`. `y' = 64 + (-8) - 0 = 56.0`. `z' = 0 + (-4.0) - 0 = -4.0`.
+    #[test]
+    fn look_for_player_teleports_towards_after_the_throttle_once_out_of_range() {
+        let mut goal = EndermanLookForPlayerGoal::new();
+        let target = Vec3::new(20.0, 64.0, 0.0); // distSqr 400 > 256
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            player: Some(target),
+            stared_at: true,
+            ..Default::default()
+        };
+        goal.can_use(&mut mob);
+        goal.start(&mut mob);
+        for _ in 0..5 {
+            goal.tick(&mut mob);
+        }
+        assert_eq!(mob.attack, Some(target), "precondition: must have acquired");
+
+        // No longer being watched: the far branch, not the close one.
+        mob.stared_at = false;
+        for n in 0..30 {
+            goal.tick(&mut mob);
+            assert!(
+                mob.teleported.is_empty(),
+                "must not teleport before the throttle elapses (tick {n})"
+            );
+        }
+        goal.tick(&mut mob); // the 31st far-branch tick opens the throttle
+        assert_eq!(mob.teleported.len(), 1, "must teleport exactly once once the throttle opens");
+        let landed = mob.teleported[0];
+        let expected = Vec3::new(12.0, 56.0, -4.0);
+        assert!(
+            (landed.x - expected.x).abs() < 1e-9
+                && (landed.y - expected.y).abs() < 1e-9
+                && (landed.z - expected.z).abs() < 1e-9,
+            "expected {expected:?}, got {landed:?}"
+        );
+    }
+
+    /// Predicts the **wrong** hypothesis explicitly and requires the real
+    /// output to land on the right one, not merely differ from zero —
+    /// CLAUDE.md's magnitude species. The wrong hypothesis is the exact
+    /// formula this file used to compute (`target + normalize(pos - target)
+    /// * 16`, anchored on the *target's* position and carrying no jitter):
+    /// for this test's inputs that lands at `(4.0, 64.0, 0.0)`, a materially
+    /// different point from the correct, enderman-anchored `(12.0, 56.0,
+    /// -4.0)` the primary test above pins. Same scenario as that test,
+    /// re-run here only to keep this assertion self-contained.
+    #[test]
+    fn look_for_player_teleport_towards_does_not_land_on_the_target_anchored_formula() {
+        let mut goal = EndermanLookForPlayerGoal::new();
+        let target = Vec3::new(20.0, 64.0, 0.0);
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            player: Some(target),
+            stared_at: true,
+            ..Default::default()
+        };
+        goal.can_use(&mut mob);
+        goal.start(&mut mob);
+        for _ in 0..5 {
+            goal.tick(&mut mob);
+        }
+        mob.stared_at = false;
+        for _ in 0..31 {
+            goal.tick(&mut mob);
+        }
+        let landed = mob.teleported[0];
+        let wrong_hypothesis = Vec3::new(4.0, 64.0, 0.0);
+        let dist = ((landed.x - wrong_hypothesis.x).powi(2)
+            + (landed.y - wrong_hypothesis.y).powi(2)
+            + (landed.z - wrong_hypothesis.z).powi(2))
+        .sqrt();
+        assert!(
+            dist > 1.0,
+            "landed at {landed:?}, which is suspiciously close to the old \
+             target-anchored (and un-jittered) formula's {wrong_hypothesis:?} \
+             — this must be the enderman-anchored formula, not the one it replaced"
         );
     }
 

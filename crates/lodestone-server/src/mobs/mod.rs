@@ -737,6 +737,15 @@ const ANGER_TICKS: (u64, u64) = (400, 780);
 /// death still counts as a player kill, in ticks.
 const PLAYER_HURT_EXPERIENCE_TIME: u64 = 100;
 
+/// The flat knockback power `LivingEntity.dealDefaultKnockback` applies to
+/// **every** damaging hit, regardless of the attacker's own
+/// `minecraft:attack_knockback` attribute — `LivingEntity.knockback(0.4F, xd,
+/// zd, source, damage)`. This is separate from,
+/// and applied before, any attacker-specific bonus (sprint attack,
+/// enchantments) — see [`MobSim::attack`]'s own doc comment for why the two
+/// are chained as two `knockback_impulse` calls rather than summed into one.
+const MELEE_DEFAULT_KNOCKBACK_POWER: f64 = 0.4;
+
 /// Wraps a bare species path back into a [`ResourceKey`] so
 /// [`mob_experience_reward`] can consult [`is_hostile_species`], which takes one.
 ///
@@ -4515,7 +4524,7 @@ impl<'w> MobSim<'w> {
     }
 
     /// Resolves a melee attack against a live mob: runs the damage pipeline
-    /// ([`SimMob::apply_damage`]) and, if `knockback_power` is positive, the
+    /// ([`SimMob::apply_damage`]) and, whenever the hit actually landed, the
     /// knockback impulse
     /// ([`lodestone_physics::knockback::knockback_impulse`]), writing both
     /// straight into the target's own state so the very next
@@ -4526,15 +4535,50 @@ impl<'w> MobSim<'w> {
     /// `MeleeAttackGoal` hits and explosions; this is the first path a
     /// *player's* attack can reach it through.
     ///
-    /// `attacker_pos` supplies the knockback *direction* only (the horizontal
-    /// vector from attacker to target) — see `crate::server::apply_attack`'s
-    /// own doc comment for why this substitutes for
-    /// `lodestone_physics::knockback::attack_direction`'s real
-    /// attacker-facing formula (nothing server-side tracks player rotation
-    /// yet) and for why that is a materially smaller divergence than it
-    /// sounds: a melee attack requires the crosshair to already be on the
-    /// target, so facing and attacker→target are nearly always the same
-    /// vector in practice.
+    /// # Two knockback contributions, chained like vanilla's two calls
+    ///
+    /// Vanilla applies knockback to a melee target in two independent
+    /// `LivingEntity.knockback` calls, not one: `LivingEntity.hurtServer`
+    /// calls `dealDefaultKnockback` — a flat `0.4F` applied to **every**
+    /// damaging hit regardless of the attacker's own attributes — and,
+    /// separately, `Player.attack` calls `causeExtraKnockback` with
+    /// `getKnockback(...) + (sprintAttack ? 0.5F : 0.0F)`, which for a
+    /// bare-handed, non-enchanted attacker is `0.0` unless sprinting.
+    /// `knockback_power` here is that
+    /// *second*, caller-supplied bonus (`crate::server::apply_attack`'s
+    /// `SPRINT_ATTACK_KNOCKBACK_POWER`, `0.0` for a non-sprinting hit); the
+    /// mandatory first `0.4` was previously missing entirely, so a plain
+    /// (non-sprinting) punch applied **no knockback at all** — the literal
+    /// reported symptom ("mobs dont take knockback if i punch them"), not a
+    /// magnitude shortfall.
+    ///
+    /// Both calls are chained through the same `knockback_impulse` primitive
+    /// — the second call's input velocity is the first call's output — which
+    /// reproduces vanilla's halving-then-subtracting twice (a single call
+    /// with the *summed* power is not equivalent: it halves the pre-hit
+    /// velocity only once).
+    ///
+    /// # Direction
+    ///
+    /// Both calls use the same horizontal direction: the vector from the
+    /// target's position to the attacker's, i.e. `dx = attacker_pos.x -
+    /// target_pos.x` — vanilla's own `dealDefaultKnockback`
+    /// (`source.getSourcePosition().x() - this.getX()`).
+    /// `knockback_impulse` then subtracts that
+    /// direction's contribution from velocity, so the target moves *away*
+    /// from the attacker. This also substitutes for `causeExtraKnockback`'s
+    /// real attacker-facing formula
+    /// (`lodestone_physics::knockback::attack_direction`) for the bonus half,
+    /// since nothing server-side tracks player rotation yet — a materially
+    /// smaller divergence than it sounds, because a melee attack requires the
+    /// crosshair to already be on the target, so facing and attacker→target
+    /// are nearly always the same vector in practice.
+    ///
+    /// A previous version of this method computed `dx`/`dz` as
+    /// `target_pos - attacker_pos` — backwards, pointing from the attacker
+    /// *to* the target rather than from the target *to* the attacker —
+    /// which pulled a hit mob toward its attacker instead of pushing it
+    /// away.
     ///
     /// A mob's own [`NavigatingMob`] follower has no ground-contact state
     /// (see that struct's own doc comment: "kinematic... not the physics
@@ -4591,31 +4635,57 @@ impl<'w> MobSim<'w> {
             // `dropExperience` reads exactly this, which is why a mob killed by
             // anything else drops no XP — see `hurt_by_player_until`.
             mob.hurt_by_player_until = Some(now + PLAYER_HURT_EXPERIENCE_TIME);
-            if knockback_power > 0.0 && mob.health() > 0.0 {
+            if damage_dealt > 0.0 && mob.health() > 0.0 {
                 let target_pos = mob.position();
-                let dx = target_pos.x - attacker_pos.x;
-                let dz = target_pos.z - attacker_pos.z;
+                // Vector from the target to the attacker — see this method's
+                // own doc comment for why this is the correct sign (and why
+                // the previous `target_pos - attacker_pos` pulled the mob
+                // toward its attacker instead of pushing it away).
+                let dx = attacker_pos.x - target_pos.x;
+                let dz = attacker_pos.z - target_pos.z;
                 let v = mob.velocity();
-                let new_velocity = lodestone_physics::knockback::knockback_impulse(
+                let jitter = || (1.0, 0.0);
+                // A degenerate (attacker and target share an exact
+                // horizontal position) direction is possible here, unlike
+                // `attack_direction`'s facing-derived one — see
+                // `knockback_impulse`'s own doc comment. A fixed,
+                // deterministic non-degenerate fallback (rather than a
+                // threaded RNG this call site has no source for) is
+                // sufficient: it only ever fires on that one pathological
+                // input, and `knockback_impulse`'s own test
+                // (`knockback_loops_the_jitter_until_a_non_degenerate_direction_lands`)
+                // already proves a single non-degenerate draw is enough
+                // to terminate the loop.
+                //
+                // First call: vanilla's mandatory `dealDefaultKnockback`,
+                // applied to every damaging hit regardless of the attacker's
+                // own knockback attribute.
+                let after_default = lodestone_physics::knockback::knockback_impulse(
                     lodestone_physics::geometry::Vec3d { x: v.x, y: v.y, z: v.z },
                     true, // always the grounded branch — see this method's own doc comment.
-                    knockback_power,
+                    MELEE_DEFAULT_KNOCKBACK_POWER,
                     dx,
                     dz,
                     mob.knockback_resistance(),
-                    // A degenerate (attacker and target share an exact
-                    // horizontal position) direction is possible here, unlike
-                    // `attack_direction`'s facing-derived one — see
-                    // `knockback_impulse`'s own doc comment. A fixed,
-                    // deterministic non-degenerate fallback (rather than a
-                    // threaded RNG this call site has no source for) is
-                    // sufficient: it only ever fires on that one pathological
-                    // input, and `knockback_impulse`'s own test
-                    // (`knockback_loops_the_jitter_until_a_non_degenerate_direction_lands`)
-                    // already proves a single non-degenerate draw is enough
-                    // to terminate the loop.
-                    || (1.0, 0.0),
+                    jitter,
                 );
+                // Second call: the attacker-specific bonus (sprint attack,
+                // future enchantments), chained onto the first call's result
+                // exactly as vanilla's second, independent `knockback` call
+                // chains onto the first's mutated `deltaMovement`.
+                let new_velocity = if knockback_power > 0.0 {
+                    lodestone_physics::knockback::knockback_impulse(
+                        after_default,
+                        true,
+                        knockback_power,
+                        dx,
+                        dz,
+                        mob.knockback_resistance(),
+                        jitter,
+                    )
+                } else {
+                    after_default
+                };
                 mob.apply_knockback(Vec3::new(new_velocity.x, new_velocity.y, new_velocity.z));
             }
             (mob.health(), mob.velocity(), damage_dealt)

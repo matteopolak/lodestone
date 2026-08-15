@@ -216,11 +216,13 @@ pub const ENDERMAN: &[Registration] = &[
     Registration::goal(0, "FloatGoal", float_goal),
     // `EnderMan.EndermanFreezeWhenLookedAt`, flags `{JUMP, MOVE}`.
     // Built on `MobController::is_being_stared_at` — see
-    // `EndermanFreezeWhenLookedAt`'s own doc comment for the port. The
-    // host feed that computes the boolean from a real player view vector has
-    // not landed (`lodestone_server::mobs::PlayerPerception` carries none
-    // yet), so `can_use` reads a permanent `false` in the running game until
-    // it does; the goal itself is real and exercised against the seam by this
+    // `EndermanFreezeWhenLookedAt`'s own doc comment for the port. The host
+    // feed that computes the boolean from a real player view vector has
+    // landed: `lodestone_server::mobs::PlayerPerception::view_direction` is
+    // fed from the player's own rotation packet and `MobSim::feed_perception`
+    // folds it through `is_in_view_cone` into `set_stared_at` every tick, so
+    // `can_use` reads a real answer in the running game, not a permanent
+    // `false`. The goal itself is also exercised against the seam by this
     // module's own tests.
     Registration::goal(1, "EnderMan.EndermanFreezeWhenLookedAt", freeze_when_looked_at),
     Registration::goal(2, "MeleeAttackGoal", melee_attack),
@@ -990,15 +992,30 @@ mod tests {
         );
     }
 
-    /// Predicts the exact landing point of `EnderMan::teleportTowards`, not
-    /// merely "the enderman moved" or "moved closer" — both the *magnitude*
-    /// species of vacuous test this repo's evidence standards name explicitly.
-    /// `teleport_time` must reach vanilla's `adjustedTickDelay(30)` while the
-    /// target stays farther than 16 blocks (`distanceToSqr > 256.0`) and the
-    /// enderman is *not* currently stared at (the sibling branch, exercised
-    /// separately below); the landing point is 16 blocks from the target along
-    /// the target-to-enderman direction, computed independently of the goal's
-    /// own implementation from the same inputs.
+    /// Predicts the landing point of `EnderMan::teleportTowards` to within
+    /// its own real jitter bounds, not merely "the enderman moved" or "moved
+    /// closer" — both the *magnitude* species of vacuous test this repo's
+    /// evidence standards name explicitly. `teleport_time` must reach
+    /// vanilla's `adjustedTickDelay(30)` while the target stays farther than
+    /// 16 blocks (`distanceToSqr > 256.0`) and the enderman is *not*
+    /// currently stared at (the sibling branch, exercised separately below).
+    ///
+    /// **The landing point is anchored on the enderman's own pre-teleport
+    /// position, not the target's** — `EnderMan::teleportTowards`'s real
+    /// formula is `this.getX() + jitter - dir.x * 16.0` where `dir =
+    /// normalize(this.pos - target.pos)`, i.e. "step 16 blocks from where I
+    /// am, toward the target", not "land within 16 blocks of the target
+    /// regardless of how far I started". A previous version of the goal's
+    /// `tick` computed the latter, and this test's own expected value was
+    /// hand-derived from that same wrong transcription rather than
+    /// independently from the jar — see `EndermanLookForPlayerGoal::tick`'s
+    /// own doc comment for the fix and the exact numbers this bug produced.
+    ///
+    /// Exact to within vanilla's own random jitter (`±4.0` on X/Z,
+    /// `[-8.0, 7.0]` on Y — `(random - 0.5) * 8.0` and `randomInt(16) - 8`
+    /// respectively), rather than to the bit, because `NavigatingMob`'s own
+    /// seeded RNG stream is not independently replicated here; the *bounds*
+    /// are still an outside-derived prediction, not merely "not zero".
     #[test]
     fn a_far_untended_target_is_closed_by_a_predicted_teleport_not_a_walk() {
         use crate::ai::mob::MobController;
@@ -1054,15 +1071,42 @@ mod tests {
         // The 31st tick crosses the gate.
         goal.tick(&mut mob);
 
-        // Independently derived expectation: `EnderMan::teleportTowards`
-        // lands 16 blocks from the target along (enderman - target),
-        // normalised. Here that direction is exactly -X, so the landing point
-        // is target.x - 16.
-        let expected = Vec3::new(far_target.x - 16.0, 0.0, 0.0);
+        // Independently derived expectation: `EnderMan::teleportTowards`'s
+        // direction here is exactly -X (`dir = normalize(start - far_target)
+        // = (-1, 0, 0)`), so the landing point is `start.x + jitter_x -
+        // (-1 * 16) = start.x + 16 + jitter_x`, jitter_x in `[-4.0, 4.0]`;
+        // `y = start.y + jitter_y`, jitter_y in `[-8.0, 7.0]`; `z = start.z +
+        // jitter_z`, jitter_z in `[-4.0, 4.0]`. This is a materially
+        // different region from the old, wrong (target-anchored) formula's
+        // single point at `far_target.x - 16.0 = 34.0` — the two ranges do
+        // not overlap (`[12.0, 20.0]` vs `{34.0}`), so this input still
+        // separates the two hypotheses even without pinning the exact byte.
         let got = mob.position();
         assert!(
-            (got.x - expected.x).abs() < 1.0e-9 && got.y == expected.y && got.z == expected.z,
-            "expected the teleport-towards landing point {expected:?}, got {got:?}"
+            (got.x - (start.x + 16.0)).abs() <= 4.0,
+            "expected x within 4.0 of {} (start.x + 16), got {}",
+            start.x + 16.0,
+            got.x
+        );
+        assert!(
+            (got.y - start.y) >= -8.0 && (got.y - start.y) <= 7.0,
+            "expected y within [-8.0, 7.0] of start.y ({}), got {}",
+            start.y,
+            got.y
+        );
+        assert!(
+            (got.z - start.z).abs() <= 4.0,
+            "expected z within 4.0 of start.z ({}), got {}",
+            start.z,
+            got.z
+        );
+        let old_wrong_hypothesis = far_target.x - 16.0;
+        assert!(
+            (got.x - old_wrong_hypothesis).abs() > 4.0,
+            "landed at x={}, which is within jitter range of the old \
+             target-anchored formula's {old_wrong_hypothesis} — this must be \
+             the enderman-anchored formula, not the one it replaced",
+            got.x
         );
     }
 
