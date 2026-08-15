@@ -2428,10 +2428,29 @@ impl HudGeometry {
         }
 
         // Crosshair: a white plus at the centre.
+        //
+        // `arm`/`thick` reproduce vanilla's actual ink, not its sprite's bounding
+        // box. `Hud.extractCrosshair` (`Hud.java`) blits the 15x15
+        // `hud/crosshair` sprite (`assets/minecraft/textures/gui/sprites/hud/
+        // crosshair.png`) at `((guiWidth-15)/2, (guiHeight-15)/2, 15, 15)` — but
+        // that box is mostly transparent padding. Read directly off the PNG's own
+        // pixels: only rows/columns 3..=11 of the 15x15 grid are opaque, a
+        // single-pixel-thick "+" spanning 9 of the 15 px, centred in the box (and
+        // therefore already centred on `(cx, cy)` here). This used to draw the
+        // *sprite's* 16-wide, 2-thick bounding box solid instead of that 9-wide,
+        // 1-thick mark — a ~3.5x ink-area crosshair at every GUI scale, on both
+        // targets (this call has no `wasm32` branch), which is the whole of the
+        // "crosshair is too big" report. Hand-drawn rather than a real `b.sprite`
+        // blit for the same reason the attack-indicator fallback below is: this
+        // stays a plain colour-stream quad pair, so it still draws with no GUI
+        // atlas attached (a jar-less/headless run), which `b.sprite` would not,
+        // and the two tests asserting an exact 12-vert/2-quad crosshair
+        // (`geometry_has_crosshair_and_text`, `hiding_the_debug_overlay_removes_its_geometry`)
+        // stay meaningful rather than moving to a different vertex stream.
         if frame.crosshair {
             let (cx, cy) = (b.w * 0.5, b.h * 0.5);
-            let arm = 8.0;
-            let thick = 2.0;
+            let arm = 4.5;
+            let thick = 1.0;
             let col = [1.0, 1.0, 1.0, 0.85];
             b.rect_px(cx - arm, cy - thick * 0.5, arm * 2.0, thick, col);
             b.rect_px(cx - thick * 0.5, cy - arm, thick, arm * 2.0, col);
@@ -5731,6 +5750,96 @@ mod tests {
         // Only the crosshair (2 quads = 12 verts) should remain.
         assert!(without < with, "F3 off must drop the overlay glyphs");
         assert_eq!(without, 12, "just the crosshair survives");
+    }
+
+    /// Decodes a colour-stream vertex buffer's NDC positions back to the pixel
+    /// space `ColourStream::rect` built them from, returning `(min_x, max_x,
+    /// min_y, max_y)`. The exact inverse of `to_ndc` in
+    /// `hud/item_icon.rs`'s `ColourStream::rect`.
+    fn ndc_bounds(verts: &[f32], w: f32, h: f32) -> (f32, f32, f32, f32) {
+        let (mut min_x, mut max_x, mut min_y, mut max_y) =
+            (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+        for v in verts.chunks_exact(FLOATS_PER_VERTEX) {
+            let px = (v[0] + 1.0) * 0.5 * w;
+            let py = (1.0 - v[1]) * 0.5 * h;
+            min_x = min_x.min(px);
+            max_x = max_x.max(px);
+            min_y = min_y.min(py);
+            max_y = max_y.max(py);
+        }
+        (min_x, max_x, min_y, max_y)
+    }
+
+    /// Pins the crosshair to vanilla's real ink, not its sprite's bounding box —
+    /// the draw site's own doc has the pixel-by-pixel read of
+    /// `hud/crosshair.png`. Two hypotheses, computed from outside constants
+    /// rather than guessed: vanilla's real 9px-long, 1px-thick "+" (correct), and
+    /// this draw's own pre-fix 16px/2px-thick bar (the bug this test would have
+    /// caught). At `gui_scale == 1` — the floor `320x240` this repo already uses
+    /// elsewhere for that reason — physical and logical pixels coincide, so the
+    /// measured span is the real on-screen footprint, not a scaled derivative.
+    #[test]
+    fn crosshair_span_matches_vanillas_real_ink_not_the_old_wrong_hypothesis() {
+        let stats = DebugStats::default();
+        let mut frame = HudFrame::new(&stats);
+        frame.show_debug = false;
+        let (w, h) = (320.0_f32, 240.0_f32);
+        let geo = HudGeometry::build(&frame, w as u32, h as u32);
+        assert_eq!(geo.vertex_count(), 12, "precondition: only the crosshair draws");
+
+        let (min_x, max_x, min_y, max_y) = ndc_bounds(&geo.verts, w, h);
+        let (span_x, span_y) = (max_x - min_x, max_y - min_y);
+        let (correct, wrong) = (9.0_f32, 16.0_f32);
+        let mut mismatches = Vec::new();
+        if (span_x - correct).abs() >= 0.01 {
+            mismatches.push(format!("horizontal span {span_x} (want {correct})"));
+        }
+        if (span_y - correct).abs() >= 0.01 {
+            mismatches.push(format!("vertical span {span_y} (want {correct})"));
+        }
+        assert!(
+            mismatches.is_empty(),
+            "crosshair does not match vanilla's real ink: {mismatches:?} — \
+             note the wrong hypothesis this used to draw was {wrong}px"
+        );
+        // The wrong hypothesis is a real, distinct number — if `correct` and
+        // `wrong` ever coincided this assertion would be measuring nothing.
+        assert!((correct - wrong).abs() > 1.0);
+
+        // Still centred on the canvas — only the size should have changed.
+        let (cx, cy) = ((min_x + max_x) * 0.5, (min_y + max_y) * 0.5);
+        assert!((cx - w * 0.5).abs() < 0.01, "crosshair should stay x-centred");
+        assert!((cy - h * 0.5).abs() < 0.01, "crosshair should stay y-centred");
+    }
+
+    /// The same shape one GUI-scale step up: vanilla's `calculateScale` picks 3
+    /// for a 1280x720 framebuffer at `AUTO_GUI_SCALE` (height-bound:
+    /// `720/(3+1) < 240`, `720/(3+0) >= 240` at the previous step — see
+    /// `calculate_gui_scale`'s own doc), so every logical-pixel constant this
+    /// draw site uses should come out scaled by exactly 3, including the
+    /// crosshair's real 9px span becoming 27.
+    #[test]
+    fn crosshair_span_scales_with_gui_scale_not_just_at_the_floor() {
+        let stats = DebugStats::default();
+        let mut frame = HudFrame::new(&stats);
+        frame.show_debug = false;
+        let (w, h) = (1280.0_f32, 720.0_f32);
+        assert_eq!(
+            crate::config::calculate_gui_scale(crate::config::AUTO_GUI_SCALE, w as u32, h as u32),
+            3,
+            "precondition: this framebuffer must resolve to gui_scale 3"
+        );
+        let geo = HudGeometry::build(&frame, w as u32, h as u32);
+        let (min_x, max_x, min_y, max_y) = ndc_bounds(&geo.verts, w, h);
+        let (span_x, span_y) = (max_x - min_x, max_y - min_y);
+        assert!(
+            (span_x - 27.0).abs() < 0.05,
+            "crosshair horizontal span should scale to 27px at gui_scale 3, got {span_x}"
+        );
+        assert!(
+            (span_y - 27.0).abs() < 0.05,
+            "crosshair vertical span should scale to 27px at gui_scale 3, got {span_y}"
+        );
     }
 
     /// Twelve candidates named so their widths are equal, so the layout
