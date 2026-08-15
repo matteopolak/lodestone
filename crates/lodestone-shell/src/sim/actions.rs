@@ -117,11 +117,23 @@ impl Sim {
     /// * `MISS` (or no target at all) — nothing happens server-side, but the
     ///   arm still swings.
     ///
-    /// Before this fix, only the `BLOCK`-with-a-dig-that-actually-starts arm
-    /// ever reached [`Self::swing_hand`] (through `drive_mining`'s own queued
-    /// `SwingArm`, see `drain_action_queue`'s docs) — so punching air, an
-    /// entity, or empty space produced no animation at all. This
+    /// Before an earlier fix, only the `BLOCK`-with-a-dig-that-actually-starts
+    /// arm ever reached [`Self::swing_hand`] (through `drive_mining`'s own
+    /// queued `SwingArm`, see `drain_action_queue`'s docs) — so punching air,
+    /// an entity, or empty space produced no *local* animation at all. This
     /// method is the one place all three branches now funnel through.
+    ///
+    /// That fix only reached [`Self::swing_hand`], which is purely the local
+    /// animation clock — it does not touch the wire. On a live server the
+    /// `ENTITY` and `MISS` arms called it **directly** rather than through
+    /// [`Self::swing_main_hand_live`], so this client's own arm swung while no
+    /// `ClientAction::SwingArm` ever reached [`ActionQueue`] or the socket:
+    /// the local player saw their own swing and every other client saw
+    /// nothing, exactly the reported symptom ("if i punch the air, it doesnt
+    /// send the arm swing packet so other players dont see it"). The `BLOCK`
+    /// arm was never affected — `drive_mining` queues its own `SwingArm`
+    /// through `ActionQueue` the instant a dig starts, which is why hitting a
+    /// block already worked.
     ///
     /// `case ENTITY` takes priority over `case BLOCK`: [`EntityRayTarget`] is
     /// already the nearer of an entity-or-block pick (see
@@ -174,7 +186,7 @@ impl Sim {
         }
         if let Some(entity_id) = self.entity_target() {
             self.attack_entity(entity_id);
-            self.swing_hand();
+            self.swing_main_hand_live();
             return;
         }
         if self.target().is_some() {
@@ -186,6 +198,25 @@ impl Sim {
             return;
         }
         // MISS: no block, no entity. Vanilla still swings.
+        self.swing_main_hand_live();
+    }
+
+    /// Swing the main hand for a **live** discrete click: the wire packet and
+    /// the local animation together, one call so a caller cannot reach for
+    /// the local-only half by mistake.
+    ///
+    /// [`Self::begin_attack_live`]'s `ENTITY` and `MISS` arms are discrete
+    /// click events, not per-tick ones, so — same reasoning as
+    /// [`Self::attack_entity`], [`Self::interact_entity`] and
+    /// [`Self::end_attack`] — the send goes straight to the socket rather
+    /// than through [`ActionQueue`], which only drains inside the tick loop.
+    /// Mirrors [`Self::interact_entity`]'s own
+    /// `net.send_action(SwingArm) then swing_hand()` pair exactly; that
+    /// method already got this right; `begin_attack_live` did not.
+    fn swing_main_hand_live(&mut self) {
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::SwingArm { hand: Hand::Main });
+        }
         self.swing_hand();
     }
 

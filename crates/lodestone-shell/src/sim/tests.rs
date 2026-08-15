@@ -3892,6 +3892,81 @@ fn begin_attack_live_prefers_an_entity_target_over_mining() {
     );
 }
 
+/// The owner's own bug report: punching the air must put a `SwingArm` on the
+/// wire, not just animate the local arm. `begin_attack_live_swings_on_a_miss`
+/// above already proved the *local* half; it used no net connection at all
+/// (deliberately, per its own doc) and so could not have caught this — the
+/// wire send and the local animation were, before this fix, two different
+/// calls (`ActionQueue`'s `SwingArm` vs `Sim::swing_hand` directly), and only
+/// one of them was reached on a miss. A client with no `SwingArm` on the wire
+/// here is exactly the reported defect: other players never see the swing.
+#[test]
+fn begin_attack_live_sends_swing_arm_on_the_wire_on_a_miss() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    assert!(sim.target().is_none(), "precondition: no block targeted");
+    assert!(sim.entity_target().is_none(), "precondition: no entity targeted");
+
+    sim.begin_attack_live();
+
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert!(
+        sent.iter()
+            .any(|a| matches!(a, ClientAction::SwingArm { hand: Hand::Main })),
+        "a live miss must send a main-hand SwingArm over the wire so other \
+         players see it, got {sent:?}"
+    );
+}
+
+/// The `ENTITY` arm has the identical defect, one hop earlier: `attack_entity`
+/// sends `InteractEntity { interaction: Attack, .. }` but never `SwingArm`
+/// itself, and `begin_attack_live` used to reach only the local-only
+/// `Sim::swing_hand` afterward. Vanilla's own animation call (`player.swing`
+/// in `Minecraft.startAttack`) is unconditional and outside the switch, so it
+/// covers `ENTITY` too — the attack packet does not carry the swing.
+#[test]
+fn begin_attack_live_sends_swing_arm_on_the_wire_on_an_entity_hit() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = Some(42));
+
+    sim.begin_attack_live();
+
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    let attack = sent.iter().position(|a| {
+        matches!(
+            a,
+            ClientAction::InteractEntity {
+                interaction: EntityInteraction::Attack,
+                ..
+            }
+        )
+    });
+    let swing = sent
+        .iter()
+        .position(|a| matches!(a, ClientAction::SwingArm { hand: Hand::Main }));
+    assert!(
+        attack.is_some(),
+        "control precondition: the attack packet itself must still be sent, \
+         or the absence below is just an unwired Sim — got {sent:?}"
+    );
+    assert!(
+        swing.is_some(),
+        "attacking an entity must also send a main-hand SwingArm over the \
+         wire so other players see the swing, got {sent:?}"
+    );
+    assert!(
+        attack < swing,
+        "vanilla's `MultiPlayerGameMode.attack` sends the attack packet, and \
+         only afterward does `Minecraft.startAttack`'s unconditional \
+         `player.swing(...)` send the swing — got {sent:?}"
+    );
+}
+
 /// A dead local player must not attack — mirrors `use_item_live`'s own
 /// `is_dead()` guard, and vanilla drops input entirely on the death
 /// screen.
