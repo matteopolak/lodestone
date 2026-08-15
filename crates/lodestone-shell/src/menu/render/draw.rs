@@ -1821,11 +1821,18 @@ fn draw_tab(
         );
     }
 
-    // `renderLabel`: centred in `[x + 1, x + w - 1]`, top dropped 3 px unless
-    // selected (`widget::tab_label_dy`). Colour follows `active` — vanilla's
-    // `WithInactiveMessage`, the same rule `Widget::message_colour` already
-    // applies everywhere else. Drawn last, matching vanilla's own order (see
-    // this function's own doc) — over the merge fill and the underline.
+    // `renderLabel`: horizontally centred in `[x + 1, x + w - 1]`
+    // (`acceptScrollingWithDefaultCenter`'s `centerX`, via `TextAlignment.
+    // CENTER` — matched by `tx` below) and vertically centred between a
+    // `top` that drops 3 px unless selected and `bottom = y + h`
+    // (`ActiveTextCollector.defaultScrollingHelper`'s `(top + bottom -
+    // lineHeight) / 2 + 1` — matched by `widget::tab_label_top`, which is
+    // *not* the same as drawing flush against `top`; see its own doc for the
+    // "too high up" incident this fixed). Colour follows `active` —
+    // vanilla's `WithInactiveMessage`, the same rule `Widget::
+    // message_colour` already applies everywhere else. Drawn last, matching
+    // vanilla's own order (see this function's own doc) — over the merge
+    // fill and the underline.
     let colour = if row.enabled {
         widget::ACTIVE_LABEL
     } else {
@@ -1834,7 +1841,7 @@ fn draw_tab(
     let (left, right) = (x + 1.0, x + w - 1.0);
     let tw = b.text_width(&row.label, 1.0);
     let tx = ((left + right) * 0.5 - tw * 0.5).floor();
-    let ty = y + widget::tab_label_dy(tab.selected);
+    let ty = widget::tab_label_top(y, h, tab.selected, LINE_H);
     b.text(&row.label, tx, ty, 1.0, colour);
 
     // The two flanking separators — `Screen.HEADER_SEPARATOR`, only in the

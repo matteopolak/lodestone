@@ -822,13 +822,52 @@ pub fn tab_underline_colour(active: bool) -> [f32; 4] {
     if active { ACTIVE_LABEL } else { INACTIVE_LABEL }
 }
 
-/// `MenuTabButton.renderLabel`'s vertical offset (`MenuTabBar.java`):
-/// `getY() + (isSelected() ? 0 : 3)` — an unselected tab's label drops 3 px
-/// because the selected tab alone draws the inset background/underline that
-/// would otherwise collide with a label sitting flush against the top.
+/// `MenuTabButton.renderLabel`'s `top` local (`MenuTabBar.java`):
+/// `getY() + (isSelected() ? 0 : 3)` — an unselected tab's label window
+/// starts 3 px lower because the selected tab alone draws the inset
+/// background/underline that would otherwise collide with a label sitting
+/// flush against the top.
+///
+/// This is **not** the label's final draw `y` — vanilla never blits at
+/// `top` directly. `renderLabel` passes `top` and `bottom = getY() +
+/// getHeight()` into `acceptScrollingWithDefaultCenter`, which vertically
+/// *centres* the line between them (`ActiveTextCollector.
+/// defaultScrollingHelper`: `(top + bottom - lineHeight) / 2 + 1`). Use
+/// [`tab_label_top`], which applies that centring; a caller that adds this
+/// straight to `y` reproduces the bug this function's doc used to describe
+/// as the whole story — see that function's own doc for the incident.
 #[must_use]
 pub fn tab_label_dy(selected: bool) -> f32 {
     if selected { 0.0 } else { 3.0 }
+}
+
+/// The tab label's actual draw `y` — vanilla's `renderLabel` (`MenuTabBar.
+/// java`) does not blit at [`tab_label_dy`]'s `top` directly; it hands `top`
+/// and `bottom = getY() + getHeight()` to `acceptScrollingWithDefaultCenter`,
+/// which vertically centres the line between them:
+/// `ActiveTextCollector.defaultScrollingHelper`'s `textTop = (top + bottom -
+/// lineHeight) / 2 + 1`, floored before the `+ 1` exactly as [`Widget::
+/// label_top`] already floors for every other widget's label — the same
+/// formula, just with a `top` that is not always `y` because of the
+/// selected/unselected offset.
+///
+/// A tab widget has no backing [`Widget`] (`draw_tab` works off raw
+/// `x, y, w, h` locals from [`super::layout::tab_bar_row_rect`]), so this is
+/// a free function taking `y`/`height` rather than a method — [`Widget::
+/// label_top`]'s formula duplicated once, on purpose, rather than
+/// constructing a throwaway `Widget` just to borrow a method off it.
+///
+/// Landed after the owner reported the tab labels "too high up": the
+/// pre-fix code drew at `y + tab_label_dy(selected)` directly (0 or 3 px
+/// down from the tab's own top), skipping the centring step entirely —
+/// correct as vanilla's `top` local, wrong as a draw position, since
+/// `top`/`bottom` are a *window* vanilla centres text in, not a coordinate
+/// vanilla blits at.
+#[must_use]
+pub fn tab_label_top(y: f32, height: f32, selected: bool, line_height: f32) -> f32 {
+    let top = y + tab_label_dy(selected);
+    let bottom = y + height;
+    ((top + bottom - line_height) / 2.0).floor() + 1.0
 }
 
 /// `MenuTabButton.UNDERLINE_HEIGHT`/`_MARGIN_BOTTOM` (`MenuTabBar.java:
@@ -3238,5 +3277,25 @@ mod tests {
         // `MenuTabBar.java`: `getY() + (isSelected() ? 0 : 3)`.
         assert_eq!(tab_label_dy(true), 0.0);
         assert_eq!(tab_label_dy(false), 3.0);
+    }
+
+    #[test]
+    fn tab_label_top_centres_between_its_own_top_and_bottom_not_flush_against_top() {
+        // At `y = 0`, `height = 24` (a real `layout::TAB_BAR_HEIGHT` row) and
+        // `line_height = 9` (this crate's own standard font line height,
+        // `render::LINE_H`): `ActiveTextCollector.defaultScrollingHelper`'s
+        // `(top + bottom - lineHeight) / 2 + 1`, worked by hand —
+        // selected: `top = 0`, `bottom = 24`, `(0 + 24 - 9) / 2 + 1 = 8`;
+        // unselected: `top = 3`, `bottom = 24`, `(3 + 24 - 9) / 2 + 1 = 10`.
+        assert_eq!(tab_label_top(0.0, 24.0, true, 9.0), 8.0);
+        assert_eq!(tab_label_top(0.0, 24.0, false, 9.0), 10.0);
+        // The discriminating control: the two must differ, and neither may
+        // equal the pre-fix value (`tab_label_dy` alone: 0 or 3) — a
+        // regression back to "blit at `top`, skip centring" would collapse
+        // this pair to (0.0, 3.0), which is a value this assertion also
+        // rules out directly.
+        assert_ne!(tab_label_top(0.0, 24.0, true, 9.0), tab_label_top(0.0, 24.0, false, 9.0));
+        assert_ne!(tab_label_top(0.0, 24.0, true, 9.0), 0.0);
+        assert_ne!(tab_label_top(0.0, 24.0, false, 9.0), 3.0);
     }
 }
