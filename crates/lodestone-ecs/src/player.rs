@@ -809,7 +809,23 @@ impl Default for Profile {
 /// driver that never populates this — every existing test harness, and
 /// `--headless` — sees no behaviour change at all.
 #[derive(Resource, Debug, Clone, Default)]
-pub struct NearbyEntities(pub Vec<NearbyEntity>);
+pub struct NearbyEntities {
+    /// The neighbourhood itself.
+    pub list: Vec<NearbyEntity>,
+    /// The local player's own scoreboard-team `CollisionRule` — `Entity.getTeam()`
+    /// resolved for *us*, the other half of the team gate
+    /// [`lodestone_physics::push::pair_admitted`] applies (each [`NearbyEntity`]
+    /// in `list` carries the neighbour's own half already). Threaded into
+    /// [`lodestone_physics::push::PushSelf::collision_rule`] at the same call
+    /// site `list` is threaded into
+    /// [`lodestone_physics::push::apply_entity_push`]'s neighbour slice.
+    ///
+    /// `Default` is [`lodestone_physics::push::CollisionRule::Always`] — a
+    /// team-less player, vanilla's own resolution for `ownTeam == null` — so a
+    /// driver that never populates this sees no behaviour change, exactly as
+    /// `list`'s own empty default does not.
+    pub self_collision_rule: lodestone_physics::push::CollisionRule,
+}
 
 /// Vanilla's `Options.autoJump`, pushed down by the driver once per tick and
 /// carried into [`PlayerState::auto_jump_enabled`] by [`player_physics`] —
@@ -1295,8 +1311,11 @@ pub fn player_physics(
                     intent,
                     view,
                     profile,
-                    &nearby.0,
-                    PushSelf::LIVING_PLAYER,
+                    &nearby.list,
+                    PushSelf {
+                        collision_rule: nearby.self_collision_rule,
+                        ..PushSelf::LIVING_PLAYER
+                    },
                 );
                 // The same view movement collided against, so the submerged
                 // summary is consistent with where the tick left the player.

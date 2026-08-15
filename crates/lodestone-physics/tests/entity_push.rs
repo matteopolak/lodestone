@@ -3,18 +3,25 @@
 //! bit for bit.
 //!
 //! The rule's own arithmetic (the `sqrt(absMax)` normaliser, the widened `0.01f`
-//! floor and `0.05f` scale, the near-contact clamp, the team truth table, the
-//! vehicle/ladder/spectator vetoes) is unit-tested inside
-//! `lodestone_physics::push`. The bit-exact trajectory comparison against the
-//! independent Python oracle is `golden.rs`'s `entity_push_*`. This file covers the
-//! two things neither can see.
+//! floor and `0.05f` scale, the near-contact clamp, the vehicle/ladder/spectator
+//! vetoes) is unit-tested inside `lodestone_physics::push`. The bit-exact
+//! trajectory comparison against the independent Python oracle is `golden.rs`'s
+//! `entity_push_*`. This file covers the pipeline-level things neither can see —
+//! including, now, the team truth table run through the real entry point
+//! ([`tick_among_entities`]) rather than through `push`'s own
+//! `team_allows_push`/`pair_admitted` directly: every other fixture in this file
+//! builds its [`NearbyEntity`]s through [`neighbour_at`], whose `collision_rule`
+//! is [`NearbyEntity::living`]'s `Always` default, so until the team-gate test
+//! below, this whole file was structurally blind to a team ever mattering —
+//! exactly the shape production had until `lodestone-shell`'s
+//! `Sim::tick_nearby_entities` started resolving one.
 
 use std::collections::HashSet;
 
 use lodestone_physics::collision::CollisionView;
 use lodestone_physics::geometry::{Aabb, Vec3d};
 use lodestone_physics::player::{MovementInput, PlayerState, tick, tick_among_entities};
-use lodestone_physics::push::{NearbyEntity, PushSelf};
+use lodestone_physics::push::{CollisionRule, NearbyEntity, PushSelf};
 use lodestone_physics::{EntityDimensions, PhysicsProfile};
 
 struct Floor(HashSet<(i32, i32, i32)>);
@@ -217,4 +224,132 @@ fn a_ladder_holds_you_against_a_crowd_and_the_control_shows_the_crowd_would_move
         "onClimbable must veto the push entirely"
     );
     assert_eq!(climbing.position.z, 0.5);
+}
+
+/// The team gate (`EntitySelector.pushableBy`'s `CollisionRule` half, ported at
+/// `lodestone_physics::push::team_allows_push`) run through the real pipeline
+/// entry point, [`tick_among_entities`] — not through `team_allows_push` or
+/// `pair_admitted` directly, which is all `push`'s own unit tests exercise.
+///
+/// One discriminating pair is not enough on its own — "forbidden never moves"
+/// is also what a broken push looks like — so every forbidden case here is
+/// paired with an allowed one built from the *same* geometry, and a run that
+/// forgot to wire the neighbour's `collision_rule`/`allied` at all (i.e. every
+/// case reads as `Always`/`false`, [`NearbyEntity::living`]'s default) is
+/// required to fail at least one row: `Never` and `PushOwnTeam`-while-allied
+/// both expect *no* push, which `Always` cannot reproduce, and
+/// `PushOtherTeams`-while-allied expects a push that plain `Always` also
+/// gives, but `PushOtherTeams`-while-**not**-allied expects *no* push, which
+/// `Always` again cannot reproduce.
+#[test]
+fn the_team_gate_reaches_the_pipeline_entry_point_not_only_push_own_unit_tests() {
+    struct Case {
+        label: &'static str,
+        self_rule: CollisionRule,
+        neighbour_rule: CollisionRule,
+        allied: bool,
+        expect_pushed: bool,
+    }
+    let cases = [
+        Case {
+            label: "no team on either side pushes (the transparent default)",
+            self_rule: CollisionRule::Always,
+            neighbour_rule: CollisionRule::Always,
+            allied: false,
+            expect_pushed: true,
+        },
+        Case {
+            label: "neighbour's NEVER vetoes an otherwise-open pusher",
+            self_rule: CollisionRule::Always,
+            neighbour_rule: CollisionRule::Never,
+            allied: false,
+            expect_pushed: false,
+        },
+        Case {
+            label: "our own NEVER vetoes an otherwise-open neighbour",
+            self_rule: CollisionRule::Never,
+            neighbour_rule: CollisionRule::Always,
+            allied: false,
+            expect_pushed: false,
+        },
+        Case {
+            label: "PUSH_OWN_TEAM vetoes an allied pair",
+            self_rule: CollisionRule::PushOwnTeam,
+            neighbour_rule: CollisionRule::Always,
+            allied: true,
+            expect_pushed: false,
+        },
+        Case {
+            label: "PUSH_OWN_TEAM admits a non-allied pair",
+            self_rule: CollisionRule::PushOwnTeam,
+            neighbour_rule: CollisionRule::Always,
+            allied: false,
+            expect_pushed: true,
+        },
+        Case {
+            label: "PUSH_OTHER_TEAMS vetoes a non-allied pair",
+            self_rule: CollisionRule::PushOtherTeams,
+            neighbour_rule: CollisionRule::Always,
+            allied: false,
+            expect_pushed: false,
+        },
+        Case {
+            label: "PUSH_OTHER_TEAMS admits an allied pair",
+            self_rule: CollisionRule::PushOtherTeams,
+            neighbour_rule: CollisionRule::Always,
+            allied: true,
+            expect_pushed: true,
+        },
+    ];
+
+    let view = Floor::flat(6);
+    let profile = PhysicsProfile::mc_1_21();
+    let mut mismatches = Vec::new();
+    for case in &cases {
+        let neighbour = NearbyEntity {
+            collision_rule: case.neighbour_rule,
+            allied: case.allied,
+            ..neighbour_at(0.65, 1.0, 0.5)
+        };
+        let self_flags = PushSelf {
+            collision_rule: case.self_rule,
+            ..PushSelf::LIVING_PLAYER
+        };
+        let mut subject = grounded(0.5, 1.0, 0.5);
+        for _ in 0..5 {
+            tick_among_entities(
+                &mut subject,
+                MovementInput::NONE,
+                &view,
+                &profile,
+                &[neighbour],
+                self_flags,
+            );
+        }
+        let pushed = subject.position.x != 0.5;
+        if pushed != case.expect_pushed {
+            mismatches.push(format!(
+                "{}: expected pushed={}, got pushed={} (velocity.x={}, position.x={})",
+                case.label, case.expect_pushed, pushed, subject.velocity.x, subject.position.x
+            ));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "team-gate pipeline mismatches:\n{}",
+        mismatches.join("\n")
+    );
+
+    // Control: run the very first case (no team on either side) through the
+    // *forbidden* neighbour's exact geometry with `collision_rule` left at
+    // `NearbyEntity::living`'s default instead of explicitly `Always`, proving
+    // the "expect_pushed: true" rows above are not vacuously true because
+    // nothing ever gates.
+    let default_rule_neighbour = neighbour_at(0.65, 1.0, 0.5);
+    assert_eq!(
+        default_rule_neighbour.collision_rule,
+        CollisionRule::Always,
+        "CONTROL: NearbyEntity::living's default must be Always, or every \
+         `expect_pushed: true` row above is meaningless"
+    );
 }
