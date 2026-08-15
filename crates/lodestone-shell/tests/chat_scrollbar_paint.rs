@@ -43,18 +43,26 @@ fn rects(frame: &HudFrame<'_>) -> Vec<(f32, f32, f32, f32, [f32; 4])> {
         .collect()
 }
 
-/// The scrollbar's own thumb: narrow (a couple of pixels wide), sat just past
-/// the right edge of the chat box, non-black (either the amber or the
-/// blue-grey vanilla colour) — distinct enough from every other black
-/// background band and every glyph rect that filtering on "narrow and not
-/// black and not white" isolates it without assuming a draw-call count.
+/// The scrollbar's own thumb, isolated by **position**, not by width or
+/// colour: `hud.rs`'s draw site places it at `chat_box_w + 2 * pose_scale`,
+/// strictly to the right of the chat box every glyph and background band is
+/// wrapped/clipped to. `chat_box_w` here is `chat_width_px(1.0)` (the default
+/// `width_pct`, matching [`open_frame_with`]'s `ChatDisplayOptions::default`)
+/// clamped to the canvas width, the same expression `hud.rs` itself computes
+/// — not a restated constant.
+///
+/// An earlier version of this filter matched on "narrow and not black",
+/// which is exactly this repo's `CLAUDE.md`'s "magnitude"/probe-species trap: the fixed
+/// 5×7 debug font draws each glyph as a handful of narrow, non-black column
+/// rects, so that filter matched ordinary chat/input **text** glyphs and both
+/// tests below failed on real ink, not on a real scrollbar. Position is the
+/// one property vanilla's own placement gives no other rect on this frame.
 fn scrollbar_thumbs(frame: &HudFrame<'_>) -> Vec<(f32, f32, f32, f32, [f32; 4])> {
+    let (canvas_w, _) = canvas();
+    let chat_box_w = lodestone::hud::chat_width_px(1.0).min(canvas_w);
     rects(frame)
         .into_iter()
-        .filter(|(x0, x1, _, _, c)| {
-            let w = x1 - x0;
-            (0.5..6.0).contains(&w) && !(c[0] < 0.02 && c[1] < 0.02 && c[2] < 0.02)
-        })
+        .filter(|(x0, _, _, _, _)| *x0 >= chat_box_w)
         .collect()
 }
 
