@@ -223,19 +223,46 @@ every `cargo test -p lodestone-shell` run.
     gates assert *counts* rather than durations — a "started within N ms" test is
     the sequential-duration trap that has already flaked a gate in this repo.
 
-- **Still no sound, and the remaining gap is in `lodestone-audio`.**
-  `ShellAudio::start_music` resolves through the new
-  `AudioEngine::resolve_music` (the **streaming** path — `resolve_instance` caches
-  decoded PCM and `the_end.ogg` is 304 MiB decoded) and then **drops the stream**,
-  because `Mixer` has no streaming-voice API: its `SoundInstance` takes a fully
-  decoded `Arc<PcmBuffer>`. `VorbisStream` exists and is unwired. So selection and
-  request are closed and the last mile is open — a streaming voice in `Mixer` is the
-  whole remaining work, and when it lands music plays with no change here.
+- ~~**Still no sound, and the remaining gap is in `lodestone-audio`.**~~ **Landed.**
+  `Mixer` now has a streaming-voice API: `lodestone_audio::StreamVoice` pulls from
+  a producer-fed `lodestone_audio::SampleRing` (the ring this doc already named as
+  existing "for exactly this purpose") instead of a decoded `Arc<PcmBuffer>`, and
+  `Mixer::play_stream`/`stream_voice_count`/`is_active` are its mixer-level surface,
+  kept in a list separate from ordinary voices so every existing exact-`voice_count`
+  test kept its meaning unchanged.
 
-  Note this is *doubly* silent in an ordinary checkout, and the second reason is
-  intended: `cargo xtask fetch-sounds` excludes music, so 0 of 70 music objects are
-  on disk and `resolve_streaming` returns `Ok(None)`. Silence is the correct
-  default; `--all` adds 92 objects / 293 MB.
+  The producer differs by target, and both close the same gap by different means:
+
+  - **Native**: `AudioEngine::start_music` spawns a real OS thread
+    (`lodestone_sound::engine::spawn_stream_producer`, `cfg(not(target_arch =
+    "wasm32"))` by construction since the whole `engine` module already is) that
+    owns the `VorbisStream` and decodes packet-by-packet into the ring, backing off
+    with a short sleep when the ring is full. The `cpal` realtime callback never
+    touches decode or the thread — it only calls `Mixer::render`, which reads the
+    ring wait-free.
+  - **Browser**: `wasm32` has no second thread to spawn one onto (`thread::spawn`
+    traps there regardless), so `ShellAudio`'s `MusicProducer` is pumped from
+    *inside* the same `onaudioprocess` closure that already calls `Mixer::render` —
+    a `ScriptProcessorNode` callback runs on the main thread, so "decode a bounded
+    handful of packets, then render" is exactly as safe as "render" alone was.
+
+  Either way, an underrun (the producer has not caught up) makes
+  `StreamVoice::render_into` stop mixing for the *rest of that render block* and
+  return — `Mixer::render` already zeroed the output buffer, so the unfilled tail
+  is silence, never a stall or a panic, and playback resumes exactly where it left
+  off once the producer catches up.
+
+  The music-bus crossfade (`MusicManager.fadePlaying`) is **not** a per-voice
+  field: `MusicSink::set_music_gain` reaches
+  `CategoryVolumes::set_runtime_gain(SoundCategory::Music, gain)` on the mixer,
+  matching vanilla's own `updateCategoryVolume(SoundSource.MUSIC, gain)` call
+  rather than touching the individual sound instance.
+
+  Note this is still *doubly* silent in an ordinary checkout, and the second
+  reason is unchanged and intended: `cargo xtask fetch-sounds` excludes music, so
+  0 of 70 music objects are on disk and `resolve_streaming` returns `Ok(None)`,
+  which `AudioEngine::start_music`/`ShellAudio::start_music` both report as
+  `MusicStart::Silent`, not an error. `--all` adds 92 objects / 293 MB.
 
 - **In-world selection reaches the 42-biome table.** `Sim::background_music`
   resolves the standing biome out of the chunk section's palette against the

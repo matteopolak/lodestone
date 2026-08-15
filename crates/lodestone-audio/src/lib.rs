@@ -49,6 +49,7 @@ mod select;
 mod sink;
 mod spatial;
 mod stream;
+mod stream_voice;
 mod voice;
 
 pub use category::{CategoryVolumes, SoundCategory};
@@ -62,6 +63,7 @@ pub use select::{JavaRandom, select_weighted};
 pub use sink::AudioSink;
 pub use spatial::{Attenuation, Listener, Spatialization, attenuation_gain, panning_gains};
 pub use stream::VorbisStream;
+pub use stream_voice::{StreamSource, StreamVoice};
 pub use voice::Voice;
 
 #[cfg(not(target_arch = "wasm32"))]

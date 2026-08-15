@@ -16,6 +16,7 @@ use std::sync::Arc;
 use crate::category::CategoryVolumes;
 use crate::event::SoundInstance;
 use crate::spatial::Listener;
+use crate::stream_voice::{StreamSource, StreamVoice};
 use crate::voice::{PlayHandle, Voice};
 
 /// The number of output channels the mixer produces (stereo).
@@ -28,6 +29,13 @@ pub struct Mixer {
     listener: Listener,
     volumes: CategoryVolumes,
     voices: Vec<Voice>,
+    /// Streaming (music/record) voices — kept in a separate list from
+    /// `voices` so every existing exact-`voice_count()` test keeps meaning
+    /// "ordinary, PCM-backed voices" with no change. Handles are drawn from
+    /// the same counter, so a caller never needs to know which list a handle
+    /// belongs to: [`stop`](Self::stop) and [`is_active`](Self::is_active)
+    /// search both.
+    stream_voices: Vec<StreamVoice>,
     next_handle: u64,
 }
 
@@ -39,6 +47,7 @@ impl Mixer {
             listener: Listener::default(),
             volumes: CategoryVolumes::new(),
             voices: Vec::new(),
+            stream_voices: Vec::new(),
             next_handle: 1,
         }
     }
@@ -125,17 +134,43 @@ impl Mixer {
         handle
     }
 
-    /// Stops and removes the voice with `handle`, if present. Returns whether a
-    /// voice was removed.
-    pub fn stop(&mut self, handle: PlayHandle) -> bool {
-        let before = self.voices.len();
-        self.voices.retain(|v| v.handle() != handle);
-        self.voices.len() != before
+    /// Starts playing a streaming (music/record) voice fed through a
+    /// [`SampleRing`](crate::ring::SampleRing) rather than decoded PCM,
+    /// returning a handle in the same space [`play`](Self::play) uses.
+    pub fn play_stream(&mut self, source: StreamSource) -> PlayHandle {
+        let handle = PlayHandle(self.next_handle);
+        self.next_handle += 1;
+        self.stream_voices.push(StreamVoice::new(handle, source));
+        handle
     }
 
-    /// Stops every voice.
+    /// The number of currently active streaming voices. Kept separate from
+    /// [`voice_count`](Self::voice_count) — see the `stream_voices` field doc.
+    pub fn stream_voice_count(&self) -> usize {
+        self.stream_voices.len()
+    }
+
+    /// Whether a voice — ordinary or streaming — with `handle` is still live.
+    /// The read-back side of [`play`](Self::play)/[`play_stream`](Self::play_stream)
+    /// that does not care which kind started it.
+    pub fn is_active(&self, handle: PlayHandle) -> bool {
+        self.voices.iter().any(|v| v.handle() == handle)
+            || self.stream_voices.iter().any(|v| v.handle() == handle)
+    }
+
+    /// Stops and removes the voice with `handle`, if present (ordinary or
+    /// streaming). Returns whether a voice was removed.
+    pub fn stop(&mut self, handle: PlayHandle) -> bool {
+        let before = self.voices.len() + self.stream_voices.len();
+        self.voices.retain(|v| v.handle() != handle);
+        self.stream_voices.retain(|v| v.handle() != handle);
+        self.voices.len() + self.stream_voices.len() != before
+    }
+
+    /// Stops every voice, ordinary and streaming.
     pub fn stop_all(&mut self) {
         self.voices.clear();
+        self.stream_voices.clear();
     }
 
     /// Renders the next block into `out`, an interleaved stereo buffer
@@ -153,6 +188,12 @@ impl Mixer {
             voice.render_into(out, rate, &listener, bus_gain);
         }
         self.voices.retain(|v| !v.is_finished());
+
+        for voice in &mut self.stream_voices {
+            let bus_gain = self.volumes.gain(voice.category(), voice.instance_volume());
+            voice.render_into(out, rate, bus_gain);
+        }
+        self.stream_voices.retain(|v| !v.is_finished());
     }
 }
 
@@ -345,6 +386,106 @@ mod tests {
         assert!(
             !m.set_voice_position(PlayHandle(424_242), Vec3::ZERO),
             "unknown handle must report not-found"
+        );
+    }
+
+    // --- streaming voices ---------------------------------------------------
+
+    fn stream_source(samples: &[f32], channels: u16, ended: bool) -> StreamSource {
+        let ring = Arc::new(crate::ring::SampleRing::with_min_capacity(samples.len().max(2)));
+        assert_eq!(ring.write(samples), samples.len(), "fixture must fit");
+        StreamSource {
+            ring,
+            source_channels: channels,
+            source_rate: 48_000,
+            category: SoundCategory::Music,
+            volume: 1.0,
+            pitch: 1.0,
+            ended: Arc::new(std::sync::atomic::AtomicBool::new(ended)),
+        }
+    }
+
+    #[test]
+    fn play_stream_is_counted_separately_from_ordinary_voices() {
+        let mut m = Mixer::new(48_000);
+        m.play(relative_instance(mono(48_000, vec![0.0; 8])));
+        m.play_stream(stream_source(&[0.2, 0.2], 2, true));
+        assert_eq!(m.voice_count(), 1, "ordinary voices unaffected");
+        assert_eq!(m.stream_voice_count(), 1);
+    }
+
+    #[test]
+    fn a_streaming_voice_mixes_into_the_same_block_as_ordinary_voices() {
+        // Predicted value, not a sign check: a MASTER-bus mono voice at 0.4
+        // centred (0.4 * 0.707) plus a Music-bus stereo stream at 0.2 (flat,
+        // no panning) must sum exactly.
+        let mut m = Mixer::new(48_000);
+        m.play(relative_instance(mono(48_000, vec![0.4])));
+        m.play_stream(stream_source(&[0.2, 0.2], 2, true));
+        let mut out = [0.0f32; 2];
+        m.render(&mut out);
+        let c = std::f32::consts::FRAC_1_SQRT_2;
+        let expected = 0.4 * c + 0.2;
+        assert!(
+            (out[0] - expected).abs() < 1e-6,
+            "got {}, want {expected}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn music_bus_runtime_gain_scales_a_streaming_voice() {
+        // The crossfade primitive `MusicManager.fadePlaying` drives: a runtime
+        // gain on the Music bus must reach a streaming voice exactly like it
+        // reaches an ordinary one.
+        let mut m = Mixer::new(48_000);
+        m.volumes_mut()
+            .set_runtime_gain(SoundCategory::Music, 0.25);
+        m.play_stream(stream_source(&[1.0, 1.0], 2, true));
+        let mut out = [0.0f32; 2];
+        m.render(&mut out);
+        assert!((out[0] - 0.25).abs() < 1e-6, "left {}", out[0]);
+        assert!((out[1] - 0.25).abs() < 1e-6, "right {}", out[1]);
+    }
+
+    #[test]
+    fn stop_and_is_active_work_across_both_voice_kinds() {
+        let mut m = Mixer::new(48_000);
+        let ordinary = m.play(relative_instance(mono(48_000, vec![0.0; 8])));
+        let streaming = m.play_stream(stream_source(&[0.1, 0.1], 2, false));
+        assert!(m.is_active(ordinary));
+        assert!(m.is_active(streaming));
+
+        assert!(m.stop(streaming));
+        assert!(!m.is_active(streaming), "stopped streaming voice must report inactive");
+        assert!(m.is_active(ordinary), "stopping one voice must not touch the other");
+        assert_eq!(m.stream_voice_count(), 0);
+
+        assert!(m.stop(ordinary));
+        assert!(!m.stop(ordinary), "stopping an already-removed voice returns false");
+    }
+
+    #[test]
+    fn stop_all_clears_both_lists() {
+        let mut m = Mixer::new(48_000);
+        m.play(relative_instance(mono(48_000, vec![0.0; 8])));
+        m.play_stream(stream_source(&[0.1, 0.1], 2, false));
+        m.stop_all();
+        assert_eq!(m.voice_count(), 0);
+        assert_eq!(m.stream_voice_count(), 0);
+    }
+
+    #[test]
+    fn a_finished_streaming_voice_is_reaped_after_render() {
+        let mut m = Mixer::new(48_000);
+        m.play_stream(stream_source(&[1.0, 1.0], 2, true)); // 1 frame, ended
+        assert_eq!(m.stream_voice_count(), 1);
+        let mut out = [0.0f32; 4]; // 2 frames -> stream drains and ends
+        m.render(&mut out);
+        assert_eq!(
+            m.stream_voice_count(),
+            0,
+            "a fully-drained, ended stream must be reaped"
         );
     }
 }
