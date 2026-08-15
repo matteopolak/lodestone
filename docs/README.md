@@ -1718,6 +1718,17 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   experience bottle, splash potion, lingering potion, eye of ender, fireball and small
   fireball. Each is drawn as its **item model**, posed by `display.ground`, turned to
   face the camera, at the entity's position.
+- [Tick-loop and worldgen per-phase profiling](./tick-and-worldgen-profiling.md) —
+  Per-phase timing for [`run_tick_loop`](../crates/lodestone-server/src/tick.rs) (the
+  server's 20 Hz world tick) and per-stage duration percentiles for
+  [`OverworldGenerator::column`](../crates/lodestone-worldgen/src/overworld/mod.rs)
+  (the overworld generation pipeline) — an answer to "which parts of the tick loop
+  and worldgen should we improve on", built to measure the **tail**, not the mean,
+  after this repo's own record of a keep-alive timeout once being diagnosed from an
+  average that hid the one window that actually mattered (`DESIGN.md` §12, the
+  "measure the tail" incident cited throughout `CLAUDE.md`). The SIMD half of that
+  original request is explicitly downstream of this: see ["Where SIMD would pay
+  next"](#where-simd-would-pay-next) for a recommendation, not an implementation.
 - [Random ticks, scheduled ticks, and neighbour-update propagation](./tick-scheduling.md) —
   Five modules in `crates/lodestone-server/src/`, each a generic, vanilla-shaped
   primitive with its own test suite, wired into `tick::run_tick_loop`:

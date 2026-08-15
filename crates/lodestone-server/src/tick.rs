@@ -188,6 +188,96 @@ pub(crate) type PlayTimerInstant = tokio::time::Instant;
 /// (`MinecraftServer.java:248`, `private final long[] tickTimesNanos = new long[100];`).
 const HISTORY_LEN: usize = 100;
 
+/// One coarse phase of [`run_tick_loop`]'s body, for per-phase timing.
+///
+/// Deliberately three, not finer. The back two thirds of the tick body run
+/// inside `scheduled.with`'s closure — block-tick drain, fire/redstone/fluid
+/// propagation, random ticks, falling blocks, vehicles, TNT, minecarts,
+/// dragons — which holds the scheduled-tick queue mutex across its whole
+/// extent (see that closure's own doc comment, and this module's own record
+/// of the self-deadlock a re-entrant call into that same mutex caused). A
+/// phase boundary here is a bare timestamp with no lock taken and nothing
+/// called back into `scheduled`, so it cannot deadlock; splitting the third
+/// phase further would mean scattering timestamps through ~1,000 lines of
+/// mob/redstone logic another agent may be editing concurrently, which is a
+/// collision risk this instrument does not need to take just to answer
+/// "which third of the tick dominates". If a future pass wants a finer split
+/// of that phase, do it from *inside* `scheduled.with` once no other agent
+/// holds this file, not by widening the lock-safety argument above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TickPhase {
+    /// World border tick, dropped-item settling against live terrain, mob
+    /// removal (peaceful), the natural spawn cycle, the despawn pass,
+    /// patrols, wandering traders, detonations, block drops, mob grazing,
+    /// vocalisations, projectile block hits, spawner blocks.
+    MobsAndItems = 0,
+    /// The weather cycle (`WeatherState::tick`) and the night-skip vote.
+    WeatherAndSleep = 1,
+    /// Everything inside `scheduled.with`: the scheduled block-tick drain,
+    /// fire/redstone/fluid propagation, random ticks, falling blocks,
+    /// vehicles, TNT, minecarts, dragons. The only phase that calls
+    /// `world.column()` — a chunk-boundary block tick can trigger real
+    /// worldgen — so it is the phase a keep-alive-timeout-shaped stall (see
+    /// this module's own doc for the incident this instrument exists to
+    /// catch a repeat of) would show up in.
+    ScheduledAndPhysics = 2,
+}
+
+/// [`TickPhase`] variant count — keep in sync with the enum by construction
+/// (every array below is sized off this, not off a second literal).
+const TICK_PHASE_COUNT: usize = 3;
+
+/// [`TickPhase`] names in discriminant order, for a report that wants to
+/// join a phase index back to a label.
+pub const TICK_PHASE_NAMES: [&str; TICK_PHASE_COUNT] =
+    ["mobs_and_items", "weather_and_sleep", "scheduled_and_physics"];
+
+/// Above this, one phase in one tick counts as "over budget" rather than
+/// only contributing a sample to that phase's percentile history — 20% of
+/// the 50ms tick period. One threshold shared by all three phases rather
+/// than three tuned constants: nothing has established a real per-phase
+/// budget yet, and an unjustified separate number per phase would be
+/// exactly the "predict the plausible round number" failure this crate's
+/// own evidence-standard rules warn about. Revisit once real per-phase
+/// percentiles from a loaded server exist to derive one from.
+const PHASE_SOFT_BUDGET: Duration = Duration::from_millis(MILLIS_PER_TICK / 5);
+
+/// The single largest [`TickPhase`] duration a [`TickClock`] has ever
+/// recorded, and which phase and (approximately) which tick it was — "the
+/// worst unserviced window, named", as opposed to a rolling percentile that
+/// forgets anything older than [`HISTORY_LEN`] samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorstPhaseWindow {
+    pub phase: TickPhase,
+    pub micros: u64,
+    /// [`TickClock::tick_count`] read at the moment this was recorded. Every
+    /// phase for a given tick is recorded before that tick's own
+    /// `record_tick` call increments the counter, so this is "the tick
+    /// index this phase belonged to", not off by a whole tick — but it is a
+    /// diagnostic label, not a value anything asserts equality on.
+    pub tick_count: u64,
+}
+
+/// A percentile summary of one [`TickPhase`]'s recorded durations — the
+/// tail, not the mean, per this crate's own "measure the tail" rule: a
+/// keep-alive timeout here was once diagnosed from an average that hid the
+/// one window that actually mattered.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PhaseStats {
+    pub phase: TickPhase,
+    /// How many samples this is derived from — at most [`HISTORY_LEN`],
+    /// because the ring buffer drops the oldest sample past that.
+    pub sample_count: u64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub max_ms: f64,
+    /// Total ticks (not bounded by the ring buffer — a plain running
+    /// counter) where this phase exceeded [`PHASE_SOFT_BUDGET`].
+    pub over_budget_count: u64,
+}
+
 /// Vanilla's own per-queue drain cap, `ServerLevel.MAX_SCHEDULED_TICKS_PER_TICK`
 /// (`ServerLevel.java:194`) — see `crate::scheduled_tick`'s module doc for the
 /// full citation of `blockTicks.tick(tick, 65536, ...)`/`fluidTicks.tick(tick,
@@ -716,6 +806,15 @@ pub struct TickClock {
     last_mspt_micros: AtomicU64,
     overrun_count: AtomicU64,
     history: Mutex<VecDeque<u64>>,
+    /// Per-[`TickPhase`] rolling duration history, same shape and cap as
+    /// `history` above, indexed by the phase's discriminant.
+    phase_history: [Mutex<VecDeque<u64>>; TICK_PHASE_COUNT],
+    /// Per-phase "exceeded [`PHASE_SOFT_BUDGET`]" counts — a counter, not a
+    /// duration, so it stays cheap and load-invariant to read even after
+    /// millions of ticks, unlike re-deriving it from the (bounded) history.
+    phase_over_budget: [AtomicU64; TICK_PHASE_COUNT],
+    /// The largest single phase duration ever recorded, and which phase.
+    worst_phase: Mutex<Option<WorstPhaseWindow>>,
 }
 
 impl Default for TickClock {
@@ -733,6 +832,9 @@ impl TickClock {
             last_mspt_micros: AtomicU64::new(0),
             overrun_count: AtomicU64::new(0),
             history: Mutex::new(VecDeque::with_capacity(HISTORY_LEN)),
+            phase_history: std::array::from_fn(|_| Mutex::new(VecDeque::with_capacity(HISTORY_LEN))),
+            phase_over_budget: [const { AtomicU64::new(0) }; TICK_PHASE_COUNT],
+            worst_phase: Mutex::new(None),
         }
     }
 
@@ -760,6 +862,79 @@ impl TickClock {
     /// once per skipped tick.
     pub(crate) fn record_overrun(&self) {
         self.overrun_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one [`TickPhase`]'s wall-clock duration for the tick
+    /// currently in progress.
+    ///
+    /// Every production call site is a bare timestamp taken outside any
+    /// lock this loop holds and outside `scheduled.with`'s closure — see
+    /// [`TickPhase`]'s own doc for why that boundary is load-bearing rather
+    /// than incidental. This function itself only ever locks its own
+    /// `phase_history`/`worst_phase` mutexes, neither of which any other
+    /// code in this module locks transitively, so calling it cannot
+    /// self-deadlock the way a call into `scheduled` from inside its own
+    /// closure would.
+    pub(crate) fn record_phase(&self, phase: TickPhase, elapsed: Duration) {
+        let micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+        let idx = phase as usize;
+        {
+            let mut history = self.phase_history[idx]
+                .lock()
+                .expect("tick phase history lock poisoned");
+            if history.len() == HISTORY_LEN {
+                history.pop_front();
+            }
+            history.push_back(micros);
+        }
+        if elapsed > PHASE_SOFT_BUDGET {
+            self.phase_over_budget[idx].fetch_add(1, Ordering::Relaxed);
+        }
+        let mut worst = self.worst_phase.lock().expect("worst tick phase lock poisoned");
+        if worst.is_none_or(|w| micros > w.micros) {
+            *worst = Some(WorstPhaseWindow { phase, micros, tick_count: self.tick_count() });
+        }
+    }
+
+    /// A percentile summary of `phase`'s recorded durations — see
+    /// [`PhaseStats`]. Sorts a clone of the ring buffer (bounded at
+    /// [`HISTORY_LEN`] samples), so this is cheap enough for a debug command
+    /// or a test to call, but it is not itself called from the tick loop.
+    #[must_use]
+    pub fn phase_stats(&self, phase: TickPhase) -> PhaseStats {
+        let idx = phase as usize;
+        let mut samples: Vec<u64> = {
+            let history = self.phase_history[idx]
+                .lock()
+                .expect("tick phase history lock poisoned");
+            history.iter().copied().collect()
+        };
+        samples.sort_unstable();
+        let sample_count = samples.len();
+        let percentile = |p: f64| -> f64 {
+            if sample_count == 0 {
+                return 0.0;
+            }
+            let rank = ((p * sample_count as f64).ceil() as usize).clamp(1, sample_count) - 1;
+            samples[rank] as f64 / 1000.0
+        };
+        PhaseStats {
+            phase,
+            sample_count: sample_count as u64,
+            p50_ms: percentile(0.50),
+            p95_ms: percentile(0.95),
+            p99_ms: percentile(0.99),
+            max_ms: samples.last().copied().unwrap_or(0) as f64 / 1000.0,
+            over_budget_count: self.phase_over_budget[idx].load(Ordering::Relaxed),
+        }
+    }
+
+    /// The largest single [`TickPhase`] duration this clock has ever
+    /// recorded, and which phase — `None` before the first phase is
+    /// recorded.
+    #[must_use]
+    pub fn worst_phase_window(&self) -> Option<WorstPhaseWindow> {
+        *self.worst_phase.lock().expect("worst tick phase lock poisoned")
     }
 
     /// Total real (never skipped) ticks this clock has recorded.
@@ -1787,6 +1962,13 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             });
         }
 
+        // Per-phase timing (see `TickPhase::MobsAndItems`'s own doc): closes
+        // out everything from `tick_start` through the spawner-block pass
+        // just above. A bare timestamp, no lock held, so it cannot
+        // deadlock and cannot fold in the top-of-loop `sleep_until` wait.
+        let t_mobs_end = tokio::time::Instant::now();
+        clock.record_phase(TickPhase::MobsAndItems, t_mobs_end.duration_since(tick_start));
+
         // Issue #323. The clock is the **world's**, not this loop's: one
         // `tick_time` advances `game_time` unconditionally and `day_time` only
         // under the `advance_time` rule (`ServerLevel.tickTime`, where `setDayTime`
@@ -1886,6 +2068,13 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // saved queue can be rebased on load. One relaxed atomic store — the
         // tick-thread cost is a count of one, no I/O and no encoding.
         scheduled.set_game_tick(game_tick);
+
+        // Per-phase timing (see `TickPhase::WeatherAndSleep`'s own doc):
+        // closes out the weather cycle and the night-skip vote above. Taken
+        // *before* `scheduled.with` opens below, never from inside it — see
+        // `TickPhase::ScheduledAndPhysics`'s doc for why.
+        let t_weather_end = tokio::time::Instant::now();
+        clock.record_phase(TickPhase::WeatherAndSleep, t_weather_end.duration_since(t_mobs_end));
 
         // Issue #468: both queues are borrowed out of `scheduled` for the whole
         // scheduled-tick and random-tick section, and every use site inside is
@@ -2896,6 +3085,13 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         mobs.with(super::mobs::MobSim::tick_dragons);
         });
 
+        // Per-phase timing (see `TickPhase::ScheduledAndPhysics`'s own doc):
+        // closes out everything `scheduled.with`'s closure just ran. Taken
+        // immediately after the closure returns (the mutex is already
+        // released by here), so this timestamp is outside the lock too.
+        let t_scheduled_end = tokio::time::Instant::now();
+        clock.record_phase(TickPhase::ScheduledAndPhysics, t_scheduled_end.duration_since(t_weather_end));
+
         clock.record_tick(tick_start.elapsed());
     }
 }
@@ -3346,6 +3542,210 @@ mod tests {
             stats.mspt_avg_ms
         );
         assert_eq!(stats.tick_count, (HISTORY_LEN * 2) as u64);
+    }
+
+    // ---------------------------------------------------------------------
+    // Per-phase timing: `TickPhase`/`PhaseStats`/`WorstPhaseWindow` mirror
+    // the shape of the MSPT/overrun accounting above, one layer finer.
+    // ---------------------------------------------------------------------
+
+    /// [`TICK_PHASE_NAMES`] must stay the same length as [`TickPhase`] has
+    /// variants and in discriminant order — the same guard
+    /// `lodestone-worldgen-core`'s `STAGE_NAMES` carries for the same
+    /// reason: a report joining an index back to a label silently mislabels
+    /// every row past the first drift.
+    #[test]
+    fn tick_phase_names_cover_every_phase_in_discriminant_order() {
+        assert_eq!(TICK_PHASE_NAMES.len(), TICK_PHASE_COUNT);
+        assert_eq!(TICK_PHASE_NAMES[TickPhase::MobsAndItems as usize], "mobs_and_items");
+        assert_eq!(TICK_PHASE_NAMES[TickPhase::WeatherAndSleep as usize], "weather_and_sleep");
+        assert_eq!(TICK_PHASE_NAMES[TickPhase::ScheduledAndPhysics as usize], "scheduled_and_physics");
+    }
+
+    /// Predicted value, not a magnitude-species guess: ten known samples
+    /// (1ms..=10ms) fed through `record_phase`, checked against the
+    /// nearest-rank percentile formula worked out by hand. `p50` of ten
+    /// ascending samples is the 5th smallest (`ceil(0.50*10)=5`); `p95` and
+    /// `p99` both land on the 10th (`ceil(9.5)=10`, `ceil(9.9)=10`) because
+    /// ten samples cannot resolve either percentile finer than the max —
+    /// that is arithmetic, not a bug in the test.
+    #[test]
+    fn phase_stats_reports_the_hand_derived_percentiles_for_known_samples() {
+        let clock = TickClock::new();
+        for ms in 1..=10u64 {
+            clock.record_phase(TickPhase::MobsAndItems, Duration::from_millis(ms));
+        }
+        let stats = clock.phase_stats(TickPhase::MobsAndItems);
+        assert_eq!(stats.sample_count, 10);
+        assert!((stats.p50_ms - 5.0).abs() < f64::EPSILON, "p50 {}", stats.p50_ms);
+        assert!((stats.p95_ms - 10.0).abs() < f64::EPSILON, "p95 {}", stats.p95_ms);
+        assert!((stats.p99_ms - 10.0).abs() < f64::EPSILON, "p99 {}", stats.p99_ms);
+        assert!((stats.max_ms - 10.0).abs() < f64::EPSILON, "max {}", stats.max_ms);
+        // A phase that was never recorded must read as empty, not as a stale
+        // read of another phase's buffer — the control that would catch two
+        // phases sharing one array index by mistake.
+        let untouched = clock.phase_stats(TickPhase::WeatherAndSleep);
+        assert_eq!(untouched.sample_count, 0);
+        assert_eq!(untouched.max_ms, 0.0);
+    }
+
+    /// [`PHASE_SOFT_BUDGET`] is 10ms (20% of the 50ms tick period). Feed
+    /// exactly three samples over it and two under, interleaved, and require
+    /// the counter to land on exactly 3 — a magnitude check, not a "the
+    /// counter moved" one — and prove it is per-phase, not global, by
+    /// checking a second, untouched phase stayed at zero.
+    #[test]
+    fn phase_over_budget_counts_exactly_the_samples_that_exceed_the_threshold() {
+        let clock = TickClock::new();
+        for ms in [1, 12, 9, 15, 50] {
+            clock.record_phase(TickPhase::ScheduledAndPhysics, Duration::from_millis(ms));
+        }
+        assert_eq!(clock.phase_stats(TickPhase::ScheduledAndPhysics).over_budget_count, 3);
+        assert_eq!(clock.phase_stats(TickPhase::MobsAndItems).over_budget_count, 0);
+    }
+
+    /// The worst-window tracker must report the single largest duration
+    /// across *all* phases, name which phase it was, and must not be
+    /// overwritten by a later, smaller sample — only a new maximum moves it.
+    #[test]
+    fn worst_phase_window_tracks_the_global_maximum_and_ignores_smaller_later_samples() {
+        let clock = TickClock::new();
+        assert!(clock.worst_phase_window().is_none(), "must be empty before any phase is recorded");
+
+        clock.record_phase(TickPhase::MobsAndItems, Duration::from_millis(5));
+        clock.record_phase(TickPhase::WeatherAndSleep, Duration::from_millis(20));
+        clock.record_phase(TickPhase::ScheduledAndPhysics, Duration::from_millis(3));
+        let worst = clock.worst_phase_window().expect("a sample was recorded");
+        assert_eq!(worst.phase, TickPhase::WeatherAndSleep);
+        assert_eq!(worst.micros, 20_000);
+
+        // A new, larger sample on a *different* phase must replace it.
+        clock.record_phase(TickPhase::MobsAndItems, Duration::from_millis(25));
+        let worst = clock.worst_phase_window().expect("a sample was recorded");
+        assert_eq!(worst.phase, TickPhase::MobsAndItems);
+        assert_eq!(worst.micros, 25_000);
+
+        // A smaller sample afterwards must not un-set the recorded worst.
+        clock.record_phase(TickPhase::ScheduledAndPhysics, Duration::from_millis(1));
+        let worst = clock.worst_phase_window().expect("still recorded");
+        assert_eq!(worst.phase, TickPhase::MobsAndItems);
+        assert_eq!(worst.micros, 25_000);
+    }
+
+    /// **Validation control for the instrument itself.** An idle world with
+    /// no players, no mobs and no scheduled ticks (`run_tick_loop`'s own
+    /// default wrapper, `EmptyWorld`, `world_tick_args`'s empty tick area)
+    /// cannot physically do any of the work a phase boundary measures — and
+    /// because this test runs under `start_paused` virtual time with no
+    /// `.await` anywhere inside one tick's body (`scheduled.with`'s own doc
+    /// comment above states this and it is enforced by the closure's type,
+    /// not just asserted), `Instant::now()` cannot advance between any two
+    /// of one tick's boundaries either. So every phase, every tick, must
+    /// read *exactly* zero — not "small". An instrument whose boundary
+    /// accidentally spanned the top-of-loop `sleep_until` wait, or that
+    /// leaked a previous tick's timestamp into this one, would show up here
+    /// as a large, nonzero reading — the same shape of control as a pure
+    /// camera rotation revealing the `vram_bytes` mis-attribution this
+    /// crate's evidence standards cite: an input that cannot physically
+    /// move the quantity must not move it. Deterministic rather than a
+    /// wall-clock timing, so it is immune to this machine's load, unlike
+    /// the "idle world" control this task's brief describes in the general
+    /// case.
+    #[tokio::test(start_paused = true)]
+    async fn phase_durations_on_an_idle_world_are_exactly_zero_under_paused_time() {
+        let (mobs, out, block_entities) = handles();
+        let clock = Arc::new(TickClock::new());
+        let (world, block_tick_out, tick_area) = world_tick_args();
+        tokio::spawn(run_tick_loop(
+            mobs,
+            out,
+            block_entities,
+            Arc::clone(&clock),
+            world,
+            block_tick_out,
+            tick_area,
+            ExplosionFeed::default(),
+            crate::region_source::ScheduledTickHandle::default(),
+            crate::tick_area::TickFollow::default(),
+        ));
+        tokio::task::yield_now().await;
+
+        const TICKS: usize = 20;
+        for _ in 0..TICKS {
+            tokio::time::advance(TICK_PERIOD).await;
+        }
+        tokio::task::yield_now().await;
+
+        assert_eq!(clock.tick_count(), TICKS as u64);
+        for &phase in &[TickPhase::MobsAndItems, TickPhase::WeatherAndSleep, TickPhase::ScheduledAndPhysics] {
+            let stats = clock.phase_stats(phase);
+            assert_eq!(stats.sample_count, TICKS as u64, "phase {phase:?} missing samples");
+            assert_eq!(stats.max_ms, 0.0, "phase {phase:?} moved on an idle world: {stats:?}");
+            assert_eq!(stats.over_budget_count, 0, "phase {phase:?} over budget on an idle world");
+        }
+        let worst = clock.worst_phase_window().expect("20 ticks recorded samples");
+        assert_eq!(worst.micros, 0, "worst window must also read zero on an idle world");
+    }
+
+    /// **Real numbers, not a control.** The test above proves the phase
+    /// boundaries are placed correctly using a deterministic paused clock,
+    /// which by construction can only ever read zero. This one runs the
+    /// same idle scenario under *real* wall-clock time, so it reports the
+    /// unavoidable per-phase floor cost (scheduling, `tokio::spawn`/`.await`
+    /// overhead, the mutex takes) on real hardware — not a loaded server's
+    /// actual cost, just the cost of the loop existing at all. Printed with
+    /// `--nocapture`, and read together with the machine-state note in
+    /// `docs/tick-and-worldgen-profiling.md` for what else was running on
+    /// this box when the numbers were captured; not asserted on for a
+    /// specific magnitude, only for internal consistency (samples recorded,
+    /// percentile ordering holds), because a specific millisecond figure
+    /// here would be exactly the "duration gathered while other agents
+    /// build gets attributed to the wrong cause" hazard this repo's own
+    /// rules warn about.
+    #[tokio::test]
+    async fn phase_durations_floor_cost_on_an_idle_world_under_real_time() {
+        let (mobs, out, block_entities) = handles();
+        let clock = Arc::new(TickClock::new());
+        let (world, block_tick_out, tick_area) = world_tick_args();
+        tokio::spawn(run_tick_loop(
+            mobs,
+            out,
+            block_entities,
+            Arc::clone(&clock),
+            world,
+            block_tick_out,
+            tick_area,
+            ExplosionFeed::default(),
+            crate::region_source::ScheduledTickHandle::default(),
+            crate::tick_area::TickFollow::default(),
+        ));
+
+        const TICKS: u64 = 15;
+        while clock.tick_count() < TICKS {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        println!("PHASE_REPORT ticks={}", clock.tick_count());
+        for &phase in &[TickPhase::MobsAndItems, TickPhase::WeatherAndSleep, TickPhase::ScheduledAndPhysics] {
+            let stats = clock.phase_stats(phase);
+            assert!(stats.p50_ms <= stats.p95_ms && stats.p95_ms <= stats.p99_ms && stats.p99_ms <= stats.max_ms);
+            println!(
+                "PHASE_REPORT phase={:<21} samples={:>3} p50_ms={:>8.3} p95_ms={:>8.3} p99_ms={:>8.3} max_ms={:>8.3} over_budget={}",
+                TICK_PHASE_NAMES[phase as usize],
+                stats.sample_count,
+                stats.p50_ms,
+                stats.p95_ms,
+                stats.p99_ms,
+                stats.max_ms,
+                stats.over_budget_count
+            );
+        }
+        if let Some(worst) = clock.worst_phase_window() {
+            println!(
+                "PHASE_REPORT worst_phase={} worst_us={} at_tick={}",
+                TICK_PHASE_NAMES[worst.phase as usize], worst.micros, worst.tick_count
+            );
+        }
     }
 
     // ---------------------------------------------------------------------
