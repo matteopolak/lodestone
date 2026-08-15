@@ -1547,6 +1547,15 @@ impl IntegratedServer {
         // shape got from the floor alone, now reached by the real count too.
         let sleep_vote = SleepVote::new();
         let sleep_feed = SleepFeed::default();
+        // Issues #326/#580: the world border, shared the same way — one
+        // handle cloned into the connection task (which reads it for its
+        // join broadcast and per-tick damage) and into the tick loop (which
+        // ticks it and is the thing a future `/worldborder` command mutates
+        // through `BorderFeed::with`). Before this, the tick loop ticked a
+        // private `WorldBorder::default()` and every connection built its
+        // own throwaway `BorderFeed::default()` — two unreachable borders,
+        // not one shared one.
+        let border_feed = crate::border::BorderFeed::default();
         // Issue #12: the *handle* is still built synchronously here, before any
         // task spawns, so the exact same `MobSim` can be shared by the
         // connection task (which mutates it on an `Attack` packet, through
@@ -1800,6 +1809,7 @@ impl IntegratedServer {
         // passes the same inner handle to `run_tick_loop_with_weather`.
         let conn_sleep_vote = sleep_vote.clone();
         let conn_sleep_feed = sleep_feed.clone();
+        let conn_border = border_feed.clone();
         // Issues #327/#328/#323. **One** world state, cloned out here for the same
         // reason the sleep vote is: a clone made inside the `async move` below would
         // move the original out of reach of the tick task, and two stores is the bug
@@ -1852,6 +1862,7 @@ impl IntegratedServer {
                     &conn_explosions,
                     &conn_sleep_vote,
                     &conn_sleep_feed,
+                    &conn_border,
                     &conn_world_state,
                     &conn_live_save,
                     &conn_tickets,
@@ -1947,6 +1958,7 @@ impl IntegratedServer {
                 scheduled,
                 world_state,
                 follow,
+                border_feed,
             )
             .await;
         });
@@ -2738,6 +2750,12 @@ impl IntegratedServer {
                 // the fixed origin box it replaces, and the fix is per-connection
                 // anchor bookkeeping, not more geometry — `FollowArea` already unions.
                 lan_follow,
+                // Issue #580: LAN stays border-unwired too, same shape as the
+                // sleep vote above — a fresh, unshared feed no accepted
+                // socket reads. Threading a real one needs the same
+                // per-connection plumbing `bind`'s LAN relay would need for
+                // sleep, which is a separate pass.
+                crate::border::BorderFeed::default(),
             )
             .await;
         });

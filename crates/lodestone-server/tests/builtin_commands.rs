@@ -70,8 +70,13 @@ fn run(
     text: &str,
 ) -> Option<lodestone_server::CommandOutcome> {
     let state = lodestone_server::world_state::WorldStateHandle::new();
-    let world =
-        CommandWorld { rules: rules as &(dyn RuleStore + Sync), players, state: &state, mobs: None };
+    let world = CommandWorld {
+        rules: rules as &(dyn RuleStore + Sync),
+        players,
+        state: &state,
+        mobs: None,
+        border: None,
+    };
     commands.run(&world, source, text)
 }
 
@@ -566,6 +571,7 @@ fn gamerule_writes_the_store_it_is_handed_including_the_production_world_state()
         players: &players,
         state: &world_state,
         mobs: None,
+        border: None,
     };
     let outcome = commands
         .run(&command_world, &alice, "gamerule random_tick_speed 6")
@@ -702,7 +708,7 @@ fn run_stateful(
     source: &CommandSource,
     text: &str,
 ) -> Option<lodestone_server::CommandOutcome> {
-    let world = CommandWorld { rules: state, players, state, mobs: None };
+    let world = CommandWorld { rules: state, players, state, mobs: None, border: None };
     commands.run(&world, source, text)
 }
 
@@ -1191,7 +1197,7 @@ fn summon_spawns_into_the_shared_mob_handle_at_the_resolved_position() {
 
     assert!(mobs.snapshots().is_empty(), "nothing spawned yet");
 
-    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs) };
+    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None };
     let outcome =
         commands.run(&world, &alice, "summon minecraft:cow ~11 ~1 ~4").expect("root matched");
     assert!(outcome.response.is_ran(), "{outcome:?}");
@@ -1216,7 +1222,7 @@ fn summon_refuses_an_unknown_entity_type_at_parse_time() {
     let players = roster();
     let mobs = lodestone_server::MobHandle::default();
 
-    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs) };
+    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None };
     let outcome =
         commands.run(&world, &alice, "summon minecraft:not_a_real_mob").expect("root matched");
     assert!(!outcome.response.is_ran(), "{outcome:?}");
@@ -1549,5 +1555,247 @@ fn execute_run_reenters_the_root_so_execute_nests() {
             Effect::Teleport { x: 6.0, y: 65.0, z: 1.0, yaw: None, pitch: None }
         )],
         "targets bob and offsets from bob's own (5, 64, 0), not alice's (0, 64, 0): {outcome:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `/worldborder` (issue #580)
+// ---------------------------------------------------------------------------
+
+/// Builds the pieces `/worldborder`'s tests need: real commands, a real
+/// [`BorderFeed`] and a [`CommandWorld`] with `border: Some(&feed)` — the
+/// shape a connected player's `ChatCommand` arm actually gets, per
+/// `crate::commands::worldborder`'s own doc on reachability.
+fn worldborder_world<'a>(
+    state: &'a lodestone_server::world_state::WorldStateHandle,
+    feed: &'a lodestone_server::BorderFeed,
+) -> CommandWorld<'a> {
+    CommandWorld { rules: state, players: &[], state, mobs: None, border: Some(feed) }
+}
+
+/// **The composition that matters**: the command mutates the *same* feed the
+/// caller reads back, not a copy. `set` immediate (no `<time>`) applies
+/// instantly — the assertion a gate that only checked "the command returned
+/// Ok" could not make.
+#[test]
+fn worldborder_set_immediate_reaches_the_shared_feed() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let feed = lodestone_server::BorderFeed::default();
+    let world = worldborder_world(&state, &feed);
+    let alice = source(1, "alice");
+
+    let outcome = commands.run(&world, &alice, "worldborder set 500").expect("root matched");
+    assert!(
+        outcome.response.lines().iter().any(|l| l.contains("Set the world border to 500.0")),
+        "{:?}",
+        outcome.response.lines()
+    );
+    assert_eq!(feed.get().size(), 500.0, "the shared feed must reflect the new size");
+}
+
+/// `set <distance> <time>` must **not** apply immediately — it starts a
+/// lerp, so the size at tick 0 is still the old one and only the lerp target
+/// has moved. The discriminating pair against the immediate case above: an
+/// implementation that ignores `<time>` entirely would still report success
+/// here, but only checking `size()` stayed put catches it.
+#[test]
+fn worldborder_set_with_time_starts_a_lerp_rather_than_snapping() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let feed = lodestone_server::BorderFeed::default();
+    let world = worldborder_world(&state, &feed);
+    let alice = source(1, "alice");
+
+    // `WorldBorder::default()`'s own size is `MAX_SIZE` (vanilla's real
+    // default), which is already far above 2000 — so growing *to* 2000 needs
+    // starting from something smaller first, or the command would (correctly)
+    // report a shrink instead and the "Growing" assertion below would be
+    // testing the wrong hypothesis.
+    commands.run(&world, &alice, "worldborder set 1000").expect("root matched");
+    let before = feed.get().size();
+    assert_eq!(before, 1000.0);
+
+    let outcome =
+        commands.run(&world, &alice, "worldborder set 2000 200").expect("root matched");
+    assert!(
+        outcome.response.lines().iter().any(|l| l.contains("Growing world border to 2000.0")),
+        "{:?}",
+        outcome.response.lines()
+    );
+    let after = feed.get();
+    assert_eq!(after.size(), before, "size must not snap on tick 0 of a lerp");
+    assert_eq!(after.lerp_target(), 2000.0, "the lerp target must be the new size");
+    assert!(after.lerp_time() > 0, "a positive lerp_time means the lerp actually started");
+}
+
+/// `add` reads the *current* size rather than treating its argument as an
+/// absolute — the discriminating check: adding `100` to a border already
+/// resized to `300` must land on `400`, not `100`. A negative distance
+/// shrinks, checked in the same test since both exercise the identical
+/// `current + delta` arithmetic.
+#[test]
+fn worldborder_add_is_relative_to_the_current_size_not_absolute() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let feed = lodestone_server::BorderFeed::default();
+    let world = worldborder_world(&state, &feed);
+    let alice = source(1, "alice");
+
+    commands.run(&world, &alice, "worldborder set 300").expect("root matched");
+    assert_eq!(feed.get().size(), 300.0);
+    commands.run(&world, &alice, "worldborder add 100").expect("root matched");
+    assert_eq!(
+        feed.get().size(),
+        400.0,
+        "add must be current (300) + delta (100), not the delta alone"
+    );
+    commands.run(&world, &alice, "worldborder add -150").expect("root matched");
+    assert_eq!(feed.get().size(), 250.0, "a negative distance must shrink");
+}
+
+/// `center <x> <z>` — the two-double substitute for vanilla's
+/// `Vec2Argument` (see the command module's own doc for why), checked
+/// against both axes so a transposed pair (`x` read into `z`) would fail.
+#[test]
+fn worldborder_center_moves_both_axes_independently() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let feed = lodestone_server::BorderFeed::default();
+    let world = worldborder_world(&state, &feed);
+    let alice = source(1, "alice");
+
+    commands
+        .run(&world, &alice, "worldborder center 150.5 -300.25")
+        .expect("root matched");
+    let after = feed.get();
+    assert_eq!(after.center_x(), 150.5);
+    assert_eq!(after.center_z(), -300.25);
+}
+
+/// `damage amount`/`damage buffer` and `warning distance`/`warning time`
+/// each land on the field they name, not a sibling — the discriminating
+/// check is that all four end at *different* values, so a copy-paste that
+/// wrote to the wrong setter would show up as two fields agreeing when they
+/// should not.
+#[test]
+fn worldborder_damage_and_warning_subcommands_each_hit_their_own_field() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let feed = lodestone_server::BorderFeed::default();
+    let world = worldborder_world(&state, &feed);
+    let alice = source(1, "alice");
+
+    commands.run(&world, &alice, "worldborder damage amount 0.5").expect("root matched");
+    commands.run(&world, &alice, "worldborder damage buffer 7.5").expect("root matched");
+    commands.run(&world, &alice, "worldborder warning distance 11").expect("root matched");
+    commands.run(&world, &alice, "worldborder warning time 40").expect("root matched");
+
+    let after = feed.get();
+    assert_eq!(after.damage_per_block(), 0.5);
+    assert_eq!(after.safe_zone(), 7.5);
+    assert_eq!(after.warning_blocks(), 11);
+    assert_eq!(after.warning_time(), 40);
+}
+
+/// **`get` reads without mutating** — a positive control that `set` changes
+/// `size()` (covered above) paired with the negative control that `get`
+/// alone does not.
+#[test]
+fn worldborder_get_reports_the_current_size_without_changing_it() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let feed = lodestone_server::BorderFeed::default();
+    let world = worldborder_world(&state, &feed);
+    let alice = source(1, "alice");
+
+    commands.run(&world, &alice, "worldborder set 800").expect("root matched");
+    let before = feed.get().size();
+    let outcome = commands.run(&world, &alice, "worldborder get").expect("root matched");
+    assert!(
+        outcome.response.lines().iter().any(|l| l.contains("currently 800")),
+        "{:?}",
+        outcome.response.lines()
+    );
+    assert_eq!(feed.get().size(), before, "a query must not mutate the border");
+}
+
+/// The "nothing changed" refusal — set to the exact current size — must
+/// refuse **and leave the feed untouched**, not merely print an error while
+/// still applying.
+#[test]
+fn worldborder_setting_to_the_current_value_is_refused_and_does_not_mutate() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let feed = lodestone_server::BorderFeed::default();
+    let world = worldborder_world(&state, &feed);
+    let alice = source(1, "alice");
+
+    // Every field starts at `WorldBorder::default()`'s own value — asking to
+    // set it to that exact value must refuse immediately.
+    let default_size = feed.get().size();
+    let outcome = commands
+        .run(&world, &alice, &format!("worldborder set {default_size}"))
+        .expect("root matched");
+    assert!(
+        outcome.response.lines().iter().any(|l| l.contains("Nothing changed")),
+        "{:?}",
+        outcome.response.lines()
+    );
+    assert_eq!(feed.get().size(), default_size);
+}
+
+/// **A missing border refuses every subcommand by name, not by panic.** The
+/// `CommandWorld` shape RCON/a command block build — `border: None` — must
+/// not crash the dispatcher; each subcommand's own refusal is what a plain
+/// "not available" response depends on.
+#[test]
+fn worldborder_with_no_border_refuses_cleanly_instead_of_panicking() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let world = CommandWorld { rules: &state, players: &[], state: &state, mobs: None, border: None };
+    let alice = source(1, "alice");
+
+    let outcome = commands.run(&world, &alice, "worldborder get").expect("root matched");
+    assert!(
+        outcome.response.lines().iter().any(|l| l.contains("not available")),
+        "{:?}",
+        outcome.response.lines()
+    );
+}
+
+/// Below `Commands.LEVEL_GAMEMASTERS`, `/worldborder` is denied loudly on
+/// execution and hidden silently from suggestions — the same two-halved
+/// gate `a_level_1_caller_cannot_run_or_see_a_level_2_command` establishes
+/// for `/gamemode`. The root still matches (`Some`, not `None`): a denied
+/// command must say "no permission", not "no such command".
+#[test]
+fn worldborder_a_low_permission_caller_cannot_reach_it() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let feed = lodestone_server::BorderFeed::default();
+    let world = worldborder_world(&state, &feed);
+    let low = CommandSource::player(
+        uuid(9),
+        1009,
+        "guest",
+        Vec3::new(0.0, 64.0, 0.0),
+        Rotation { yaw: 0.0, pitch: 0.0 },
+        overworld_dimension(),
+        0,
+    );
+
+    let before = feed.get().size();
+    let outcome = commands.run(&world, &low, "worldborder get").expect("the root is ours even when denied");
+    assert!(!outcome.response.is_ran(), "{outcome:?}");
+    assert!(
+        outcome.response.lines()[0].contains("permission"),
+        "a denied command must say so, not read as a typo: {outcome:?}"
+    );
+    assert_eq!(feed.get().size(), before, "a denied command must not mutate the border either");
+    assert!(
+        commands.suggest("world", 0).is_empty(),
+        "a level-0 caller must not be offered the level-2 worldborder tree: {:?}",
+        commands.suggest("world", 0)
     );
 }

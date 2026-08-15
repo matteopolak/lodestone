@@ -440,13 +440,17 @@ impl WorldBorder {
 /// it with [`get`](Self::get) for the join `initialize_border` broadcast and
 /// reads it every vitals tick to compute border damage.
 ///
-/// Interim (pre-shape-B): `tick::run_tick_loop` ticks a **private static
-/// default** and nothing publishes a resize yet, so every connection that
-/// reaches `serve_connection_inner` today builds its own
-/// [`BorderFeed::default()`] — the same full-size static border, which is
-/// exactly what vanilla's default world border is. [`get`](Self::get) and
-/// [`with`](Self::with) are the mechanism shape B reconnects; see
-/// `docs/plans/world-state.md` B1.
+/// Issue #580 closed the last gap: `crate::tick::run_tick_loop_with_weather`
+/// now ticks **this shared handle** (not a private local), every production
+/// `serve_connection*` entry point that can reach a live one threads it
+/// through (`IntegratedServer::open_in_memory_with_mobs*`; `bind`'s
+/// open-to-LAN path still passes a fresh, unshared default — a stated,
+/// separate gap, same shape as that path's own unwired sleep vote), and
+/// `crate::commands::worldborder` is the resize entry point
+/// [`with`](Self::with) exists for. RCON, a command block and this crate's
+/// own test doubles still build a `CommandWorld` with no border to reach
+/// (`border: None`), in which case `/worldborder` refuses by name rather
+/// than mutating a feed nothing reads — see that module's own doc.
 #[derive(Debug, Clone, Default)]
 pub struct BorderFeed(Arc<Mutex<WorldBorder>>);
 
@@ -459,16 +463,10 @@ impl BorderFeed {
         self.0.lock().expect("border feed lock poisoned").clone()
     }
 
-    /// Mutates the shared border — the resize entry point a future
-    /// `/worldborder`-style command or plugin calls (`set_size`,
-    /// `lerp_size_between`, `set_center`, `set_damage_per_block`, ...).
-    ///
-    /// Deliberately unused in production today: nothing publishes a resize yet
-    /// (the world loop ticks a private default, not this feed), so every call
-    /// would mutate a default no connection shares. Kept rather than deferred
-    /// so the shape-B wiring is genuinely one line, and exercised by
-    /// [`border_feed_mutation_is_visible_through_get`].
-    #[allow(dead_code)]
+    /// Mutates the shared border — `crate::tick::run_tick_loop_with_weather`'s
+    /// own per-tick `WorldBorder::tick` call and `crate::commands::worldborder`'s
+    /// resize entry point (`set_size`, `lerp_size_between`, `set_center`,
+    /// `set_damage_per_block`, ...) both go through this.
     pub fn with<R>(&self, f: impl FnOnce(&mut WorldBorder) -> R) -> R {
         f(&mut *self.0.lock().expect("border feed lock poisoned"))
     }
