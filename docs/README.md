@@ -353,6 +353,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   the server-side dispatcher and a plugin's own command registration are both
   explicitly out of scope here, and are designed to share an argument-type library
   with this work rather than duplicate it.
+- [Compile times: `--timings` critical path, Cranelift, parallel frontend, and linker](./compile-times.md) —
+  Measured findings from `cargo build --timings`, a Cranelift-vs-LLVM debug-build
+  comparison, the nightly parallel front-end (`-Z threads=N`), and the macOS linker,
+  taken to decide whether crates should split, dev-profile options should change, or
+  nightly-only compiler flags are worth taking permanently. This complements
+  [`docs/build-caching.md`](./build-caching.md) (sccache + the existing dev-profile
+  trims), which everything below assumes as the baseline.
 - [Confirmation screen](./confirm-screen.md) — `Screen::Confirm` — vanilla's
   `ConfirmScreen`: a question, a warning naming the thing at risk, and two buttons. It
   is the gate an **irreversible** action passes through, and the only thing that opens
