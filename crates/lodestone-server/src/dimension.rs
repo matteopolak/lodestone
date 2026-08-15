@@ -72,6 +72,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::block_entities::BlockEntityHandle;
 use crate::chunk::{ChunkColumn, ChunkSource};
 
 /// A level this server can host.
@@ -356,6 +357,24 @@ pub struct DimensionalSource<S> {
     siblings: Mutex<HashMap<Dimension, Arc<dyn ChunkSource>>>,
     factory: Option<SiblingFactory>,
     portals: crate::portal::PortalIndex,
+    /// This dimension's *own* block-entity/scheduled-tick registries and
+    /// inbound tick feed, when it has one of its own to offer — set only by
+    /// [`Self::alone_with_dimension_handles`], which
+    /// [`crate::integrated::sibling_chunk_source`] uses to build a Nether/End
+    /// sibling. `None` for [`Self::alone`] and [`Self::with_siblings`]
+    /// (the *primary*/join dimension, whose handles a connection already
+    /// holds as its own `serve_play` parameters).
+    ///
+    /// This is what closes the routing gap a `BlockPos`-only, join-dimension-only
+    /// pair of handles left open: without it, [`ChunkSource::world_registries`]
+    /// forwards only to `self.primary`'s own answer, which for an *in-memory*
+    /// (non-persistent) sibling is `None` — no `RegionChunkSource` exists to
+    /// answer `Some` — so a Nether visited in a non-persistent world would have
+    /// nothing to fall back to. Storing the handles here directly, rather than
+    /// only relying on the forward, means both the persistent and the
+    /// in-memory sibling case are reachable the same way.
+    own_registries: Option<(BlockEntityHandle, crate::scheduled_tick::ScheduledTickHandle)>,
+    own_block_tick_feed: Option<crate::tick::BlockTickFeed>,
 }
 
 /// Builds another dimension's terrain on demand. See
@@ -378,6 +397,8 @@ impl<S> DimensionalSource<S> {
             siblings: Mutex::new(HashMap::new()),
             factory: None,
             portals,
+            own_registries: None,
+            own_block_tick_feed: None,
         }
     }
 
@@ -396,6 +417,41 @@ impl<S> DimensionalSource<S> {
             siblings: Mutex::new(HashMap::new()),
             factory: Some(factory),
             portals,
+            own_registries: None,
+            own_block_tick_feed: None,
+        }
+    }
+
+    /// Labels `primary` as `which` with no siblings of its own reachable — same
+    /// shape as [`Self::alone`] — but additionally carrying `which`'s own
+    /// block-entity registry, scheduled-tick queue and tick-scheduling feed
+    /// directly on this wrapper, so [`ChunkSource::world_registries`]/
+    /// [`ChunkSource::block_tick_feed`] answer `Some` for this dimension even
+    /// when `primary` has no [`crate::region_source::RegionChunkSource`] of its
+    /// own to forward to (an in-memory sibling).
+    ///
+    /// `block_entities`/`scheduled` must be the **same** handles the caller
+    /// already handed to this dimension's own background tick loop (if any) —
+    /// see [`crate::dimension_tick::spawn_for_dimension`]'s doc comment — or a
+    /// live placement recorded through this accessor and a random/scheduled
+    /// tick reading through the loop's own copy would silently diverge.
+    #[must_use]
+    pub fn alone_with_dimension_handles(
+        primary: S,
+        which: Dimension,
+        portals: crate::portal::PortalIndex,
+        block_entities: BlockEntityHandle,
+        scheduled: crate::scheduled_tick::ScheduledTickHandle,
+        block_tick_feed: crate::tick::BlockTickFeed,
+    ) -> Self {
+        Self {
+            primary,
+            which,
+            siblings: Mutex::new(HashMap::new()),
+            factory: None,
+            portals,
+            own_registries: Some((block_entities, scheduled)),
+            own_block_tick_feed: Some(block_tick_feed),
         }
     }
 
@@ -461,8 +517,30 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.set_retention_radius(view_radius);
     }
 
+    /// `self.primary`'s own answer first — for a *persistent* sibling that is
+    /// `Some`, carrying real `player_data`, so this must not shadow it with
+    /// the coarser [`Self::own_registries`] copy. Only when `primary` has
+    /// nothing of its own (an in-memory sibling, no `RegionChunkSource`) does
+    /// this fall back to the handles [`Self::alone_with_dimension_handles`]
+    /// stored directly — see that constructor's doc comment for why both
+    /// paths have to reach *something* here.
     fn world_registries(&self) -> Option<crate::chunk::WorldRegistries> {
-        self.primary.world_registries()
+        self.primary.world_registries().or_else(|| {
+            self.own_registries
+                .as_ref()
+                .map(|(block_entities, scheduled)| crate::chunk::WorldRegistries {
+                    block_entities: block_entities.clone(),
+                    scheduled: scheduled.clone(),
+                    #[cfg(not(target_arch = "wasm32"))]
+                    player_data: None,
+                })
+        })
+    }
+
+    fn block_tick_feed(&self) -> Option<crate::tick::BlockTickFeed> {
+        self.own_block_tick_feed
+            .clone()
+            .or_else(|| self.primary.block_tick_feed())
     }
 
     fn dimension(&self) -> Option<Dimension> {
