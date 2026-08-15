@@ -54,6 +54,40 @@ impl BossBarColor {
             _ => return None,
         })
     }
+
+    /// The GUI atlas sprite id for this colour's **background** plate —
+    /// `BossHealthOverlay.BAR_BACKGROUND_SPRITES` (`.cache/mc/26.2/client-src`).
+    /// Each colour is a distinct pre-baked sprite; vanilla's `blitSprite` call
+    /// for it passes no tint (`color = -1`, i.e. opaque white), so a renderer
+    /// must select the sprite by id rather than tint a shared greyscale one.
+    #[must_use]
+    pub fn background_sprite_id(self) -> &'static str {
+        match self {
+            BossBarColor::Pink => "boss_bar/pink_background",
+            BossBarColor::Blue => "boss_bar/blue_background",
+            BossBarColor::Red => "boss_bar/red_background",
+            BossBarColor::Green => "boss_bar/green_background",
+            BossBarColor::Yellow => "boss_bar/yellow_background",
+            BossBarColor::Purple => "boss_bar/purple_background",
+            BossBarColor::White => "boss_bar/white_background",
+        }
+    }
+
+    /// The GUI atlas sprite id for this colour's **progress** fill —
+    /// `BossHealthOverlay.BAR_PROGRESS_SPRITES`. Also untinted; see
+    /// [`Self::background_sprite_id`].
+    #[must_use]
+    pub fn progress_sprite_id(self) -> &'static str {
+        match self {
+            BossBarColor::Pink => "boss_bar/pink_progress",
+            BossBarColor::Blue => "boss_bar/blue_progress",
+            BossBarColor::Red => "boss_bar/red_progress",
+            BossBarColor::Green => "boss_bar/green_progress",
+            BossBarColor::Yellow => "boss_bar/yellow_progress",
+            BossBarColor::Purple => "boss_bar/purple_progress",
+            BossBarColor::White => "boss_bar/white_progress",
+        }
+    }
 }
 
 /// Boss bar division/overlay style.
@@ -91,6 +125,39 @@ impl BossBarOverlay {
             3 => BossBarOverlay::Notched12,
             4 => BossBarOverlay::Notched20,
             _ => return None,
+        })
+    }
+
+    /// The GUI atlas sprite id for this overlay's **background** notch art, or
+    /// `None` for [`BossBarOverlay::Progress`] — vanilla's
+    /// `BossHealthOverlay.extractBar` only blits an overlay sprite when
+    /// `event.getOverlay() != BossEvent.BossBarOverlay.PROGRESS`
+    /// (`.cache/mc/26.2/client-src`), so the plain progress style draws no
+    /// notch layer at all. Drawn on top of the background colour plate, at the
+    /// bar's **full** native width (unlike the progress-side twin, which is
+    /// clipped to the health fraction).
+    #[must_use]
+    pub fn background_sprite_id(self) -> Option<&'static str> {
+        Some(match self {
+            BossBarOverlay::Progress => return None,
+            BossBarOverlay::Notched6 => "boss_bar/notched_6_background",
+            BossBarOverlay::Notched10 => "boss_bar/notched_10_background",
+            BossBarOverlay::Notched12 => "boss_bar/notched_12_background",
+            BossBarOverlay::Notched20 => "boss_bar/notched_20_background",
+        })
+    }
+
+    /// The GUI atlas sprite id for this overlay's **progress** notch art, or
+    /// `None` for [`BossBarOverlay::Progress`]. Drawn on top of the progress
+    /// colour fill, clipped to the same health-fraction width as that fill.
+    #[must_use]
+    pub fn progress_sprite_id(self) -> Option<&'static str> {
+        Some(match self {
+            BossBarOverlay::Progress => return None,
+            BossBarOverlay::Notched6 => "boss_bar/notched_6_progress",
+            BossBarOverlay::Notched10 => "boss_bar/notched_10_progress",
+            BossBarOverlay::Notched12 => "boss_bar/notched_12_progress",
+            BossBarOverlay::Notched20 => "boss_bar/notched_20_progress",
         })
     }
 }
@@ -296,6 +363,91 @@ impl BossBarSet {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod sprite_id_tests {
+    use super::*;
+
+    /// Every colour must resolve to a **distinct** background sprite id and a
+    /// distinct progress sprite id — vanilla's `BAR_BACKGROUND_SPRITES`/
+    /// `BAR_PROGRESS_SPRITES` are seven separate PNGs
+    /// (`.cache/mc/26.2/client-src/assets/minecraft/textures/gui/sprites/boss_bar/`),
+    /// not one greyscale sprite tinted seven ways. Collected into one
+    /// assertion rather than seven, so a single colliding pair still reports
+    /// which.
+    #[test]
+    fn every_colour_resolves_to_a_distinct_sprite_pair() {
+        let colors = [
+            BossBarColor::Pink,
+            BossBarColor::Blue,
+            BossBarColor::Red,
+            BossBarColor::Green,
+            BossBarColor::Yellow,
+            BossBarColor::Purple,
+            BossBarColor::White,
+        ];
+        let mut wrong = Vec::new();
+        for (i, a) in colors.iter().enumerate() {
+            for b in &colors[i + 1..] {
+                if a.background_sprite_id() == b.background_sprite_id() {
+                    wrong.push(format!("{a:?} and {b:?} share a background sprite id"));
+                }
+                if a.progress_sprite_id() == b.progress_sprite_id() {
+                    wrong.push(format!("{a:?} and {b:?} share a progress sprite id"));
+                }
+            }
+            // Every id lives under the `boss_bar/` folder, ends in the right
+            // suffix, and a colour's background and progress ids differ from
+            // each other.
+            if !a.background_sprite_id().starts_with("boss_bar/")
+                || !a.background_sprite_id().ends_with("_background")
+            {
+                wrong.push(format!("{a:?} background id malformed: {}", a.background_sprite_id()));
+            }
+            if !a.progress_sprite_id().starts_with("boss_bar/") || !a.progress_sprite_id().ends_with("_progress")
+            {
+                wrong.push(format!("{a:?} progress id malformed: {}", a.progress_sprite_id()));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// The `Progress` overlay style is vanilla's "no notch art" case —
+    /// `BossHealthOverlay.extractBar` only blits an overlay sprite when
+    /// `event.getOverlay() != BossEvent.BossBarOverlay.PROGRESS`
+    /// (`.cache/mc/26.2/client-src`) — and every notched style must resolve to
+    /// a distinct pair, one per `OVERLAY_BACKGROUND_SPRITES`/
+    /// `OVERLAY_PROGRESS_SPRITES` entry.
+    #[test]
+    fn progress_overlay_has_no_sprite_and_every_notch_is_distinct() {
+        assert_eq!(BossBarOverlay::Progress.background_sprite_id(), None);
+        assert_eq!(BossBarOverlay::Progress.progress_sprite_id(), None);
+
+        let notches = [
+            BossBarOverlay::Notched6,
+            BossBarOverlay::Notched10,
+            BossBarOverlay::Notched12,
+            BossBarOverlay::Notched20,
+        ];
+        let mut wrong = Vec::new();
+        for (i, a) in notches.iter().enumerate() {
+            let a_bg = a.background_sprite_id();
+            let a_pg = a.progress_sprite_id();
+            if a_bg.is_none() || a_pg.is_none() {
+                wrong.push(format!("{a:?} must have both a background and a progress sprite"));
+            }
+            for b in &notches[i + 1..] {
+                if a_bg == b.background_sprite_id() {
+                    wrong.push(format!("{a:?} and {b:?} share a background notch sprite id"));
+                }
+                if a_pg == b.progress_sprite_id() {
+                    wrong.push(format!("{a:?} and {b:?} share a progress notch sprite id"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
     }
 }
 
