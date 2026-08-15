@@ -1,21 +1,63 @@
-# Trunk dev-server config for the wasm render spike.
+# Trunk dev-server config for the browser build of Lodestone (the real shell —
+# see src/main.rs's own doc for why this is no longer "the wasm render spike").
 #
-# Build + run (and the required WS→TCP relay for live multiplayer) are documented
-# in web/README.md → "Run it". In short:
+# Build + run (and the WS→TCP relay live multiplayer needs) are documented in
+# web/README.md → "Run it". In short:
 #   cd web && trunk serve --release          # http://127.0.0.1:8080/
 #   cargo run -p lodestone-relay -- --listen 127.0.0.1:25580 --target 127.0.0.1:25565
-# The browser cannot open raw TCP, so joining a real server needs the relay up;
-# render + in-memory singleplayer work without it.
+# The browser cannot open raw TCP, so joining or pinging a real server needs the
+# relay up; render + in-memory singleplayer work without it. The `[[proxies]]`
+# entry below is what lets the browser reach that relay through THIS port
+# rather than a second one — see its own comment.
 #
-# The COOP/COEP headers are set NOW even though this spike is single-threaded and
-# does not yet need SharedArrayBuffer. They are required the moment we adopt
-# `wasm-bindgen-rayon`/threads, they are free today, and a missing cross-origin
-# isolation header is a genuinely confusing thing to debug later. Setting them
-# early means the browser is already cross-origin isolated when threading lands.
+# The COOP/COEP headers are set NOW even though the shell does not yet use
+# `wasm-bindgen-rayon`/threads. They are required the moment it does, they are
+# free today, and a missing cross-origin isolation header is a genuinely
+# confusing thing to debug later. Setting them early means the browser is
+# already cross-origin isolated when threading lands.
 [serve]
 addresses = ["127.0.0.1"]
 port = 8080
 headers = { "Cross-Origin-Opener-Policy" = "same-origin", "Cross-Origin-Embedder-Policy" = "require-corp" }
+
+# Proxies `/relay` on this page's own port through to `lodestone-relay`'s real
+# listener, so the browser never has to know about a second port at all —
+# `crate::platform::relay::relay_ws_url` (lodestone-shell) just asks its own
+# origin for `/relay`. Before this, the client needed `ws://127.0.0.1:25580`
+# hardcoded independently of the page it was served from.
+#
+# Schema verified against the installed trunk 0.21.14 itself, not guessed:
+# `trunk config generate-schema` names the top-level field `proxies` (an array
+# of `Proxy`, `backend` required, `rewrite`/`ws` optional) — the guide's own
+# `[[proxy]]` singular spelling still parses (a serde alias), but `proxies` is
+# the current, non-deprecated name and what a fresh `generate-schema` reports.
+# `ws = true` is required, not optional-but-nice: this endpoint is the
+# browser's only way to open a raw byte stream to the relay at all, so without
+# it trunk proxies the request as plain HTTP and the WebSocket upgrade fails.
+#
+# WHY THE BACKEND PORT IS A LITERAL, NOT A SHARED DEFINITION
+# The justfile's `relay_defaults` variable exists precisely so `run-wasm` and
+# `run-relay` cannot drift on the relay's `--listen` address — but that is a
+# shell variable, and trunk reads only this static TOML with no templating, so
+# it cannot see it. `backend` below is therefore a second, hand-kept copy of
+# `relay_defaults`'s port; `scripts/run-wasm.sh` cross-checks the two at
+# startup and warns (does not fail) on a mismatch, which is as close to "one
+# definition" as a shell variable and a TOML literal can get without teaching
+# trunk to read the environment. If you change `relay_defaults`'s `--listen`
+# port, change the port below too.
+#
+# WHAT THIS DOES NOT COVER: a deployed (non-`trunk serve`) build
+# A pre-built `dist/` served by anything other than `trunk serve` has no trunk
+# process behind it, so nothing proxies `/relay` and a WebSocket to it fails
+# immediately (refused upgrade) — gracefully, per `relay_probe`'s error
+# handling, but the row just reads "relay unreachable" forever. That is an
+# accepted, currently-unsolved gap for a real deployment: it would need the
+# deployment's own reverse proxy (nginx, Caddy, a CDN edge function) to add an
+# equivalent `/relay` → relay-host WebSocket forward. See web/README.md.
+[[proxies]]
+rewrite = "/relay"
+backend = "ws://127.0.0.1:25580/"
+ws = true
 
 # Stage the two large game-data blobs beside the page — IF the local cache has
 # them. `index.html` carries the full reasoning; the short version is that these
@@ -40,4 +82,22 @@ command = "sh"
 command_arguments = [
   "-c",
   "for f in ../.cache/mc/26.2/client.jar ../.cache/mc/26.2/generated/reports/blocks.json; do if [ -f \"$f\" ]; then cp \"$f\" \"$TRUNK_STAGING_DIR/\"; else echo \"trunk hook: $f is absent, not staged — the page will report ASSET LOAD FAILED and draw nothing (see web/README.md)\"; fi; done",
+]
+
+# Stage the real (non-stub) title-screen panorama faces, IF the local
+# asset-object store has them — same conditional-staging shape as the hook
+# above, and the same reason: these come from ~2.6 MB of gitignored files
+# (`cargo run -p xtask -- fetch-assets --version 26.2`) that must not be a hard
+# build dependency. Unlike the hook above, absence here is NOT degraded to
+# "the page draws nothing" — `client.jar` ships a working (if flat, 1x1 grey)
+# stub for each face, so `fetch_panorama_faces` in `src/main.rs` just falls
+# back to it per missing face. See `scripts/stage_panorama.py`'s module doc
+# for the full chain, and `crates/lodestone-shell/src/asset_objects.rs` for
+# why the panorama specifically needs this second source at all.
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = [
+  "-c",
+  "python3 scripts/stage_panorama.py --cache-dir ../.cache/mc/26.2 --out \"$TRUNK_STAGING_DIR\"",
 ]
