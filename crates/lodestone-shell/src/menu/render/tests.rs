@@ -271,6 +271,14 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
                 ui.pause();
                 ui.open_statistics_from_pause();
             }
+            // Server Links is `owns_frame == false` unconditionally (see its
+            // own doc) — it never owns the Clear pass, so `frame_for` must
+            // answer `None` here exactly as it does for `Screen::Paused`.
+            Screen::ServerLinks => {
+                ui.enter_dev_world();
+                ui.pause();
+                ui.open_server_links_from_pause();
+            }
             Screen::Advancements => {
                 ui.enter_dev_world();
                 ui.pause();
@@ -297,11 +305,28 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
         assert_eq!(ui.screen(), screen, "failed to reach {screen:?}");
         reached += 1;
         let built = frame_for(&ui, &nav, &statuses, &mut fav).is_some();
-        assert_eq!(
-            built,
-            owns_frame(screen),
-            "owns_frame and frame_for disagree about {screen:?}"
-        );
+        if screen == Screen::Statistics {
+            // The one other documented exception, alongside `Screen::Settings`
+            // while `settings_in_world()`: this loop reaches Statistics the
+            // only way a player can (`ui.open_statistics_from_pause()`,
+            // which is always in-world — there is no title-screen route for
+            // this test to take instead, unlike Settings), so it always hits
+            // the case where `frame_for` deliberately answers `None` and
+            // `owns_frame` deliberately stays `true` (see that arm's own
+            // doc). `frame_for_defers_to_an_overlay_for_statistics` below is
+            // what covers the frame this loop cannot reach.
+            assert!(!built, "Screen::Statistics must defer to the overlay path");
+            assert!(
+                owns_frame(screen),
+                "owns_frame(Statistics) must stay true regardless — see that arm's own doc"
+            );
+        } else {
+            assert_eq!(
+                built,
+                owns_frame(screen),
+                "owns_frame and frame_for disagree about {screen:?}"
+            );
+        }
         // And a frame it claims must actually be drawable.
         if built {
             let f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
@@ -2937,6 +2962,134 @@ fn frame_for_defers_to_an_overlay_for_in_world_settings() {
     );
     // `owns_frame` itself is unchanged either way — see its doc.
     assert!(owns_frame(Screen::Settings));
+}
+
+/// The Statistics half of the same defect class: a player report
+/// (2026-08-15, *"right now our client does not blur and shows a panorama
+/// for the statistics page"*) caught that the Statistics screen showed the
+/// panorama instead of the paused world it is always opened over. Unlike
+/// `Screen::Settings` there is no out-of-world route at all — this is the
+/// **only** case, so the general sweep above cannot cover it (it is carved
+/// out of that loop for exactly this reason) and this is the dedicated gate.
+#[test]
+fn frame_for_defers_to_an_overlay_for_statistics() {
+    let nav = test_nav("stats-overlay");
+    let mut fav = FaviconCache::new();
+    let statuses = StatusCache::with_probe(unavailable_probe());
+
+    let mut ui = UiState::new();
+    ui.enter_dev_world();
+    ui.pause();
+    ui.open_statistics_from_pause();
+    assert_eq!(ui.screen(), Screen::Statistics, "premise: reached the screen");
+    assert!(
+        frame_for(&ui, &nav, &statuses, &mut fav).is_none(),
+        "Statistics must defer to an overlay over the still-rendering world, \
+         not the Clear pass — see that arm's own doc"
+    );
+    assert!(owns_frame(Screen::Statistics), "owns_frame must stay true regardless");
+
+    // And the overlay frame itself carries the fix: `Dim`, not the default
+    // `Panorama`, plus the same canvas stamp `frame_for` gives every other
+    // screen (a frame built outside `frame_for`'s own `Some` arm does not get
+    // it for free — see `stamp_canvas_facts`'s own doc on exactly this gap).
+    let overlay = crate::menu::nav::stats_overlay_frame(&ui, &nav)
+        .expect("the overlay frame must exist once the screen is open");
+    assert_eq!(
+        overlay.backdrop,
+        MenuBackdrop::Dim,
+        "the paused world must stay visible behind Statistics, not the panorama"
+    );
+    assert_eq!(overlay.gui_scale, nav.gui_scale());
+    assert_eq!(overlay.panorama_speed, Some(nav.panorama_speed()));
+    assert_eq!(overlay.cursor, nav.menu_cursor());
+
+    // -- control ----------------------------------------------------------
+    // `MenuBackdrop::default()` is `Panorama` — the bug this test exists to
+    // catch is exactly "the frame's `backdrop` field was left at its
+    // `..Default::default()`", so the control proves the assertion above
+    // discriminates rather than passing for any backdrop value.
+    assert_ne!(
+        overlay.backdrop,
+        MenuBackdrop::default(),
+        "the default backdrop is Panorama, so this control must fail if the \
+         fix regresses to it"
+    );
+}
+
+/// The Server Links screen never had this bug in the first place — it was
+/// built overlay-only from the start (see `Screen::ServerLinks`'s own doc) —
+/// but the gate is cheap and the shape is identical, so it is worth pinning
+/// alongside the two recurrences above rather than trusting the general
+/// sweep's silent pass to mean the same thing it means for every other
+/// screen.
+#[test]
+fn frame_for_defers_to_an_overlay_for_server_links() {
+    let nav = test_nav("server-links-overlay");
+    let mut fav = FaviconCache::new();
+    let statuses = StatusCache::with_probe(unavailable_probe());
+
+    let mut ui = UiState::new();
+    ui.enter_dev_world();
+    ui.pause();
+    ui.open_server_links_from_pause();
+    assert_eq!(ui.screen(), Screen::ServerLinks, "premise: reached the screen");
+    assert!(frame_for(&ui, &nav, &statuses, &mut fav).is_none());
+    assert!(
+        !owns_frame(Screen::ServerLinks),
+        "unlike Statistics/Settings, this screen never owned the Clear pass"
+    );
+
+    let overlay = crate::menu::nav::server_links_overlay_frame(&ui, &nav)
+        .expect("the overlay frame must exist once the screen is open");
+    assert_eq!(overlay.backdrop, MenuBackdrop::Dim);
+    assert_ne!(overlay.backdrop, MenuBackdrop::default());
+}
+
+/// **The layer `stats.rs`'s own zebra test cannot reach.**
+/// `general_row_colour_alternates_and_the_two_shades_are_vanillas_own_argb`
+/// (in `menu::stats`) proves `MenuFrame::list_labels[i].colour` is right; it
+/// stops one layer above the draw, exactly the shape `CLAUDE.md` warns a
+/// whole corpus can share (the menu tab widget's `draw_tab` went dead for
+/// this reason). This asserts the real rasterised geometry — through
+/// `nav::stats_overlay_frame`, the actual production path now that
+/// Statistics is an overlay — carries vanilla's own `0xFFBABABA` (`-4539718`,
+/// `StatsScreen.java`'s `GeneralStatisticsList.Entry.extractContent`) grey
+/// somewhere on screen, not only inside the frame's own metadata.
+#[test]
+fn the_odd_stat_rows_zebra_grey_reaches_real_geometry_not_just_frame_metadata() {
+    let nav = test_nav("stats-zebra-geometry");
+    let mut ui = UiState::new();
+    ui.enter_dev_world();
+    ui.pause();
+    ui.open_statistics_from_pause();
+    let overlay = crate::menu::nav::stats_overlay_frame(&ui, &nav)
+        .expect("the overlay frame must exist once the screen is open");
+    let verts = geometry(&overlay, V_W, V_H);
+
+    // Vanilla's own literal, unpacked the same way `stats.rs`'s own test
+    // does — not a restated `0.729` float that could quietly drift from it.
+    let odd_grey = widget::argb_to_rgba(-4_539_718);
+    assert!(
+        colour_bounds(&verts, V_W, V_H, odd_grey).is_some(),
+        "the odd row's 0xFFBABABA grey never reached a real vertex — the \
+         value is right in `general_row_colour` but not painted"
+    );
+
+    // The control: plain white (the even rows, and also this shell's default
+    // `ACTIVE_LABEL`) must also be present, proving the probe can see text on
+    // this screen at all — a probe that found nothing for *either* colour
+    // would make the assertion above vacuous.
+    assert!(
+        colour_bounds(&verts, V_W, V_H, widget::argb_to_rgba(-1)).is_some(),
+        "control: the even rows' white never reached a vertex either, so \
+         this probe is not actually seeing the stats list"
+    );
+
+    // The discriminating control CLAUDE.md's own evidence section asks for:
+    // the two shades must not coincide, or a solid-white implementation
+    // (the pre-#564 bug) would satisfy the assertion above by accident.
+    assert_ne!(odd_grey, widget::argb_to_rgba(-1));
 }
 
 /// The unpublished row set — `nav.set_lan_published` is never called, so this
@@ -7814,15 +7967,17 @@ fn in_world_settings_carries_the_same_band_chrome_as_the_main_menu() {
 #[test]
 fn the_statistics_tab_bar_meshes_selected_tab_only_and_the_flanks_carry_the_header_separator() {
     let nav = test_nav("tab-mesh-stats");
-    let statuses = StatusCache::with_probe(unavailable_probe());
-    let mut fav = FaviconCache::new();
     let mut ui = UiState::new();
     ui.enter_dev_world();
     ui.pause();
     ui.open_statistics_from_pause();
     assert_eq!(ui.screen(), Screen::Statistics, "premise");
 
-    let frame = frame_for(&ui, &nav, &statuses, &mut fav).expect("Statistics draws a frame");
+    // Statistics is an overlay now (it always shows the paused world behind
+    // it — see `Screen::Statistics`'s own doc), so its production frame comes
+    // from `stats_overlay_frame`, not `frame_for` (which deliberately
+    // answers `None` here).
+    let frame = crate::menu::nav::stats_overlay_frame(&ui, &nav).expect("Statistics draws a frame");
     let (w, h) = (854.0_f32, 480.0_f32);
     let v = geometry(&frame, w, h);
     assert!(!v.is_empty(), "the screen must draw something");

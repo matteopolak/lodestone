@@ -891,6 +891,21 @@ pub enum PauseButton {
     /// note flagged that as a trap because comments drift; it no longer needs
     /// to be, now that `super::social`'s module docs carry it instead.
     PlayerReporting,
+    /// Vanilla's `menu.server_links` — opens [`super::Screen::ServerLinks`].
+    /// See that variant's own doc and [`super::server_links`]'s module doc
+    /// for the vanilla dialog this reproduces as a dedicated screen.
+    ///
+    /// **Not in [`PAUSE_BUTTONS`]/[`PAUSE_BUTTONS_PUBLISHED`]** — those two
+    /// arrays are the pause **grid**'s own membership, and this row is
+    /// deliberately drawn *outside* the arranged grid (see
+    /// [`super::render::pause_slot`]'s `ServerLinks` arm), the same
+    /// "outside the arranged tree" shape [`MainButton::Accounts`] already
+    /// uses on the title screen. [`MenuNav::pause_buttons`] appends it
+    /// dynamically, and only when the server actually announced a link —
+    /// vanilla's own `!serverLinks.isEmpty()` gate, reproduced as an
+    /// *omission* rather than a disabled row, matching
+    /// [`Self::OpenToLan`]'s own precedent for a row with nothing to offer.
+    ServerLinks,
     /// Open the settings screen (reuses [`super::Screen::Settings`] — see
     /// [`super::UiState::open_settings_from_pause`]).
     Options,
@@ -978,6 +993,7 @@ impl PauseButton {
             PauseButton::Feedback => "Give Feedback",
             PauseButton::Friends => "Friends",
             PauseButton::PlayerReporting => "Player Reporting",
+            PauseButton::ServerLinks => super::server_links::ROW_LABEL,
             PauseButton::Options => "Options...",
             PauseButton::OpenToLan => "Open to LAN",
             PauseButton::QuitToTitle => "Disconnect",
@@ -1006,6 +1022,10 @@ impl PauseButton {
                 // function of the variant at every call site — see the variant's
                 // own doc for what happens outside a hosted world.
                 | PauseButton::OpenToLan
+                // This screen is real (see `super::server_links`), and the
+                // row itself is never present without a real link to show —
+                // see `PauseButton::ServerLinks`'s own doc.
+                | PauseButton::ServerLinks
         )
     }
 
@@ -1290,6 +1310,12 @@ pub struct MenuNav {
     /// and focus reset when the screen opens, while the counters belong to the
     /// session. Empty is the honest default outside one.
     stats_snapshot: crate::menu::stats::StatsSnapshot,
+    /// The Server Links screen's own view (list or confirmation) and hover
+    /// cursor, plus the server's live link list — refreshed once per frame by
+    /// `app::session`, [`Self::stats_snapshot`]'s exact shape and for the same
+    /// reason: the screen and its data have different lifetimes (the view
+    /// resets on entry, the links belong to the session).
+    server_links: crate::menu::server_links::ServerLinksNav,
     /// The Advancements screen's selected tab and per-tab scroll (issue #167).
     /// Held here for [`Self::stats`]' reason: `Screen::Advancements` is one screen
     /// however far its tree is panned, and `UiState` models legal screen edges
@@ -1453,6 +1479,7 @@ impl MenuNav {
             social: crate::menu::social::SocialNav::with_path(hidden_players_path),
             stats: crate::menu::stats::StatsNav::default(),
             stats_snapshot: crate::menu::stats::StatsSnapshot::default(),
+            server_links: crate::menu::server_links::ServerLinksNav::default(),
             advancements: crate::menu::advancements::AdvancementsState::default(),
             create_world: crate::menu::create_world::CreateWorldNav::new(),
             // A placeholder: nothing reads it until `Screen::Confirm` is
@@ -1730,6 +1757,24 @@ impl MenuNav {
     #[must_use]
     pub fn stats_snapshot(&self) -> &crate::menu::stats::StatsSnapshot {
         &self.stats_snapshot
+    }
+
+    /// Replaces the live link list the Server Links screen — and the pause
+    /// menu's own row gate, [`Self::pause_buttons`] — read. The same shape
+    /// and reason as [`Self::refresh_stats`]: `menu::render`'s dispatcher
+    /// cannot reach the session world, so `app::session`'s per-frame
+    /// reconciliation pushes this in.
+    pub fn refresh_server_links(&mut self, links: Vec<lodestone_model::event::ServerLink>) {
+        self.server_links.set_links(links);
+    }
+
+    /// The Server Links screen's own state (list/confirm view, hover, the
+    /// live link list). Public for the same reason [`Self::stats`] is: the
+    /// draw and the hit-test both need it, and duplicating a second read
+    /// would be a second source of truth.
+    #[must_use]
+    pub fn server_links(&self) -> &crate::menu::server_links::ServerLinksNav {
+        &self.server_links
     }
 
     /// The Statistics screen's own state (issue #188).
@@ -2256,13 +2301,24 @@ impl MenuNav {
     /// user of a pause-screen row — [`Self::pause_button`], the hover/click
     /// hit test, and the keyboard walk — reads through this rather than the
     /// two constants directly, so they cannot drift onto different lists.
+    ///
+    /// **A `Vec`, not `&'static [PauseButton]` any more.** [`PauseButton::
+    /// ServerLinks`] is appended here rather than living in
+    /// [`PAUSE_BUTTONS`]/[`PAUSE_BUTTONS_PUBLISHED`], because its presence
+    /// depends on session data (whether the server announced any links) that
+    /// those two `const` arrays cannot express — see that variant's own doc.
     #[must_use]
-    pub fn pause_buttons(&self) -> &'static [PauseButton] {
-        if self.lan_published {
+    pub fn pause_buttons(&self) -> Vec<PauseButton> {
+        let base: &[PauseButton] = if self.lan_published {
             &PAUSE_BUTTONS_PUBLISHED
         } else {
             &PAUSE_BUTTONS
+        };
+        let mut buttons = base.to_vec();
+        if self.server_links.has_links() {
+            buttons.push(PauseButton::ServerLinks);
         }
+        buttons
     }
 
     /// Opens the command block edit screen (issue #47) with `open`'s data —
@@ -2429,6 +2485,7 @@ impl MenuNav {
             // the tab bar's own hover is derived from `MenuFrame::cursor` at
             // draw time (see `stats::hover_row`'s own doc).
             Screen::Statistics => self.stats.hover_row(row),
+            Screen::ServerLinks => self.server_links.hover(row),
             // The settings tree now *has* a cursor (issue #55), so hover moves
             // it — this arm's absence is what let #391 happen, because a screen
             // with no hover arm had to route a click through `Enter`. Row indices
@@ -2693,6 +2750,12 @@ impl MenuNav {
         if ui.screen() == Screen::Statistics {
             return self.click_statistics(ui, row);
         }
+        // Server Links — every row on both its views is a real button (a
+        // link row, Back, or Yes/No), never a field, so the same #391 shape
+        // applies: a click resolves directly to the row it hit.
+        if ui.screen() == Screen::ServerLinks {
+            return self.click_server_links(ui, row);
+        }
         // #391's shape once more, and only while the account screen's offline-name
         // editor is open. The *list* screen still wants the `hover` + `Enter`
         // translation below (a click on an account row selects it — see
@@ -2934,6 +2997,12 @@ impl MenuNav {
             // arm calls `close_statistics`), but keeping Up/Down/Escape in
             // one function is the established pattern here.
             Screen::Statistics => self.key_statistics(ui, key),
+            // Server Links — its own arm for the reason `Screen::Statistics`'s
+            // above gives, sharpened: Escape here is two-step (back out of a
+            // link's confirmation to the list, *then* close), which the
+            // catch-all's single `UiState::on_escape` call cannot express —
+            // see `key_server_links`.
+            Screen::ServerLinks => self.key_server_links(ui, key),
             // The command block edit screen (issue #47) — its own arm for the
             // same reason `Screen::ServerEdit`'s is: a text field needs every
             // keystroke routed to it, which the catch-all below (Escape only)
@@ -4535,6 +4604,15 @@ impl MenuNav {
                         ui.open_statistics_from_pause();
                         MenuAction::None
                     }
+                    // Same "reset on every entry" rule as `PauseButton::
+                    // Statistics` immediately above — a re-opened screen must
+                    // never still be sitting on the confirmation for whatever
+                    // link the player last looked at.
+                    PauseButton::ServerLinks => {
+                        self.server_links.reset();
+                        ui.open_server_links_from_pause();
+                        MenuAction::None
+                    }
                     // Issue #167 — same shape as the two above. `advancements`
                     // is reset on entry so a reopened screen starts on the
                     // default tab with each tab freshly centred, matching
@@ -4718,6 +4796,54 @@ impl MenuNav {
         self.stats.focus_done();
         ui.close_statistics();
         MenuAction::None
+    }
+
+    /// A click on the Server Links screen, in whichever view it is showing —
+    /// [`crate::menu::server_links::ServerLinksNav::click_row`] decides what
+    /// the row *means*; this turns that answer into a [`MenuAction`], the
+    /// same split [`Self::click_list`]/[`Self::apply_confirm`] already make.
+    fn click_server_links(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+        let outcome = self.server_links.click_row(row);
+        self.apply_server_links(ui, outcome)
+    }
+
+    fn key_server_links(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        match key {
+            MenuKey::Escape => {
+                let outcome = self.server_links.escape();
+                self.apply_server_links(ui, outcome)
+            }
+            _ => MenuAction::None,
+        }
+    }
+
+    /// [`crate::menu::server_links::ServerLinksOutcome`] to [`MenuAction`] —
+    /// the one place that answer is turned into a screen change or a browser
+    /// open, so [`Self::click_server_links`] and [`Self::key_server_links`]
+    /// cannot disagree about what a given outcome does.
+    fn apply_server_links(
+        &mut self,
+        ui: &mut UiState,
+        outcome: crate::menu::server_links::ServerLinksOutcome,
+    ) -> MenuAction {
+        use crate::menu::server_links::ServerLinksOutcome;
+        match outcome {
+            ServerLinksOutcome::Handled => MenuAction::None,
+            ServerLinksOutcome::Close => {
+                ui.close_server_links();
+                MenuAction::None
+            }
+            // Vanilla's `ConfirmLinkScreen` always returns to the screen it
+            // was opened over regardless of which button answered — see
+            // `clickUrlAction` — so opening the link also closes this screen,
+            // not just the confirmation sub-view.
+            ServerLinksOutcome::OpenUrl(url) => {
+                crate::menu::accounts::open_in_browser(&url);
+                self.server_links.reset();
+                ui.close_server_links();
+                MenuAction::None
+            }
+        }
     }
 
     /// Steps the persisted `gui_scale` option by `delta`, wrapping between
@@ -4940,6 +5066,17 @@ pub fn on_screen_frame<'a>(
     if let Some(frame) = settings_overlay_frame(ui, nav) {
         return Some(frame);
     }
+    // The Statistics screen — always reached from the pause menu (see
+    // `stats_overlay_frame`'s own doc), so an overlay unconditionally.
+    if let Some(frame) = stats_overlay_frame(ui, nav) {
+        return Some(frame);
+    }
+    // The Server Links screen — always reached from the pause menu, so
+    // (unlike in-world Settings) it has no out-of-world case at all and is an
+    // overlay unconditionally. See `server_links_overlay_frame`'s own doc.
+    if let Some(frame) = server_links_overlay_frame(ui, nav) {
+        return Some(frame);
+    }
     // The fourth overlay screen (#474), and the second instance of the exact
     // shape above. `command_block_overlay_frame` is the *same call* the draw
     // path in `app/redraw.rs` makes — see its own doc for why it is a function
@@ -5046,6 +5183,59 @@ pub fn settings_overlay_frame<'a>(
     Some(frame)
 }
 
+/// The Statistics screen's overlay frame, or `None` when it is not up —
+/// [`settings_overlay_frame`]'s exact shape, but for a screen with no
+/// out-of-world case at all: `UiState::open_statistics_from_pause` only
+/// opens `Screen::Statistics` from `Screen::Paused`, and there is no
+/// title-screen entry point (see that variant's own doc), so this is
+/// unconditional rather than gated on an `..._in_world()` predicate the way
+/// [`settings_overlay_frame`] is.
+///
+/// `Dim`, not the default `Panorama` — the fix for the defect
+/// [`super::render::dispatch::frame_for`]'s `Screen::Statistics` arm
+/// documents at length: a frame built outside `frame_for`'s own `Some` arm
+/// never receives its stamp, so the in-world backdrop has to be set here by
+/// hand, the same one line [`settings_overlay_frame`]/[`pause_frame`]/
+/// [`death_frame`] already carry.
+#[must_use]
+pub fn stats_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super::render::MenuFrame<'a>> {
+    if ui.screen() != Screen::Statistics {
+        return None;
+    }
+    let mut frame = crate::menu::stats::frame(nav.stats(), nav.stats_snapshot());
+    super::render::stamp_canvas_facts(&mut frame, ui, nav);
+    frame.backdrop = super::render::MenuBackdrop::Dim;
+    Some(frame)
+}
+
+/// The Server Links screen's overlay frame, or `None` when it is not up —
+/// one expression with two consumers, [`settings_overlay_frame`]'s exact
+/// shape and for the same underlying reason: this screen can only ever be
+/// reached from the pause menu (see [`super::Screen::ServerLinks`]'s own
+/// doc), so it is an overlay unconditionally rather than conditionally like
+/// in-world Settings. That is also why [`super::render::frame_for`] carries
+/// no `Screen::ServerLinks` arm at all — every case is the overlay case,
+/// so there is nothing for that dispatcher to build.
+///
+/// `Dim`, not the default `Panorama` — the same fix
+/// [`settings_overlay_frame`]'s own doc explains at length: a frame built
+/// without going through `frame_for`'s stamp has to set the in-world
+/// backdrop by hand, or the paused world it must leave visible gets replaced
+/// by the panorama that belongs to the *main menu* only.
+#[must_use]
+pub fn server_links_overlay_frame<'a>(
+    ui: &UiState,
+    nav: &MenuNav,
+) -> Option<super::render::MenuFrame<'a>> {
+    if ui.screen() != Screen::ServerLinks {
+        return None;
+    }
+    let mut frame = crate::menu::server_links::frame(&nav.server_links);
+    super::render::stamp_canvas_facts(&mut frame, ui, nav);
+    frame.backdrop = super::render::MenuBackdrop::Dim;
+    Some(frame)
+}
+
 /// The command block edit screen's overlay frame, or `None` when that screen is
 /// not up — **one expression with two consumers**.
 ///
@@ -5128,6 +5318,12 @@ pub fn routes_menu_input(ui: &UiState) -> bool {
         // movement) instead of answering the dialog — the screen would open,
         // draw, and never receive a single Accept/Decline.
         || ui.is_resource_pack_prompt()
+        // Server Links (like the `Screen::ResourcePackPrompt` arm above) is
+        // `owns_frame == false` unconditionally — it is never routed through
+        // the Clear pass, only ever drawn as an overlay — so without this arm
+        // every click and keystroke on it would fall straight through to
+        // gameplay input instead of reaching the screen at all.
+        || ui.screen() == Screen::ServerLinks
 }
 
 /// Steps `i` one row in `forward`'s direction, wrapping, and keeps stepping
@@ -9687,6 +9883,17 @@ mod tests {
                         false,
                     ),
                 );
+            }),
+            // The seventh overlay screen — `owns_frame == false`
+            // unconditionally (see `Screen::ServerLinks`'s own doc), so
+            // without `server_links_overlay_frame` in `on_screen_frame` every
+            // click on it would be dropped exactly as #474 dropped every
+            // click on the command block editor.
+            ("ServerLinks", |ui, nav| {
+                ui.enter_dev_world();
+                ui.pause();
+                ui.open_server_links_from_pause();
+                let _ = nav;
             }),
         ];
 

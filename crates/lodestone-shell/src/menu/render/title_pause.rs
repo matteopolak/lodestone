@@ -307,6 +307,23 @@ const ACCOUNTS_ENTRY_MARGIN: f32 = 4.0;
 /// own doc) and panics rather than reading a nonsense cell.
 #[must_use]
 pub fn pause_slot(button: PauseButton, published: bool) -> Slot {
+    // `PauseButton::ServerLinks` is deliberately **not** one of
+    // `pause_menu_grid_with`'s arranged leaves — see that variant's own doc.
+    // It gets a hand-placed rect just below the whole grid instead, the same
+    // "outside the arranged tree" shape `title_slot`'s `MainButton::Accounts`
+    // arm already uses, rather than reworking the grid (and every rect test
+    // pinned to its current five rows) to carry a sixth, conditional row.
+    if button == PauseButton::ServerLinks {
+        let (_, grid_h) = pause_grid_size();
+        let padding = PAUSE_BUTTON_PADDING as f32;
+        return Slot {
+            origin: Origin::PauseGrid,
+            dx: padding,
+            dy: grid_h + padding,
+            w: PAUSE_BUTTON_FULL_W,
+            h: WIDGET_H,
+        };
+    }
     // `pause_menu_grid_with`'s insertion order, which is `PAUSE_BUTTONS`'/
     // `PAUSE_BUTTONS_PUBLISHED`'s order. Exhaustive rather than
     // `button as usize` so a new variant is a compile error and not a silent
@@ -322,6 +339,7 @@ pub fn pause_slot(button: PauseButton, published: bool) -> Slot {
             PauseButton::PlayerReporting => 6,
             PauseButton::Options => 7,
             PauseButton::QuitToTitle => 8,
+            PauseButton::ServerLinks => unreachable!("handled by the early return above"),
             PauseButton::OpenToLan => panic!(
                 "pause_slot(OpenToLan, published: true) — that row does not \
                  exist in the published grid, see PauseButton::OpenToLan's doc"
@@ -339,6 +357,7 @@ pub fn pause_slot(button: PauseButton, published: bool) -> Slot {
             PauseButton::Options => 7,
             PauseButton::OpenToLan => 8,
             PauseButton::QuitToTitle => 9,
+            PauseButton::ServerLinks => unreachable!("handled by the early return above"),
         }
     };
     let (dx, dy, w, h) = pause_block(published).cells[index];

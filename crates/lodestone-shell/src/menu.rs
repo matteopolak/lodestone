@@ -63,6 +63,7 @@ pub mod options;
 pub mod packs;
 pub mod panorama;
 pub mod render;
+pub mod server_links;
 pub mod servers;
 pub mod sign_edit;
 pub mod social;
@@ -290,6 +291,23 @@ pub enum Screen {
     /// say every value read zero because nothing decoded the packet; that was
     /// true and is not any more.
     Statistics,
+    /// The Server Links screen: vanilla surfaces this as a `Dialogs.SERVER_LINKS`
+    /// dialog button on the pause menu, labelled `menu.server_links`
+    /// ("Server Links...") and only present when the server actually
+    /// announced any (`SERVER_LINKS`, `!ServerLinks.isEmpty()` in
+    /// `PauseScreen.getCustomAdditions`). This client has no generic
+    /// dialog-registry renderer, so it is a dedicated screen instead: a flat
+    /// list of the server's links, and a link-open confirmation reusing
+    /// vanilla's `ConfirmLinkScreen` wording — see [`server_links`]'s module
+    /// doc for the clauses this reproduces and the ones it deliberately
+    /// does not (no "Copy to Clipboard" button, no keyboard row-stepping).
+    ///
+    /// Reached from the pause menu's Server Links row
+    /// ([`nav::PauseButton::ServerLinks`]), gated on
+    /// [`server_links::ServerLinksNav::links`] being non-empty, the same gate
+    /// vanilla's own row presence uses; Escape or the screen's own Back
+    /// button returns to [`Screen::Paused`].
+    ServerLinks,
     /// The Advancements screen: vanilla's `AdvancementsScreen`.
     /// Reached from the pause menu's Advancements button
     /// ([`nav::PauseButton::Advancements`], now live); Escape returns to
@@ -392,7 +410,7 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 22] = [
+    pub const ALL: [Screen; 23] = [
         Screen::MainMenu,
         Screen::ServerList,
         Screen::ServerEdit,
@@ -411,6 +429,7 @@ impl Screen {
         Screen::Credits,
         Screen::Social,
         Screen::Statistics,
+        Screen::ServerLinks,
         Screen::Advancements,
         Screen::CreateWorld,
         Screen::Confirm,
@@ -748,6 +767,11 @@ impl UiState {
                     // And for Advancements, whose tree is data-pack data
                     // but whose *progress* belongs to a session.
                     | Screen::Advancements
+                    // Same reasoning again: the Server Links screen shows
+                    // links the *current* server announced, so a disconnect
+                    // while it is open must not strand the player on a list
+                    // that belonged to a session that no longer exists.
+                    | Screen::ServerLinks
                     // Same reasoning again: a disconnect while the
                     // resource-pack prompt is up (the server dropped the
                     // connection, or kicked us for taking too long to
@@ -926,6 +950,24 @@ impl UiState {
     /// Back to the pause menu from Statistics.
     pub fn close_statistics(&mut self) {
         if self.screen == Screen::Statistics {
+            self.screen = Screen::Paused;
+        }
+    }
+
+    /// Open the Server Links screen from the pause menu's Server Links row.
+    /// Only from [`Screen::Paused`], same reasoning as
+    /// [`Self::open_statistics_from_pause`] — there is no title-screen entry
+    /// point because there is no server to have announced any links before a
+    /// session exists.
+    pub fn open_server_links_from_pause(&mut self) {
+        if self.screen == Screen::Paused {
+            self.screen = Screen::ServerLinks;
+        }
+    }
+
+    /// Back to the pause menu from Server Links.
+    pub fn close_server_links(&mut self) {
+        if self.screen == Screen::ServerLinks {
             self.screen = Screen::Paused;
         }
     }
@@ -1236,6 +1278,14 @@ impl UiState {
             Screen::Social => self.close_social(),
             // Same reasoning as `Screen::Social` immediately above.
             Screen::Statistics => self.close_statistics(),
+            // In practice `MenuNav::key_server_links` intercepts Escape
+            // before this is reached, and it must: on the confirmation
+            // sub-view Escape backs out to the list rather than closing the
+            // whole screen (see `server_links::ServerLinksNav::escape`'s own
+            // doc), which this single-level `close_server_links` cannot
+            // express. This arm keeps the match exhaustive and unwinds the
+            // outer level for a caller that reaches here some other way.
+            Screen::ServerLinks => self.close_server_links(),
             // Same reasoning again, for Advancements.
             Screen::Advancements => self.close_advancements(),
             // Same reasoning again — back to the world list.

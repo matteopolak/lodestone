@@ -273,6 +273,15 @@ impl WindowApp {
             let stats = self.sim.statistics();
             self.nav
                 .refresh_stats(crate::menu::stats::StatsSnapshot::from_statistics(&stats));
+
+            // The pause menu's Server Links row and the screen it opens, for
+            // exactly the same reason: `SERVER_LINKS` decodes into
+            // `ClientEvent::ServerLinksReceived` and folds into
+            // `lodestone_ecs::session::SessionServerInfo`, and nothing read
+            // it — the row never had a live link list to gate its own
+            // presence on. Every frame rather than only while the screen is
+            // open, matching the roster and the counters above.
+            self.nav.refresh_server_links(self.sim.server_links());
         }
     }
 
