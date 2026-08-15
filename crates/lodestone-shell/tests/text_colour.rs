@@ -59,7 +59,7 @@
 //! [`shadow_is_a_gamma_space_quarter`].
 
 use lodestone::hud::{DebugStats, HudFrame, HudGeometry};
-use lodestone::overlay::{Sidebar, SidebarLine, plain_spans};
+use lodestone::overlay::{Sidebar, plain_spans};
 use lodestone_model::text::{Text, TextColor, TextSpan, TextStyle};
 
 const W: u32 = 640;
@@ -136,14 +136,36 @@ fn as_byte(v: f32) -> u8 {
 /// its colour and none of `0x00`/`0x55`/`0xAA`/`0xFF` is a quarter of another
 /// (`0xAA/4 = 0x2A`, `0xFF/4 = 0x3F`, `0x55/4 = 0x15`). Black is its own shadow,
 /// which is harmless for a presence test.
+///
+/// **`x`/`y` are pixel coordinates, converted back from the NDC
+/// [`ColourStream`] actually writes** — `HudGeometry::verts` is `[x, y, r, g, b,
+/// a]` with the position pair in `[-1, 1]` clip space
+/// (`(2*px/w - 1, 1 - 2*py/h)`), the inverse of the transform every `rect`/
+/// `glyph` call applies. Casting an NDC float straight to `i32` — the previous
+/// version of this function — truncates almost every on-screen vertex to `0`,
+/// so [`bbox`] always reported `(0, 0, 0, 0)` regardless of where the ink
+/// actually was: not "found at the origin", but the diagnostic never having a
+/// real coordinate to report at all. Presence/absence (`bbox(..).is_some()`)
+/// was never affected — that only reads `rgb` — but the printed box was
+/// useless for localising a mismatch, which is the one thing this repo's own
+/// rule ("make failure output print a bounding box") requires it to do.
 fn opaque_ink(geo: &HudGeometry) -> Vec<Ink> {
+    let to_px = |ndc_x: f32, ndc_y: f32| {
+        (
+            ((ndc_x + 1.0) * W as f32 / 2.0).round() as i32,
+            ((1.0 - ndc_y) * H as f32 / 2.0).round() as i32,
+        )
+    };
     geo.verts
         .chunks_exact(6)
         .filter(|v| (v[5] - 1.0).abs() < 1e-6)
-        .map(|v| Ink {
-            x: v[0] as i32,
-            y: v[1] as i32,
-            rgb: (as_byte(v[2]), as_byte(v[3]), as_byte(v[4])),
+        .map(|v| {
+            let (x, y) = to_px(v[0], v[1]);
+            Ink {
+                x,
+                y,
+                rgb: (as_byte(v[2]), as_byte(v[3]), as_byte(v[4])),
+            }
         })
         .collect()
 }
@@ -189,13 +211,26 @@ fn span(text: &str, color: Option<TextColor>) -> TextSpan {
 /// history, not a synthetic harness: its projection called `to_plain_string()`
 /// and its draw passed three hardcoded `[f32; 4]` constants, so *no* server
 /// colour could reach it by construction.
+///
+/// **No score rows.** This used to add one fixed `SidebarLine` — `"row"`/`"1"`,
+/// both uncoloured — for realism. Both fields are drawn with a *base* colour
+/// the row cannot opt out of by being uncoloured: the label's base is
+/// `[1.0, 1.0, 1.0]` (white) and the score's is `SIDEBAR_SCORE_DEFAULT`, which
+/// is vanilla's own `0xFF5555` — byte-identical to [`VANILLA`]'s `"red"`. So
+/// every geometry this function built also always painted white and red,
+/// regardless of `spans`' own colour: two callers below assert the *absence*
+/// of every named colour but the one under test, and that fixed row made both
+/// assertions false on their face — "found red" and "white is present" were
+/// reports about the row, not about `spans`. This is the control-premise-false
+/// species: the row's own drawing is correct (vanilla really does default a
+/// score to red and a label to white), the confound is that an isolation test
+/// shared a fixture with content it does not control. Row rendering already
+/// has its own coverage in `hud.rs`'s `sidebar_draws_title_and_scored_rows`;
+/// this fixture only needs to isolate the title.
 fn geometry_for_title(spans: Vec<TextSpan>) -> HudGeometry {
     let side = Sidebar {
         title: spans,
-        lines: vec![SidebarLine {
-            label: plain_spans("row"),
-            score: plain_spans("1"),
-        }],
+        lines: vec![],
     };
     let stats = DebugStats::default();
     let frame = HudFrame {
