@@ -1065,6 +1065,7 @@ impl WindowApp {
         hud_frame.title = self.sim.title_overlay();
         hud_frame.action_bar = self.sim.action_bar_overlay();
         hud_frame.held_item = self.sim.held_item_overlay();
+        hud_frame.held_item_spans = self.sim.held_item_overlay_spans();
         hud_frame.recipe_stats = self
             .recipe_book
             .as_ref()

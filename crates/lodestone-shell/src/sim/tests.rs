@@ -2801,6 +2801,183 @@ fn held_item_overlay_reaches_pixels_and_keys_on_identity_not_slot() {
     );
 }
 
+/// The seam this issue landed (#656): [`Sim::held_item_overlay_spans`] —
+/// which `app/redraw.rs`'s `hud_frame.held_item_spans =
+/// self.sim.held_item_overlay_spans()` reads every frame, mirroring
+/// `hud_frame.held_item = self.sim.held_item_overlay()` right above it —
+/// must carry a held item's hex-coloured custom name all the way to a HUD
+/// **vertex colour**, not merely return spans from the accessor.
+///
+/// Builds the item through the real production path a live server's
+/// `set_container_slot`/`set_container_content` would drive
+/// (`ClientEvent::InventorySlotChanged` → `Menus::apply` →
+/// `lodestone_ecs::session::tick_hud_overlays` →
+/// `HeldItemHighlight::set_spans`, from `styled_hover_name_spans`), then
+/// feeds the accessor's own output into `HudFrame`/`HudGeometry::build`
+/// exactly the shape `app/redraw.rs` assembles, and checks three
+/// pairwise-distinct vertex RGBs (hex, an inline `§` code and a named
+/// colour — the same three-clause shape `hud::tests::
+/// held_item_spans_carry_hex_named_and_inline_legacy_colour_to_distinct_vertices`
+/// uses, so a fixture with only named colours cannot hide the hex-drop bug).
+///
+/// The control repeats the *same* real item through the legacy
+/// `Sim::held_item_overlay`/`HudFrame::held_item` path
+/// (`styled_hover_name`'s `Text::to_legacy_string`) and requires the hex
+/// colour to be lost there — proving the positive assertion above is
+/// measuring the seam this test exists for, not a coincidence.
+#[test]
+fn held_item_overlay_spans_carry_hex_colour_from_a_real_item_to_a_vertex() {
+    use lodestone_model::text::{Text, TextColor, TextContent, TextStyle};
+    use lodestone_model::{Identifier, ItemComponents, ItemStack as ModelItemStack};
+
+    let hex = Text {
+        content: TextContent::Literal("Hex".to_string()),
+        style: TextStyle {
+            color: Some(TextColor::Rgb(0x1a_2b3c)),
+            ..TextStyle::default()
+        },
+        ..Text::default()
+    };
+    // The inline convention: a server-authored custom name whose colour
+    // lives inside the literal text as a `§c` code rather than as a
+    // component-level style.
+    let inline_legacy = Text::literal("\u{00a7}cRed");
+    let named = Text {
+        content: TextContent::Literal("Gray".to_string()),
+        style: TextStyle {
+            color: Some(TextColor::Gray),
+            ..TextStyle::default()
+        },
+        ..Text::default()
+    };
+    let custom_name = Text {
+        extra: vec![hex, inline_legacy, named],
+        ..Text::default()
+    };
+
+    let item_id: Identifier = "minecraft:diamond_sword".parse().expect("valid item id");
+    let mut components = ItemComponents::default();
+    components.custom_name = Some(custom_name);
+    let wire_stack = ModelItemStack {
+        item: item_id,
+        count: 1,
+        components,
+    };
+
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    let local = sim.local;
+    sim.write(|w| {
+        if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
+            menus.0.apply(&lodestone_model::ClientEvent::InventorySlotChanged {
+                slot: 0,
+                item: Some(wire_stack),
+            });
+        }
+    });
+    sim.step(1.0 / 20.0);
+
+    let (spans, alpha) = sim
+        .held_item_overlay_spans()
+        .expect("a hex-coloured custom name must still show a held-item overlay");
+    assert!(alpha > 0.0, "a freshly triggered highlight is at full opacity");
+
+    let stats = DebugStats::default();
+    let geo = crate::hud::HudGeometry::build(
+        &crate::hud::HudFrame {
+            crosshair: false,
+            show_debug: false,
+            held_item_spans: Some((spans, alpha)),
+            ..crate::hud::HudFrame::new(&stats)
+        },
+        640,
+        480,
+    );
+    assert!(
+        geo.vertex_count() > 0,
+        "sanity: the label must draw something at all"
+    );
+
+    let byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+    let has_colour = |verts: &[f32], rgb: (u8, u8, u8)| {
+        verts
+            .chunks_exact(6)
+            .any(|v| (byte(v[2]), byte(v[3]), byte(v[4])) == rgb)
+    };
+    let expected = [
+        ("hex", (0x1a_u8, 0x2b_u8, 0x3c_u8)),
+        ("inline §c", (0xff_u8, 0x55_u8, 0x55_u8)),
+        ("named gray", (0xaa_u8, 0xaa_u8, 0xaa_u8)),
+    ];
+    let missing: Vec<&str> = expected
+        .iter()
+        .filter(|(_, rgb)| !has_colour(&geo.verts, *rgb))
+        .map(|(name, _)| *name)
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these colours never reached a vertex: {missing:?} (full expected set: {expected:?})"
+    );
+
+    // Control: the same real held item, but through the lossy
+    // `Sim::held_item_overlay`/`HudFrame::held_item` path — must lose the
+    // hex colour, or the assertion above proves nothing about which field
+    // actually carries it.
+    let (legacy_name, legacy_alpha) = sim
+        .held_item_overlay()
+        .expect("control: the legacy accessor must also see the same held item");
+    let legacy_geo = crate::hud::HudGeometry::build(
+        &crate::hud::HudFrame {
+            crosshair: false,
+            show_debug: false,
+            held_item: Some((legacy_name, legacy_alpha)),
+            ..crate::hud::HudFrame::new(&stats)
+        },
+        640,
+        480,
+    );
+    assert!(
+        !has_colour(&legacy_geo.verts, (0x1a, 0x2b, 0x3c)),
+        "control failed: the legacy `held_item` path was expected to lose the hex \
+         colour (that is the bug #656 tracks), but it drew it anyway — this test's \
+         premise is wrong"
+    );
+}
+
+/// `app/redraw.rs`'s per-frame render loop is built on live GPU/window
+/// state, so no unit test in this crate can call it directly — the same
+/// constraint `menu::nav::tests::
+/// app_rs_still_threads_every_chat_option_into_the_hud_frame` and
+/// `redraw_rs_still_pushes_the_glint_options_to_all_three_sites` work around
+/// by grepping that file's own source text instead. This is the same
+/// technique for issue #656's held-item seam: `Sim::held_item_overlay_spans`
+/// (`sim/session.rs`) reaching `HudFrame::held_item_spans` at the app-wiring
+/// layer, mirroring the pre-existing legacy `held_item_overlay` →
+/// `HudFrame::held_item` line right above it.
+///
+/// This lives in `sim/tests.rs` rather than beside the line it checks —
+/// `include_str!`-ing a file from *within itself* would make the assertion
+/// tautological, since the search string would always be present as the
+/// literal argument to this very `.contains()` call. Living in a different
+/// file (as the `chat_opts`/glint-options precedents already do) is what
+/// keeps the check meaningful.
+///
+/// `held_item_overlay_spans_carry_hex_colour_from_a_real_item_to_a_vertex`
+/// (just above) proves the accessor's own output reaches a vertex colour;
+/// this proves the line that hands that output to `HudFrame` in the first
+/// place is still present, so the two together cover the whole seam.
+#[test]
+fn redraw_rs_still_forwards_held_item_overlay_spans_to_the_hud_frame() {
+    let src = include_str!("../app/redraw.rs");
+    assert!(
+        src.contains("hud_frame.held_item_spans = self.sim.held_item_overlay_spans();"),
+        "app/redraw.rs no longer forwards `Sim::held_item_overlay_spans` into \
+         `HudFrame::held_item_spans` — the held-item label is back to losing hex \
+         colours, with nothing else in this crate able to see it because the real \
+         draw loop cannot be unit tested"
+    );
+}
+
 /// The read-through the shell now depends on: it folds nothing itself, so
 /// the rows must come out of the **client's** one `SessionTabList`.
 ///
