@@ -143,7 +143,15 @@ impl ApplicationHandler for WindowApp {
                 // is not paused by this: `Screen::Paused` is local UI state and
                 // the sim keeps ticking (see `FramePacer`), which is what keeps
                 // keep-alives and movement flowing to the server.
-                self.ui.pause();
+                //
+                // Gated on `Options.pauseOnLostFocus` (F3+P) — vanilla's
+                // `Minecraft.pauseIfInactive` calls `pauseGame` only when the
+                // option is on (`Minecraft.java`); the pointer release and the
+                // pacer's background throttle are a different mechanism (mouse
+                // capture, frame rate) and stay unconditional either way.
+                if self.nav.pause_on_lost_focus() {
+                    self.ui.pause();
+                }
                 self.set_grab(false);
                 self.pacer.set_focused(false);
             }
@@ -867,13 +875,26 @@ impl ApplicationHandler for WindowApp {
                         use std::sync::atomic::Ordering;
                         self.debug_chord_used = true;
                         let was = self.debug_hitboxes.load(Ordering::Relaxed);
-                        self.debug_hitboxes.store(!was, Ordering::Relaxed);
+                        let now = !was;
+                        self.debug_hitboxes.store(now, Ordering::Relaxed);
+                        // `debug.show_hitboxes.on`/`.off` — the owner's own
+                        // report: F3+H had this and F3+B/F3+G did not.
+                        self.sim.push_local_chat(debug_shown_feedback(
+                            "Hitboxes",
+                            now,
+                        ));
                     }
                     Some(KeyOutcome::ToggleChunkBorders) => {
                         use std::sync::atomic::Ordering;
                         self.debug_chord_used = true;
                         let was = self.debug_chunk_borders.load(Ordering::Relaxed);
-                        self.debug_chunk_borders.store(!was, Ordering::Relaxed);
+                        let now = !was;
+                        self.debug_chunk_borders.store(now, Ordering::Relaxed);
+                        // `debug.chunk_boundaries.on`/`.off`.
+                        self.sim.push_local_chat(debug_shown_feedback(
+                            "Chunk borders",
+                            now,
+                        ));
                     }
                     Some(KeyOutcome::ToggleSpectator) => {
                         self.debug_chord_used = true;
@@ -966,6 +987,48 @@ impl ApplicationHandler for WindowApp {
                         // survives a crash the way every settings row does.
                         self.debug_chord_used = true;
                         self.nav.toggle_advanced_item_tooltips();
+                        // `debug.advanced_tooltips.on`/`.off` — the owner's
+                        // named gap: the toggle already worked, only this line
+                        // was missing.
+                        let now = self.nav.advanced_item_tooltips();
+                        self.sim.push_local_chat(debug_shown_feedback(
+                            "Advanced tooltips",
+                            now,
+                        ));
+                    }
+                    Some(KeyOutcome::TogglePauseOnLostFocus) => {
+                        // `debug.pause_focus.on`/`.off` — vanilla's
+                        // `keyDebugFocusPause` arm: toggle, persist, then
+                        // feedback, same order as `toggle_advanced_item_tooltips`.
+                        self.debug_chord_used = true;
+                        self.nav.toggle_pause_on_lost_focus();
+                        let now = self.nav.pause_on_lost_focus();
+                        self.sim.push_local_chat(debug_enabled_feedback(
+                            "Pause on lost focus",
+                            now,
+                        ));
+                    }
+                    Some(KeyOutcome::CopyLocation) => {
+                        // `debug.copy_location.message` — vanilla's
+                        // `keyDebugCopyLocation` arm builds `/execute in <dim>
+                        // run tp @s x y z yaw pitch` from the local player's own
+                        // state and writes it to the clipboard, unconditionally
+                        // (no on/off — a location either copies or, off a
+                        // pre-login `dimension`, is a no-op, matching vanilla's
+                        // own `this.minecraft.player != null` guard).
+                        self.debug_chord_used = true;
+                        if let Some(dimension) = self.sim.stats.dimension.clone() {
+                            let command = copy_location_command(
+                                &dimension,
+                                self.sim.stats.position,
+                                self.sim.stats.yaw,
+                                self.sim.stats.pitch,
+                            );
+                            clipboard_seam::set(&command);
+                            self.sim.push_local_chat(debug_feedback(
+                                "Copied location to clipboard",
+                            ));
+                        }
                     }
                     Some(KeyOutcome::Screenshot) => {
                         // Arm it; `redraw()` services it after the frame is

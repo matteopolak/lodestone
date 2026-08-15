@@ -4,6 +4,49 @@
 
 use super::*;
 
+/// The clipboard `KeyOutcome::CopyLocation` writes to — vanilla's
+/// `KeyboardHandler.setClipboard`, called from `keyDebugCopyLocation`.
+///
+/// The same fork [`crate::menu::edit_box`]'s own `clipboard_seam` module
+/// doc describes (`CLAUDE.md`'s "test that performs an OS-level side effect"
+/// rule): production writes the real OS clipboard through
+/// [`crate::platform::clipboard`]; every `#[cfg(test)]` build routes through
+/// an in-memory stand-in, so no `cargo test` run touches, or depends on,
+/// whatever happens to be on the developer's real clipboard.
+///
+/// A second, separate module from `menu::edit_box`'s rather than a shared
+/// one: that module's seam is private outside `cfg(test)` (`mod
+/// clipboard_seam`, no `pub`), by design — it exists only for
+/// `EditBox::handle_key`, not as a crate-wide clipboard API — so this file
+/// needs its own copy of the same two functions rather than reaching into it.
+#[cfg(not(test))]
+pub(crate) mod clipboard_seam {
+    pub fn set(text: &str) {
+        crate::platform::clipboard::set(text);
+    }
+}
+
+/// The `#[cfg(test)]` half of [`clipboard_seam`] — a `thread_local` string,
+/// not the OS clipboard. `pub(crate)` (test-only) so
+/// `the_copy_location_chord_writes_the_execute_command_to_the_clipboard`
+/// below can read back what `KeyOutcome::CopyLocation`'s driver arm wrote.
+#[cfg(test)]
+pub(crate) mod clipboard_seam {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static FAKE: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+
+    pub fn get() -> String {
+        FAKE.with(|c| c.borrow().clone())
+    }
+
+    pub fn set(text: &str) {
+        FAKE.with(|c| *c.borrow_mut() = text.to_owned());
+    }
+}
+
 /// Which input surface owns the keyboard this instant.
 ///
 /// The flags [`resolve_key`] needs, read off [`crate::menu::UiState`] at
@@ -134,6 +177,13 @@ pub(crate) enum KeyOutcome {
     /// into an `AtomicBool` — see
     /// [`crate::config::Options::advanced_item_tooltips`].
     ToggleAdvancedTooltips,
+    /// F3+P — vanilla's `key.debug.focusPause`
+    /// (`Options.pauseOnLostFocus`).
+    TogglePauseOnLostFocus,
+    /// F3+C — vanilla's `key.debug.copyLocation`: copy a `/execute in <dim>
+    /// run tp @s x y z yaw pitch` command for the local player to the
+    /// clipboard.
+    CopyLocation,
     /// `key.screenshot`: capture the window's own frame to a PNG.
     ///
     /// **No payload**, and the two things it does not carry are deliberate,
@@ -400,6 +450,15 @@ pub(crate) fn resolve_key(
         // for the others, because the thing it changes is only *visible* with a
         // container screen open.
         Some(KeyOutcome::ToggleAdvancedTooltips)
+    } else if gate.debug_held && pressed && code == KeyCode::KeyP {
+        // `key.debug.focusPause`, vanilla keysym 80. Same "not gated on
+        // `gate.gameplay`" reasoning as its siblings above.
+        Some(KeyOutcome::TogglePauseOnLostFocus)
+    } else if gate.debug_held && pressed && code == KeyCode::KeyC {
+        // `key.debug.copyLocation`, vanilla keysym 67. Vanilla additionally
+        // gates this on `!player.isReducedDebugInfo()`, a concept this client
+        // does not model yet — see `docs/keybindings.md`'s F3 section.
+        Some(KeyOutcome::CopyLocation)
     } else if binds.is(InputAction::Screenshot, code) && pressed {
         // Same tier as `DebugOverlay` immediately above, and for the same
         // reason: vanilla's `key.screenshot` is `Category.MISC` and takes no
@@ -472,6 +531,73 @@ pub(crate) fn resolve_key(
     } else {
         None
     }
+}
+
+/// Vanilla's `KeyboardHandler.decorateDebugComponent`/`debugFeedback`: every
+/// F3 chord that changes something prints a `[Debug]: <message>` line to
+/// chat, with the prefix bold and `ChatFormatting.YELLOW`
+/// (`KeyboardHandler.java`).
+///
+/// `YELLOW` is a legacy-representable colour — `TextColor::legacy_code()`
+/// returns `Some` for it — so this needs no
+/// [`lodestone_model::text::TextSpan`] construction of its own: a plain
+/// string carrying embedded `§` codes is exactly what
+/// [`lodestone_model::text::Text::to_spans`] exists to expand (its own doc:
+/// "`from_legacy` consumes every `§`+code pair"), and
+/// `Sim::push_local_chat`/`ChatLog::push_system` already route every chat
+/// line through `to_spans()` for the HUD's draw
+/// (`ChatLog::recent_ages_spans`), never through `to_legacy_string()` — the
+/// lossy path that cannot carry an RGB colour but has no trouble with a named
+/// one. So the colour reaches a vertex without this function, or its caller,
+/// touching a span directly.
+///
+/// Vanilla has a red `debugWarningComponent` sibling for the failure paths
+/// (no-permission errors); every chord ported here either always succeeds or
+/// has no failure path we can detect client-side (see
+/// `docs/keybindings.md`), so only the yellow feedback path exists — add the
+/// red one back the day a chord needs it rather than shipping it unused now.
+#[must_use]
+pub(crate) fn debug_feedback(message: impl std::fmt::Display) -> String {
+    format!("§e§l[Debug]:§r {message}")
+}
+
+/// The `"<label>: shown"`/`"<label>: hidden"` shape three chords share —
+/// `debug.show_hitboxes.on`/`.off`, `debug.chunk_boundaries.on`/`.off` and
+/// `debug.advanced_tooltips.on`/`.off` (`KeyboardHandler.debugFeedbackTranslated`).
+/// Pure so `debug_feedback`'s driver call sites and this module's own tests
+/// share one source of the exact vanilla wording, rather than each arm in
+/// `app/lifecycle.rs` spelling the strings out separately.
+#[must_use]
+pub(crate) fn debug_shown_feedback(label: &str, now: bool) -> String {
+    debug_feedback(format!("{label}: {}", if now { "shown" } else { "hidden" }))
+}
+
+/// The `"<label>: enabled"`/`"<label>: disabled"` shape
+/// `debug.pause_focus.on`/`.off` uses — same reason as
+/// [`debug_shown_feedback`], different vanilla wording.
+#[must_use]
+pub(crate) fn debug_enabled_feedback(label: &str, now: bool) -> String {
+    debug_feedback(format!(
+        "{label}: {}",
+        if now { "enabled" } else { "disabled" }
+    ))
+}
+
+/// `KeyboardHandler.keyDebugCopyLocation`'s `String.format`
+/// (`KeyboardHandler.java`): `/execute in %s run tp @s %.2f %.2f %.2f %.2f
+/// %.2f`, the dimension identifier then x/y/z/yaw/pitch each to two decimal
+/// places. Pure so `KeyOutcome::CopyLocation`'s driver arm and this module's
+/// own test share the exact format rather than the test re-deriving it from
+/// the same literal the arm uses.
+#[must_use]
+pub(crate) fn copy_location_command(
+    dimension: &str,
+    position: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+) -> String {
+    let [x, y, z] = position;
+    format!("/execute in {dimension} run tp @s {x:.2} {y:.2} {z:.2} {yaw:.2} {pitch:.2}")
 }
 
 /// The action a gameplay off-hand-key press should send, or `None`.

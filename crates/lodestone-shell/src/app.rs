@@ -98,7 +98,10 @@ pub(crate) use creative_screen::CreativeSearchEdit;
 #[allow(unused_imports)]
 use creative_screen::creative_panel_geometry;
 #[allow(unused_imports)]
-pub(crate) use input::{KeyGate, KeyOutcome, drop_selected_action, offhand_swap_action, resolve_key};
+pub(crate) use input::{
+    KeyGate, KeyOutcome, clipboard_seam, copy_location_command, debug_enabled_feedback,
+    debug_feedback, debug_shown_feedback, drop_selected_action, offhand_swap_action, resolve_key,
+};
 #[allow(unused_imports)]
 pub(crate) use launch::{LaunchError, launch_singleplayer};
 #[cfg(not(target_arch = "wasm32"))]
