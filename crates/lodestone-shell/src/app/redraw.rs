@@ -894,15 +894,23 @@ impl WindowApp {
         // `ChatScreen` to hold a position while the box is not up), so the
         // small fixed fetch from before this feature is untouched and
         // unaffected by anything below.
-        // The feed hands back owned legacy strings (flattened from the canonical
-        // `ChatFeed`'s `Text` at read time); borrow them into the `&str` slice
-        // the HUD frame takes, keeping both locals alive for the frame's scope.
-        let chat_owned: Vec<(String, f32)> = self.sim.recent_chat(if chat_open { 100 } else { 10 });
+        // The feed hands back owned spans (the hex-carrying sibling of the
+        // legacy-flattened `String` this used to read — `Session::recent_chat`
+        // still exists for the other, untouched draw path); borrow them into
+        // the `&[TextSpan]` slice the HUD frame takes, keeping both locals
+        // alive for the frame's scope.
+        let chat_spans_owned: Vec<(Vec<lodestone_model::text::TextSpan>, f32)> =
+            self.sim.recent_chat_spans(if chat_open { 100 } else { 10 });
         // `ChatScroll::sync` only reads `history` on the open branch, so
         // building this unconditionally (rather than gating the clone on
         // `chat_open`) costs nothing extra on the closed path (10 short
-        // strings) and keeps the call site to one line.
-        let chat_history_strings: Vec<String> = chat_owned.iter().map(|(l, _)| l.clone()).collect();
+        // strings) and keeps the call site to one line. Scrolling only needs
+        // the visible text, not the colour, so each entry's spans are
+        // concatenated back to a plain `String` here.
+        let chat_history_strings: Vec<String> = chat_spans_owned
+            .iter()
+            .map(|(spans, _)| spans.iter().map(|s| s.text.as_str()).collect::<String>())
+            .collect();
         // Reproduces `ChatComponent.addMessageToDisplayQueue`'s "a new
         // message while scrolled does not jump the view" behaviour, and
         // `ChatScreen.removed`'s `resetChatScroll()` when closed — see
@@ -914,19 +922,20 @@ impl WindowApp {
         let (chat_win_start, chat_win_end) = if chat_open {
             self.chat_input
                 .scroll()
-                .window_range(chat_owned.len(), chat_rows_per_page)
+                .window_range(chat_spans_owned.len(), chat_rows_per_page)
         } else {
-            (0, chat_owned.len())
+            (0, chat_spans_owned.len())
         };
-        let chat_lines: Vec<(&str, f32)> = chat_owned[chat_win_start..chat_win_end]
+        let chat_spans_lines: Vec<(&[lodestone_model::text::TextSpan], f32)> = chat_spans_owned
+            [chat_win_start..chat_win_end]
             .iter()
-            .map(|(line, age)| (line.as_str(), *age))
+            .map(|(spans, age)| (spans.as_slice(), *age))
             .collect();
         // `None` while closed — vanilla's own scrollbar draws only in the
         // `isForeground` (open) display mode.
         let chat_scrollbar_view = chat_open.then(|| crate::hud::ChatScrollbar {
             scrolled: self.chat_input.scroll().scrolled(),
-            total: chat_owned.len(),
+            total: chat_spans_owned.len(),
             new_message_since_scroll: self.chat_input.scroll().new_message_since_scroll(),
         });
         // Rows, header and footer together — the whole `PlayerTabOverlay` frame.
@@ -976,10 +985,19 @@ impl WindowApp {
         let mut hud_frame = HudFrame::new(&self.sim.stats);
         hud_frame.show_debug = self.show_debug;
         hud_frame.crosshair = crosshair;
-        hud_frame.chat = &chat_lines;
+        // `chat_spans`, not `chat`: a non-empty `chat_spans` wins outright over
+        // the legacy `&str` path (see `HudFrame::chat_spans`'s own doc), and is
+        // the only one of the pair carrying a hex `TextColor::Rgb` past this
+        // point. `chat_wrap_spans` is left `None` — no persisted spans cache
+        // exists yet, so the visible log is re-wrapped every frame on this path
+        // exactly as the legacy path was before issue #527 (a); `chat_wrap`
+        // below still caches nothing for it since it caches `&str`, not spans.
+        hud_frame.chat_spans = &chat_spans_lines;
         hud_frame.sound_subtitles = &sound_subtitles;
         // Persisted wrap results (issue #527 (a)): without this the whole
-        // visible log is re-wrapped, quadratically, every frame.
+        // visible log is re-wrapped, quadratically, every frame. Retained for
+        // the (now-dormant) legacy `chat` path; `chat_spans` above has no
+        // persisted cache of its own yet.
         hud_frame.chat_wrap = Some(&self.chat_wrap);
         hud_frame.chat_input = chat_open.then(|| self.chat_input.as_str());
         // Vanilla blinks the text cursor on a 300 ms half-period:
@@ -1495,6 +1513,23 @@ impl WindowApp {
         {
             let death_frame = crate::menu::render::death_frame(&self.nav, self.sim.death_message());
             menu.render_overlay(device, queue, frame.view(), &death_frame, w, h);
+        }
+
+        // The resource-pack prompt (a server's own `ClientboundResourcePackPushPacket`,
+        // not a menu button) follows the same overlay shape as Death/Paused
+        // immediately above, for the same reason: it must not itself stop the
+        // world from rendering or the session from ticking. It differs from
+        // both in *when* it can be up — `Screen::ResourcePackPrompt` is
+        // reachable from `Screen::Connecting` (a push can arrive during
+        // Configuration, before Play), where `frame_for` already returns
+        // `None` and `draw_menu` already falls through to this world path —
+        // so no extra branch is needed for that case; the world render
+        // still clears and presents a real (if chunk-less) frame underneath.
+        if let Some(prompt_frame) =
+            crate::menu::nav::resource_pack_prompt_overlay_frame(&self.ui, &self.nav)
+            && let Some(menu) = self.menu.as_mut()
+        {
+            menu.render_overlay(device, queue, frame.view(), &prompt_frame, w, h);
         }
 
         // Issue #449's terrain half. `Screen::Connecting` covers the

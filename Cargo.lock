@@ -3136,6 +3136,7 @@ dependencies = [
  "pollster",
  "reqwest",
  "serde_json",
+ "sha1 0.10.7",
  "tokio",
  "tracing",
  "tracing-chrome",
@@ -3147,6 +3148,7 @@ dependencies = [
  "web-sys",
  "wgpu",
  "winit",
+ "zip",
 ]
 
 [[package]]

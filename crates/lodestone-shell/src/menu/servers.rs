@@ -49,6 +49,88 @@ pub const DEFAULT_PORT: u16 = 25565;
 /// from making the list unreadable.
 pub const MAX_NAME_CHARS: usize = 48;
 
+/// This server's resource-pack policy — vanilla's
+/// `ServerData.ServerPackStatus` (`client/multiplayer/ServerData.java`),
+/// declared `ENABLED, DISABLED, PROMPT` in that order (the order
+/// `CycleButton` cycles forward through, and the order [`Self::cycle`]
+/// mirrors).
+///
+/// The on-disk encoding matches vanilla's own `FIELD_CODEC` exactly, field
+/// name included: an *optional* `acceptTextures` bool — `true` for
+/// [`Enabled`](Self::Enabled), `false` for [`Disabled`](Self::Disabled), and
+/// **absent** (not `null`) for [`Prompt`](Self::Prompt). Vanilla stores this in
+/// NBT; this client's server list is JSON, but the tri-state shape is
+/// unchanged — see [`Self::to_json_value`]/[`Self::from_json_value`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerPackPolicy {
+    /// Every pushed pack downloads and applies with no prompt.
+    Enabled,
+    /// An optional pushed pack is declined with no prompt. A **required**
+    /// pack still prompts — vanilla will not silently disconnect a player
+    /// who never set an opinion on this particular pack
+    /// (`ClientCommonPacketListenerImpl.handleResourcePackPush`'s own
+    /// condition: `status != PROMPT && (!required || status != DISABLED)`
+    /// is the auto-apply path, so `DISABLED` only takes it when the pack is
+    /// *not* required).
+    Disabled,
+    /// Every pushed pack shows the accept/decline prompt. Vanilla's default
+    /// for a freshly added server.
+    Prompt,
+}
+
+impl Default for ServerPackPolicy {
+    fn default() -> Self {
+        Self::Prompt
+    }
+}
+
+impl ServerPackPolicy {
+    /// Advances to the next value in declaration order, wrapping — the
+    /// `ManageServerScreen`'s `CycleButton` click.
+    #[must_use]
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Enabled => Self::Disabled,
+            Self::Disabled => Self::Prompt,
+            Self::Prompt => Self::Enabled,
+        }
+    }
+
+    /// The row's display text — `ServerPackStatus.getName()`
+    /// (`manageServer.resourcePack.{enabled,disabled,prompt}`).
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Enabled => "Enabled",
+            Self::Disabled => "Disabled",
+            Self::Prompt => "Prompt",
+        }
+    }
+
+    /// The JSON encoding: `Some(bool)` for `acceptTextures`, or `None` to
+    /// omit the key entirely (which is what makes a re-read come back
+    /// [`Self::Prompt`] — see [`Self::from_json_value`]).
+    #[must_use]
+    fn accept_textures(self) -> Option<bool> {
+        match self {
+            Self::Enabled => Some(true),
+            Self::Disabled => Some(false),
+            Self::Prompt => None,
+        }
+    }
+
+    /// Inverse of [`Self::accept_textures`]. A present-but-non-bool value
+    /// (a hand-edited file) is treated the same as absent: [`Self::Prompt`],
+    /// never a parse error that could lose the rest of the row.
+    fn from_accept_textures(value: Option<&serde_json::Value>) -> Self {
+        match value.and_then(serde_json::Value::as_bool) {
+            Some(true) => Self::Enabled,
+            Some(false) => Self::Disabled,
+            None => Self::Prompt,
+        }
+    }
+}
+
 /// One saved server.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ServerEntry {
@@ -62,6 +144,10 @@ pub struct ServerEntry {
     /// `_minecraft._tcp` SRV lookup when the user did not pin a port, so
     /// collapsing these two makes a large slice of real servers unreachable.
     pub port: Option<u16>,
+    /// This server's resource-pack policy — see [`ServerPackPolicy`].
+    /// Defaults to [`ServerPackPolicy::Prompt`], matching a freshly added
+    /// vanilla server.
+    pub pack_status: ServerPackPolicy,
 }
 
 impl ServerEntry {
@@ -72,6 +158,7 @@ impl ServerEntry {
             name: name.into().trim().to_string(),
             host: host.into().trim().to_string(),
             port,
+            pack_status: ServerPackPolicy::default(),
         };
         if e.name.chars().count() > MAX_NAME_CHARS {
             e.name = e.name.chars().take(MAX_NAME_CHARS).collect();
@@ -223,6 +310,13 @@ impl ServerList {
                 if let Some(p) = e.port {
                     obj.insert("port".into(), p.into());
                 }
+                // Vanilla's own field name and tri-state shape — see
+                // `ServerPackPolicy`'s doc. Omitted (not written as `null`)
+                // for `Prompt`, matching `FIELD_CODEC`'s
+                // `optionalFieldOf("acceptTextures")`.
+                if let Some(accept) = e.pack_status.accept_textures() {
+                    obj.insert("acceptTextures".into(), accept.into());
+                }
                 serde_json::Value::Object(obj)
             })
             .collect();
@@ -281,7 +375,9 @@ fn entry_from_json(v: &serde_json::Value) -> Option<ServerEntry> {
         .get("port")
         .and_then(serde_json::Value::as_u64)
         .and_then(|p| u16::try_from(p).ok());
-    Some(ServerEntry::new(name, host, port))
+    let mut entry = ServerEntry::new(name, host, port);
+    entry.pack_status = ServerPackPolicy::from_accept_textures(obj.get("acceptTextures"));
+    Some(entry)
 }
 
 /// The directory Lodestone keeps user state in.
@@ -406,6 +502,59 @@ mod tests {
         let list = ServerList::from_json(json);
         assert_eq!(list.len(), 2, "{:?}", list.entries());
         assert_eq!(list.get(1).unwrap().port, Some(1234));
+    }
+
+    #[test]
+    fn pack_policy_defaults_to_prompt_and_round_trips_through_json() {
+        // A freshly added entry is Prompt, matching a freshly added vanilla
+        // server (`ServerData.packStatus = ServerData.ServerPackStatus.PROMPT`).
+        let entry = ServerEntry::new("Home", "mc.example.com", None);
+        assert_eq!(entry.pack_status, ServerPackPolicy::Prompt);
+
+        for status in [
+            ServerPackPolicy::Enabled,
+            ServerPackPolicy::Disabled,
+            ServerPackPolicy::Prompt,
+        ] {
+            let mut list = ServerList::new();
+            let mut entry = ServerEntry::new("Home", "mc.example.com", None);
+            entry.pack_status = status;
+            list.add(entry);
+            let back = ServerList::from_json(&list.to_json());
+            assert_eq!(
+                back.get(0).unwrap().pack_status,
+                status,
+                "{status:?} did not round-trip"
+            );
+        }
+        // Prompt is the *omitted* encoding, matching vanilla's
+        // `optionalFieldOf` — never a literal `null`/`false`-shaped stand-in.
+        let mut list = ServerList::new();
+        list.add(ServerEntry::new("Home", "mc.example.com", None));
+        assert!(
+            !list.to_json().contains("acceptTextures"),
+            "Prompt must omit the key entirely: {}",
+            list.to_json()
+        );
+    }
+
+    #[test]
+    fn pack_policy_cycles_enabled_disabled_prompt_and_wraps() {
+        // Declaration order, vanilla's own `CycleButton` forward direction.
+        assert_eq!(ServerPackPolicy::Enabled.cycle(), ServerPackPolicy::Disabled);
+        assert_eq!(ServerPackPolicy::Disabled.cycle(), ServerPackPolicy::Prompt);
+        assert_eq!(ServerPackPolicy::Prompt.cycle(), ServerPackPolicy::Enabled);
+    }
+
+    #[test]
+    fn a_hand_edited_non_bool_accept_textures_falls_back_to_prompt() {
+        // A corrupt/hand-edited field must not lose the row (same discipline
+        // as `one_bad_row_does_not_lose_the_others`), and must not be
+        // misread as `Enabled` or `Disabled`.
+        let list = ServerList::from_json(
+            r#"[{"name":"x","host":"h","acceptTextures":"yes"}]"#,
+        );
+        assert_eq!(list.get(0).unwrap().pack_status, ServerPackPolicy::Prompt);
     }
 
     #[test]

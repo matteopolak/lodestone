@@ -216,6 +216,25 @@ impl WindowApp {
         // player's own `E`-opened inventory.
         self.ui
             .reconcile_server_menu_window(self.sim.open_menu().map(|open| open.window_id));
+        // The resource-pack prompt: `NetClient::pending_resource_pack_prompt`
+        // is the ground truth, reconciled here every frame the same way
+        // `has_won`/`is_dead`/`is_lan_published` are above. `show_resource_pack_prompt`
+        // rebuilds `MenuNav`'s own dialog state unconditionally (a second
+        // push must not inherit a stale focus or pack id — see that
+        // method's own doc), so it is only called on the **edge** into
+        // "something is pending" via `!self.ui.is_resource_pack_prompt()`;
+        // the *closing* edge needs no action here at all —
+        // `apply_resource_pack_prompt` already closed the screen and
+        // cleared `NetClient`'s cell (through `respond_to_resource_pack`)
+        // the instant the player answered, so by the time this reads
+        // `None` there is nothing left to reconcile.
+        if let Some(net) = self.sim.net() {
+            if let Some(prompt) = net.pending_resource_pack_prompt() {
+                if !self.ui.is_resource_pack_prompt() {
+                    self.nav.show_resource_pack_prompt(&mut self.ui, &prompt);
+                }
+            }
+        }
         // A transition may have changed grab intent (Connected → Playing grabs;
         // Ended/Death → menu-owned screens release). Only touch the OS grab
         // when it disagrees.

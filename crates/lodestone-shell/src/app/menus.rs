@@ -148,6 +148,14 @@ impl WindowApp {
                 self.begin_singleplayer(config);
             }
             MenuAction::Connect(entry) => {
+                // Set before dialing: `net::set_pending_server_pack_policy`'s
+                // own doc explains why this is a one-shot global read at
+                // `NetClient::connect_impl` rather than a `Sim::connect`
+                // parameter — that fixed signature has no policy to carry
+                // for a direct/quick connect or a singleplayer/LAN session,
+                // only for a saved `ServerEntry`, which is exactly what this
+                // arm (and only this arm) holds.
+                crate::net::set_pending_server_pack_policy(entry.pack_status);
                 self.connect_to(entry.host.clone(), entry.effective_port());
             }
             MenuAction::Quit => {}
@@ -241,6 +249,23 @@ impl WindowApp {
             MenuAction::OpenToLan => self.open_current_world_to_lan(),
             #[cfg(target_arch = "wasm32")]
             MenuAction::OpenToLan => {}
+            // The resource-pack prompt's Accept/Decline (`nav.rs`'s
+            // `apply_resource_pack_prompt`). Goes out through `Sim`'s own
+            // `NetClient`, not a `Sim` method — the same shape
+            // `MenuAction::SetCommandBlock` uses and for the identical
+            // reason: there is no state-dependent guard to enforce here
+            // (the net thread's own `apply_pack_response` already handles a
+            // stale/superseded id), only a value to hand across the
+            // `Sim`/`NetClient` boundary this layer owns. `Sim::net()` is
+            // `None` off a live session, so this is a no-op if the session
+            // has already ended — which can only mean the prompt's own
+            // answer no longer has anywhere to go, not a dropped answer for
+            // a session that is still live.
+            MenuAction::ResourcePackResponse { id, accept } => {
+                if let Some(net) = self.sim.net() {
+                    net.respond_to_resource_pack(id, accept);
+                }
+            }
         }
     }
 

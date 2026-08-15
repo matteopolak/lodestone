@@ -174,6 +174,11 @@ crossbeam-channel = "0.5"
 anyhow = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+# SHA-1 verification of a downloaded server resource pack against the hash
+# `ClientboundResourcePackPushPacket` carries (`net.rs`). Version-free (pure
+# arithmetic over bytes already in memory), so it is not confined to the
+# native target section below the way the download itself is.
+sha1 = { workspace = true }
 # Writes `key.screenshot`'s PNG (issue #16, `src/screenshot.rs`). **A normal
 # dependency, not a dev one** — it was `[dev-dependencies]` while its only use
 # was encoding genuine PNG streams as *input* to the favicon-mosaic tests, and
@@ -315,6 +320,12 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 # the lib *test* target, which links dev dependencies — so `net.rs`'s,
 # `app/tests.rs`'s and `sim/tests.rs`'s live gates are unaffected.
 lodestone-testsupport = { workspace = true }
+# Builds an in-memory zip fixture for `resources.rs`'s server-resource-pack
+# tests — a real archive `ZipSource::from_bytes` opens, not a hand-rolled
+# byte string, so the test exercises the same parser production does. Dev
+# dependency only: this is the writer half, and nothing in the lib target
+# ever needs to *build* a zip, only read one.
+zip = { workspace = true }
 
 # Entity tick throughput and interpolation cost (issues #97/#99). CPU-only: no
 # GPU adapter, no window, no server. Must stay free of anything version-gated so

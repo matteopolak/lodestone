@@ -227,6 +227,20 @@ pub enum MenuAction {
     /// [`MenuAction::Singleplayer`] have. Carries nothing: the world to publish is
     /// whichever one the app already has open.
     OpenToLan,
+    /// The resource-pack prompt was answered ([`Screen::ResourcePackPrompt`]).
+    /// The app must call `NetClient::respond_to_resource_pack(id, accept)`
+    /// through `Sim::net()` — `MenuNav` holds no `Sim`/`NetClient` to send it
+    /// through, the same division of labour [`MenuAction::Respawn`] has.
+    /// `accept = false` on a `required` pack additionally ends the session,
+    /// but that decision is the net thread's own (see
+    /// `net::NetClient::respond_to_resource_pack`'s doc) — this variant only
+    /// carries the player's answer, not the consequence.
+    ResourcePackResponse {
+        /// The pack id this answers.
+        id: uuid::Uuid,
+        /// `true` for Accept, `false` for Decline.
+        accept: bool,
+    },
 }
 
 /// Which field of the add/edit form has focus.
@@ -264,10 +278,13 @@ pub mod sign_edit_row {
     pub const DONE: usize = super::sign_edit::LINE_COUNT;
 }
 /// `ManageServerScreen`'s `manageServer.resourcePack` cycle button
-/// (`ManageServerScreen.java`). **Present and inactive**: `ServerEntry`
-/// has no `pack_status` field to cycle (see that struct's docs), so wiring
-/// this row would be exactly the fabricated persistence `CLAUDE.md`'s
-/// evidence standards warn against — same rule as every inactive settings row.
+/// (`ManageServerScreen.java`). **Live**: a click cycles
+/// [`super::servers::ServerPackPolicy`] (`MenuNav::click`'s `ServerEdit`
+/// arm), and the value is what a live join now reads to decide whether a
+/// pushed resource pack is silently applied, silently declined, or prompted
+/// — see `net.rs`'s resource-pack flow. This row used to be present and
+/// permanently inactive, on the grounds that `ServerEntry` carried no
+/// `pack_status` field to cycle; that gap is closed.
 pub const RESOURCE_PACK_ROW: usize = 2;
 /// `CommonComponents.GUI_DONE` (`ManageServerScreen.java`) — saves the
 /// form. A real, clickable row alongside the existing Enter/Tab keyboard path
@@ -384,6 +401,11 @@ pub struct EditForm {
     /// hovering one must not steal keyboard focus out of whichever field it
     /// was in. See [`super::render::MenuFrame::hovered`].
     hovered: Option<usize>,
+    /// The `ManageServerScreen`'s resource-pack `CycleButton` value — see
+    /// [`super::servers::ServerPackPolicy`]. Seeded from the entry being
+    /// edited, or [`super::servers::ServerPackPolicy::default`] (`Prompt`)
+    /// for a new one, and carried into [`Self::to_entry`].
+    pack_status: super::servers::ServerPackPolicy,
 }
 
 impl Default for EditForm {
@@ -444,6 +466,7 @@ impl EditForm {
             focus,
             editing: None,
             hovered: None,
+            pack_status: super::servers::ServerPackPolicy::default(),
         }
     }
 
@@ -454,6 +477,7 @@ impl EditForm {
         form.fields.name.set_value(&entry.name);
         form.fields.address.set_value(entry.address_label());
         form.editing = Some(index);
+        form.pack_status = entry.pack_status;
         form
     }
 
@@ -507,7 +531,20 @@ impl EditForm {
         } else {
             self.name().to_owned()
         };
-        ServerEntry::new(name, host, port)
+        let mut entry = ServerEntry::new(name, host, port);
+        entry.pack_status = self.pack_status;
+        entry
+    }
+
+    /// The resource-pack `CycleButton`'s current value, for the row's label.
+    #[must_use]
+    pub fn pack_status(&self) -> super::servers::ServerPackPolicy {
+        self.pack_status
+    }
+
+    /// Advances [`Self::pack_status`] — the `RESOURCE_PACK_ROW` click.
+    pub fn cycle_pack_status(&mut self) {
+        self.pack_status = self.pack_status.cycle();
     }
 
     /// One key, routed through vanilla's `Screen.keyPressed` order: Escape, then
@@ -1270,6 +1307,14 @@ pub struct MenuNav {
     /// stale target can never survive into the next one. A confirmation that
     /// remembered the last answer is the failure mode this rules out.
     confirm: crate::menu::confirm::ConfirmNav,
+    /// The live resource-pack prompt's own widgets, focus and pack id, held
+    /// for [`Self::command_block`]'s reason: it owns real widget focus state
+    /// that cannot be rebuilt per frame, and there is no non-empty default
+    /// to construct eagerly, since it is entirely server-driven (a
+    /// `net::PendingResourcePackPrompt`, not a menu button). `None` whenever
+    /// [`Screen::ResourcePackPrompt`](super::Screen::ResourcePackPrompt) is
+    /// not showing — see [`Self::open_resource_pack_prompt`].
+    resource_pack_prompt: Option<crate::menu::confirm::ResourcePackPromptNav>,
     /// A double-click on a server row joins it — vanilla's
     /// `ServerSelectionList.java`, `if (doubleClick) join()`,
     /// unconditional on where in the row the click landed. The primitive is
@@ -1418,6 +1463,7 @@ impl MenuNav {
             click_clock: crate::platform::Instant::now(),
             command_block: None,
             sign_edit: None,
+            resource_pack_prompt: None,
             command_tree: None,
             lan_published: false,
         }
@@ -2293,6 +2339,33 @@ impl MenuNav {
         &self.confirm
     }
 
+    /// The live resource-pack prompt, if [`Screen::ResourcePackPrompt`] is
+    /// showing — what it asks and which pack it answers for. `None` off that
+    /// screen, the same shape [`Self::sign_edit`]/[`Self::command_block`]
+    /// use.
+    #[must_use]
+    pub fn resource_pack_prompt(&self) -> Option<&crate::menu::confirm::ResourcePackPromptNav> {
+        self.resource_pack_prompt.as_ref()
+    }
+
+    /// Opens the resource-pack prompt for `prompt` — `app/session.rs`'s
+    /// `drive_ui_from_session` calls this once per frame while
+    /// `NetClient::pending_resource_pack_prompt` is `Some` and the prompt is
+    /// not already showing (mirroring how it reconciles
+    /// `Sim::is_dead`/`Sim::has_won` into their own screens). A **new**
+    /// `ResourcePackPromptNav` is built every call rather than reused, so a
+    /// second push cannot inherit a stale focus or a stale pack id — the
+    /// same replace-not-mutate discipline [`Self::confirm`]'s own doc
+    /// describes for [`Screen::WorldSelect`]'s Delete confirmation.
+    pub fn show_resource_pack_prompt(
+        &mut self,
+        ui: &mut UiState,
+        prompt: &crate::net::PendingResourcePackPrompt,
+    ) {
+        self.resource_pack_prompt = Some(crate::menu::confirm::ResourcePackPromptNav::new(prompt));
+        ui.open_resource_pack_prompt();
+    }
+
     /// Moves the highlight to row `row` of the current screen, as a mouse hover
     /// would. Out-of-range rows are ignored rather than clamped: the caller
     /// hit-tests against the rendered rects, so "no row here" must not silently
@@ -2328,6 +2401,12 @@ impl MenuNav {
             // onto the affirmative button would arm the *next* Enter to delete.
             // See `confirm::ConfirmNav::hover`.
             Screen::Confirm => self.confirm.hover(row),
+            // Same reasoning as `Screen::Confirm` immediately above.
+            Screen::ResourcePackPrompt => {
+                if let Some(prompt) = &mut self.resource_pack_prompt {
+                    prompt.hover(row);
+                }
+            }
             // `hover_row` is `ContainerEventHandler.setFocused(child)` for the
             // two text fields — real focus, not a highlight index, because the
             // row indices and `EditForm`'s focus ids are the same numbers (see
@@ -2501,8 +2580,13 @@ impl MenuNav {
                 // Enter/Escape so the two paths cannot disagree.
                 DONE_ROW => self.save_entry(ui),
                 CANCEL_ROW => self.cancel_edit(ui),
-                // `RESOURCE_PACK_ROW` (present, inactive — see its doc) and
-                // anything past the five rows this screen has: a click does
+                // `ManageServerScreen`'s `manageServer.resourcePack`
+                // `CycleButton` — see `RESOURCE_PACK_ROW`'s doc.
+                RESOURCE_PACK_ROW => {
+                    self.form.cycle_pack_status();
+                    MenuAction::None
+                }
+                // Anything past the five rows this screen has: a click does
                 // nothing, same as every other inactive control.
                 _ => MenuAction::None,
             };
@@ -2523,6 +2607,15 @@ impl MenuNav {
         if ui.screen() == Screen::Confirm {
             let outcome = self.confirm.click_row(row);
             return self.apply_confirm(ui, outcome);
+        }
+        // The resource-pack prompt. Same reasoning as `Screen::Confirm`
+        // immediately above.
+        if ui.screen() == Screen::ResourcePackPrompt {
+            let Some(prompt) = &mut self.resource_pack_prompt else {
+                return MenuAction::None;
+            };
+            let outcome = prompt.click_row(row);
+            return self.apply_resource_pack_prompt(ui, outcome);
         }
         // World Creation (issue #190) — #391's shape again: a click focuses a
         // field or presses a button, never "hover then Enter".
@@ -2795,6 +2888,9 @@ impl MenuNav {
             // answer* rather than a bare unwind, which is why it needs an arm of
             // its own and cannot fall through to `UiState::on_escape`.
             Screen::Confirm => self.key_confirm(ui, key),
+            // The resource-pack prompt. Same reasoning as `Screen::Confirm`
+            // immediately above — Escape is Decline, not a bare unwind.
+            Screen::ResourcePackPrompt => self.key_resource_pack_prompt(ui, key),
             Screen::Settings => self.key_settings(ui, key),
             Screen::Accounts => self.key_accounts(ui, key),
             // Unlike the other arms above, the pause menu is not an
@@ -3420,6 +3516,51 @@ impl MenuNav {
                         .set_error(format!("Could not delete the world: {e}"));
                 }
                 MenuAction::None
+            }
+        }
+    }
+
+    /// The resource-pack prompt. Every key goes through
+    /// [`crate::menu::confirm::ResourcePackPromptNav::handle_key`], which
+    /// follows [`crate::menu::confirm::ConfirmNav::handle_key`]'s own order —
+    /// including its Escape branch, which answers Decline rather than a bare
+    /// close.
+    fn key_resource_pack_prompt(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        let Some(prompt) = &mut self.resource_pack_prompt else {
+            return MenuAction::None;
+        };
+        let outcome = prompt.handle_key(key);
+        self.apply_resource_pack_prompt(ui, outcome)
+    }
+
+    /// What an answer to the resource-pack prompt means: close the overlay
+    /// (back to whatever live screen it opened over) and hand the app the
+    /// [`MenuAction::ResourcePackResponse`] to submit — `MenuNav` holds no
+    /// `Sim`/`NetClient` to send it through itself, [`MenuAction::Respawn`]'s
+    /// own division of labour.
+    ///
+    /// `self.resource_pack_prompt` is taken (`Option::take`), not merely
+    /// read, so a second answer to an already-closed prompt (a double-click
+    /// racing the overlay's own close) cannot resubmit it — the same
+    /// "already handled" shape [`Screen::Death`]'s respawn button relies on
+    /// `Sim::respawn`'s own idempotence for, done here at the source instead.
+    fn apply_resource_pack_prompt(
+        &mut self,
+        ui: &mut UiState,
+        outcome: crate::menu::confirm::ResourcePackPromptOutcome,
+    ) -> MenuAction {
+        use crate::menu::confirm::ResourcePackPromptOutcome;
+        match outcome {
+            ResourcePackPromptOutcome::Handled => MenuAction::None,
+            ResourcePackPromptOutcome::Accept | ResourcePackPromptOutcome::Decline => {
+                let Some(prompt) = self.resource_pack_prompt.take() else {
+                    return MenuAction::None;
+                };
+                ui.close_resource_pack_prompt();
+                MenuAction::ResourcePackResponse {
+                    id: prompt.id(),
+                    accept: outcome == ResourcePackPromptOutcome::Accept,
+                }
             }
         }
     }
@@ -4810,6 +4951,10 @@ pub fn on_screen_frame<'a>(
     if let Some(frame) = sign_edit_overlay_frame(ui, nav) {
         return Some(frame);
     }
+    // The sixth overlay screen, same shape again.
+    if let Some(frame) = resource_pack_prompt_overlay_frame(ui, nav) {
+        return Some(frame);
+    }
     super::render::frame_for(ui, nav, statuses, favicons)
 }
 
@@ -4825,6 +4970,22 @@ pub fn sign_edit_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super:
     }
     let state = nav.sign_edit()?;
     Some(super::render::sign_edit_frame(state))
+}
+
+/// The resource-pack prompt's overlay frame, or `None` when it is not up —
+/// the sixth overlay screen, [`sign_edit_overlay_frame`]'s exact shape and
+/// for the same reason: a second construction in `app/redraw.rs`'s draw
+/// block would be free to disagree with what this hit-tests against.
+#[must_use]
+pub fn resource_pack_prompt_overlay_frame<'a>(
+    ui: &UiState,
+    nav: &MenuNav,
+) -> Option<super::render::MenuFrame<'a>> {
+    if !ui.is_resource_pack_prompt() {
+        return None;
+    }
+    let prompt = nav.resource_pack_prompt()?;
+    Some(crate::menu::confirm::resource_pack_prompt_frame(prompt))
 }
 
 /// The **in-world** settings screen's overlay frame, or `None` when settings is not
@@ -4961,6 +5122,12 @@ pub fn routes_menu_input(ui: &UiState) -> bool {
         // `_` arm of `MenuNav::key` routes exactly that through
         // `UiState::on_escape`.
         || ui.is_advancements()
+        // Same reasoning as `is_command_block_open`/`is_sign_edit_open`
+        // immediately above: without this arm a click or keystroke while the
+        // prompt is up would fall through to gameplay input (mining,
+        // movement) instead of answering the dialog — the screen would open,
+        // draw, and never receive a single Accept/Decline.
+        || ui.is_resource_pack_prompt()
 }
 
 /// Steps `i` one row in `forward`'s direction, wrapping, and keeps stepping
@@ -5146,6 +5313,57 @@ mod tests {
         assert!(matches!(action, MenuAction::Forget(_)), "{action:?}");
         assert!(nav.list().is_empty());
         assert!(MenuNav::with_path(path.clone()).list().is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn clicking_the_resource_pack_row_cycles_and_persists_the_choice() {
+        use crate::menu::servers::ServerPackPolicy;
+        let (mut nav, path) = nav("packrow");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        nav.key(&mut ui, MenuKey::Char('a'));
+        assert_eq!(ui.screen(), Screen::ServerEdit);
+        assert_eq!(
+            nav.form().pack_status(),
+            ServerPackPolicy::Prompt,
+            "a new entry defaults to Prompt, matching a freshly added vanilla server"
+        );
+
+        // Enabled -> Disabled -> Prompt -> Enabled, vanilla's declaration order.
+        assert_eq!(nav.click(&mut ui, RESOURCE_PACK_ROW), MenuAction::None);
+        assert_eq!(nav.form().pack_status(), ServerPackPolicy::Enabled);
+        assert_eq!(nav.click(&mut ui, RESOURCE_PACK_ROW), MenuAction::None);
+        assert_eq!(nav.form().pack_status(), ServerPackPolicy::Disabled);
+        assert_eq!(nav.click(&mut ui, RESOURCE_PACK_ROW), MenuAction::None);
+        assert_eq!(nav.form().pack_status(), ServerPackPolicy::Prompt);
+        assert_eq!(nav.click(&mut ui, RESOURCE_PACK_ROW), MenuAction::None);
+        assert_eq!(nav.form().pack_status(), ServerPackPolicy::Enabled);
+
+        // Save, and the choice must have travelled with the entry — through
+        // `to_entry`, through `ServerList::to_json`, and back out of a fresh
+        // `MenuNav` reading the same file, not merely out of the live one.
+        type_str(&mut nav, &mut ui, "Home");
+        nav.key(&mut ui, MenuKey::Tab);
+        type_str(&mut nav, &mut ui, "mc.example.com");
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(ui.screen(), Screen::ServerList);
+        assert_eq!(nav.list().get(0).unwrap().pack_status, ServerPackPolicy::Enabled);
+        assert_eq!(
+            MenuNav::with_path(path.clone())
+                .list()
+                .get(0)
+                .unwrap()
+                .pack_status,
+            ServerPackPolicy::Enabled,
+            "the policy must be on disk, not only in the live list"
+        );
+
+        // Re-opening the edit form for this entry seeds the cycle button from
+        // the saved value, not from `Prompt`.
+        nav.key(&mut ui, MenuKey::Char('e'));
+        assert_eq!(ui.screen(), Screen::ServerEdit);
+        assert_eq!(nav.form().pack_status(), ServerPackPolicy::Enabled);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -9454,6 +9672,21 @@ mod tests {
             ("SignEdit", |ui, nav| {
                 ui.enter_dev_world();
                 nav.open_sign_edit(ui, sign_edit::SignEditOpen::default());
+            }),
+            // The sixth overlay screen — the frame is built from
+            // `MenuNav::resource_pack_prompt`, so this drives
+            // `show_resource_pack_prompt` rather than a bare
+            // `ui.open_resource_pack_prompt()`, the same "not the production
+            // state otherwise" reason `CommandBlockEdit`/`SignEdit` above give.
+            ("ResourcePackPrompt", |ui, nav| {
+                ui.enter_dev_world();
+                nav.show_resource_pack_prompt(
+                    ui,
+                    &crate::net::PendingResourcePackPrompt::for_test(
+                        uuid::Uuid::from_u128(1),
+                        false,
+                    ),
+                );
             }),
         ];
 
