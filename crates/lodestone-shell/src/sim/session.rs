@@ -625,6 +625,20 @@ impl Sim {
         })
     }
 
+    /// The span-carrying sibling of `recent_chat`: same recent-lines-with-age
+    /// projection, `recent_ages_spans` in place of `recent_ages`, so a hex
+    /// colour survives past this accessor.
+    #[must_use]
+    pub fn recent_chat_spans(&self, n: usize) -> Vec<(Vec<lodestone_model::TextSpan>, f32)> {
+        let now = self.clock().secs;
+        self.read(|w| {
+            w.get::<SessionChat>(self.local)
+                .expect("the local player always carries SessionChat")
+                .0
+                .recent_ages_spans(n, now)
+        })
+    }
+
     /// Push a client-authored system line into the chat feed.
     ///
     /// The one writer that is not the wire. Vanilla has the same seam —
