@@ -959,6 +959,24 @@ impl Sim {
         self.local
     }
 
+    /// The server's advertised links, as `SERVER_LINKS` last delivered them.
+    ///
+    /// [`Self::statistics`]'s exact shape: cloned out from under a short read
+    /// guard rather than handed out as a reference, and the one caller
+    /// (`app::session`'s reconciliation, which pushes this into
+    /// `menu::nav::MenuNav::refresh_server_links` once per frame) is what the
+    /// pause menu's Server Links row — and the screen it opens — read.
+    #[must_use]
+    pub fn server_links(&self) -> Vec<lodestone_model::event::ServerLink> {
+        self.read(|w| {
+            w.get::<lodestone_ecs::session::SessionServerInfo>(self.local)
+                .expect("the local player always carries SessionServerInfo")
+                .0
+                .links()
+                .to_vec()
+        })
+    }
+
     // -----------------------------------------------------------------------
     // The chunk world and terrain meshing, which live in `self.ecs` (Stage 4)
     // -----------------------------------------------------------------------
@@ -1494,7 +1512,12 @@ mod meshing;
 mod build;
 mod session;
 mod collide;
-mod step;
+// `pub(crate)`, not the bare `mod` every other seam above uses: `entities.rs`
+// reuses `step::{body_yaw_target, tick_head_turn}` for the remote-player body
+// yaw simulation (`tick_remote_body_yaw`) rather than forking a second copy of
+// vanilla's `LivingEntity.tickHeadTurn`. Everything else in this file stays
+// reachable only from `sim`'s descendants, per the comment above.
+pub(crate) mod step;
 mod render_sources;
 // The dimension cluster: `dimension`/`sky_mode` (the one read of "which dimension
 // are we in"), the portal-transition effect's tick and lerp, and the

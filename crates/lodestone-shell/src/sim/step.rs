@@ -62,8 +62,15 @@ use super::*;
 /// rather than the way the feet are moving), and snaps straight to the look
 /// yaw while an arm swing is in progress (`attackAnim > 0.0F`), overriding
 /// the walking clause outright — vanilla checks it *after*, unconditionally.
+///
+/// `pub(crate)` rather than private: `crate::entities::tick_remote_body_yaw`
+/// reuses this exact port for every tracked player entity, not only the local
+/// one -- a player's reported body/head yaw arrive over the wire equal (see
+/// that function's doc), so this same client-side lag is the only way a
+/// remote player's body ever diverges from its head. One implementation of
+/// the rule, called from two places, not a second copy risking drift.
 #[must_use]
-fn body_yaw_target(body_yaw: f32, look_yaw: f32, dx: f64, dz: f64, attacking: bool) -> f32 {
+pub(crate) fn body_yaw_target(body_yaw: f32, look_yaw: f32, dx: f64, dz: f64, attacking: bool) -> f32 {
     let mut target = body_yaw;
     let side_dist = (dx * dx + dz * dz) as f32;
     if side_dist > 0.002_500_000_2 {
@@ -89,8 +96,10 @@ fn body_yaw_target(body_yaw: f32, look_yaw: f32, dx: f64, dz: f64, attacking: bo
 /// `getMaxHeadRotationRelativeToBody()`: `50.0` by default
 /// (`LivingEntity`), narrowed to `15.0` while a `Player` blocks with a
 /// shield (`Player`'s override — see [`Sim::is_blocking`]).
+///
+/// `pub(crate)`, for the same reuse as [`body_yaw_target`] just above.
 #[must_use]
-fn tick_head_turn(body_yaw: f32, look_yaw: f32, target: f32, max_head_rotation: f32) -> f32 {
+pub(crate) fn tick_head_turn(body_yaw: f32, look_yaw: f32, target: f32, max_head_rotation: f32) -> f32 {
     let mut body = body_yaw + wrap_degrees(target - body_yaw) * 0.3;
     let head_diff = wrap_degrees(look_yaw - body);
     if head_diff.abs() > max_head_rotation {
