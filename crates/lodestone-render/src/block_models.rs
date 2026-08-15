@@ -1752,16 +1752,13 @@ impl BlockModels {
         } = collect_item_variants(manager);
         let atlas = build_complete_atlas(manager, &resolver, &item_parts, &sprite_parts)?;
 
-        // Precompute each atlas sprite's render layer once; a baked quad's layer
-        // is the layer of the sprite its UVs land in.
-        let sprite_rects: Vec<SpriteRect> = atlas
+        // Precompute each atlas sprite's render layer once, indexed the same
+        // way `atlas.sprites()` is — a baked quad's own `sprite` field (an
+        // index into that same order) is the lookup, no UV geometry involved.
+        let sprite_layers: Vec<RenderLayer> = atlas
             .sprites()
             .iter()
-            .map(|s| SpriteRect {
-                uv_min: s.uv_min,
-                uv_max: s.uv_max,
-                layer: sprite_layer(&atlas, s),
-            })
+            .map(|s| sprite_layer(&atlas, s))
             .collect();
 
         let baker = BlockBaker::new(manager, &resolver, &atlas);
@@ -1811,8 +1808,8 @@ impl BlockModels {
                         .as_ref()
                         .and_then(|r| tints.color(vanilla_particle_tint_kind(r.block, r.properties)))
                         .map(unpack_rgb);
-                    let layer = block_layer(&sprite_rects, &quads);
-                    let face_occludes = face_occlusion(&sprite_rects, &quads);
+                    let layer = block_layer(&sprite_layers, &quads);
+                    let face_occludes = face_occlusion(&sprite_layers, &quads);
                     let is_leaves = resolved
                         .is_some_and(|r| FLUID_OVERLAY_LEAVES_BLOCKS.contains(&r.block.path()));
                     // Copied from the static list itself (not borrowed from
@@ -2456,15 +2453,6 @@ fn sprite_uv(atlas: &Atlas, loc: &ResourceLocation) -> SpriteUv {
         )
 }
 
-/// A sprite's UV rectangle plus its precomputed render layer, for mapping a baked
-/// quad back to the sprite it samples.
-#[derive(Debug, Clone, Copy)]
-struct SpriteRect {
-    uv_min: [f32; 2],
-    uv_max: [f32; 2],
-    layer: RenderLayer,
-}
-
 /// Stitch a complete block atlas: every texture referenced by any blockstate's
 /// resolved models, so a baked quad's UVs always resolve to a real sprite.
 ///
@@ -2581,11 +2569,11 @@ fn sprite_alpha(atlas: &Atlas, sprite: &AtlasSprite) -> Vec<u8> {
 /// The render layer of a whole block: the most transparent layer across all its
 /// quads' sprites (`Solid < Cutout < Translucent`), so a block with any
 /// translucent face lands on the translucent pass.
-fn block_layer(sprites: &[SpriteRect], quads: &[BakedQuad]) -> RenderLayer {
+fn block_layer(sprite_layers: &[RenderLayer], quads: &[BakedQuad]) -> RenderLayer {
     let mut layer = RenderLayer::Solid;
     for quad in quads {
-        if let Some(sr) = sprite_for_uv(sprites, uv_centroid(quad)) {
-            layer = layer.max(sr.layer);
+        if let Some(&l) = sprite_layers.get(quad.sprite as usize) {
+            layer = layer.max(l);
         }
     }
     layer
@@ -2640,7 +2628,7 @@ fn block_layer(sprites: &[SpriteRect], quads: &[BakedQuad]) -> RenderLayer {
 /// "air" bank, tilting and animating the surface. Measured on an 8×8×8 pool:
 /// 64 quads (all horizontal) with occluding walls, **384 quads, 284 of them
 /// vertical** with non-occluding ones.
-fn face_occlusion(sprites: &[SpriteRect], quads: &[BakedQuad]) -> [bool; 6] {
+fn face_occlusion(sprite_layers: &[RenderLayer], quads: &[BakedQuad]) -> [bool; 6] {
     let mut opaque_face = [false; 6];
     let mut interior_drawn = [false; 6];
     for quad in quads {
@@ -2655,31 +2643,11 @@ fn face_occlusion(sprites: &[SpriteRect], quads: &[BakedQuad]) -> [bool; 6] {
         if !quad_is_full_face(quad) {
             continue;
         }
-        if sprite_for_uv(sprites, uv_centroid(quad)).is_some_and(|sr| sr.layer == RenderLayer::Solid)
-        {
+        if sprite_layers.get(quad.sprite as usize) == Some(&RenderLayer::Solid) {
             opaque_face[facing.index()] = true;
         }
     }
     std::array::from_fn(|i| opaque_face[i] && !interior_drawn[i])
-}
-
-/// The centroid of a quad's four UVs — a point guaranteed to sit inside its
-/// sprite's UV rect, robust to a corner landing exactly on a shared edge.
-fn uv_centroid(quad: &BakedQuad) -> [f32; 2] {
-    let mut u = 0.0;
-    let mut v = 0.0;
-    for c in &quad.uvs {
-        u += c[0];
-        v += c[1];
-    }
-    [u / 4.0, v / 4.0]
-}
-
-/// Find the sprite whose UV rect contains `uv`.
-fn sprite_for_uv(sprites: &[SpriteRect], uv: [f32; 2]) -> Option<&SpriteRect> {
-    sprites.iter().find(|s| {
-        uv[0] >= s.uv_min[0] && uv[0] <= s.uv_max[0] && uv[1] >= s.uv_min[1] && uv[1] <= s.uv_max[1]
-    })
 }
 
 #[cfg(test)]
@@ -2687,16 +2655,17 @@ mod tests {
     use super::*;
     use lodestone_assets::Direction;
 
-    fn quad_with_uv(uv: [f32; 2]) -> BakedQuad {
+    fn quad_with_sprite(sprite: u32) -> BakedQuad {
         BakedQuad {
             positions: [[0.0; 3]; 4],
-            uvs: [uv; 4],
+            uvs: [[0.0, 0.0]; 4],
             direction: Direction::Up,
             cullface: None,
             tint_index: None,
             shade: true,
             layer: 0,
             anim: 0,
+            sprite,
         }
     }
 
@@ -2741,61 +2710,61 @@ mod tests {
         );
     }
 
+    /// `block_layer`/`face_occlusion` now recover "which sprite does this quad
+    /// sample" as a direct array index (`sprite_layers[quad.sprite as usize]`)
+    /// rather than a UV containment scan — see [`BakedQuad::sprite`]'s doc.
+    /// This is the case a geometric scan structurally cannot resolve and an
+    /// index can: two sprites sharing a UV edge, so a quad whose (degenerate,
+    /// all-corners-equal) UV sits exactly on that edge is ambiguous by
+    /// containment alone. `quad_with_sprite` records the real index the baker
+    /// would have carried, sidestepping the ambiguity entirely.
     #[test]
-    fn uv_centroid_is_the_average_corner() {
-        let q = BakedQuad {
-            uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-            ..quad_with_uv([0.0, 0.0])
+    fn block_layer_reads_the_sprite_the_quad_indexes_not_a_uv_scan() {
+        let sprite_layers = vec![RenderLayer::Solid, RenderLayer::Translucent];
+        // Both quads carry the identical (shared-edge) UV `[0.5, 0.5]` — a
+        // geometric scan would find whichever sprite's `find` happens to hit
+        // first for *both* of them. The index tells them apart regardless.
+        let shared_edge_uv = [[0.5, 0.5]; 4];
+        let solid_quad = BakedQuad {
+            uvs: shared_edge_uv,
+            ..quad_with_sprite(0)
         };
-        assert_eq!(uv_centroid(&q), [0.5, 0.5]);
-    }
-
-    #[test]
-    fn sprite_for_uv_finds_the_containing_rect() {
-        let sprites = vec![
-            SpriteRect {
-                uv_min: [0.0, 0.0],
-                uv_max: [0.5, 1.0],
-                layer: RenderLayer::Solid,
-            },
-            SpriteRect {
-                uv_min: [0.5, 0.0],
-                uv_max: [1.0, 1.0],
-                layer: RenderLayer::Translucent,
-            },
-        ];
+        let translucent_quad = BakedQuad {
+            uvs: shared_edge_uv,
+            ..quad_with_sprite(1)
+        };
         assert_eq!(
-            sprite_for_uv(&sprites, [0.25, 0.5]).map(|s| s.layer),
-            Some(RenderLayer::Solid)
+            block_layer(&sprite_layers, std::slice::from_ref(&solid_quad)),
+            RenderLayer::Solid
         );
         assert_eq!(
-            sprite_for_uv(&sprites, [0.75, 0.5]).map(|s| s.layer),
-            Some(RenderLayer::Translucent)
+            block_layer(&sprite_layers, std::slice::from_ref(&translucent_quad)),
+            RenderLayer::Translucent
         );
-        assert!(sprite_for_uv(&sprites, [2.0, 2.0]).is_none());
     }
 
     #[test]
     fn block_layer_takes_the_most_transparent_face() {
         // One translucent face drags the whole block onto the translucent pass.
-        let sprites = vec![
-            SpriteRect {
-                uv_min: [0.0, 0.0],
-                uv_max: [0.5, 1.0],
-                layer: RenderLayer::Solid,
-            },
-            SpriteRect {
-                uv_min: [0.5, 0.0],
-                uv_max: [1.0, 1.0],
-                layer: RenderLayer::Translucent,
-            },
-        ];
-        let quads = vec![quad_with_uv([0.25, 0.5]), quad_with_uv([0.75, 0.5])];
-        assert_eq!(block_layer(&sprites, &quads), RenderLayer::Translucent);
+        let sprite_layers = vec![RenderLayer::Solid, RenderLayer::Translucent];
+        let quads = vec![quad_with_sprite(0), quad_with_sprite(1)];
+        assert_eq!(block_layer(&sprite_layers, &quads), RenderLayer::Translucent);
 
         // All-solid stays solid.
-        let solid_only = vec![quad_with_uv([0.25, 0.5])];
-        assert_eq!(block_layer(&sprites, &solid_only), RenderLayer::Solid);
+        let solid_only = vec![quad_with_sprite(0)];
+        assert_eq!(block_layer(&sprite_layers, &solid_only), RenderLayer::Solid);
+    }
+
+    /// An out-of-range `sprite` index (never produced by the real baker, but
+    /// worth being defensive about) must not panic — `block_layer`/
+    /// `face_occlusion` both go through `sprite_layers.get(..)`, not
+    /// `sprite_layers[..]`.
+    #[test]
+    fn an_out_of_range_sprite_index_does_not_panic() {
+        let sprite_layers = vec![RenderLayer::Solid];
+        let quads = vec![quad_with_sprite(99)];
+        assert_eq!(block_layer(&sprite_layers, &quads), RenderLayer::Solid);
+        assert_eq!(face_occlusion(&sprite_layers, &quads), [false; 6]);
     }
 
     #[test]
@@ -3074,6 +3043,7 @@ mod live_item_tint_tests {
             shade: false,
             layer: 0,
             anim: 0,
+            sprite: 0,
         }
     }
 

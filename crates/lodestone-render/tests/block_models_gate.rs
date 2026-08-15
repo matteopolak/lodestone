@@ -277,6 +277,106 @@ fn nether_portal_is_a_translucent_non_occluding_swirl() {
     );
 }
 
+/// Refactor-parity gate for `BakedQuad::sprite`: the baker's own index must
+/// name the exact sprite the quad's UVs were baked against, over **every**
+/// quad of **every** real block state — not a synthetic fixture.
+///
+/// This is the instrument #526 asked for: `BlockModels::build`'s per-state
+/// loop used to recover "which sprite does this quad sample" with a linear
+/// UV-containment scan (`sprite_for_uv`) over every atlas sprite, once per
+/// quad per state — over 32k states and >1000 block sprites
+/// (`lodestone-assets/tests/real_jar.rs` asserts that floor), a real startup
+/// cost. `BakedQuad` now carries the baker's own `sprite` index, and
+/// `block_layer`/`face_occlusion` read it directly (`sprites.get(quad.sprite
+/// as usize)`, an O(1) index — `sprite_for_uv` and its scan no longer exist
+/// in the source at all, which is the strongest form of "0 candidates
+/// tested": there is no scan left to count candidates in).
+///
+/// The parity check does not re-derive the deleted scan (that would just be
+/// a second copy of the removed code) — instead it independently re-derives
+/// the expected UV rect from `AtlasSprite::frame_uv`, which is the same
+/// public entry point the baker itself calls, and asserts every one of a
+/// quad's four baked UVs (with float slop for the atlas's mip-edge inset)
+/// falls inside frame 0's rect of the sprite `quad.sprite` names. If the
+/// index pointed at the wrong sprite, or a stale/default `0` had leaked
+/// through anywhere in the pipeline, this fails: a wrong sprite's rect
+/// essentially never contains another sprite's UVs (they are packed
+/// disjoint, with only 1px+ padding between them), so a wrong index is not a
+/// coincidence this check could miss.
+#[test]
+#[ignore = "requires a fetched vanilla client.jar and generated/reports/blocks.json"]
+fn baked_quad_sprite_index_names_the_sprite_its_own_uvs_were_baked_against() {
+    let (models, _mgr, reg) = build_models();
+    let atlas = models.atlas();
+    let sprites = atlas.sprites();
+
+    // Generous slop: `BLOCK_ATLAS_MIP_LEVELS` padding plus the mip-edge UV
+    // inset can pull a quad's UV a few texels inside its own sprite's frame
+    // rect (never outside it, never into a neighbour's) — this check cares
+    // about "still inside *this* sprite", not exact-edge equality.
+    const SLOP: f32 = 0.01;
+
+    let mut checked_quads: u64 = 0;
+    let mut checked_states: u64 = 0;
+    let mut mismatches: Vec<String> = Vec::new();
+    for id in 0..reg.state_count() {
+        let sm = models.state(id);
+        if sm.quads.is_empty() {
+            continue;
+        }
+        checked_states += 1;
+        for quad in &sm.quads {
+            checked_quads += 1;
+            let Some(sprite) = sprites.get(quad.sprite as usize) else {
+                mismatches.push(format!(
+                    "state {id}: sprite index {} is out of range ({} sprites)",
+                    quad.sprite,
+                    sprites.len()
+                ));
+                continue;
+            };
+            let Some((fmin, fmax)) = sprite.frame_uv(0, atlas.width, atlas.height) else {
+                mismatches.push(format!(
+                    "state {id}: sprite {} ({}) has no frame 0",
+                    quad.sprite, sprite.location
+                ));
+                continue;
+            };
+            for uv in &quad.uvs {
+                let inside = uv[0] >= fmin[0] - SLOP
+                    && uv[0] <= fmax[0] + SLOP
+                    && uv[1] >= fmin[1] - SLOP
+                    && uv[1] <= fmax[1] + SLOP;
+                if !inside {
+                    mismatches.push(format!(
+                        "state {id}: quad UV {uv:?} falls outside sprite {} ({})'s frame \
+                         rect {fmin:?}..{fmax:?} — the sprite index names the wrong sprite",
+                        quad.sprite, sprite.location
+                    ));
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "states with geometry = {checked_states}, quads checked = {checked_quads}, \
+         sprites in atlas = {}",
+        sprites.len()
+    );
+    assert!(
+        checked_quads > 100_000,
+        "only {checked_quads} quads checked across {checked_states} states — too few to \
+         be exercising the real jar corpus this gate is supposed to run against"
+    );
+    assert!(
+        mismatches.is_empty(),
+        "{} of {checked_quads} quads have a sprite index that does not name their own \
+         sprite:\n{}",
+        mismatches.len(),
+        mismatches.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+    );
+}
+
 /// Occlusion is decided **per face** from the covering quad's sprite, not from
 /// the block's render layer — the fix for the reported water-shoreline bug.
 ///

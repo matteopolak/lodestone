@@ -51,6 +51,7 @@ fn up_quad(tinted: bool) -> BakedQuad {
         shade: true,
         layer: 0,
         anim: 0,
+        sprite: 0,
     }
 }
 

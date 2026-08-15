@@ -863,6 +863,7 @@ fn fluid_quad(
         shade: false,
         layer: 0,
         anim,
+        sprite: 0,
     }
 }
 
@@ -892,6 +893,7 @@ fn back_face(front: &BakedQuad) -> BakedQuad {
         shade: false,
         layer: 0,
         anim: front.anim,
+        sprite: 0,
     }
 }
 

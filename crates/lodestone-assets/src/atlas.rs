@@ -390,6 +390,20 @@ impl Atlas {
         self.index.get(location).map(|&i| &self.sprites[i])
     }
 
+    /// The index of a sprite (by resource location) into [`Self::sprites`]'s
+    /// slice — the same order a caller iterating [`Self::sprites`] sees, so
+    /// the index this returns is stable to index back into any parallel
+    /// per-sprite table a caller built by mapping over [`Self::sprites`].
+    ///
+    /// Exists so a baker can record *which* sprite a quad samples once, at
+    /// bake time, instead of a consumer re-deriving it later with a UV
+    /// containment scan over every sprite (see [`crate::BakedQuad::sprite`]'s
+    /// doc).
+    #[must_use]
+    pub fn sprite_index(&self, location: &ResourceLocation) -> Option<usize> {
+        self.index.get(location).copied()
+    }
+
     /// The number of mip levels including level 0 (so `1` when no mips were
     /// generated). This is the count the renderer sizes its texture allocation
     /// against.
