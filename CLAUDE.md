@@ -105,6 +105,18 @@ All four *checks* are required, and each catches a class the others structurally
   the tab anyway, and it never appeared in a census that had (correctly) filed that call as degradation-class.
   A hazard census keyed on the function is blind to how the result is handled; read the handling.
 
+  **And the `.expect()` can live in `std`, where no grep of ours will ever see it: `std::thread::scope`
+  traps.** Measured the same way as the rest of this table — compiled to a `cdylib` and executed in a wasm
+  VM — `Scope::spawn` reaches `Builder::spawn`'s `Err` through an internal `.expect()`, so it is
+  **crash**-class despite being built on a degradation-class primitive, and under this workspace's
+  `panic = "abort"` release profile that is unrecoverable. It froze the browser tab on world creation:
+  `chunk.rs`'s two offload wrappers fanned out over `thread::scope` on wasm32, while `portal.rs` had
+  already independently discovered and gated the identical hazard for its own call site — the same fix
+  found twice, unshared, because nothing mechanical connected them. So a census that classifies by
+  *our* call sites is not enough either: **a safe-looking `std` wrapper over a degrading primitive
+  inherits none of its gracefulness**, and the only durable answer is a `wasm-check` rule, since the
+  second discovery of a hazard is evidence the first one never became a guard.
+
   **And a rule written in prose is not a rule.** `lodestone-server` already carried this exact one in a doc
   comment — *"this crate must not call `std::time::Instant::now()` anywhere … because the crate links into a
   wasm32 bundle where that compiles and then panics at runtime"* — and **four sites violated it**. The rule was
