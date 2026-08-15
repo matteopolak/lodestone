@@ -334,7 +334,11 @@ pub fn y_offset(top: Option<f64>, moved_up: bool) -> f64 {
 /// block's *lowest* state id rather than its default. That distinction is what
 /// decides whether a bare `minecraft:oak_slab` is a bottom slab or a full cube,
 /// and it is the same trap `crate::mobs`' item-settling probe documents.
-fn collision_boxes_for(state: &str) -> &'static [collision_shapes::Aabb] {
+///
+/// `pub(crate)`: `crate::mob_spawner`'s spawner-tick collision check
+/// (`crate::tick::run_tick_loop`'s call site) reuses this rather than a second
+/// copy of the same resolution order.
+pub(crate) fn collision_boxes_for(state: &str) -> &'static [collision_shapes::Aabb] {
     let id = crate::mobs::block_state_id(state).or_else(|| block_states::state_id(state));
     id.and_then(collision_shapes::collision_boxes)
         .unwrap_or(&[])

@@ -1217,6 +1217,11 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // `DefaultDispenseItemBehavior.execute` draw from the same generator.
     let mut dispenser_rng =
         crate::mob_spawn::SpawnRng::new(crate::redstone_dispenser::DISPENSER_BEHAVIOR_SEED);
+    // `minecraft:spawner` block entities' delay reroll and per-attempt cell
+    // pick (`crate::mob_spawner::SpawnerState::tick`) — one stream shared by
+    // every spawner in the world, matching vanilla's single per-level
+    // `RandomSource` the same way `dispenser_rng` above does for dispensers.
+    let mut spawner_rng = crate::mob_spawn::SpawnRng::new(crate::mob_spawner::SPAWNER_BEHAVIOR_SEED);
     // The built-in tree a `TICK_COMMAND_BLOCK` drain runs a command block's
     // own command through — see that arm's own comment below. Built once per
     // loop, the same convention `crate::server`'s per-connection `CommandSession`
@@ -1675,6 +1680,100 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             );
         });
 
+        // Issue #224 (the spawner half): `minecraft:spawner` block entities.
+        // `tick_all_with_hopper_lock` above deliberately does not advance one —
+        // `crate::mob_spawner::SpawnerState::tick` needs the player list and the
+        // live entity set to decide anything, and `BlockEntityRegistry` has a
+        // handle to neither (the same reason the natural-spawn cycle above does
+        // not live in that registry either). Snapshotted once per tick rather
+        // than re-read per spawner, same reasoning as `spawner_players` below.
+        let spawner_snapshots = mobs.with(|sim| sim.snapshots());
+        let spawner_players: Vec<lodestone_model::Vec3> =
+            mobs.with(|sim| sim.players().iter().map(|p| p.perception.position).collect());
+        let spawner_blocks_work = world_state.spawner_blocks_work();
+        let spawner_difficulty = world_state.difficulty().0;
+        let mut spawner_attempts: Vec<crate::mob_spawner::SpawnAttempt> = Vec::new();
+        block_entities.with(|registry| {
+            // Positions snapshotted up front — `tick_all_with_hopper_lock`'s own
+            // doc explains why a plain `HashMap` iterator cannot be walked while
+            // `get_mut` also wants to mutate the map.
+            let positions: Vec<BlockPos> = registry
+                .iter()
+                .filter_map(|(pos, entity)| {
+                    matches!(entity, crate::block_entities::BlockEntity::Spawner(_))
+                        .then_some(*pos)
+                })
+                .collect();
+            for pos in positions {
+                // Issue #504's residency gate, reused: a spawner outside every
+                // loaded chunk must not cost a worldgen call just to be told no.
+                if !world.is_column_resident(pos.x.div_euclid(16), pos.z.div_euclid(16)) {
+                    continue;
+                }
+                let Some(crate::block_entities::BlockEntity::Spawner(state)) =
+                    registry.get_mut(pos)
+                else {
+                    continue;
+                };
+                // `BaseSpawner.isNearPlayer`: an alive player within
+                // `required_player_range` blocks of the spawner's centre.
+                let required_range = f64::from(state.required_player_range());
+                let near_player = spawner_players.iter().any(|p| {
+                    let dx = p.x - (f64::from(pos.x) + 0.5);
+                    let dy = p.y - (f64::from(pos.y) + 0.5);
+                    let dz = p.z - (f64::from(pos.z) + 0.5);
+                    dx * dx + dy * dy + dz * dz <= required_range * required_range
+                });
+                // `level.noCollision`, approximated as "the candidate's floor
+                // cell has an empty collision shape" — see
+                // `crate::mob_spawner`'s module doc for the scope note.
+                let is_valid_position = |v: lodestone_model::Vec3| {
+                    let block = world.block_state(
+                        v.x.floor() as i32,
+                        v.y.floor() as i32,
+                        v.z.floor() as i32,
+                    );
+                    crate::spawn_egg::collision_boxes_for(&block).is_empty()
+                };
+                // `level.getEntities(EntityTypeTest.forExactClass(...), aabb,
+                // NO_SPECTATORS).size()` over the already-taken snapshot set —
+                // an exact-type count, not a category count.
+                let nearby_count =
+                    |entity_type: &lodestone_model::ResourceKey, spawn_range: i32| {
+                        let range = f64::from(spawn_range);
+                        let min_x = f64::from(pos.x) - range;
+                        let min_y = f64::from(pos.y) - range;
+                        let min_z = f64::from(pos.z) - range;
+                        let max_x = f64::from(pos.x + 1) + range;
+                        let max_y = f64::from(pos.y + 1) + range;
+                        let max_z = f64::from(pos.z + 1) + range;
+                        spawner_snapshots
+                            .iter()
+                            .filter(|s| {
+                                &s.entity_type == entity_type
+                                    && (min_x..=max_x).contains(&s.position.x)
+                                    && (min_y..=max_y).contains(&s.position.y)
+                                    && (min_z..=max_z).contains(&s.position.z)
+                            })
+                            .count() as i32
+                    };
+                let ctx = crate::mob_spawner::SpawnCtx {
+                    near_player,
+                    spawner_blocks_work,
+                    difficulty: spawner_difficulty,
+                    pos,
+                    is_valid_position: &is_valid_position,
+                    nearby_count: &nearby_count,
+                };
+                spawner_attempts.extend(state.tick(&ctx, &mut spawner_rng));
+            }
+        });
+        for attempt in spawner_attempts {
+            mobs.with(|sim| {
+                sim.spawn_species(attempt.entity_type, attempt.position);
+            });
+        }
+
         // Issue #323. The clock is the **world's**, not this loop's: one
         // `tick_time` advances `game_time` unconditionally and `day_time` only
         // under the `advance_time` rule (`ServerLevel.tickTime`, where `setDayTime`
@@ -2115,6 +2214,10 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                         // ahead), is a toss.
                         let mut consumed = true;
                         let mut toss = false;
+                        // Set by the bucket arms below: `consumeWithRemainder`
+                        // swaps the picked slot's item for a different one
+                        // (empty↔filled bucket) rather than a plain shrink.
+                        let mut swap_remainder: Option<lodestone_model::ResourceKey> = None;
 
                         if crate::redstone_dispenser::is_dropper(&state) {
                             // `DropperBlock.dispenseFrom`'s container branch.
@@ -2222,6 +2325,65 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                                 // vanilla's own `FlintAndSteelDispenseItemBehavior`.
                                 None => consumed = false,
                             }
+                        } else if let Some(entity_type) = crate::redstone_dispenser::arrow_entity_type(&item_str) {
+                            // `ProjectileDispenseBehavior` — issue #578's
+                            // projectile half. `ArrowItem`/`TippedArrowItem`/
+                            // `SpectralArrowItem` all use the same default
+                            // power/uncertainty; see `arrow_entity_type`'s own
+                            // doc for why a tipped arrow's potion is not
+                            // modelled here.
+                            let position = crate::redstone_dispenser::projectile_dispense_position(center, face);
+                            let velocity = crate::redstone_dispenser::projectile_velocity(
+                                face,
+                                crate::redstone_dispenser::ARROW_DISPENSE_POWER,
+                                crate::redstone_dispenser::ARROW_DISPENSE_UNCERTAINTY,
+                                &mut || dispenser_rng.next_f64(),
+                            );
+                            mobs.with(|sim| {
+                                sim.spawn_projectile(
+                                    entity_type.parse().expect("arrow_entity_type names a real key"),
+                                    lodestone_entity::projectile::Projectile::arrow(
+                                        lodestone_model::Vec3::new(position.0, position.1, position.2),
+                                        lodestone_model::Vec3::new(velocity.0, velocity.1, velocity.2),
+                                    ),
+                                );
+                            });
+                        } else if let Some(kind) = crate::fluid::bucket_empty_item_kind(&item_str) {
+                            // The "filled bucket" shared behaviour
+                            // (`filledBucketBehavior` in the jar) — water and
+                            // lava only, see `crate::fluid`'s own doc section
+                            // for why the other four registrants are not here.
+                            let target = face.relative(origin);
+                            let target_state = lookup(target);
+                            if crate::fluid::is_bucket_emptiable_target(&target_state) {
+                                let new_state = crate::fluid::bucket_empty_state(kind);
+                                world.set_block(target.x, target.y, target.z, new_state);
+                                block_tick_out.publish(target.x, target.y, target.z, new_state.to_owned());
+                                swap_remainder =
+                                    Some("minecraft:bucket".parse().expect("valid key"));
+                            } else {
+                                // `DefaultDispenseItemBehavior` fallback: a
+                                // filled bucket with nowhere to empty just
+                                // tosses like an ordinary item.
+                                toss = true;
+                            }
+                        } else if item_str == "minecraft:bucket" {
+                            let target = face.relative(origin);
+                            let target_state = lookup(target);
+                            if let Some(kind) = crate::fluid::bucket_pickup_kind(&target_state) {
+                                world.set_block(target.x, target.y, target.z, crate::chunk::AIR);
+                                block_tick_out.publish(target.x, target.y, target.z, crate::chunk::AIR.to_owned());
+                                swap_remainder = Some(
+                                    crate::fluid::filled_bucket_item(kind)
+                                        .parse()
+                                        .expect("valid key"),
+                                );
+                            } else {
+                                // Nothing to pick up: vanilla's own
+                                // `super.execute` fallback for an empty bucket
+                                // is a plain toss.
+                                toss = true;
+                            }
                         } else {
                             toss = true;
                         }
@@ -2229,7 +2391,41 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                         if consumed {
                             let mut remaining = stack.clone();
                             remaining.count = remaining.count.saturating_sub(1);
-                            let remainder = if remaining.count == 0 { None } else { Some(remaining) };
+                            let remainder = if remaining.count == 0 {
+                                // `consumeWithRemainder`'s common case: the
+                                // picked slot held exactly one bucket, so the
+                                // swap lands directly in the now-empty slot.
+                                swap_remainder.map(|item| lodestone_model::ItemStack::new(item, 1))
+                            } else {
+                                // A rarer case `consumeWithRemainder` handles by
+                                // searching the dispenser's own inventory for a
+                                // free slot (falling further back to dropping it
+                                // in the world if none exists). Searching this
+                                // container's other eight slots is not modelled
+                                // here; the swap item is tossed outside instead
+                                // — still delivered, never silently discarded.
+                                if let Some(item) = swap_remainder {
+                                    let (position, velocity) = crate::redstone_dispenser::plain_toss(
+                                        center,
+                                        face,
+                                        &mut || dispenser_rng.next_f64(),
+                                    );
+                                    mobs.with(|sim| {
+                                        sim.spawn_item(
+                                            item,
+                                            lodestone_model::Vec3::new(position.0, position.1, position.2),
+                                            lodestone_model::Vec3::new(velocity.0, velocity.1, velocity.2),
+                                            lodestone_entity::ItemLifecycle {
+                                                age: 0,
+                                                pickup_delay: 0,
+                                                count: 1,
+                                                max_stack_size: lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE,
+                                            },
+                                        );
+                                    });
+                                }
+                                Some(remaining)
+                            };
                             block_entities.with(|reg| {
                                 if let Some(entity) = reg.get_mut(origin) {
                                     entity.set_container_slot(slot, remainder);
@@ -3942,7 +4138,11 @@ mod tests {
     // simulation through the production `run_tick_loop`, the island shape
     // CLAUDE.md's rule 1 names (a correct module with zero production
     // callers). Before this arm existed, `TICK_DISPENSER_FIRE` was scheduled
-    // and never drained, so a dispenser filled with arrows sat there forever.
+    // and never drained, so a dispenser filled with cobblestone sat there
+    // forever. Cobblestone rather than an arrow: arrows now dispense as a
+    // projectile (issue #578's remainder), which this plain-toss gate is not
+    // testing — see `the_loop_dispenses_an_arrow_as_a_real_projectile` below
+    // for that arm.
     // ---------------------------------------------------------------------
 
     /// A `ChunkSource` whose `column()` **reflects its own edits** — unlike
@@ -4021,7 +4221,7 @@ mod tests {
             let mut container =
                 crate::block_entities::BlockEntity::container_of_size("minecraft:dispenser", crate::block_entities::CONTAINER_3X3_SIZE);
             container.set_container_slot(0, Some(lodestone_model::ItemStack::new(
-                "minecraft:arrow".parse().expect("valid item key"),
+                "minecraft:cobblestone".parse().expect("valid item key"),
                 3,
             )));
             reg.insert(BlockPos::new(px, py, pz), container);
@@ -4074,10 +4274,10 @@ mod tests {
         assert_eq!(
             snapshots[0].metadata,
             vec![crate::protocol::MetadataField::Item {
-                item: "minecraft:arrow".parse().expect("valid key"),
+                item: "minecraft:cobblestone".parse().expect("valid key"),
                 count: 1,
             }],
-            "exactly one arrow leaves the stack of three — `ItemStack.split(1)`, not the whole stack"
+            "exactly one cobblestone leaves the stack of three — `ItemStack.split(1)`, not the whole stack"
         );
 
         let center_x = f64::from(px) + 0.5;
@@ -4128,5 +4328,276 @@ mod tests {
             Some(2),
             "the container's slot 0 must go from 3 to 2, not stay at 3 or empty out entirely: {remaining:?}"
         );
+    }
+
+    /// Issue #578's projectile half: a dispenser loaded with arrows must put a
+    /// real `minecraft:arrow` **projectile** on the wire, not a plain-tossed
+    /// item entity — the negative control the assertion above (`item_count`
+    /// staying `0`) proves, since a pre-#578 implementation would have this
+    /// exact stack fall through to `plain_toss` and pass as an item instead.
+    #[tokio::test(start_paused = true)]
+    async fn the_loop_dispenses_an_arrow_as_a_real_projectile() {
+        let pos = (11, 6, 9);
+        let (px, py, pz) = pos;
+        let world = ColumnBackedWorld::with(&[(pos, "minecraft:dispenser[facing=east,triggered=true]")]);
+        let scheduled = crate::region_source::ScheduledTickHandle::default();
+        scheduled.with(|queues| {
+            queues.block.schedule(
+                pos,
+                crate::redstone_dispenser::TICK_DISPENSER_FIRE.to_owned(),
+                1,
+                TickPriority::Normal,
+            );
+        });
+        let feed = BlockTickFeed::default();
+        let (mobs, out, block_entities) = handles();
+        block_entities.with(|reg| {
+            let mut container = crate::block_entities::BlockEntity::container_of_size(
+                "minecraft:dispenser",
+                crate::block_entities::CONTAINER_3X3_SIZE,
+            );
+            container.set_container_slot(
+                0,
+                Some(lodestone_model::ItemStack::new(
+                    "minecraft:arrow".parse().expect("valid item key"),
+                    3,
+                )),
+            );
+            reg.insert(BlockPos::new(px, py, pz), container);
+        });
+        tokio::spawn(run_tick_loop(
+            mobs.clone(),
+            out,
+            block_entities.clone(),
+            Arc::new(TickClock::new()),
+            Arc::clone(&world),
+            feed.clone(),
+            (0..=0, 0..=0),
+            ExplosionFeed::default(),
+            scheduled,
+            crate::tick_area::TickFollow::default(),
+        ));
+        tokio::task::yield_now().await;
+
+        let mut spawned_at_tick = None;
+        for tick in 1..=8 {
+            tokio::time::advance(TICK_PERIOD).await;
+            tokio::task::yield_now().await;
+            if mobs.with(|sim| sim.projectile_count()) >= 1 {
+                spawned_at_tick = Some(tick);
+                break;
+            }
+        }
+        assert!(
+            spawned_at_tick.is_some(),
+            "no projectile ever appeared — the arrow arm never fired"
+        );
+        assert_eq!(
+            mobs.with(|sim| sim.item_count()),
+            0,
+            "an arrow must never fall through to the plain-toss item path"
+        );
+
+        let snapshots = mobs.with(|sim| sim.snapshots());
+        assert_eq!(snapshots.len(), 1, "exactly one entity must exist: {snapshots:?}");
+        assert_eq!(
+            snapshots[0].entity_type.to_string(),
+            "minecraft:arrow",
+            "the dispensed entity must be the arrow itself, not an item entity carrying one"
+        );
+
+        // The projectile's spawn point is `dispense_position` shifted `0.1`
+        // *higher* than a plain toss's own point — the one arithmetic
+        // difference `projectile_dispense_position` exists to apply. East
+        // moves only x, so y and z pin the position precisely enough to
+        // catch a missing offset.
+        let expected_x = f64::from(px) + 0.5 + 0.7;
+        let position = snapshots[0].position;
+        assert!(
+            (position.x - expected_x).abs() < 0.5,
+            "position.x = {} is not near the east dispense point {expected_x} (a wide tolerance \
+             because the shoot velocity's own randomness is not being pinned here)",
+            position.x
+        );
+        assert!(
+            (position.y - (f64::from(py) + 0.5 + 0.1)).abs() < 1e-6,
+            "position.y = {} does not match the projectile's own +0.1 offset over a plain toss's point",
+            position.y
+        );
+        assert_eq!(
+            position.z,
+            f64::from(pz) + 0.5,
+            "east does not move z at all"
+        );
+
+        // It flies east: a stationary or backward-moving arrow means the
+        // facing-derived direction never reached `projectile_velocity`.
+        assert!(
+            snapshots[0].velocity.x > 0.0,
+            "an east-facing dispenser must launch the arrow toward +x: {:?}",
+            snapshots[0].velocity
+        );
+    }
+
+    /// Issue #578's fluid-bucket half. Two arms in one test, sharing a
+    /// dispenser position but run as two independent scenarios (each its own
+    /// fresh world/handles), matching this crate's own habit of keeping
+    /// ordering and `amount`-shaped discriminators in separate cases: filling
+    /// needs an *empty* target, and picking up needs a *source fluid* target
+    /// — the two cannot share one fixture.
+    #[tokio::test(start_paused = true)]
+    async fn the_loop_empties_a_water_bucket_into_the_world_ahead() {
+        let pos = (11, 6, 9);
+        let (px, py, pz) = pos;
+        let target = (px + 1, py, pz); // east, one cell ahead.
+        let world = ColumnBackedWorld::with(&[
+            (pos, "minecraft:dispenser[facing=east,triggered=true]"),
+            (target, "minecraft:air"),
+        ]);
+        let scheduled = crate::region_source::ScheduledTickHandle::default();
+        scheduled.with(|queues| {
+            queues.block.schedule(
+                pos,
+                crate::redstone_dispenser::TICK_DISPENSER_FIRE.to_owned(),
+                1,
+                TickPriority::Normal,
+            );
+        });
+        let feed = BlockTickFeed::default();
+        let (mobs, out, block_entities) = handles();
+        block_entities.with(|reg| {
+            let mut container = crate::block_entities::BlockEntity::container_of_size(
+                "minecraft:dispenser",
+                crate::block_entities::CONTAINER_3X3_SIZE,
+            );
+            container.set_container_slot(
+                0,
+                Some(lodestone_model::ItemStack::new(
+                    "minecraft:water_bucket".parse().expect("valid item key"),
+                    1,
+                )),
+            );
+            reg.insert(BlockPos::new(px, py, pz), container);
+        });
+        tokio::spawn(run_tick_loop(
+            mobs.clone(),
+            out,
+            block_entities.clone(),
+            Arc::new(TickClock::new()),
+            Arc::clone(&world),
+            feed.clone(),
+            (0..=0, 0..=0),
+            ExplosionFeed::default(),
+            scheduled,
+            crate::tick_area::TickFollow::default(),
+        ));
+        tokio::task::yield_now().await;
+
+        let mut fired = false;
+        for _ in 1..=8 {
+            tokio::time::advance(TICK_PERIOD).await;
+            tokio::task::yield_now().await;
+            if world.block_state(target.0, target.1, target.2) != "minecraft:air" {
+                fired = true;
+                break;
+            }
+        }
+        assert!(fired, "the target cell never changed — the bucket arm never fired");
+        assert_eq!(
+            world.block_state(target.0, target.1, target.2),
+            "minecraft:water[level=0]",
+            "a water bucket must place a water *source*, not a flowing state"
+        );
+
+        // The slot swaps to an empty bucket in place — `consumeWithRemainder`,
+        // not a plain shrink. A gate that only checked "the stack count
+        // dropped" would pass an implementation that merely deleted the
+        // filled bucket instead of returning the empty one.
+        let remaining = block_entities.with(|reg| {
+            reg.get(BlockPos::new(px, py, pz))
+                .map(crate::block_entities::BlockEntity::container_slots)
+        });
+        let slot0 = remaining.as_ref().and_then(|slots| slots[0].clone());
+        assert_eq!(
+            slot0.as_ref().map(|s| s.item.to_string()),
+            Some("minecraft:bucket".to_owned()),
+            "slot 0 must hold an empty bucket after emptying, not stay a water bucket or go empty: {slot0:?}"
+        );
+        assert_eq!(slot0.map(|s| s.count), Some(1));
+    }
+
+    /// The pickup half, same shape: a plain bucket dispensed at a water
+    /// source ahead must remove the source and swap the slot to a filled
+    /// water bucket.
+    #[tokio::test(start_paused = true)]
+    async fn the_loop_picks_up_a_water_source_with_a_plain_bucket() {
+        let pos = (11, 6, 9);
+        let (px, py, pz) = pos;
+        let target = (px + 1, py, pz);
+        let world = ColumnBackedWorld::with(&[
+            (pos, "minecraft:dispenser[facing=east,triggered=true]"),
+            (target, "minecraft:water[level=0]"),
+        ]);
+        let scheduled = crate::region_source::ScheduledTickHandle::default();
+        scheduled.with(|queues| {
+            queues.block.schedule(
+                pos,
+                crate::redstone_dispenser::TICK_DISPENSER_FIRE.to_owned(),
+                1,
+                TickPriority::Normal,
+            );
+        });
+        let feed = BlockTickFeed::default();
+        let (mobs, out, block_entities) = handles();
+        block_entities.with(|reg| {
+            let mut container = crate::block_entities::BlockEntity::container_of_size(
+                "minecraft:dispenser",
+                crate::block_entities::CONTAINER_3X3_SIZE,
+            );
+            container.set_container_slot(
+                0,
+                Some(lodestone_model::ItemStack::new(
+                    "minecraft:bucket".parse().expect("valid item key"),
+                    1,
+                )),
+            );
+            reg.insert(BlockPos::new(px, py, pz), container);
+        });
+        tokio::spawn(run_tick_loop(
+            mobs.clone(),
+            out,
+            block_entities.clone(),
+            Arc::new(TickClock::new()),
+            Arc::clone(&world),
+            feed.clone(),
+            (0..=0, 0..=0),
+            ExplosionFeed::default(),
+            scheduled,
+            crate::tick_area::TickFollow::default(),
+        ));
+        tokio::task::yield_now().await;
+
+        let mut fired = false;
+        for _ in 1..=8 {
+            tokio::time::advance(TICK_PERIOD).await;
+            tokio::task::yield_now().await;
+            if world.block_state(target.0, target.1, target.2) == "minecraft:air" {
+                fired = true;
+                break;
+            }
+        }
+        assert!(fired, "the target's water source never disappeared — the pickup arm never fired");
+
+        let remaining = block_entities.with(|reg| {
+            reg.get(BlockPos::new(px, py, pz))
+                .map(crate::block_entities::BlockEntity::container_slots)
+        });
+        let slot0 = remaining.as_ref().and_then(|slots| slots[0].clone());
+        assert_eq!(
+            slot0.as_ref().map(|s| s.item.to_string()),
+            Some("minecraft:water_bucket".to_owned()),
+            "slot 0 must hold a filled water bucket after pickup: {slot0:?}"
+        );
+        assert_eq!(slot0.map(|s| s.count), Some(1));
     }
 }

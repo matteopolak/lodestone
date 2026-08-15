@@ -544,6 +544,74 @@ fn is_source_of_type(state: &str, kind: FluidKind) -> bool {
     fluid_state_of(state).is_some_and(|fluid| fluid.kind == kind && fluid.is_source())
 }
 
+// ---------------------------------------------------------------------------
+// Bucket place/pickup — issue #578's remainder. This crate ticks fluid
+// already in the world; these two functions are the missing entry point a
+// dispenser (or, eventually, a player's direct use) needs to *start* one.
+// Water and lava only — see `crate::redstone_dispenser`'s own behaviour
+// table for why the powder-snow/fish/axolotl/tadpole buckets are not here
+// (each needs an entity or block mechanic this module has nothing to do
+// with fluid placement).
+// ---------------------------------------------------------------------------
+
+/// `DispensibleContainerItem.emptyContents`'s target check, reduced to the
+/// case this crate can answer without a `canBeReplaced`/`Material` model: the
+/// three air variants. Vanilla additionally empties onto any block whose
+/// `canBeReplaced` is `true` for the fluid (a torch, tall grass, a flower,
+/// …); refusing those here **under**-empties rather than over-empties —
+/// naming a target as fillable that vanilla would refuse is the direction
+/// that would be a real bug (griefing a block that should have survived),
+/// and this cannot do that.
+#[must_use]
+pub fn is_bucket_emptiable_target(state: &str) -> bool {
+    matches!(
+        base_name(state),
+        "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
+    )
+}
+
+/// The source [`FluidKind`] a filled bucket item empties, or `None` for a
+/// bucket variant this module does not place fluid for (empty bucket, or any
+/// of the non-water/lava filled buckets — see this section's own doc comment).
+#[must_use]
+pub fn bucket_empty_item_kind(item: &str) -> Option<FluidKind> {
+    match item {
+        "minecraft:water_bucket" => Some(FluidKind::Water),
+        "minecraft:lava_bucket" => Some(FluidKind::Lava),
+        _ => None,
+    }
+}
+
+/// The block-state string to place at a target that
+/// [`is_bucket_emptiable_target`] accepts — always the source state,
+/// `FluidState::is_source`'s own shape (`amount == 8`, not falling).
+#[must_use]
+pub fn bucket_empty_state(kind: FluidKind) -> &'static str {
+    match kind {
+        FluidKind::Water => "minecraft:water[level=0]",
+        FluidKind::Lava => "minecraft:lava[level=0]",
+    }
+}
+
+/// `BucketPickup.pickupBlock`'s water/lava half: the fluid kind at
+/// `target_state`, if it is a **source** (`FlowingFluid.pickupBlock` refuses
+/// a flowing, non-source cell — an empty bucket dipped in a stream's middle
+/// comes back empty, matching vanilla exactly).
+#[must_use]
+pub fn bucket_pickup_kind(target_state: &str) -> Option<FluidKind> {
+    let fluid = fluid_state_of(target_state)?;
+    fluid.is_source().then_some(fluid.kind)
+}
+
+/// The filled-bucket item a pickup of `kind` yields.
+#[must_use]
+pub fn filled_bucket_item(kind: FluidKind) -> &'static str {
+    match kind {
+        FluidKind::Water => "minecraft:water_bucket",
+        FluidKind::Lava => "minecraft:lava_bucket",
+    }
+}
+
 /// `FluidState.getHeight` — `hasSameAbove ? 1.0 : ownHeight`
 /// (`FlowingFluid.java:488-495`). Only lava's `canBeReplacedWith` needs it.
 fn fluid_height(fluid: FluidState, above_state: &str) -> f32 {

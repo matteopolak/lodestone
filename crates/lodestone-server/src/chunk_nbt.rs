@@ -118,6 +118,7 @@ use crate::chunk::ChunkColumn;
 use crate::composter::Composter;
 use crate::furnace::{Furnace, FurnaceKind};
 use crate::hopper::Hopper;
+use crate::mob_spawner::{SpawnData, SpawnerState, WeightedSpawnData};
 use crate::scheduled_tick::TickPriority;
 
 /// The `DataVersion` a 26.2 server stamps on every chunk it writes, read
@@ -938,6 +939,74 @@ fn items_from_nbt(nbt: Option<&Nbt>, len: usize) -> Vec<Option<ItemStack>> {
     out
 }
 
+/// Decodes one `SpawnData` compound (`net.minecraft.world.level.SpawnData`'s
+/// own shape: `{entity: {id: "...", ...}, custom_spawn_rules?: {...},
+/// equipment?: {...}}`) into the reduced form `crate::mob_spawner` acts on.
+///
+/// Only `entity.id` is read — see that module's doc for why
+/// `custom_spawn_rules`/`equipment` and the rest of the `entity` compound
+/// (equipment, custom NBT, age) are not modelled. A missing `entity` compound,
+/// a missing `id`, or an `id` this crate's entity-type registry does not know
+/// all resolve to [`SpawnData::default`] (`entity_type: None`) rather than a
+/// load failure — matching vanilla's own tolerance for a `SpawnData` whose
+/// `EntityType.by` lookup comes back empty.
+fn spawn_data_from_nbt(nbt: &Nbt) -> SpawnData {
+    let entity_type = field(nbt, "entity")
+        .and_then(|entity| string_field(entity, "id"))
+        .and_then(crate::mob_spawner::entity_type_from_id_field);
+    SpawnData { entity_type }
+}
+
+/// The inverse of [`spawn_data_from_nbt`]. An unresolved [`SpawnData`] (`entity_type:
+/// None`) round-trips as an empty `entity` compound — vanilla's own
+/// stripped-constructor shape for "no id" — rather than a placeholder id.
+fn spawn_data_to_nbt(data: &SpawnData) -> Nbt {
+    let entity = match &data.entity_type {
+        Some(entity_type) => Nbt::Compound(vec![(
+            "id".to_owned(),
+            Nbt::String(entity_type.to_string()),
+        )]),
+        None => Nbt::Compound(Vec::new()),
+    };
+    Nbt::Compound(vec![("entity".to_owned(), entity)])
+}
+
+/// Decodes a `SpawnPotentials` list — `WeightedList<SpawnData>`'s own wire
+/// shape, one `{data: <SpawnData>, weight: <non-negative int>}` compound per
+/// entry (`Weighted.codec`). A missing or malformed list decodes as empty;
+/// an entry with no `data` compound is dropped, matching [`items_from_nbt`]'s
+/// own "one unreadable entry must not cost the whole list" precedent.
+fn spawn_potentials_from_nbt(nbt: Option<&Nbt>) -> Vec<WeightedSpawnData> {
+    let Some(Nbt::List { elements, .. }) = nbt else {
+        return Vec::new();
+    };
+    elements
+        .iter()
+        .filter_map(|entry| {
+            let data = field(entry, "data")?;
+            let weight = int_field(entry, "weight").unwrap_or(0).max(0) as u32;
+            Some(WeightedSpawnData {
+                weight,
+                data: spawn_data_from_nbt(data),
+            })
+        })
+        .collect()
+}
+
+/// The inverse of [`spawn_potentials_from_nbt`].
+fn spawn_potentials_to_nbt(potentials: &[WeightedSpawnData]) -> Nbt {
+    let elements: Vec<Nbt> = potentials
+        .iter()
+        .map(|entry| {
+            Nbt::Compound(vec![
+                ("data".to_owned(), spawn_data_to_nbt(&entry.data)),
+                ("weight".to_owned(), Nbt::Int(entry.weight as i32)),
+            ])
+        })
+        .collect();
+    nbt_list(elements)
+}
+
 /// This crate's own id for a composter block entity.
 ///
 /// **Namespaced, because vanilla has no composter block entity at all.** A
@@ -1196,6 +1265,24 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             }
             ("minecraft:command_block", fields)
         }
+        BlockEntity::Spawner(s) => {
+            let (delay, min_delay, max_delay, count, max_nearby, required_range, spawn_range, potentials, next) =
+                s.saved_fields();
+            let mut fields = vec![
+                ("Delay".to_owned(), Nbt::Short(delay as i16)),
+                ("MinSpawnDelay".to_owned(), Nbt::Short(min_delay as i16)),
+                ("MaxSpawnDelay".to_owned(), Nbt::Short(max_delay as i16)),
+                ("SpawnCount".to_owned(), Nbt::Short(count as i16)),
+                ("MaxNearbyEntities".to_owned(), Nbt::Short(max_nearby as i16)),
+                ("RequiredPlayerRange".to_owned(), Nbt::Short(required_range as i16)),
+                ("SpawnRange".to_owned(), Nbt::Short(spawn_range as i16)),
+                ("SpawnPotentials".to_owned(), spawn_potentials_to_nbt(potentials)),
+            ];
+            if let Some(next) = next {
+                fields.push(("SpawnData".to_owned(), spawn_data_to_nbt(next)));
+            }
+            ("minecraft:spawner", fields)
+        }
     };
 
     let mut fields = vec![
@@ -1235,11 +1322,12 @@ fn bottle_kind_for_item(id: &str) -> Option<BottleKind> {
 /// simulate.
 ///
 /// **Returning `None` is the normal case, not an error.** A real world is full
-/// of chests, vaults, spawners and decorated pots this crate has no model for
-/// — 1,608 of the 1,613 block entities measured across `.cache/mc`'s worlds
-/// are kinds we do not simulate. Dropping them silently is what vanilla itself
-/// does with an id it cannot resolve, and it is why loading a real vanilla
-/// region never fails on this path.
+/// of vaults and decorated pots this crate has no model for — chests and
+/// spawners are now modelled, but the measured 1,608-of-1,613 ratio (across
+/// `.cache/mc`'s worlds) that motivated `Opaque` predates that, so most block
+/// entities are still an unmodelled kind. Dropping them silently is what
+/// vanilla itself does with an id it cannot resolve, and it is why loading a
+/// real vanilla region never fails on this path.
 ///
 /// It is also a **real, named gap**: a chest in a world Lodestone opens and
 /// re-saves loses its contents, because we drop it here and then write a chunk
@@ -1358,6 +1446,33 @@ fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)> {
                     crate::block_entities::CONTAINER_9X3_SIZE,
                 ),
             }
+        }
+        "minecraft:spawner" => {
+            // `BaseSpawner.load`: `SpawnData` (if present) is parsed
+            // unconditionally; `SpawnPotentials`, if *absent*, falls back to a
+            // one-entry weighted list built from that same `SpawnData` (or a
+            // fresh empty one) — not to an empty list. Reproduced exactly
+            // rather than simplified, since a data-pack spawner minted with
+            // only a `SpawnData` tag (no `SpawnPotentials` at all) is common.
+            let spawn_data_tag = field(nbt, "SpawnData").map(spawn_data_from_nbt);
+            let spawn_potentials = match field(nbt, "SpawnPotentials") {
+                Some(list) => spawn_potentials_from_nbt(Some(list)),
+                None => vec![WeightedSpawnData {
+                    weight: 1,
+                    data: spawn_data_tag.clone().unwrap_or_default(),
+                }],
+            };
+            BlockEntity::Spawner(SpawnerState::restore(
+                int_field(nbt, "Delay").unwrap_or(20),
+                int_field(nbt, "MinSpawnDelay").unwrap_or(200),
+                int_field(nbt, "MaxSpawnDelay").unwrap_or(800),
+                int_field(nbt, "SpawnCount").unwrap_or(4),
+                int_field(nbt, "MaxNearbyEntities").unwrap_or(6),
+                int_field(nbt, "RequiredPlayerRange").unwrap_or(16),
+                int_field(nbt, "SpawnRange").unwrap_or(4),
+                spawn_potentials,
+                spawn_data_tag,
+            ))
         }
         // The inverse of the `BlockEntity::CommandBlock` arm above — note the
         // block-entity type `id` here is always `minecraft:command_block`

@@ -326,6 +326,10 @@ pub const MOB_GRIEFING: &str = "mob_griefing";
 pub const RANDOM_TICK_SPEED: &str = "random_tick_speed";
 /// `GameRules.SPAWN_MOBS` — pre-26.2's `doMobSpawning`.
 pub const SPAWN_MOBS: &str = "spawn_mobs";
+/// `GameRules.SPAWNER_BLOCKS_WORK` — `ServerLevel.isSpawnerBlockEnabled`. Read
+/// by `crate::tick::run_tick_loop`'s spawner-block tick pass
+/// (`crate::mob_spawner::SpawnCtx::spawner_blocks_work`).
+pub const SPAWNER_BLOCKS_WORK: &str = "spawner_blocks_work";
 /// `GameRules.SPAWN_PATROLS`. Read by `crate::tick::run_tick_loop`'s
 /// patrol-spawn pass (`MobSim::run_patrol_spawn_cycle`).
 pub const SPAWN_PATROLS: &str = "spawn_patrols";
@@ -488,6 +492,14 @@ impl GameRules {
     #[must_use]
     pub fn spawn_mobs(&self) -> bool {
         self.boolean(SPAWN_MOBS)
+    }
+
+    /// `spawner_blocks_work` — whether a `minecraft:spawner` block entity may
+    /// fire at all (`ServerLevel.isSpawnerBlockEnabled`). Read by
+    /// `crate::tick::run_tick_loop`'s spawner-block tick pass.
+    #[must_use]
+    pub fn spawner_blocks_work(&self) -> bool {
+        self.boolean(SPAWNER_BLOCKS_WORK)
     }
 
     /// `spawn_patrols` — whether pillager patrols spawn. Read by
