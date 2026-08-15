@@ -1486,6 +1486,93 @@ where
     })
 }
 
+/// [`map_columns_parallel`]'s single-threaded, **yielding** twin — the wasm32
+/// shape of the same idea, used because wasm32 has neither a scoped-thread fan-out
+/// nor a blocking pool to offload to (see [`generate_columns_offloaded`]'s own
+/// wasm32 note).
+///
+/// # Why per-column, not per-batch
+///
+/// `yield_between` is awaited **after every single column**, not after some
+/// larger slice. `docs/world-open-latency.md` measures real per-column
+/// generation cost at ~222 ms warm (contiguous, memo-assisted) and ~909 ms cold
+/// (independent sources — closer to what a brand-new world's first join actually
+/// is); a browser's own hang detector fires on a single unyielded task of only a
+/// few seconds. One cold column alone can already spend a meaningful fraction of
+/// that budget, so any slice bigger than one column reintroduces the exact
+/// failure this function exists to remove — it would just take a slightly larger
+/// batch to reproduce it. A slice of one is the only size that stays correct
+/// regardless of how expensive a single column turns out to be.
+///
+/// # `FnMut` yield, not a fixed timer
+///
+/// `yield_between` is a caller-supplied future rather than (say) a hardcoded
+/// `tokio::time::sleep`: `tokio::time` has no timer driver on wasm32 (see
+/// `net.rs`'s own note — a wasm32 `tokio::time::timeout` hung a browser join on
+/// its first poll), so the real yield has to come from the browser's own task
+/// queue instead. Tests substitute a counting stub; production substitutes
+/// [`yield_to_browser`].
+async fn map_columns_yielding<S, T, F, Y, YFut>(
+    source: &S,
+    coords: &[(i32, i32)],
+    f: F,
+    mut yield_between: Y,
+) -> Vec<T>
+where
+    S: ChunkSource + ?Sized,
+    F: Fn((i32, i32), ChunkColumn) -> T,
+    Y: FnMut() -> YFut,
+    YFut: std::future::Future<Output = ()>,
+{
+    let mut out = Vec::with_capacity(coords.len());
+    for &(cx, cz) in coords {
+        out.push(f((cx, cz), source.column(cx, cz)));
+        yield_between().await;
+    }
+    out
+}
+
+/// [`map_columns_yielding`] with the identity transform — the yielding twin of
+/// [`generate_columns_parallel`], for the same reason `map_columns_parallel`
+/// has a plain twin ([`generate_columns_parallel`] itself).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+async fn generate_columns_yielding<S, Y, YFut>(
+    source: &S,
+    coords: &[(i32, i32)],
+    yield_between: Y,
+) -> Vec<ChunkColumn>
+where
+    S: ChunkSource + ?Sized,
+    Y: FnMut() -> YFut,
+    YFut: std::future::Future<Output = ()>,
+{
+    map_columns_yielding(source, coords, |_, column| column, yield_between).await
+}
+
+/// The production `yield_between` for [`generate_columns_yielding`]/
+/// [`map_columns_yielding`] on wasm32: a real browser **macrotask**, not a
+/// microtask.
+///
+/// `js_sys::Promise::new` resolved by `window.setTimeout(_, 0)` is load-bearing
+/// in that choice. A microtask (e.g. `Promise::resolve().then(...)`) drains
+/// entirely within the *current* JS task — the browser does not get a chance to
+/// paint or service input between microtasks, only between tasks — so a future
+/// built on one would satisfy "the Rust code has an `.await` point" while doing
+/// nothing to stop the tab from hanging. `setTimeout` queues a genuine new
+/// macrotask, which is the granularity Chrome's own unresponsive-page detector
+/// (and rendering) actually yields at.
+#[cfg(target_arch = "wasm32")]
+async fn yield_to_browser() {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let window = web_sys::window()
+            .expect("no global `window`: this crate's wasm32 build only runs inside a browser tab");
+        window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0)
+            .expect("window.setTimeout");
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
 /// [`generate_columns_parallel`], moved off the async runtime's core thread
 /// (issue #293).
 ///
@@ -1535,10 +1622,20 @@ where
 ///
 /// # wasm32
 ///
-/// `wasm32-unknown-unknown` has no blocking pool (and no OS threads for
-/// `generate_columns_parallel`'s scope either), so there it calls straight
-/// through — unchanged behaviour on a target that never had a second thread
-/// to protect.
+/// `wasm32-unknown-unknown` has no blocking pool, and — unlike the doc above
+/// used to claim — it does **not** get to "call `generate_columns_parallel`
+/// straight through" either: that function's `coords.len() > 1` arm fans out
+/// over `std::thread::scope`, and a `Scope::spawn` on this target reaches
+/// `Builder::spawn`'s `Err` through an internal `.expect()` — measured,
+/// executed in a wasm VM: `unreachable`, i.e. it TRAPS, and with this crate's
+/// `panic = "abort"` release profile that is unrecoverable. `portal.rs`'s
+/// `create_portal` already gates its own `generate_columns_parallel` call off
+/// on wasm32 for exactly this reason; this call site had no such gate. So
+/// wasm32 instead calls [`generate_columns_yielding`], which never enters
+/// `map_columns_parallel`'s multi-column branch (it generates one column at a
+/// time) and yields to the browser's own task queue between columns — fixing
+/// both the trap and the "page not responding" hang in the same change,
+/// because both came from the same unguarded synchronous fan-out.
 #[tracing::instrument(skip_all, fields(count = coords.len()))]
 pub(crate) async fn generate_columns_offloaded<S: ChunkSource + 'static + ?Sized>(
     source: Arc<S>,
@@ -1546,7 +1643,7 @@ pub(crate) async fn generate_columns_offloaded<S: ChunkSource + 'static + ?Sized
 ) -> Vec<ChunkColumn> {
     #[cfg(target_arch = "wasm32")]
     {
-        generate_columns_parallel(&*source, &coords)
+        generate_columns_yielding(&*source, &coords, yield_to_browser).await
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -1588,22 +1685,37 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
     encoder: Option<Arc<dyn crate::protocol::ChunkEncoder>>,
 ) -> Option<Vec<crate::protocol::ServerDirective>> {
     let encoder = encoder?;
-    // `map_columns_parallel`, not `generate_columns_parallel` followed by an
-    // encode loop: the encode runs on the worker that generated the column, so a
-    // 33-column strip's ≈80 ms of encode is fanned out rather than paid serially
-    // after the join. See that function's own doc for the two properties this
-    // buys.
-    let encode = move || {
-        map_columns_parallel(&*source, &coords, |(cx, cz), column| {
-            encoder.encode_chunk(cx, cz, &column)
-        })
-    };
+    // wasm32: `map_columns_yielding`, one column generated-and-encoded at a
+    // time with a real browser yield between each — see
+    // `generate_columns_offloaded`'s wasm32 doc for why this is not merely a
+    // latency nicety on this target. `map_columns_parallel`'s
+    // `coords.len() > 1` branch (native's own past shape here) TRAPS on
+    // wasm32 via `std::thread::scope`, so this is also what keeps the browser
+    // build from crashing on any batch bigger than one column.
     #[cfg(target_arch = "wasm32")]
     {
-        Some(encode())
+        Some(
+            map_columns_yielding(
+                &*source,
+                &coords,
+                |(cx, cz), column| encoder.encode_chunk(cx, cz, &column),
+                yield_to_browser,
+            )
+            .await,
+        )
     }
+    // Native: `map_columns_parallel`, not `generate_columns_parallel`
+    // followed by an encode loop — the encode runs on the worker that
+    // generated the column, so a 33-column strip's ≈80 ms of encode is
+    // fanned out rather than paid serially after the join. See that
+    // function's own doc for the two properties this buys.
     #[cfg(not(target_arch = "wasm32"))]
     {
+        let encode = move || {
+            map_columns_parallel(&*source, &coords, |(cx, cz), column| {
+                encoder.encode_chunk(cx, cz, &column)
+            })
+        };
         Some(
             tokio::task::spawn_blocking(encode)
                 .await
@@ -2527,6 +2639,135 @@ mod tests {
             offloaded_states, serial,
             "offloaded generation must hand back columns aligned index-for-index with \
              `coords` — the wire order depends on it (see `generate_columns_parallel`)"
+        );
+    }
+
+    /// [`generate_columns_yielding`]/[`map_columns_yielding`] are what
+    /// `generate_columns_offloaded`/`generate_and_encode_columns_offloaded`'s
+    /// wasm32 branches call instead of `generate_columns_parallel` — whose
+    /// `coords.len() > 1` branch TRAPS on wasm32 via `std::thread::scope` (see
+    /// their doc comments; measured executing the equivalent
+    /// `std::thread::scope(|s| s.spawn(...))` in a wasm VM: `unreachable`).
+    /// wasm32-only code cannot be exercised by a native `cargo test`, so this
+    /// gate proves the one property that is target-independent by
+    /// construction: **the yield closure runs exactly once per column,
+    /// strictly interleaved, never two columns before a yield.** Production
+    /// substitutes [`yield_to_browser`] for the closure under test; nothing
+    /// about *that* substitution can change the interleaving, only what a
+    /// yield does once it happens.
+    ///
+    /// # Counter, not duration
+    ///
+    /// A wall-clock measurement of this loop would be exactly the duration
+    /// species this repo's evidence rules warn about, and it could not see the
+    /// property that matters anyway — *when* a yield lands relative to
+    /// generation, not how long the whole call took. The log below is a
+    /// counter: an ordered event sequence, checked against a value **predicted**
+    /// from `coords.len()` rather than merely "at least one yield happened
+    /// somewhere". Mismatches are collected rather than asserted one at a time
+    /// inside the loop, so a broken gate reports every wrong position instead
+    /// of only the first.
+    #[tokio::test]
+    async fn yielding_generation_yields_after_every_single_column() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Event {
+            Column,
+            Yield,
+        }
+
+        struct RecordingSource {
+            log: Arc<Mutex<Vec<Event>>>,
+        }
+
+        impl ChunkSource for RecordingSource {
+            fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+                self.log.lock().unwrap().push(Event::Column);
+                ChunkColumn::new(-64, 32)
+            }
+
+            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+                "minecraft:air".to_string()
+            }
+
+            // Discarded by design (issue #440's explicit-choice rule) — this
+            // fixture only ever reads.
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        }
+
+        /// Positional diff, collected rather than asserted per-element — a
+        /// length mismatch is reported as its own entry rather than panicking
+        /// the comparison outright, so one failing run names every wrong
+        /// position at once.
+        fn mismatches(expected: &[Event], observed: &[Event]) -> Vec<String> {
+            let mut out: Vec<String> = expected
+                .iter()
+                .zip(observed.iter())
+                .enumerate()
+                .filter(|(_, (want, got))| want != got)
+                .map(|(i, (want, got))| format!("position {i}: expected {want:?}, got {got:?}"))
+                .collect();
+            if expected.len() != observed.len() {
+                out.push(format!(
+                    "length mismatch: expected {} events, got {}",
+                    expected.len(),
+                    observed.len()
+                ));
+            }
+            out
+        }
+
+        // 7 columns: enough that a "yield once per batch" or "yield every two
+        // columns" bug cannot coincide with a "yield once per column" fix by
+        // accident (an even split would).
+        let coords: Vec<(i32, i32)> = (0..7).map(|i| (i, -i)).collect();
+        let expected: Vec<Event> = coords.iter().flat_map(|_| [Event::Column, Event::Yield]).collect();
+
+        // --- Arm 1: the fix. `generate_columns_yielding`, the exact function
+        // `generate_columns_offloaded`'s wasm32 branch calls — with a yield
+        // closure that logs into the same sequence `RecordingSource::column`
+        // does, and *really* suspends (`tokio::task::yield_now`), so a closure
+        // that logged without actually yielding could not pass by accident.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let source = RecordingSource { log: Arc::clone(&log) };
+        let yield_log = Arc::clone(&log);
+        let produced = generate_columns_yielding(&source, &coords, move || {
+            let yield_log = Arc::clone(&yield_log);
+            async move {
+                yield_log.lock().unwrap().push(Event::Yield);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert_eq!(produced.len(), coords.len(), "must still generate every requested column");
+
+        let observed = log.lock().unwrap().clone();
+        let found = mismatches(&expected, &observed);
+        assert!(
+            found.is_empty(),
+            "generate_columns_yielding must alternate Column, Yield, Column, Yield, … — one \
+             yield strictly after every column, never two columns before a yield; got \
+             {observed:?}, wanted {expected:?}; mismatches: {found:?}"
+        );
+
+        // --- Arm 2: the permanent negative control. A "fix" that generates
+        // every column first and yields only afterwards — what
+        // `generate_columns_parallel`'s own `coords.len() <= 1` fast path looks
+        // like when driven in a loop with no yields threaded through it at all,
+        // and the shape a batched-instead-of-per-column "fix" would produce
+        // too. If this control ever stops failing the same check, the check
+        // above has stopped distinguishing the two shapes.
+        let control_log = Arc::new(Mutex::new(Vec::new()));
+        let control_source = RecordingSource { log: Arc::clone(&control_log) };
+        for &(cx, cz) in &coords {
+            let _ = control_source.column(cx, cz);
+        }
+        let control_observed = control_log.lock().unwrap().clone();
+        let control_found = mismatches(&expected, &control_observed);
+        assert!(
+            !control_found.is_empty(),
+            "negative control: an unyielded batch must fail the alternation check, or this \
+             gate is not distinguishing yielded generation from the pre-fix shape; got \
+             {control_observed:?}"
         );
     }
 }

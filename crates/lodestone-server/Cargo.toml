@@ -163,6 +163,15 @@ tokio = { version = "1", default-features = false, features = [
     "time",
 ] }
 wasm-bindgen-futures = { workspace = true }
+# `crate::chunk::yield_to_browser`'s `js_sys::Promise::new` +
+# `window.setTimeout`: the real browser macrotask yield that lets column
+# generation give the tab back to the event loop between columns instead of
+# generating a whole join/streaming batch inline. Same versions
+# `lodestone-shell`/`lodestone-net` already pin for wasm32 (`Window` is the
+# only feature this crate's own use needs; no direct `wasm-bindgen` call, so
+# unlike those two crates this one does not need that dependency itself).
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window"] }
 
 [dev-dependencies]
 # `test-util` for `#[tokio::test(start_paused = true)]` + time-auto-advance,
