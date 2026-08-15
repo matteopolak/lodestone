@@ -128,6 +128,25 @@ pub struct ItemComponents {
     /// version-free type does not own — evaluating at decode time is the same
     /// tradeoff [`max_stack_size`] already makes.
     pub potion_color: Option<u32>,
+    /// The raw `minecraft:potion_contents` `potion` field: the network
+    /// `minecraft:potion` registry id itself (`Potion.STREAM_CODEC`'s
+    /// `Holder<Potion>`), not [`potion_color`](Self::potion_color)'s already-mixed
+    /// colour.
+    ///
+    /// [`potion_color`](Self::potion_color) alone cannot drive a tooltip title or
+    /// effect lore: `swiftness`/`long_swiftness`/`strong_swiftness` all mix to the
+    /// same colour (`Potion.calculate` only sees the effect list, and all three
+    /// share one) but must resolve to three different lore bodies (different
+    /// duration, and `strong_swiftness` a different amplifier). `None` when the
+    /// patch carries no `minecraft:potion_contents`, or one with no `potion`
+    /// holder (a bare custom-effects patch) — the same absent-means-no-component
+    /// contract every other patch field here uses.
+    pub potion: Option<i32>,
+    /// An enchantment identity this client itself authored — never decoded off
+    /// the wire. See [`AuthoredEnchantment`]'s own doc for what it is, why it
+    /// exists, and why it must never be confused with
+    /// [`enchantments`](Self::enchantments).
+    pub authored_enchantment: Option<AuthoredEnchantment>,
     /// What this stack's component *patch* said about `minecraft:tool`.
     ///
     /// Almost always [`ToolPatch::Inherited`] — see that type's docs; a plain
@@ -421,4 +440,34 @@ pub struct ItemEnchantment {
     pub id: i32,
     /// Enchantment level (for example, 4 for Efficiency IV).
     pub level: u32,
+}
+
+/// An enchantment identity a **client itself authored** for a stack it built out
+/// of band — never produced by decoding the wire, and never comparable to
+/// [`ItemEnchantment::id`] (a real, session-scoped network id assigned by the
+/// server's own registry sync).
+///
+/// `path` is the enchantment's bare registry path (`"sharpness"`, no
+/// `minecraft:` prefix), resolvable through `lodestone_data::enchantment` with
+/// **no session in hand** — that crate's census is session-independent by
+/// construction (name and level range only, see its own module doc for why it
+/// carries no network id). `level` is a plain enchantment level, not a network
+/// anything.
+///
+/// The one current producer is the creative menu's enchanted-book entries: each
+/// one's enchantment identity and level are known statically (the creative table
+/// is a fixed list, always built at each enchantment's own max level) but the
+/// stack's *network* `minecraft:enchantment` id is session-scoped and that list
+/// has no session in hand. A consumer may render this directly; it must never be
+/// confused with, merged into, or compared against
+/// [`ItemComponents::enchantments`] — doing so would let a locally-meaningful
+/// path collide with a real, differently-ordered session id and silently name
+/// the wrong enchantment, exactly the hazard `ItemEnchantment::id`'s own doc
+/// warns about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthoredEnchantment {
+    /// Bare registry path, e.g. `"sharpness"`.
+    pub path: &'static str,
+    /// Enchantment level.
+    pub level: u8,
 }

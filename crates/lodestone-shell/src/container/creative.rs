@@ -1064,23 +1064,31 @@ fn stack_of(id: &str) -> Option<ItemStack> {
     }
     if let Some(suffix) = suffix {
         potion_color_for(base, suffix, &mut model);
-        // Enchanted books get no `minecraft:stored_enchantments` component here.
-        // `minecraft:enchantment` is data-driven, so its network registry id is
-        // assigned per-connection by configuration-phase sync order — there is no
-        // fixed id this static list-builder could attach that would be correct in
-        // any given session. See `creative_items.rs`'s module doc.
+        // Enchanted books still get no real `minecraft:stored_enchantments` — that
+        // needs a *network* enchantment id, and `minecraft:enchantment` is
+        // data-driven, assigned per-connection by configuration-phase sync order,
+        // with no fixed id this static list-builder could attach correctly in any
+        // given session. See `creative_items.rs`'s module doc. What they *do* get
+        // is an `AuthoredEnchantment`: the enchantment's identity and level are
+        // known statically (this table is fixed, always at each enchantment's own
+        // max level), so the name/level lore does not need a session at all — the
+        // same shape of shortcut the colour mix above takes for potions.
+        authored_enchantment_for(base, suffix, &mut model);
     }
     Some(ItemStack::from(&model))
 }
 
-/// Attaches the real `minecraft:potion_contents` mix to a synthetic
-/// `"minecraft:<potion-family-item>#<potion path>"` list entry — the one piece of
+/// Attaches the real `minecraft:potion_contents` mix — and, alongside it, the raw
+/// potion registry id the mix was computed from — to a synthetic
+/// `"minecraft:<potion-family-item>#<potion path>"` list entry. The one piece of
 /// [`stack_of`] that *is* resolvable statically, because `minecraft:potion` (unlike
 /// `minecraft:enchantment`) is a fixed, built-in registry with no per-session id.
+/// The id is what lets a tooltip title and effect lore resolve at all — the mixed
+/// colour alone cannot distinguish `swiftness` from `long_swiftness`.
 ///
 /// No-op for any `base` this suffix scheme is not used for, so a future suffix
-/// convention this function does not yet know about degrades to an untinted stack
-/// rather than a panic.
+/// convention this function does not yet know about degrades to an untinted,
+/// unnamed stack rather than a panic.
 fn potion_color_for(base: &str, suffix: &str, model: &mut lodestone_model::ItemStack) {
     if !matches!(
         base,
@@ -1092,6 +1100,36 @@ fn potion_color_for(base: &str, suffix: &str, model: &mut lodestone_model::ItemS
         return;
     };
     model.components.potion_color = Some(lodestone_data::potion::potion_color(Some(potion), None, &[]));
+    // Carries the potion's identity, not just its mixed tint, across the crate
+    // boundary — `tooltip.rs`'s title and effect-lore lines need to tell
+    // `swiftness` from `long_swiftness` from `strong_swiftness`, which all three
+    // mix to the same colour and so cannot be told apart from `potion_color`
+    // alone. See `lodestone_model::ItemComponents::potion`'s own doc.
+    model.components.potion = Some(potion);
+}
+
+/// Attaches an [`lodestone_model::AuthoredEnchantment`] to a synthetic
+/// `"minecraft:enchanted_book#<enchantment path>"` list entry — the enchantment's
+/// name and level, resolved with no session in hand, unlike the real network id a
+/// `minecraft:stored_enchantments` component would need (see the module doc at
+/// this function's call site). `creative_items.rs` builds this table at each
+/// enchantment's own max level, so `level` here is always
+/// `lodestone_data::enchantment::max_level`, never a lower one.
+///
+/// No-op for any `base` other than `minecraft:enchanted_book`, so a future suffix
+/// convention this function does not yet know about degrades to an unnamed stack
+/// rather than a panic — the same contract [`potion_color_for`] keeps.
+fn authored_enchantment_for(base: &str, suffix: &str, model: &mut lodestone_model::ItemStack) {
+    if base != "minecraft:enchanted_book" {
+        return;
+    }
+    let Some(path) = lodestone_data::enchantment::canonical_path(suffix) else {
+        return;
+    };
+    let Some(level) = lodestone_data::enchantment::max_level(path) else {
+        return;
+    };
+    model.components.authored_enchantment = Some(lodestone_model::AuthoredEnchantment { path, level });
 }
 
 /// One consequence of a creative-screen click, in the order it must be applied.
@@ -1397,15 +1435,32 @@ mod tests {
     }
 
     /// An enchanted-book creative entry parses to a valid stack of the right base
-    /// item and carries no crash-inducing garbage — but, per `creative_items.rs`'s
-    /// module doc, no live enchantment identity either, because
-    /// `minecraft:enchantment`'s network id is session-scoped and this list is
-    /// built with no session in hand.
+    /// item, carries no *real* enchantment identity (`enchantments()` — a real
+    /// `minecraft:stored_enchantments` needs a network id, which is session-scoped
+    /// and this list has no session in hand, per `creative_items.rs`'s module
+    /// doc) — but does carry an [`lodestone_model::AuthoredEnchantment`], which
+    /// `tooltip.rs` renders from directly.
     #[test]
     fn enchanted_book_creative_entry_parses_with_no_live_enchantment_id() {
         let stack = stack_of("minecraft:enchanted_book#sharpness").expect("a valid synthetic id");
         assert_eq!(stack.item().to_string(), "minecraft:enchanted_book");
         assert!(stack.enchantments().is_empty());
+        assert_eq!(
+            stack.authored_enchantment(),
+            Some(lodestone_model::AuthoredEnchantment { path: "sharpness", level: 5 })
+        );
+    }
+
+    /// A single-level enchantment (`mending`, max level `1`) round-trips its
+    /// level correctly too — the discriminating pair against `sharpness`'s `5`,
+    /// so a producer that always writes a hardcoded level cannot pass both.
+    #[test]
+    fn a_single_level_enchanted_book_authors_level_one_not_a_hardcoded_five() {
+        let stack = stack_of("minecraft:enchanted_book#mending").expect("a valid synthetic id");
+        assert_eq!(
+            stack.authored_enchantment(),
+            Some(lodestone_model::AuthoredEnchantment { path: "mending", level: 1 })
+        );
     }
 
     /// A plain, unsuffixed id (every non-potion, non-book entry, and every tab
@@ -1416,6 +1471,19 @@ mod tests {
         let stack = stack_of("minecraft:diamond_sword").expect("a valid id");
         assert_eq!(stack.item().to_string(), "minecraft:diamond_sword");
         assert_eq!(stack.potion_color(), None);
+        assert_eq!(stack.potion_effect_id(), None);
+    }
+
+    /// The end-to-end link `tooltip.rs`'s title/lore depend on: a creative-menu
+    /// potion entry's raw registry id must survive `stack_of`, not just its
+    /// already-mixed colour — without this, the tooltip has no way to tell
+    /// `swiftness` from `long_swiftness` even though `stack_of` resolved both
+    /// correctly at build time.
+    #[test]
+    fn stack_of_carries_the_raw_potion_id_not_just_its_colour() {
+        let expected = lodestone_data::potion::potion_id("minecraft:strong_turtle_master").unwrap();
+        let stack = stack_of("minecraft:lingering_potion#strong_turtle_master").expect("valid id");
+        assert_eq!(stack.potion_effect_id(), Some(expected));
     }
 
     #[test]
