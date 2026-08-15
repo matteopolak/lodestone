@@ -181,6 +181,17 @@ async fn install_assets() -> Result<(), String> {
         client_jar,
         blocks_report,
         panorama,
+        // Empty for now, and deliberately not silently defaulted: the browser
+        // audio backend exists and its assets do not. Nothing here fetches
+        // `sounds.json` or any `.ogg` yet, so the mixer resolves no sound and
+        // the page is silent — the same "absent means absent" contract
+        // `panorama` uses, where a missing face falls back rather than
+        // pretending. Staging these the way the panorama faces are staged is
+        // what makes the backend audible; until then an empty vec is the honest
+        // value, and a `..Default::default()` here would hide that this field
+        // was never filled in.
+        sounds_json: Vec::new(),
+        sound_objects: Vec::new(),
     })?;
     status(&sizes);
     Ok(())
