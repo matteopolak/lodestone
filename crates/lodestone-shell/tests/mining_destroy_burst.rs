@@ -82,6 +82,7 @@ use lodestone::interact::{Attacking, MiningPredictor, NetHandle, ParticleSim, Ra
 use lodestone::mesher::{MeshScheduler, TerrainMesh};
 use lodestone::particles::Particles;
 use lodestone::raycast::RayHit;
+use lodestone::sim::AudioEngine;
 use lodestone_client::{
     ClientBuilder, ConnectionState, Directive, LoginProfile, ServerAddress, VersionAdapter,
 };
@@ -89,7 +90,7 @@ use lodestone_ecs::ecs::schedule::Schedule;
 use lodestone_ecs::ecs::world::World as EcsWorld;
 use lodestone_ecs::player::{ActionQueue, Egress};
 use lodestone_ecs::session::SessionMenus;
-use lodestone_ecs::{EcsHandle, GameTick, LockHolds, VersionData};
+use lodestone_ecs::{EcsHandle, FrameClock, GameTick, LockHolds, VersionData};
 use lodestone_game::mining::BreakInputs;
 use lodestone_model::{AdapterError, BlockHardness, ClientAction, ItemStack, ToolMining};
 use lodestone_world::{
@@ -404,6 +405,14 @@ fn build_resources(world: &mut EcsWorld, version: OneBlockVersion) {
     world.insert_resource(ParticleSim(Particles::new(None)));
     world.insert_resource(ActionQueue::default());
     world.insert_resource(VersionData(Some(Box::new(version))));
+    // `drive_mining`'s own predicted break sound needs `FrameClock` (the seed)
+    // and `AudioEngine` — see `break_intent.rs`'s identical addition for the
+    // full reasoning. `AudioEngine(None)` keeps the sound branch a no-op here;
+    // this file is about the destroy-particle burst, not about sound —
+    // `Sim::block_sound_seed`/particle RNG independence is exactly why the
+    // sound seed must never draw from the particle engine's `JavaRandom`.
+    world.insert_resource(FrameClock::default());
+    world.insert_resource(AudioEngine(None));
     // `drive_mining`'s local block-edit prediction (issue #596) needs a mesh
     // scheduler to re-mesh through; a `Demo` classifier is the same
     // GPU-free choice `place_intent.rs`'s harness makes for `drive_placement`.

@@ -159,6 +159,76 @@ impl Sim {
         });
     }
 
+    /// Play a **head-relative** sound with no wire origin and no world
+    /// position — vanilla's `SimpleSoundInstance.forUI` shape. The UI
+    /// button-click sound (`crate::app::WindowApp`) is the motivating and, for
+    /// now, only caller: a menu screen has no world position to attach a click
+    /// to, and vanilla does not give it one either (`Attenuation.NONE`,
+    /// `RELATIVE`). See [`Self::play_local_sound`] for the positioned sibling
+    /// and [`crate::audio::ShellAudio::play_relative_sound`] for why this
+    /// needs no `pos` argument at all.
+    pub fn play_relative_sound(
+        &mut self,
+        name: &str,
+        category: lodestone_model::event::SoundCategory,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) {
+        self.audio_mut(|audio| {
+            if let Some(audio) = audio {
+                audio.play_relative_sound(name, category, volume, pitch, seed);
+            }
+        });
+    }
+
+    /// Vanilla's `AbstractWidget.playButtonClickSound`
+    /// (`SimpleSoundInstance.forUI(SoundEvents.UI_BUTTON_CLICK, 1.0F)`, which is
+    /// `forUI(sound, pitch, 0.25F)` under the hood): pitch `1.0`, volume
+    /// `0.25`, `SoundSource.UI`. One choke point for the three magic numbers
+    /// rather than repeating them at every menu-click call site
+    /// (`crate::app::WindowApp`).
+    ///
+    /// The seed is client-chosen — same reasoning as [`Self::block_sound_seed`]
+    /// (vanilla's own `this.random.nextLong()`, no cross-client agreement to
+    /// preserve) — mixed over the tick count with a fixed all-zero "position",
+    /// since a UI click has none. `ui.button.click`'s own sounds.json entry
+    /// declares exactly one sample (`random/click_stereo`, no weighted
+    /// alternatives), so today the seed changes nothing observable; deriving it
+    /// properly rather than hardcoding `0` costs nothing and stops silently
+    /// picking one variant forever the day that entry gains a second sample.
+    pub fn play_ui_click_sound(&mut self) {
+        let seed = block_sound_seed([0, 0, 0], self.clock().ticks);
+        self.play_relative_sound(
+            "ui.button.click",
+            lodestone_model::event::SoundCategory::Ui,
+            0.25,
+            1.0,
+            seed,
+        );
+    }
+
+    /// Resume the browser's `AudioContext` from a real user-gesture input
+    /// event — see `crate::audio::ShellAudio`'s module doc ("the autoplay
+    /// gate") for why this must be called from inside a real click/keydown
+    /// handler and never eagerly, and `ShellAudio::is_suspended` for how to
+    /// observe whether it actually took.
+    ///
+    /// A plain no-op on native: there is no browser autoplay gate to lift, and
+    /// native's `ShellAudio` does not even carry this method — its `cpal`
+    /// stream starts running the moment `from_env` opens the device, with no
+    /// gesture requirement at all. Written this way (one method, an internal
+    /// `cfg`) rather than `#[cfg]`-gating the method itself so every call site
+    /// (`crate::app::WindowApp`) stays portable and needs no `cfg` of its own.
+    pub fn resume_audio_on_gesture(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        self.audio_mut(|audio| {
+            if let Some(audio) = audio {
+                audio.resume_on_gesture();
+            }
+        });
+    }
+
     /// Advance the music clock by however many 20 Hz ticks have elapsed, and start
     /// a track if vanilla's `MusicManager` says to.
     ///

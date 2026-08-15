@@ -354,6 +354,29 @@ impl ShellAudio {
         }
     }
 
+    /// Plays a **head-relative** one-shot sound — vanilla's
+    /// `SimpleSoundInstance.forUI` shape (`ui.button.click` and anything else
+    /// vanilla marks `RELATIVE`/`Attenuation.NONE`): no distance falloff, no
+    /// panning, audible identically everywhere. No position argument at all,
+    /// unlike [`play_sound`](Self::play_sound) — see
+    /// [`lodestone_sound::AudioEngine::play_relative_sound`] for why a position
+    /// would be ignored anyway. Captioned at the listener's own origin
+    /// (`Vec3::ZERO`), which reads as "no arrow" — correct for a sound with no
+    /// world source.
+    pub fn play_relative_sound(
+        &mut self,
+        name: &str,
+        category: SoundCategory,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) {
+        self.record_caption(name, Vec3::ZERO);
+        if let Err(e) = self.engine.play_relative_sound(name, category, volume, pitch, seed) {
+            self.report_failure(name, &e);
+        }
+    }
+
     /// This frame's drawable caption rows against the listener basis, or an empty
     /// vector when nothing is live. `forward` is the camera's own forward; `right`
     /// is derived from it here so every caller shares one basis.
@@ -590,6 +613,32 @@ impl AudioState {
             Err(e) => self.report_failure(name, &e),
         }
     }
+
+    /// Head-relative one-shot: `Self::play` minus the position, forcing
+    /// `instance.relative` after resolve — the same shape native's
+    /// `AudioEngine::play_relative_sound` forces, since `SoundResolver` here
+    /// carries no separate "relative" resolve path of its own.
+    fn play_relative(
+        &mut self,
+        name: &str,
+        category: SoundCategory,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) {
+        self.record_caption(name, Vec3::ZERO);
+        match self
+            .resolver
+            .resolve_instance(name, category, Vec3::ZERO, volume, pitch, seed)
+        {
+            Ok(Some(mut instance)) => {
+                instance.relative = true;
+                self.mixer.borrow_mut().play(instance);
+            }
+            Ok(None) => {}
+            Err(e) => self.report_failure(name, &e),
+        }
+    }
 }
 
 /// The shell's handle to the browser's audio — see [`AUDIO_STATE`] for why
@@ -796,10 +845,28 @@ impl ShellAudio {
     /// the way to observe whether it actually took.
     pub fn resume_on_gesture(&self) {
         AUDIO_STATE.with(|cell| {
-            if let Some(state) = cell.borrow().as_ref()
-                && let Err(e) = state.ctx.resume()
-            {
-                tracing::warn!(target: "audio", "AudioContext::resume() failed: {e:?}");
+            if let Some(state) = cell.borrow().as_ref() {
+                // Read before the call, not after: `resume()` returns a `Promise`
+                // and this is deliberately fire-and-forget (see this method's own
+                // doc), so `ctx.state()` immediately afterward would still often
+                // read `suspended` even on a call that is about to succeed — that
+                // would make a *correct* resume log as a failure. The pre-call
+                // read is what makes the log line mean "a resume was actually
+                // requested", not "the browser confirmed it synchronously" —
+                // which the API structurally cannot promise.
+                let was_suspended = state.ctx.state() == web_sys::AudioContextState::Suspended;
+                if let Err(e) = state.ctx.resume() {
+                    tracing::warn!(target: "audio", "AudioContext::resume() failed: {e:?}");
+                } else if was_suspended {
+                    // The one observable signal this call has: it was asked to
+                    // lift the autoplay gate at least once. `ShellAudio::is_suspended`
+                    // is the way to confirm it actually took.
+                    tracing::info!(
+                        target: "audio",
+                        "AudioContext::resume() requested from a real user gesture \
+                         (was suspended)"
+                    );
+                }
             }
         });
     }
@@ -867,6 +934,24 @@ impl ShellAudio {
         AUDIO_STATE.with(|cell| {
             if let Some(state) = cell.borrow_mut().as_mut() {
                 state.play(name, category, pos, volume, pitch, seed);
+            }
+        });
+    }
+
+    /// Plays a head-relative one-shot sound (`ui.button.click` and anything
+    /// else vanilla marks `RELATIVE`) — identical contract to native's
+    /// [`play_relative_sound`](Self::play_relative_sound).
+    pub fn play_relative_sound(
+        &mut self,
+        name: &str,
+        category: SoundCategory,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) {
+        AUDIO_STATE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().as_mut() {
+                state.play_relative(name, category, volume, pitch, seed);
             }
         });
     }

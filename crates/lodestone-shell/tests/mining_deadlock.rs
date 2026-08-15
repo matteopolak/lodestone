@@ -59,6 +59,7 @@ use lodestone::interact::{Attacking, MiningPredictor, NetHandle, ParticleSim, Ra
 use lodestone::mesher::{MeshScheduler, TerrainMesh};
 use lodestone::particles::Particles;
 use lodestone::raycast::RayHit;
+use lodestone::sim::AudioEngine;
 use lodestone_client::{
     ClientBuilder, ClientHandle, ConnectionState, Directive, LoginProfile, ServerAddress,
     VersionAdapter,
@@ -67,7 +68,7 @@ use lodestone_ecs::ecs::schedule::Schedule;
 use lodestone_ecs::ecs::world::World as EcsWorld;
 use lodestone_ecs::player::{ActionQueue, Egress};
 use lodestone_ecs::session::SessionMenus;
-use lodestone_ecs::{EcsHandle, GameTick, LockHolds, VersionData, hold_write};
+use lodestone_ecs::{EcsHandle, FrameClock, GameTick, LockHolds, VersionData, hold_write};
 use lodestone_model::{AdapterError, BlockHardness, ClientAction, ItemStack, ToolMining};
 use lodestone_world::{
     ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, WorldSink,
@@ -273,6 +274,12 @@ fn build_resources(world: &mut EcsWorld) {
     world.insert_resource(ParticleSim(Particles::new(None)));
     world.insert_resource(ActionQueue::default());
     world.insert_resource(VersionData(Some(Box::new(OneBlockVersion))));
+    // `drive_mining`'s own predicted break sound needs `FrameClock` (the seed)
+    // and `AudioEngine` — see `break_intent.rs`'s identical addition for the
+    // full reasoning. `AudioEngine(None)` keeps the sound branch a no-op here;
+    // this file is about the world-lock deadlock, not about sound.
+    world.insert_resource(FrameClock::default());
+    world.insert_resource(AudioEngine(None));
     // `drive_mining`'s local block-edit prediction (issue #596) needs a mesh
     // scheduler to re-mesh through; a `Demo` classifier is the same
     // GPU-free choice `place_intent.rs`'s harness makes for `drive_placement`.

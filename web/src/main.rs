@@ -155,8 +155,74 @@ async fn fetch_panorama_faces() -> Vec<(String, Vec<u8>)> {
     faces
 }
 
-/// Fetch the required blobs and the optional panorama faces, and install them
-/// all as the session's asset bundle.
+/// Parses `web/scripts/stage_sounds.py`'s manifest — a flat JSON array of
+/// object-name strings — via the browser's own `JSON.parse` rather than
+/// pulling `serde_json` into this size-sensitive crate (`just wasm-size`
+/// enforces a gzip ceiling on the compiled `.wasm`, and this is the one call
+/// site that would need it) for one small, fixed shape. `None` covers
+/// malformed JSON or anything other than an all-string array; the caller
+/// degrades to "no samples staged" either way, exactly as a missing manifest
+/// does.
+fn parse_sound_manifest(bytes: &[u8]) -> Option<Vec<String>> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let value = js_sys::JSON::parse(text).ok()?;
+    let array: js_sys::Array = value.dyn_into().ok()?;
+    array.iter().map(|v| v.as_string()).collect()
+}
+
+/// Best-effort fetch of the curated sound corpus `web/Trunk.toml`'s
+/// `post_build` hook staged via `scripts/stage_sounds.py`, when a local
+/// asset-object store was populated — that script's module doc has the full
+/// curation rationale and the measured byte counts.
+///
+/// **Unlike `client.jar`/`blocks.json`, a miss here is not fatal**, matching
+/// [`fetch_panorama_faces`]: `ShellAudio::from_env` already degrades an empty
+/// `Bundle::sounds_json`/`sound_objects` to a logged "audio disabled" (no
+/// registry) or "audio enabled, N/M events have a sample" (a partial corpus),
+/// never a broken page. Three independent misses are tolerated in sequence —
+/// the registry itself, the manifest naming which objects were staged, and
+/// each individual object — because each is a *different* thing that can be
+/// absent (no store at all, a store with `fetch-assets` but not
+/// `fetch-sounds`, or a store with some but not all curated samples on disk).
+async fn fetch_sound_bundle() -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
+    let sounds_json = match fetch_bytes("sounds.json").await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::info!(
+                "[boot] sounds.json not staged ({e}); browser audio stays disabled \
+                 (see web/scripts/stage_sounds.py)"
+            );
+            return (Vec::new(), Vec::new());
+        }
+    };
+    let manifest_bytes = match fetch_bytes("sounds/manifest.json").await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::info!(
+                "[boot] sounds/manifest.json not staged ({e}); the registry alone \
+                 resolves every event to \"no sample on disk\", same as native with an \
+                 empty corpus"
+            );
+            return (sounds_json, Vec::new());
+        }
+    };
+    let Some(names) = parse_sound_manifest(&manifest_bytes) else {
+        log::warn!("[boot] sounds/manifest.json did not parse as a JSON string array");
+        return (sounds_json, Vec::new());
+    };
+    let mut objects = Vec::with_capacity(names.len());
+    for name in names {
+        match fetch_bytes(&format!("sounds/{name}")).await {
+            Ok(bytes) => objects.push((name, bytes)),
+            Err(e) => log::info!("[boot] sound object {name} not staged ({e}), skipping"),
+        }
+    }
+    log::info!("[boot] sound corpus: {} object(s) staged", objects.len());
+    (sounds_json, objects)
+}
+
+/// Fetch the required blobs and the optional panorama faces and sound corpus,
+/// and install them all as the session's asset bundle.
 async fn install_assets() -> Result<(), String> {
     status("fetching client.jar …");
     let client_jar = fetch_bytes(CLIENT_JAR_URL).await?;
@@ -171,27 +237,29 @@ async fn install_assets() -> Result<(), String> {
         blocks_report.len() as f64 / (1024.0 * 1024.0),
     ));
     let panorama = fetch_panorama_faces().await;
-    let sizes = format!(
-        "assets ready: client.jar {:.1} MiB, blocks.json {:.1} MiB, panorama {}/6 faces",
+    status(&format!(
+        "client.jar {:.1} MiB, blocks.json {:.1} MiB, panorama {}/6 faces — fetching sound \
+         corpus …",
         client_jar.len() as f64 / (1024.0 * 1024.0),
         blocks_report.len() as f64 / (1024.0 * 1024.0),
         panorama.len(),
+    ));
+    let (sounds_json, sound_objects) = fetch_sound_bundle().await;
+    let sizes = format!(
+        "assets ready: client.jar {:.1} MiB, blocks.json {:.1} MiB, panorama {}/6 faces, \
+         sound corpus {} object(s) ({:.1} KiB registry)",
+        client_jar.len() as f64 / (1024.0 * 1024.0),
+        blocks_report.len() as f64 / (1024.0 * 1024.0),
+        panorama.len(),
+        sound_objects.len(),
+        sounds_json.len() as f64 / 1024.0,
     );
     lodestone::platform::assets::install(lodestone::platform::assets::Bundle {
         client_jar,
         blocks_report,
         panorama,
-        // Empty for now, and deliberately not silently defaulted: the browser
-        // audio backend exists and its assets do not. Nothing here fetches
-        // `sounds.json` or any `.ogg` yet, so the mixer resolves no sound and
-        // the page is silent — the same "absent means absent" contract
-        // `panorama` uses, where a missing face falls back rather than
-        // pretending. Staging these the way the panorama faces are staged is
-        // what makes the backend audible; until then an empty vec is the honest
-        // value, and a `..Default::default()` here would hide that this field
-        // was never filled in.
-        sounds_json: Vec::new(),
-        sound_objects: Vec::new(),
+        sounds_json,
+        sound_objects,
     })?;
     status(&sizes);
     Ok(())
