@@ -85,6 +85,33 @@ impl ApplicationHandler for WindowApp {
         ) {
             self.pacer.record_input(Instant::now());
         }
+        // Browser: an `AudioContext` created before any user gesture starts
+        // `suspended` and stays that way with **no error** — the identical
+        // failure shape this crate already measured for a gesture-less
+        // `request_pointer_lock()` (see the `WindowEvent::MouseInput` arm below
+        // that re-issues the grab from inside a real click for that exact
+        // reason). `Sim::resume_audio_on_gesture` is a no-op on native and,
+        // once the context is already running, an idempotent one here too —
+        // `AudioContext::resume()` on a running context just resolves
+        // immediately — so this can run on every press with nothing to guard.
+        //
+        // A key or mouse press is unambiguously a real user gesture per the
+        // HTML spec's "sticky activation" rules; a wheel event is deliberately
+        // excluded from this check even though it shares the pacer's input
+        // above — the spec does not count it as activating, so calling
+        // `resume()` from one would be asking the browser to honour a gesture
+        // it never granted.
+        if matches!(event, WindowEvent::MouseInput { state: ElementState::Pressed, .. })
+            || matches!(
+                event,
+                WindowEvent::KeyboardInput {
+                    event: winit::event::KeyEvent { state: ElementState::Pressed, .. },
+                    ..
+                }
+            )
+        {
+            self.sim.resume_audio_on_gesture();
+        }
         match event {
             // Winit reports modifier state as its own event rather than
             // attaching it to every `KeyboardInput`, and nothing in this
@@ -288,6 +315,18 @@ impl ApplicationHandler for WindowApp {
                             if dragged {
                                 self.menu_slider_drag = Some(row);
                             } else {
+                                // `AbstractWidget.mouseClicked`: `playDownSound`
+                                // fires unconditionally before `onClick`, on
+                                // every activating click — a slider is the one
+                                // exception (`AbstractSliderButton` overrides
+                                // `playDownSound` to a no-op here and plays it on
+                                // *release* instead, handled below), which is
+                                // exactly why this arm is reached only on the
+                                // non-`dragged` branch. This was the owner's
+                                // literal report ("clicking menu buttons"): no
+                                // call site anywhere in the shell played
+                                // `ui.button.click` before this.
+                                self.sim.play_ui_click_sound();
                                 let action = self.nav.click(&mut self.ui, row);
                                 self.apply_menu_action(action);
                             }
@@ -295,10 +334,15 @@ impl ApplicationHandler for WindowApp {
                     }
                 }
                 if state == ElementState::Released && button == MouseButton::Left {
-                    // `AbstractSliderButton.onRelease`: the drag ends. Also the
-                    // safety net for a release outside the row, which is where a
-                    // sticky drag would otherwise come from.
-                    self.menu_slider_drag = None;
+                    // `AbstractSliderButton.onRelease`: the drag ends, and
+                    // *this* is where a slider's click sound plays (its
+                    // `playDownSound` override is a no-op on press — see the
+                    // press arm above) — only when a drag was actually live,
+                    // matching vanilla's `onRelease` being a widget method that
+                    // fires only for the widget that started the drag.
+                    if self.menu_slider_drag.take().is_some() {
+                        self.sim.play_ui_click_sound();
+                    }
                 }
                 // Every `owns_frame` action handles its own grab (each of them
                 // either stays on a menu screen, which never grabs, or moves to

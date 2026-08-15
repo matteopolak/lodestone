@@ -72,3 +72,21 @@ command_arguments = [
   "-c",
   "python3 scripts/stage_panorama.py --cache-dir ../.cache/mc/26.2 --out \"$TRUNK_STAGING_DIR\"",
 ]
+
+# Stage a curated `.ogg` sound subset (plus the full `sounds.json` registry),
+# IF the local asset-object store has them — same conditional-staging shape
+# and the same reason as the two hooks above: `scripts/stage_sounds.py`'s
+# module doc has the full curation rationale and the measured byte counts
+# (46 objects / ~1.0 MB raw, ~410 KB gzip). Unlike the panorama hook, this one
+# feeds a genuinely new capability rather than falling back to an existing
+# stub: with nothing staged, `ShellAudio::from_env` degrades to "audio
+# disabled" exactly as it already does with an empty `Bundle`, so a checkout
+# with no populated `.cache/mc` still boots — just silently, as it always did
+# before this hook existed.
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = [
+  "-c",
+  "python3 scripts/stage_sounds.py --cache-dir ../.cache/mc/26.2 --out \"$TRUNK_STAGING_DIR\"",
+]

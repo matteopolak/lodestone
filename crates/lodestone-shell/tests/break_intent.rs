@@ -37,6 +37,7 @@ use std::sync::OnceLock;
 use lodestone::interact::{Attacking, MiningPredictor, NetHandle, ParticleSim, RayTarget};
 use lodestone::mesher::{MeshScheduler, TerrainMesh};
 use lodestone::particles::Particles;
+use lodestone::sim::AudioEngine;
 use lodestone_client::{
     ClientBuilder, ConnectionState, Directive, LoginProfile, ServerAddress, VersionAdapter,
 };
@@ -47,7 +48,7 @@ use lodestone_ecs::player::{
     ActionQueue, BreakIntent, BreakOutcome, BreakRejection, BreakStatus, Egress,
 };
 use lodestone_ecs::session::SessionMenus;
-use lodestone_ecs::{EcsHandle, GameTick, LockHolds, VersionData};
+use lodestone_ecs::{EcsHandle, FrameClock, GameTick, LockHolds, VersionData};
 use lodestone_model::{BlockAabb, BlockFace, BlockHardness, BlockPos, ClientAction, ItemStack, ToolMining};
 use lodestone_world::{ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, WorldSink};
 
@@ -308,6 +309,18 @@ fn build_resources(world: &mut EcsWorld) {
     world.insert_resource(ParticleSim(Particles::new(None)));
     world.insert_resource(ActionQueue::default());
     world.insert_resource(VersionData(Some(Box::new(OneBlockVersion))));
+    // `drive_mining`'s own predicted break sound (the live-mining half of
+    // `docs/sound-playback.md`'s "your own mined break" row) needs
+    // `FrameClock` (the seed) and `AudioEngine` — the same two resources
+    // `place_intent.rs`'s harness already inserts for `drive_placement`'s
+    // identical-shape predicted placement sound. `AudioEngine(None)` is the
+    // "audio disabled" state real headless/CI runs are in, and is exactly
+    // the state that makes the `if let Some(engine) = &mut audio.0` branch a
+    // no-op — this file is not testing that the sound *plays* (that needs a
+    // real device, which no test here opens), only that its own resource
+    // requirement does not panic the schedule.
+    world.insert_resource(FrameClock::default());
+    world.insert_resource(AudioEngine(None));
     // `drive_mining`'s local block-edit prediction (issue #596) needs a mesh
     // scheduler to re-mesh through; a `Demo` classifier is the same
     // GPU-free choice `place_intent.rs`'s harness makes for `drive_placement`.

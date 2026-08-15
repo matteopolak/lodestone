@@ -191,6 +191,44 @@ impl AudioEngine {
         self.lock_mixer().set_voice_position(handle, position)
     }
 
+    /// Plays a **head-relative, one-shot** sound — vanilla's
+    /// `SimpleSoundInstance.forUI` shape (`Attenuation.NONE`, `RELATIVE`): no
+    /// distance falloff and no stereo panning, so it sounds identical no matter
+    /// where the listener stands or faces. This is [`play_loop`](Self::play_loop)
+    /// minus the forced `looping = true` — the two share the same
+    /// `Vec3::ZERO`-position-is-ignored contract because `relative` is what makes
+    /// the position irrelevant, not the zero itself.
+    ///
+    /// The UI button-click sound is the motivating caller
+    /// (`crate::app::WindowApp` in `lodestone-shell`), but this is the general
+    /// "vanilla marked this `RELATIVE`" primitive — not UI-specific — should
+    /// another head-relative one-shot event need it later.
+    ///
+    /// `Ok(None)` means the event resolved to nothing playable (the ordinary
+    /// answer when the `.ogg` corpus is not on disk), not an error.
+    pub fn play_relative_sound(
+        &mut self,
+        event_name: &str,
+        category: ModelCategory,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) -> Result<Option<PlayHandle>, DriverError> {
+        let mut instance = match self.resolver.resolve_instance(
+            event_name,
+            category,
+            Vec3::ZERO,
+            volume,
+            pitch,
+            seed,
+        )? {
+            Some(instance) => instance,
+            None => return Ok(None),
+        };
+        instance.relative = true;
+        Ok(Some(self.lock_mixer().play(instance)))
+    }
+
     /// Starts a **looping, head-relative** voice — the ambient biome/dimension
     /// loop (`BiomeAmbientSoundsHandler.LoopSoundInstance`).
     ///

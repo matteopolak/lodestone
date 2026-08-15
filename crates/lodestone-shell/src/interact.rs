@@ -581,9 +581,11 @@ pub fn drive_mining(
     // own docs).
     chunk_world: Res<ChunkWorld>,
     write: Res<ChunkWorldWrite>,
+    clock: Res<FrameClock>,
     mut terrain: ResMut<TerrainMesh>,
     mut mining: ResMut<MiningPredictor>,
     mut particles: ResMut<ParticleSim>,
+    mut audio: ResMut<AudioEngine>,
     mut queue: ResMut<ActionQueue>,
     // That fix's veto registry. `Option`, so this system is unchanged for a
     // client that installed no plugin.
@@ -857,6 +859,36 @@ pub fn drive_mining(
         // `id_value`, not `id::AIR`: the burst must show the block that *was*
         // there, not the air it just became.
         particles.0.destroy_block(hit.block, id_value, [1.0; 3]);
+        // The break sound, predicted locally for the same reason
+        // `drive_placement`'s is: `ServerPlayerGameMode.destroyBlock` calls
+        // `this.level.removeBlock(pos, false)` with no `levelEvent`/`playSound`
+        // anywhere in it (`docs/sound-playback.md`), so a player's own dig never
+        // produces a `2001` packet for `NetUpdate::BlockDestroyed` to catch —
+        // vanilla's own client makes it audible by having `ClientLevel.levelEvent`
+        // dispatch `case 2001` locally, sound and debris together
+        // (`MultiPlayerGameMode.destroyBlock` → `Block.spawnDestroyParticles` →
+        // `level.levelEvent(player, 2001, …)`). This system could not reach
+        // `ShellAudio` before `AudioEngine` became a resource; now it reads it
+        // exactly as `drive_placement` already does. `id_value` — the state that
+        // *was* there — not `id::AIR`, matching `sim::actions::Sim::break_block`'s
+        // offline mirror of the same case.
+        if let Some(sound) = lodestone_data::sound_types::sound_type(id_value)
+            && let Some(sound_name) = lodestone_data::sound_types::break_sound_name(id_value)
+            && let Some(engine) = &mut audio.0
+        {
+            engine.play_sound(
+                sound_name,
+                lodestone_model::event::SoundCategory::Block,
+                glam::Vec3::new(
+                    hit.block[0] as f32 + 0.5,
+                    hit.block[1] as f32 + 0.5,
+                    hit.block[2] as f32 + 0.5,
+                ),
+                sound.break_or_place_volume(),
+                sound.break_or_place_pitch(),
+                block_sound_seed(hit.block, clock.ticks),
+            );
+        }
     }
     queue.0.extend(actions);
 }

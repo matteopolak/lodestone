@@ -20,7 +20,7 @@ The chain, end to end, all of which exists:
 | → `ShellAudio::play_sound` | `crates/lodestone-shell/src/audio.rs::ShellAudio::play_sound` |
 | event → `sounds.json` → weighted pick → decode → mixer | `crates/lodestone-sound/` |
 | decode / mix / spatialise | `crates/lodestone-audio/` |
-| `cpal` device, listener from the render camera | `ShellAudio`, `Sim::set_audio_listener` (called from `app.rs::WindowApp::redraw`) |
+| device, listener from the render camera | `ShellAudio`, `Sim::set_audio_listener` (called from `app.rs::WindowApp::redraw`) — `cpal` natively, a `web_sys::ScriptProcessorNode` pulling from the same `Mixer` in the browser (see "Configuration" below) |
 
 `net.rs`'s `forward` is the only router involved. `ingest::handles_event` and
 `session::handles_event` are correctly silent on the two sound variants: a sound is
@@ -110,10 +110,10 @@ guesswork; it follows from whether vanilla's server passes an *excluded player* 
 | **cascading** block break (torch losing support, fire, explosion) | `Level.destroyBlock` → `levelEvent(2001, …)`, no exclusion (`Level.java`) | **plays** (new) |
 | **your own** block placement | `BlockItem.place` → `playSound(player, …)` (`BlockItem.java`) — predicted | **plays** (new) |
 | block break in the **offline demo world** | the same `case 2001` dispatched locally | **plays** (new) |
-| **your own** mined break | predicted; the emit lives in an ECS system with no audio handle — see below | silent |
-| **your own** footsteps | `Player.playSound` overrides to pass `this` (`Player.java`) — server broadcasts to everyone but you | silent |
+| **your own** mined break | predicted; `interact::drive_mining` now reads the `AudioEngine` resource directly, the same way `drive_placement` already did — see below | **plays** (new) |
+| **your own** footsteps | `Player.playSound` overrides to pass `this` (`Player.java`), so nothing crosses the wire — predicted instead, `Sim::tick_footstep` (`sim/step.rs`'s physics-tick loop) | **plays** |
 | *another* player's footsteps and mined breaks | never on the wire at all — see below | silent |
-| UI clicks | `SimpleSoundInstance.forUI`, never on the wire | silent |
+| UI clicks | `SimpleSoundInstance.forUI`, never on the wire — `Sim::play_ui_click_sound`, called from every activating menu click in `app::WindowApp` | **plays** (new) |
 
 Note that the first four rows are not a theoretical list: `lodestone-sound`'s
 `live_sound_gate` already proves a server-decided sound crosses the public
@@ -209,25 +209,31 @@ through the real, production `forward()` function into the exact
 `ShellAudio::play_sound` — the two protocol-layer tests stop at
 `ClientEvent::Sound` and never call `forward` at all.
 
-### What is still missing, and the exact seam
+### What used to be missing here, and is not any more
 
-The live predicted break. Its debris sibling is emitted in
-`interact.rs`'s `drive_mining` at `mining.0.take_destroyed()`, which is a Bevy system
-running *inside* the one `World` — and `ShellAudio` is a private field on `Sim`, not an
-ECS resource, so the system cannot reach it. (Making it a resource is not a
-one-liner: `AudioEngine` owns a live `cpal` stream, and `interact.rs` already records
-a deadlock from a system taking a read guard on the `World` it runs in.)
+**This section previously said `ShellAudio` was a private field on `Sim`, not an
+ECS resource, and that footsteps had no producer at all — both were stale by the
+time they were read.** The `AudioEngine` resource (`docs/sim-dissolution.md`)
+predates this correction, and `drive_placement` (`interact.rs`) had already been
+reading it directly for its own predicted placement sound; the live predicted
+*break* was the one real remaining gap, closed the same way: `drive_mining` now
+takes `mut audio: ResMut<AudioEngine>` and `clock: Res<FrameClock>` alongside its
+existing params and, at the exact point `Mining::take_destroyed` fires (the same
+tick the debris burst and the local block-state prediction happen), resolves
+`id_value`'s `SoundType` and plays `break_sound_name` at the block centre with
+`block_sound_seed(hit.block, clock.ticks)` — the identical shape
+`drive_placement`'s own placement sound already used, so there is no new producer
+*pattern* here, only a second call site of an existing one. `sim::actions::Sim::break_block`
+(the **offline demo world**'s direct-edit path, a `Sim` method rather than a
+system) already played this sound; the live path was the one still silent.
 
-The seam that closes it: a small `PredictedBlockSounds(Vec<([i32; 3], u32)>)` ECS
-resource that `drive_mining` pushes to next to the `destroy_block` call, drained by
-`Sim` immediately after it runs the `GameTick` schedule and fed to
-`Sim::play_block_break_sound`. That is a *new producer path*, deliberately not
-half-built here.
-
-Footsteps are the other missing producer and a bigger one — per-tick, per-surface,
-distance-gated, and keyed off the block *below* the player. The data is now free
-(`sound_types::step_sound_name(id)`), so what remains is the step-distance
-accumulator and the surface pick, not a census.
+Footsteps are not missing either: `Sim::tick_footstep` (`sim/step.rs`'s physics-tick
+loop, right after `w.run_schedule(GameTick)` returns each tick) has run in
+production since the cave-ambience/biome-loop/rain landing — per-tick, keyed off
+the block *below* the player via `sound_types::step_sound_name`, gated by
+`StepAccumulator`'s distance accumulator. If a future audit finds this section
+disagreeing with the tree again, re-check `git log -S 'fn tick_footstep'` before
+trusting either the doc or a summary of it.
 
 ## How to change it
 
@@ -249,10 +255,21 @@ accumulator and the surface pick, not a census.
   engine's `JavaRandom`, even though that is already in scope at the break site,
   because shifting that sequence would break the `mining_destroy_burst` and
   `break_particle_tint` golden gates.
-* **Reaching audio from an ECS system**: you cannot, today. See "What is still
-  missing" above for the seam.
+* **Reaching audio from an ECS system**: `ResMut<crate::sim::AudioEngine>`, exactly
+  as `drive_placement`/`drive_mining` (`interact.rs`) already do — it is a real
+  resource, not a private `Sim` field, and has been since `docs/sim-dissolution.md`
+  landed. `Sim::play_local_sound`/`Sim::play_relative_sound` are the equivalent for
+  non-system callers (`crate::app::WindowApp`, `crate::sim::Sim` methods).
+* **A head-relative sound with no world position** (UI, vanilla's
+  `SimpleSoundInstance.forUI`/`forMusic` shape: `Attenuation.NONE`, `RELATIVE`, no
+  panning, audible identically everywhere): `Sim::play_relative_sound`, or
+  `AudioEngine::play_relative_sound` from inside a system. Not the same call as a
+  positioned one — passing a position and hoping it lands near the listener is an
+  approximation this API does not need you to make.
 * **Changing the corpus policy**: `xtask::plan_sound_corpus`. Keep it derived from
-  `sounds.json`; a file list rots at the next version bump.
+  `sounds.json`; a file list rots at the next version bump. The browser's curated
+  subset (`web/scripts/stage_sounds.py`) uses the same "derive from event names,
+  not files" discipline at a much smaller scale — see its module doc.
 * **Gotcha — the index key has no `assets/` prefix.** `AssetObjectStore`'s
   `ResourceSource` impl strips it; call `object_bytes` directly and you must not
   pass one. Getting this wrong resolves nothing, silently.
@@ -304,19 +321,54 @@ is connection setup, not bandwidth.
 
 ## Configuration
 
+**Native** — `crate::audio::ShellAudio::from_env` reads the local asset-object
+store:
+
 | variable | effect |
 |---|---|
 | `LODESTONE_ASSET_ROOT` | asset-object root, highest priority |
 | `LODESTONE_ASSETS` | pack root; the same directory in a vanilla install |
 | neither set | ancestor walk for `.cache/mc/<version>` |
 
-No feature flag: `audio.rs` is `#![cfg(not(target_arch = "wasm32"))]` and otherwise
-always compiled.
+**Browser** — no environment variable; `web/`'s trunk build fetches everything
+`ShellAudio::from_env` (the `wasm32` arm) needs and hands it in through
+[`platform::assets::Bundle`](../crates/lodestone-shell/src/platform.rs)'s
+`sounds_json`/`sound_objects` fields, exactly like `client.jar` and the
+title-screen panorama:
+
+| stage | where |
+|---|---|
+| curated event list | `web/scripts/stage_sounds.py`'s `CURATED_EVENTS` — 16 events, derived to 46 `.ogg` objects, not a hand-kept file list |
+| staging (build time, conditional) | `web/Trunk.toml`'s third `post_build` hook, fail-open exactly like the panorama hook beside it |
+| fetch (runtime, best-effort) | `web/src/main.rs`'s `fetch_sound_bundle` |
+| gesture gate | `Sim::resume_audio_on_gesture`, called from every real mouse-press/key-press `WindowEvent` (`app/lifecycle.rs::window_event`) — a no-op on native |
+
+Measured (26.2, this checkout's `.cache/mc/26.2`): 46 objects, 411,904 B raw /
+375,502 B gzip, plus `sounds.json` staged whole at 626,160 B raw / 44,671 B gzip —
+1,038,064 B raw / 420,173 B gzip total. This is fetched at runtime, the same as
+`client.jar`, so it does **not** count against `just wasm-size`'s ceiling on the
+compiled `.wasm` (that guard measures the linked binary only); the number is
+recorded here because a real page load still pays for it over the wire.
+`audio.rs` used to be `#![cfg(not(target_arch = "wasm32"))]` in its entirety —
+it no longer is; both targets compile a real `ShellAudio` now, with different
+backends (`cpal` vs. a `web_sys::ScriptProcessorNode`) behind the same public
+API.
+
+**Growing the curated corpus needs no Rust change and no `.wasm` rebuild.** Add
+an event name to `CURATED_EVENTS`; `web/src/main.rs` fetches whatever the
+staged manifest names, by name, with no hardcoded file list on the Rust side
+to keep in sync.
 
 ## Dependencies
 
-`lodestone-sound` (registry resolution, weighted selection, `cpal` device),
-`lodestone-audio` (Ogg Vorbis decode, mix, spatialise), `lodestone-assets`
-(`SoundRegistry`, `ResourceSource`), `crate::asset_objects` (the store),
-`lodestone-render::Camera` (the listener transform). `xtask` needs `curl` on
-`PATH`.
+`lodestone-sound` (registry resolution, weighted selection, `cpal` device
+natively, a device-free `Mixer`-driving resolver in the browser),
+`lodestone-audio` (Ogg Vorbis decode, mix, spatialise — shared by both
+targets), `lodestone-assets` (`SoundRegistry`, `ResourceSource`,
+`MemorySource` for the browser's staged bundle), `crate::asset_objects` (the
+native store), `lodestone-render::Camera` (the listener transform). `xtask`
+needs `curl` on `PATH`. The browser path additionally needs `web_sys`'s
+`AudioContext`/`ScriptProcessorNode` (already an ordinary `lodestone-shell`
+wasm32 dependency) and, at build time, a Python 3 interpreter for
+`stage_sounds.py`/`stage_panorama.py` (same requirement the panorama staging
+already had).

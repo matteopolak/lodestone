@@ -30,6 +30,13 @@ other than `main.rs` as unverified until it is swept.
   list now really pings a server from the browser, through `lodestone-relay`
   linked into `lodestone-web-server` (`web/server/`) — see "Live multiplayer
   transport" below for what that needs and what it does not (yet) cover.
+- **Audio:** a real `web_sys::AudioContext` + `ScriptProcessorNode` drives the
+  same device-free `lodestone_audio::Mixer` native uses, fed a curated `.ogg`
+  subset `scripts/stage_sounds.py` stages at build time — see
+  `docs/sound-playback.md`'s "Configuration" section for the byte counts and
+  `crates/lodestone-shell/src/audio.rs`'s module doc for the autoplay gesture
+  gate (`Sim::resume_audio_on_gesture`, wired from every real mouse/key press
+  in `app/lifecycle.rs`).
 
 ## Toolchain (verified versions)
 
@@ -104,6 +111,15 @@ They used to be `data-trunk rel="copy-file"` links in `index.html`, i.e. a
 build-time hard dependency on 46 MB of gitignored files. That made `trunk build`
 fail outright on every CI runner and on every contributor's first build, with the
 real cause buried (see `docs/ci.md`).
+
+**The panorama faces and the sound corpus are optional in the other
+direction**: unlike `client.jar`/`blocks.json`, their absence does not stop the
+page from working, only from looking/sounding as intended — a missing
+panorama face falls back to `client.jar`'s flat grey stub, and a missing sound
+corpus leaves the browser's `ShellAudio` disabled with a logged reason,
+exactly as a native checkout with no `.ogg` corpus fetched degrades. Both are
+staged by the same conditional `post_build` hook shape as `client.jar`/
+`blocks.json` — see `scripts/stage_panorama.py`/`scripts/stage_sounds.py`.
 
 ### Live multiplayer transport (optional)
 
@@ -492,6 +508,10 @@ web/
                        no relay) — COOP/COEP headers, post_build asset hooks
   scripts/
     stage_panorama.py post_build hook: stages real panorama faces if present
+    stage_sounds.py    post_build hook: stages a curated .ogg sound subset
+                        plus the full sounds.json registry, if present — see
+                        its own module doc for the curated event list and the
+                        measured byte counts, and docs/sound-playback.md
   assets/               post_build-hook staging target; empty in the repo
   src/
     main.rs             the entire wasm crate: boot, asset fetch, hands off to
