@@ -85,10 +85,43 @@ behaviour moved.
   driving it would be cosmetic. A hostile mob's `MeleeAttackGoal` still fires
   correctly once *something* — a caller, or a future population search —
   calls `SimMob::set_attack_target`/`set_attack_target_id`.
-- **`movement_speed` is read directly as blocks/tick**, matching the
-  convention `run_spawn_cycle`'s candidates and the old hardcoded `0.23`
-  demo-seeding literal already used — not vanilla's real UI-speed-to-motion
-  conversion. Revisit if a species issue needs exact vanilla speed parity.
+- **`movement_speed` is no longer read directly as blocks/tick.** It was,
+  until this was the confirmed cause of the owner's repeated "mobs move way
+  too fast" report. Vanilla's own AI movement controller
+  (`MoveControl.tick()`) does not drive a mob at full input magnitude the way
+  a player's WASD does: `Mob.setSpeed(speedModifier * movement_speed)` sets
+  *both* the per-tick speed scale `moveRelative` multiplies by **and** the
+  forward-input magnitude of the vector it multiplies (`Mob.setSpeed` calls
+  `setZza(speed)`), and `Entity.getInputVector` only normalizes an input
+  whose length exceeds `1.0` — which a `speedModifier * movement_speed` value
+  almost never does. So the two multiply: the per-tick thrust vanilla
+  actually adds to a mob's velocity is the *square* of the requested speed,
+  not the value itself (`LivingEntity.travelInAir` →
+  `handleRelativeFrictionAndCalculateMovement` →
+  `Entity.moveRelative`). That thrust then accumulates against a per-tick
+  friction decay (default ground: block friction `0.6` times the constant air
+  drag `0.91`) until it converges on a steady cruising speed of
+  `requested_speed² / (1 - 0.6 * 0.91)`.
+
+  `MobSim`'s `ai_ground_speed` (private to `crates/lodestone-server/src/mobs/mod.rs`)
+  implements exactly that conversion and is what `spawn_species` and
+  `SimMob::set_age` now feed the kinematic follower's `step_per_tick`, in
+  place of the bare attribute. `SpeciesContext` (and therefore every roster
+  goal's own `speedModifier` multiplier — panic, tempt, breed, follow) still
+  receives the *un*converted attribute, exactly as vanilla's own
+  `speedModifier * movement_speed` composes before `MoveControl` ever squares
+  it, so a goal's relative speed boost still compounds correctly through the
+  conversion.
+
+  Checked against a live vanilla server, not just derived: a real zombie
+  (`movement_speed` `0.23`) chasing a stationary villager over open ground
+  measured a mean pursuit speed of **≈0.118 blocks/tick**
+  (`crates/lodestone-entity/tests/live_navigation.rs`'s
+  `live_zombie_reaches_villager_on_open_ground`); this conversion predicts
+  `0.23² / (1 - 0.6 * 0.91) ≈ 0.1165` — within the live measurement's own
+  timing noise. The un-converted attribute value (`0.23`) is roughly double
+  either number, which is the direction and rough magnitude of the "too
+  fast" report.
 - **Unknown species are not an error.** `default_attributes` returning `None`
   falls back to `AttributeMap::new()` (generic defaults: 20 health, 2 attack,
   no armor) and `species_shape` falls back to the zombie-sized box — the same
