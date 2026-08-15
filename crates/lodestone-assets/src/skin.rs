@@ -168,6 +168,135 @@ impl PlayerModelType {
     }
 }
 
+/// One of vanilla's 18 identity skins — `DefaultPlayerSkin.get(uuid)`'s own
+/// answer for an account that has never set a skin, or whose skin has not
+/// (yet) been fetched.
+///
+/// # Where the record definition comes from
+///
+/// `DefaultPlayerSkin` (`.cache/mc/26.2/client-src/net/minecraft/client/resources/DefaultPlayerSkin.java`,
+/// a client-only class) carries a fixed 18-entry table — nine slim identities
+/// then the same nine wide, each `alex`/`ari`/`efe`/`kai`/`makena`/`noor`/
+/// `steve`/`sunny`/`zuri` — and:
+///
+/// ```java
+/// public static PlayerSkin get(final UUID profileId) {
+///    return DEFAULT_SKINS[Math.floorMod(profileId.hashCode(), DEFAULT_SKINS.length)];
+/// }
+/// ```
+///
+/// `UUID.hashCode()` and `Long.hashCode(long)` are JDK library methods, not
+/// Mojang's, so they are not in the decompile; [`default_skin_for_uuid`]'s own
+/// doc cites the exact `openjdk/jdk` source read to port them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DefaultSkin {
+    /// The rig this identity's sheet is authored for.
+    pub model: PlayerModelType,
+    /// The jar sheet **reference** — no `assets/`/`.png` wrapping, e.g.
+    /// `entity/player/wide/steve` — matching the shape
+    /// [`crate::entity::EntityTexture`]'s `default_path()` and
+    /// `skull_texture_stem` already return, so a caller can feed this straight
+    /// into the same sheet lookup either of those does.
+    pub texture: &'static str,
+}
+
+/// `DefaultPlayerSkin.DEFAULT_SKINS`, in its own declared order: nine slim
+/// identities, then the same nine names wide. **Order is load-bearing** — the
+/// index vanilla's uuid-hash pick lands on is this array's index, not an
+/// alphabetised or regrouped one.
+const DEFAULT_SKINS: [DefaultSkin; 18] = [
+    DefaultSkin { model: PlayerModelType::Slim, texture: "entity/player/slim/alex" },
+    DefaultSkin { model: PlayerModelType::Slim, texture: "entity/player/slim/ari" },
+    DefaultSkin { model: PlayerModelType::Slim, texture: "entity/player/slim/efe" },
+    DefaultSkin { model: PlayerModelType::Slim, texture: "entity/player/slim/kai" },
+    DefaultSkin { model: PlayerModelType::Slim, texture: "entity/player/slim/makena" },
+    DefaultSkin { model: PlayerModelType::Slim, texture: "entity/player/slim/noor" },
+    DefaultSkin { model: PlayerModelType::Slim, texture: "entity/player/slim/steve" },
+    DefaultSkin { model: PlayerModelType::Slim, texture: "entity/player/slim/sunny" },
+    DefaultSkin { model: PlayerModelType::Slim, texture: "entity/player/slim/zuri" },
+    DefaultSkin { model: PlayerModelType::Wide, texture: "entity/player/wide/alex" },
+    DefaultSkin { model: PlayerModelType::Wide, texture: "entity/player/wide/ari" },
+    DefaultSkin { model: PlayerModelType::Wide, texture: "entity/player/wide/efe" },
+    DefaultSkin { model: PlayerModelType::Wide, texture: "entity/player/wide/kai" },
+    DefaultSkin { model: PlayerModelType::Wide, texture: "entity/player/wide/makena" },
+    DefaultSkin { model: PlayerModelType::Wide, texture: "entity/player/wide/noor" },
+    DefaultSkin { model: PlayerModelType::Wide, texture: "entity/player/wide/steve" },
+    DefaultSkin { model: PlayerModelType::Wide, texture: "entity/player/wide/sunny" },
+    DefaultSkin { model: PlayerModelType::Wide, texture: "entity/player/wide/zuri" },
+];
+
+/// `DefaultPlayerSkin.getDefaultSkin()` — index `6`, `wide/steve` — vanilla's
+/// answer when no uuid is available at all. Distinct from
+/// [`default_skin_for_uuid`], which is the uuid-hash pick every *identified*
+/// account (including every offline-mode one, whose uuid is derived from its
+/// username rather than absent) actually gets.
+#[must_use]
+pub const fn default_skin() -> DefaultSkin {
+    DEFAULT_SKINS[6]
+}
+
+/// `DefaultPlayerSkin.get(UUID)` — the uuid-hash pick over the 18 built-in
+/// identities, for a profile that has declared no skin at all (or one not yet
+/// fetched). This is **one resolver, shared by every consumer that only has a
+/// uuid to go on**: a player-head item's owner (once threaded through), a
+/// player entity with no `textures` property, and the local player's own
+/// avatar before sign-in or before a fetch lands — so the same uuid always
+/// picks the same identity everywhere it is asked, rather than each call site
+/// defaulting independently and disagreeing (the wide-in-world/slim-in-inventory
+/// split this function exists to close).
+///
+/// # Signature: the Java-shaped halves, not this crate's own uuid type
+///
+/// This crate takes no dependency on the `uuid` crate (every consumer of this
+/// function already has one, gated behind their own feature or none at all), so
+/// the two 64-bit halves are the parameter — exactly the shape
+/// `java.util.UUID`'s own two private fields take, and exactly what
+/// `uuid::Uuid::as_u64_pair()` returns, reinterpreted as signed: `let (hi, lo) =
+/// uuid.as_u64_pair(); default_skin_for_uuid(hi as i64, lo as i64)`.
+///
+/// # Ported from the method bodies, not restated from memory
+///
+/// Three JDK/Mojang methods chain into this one value, each read from its own
+/// source rather than transcribed from familiarity — the discipline this
+/// codebase asks of every port:
+///
+/// ```java
+/// // DefaultPlayerSkin.java (26.2 client decompile)
+/// DEFAULT_SKINS[Math.floorMod(profileId.hashCode(), DEFAULT_SKINS.length)]
+///
+/// // java.util.UUID (openjdk/jdk, java.base/java.util.UUID -- not Mojang's,
+/// // so not in the 26.2 decompile; read from the real JDK source)
+/// public int hashCode() {
+///     return Long.hashCode(mostSigBits ^ leastSigBits);
+/// }
+///
+/// // java.lang.Long (openjdk/jdk, java.base/java.lang.Long)
+/// public static int hashCode(long value) {
+///     return (int)(value ^ (value >>> 32));
+/// }
+/// ```
+///
+/// `>>> `is Java's **unsigned** right shift. The final truncating `(int)` cast
+/// keeps only the low 32 bits either way, and XORing two 32-bit halves whose
+/// upper half only differs by its fill bits (sign- vs zero-extended) leaves
+/// that upper half discarded regardless — so an arithmetic and a logical shift
+/// by exactly 32 give the identical final `i32` here. Implemented with an
+/// explicit `u64` shift anyway, matching the Java operator literally rather
+/// than leaning on that equivalence.
+///
+/// `Math.floorMod` for a positive divisor is "the least non-negative
+/// remainder", which is exactly [`i32::rem_euclid`]'s contract for a positive
+/// argument.
+#[must_use]
+pub fn default_skin_for_uuid(most_sig_bits: i64, least_sig_bits: i64) -> DefaultSkin {
+    let hilo = most_sig_bits ^ least_sig_bits;
+    // `Long.hashCode(long)`: `(int)(value ^ (value >>> 32))`, `>>>` unsigned.
+    let long_hash = hilo ^ (((hilo as u64) >> 32) as i64);
+    let hash = long_hash as i32;
+    let index = hash.rem_euclid(DEFAULT_SKINS.len() as i32) as usize;
+    DEFAULT_SKINS[index]
+}
+
 /// One entry of `MinecraftTexturesPayload.textures` — a URL plus its declared
 /// model. `model` is meaningful only for the `SKIN` entry; a cape or elytra
 /// carries no `metadata.model` and so reads as [`PlayerModelType::Wide`],
