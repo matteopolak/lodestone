@@ -790,7 +790,7 @@ mod tests {
         let draw = EntityDraw {
             hurt: false,
             id: 1,
-            type_path: "pig".to_owned(),
+            type_path: std::sync::Arc::from("pig"),
             item: None,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),
@@ -871,7 +871,7 @@ mod tests {
         let draw = EntityDraw {
             hurt: false,
             id: 1,
-            type_path: "pig".to_owned(),
+            type_path: std::sync::Arc::from("pig"),
             item: None,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),
@@ -974,7 +974,7 @@ mod tests {
         let draw = EntityDraw {
             hurt: false,
             id: 1,
-            type_path: "pig".to_owned(),
+            type_path: std::sync::Arc::from("pig"),
             item: None,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),

@@ -89,7 +89,7 @@ impl RenderState {
         // camera.
         let orientation = camera_orientation(camera.view_matrix());
         for draw in entities {
-            if draw.type_path != ITEM_ENTITY_TYPE_PATH {
+            if draw.type_path.as_ref() != ITEM_ENTITY_TYPE_PATH {
                 if let Some(thrown) = thrown_item_for(&draw.type_path) {
                     self.merge_thrown_item(
                         model,

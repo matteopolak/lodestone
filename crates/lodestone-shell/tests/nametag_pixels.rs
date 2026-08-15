@@ -125,7 +125,7 @@ fn base_draw(id: i32, type_path: &str, feet: glam::Vec3, scale: f32) -> EntityDr
         hurt: false,
         block_state: None,
         id,
-        type_path: type_path.to_owned(),
+        type_path: std::sync::Arc::from(type_path),
         item: None,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),

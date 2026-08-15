@@ -202,7 +202,7 @@ fn wait_for_drop(
         let nearest = interp
             .draws()
             .into_iter()
-            .filter(|d| d.type_path == ITEM_ENTITY_TYPE_PATH && Some(d.id) != exclude)
+            .filter(|d| d.type_path.as_ref() == ITEM_ENTITY_TYPE_PATH && Some(d.id) != exclude)
             .min_by(|a, b| {
                 let da = (f64::from(a.feet.x) - px).powi(2) + (f64::from(a.feet.z) - pz).powi(2);
                 let db = (f64::from(b.feet.x) - px).powi(2) + (f64::from(b.feet.z) - pz).powi(2);
@@ -295,7 +295,7 @@ fn a_server_spawned_drop_knows_which_item_it_is_and_reaches_pixels() {
     eprintln!("drop.item (decoded) = {:?}", drop.item);
     eprintln!("age_ticks          = {:.2}", drop.anim.age_ticks);
 
-    assert_eq!(drop.type_path, ITEM_ENTITY_TYPE_PATH);
+    assert_eq!(drop.type_path.as_ref(), ITEM_ENTITY_TYPE_PATH);
     // The whole point of the gate: the id came off the wire, nothing here
     // supplied it. Before the metadata chain was closed this read `None`.
     assert_eq!(

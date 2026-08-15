@@ -408,7 +408,7 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
     let draw = EntityDraw {
         hurt: false,
         id: 7,
-        type_path: "zombie".to_string(),
+        type_path: std::sync::Arc::from("zombie"),
         item: None,
         equipment: vec![
             (
@@ -574,7 +574,7 @@ fn third_person_body_state_resolves_through_the_real_corpus() {
         let expected_model = if slim { "player_slim" } else { "player_wide" };
         let draw = state.clone().into_draw();
         assert_eq!(draw.id, LOCAL_PLAYER_DRAW_ID);
-        assert_eq!(draw.type_path, expected_model);
+        assert_eq!(draw.type_path.as_ref(), expected_model);
         assert_eq!(draw.feet, state.feet);
         assert_eq!(draw.yaw, state.body_yaw_deg);
         assert_eq!(draw.scale, state.scale);

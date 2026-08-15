@@ -379,7 +379,7 @@ impl RenderState {
         stats: &mut RenderStats,
     ) {
         for draw in entities {
-            if draw.type_path != FALLING_BLOCK_TYPE_PATH {
+            if draw.type_path.as_ref() != FALLING_BLOCK_TYPE_PATH {
                 continue;
             }
             // `block_state`'s absence is the switch: an entity whose spawn packet
@@ -483,7 +483,7 @@ impl RenderState {
             return;
         };
         for draw in entities {
-            if draw.type_path != PRIMED_TNT_TYPE_PATH {
+            if draw.type_path.as_ref() != PRIMED_TNT_TYPE_PATH {
                 continue;
             }
             if !frustum.intersects_aabb(

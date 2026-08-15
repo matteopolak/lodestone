@@ -114,7 +114,7 @@ fn a_woolly_sheep_draws_more_silhouette_than_a_sheared_one() {
     let subject = EntityDraw {
         hurt: false,
         id: 1,
-        type_path: "sheep".to_owned(),
+        type_path: std::sync::Arc::from("sheep"),
         item: None,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),

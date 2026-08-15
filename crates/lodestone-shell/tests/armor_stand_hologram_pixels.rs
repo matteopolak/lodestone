@@ -110,7 +110,7 @@ fn armor_stand_draw(feet: glam::Vec3, invisible: bool, name_tag: Option<NameTag>
         hurt: false,
         block_state: None,
         id: 1,
-        type_path: "armor_stand".to_owned(),
+        type_path: std::sync::Arc::from("armor_stand"),
         item: None,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),

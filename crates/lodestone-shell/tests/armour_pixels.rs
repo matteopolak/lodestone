@@ -169,7 +169,7 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
         hurt: false,
         block_state: None,
         id: 1,
-        type_path: "zombie".to_owned(),
+        type_path: std::sync::Arc::from("zombie"),
         item: None,
         equipment: armour_equipment,
         equipment_dye: Vec::new(),
