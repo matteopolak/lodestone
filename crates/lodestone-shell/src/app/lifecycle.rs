@@ -1021,8 +1021,27 @@ impl WindowApp {
         &mut self,
         window: Arc<Window>,
         gpu: GpuContext,
-        target: lodestone_render::SurfaceTarget<'static>,
+        #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))] mut target: lodestone_render::SurfaceTarget<'static>,
     ) {
+        // Browser only: `attach_window_async` sized `target` from `window.inner_size()`,
+        // read from inside an async task racing winit's own canvas `ResizeObserver` — see
+        // `window_attributes`'s doc on why nothing seeds that observer's tracked size
+        // synchronously. When the observer has not delivered yet, `window.inner_size()`
+        // reads `(0, 0)` and `SurfaceTarget::new` clamps that to a 1x1 surface rather than
+        // failing, so `target` can be sized wrong the instant it exists. The canvas's CSS
+        // box itself needs no observer to be correct, though: bring-up only starts after
+        // `boot()`'s multi-second asset fetch, so the page has been laid out for a long
+        // time by the time this runs, and `clientWidth`/`clientHeight` are authoritative
+        // the instant they are read. Measuring directly here — before the depth buffer and
+        // first frame are ever sized from `target` — fixes the initial frame outright
+        // instead of relying on a `Resized` event to correct it a moment later.
+        #[cfg(target_arch = "wasm32")]
+        if let Some((mw, mh)) = measured_canvas_physical_size()
+            && (mw, mh) != target.size()
+        {
+            target.resize(gpu.device(), mw, mh);
+        }
+
         let (w, h) = target.size();
         let format = target.format();
         let mut render = RenderState::new(
@@ -1427,9 +1446,14 @@ impl WindowApp {
 /// A free function so both targets build the identical attributes and only the
 /// browser-specific part is forked.
 fn window_attributes() -> winit::window::WindowAttributes {
-    let attrs = Window::default_attributes()
-        .with_title("Lodestone")
-        .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
+    let attrs = Window::default_attributes().with_title("Lodestone");
+
+    // Native only: a concrete starting size for a freestanding OS window, which has no
+    // other source of truth for its initial size. **Deliberately not applied on
+    // `wasm32`** — see the browser arm below for why setting this there is actively
+    // wrong rather than merely redundant.
+    #[cfg(not(target_arch = "wasm32"))]
+    let attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
 
     // Browser: bind winit to the page's own `<canvas id="lodestone">` instead of
     // letting it create one. Two reasons, and the second is the one that bites:
@@ -1441,6 +1465,29 @@ fn window_attributes() -> winit::window::WindowAttributes {
     // A missing element falls through to winit's own canvas rather than panicking, so a
     // page that forgot the element gets the "renders nowhere" behaviour and a warning,
     // not a dead tab.
+    //
+    // **No `.with_inner_size(..)` call on this path — this is not an oversight.**
+    // Winit's web backend does not treat `inner_size` as a mere initial hint: `Canvas::create`
+    // spends it by writing an *inline* `style.width`/`style.height` (in px) onto the canvas
+    // element (see `winit::platform_impl::web::web_sys::set_canvas_size`), and an inline style
+    // outranks the stylesheet rule `#lodestone { width: 100vw; height: 100vh; }` in
+    // `web/index.html`. Calling it here — even with a value that happens to match the
+    // viewport at that instant — pins the canvas's CSS box at that fixed pixel size forever;
+    // nothing else in winit's web backend ever rewrites that inline style. That was the whole
+    // bug this comment replaces: the canvas rendered at a permanent 1280x720 and was then
+    // stretched by nothing (its own inline style *was* the layout), which is
+    // indistinguishable on screen from "not resizing to the viewport" because that is
+    // exactly what was happening. Leaving `inner_size` unset lets the stylesheet own the box,
+    // and winit's own `ResizeObserver` on the canvas element (already wired up regardless of
+    // this call, in `web_sys::resize_scaling`) reports every subsequent box change — initial
+    // layout included — as a `WindowEvent::Resized`, which the shared `Resized` arm below
+    // already forwards to the surface reconfigure and the depth buffer resize. Sizes it
+    // reports are already DPR-scaled (`devicePixelContentBoxSize` where supported), so this
+    // renders at native `devicePixelRatio`, matching what desktop winit already does and
+    // costing the same `dpr²` fragment multiplier a retina display always costs — e.g. 4x
+    // fragments at `dpr = 2`. Downscaling to CSS pixels and letting the browser upscale
+    // would trade that cost for a soft/blurry image; this build takes the sharp, expensive
+    // option to match native rather than picking silently.
     #[cfg(target_arch = "wasm32")]
     {
         use winit::platform::web::WindowAttributesExtWebSys;
@@ -1473,6 +1520,37 @@ fn browser_canvas() -> Option<web_sys::HtmlCanvasElement> {
         .get_element_by_id(CANVAS_ID)?
         .dyn_into::<web_sys::HtmlCanvasElement>()
         .ok()
+}
+
+/// The canvas's real backing-store size in physical pixels, read directly from its live CSS
+/// box rather than from winit's own tracked `Window::inner_size` — see `finish_bring_up`'s
+/// call site for why the two can disagree at browser bring-up. `clientWidth`/`clientHeight`
+/// need no `ResizeObserver` delivery to be correct; they reflect the box the browser has
+/// already laid out. Scaled by `devicePixelRatio` to match what `SurfaceTarget`/`RenderState`
+/// expect everywhere else — see `window_attributes`'s doc on rendering at native DPR.
+///
+/// `None` if there is no canvas (mirrors `browser_canvas`) or it currently measures to zero
+/// (e.g. `display: none`), in which case the caller keeps whatever `target` already has
+/// rather than resizing to a degenerate surface.
+#[cfg(target_arch = "wasm32")]
+fn measured_canvas_physical_size() -> Option<(u32, u32)> {
+    let canvas = browser_canvas()?;
+    let dpr = web_sys::window()?.device_pixel_ratio();
+    dpr_scaled_size(canvas.client_width(), canvas.client_height(), dpr)
+}
+
+/// Scales a CSS-pixel box by `dpr` into a rounded physical-pixel size, or `None` if either
+/// scaled dimension rounds to less than one physical pixel.
+///
+/// Pulled out of [`measured_canvas_physical_size`] as a plain function with no `web_sys`/DOM
+/// dependency and **no `wasm32` gate**, specifically so it is exercised by the workspace's
+/// ordinary native `cargo test` run (see `app::tests`) rather than only by a `wasm32` target
+/// nothing in `just health` builds for — a `#[cfg(test)]` block inside the `wasm32`-gated
+/// function above would never run under any check this repo actually runs.
+pub(crate) fn dpr_scaled_size(client_width: i32, client_height: i32, dpr: f64) -> Option<(u32, u32)> {
+    let w = (f64::from(client_width) * dpr).round();
+    let h = (f64::from(client_height) * dpr).round();
+    (w >= 1.0 && h >= 1.0).then_some((w as u32, h as u32))
 }
 
 thread_local! {
