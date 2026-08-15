@@ -55,12 +55,12 @@ See "The integrated-server melee-damage gap" below for the full account:
 `ServerBound::Attack`/`PlayerInput` decode, `MobHandle` (the mutation handle
 that issue's own census said was missing), `MobSim::attack` (damage +
 knockback in one call), and a real client proving the exact predicted health
-and knockback position land. Mob-on-player damage gets a real, tested
-`PlayerVitals::apply_damage` entry point but **not** a live trigger — no AI
-in this workspace gives a mob the player's position to attack, a separate,
-larger feature; see that section's own scope note. Shield blocking remains
-entirely unbuilt (unrelated to `damage.rs`'s pipeline — needs an item-data
-model this workspace does not have).
+and knockback position land. Mob-on-player damage got a real, tested
+`PlayerVitals::apply_damage` entry point in that pass, and a live trigger
+followed once pursuit AI existed to feed it (issue #625) — see "Mob-on-player
+damage: now a live trigger" below. Shield blocking remains entirely unbuilt
+(unrelated to `damage.rs`'s pipeline — needs an item-data model this
+workspace does not have).
 
 ## How it works
 
@@ -1020,22 +1020,31 @@ server-side, same disclosed gap as damage above). `combat_live.rs`'s live
 gate (below) exercises the sprinting, nonzero-power case specifically so the
 primitive's wiring is provably real, not just correctly inert.
 
-**Mob-on-player damage: an entry point, not a live trigger.**
-`PlayerVitals::apply_damage` (`crates/lodestone-server/src/vitals.rs`) is now
-a real, unit-tested, jar-verified generic damage entry point — the
+**Mob-on-player damage: now a live trigger (issue #625).**
+`PlayerVitals::apply_damage` (`crates/lodestone-server/src/vitals.rs`) is the
+real, unit-tested, jar-verified generic damage entry point — the
 `HurtCooldown` + `apply_reductions` pipeline `SimMob::apply_damage` already
-runs for a mob, given to the player for the first time (previously only
-`tick`/drowning and `apply_fall_damage` existed, neither gated by an
-i-frame). **Nothing calls it in production.** Making a mob actually attack
-the connected player needs player-position-aware targeting AI that does not
-exist anywhere in this workspace: `crate::mobs`'s own module doc already
-scopes real player-targeting (`NearestAttackableTargetGoal`'s population
-search) as a separate, larger feature, and `run_mob_tick_loop` has no
-player-position feed into the sim at all — `MobSim::despawn_pass`'s own "no
-despawn pass" scope note names the identical missing input. Disclosed here
-rather than silently left unfindable, the same shape `ViewBob::hurt`/`bobHurt`
-is tracked in elsewhere in this doc: real, tested, a documented reason
-nothing calls it yet.
+runs for a mob, given to the player. Once `NearestAttackableTargetGoal`/
+`MeleeAttackGoal` pursuit landed (issue #607), the remaining gap was narrower
+than "no player-targeting AI exists": the goal seam carries only a bare
+`Vec3` attack target, never a player identity, so nothing could say *which*
+player a connected attack belonged to — `SimMob::attack_target_id` names only
+another live `SimMob` by its own doc comment and nothing in production ever
+set it to `Some` at all.
+
+`crate::mobs::MobSim` now resolves this by matching an attack's target
+position against its own fed player list (see `crate::mobs::PlayerHit`'s doc
+comment) and queues a `PlayerHit`, drained by
+`crate::server::serve_play`'s `vitals_tick` arm — the same 50ms timer that
+already applies border, drowning, burn and status-effect damage — which runs
+it through `PlayerVitals::apply_damage` with the real `mob_attack` damage
+flags and `PlayerInventory`'s armour defenses, then `publish_health` for the
+`SET_HEALTH`/hurt-animation packets. One disclosed miss: a grudge-target
+attack (the anger-gated `NearestAttackableTargetGoal` row, for the four
+neutral species) targets a position remembered from whenever the grudge was
+set rather than the player's live position, so it can fail to match if the
+player has since moved — ordinary hostile-melee (zombie, skeleton, …) always
+targets the live `nearest_player` feed and matches every time.
 
 **Shield blocking: confirmed, again, out of scope.** `LivingEntity.applyItemBlocking`
 is a separate angle-gated reduction keyed off the held item's
@@ -1093,6 +1102,21 @@ existing pieces").
   with no `Attack` packet must never move or damage the mob. Both run
   hermetically (in-memory transport, no real sockets or wall-clock waits)
   and are **not** `#[ignore]`d.
+- **Mob-on-player (issue #625)**:
+  `crates/lodestone-server/tests/mob_melee_damages_player.rs`, all three
+  driven through `MobSim::spawn_species` (the real roster) rather than a
+  hand-installed goal, so a passing run proves the whole chain — goal →
+  attack → position → player identity — not `take_player_hits` in
+  isolation. `a_pursuing_zombie_lands_melee_hits_on_the_real_player_it_is_chasing`
+  predicts the exact raw damage (`3.0`, the jar-verified zombie
+  `ATTACK_DAMAGE` base) against a real, fed `PlayerIdentity`.
+  `a_zombie_with_no_fed_player_lands_no_hits` is the negative control
+  (position-matching must not invent a player).
+  `attack_target_id_still_resolves_to_a_mob_not_the_unrelated_fed_player`
+  proves the pre-existing mob-vs-mob path is unaffected, with a real player
+  fed but standing far outside reach. The positive test was run against a
+  deliberately broken match predicate and watched fail before being
+  restored.
 
 ## What is deliberately not built here
 
@@ -1116,12 +1140,9 @@ There is no vanilla full-screen colour overlay or camera shake for taking
 damage at all — see the per-entity hurt/death red overlay section above for
 the jar evidence.
 
-**Mob-on-player autonomous damage** — see "Mob-on-player damage: an entry
-point, not a live trigger" above. `PlayerVitals::apply_damage` exists,
-tested, jar-verified; nothing calls it, because no AI in this workspace
-gives a mob the player's position to target. Needs player-position-aware
-mob AI, a materially larger feature than this pass's "reach a live mob's
-health" scope.
+**Mob-on-player autonomous damage** — **landed** (issue #625); see
+"Mob-on-player damage: now a live trigger" above for the resolution chain and
+its one disclosed miss (a stale grudge target).
 
 **Shield blocking** — confirmed out of scope again this pass; see that
 section above. Needs an item-data model (`BlocksAttacks`) this workspace

@@ -12277,6 +12277,62 @@ where
                         )
                         .await?;
                     }
+
+                    // Issue #625: hostile-mob melee damage against this
+                    // player, drained from `MobSim::take_player_hits`. See
+                    // that method's, and `PlayerHit`'s, own doc comments for
+                    // how a mob's attack target position resolves to a
+                    // player identity and the one disclosed miss (a stale
+                    // grudge target). `!invulnerable` matches the border and
+                    // drowning arms just above: a creative/spectator player
+                    // takes no damage from any source here.
+                    //
+                    // Filtered to `player_uuid` because the drain empties for
+                    // whichever connection reads it first — the same
+                    // single-consumer caveat `ExplosionFeed`/`BlockTickFeed`
+                    // document — which matches this crate's one
+                    // connection-per-mob-tick-loop shape today (singleplayer,
+                    // and `bind`'s per-connection LAN wrapper — see those
+                    // types' own doc comments).
+                    if !invulnerable {
+                        for hit in mobs.with(|sim| sim.take_player_hits()) {
+                            if hit.identity.uuid != player_uuid {
+                                continue;
+                            }
+                            let flags = lodestone_entity::DamageFlags::for_damage_type_name(
+                                "mob_attack",
+                            )
+                            .expect("mob_attack is a real damage type");
+                            if vitals
+                                .apply_damage(
+                                    hit.raw_damage,
+                                    &inventory.combat_stats().defenses,
+                                    flags,
+                                )
+                                .is_some()
+                            {
+                                let direction = crate::vitals::HurtDirection::from_source(
+                                    hit.attacker_pos,
+                                    Vec3::new(x, y, z),
+                                    player_rot.unwrap_or_default().yaw,
+                                );
+                                publish_health(
+                                    conn,
+                                    &mut state,
+                                    proto,
+                                    &vitals,
+                                    // Self-facing, per `publish_health`'s own call sites.
+                                    LOCAL_PLAYER_ENTITY_ID,
+                                    &username,
+                                    crate::vitals::DeathCause::Generic,
+                                    &mut advancements,
+                                    player_uuid,
+                                    Some(direction),
+                                )
+                                .await?;
+                            }
+                        }
+                    }
                 }
 
                 // Burning. The ignition producer and the burn consumer in one place,
