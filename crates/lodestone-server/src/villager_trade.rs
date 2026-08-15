@@ -585,9 +585,17 @@ mod tests {
         state.mark_restocked(2401);
         assert_eq!(state.number_of_restocks_today, 2);
 
-        // A third same-day restock is refused even with no time constraint,
-        // until a new day rolls the counter over.
-        assert!(!state.should_restock(100_000, 1, true));
+        // A third same-day restock is refused — but only strictly *within*
+        // the half-day auto-rollover window (`last_restock_game_time +
+        // 12000`, here `2401 + 12000 = 14401`): `should_restock` treats a
+        // half day with no restock at all as a new day regardless of the
+        // day counter, so a game_time past that boundary would roll the
+        // counter over instead of merely refusing. `14401` is the exact
+        // boundary (`>`, not `>=`) — one tick later and this assertion would
+        // flip, which is the discriminating reason this is 14401 and not a
+        // round `100_000` (which does cross it, and did — this exact test
+        // failed against that value before the boundary was worked out).
+        assert!(!state.should_restock(14_401, 1, true));
 
         // A day rollover resets the counter, and the first restock of the
         // new day is allowed again.
