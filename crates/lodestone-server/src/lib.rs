@@ -311,6 +311,11 @@ mod redstone_oracle_gate;
 /// the gates, no production code.
 #[cfg(test)]
 mod redstone_order_oracle_gate;
+/// `docs/plans/redstone-execution-model.md`'s U0, piston half: interrupting a
+/// piston's own pending commit — the "update-order quirk" issue #316 is named
+/// for — measured on a real 26.2 server. Test-only.
+#[cfg(test)]
+mod redstone_piston_order_oracle_gate;
 /// Issue #465's delayed half: a component a player mutates must flip at the
 /// tick the live 26.2 server flipped it, and the flip must reach the wire —
 /// driven through the real `tick::run_tick_loop` rather than through

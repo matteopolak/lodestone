@@ -1752,6 +1752,55 @@ fn react_to_notification(
                 crate::piston::has_extend_signal(&redstone::make_lookup(column, min_x, min_z), n.pos, facing);
             if want_extended != extended {
                 let sticky = crate::piston::is_sticky_piston(&state);
+
+                // Interruption (part of #316's "update order" residue).
+                // `PistonBaseBlock.triggerEvent`'s retract branch always looks at
+                // the piston's *own arm cell* (`pos.relative(direction)`, never a
+                // cell further out a run may have carried a block to) for a still
+                // -pending commit and forces it to finish immediately
+                // (`PistonMovingBlockEntity.finalTick`) before doing anything else.
+                // A `source` entity there (an extension's not-yet-placed head, or a
+                // retraction's not-yet-restored base) evaporates to air instead of
+                // materialising — see `crate::piston::interrupt`'s own doc comment,
+                // live-verified against the 26.2 oracle in
+                // `redstone_piston_order_oracle_gate.rs`. This is what a piston
+                // caught mid-extend and immediately retracted needs to never show a
+                // head, the specific "update-order quirk" #316 is named for.
+                //
+                // `take_matching` both finds *and removes* the pending commit, so
+                // the ordinary drain can never also fire it later against a cell
+                // this write has already rewritten.
+                let mut interrupt_fan_out = Vec::new();
+                if !want_extended {
+                    let arm_pos = facing.relative(n.pos);
+                    if let Some(pending) = block_ticks.take_matching(
+                        (arm_pos.x, arm_pos.y, arm_pos.z),
+                        |kind: &String| crate::piston::is_finish_kind(kind),
+                    ) {
+                        if let Some(entity) = crate::piston::parse_finish_kind(&pending.kind) {
+                            let write = crate::piston::interrupt(arm_pos, &entity);
+                            let wlx = write.pos.x - min_x;
+                            let wlz = write.pos.z - min_z;
+                            if (0..16).contains(&wlx)
+                                && (0..16).contains(&wlz)
+                                && write.pos.y >= column.min_y
+                                && write.pos.y < column.min_y + column.height
+                            {
+                                let from = column.block_state(wlx, write.pos.y, wlz).to_string();
+                                if from != write.to {
+                                    column.set_block(wlx, write.pos.y, wlz, &write.to);
+                                    events.push(RandomTickEvent {
+                                        pos: (write.pos.x, write.pos.y, write.pos.z),
+                                        from,
+                                        to: write.to.clone(),
+                                    });
+                                    interrupt_fan_out.push(Notification { pos: write.pos, from: Direction::Down });
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let resolution = crate::piston::resolve(
                     &redstone::make_lookup(column, min_x, min_z),
                     n.pos,
@@ -1804,7 +1853,10 @@ fn react_to_notification(
                     plan.push((n.pos, base_now.clone(), None));
                 }
 
-                let mut fan_out = Vec::new();
+                // The interrupt's own notification precedes the new move's, matching
+                // vanilla's order: `finalTick`'s `neighborChanged` call happens before
+                // `triggerEvent` goes on to build the new move at all.
+                let mut fan_out = interrupt_fan_out;
                 for (pos, to, entity) in plan {
                     let wlx = pos.x - min_x;
                     let wlz = pos.z - min_z;
