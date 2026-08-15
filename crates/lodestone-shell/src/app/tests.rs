@@ -3503,3 +3503,124 @@ fn a_cursor_inside_the_band_still_resolves_to_the_list_row_under_it() {
         "premise: the footer probe answers the footer row at scroll 0 as well"
     );
 }
+
+/// [`crate::app::lifecycle::dpr_scaled_size`] — the pure CSS-box-times-`devicePixelRatio`
+/// arithmetic behind the browser build's initial canvas sizing (see that function's doc and
+/// `finish_bring_up`'s call site). Deliberately not `#[cfg(target_arch = "wasm32")]`: the
+/// DOM-touching caller is, so this is the only part of that fix a native `cargo test` run
+/// ever exercises — a test living inside the `wasm32`-gated function itself would never run
+/// under any check `just health` performs.
+///
+/// Every case predicts an exact `(width, height)` from outside the function under test
+/// (plain `f64` arithmetic on the input), collects every mismatch rather than asserting
+/// inside the loop (CLAUDE.md's *magnitude* species — a `for`-loop `assert!` would only ever
+/// report the first failing case), and every input is pairwise-distinct so a transposed
+/// width/height cannot survive unnoticed.
+#[test]
+fn dpr_scaled_size_matches_predicted_physical_pixels() {
+    use crate::app::lifecycle::dpr_scaled_size;
+
+    struct Case {
+        label: &'static str,
+        client_width: i32,
+        client_height: i32,
+        dpr: f64,
+        expected: Option<(u32, u32)>,
+    }
+
+    let cases = [
+        // DPR 1 anchor: no scaling, so this alone cannot tell "scaled" from
+        // "unscaled" — the other cases below carry that weight.
+        Case {
+            label: "dpr 1.0, exact",
+            client_width: 900,
+            client_height: 600,
+            dpr: 1.0,
+            expected: Some((900, 600)),
+        },
+        // The "4x fragment count at retina" case named in `dpr_scaled_size`'s
+        // caller's doc: dpr 2.0 doubles *both* dimensions, so the fragment count
+        // — width * height — is 4x, not 2x.
+        Case {
+            label: "dpr 2.0, retina",
+            client_width: 960,
+            client_height: 540,
+            dpr: 2.0,
+            expected: Some((1920, 1080)),
+        },
+        // A real iPhone-class dpr (3.0), and large enough that a `u32` truncation
+        // bug in an intermediate would be visible.
+        Case {
+            label: "dpr 3.0, phone-class",
+            client_width: 375,
+            client_height: 812,
+            dpr: 3.0,
+            expected: Some((1125, 2436)),
+        },
+        // The rounding discriminator: 667 * 1.5 = 1000.5 and 421 * 1.5 = 631.5,
+        // both exact half-pixels. `.round()` (round-half-away-from-zero) gives
+        // 1001 and 632; a truncating cast (`as u32` with no `.round()` — the
+        // plausible neuter for this function, and a real bug shape: forgetting
+        // the round and letting the float-to-int cast truncate) would instead
+        // give 1000 and 631. The two hypotheses differ on both fields, so a
+        // width/height transposition could not accidentally pass this either.
+        Case {
+            label: "dpr 1.5, half-pixel rounding",
+            client_width: 667,
+            client_height: 421,
+            dpr: 1.5,
+            expected: Some((1001, 632)),
+        },
+        // Zero-guard, width: `client_width` reads 0 when the canvas has not been
+        // laid out yet (or is `display: none`) — must not resize the surface to
+        // a degenerate 0-wide target.
+        Case {
+            label: "zero width guards to None",
+            client_width: 0,
+            client_height: 600,
+            dpr: 1.0,
+            expected: None,
+        },
+        // Zero-guard, height — a non-1.0 dpr here so this is not merely the
+        // same guard exercised twice under the same scale factor.
+        Case {
+            label: "zero height guards to None",
+            client_width: 900,
+            client_height: 0,
+            dpr: 2.0,
+            expected: None,
+        },
+        // A negative `client_width` is a real (if pathological) input shape the
+        // DOM can hand back; the guard compares the unscaled `f64` product
+        // against `1.0` *before* any cast, so this must not become a huge
+        // `u32` via a wrapping negative-float-to-unsigned cast.
+        Case {
+            label: "negative width guards to None",
+            client_width: -5,
+            client_height: 600,
+            dpr: 1.0,
+            expected: None,
+        },
+    ];
+
+    let mismatches: Vec<String> = cases
+        .iter()
+        .filter_map(|case| {
+            let actual = dpr_scaled_size(case.client_width, case.client_height, case.dpr);
+            (actual != case.expected).then(|| {
+                format!(
+                    "{}: dpr_scaled_size({}, {}, {}) = {:?}, expected {:?}",
+                    case.label, case.client_width, case.client_height, case.dpr, actual, case.expected
+                )
+            })
+        })
+        .collect();
+
+    assert!(
+        mismatches.is_empty(),
+        "{} of {} cases mismatched:\n{}",
+        mismatches.len(),
+        cases.len(),
+        mismatches.join("\n")
+    );
+}
