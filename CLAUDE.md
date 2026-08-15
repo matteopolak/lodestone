@@ -828,6 +828,20 @@ actually resolve to, and is it the one production uses?"** — a test double *co
 most dangerous kind. Also ask: **does any server-side counter accumulate past this gate's lifetime?** and
 **does the input actually contain the structure the code under test exists to handle?** (§12.43)
 
+**And the corpus can state its own blind spot in plain words, where it reads as an explanation rather than
+as a defect report.** Measured: every drop/pickup gate in `serve_play.rs` passes `&NoEntities` — a
+permanently-empty `EntitySource` — and asserts against `mobs.with(|sim| sim.snapshots())`, never against
+what a client receives. Its own `FakeProtocol::encode_add_entity` carries a doc comment saying those
+encoders are *"inert for every other test in this file … never called"*. That sentence is **true**, it was
+written deliberately, and it is exactly the finding: an encoder no gate ever reaches is an unguarded wire,
+and the browser's singleplayer path really did construct the server with `NoEntities`, so a mined block
+rolled its loot, spawned a real item, and **never sent `ADD_ENTITY`**. Nothing was red anywhere.
+
+So when a fixture's own docs explain that some path is not exercised, **read it as scope, not as
+reassurance** — and grep the corpus for that phrasing (`never called`, `inert`, `unused in these tests`) as
+its own audit. The habit that catches this class: for any packet you believe production sends, ask **which
+gate asserts it reached the wire**, not which gate asserts the state that should have produced it.
+
 **The worst instance so far shipped a totally silent hang, and every gate in the corpus used a fresh world.**
 The owner's saved worlds served **0 chunks in 240 s — no error, no disconnect, no panic**. The cause was a
 **self-deadlock**: `run_tick_loop` holds the scheduled-tick queue mutex across its whole tick section, that
