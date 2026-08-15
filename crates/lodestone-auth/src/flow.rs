@@ -203,13 +203,21 @@ pub struct Profile {
 
 /// An authenticated Minecraft session: a services access token plus the profile
 /// it belongs to.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     /// The Minecraft services access token (a JWT), used as the `accessToken`
     /// in the session-server join call.
     pub access_token: String,
     /// The authenticated player's profile.
     pub profile: Profile,
+    /// Unix timestamp (seconds) after which [`Self::access_token`] should be
+    /// treated as expired. Derived from the real `expires_in` Mojang's own
+    /// `login_with_xbox` response carries (see [`McLoginResponse`]) —
+    /// never a value invented here. `crate::store::CachedSession` is what
+    /// persists this across a launch; see `crate::login::try_cached_session`
+    /// for the margin applied when deciding whether a cached value is still
+    /// usable.
+    pub expires_at: u64,
 }
 
 /// Requests a device code, returning a prompt to show the user.
@@ -643,6 +651,13 @@ async fn step_result(
 #[derive(Deserialize)]
 struct McLoginResponse {
     access_token: String,
+    /// Seconds this `access_token` is valid for, per Mojang's own response —
+    /// the crate's prior doc comment guessed "~24h"; this is the real number
+    /// the service returns (typically, but not asserted to always be, 86400).
+    /// Read here rather than assumed so [`Session::expires_at`] — and
+    /// therefore the cache in `crate::store` — is never wrong about how long
+    /// a token is actually good for.
+    expires_in: u64,
 }
 
 /// Exchanges an XSTS token for a Minecraft services access token.
@@ -662,7 +677,7 @@ struct McLoginResponse {
 /// bug that was not there. Reaching this step at all is *positive* evidence: the
 /// client id resolved, the redirect matched, Xbox Live and XSTS both issued tokens.
 /// Only the allow list is outstanding.
-async fn login_with_xbox(client: &reqwest::Client, xsts: &XstsToken) -> Result<String> {
+async fn login_with_xbox(client: &reqwest::Client, xsts: &XstsToken) -> Result<(String, u64)> {
     let identity = format!("XBL3.0 x={};{}", xsts.user_hash, xsts.token);
     let http = client
         .post(MC_LOGIN_URL)
@@ -700,7 +715,7 @@ async fn login_with_xbox(client: &reqwest::Client, xsts: &XstsToken) -> Result<S
         });
     }
     let resp: McLoginResponse = step_result("login_with_xbox", http).await?.json().await?;
-    Ok(resp.access_token)
+    Ok((resp.access_token, resp.expires_in))
 }
 
 #[derive(Deserialize)]
@@ -799,11 +814,17 @@ pub async fn session_from_ms_token(
 ) -> Result<Session> {
     let xbl = authenticate_xbl(client, ms_access_token).await?;
     let xsts = authorize_xsts(client, &xbl).await?;
-    let access_token = login_with_xbox(client, &xsts).await?;
+    let (access_token, expires_in) = login_with_xbox(client, &xsts).await?;
     let profile = fetch_profile(client, &access_token).await?;
+    // `crate::migrate::unix_now()` is the same clock `crate::login` stamps
+    // `AccountProfile::last_used` with; sharing it keeps every "now" in this
+    // crate reading the same wall clock rather than each call site
+    // re-deriving it.
+    let expires_at = crate::migrate::unix_now().saturating_add(expires_in);
     Ok(Session {
         access_token,
         profile,
+        expires_at,
     })
 }
 
