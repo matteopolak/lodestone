@@ -176,21 +176,35 @@ a flattened string would have been simpler and would have thrown away exactly th
 change exists to keep. It carries each run's style across the break, so a coloured banner stays
 coloured on both lines.
 
-**Chat was hex-blind at exactly one accessor, and that half is now fixed.** `ChatLog`
-(`crates/lodestone-game/src/chat.rs`) never stored legacy strings internally — each
-`ChatEntry::Player`/`::System` holds a full `Text`, exactly like every other surface fixed
-above. The flattening happened only at *read* time, in `ChatLog::recent`/`recent_ages`, which
-call `entry_display(entry).to_legacy_string()`, and `to_legacy_string` has no representation for
-`TextColor::Rgb` (`TextColor::legacy_code` returns `None` for it), so a hex-coloured message's
-colour was dropped between storage and every reader. `ChatLog` now carries a span-returning
-sibling pair — `recent_spans(&self, n: usize) -> Vec<(Vec<TextSpan>, f64)>`, composed the same
-way `recent_ages` composes `recent`, and `recent_ages_spans(&self, n: usize, now: f64) ->
-Vec<(Vec<TextSpan>, f32)>` on top of it — calling `entry_display(entry).to_spans()` instead of
-`.to_legacy_string()`. Nothing about storage changed; only how one is read out. See that file's
-own `recent_spans_preserves_a_hex_colour_the_legacy_string_cannot_represent` test for the
+**Chat was hex-blind at two points in the chain — the accessor and the HUD draw pipeline — and
+both are now fixed.** `ChatLog` (`crates/lodestone-game/src/chat.rs`) never stored legacy
+strings internally — each `ChatEntry::Player`/`::System` holds a full `Text`, exactly like every
+other surface fixed above. The flattening happened only at *read* time, in
+`ChatLog::recent`/`recent_ages`, which call `entry_display(entry).to_legacy_string()`, and
+`to_legacy_string` has no representation for `TextColor::Rgb` (`TextColor::legacy_code` returns
+`None` for it), so a hex-coloured message's colour was dropped between storage and every reader.
+`ChatLog` carries a span-returning sibling pair — `recent_spans(&self, n: usize) ->
+Vec<(Vec<TextSpan>, f64)>`, composed the same way `recent_ages` composes `recent`, and
+`recent_ages_spans(&self, n: usize, now: f64) -> Vec<(Vec<TextSpan>, f32)>` on top of it —
+calling `entry_display(entry).to_spans()` instead of `.to_legacy_string()`. Nothing about storage
+changed; only how one is read out. See that file's own
+`recent_spans_preserves_a_hex_colour_the_legacy_string_cannot_represent` test for the
 discriminating gate: a plain `recent(1)` call on the same entry is the control, and it shows the
 loss (`"hex"`, no colour), which is what proves `recent_spans` is actually carrying something
 `recent` cannot.
+
+The HUD side of the chain (`crates/lodestone-shell/src/hud.rs`) now has a complete span-aware
+sibling for every piece that used to only understand `String`: `HudFrame::chat_spans` beside
+`chat`, `HudFrame::chat_wrap_spans` (`ChatWrapCacheSpans`, keyed on `Vec<TextSpan>` — `TextSpan`
+gained `Hash` for this) beside `chat_wrap`, `wrap_spans_with`/`Builder::wrap_spans` beside
+`wrap_legacy_with`/`Builder::wrap_legacy`, and `strip_style_spans` beside `strip_legacy`. The
+draw in `HudGeometry::build` uses `chat_spans` instead of `chat` whenever it is non-empty — the
+two are alternatives, not composited, so a caller fills one or the other. See
+`hud.rs`'s own `chat_spans_carry_hex_named_and_inline_legacy_colour_to_distinct_vertices` for the
+discriminating gate: one message built from a hex-styled component, a named-colour component,
+and a literal carrying an *inline* `§c` code (the shape a real server actually sends), asserted
+to reach three pairwise-distinct vertex colours, with a control proving the legacy `chat` path
+loses the hex on the identical input.
 
 **The rest of the pipeline is still hex-blind, and that is the part that needs real work.**
 `hud.rs`'s wrapping (`wrap_legacy` / `wrap_legacy_with`, plus `ChatWrapCache`, plus
@@ -217,10 +231,15 @@ surface, so a surface drawing another surface's text also fails.
 **Chat** already worked for named colours and still does: `ChatLog` flattens to a legacy
 string (`lodestone-game/src/chat.rs`), `hud.rs`'s `wrap_legacy` wraps it treating code pairs
 as zero-width, and `Builder::text_legacy` → `VanillaFont::draw_legacy` → `resolve_legacy` +
-`draw_resolved` colours each run. `ChatLog` itself now has a span-returning path
-(`recent_spans`/`recent_ages_spans`) that keeps a hex colour, but **hex colours are still lost
-on screen**, because `hud.rs`'s wrap/draw pipeline is still wired to the legacy-`String`
-accessors and nothing yet calls the new ones; see *How to change it*.
+`draw_resolved` colours each run. `ChatLog` has a span-returning path
+(`recent_spans`/`recent_ages_spans`) that keeps a hex colour, and `hud.rs` now has a complete
+span-aware wrap/draw sibling (`HudFrame::chat_spans`, `ChatWrapCacheSpans`, `wrap_spans_with`,
+`Builder::wrap_spans`/`text_spans`, `strip_style_spans`) that draws it. **Hex colours are still
+lost on a real server**, though, because nothing between `ChatLog` and this frame threads them
+through yet: `Session::recent_chat` (`crates/lodestone-shell/src/sim/session.rs`) calls
+`recent_ages` rather than `recent_ages_spans`, and `app/redraw.rs` fills `HudFrame::chat` rather
+than `chat_spans`. Both are small, mechanical hunks once someone owns those two files; see *How
+to change it*.
 
 **Scoreboard sidebar** — `crates/lodestone-shell/src/scoreboard.rs`. `lodestone-game`'s fold
 already preserved style all the way (its own test asserts `style.color == Some(Aqua)`
@@ -346,12 +365,20 @@ near-black one.
   takes the route `Font::legacy_width`'s own doc prescribes for structured components: decompose
   to `(codepoint, bold)` and call `advance_bold`. Italic shears in place; underline,
   strikethrough and obfuscated leave the pen alone.
-- **Chat hex is still lost on screen, though `ChatLog` itself no longer loses it.**
-  `ChatLog::recent_spans`/`recent_ages_spans` (`crates/lodestone-game/src/chat.rs`) exist and
-  are tested; nothing downstream calls them yet. The remaining fix is to route the shell's
-  chat *draw* path through spans, which needs span-aware *wrapping* — `wrap_legacy` currently
-  works over a `String` — plus `lodestone-ecs`'s `SessionChat` and `lodestone-shell`'s
-  `Session::recent_chat` switched from `recent_ages` to `recent_ages_spans`.
+- **Chat hex is still lost on a real server, though both `ChatLog` and the HUD draw pipeline
+  can now carry it.** `ChatLog::recent_spans`/`recent_ages_spans`
+  (`crates/lodestone-game/src/chat.rs`) and `hud.rs`'s `HudFrame::chat_spans` +
+  `wrap_spans_with`/`ChatWrapCacheSpans`/`strip_style_spans` all exist and are tested
+  (`hud.rs`'s `chat_spans_carry_hex_named_and_inline_legacy_colour_to_distinct_vertices`
+  proves a hex colour, a named colour and an inline `§` code all reach distinct vertices
+  through the new path). What is missing is the seam between them: `Session::recent_chat`
+  (`crates/lodestone-shell/src/sim/session.rs`) still calls `recent_ages`, and
+  `app/redraw.rs` still fills `HudFrame::chat` instead of `HudFrame::chat_spans`. Wiring those
+  two call sites — add a `recent_chat_spans` sibling to `Session` calling
+  `recent_ages_spans`, and thread its output into `chat_spans`/`chat_wrap_spans` in
+  `app/redraw.rs` the same way `chat`/`chat_wrap` are filled today — is the entire remaining
+  fix; `ChatScroll::sync`'s history input can keep reading each span list's concatenated
+  `.text`, since scrolling only needs the visible text.
   **Do not instead teach the legacy string the BungeeCord `§x§r§r§g§g§b§b` form**, which reads
   as the cheaper change and would be wrong: vanilla 26.2 does not honour that dialect
   (`ChatFormatting.getByCode('x')` is null), so a client that did would disagree with vanilla
