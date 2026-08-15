@@ -214,6 +214,40 @@ impl ApplicationHandler for WindowApp {
                 // one place both come from.
                 if self.suggestion_row_under_cursor().is_some() {
                     self.chat_input.suggestion_scroll(wheel_notches(delta) as i32);
+                } else {
+                    // `ChatScreen.mouseScrolled`: the popup gets first refusal
+                    // (the arm above, mirroring `commandSuggestions
+                    // .mouseScrolled` returning `true`); everything else
+                    // scrolls the scrollback itself. Vanilla clamps the raw
+                    // notch to a single unit *before* applying the ×7 "not
+                    // holding shift" multiplier
+                    // (`scrollY = Mth.clamp(scrollY, -1.0, 1.0);` then
+                    // `if (!hasShiftDown()) scrollY *= 7.0;`), so a precise
+                    // trackpad gesture is not amplified sevenfold — only a
+                    // whole mouse-wheel click is.
+                    let notch = wheel_notches(delta).clamp(-1.0, 1.0);
+                    let notch = if self.shift_held { notch } else { notch * 7.0 };
+                    let opts = self.nav.options();
+                    let chat_opts = crate::hud::ChatDisplayOptions {
+                        scale: opts.chat_scale,
+                        width_pct: opts.chat_width,
+                        height_pct_unfocused: opts.chat_height_unfocused,
+                        height_pct_focused: opts.chat_height_focused,
+                        line_spacing: opts.chat_line_spacing,
+                        text_opacity: opts.chat_opacity,
+                        background_opacity: opts.chat_background_opacity,
+                        colors: opts.chat_colors,
+                    };
+                    let rows_per_page = crate::hud::chat_lines_per_page(
+                        chat_opts,
+                        crate::hud::chat_pose_scale(chat_opts),
+                        true,
+                    );
+                    // The same 100-entry cap the per-frame sync/window fetch
+                    // uses (`app/redraw.rs`) — `ChatFeed`'s own capacity, so
+                    // this is the true total, not a windowed subset of it.
+                    let total = self.sim.recent_chat(100).len();
+                    self.chat_input.scroll_mut().scroll(notch as i32, total, rows_per_page);
                 }
             }
             WindowEvent::CursorMoved { position, .. } if self.ui.is_advancements() => {

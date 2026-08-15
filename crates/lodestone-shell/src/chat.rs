@@ -292,6 +292,14 @@ pub struct ChatInput {
     history_buffer: String,
     /// Everything the player has sent this session — see [`ChatHistory`].
     history: ChatHistory,
+    /// The received scrollback's scroll position — see [`ChatScroll`]. Lives
+    /// here rather than beside the received log itself
+    /// ([`lodestone_game::chat::ChatLog`]) for the same reason
+    /// [`Self::history`] does: it is chat-*screen* state (open, closed,
+    /// scrolled), not message content, and this crate's version-free log
+    /// deliberately holds neither a client handle nor any UI notion of
+    /// "open" to check against.
+    scroll: ChatScroll,
 }
 
 impl ChatInput {
@@ -1719,11 +1727,383 @@ impl ChatInput {
     pub fn completion(&self) -> &ChatCompletion {
         &self.completion
     }
+
+    /// The scrollback's scroll position — see [`ChatScroll`].
+    #[must_use]
+    pub fn scroll(&self) -> &ChatScroll {
+        &self.scroll
+    }
+
+    /// Mutable access for a wheel event or the per-frame sync — see
+    /// [`ChatScroll::scroll`]/[`ChatScroll::sync`].
+    pub fn scroll_mut(&mut self) -> &mut ChatScroll {
+        &mut self.scroll
+    }
+}
+
+/// The chat scrollback's scroll position while the box is open — vanilla's
+/// `ChatComponent.chatScrollbarPos`/`newMessageSinceScroll`
+/// (`ChatComponent.java`).
+///
+/// # Where this differs from vanilla, and why
+///
+/// **Granularity is one *logical entry*, not one *wrapped visual row*.**
+/// Vanilla scrolls through `trimmedMessages` — messages already split into
+/// `FormattedCharSequence` lines by `GuiMessage.splitLines`, which needs real
+/// font metrics. This module has none ([`highlight`]/[`complete`] already
+/// return byte spans rather than pixel runs for the identical reason — see
+/// this module's own doc). Entry granularity is the exact one-line-per-entry
+/// case of vanilla's own scheme and is wrong only when a message wraps into
+/// more than one visual row, in which case a scroll step can move by more or
+/// fewer visual rows than vanilla's would. Named here rather than silently
+/// shipped, matching this module's other documented simplifications.
+///
+/// **Adjustment on a new arrival is read-time, not push-time.** Vanilla's
+/// `ChatComponent.addMessageToDisplayQueue` checks `isChatFocused()` and
+/// compensates the instant a message is queued
+/// (`if (chatting && chatScrollbarPos > 0) { newMessageSinceScroll = true;
+/// scrollChat(1); }`). This crate's received log ([`lodestone_game::chat::
+/// ChatLog`]) is deliberately version- and UI-free and holds no notion of
+/// "is the chat box open" — so [`Self::sync`] is called once per frame
+/// instead, with the box's current open/closed state and its full history,
+/// and detects every arrival since the last call by finding where last
+/// frame's newest line now sits. This is not an approximation of vanilla's
+/// behaviour, it is the same arithmetic batched: `scrollChat`'s clamp is
+/// linear in both the scroll position and the total, so applying `k`
+/// single-line increments in sequence and applying one increment of `k` land
+/// on the same clamped result whenever the box stayed open across the whole
+/// gap (the only case vanilla's own per-push check ever fires for either).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChatScroll {
+    /// Vanilla's `chatScrollbarPos`: entries scrolled back from the newest.
+    /// `0` is "at the bottom" (live).
+    scrolled: usize,
+    /// Vanilla's `newMessageSinceScroll`.
+    new_message_since_scroll: bool,
+    /// The full history, oldest-first, as of the last [`Self::sync`] —
+    /// what a new frame's history is diffed against in [`new_arrivals`].
+    last_seen: Vec<String>,
+}
+
+impl ChatScroll {
+    /// Not scrolled, no history seen yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `ChatComponent.scrollChat`, transcribed exactly — including the order
+    /// of its two clamps. The upper clamp (`total - rows_per_page`) can be
+    /// negative when everything already fits on screen; vanilla does not
+    /// guard against that with a saturating subtraction, it relies on the
+    /// second (`<= 0`) clamp to catch the resulting negative `pos` and pin it
+    /// to `0` — reproduced with `i64` arithmetic for the same reason.
+    pub fn scroll(&mut self, dir: i32, total: usize, rows_per_page: usize) {
+        let mut pos = self.scrolled as i64 + i64::from(dir);
+        let max = total as i64 - rows_per_page as i64;
+        if pos > max {
+            pos = max;
+        }
+        if pos <= 0 {
+            pos = 0;
+            self.new_message_since_scroll = false;
+        }
+        self.scrolled = pos as usize;
+    }
+
+    /// `ChatScreen.removed`'s `resetChatScroll()` — everything back to the
+    /// live position. [`Self::sync`] calls this itself whenever the box is
+    /// closed, so a caller need not hook every place the box can close
+    /// separately (see [`Self::sync`]'s own doc).
+    pub fn reset(&mut self) {
+        self.scrolled = 0;
+        self.new_message_since_scroll = false;
+        self.last_seen.clear();
+    }
+
+    /// Call once per frame with whether the chat box is open and the
+    /// **full** received history, oldest-first (the same order
+    /// [`lodestone_game::chat::ChatLog::recent`] already returns).
+    ///
+    /// Closed resets outright — matching vanilla's `removed()` without
+    /// needing a separate hook into every path that can close the screen
+    /// (Escape, sending with `closeOnSubmit`, a disconnect): scroll position
+    /// is meaningless while there is no box to scroll, so collapsing "closed"
+    /// to "reset" is exact, not an approximation.
+    ///
+    /// Open, this reproduces `addMessageToDisplayQueue`'s no-jump
+    /// compensation for every entry that arrived since the last call — see
+    /// this type's own doc for why per-frame batching is exact here.
+    pub fn sync(&mut self, chat_open: bool, history: &[String], rows_per_page: usize) {
+        if !chat_open {
+            self.reset();
+            return;
+        }
+        let arrived = new_arrivals(&self.last_seen, history);
+        self.last_seen = history.to_vec();
+        if self.scrolled > 0 && arrived > 0 {
+            self.new_message_since_scroll = true;
+            self.scroll(
+                i32::try_from(arrived).unwrap_or(i32::MAX),
+                history.len(),
+                rows_per_page,
+            );
+        }
+    }
+
+    /// Entries scrolled back from the newest. `0` is live.
+    #[must_use]
+    pub fn scrolled(&self) -> usize {
+        self.scrolled
+    }
+
+    /// Whether anything is scrolled back from the live position.
+    #[must_use]
+    pub fn is_scrolled(&self) -> bool {
+        self.scrolled > 0
+    }
+
+    /// Vanilla's `newMessageSinceScroll` — a message arrived while scrolled
+    /// back, so the scrollbar should read as "new" (vanilla tints it
+    /// differently; see [`crate::hud::ChatScrollbar`]).
+    #[must_use]
+    pub fn new_message_since_scroll(&self) -> bool {
+        self.new_message_since_scroll
+    }
+
+    /// The visible window of `history` (oldest-first) at the current scroll
+    /// position: up to `rows_per_page` entries, ending `self.scrolled`
+    /// entries back from the newest. Shorter than `rows_per_page` only when
+    /// the history itself is shorter.
+    ///
+    /// Generic over the element type (rather than fixed to `&[String]`) so a
+    /// caller holding the paired `(String, age)` rows
+    /// [`lodestone_game::chat::ChatLog::recent`] returns can window those
+    /// directly, with [`Self::sync`]'s own `&[String]` (identity-only, no
+    /// age) staying a separate, narrower view of the same history.
+    #[must_use]
+    pub fn window<'a, T>(&self, history: &'a [T], rows_per_page: usize) -> &'a [T] {
+        let (start, end) = self.window_range(history.len(), rows_per_page);
+        &history[start..end]
+    }
+
+    /// The `[start, end)` byte-index-free (entry-index) range [`Self::window`]
+    /// slices with, exposed separately so a caller windowing two parallel
+    /// slices (e.g. legacy strings and ages fetched together) can compute it
+    /// once and apply it twice rather than trusting two `window` calls to
+    /// agree.
+    #[must_use]
+    pub fn window_range(&self, total: usize, rows_per_page: usize) -> (usize, usize) {
+        let end = total.saturating_sub(self.scrolled);
+        let start = end.saturating_sub(rows_per_page);
+        (start, end)
+    }
+}
+
+/// How many entries are new in `current` (oldest-first) relative to
+/// `previous` (also oldest-first, a prior frame's full history) — the count
+/// appended at the newest end, accounting for the feed's own capacity
+/// eviction (which drops the oldest and shifts every remaining index without
+/// being a "new arrival"). `0` when nothing changed or `previous` is empty
+/// (the first frame after opening).
+///
+/// Finds `previous`'s last (newest) entry scanning `current` from its own
+/// newest end — the common case (zero or a handful of new lines) finds it in
+/// the first few steps. Two entries sharing identical text is the one case
+/// this can misjudge (it finds the *nearest* match to the newest end, which
+/// undercounts only if a duplicate of the true previous-newest line was
+/// itself one of the new arrivals); vanilla's own push-time trigger has no
+/// such ambiguity, so this is a named, accepted approximation of the
+/// read-time reconstruction, not a hidden one.
+fn new_arrivals(previous: &[String], current: &[String]) -> usize {
+    let Some(last) = previous.last() else {
+        return 0;
+    };
+    match current.iter().rev().position(|s| s == last) {
+        Some(idx_from_end) => idx_from_end,
+        // `last` fell out of even a full-capacity history: more entries
+        // arrived than the feed can hold at once. Report what we can see
+        // rather than nothing.
+        None => current.len().saturating_sub(previous.len()).max(1),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds an oldest-first `Vec<String>` of `n` distinct lines, so a
+    /// mismatch prints exactly which line landed where instead of an opaque
+    /// index.
+    fn history(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("line {i}")).collect()
+    }
+
+    mod chat_scroll {
+        use super::*;
+
+        /// Both ends of `ChatComponent.scrollChat`'s clamp: cannot scroll past
+        /// the newest (below `0`) and cannot scroll further back than the
+        /// oldest entry that would still fill a page.
+        #[test]
+        fn scroll_clamps_at_both_ends() {
+            let mut s = ChatScroll::new();
+            // total = 10, rows_per_page = 4 -> the oldest reachable position
+            // is `10 - 4 = 6`.
+            s.scroll(3, 10, 4);
+            assert_eq!(s.scrolled(), 3, "3 is within range, no clamp yet");
+            s.scroll(100, 10, 4);
+            assert_eq!(s.scrolled(), 6, "clamped at the top: total - rows_per_page");
+            s.scroll(-100, 10, 4);
+            assert_eq!(s.scrolled(), 0, "clamped at the bottom: never negative");
+            assert!(!s.is_scrolled());
+        }
+
+        /// When everything already fits on screen (`total <= rows_per_page`),
+        /// vanilla's own upper clamp goes negative and the lower clamp is what
+        /// actually pins it — scrolling must land at `0` either way, not at
+        /// the negative intermediate value.
+        #[test]
+        fn scroll_with_nothing_to_scroll_into_stays_at_zero() {
+            let mut s = ChatScroll::new();
+            s.scroll(5, 3, 10);
+            assert_eq!(s.scrolled(), 0);
+        }
+
+        /// The core "no silent jump" behaviour: with the box open, a new
+        /// arrival while scrolled back increments the scroll position so the
+        /// *same* messages stay on screen — the view does not snap to the
+        /// bottom just because something new came in.
+        #[test]
+        fn a_new_message_while_scrolled_and_open_keeps_the_view_steady() {
+            let mut s = ChatScroll::new();
+            let before = history(20);
+            s.sync(true, &before, 5);
+            s.scroll(4, 20, 5); // scroll back into history
+            assert_eq!(s.scrolled(), 4);
+            // Captured *before* the arrival, at the position that was
+            // current then — this, not a re-derived window, is "what the
+            // player was looking at".
+            let visible_before: Vec<String> = s.window(&before, 5).to_vec();
+            assert_eq!(
+                visible_before,
+                ["line 11", "line 12", "line 13", "line 14", "line 15"]
+            );
+
+            // One more line arrives at the newest end.
+            let mut after = before.clone();
+            after.push("line 20".to_string());
+            s.sync(true, &after, 5);
+
+            assert_eq!(
+                s.scrolled(),
+                5,
+                "scrolled position must grow by exactly the 1 new arrival, \
+                 so the visible window does not move"
+            );
+            assert!(s.new_message_since_scroll());
+            assert_eq!(
+                s.window(&after, 5),
+                visible_before.as_slice(),
+                "the same five lines must still be on screen after the arrival"
+            );
+        }
+
+        /// The sibling clause a naive implementation drops: while **not**
+        /// scrolled (at the live bottom), a new arrival must do nothing extra
+        /// — the view is already following the newest message, and bumping
+        /// `scrolled` here would scroll it *away* from live.
+        #[test]
+        fn a_new_message_while_not_scrolled_does_not_move_anything() {
+            let mut s = ChatScroll::new();
+            let before = history(10);
+            s.sync(true, &before, 5);
+            assert_eq!(s.scrolled(), 0);
+
+            let mut after = before.clone();
+            after.push("line 10".to_string());
+            s.sync(true, &after, 5);
+
+            assert_eq!(s.scrolled(), 0, "still live, not scrolled by an arrival");
+            assert!(!s.new_message_since_scroll());
+        }
+
+        /// A message arriving while the box is **closed** must not leave a
+        /// stale scroll position or a stale `new_message_since_scroll` for
+        /// the next time it opens — `sync(false, ..)` resets outright.
+        #[test]
+        fn closing_resets_scroll_even_with_a_message_in_flight() {
+            let mut s = ChatScroll::new();
+            let before = history(20);
+            s.sync(true, &before, 5);
+            s.scroll(4, 20, 5);
+            assert!(s.is_scrolled());
+
+            s.sync(false, &before, 5); // box closed
+            assert_eq!(s.scrolled(), 0);
+            assert!(!s.new_message_since_scroll());
+
+            // Reopening with more history must not resurrect the old
+            // position or spuriously flag a "new message" from the gap.
+            let mut after = before.clone();
+            after.push("line 20".to_string());
+            s.sync(true, &after, 5);
+            assert_eq!(s.scrolled(), 0);
+            assert!(!s.new_message_since_scroll());
+        }
+
+        /// [`ChatScroll::window`] returns exactly `rows_per_page` entries
+        /// ending `scrolled` back from the newest, and the unscrolled case
+        /// (`scrolled == 0`) is the plain "last `rows_per_page` entries" read
+        /// — the same thing [`lodestone_game::chat::ChatLog::recent`] returns
+        /// with no scroll applied.
+        #[test]
+        fn window_selects_the_right_slice() {
+            let h = history(10);
+            let mut s = ChatScroll::new();
+            assert_eq!(
+                s.window(&h, 3),
+                &["line 7", "line 8", "line 9"],
+                "unscrolled: the newest 3"
+            );
+            s.scroll(2, 10, 3);
+            assert_eq!(
+                s.window(&h, 3),
+                &["line 5", "line 6", "line 7"],
+                "scrolled back 2: the window shifts by exactly 2"
+            );
+        }
+
+        /// A history shorter than a page must not panic or short-read past
+        /// what exists — [`ChatScroll::window`] saturates rather than
+        /// indexing negative.
+        #[test]
+        fn window_with_short_history_returns_everything() {
+            let h = history(2);
+            let s = ChatScroll::new();
+            assert_eq!(s.window(&h, 10), &["line 0", "line 1"]);
+        }
+
+        /// Explicit [`ChatScroll::reset`] (the direct `resetChatScroll()`
+        /// equivalent, for a caller with its own close hook) clears both the
+        /// position and the "new message" flag.
+        #[test]
+        fn reset_clears_position_and_flag() {
+            let mut s = ChatScroll::new();
+            let before = history(20);
+            s.sync(true, &before, 5);
+            s.scroll(4, 20, 5);
+            let mut after = before.clone();
+            after.push("line 20".to_string());
+            s.sync(true, &after, 5);
+            assert!(s.is_scrolled());
+            assert!(s.new_message_since_scroll());
+
+            s.reset();
+            assert_eq!(s.scrolled(), 0);
+            assert!(!s.new_message_since_scroll());
+        }
+    }
 
     #[test]
     fn input_edits_are_char_boundary_safe() {

@@ -158,6 +158,96 @@ split line nearest the bottom edge and its earlier lines above it
 (`ChatComponent.extractRenderState`/`ChatComponent.addMessageToDisplayQueue`); the draw reproduces that by reversing
 each entry's own wrapped rows before stacking them bottom-up.
 
+### Scrolling the scrollback
+
+`crate::chat::ChatScroll` (a field of `ChatInput`) is vanilla's
+`ChatComponent.chatScrollbarPos`/`newMessageSinceScroll`
+(`ChatComponent.java`), reachable by mouse wheel while the chat box is open
+(`app/lifecycle.rs`'s `WindowEvent::MouseWheel` arm, falling through to it
+only when the pointer is *not* over the command-suggestion popup — vanilla's
+own `commandSuggestions.mouseScrolled` first refusal). Vanilla's constants,
+read straight from the decompile rather than invented:
+
+- **History cap**: `ChatComponent`'s own `trimmedMessages`/`allMessages` cap
+  at **100**, matching this crate's pre-existing
+  `lodestone_game::chat::ChatFeed::DEFAULT_CHAT_CAPACITY` (already 100, no
+  change needed) — scrolling can never reach further back than the feed
+  already retains.
+- **Wheel step**: `ChatScreen.mouseScrolled` clamps the raw notch to
+  `±1.0`, then multiplies by `7.0` unless Shift is held (`hasShiftDown()`) —
+  so an ordinary wheel click moves 7 lines, Shift+wheel moves 1.
+- **Clamp**: `ChatComponent.scrollChat` — `chatScrollbarPos += dir`, then
+  clamped above at `total - linesPerPage` and below at `0`, in that order
+  (the upper clamp can go negative when everything already fits on screen;
+  the lower clamp is what actually pins it there, not a saturating
+  subtraction).
+- **No jump on a new message while scrolled**:
+  `addMessageToDisplayQueue`'s `if (chatting && chatScrollbarPos > 0) {
+  newMessageSinceScroll = true; scrollChat(1); }` — the currently-visible
+  window stays put instead of snapping to the newest message.
+- **Reset on close**: `ChatScreen.removed()` calls `resetChatScroll()`.
+
+**Two deliberate departures from vanilla, both named in `ChatScroll`'s own
+doc comment:**
+
+1. **Granularity is one *logical entry*, not one *wrapped visual row*.**
+   Vanilla scrolls through already-wrapped `GuiMessage.Line`s, which needs
+   real font metrics this crate's `chat.rs` deliberately has none of (see
+   this file's own module doc on why `highlight`/`complete` return byte
+   spans rather than pixel runs, for the same reason). Entry granularity is
+   the exact one-line-per-entry case of vanilla's scheme, and is wrong only
+   for a message that wraps into more than one row.
+2. **The no-jump compensation runs once per frame (`ChatScroll::sync`), not
+   once per push.** The received log
+   (`lodestone_game::chat::ChatLog`) is version- and UI-free by design and
+   holds no notion of "is chat open" to check against, so `sync` is called
+   every frame with the box's current open state and its full history, and
+   detects every arrival since the last call by finding where last frame's
+   newest line now sits (`chat.rs`'s private `new_arrivals`). This is exact,
+   not approximate, whenever the box stayed open across the gap:
+   `scrollChat`'s clamp is linear in both the position and the total, so `k`
+   sequential single-line increments and one increment of `k` land on the
+   same clamped result. `sync(false, ..)` also **is** the reset-on-close
+   path — called unconditionally every frame regardless of screen state, it
+   collapses "closed" to "reset" directly rather than needing a hook into
+   every place the screen can close (Escape, sending without
+   `closeOnSubmit`, a disconnect).
+
+The scrollbar (`crate::hud::ChatScrollbar`, drawn in `hud.rs` right after the
+scrollback entries) tracks the same three numbers `ChatScroll` exposes
+(`scrolled`, `total`, `new_message_since_scroll`) — never a second, re-derived
+count — and only appears once there is more history than fits on screen,
+matching vanilla's own `virtualHeight != chatHeight` gate. Vanilla's alpha
+(`y > 0 ? 170 : 96`) is simplified to a fixed `170/255`: the sign check is on
+an internal value that is essentially never positive in practice (it would
+need a chat box taller than the canvas itself), so branching on it added risk
+without a way to verify the branch here — a named simplification, not a
+guessed one.
+
+### Vertical layout: the scrollback's own anchor
+
+The scrollback's bottom edge (`crate::hud::chat_bottom`) and the input box's
+own placement (`crate::hud::chat_input_top`) are **two independent literals in
+vanilla**, not one derived from the other:
+`ChatComponent.extractRenderState`'s `chatBottom = Mth.floor((screenHeight -
+40) / scale)` is computed once, before that method ever branches on open vs.
+closed, and has no reference anywhere to where the `EditBox` sits
+(`this.height - 12`, a different literal in a different class,
+`ChatScreen.init`). At the vanilla-default `chatScale` of `1.0` this is simply
+`canvas_h - 40.0` — a real, fixed ~26 logical-canvas-pixel gap between the
+newest message and the input box, by design.
+
+This HUD used to compute `chat_bottom` as `input_y - INPUT_STRIP_PAD *
+chat_pose_scale` while the box was open — literally the input strip's own top
+edge — which coupled the scrollback to the input box and erased that gap
+(measured: ~1px instead of vanilla's ~26px). Reported by the owner as "a gap
+between the bottom of the chat and the bar where I type stuff"; fixed by
+porting `chatBottom`'s real expression as `crate::hud::chat_bottom`, used
+unconditionally (open or closed), same as vanilla. See
+`crates/lodestone-shell/tests/chat_input_gap.rs` for the regression gate,
+which rasterises `HudGeometry::build` and measures the two background bands'
+actual pixel positions rather than asserting on the formula alone.
+
 ### Chat Settings
 
 `crate::hud::ChatDisplayOptions` (a small `Copy` struct on `HudFrame`) carries
@@ -169,7 +259,7 @@ that this renderer actually consumes:
 
 | field | vanilla option | default | effect |
 |---|---|---|---|
-| `scale` | `options.chat.scale` | `1.0` | pose-scale multiplier on top of this HUD's fixed 2× legibility factor |
+| `scale` | `options.chat.scale` | `1.0` | `chat_pose_scale`'s **entire** value — vanilla's `ChatComponent.getScale`, with no HUD-side multiplier on top (see `docs/hud-text-scale.md`; the old "2× legibility factor" this row used to describe was fixed there) |
 | `width_pct` | `options.chat.width` | `1.0` | box width, via `chat_width_px` (vanilla's `ChatComponent.getWidth`) |
 | `height_pct_unfocused` | `options.chat.height.unfocused` | `70.0/160.0` | box height (and row cap) while closed |
 | `height_pct_focused` | `options.chat.height.focused` | `1.0` | box height (and row cap) while open |
@@ -223,10 +313,15 @@ for the same note in code.
   wrap bug rather than a cache bug. A `chat_wrap: None` frame (every hermetic
   test) wraps from scratch, so a test never observes the cache unless it
   attaches one.
-- **Gotcha**: `chat_pose_scale = scale * chat_options.scale` folds this HUD's
-  own fixed 2× legibility factor (`scale`, shared with the F3 debug overlay)
-  together with the option. Do not apply the option to the shared `scale`
-  local directly — that would also rescale the debug overlay.
+- **Gotcha (stale, kept for the shape of the mistake)**: `chat_pose_scale` used
+  to be `HUD_TEXT_SCALE * chat_options.scale`, folding an ad-hoc HUD-wide 2×
+  pitch into the option. Fixed: `chat_pose_scale(opts)` is `opts.scale` alone
+  now (`crate::hud::chat_pose_scale`), matching vanilla's
+  `ChatComponent.getScale` with nothing layered on top — see
+  `docs/hud-text-scale.md` for the fuller history. The lesson survives the
+  fix: a *shared* ambient scale constant is exactly what lets an unrelated
+  surface's correction silently move this one, or vice versa — prefer a
+  surface's own named constant over reaching for one already in scope.
 - **Gotcha**: the logical canvas (`b.w`/`b.h`) is already in vanilla's
   `guiScaledWidth`/`Height` units (see `logical_canvas`'s own doc), which is
   why `chat_width_px`/`chat_height_px` need no unit conversion against it.

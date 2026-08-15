@@ -1211,6 +1211,12 @@ pub struct HudFrame<'a> {
     /// The command-suggestion dropdown, `Some` only while it is up. See
     /// [`SuggestionPopup`] and [`draw_command_suggestions`].
     pub chat_suggestions: Option<SuggestionPopup<'a>>,
+    /// The scrollback's scroll indicator — vanilla's own scrollbar
+    /// (`ChatComponent.extractRenderState`'s `if (total > 0 && isForeground)`
+    /// block), `Some` only while there is [`crate::chat::ChatScroll`] state to
+    /// show. `None` draws nothing, matching vanilla's own
+    /// `virtualHeight != chatHeight` gate for "nothing to scroll into".
+    pub chat_scrollbar: Option<ChatScrollbar>,
     /// The persisted Chat Settings values that shape the scrollback/input
     /// draw — see [`ChatDisplayOptions`]. Defaults to vanilla's own defaults
     /// (see [`HudFrame::new`]), so a caller that never sets this renders
@@ -1442,6 +1448,7 @@ impl<'a> HudFrame<'a> {
             chat_caret_visible: true,
             chat_suggestion_ghost: None,
             chat_suggestions: None,
+            chat_scrollbar: None,
             chat_options: ChatDisplayOptions::default(),
             chat_wrap: None,
             players: None,
@@ -1768,6 +1775,38 @@ pub fn chat_bottom(canvas_h: f32, pose_scale: f32) -> f32 {
     ((canvas_h - 40.0) / pose_scale).floor() * pose_scale
 }
 
+/// One scrollback row's vertical pitch — vanilla's `entryHeight = messageHeight
+/// * (lineSpacing + 1.0)` (`ChatComponent.java`), scaled by the chat pose
+/// afterward. `messageHeight` is vanilla's literal `9`; `glyph_h + 2.0` is this
+/// HUD's own 5×7-font analogue of it.
+///
+/// A free function, not an inline `let`, so a caller outside the draw (the
+/// mouse-wheel scroll handler and the per-frame scroll sync, neither of which
+/// build a full [`HudFrame`]) can compute the same "how many rows fit the
+/// chat box" figure the draw itself uses, without restating the formula.
+#[must_use]
+pub fn chat_line_h(opts: ChatDisplayOptions, pose_scale: f32) -> f32 {
+    (font::GLYPH_H as f32 + 2.0) * (1.0 + opts.line_spacing.max(0.0)) * pose_scale
+}
+
+/// How many scrollback rows fit the configured chat box height — vanilla's
+/// `ChatComponent.getLinesPerPage` (`height / lineHeight`, `ChatComponent.java`),
+/// at this crate's entry-granularity approximation of a "row" (see
+/// [`crate::chat::ChatScroll`]'s own doc). Shared by the draw and by
+/// [`crate::chat::ChatScroll::scroll`]'s callers so a resize cannot leave the
+/// two disagreeing about how many lines the box holds.
+#[must_use]
+pub fn chat_lines_per_page(opts: ChatDisplayOptions, pose_scale: f32, chat_open: bool) -> usize {
+    let height_pct = if chat_open {
+        opts.height_pct_focused
+    } else {
+        opts.height_pct_unfocused
+    };
+    let box_h = chat_height_px(height_pct.clamp(0.0, 1.0));
+    let line_h = chat_line_h(opts, pose_scale);
+    (box_h / line_h).floor().max(1.0) as usize
+}
+
 /// Vanilla's `CommandSuggestions.LINE_HEIGHT` is `12`, decomposed: the 9px font
 /// draws at `rect.getY() + 2 + 12 * i`, so the row is 2px of lead, the glyph,
 /// and 1px of trail. Ours keeps the padding and substitutes this HUD's own glyph
@@ -1809,6 +1848,23 @@ fn measure_text(font: Option<&VanillaFont>, s: &str, scale: f32) -> f32 {
         Some(f) => f.width(s, scale),
         None => item_icon::text_w(s, scale),
     }
+}
+
+/// What [`HudFrame::chat_scrollbar`] needs to draw vanilla's own scrollback
+/// indicator — the three numbers [`crate::chat::ChatScroll`] already tracks,
+/// read straight off it rather than re-derived at the draw site.
+#[derive(Debug, Clone, Copy)]
+pub struct ChatScrollbar {
+    /// [`crate::chat::ChatScroll::scrolled`] — entries scrolled back from the
+    /// newest.
+    pub scrolled: usize,
+    /// The full history length the scroll position is relative to —
+    /// vanilla's `trimmedMessages.size()`, at this crate's entry granularity.
+    pub total: usize,
+    /// [`crate::chat::ChatScroll::new_message_since_scroll`] — tints the bar
+    /// vanilla's amber (`0xCC3333`) instead of its usual blue-grey
+    /// (`0x3333AA`).
+    pub new_message_since_scroll: bool,
 }
 
 /// What the suggestion popup needs from `chat::SuggestionsList` to lay itself
@@ -2212,14 +2268,7 @@ impl HudGeometry {
         let chat_open = frame.chat_input.is_some();
         let opts = frame.chat_options;
         let chat_pose_scale = chat_pose_scale(opts);
-        // Vanilla's unscaled per-line stride is 9px
-        // (`ChatComponent.MESSAGE_BOTTOM_TO_MESSAGE_TOP`/`messageHeight`,
-        // `ChatComponent.java`); `glyph_h + 2.0` is this HUD's own 5×7
-        // analogue. `entryHeight = messageHeight * (lineSpacing + 1.0)`
-        // (`ChatComponent.java`) is computed *before* the pose scale is
-        // applied, so line-spacing multiplies the base stride and
-        // `chat_pose_scale` multiplies the whole result, matching that order.
-        let chat_line_h = (glyph_h + 2.0) * (1.0 + opts.line_spacing.max(0.0)) * chat_pose_scale;
+        let chat_line_h = chat_line_h(opts, chat_pose_scale);
         // `chat_width_px`/`chat_height_px` are vanilla's own
         // `ChatComponent.getWidth`/`getHeight` formulas, in the same
         // logical-canvas pixel unit as `b.w`/`b.h` (see their doc comments),
@@ -2443,6 +2492,52 @@ impl HudGeometry {
                     alpha * chat_text_opacity,
                 );
                 row_i += 1;
+            }
+        }
+
+        // The scrollback's own scroll indicator — vanilla's
+        // `ChatComponent.extractRenderState`'s `if (total > 0 && isForeground)`
+        // block (`ChatComponent.java`). Drawn only while open
+        // (`isForeground`) and only once there is more history than fits on
+        // screen (`virtualHeight != chatHeight`), matching vanilla's own two
+        // gates. The two colours are vanilla's literal `13382451`/`3355562`
+        // (`0xCC3333`/`0x3333AA`); the alpha vanilla derives from a sign check
+        // on an internal `y` that is only ever positive for a canvas smaller
+        // than the chat box itself is simplified here to a single fixed
+        // `170/255` (vanilla's own "not that" branch) rather than guessed at
+        // — a named simplification, not a hidden one.
+        if let Some(bar) = frame.chat_scrollbar {
+            let rows_per_page = chat_lines_per_page(opts, chat_pose_scale, chat_open);
+            let total = bar.total as f32;
+            let count = (bar.total.min(rows_per_page)) as f32;
+            if chat_open && total > 0.0 && count < total {
+                let chat_h = count * chat_line_h;
+                let virtual_h = total * chat_line_h;
+                let thumb_h = (chat_h * chat_h / virtual_h).max(1.0);
+                let thumb_bottom = chat_bottom - bar.scrolled as f32 * chat_h / total;
+                let thumb_top = thumb_bottom - thumb_h;
+                let x = chat_box_w + 2.0 * chat_pose_scale;
+                let rgb = if bar.new_message_since_scroll {
+                    [0xCC as f32 / 255.0, 0x33 as f32 / 255.0, 0x33 as f32 / 255.0]
+                } else {
+                    [0x33 as f32 / 255.0, 0x33 as f32 / 255.0, 0xAA as f32 / 255.0]
+                };
+                b.rect_px(
+                    x,
+                    thumb_top,
+                    2.0 * chat_pose_scale,
+                    thumb_h,
+                    [rgb[0], rgb[1], rgb[2], 170.0 / 255.0],
+                );
+                // Vanilla's second, 1px `0xCCCCCC` highlight fill just right
+                // of the main bar.
+                b.rect_px(
+                    x + 2.0 * chat_pose_scale,
+                    thumb_top,
+                    1.0 * chat_pose_scale,
+                    thumb_h,
+                    [0xCC as f32 / 255.0, 0xCC as f32 / 255.0, 0xCC as f32 / 255.0, 170.0 / 255.0],
+                );
             }
         }
 
