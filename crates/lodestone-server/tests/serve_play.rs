@@ -3186,6 +3186,70 @@ async fn breaking_stone_drops_exactly_one_cobblestone_item_entity() {
     let _ = server.await.expect("server task panicked");
 }
 
+/// **The wire assertion every other drop gate in this file omits.**
+///
+/// Every drop/pickup test above (and `a_dropped_item_is_collected_into_the_hotbar_and_announced`
+/// and friends below) passes `entities: &NoEntities` — this file's own
+/// `encode_add_entity` doc comment names that directly: "inert for every other
+/// test in this file... `stream_pass` produces nothing and these are never
+/// called." So the whole corpus proves a break rolls the right loot into the
+/// right `MobSim`, and proves pickup/inventory side effects, but **none of it
+/// proves a connected client is ever told the drop exists.** That is exactly
+/// the browser's own production gap: `IntegratedServer::open_in_memory` (the
+/// `wasm32` singleplayer entry — see `crates/lodestone-shell/src/net.rs`'s
+/// `#[cfg(target_arch = "wasm32")]` arm) passes `NoEntities` too, so a block
+/// break there rolls loot, spawns a real item entity into a real `MobHandle`,
+/// and never once reaches the wire — zero pixels, no error anywhere.
+///
+/// This gate closes the gap the cheap way: pass the **same** `MobHandle` as
+/// both `entities` and `mobs`, exactly what
+/// [`lodestone_server::IntegratedServer::open_in_memory_with_items`] now does
+/// for the browser build. `MobHandle` is already a legitimate `EntitySource`
+/// on its own (see that impl's own doc comment) for a caller that mutates the
+/// sim directly and needs no ticked republish — which is exactly
+/// `destroy_block`'s access pattern, no tick loop involved.
+#[tokio::test(start_paused = true)]
+async fn breaking_stone_streams_add_entity_when_the_mob_handle_is_its_own_source() {
+    let (client_end, server_end) = memory_pair();
+    let mobs = MobHandle::default();
+    let mobs_for_server = mobs.clone();
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &StoneSource,
+            // The fix: the same handle as `mobs` below, not `&NoEntities`.
+            &mobs_for_server,
+            0,
+            &BlockEntityHandle::default(),
+            &mobs_for_server,
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Streamer", 1).await;
+    break_with_a_pickaxe(&mut client, 2, BREAK_POS).await;
+    let packets = drain_available(&mut client).await;
+
+    assert_eq!(
+        mobs.with(|sim| sim.item_count()),
+        1,
+        "precondition: the break must actually roll a drop"
+    );
+    assert!(
+        packets.iter().any(|(id, _)| *id == ADD_ENTITY_S2C),
+        "the dropped item's MobHandle doubles as its own EntitySource, so an \
+         ADD_ENTITY must reach the client on the very next streaming pass; got \
+         packet ids {:?}",
+        packets.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+    );
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
+}
+
 /// A [`ChunkSource`] like [`StoneSource`] but with **one persisted cell**: every
 /// other block is stone (discarded on write, exactly as [`StoneSource`]), while
 /// [`BREAK_POS`] alone remembers whatever it was last set to. Issue #550's

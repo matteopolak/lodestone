@@ -927,6 +927,151 @@ impl IntegratedServer {
         Self::open_in_memory_with_entities(protocol, source, NoEntities, view_radius)
     }
 
+    /// Like [`open_in_memory`](Self::open_in_memory), but a block break's
+    /// dropped item is actually visible on the wire: the constructor's own
+    /// [`MobHandle`] streams **itself**, instead of the caller getting
+    /// [`NoEntities`]'s permanently empty source.
+    ///
+    /// # Why this exists
+    ///
+    /// `open_in_memory`'s `NoEntities` meant a block break rolled its loot,
+    /// spawned a real item entity into a real (but private, unstreamed)
+    /// `MobHandle` — `crate::server::destroy_block`'s own `mobs` parameter —
+    /// and `stream_pass` (`crate::server`) diffed a permanently empty
+    /// `NoEntities::snapshots()` on every pass. The item existed, could be
+    /// picked up by a client that happened to walk over its position, and was
+    /// never once sent as an `ADD_ENTITY`. This is the exact shape this
+    /// crate's own test corpus could not see: every drop/pickup gate in
+    /// `crates/lodestone-server/tests/serve_play.rs` also constructs its
+    /// connection with `&NoEntities` (that file's own `encode_add_entity` doc
+    /// comment says so directly), so none of them assert the client ever
+    /// receives the spawn — see
+    /// `breaking_stone_streams_add_entity_when_the_mob_handle_is_its_own_source`,
+    /// which does, and which fails against `open_in_memory`'s wiring and
+    /// passes against this constructor's.
+    ///
+    /// This is `wasm32`'s own singleplayer entry point —
+    /// `crates/lodestone-shell/src/net.rs`'s `#[cfg(target_arch = "wasm32")]`
+    /// arm is the one production caller, the only target that reaches
+    /// [`open_in_memory`](Self::open_in_memory) instead of
+    /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs), because
+    /// that constructor's tick loop needs `tokio::time`, unavailable on
+    /// `wasm32` (see this module's own doc on `run_tick_loop`).
+    ///
+    /// No tick loop is spawned here either, for the identical reason — this
+    /// fixes *visibility*, not physics. [`MobHandle`] is already a legitimate
+    /// [`EntitySource`] on its own for a caller that mutates the sim directly
+    /// and needs no ticked republish (see that impl's own doc comment), which
+    /// is exactly `destroy_block`'s access pattern: it calls
+    /// `mobs.with(|sim| sim.spawn_item(..))` synchronously from packet
+    /// handling, no timer involved, so a fresh `snapshots()` read on the very
+    /// next streaming pass already sees it.
+    ///
+    /// The gaps this does **not** close, because they are genuinely
+    /// timer-shaped and `wasm32` has no timer to drive them: a dropped item
+    /// never falls, merges with a neighbour, ages toward its despawn time, or
+    /// attracts any AI, and no mob spawns or moves, ever — the same
+    /// documented gap [`open_in_memory`](Self::open_in_memory) already
+    /// carried. Pickup still works: `collect_nearby_items` is dispatched from
+    /// every inbound movement packet in both `serve_play` definitions, not
+    /// from a tick, so a player can still walk over and bank what they mined.
+    #[must_use]
+    pub fn open_in_memory_with_items<P, S>(
+        protocol: P,
+        source: S,
+        view_radius: i32,
+    ) -> (Self, DuplexStream)
+    where
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+    {
+        let (client_end, server_end) = memory_pair();
+        let shutdown = ShutdownSignal::new();
+        let signal = shutdown.clone();
+        let source = Arc::new(with_nether(
+            ChunkStore::for_integrated_view_radius(source, view_radius),
+            view_radius,
+            true,
+            // No world directory reaches this constructor, so there is
+            // nothing on disk to restore — a fresh index, same as
+            // `open_in_memory_with_entities`.
+            crate::portal::PortalIndex::new(),
+            None,
+            // Same "spawns no tick loop" contract as `open_in_memory_with_entities` —
+            // see that constructor's own comment on this argument.
+            None,
+        ));
+        let tickets = source.primary().tickets();
+        // A fresh, empty registry for this one connection's lifetime — see
+        // `open_in_memory_with_entities`'s identical field for why nothing
+        // ticks it here.
+        let block_entities = BlockEntityHandle::default();
+        // The one handle that plays both roles: `destroy_block` mutates it
+        // directly through the `mobs` parameter below, and the very same
+        // handle is what `stream_pass` diffs through the `entities`
+        // parameter — see this function's own doc comment for why
+        // `MobHandle` can be its own `EntitySource` with no tick loop
+        // involved.
+        let mobs = MobHandle::default();
+
+        let task = spawn(async move {
+            let mut conn = Connection::new(server_end);
+            tokio::select! {
+                _ = signal.notified() => {}
+                _ = serve_connection_shared(&mut conn, &protocol, &source, &mobs, view_radius, crate::server::MAX_CLIENT_VIEW_RADIUS, &block_entities, &mobs, &tickets) => {}
+            }
+        });
+
+        (
+            Self {
+                #[cfg(not(target_arch = "wasm32"))]
+                local_addr: None,
+                shutdown,
+                task,
+                tick_task: None,
+                clock: None,
+                // No tick task, so nobody owns a server `World` (issue #433).
+                server_tick: None,
+                // Nothing seeds a mob population through this constructor
+                // (see the `mobs` binding above), so there is nothing to seed.
+                seed_task: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                save: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                autosave_task: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                level_dat: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                entity_storage: None,
+                // Nothing persists here, so the save path has no population to read.
+                #[cfg(not(target_arch = "wasm32"))]
+                mobs: None,
+                // No world directory reaches this constructor, so there is
+                // nothing to restore from and nothing to write back.
+                #[cfg(not(target_arch = "wasm32"))]
+                portals: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                poi_storage: None,
+                // No tick loop here, so there is nothing to share a store *with*.
+                world_state: crate::world_state::WorldStateHandle::default(),
+                live_save: crate::live_save::LiveSaveSlot::default(),
+                #[cfg(not(target_arch = "wasm32"))]
+                rcon_task: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                query_task: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                discovery_task: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                host: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                relay_task: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                publish_task: None,
+            },
+            client_end,
+        )
+    }
+
     /// Like [`open_in_memory`](Self::open_in_memory) but also streams entities:
     /// once the client reaches Play, each of its inbound packets drives a diff of
     /// `entities.snapshots()` against what this connection was last sent, emitting

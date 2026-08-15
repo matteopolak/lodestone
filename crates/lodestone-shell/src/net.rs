@@ -2451,7 +2451,16 @@ async fn run_async(
                 };
                 #[cfg(target_arch = "wasm32")]
                 let (server, client_io, lan_address): (_, _, Option<ServerAddress>) = {
-                    let (server, io) = lodestone_server::IntegratedServer::open_in_memory(
+                    // `open_in_memory_with_items`, not `open_in_memory`: the
+                    // latter's `NoEntities` source meant a block break rolled
+                    // its loot into a real (but unstreamed) `MobHandle` and
+                    // never once reached the wire — a real item entity,
+                    // zero pixels, no error anywhere. This target still gets
+                    // no tick loop (needs `tokio::time`, unavailable here),
+                    // so a drop still does not fall, merge or despawn on its
+                    // own; it is at least visible and pickable now. See that
+                    // constructor's own doc comment.
+                    let (server, io) = lodestone_server::IntegratedServer::open_in_memory_with_items(
                         server_protocol,
                         source,
                         view_radius,
