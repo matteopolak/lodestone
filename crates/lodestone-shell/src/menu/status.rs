@@ -332,17 +332,26 @@ pub const STATUS_PROTOCOL: i32 = 776;
 /// when no port was pinned, so collapsing `None` into `Some(25565)` here would
 /// make every SRV-only server in the list unreachable while looking like a
 /// connection failure.
-/// # Browser (`wasm32`)
 ///
-/// Returns a probe that always fails with a reason naming the actual obstacle,
-/// rather than one that silently reports nothing. Two things are missing there and
-/// **both** are structural: `lodestone_net::server_status` is `cfg`-gated off wasm
-/// because it opens a raw `TcpStream`, which a page cannot do at all; and the
-/// runtime this function builds to `block_on` is a blocking wait on the one thread
-/// the browser uses to paint. A browser server list needs the WebSocket relay
-/// (`ws-web`) and an `async` probe driven off `spawn_local`, which is a different
-/// function, not a shim over this one. `unavailable_probe`'s docs below say why the
-/// reason has to be explicit; the same argument applies here.
+/// # Browser (`wasm32`) — this is no longer the browser's probe
+///
+/// This arm still exists and still refuses, but **[`StatusCache::spawn`] no
+/// longer calls it on `wasm32`** — it now runs [`relay_probe`] through
+/// `spawn_local` instead, which is the real thing this doc used to say did not
+/// exist yet: *"A browser server list needs the WebSocket relay (`ws-web`) and
+/// an async probe driven off `spawn_local`, which is a different function, not
+/// a shim over this one."* That function is [`relay_probe`], written below.
+///
+/// The reason this arm is not simply deleted is the same reason `Probe` cannot
+/// host [`relay_probe`] in the first place: `Probe` is `Fn(&ServerEntry) ->
+/// Result<..>`, a **synchronous** call, and there is no blocking wait available
+/// on a browser's one thread to hide an `await` behind. So a real network probe
+/// on `wasm32` structurally cannot be a `Probe` — the type is native-shaped,
+/// full stop — and this arm stays as the explicit, honestly-worded value
+/// `net_probe(protocol)` still produces for wasm32 if anything (a test, a future
+/// caller) asks for one through `set_probe`, e.g. to force the menu into a
+/// no-network state on purpose. It is a dead default in ordinary operation, not
+/// a dead function.
 #[must_use]
 pub fn net_probe(protocol: i32) -> Probe {
     #[cfg(target_arch = "wasm32")]
@@ -350,8 +359,10 @@ pub fn net_probe(protocol: i32) -> Probe {
         let _ = protocol;
         return Arc::new(|entry: &ServerEntry| {
             Err(format!(
-                "cannot ping {} from a browser: a page has no raw TCP socket. \
-                 A browser server list needs an async probe over the ws-web relay.",
+                "cannot ping {} synchronously from a browser: a page has no raw TCP \
+                 socket and no blocking wait. The real browser probe is `relay_probe`, \
+                 run from `StatusCache::spawn` through `spawn_local` — this `Probe` is \
+                 only reachable via an explicit `set_probe` override.",
                 entry.host
             ))
         });
@@ -394,11 +405,118 @@ pub fn unavailable_probe() -> Probe {
     Arc::new(|_| Err("status ping disabled in this build".to_string()))
 }
 
+/// How long [`relay_probe`] waits for a full status exchange before giving up.
+///
+/// Generous relative to a same-machine `trunk serve` + relay round trip (single
+/// digit milliseconds, measured) because the budget also has to cover a relay
+/// that is up but whose *target* server is slow to answer — the two failure
+/// modes this function's doc distinguishes. Short enough that a row visibly
+/// resolves to `Failed` well inside the time a person will wait looking at a
+/// server list before assuming the client is broken.
+#[cfg(target_arch = "wasm32")]
+const RELAY_PING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The real browser status probe: dial the `ws-web` relay, then run the
+/// ordinary modern status exchange over it.
+///
+/// # What it is
+///
+/// This is the function [`net_probe`]'s wasm32 doc promised: async, driven off
+/// `spawn_local` (see [`StatusCache::spawn`]), reaching a live server through
+/// [`lodestone_net::WsWebTransport`] rather than a raw `TcpStream`. Everything
+/// after the transport is connected is the **same** code the native probe
+/// drives — [`lodestone_net::ServerListPing::status_over`] plus
+/// [`lodestone_net::parse_status_json`] — so the wire-level exchange itself
+/// carries the same test coverage `ping.rs`/`status.rs` already have over a
+/// hermetic `memory_pair`, and `ws_native.rs`'s relay tests already prove the
+/// *relay* half of this round trip end-to-end (native code dialling the same
+/// protocol-blind relay a browser does, just over [`lodestone_net::WsTransport`]
+/// instead of [`lodestone_net::WsWebTransport`]). What is new here is only the
+/// glue: which URL to dial and how to bound the wait, both in `crate::platform`.
+///
+/// # One relay, one backend
+///
+/// `lodestone-relay` forwards to a single fixed `--target` chosen at startup —
+/// it is a protocol-blind byte pipe, not a router keyed on the handshake's
+/// server-address field. So every row in a browser server list that pings
+/// through the relay reaches the **same** backend server regardless of which
+/// row's `host`/`port` triggered the probe; those fields still travel in the
+/// handshake (a real server may virtual-host on them), but the relay itself
+/// does not look at them to choose where to forward. This is an existing
+/// property of `lodestone-relay`'s design, not something introduced or fixed
+/// here — worth knowing so a browser server list with several rows is not
+/// mistaken for one that can reach several independent backends.
+///
+/// # Errors
+///
+/// Three distinct failure shapes reach the caller as `Err`, each naming the
+/// obstacle rather than leaving the row looking like it never started:
+/// the relay refused the WebSocket upgrade (down, or `/relay` not proxied —
+/// see `crate::platform::relay::relay_ws_url`'s "deployed builds" note); the
+/// status exchange itself failed (bad handshake, malformed JSON, EOF); or
+/// [`RELAY_PING_TIMEOUT`] elapsed before either resolved.
+#[cfg(target_arch = "wasm32")]
+async fn relay_probe(entry: ServerEntry, protocol: i32) -> Result<ServerStatus, String> {
+    let url = crate::platform::relay::relay_ws_url();
+    let port = entry.effective_port();
+
+    let ping = async {
+        let transport = lodestone_net::WsWebTransport::connect(&url)
+            .await
+            .map_err(|e| format!("relay ({url}): {e}"))?;
+        let mut conn = lodestone_net::Connection::new(transport);
+        let resp = lodestone_net::ServerListPing::new(protocol)
+            .status_over(&mut conn, &entry.host, port)
+            .await
+            .map_err(|e| format!("status exchange with {}: {e}", entry.host))?;
+        let s = lodestone_net::parse_status_json(&resp.json, resp.latency_ms)
+            .map_err(|e| format!("decoding {}'s status: {e}", entry.host))?;
+        let players = s.players_line();
+        Ok(ServerStatus {
+            motd: s.motd,
+            motd_spans: s.motd_spans,
+            players,
+            online: s.online,
+            sample: s.sample.iter().map(|p| p.name.clone()).collect(),
+            version: s.version.unwrap_or_default(),
+            protocol: s.protocol,
+            favicon_png: s.favicon_png,
+            latency_ms: s.latency_ms,
+        })
+    };
+
+    // `tokio::select!` rather than `tokio::time::timeout`: the latter hangs on
+    // its first poll on wasm32 (no timer driver behind its deadline — see
+    // `crate::platform::relay`'s doc for where that was measured), so the
+    // deadline has to come from something that *is* backed by a real timer.
+    // `select!` itself needs no driver of its own; it only polls whichever
+    // future's waker fires first.
+    tokio::select! {
+        result = ping => result,
+        () = crate::platform::relay::sleep(RELAY_PING_TIMEOUT) => Err(format!(
+            "ping timed out after {}s: no response from the relay or {}",
+            RELAY_PING_TIMEOUT.as_secs(),
+            entry.host,
+        )),
+    }
+}
+
 /// Cache of per-address status results, with background probing.
 pub struct StatusCache {
     slots: HashMap<String, StatusSlot>,
     tx: Sender<(String, Result<ServerStatus, String>)>,
     rx: Receiver<(String, Result<ServerStatus, String>)>,
+    // Read by `spawn`'s native arm on every probe; on `wasm32` it is set
+    // (`with_probe`/`set_probe`) but never read — `spawn`'s wasm32 arm calls
+    // `relay_probe` directly instead, because `Probe` is a synchronous `Fn` and
+    // a real network round trip cannot hide behind one on a target with no
+    // blocking wait (see `net_probe`'s wasm32 doc). The field stays for
+    // `set_probe`'s public API to keep compiling identically on both targets;
+    // only its wasm32 *effect* is currently unreachable, which is why this is
+    // `cfg_attr` rather than a bare `#[allow(dead_code)]` — it names exactly
+    // which target the allowance is for and why, rather than blanket-silencing
+    // a warning that might one day mean something else.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     probe: Probe,
     /// When this cache was built, i.e. the zero of [`Self::millis`].
     started: crate::platform::Instant,
@@ -520,38 +638,45 @@ impl StatusCache {
     fn spawn(&mut self, key: String, entry: ServerEntry) {
         self.slots.insert(key.clone(), StatusSlot::Pending);
         let tx = self.tx.clone();
-        let probe = Arc::clone(&self.probe);
         // Detached: the result is delivered through the channel, and a dropped
         // receiver simply makes the send fail. Nothing joins these, so a slow
         // DNS lookup can never stall shutdown.
         #[cfg(not(target_arch = "wasm32"))]
-        std::thread::spawn(move || {
-            let out = probe(&entry);
-            let _ = tx.send((key, out));
-        });
+        {
+            let probe = Arc::clone(&self.probe);
+            std::thread::spawn(move || {
+                let out = probe(&entry);
+                let _ = tx.send((key, out));
+            });
+        }
 
-        // Browser: run the probe inline and send on this thread.
+        // Browser: a real network round trip now (`relay_probe`, over the
+        // `ws-web` relay), which is exactly the case this comment used to say
+        // was future work: *"If a browser probe ever really does I/O — an async
+        // ping over the ws-web relay — it belongs in spawn_local, and the tx
+        // clone above is already the right handoff for it. That is a new probe,
+        // not a change here."* This is that change.
         //
-        // **This was a reachable crash, not a latent one.** `std::thread::spawn`
-        // TRAPS on wasm32 — measured, executed in a wasm VM: `RuntimeError:
-        // unreachable`, and with `panic = "abort"` that is the tab dying — and this
-        // function runs when the player opens the Multiplayer screen, via
-        // `refresh_one`/`pump`. Nothing about it was visible to any `cargo check`.
+        // **Deliberately bypasses `self.probe` on this target**, unlike the
+        // native arm above. `Probe` is a synchronous `Fn`, and `wasm32` has no
+        // blocking wait to hide an `.await` behind — see `net_probe`'s wasm32
+        // doc for why that makes the sync probe structurally the wrong shape
+        // here, not merely an unfinished one. `set_probe`/`unavailable_probe`
+        // remain fully meaningful on native, where every existing test in this
+        // module runs (`cargo test` builds natively; nothing here currently
+        // exercises this arm under an actual `wasm32` target).
         //
-        // Inline is correct rather than a compromise: `net_probe`'s browser arm
-        // performs **no I/O at all** (a page has no raw TCP socket, so it returns an
-        // explanatory `Err` immediately), so there is nothing to move off the frame
-        // thread. The channel round-trip is kept so `pump` remains the single place a
-        // result reaches a slot — one code path for both targets, and the `Pending`
-        // → `Failed` transition a caller observes is identical.
-        //
-        // If a browser probe ever really does I/O — an async ping over the `ws-web`
-        // relay — it belongs in `spawn_local`, and the `tx` clone above is already
-        // the right handoff for it. That is a new probe, not a change here.
+        // `std::thread::spawn` is not an option here regardless — it TRAPS on
+        // wasm32 (measured, executed in a wasm VM: `RuntimeError: unreachable`,
+        // fatal under this crate's `panic = "abort"`) — so `spawn_local` is not
+        // a preference, it is the only thing that can run this future at all.
         #[cfg(target_arch = "wasm32")]
         {
-            let out = probe(&entry);
-            let _ = tx.send((key, out));
+            let protocol = STATUS_PROTOCOL;
+            wasm_bindgen_futures::spawn_local(async move {
+                let out = relay_probe(entry, protocol).await;
+                let _ = tx.send((key, out));
+            });
         }
     }
 

@@ -1,9 +1,18 @@
-# lodestone-web — browser (WebAssembly) spike
+# lodestone-web — browser (WebAssembly) build
 
-An isolated feasibility spike proving Lodestone's stack runs in a browser via
-WebAssembly + WebGPU. It is its **own** Cargo workspace (empty `[workspace]` in
-`Cargo.toml`), deliberately outside the parent `crates/lodestone-*` glob, so it
-never affects other crates' `cargo build --workspace`.
+The browser build of Lodestone — the real shell, not a spike; see
+`src/main.rs`'s own doc for what changed and when. It is its **own** Cargo
+workspace (empty `[workspace]` in `Cargo.toml`), deliberately outside the
+parent `crates/lodestone-*` glob, so it never affects other crates' `cargo
+build --workspace`.
+
+**Much of the section-level detail below (the "Multiplayer: a real browser
+join" section especially) still describes an earlier version of this crate
+that had its own `src/multiplayer.rs`/`src/singleplayer.rs`/`src/input.rs`/
+`src/terrain.rs` — none of which exist any more; `src/main.rs` is now the
+entire crate. That is a larger, separate cleanup than the relay-ping/proxy
+change this pass made; treat any claim below that names a `web/src/*.rs` file
+other than `main.rs` as unverified until it is swept.
 
 ## What it demonstrates
 
@@ -14,11 +23,12 @@ never affects other crates' `cargo build --workspace`.
   which was **false**: no terrain pixel had ever reached the canvas.
 - **Assets:** the sync, byte-based `lodestone-assets` `ResourceSource` pipeline
   runs unchanged once bytes are `fetch`ed (zip + PNG decoded in-browser).
-- **Singleplayer (`src/singleplayer.rs`):** the real `lodestone-client` ↔
-  `lodestone-server` ↔ `lodestone-worldgen` stack, connected in-process over an
-  in-memory duplex under `spawn_local` — no relay, no socket, no Docker.
-- **Multiplayer transport (`src/main.rs` relay probe):** a browser WebSocket →
-  `lodestone-relay` → live TCP server round-trip (Server-List-Ping).
+- **Singleplayer:** the real `lodestone-client` ↔ `lodestone-server` ↔
+  `lodestone-worldgen` stack, connected in-process over an in-memory duplex
+  under `spawn_local` — no relay, no socket, no Docker.
+- **Server-list ping, over the relay:** `lodestone-shell`'s multiplayer server
+  list now really pings a server from the browser — see "Live multiplayer
+  transport" below for what that needs and what it does not (yet) cover.
 
 ## Toolchain (verified versions)
 
@@ -80,16 +90,50 @@ real cause buried (see `docs/ci.md`).
 
 ### Live multiplayer transport (optional)
 
-The relay probe expects a WebSocket→TCP bridge on `ws://127.0.0.1:25580`. Start
-`lodestone-relay` pointing at a real server, then reload:
+A browser page has no raw TCP socket, so both the multiplayer server-list
+**ping** and (once wired — see the warning below) a real **join** go through
+`lodestone-relay`, a protocol-blind WebSocket→TCP bridge. Start it pointing at
+a real server, then reload:
 
 ```sh
 cargo run -p lodestone-relay -- --listen 127.0.0.1:25580 --target 127.0.0.1:25565
 ```
 
-With it down, the page shows **`⚠ relay UNREACHABLE …`** on the `net` HUD line
-(render + singleplayer are unaffected — that path is isolated). With it up, the
-line shows the live server's status JSON.
+**The browser no longer needs to know the relay's port.** `web/Trunk.toml`'s
+`[[proxies]]` entry forwards the fixed path `/relay` on the page's own origin
+(`ws://127.0.0.1:8080/relay` under `trunk serve`) through to the relay's real
+listener, so a page served on one port reaches everything through that one
+port — see `Trunk.toml`'s own comment for the schema and for the one literal
+that still has to be kept in sync by hand (its `backend`, against the
+justfile's `relay_defaults`). `just run-wasm` starts both; `LODESTONE_NO_RELAY=1
+just run-wasm` serves the page alone.
+
+**Server-list ping:** `lodestone-shell`'s multiplayer screen (`menu/status.rs`)
+pings a saved server entry by dialing the relay and running the ordinary
+status exchange over it, asynchronously, with a 5 s deadline. With the relay
+down (or `/relay` not proxied — see "Deployed builds" below), a row resolves
+to `Failed` with a reason naming the obstacle rather than hanging on
+`Pending` forever. With the relay up and pointed at a real server, a row shows
+that server's real MOTD/ping/player count. **One relay forwards to exactly one
+fixed backend** (`lodestone-relay`'s own `--target`), so every row in the list
+reaches the *same* server when pinged through a relay, regardless of which
+row's host/port triggered the probe — those fields still travel in the
+handshake, a real server may virtual-host on them, but the relay itself does
+not route on them.
+
+**A real browser** ***join*** **is not currently wired to the relay at all.**
+`lodestone-shell/src/net.rs`'s `run_async`, on `target_arch = "wasm32"` with a
+remote `Origin`, unconditionally reports *"connect: a browser cannot open a
+TCP socket … must go through the WebSocket relay"* and returns — there is no
+call to `lodestone_net::WsWebTransport::connect` anywhere in that path, and
+`lodestone-net`'s `ws-web` feature was not even enabled on `lodestone-shell`'s
+dependency edge before this change (it needed adding just to make the ping
+above compile). Older prose elsewhere in this file (the "Multiplayer: a real
+browser join" section) describes a *working* join through a now-deleted
+`src/multiplayer.rs` in an earlier version of this crate; that measurement
+predates the shell-launcher port and does not describe what `net.rs` does
+today. Wiring a real join is a separate, larger change than this pass made —
+see that function's `Origin::Remote` match arm for the exact seam.
 
 ## ⚠ COOP/COEP: why the dev server matters
 
@@ -107,12 +151,30 @@ while the spike is single-threaded and doesn't need them, precisely so the
 substrate is already isolated when threading lands.
 
 **The trap:** a plain static file server (`python -m http.server`, most CDNs by
-default, etc.) does **not** send these headers. The spike renders fine without
+default, etc.) does **not** send these headers. The build renders fine without
 them today, so serving `dist/` statically *appears* to work — but anything that
 later depends on cross-origin isolation will work under `trunk serve` and
 **silently fail** under a plain server, with `crossOriginIsolated === false` and
 no error. If you serve `dist/` yourself, replicate both headers, or you are
 building on a foundation the dev server has and production may not.
+
+### Deployed builds have no relay proxy either — say so, don't discover it
+
+The `[[proxies]]` entry that makes `/relay` reach the relay (see "Live
+multiplayer transport" above) is a **`trunk serve`-only** feature: it is
+`Trunk.toml` config for the dev server's own built-in proxy, and `trunk build`
+produces a plain static `dist/` with nothing behind it. Serve that directory
+with anything other than `trunk serve` — a CDN, `nginx`, GitHub Pages — and a
+request to `/relay` has nothing to answer it; the browser's WebSocket upgrade
+fails immediately (refused), which the ping path already treats as an ordinary
+`Failed` row rather than a hang, but there is still no way to reach a real
+server from that deployment. This is an **accepted, currently unsolved gap**,
+not an oversight nobody noticed: a real deployment needs its own reverse proxy
+(nginx, Caddy, a CDN edge function, or a copy of trunk's own proxy behaviour)
+in front of a reachable `lodestone-relay`, forwarding `/relay` as a WebSocket
+the same way `Trunk.toml` does today. Nothing here builds or runs that; it is
+recorded so the gap has a name rather than surfacing as "multiplayer silently
+does not work" on whatever the first real deployment turns out to be.
 
 ## Worldgen is the singleplayer gate, not the transport
 
@@ -374,16 +436,13 @@ error into a runtime crash, which is strictly worse and invisible to `cargo chec
 
 ```
 web/
-  index.html        data-trunk links: rust app, copy blocks_pack.zip, worldgen.json, fixtures/
-  Trunk.toml        dev-server config (COOP/COEP headers)
-  assets/
-    blocks_pack.zip trimmed real vanilla resource pack (fetched at runtime)
-    worldgen.json   97 density/noise JSON files concatenated (fetched by the browser resolver)
-  fixtures/
-    chunks.bin      real level_chunk_with_light payloads captured from live 26.2
+  index.html          data-trunk links: rust app; client.jar/blocks.json are
+                       fetched at runtime, not linked here — see "Assets" above
+  Trunk.toml           dev-server config (COOP/COEP headers, the /relay proxy)
+  scripts/
+    stage_panorama.py post_build hook: stages real panorama faces if present
+  assets/               post_build-hook staging target; empty in the repo
   src/
-    main.rs         app entry, render loop, relay probe
-    singleplayer.rs in-browser client↔server↔worldgen probe
-    input.rs        platform input → shared lodestone-controller
-    terrain.rs      chunk meshing
+    main.rs             the entire crate: boot, asset fetch, hands off to
+                         lodestone-shell's `app::run` — see its own module doc
 ```
