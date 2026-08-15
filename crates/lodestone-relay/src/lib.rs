@@ -102,8 +102,19 @@ const FORWARD_CHUNK: usize = 16 * 1024;
 /// character `application/x-www-form-urlencoded` would escape — unusual for a
 /// hostname, but IPv6 literals and some internationalized domain names need it,
 /// and the decode is cheap enough to always apply rather than special-case.
+///
+/// `pub` (not just crate-internal) so a caller that cannot use [`bridge`]
+/// directly — `web/server`'s `lodestone-web-server` links this crate but has
+/// to re-express the WebSocket forwarding loop itself (axum completes the HTTP
+/// upgrade before this crate would see the socket, handing back its own
+/// `Message`/`WebSocket` types) — can still resolve a destination the exact
+/// same way instead of hand-duplicating this parsing. At the time this was
+/// exported, `lodestone-web-server` already carried its own private copy,
+/// kept in sync "by inspection"; switching it to call this one directly is a
+/// follow-up, not done here to avoid colliding with that crate's own
+/// in-flight edits.
 #[must_use]
-fn destination_from_query(query: Option<&str>) -> Option<(String, u16)> {
+pub fn destination_from_query(query: Option<&str>) -> Option<(String, u16)> {
     let query = query?;
     let mut host: Option<String> = None;
     let mut port: Option<u16> = None;
@@ -133,7 +144,10 @@ fn destination_from_query(query: Option<&str>) -> Option<(String, u16)> {
 /// An incomplete or invalid `%XX` escape is passed through literally rather than
 /// dropped, so a malformed destination surfaces as "no such host" from the
 /// eventual TCP dial rather than as silently truncated input.
-fn percent_decode(s: &str) -> String {
+///
+/// `pub` for the same reason as [`destination_from_query`].
+#[must_use]
+pub fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
