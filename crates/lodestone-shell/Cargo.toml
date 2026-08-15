@@ -244,6 +244,11 @@ tokio = { version = "1", default-features = false, features = [
 wasm-bindgen = { version = "0.2" }
 wasm-bindgen-futures = { workspace = true }
 js-sys = "0.3"
+# The device-free mixer `audio.rs`'s wasm32 `ShellAudio` drives directly (the
+# native arm reaches it only indirectly, through `lodestone-sound`'s
+# `cfg(not(wasm32))`-gated `AudioEngine`). By path, not a `[workspace.dependencies]`
+# entry — `lodestone-sound` references it the same way, for the same reason.
+lodestone-audio = { path = "../lodestone-audio" }
 web-sys = { version = "0.3", features = [
     "Window",
     "Document",
@@ -255,10 +260,28 @@ web-sys = { version = "0.3", features = [
     # inputs never receive keyboard modifiers).
     "Clipboard",
     "Navigator",
+    # `app::lifecycle`'s `pointerlockchange` listener — the browser silently
+    # exits Pointer Lock on Escape and delivers no corresponding key event
+    # (see `browser_pointer_locked`'s doc), so that release has to be heard
+    # as a DOM event instead; `Document`/`Element` inherit this but the
+    # method is not visible without enabling it explicitly.
+    "EventTarget",
     # `platform::relay::relay_ws_url`'s `window.location().host()/.protocol()`,
     # so the browser server-list ping can dial the relay without a hardcoded
     # port — see that function's doc.
     "Location",
+    # `audio.rs`'s wasm32 `ShellAudio`: a `ScriptProcessorNode` pulling
+    # interleaved stereo frames out of `lodestone-audio`'s device-free `Mixer`
+    # on every `onaudioprocess` callback, matching that module's own doc on why
+    # a `ScriptProcessorNode` rather than an `AudioWorklet` (no second JS/wasm
+    # build artifact under `web/`, no `SharedArrayBuffer`).
+    "AudioContext",
+    "AudioContextState",
+    "AudioDestinationNode",
+    "AudioNode",
+    "ScriptProcessorNode",
+    "AudioProcessingEvent",
+    "AudioBuffer",
 ] }
 # The status ping behind the multiplayer server list needs a real network round
 # trip on this target too (`menu/status.rs`'s `relay_probe`), and a browser has

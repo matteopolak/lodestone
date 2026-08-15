@@ -1002,6 +1002,19 @@ impl ApplicationHandler for WindowApp {
                 }
             }
         }
+        // Browser: react to a `pointerlockchange` DOM event the listener recorded
+        // since the last turn — see `reconcile_browser_pointer_lock_change`'s doc
+        // for why this is Escape's *other* half on this target. Registering the
+        // listener is idempotent and cheap, so it is simplest to just make sure it
+        // exists every turn rather than threading a "did bring-up run yet" flag
+        // through this function.
+        #[cfg(target_arch = "wasm32")]
+        {
+            ensure_pointer_lock_change_listener();
+            if POINTER_LOCK_CHANGED.with(|flag| flag.replace(false)) {
+                self.reconcile_browser_pointer_lock_change();
+            }
+        }
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -1046,6 +1059,52 @@ impl WindowApp {
         {
             self.grabbed
         }
+    }
+
+    /// Folds a **browser-initiated** Pointer Lock release into the same pause
+    /// action a keyboard Escape triggers — called from `about_to_wait` once the
+    /// `pointerlockchange` listener (see [`ensure_pointer_lock_change_listener`])
+    /// reports that something changed.
+    ///
+    /// # The bug this closes
+    ///
+    /// Escape is the browser's own gesture for exiting Pointer Lock (the Pointer
+    /// Lock spec reserves it), and it consumes the keypress: winit's web backend
+    /// delivers no `WindowEvent::KeyboardInput` for it while locked (see
+    /// `browser_pointer_locked`'s doc for the same "winit registers no
+    /// `pointerlockchange`/`pointerlockerror` listener" gap). So the first Escape
+    /// silently released the cursor and the `KeyOutcome::Pause` arm in
+    /// `window_event` never ran — only a second, now-unlocked Escape reached it.
+    /// This reacts to the release itself instead of waiting for a keypress that
+    /// never arrives.
+    ///
+    /// # Distinguishing "we asked for this" from "the browser did this on its own"
+    ///
+    /// No new flag: `set_grab(false)` already sets `self.grabbed = false`
+    /// **synchronously**, before the browser's own asynchronous unlock (or a
+    /// `pointerlockchange` event) can possibly be observed here. So by the time
+    /// this runs, `self.grabbed` already reads `false` for every release *we*
+    /// initiated (closing a menu, losing focus, …) and `true` only when we did
+    /// not — meaning the browser ended the lock on its own, which on the
+    /// gameplay screen only ever happens via this one gesture. If a keydown
+    /// *were* also delivered for the same Escape (contradicting the report but
+    /// not ruled out on every browser), whichever handler runs first already
+    /// flips `self.grabbed` to `false`, so the second is a no-op rather than a
+    /// double pause/unpause — this needs no ordering guarantee between the two.
+    #[cfg(target_arch = "wasm32")]
+    fn reconcile_browser_pointer_lock_change(&mut self) {
+        if !self.grabbed || browser_pointer_locked() {
+            return;
+        }
+        // Mirrors the `KeyOutcome::Pause` arm in `window_event` exactly: a
+        // container screen closes rather than opening the pause menu over it.
+        if self.active_container_menu().is_some() {
+            self.sim.close_open_menu();
+            self.ui.close_container();
+        } else {
+            self.ui.on_escape();
+        }
+        self.set_grab(self.ui.wants_cursor_grab());
     }
 
     /// The synchronous half of window bring-up: everything after the GPU exists.
@@ -1593,6 +1652,63 @@ fn browser_pointer_locked() -> bool {
         .and_then(|w| w.document())
         .and_then(|d| d.pointer_lock_element())
         .is_some_and(|el| JsValue::from(el) == JsValue::from(canvas))
+}
+
+thread_local! {
+    /// Set by the `pointerlockchange` listener [`ensure_pointer_lock_change_listener`]
+    /// registers, polled and cleared once per turn in `about_to_wait`.
+    ///
+    /// A bare `Cell<bool>` rather than anything richer: the listener fires on
+    /// *every* lock change (ours and the browser's own, acquired and released
+    /// alike), and the poll side always re-derives the ground truth from
+    /// [`browser_pointer_locked`] and `WindowApp::grabbed` rather than trusting a
+    /// value smuggled out of the DOM callback — "something changed, go look" is
+    /// all this needs to carry. Same shape as `PENDING_GPU` above it: a JS
+    /// callback has no way back into the live `WindowApp` winit's wasm
+    /// `spawn_app` owns, so the callback can only leave a note for the next
+    /// `about_to_wait` to read.
+    #[cfg(target_arch = "wasm32")]
+    static POINTER_LOCK_CHANGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Registers the page's one `pointerlockchange` listener, the first time this is
+/// called; every later call is a no-op.
+///
+/// Exists because nothing else registers one: `browser_pointer_locked`'s doc
+/// already notes winit 0.30's web backend adds no
+/// `pointerlockchange`/`pointerlockerror` listener of its own, and that gap is
+/// exactly what stops this app from ever learning that Escape released the
+/// pointer — the DOM event is the only signal there is.
+///
+/// The closure is intentionally leaked (`Closure::forget`): it has to outlive
+/// every possible lock change for the rest of the page's life, which is the
+/// app's entire lifetime, so there is no earlier point at which dropping it
+/// would be correct. Matches winit's own web backend, which leaks its DOM
+/// closures for the same reason.
+#[cfg(target_arch = "wasm32")]
+fn ensure_pointer_lock_change_listener() {
+    thread_local! {
+        static REGISTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    REGISTERED.with(|registered| {
+        if registered.get() {
+            return;
+        }
+        let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
+        use wasm_bindgen::JsCast;
+        let closure = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(|| {
+            POINTER_LOCK_CHANGED.with(|flag| flag.set(true));
+        });
+        if document
+            .add_event_listener_with_callback("pointerlockchange", closure.as_ref().unchecked_ref())
+            .is_ok()
+        {
+            registered.set(true);
+        }
+        closure.forget();
+    });
 }
 
 /// The canvas's real backing-store size in physical pixels, read directly from its live CSS
