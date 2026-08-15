@@ -471,7 +471,7 @@ impl ApplicationHandler for WindowApp {
                 // `owns_frame(...) || self.ui.is_paused()` arm above now handles
                 // every click while paused (hover + activate the highlighted
                 // pause-menu row, including Back to Game via `MenuKey::Enter`).
-                if self.grabbed {
+                if self.pointer_really_locked() {
                     // `key.attack` mines (hold-to-mine on live; one-shot break on
                     // demo) and `key.use` uses/places against the targeted face.
                     // Both default to a mouse button — left and right
@@ -508,6 +508,20 @@ impl ApplicationHandler for WindowApp {
                         }
                         _ => {}
                     }
+                } else if self.ui.is_playing() && state == ElementState::Pressed {
+                    // Browser only: the world-entry grab in `drive_ui_from_session`
+                    // fires from the per-frame reconciliation the instant
+                    // `SessionPhase` becomes `Connected`, not from a user gesture, so
+                    // the Pointer Lock API silently refuses it (see
+                    // `pointer_really_locked`'s doc). This press *is* a real
+                    // gesture — the one place on the gameplay screen guaranteed to
+                    // run inside one — so re-issue the request here. `set_grab` is
+                    // idempotent (`self.grabbed` is already true from the doomed
+                    // automatic request), so this only ever *adds* a second, this
+                    // time gesture-backed, `request_pointer_lock()` call; it is a
+                    // pure no-op on native, where `pointer_really_locked()` already
+                    // agreed with `self.grabbed` and this branch is unreachable.
+                    self.set_grab(true);
                 }
             }
             // Scroll cycles the hotbar (down = right, like vanilla) only
@@ -946,9 +960,15 @@ impl ApplicationHandler for WindowApp {
         _device_id: DeviceId,
         event: DeviceEvent,
     ) {
+        // `pointer_really_locked`, not the raw `self.grabbed` flag: on the browser
+        // build `self.grabbed` can be true while the OS pointer was never actually
+        // captured (a rejected, gesture-less lock request — see that method's doc),
+        // and feeding an un-locked, edge-bounded `movementX`/`Y` through as look-delta
+        // is exactly the "stops registering at the edge of the page" report. A no-op
+        // change on native, where the two are the same value.
         if let DeviceEvent::MouseMotion { delta } = event
             && self.ui.is_playing()
-            && self.grabbed
+            && self.pointer_really_locked()
         {
             self.sim
                 .input_mut(|i| i.add_mouse(delta.0 as f32, delta.1 as f32));
@@ -1010,6 +1030,24 @@ impl ApplicationHandler for WindowApp {
 /// Here that layer is the routing site: `handle_chat_key` is the text-entry and
 /// submit path, and these keys are handled before it sees them.
 impl WindowApp {
+    /// Whether the pointer is **actually** captured, as opposed to `self.grabbed`,
+    /// which only tracks whether we *asked* — see `browser_pointer_locked`'s doc for
+    /// why the two can disagree on `wasm32`. Native's `CursorGrabMode::Locked`
+    /// request is synchronous and the platform has no user-gesture requirement, so
+    /// `self.grabbed` is already ground truth there and this is a plain passthrough
+    /// — every native call site that gated on `self.grabbed` before this method
+    /// existed sees byte-identical behaviour through it.
+    pub(super) fn pointer_really_locked(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.grabbed && browser_pointer_locked()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.grabbed
+        }
+    }
+
     /// The synchronous half of window bring-up: everything after the GPU exists.
     ///
     /// Extracted from `resumed` when the browser arm landed. **One body, both
@@ -1520,6 +1558,41 @@ fn browser_canvas() -> Option<web_sys::HtmlCanvasElement> {
         .get_element_by_id(CANVAS_ID)?
         .dyn_into::<web_sys::HtmlCanvasElement>()
         .ok()
+}
+
+/// Whether the browser's Pointer Lock API has **genuinely** engaged on our canvas —
+/// the ground truth `WindowApp::grabbed` cannot provide on its own here, and trusting
+/// it anyway is the whole of the "pointer doesn't get locked" report.
+///
+/// `winit::window::Window::set_cursor_grab(CursorGrabMode::Locked)` on this platform
+/// (`platform_impl::web::web_sys::canvas::Canvas::set_cursor_lock`) calls the
+/// fire-and-forget `Element::request_pointer_lock()` and returns `Ok(())`
+/// *unconditionally* — it never inspects a result, and winit 0.30 registers no
+/// `pointerlockchange`/`pointerlockerror` listener anywhere in its web backend, so a
+/// rejected request is invisible to it. The browser rejects any such request that is
+/// not the direct result of a user gesture (a click/keydown handler), and
+/// `app::session::drive_ui_from_session` — the call site that actually flips grab the
+/// instant `SessionPhase` becomes `Connected` — runs from the per-frame render loop,
+/// not from one. So the very first grab of a session is silently refused: `grabbed`
+/// becomes (falsely) `true`, the cursor is hidden by CSS, and `device_event` starts
+/// feeding ordinary, edge-bounded `movementX`/`Y` through as if it were an unbounded
+/// locked delta — exactly the "cursor doesn't get locked / goes off the page and
+/// stops registering" report, because the OS cursor was never actually captured.
+///
+/// Reads `Document::pointer_lock_element()` and compares it against our own canvas by
+/// identity (`===` via `JsValue` equality) rather than merely checking `is_some()`, so
+/// a lock briefly held by some other element (there is only ever one canvas here, but
+/// nothing enforces that structurally) cannot read as ours.
+#[cfg(target_arch = "wasm32")]
+fn browser_pointer_locked() -> bool {
+    use wasm_bindgen::JsValue;
+    let Some(canvas) = browser_canvas() else {
+        return false;
+    };
+    web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.pointer_lock_element())
+        .is_some_and(|el| JsValue::from(el) == JsValue::from(canvas))
 }
 
 /// The canvas's real backing-store size in physical pixels, read directly from its live CSS
