@@ -107,7 +107,7 @@
 use std::sync::{
     Arc, Mutex, OnceLock, PoisonError,
     atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
-    mpsc::{self, Receiver, Sender},
+    mpsc::{self, Receiver, Sender, SyncSender},
 };
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -1072,13 +1072,70 @@ fn take_pending_server_pack_policy() -> crate::menu::servers::ServerPackPolicy {
     std::mem::replace(&mut *guard, crate::menu::servers::ServerPackPolicy::default())
 }
 
+/// Depth of the inbound [`NetUpdate`] relay ([`NetClient::rx`]) between the net
+/// thread and the render loop.
+///
+/// **Why bounded, and why this failure mode rather than a blocking one.**
+/// [`NetClient::poll`] drains the *entire* channel every call, not one item at
+/// a time, so under normal operation this queue never holds more than one
+/// frame's worth of forwarded events — bounded in practice by the
+/// already-bounded 256-slot `lodestone_client` event channel upstream (see
+/// `run_async`'s outbound-drain timeout comment for the incident that
+/// localised that bound). It only grows without limit if the render loop
+/// stops calling `poll` at all, which is a full game-loop stall, not a slow
+/// consumer lagging an active producer.
+///
+/// A **blocking** bound (plain `send`, backpressuring the net thread until
+/// the render loop drains) would be the textbook fix and is exactly what the
+/// existing 256-slot client channel already does one layer down. It is wrong
+/// here specifically: `run_async`'s body is shared verbatim between the
+/// native net thread (its own OS thread, safe to block) and the wasm32
+/// driver, which runs via `spawn_local` on the **same single JS thread** as
+/// the render loop it would be blocking on. A blocking send there cannot
+/// ever be unblocked — nothing can run to call `poll` while the only thread
+/// is parked inside `send` — turning a recoverable, bounded-memory stall into
+/// a permanent deadlock. That is strictly worse than the unbounded growth
+/// this issue exists to fix, and it is the same class of trap `CLAUDE.md`
+/// already documents for `tokio::time::timeout` hanging this same driver.
+///
+/// So every `tx.send` in `run_async`/`run`/[`forward`] uses `try_send`
+/// instead: never blocks on either target, and a full queue is treated
+/// exactly like a disconnected receiver — [`forward`] returns `Err(())`,
+/// and its one caller already breaks the net loop on that. A stalled render
+/// loop that never drains `rx` therefore caps this queue at
+/// `NET_RELAY_CAPACITY` entries and then stops producing more (the net
+/// thread exits), rather than growing it forever *or* wedging the thread
+/// that would otherwise recover it. The capacity is 4x the upstream client
+/// buffer: generous headroom for a single frame's burst (a multi-hundred
+/// column chunk stream can produce that many events at once), while still a
+/// hard ceiling.
+const NET_RELAY_CAPACITY: usize = 1024;
+
+/// Depth of the outbound [`ClientAction`] relay ([`NetClient::action_tx`]).
+///
+/// [`NetClient::send_action`] is called from the render/game thread — native
+/// *and* wasm32 — every frame a local action needs to reach the net thread,
+/// so it must never block there either; see [`NET_RELAY_CAPACITY`] for why a
+/// blocking bound is unsafe on this driver. It uses `try_send` and drops the
+/// action on `Full`. That is safe: a full queue means the net thread has
+/// already stopped draining actions (dead or wedged), so an action that
+/// can't be queued would never have been acted on anyway — no different from
+/// today's `let _ = ...` best-effort semantics on a disconnected receiver,
+/// just reachable before the thread actually exits too.
+const ACTION_RELAY_CAPACITY: usize = 256;
+
 /// A live client running on a background thread. Drop to request shutdown.
 #[derive(Debug)]
 pub struct NetClient {
     rx: Receiver<NetUpdate>,
     /// Outbound actions (movement, swings, chat) queued for the net thread to
     /// hand to the client. Kept off the render thread; the net loop drains it.
-    action_tx: Sender<ClientAction>,
+    ///
+    /// Bounded ([`ACTION_RELAY_CAPACITY`]); [`Self::send_action`] uses
+    /// `try_send` and drops on `Full` rather than blocking the caller's
+    /// thread — see [`NET_RELAY_CAPACITY`]'s doc for why blocking is unsafe
+    /// on this driver's wasm32 path.
+    action_tx: SyncSender<ClientAction>,
     /// "Open to LAN" requests (issue #562): a port to add a TCP listener on,
     /// drained by the net thread's own loop rather than handed to the client
     /// handle like [`Self::action_tx`] — this is not a wire packet, it is a
@@ -1729,8 +1786,8 @@ impl NetClient {
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
         offline: OfflineIdentity,
     ) -> Self {
-        let (tx, rx) = mpsc::channel();
-        let (action_tx, action_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
+        let (action_tx, action_rx) = mpsc::sync_channel(ACTION_RELAY_CAPACITY);
         #[cfg(not(target_arch = "wasm32"))]
         let (publish_tx, publish_rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
@@ -1852,10 +1909,12 @@ impl NetClient {
     }
 
     /// Queue an outbound action for the net thread to submit through the client
-    /// handle. Best-effort: if the session has ended the send is silently
-    /// dropped (the shell keeps rendering regardless).
+    /// handle. Best-effort: if the session has ended, or the queue is full
+    /// ([`ACTION_RELAY_CAPACITY`] — meaning the net thread is not draining,
+    /// i.e. already dead or wedged), the send is silently dropped and the
+    /// shell keeps rendering regardless.
     pub fn send_action(&self, action: ClientAction) {
-        let _ = self.action_tx.send(action);
+        let _ = self.action_tx.try_send(action);
     }
 
     /// This frame's pending resource-pack prompt, if the server pushed one
@@ -2166,8 +2225,8 @@ impl NetClient {
     #[cfg(test)]
     pub(crate) fn loopback() -> (Self, Receiver<ClientAction>) {
         // `rx`'s sender is dropped immediately, so `poll` just yields nothing.
-        let (_tx, rx) = mpsc::channel();
-        let (action_tx, action_rx) = mpsc::channel();
+        let (_tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
+        let (action_tx, action_rx) = mpsc::sync_channel(ACTION_RELAY_CAPACITY);
         let client = Self {
             rx,
             action_tx,
@@ -2227,9 +2286,9 @@ impl NetClient {
     /// receiver so a test can both push the session to `Connected` and assert
     /// the outbound movement it then produces.
     #[cfg(test)]
-    pub(crate) fn loopback_with_feed() -> (Self, Receiver<ClientAction>, Sender<NetUpdate>) {
-        let (tx, rx) = mpsc::channel();
-        let (action_tx, action_rx) = mpsc::channel();
+    pub(crate) fn loopback_with_feed() -> (Self, Receiver<ClientAction>, SyncSender<NetUpdate>) {
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
+        let (action_tx, action_rx) = mpsc::sync_channel(ACTION_RELAY_CAPACITY);
         let client = Self {
             rx,
             action_tx,
@@ -2375,7 +2434,7 @@ pub fn entity_light_at(
 async fn run_async(
     origin: Origin,
     protocol: i32,
-    tx: Sender<NetUpdate>,
+    tx: SyncSender<NetUpdate>,
     action_rx: Receiver<ClientAction>,
     // Issue #562. Native only — the capability it drives (`IntegratedServer::publish`)
     // needs a real TCP socket, which wasm32 does not have; the wasm `spawn_local`
@@ -2396,13 +2455,13 @@ async fn run_async(
     offline: OfflineIdentity,
 ) {
         let Some(adapter) = lodestone_registry::adapter_for_protocol(protocol) else {
-            let _ = tx.send(NetUpdate::Error(format!(
+            let _ = tx.try_send(NetUpdate::Error(format!(
                 "no version family compiled in for protocol {protocol}; build with the `live` feature"
             )));
             return;
         };
 
-        let _ = tx.send(NetUpdate::Connecting);
+        let _ = tx.try_send(NetUpdate::Connecting);
 
         // Start the integrated server *before* the client, when this is a
         // singleplayer session. Its serving task goes onto this thread's runtime
@@ -2456,7 +2515,7 @@ async fn run_async(
                             // world whose stored seed we cannot read is one we
                             // would silently regenerate differently.
                             Err(e) => {
-                                let _ = tx.send(NetUpdate::Error(format!(
+                                let _ = tx.try_send(NetUpdate::Error(format!(
                                     "cannot read the world seed for {}: {e}",
                                     dir.display()
                                 )));
@@ -2535,11 +2594,11 @@ async fn run_async(
                                         }
                                     });
                                 }
-                                let _ = tx.send(NetUpdate::LanOpened { port: address.port });
+                                let _ = tx.try_send(NetUpdate::LanOpened { port: address.port });
                                 (server, None, Some(address))
                             }
                             Err(message) => {
-                                let _ = tx.send(NetUpdate::Error(message));
+                                let _ = tx.try_send(NetUpdate::Error(message));
                                 return;
                             }
                         }
@@ -2613,7 +2672,7 @@ async fn run_async(
                                 // the honest failure. (The only cause is the
                                 // region directory being uncreatable.)
                                 Err(e) => {
-                                    let _ = tx.send(NetUpdate::Error(format!(
+                                    let _ = tx.try_send(NetUpdate::Error(format!(
                                         "cannot open {} for saving: {e}",
                                         dir.display()
                                     )));
@@ -2918,7 +2977,7 @@ async fn run_async(
                         result = dial => match result {
                             Ok(transport) => transport,
                             Err(e) => {
-                                let _ = tx.send(NetUpdate::Error(format!(
+                                let _ = tx.try_send(NetUpdate::Error(format!(
                                     "connect: relay ({url}): {e}"
                                 )));
                                 return;
@@ -2931,7 +2990,7 @@ async fn run_async(
                         // transport, so there is nothing left for a connect
                         // timeout to bound.
                         () = crate::platform::relay::sleep(Duration::from_secs(10)) => {
-                            let _ = tx.send(NetUpdate::Error(format!(
+                            let _ = tx.try_send(NetUpdate::Error(format!(
                                 "connect: relay ({url}) did not answer within 10s"
                             )));
                             return;
@@ -2943,7 +3002,7 @@ async fn run_async(
                 match builder.connect().await {
                     Ok(pair) => pair,
                     Err(e) => {
-                        let _ = tx.send(NetUpdate::Error(format!("connect: {e}")));
+                        let _ = tx.try_send(NetUpdate::Error(format!("connect: {e}")));
                         return;
                     }
                 }
@@ -2965,7 +3024,7 @@ async fn run_async(
         // stops saying "Connecting to the server..." and says "Joining
         // world...". `NetUpdate::LoggedIn` moves it on again, from the forward
         // loop below.
-        let _ = tx.send(NetUpdate::ConnectPhase(
+        let _ = tx.try_send(NetUpdate::ConnectPhase(
             crate::menu::loading::ConnectPhase::Joining,
         ));
 
@@ -3006,7 +3065,7 @@ async fn run_async(
             // break) so the two self-disconnect paths cannot drift apart.
             while let Ok((id, accept)) = pack_response_rx.try_recv() {
                 if apply_pack_response(id, accept, &pack_prompt, &handle) {
-                    let _ = tx.send(NetUpdate::Disconnected(Box::new(
+                    let _ = tx.try_send(NetUpdate::Disconnected(Box::new(
                         lodestone_model::Text::literal(REQUIRED_PACK_DISCONNECT_REASON),
                     )));
                     break 'session;
@@ -3033,7 +3092,7 @@ async fn run_async(
                         // joiner who knows the host's address is unaffected.
                         match server.publish(("0.0.0.0", port), None).await {
                             Ok(addr) => {
-                                let _ = tx.send(NetUpdate::LanOpened { port: addr.port() });
+                                let _ = tx.try_send(NetUpdate::LanOpened { port: addr.port() });
                             }
                             Err(e) => {
                                 // Non-fatal: `IntegratedServer::publish` returning
@@ -3053,7 +3112,7 @@ async fn run_async(
                         // remote join, which `open_current_world_to_lan` already
                         // guards against client-side) must not take down a
                         // connection that has nothing to do with the request.
-                        let _ = tx.send(NetUpdate::LanPublishError(
+                        let _ = tx.try_send(NetUpdate::LanPublishError(
                             "only a world you are hosting can be opened to LAN".to_string(),
                         ));
                     }
@@ -3170,7 +3229,7 @@ async fn run_async(
                     }
                 }
                 Ok(None) => {
-                    let _ = tx.send(NetUpdate::Disconnected(Box::new(
+                    let _ = tx.try_send(NetUpdate::Disconnected(Box::new(
                         lodestone_model::Text::literal("stream closed"),
                     )));
                     break;
@@ -3237,7 +3296,7 @@ async fn run_async(
 fn run(
     origin: Origin,
     protocol: i32,
-    tx: Sender<NetUpdate>,
+    tx: SyncSender<NetUpdate>,
     action_rx: Receiver<ClientAction>,
     publish_rx: Receiver<u16>,
     stop: Arc<AtomicBool>,
@@ -3259,7 +3318,7 @@ fn run(
     {
         Ok(rt) => rt,
         Err(e) => {
-            let _ = tx.send(NetUpdate::Error(format!("runtime: {e}")));
+            let _ = tx.try_send(NetUpdate::Error(format!("runtime: {e}")));
             return;
         }
     };
@@ -3801,7 +3860,7 @@ fn verify_pack_hash(bytes: &[u8], hash: &str) -> bool {
 /// event X", and an event handled outside it is invisible to that reading. Three
 /// separate islands have already been found in this one function.
 fn forward(
-    tx: &Sender<NetUpdate>,
+    tx: &SyncSender<NetUpdate>,
     weather: &WeatherCell,
     biome_climates: &BiomeClimateCell,
     biome_names: &BiomeNameCell,
@@ -3870,7 +3929,7 @@ fn forward(
             // read boundary that owns translation for this class of event
             // (issue #68), so flattening here would throw the translation
             // key away before it ever reaches `Sim::translator()`.
-            let _ = tx.send(NetUpdate::Disconnected(Box::new(reason)));
+            let _ = tx.try_send(NetUpdate::Disconnected(Box::new(reason)));
             return Err(());
         }
         // The client-side twin of the arm above, and the other half of the
@@ -3890,7 +3949,7 @@ fn forward(
         // Like `Disconnect`, this ends the forward loop: the driver has already
         // stopped and the only thing that could follow is the channel closing.
         ClientEvent::SessionFailed { reason } => {
-            let _ = tx.send(NetUpdate::Error(reason));
+            let _ = tx.try_send(NetUpdate::Error(reason));
             return Err(());
         }
         // No `HealthChanged`/`ExperienceChanged` arms: those fold into the
@@ -4178,7 +4237,7 @@ fn forward(
             return Ok(());
         }
     };
-    tx.send(update).map_err(|_| ())
+    tx.try_send(update).map_err(|_| ())
 }
 
 // `entity_snapshot` (the `EntityView` -> `EntitySnapshot` lowering) and
@@ -4594,7 +4653,7 @@ mod tests {
     /// the duplicate fold this test exists to forbid.
     #[test]
     fn the_vitals_events_are_not_forwarded_to_the_shell_at_all() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
         let weather = WeatherCell::default();
         forward(
             &tx,
@@ -4656,7 +4715,7 @@ mod tests {
     /// pins the actual translation rather than relying on that assert alone.
     #[test]
     fn forward_translates_win_game_into_the_credits_signal() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
         forward(
             &tx,
             &WeatherCell::default(),
@@ -4677,7 +4736,7 @@ mod tests {
         use lodestone_client::ResourceKey;
         use std::str::FromStr;
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
         let event = ClientEvent::MobEffectApplied {
             entity_id: 42,
             effect: ResourceKey::from_str("minecraft:speed").unwrap(),
@@ -4720,7 +4779,7 @@ mod tests {
         use lodestone_client::ResourceKey;
         use std::str::FromStr;
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
         let event = ClientEvent::Particles {
             particle: ResourceKey::from_str("minecraft:flame").unwrap(),
             long_distance: true,
@@ -4846,7 +4905,7 @@ mod tests {
         assert!(saw_particles, "the explosion particle directive must be emitted");
         let event = sound_event.expect("the explosion sound directive must be emitted");
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
         forward(
             &tx,
             &WeatherCell::default(),
@@ -4895,7 +4954,7 @@ mod tests {
         // Effects are not narrowed to the local player at the wire/forward
         // layer — a remote mob's effect must still come through so the sim can
         // decide whether it is "us" downstream.
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
         let event = ClientEvent::MobEffectRemoved {
             entity_id: 99,
             effect: ResourceKey::from_str("minecraft:levitation").unwrap(),
@@ -4910,13 +4969,89 @@ mod tests {
         }
     }
 
+    /// The control for [`NET_RELAY_CAPACITY`]'s whole reasoning (#581): a
+    /// full relay must be reported as "stop the loop", exactly like a
+    /// disconnected receiver, and must never block the caller.
+    ///
+    /// This test's own completion is half the assertion: `forward` used to
+    /// funnel through a blocking `Sender::send` on an unbounded channel,
+    /// which could never fill and therefore could never exercise this path
+    /// at all. If `try_send` regressed back to a blocking `send` on a now
+    /// *bounded* channel, this test would hang forever rather than fail
+    /// loudly — so the collection below is the *second* half: proving
+    /// capacity was actually enforced (exactly 2 items land, not 3), not
+    /// just that a third call returned.
+    #[test]
+    fn forward_reports_a_full_relay_as_stop_the_loop_not_a_block() {
+        use lodestone_client::ResourceKey;
+        use std::str::FromStr;
+
+        // A tiny, explicit capacity — this test does not use
+        // `NET_RELAY_CAPACITY` itself, so it stays a control on the
+        // *mechanism* (try_send + Err(()) on Full) rather than on today's
+        // chosen depth.
+        let (tx, rx) = mpsc::sync_channel(2);
+        let event = |id: i32| ClientEvent::MobEffectRemoved {
+            entity_id: id,
+            effect: ResourceKey::from_str("minecraft:levitation").unwrap(),
+        };
+
+        // Deliberately never drained between calls: fills the channel to
+        // its 2-slot capacity...
+        for id in 0..2 {
+            forward(
+                &tx,
+                &WeatherCell::default(),
+                &BiomeClimateCell::default(),
+                &BiomeNameCell::default(),
+                &CommandTreeCell::default(),
+                event(id),
+            )
+            .expect("the first two forwards fit inside capacity 2");
+        }
+
+        // ...so a third has nowhere to go. `try_send` must report `Full`
+        // immediately (this call returning at all, rather than the test
+        // hanging, is the non-blocking half of the assertion) and `forward`
+        // must translate that into the same `Err(())` a disconnected
+        // receiver produces, so the net loop's existing `if forward(...)
+        // .is_err() { break; }` also stops it here.
+        assert_eq!(
+            forward(
+                &tx,
+                &WeatherCell::default(),
+                &BiomeClimateCell::default(),
+                &BiomeNameCell::default(),
+                &CommandTreeCell::default(),
+                event(2),
+            ),
+            Err(()),
+            "a full relay must report Err(()) like a disconnected receiver, \
+             not silently succeed and not block"
+        );
+
+        // And capacity was a real ceiling, not a no-op: exactly the first
+        // two events are recoverable, the third was genuinely dropped
+        // rather than queued past the bound.
+        let mut recovered = Vec::new();
+        while let Ok(NetUpdate::EffectRemoved { entity_id, .. }) = rx.try_recv() {
+            recovered.push(entity_id);
+        }
+        assert_eq!(
+            recovered,
+            vec![0, 1],
+            "capacity 2 must admit exactly the first two events and drop the \
+             third, not silently grow past the bound"
+        );
+    }
+
     /// The island this feature closed: `ClientEvent::WeatherChanged` was decoded,
     /// hermetically tested in `protocol/v770/tests/world_events.rs`, and consumed
     /// by **nothing** in the tree. This asserts the fold happens *and* that it
     /// stays off the channel.
     #[test]
     fn forward_folds_weather_into_the_cell_without_using_the_channel() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
         let weather = WeatherCell::default();
         assert_eq!(weather.snapshot(), WeatherSnapshot::default());
 
@@ -4990,7 +5125,7 @@ mod tests {
     /// stays off the channel, matching `WeatherChanged`'s own shape.
     #[test]
     fn forward_folds_biome_climates_into_the_cell_without_using_the_channel() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
         let weather = WeatherCell::default();
         let climates = BiomeClimateCell::default();
         assert_eq!(climates.get(0), None, "empty before Login");
@@ -5044,7 +5179,7 @@ mod tests {
     /// every access.
     #[test]
     fn forward_folds_biome_registry_names_into_the_cell_without_using_the_channel() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
         let weather = WeatherCell::default();
         let names = BiomeNameCell::default();
         assert_eq!(names.snapshot(), Vec::<&str>::new(), "empty before Login");
@@ -5085,7 +5220,7 @@ mod tests {
             CommandSuggestionEntry, CommandTree, NodeKind, RawCommandNode,
         };
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
         let weather = WeatherCell::default();
         let cell = CommandTreeCell::default();
         assert!(cell.tree().is_none(), "empty before the server sends one");
@@ -5232,7 +5367,7 @@ mod tests {
             velocity: None,
         };
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
         let weather = WeatherCell::default();
 
         // The negative control first, so a passing positive cannot be "every
