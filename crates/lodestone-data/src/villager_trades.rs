@@ -60,7 +60,9 @@
 
 /// One `VillagerTrade` record: what a villager wants (one or two items) for
 /// what it gives, and the record's own use/xp limits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// No `Eq`/`Hash`: [`price_multiplier`](Self::price_multiplier) is an `f32`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TradeRecord {
     /// The primary cost — always present. A full `minecraft:*` resource id.
     pub wants_item: &'static str,
@@ -79,6 +81,16 @@ pub struct TradeRecord {
     /// ConstantValue.exactly(1.0F))`) — already resolved at transcription
     /// time below, not deferred to a runtime default.
     pub xp: i32,
+    /// The record's own `reputation_discount` — despite the name, this is
+    /// **not** gossip/reputation (issues #244/#246, neither built here); it
+    /// is `MerchantOffer`'s `priceMultiplier`, the coefficient
+    /// `getModifiedCostCount` scales *demand* by
+    /// (`demandDiff = max(0, floor(basePrice * demand * priceMultiplier))`).
+    /// Every record in this table sets it explicitly (`0.05` or `0.2`); the
+    /// codec default when a record omits the key is `0.0`, which would make
+    /// that record's price demand-inelastic — never guessed here, always the
+    /// jar's own value.
+    pub price_multiplier: f32,
 }
 
 /// `tags/villager_trade/armorer/level_1.json` resolves to: `smith/1/coal_emerald`, `armorer/1/emerald_iron_leggings`, `armorer/1/emerald_iron_boots`, `armorer/1/emerald_iron_helmet`, `armorer/1/emerald_iron_chestplate`.
@@ -93,6 +105,7 @@ const ARMORER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // armorer/1/emerald_iron_leggings
     TradeRecord {
@@ -103,6 +116,7 @@ const ARMORER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.20,
     },
     // armorer/1/emerald_iron_boots
     TradeRecord {
@@ -113,6 +127,7 @@ const ARMORER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.20,
     },
     // armorer/1/emerald_iron_helmet
     TradeRecord {
@@ -123,6 +138,7 @@ const ARMORER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.20,
     },
     // armorer/1/emerald_iron_chestplate
     TradeRecord {
@@ -133,6 +149,7 @@ const ARMORER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.20,
     },
 ];
 
@@ -148,6 +165,7 @@ const ARMORER_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // smith/2/emerald_bell
     TradeRecord {
@@ -158,6 +176,7 @@ const ARMORER_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 5,
+        price_multiplier: 0.20,
     },
     // armorer/2/emerald_chainmail_boots
     TradeRecord {
@@ -168,6 +187,7 @@ const ARMORER_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 5,
+        price_multiplier: 0.20,
     },
     // armorer/2/emerald_chainmail_leggings
     TradeRecord {
@@ -178,6 +198,7 @@ const ARMORER_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 5,
+        price_multiplier: 0.20,
     },
 ];
 
@@ -193,6 +214,7 @@ const ARMORER_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 20,
+        price_multiplier: 0.05,
     },
     // armorer/3/emerald_chainmail_helmet
     TradeRecord {
@@ -203,6 +225,7 @@ const ARMORER_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.20,
     },
     // armorer/3/emerald_chainmail_chestplate
     TradeRecord {
@@ -213,6 +236,7 @@ const ARMORER_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.20,
     },
     // armorer/3/emerald_shield
     TradeRecord {
@@ -223,6 +247,7 @@ const ARMORER_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.20,
     },
     // armorer/3/diamond_emerald
     TradeRecord {
@@ -233,6 +258,7 @@ const ARMORER_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 20,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -250,6 +276,7 @@ const BUTCHER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // butcher/1/porkchop_emerald
     TradeRecord {
@@ -260,6 +287,7 @@ const BUTCHER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // butcher/1/rabbit_emerald
     TradeRecord {
@@ -270,6 +298,7 @@ const BUTCHER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // butcher/1/emerald_rabbit_stew
     TradeRecord {
@@ -280,6 +309,7 @@ const BUTCHER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -295,6 +325,7 @@ const BUTCHER_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // butcher/2/emerald_cooked_porkchop
     TradeRecord {
@@ -305,6 +336,7 @@ const BUTCHER_LEVEL_2: &[TradeRecord] = &[
         gives_count: 5,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // butcher/2/emerald_cooked_chicken
     TradeRecord {
@@ -315,6 +347,7 @@ const BUTCHER_LEVEL_2: &[TradeRecord] = &[
         gives_count: 8,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -330,6 +363,7 @@ const BUTCHER_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 20,
+        price_multiplier: 0.05,
     },
     // butcher/3/beef_emerald
     TradeRecord {
@@ -340,6 +374,7 @@ const BUTCHER_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 20,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -355,6 +390,7 @@ const BUTCHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -370,6 +406,7 @@ const BUTCHER_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -385,6 +422,7 @@ const CARTOGRAPHER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // cartographer/1/emerald_map
     TradeRecord {
@@ -395,6 +433,7 @@ const CARTOGRAPHER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -410,6 +449,7 @@ const CARTOGRAPHER_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -425,6 +465,7 @@ const CARTOGRAPHER_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 20,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -440,6 +481,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // cartographer/4/emerald_white_banner
     TradeRecord {
@@ -450,6 +492,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // cartographer/4/emerald_orange_banner
     TradeRecord {
@@ -460,6 +503,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // cartographer/4/emerald_magenta_banner
     TradeRecord {
@@ -470,6 +514,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // cartographer/4/emerald_blue_banner
     TradeRecord {
@@ -480,6 +525,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // cartographer/4/emerald_light_blue_banner
     TradeRecord {
@@ -490,6 +536,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // cartographer/4/emerald_yellow_banner
     TradeRecord {
@@ -500,6 +547,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // cartographer/4/emerald_lime_banner
     TradeRecord {
@@ -510,6 +558,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // cartographer/4/emerald_pink_banner
     TradeRecord {
@@ -520,6 +569,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // cartographer/4/emerald_gray_banner
     TradeRecord {
@@ -530,6 +580,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // cartographer/4/emerald_cyan_banner
     TradeRecord {
@@ -540,6 +591,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // cartographer/4/emerald_purple_banner
     TradeRecord {
@@ -550,6 +602,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // cartographer/4/emerald_brown_banner
     TradeRecord {
@@ -560,6 +613,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // cartographer/4/emerald_green_banner
     TradeRecord {
@@ -570,6 +624,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // cartographer/4/emerald_red_banner
     TradeRecord {
@@ -580,6 +635,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // cartographer/4/emerald_black_banner
     TradeRecord {
@@ -590,6 +646,7 @@ const CARTOGRAPHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -605,6 +662,7 @@ const CARTOGRAPHER_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -620,6 +678,7 @@ const CLERIC_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // cleric/1/emerald_redstone
     TradeRecord {
@@ -630,6 +689,7 @@ const CLERIC_LEVEL_1: &[TradeRecord] = &[
         gives_count: 2,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -645,6 +705,7 @@ const CLERIC_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // cleric/2/emerald_lapis_lazuli
     TradeRecord {
@@ -655,6 +716,7 @@ const CLERIC_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 5,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -670,6 +732,7 @@ const CLERIC_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 20,
+        price_multiplier: 0.05,
     },
     // cleric/3/emerald_glowstone
     TradeRecord {
@@ -680,6 +743,7 @@ const CLERIC_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -695,6 +759,7 @@ const CLERIC_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // cleric/4/glass_bottle_emerald
     TradeRecord {
@@ -705,6 +770,7 @@ const CLERIC_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // cleric/4/emerald_ender_pearl
     TradeRecord {
@@ -715,6 +781,7 @@ const CLERIC_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -730,6 +797,7 @@ const CLERIC_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // cleric/5/emerald_experience_bottle
     TradeRecord {
@@ -740,6 +808,7 @@ const CLERIC_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -755,6 +824,7 @@ const FARMER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // farmer/1/potato_emerald
     TradeRecord {
@@ -765,6 +835,7 @@ const FARMER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // farmer/1/carrot_emerald
     TradeRecord {
@@ -775,6 +846,7 @@ const FARMER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // farmer/1/beetroot_emerald
     TradeRecord {
@@ -785,6 +857,7 @@ const FARMER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // farmer/1/emerald_bread
     TradeRecord {
@@ -795,6 +868,7 @@ const FARMER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 6,
         max_uses: 16,
         xp: 1,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -810,6 +884,7 @@ const FARMER_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // farmer/2/emerald_pumpkin_pie
     TradeRecord {
@@ -820,6 +895,7 @@ const FARMER_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 12,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // farmer/2/emerald_apple
     TradeRecord {
@@ -830,6 +906,7 @@ const FARMER_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -845,6 +922,7 @@ const FARMER_LEVEL_3: &[TradeRecord] = &[
         gives_count: 18,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // farmer/3/melon_emerald
     TradeRecord {
@@ -855,6 +933,7 @@ const FARMER_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 20,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -870,6 +949,7 @@ const FARMER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -885,6 +965,7 @@ const FARMER_LEVEL_5: &[TradeRecord] = &[
         gives_count: 3,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // farmer/5/emerald_glistening_melon_slice
     TradeRecord {
@@ -895,6 +976,7 @@ const FARMER_LEVEL_5: &[TradeRecord] = &[
         gives_count: 3,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -910,6 +992,7 @@ const FISHERMAN_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // fisherman/1/coal_emerald
     TradeRecord {
@@ -920,6 +1003,7 @@ const FISHERMAN_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // fisherman/1/raw_cod_and_emerald_cooked_cod
     TradeRecord {
@@ -930,6 +1014,7 @@ const FISHERMAN_LEVEL_1: &[TradeRecord] = &[
         gives_count: 6,
         max_uses: 16,
         xp: 1,
+        price_multiplier: 0.05,
     },
     // fisherman/1/emerald_cod_bucket
     TradeRecord {
@@ -940,6 +1025,7 @@ const FISHERMAN_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 1,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -955,6 +1041,7 @@ const FISHERMAN_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // fisherman/2/salmon_and_emerald_cooked_salmon
     TradeRecord {
@@ -965,6 +1052,7 @@ const FISHERMAN_LEVEL_2: &[TradeRecord] = &[
         gives_count: 6,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // fisherman/2/emerald_campfire
     TradeRecord {
@@ -975,6 +1063,7 @@ const FISHERMAN_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 5,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -990,6 +1079,7 @@ const FISHERMAN_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 20,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1005,6 +1095,7 @@ const FISHERMAN_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1020,6 +1111,7 @@ const FISHERMAN_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // fisherman/5/oak_boat_emerald
     TradeRecord {
@@ -1030,6 +1122,7 @@ const FISHERMAN_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // fisherman/5/spruce_boat_emerald
     TradeRecord {
@@ -1040,6 +1133,7 @@ const FISHERMAN_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // fisherman/5/jungle_boat_emerald
     TradeRecord {
@@ -1050,6 +1144,7 @@ const FISHERMAN_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // fisherman/5/acacia_boat_emerald
     TradeRecord {
@@ -1060,6 +1155,7 @@ const FISHERMAN_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // fisherman/5/dark_oak_boat_emerald
     TradeRecord {
@@ -1070,6 +1166,7 @@ const FISHERMAN_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1085,6 +1182,7 @@ const FLETCHER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // fletcher/1/emerald_arrow
     TradeRecord {
@@ -1095,6 +1193,7 @@ const FLETCHER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 16,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.05,
     },
     // fletcher/1/gravel_and_emerald_flint
     TradeRecord {
@@ -1105,6 +1204,7 @@ const FLETCHER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 10,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1120,6 +1220,7 @@ const FLETCHER_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // fletcher/2/emerald_bow
     TradeRecord {
@@ -1130,6 +1231,7 @@ const FLETCHER_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 5,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1145,6 +1247,7 @@ const FLETCHER_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 20,
+        price_multiplier: 0.05,
     },
     // fletcher/3/emerald_crossbow
     TradeRecord {
@@ -1155,6 +1258,7 @@ const FLETCHER_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1170,6 +1274,7 @@ const FLETCHER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 30,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1185,6 +1290,7 @@ const FLETCHER_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1200,6 +1306,7 @@ const LEATHERWORKER_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1215,6 +1322,7 @@ const LEATHERWORKER_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1230,6 +1338,7 @@ const LEATHERWORKER_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 20,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1245,6 +1354,7 @@ const LEATHERWORKER_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1260,6 +1370,7 @@ const LEATHERWORKER_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.20,
     },
 ];
 
@@ -1275,6 +1386,7 @@ const LIBRARIAN_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // librarian/1/emerald_bookshelf
     TradeRecord {
@@ -1285,6 +1397,7 @@ const LIBRARIAN_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1300,6 +1413,7 @@ const LIBRARIAN_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // librarian/2/emerald_lantern
     TradeRecord {
@@ -1310,6 +1424,7 @@ const LIBRARIAN_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 5,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1325,6 +1440,7 @@ const LIBRARIAN_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 20,
+        price_multiplier: 0.05,
     },
     // librarian/3/emerald_glass
     TradeRecord {
@@ -1335,6 +1451,7 @@ const LIBRARIAN_LEVEL_3: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1350,6 +1467,7 @@ const LIBRARIAN_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // librarian/4/emerald_clock
     TradeRecord {
@@ -1360,6 +1478,7 @@ const LIBRARIAN_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // librarian/4/emerald_compass
     TradeRecord {
@@ -1370,6 +1489,7 @@ const LIBRARIAN_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1385,6 +1505,7 @@ const LIBRARIAN_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // librarian/5/emerald_red_candle
     TradeRecord {
@@ -1395,6 +1516,7 @@ const LIBRARIAN_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1410,6 +1532,7 @@ const MASON_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // mason/1/emerald_brick
     TradeRecord {
@@ -1420,6 +1543,7 @@ const MASON_LEVEL_1: &[TradeRecord] = &[
         gives_count: 10,
         max_uses: 16,
         xp: 1,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1435,6 +1559,7 @@ const MASON_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // mason/2/emerald_chiseled_stone_bricks
     TradeRecord {
@@ -1445,6 +1570,7 @@ const MASON_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1460,6 +1586,7 @@ const MASON_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 20,
+        price_multiplier: 0.05,
     },
     // mason/3/andesite_emerald
     TradeRecord {
@@ -1470,6 +1597,7 @@ const MASON_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 20,
+        price_multiplier: 0.05,
     },
     // mason/3/diorite_emerald
     TradeRecord {
@@ -1480,6 +1608,7 @@ const MASON_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 20,
+        price_multiplier: 0.05,
     },
     // mason/3/emerald_dripstone_block
     TradeRecord {
@@ -1490,6 +1619,7 @@ const MASON_LEVEL_3: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // mason/3/emerald_polished_andesite
     TradeRecord {
@@ -1500,6 +1630,7 @@ const MASON_LEVEL_3: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // mason/3/emerald_polished_diorite
     TradeRecord {
@@ -1510,6 +1641,7 @@ const MASON_LEVEL_3: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // mason/3/emerald_polished_granite
     TradeRecord {
@@ -1520,6 +1652,7 @@ const MASON_LEVEL_3: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 10,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1535,6 +1668,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_white_terracotta
     TradeRecord {
@@ -1545,6 +1679,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_orange_terracotta
     TradeRecord {
@@ -1555,6 +1690,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_magenta_terracotta
     TradeRecord {
@@ -1565,6 +1701,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_light_blue_terracotta
     TradeRecord {
@@ -1575,6 +1712,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_yellow_terracotta
     TradeRecord {
@@ -1585,6 +1723,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_lime_terracotta
     TradeRecord {
@@ -1595,6 +1734,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_pink_terracotta
     TradeRecord {
@@ -1605,6 +1745,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_gray_terracotta
     TradeRecord {
@@ -1615,6 +1756,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_light_gray_terracotta
     TradeRecord {
@@ -1625,6 +1767,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_cyan_terracotta
     TradeRecord {
@@ -1635,6 +1778,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_purple_terracotta
     TradeRecord {
@@ -1645,6 +1789,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_blue_terracotta
     TradeRecord {
@@ -1655,6 +1800,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_brown_terracotta
     TradeRecord {
@@ -1665,6 +1811,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_green_terracotta
     TradeRecord {
@@ -1675,6 +1822,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_red_terracotta
     TradeRecord {
@@ -1685,6 +1833,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_black_terracotta
     TradeRecord {
@@ -1695,6 +1844,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_white_glazed_terracotta
     TradeRecord {
@@ -1705,6 +1855,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_orange_glazed_terracotta
     TradeRecord {
@@ -1715,6 +1866,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_magenta_glazed_terracotta
     TradeRecord {
@@ -1725,6 +1877,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_light_blue_glazed_terracotta
     TradeRecord {
@@ -1735,6 +1888,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_yellow_glazed_terracotta
     TradeRecord {
@@ -1745,6 +1899,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_lime_glazed_terracotta
     TradeRecord {
@@ -1755,6 +1910,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_pink_glazed_terracotta
     TradeRecord {
@@ -1765,6 +1921,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_gray_glazed_terracotta
     TradeRecord {
@@ -1775,6 +1932,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_light_gray_glazed_terracotta
     TradeRecord {
@@ -1785,6 +1943,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_cyan_glazed_terracotta
     TradeRecord {
@@ -1795,6 +1954,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_purple_glazed_terracotta
     TradeRecord {
@@ -1805,6 +1965,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_blue_glazed_terracotta
     TradeRecord {
@@ -1815,6 +1976,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_brown_glazed_terracotta
     TradeRecord {
@@ -1825,6 +1987,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_green_glazed_terracotta
     TradeRecord {
@@ -1835,6 +1998,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_red_glazed_terracotta
     TradeRecord {
@@ -1845,6 +2009,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // mason/4/emerald_black_glazed_terracotta
     TradeRecord {
@@ -1855,6 +2020,7 @@ const MASON_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1870,6 +2036,7 @@ const MASON_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // mason/5/emerald_quartz_block
     TradeRecord {
@@ -1880,6 +2047,7 @@ const MASON_LEVEL_5: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1895,6 +2063,7 @@ const SHEPHERD_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // shepherd/1/brown_wool_emerald
     TradeRecord {
@@ -1905,6 +2074,7 @@ const SHEPHERD_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // shepherd/1/gray_wool_emerald
     TradeRecord {
@@ -1915,6 +2085,7 @@ const SHEPHERD_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // shepherd/1/black_wool_emerald
     TradeRecord {
@@ -1925,6 +2096,7 @@ const SHEPHERD_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // shepherd/1/emerald_shears
     TradeRecord {
@@ -1935,6 +2107,7 @@ const SHEPHERD_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -1950,6 +2123,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/2/gray_dye_emerald
     TradeRecord {
@@ -1960,6 +2134,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/2/black_dye_emerald
     TradeRecord {
@@ -1970,6 +2145,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/2/light_blue_dye_emerald
     TradeRecord {
@@ -1980,6 +2156,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/2/lime_dye_emerald
     TradeRecord {
@@ -1990,6 +2167,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_white_wool
     TradeRecord {
@@ -2000,6 +2178,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_orange_wool
     TradeRecord {
@@ -2010,6 +2189,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_magenta_wool
     TradeRecord {
@@ -2020,6 +2200,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_light_blue_wool
     TradeRecord {
@@ -2030,6 +2211,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_yellow_wool
     TradeRecord {
@@ -2040,6 +2222,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_lime_wool
     TradeRecord {
@@ -2050,6 +2233,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_pink_wool
     TradeRecord {
@@ -2060,6 +2244,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_gray_wool
     TradeRecord {
@@ -2070,6 +2255,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_light_gray_wool
     TradeRecord {
@@ -2080,6 +2266,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_cyan_wool
     TradeRecord {
@@ -2090,6 +2277,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_purple_wool
     TradeRecord {
@@ -2100,6 +2288,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_blue_wool
     TradeRecord {
@@ -2110,6 +2299,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_brown_wool
     TradeRecord {
@@ -2120,6 +2310,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_green_wool
     TradeRecord {
@@ -2130,6 +2321,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_red_wool
     TradeRecord {
@@ -2140,6 +2332,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_black_wool
     TradeRecord {
@@ -2150,6 +2343,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_white_carpet
     TradeRecord {
@@ -2160,6 +2354,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_orange_carpet
     TradeRecord {
@@ -2170,6 +2365,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_magenta_carpet
     TradeRecord {
@@ -2180,6 +2376,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_light_blue_carpet
     TradeRecord {
@@ -2190,6 +2387,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_yellow_carpet
     TradeRecord {
@@ -2200,6 +2398,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_lime_carpet
     TradeRecord {
@@ -2210,6 +2409,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_pink_carpet
     TradeRecord {
@@ -2220,6 +2420,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_gray_carpet
     TradeRecord {
@@ -2230,6 +2431,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_light_gray_carpet
     TradeRecord {
@@ -2240,6 +2442,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_cyan_carpet
     TradeRecord {
@@ -2250,6 +2453,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_purple_carpet
     TradeRecord {
@@ -2260,6 +2464,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_blue_carpet
     TradeRecord {
@@ -2270,6 +2475,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_brown_carpet
     TradeRecord {
@@ -2280,6 +2486,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_green_carpet
     TradeRecord {
@@ -2290,6 +2497,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_red_carpet
     TradeRecord {
@@ -2300,6 +2508,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
     // shepherd/2/emerald_black_carpet
     TradeRecord {
@@ -2310,6 +2519,7 @@ const SHEPHERD_LEVEL_2: &[TradeRecord] = &[
         gives_count: 4,
         max_uses: 16,
         xp: 5,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -2325,6 +2535,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 20,
+        price_multiplier: 0.05,
     },
     // shepherd/3/light_gray_dye_emerald
     TradeRecord {
@@ -2335,6 +2546,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 20,
+        price_multiplier: 0.05,
     },
     // shepherd/3/orange_dye_emerald
     TradeRecord {
@@ -2345,6 +2557,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 20,
+        price_multiplier: 0.05,
     },
     // shepherd/3/red_dye_emerald
     TradeRecord {
@@ -2355,6 +2568,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 20,
+        price_multiplier: 0.05,
     },
     // shepherd/3/pink_dye_emerald
     TradeRecord {
@@ -2365,6 +2579,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 20,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_white_bed
     TradeRecord {
@@ -2375,6 +2590,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_orange_bed
     TradeRecord {
@@ -2385,6 +2601,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_magenta_bed
     TradeRecord {
@@ -2395,6 +2612,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_light_blue_bed
     TradeRecord {
@@ -2405,6 +2623,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_yellow_bed
     TradeRecord {
@@ -2415,6 +2634,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_lime_bed
     TradeRecord {
@@ -2425,6 +2645,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_pink_bed
     TradeRecord {
@@ -2435,6 +2656,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_gray_bed
     TradeRecord {
@@ -2445,6 +2667,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_light_gray_bed
     TradeRecord {
@@ -2455,6 +2678,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_cyan_bed
     TradeRecord {
@@ -2465,6 +2689,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_purple_bed
     TradeRecord {
@@ -2475,6 +2700,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_blue_bed
     TradeRecord {
@@ -2485,6 +2711,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_brown_bed
     TradeRecord {
@@ -2495,6 +2722,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_green_bed
     TradeRecord {
@@ -2505,6 +2733,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_red_bed
     TradeRecord {
@@ -2515,6 +2744,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // shepherd/3/emerald_black_bed
     TradeRecord {
@@ -2525,6 +2755,7 @@ const SHEPHERD_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -2540,6 +2771,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // shepherd/4/purple_dye_emerald
     TradeRecord {
@@ -2550,6 +2782,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // shepherd/4/blue_dye_emerald
     TradeRecord {
@@ -2560,6 +2793,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // shepherd/4/green_dye_emerald
     TradeRecord {
@@ -2570,6 +2804,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // shepherd/4/magenta_dye_emerald
     TradeRecord {
@@ -2580,6 +2815,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // shepherd/4/cyan_dye_emerald
     TradeRecord {
@@ -2590,6 +2826,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 30,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_white_banner
     TradeRecord {
@@ -2600,6 +2837,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_orange_banner
     TradeRecord {
@@ -2610,6 +2848,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_magenta_banner
     TradeRecord {
@@ -2620,6 +2859,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_light_blue_banner
     TradeRecord {
@@ -2630,6 +2870,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_yellow_banner
     TradeRecord {
@@ -2640,6 +2881,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_lime_banner
     TradeRecord {
@@ -2650,6 +2892,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_pink_banner
     TradeRecord {
@@ -2660,6 +2903,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_gray_banner
     TradeRecord {
@@ -2670,6 +2914,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_light_gray_banner
     TradeRecord {
@@ -2680,6 +2925,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_cyan_banner
     TradeRecord {
@@ -2690,6 +2936,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_purple_banner
     TradeRecord {
@@ -2700,6 +2947,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_blue_banner
     TradeRecord {
@@ -2710,6 +2958,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_brown_banner
     TradeRecord {
@@ -2720,6 +2969,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_green_banner
     TradeRecord {
@@ -2730,6 +2980,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_red_banner
     TradeRecord {
@@ -2740,6 +2991,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
     // shepherd/4/emerald_black_banner
     TradeRecord {
@@ -2750,6 +3002,7 @@ const SHEPHERD_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 15,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -2765,6 +3018,7 @@ const SHEPHERD_LEVEL_5: &[TradeRecord] = &[
         gives_count: 3,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -2780,6 +3034,7 @@ const TOOLSMITH_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // toolsmith/1/emerald_stone_axe
     TradeRecord {
@@ -2790,6 +3045,7 @@ const TOOLSMITH_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.20,
     },
     // toolsmith/1/emerald_stone_shovel
     TradeRecord {
@@ -2800,6 +3056,7 @@ const TOOLSMITH_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.20,
     },
     // toolsmith/1/emerald_stone_pickaxe
     TradeRecord {
@@ -2810,6 +3067,7 @@ const TOOLSMITH_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.20,
     },
     // toolsmith/1/emerald_stone_hoe
     TradeRecord {
@@ -2820,6 +3078,7 @@ const TOOLSMITH_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.20,
     },
 ];
 
@@ -2835,6 +3094,7 @@ const TOOLSMITH_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // smith/2/emerald_bell
     TradeRecord {
@@ -2845,6 +3105,7 @@ const TOOLSMITH_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 5,
+        price_multiplier: 0.20,
     },
 ];
 
@@ -2860,6 +3121,7 @@ const TOOLSMITH_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 20,
+        price_multiplier: 0.05,
     },
     // toolsmith/3/emerald_diamond_hoe
     TradeRecord {
@@ -2870,6 +3132,7 @@ const TOOLSMITH_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 3,
         xp: 10,
+        price_multiplier: 0.20,
     },
 ];
 
@@ -2885,6 +3148,7 @@ const TOOLSMITH_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -2901,6 +3165,7 @@ const WEAPONSMITH_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 16,
         xp: 2,
+        price_multiplier: 0.05,
     },
     // weaponsmith/1/emerald_iron_axe
     TradeRecord {
@@ -2911,6 +3176,7 @@ const WEAPONSMITH_LEVEL_1: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 1,
+        price_multiplier: 0.20,
     },
 ];
 
@@ -2926,6 +3192,7 @@ const WEAPONSMITH_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 10,
+        price_multiplier: 0.05,
     },
     // smith/2/emerald_bell
     TradeRecord {
@@ -2936,6 +3203,7 @@ const WEAPONSMITH_LEVEL_2: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 5,
+        price_multiplier: 0.20,
     },
 ];
 
@@ -2951,6 +3219,7 @@ const WEAPONSMITH_LEVEL_3: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 20,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -2966,6 +3235,7 @@ const WEAPONSMITH_LEVEL_4: &[TradeRecord] = &[
         gives_count: 1,
         max_uses: 12,
         xp: 30,
+        price_multiplier: 0.05,
     },
 ];
 
@@ -3069,6 +3339,7 @@ mod tests {
                 gives_count: 1,
                 max_uses: 16,
                 xp: 2,
+                price_multiplier: 0.05,
             }
         );
     }
