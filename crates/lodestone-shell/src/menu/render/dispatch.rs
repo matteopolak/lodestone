@@ -453,10 +453,17 @@ pub fn frame_for<'a>(
         // level, same shape as `Screen::Paused`/`Screen::Death`. Returning
         // `None` here routes it through the *world* render path in `app.rs`'s
         // `redraw` instead of `draw_menu`'s Clear pass — exactly like Paused
-        // and Death — where a **new overlay block** (not yet landed; this is
-        // the render-side half, app.rs's half is brokered) must draw this same
-        // `settings_frame` with `MenuRenderer::render_overlay` after the world
-        // paints, or the screen goes blank in-world until that block exists.
+        // and Death — where an overlay block draws this same `settings_frame`
+        // with `MenuRenderer::render_overlay` after the world paints
+        // (`app/redraw.rs`'s in-world-Options block, landed since this doc
+        // paragraph was written and called it "not yet landed, brokered" —
+        // that line stayed in the tree after the block did, which is exactly
+        // the stale-status-annotation trap `CLAUDE.md` warns about: verify
+        // against the tree, not against a doc comment). Without that block
+        // the screen would go blank in-world instead of showing the panorama
+        // it replaced, which is why the two halves have to land together for
+        // any *new* overlay of this shape — see `Screen::Statistics`'s own
+        // arm below for one currently in exactly that half-landed state.
         // `owns_frame(Screen::Settings)` is deliberately left `true` regardless
         // — every non-render caller (mouse/keyboard routing) still wants
         // Settings treated as a menu-row screen whether or not a world is
@@ -543,16 +550,41 @@ pub fn frame_for<'a>(
         // Social Interactions — see `super::social::frame`'s own doc
         // for the singleplayer/multiplayer fork.
         Screen::Social => Some(super::social::frame(nav.social(), ui.kind())),
-        // Statistics. This used to pass `StatsSnapshot::default()` — a
-        // literal, unconditionally — with a comment explaining that an empty
-        // table was the only data that had ever existed. `award_stats` is
-        // decoded now, so the empty literal became an island: the numbers
-        // arrive in `lodestone_ecs::SessionStatistics` and the screen showed
-        // zeros regardless. `app::session` refreshes `StatsNav`'s own snapshot
-        // once per frame (`MenuNav::refresh_stats`), for the same reason
-        // `Screen::Social` reads its roster off `nav` — this dispatcher cannot
-        // reach the session world.
-        Screen::Statistics => Some(super::stats::frame(nav.stats(), nav.stats_snapshot())),
+        // Statistics is **always** in-world — `UiState::open_statistics_from_pause`
+        // only opens it from `Screen::Paused`, and there is no title-screen
+        // entry point at all (see `Screen::Statistics`'s own doc) — so unlike
+        // `Screen::Settings` this has no out-of-world case to still return
+        // `Some` for. A player report (2026-08-15) caught that this arm drew
+        // the *panorama* behind Statistics instead of the paused world: this
+        // used to be `Some(super::stats::frame(..))` unconditionally, which
+        // routes through `draw_menu`'s `Clear` pass
+        // (`app/menus.rs::draw_menu`) — and that pass, by construction, never
+        // renders the world at all this frame (see `app/redraw.rs`'s own "a
+        // menu screen owns the whole frame" comment), so no backdrop value on
+        // the frame this arm built could ever have shown it. This is the
+        // exact defect `menu::render::dispatch`'s own module doc already
+        // records for in-world Options, recurring here because the two
+        // screens share no code — see `nav::server_links_overlay_frame`'s own
+        // doc for a *third* instance built overlay-only from the start,
+        // rather than needing this same fix a third time.
+        //
+        // The fix is `settings_overlay_frame`'s exact shape: `None` here, so
+        // `draw_menu` falls through to the world path, and a caller draws
+        // `nav::stats_overlay_frame`'s frame with `MenuRenderer::render_overlay`
+        // once the world (and its HUD/container passes) have painted — see
+        // that function's own doc for the one call site this needs that this
+        // renderer's own file ownership cannot add (`app/redraw.rs`).
+        //
+        // `owns_frame(Screen::Statistics)` is deliberately left `true`
+        // regardless, for `owns_frame(Screen::Settings)`'s own reason: every
+        // non-render caller (mouse/keyboard routing, the wheel arm in
+        // `app/lifecycle.rs`) still wants Statistics treated as a menu-row
+        // screen, whether or not the render half of this fix has landed. See
+        // `frame_for_defers_to_an_overlay_for_statistics` for the coverage
+        // the general `owns_frame`/`frame_for` sweep cannot give this one
+        // screen, which — unlike Settings — has no out-of-world route for
+        // that sweep to exercise instead.
+        Screen::Statistics => None,
         // World Creation — see `super::create_world`'s own doc
         // for why this is one flat hand-placed list rather than vanilla's
         // three tabs.
