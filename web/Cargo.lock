@@ -148,6 +148,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "arboard"
+version = "3.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0348a1c054491f4bfe6ab86a7b6ab1e44e45d899005de92f58b3df180b36ddaf"
+dependencies = [
+ "clipboard-win",
+ "log",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "parking_lot",
+ "percent-encoding",
+ "windows-sys 0.52.0",
+ "x11rb",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -454,7 +471,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3120670bb2308980f723477c9d82476fcda31f08be9b256c3f0acdee82a65094"
 dependencies = [
  "critical-section",
- "foldhash",
+ "foldhash 0.2.0",
  "futures-channel",
  "hashbrown 0.16.1",
  "js-sys",
@@ -488,7 +505,7 @@ dependencies = [
  "disqualified",
  "downcast-rs 2.0.2",
  "erased-serde",
- "foldhash",
+ "foldhash 0.2.0",
  "glam 0.32.1",
  "indexmap",
  "serde",
@@ -759,6 +776,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipboard-win"
+version = "5.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bde03770d3df201d4fb868f2c9c59e66a3e4e2bd06692a0fe701e7103c7e84d4"
+dependencies = [
+ "error-code",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -872,6 +898,15 @@ dependencies = [
  "bitflags 1.3.2",
  "core-foundation 0.9.4",
  "libc",
+]
+
+[[package]]
+name = "core_maths"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77745e017f5edba1a9c1d854f6f3a52dac8a12dd5af5d2f54aecf61e43d80d30"
+dependencies = [
+ "libm",
 ]
 
 [[package]]
@@ -1241,6 +1276,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "error-code"
+version = "3.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
+
+[[package]]
 name = "event-listener"
 version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1306,9 +1347,25 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "foldhash"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
+
+[[package]]
+name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
+name = "fontdue"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7894823fa221401399e2598f8b63f81ac77ff5c63248b7656779bff1632d7d3d"
+dependencies = [
+ "hashbrown 0.15.5",
+ "ttf-parser",
+]
 
 [[package]]
 name = "foreign-types"
@@ -1576,13 +1633,24 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
+version = "0.15.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.1.5",
+]
+
+[[package]]
+name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
  "allocator-api2",
  "equivalent",
- "foldhash",
+ "foldhash 0.2.0",
  "serde",
  "serde_core",
 ]
@@ -1593,7 +1661,7 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "foldhash",
+ "foldhash 0.2.0",
 ]
 
 [[package]]
@@ -2203,6 +2271,7 @@ dependencies = [
 name = "lodestone-assets"
 version = "0.1.0"
 dependencies = [
+ "fontdue",
  "lodestone-model",
  "png",
  "serde_json",
@@ -2229,6 +2298,7 @@ dependencies = [
  "num-bigint",
  "rand 0.8.7",
  "reqwest",
+ "rsa",
  "rustls",
  "serde",
  "serde_json",
@@ -2251,6 +2321,7 @@ dependencies = [
  "lodestone-model",
  "lodestone-net",
  "lodestone-registry",
+ "lodestone-time",
  "lodestone-world",
  "reqwest",
  "thiserror 2.0.19",
@@ -2312,10 +2383,10 @@ dependencies = [
  "lodestone-game",
  "lodestone-model",
  "lodestone-physics",
+ "lodestone-time",
  "lodestone-world",
  "parking_lot",
  "uuid",
- "web-time",
 ]
 
 [[package]]
@@ -2363,15 +2434,19 @@ dependencies = [
  "cfb8",
  "flate2",
  "hickory-resolver",
+ "js-sys",
  "lodestone-core",
  "lodestone-model",
+ "lodestone-time",
  "rand 0.8.7",
  "rsa",
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
- "web-time",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -2379,7 +2454,7 @@ name = "lodestone-particle"
 version = "0.1.0"
 dependencies = [
  "lodestone-physics",
- "web-time",
+ "lodestone-time",
 ]
 
 [[package]]
@@ -2402,6 +2477,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.2",
  "lodestone-assets",
+ "lodestone-data",
  "lodestone-model",
  "lodestone-world",
  "pollster",
@@ -2419,7 +2495,9 @@ dependencies = [
  "bevy_app",
  "bevy_ecs",
  "flate2",
+ "js-sys",
  "lodestone-anvil",
+ "lodestone-auth",
  "lodestone-command",
  "lodestone-command-mc",
  "lodestone-core",
@@ -2431,12 +2509,14 @@ dependencies = [
  "lodestone-physics",
  "lodestone-world",
  "lodestone-worldgen",
+ "reqwest",
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
  "uuid",
  "wasm-bindgen-futures",
+ "web-sys",
  "web-time",
 ]
 
@@ -2445,6 +2525,7 @@ name = "lodestone-shell"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arboard",
  "bevy_ecs",
  "bytemuck",
  "crossbeam-channel",
@@ -2470,6 +2551,7 @@ dependencies = [
  "lodestone-render",
  "lodestone-server",
  "lodestone-sound",
+ "lodestone-time",
  "lodestone-world",
  "lodestone-worldgen-core",
  "memory-stats",
@@ -2481,11 +2563,11 @@ dependencies = [
  "tracing",
  "tracing-chrome",
  "tracing-subscriber",
+ "unicode-bidi",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "web-time",
  "wgpu",
  "winit",
 ]
@@ -2499,6 +2581,13 @@ dependencies = [
  "lodestone-audio",
  "lodestone-model",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "lodestone-time"
+version = "0.1.0"
+dependencies = [
+ "web-time",
 ]
 
 [[package]]
@@ -2550,9 +2639,9 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "lodestone-core",
+ "lodestone-time",
  "lodestone-worldgen-core",
  "serde_json",
- "web-time",
 ]
 
 [[package]]
@@ -2936,6 +3025,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-app-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
+dependencies = [
+ "bitflags 2.13.1",
+ "objc2 0.6.4",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc2-audio-toolbox"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3039,6 +3140,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e022c9d066895efa1345f8e33e584b9f958da2fd4cd116792e15e07e4720a807"
 dependencies = [
+ "bitflags 2.13.1",
  "dispatch2",
  "objc2 0.6.4",
  "objc2-core-foundation",
@@ -3120,7 +3222,7 @@ checksum = "a1a1ae721c5e35be65f01a03b6d2ac13a54cb4fa70d8a5da293d7b0020261398"
 dependencies = [
  "block2 0.5.1",
  "objc2 0.5.2",
- "objc2-app-kit",
+ "objc2-app-kit 0.2.2",
  "objc2-foundation 0.2.2",
 ]
 
@@ -4661,6 +4763,9 @@ name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
+dependencies = [
+ "core_maths",
+]
 
 [[package]]
 name = "typed-path"
@@ -4690,6 +4795,12 @@ dependencies = [
  "tempfile",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "unicode-bidi"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
 
 [[package]]
 name = "unicode-ident"
@@ -5457,7 +5568,7 @@ dependencies = [
  "memmap2",
  "ndk",
  "objc2 0.5.2",
- "objc2-app-kit",
+ "objc2-app-kit 0.2.2",
  "objc2-foundation 0.2.2",
  "objc2-ui-kit",
  "orbclient",
