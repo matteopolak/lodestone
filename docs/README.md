@@ -427,6 +427,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   chunk-border world overlays. The presentation is a port of `DebugScreenOverlay`; the
   *content* is curated — vanilla lines that describe the JVM are dropped rather than
   faked, and this engine's own counters take the slots they leave.
+- [Standalone dedicated server](./dedicated-server.md) —
+  `lodestone-dedicated-server` is a new, thin binary crate — its produced binary is
+  named `lodestone-server` — that runs `lodestone-server` headless: no client, no
+  renderer, no windowing crate in the graph. Drop it into a directory and run it; it
+  reads `server.properties` and `eula.txt` from that directory (writing vanilla-shaped
+  defaults on a first run, exactly like vanilla's own `server.jar`), enforces
+  ops/whitelist/bans, opens a persistent, autosaving world, hosts it over real TCP,
+  takes commands on stdin, and saves and closes the world cleanly on `stop` or a
+  shutdown signal.
 - [Dimension visuals: sky, fog and the Nether/End](./dimension-visuals.md) — How the
   client's render path is supposed to look different in the Nether and the End, versus
   what it actually does today: which parts already work (sky light defaulting, and now
@@ -869,6 +878,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `encode_update_advancements` and `encode_award_stats` — that had never existed, so
   the server's own advancement and statistic tracking reached the wire as
   `ServerDirective::None`.
+- [The background blur behind an open in-game menu](./menu-blur.md) — Vanilla blurs
+  whatever is already on screen behind most menu screens before drawing the screen's
+  own widgets on top — a six-pass separable box blur, `Screen::extractBackground`
+  → `extractBlurredBackground` → `GuiRenderState::blurBeforeThisStratum` →
+  `GameRenderer::processBlurEffect` running the `minecraft:blur` post chain
+  (`assets/minecraft/post_effect/blur.json`). This client had the accompanying dim
+  wash (`MenuBackdrop::Dim`) but not the blur; this is the missing half —
+  [`crates/lodestone-shell/src/menu/render/blur.rs`](../crates/lodestone-shell/src/menu/render/blur.rs)
+  plus
+  [`src/shaders/menu_blur.wgsl`](../crates/lodestone-shell/src/shaders/menu_blur.wgsl).
 - [Screen focus, tab traversal, event dispatch — and `EditBox`](./menu-focus.md) —
   Two modules, the third child of the menu-framework epic (#392/#395):
 - [Menu layout containers](./menu-layout.md) —

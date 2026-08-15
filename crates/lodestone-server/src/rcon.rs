@@ -411,6 +411,19 @@ fn strip_optional_slash(command: &str) -> &str {
     command.strip_prefix('/').unwrap_or(command)
 }
 
+/// The stdin console's own entry point (dedicated-server binary): built-ins
+/// first, host sink for a root they do not own, identity "Server" at
+/// permission level 4 — vanilla's own dedicated-server console identity,
+/// distinct from RCON's "Rcon" (`RconConsoleSource` vs `MinecraftServer`
+/// itself as a `CommandSource`, both level 4/`LEVEL_OWNERS`). Reuses
+/// [`run_command_as`] rather than reimplementing the built-in-then-host-sink
+/// fallback a second time.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn run_console_command(config: &RconConfig, command: &str) -> String {
+    let command = strip_optional_slash(command);
+    join_response(&run_command_as(config, "Server", RCON_PERMISSION_LEVEL, command))
+}
+
 /// Flattens a [`CommandResponse`] into the text an RCON admin reads back.
 ///
 /// Each `lines()` entry is one system-chat line; RCON joins them with newlines
@@ -436,6 +449,21 @@ const RCON_PERMISSION_LEVEL: u8 = 4;
 /// and therefore no uuid for a command to address.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_command(config: &RconConfig, command: &str) -> CommandResponse {
+    run_command_as(config, RCON_NAME, RCON_PERMISSION_LEVEL, command)
+}
+
+/// [`run_command`], generalised over the caller's console identity — the
+/// shared body `crate::console`'s stdin runner reuses rather than
+/// reimplementing (name "Server", the same permission level 4 vanilla's
+/// dedicated-server console operates at). See that module's own doc comment
+/// for why a second, un-networked console needs this at all.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn run_command_as(
+    config: &RconConfig,
+    caller_name: &str,
+    permission_level: u8,
+    command: &str,
+) -> CommandResponse {
     let candidates = config.players.as_ref().map(crate::PlayerRegistry::candidates).unwrap_or_default();
     // `mobs: None` — RCON has no `MobHandle` in scope at all (see
     // `crate::commands::registrar::CommandWorld::mobs`'s own doc for why that
@@ -445,9 +473,9 @@ fn run_command(config: &RconConfig, command: &str) -> CommandResponse {
     let world =
         CommandWorld { rules: &config.world, players: &candidates, state: &config.world, mobs: None };
     let source = CommandSource::console(
-        RCON_NAME,
+        caller_name,
         crate::commands::overworld_dimension(),
-        RCON_PERMISSION_LEVEL,
+        permission_level,
     );
     match config.builtins.run(&world, &source, command) {
         Some(outcome) => {
@@ -483,7 +511,9 @@ fn run_command(config: &RconConfig, command: &str) -> CommandResponse {
             }
             outcome.response
         }
-        None => config.commands.run(&rcon_caller(), command),
+        None => config
+            .commands
+            .run(&CommandCaller::new(Uuid::nil(), caller_name), command),
     }
 }
 
