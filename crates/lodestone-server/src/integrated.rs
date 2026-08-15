@@ -328,7 +328,7 @@ where
 {
     let shared = portals.clone();
     let factory: crate::dimension::SiblingFactory = Arc::new(move |dimension| {
-        let (source, block_entities, scheduled) = match dimension {
+        let (source, block_entities, scheduled, block_tick_feed) = match dimension {
             Dimension::Nether => {
                 let seed = crate::worldgen_data::active_world_seed();
                 sibling_chunk_source(
@@ -353,7 +353,14 @@ where
             }
             Dimension::Overworld => return None,
         };
-        start_sibling_tick_loop(dimension, &source, block_entities, scheduled, &ticking);
+        start_sibling_tick_loop(
+            dimension,
+            &source,
+            block_entities,
+            scheduled,
+            block_tick_feed,
+            &ticking,
+        );
         Some(source)
     });
     DimensionalSource::with_siblings(overworld, Dimension::Overworld, factory, portals)
@@ -372,6 +379,7 @@ fn start_sibling_tick_loop(
     source: &Arc<dyn ChunkSource>,
     block_entities: BlockEntityHandle,
     scheduled: crate::scheduled_tick::ScheduledTickHandle,
+    block_tick_feed: BlockTickFeed,
     ticking: &Option<crate::dimension_tick::DimensionTickContext>,
 ) {
     if let Some(ctx) = ticking {
@@ -380,6 +388,7 @@ fn start_sibling_tick_loop(
             Arc::clone(source),
             block_entities,
             scheduled,
+            block_tick_feed,
             ctx,
         );
     }
@@ -395,6 +404,7 @@ fn start_sibling_tick_loop(
     _source: &Arc<dyn ChunkSource>,
     _block_entities: BlockEntityHandle,
     _scheduled: crate::scheduled_tick::ScheduledTickHandle,
+    _block_tick_feed: BlockTickFeed,
     _ticking: &Option<crate::dimension_tick::DimensionTickContext>,
 ) {
 }
@@ -439,10 +449,21 @@ fn sibling_chunk_source<S>(
     // fix as `crate::live_save::LiveSaveSlot`'s own doc comment names for
     // exactly this shape.
     crate::scheduled_tick::ScheduledTickHandle,
+    // The one instance this dimension's own tick loop drains and a travelling
+    // connection publishes into — see `DimensionalSource::alone_with_dimension_handles`'s
+    // doc comment for why the *same* instance has to reach both, and issue
+    // history (the join-dimension routing bug) for why a fresh
+    // `BlockTickFeed::default()` per caller silently went nowhere before.
+    BlockTickFeed,
 )
 where
     S: ChunkSource + 'static,
 {
+    // One instance for both this dimension's own tick loop and this function's
+    // `DimensionalSource` return value below — never `BlockTickFeed::default()`
+    // a second time at either use site, or a connection's published tick and
+    // the loop's drain would be talking to two different queues.
+    let block_tick_feed = BlockTickFeed::default();
     // `region_source` (and therefore `RegionChunkSource`) is native-only — a
     // browser singleplayer world has no filesystem, see that module's own doc
     // comment — so only this branch, not the function, is gated. `world_dir`
@@ -466,13 +487,23 @@ where
                 } else {
                     ChunkStore::for_view_radius(persistent, view_radius)
                 };
-                // `alone`, not `with_siblings`: the way *home* is the source
-                // the connection joined with, which `crate::server` still
-                // holds. See `DimensionalSource`'s "the links are
-                // one-directional" note.
-                let source = Arc::new(DimensionalSource::alone(store, dimension, portals))
-                    as Arc<dyn ChunkSource>;
-                return (source, block_entities, scheduled);
+                // `alone_with_dimension_handles`, not `with_siblings`: the way
+                // *home* is the source the connection joined with, which
+                // `crate::server` still holds. See `DimensionalSource`'s "the
+                // links are one-directional" note. Carrying the handles
+                // directly (rather than plain `alone`) is what makes them
+                // reachable through `ChunkSource::world_registries`/
+                // `block_tick_feed` for the connection that later travels
+                // here — see that constructor's own doc comment.
+                let source = Arc::new(DimensionalSource::alone_with_dimension_handles(
+                    store,
+                    dimension,
+                    portals,
+                    block_entities.clone(),
+                    scheduled.clone(),
+                    block_tick_feed.clone(),
+                )) as Arc<dyn ChunkSource>;
+                return (source, block_entities, scheduled, block_tick_feed);
             }
             Err(err) => {
                 tracing::error!(
@@ -489,13 +520,23 @@ where
     } else {
         ChunkStore::for_view_radius(make_terrain(), view_radius)
     };
-    let source =
-        Arc::new(DimensionalSource::alone(store, dimension, portals)) as Arc<dyn ChunkSource>;
-    (
-        source,
-        BlockEntityHandle::default(),
-        crate::scheduled_tick::ScheduledTickHandle::default(),
-    )
+    let block_entities = BlockEntityHandle::default();
+    let scheduled = crate::scheduled_tick::ScheduledTickHandle::default();
+    // Also `alone_with_dimension_handles`: an **in-memory** sibling has no
+    // `RegionChunkSource` for `world_registries` to forward to, so without
+    // carrying these directly a Nether/End visited in a non-persistent world
+    // (every deterministic test world, and any singleplayer world opened
+    // without a save directory) would have nothing for a travelling
+    // connection to route a live placement or a delayed tick request into.
+    let source = Arc::new(DimensionalSource::alone_with_dimension_handles(
+        store,
+        dimension,
+        portals,
+        block_entities.clone(),
+        scheduled.clone(),
+        block_tick_feed.clone(),
+    )) as Arc<dyn ChunkSource>;
+    (source, block_entities, scheduled, block_tick_feed)
 }
 
 /// Spawns `fut` racing against `shutdown`'s notification — whichever finishes
@@ -3698,6 +3739,87 @@ mod tests {
             .expect("counting source lock poisoned")
             .values()
             .sum()
+    }
+
+    /// **The production-wiring half of issue #620's fix.** `server::tests`
+    /// covers the *consumption* side (`dimension_scoped_handles` routing
+    /// through whatever a source answers); this covers that `with_nether`'s
+    /// real sibling factory — `sibling_chunk_source`, exercised through no
+    /// stub — actually builds a Nether source that answers `world_registries`/
+    /// `block_tick_feed` with something, and with the **same** instance its
+    /// own background tick loop would drain, for an **in-memory** world (no
+    /// `world_dir`) — the case `DimensionalSource::world_registries`'s plain
+    /// forward-to-`primary` cannot reach on its own, since there is no
+    /// `RegionChunkSource` underneath to forward to.
+    #[test]
+    fn a_nether_sibling_answers_its_own_registry_and_tick_feed() {
+        let calls = Arc::new(Mutex::new(HashMap::new()));
+        let overworld = CountingSource::new(&calls);
+        let primary = ChunkStore::for_view_radius(overworld, VIEW_RADIUS);
+        let portals = crate::portal::PortalIndex::new();
+        // `ticking: None` — this test is about reachability, not about the
+        // loop actually running, so no Tokio runtime is required.
+        let wrapped = with_nether(primary, VIEW_RADIUS, false, portals, None, None);
+
+        let nether = wrapped
+            .sibling(Dimension::Nether)
+            .expect("with_nether always wires a Nether sibling factory");
+
+        let registries = nether
+            .world_registries()
+            .expect("an in-memory sibling must still answer Some through its own stored handles");
+        let feed = nether
+            .block_tick_feed()
+            .expect("an in-memory sibling must still answer Some for its tick feed");
+
+        // Written through the accessor, read back through a **second** call to
+        // the same accessor — proving `nether`'s answer is a stable handle
+        // onto one registry/feed, not a fresh default rebuilt per call (which
+        // would make every placement invisible to the next one).
+        let pos = lodestone_model::BlockPos::new(3, 40, -9);
+        registries.block_entities.with(|registry| {
+            registry.insert(
+                pos,
+                crate::block_entities::BlockEntity::Container {
+                    id: "minecraft:chest".to_string(),
+                    slots: Vec::new(),
+                },
+            );
+        });
+        assert!(
+            nether
+                .world_registries()
+                .expect("still Some on the second call")
+                .block_entities
+                .with(|registry| registry.get(pos).is_some()),
+            "a marker written through the first `world_registries()` call must be visible \
+             through a second call to the same accessor on the same sibling"
+        );
+
+        let mut queue: crate::scheduled_tick::ScheduledTickQueue<String> =
+            crate::scheduled_tick::ScheduledTickQueue::new();
+        queue.schedule((3, 40, -9), "minecraft:redstone_wire".to_string(), 2, crate::scheduled_tick::TickPriority::Normal);
+        feed.request_scheduled_ticks(queue.drain_due(u64::MAX, usize::MAX));
+        assert_eq!(
+            nether
+                .block_tick_feed()
+                .expect("still Some on the second call")
+                .drain_scheduled_ticks()
+                .len(),
+            1,
+            "a tick requested through the first `block_tick_feed()` call must be visible \
+             through a second call on the same sibling"
+        );
+
+        // The negative control: the *overworld's* own handles must not see
+        // either marker — proving the Nether's registry/feed are genuinely
+        // separate instances, not the join dimension's aliased in. This is
+        // the exact collision the issue named as a second, latent bug.
+        assert!(
+            wrapped.world_registries().is_none(),
+            "the primary `DimensionalSource` (no `RegionChunkSource`, no stored own_registries) \
+             must not suddenly answer Some just because its Nether sibling does"
+        );
     }
 
     /// The shell's own singleplayer parameters (`lodestone-shell/src/net.rs`),

@@ -42,19 +42,27 @@
 //!   deferred item ("entities/mobs are world-scoped, not dimension-scoped").
 //!   This loop still runs the mob-tick machinery (it is part of the unified
 //!   loop body), it just has nothing in its `MobSim` to move.
-//! - **Block-entity placement routing.** [`crate::server`]'s connection loop
-//!   threads one fixed `&BlockEntityHandle`/`&BlockTickFeed` pair through the
-//!   whole of `serve_play`, taken from the dimension the player *joined*
-//!   in — it does not swap when `SourceRef` switches dimension on a portal
-//!   trip. So a furnace lit or a lever flipped while standing in the Nether
-//!   is, today, still recorded into the overworld's registry and feed. That
-//!   is a pre-existing aliasing bug this change does not introduce and does
-//!   not fix (fixing it means threading a dimension-aware handle through
-//!   every `serve_play` call site that touches one, which is a much larger,
-//!   separate change) — this loop still correctly *ticks* whatever
-//!   ends up in **its own** [`crate::block_entities::BlockEntityHandle`] (the
-//!   one a persistent dimension's own `RegionChunkSource` restores from
-//!   disk), it just is not, yet, where a live placement lands.
+//! - **Block-entity placement routing is now fixed, not deferred.**
+//!   [`crate::server`]'s connection loop used to thread one fixed
+//!   `&BlockEntityHandle`/`&BlockTickFeed` pair through the whole of
+//!   `serve_play`, taken from the dimension the player *joined* in — it did
+//!   not swap when `SourceRef` switched dimension on a portal trip, so a
+//!   furnace lit or a lever flipped while standing in the Nether was
+//!   recorded into the overworld's registry and feed. The fix reaches the
+//!   destination's own handles through the `Arc<dyn ChunkSource>` the trip
+//!   already returns — [`crate::chunk::ChunkSource::world_registries`] for
+//!   the block-entity registry and scheduled-tick queue,
+//!   [`crate::chunk::ChunkSource::block_tick_feed`] for the inbound
+//!   tick-scheduling feed — and shadows the connection's local
+//!   `block_entities`/`block_ticks` bindings the same way `source` itself is
+//!   already shadowed on travel, right where `crate::server`'s connection
+//!   loop rederives `source` from `travelled` each iteration. This module's
+//!   own `block_tick_feed` parameter (below, on [`spawn_for_dimension`]) is
+//!   the other half: the loop and a travelling connection have to share the
+//!   *same* instance, or a published tick and the loop's drain would be
+//!   talking to two different queues — see
+//!   [`crate::dimension::DimensionalSource::alone_with_dimension_handles`]'s
+//!   doc comment for where that instance is built and stored.
 //! - **Random ticks and already-queued scheduled ticks are not subject to
 //!   either limitation above**, and are the reason this is still real
 //!   coverage rather than a no-op: [`crate::random_tick::RandomTickScheduler`]
@@ -119,7 +127,18 @@ pub(crate) struct DimensionTickContext {
 /// `RegionChunkSource` when the world is persistent, or a fresh empty pair
 /// when it is not) — never the primary loop's, or a furnace restored in the
 /// Nether would be ticked twice against two different registries and a save
-/// would see neither one reliably.
+/// would see neither one reliably. `block_tick_feed` is likewise the
+/// dimension's own — the **same** instance
+/// [`crate::dimension::DimensionalSource::alone_with_dimension_handles`]
+/// stores on the sibling source this loop was handed, so a connection that
+/// later travels here and calls `BlockTickFeed::request_scheduled_ticks`
+/// reaches exactly the queue this loop drains every tick, not a disposable
+/// one nothing else can ever see. Passed in rather than built with
+/// `BlockTickFeed::default()` here, unlike the loop's other disposable
+/// per-dimension handles (`MobHandle`, `LiveMobSource`, `ExplosionFeed`,
+/// `WeatherFeed`) — those have no producer outside this loop's own body to
+/// reach them from, so a private instance is correct for them and would not
+/// be for this one.
 ///
 /// A no-op — logged and otherwise silent — when called outside a Tokio
 /// runtime, which is deliberate rather than a panic: `with_nether`'s factory
@@ -134,6 +153,7 @@ pub(crate) fn spawn_for_dimension(
     source: Arc<dyn ChunkSource>,
     block_entities: BlockEntityHandle,
     scheduled: ScheduledTickHandle,
+    block_tick_feed: BlockTickFeed,
     ctx: &DimensionTickContext,
 ) {
     if tokio::runtime::Handle::try_current().is_err() {
@@ -191,7 +211,7 @@ pub(crate) fn spawn_for_dimension(
             block_entities,
             Arc::new(TickClock::new()),
             world,
-            BlockTickFeed::default(),
+            block_tick_feed,
             tick_area,
             ExplosionFeed::default(),
             WeatherFeed::default(),
@@ -308,6 +328,7 @@ mod tests {
             source,
             BlockEntityHandle::default(),
             scheduled.clone(),
+            BlockTickFeed::default(),
             &ctx,
         );
 

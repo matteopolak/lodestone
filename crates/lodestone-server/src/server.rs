@@ -737,6 +737,47 @@ struct PortalTrip {
     position: Vec3,
 }
 
+/// Which block-entity registry and tick-scheduling feed a connection should
+/// route a live placement or a delayed redstone/fluid request through, given
+/// `travelled` — this connection's current sibling-dimension source, `None`
+/// when it has not travelled at all.
+///
+/// **This is the whole fix for the join-dimension routing bug**: before it,
+/// `serve_play`'s `block_entities`/`block_ticks` parameters were fixed for the
+/// life of the connection, taken from the dimension the player *joined* in —
+/// so a furnace lit or a lever flipped while standing in the Nether was
+/// recorded into the *overworld's* registry, and a repeater's delayed flip
+/// request landed in a feed only the overworld's tick loop ever drained. The
+/// caller (`serve_play`'s connection loop, right where `source` itself is
+/// already re-derived from `travelled` every iteration) shadows its local
+/// `block_entities`/`block_ticks` bindings with these, falling back to the
+/// pair it joined with on either field's `None`.
+///
+/// Each field independently falls back to "use the pair you joined with" —
+/// **not** as one combined switch — because `crate::chunk::ChunkSource::world_registries`
+/// and `crate::chunk::ChunkSource::block_tick_feed` are two different
+/// accessors that can in principle disagree, and collapsing them into one
+/// `Option` would make a future asymmetric source (one with a registry but no
+/// tick loop, say) silently lose the registry half too. In production today
+/// both a `DimensionalSource` built by
+/// `crate::integrated::sibling_chunk_source` answers `Some` for both or
+/// `None` for neither — see `crate::dimension::DimensionalSource::alone_with_dimension_handles`'s
+/// own doc comment — so this test doubles as the discriminator, not just a
+/// hypothetical.
+struct DimensionScopedHandles {
+    block_entities: Option<BlockEntityHandle>,
+    block_ticks: Option<BlockTickFeed>,
+}
+
+fn dimension_scoped_handles(travelled: Option<&Arc<dyn ChunkSource>>) -> DimensionScopedHandles {
+    DimensionScopedHandles {
+        block_entities: travelled
+            .and_then(|other| other.world_registries())
+            .map(|registries| registries.block_entities),
+        block_ticks: travelled.and_then(|other| other.block_tick_feed()),
+    }
+}
+
 /// Moves a player through a nether portal — the whole server side of a trip.
 ///
 /// Returns `None`, having sent nothing, when the trip cannot happen: the world has
@@ -11619,6 +11660,17 @@ where
             Some(other) => SourceRef::Dimension(other),
             None => home,
         };
+        // Same shadow, same reason, for the two handles a live placement or a
+        // delayed redstone/fluid request has to land in — see
+        // `dimension_scoped_handles`'s own doc comment for why this closes
+        // the join-dimension routing bug (Nether furnaces/redstone recording
+        // into the overworld's registry and feed).
+        let dimension_handles = dimension_scoped_handles(travelled.as_ref());
+        let block_entities = dimension_handles
+            .block_entities
+            .as_ref()
+            .unwrap_or(block_entities);
+        let block_ticks = dimension_handles.block_ticks.as_ref().unwrap_or(block_ticks);
         tokio::select! {
             // The deferred join view (`JOIN_PRESTREAM_RADIUS`), streamed while this
             // loop goes on servicing everything else — which is the point: a dig,
@@ -16287,6 +16339,127 @@ mod tests {
         fn dimension(&self) -> Option<crate::dimension::Dimension> {
             Some(self.0)
         }
+    }
+
+    /// A [`ChunkSource`] double for [`dimension_scoped_handles`]: answers
+    /// `world_registries`/`block_tick_feed` with whatever the test hands it
+    /// and nothing else, so the fixture can stand in for a real
+    /// `DimensionalSource` sibling without pulling in `crate::integrated`.
+    struct HandleStubSource {
+        block_entities: Option<BlockEntityHandle>,
+        scheduled: crate::scheduled_tick::ScheduledTickHandle,
+        block_tick_feed: Option<BlockTickFeed>,
+    }
+
+    impl ChunkSource for HandleStubSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 256)
+        }
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            "minecraft:air".to_string()
+        }
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn world_registries(&self) -> Option<crate::chunk::WorldRegistries> {
+            self.block_entities.clone().map(|block_entities| crate::chunk::WorldRegistries {
+                block_entities,
+                scheduled: self.scheduled.clone(),
+                #[cfg(not(target_arch = "wasm32"))]
+                player_data: None,
+            })
+        }
+        fn block_tick_feed(&self) -> Option<BlockTickFeed> {
+            self.block_tick_feed.clone()
+        }
+    }
+
+    /// No trip at all: both handles fall back to "use the pair you joined
+    /// with" — the precondition every arm below builds on.
+    #[test]
+    fn dimension_scoped_handles_is_none_before_any_trip() {
+        let handles = dimension_scoped_handles(None);
+        assert!(handles.block_entities.is_none());
+        assert!(handles.block_ticks.is_none());
+    }
+
+    /// **The discriminating gate for issue #620.** A sibling with its own
+    /// registry and feed must hand back *that exact instance*, not merely
+    /// `Some(_)` — proven by writing a marker through the handle this
+    /// function returns and reading it back through the sibling source's own
+    /// accessor (a second path over the same data, not a restatement).
+    #[test]
+    fn dimension_scoped_handles_reaches_the_sibling_own_registry_and_feed() {
+        let block_entities = BlockEntityHandle::default();
+        let scheduled = crate::scheduled_tick::ScheduledTickHandle::default();
+        let block_tick_feed = BlockTickFeed::default();
+        let sibling: Arc<dyn ChunkSource> = Arc::new(HandleStubSource {
+            block_entities: Some(block_entities.clone()),
+            scheduled,
+            block_tick_feed: Some(block_tick_feed.clone()),
+        });
+
+        let handles = dimension_scoped_handles(Some(&sibling));
+        let routed_entities = handles
+            .block_entities
+            .expect("a sibling with its own registry must answer Some");
+        let routed_ticks = handles
+            .block_ticks
+            .expect("a sibling with its own feed must answer Some");
+
+        // Written through the *returned* handle, read back through the
+        // sibling's own — if `dimension_scoped_handles` had handed back a
+        // fresh default instead of the sibling's real one, this would find
+        // nothing.
+        let pos = BlockPos::new(11, 60, -4);
+        routed_entities.with(|registry| {
+            registry.insert(
+                pos,
+                BlockEntity::Container {
+                    id: "minecraft:chest".to_string(),
+                    slots: Vec::new(),
+                },
+            );
+        });
+        assert!(
+            block_entities.with(|registry| registry.get(pos).is_some()),
+            "a marker inserted through the routed handle must be visible through the \
+             sibling's own — they must be the same instance, not a copy"
+        );
+
+        // `ScheduledTick` carries a private `sub_tick_order`, so it is built
+        // through a real queue rather than a struct literal — same trick
+        // `tick.rs`'s own `one_pending` test helper uses.
+        let mut queue: crate::scheduled_tick::ScheduledTickQueue<String> =
+            crate::scheduled_tick::ScheduledTickQueue::new();
+        queue.schedule(
+            (11, 60, -4),
+            "minecraft:redstone_wire".to_string(),
+            2,
+            crate::scheduled_tick::TickPriority::Normal,
+        );
+        routed_ticks.request_scheduled_ticks(queue.drain_due(u64::MAX, usize::MAX));
+        assert_eq!(
+            block_tick_feed.drain_scheduled_ticks().len(),
+            1,
+            "a tick requested through the routed feed must be drained through the \
+             sibling's own — same-instance requirement as the registry above"
+        );
+    }
+
+    /// The negative control proving the positive result above is not
+    /// vacuous: a source with **neither** registry nor feed of its own (an
+    /// in-memory sibling with no tick loop wired, or the degenerate case) must
+    /// fall back to `None` on both — never invent a private default that
+    /// silently discards a placement.
+    #[test]
+    fn dimension_scoped_handles_falls_back_when_the_sibling_has_neither() {
+        let sibling: Arc<dyn ChunkSource> = Arc::new(HandleStubSource {
+            block_entities: None,
+            scheduled: crate::scheduled_tick::ScheduledTickHandle::default(),
+            block_tick_feed: None,
+        });
+        let handles = dimension_scoped_handles(Some(&sibling));
+        assert!(handles.block_entities.is_none());
+        assert!(handles.block_ticks.is_none());
     }
 
     /// A protocol double carrying only what `apply_client_command`'s

@@ -1027,6 +1027,14 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         self.source.portal_index()
     }
 
+    /// Forwarded for the same reason [`world_registries`](ChunkSource::world_registries)
+    /// is: a cache is transparent, and answering the default here would hide a
+    /// dimension's own tick-scheduling feed from a connection asking through
+    /// this layer.
+    fn block_tick_feed(&self) -> Option<crate::tick::BlockTickFeed> {
+        self.source.block_tick_feed()
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         // `Some` means retention is off (the negative-control configuration) —
         // the column was just generated and there is nothing to read it from.

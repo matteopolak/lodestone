@@ -364,15 +364,27 @@ Honest list, so nothing here reads as finished:
   once this session. `dimension_tick::spawn_for_dimension` starts a second
   `run_tick_loop_with_weather` the first time `with_nether`'s factory builds a
   Nether/End `ChunkSource`, following the same dimension-tagged `TickAnchors` handle
-  every connection already publishes into. **What this does not close**: `server.rs`'s
-  `serve_play` threads one fixed `BlockEntityHandle`/`BlockTickFeed` pair through the
-  whole connection, taken from the join dimension, and does not swap it on a portal
-  trip — so a furnace lit or a lever flipped while standing in the Nether still lands
-  in the overworld's registry today. Random ticks (crop growth, fire, leaf decay) and
-  any scheduled tick already restored from a dimension's own saved region file are
-  unaffected by that gap, since neither goes through the connection's fixed handle.
-  See `dimension_tick.rs`'s own module doc for the full account and its own tests for
-  a playerless-dimension gate with a control.
+  every connection already publishes into.
+* **Live placement routing now follows the player across a portal trip, too.**
+  `server.rs`'s connection loop used to thread one fixed `BlockEntityHandle`/
+  `BlockTickFeed` pair through the whole connection, taken from the join dimension, and
+  never swapped it on a portal trip — so a furnace lit or a lever flipped while standing
+  in the Nether landed in the overworld's registry, and could even collide with an
+  overworld block entity at the same `BlockPos`. The fix needed no new `serve_play`
+  parameter: `crate::dimension::DimensionalSource::alone_with_dimension_handles` stores
+  each sibling's own registry/scheduled-tick queue/tick feed directly on the source
+  `ChunkSource::sibling` returns, reachable through `ChunkSource::world_registries`/
+  `ChunkSource::block_tick_feed`; `server::dimension_scoped_handles` reads them back and
+  the connection loop shadows its local `block_entities`/`block_ticks` bindings the same
+  way `source` itself is already shadowed on travel. This closes the registry-collision
+  risk too, as a side effect rather than by widening the `BlockPos` key: each dimension
+  now routes through a physically separate registry instance. Random ticks (crop
+  growth, fire, leaf decay) and any scheduled tick already restored from a dimension's
+  own saved region file were never affected by the old gap, since neither went through
+  the connection's fixed handle. See `dimension_tick.rs`'s own module doc for the full
+  account and its own tests, plus `server::tests::dimension_scoped_handles_*` and
+  `integrated::tests::a_nether_sibling_answers_its_own_registry_and_tick_feed`, for a
+  playerless-dimension gate with controls.
 * **Entities and mobs are world-scoped, not dimension-scoped.** A player in the Nether
   is still streamed the overworld's entities. Nether biome spawn lists *are* in
   `bundled_biome_spawners` (the five nether biomes are bundled), so natural spawning

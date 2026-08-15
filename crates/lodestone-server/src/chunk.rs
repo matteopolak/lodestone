@@ -1275,6 +1275,24 @@ pub trait ChunkSource: Send + Sync {
     fn portal_index(&self) -> Option<&crate::portal::PortalIndex> {
         None
     }
+
+    /// This dimension's own inbound tick-scheduling feed — the same
+    /// [`crate::tick::BlockTickFeed`] its own background tick loop (when one
+    /// runs) drains every tick to rebase a connection's delayed
+    /// redstone/fluid request onto that loop's own scheduled-tick queue.
+    ///
+    /// `None` — the default — is correct for a source with no dimension-scoped
+    /// tick loop of its own, and for the *primary* (join) dimension, whose feed
+    /// a connection already holds directly as a `serve_play` parameter and has
+    /// no reason to ask for a second time. Only
+    /// [`DimensionalSource`](crate::dimension::DimensionalSource) built through
+    /// [`crate::integrated`]'s sibling factory answers `Some` — see that type's
+    /// own doc comment for why a *second* dimension's tick loop needs its own
+    /// feed rather than sharing the primary's, and `crate::server`'s
+    /// portal-travel handling for the one call site that asks.
+    fn block_tick_feed(&self) -> Option<crate::tick::BlockTickFeed> {
+        None
+    }
 }
 
 /// Forwards every [`ChunkSource`] method through the `Arc`, the same shape
@@ -1341,6 +1359,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
 
     fn portal_index(&self) -> Option<&crate::portal::PortalIndex> {
         (**self).portal_index()
+    }
+
+    fn block_tick_feed(&self) -> Option<crate::tick::BlockTickFeed> {
+        (**self).block_tick_feed()
     }
 }
 
