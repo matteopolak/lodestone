@@ -670,6 +670,9 @@ fn entity_renders_to_pixels_through_shell_path() {
             death_time: 0.0,
         // No flame overlay from this construction site.
         on_fire: false,
+        // Not invisible and not an armour stand.
+        invisible: false,
+        armor_stand: None,
         // Not a player, so no skin can apply.
         player_skin: None,
         variant_sheet: None,
@@ -709,6 +712,9 @@ fn entity_renders_to_pixels_through_shell_path() {
             death_time: 0.0,
         // No flame overlay from this construction site.
         on_fire: false,
+        // Not invisible and not an armour stand.
+        invisible: false,
+        armor_stand: None,
         // Not a player, so no skin can apply.
         player_skin: None,
         variant_sheet: None,
@@ -901,6 +907,9 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         death_time: 0.0,
         // No flame overlay from this construction site.
         on_fire: false,
+        // Not invisible and not an armour stand.
+        invisible: false,
+        armor_stand: None,
         // Not a player, so no skin can apply.
         player_skin: None,
         variant_sheet: None,
@@ -1474,6 +1483,8 @@ fn orb_draw(value: i32) -> EntityDraw {
         swim_amount: 0.0,
         death_time: 0.0,
         on_fire: false,
+        invisible: false,
+        armor_stand: None,
         player_skin: None,
         variant_sheet: None,
         experience_orb_value: Some(value),

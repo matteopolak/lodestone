@@ -193,6 +193,19 @@ impl ContainerRenderer {
         self.player_preview.as_ref().map(|p| p.skin_model())
     }
 
+    /// Whether the inventory avatar bound a **local** `skin.png`/
+    /// `skin.model` override at construction, or `None` when not attached —
+    /// exposed so a gate can tell "the uuid default was never given a chance
+    /// to apply, because a real local override outranks it" apart from "the
+    /// uuid default ran and produced this value". A real local override is a
+    /// legitimate state on any machine that has actually used this build
+    /// (see `PlayerPreview::used_local_override`'s own doc for why this
+    /// cannot be neutralised from inside a test process).
+    #[must_use]
+    pub fn player_preview_used_local_override(&self) -> Option<bool> {
+        self.player_preview.as_ref().map(|p| p.used_local_override())
+    }
+
     /// Attach vanilla's real `container/*.png` panel art, so the
     /// screen draws the real texture instead of the flat programmatic fill.
     /// Independent of [`attach_items`](Self::attach_items)/
@@ -685,6 +698,19 @@ impl ContainerRenderer {
                 applied,
                 "bound the fetched skin to the inventory avatar"
             );
+        }
+        // Issue #646: the uuid-derived default, the same per-frame-drain
+        // shape as the fetched skin above and for the identical reason — the
+        // local player's uuid is not known at `attach_player_preview` time,
+        // only once a session exists. `maybe_default_from_uuid` is itself
+        // idempotent (applies once, never overwrites a local override or a
+        // later real fetch), so this is a cheap no-op on every frame after
+        // the first with a uuid.
+        if let (Some(uuid), Some(preview)) = (
+            geo.player_avatar.and_then(|avatar| avatar.uuid),
+            self.player_preview.as_mut(),
+        ) {
+            preview.maybe_default_from_uuid(device, queue, uuid);
         }
         // `geo.special` counts too — see the same guard in
         // `HudRenderer::render_with_item_models`. A frame whose only content is a

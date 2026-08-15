@@ -350,6 +350,11 @@ impl ThirdPersonBodyState {
             // the same reason `hurt` above cannot: no ingest entity, hence no
             // `EntityFlags` to read. `false` by construction, not by omission.
             on_fire: false,
+            // Same reasoning as `on_fire`: no ingest entity, hence no
+            // `EntityFlags` to read invisible off — and the local player is
+            // never an armour stand.
+            invisible: false,
+            armor_stand: None,
             // **The rig is already chosen** — `type_path` above is
             // `player_model_name(self.slim)` — so this field would be redundant
             // for the rig and is only ever the *sheet*. `None` therefore means

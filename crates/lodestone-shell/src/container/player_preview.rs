@@ -181,6 +181,12 @@ pub struct PlayerAvatar {
     /// smaller recess. Reading the constant would draw the creative avatar at the
     /// survival size and it would overflow its well.
     pub size: f32,
+    /// The local player's own uuid, carried through from
+    /// [`super::frame::ContainerFrame::avatar_uuid`] — `None` for every
+    /// caller with no live session (every hermetic gate, and a frame built
+    /// before login). See [`PlayerPreview::maybe_default_from_uuid`], the
+    /// consumer.
+    pub uuid: Option<uuid::Uuid>,
 }
 
 impl PlayerAvatar {
@@ -232,6 +238,7 @@ impl PlayerAvatar {
             mouse,
             pose: AnimInput::REST,
             size,
+            uuid: None,
         }
     }
 
@@ -286,6 +293,20 @@ pub(super) struct PlayerPreview {
     /// share this with the world entity pass.
     cam_buffer: wgpu::Buffer,
     cam_bind_group: wgpu::BindGroup,
+    /// Whether [`Self::new`] bound a **local** override (`skin.png`/
+    /// `skin.model` in the data dir) rather than the hardcoded
+    /// [`DEFAULT_MODEL`] fallback. `true` here means
+    /// [`maybe_default_from_uuid`](Self::maybe_default_from_uuid) must never
+    /// overwrite it — a user-supplied override outranks a uuid-derived
+    /// guess, the same precedence [`new`] itself already gives it.
+    used_local_override: bool,
+    /// Whether [`maybe_default_from_uuid`](Self::maybe_default_from_uuid) has
+    /// already resolved and bound the uuid-derived default once. Set the
+    /// first time a uuid becomes available and never cleared, so a later
+    /// real fetch (`skin_fetch::take_pending`, drained in
+    /// `ContainerRenderer::render_geometry_scaled_between_strata`) is not
+    /// clobbered back to the uuid guess on a subsequent frame.
+    default_from_uuid_applied: bool,
 }
 
 impl PlayerPreview {
@@ -297,10 +318,15 @@ impl PlayerPreview {
         color_format: wgpu::TextureFormat,
     ) -> Option<Self> {
         // A local skin override, if the user has dropped one in the data
-        // directory; otherwise the pack's own sheet for the default rig.
-        let (skin_model, supplied) = match local_skin_override() {
-            Some((m, img)) => (m, Some(img)),
-            None => (DEFAULT_MODEL, None),
+        // directory; otherwise the pack's own sheet for the default rig —
+        // `DEFAULT_MODEL` here is a bootstrap value only, overwritten the
+        // first time `maybe_default_from_uuid` runs with a real uuid (see
+        // that method and `used_local_override` below). A local override, by
+        // contrast, is a user's explicit choice and must never be overridden
+        // by a guess.
+        let (skin_model, supplied, used_local_override) = match local_skin_override() {
+            Some((m, img)) => (m, Some(img), true),
+            None => (DEFAULT_MODEL, None, false),
         };
         let model = lodestone_render::entity::player_model_name(skin_model.is_slim());
         let models = EntityModelSet::load();
@@ -354,6 +380,8 @@ impl PlayerPreview {
             sampler,
             cam_buffer,
             cam_bind_group,
+            used_local_override,
+            default_from_uuid_applied: false,
         })
     }
 
@@ -361,6 +389,66 @@ impl PlayerPreview {
     #[must_use]
     pub(super) fn skin_model(&self) -> PlayerModelType {
         self.skin_model
+    }
+
+    /// Resolve and bind the **uuid-derived default** — issue #646's fix —
+    /// the *first* time a real uuid reaches this pass, unless a local
+    /// override already claimed the avatar at construction.
+    ///
+    /// # Why this exists rather than resolving the default at [`new`]
+    ///
+    /// `PlayerPreview::new` runs once during GPU bring-up, before a session
+    /// exists — there is no local player uuid yet, only [`DEFAULT_MODEL`]'s
+    /// bootstrap guess. This is the seam that corrects it once one is known,
+    /// called every container frame from
+    /// `ContainerRenderer::render_geometry_scaled_between_strata` (the same
+    /// per-frame drain `skin_fetch::take_pending` already uses for a real
+    /// fetched skin, for the identical reason: the avatar is built long
+    /// before the fact it needs is available).
+    ///
+    /// # One resolver, keyed on one uuid
+    ///
+    /// This calls the *exact* function `entities.rs::default_remote_skin`
+    /// calls for the world-side default of every other player with no
+    /// declared skin — `lodestone_assets::skin::default_skin_for_uuid`. Two
+    /// call sites reading one pure function of the same uuid cannot disagree
+    /// by construction, which is the acceptance bar issue #646 states
+    /// explicitly (the original report was exactly this: Alex in the
+    /// inventory, Steve in the world, for the *same* player).
+    ///
+    /// No-op once [`Self::default_from_uuid_applied`] is set (idempotent
+    /// across frames) or when [`Self::used_local_override`] is `true` (a
+    /// user's explicit `skin.png`/`skin.model` outranks a guess). Silently
+    /// leaves the bootstrap default in place if the resolved rig's sheet
+    /// cannot be loaded — the same fail-open [`set_skin`](Self::set_skin)
+    /// already takes for a rig switch.
+    pub(super) fn maybe_default_from_uuid(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        uuid: uuid::Uuid,
+    ) {
+        let Some(model) =
+            uuid_default_model(self.used_local_override, self.default_from_uuid_applied, uuid)
+        else {
+            return;
+        };
+        self.default_from_uuid_applied = true;
+        self.set_skin(device, queue, model, None);
+    }
+
+    /// Whether [`Self::new`] bound a local `skin.png`/`skin.model` override
+    /// rather than the bootstrap [`DEFAULT_MODEL`] — exposed (through
+    /// [`super::ContainerRenderer::player_preview_used_local_override`]) so a
+    /// gate can tell the two apart rather than assuming a clean environment.
+    /// The real data directory is process-global and not test-overridable
+    /// from inside a test binary (`std::env::set_var` is `unsafe` under this
+    /// workspace's edition and process-global besides), so a machine with a
+    /// real local skin on disk is a legitimate state a gate must account for,
+    /// not an error.
+    #[must_use]
+    pub(super) fn used_local_override(&self) -> bool {
+        self.used_local_override
     }
 
     /// Bind a different skin: a declared rig and, optionally, a sheet to draw it
@@ -523,6 +611,15 @@ impl PlayerAvatar {
         self.pose = pose;
         self
     }
+
+    /// Attach the local player's own uuid — see [`Self::uuid`]. Builder-style
+    /// for the same reason [`with_pose`](Self::with_pose) is: every existing
+    /// caller keeps `uuid: None` (`in_rect`'s default) unless it opts in.
+    #[must_use]
+    pub fn with_uuid(mut self, uuid: Option<uuid::Uuid>) -> Self {
+        self.uuid = uuid;
+        self
+    }
 }
 
 /// The per-part `mesh → clip` matrices the avatar draws with, at
@@ -559,6 +656,31 @@ fn avatar_part_matrices(
         .iter()
         .map(|part| clip * *part)
         .collect()
+}
+
+/// The pure decision behind [`PlayerPreview::maybe_default_from_uuid`],
+/// extracted so it is testable without a GPU device, a vanilla jar, or the
+/// real filesystem `local_skin_override` reads — none of which this decision
+/// itself depends on.
+///
+/// `None` means "leave the currently bound skin alone" (a local override
+/// outranks a guess, or the uuid default was already applied once and must
+/// not flip-flop across frames); `Some(model)` is the rig
+/// `lodestone_assets::skin::default_skin_for_uuid` resolves for `uuid` — the
+/// **same** function `entities.rs::default_remote_skin` calls for the
+/// world-side default of every other player, so this call site and that one
+/// cannot disagree for the same uuid.
+#[must_use]
+fn uuid_default_model(
+    used_local_override: bool,
+    already_applied: bool,
+    uuid: uuid::Uuid,
+) -> Option<PlayerModelType> {
+    if used_local_override || already_applied {
+        return None;
+    }
+    let (hi, lo) = uuid.as_u64_pair();
+    Some(lodestone_assets::skin::default_skin_for_uuid(hi as i64, lo as i64).model)
 }
 
 /// A logical-pixel rect as a **physical** scissor `[x, y, w, h]`, clamped into
@@ -680,6 +802,76 @@ mod tests {
             physical_scissor(rect, 1, 80, 200).is_none(),
             "entirely off the target must be None, not a zero-width scissor"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #646: the uuid-derived default, decoupled from the GPU/filesystem
+    // -----------------------------------------------------------------------
+
+    /// `uuid_default_model` is the whole decision behind
+    /// `maybe_default_from_uuid`, pure and GPU/filesystem-free, so this gate
+    /// needs neither a device nor a vanilla jar nor a clean data directory.
+    ///
+    /// **Two discriminating uuids, not one** — hand-verified against
+    /// `lodestone-assets/src/skin.rs`'s own
+    /// `default_skin_for_uuid_matches_hand_derived_cases`: the nil uuid
+    /// resolves Slim (index 0), `(9, 0)` resolves Wide (index 9). A
+    /// hardcoded `PlayerModelType::Wide` — the pre-fix constant this
+    /// function replaces — fails the first case; a resolver that ignores the
+    /// uuid entirely (always returning the same model) fails to distinguish
+    /// the two.
+    #[test]
+    fn uuid_default_model_picks_the_uuids_own_answer() {
+        let slim_uuid = uuid::Uuid::from_u64_pair(0, 0);
+        let wide_uuid = uuid::Uuid::from_u64_pair(9, 0);
+
+        assert_eq!(
+            uuid_default_model(false, false, slim_uuid),
+            Some(PlayerModelType::Slim),
+            "nil uuid, no override, not yet applied -> Slim"
+        );
+        assert_eq!(
+            uuid_default_model(false, false, wide_uuid),
+            Some(PlayerModelType::Wide),
+            "(9, 0) uuid, no override, not yet applied -> Wide"
+        );
+
+        // Both gates a real caller must respect: a local override always
+        // wins, and the resolution only ever fires once.
+        assert_eq!(
+            uuid_default_model(true, false, slim_uuid),
+            None,
+            "a local override must block the uuid default, even for a uuid \
+             that would otherwise resolve"
+        );
+        assert_eq!(
+            uuid_default_model(false, true, slim_uuid),
+            None,
+            "already applied must not re-resolve — a later real fetch must \
+             not be clobbered back to the uuid guess on a subsequent frame"
+        );
+    }
+
+    /// Cross-checked against `lodestone_assets::skin::default_skin_for_uuid`
+    /// directly, not just against the hand-derived constants above — this is
+    /// the "one resolver, two call sites" claim itself, at the unit level:
+    /// `uuid_default_model` must return *exactly* what the shared resolver
+    /// says for a spread of uuids, never a second, independent guess that
+    /// happens to agree on the two hand-picked cases.
+    #[test]
+    fn uuid_default_model_matches_the_shared_resolver_across_a_spread() {
+        for i in 0..40u64 {
+            let hi = i.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let lo = i.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+            let uuid = uuid::Uuid::from_u64_pair(hi, lo);
+            let expected =
+                lodestone_assets::skin::default_skin_for_uuid(hi as i64, lo as i64).model;
+            assert_eq!(
+                uuid_default_model(false, false, uuid),
+                Some(expected),
+                "uuid_default_model disagreed with default_skin_for_uuid for hi={hi:#x} lo={lo:#x}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

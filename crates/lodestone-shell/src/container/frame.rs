@@ -87,6 +87,19 @@ pub struct ContainerFrame<'a> {
     /// `tests/container_screen.rs`) unchanged. See
     /// [`with_avatar_pose`](Self::with_avatar_pose).
     pub avatar_pose: lodestone_render::AnimInput,
+    /// The local player's own uuid, so the inventory avatar's *default* skin
+    /// (when nothing local or fetched has overridden it) can be resolved the
+    /// same way `entities.rs::default_remote_skin` resolves the world-side
+    /// default for every other player: `lodestone_assets::skin::
+    /// default_skin_for_uuid`, keyed on this one uuid. `None` (the default
+    /// from [`new`](Self::new)) is what every caller without a live session
+    /// keeps — the avatar then falls back to `PlayerPreview`'s own
+    /// construction-time default, exactly as before this field existed.
+    ///
+    /// See `container/player_preview.rs`'s `PlayerPreview::
+    /// maybe_default_from_uuid` for the consumer — issue #646's "both sites
+    /// derive from one resolver, keyed on the same uuid" requirement.
+    pub avatar_uuid: Option<uuid::Uuid>,
     /// `Player.hasInfiniteMaterials()` — `Abilities.instabuild`
     /// (`AnvilMenu.java`, `EnchantmentScreen.java`). Gates the
     /// anvil's "Too Expensive!" branch and the enchanting rows' afford
@@ -190,6 +203,7 @@ impl<'a> ContainerFrame<'a> {
             menu_type: None,
             cost_data: &[],
             avatar_pose: lodestone_render::AnimInput::REST,
+            avatar_uuid: None,
             has_infinite_materials: false,
             xp_level: 0,
             tooltips: None,
@@ -215,6 +229,7 @@ impl<'a> ContainerFrame<'a> {
             menu_type: None,
             cost_data: &[],
             avatar_pose: lodestone_render::AnimInput::REST,
+            avatar_uuid: None,
             has_infinite_materials: false,
             xp_level: 0,
             tooltips: None,
@@ -314,6 +329,17 @@ impl<'a> ContainerFrame<'a> {
     #[must_use]
     pub fn with_avatar_pose(mut self, pose: lodestone_render::AnimInput) -> Self {
         self.avatar_pose = pose;
+        self
+    }
+
+    /// Attach the local player's own uuid, so the inventory avatar's
+    /// *default* skin (absent a local override or a fetched one) resolves
+    /// from the same `default_skin_for_uuid` call the world-side default
+    /// uses for every other player — see [`Self::avatar_uuid`]. `None` (the
+    /// default) keeps every existing caller unchanged.
+    #[must_use]
+    pub fn with_avatar_uuid(mut self, uuid: Option<uuid::Uuid>) -> Self {
+        self.avatar_uuid = uuid;
         self
     }
 
