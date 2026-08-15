@@ -97,8 +97,8 @@ use lodestone_assets::{
     AnimTable, Atlas, AtlasBuilder, AtlasError, AtlasSprite, BakeOptions, BakedQuad, BlockBaker,
     BlockStates, Direction, DisplayTransform, DisplayTransforms, Element, Face, FirstWeight,
     GuiItemContext, GuiLight,
-    IconPart, ItemIconBuilder, ItemModel, ItemModelOutput, ItemPropertyContext, ModelResolver,
-    ModelTransform, ResolvedModel, ResourceLocation,
+    IconPart, ItemIconBuilder, ItemModel, ItemModelOutput, ItemNodeTransform, ItemPropertyContext,
+    ModelResolver, ModelTransform, ResolvedModel, ResourceLocation,
     ResourceManager, SpriteLayer, TextureBinding, bake_model_with,
 };
 use lodestone_model::{BlockStateRegistry, Identifier};
@@ -762,6 +762,16 @@ pub struct SpecialItemForm {
     pub kind: String,
     /// The `base` model's own `display` map, all nine slots.
     pub display: DisplayTransforms,
+    /// The `minecraft:special` node's own `"transformation"` field (translation
+    /// plus a `left_rotation`/`right_rotation` quaternion pair), composed by
+    /// vanilla *underneath* the display-context transform above —
+    /// `Transformation.compose(displayTransform, this.transformation)` in
+    /// `SpecialModelWrapper.Unbaked.bake`. `None` for the six of ten `kind`s
+    /// whose JSON carries no `"transformation"` at all (only the skull family —
+    /// `minecraft:head`/`minecraft:player_head` — has one today). A caller
+    /// composes it as `existing_outer_placement * node_transform_matrix`; see
+    /// [`lodestone_assets::ItemNodeTransform`]'s doc for the derivation.
+    pub transformation: Option<ItemNodeTransform>,
 }
 
 impl ItemVariants {
@@ -1004,7 +1014,12 @@ fn collect_item_variants(manager: &ResourceManager) -> ItemVariantParts {
         // display map at all.
         let mut seen_specials = BTreeSet::new();
         for output in definition.outputs() {
-            if let ItemModelOutput::Special { base, kind } = output {
+            if let ItemModelOutput::Special {
+                base,
+                kind,
+                transformation,
+            } = output
+            {
                 // `part_for` (not `part_for_model`) is the entry point that resolves
                 // a special node's `base` for its `display` map.
                 if seen_specials.insert(base.clone())
@@ -1016,6 +1031,7 @@ fn collect_item_variants(manager: &ResourceManager) -> ItemVariantParts {
                         SpecialItemForm {
                             kind: kind.to_string(),
                             display,
+                            transformation,
                         },
                     ));
                 }
@@ -2934,6 +2950,7 @@ mod special_form_tests {
             SpecialItemForm {
                 kind: "minecraft:chest".to_string(),
                 display: DisplayTransforms::NONE,
+                transformation: None,
             },
         );
         ItemVariants {

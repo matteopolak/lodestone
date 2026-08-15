@@ -170,9 +170,50 @@ fn chest_becomes_a_special_renderer() {
 
     assert!(icon.is_drawable());
     match &icon.parts[0] {
-        IconPart::Special { base, kind } => {
+        IconPart::Special {
+            base,
+            kind,
+            transformation,
+        } => {
             assert_eq!(*base, loc("minecraft:item/chest"));
             assert_eq!(kind, "minecraft:chest");
+            // chest.json carries no node-level `"transformation"` at all.
+            assert_eq!(*transformation, None);
+        }
+        other => panic!("expected Special, got {other:?}"),
+    }
+}
+
+#[test]
+fn skull_special_renderer_carries_its_own_node_transformation() {
+    // The skull family's real gap (issue #645): the node's own
+    // `"transformation"` must survive from the parsed tree through
+    // `ItemIconBuilder::part_for` onto `IconPart::Special`, not be dropped.
+    let mgr = manager(&[(
+        "assets/minecraft/items/skeleton_skull.json",
+        r#"{"model":{"type":"minecraft:special","base":"minecraft:item/template_skull",
+            "model":{"type":"minecraft:head","kind":"skeleton"},
+            "transformation":{
+                "left_rotation":[1.0,0.0,0.0,-0.0],
+                "right_rotation":[0.0,0.0,0.0,1.0],
+                "scale":[1.0,1.0,1.0],
+                "translation":[0.5,0.0,0.5]
+            }}}"#,
+    )]);
+    let builder = ItemIconBuilder::new(&mgr);
+    let icon = builder.icon(&loc("minecraft:skeleton_skull")).unwrap();
+
+    assert!(icon.is_drawable());
+    match &icon.parts[0] {
+        IconPart::Special {
+            kind,
+            transformation,
+            ..
+        } => {
+            assert_eq!(kind, "minecraft:head");
+            let t = transformation.expect("skull carries its own node transformation");
+            assert_eq!(t.translation, [0.5, 0.0, 0.5]);
+            assert_eq!(t.left_rotation, [1.0, 0.0, 0.0, -0.0]);
         }
         other => panic!("expected Special, got {other:?}"),
     }

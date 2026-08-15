@@ -1389,7 +1389,7 @@ impl RenderState {
         );
         self.block_entities
             .models
-            .resolve_special_item(&form.kind, item.path(), placement, light)
+            .resolve_special_item(&form.kind, item.path(), placement, form.transformation, light)
     }
 
     /// A `minecraft:special` item in another entity's hand, posed off that
@@ -1437,7 +1437,7 @@ impl RenderState {
             lodestone_render::entity::held_item_matrix(arm_transform, arm, baby, &transform);
         self.block_entities
             .models
-            .resolve_special_item(&form.kind, item.path(), placement, light)
+            .resolve_special_item(&form.kind, item.path(), placement, form.transformation, light)
     }
 
     /// A `minecraft:special` item hanging in an item frame.
@@ -1469,7 +1469,7 @@ impl RenderState {
         );
         self.block_entities
             .models
-            .resolve_special_item(&form.kind, item.path(), placement, light)
+            .resolve_special_item(&form.kind, item.path(), placement, form.transformation, light)
     }
 
     /// # The `entities` slice is here for the `minecraft:special` items

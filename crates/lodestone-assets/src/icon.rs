@@ -142,6 +142,13 @@ pub enum IconPart {
         base: ResourceLocation,
         /// The special renderer id (e.g. `minecraft:chest`).
         kind: String,
+        /// The `minecraft:special` node's own `"transformation"` field —
+        /// `None` for the ex-`builtin/entity` arm (a different model type
+        /// entirely, no such field) and for the nine of ten `special` kinds
+        /// whose JSON omits it; `Some` for the skull family. A caller
+        /// composes this *underneath* [`ItemIcon::display`]'s pose — see
+        /// [`crate::ItemNodeTransform`]'s doc for the derivation.
+        transformation: Option<crate::ItemNodeTransform>,
     },
 }
 
@@ -405,7 +412,11 @@ impl<'a> ItemIconBuilder<'a> {
         output: ItemModelOutput<'_>,
     ) -> Result<(Option<IconPart>, Option<DisplayTransforms>), IconError> {
         match output {
-            ItemModelOutput::Special { base, kind } => {
+            ItemModelOutput::Special {
+                base,
+                kind,
+                transformation,
+            } => {
                 let display = self
                     .resolver
                     .resolve(base)
@@ -415,6 +426,7 @@ impl<'a> ItemIconBuilder<'a> {
                     Some(IconPart::Special {
                         base: base.clone(),
                         kind: kind.to_string(),
+                        transformation,
                     }),
                     display,
                 ))
@@ -472,6 +484,7 @@ impl<'a> ItemIconBuilder<'a> {
             Some("entity") => Some(IconPart::Special {
                 base: model.clone(),
                 kind: "minecraft:builtin_entity".to_string(),
+                transformation: None,
             }),
             // `builtin/empty` and any other builtin sentinel render nothing here.
             Some(_) => None,

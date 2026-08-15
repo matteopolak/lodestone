@@ -60,9 +60,9 @@
 //! `ItemPropertyContext` *trait*. See
 //! [`ItemVariants`](crate::ItemVariants) and `docs/item-variants.md`.
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use lodestone_assets::{
-    DISPLAY_CONTEXT_PROPERTY, DisplaySlot, DisplayTransform, ItemPropertyContext,
+    DISPLAY_CONTEXT_PROPERTY, DisplaySlot, DisplayTransform, ItemNodeTransform, ItemPropertyContext,
 };
 
 /// Model-space units per block: a model JSON's `display` translation is in
@@ -167,6 +167,56 @@ pub fn gui_item_pose(rect_px: [f32; 4], transform: &DisplayTransform) -> Mat4 {
     Mat4::from_translation(centre)
         * Mat4::from_scale(Vec3::new(w, -h, w.min(h)))
         * display_matrix(transform)
+}
+
+/// A `minecraft:special` node's own `"transformation"` field
+/// ([`ItemNodeTransform`]) as a model-space matrix.
+///
+/// ```text
+/// T(translation) · Q(left_rotation) · S(scale) · Q(right_rotation)
+/// ```
+///
+/// Vanilla's `com.mojang.math.Transformation`'s private `compose` builds
+/// exactly this product (`result.translation(t); result.rotate(left);
+/// result.scale(s); result.rotate(right);`, each JOML call right-multiplying
+/// the running matrix) — no `/16`, no clamp, unlike [`display_matrix`]: this
+/// is a different vanilla type (`Transformation`, not `ItemTransform`) with
+/// its own codec and no such deserializer-side massaging.
+#[must_use]
+pub fn node_transform_matrix(t: &ItemNodeTransform) -> Mat4 {
+    let [lx, ly, lz, lw] = t.left_rotation;
+    let [rx, ry, rz, rw] = t.right_rotation;
+    Mat4::from_translation(Vec3::from(t.translation))
+        * Mat4::from_quat(Quat::from_xyzw(lx, ly, lz, lw))
+        * Mat4::from_scale(Vec3::from(t.scale))
+        * Mat4::from_quat(Quat::from_xyzw(rx, ry, rz, rw))
+}
+
+/// Composes a `minecraft:special` node's own transformation on top of an
+/// already-built outer placement — the GUI icon pose, the held-item hand
+/// chain, or a dropped/other-entity-hand/item-frame world placement.
+///
+/// # Why right-multiply, not left
+///
+/// `SpecialModelWrapper.Unbaked.bake` computes
+/// `Transformation.compose(transformation, this.transformation)`, which is
+/// `Transformation.compose(Matrix4fc parent, Optional<Transformation>
+/// transform)` → `parent.mul(transform.getMatrix())`. JOML's `Matrix4f.mul`
+/// is `this * other`; applied to a column vector right-to-left, `other` (the
+/// node's own transform) acts on the model *first*, `parent` (the
+/// already-built outer placement — `display.<context>`, or the world/hand/
+/// GUI chain built on top of it) acts *second*. `glam::Mat4` uses the same
+/// column-vector, right-to-left convention, so the direct translation is
+/// `outer * node_transform_matrix`, not the other way round.
+///
+/// A no-op (`outer` unchanged) when `transformation` is `None` — vanilla's
+/// `Optional::isEmpty` short-circuit in the same `compose` overload.
+#[must_use]
+pub fn compose_special_node_transform(outer: Mat4, transformation: Option<ItemNodeTransform>) -> Mat4 {
+    match transformation {
+        Some(t) => outer * node_transform_matrix(&t),
+        None => outer,
+    }
 }
 
 /// The **GUI pixel space → clip space** projection for a `width_px × height_px`
