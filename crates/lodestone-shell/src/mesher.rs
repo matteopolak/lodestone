@@ -1036,6 +1036,26 @@ impl ModelSectionView for SnapshotModelView<'_> {
         self.models.occludes(id)
     }
 
+    /// Owner report: "the ice texture looks inverted... i can see the four
+    /// walls of the ice blocks even when theyre beside other ice so it looks
+    /// like a grid". `occludes_at` above is correctly `false` for ice (it is a
+    /// vanilla `noOcclusion()` block), so nothing culled its interior faces —
+    /// this is the missing second half of `Block.shouldRenderFace`,
+    /// `BlockBehaviour.skipRendering`. Mirrors `occludes_at`'s split/bounds
+    /// logic for the neighbour; the block being meshed (`x, y, z`) is always
+    /// section-local, matching every other per-cell lookup on this view.
+    fn skips_rendering_against(&self, x: i32, y: i32, z: i32, nx: i32, ny: i32, nz: i32) -> bool {
+        let (ndx, nlx) = split16(nx);
+        let (ndy, nly) = split16(ny);
+        let (ndz, nlz) = split16(nz);
+        if !(-1..=1).contains(&ndx) || !(-1..=1).contains(&ndy) || !(-1..=1).contains(&ndz) {
+            return false;
+        }
+        let here_id = self.snapshot.at(0, 0, 0).get_block(x as usize, y as usize, z as usize);
+        let neighbour_id = self.snapshot.at(ndx, ndy, ndz).get_block(nlx, nly, nlz);
+        self.models.skips_rendering_against(here_id, neighbour_id)
+    }
+
     /// Vanilla's FAST leaves (`options.cutoutLeaves == false`): real per-face
     /// occlusion is untouched — `occludes_at`/`ambient_occlusion_at` above
     /// still answer from the block's *actual*, cutout-textured geometry, so a
