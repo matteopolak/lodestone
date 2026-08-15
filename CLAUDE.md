@@ -887,6 +887,22 @@ feature that happens to use it.
 - **Depth is `[0,1]` DirectX-style, not vanilla's reversed-Z.** Every ported depth comparison and bias
   flips sign: vanilla's `GREATER_THAN_OR_EQUAL` is our `LessEqual`, and a positive vanilla depth bias is
   negative here.
+- **`Surface::get_default_config` is correct natively and wrong in a browser, and the difference is
+  structural rather than a preference.** It takes `get_capabilities().formats[0]`; native `wgpu-core`
+  sorts sRGB formats first, so that is already `Bgra8UnormSrgb`, while the WebGPU backend **never lists
+  an sRGB format at all** — a browser canvas structurally cannot be configured with one. Measured live:
+  `navigator.gpu.getPreferredCanvasFormat()` returns `"bgra8unorm"`. Linear shader output then reaches
+  the compositor with no EOTF applied and **the whole image, menus included, comes out dark**. The fix
+  is an sRGB *view* over the swapchain (`config.view_formats`, plus an explicit format on every acquired
+  frame's `TextureViewDescriptor`), with the target reporting that **view** format, since every pipeline
+  is built against it.
+
+  Two things generalise past this one call. **A defaulting helper that reads a platform-supplied
+  ordering is a `cfg`-free way to get different behaviour per target** — nothing in the source looks
+  conditional, so it will not appear in any wasm hazard census, all four native checks stay green, and
+  `wasm-check` passes. And the honest gate here is a **decision-level** one — assert which format the
+  chooser picks given a web-shaped capability list and again given a native-shaped one — because you
+  cannot predict an exact composited byte through `ALPHA_BLENDING` on this backend anyway (see below).
 - **The GUI winding invariant is negative, not positive.** `sign(det(gui_ortho * gui_item_pose))` must
   **equal** `sign(det(Camera::view_projection()))`, and that sign is negative because `glam`'s DirectX RH
   perspective is itself negative. Coding to "positive determinant" ships an inside-out block that still
