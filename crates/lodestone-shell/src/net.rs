@@ -2650,6 +2650,17 @@ async fn run_async(
         // react. Manual makes death a real gate: `Sim` marks the player dead
         // and waits, the shell shows the death screen, and only a click on its
         // Respawn button (`Sim::respawn`) sends the action.
+        //
+        // Captured before `server` moves into the builder below: the browser
+        // join arm further down needs the *destination* the player actually
+        // chose to put on the relay URL as a `?host=&port=` query pair (see
+        // `crate::platform::relay::relay_ws_url_for`) — the relay dials
+        // whatever a connection names, not one fixed `--target`, so this must
+        // travel with the connection rather than being assumed on the relay
+        // side. Unused on native (`ClientBuilder::connect` reaches the real
+        // server directly, no relay involved), hence the `cfg`.
+        #[cfg(target_arch = "wasm32")]
+        let relay_destination = (server.host.clone(), server.port);
         let mut builder = ClientBuilder::new(server, profile, adapter)
             .connect_timeout(Some(Duration::from_secs(10)))
             // Issue #280: arm the read timeout so a server that hangs (sends
@@ -2688,24 +2699,52 @@ async fn run_async(
             Some(client_io) => builder.connect_with(client_io),
             None => {
                 // Browser: `ClientBuilder::connect` is `cfg(not(wasm32))` because it
-                // opens a `TcpStream`, which a page cannot do at any layer. This is
-                // not a missing feature so much as the wrong entry point: a browser
-                // multiplayer join goes over `lodestone-net`'s `ws-web` transport
-                // through the relay, which lands on `connect_with` above — the same
-                // arm singleplayer's in-memory duplex uses. Reported rather than
-                // silently dropped, because a join that produces no session and no
-                // message is the hardest kind of failure to diagnose.
+                // opens a `TcpStream`, which a page cannot do at any layer. A browser
+                // multiplayer join instead dials `lodestone-net`'s `ws-web` transport
+                // through the relay and lands on `connect_with` above — the same arm
+                // singleplayer's in-memory duplex uses, and everything past the
+                // transport (handshake, login, the driver's event loop) is the
+                // version adapter's `begin_login`/`Driver::run`, unchanged from the
+                // native path. This mirrors `menu/status.rs`'s `relay_probe`, the
+                // working precedent for dialling the relay from wasm32 — same URL
+                // source (`crate::platform::relay::relay_ws_url_for`, which names
+                // *this* connection's destination on top of the relay endpoint —
+                // see that function's doc for why the relay cannot be trusted to
+                // guess it), same reason `tokio::time::timeout` cannot be used for
+                // the deadline (it hangs on its first poll on wasm32 — no timer
+                // driver), so this races the dial against
+                // `crate::platform::relay::sleep` exactly as the probe does.
                 #[cfg(target_arch = "wasm32")]
                 {
-                    drop(builder);
-                    let _ = tx.send(NetUpdate::Error(
-                        "connect: a browser cannot open a TCP socket. A multiplayer \
-                         join must go through the WebSocket relay (lodestone-net's \
-                         ws-web transport), which reaches connect_with rather than \
-                         connect."
-                            .to_owned(),
-                    ));
-                    return;
+                    let url = crate::platform::relay::relay_ws_url_for(
+                        &relay_destination.0,
+                        relay_destination.1,
+                    );
+                    let dial = lodestone_net::WsWebTransport::connect(&url);
+                    let transport = tokio::select! {
+                        result = dial => match result {
+                            Ok(transport) => transport,
+                            Err(e) => {
+                                let _ = tx.send(NetUpdate::Error(format!(
+                                    "connect: relay ({url}): {e}"
+                                )));
+                                return;
+                            }
+                        },
+                        // Same budget as the native TCP dial's `connect_timeout`
+                        // above, applied by hand here because `connect_with` (the
+                        // only entry point wasm32 has) ignores that builder option
+                        // outright — it is handed an already-established
+                        // transport, so there is nothing left for a connect
+                        // timeout to bound.
+                        () = crate::platform::relay::sleep(Duration::from_secs(10)) => {
+                            let _ = tx.send(NetUpdate::Error(format!(
+                                "connect: relay ({url}) did not answer within 10s"
+                            )));
+                            return;
+                        }
+                    };
+                    builder.connect_with(transport)
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 match builder.connect().await {
