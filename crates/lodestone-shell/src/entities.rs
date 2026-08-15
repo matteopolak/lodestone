@@ -133,7 +133,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bevy_ecs::prelude::{
-    Component, Entity, IntoScheduleConfigs, Query, Res, ResMut, Resource, With,
+    Commands, Component, Entity, IntoScheduleConfigs, Query, Res, ResMut, Resource, With, Without,
 };
 use bevy_ecs::world::World;
 use glam::Vec3;
@@ -2552,6 +2552,120 @@ fn new_item_physics(snap: &EntityFacts) -> ItemPhysics {
     }
 }
 
+/// The client-simulated body yaw for a **player** entity — vanilla's
+/// `LivingEntity.yBodyRot`, run locally because nothing ever sends it.
+///
+/// A player's own `Rotation`/`HeadYaw` arrive over the wire **equal**:
+/// `ServerEntity.sendChanges` broadcasts `Mth.packDegrees(entity.getYRot())`
+/// as the move/rotation packet's angle and `Mth.packDegrees(entity.getYHeadRot())`
+/// as the head packet's, and `Player.aiStep` forces `this.yHeadRot =
+/// this.getYRot()` every tick — a player has no second, independently-aimed
+/// value the way a `Mob`'s `LookControl` gives its head. So feeding the
+/// reported [`Rotation`] yaw straight into [`EntityFacts::yaw`], which is
+/// exactly right for a mob (whose body and AI-aimed head genuinely diverge
+/// on the wire already), makes a *player's* body and head numerically
+/// identical forever — the "turns as one rigid block, head never moves"
+/// report this component exists to fix.
+///
+/// Real vanilla clients never receive a body yaw for another player either:
+/// every receiving client's own `RemotePlayer` puppet runs
+/// `LivingEntity.tick()`'s generic `tickHeadTurn` lag **locally**, deriving
+/// its rendered body yaw from the received look yaw and that puppet's own
+/// per-tick movement. [`tick_remote_body_yaw`] is that same simulation,
+/// reusing [`crate::sim::step::body_yaw_target`]/[`crate::sim::step::tick_head_turn`]
+/// — the identical port `sim/step.rs` already wrote for the local
+/// third-person body — so the rule has one implementation, not two.
+///
+/// Lives on the **ingest** entity, beside `Rotation`/`HeadYaw`/`Position`,
+/// not the render track: [`resolve_entity_facts`] reads it directly the same
+/// way it reads those.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct BodyYawState {
+    /// Vanilla's `yBodyRot`.
+    yaw: f32,
+    /// This entity's `Position` as of last tick — vanilla's `xo`/`zo`, the
+    /// reference [`crate::sim::step::body_yaw_target`]'s `(dx, dz)` is
+    /// measured against.
+    last_feet: lodestone_model::Vec3,
+}
+
+/// `GameTick`/`TickSet::Animate`: advances [`BodyYawState`] for every tracked
+/// **player** entity, once per tick — the client-side half of
+/// `LivingEntity.tickHeadTurn` real vanilla runs for every other player's
+/// puppet on every receiving client. See [`BodyYawState`]'s doc for why a
+/// player needs this simulation and a mob (whose `Rotation` is already an
+/// independent, AI-driven body yaw) must not get it — gated here on
+/// `EntityKind::path` `== "player"`, exactly the check `resolve_entity_facts`
+/// already uses for `is_player`.
+///
+/// Two passes over disjoint archetypes (`Without<BodyYawState>` for the
+/// lazy-insert half) rather than one `Option<&mut BodyYawState>` query,
+/// because a fresh player needs [`Commands`] to gain the component at all —
+/// initialised to its own reported yaw, matching vanilla's spawn-time
+/// `this.yBodyRot = this.getYRot()`, so a fresh join starts rigid for
+/// exactly the one tick nothing has told it otherwise yet, not eased in from
+/// a guessed value.
+///
+/// `attacking` reads [`AttackSwing::attack_anim`] the same tick
+/// `lodestone_ecs::ingest::tick_entity_swing` ages it — one tick "behind"
+/// vanilla's own ordering, the same way `sim/step.rs`'s identical call site
+/// already documents itself as being, for the identical reason.
+///
+/// The `50.0` `max_head_rotation` is vanilla's un-narrowed
+/// `LivingEntity.getMaxHeadRotationRelativeToBody()`. `Player`'s own `15.0`
+/// override while blocking with a shield is **not** modelled here: it needs
+/// a decoded remote block/use-item state this crate does not carry yet, so a
+/// blocking remote player's body currently drags at the wider, un-narrowed
+/// angle rather than vanilla's tighter one — a narrower gap than the "rigid
+/// block" bug this fixes, and recorded rather than silently assumed away.
+pub fn tick_remote_body_yaw(
+    mut existing: Query<(
+        &lodestone_ecs::entity::EntityKind,
+        &lodestone_ecs::entity::Position,
+        &lodestone_ecs::entity::Rotation,
+        Option<&AttackSwing>,
+        &mut BodyYawState,
+    )>,
+    missing: Query<
+        (
+            Entity,
+            &lodestone_ecs::entity::EntityKind,
+            &lodestone_ecs::entity::Position,
+            &lodestone_ecs::entity::Rotation,
+        ),
+        Without<BodyYawState>,
+    >,
+    mut commands: Commands,
+) {
+    const MAX_HEAD_ROTATION_DEG: f32 = 50.0;
+    for (kind, position, rotation, swing, mut state) in &mut existing {
+        if kind.0.path() != "player" {
+            continue;
+        }
+        let dx = position.0.x - state.last_feet.x;
+        let dz = position.0.z - state.last_feet.z;
+        let attacking = swing.is_some_and(|swing| swing.attack_anim > 0.0);
+        let target =
+            crate::sim::step::body_yaw_target(state.yaw, rotation.0.yaw, dx, dz, attacking);
+        state.yaw = crate::sim::step::tick_head_turn(
+            state.yaw,
+            rotation.0.yaw,
+            target,
+            MAX_HEAD_ROTATION_DEG,
+        );
+        state.last_feet = position.0;
+    }
+    for (entity, kind, position, rotation) in &missing {
+        if kind.0.path() != "player" {
+            continue;
+        }
+        commands.entity(entity).insert(BodyYawState {
+            yaw: rotation.0.yaw,
+            last_feet: position.0,
+        });
+    }
+}
+
 /// Resolves the [`EntityFacts`] a live ingest entity carries, exactly the
 /// narrowing `net::entity_snapshot` used to do against an
 /// [`EntityView`](lodestone_client::EntityView) — now read straight off
@@ -2581,6 +2695,17 @@ fn resolve_entity_facts(
     let position = entity.get::<Position>()?.0;
     let rotation = entity.get::<Rotation>()?.0;
     let head_yaw = entity.get::<HeadYaw>()?.0;
+    // The reported `Rotation::yaw` is the right *body* yaw for a mob (its
+    // body and AI-aimed head already diverge on the wire), but for a player
+    // it is the same number as `head_yaw` above — see [`BodyYawState`]'s doc.
+    // `tick_remote_body_yaw` (`GameTick`/`TickSet::Animate`) maintains the
+    // locally-lagged alternative on this same ingest entity; absent means
+    // either a non-player or the very first fold before that system has run
+    // a tick yet, both of which fall back to the raw reported yaw exactly as
+    // before this component existed.
+    let body_yaw = entity
+        .get::<BodyYawState>()
+        .map_or(rotation.yaw, |state| state.yaw);
 
     let scale = if entity.get::<Baby>().is_some_and(|baby| baby.0) {
         0.5
@@ -2738,7 +2863,7 @@ fn resolve_entity_facts(
         id,
         type_path: type_key.path().to_string(),
         feet: to_glam_vec3(position),
-        yaw: rotation.yaw,
+        yaw: body_yaw,
         head_yaw,
         pitch: rotation.pitch,
         scale,
@@ -3148,6 +3273,10 @@ impl Plugin for EntityInterpPlugin {
         app.add_systems(GameTick, tick_pickup_animations.in_set(TickSet::Animate));
         app.add_systems(GameTick, tick_creeper_fuse.in_set(TickSet::Animate));
         app.add_systems(GameTick, tick_swim_ramp.in_set(TickSet::Animate));
+        // See `BodyYawState`'s doc: without this, a remote player's reported
+        // body yaw and head yaw are the same wire number forever, and the
+        // entity turns as one rigid block with no head lead.
+        app.add_systems(GameTick, tick_remote_body_yaw.in_set(TickSet::Animate));
         app.add_systems(Extract, extract_entity_draws.in_set(ExtractSet::Entities));
         // **`.after` is load-bearing, not tidiness.** `extract_entity_draws`
         // clears `ExtractedDraws`; without the ordering, bevy is free to run this
@@ -5401,6 +5530,103 @@ mod tests {
         let near_zero = d.head_yaw.rem_euclid(360.0);
         let dist = near_zero.min(360.0 - near_zero);
         assert!(dist < 5.0, "head yaw should pass through ~0°, was {}", d.head_yaw);
+    }
+
+    /// [`snap`] reports the same yaw for both `Rotation` and `HeadYaw`
+    /// (`head_yaw: yaw` in its own literal), which is exactly a mob's
+    /// spawn-time convention *and* a real player's wire convention every
+    /// tick (`ServerEntity.sendChanges` sends `getYRot()` and
+    /// `getYHeadRot()` — equal for a `Player`, since nothing ever moves the
+    /// latter independently). Only the `type_path` differs from [`snap`]'s
+    /// `"pig"`, which is what routes `tick_remote_body_yaw` at all — see
+    /// [`BodyYawState`]'s own doc for why a `"pig"` must never take this
+    /// path.
+    fn player_snap(id: i32, feet: Vec3, yaw: f32) -> IngestSnap {
+        IngestSnap {
+            type_path: "player".into(),
+            ..snap(id, feet, yaw)
+        }
+    }
+
+    #[test]
+    fn a_remote_players_body_lags_a_head_turn_instead_of_matching_it() {
+        // The discriminating input this bug needs: a **player**, standing
+        // still (`dx = dz = 0`, so `body_yaw_target`'s walking clause never
+        // fires), whose reported yaw turns 30° from where it spawned. 30° is
+        // comfortably *inside* vanilla's 50° `tickHeadTurn` drag threshold —
+        // an angle at or past the clamp would drag the body under either
+        // hypothesis and would prove nothing. Before `BodyYawState`/
+        // `tick_remote_body_yaw` existed, `resolve_entity_facts` fed the one
+        // wire number a player reports for both fields straight into
+        // `EntityFacts::yaw`, so this exact setup reported `d.yaw == 40.0`
+        // and `d.anim.head_yaw_deg == 0.0` — the "turns as one rigid block,
+        // head never moves" report this fixes.
+        let mut interp = EntityInterpolator::new();
+        player_snap(1, Vec3::ZERO, 10.0).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
+
+        // Same re-anchor idiom as `yaw_interpolates_along_the_shortest_arc_
+        // across_the_wrap` above: fold the changed snapshot at `dt = 0.0`
+        // (no `GameTick` runs, so this captures only the render re-anchor),
+        // then apply the identical value again and ease forward for real.
+        player_snap(1, Vec3::ZERO, 40.0).apply(interp.world_mut());
+        interp.update(0.0);
+        player_snap(1, Vec3::ZERO, 40.0).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
+
+        let d = &interp.draws()[0];
+        assert!(
+            (d.yaw - 10.0).abs() < 1.0e-3,
+            "a stationary player's body must not follow a head turn inside \
+             the 50° clamp, was {}",
+            d.yaw
+        );
+        assert!(
+            (d.head_yaw - 40.0).abs() < 1.0e-3,
+            "the head must still reach the newly reported yaw, was {}",
+            d.head_yaw
+        );
+        assert!(
+            (d.anim.head_yaw_deg - 30.0).abs() < 1.0e-3,
+            "the relative head yaw the rig actually poses from must carry \
+             the full 30° lead, was {}",
+            d.anim.head_yaw_deg
+        );
+    }
+
+    #[test]
+    fn a_stationary_players_body_yaw_is_dragged_to_within_the_clamp() {
+        // The other clause of `tick_head_turn` (ported once, at
+        // `crate::sim::step::tick_head_turn`, and reused here rather than
+        // re-implemented): standing still, a head turn *past* 50° must
+        // instantly drag the body to exactly 50° behind the head, not merely
+        // clamp the head's own rendered angle the way `clamp_head_to_body`'s
+        // 75° Mob-only safety net does. Read `BodyYawState` directly rather
+        // than through `EntityDraw`, so this test's prediction is not also
+        // coupled to `InterpFrom`/`InterpTo`'s separate, already-tested
+        // easing timing.
+        let mut interp = EntityInterpolator::new();
+        player_snap(1, Vec3::ZERO, 10.0).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
+
+        player_snap(1, Vec3::ZERO, 90.0).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
+
+        let entity = interp
+            .world()
+            .resource::<EntityIndex>()
+            .get(1)
+            .expect("the player's ingest entity must still be tracked");
+        let state = interp
+            .world()
+            .get::<BodyYawState>(entity)
+            .expect("a player must gain BodyYawState by its first GameTick");
+        assert!(
+            (state.yaw - 40.0).abs() < 1.0e-3,
+            "an 80° head turn must drag the body to exactly 50° behind the \
+             head (90° - 50° = 40°), was {}",
+            state.yaw
+        );
     }
 
     /// Drive a mob at a steady `v` blocks/tick for `ticks` server ticks, one
