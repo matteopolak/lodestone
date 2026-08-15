@@ -70,26 +70,40 @@
 //!   return value and the caller decides what to do with them). Also unmodelled:
 //!   creative-mode `Clone` is gated on the caller's `creative` flag, matching
 //!   `player.hasInfiniteMaterials()`.
-//! * **`Slot.mayPickup` is not modelled at all — every take in this module
-//!   succeeds unconditionally.** Vanilla's own use of it is per-slot, not
-//!   uniform: `ArmorSlot.mayPickup` refuses a take while the piece carries
-//!   `minecraft:prevent_armor_change` and the wearer is not creative
-//!   (`ArmorSlot.java`), and — the one this crate's own anvil economy already
-//!   half-relies on — `ItemCombinerMenu`'s result slot routes through
-//!   `AnvilMenu.mayPickup`: `(player.hasInfiniteMaterials() ||
-//!   player.experienceLevel >= this.cost.get()) && this.cost.get() > 0`
-//!   (`AnvilMenu.java`). `crate::server`'s `ContainerClicked` arm charges the
-//!   XP levels *after* `apply_container_clicked` has already let the take
-//!   happen (`PlayerExperience::take_levels` merely clamps at zero rather
-//!   than refusing), so today a survival player with no XP levels can take a
-//!   repaired/renamed item off an anvil for free — the charge silently costs
-//!   nothing they do not have, instead of vanilla's outright refusal that
-//!   leaves the item sitting in the result slot. Threading a real gate through
-//!   here needs an economy-aware `may_pickup(index, item) -> bool` hook (the
-//!   same shape [`ResultRecipe`] already is for the result), which is more
-//!   than this pass's connectivity-focused scope — filed rather than patched
-//!   in place, since `apply_container_clicked`'s own doc already discloses
-//!   this module is deliberately economy-free.
+//! * **`Slot.mayPickup` is modelled as a caller-supplied hook, [`MayPickup`],
+//!   threaded through [`do_click_with`] the same shape [`ResultRecipe`]
+//!   already is.** Vanilla's own use of it is per-slot, not uniform: every
+//!   slot but one defaults to `true` (`Slot.mayPickup`'s own base
+//!   implementation), and the one override that exists tree-wide is
+//!   `ItemCombinerMenu`'s result slot routing through `AnvilMenu.mayPickup`:
+//!   `(player.hasInfiniteMaterials() || player.experienceLevel >=
+//!   this.cost.get()) && this.cost.get() > 0` (`AnvilMenu.java`). A caller
+//!   with nothing to gate passes `None`, matching every slot's default; the
+//!   anvil economy in `crate::server` passes `Some` closing over the
+//!   player's current XP level and the anvil's live `cost`
+//!   (`crate::anvil::compute`'s own `cost` field, re-derived the same way
+//!   the result itself is, never stored). `ArmorSlot.mayPickup` (refuses a
+//!   take while the piece carries `minecraft:prevent_armor_change` and the
+//!   wearer is not creative, `ArmorSlot.java`) is a separate, smaller gap
+//!   this hook could also close but does not yet.
+//!
+//!   **Where the hook is actually checked, one per vanilla take path** (not
+//!   uniformly at one choke point, because vanilla itself does not check it
+//!   at one choke point): [`take_from`] (covers [`pickup`]'s two take
+//!   branches, `THROW`, and [`pickup_all`]'s per-target gather — vanilla's
+//!   `Slot.safeTake` → `tryRemove` → `mayPickup`), [`quick_move`] (checked
+//!   once, before the shift-click repeat loop begins — vanilla's own explicit
+//!   `if (!slot.mayPickup(player)) return;` ahead of `quickMoveStack`, *not*
+//!   re-checked inside the loop even though the anvil's own `onTake` resets
+//!   `cost` to `0` mid-loop), and [`swap`] (the two arms that take the
+//!   clicked slot's existing item — vanilla's `target.mayPickup(player)`).
+//!   [`pickup_all`]'s outer double-click trigger and its gather loop already
+//!   skip every [`SlotKind::Result`] unconditionally (a pre-existing,
+//!   over-conservative deviation from vanilla's own `target.mayPickup`-gated
+//!   loop — vanilla *can* gather a mayPickup-true result into a matching
+//!   cursor stack, this module never does), so the anvil result can never
+//!   leave through `PICKUP_ALL` regardless of the hook; left as is, since
+//!   loosening it is a separate, non-security-relevant change.
 //!
 //! # Dependencies
 //!
@@ -550,6 +564,22 @@ impl ClickState {
 /// [`crate::crafting::CraftingState`]'s.
 pub type ResultRecipe<'a> = &'a dyn Fn(&[Option<ItemStack>]) -> Option<ItemStack>;
 
+/// `Slot.mayPickup(player)` for menu index `index`, which holds `item` —
+/// whether the player may currently take from it at all. `None` means every
+/// slot defaults to `true` (vanilla's own `Slot.mayPickup` base
+/// implementation); a caller only ever needs `Some` for a menu with a real
+/// override, which today means the anvil's result slot
+/// (`AnvilMenu.mayPickup`). See [`take_from`], [`quick_move`] and [`swap`]
+/// for the three places this is actually checked, and this module's own doc
+/// for why it is three places rather than one.
+pub type MayPickup<'a> = &'a dyn Fn(usize, &ItemStack) -> bool;
+
+/// [`MayPickup`]'s default: every slot may be picked up from unless the
+/// caller supplied a hook that says otherwise.
+fn slot_may_pickup(index: usize, item: &ItemStack, hook: Option<MayPickup<'_>>) -> bool {
+    hook.map_or(true, |f| f(index, item))
+}
+
 /// Upper bound on [`quick_move`]'s repeat rounds — vanilla's `while` loop has none,
 /// relying on the grid draining. A malformed [`ResultRecipe`] that refilled the
 /// result without consuming anything would spin forever, and a server that hangs on
@@ -572,7 +602,7 @@ pub fn do_click(
     click: Click,
     creative: bool,
 ) -> Vec<ItemStack> {
-    do_click_with(layout, slots, state, click, creative, None)
+    do_click_with(layout, slots, state, click, creative, None, None)
 }
 
 /// [`do_click`], with the menu's own recipe corpus so the result slot is **live for
@@ -592,6 +622,7 @@ pub fn do_click_with(
     click: Click,
     creative: bool,
     recipe: Option<ResultRecipe<'_>>,
+    may_pickup: Option<MayPickup<'_>>,
 ) -> Vec<ItemStack> {
     let mut dropped = Vec::new();
     let index = usize::try_from(click.slot).ok();
@@ -626,7 +657,7 @@ pub fn do_click_with(
                     }
                 }
             } else if state.drag.status == 2 {
-                finish_drag(layout, slots, state, recipe);
+                finish_drag(layout, slots, state, recipe, may_pickup);
                 state.drag = Drag::default();
             } else {
                 state.drag = Drag::default();
@@ -652,16 +683,16 @@ pub fn do_click_with(
                 }
             } else if let Some(index) = index.filter(|i| *i < layout.len()) {
                 if click.click_type == 1 {
-                    quick_move(layout, slots, index, &mut dropped, recipe);
+                    quick_move(layout, slots, index, &mut dropped, recipe, may_pickup);
                 } else {
-                    pickup(layout, slots, state, index, primary, &mut dropped, recipe);
+                    pickup(layout, slots, state, index, primary, &mut dropped, recipe, may_pickup);
                 }
             }
         }
         // SWAP — a hotbar number key (`0..9`) or the off-hand key (`40`).
         2 if (0..9).contains(&click.button) || click.button == 40 => {
             if let Some(index) = index.filter(|i| *i < layout.len()) {
-                swap(layout, slots, index, click.button, &mut dropped, recipe);
+                swap(layout, slots, index, click.button, &mut dropped, recipe, may_pickup);
             }
         }
         // CLONE — creative middle-click.
@@ -704,7 +735,7 @@ pub fn do_click_with(
                 } else {
                     1
                 };
-                if let Some(mut taken) = take_from(layout, slots, index, amount, recipe) {
+                if let Some(mut taken) = take_from(layout, slots, index, amount, recipe, may_pickup) {
                     dropped.push(taken.clone());
                     while whole {
                         let refilled_same = slots[index]
@@ -713,7 +744,8 @@ pub fn do_click_with(
                         if !refilled_same {
                             break;
                         }
-                        let Some(next_taken) = take_from(layout, slots, index, amount, recipe)
+                        let Some(next_taken) =
+                            take_from(layout, slots, index, amount, recipe, may_pickup)
                         else {
                             break;
                         };
@@ -726,7 +758,7 @@ pub fn do_click_with(
         // PICKUP_ALL — double-click gather into the cursor.
         6 => {
             if let Some(index) = index.filter(|i| *i < layout.len()) {
-                pickup_all(layout, slots, state, index, click.button == 0, recipe);
+                pickup_all(layout, slots, state, index, click.button == 0, recipe, may_pickup);
             }
         }
         _ => {}
@@ -813,6 +845,7 @@ fn finish_drag(
     slots: &mut [Option<ItemStack>],
     state: &mut ClickState,
     recipe: Option<ResultRecipe<'_>>,
+    may_pickup: Option<MayPickup<'_>>,
 ) {
     if state.drag.slots.is_empty() {
         return;
@@ -826,7 +859,7 @@ fn finish_drag(
         let primary = state.drag.kind == 0;
         let mut dropped = Vec::new();
         state.drag = Drag::default();
-        pickup(layout, slots, state, index, primary, &mut dropped, recipe);
+        pickup(layout, slots, state, index, primary, &mut dropped, recipe, may_pickup);
         return;
     }
 
@@ -867,6 +900,7 @@ fn pickup(
     primary: bool,
     dropped: &mut Vec<ItemStack>,
     recipe: Option<ResultRecipe<'_>>,
+    may_pickup: Option<MayPickup<'_>>,
 ) {
     let clicked = slots[index].clone();
     let carried = state.carried.clone();
@@ -884,7 +918,7 @@ fn pickup(
             } else {
                 clicked.count.div_ceil(2)
             };
-            if let Some(taken) = take_from(layout, slots, index, amount, recipe) {
+            if let Some(taken) = take_from(layout, slots, index, amount, recipe, may_pickup) {
                 state.carried = Some(taken);
             }
         }
@@ -905,9 +939,14 @@ fn pickup(
                 // this is how a crafting result stacks onto a partial cursor.
                 let room = max_stack_size(&carried).saturating_sub(carried.count);
                 if room > 0 {
-                    if let Some(taken) =
-                        take_from(layout, slots, index, clicked.count.min(room), recipe)
-                    {
+                    if let Some(taken) = take_from(
+                        layout,
+                        slots,
+                        index,
+                        clicked.count.min(room),
+                        recipe,
+                        may_pickup,
+                    ) {
                         let mut grown = carried;
                         grown.count += taken.count;
                         state.carried = Some(grown);
@@ -960,14 +999,22 @@ fn safe_insert(
 /// **The result slot's take consumes the grid**, which the caller learns by the
 /// grid cells in `slots` having shrunk (`ResultSlot.onTake` →
 /// `CraftingContainer.removeItem`). Nothing else about a take is special.
+///
+/// Gated on [`MayPickup`] first, matching `Slot.safeTake` → `tryRemove` →
+/// `mayPickup` — a refused take returns `None` and touches nothing, exactly
+/// as if the slot had been empty.
 fn take_from(
     layout: &MenuLayout,
     slots: &mut [Option<ItemStack>],
     index: usize,
     amount: u32,
     recipe: Option<ResultRecipe<'_>>,
+    may_pickup: Option<MayPickup<'_>>,
 ) -> Option<ItemStack> {
     let existing = slots[index].clone()?;
+    if !slot_may_pickup(index, &existing, may_pickup) {
+        return None;
+    }
     let taken = amount.min(existing.count);
     if taken == 0 {
         return None;
@@ -1088,7 +1135,17 @@ fn quick_move(
     index: usize,
     dropped: &mut Vec<ItemStack>,
     recipe: Option<ResultRecipe<'_>>,
+    may_pickup: Option<MayPickup<'_>>,
 ) {
+    // `if (!slot.mayPickup(player)) return;` — checked once, against the
+    // slot's state *before* `quickMoveStack` runs at all, and not re-checked
+    // inside the repeat loop below even though a refilled anvil result resets
+    // `cost` mid-loop (`AnvilMenu.onTake`).
+    if let Some(item) = slots[index].clone() {
+        if !slot_may_pickup(index, &item, may_pickup) {
+            return;
+        }
+    }
     let is_result = layout.kind_of(index) == Some(SlotKind::Result);
     for _ in 0..QUICK_MOVE_ROUNDS {
         let Some(source) = slots[index].clone() else {
@@ -1206,6 +1263,7 @@ fn swap(
     button: i8,
     dropped: &mut Vec<ItemStack>,
     recipe: Option<ResultRecipe<'_>>,
+    may_pickup: Option<MayPickup<'_>>,
 ) {
     let native = if button == 40 {
         OFFHAND_NATIVE
@@ -1233,6 +1291,13 @@ fn swap(
     match (source, target) {
         (None, None) => {}
         (None, Some(target)) => {
+            // `target.mayPickup(player)` — a swap that would take the clicked
+            // slot's item out is refused, and refusing it here means nothing
+            // else in this arm runs: no swap at all, matching vanilla's own
+            // `if (target.mayPickup(player)) { ... }` with no `else`.
+            if !slot_may_pickup(index, &target, may_pickup) {
+                return;
+            }
             if layout.kind_of(index) == Some(SlotKind::Result) {
                 // A result can be swapped *out* but the take must consume the grid.
                 slots[index] = None;
@@ -1260,7 +1325,8 @@ fn swap(
             }
         }
         (Some(source), Some(target)) => {
-            if !layout.may_place(index, &source) {
+            // `target.mayPickup(player) && target.mayPlace(source)`.
+            if !layout.may_place(index, &source) || !slot_may_pickup(index, &target, may_pickup) {
                 return;
             }
             let cap = layout.max_stack_size(index, &source).min(max_stack_size(&source));
@@ -1292,6 +1358,7 @@ fn pickup_all(
     index: usize,
     forwards: bool,
     recipe: Option<ResultRecipe<'_>>,
+    may_pickup: Option<MayPickup<'_>>,
 ) {
     let Some(mut carried) = state.carried.clone() else {
         return;
@@ -1312,6 +1379,13 @@ fn pickup_all(
             if carried.count >= cap {
                 break;
             }
+            // Every `Result` slot is skipped here regardless of `may_pickup` —
+            // a pre-existing, over-conservative deviation from vanilla's own
+            // `target.mayPickup`-gated gather loop (vanilla *can* scoop a
+            // mayPickup-true result into a matching cursor stack; this
+            // module never does). Left as is: the anvil result can never
+            // leave through `PICKUP_ALL` either way, so there is nothing for
+            // the hook to additionally gate here today.
             if layout.kind_of(target) == Some(SlotKind::Result) {
                 continue;
             }
@@ -1324,7 +1398,9 @@ fn pickup_all(
                 continue;
             }
             let room = cap - carried.count;
-            if let Some(taken) = take_from(layout, slots, target, existing.count.min(room), recipe) {
+            if let Some(taken) =
+                take_from(layout, slots, target, existing.count.min(room), recipe, may_pickup)
+            {
                 carried.count += taken.count;
             }
         }
@@ -1601,6 +1677,7 @@ mod tests {
             click(0, 1, 4),
             false,
             Some(recipe),
+            None,
         );
 
         assert_eq!(
@@ -1659,6 +1736,114 @@ mod tests {
         assert_eq!(
             slots[hotbar].as_ref().map(|s| s.item.to_string()),
             Some("minecraft:cobblestone".into())
+        );
+    }
+
+    /// A refusing [`MayPickup`] hook against an [`MenuKind::ItemCombiner`]
+    /// result slot (the anvil shape) — issue #617: a 0-XP survival player must
+    /// not be able to take a costed anvil result at all, through any click
+    /// type that can reach a take. One assertion per click type, collected
+    /// rather than early-returning, so a fix that only closes one path cannot
+    /// hide behind the others still passing.
+    #[test]
+    fn a_refusing_may_pickup_hook_blocks_every_take_path_off_the_result_slot() {
+        let layout = MenuLayout::item_combiner(Station::Anvil);
+        let result_index = 2; // 2 input cells (0, 1), result at 2.
+        let refuse: MayPickup<'_> = &|_index, _item| false;
+
+        let mut failures = Vec::new();
+
+        // PICKUP (click_type 0), empty cursor: must not take.
+        {
+            let mut slots = vec![None; layout.len()];
+            slots[result_index] = Some(stack("minecraft:diamond_pickaxe", 1));
+            let mut state = ClickState::default();
+            do_click_with(&layout, &mut slots, &mut state, click(2, 0, 0), false, None, Some(refuse));
+            if slots[result_index].is_none() || state.carried.is_some() {
+                failures.push(format!(
+                    "PICKUP took the result: slot={:?} cursor={:?}",
+                    slots[result_index], state.carried
+                ));
+            }
+        }
+
+        // QUICK_MOVE (click_type 1, shift-click): must not move anything into
+        // the player tail, and the result must stay put.
+        {
+            let mut slots = vec![None; layout.len()];
+            slots[result_index] = Some(stack("minecraft:diamond_pickaxe", 1));
+            let mut state = ClickState::default();
+            do_click_with(&layout, &mut slots, &mut state, click(2, 0, 1), false, None, Some(refuse));
+            let tail_has_item = slots[(result_index + 1)..].iter().any(Option::is_some);
+            if slots[result_index].is_none() || tail_has_item {
+                failures.push(format!(
+                    "QUICK_MOVE took the result: slot={:?} tail_has_item={tail_has_item}",
+                    slots[result_index]
+                ));
+            }
+        }
+
+        // SWAP (click_type 2) against hotbar native 0, **empty**: the
+        // `(None, Some(target))` arm, gated on `target.mayPickup(player)`
+        // alone with no `may_place` involved (`may_place` on the result slot
+        // is unconditionally `false` and would refuse the swap on its own if
+        // the hotbar slot were occupied instead — this fixture must leave it
+        // empty, or the `may_pickup` gate specifically is never exercised).
+        {
+            let mut slots = vec![None; layout.len()];
+            slots[result_index] = Some(stack("minecraft:diamond_pickaxe", 1));
+            // Hotbar native 0 is the first menu slot after the 27+9 player tail's
+            // storage half — `item_combiner`'s own layout, storage then hotbar.
+            let hotbar_native_0 = layout.len() - 9;
+            let mut state = ClickState::default();
+            do_click_with(&layout, &mut slots, &mut state, click(2, 0, 2), false, None, Some(refuse));
+            if slots[result_index].as_ref().map(|s| s.item.to_string()) != Some("minecraft:diamond_pickaxe".to_owned())
+                || slots[hotbar_native_0].is_some()
+            {
+                failures.push(format!(
+                    "SWAP exchanged the result: result={:?} hotbar={:?}",
+                    slots[result_index], slots[hotbar_native_0]
+                ));
+            }
+        }
+
+        // THROW (click_type 4), Q (one) and ctrl-Q (whole stack): must drop nothing.
+        for button in [0i8, 1] {
+            let mut slots = vec![None; layout.len()];
+            slots[result_index] = Some(stack("minecraft:diamond_pickaxe", 1));
+            let mut state = ClickState::default();
+            let dropped =
+                do_click_with(&layout, &mut slots, &mut state, click(2, button, 4), false, None, Some(refuse));
+            if !dropped.is_empty() || slots[result_index].is_none() {
+                failures.push(format!(
+                    "THROW (button {button}) dropped the result: dropped={dropped:?} slot={:?}",
+                    slots[result_index]
+                ));
+            }
+        }
+
+        assert!(failures.is_empty(), "a refused take path leaked: {failures:#?}");
+    }
+
+    /// The companion control for the test above: the same hook, returning
+    /// `true`, must let an ordinary PICKUP through — proving the refusal above
+    /// is the hook actually firing, not `do_click_with` silently no-opping
+    /// every anvil-shaped click regardless of what the hook says.
+    #[test]
+    fn a_permitting_may_pickup_hook_allows_the_take() {
+        let layout = MenuLayout::item_combiner(Station::Anvil);
+        let result_index = 2;
+        let allow: MayPickup<'_> = &|_index, _item| true;
+
+        let mut slots = vec![None; layout.len()];
+        slots[result_index] = Some(stack("minecraft:diamond_pickaxe", 1));
+        let mut state = ClickState::default();
+        do_click_with(&layout, &mut slots, &mut state, click(2, 0, 0), false, None, Some(allow));
+
+        assert_eq!(slots[result_index], None, "a permitted PICKUP must take the result");
+        assert_eq!(
+            state.carried.as_ref().map(|s| s.item.to_string()),
+            Some("minecraft:diamond_pickaxe".to_owned())
         );
     }
 }
