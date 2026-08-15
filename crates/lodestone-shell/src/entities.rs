@@ -618,7 +618,12 @@ pub struct EntityDraw {
     /// id stands in for it.
     pub id: i32,
     /// The entity type's canonical path (e.g. `"pig"`).
-    pub type_path: String,
+    ///
+    /// `Arc<str>`, not `String` (issue #523) — cloned from [`RenderKind`] once
+    /// per tracked entity per frame in `extract_entity_draws`; see that
+    /// component's doc for why a refcount bump replaced a heap allocation
+    /// here.
+    pub type_path: Arc<str>,
     /// For a dropped item ([`ITEM_ENTITY_TYPE_PATH`]), which item's model to
     /// draw. `None` for every other entity type, and also for an item entity
     /// whose stack has not been reported — see
@@ -990,8 +995,16 @@ impl EntityDraw {
 /// larger change nothing here requires — `RenderKind` still exists
 /// specifically so this module needs no `ResourceKey`-shaped lookup on every
 /// extract.
+///
+/// `Arc<str>` rather than `String` (issue #523): `extract_entity_draws` reads
+/// this component into a fresh `EntityDraw` every rendered frame for every
+/// tracked entity, and a `String` clone there was a per-frame heap allocation
+/// plus byte copy for a value that only actually changes on a rare
+/// `update_track` fold. `Arc::clone` is a refcount bump; the allocation now
+/// happens once, in `spawn_track`/`update_track`, not once per frame per
+/// entity.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
-pub struct RenderKind(pub String);
+pub struct RenderKind(pub Arc<str>);
 
 /// Uniform render scale (baby mobs are drawn smaller).
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
@@ -1558,7 +1571,7 @@ pub fn extract_pickup_draws(
         let feet = pickup.start.lerp(target, pickup_progress(pickup.life, partial_tick));
         out.0.push(EntityDraw {
             id: pickup.item_entity_id,
-            type_path: ITEM_ENTITY_TYPE_PATH.to_string(),
+            type_path: Arc::from(ITEM_ENTITY_TYPE_PATH),
             item: Some(pickup.item.clone()),
             count: pickup.count,
             foil: pickup.foil,
@@ -2261,7 +2274,7 @@ pub fn extract_entity_draws(
         // One lookup, not two: `item` and `count` both come from the same
         // recorded stack, and a drop with no stack yet must not manufacture a
         // count out of nowhere.
-        let stack = (kind.0 == ITEM_ENTITY_TYPE_PATH)
+        let stack = (kind.0.as_ref() == ITEM_ENTITY_TYPE_PATH)
             .then(|| stacks.0.get(&id.0))
             .flatten();
         // `0.0` for an id with no ingest entity (shouldn't happen — a render
@@ -2396,7 +2409,7 @@ pub fn extract_entity_draws(
         // adapter withholds index 8's `INT` for those — which is the switch
         // `prepare_orbs` keys on. An orb whose value has not arrived yet is still
         // drawn, at sprite cell 0; see `EntityDraw::experience_orb_value`.
-        let experience_orb_value = if kind.0 == EXPERIENCE_ORB_TYPE_PATH {
+        let experience_orb_value = if kind.0.as_ref() == EXPERIENCE_ORB_TYPE_PATH {
             Some(
                 index
                     .get(id.0)
@@ -2430,7 +2443,7 @@ pub fn extract_entity_draws(
         );
         out.0.push(EntityDraw {
             id: id.0,
-            type_path: kind.0.clone(),
+            type_path: Arc::clone(&kind.0),
             variant_sheet,
             item: stack.map(|s| s.id.clone()),
             count: stack.map_or(1, |s| s.count),
@@ -3039,7 +3052,7 @@ fn spawn_track(world: &mut World, snap: &EntityFacts) {
     let is_creeper = snap.type_path == "creeper";
     let mut entity = world.spawn((
         MinecraftEntityId(snap.id),
-        RenderKind(snap.type_path.clone()),
+        RenderKind(Arc::from(snap.type_path.as_str())),
         RenderScale(snap.scale),
         InterpFrom {
             feet: snap.feet,
@@ -3095,7 +3108,13 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
     let is_item = snap.type_path == ITEM_ENTITY_TYPE_PATH;
 
     if let Some(mut kind) = entity.get_mut::<RenderKind>() {
-        kind.0.clone_from(&snap.type_path);
+        // `Arc<str>` has no `clone_from`-style in-place reuse the way `String`
+        // did, and a reported type essentially never changes update to
+        // update — so skip the allocation (and the `Mut` write, avoiding
+        // needless Bevy change-detection churn) entirely when it has not.
+        if kind.0.as_ref() != snap.type_path.as_str() {
+            kind.0 = Arc::from(snap.type_path.as_str());
+        }
     }
     if let Some(mut scale) = entity.get_mut::<RenderScale>() {
         scale.0 = snap.scale;
@@ -4266,7 +4285,7 @@ mod tests {
         fn draw_with_skin(skin: Option<crate::remote_skins::RemoteSkin>) -> EntityDraw {
             EntityDraw {
                 id: 1,
-                type_path: "player".to_owned(),
+                type_path: std::sync::Arc::from("player"),
                 variant_sheet: None,
                 item: None,
                 equipment: Vec::new(),
@@ -6074,7 +6093,7 @@ mod tests {
         interp.update(0.016);
         let draws = interp.draws();
         assert_eq!(draws.len(), 1, "an item entity must still be tracked");
-        assert_eq!(draws[0].type_path, ITEM_ENTITY_TYPE_PATH);
+        assert_eq!(draws[0].type_path.as_ref(), ITEM_ENTITY_TYPE_PATH);
         assert_eq!(draws[0].item, None);
         assert_eq!(draws[0].id, 9);
     }
@@ -6557,7 +6576,7 @@ mod tests {
         let draws = interp.draws();
         let flying: Vec<&EntityDraw> = draws
             .iter()
-            .filter(|d| d.type_path == ITEM_ENTITY_TYPE_PATH)
+            .filter(|d| d.type_path.as_ref() == ITEM_ENTITY_TYPE_PATH)
             .collect();
         assert_eq!(
             flying.len(),
@@ -6619,7 +6638,7 @@ mod tests {
             !interp
                 .draws()
                 .iter()
-                .any(|d| d.type_path == ITEM_ENTITY_TYPE_PATH),
+                .any(|d| d.type_path.as_ref() == ITEM_ENTITY_TYPE_PATH),
             "the control must draw no item at all — otherwise the positive gate is \
              measuring an unpruned track, not an animation"
         );
@@ -6654,7 +6673,7 @@ mod tests {
                 interp
                     .draws()
                     .iter()
-                    .filter(|d| d.type_path == ITEM_ENTITY_TYPE_PATH)
+                    .filter(|d| d.type_path.as_ref() == ITEM_ENTITY_TYPE_PATH)
                     .count(),
             );
         }
@@ -6710,7 +6729,7 @@ mod tests {
             !interp
                 .draws()
                 .iter()
-                .any(|d| d.type_path == ITEM_ENTITY_TYPE_PATH),
+                .any(|d| d.type_path.as_ref() == ITEM_ENTITY_TYPE_PATH),
             "an unresolvable collector must draw nothing rather than aim at the origin"
         );
         for _ in 0..3 {

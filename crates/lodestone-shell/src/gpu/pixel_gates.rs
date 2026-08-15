@@ -643,7 +643,7 @@ fn entity_renders_to_pixels_through_shell_path() {
         EntityDraw {
             hurt: false,
             id: 1,
-            type_path: "pig".to_owned(),
+            type_path: std::sync::Arc::from("pig"),
             item: None,
             feet: pig_feet,
             yaw: 0.0,
@@ -685,7 +685,7 @@ fn entity_renders_to_pixels_through_shell_path() {
         EntityDraw {
             hurt: false,
             id: 2,
-            type_path: "pig".to_owned(),
+            type_path: std::sync::Arc::from("pig"),
             item: None,
             feet: glam::Vec3::new(0.0, 0.0, -12.0),
             yaw: 0.0,
@@ -880,7 +880,7 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
     let draws = vec![EntityDraw {
         hurt: false,
         id: 1,
-        type_path: "zombie".to_owned(),
+        type_path: std::sync::Arc::from("zombie"),
         item: None,
         feet: glam::Vec3::new(0.0, 0.0, 3.0),
         yaw: 0.0,
@@ -1456,7 +1456,7 @@ fn run_eviction_gate(evict: bool) {
 fn orb_draw(value: i32) -> EntityDraw {
     EntityDraw {
         id: 1,
-        type_path: crate::entities::EXPERIENCE_ORB_TYPE_PATH.to_owned(),
+        type_path: std::sync::Arc::from(crate::entities::EXPERIENCE_ORB_TYPE_PATH),
         item: None,
         // Above the eye and dead ahead of a yaw-0 camera, so the sprite lands in
         // the upper middle of the frame — clear of the first-person arm, which is

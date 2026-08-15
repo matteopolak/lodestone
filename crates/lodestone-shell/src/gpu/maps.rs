@@ -205,7 +205,7 @@ impl RenderState {
         let frustum = camera.frustum();
         let mut combined = ModelMesh::default();
         for draw in entities {
-            if !ITEM_FRAME_TYPES.contains(&draw.type_path.as_str()) {
+            if !ITEM_FRAME_TYPES.contains(&draw.type_path.as_ref()) {
                 continue;
             }
             if draw.item.as_ref().is_none_or(|id| id.path() != FILLED_MAP_ITEM) {

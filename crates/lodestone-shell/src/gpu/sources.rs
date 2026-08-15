@@ -281,7 +281,7 @@ impl ThirdPersonBodyState {
             // this body over, which is also what vanilla does in first person.
             death_time: 0.0,
             id: LOCAL_PLAYER_DRAW_ID,
-            type_path: player_model_name(self.slim).to_string(),
+            type_path: std::sync::Arc::from(player_model_name(self.slim)),
             item: None,
             equipment: self.equipment,
             // The local player's own dye colours are not plumbed to

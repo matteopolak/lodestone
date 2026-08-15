@@ -108,7 +108,7 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         hurt: false,
         block_state: None,
         id: DROP_ID,
-        type_path: ITEM_ENTITY_TYPE_PATH.to_owned(),
+        type_path: std::sync::Arc::from(ITEM_ENTITY_TYPE_PATH),
         item,
         feet: DROP_POS,
         yaw: 0.0,
@@ -466,7 +466,7 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         hurt: false,
         block_state: None,
         id: DROP_ID + 1,
-        type_path: type_path.to_owned(),
+        type_path: std::sync::Arc::from(type_path),
         // Exactly what `extract_entity_draws` produces for a non-`item` entity.
         item: None,
         feet: DROP_POS,

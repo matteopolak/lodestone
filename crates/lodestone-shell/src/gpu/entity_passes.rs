@@ -24,6 +24,7 @@
 //! [`super::frame`] to submit; see that module on why they all run before the
 //! render pass opens.
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use lodestone_assets::DisplaySlot;
 use lodestone_assets::entity_models::sheep_wool_tint;
@@ -615,7 +616,7 @@ impl RenderState {
             // Issue #573: the swim body-pitch rotation. Gated on `type_path`,
             // not on `swim_amount > 0.0` alone — see `apply_swim_rotation`'s
             // own doc for why only the player is ported.
-            if e.type_path == "player" {
+            if e.type_path.as_ref() == "player" {
                 apply_swim_rotation(&mut instance, e.feet, e.yaw, e.death_time, e.pitch, e.swim_amount);
             }
             // `ArmorStandModel.setupAnim`'s `leftArm.visible = state.showArms`
@@ -967,7 +968,7 @@ impl RenderState {
             if !draw.on_fire {
                 continue;
             }
-            if !self.entities.flame_gpu_models.contains_key(&draw.type_path) {
+            if !self.entities.flame_gpu_models.contains_key(draw.type_path.as_ref()) {
                 continue;
             }
             // The entity's **own** hitbox width, which is vanilla's
@@ -1000,7 +1001,7 @@ impl RenderState {
                 camera.yaw,
                 bb_width,
             );
-            accum.entry(draw.type_path.clone()).or_default().push(transform);
+            accum.entry(draw.type_path.to_string()).or_default().push(transform);
             stats.flame_billboards_drawn += 1;
         }
 
@@ -1307,7 +1308,7 @@ impl RenderState {
             }
             let light = entity_light(&self.entity_light, draw);
 
-            if draw.type_path == crate::entities::ITEM_ENTITY_TYPE_PATH {
+            if draw.type_path.as_ref() == crate::entities::ITEM_ENTITY_TYPE_PATH {
                 if let Some(instance) = self.dropped_special_item(model, draw, light) {
                     out.push(instance);
                     stats.special_item_drops_drawn += 1;
@@ -1315,7 +1316,7 @@ impl RenderState {
                 // A dropped item carries no equipment; skip the hand scan.
                 continue;
             }
-            if super::maps::ITEM_FRAME_TYPES.contains(&draw.type_path.as_str()) {
+            if super::maps::ITEM_FRAME_TYPES.contains(&draw.type_path.as_ref()) {
                 if let Some(instance) = self.framed_special_item(model, draw, light) {
                     out.push(instance);
                     stats.special_item_frames_drawn += 1;
@@ -1778,7 +1779,7 @@ mod tests {
     fn subject(type_path: &str, feet_y: f32, scale: f32, on_fire: bool) -> EntityDraw {
         EntityDraw {
             id: 1,
-            type_path: type_path.to_owned(),
+            type_path: Arc::from(type_path),
             item: None,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),
