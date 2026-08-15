@@ -330,13 +330,9 @@ impl HurtDirection {
     /// The tilt direction for a hit whose source has a position — vanilla's
     /// formula above, given the victim's position and yaw in degrees.
     ///
-    /// **No production caller yet, and the reason is above**: nothing in this
-    /// crate damages a player from a knockback-generating source, because nothing
-    /// lets a mob's melee reach the player's [`PlayerVitals`] at all
-    /// ([`PlayerVitals::apply_damage`], the melee entry point, has test callers
-    /// only). This exists so that the site which lands that wiring has the formula
-    /// already read off the record and gated, rather than re-deriving an `atan2`
-    /// argument order from a constructor.
+    /// Its production caller is `crate::server::serve_play`'s `vitals_tick`
+    /// arm (issue #625), fed from `crate::mobs::MobSim::take_player_hits`'
+    /// `attacker_pos`.
     #[must_use]
     pub fn from_source(
         source: lodestone_model::Vec3,
@@ -626,26 +622,19 @@ impl PlayerVitals {
     /// effect" from "not alive to hit" only by checking [`health`](Self::health)
     /// separately if it needs to.
     ///
-    /// # Status: a real, tested entry point with **no production caller yet**
+    /// # Status: wired (issue #625)
     ///
-    /// This closes the gap `lodestone_entity::damage`'s own module doc names
+    /// This closed the gap `lodestone_entity::damage`'s own module doc named
     /// ("`PlayerVitals` only has `tick` (drowning) and `apply_fall_damage` —
-    /// no generic melee/mob-damage entry point"), but it does not by itself
-    /// make a mob attack the player: no AI in this workspace gives a hostile
-    /// [`crate::SimMob`] the connected player's position as an
-    /// [`attack_target`](crate::SimMob::set_attack_target) at all —
-    /// `crate::mobs`'s own module doc already scopes real player-targeting
-    /// AI (`NearestAttackableTargetGoal`'s population search) as a separate,
-    /// larger feature, and the server's unified tick loop
-    /// (`crate::tick::run_tick_loop`, issue #284) has no player-position feed
-    /// into the sim to begin with (`MobSim::despawn_pass`'s own "no despawn
-    /// pass" scope note names the identical missing input). Wiring that is a
-    /// materially larger change than this task's "reach a live mob's health
-    /// from a connection" scope — disclosed here rather than silently
-    /// left unfindable, matching this project's convention for a real,
-    /// unit-tested piece with a documented reason nothing calls it yet
-    /// (the same shape `ViewBob::hurt`/`camera_rig.rs`'s `bobHurt` is
-    /// tracked in, per `docs/combat.md`).
+    /// no generic melee/mob-damage entry point") when it landed, but stayed
+    /// unreachable from a hostile mob for a while longer: the goal seam
+    /// (`NearestAttackableTargetGoal`/`MeleeAttackGoal`) carries only a bare
+    /// `Vec3` target, never a player identity, so nothing could say *which*
+    /// player a connected attack belonged to. `crate::mobs::MobSim` now
+    /// resolves that by matching the attack's target position against its
+    /// own fed player list (see `crate::mobs::PlayerHit`'s doc comment) and
+    /// hands the result to `crate::server::serve_play`'s `vitals_tick` arm,
+    /// which is this function's real production caller.
     pub fn apply_damage(
         &mut self,
         raw_damage: f32,

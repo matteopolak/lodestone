@@ -2005,6 +2005,14 @@ pub struct MobSim<'w> {
     /// `Below` is one down. Storing the mob's cell keeps the arithmetic with the
     /// consumer that knows what each variant means.
     pending_grazes: Vec<(BlockPos, EatenBlock)>,
+    /// Players struck by a hostile mob's melee attack this tick, awaiting the
+    /// driver's `PlayerVitals::apply_damage` call (issue #625) — the same
+    /// handoff shape as [`pending_detonations`](Self::pending_detonations)
+    /// above and for the same reason: this sim owns no connection and cannot
+    /// reach a player's authoritative health itself. Drained by
+    /// [`take_player_hits`](Self::take_player_hits). See [`PlayerHit`]'s own
+    /// doc comment for how a target position resolves to a player identity.
+    pending_player_hits: Vec<PlayerHit>,
     /// Hurt and death sounds awaiting the driver (issue #530), the same handoff
     /// shape as the two above and for the same reason: this sim owns no
     /// connection. Drained by [`take_vocalisations`](Self::take_vocalisations).
@@ -2330,6 +2338,36 @@ pub struct Detonation {
     pub radius: f32,
 }
 
+/// One player struck by a hostile mob's melee attack this tick, for
+/// [`take_player_hits`](MobSim::take_player_hits) to hand a driver.
+///
+/// `SimMob::attack_target_id` names only "another live `SimMob`" by its own
+/// doc comment, so it structurally cannot carry a player: the goal seam
+/// (`NearestAttackableTargetGoal`/`MeleeAttackGoal`) targets and attacks a
+/// bare `Vec3`, never an identity. This is resolved by matching that target
+/// position against `self.players`' [`feed_perception`]-fed positions in the
+/// same tick's [`tick`](MobSim::tick) — safe because nothing mutates a
+/// player's fed position between the feed at the top of the tick and the
+/// goal ticks that consume it. A grudge-target attack (the anger-gated
+/// `NearestAttackableTargetGoal` row) can miss this match: its target is a
+/// position remembered from whenever the grudge was set, not refreshed to
+/// the player's current position, so a moved player will not match. That is
+/// a disclosed gap, not a silent one — ordinary hostile-melee (zombie,
+/// skeleton, …) always targets the live `nearest_player` feed and matches
+/// every time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerHit {
+    /// Who was hit.
+    pub identity: PlayerIdentity,
+    /// Raw `ATTACK_DAMAGE`, unreduced — the driver runs it through the real
+    /// armour/i-frame pipeline via `PlayerVitals::apply_damage`, the same
+    /// split [`SimMob::apply_damage`] draws for a mob victim.
+    pub raw_damage: f32,
+    /// The attacking mob's position, for the driver's hurt-direction/knockback
+    /// calculation (`crate::vitals::HurtDirection::from_source`).
+    pub attacker_pos: Vec3,
+}
+
 /// One projectile-vs-block impact [`MobSim::resolve_projectile_impacts`] found
 /// (issue #322), for [`take_projectile_block_hits`](MobSim::take_projectile_block_hits)
 /// to hand a driver — the same handoff shape as
@@ -2390,6 +2428,7 @@ impl<'w> MobSim<'w> {
             item_probe_count: 0,
             pending_detonations: Vec::new(),
             pending_grazes: Vec::new(),
+            pending_player_hits: Vec::new(),
             pending_vocalisations: Vec::new(),
             pending_animations: Vec::new(),
             players: Vec::new(),
@@ -3109,7 +3148,12 @@ impl<'w> MobSim<'w> {
         }
         self.feed_perception();
 
-        let mut hits: Vec<(Option<i32>, f32, Vec3)> = Vec::new();
+        // Issue #625: the third element used to be discarded entirely — only
+        // `take_new_attacks().is_empty()` was read, so the actual attacked
+        // position (needed to resolve *which* player, if any, was on the
+        // receiving end) never left this loop. See `PlayerHit`'s own doc
+        // comment for what the resolution pass below does with it.
+        let mut hits: Vec<(Option<i32>, Vec3, f32, Vec3)> = Vec::new();
         let mut detonations: Vec<(i32, Vec3)> = Vec::new();
         let mut bred: Vec<(i32, Vec3, ResourceKey)> = Vec::new();
         // Issue #456: accumulated into a local and moved into
@@ -3126,7 +3170,7 @@ impl<'w> MobSim<'w> {
             // of whether the mob was hit this tick.
             m.hurt_cooldown.tick();
             m.mob.tick(&mut m.goals);
-            if !m.mob.take_new_attacks().is_empty() {
+            for target_pos in m.mob.take_new_attacks() {
                 // Carry the attacker's own position too, so the victim can
                 // retaliate: vanilla's `hurt` sets `lastHurtByMob` from the
                 // damage source's attacker (`LivingEntity.java:1358`), which is
@@ -3134,7 +3178,7 @@ impl<'w> MobSim<'w> {
                 // `(target, damage)` only, so a mob struck by another mob had
                 // no way to learn who hit it and `HurtByTargetGoal` could never
                 // fire even once the perception seam existed.
-                hits.push((m.attack_target_id, m.attack_damage, m.position()));
+                hits.push((m.attack_target_id, target_pos, m.attack_damage, m.position()));
             }
             if m.mob.take_detonated() {
                 detonations.push((m.id, m.position()));
@@ -3178,13 +3222,36 @@ impl<'w> MobSim<'w> {
                 .expect("static projectile key");
             self.spawn_projectile_from(key, projectile, Some(shooter));
         }
-        for (target_id, raw_damage, attacker_pos) in hits {
+        for (target_id, target_pos, raw_damage, attacker_pos) in hits {
             if let Some(target_id) = target_id
                 && let Some(target) = self.mobs.iter_mut().find(|m| m.id == target_id)
             {
                 let applied = target.apply_damage(raw_damage, DamageFlags::default());
                 target.mob.note_hurt(Some(attacker_pos));
                 self.note_vocalisation(target_id, applied);
+                continue;
+            }
+            // Issue #625: `attack_target_id` names only another `SimMob`
+            // (see `PlayerHit`'s own doc comment), which is why every
+            // hostile-melee attack against a player fell on the floor here
+            // before this arm existed — `target_id` is `None` for the
+            // `NearestAttackableTargetGoal`/`MeleeAttackGoal` path that
+            // targets `nearest_player`, and nothing resolved `target_pos`
+            // against anything. Matched by position rather than by id
+            // because the goal seam carries no player identity at all — see
+            // `PlayerHit`'s doc comment for the exact-match reasoning and its
+            // one disclosed miss (a stale grudge target).
+            if let Some(identity) = self
+                .players
+                .iter()
+                .find(|p| dist_sqr(p.perception.position, target_pos) < 1e-6)
+                .and_then(|p| p.identity)
+            {
+                self.pending_player_hits.push(PlayerHit {
+                    identity,
+                    raw_damage,
+                    attacker_pos,
+                });
             }
         }
         // Issue #458, primitive 4: self-inflicted damage — the bee's sting
@@ -4415,6 +4482,19 @@ impl<'w> MobSim<'w> {
     /// is entity metadata on the wire.
     pub fn take_grazes(&mut self) -> Vec<(BlockPos, EatenBlock)> {
         std::mem::take(&mut self.pending_grazes)
+    }
+
+    /// Drains every player hit by a hostile mob's melee attack since the last
+    /// call (issue #625) — the player-facing twin of
+    /// [`take_detonations`](Self::take_detonations)'s handoff shape, for the
+    /// identical reason: this sim owns no connection, so the driver
+    /// (`crate::server::serve_play`'s `vitals_tick` arm) is what turns each
+    /// entry into a real `PlayerVitals::apply_damage` call and a `SET_HEALTH`/
+    /// hurt-animation packet. See [`PlayerHit`]'s own doc comment for how a
+    /// target position resolves to an identity, and its disclosed gap for a
+    /// grudge target.
+    pub fn take_player_hits(&mut self) -> Vec<PlayerHit> {
+        std::mem::take(&mut self.pending_player_hits)
     }
 
     /// Drains every fire-ignition attempt a live lightning bolt made this
