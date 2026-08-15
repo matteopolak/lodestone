@@ -3,6 +3,18 @@ xtask = "run --quiet --package xtask --"
 
 [build]
 rustc-wrapper = "/opt/homebrew/bin/sccache"
+# Parallel front-end (`-Z threads=N`), nightly-only. Measured 2026-08-15 in two isolated,
+# contention-free `CARGO_TARGET_DIR` builds of lodestone-ecs (bevy_ecs's derive-macro-heavy
+# dependency chain): threads=1 real 50.84s / user 43.73s, threads=8 real 43.27s / user 45.80s --
+# ~15% less wall time for a few percent more total CPU, which is the expected shape (this
+# parallelises type-checking/MIR building within one crate; it does not touch codegen, so it
+# is a different lever from cargo's own cross-crate parallelism and from codegen-units).
+# 8 rather than this machine's 10 cores on purpose, leaving headroom for cargo's own
+# cross-crate scheduling to keep other cores busy on a workspace build.
+# NOTE: `RUSTFLAGS` set in the environment overrides `build.rustflags` here entirely rather
+# than merging with it -- a one-off `RUSTFLAGS=...` invocation (e.g. testing a codegen
+# backend) silently drops this. See docs/compile-times.md.
+rustflags = ["-Z", "threads=8"]
 
 [env]
 SCCACHE_CACHE_SIZE = "10G"
