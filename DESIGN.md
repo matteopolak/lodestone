@@ -8828,3 +8828,51 @@ loop claims it, and the published partial tick is **0.0**. The first draft chain
 interpolator and the third reported `4.0` where 4.5 was predicted — which would have silently turned the arm
 that discriminates vanilla's `deathTime > 0 ? deathTime + partialTicks : 0.0F` from the bare sum back into a
 coincident one. A gate that needs a non-zero partial tick must not step the same clock twice.
+
+**12.172 A disclosed simplification was the whole "mobs move way too fast" report, and a live measurement
+already on file said so before anyone read it that way.** `docs/mob-species-spawning.md` said outright:
+`movement_speed` is read directly as blocks/tick, "not vanilla's real UI-speed-to-motion conversion" — an
+honest, deliberate cut, not a bug filed against anything. It was still the bug. Vanilla's `MoveControl.tick()`
+calls `Mob.setSpeed(speedModifier * movement_speed)`, and `Mob.setSpeed` sets **both** the per-tick speed
+scale `moveRelative` multiplies by **and**, via `setZza`, the forward-input vector's own magnitude —
+`Entity.getInputVector` only normalizes an input longer than `1.0`, which a `speedModifier * movement_speed`
+value (0.2–0.5, typically) never is. So the two multiply: the thrust actually added to a mob's velocity each
+tick is the **square** of the requested speed, not the value itself, and that thrust converges against a
+per-tick friction decay (default ground `0.6 * 0.91 = 0.546`) to a steady speed of `requested² / (1 -
+0.546)`.
+
+This was checkable against a measurement already sitting in this file: §-adjacent "Live AI divergence"
+recorded a real zombie (`movement_speed 0.23`) chasing a stationary villager over open ground at a measured
+mean **≈0.118 blocks/tick** over 68 ticks, filed at the time as "≈half [the attribute], after per-tick
+acceleration and friction" with no further derivation. `0.23² / (1 - 0.6*0.91) ≈ 0.1165` — inside that
+measurement's own timing noise (the harness sleeps a fixed 60ms per `tick sprint 4` rather than confirming
+all four ticks landed). The bare attribute (`0.23`) the code was actually using is very nearly **double**
+either number — the direction and rough magnitude of "mobs move way too fast, at least pig and sheep but
+probably all of them."
+
+Fixed in `crates/lodestone-server/src/mobs/mod.rs`: a new `ai_ground_speed(requested_speed)` implements the
+squared-thrust/friction conversion and is what `MobSim::spawn_species` and `SimMob::set_age` now feed the
+kinematic follower's `step_per_tick`, in place of the bare attribute. `SpeciesContext` (and every roster
+goal's own `speedModifier` — panic, tempt, breed, follow) still receives the **un**converted attribute,
+matching vanilla's own composition order (`speedModifier * movement_speed` happens before `MoveControl`
+squares the result), so a goal's relative speed boost still compounds correctly through the new conversion
+rather than being flattened by it. Every production spawn path (`spawn_species`, `run_spawn_cycle`,
+`seed_demo_mobs`, patrol/wandering-trader/breeding spawns) already funneled through `spawn_species`, so this
+one change point is a real choke point, not a partial fix — confirmed by grep, not assumed.
+
+The reported "phases into the ground going down a block" half of the same report turned out to be **already
+fixed**, the day before, by `fix(entity): bound the kinematic follower's vertical motion per tick`
+(`NavigatingMob::step_vertical`): it integrates a drop under vanilla's real gravity/drag constants instead of
+snapping straight to the landing height, for *any* downward waypoint delta, not a size-gated special case —
+so a one-block ledge step and a longer fall share the same code path and both were already covered. Its own
+test corpus predicts exact values from an independently re-derived loop (not a call into the function under
+test) and carries a neuter (`removing_the_step_bound_reproduces_the_glide_bug`) proving the bound is
+load-bearing. Nothing further was needed there; this entry exists so the next reader does not re-diagnose a
+symptom that was already closed, exactly the staleness trap this file's own evidence section warns about.
+
+A neuter for the speed fix: forcing `ai_ground_speed` to return its input unchanged reproduces the pre-fix
+number exactly (a pig's `0.25` attribute stays `0.25` instead of converting to `≈0.138`), which is the
+control `removing_the_ground_speed_conversion_reproduces_the_too_fast_bug` pins. `cargo test -p
+lodestone-server --lib --no-fail-fast -- --test-threads=2`: 1426 passed, 0 failed at this change (no other
+test in the corpus hardcoded a raw-attribute step_per_tick value, so nothing else needed updating besides the
+one test that asserted the exact zombie/cow numbers by name).

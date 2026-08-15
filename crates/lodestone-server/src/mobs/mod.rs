@@ -234,6 +234,34 @@ fn attr_present(attrs: &AttributeMap, path: &str) -> Option<f64> {
         .map(lodestone_entity::attribute::AttributeInstance::value)
 }
 
+/// The per-tick velocity decay a grounded mob's horizontal motion is
+/// subjected to on ordinary, unmodified-friction terrain: standard block
+/// friction combined with the constant air-drag factor every entity carries
+/// regardless of the block underfoot. See `docs/mob-species-spawning.md` for
+/// the exact vanilla methods this reproduces.
+const AI_GROUND_FRICTION: f64 = 0.6 * 0.91;
+
+/// Converts a requested ground speed — a goal's `speedModifier` multiplied
+/// onto the mob's `movement_speed` attribute, the unit every roster goal in
+/// this crate already hands to [`NavigatingMob`](lodestone_entity::ai::navigating_mob::NavigatingMob)'s
+/// `move_to` — into the sustained blocks-per-tick rate an AI-driven mob
+/// actually converges on.
+///
+/// Vanilla's AI movement controller does not drive a mob at full input
+/// magnitude the way a player's WASD does: the forward input it feeds into
+/// the entity's own travel step is numerically the *same* value as the
+/// per-tick speed scale applied to that input, so the two multiply — the
+/// per-tick thrust actually added to the mob's velocity is the *square* of
+/// the requested speed, not the value itself. That thrust then accumulates
+/// against [`AI_GROUND_FRICTION`] every tick until it converges on this
+/// steady cruising speed. See `docs/mob-species-spawning.md` for the exact
+/// methods this reproduces and the live-oracle measurement it was checked
+/// against (a real zombie's measured mean pursuit speed against its
+/// predicted value).
+fn ai_ground_speed(requested_speed: f64) -> f64 {
+    (requested_speed * requested_speed) / (1.0 - AI_GROUND_FRICTION)
+}
+
 /// The health and combat-stat defaults for a mob type: `(max_health,
 /// attack_damage, defenses, knockback_resistance)`.
 ///
@@ -1020,7 +1048,7 @@ impl<'w> SimMob<'w> {
             } else {
                 1.0
             };
-            self.mob.set_step_per_tick(base_speed * multiplier);
+            self.mob.set_step_per_tick(ai_ground_speed(base_speed * multiplier));
         }
         self
     }
@@ -2761,10 +2789,15 @@ impl<'w> MobSim<'w> {
     ///   1.95)` for a species the census does not know by name, matching that
     ///   function's own "explicit fallback, never a silent guess" contract.
     /// * **Combat stats** come from [`combat_defaults`], already species-aware.
-    /// * **Speed** is the type's `movement_speed` attribute value, read
-    ///   directly as blocks/tick — the same convention
-    ///   [`run_spawn_cycle`](Self::run_spawn_cycle)'s candidates and
-    ///   [`seed_demo_mobs`]'s hardcoded `0.23` already use for a zombie.
+    /// * **Speed**: the type's `movement_speed` attribute value feeds
+    ///   [`SpeciesContext`](lodestone_entity::ai::roster::SpeciesContext) as-is
+    ///   (every roster goal multiplies it by vanilla's own `speedModifier`
+    ///   constants, exactly as vanilla's own move-control does before it ever
+    ///   reaches motion), but the actual kinematic-follower rate handed to
+    ///   [`spawn_with_type`] is [`ai_ground_speed`] of that attribute — see its
+    ///   own doc for why a bare attribute value is not the mob's real
+    ///   blocks/tick and `docs/mob-species-spawning.md` for the vanilla
+    ///   methods and live-oracle measurement behind the conversion.
     /// * **Goals** come from [`lodestone_entity::ai::roster`], which resolves the
     ///   species path to the goal set vanilla's own `registerGoals()` installs,
     ///   at vanilla's own priority numbers. This function no longer knows
@@ -2793,7 +2826,7 @@ impl<'w> MobSim<'w> {
         // `set_age(BABY_START_AGE)` afterward, which re-derives the shape
         // through the same function (see `SimMob::set_age`'s own doc).
         let shape = species_shape(&entity_type, &attrs, false);
-        let step_per_tick = attr(&attrs, "movement_speed");
+        let base_speed = attr(&attrs, "movement_speed");
         // `minecraft:follow_range`, read **once** and fed to both consumers, so
         // target acquisition and the A* budget cannot drift apart (issue #455).
         //
@@ -2820,10 +2853,20 @@ impl<'w> MobSim<'w> {
         let hostile = species::is_hostile_species(&entity_type);
 
         // Built *before* `entity_type` is moved into the spawn, so the species
-        // path is borrowed rather than cloned.
-        let goals = roster::goals_for(entity_type.path(), &SpeciesContext::new(step_per_tick));
+        // path is borrowed rather than cloned. `SpeciesContext` wants the raw
+        // attribute — every roster goal supplies its own `speedModifier`
+        // multiplier on top, matching vanilla's own move-control order — so it
+        // is *not* `ai_ground_speed`-converted here; the conversion happens
+        // once, below, for the kinematic follower's own rate.
+        let goals = roster::goals_for(entity_type.path(), &SpeciesContext::new(base_speed));
 
-        let mob = self.spawn_with_type(pos, shape, step_per_tick, visited_budget, entity_type);
+        let mob = self.spawn_with_type(
+            pos,
+            shape,
+            ai_ground_speed(base_speed),
+            visited_budget,
+            entity_type,
+        );
         mob.set_category(if hostile {
             MobCategory::Monster
         } else {
@@ -7703,34 +7746,57 @@ mod baby_shape_tests {
 
     /// **The zombie family's baby speed boost is `base * 1.5`, and a cow's
     /// stays flat** — the discriminating pair the residue's "attribute
-    /// change" half asks for. Predicted exactly (`0.23 * 1.5 = 0.345`), not
-    /// merely asserted to have increased.
+    /// change" half asks for. `step_per_tick` now reports the AI-driven
+    /// kinematic-follower rate, not the bare attribute (see
+    /// `ai_ground_speed`'s own doc): predicted here from the same outside
+    /// constants (vanilla's default ground friction, `0.6 * 0.91`) in a
+    /// separate expression, not by calling the function under test, so a
+    /// shared bug cannot cancel out. `0.23 * 1.5 = 0.345` is still the
+    /// attribute-level prediction; squaring and dividing by
+    /// `1 - 0.6 * 0.91` is the extra step `ai_ground_speed` adds.
     #[test]
     fn baby_zombie_speeds_up_and_baby_cow_does_not() {
         let world = flat_world();
         let mut sim = MobSim::new(&world);
+        let friction = 1.0 - 0.6 * 0.91;
+        let predicted = |attribute: f64| attribute * attribute / friction;
 
         let zombie_id = sim
             .spawn_species("minecraft:zombie".parse().expect("valid key"), above_floor())
             .id();
         let zombie_adult_speed = sim.get(zombie_id).expect("spawned").step_per_tick();
         assert!(
-            (zombie_adult_speed - 0.23).abs() < 1e-9,
-            "adult zombie movement_speed attribute is 0.23"
+            (zombie_adult_speed - predicted(0.23)).abs() < 1e-9,
+            "adult zombie ground speed must be movement_speed(0.23) squared over \
+             (1 - 0.6*0.91), got {zombie_adult_speed}, predicted {}",
+            predicted(0.23)
         );
         sim.get_mut(zombie_id)
             .expect("spawned")
             .set_age(lodestone_entity::ai::navigating_mob::BABY_START_AGE);
         let zombie_baby_speed = sim.get(zombie_id).expect("still spawned").step_per_tick();
         assert!(
-            (zombie_baby_speed - 0.345).abs() < 1e-9,
-            "baby zombie speed must be exactly 0.23 * 1.5 = 0.345, got {zombie_baby_speed}"
+            (zombie_baby_speed - predicted(0.23 * 1.5)).abs() < 1e-9,
+            "baby zombie speed must be exactly ai_ground_speed(0.23 * 1.5), got \
+             {zombie_baby_speed}, predicted {}",
+            predicted(0.23 * 1.5)
+        );
+        assert!(
+            zombie_baby_speed > zombie_adult_speed,
+            "the baby boost must still win after the ground-speed conversion, not \
+             just at the attribute level"
         );
 
         let cow_id = sim
             .spawn_species("minecraft:cow".parse().expect("valid key"), above_floor())
             .id();
         let cow_adult_speed = sim.get(cow_id).expect("spawned").step_per_tick();
+        assert!(
+            (cow_adult_speed - predicted(0.2)).abs() < 1e-9,
+            "adult cow ground speed must be movement_speed(0.2) squared over \
+             (1 - 0.6*0.91), got {cow_adult_speed}, predicted {}",
+            predicted(0.2)
+        );
         sim.get_mut(cow_id)
             .expect("spawned")
             .set_age(lodestone_entity::ai::navigating_mob::BABY_START_AGE);
@@ -7738,6 +7804,25 @@ mod baby_shape_tests {
         assert!(
             (cow_baby_speed - cow_adult_speed).abs() < 1e-9,
             "a cow has no SPEED_MODIFIER_BABY — baby speed must equal adult speed exactly"
+        );
+    }
+
+    /// **Control proving `ai_ground_speed` is load-bearing, not decorative**:
+    /// with the bare `movement_speed` attribute used directly (the pre-fix
+    /// behaviour this repo's own evidence standards require a control for),
+    /// a pig's per-tick movement step is `0.25` — noticeably higher than the
+    /// `ai_ground_speed(0.25)` this fix now produces, which is the measured
+    /// direction of the "way too fast" report. If this control ever starts
+    /// failing, `ai_ground_speed` has stopped changing the value it exists to
+    /// change.
+    #[test]
+    fn removing_the_ground_speed_conversion_reproduces_the_too_fast_bug() {
+        let attribute = 0.25;
+        assert!(
+            ai_ground_speed(attribute) < attribute,
+            "control: the converted ground speed must be lower than the bare \
+             attribute value, or the subject assertions above prove nothing \
+             about the conversion firing"
         );
     }
 
