@@ -3931,6 +3931,7 @@ mod tests {
                     shade: true,
                     layer: 0,
                     anim: 0,
+                    sprite: 0,
                 }
             })
             .collect()

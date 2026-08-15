@@ -161,6 +161,7 @@ fn corner_ao_quad() -> BakedQuad {
         shade: true,
         layer: 0,
         anim: 0,
+        sprite: 0,
     }
 }
 

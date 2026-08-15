@@ -86,6 +86,25 @@ pub struct BakedQuad {
     /// uses it to look up a per-frame V offset so the baked (frame-0) UVs
     /// advance without any mesh or atlas mutation. See [`AnimTable`].
     pub anim: u8,
+    /// This quad's index into [`Atlas::sprites`]'s slice — the sprite its
+    /// [`Self::uvs`] were baked against, recorded once here instead of
+    /// re-derived by a UV containment scan.
+    ///
+    /// # Why this exists
+    ///
+    /// The baker already knows exactly which [`AtlasSprite`] it resolved
+    /// (`atlas.sprite(location)`) when it computed [`Self::uvs`] from that
+    /// sprite's frame rect, and used to throw the answer away — a caller
+    /// that needed "which sprite does this quad sample" (per-block render
+    /// layer, per-face occlusion) had to recover it geometrically, scanning
+    /// every atlas sprite and testing UV containment, once per quad per
+    /// block state. This field makes that lookup an array index.
+    ///
+    /// `0` for a quad built by a baker with no atlas index to record (fluid
+    /// quads today, see [`crate::fluid`]) — harmless, because nothing reads
+    /// a fluid quad's `sprite` field; fluid render-layer/occlusion never go
+    /// through the sprite-rect path this field feeds.
+    pub sprite: u32,
 }
 
 /// A baked model: every quad from every element, ready for the mesher.
@@ -315,6 +334,13 @@ fn bake_face(
         .ok_or_else(|| BakeError::SpriteMissing {
             location: location.to_string(),
         })?;
+    // Present by construction: `atlas.sprite(location)` just succeeded, so
+    // `atlas.sprite_index(location)` — the same lookup, minus the deref —
+    // cannot fail here. `unwrap_or(0)` rather than a second `?` because a
+    // missing index is not a condition `BakeError` has a variant for and
+    // cannot actually occur; see `Atlas::sprite`/`Atlas::sprite_index`, which
+    // share one `HashMap` lookup.
+    let sprite_index = atlas.sprite_index(location).unwrap_or(0) as u32;
     let (frame_min, frame_max) = sprite
         .frame_uv(0, atlas.width, atlas.height)
         .unwrap_or((sprite.uv_min, sprite.uv_max));
@@ -378,6 +404,7 @@ fn bake_face(
         shade: element.shade.unwrap_or(true),
         layer: sprite.layer,
         anim: sprite.anim_slot,
+        sprite: sprite_index,
     })
 }
 
