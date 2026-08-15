@@ -137,3 +137,4 @@ pub mod snow_support;
 pub mod sound_events;
 pub mod sound_types;
 pub mod tool;
+pub mod villager_trades;
