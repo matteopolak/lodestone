@@ -1899,6 +1899,181 @@ fn the_debug_chords_need_the_modifier_held() {
     assert_eq!(resolve(playing(), KeyCode::KeyG, true), None);
 }
 
+/// F3+P (pause on lost focus) and F3+C (copy location) — the same
+/// modifier-gated shape [`the_debug_chords_need_the_modifier_held`] checks
+/// for F3+B/F3+G, extended to the two chords this change adds. `P` and `C`
+/// are unbound in the default table (like `B`/`G`), so the negative half is
+/// real: a chord that ignored `debug_held` would fire on every plain press.
+#[test]
+fn the_pause_and_copy_location_chords_need_the_debug_modifier() {
+    let held = KeyGate {
+        gameplay: true,
+        debug_held: true,
+        ..KeyGate::default()
+    };
+    assert_eq!(
+        resolve(held, KeyCode::KeyP, true),
+        Some(KeyOutcome::TogglePauseOnLostFocus)
+    );
+    assert_eq!(
+        resolve(held, KeyCode::KeyC, true),
+        Some(KeyOutcome::CopyLocation)
+    );
+    // Release is not a chord, same reason as F3+B/F3+G.
+    assert_eq!(resolve(held, KeyCode::KeyP, false), None);
+    assert_eq!(resolve(held, KeyCode::KeyC, false), None);
+
+    // Without the modifier, neither key means anything.
+    assert_eq!(resolve(playing(), KeyCode::KeyP, true), None);
+    assert_eq!(resolve(playing(), KeyCode::KeyC, true), None);
+}
+
+/// The exact vanilla wording `debug_shown_feedback`/`debug_enabled_feedback`
+/// produce, predicted from `KeyboardHandler.java`'s `debugFeedbackTranslated`
+/// call sites and the `en_us.json` strings they resolve
+/// (`debug.show_hitboxes.on`/`.off`, `debug.chunk_boundaries.on`/`.off`,
+/// `debug.advanced_tooltips.on`/`.off`, `debug.pause_focus.on`/`.off`) —
+/// not the round number, the exact byte string including the legacy `§`
+/// codes `decorateDebugComponent` applies (`§e` yellow, `§l` bold, `§r`
+/// reset before the un-styled body).
+#[test]
+fn debug_feedback_helpers_match_vanillas_exact_wording_and_legacy_codes() {
+    assert_eq!(debug_feedback("hi"), "§e§l[Debug]:§r hi");
+    assert_eq!(
+        debug_shown_feedback("Hitboxes", true),
+        "§e§l[Debug]:§r Hitboxes: shown"
+    );
+    assert_eq!(
+        debug_shown_feedback("Hitboxes", false),
+        "§e§l[Debug]:§r Hitboxes: hidden"
+    );
+    assert_eq!(
+        debug_shown_feedback("Chunk borders", true),
+        "§e§l[Debug]:§r Chunk borders: shown"
+    );
+    assert_eq!(
+        debug_shown_feedback("Advanced tooltips", false),
+        "§e§l[Debug]:§r Advanced tooltips: hidden"
+    );
+    assert_eq!(
+        debug_enabled_feedback("Pause on lost focus", true),
+        "§e§l[Debug]:§r Pause on lost focus: enabled"
+    );
+    assert_eq!(
+        debug_enabled_feedback("Pause on lost focus", false),
+        "§e§l[Debug]:§r Pause on lost focus: disabled"
+    );
+}
+
+/// The colour actually reaches a vertex without a hex span or the legacy
+/// string path (`Text::to_legacy_string`) touching this at all — the exact
+/// concern the brief names, because `to_legacy_string` cannot carry an RGB
+/// colour and this repo already has a defect class where a coloured message
+/// silently lost its colour through it.
+///
+/// `Text::literal(debug_feedback(msg)).to_spans()` is production's own
+/// expansion path (`Text::to_spans`'s own doc: "`from_legacy` consumes every
+/// `§`+code pair"), the same one `ChatLog::recent_ages_spans` uses for the
+/// HUD's real chat draw — not a hand-rolled parser this test invented.
+///
+/// **Negative control, in the same assertion set:** the body span carries no
+/// colour and no bold, so a version of `debug_feedback` that coloured the
+/// *whole* line (an easy way to get this "working" by accident) fails here.
+#[test]
+fn debug_feedback_expands_to_a_bold_yellow_prefix_span_and_a_plain_body_span() {
+    use lodestone_model::text::{Text, TextColor};
+
+    let spans = Text::literal(debug_shown_feedback("Hitboxes", true)).to_spans();
+    assert_eq!(spans.len(), 2, "a coloured prefix run and a plain body run: {spans:?}");
+
+    assert_eq!(spans[0].text, "[Debug]:");
+    assert_eq!(spans[0].style.color, Some(TextColor::Yellow));
+    assert_eq!(spans[0].style.bold, Some(true));
+
+    assert_eq!(spans[1].text, " Hitboxes: shown");
+    assert_eq!(
+        spans[1].style.color, None,
+        "the body must not inherit or carry a colour of its own"
+    );
+    assert_eq!(
+        spans[1].style.bold, None,
+        "§r resets bold before the body, so it must not read as bold"
+    );
+}
+
+/// `KeyOutcome::CopyLocation`'s exact wire format, predicted from
+/// `KeyboardHandler.java`'s `String.format(Locale.ROOT, "/execute in %s run
+/// tp @s %.2f %.2f %.2f %.2f %.2f", ...)` — not the round number, and every
+/// numeric field pairwise-distinct (`CLAUDE.md`'s transposition rule) so a
+/// swapped x/y/z or yaw/pitch fails here rather than round-tripping silently.
+#[test]
+fn copy_location_command_matches_vanillas_execute_format_with_distinct_fields() {
+    assert_eq!(
+        copy_location_command("minecraft:the_nether", [11.5, 64.25, -8.125], 91.5, -12.75),
+        "/execute in minecraft:the_nether run tp @s 11.50 64.25 -8.12 91.50 -12.75"
+    );
+}
+
+/// The whole chain, through the real `ChatLog` production code pushes
+/// through (`Sim::push_local_chat`/`Sim::recent_chat_spans`) rather than a
+/// hand-built `Text` — a plain literal string carrying `§` codes really does
+/// survive a round trip through the same feed the HUD reads.
+///
+/// **Negative control:** a plain message pushed alongside it (no `§` codes)
+/// comes back as one unstyled span, proving the expansion is conditional on
+/// the codes actually being present rather than every chat line silently
+/// gaining a colour.
+#[test]
+fn pushing_debug_feedback_through_the_real_chat_log_survives_as_a_bold_yellow_span() {
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    app.sim.push_local_chat("plain status line");
+    app.sim
+        .push_local_chat(debug_shown_feedback("Chunk borders", false));
+
+    let recent = app.sim.recent_chat_spans(2);
+    assert_eq!(recent.len(), 2, "both lines must be retained: {recent:?}");
+
+    let (plain_spans, _) = &recent[0];
+    assert_eq!(plain_spans.len(), 1);
+    assert_eq!(plain_spans[0].text, "plain status line");
+    assert_eq!(plain_spans[0].style.color, None);
+
+    let (debug_spans, _) = &recent[1];
+    assert_eq!(debug_spans.len(), 2, "{debug_spans:?}");
+    assert_eq!(debug_spans[0].text, "[Debug]:");
+    assert_eq!(
+        debug_spans[0].style.color,
+        Some(lodestone_model::text::TextColor::Yellow)
+    );
+    assert_eq!(debug_spans[1].text, " Chunk borders: hidden");
+}
+
+/// F3+P's toggle+persist half, through the real `MenuNav` — the same shape
+/// `toggle_advanced_item_tooltips` already has no dedicated test for, closed
+/// here since this change adds the option. Persistence itself (writing no
+/// key when untouched, degrading a garbled value to vanilla's `true`) is
+/// covered by `config.rs`'s
+/// `pause_on_lost_focus_defaults_on_and_only_writes_a_key_when_turned_off`;
+/// this is the in-memory toggle the F3+P driver arm actually calls.
+#[test]
+fn toggle_pause_on_lost_focus_flips_the_option_both_ways() {
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    assert!(
+        app.nav.pause_on_lost_focus(),
+        "vanilla's own default is on"
+    );
+    app.nav.toggle_pause_on_lost_focus();
+    assert!(!app.nav.pause_on_lost_focus());
+    app.nav.toggle_pause_on_lost_focus();
+    assert!(app.nav.pause_on_lost_focus());
+}
+
 #[test]
 fn a_rebind_moves_the_behaviour_to_the_new_key_and_off_the_old_one() {
     let mut binds = Keybinds::new();

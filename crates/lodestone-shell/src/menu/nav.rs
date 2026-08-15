@@ -1653,6 +1653,23 @@ impl MenuNav {
         self.persist_options();
     }
 
+    /// [`crate::config::Options::pause_on_lost_focus`] — read by
+    /// `WindowEvent::Focused(false)` in `app/lifecycle.rs`, written only by
+    /// [`Self::toggle_pause_on_lost_focus`].
+    #[must_use]
+    pub fn pause_on_lost_focus(&self) -> bool {
+        self.options.pause_on_lost_focus
+    }
+
+    /// F3+P. Persists eagerly, the same shape as
+    /// [`Self::toggle_advanced_item_tooltips`] and for the same vanilla reason
+    /// (`options.pauseOnLostFocus = !options.pauseOnLostFocus; options.save();`
+    /// in `KeyboardHandler.java`).
+    pub fn toggle_pause_on_lost_focus(&mut self) {
+        self.options.pause_on_lost_focus = !self.options.pause_on_lost_focus;
+        self.persist_options();
+    }
+
     /// Vanilla's `options.invertMouseX` (issue #203) — see
     /// [`crate::config::Options::invert_mouse_x`]. Read per look-integration
     /// call and handed to `apply_look_inverted`.

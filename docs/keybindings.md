@@ -608,6 +608,71 @@ all — `hud.rs`, `container.rs`, `chat.rs`, `interact.rs`, `sim.rs` and every
 `InputAction`/`Binding`/`ClientAction`/`Click` values that already passed
 through `app.rs`'s dispatch, never a raw key or button of their own.
 
+## F3 debug chords: dispatch, chat feedback, and what is not ported
+
+`KeyGate::debug_held` (set by `KeyOutcome::DebugModifier`, F3's own press/release)
+gates a fixed set of literal `KeyCode` arms in `resolve_key`
+(`app/input.rs`) — B, G, N, F4, H, P, C today — rather than a second table of
+rebindable `KeyMapping`s, matching the reasoning `KeyGate::debug_held`'s own
+doc gives. Each arm's *effect* (the atomic flip, the option toggle, the
+clipboard write) lives in `window_event`'s match in `app/lifecycle.rs`, whose
+only test coverage is the compiler — see the "`window_event`'s effects match"
+gotcha below — so every effect that has a predictable, testable shape is
+factored into a named pure function the arm merely calls: `debug_feedback`/
+`debug_shown_feedback`/`debug_enabled_feedback`, `copy_location_command`, and
+the `clipboard_seam` module.
+
+### Chat feedback
+
+Vanilla prints a `[Debug]: <message>` line to chat for (almost) every
+successful chord (`KeyboardHandler.debugFeedback`/`debugFeedbackComponent`,
+`decorateDebugComponent`), bold and `ChatFormatting.YELLOW`
+(`ChatFormatting.RED` for a handful of failure-path warnings this client does
+not model — see below). `debug_feedback` builds this as a plain `String`
+carrying embedded legacy `§` codes (`"§e§l[Debug]:§r <message>"`) rather than
+constructing a `TextSpan` tree directly: `YELLOW` and `RED` are both
+legacy-representable colours (`TextColor::legacy_code()` returns `Some` for
+either), and every chat line already passes through
+`Text::to_spans()` — which expands embedded `§` codes — on its way to a
+vertex (`ChatLog::recent_ages_spans`, read by `app/redraw.rs` and drawn by
+`hud.rs`). **Never route a coloured debug line through
+`Text::to_legacy_string()`**: unlike `to_spans()` it is the lossy
+re-serialisation path (it cannot carry a hex `TextColor::Rgb`, though neither
+`YELLOW` nor `RED` are hex, so this specific case would happen to survive it
+too — the rule is about the *pattern*, not this one colour pair).
+
+`Sim::push_local_chat` is the write side (`sim/session.rs`) — vanilla's own
+"not from the wire" seam, already used for LAN-publish and local-host
+messages. It takes a plain string and wraps it as `Text::literal`, which is
+enough: the embedded `§` codes are expanded downstream by `to_spans()`
+regardless of whether the top-level `Text` was built via `literal` or
+`from_legacy`.
+
+### Combos, by status
+
+| chord | vanilla name | status |
+|---|---|---|
+| F3+B | `key.debug.showHitboxes` | implemented, now with chat feedback |
+| F3+G | `key.debug.showChunkBorders` | implemented, now with chat feedback |
+| F3+H | `key.debug.showAdvancedTooltips` | implemented, now with chat feedback (the owner's reported gap) |
+| F3+N | `key.debug.spectate` | implemented (sends `ClientAction::ChangeGameMode`); no chat feedback, see below |
+| F3+F4 | `key.debug.switchGameMode` | implemented as a cycle rather than `GameModeSwitcherScreen`; no chat feedback, see below |
+| F3+P | `key.debug.focusPause` | implemented: new persisted `Options::pause_on_lost_focus`, gates `WindowEvent::Focused(false)` |
+| F3+C | `key.debug.copyLocation` | implemented: clipboard gets vanilla's `/execute in <dim> run tp @s x y z yaw pitch` |
+| F3+A, F3+T, F3+D | reload chunks / reload resource packs / clear chat | not implemented — each needs a write path into a file outside this pass's scope (mesher/sim internals, the resource pipeline's reload trigger, or a new `ChatLog` clear method) |
+| F3+I | copy entity/block NBT | not implemented — needs the raycast hit-result and NBT serialisation, out of scope |
+| F3+Q | "show this list" | **not implemented, deliberately** — `Options.java`'s `debugKeys` array has no `keyDebugHelp` entry and `KeyboardHandler.handleDebugKeys` has no arm for it in the 26.2 decompile; the `debug.help.*` `en_us.json` strings appear to be vestigial. There is nothing to port. |
+| F3+S/L/1-4/U/O/V/W, crash-hold | dump textures, profiling, charts, frustum, octree, wireframe, the 10-second crash | not implemented — dev-only (`SharedConstants.DEBUG_HOTKEYS`/`DEBUG_FEATURE_COUNT`, `false` in a real build) or need renderer internals outside this pass's ownership |
+
+**F3+N/F3+F4 have no chat feedback on purpose.** Vanilla's own handler only
+calls `debugFeedback` on their *failure* path (`debug.creative_spectator.error`/
+`debug.gamemodes.error`, both gated on a server permission check
+`GameModeCommand.PERMISSION_CHECK`), never on success — the success path
+either sends the packet silently or opens `GameModeSwitcherScreen`. This
+client has no client-side permission model to gate the error message on, so
+faithfully porting "only the error path talks" means porting nothing yet
+rather than inventing a success message vanilla does not have.
+
 ## Gotchas
 
 - **Physical keys, not characters.** The identity is winit's `KeyCode` — the

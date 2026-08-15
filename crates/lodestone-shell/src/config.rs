@@ -595,6 +595,14 @@ pub struct Options {
     ///
     /// Default `false`, matching vanilla's boot value.
     pub advanced_item_tooltips: bool,
+    /// F3+P — `Options.pauseOnLostFocus`: whether losing window focus pauses
+    /// the game (`KeyboardHandler.java`'s `keyDebugFocusPause` arm). Read by
+    /// `WindowEvent::Focused(false)` in `app/lifecycle.rs`, which otherwise
+    /// pauses unconditionally.
+    ///
+    /// Default `true`, matching vanilla's boot value — the client pauses on
+    /// focus loss unless a player explicitly turns it off with the chord.
+    pub pause_on_lost_focus: bool,
     /// Vanilla's eleven `soundSource.*` sliders (`Options.java`'s
     /// `createSoundSliderOptionInstance`, a `UnitDouble` defaulting to `1.0` for
     /// every bus), indexed by
@@ -767,6 +775,7 @@ impl Default for Options {
             sensitivity: DEFAULT_SENSITIVITY,
             render_distance: DEFAULT_RENDER_DISTANCE,
             advanced_item_tooltips: false,
+            pause_on_lost_focus: true,
             sound_volumes: [1.0; 11],
             fov: DEFAULT_FOV,
             glint_speed: lodestone_render::glint::DEFAULT_SPEED as f32,
@@ -950,6 +959,12 @@ impl Options {
             .get("advanced_item_tooltips")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
+        // Absent or malformed is **on** — vanilla's own default
+        // (`Options.java`'s `pauseOnLostFocus = true`).
+        let pause_on_lost_focus = obj
+            .get("pause_on_lost_focus")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
         // The eleven sound sliders, through the same `unit` rule as the chat
         // ones: every bus is a `UnitDouble` defaulting to `1.0`, so an absent,
         // non-finite or out-of-range value degrades to full volume rather than
@@ -1060,6 +1075,7 @@ impl Options {
             sensitivity,
             render_distance,
             advanced_item_tooltips,
+            pause_on_lost_focus,
             sound_volumes,
             fov,
             glint_speed,
@@ -1220,6 +1236,12 @@ impl Options {
             obj.insert(
                 "advanced_item_tooltips".into(),
                 self.advanced_item_tooltips.into(),
+            );
+        }
+        if self.pause_on_lost_focus != default.pause_on_lost_focus {
+            obj.insert(
+                "pause_on_lost_focus".into(),
+                self.pause_on_lost_focus.into(),
             );
         }
         if self.fov != default.fov {
@@ -1933,6 +1955,53 @@ mod tests {
             assert!(
                 loaded.view_bobbing,
                 "view_bobbing: {bad} must degrade to ON, not OFF"
+            );
+            assert_eq!(loaded.gui_scale, 5, "gui_scale must survive {bad}");
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    // F3+P (`KeyOutcome::TogglePauseOnLostFocus`). Same shape as
+    // `view_bobbing_defaults_on_and_only_writes_a_key_when_turned_off` and for
+    // the same reason: vanilla's `Options.pauseOnLostFocus` defaults `true`,
+    // so a missing or garbled value must read as ON, not silently stop
+    // pausing on focus loss for anyone whose file got mangled.
+    fn pause_on_lost_focus_defaults_on_and_only_writes_a_key_when_turned_off() {
+        let path = temp_options_path("pause-on-lost-focus");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        assert!(Options::default().pause_on_lost_focus);
+
+        Options::default().save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("pause_on_lost_focus"),
+            "the default writes no key: {text}"
+        );
+        assert!(Options::load_from(&path).pause_on_lost_focus);
+
+        let off = Options {
+            pause_on_lost_focus: false,
+            ..Options::default()
+        };
+        off.save_to(&path).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("pause_on_lost_focus")
+        );
+        assert_eq!(Options::load_from(&path), off);
+
+        for bad in ["\"false\"", "0", "[]", "null", "{}"] {
+            std::fs::write(
+                &path,
+                format!("{{\"gui_scale\": 5, \"pause_on_lost_focus\": {bad}}}"),
+            )
+            .unwrap();
+            let loaded = Options::load_from(&path);
+            assert!(
+                loaded.pause_on_lost_focus,
+                "pause_on_lost_focus: {bad} must degrade to ON, not OFF"
             );
             assert_eq!(loaded.gui_scale, 5, "gui_scale must survive {bad}");
         }
