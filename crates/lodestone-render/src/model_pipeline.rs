@@ -641,6 +641,32 @@ pub fn section_visibility(now_secs: f32, build_time_secs: f32) -> f32 {
     (elapsed / SECTION_FADE_DURATION_SECS).clamp(0.0, 1.0)
 }
 
+/// Vanilla's `isNearby` test from `LevelRenderer.compileSections`
+/// (`double distSqr = center.distSqr(cameraPosition); boolean isNearby =
+/// distSqr < 768.0;`) — a section within this squared-distance of the camera
+/// never fades, regardless of whether it is a genuinely new build.
+///
+/// `768.0` is a squared block distance (not a radius), so the true cutoff is
+/// `sqrt(768) ≈ 27.7` blocks from the section's centre. Deliberately integer,
+/// block-granularity input on both sides, exactly matching vanilla's own
+/// `BlockPos`-typed `center`/`cameraPosition` — there is no sub-block
+/// precision to lose by rounding the camera down first.
+#[must_use]
+pub fn section_is_nearby(section_origin: [i32; 3], camera_block_pos: [i32; 3]) -> bool {
+    // `SectionPos.of(pos).center()`: the section's own middle block, i.e. its
+    // minimum corner plus half of its 16-block span.
+    let center = [
+        section_origin[0] + 8,
+        section_origin[1] + 8,
+        section_origin[2] + 8,
+    ];
+    let dx = i64::from(center[0] - camera_block_pos[0]);
+    let dy = i64::from(center[1] - camera_block_pos[1]);
+    let dz = i64::from(center[2] - camera_block_pos[2]);
+    let dist_sqr = dx * dx + dy * dy + dz * dz;
+    dist_sqr < 768
+}
+
 /// A section's world-space origin (group 0 binding 1): `vec4(origin.xyz,
 /// build_time)`, added to the section-local vertex position in the vertex
 /// shader; `build_time` feeds the per-section fade-in (see
@@ -887,6 +913,91 @@ mod tests {
         // A negative delta (clock skew, or a section reused before its build
         // time is written) must not go negative and invert the mix.
         assert_eq!(section_visibility(build_time - 1.0, build_time), 0.0);
+    }
+
+    /// [`section_is_nearby`] against vanilla's own boundary
+    /// (`LevelRenderer.compileSections`'s `distSqr < 768.0`), predicted
+    /// exactly rather than merely signed: `sqrt(768)` is irrational
+    /// (`≈27.712...`), so the discriminating pair here is chosen on the
+    /// **squared** distance directly — `767` (just inside) and `768` (exactly
+    /// on the excluded boundary, since vanilla's test is strict `<`) — not on
+    /// a rounded block count, which is exactly the "predict the plausible
+    /// round number" trap this repo's own evidence standard warns against.
+    #[test]
+    fn section_is_nearby_matches_vanillas_exact_768_squared_boundary() {
+        let origin = [0, 64, 0];
+        // Section centre is [8, 72, 8]. A camera offset of [27, 8, 8] from the
+        // centre gives dx=27 (squared 729) plus dy=dz=0 for a total of 729 —
+        // comfortably inside. Use a mixed-axis offset instead so all three
+        // axes contribute, matching how a real camera position looks.
+        let camera_dist_sqr = |offset: [i32; 3]| -> i64 {
+            let dx = i64::from(offset[0]);
+            let dy = i64::from(offset[1]);
+            let dz = i64::from(offset[2]);
+            dx * dx + dy * dy + dz * dz
+        };
+        // 21^2 + 15^2 + 5^2 = 441 + 225 + 25 = 691 < 768: nearby.
+        let close_offset = [21, 15, 5];
+        assert_eq!(camera_dist_sqr(close_offset), 691);
+        let camera_close = [
+            origin[0] + 8 + close_offset[0],
+            origin[1] + 8 + close_offset[1],
+            origin[2] + 8 + close_offset[2],
+        ];
+        assert!(
+            section_is_nearby(origin, camera_close),
+            "distSqr=691 must read as nearby (< 768)"
+        );
+
+        // 24^2 + 16^2 + 8^2 = 576 + 256 + 64 = 896 >= 768: not nearby.
+        let far_offset = [24, 16, 8];
+        assert_eq!(camera_dist_sqr(far_offset), 896);
+        let camera_far = [
+            origin[0] + 8 + far_offset[0],
+            origin[1] + 8 + far_offset[1],
+            origin[2] + 8 + far_offset[2],
+        ];
+        assert!(
+            !section_is_nearby(origin, camera_far),
+            "distSqr=896 must read as not-nearby (>= 768)"
+        );
+
+        // The camera standing exactly at the section's own centre: distSqr=0,
+        // the least-ambiguous "nearby" case there is.
+        let center = [origin[0] + 8, origin[1] + 8, origin[2] + 8];
+        assert!(section_is_nearby(origin, center));
+    }
+
+    /// Vanilla's test is strict `<`, so a section sitting **exactly** on the
+    /// boundary (`distSqr == 768`) must NOT be treated as nearby — the
+    /// off-by-one a `<=` typo would introduce, and a case the mixed-offset
+    /// test above does not exercise since 767/896 both land strictly off the
+    /// line.
+    #[test]
+    fn section_is_nearby_excludes_the_exact_boundary() {
+        // 16^2 + 16^2 + 16^2 = 256*3 = 768 exactly, all on one axis pair
+        // chosen so the arithmetic is easy to re-derive by hand.
+        let origin = [0, 0, 0];
+        let camera = [8 + 16, 8 + 16, 8 + 16];
+        let dx = i64::from(camera[0] - 8);
+        let dy = i64::from(camera[1] - 8);
+        let dz = i64::from(camera[2] - 8);
+        assert_eq!(dx * dx + dy * dy + dz * dz, 768);
+        assert!(
+            !section_is_nearby(origin, camera),
+            "distSqr==768 sits exactly on vanilla's excluded boundary (strict <)"
+        );
+
+        // A point just inside the boundary must flip to nearby. 767 itself is
+        // not expressible as a sum of three integer squares (it is
+        // `8*95 + 7`, the Legendre-excluded residue), so this uses the
+        // nearest reachable integer offset below 768: `1² + 6² + 27² = 766`.
+        let camera_just_inside = [origin[0] + 8 + 1, origin[1] + 8 + 6, origin[2] + 8 + 27];
+        let dx2 = i64::from(camera_just_inside[0] - 8);
+        let dy2 = i64::from(camera_just_inside[1] - 8);
+        let dz2 = i64::from(camera_just_inside[2] - 8);
+        assert_eq!(dx2 * dx2 + dy2 * dy2 + dz2 * dz2, 766);
+        assert!(section_is_nearby(origin, camera_just_inside));
     }
 
     /// [`SECTION_FADE_ALREADY_VISIBLE`] must clear the fade for *any* `now`

@@ -166,6 +166,19 @@ impl RenderState {
         cracks: &[CrackTarget],
         screen_effects: ScreenEffects,
     ) -> RenderStats {
+        // Cache this frame's camera block position for `upload_section`'s
+        // near-distance fade skip — see `RenderState::last_camera_block_pos`'s
+        // doc for why this is the one write site rather than a threaded
+        // parameter, and why one frame of staleness is harmless here. Vanilla
+        // reads the same rounding (`BlockPos cameraPosition = camera.blockPos`,
+        // i.e. floored world coordinates), not the eye position's fractional
+        // part.
+        self.last_camera_block_pos.set(Some([
+            camera.position.x.floor() as i32,
+            camera.position.y.floor() as i32,
+            camera.position.z.floor() as i32,
+        ]));
+
         // Shared world-projection "spinning" warp fix — see
         // `Camera::view_projection_warped`'s doc for why injecting it here,
         // at the single upstream source every world-space uniform below is

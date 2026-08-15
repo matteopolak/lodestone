@@ -176,8 +176,25 @@ impl RenderState {
                         // current loaded lifetime (an all-air section that
                         // just got its first block, or one hollowed out and
                         // refilled) — see `ModelRenderer::seen`'s doc for why
-                        // that must not re-trigger the fade.
-                        let build_time = if model.seen.contains(&key) {
+                        // that must not re-trigger the fade — **or** unless
+                        // it is within vanilla's own `isNearby` radius
+                        // (`LevelRenderer.compileSections`'s `distSqr <
+                        // 768.0`, `≈27.7` blocks from the section's centre):
+                        // vanilla never fades a section appearing right next
+                        // to the camera, whatever its `wasPreviouslyEmpty`
+                        // state, and only the far, edge-of-render-distance
+                        // case fades. `last_camera_block_pos` is one frame
+                        // stale by construction (see that field's doc);
+                        // `None` (nothing has rendered yet) falls back to the
+                        // pre-fix always-fade behaviour for that startup
+                        // window rather than guessing a position.
+                        let is_nearby = self
+                            .last_camera_block_pos
+                            .get()
+                            .is_some_and(|camera_pos| {
+                                lodestone_render::section_is_nearby(origin, camera_pos)
+                            });
+                        let build_time = if model.seen.contains(&key) || is_nearby {
                             lodestone_render::SECTION_FADE_ALREADY_VISIBLE
                         } else {
                             self.section_fade_tick.get() as f32 / 20.0

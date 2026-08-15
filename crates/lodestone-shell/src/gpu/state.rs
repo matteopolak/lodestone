@@ -377,6 +377,7 @@ impl RenderState {
             terrain_culling: true,
             vis_graph: lodestone_render::VisibilityGraph::new(),
             occlusion: std::cell::RefCell::default(),
+            last_camera_block_pos: std::cell::Cell::new(None),
             // Likewise on by default, for the same reason — and it is harmless
             // until something populates the graph: an empty graph produces no
             // reachable set, which is the pre-U3 cull exactly. See
