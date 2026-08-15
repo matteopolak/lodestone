@@ -1711,6 +1711,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (`destroySpeed`, `requiresCorrectToolForDrops`) is the pre-existing hardness census
   documented in [`block-break-timing.md`](./block-break-timing.md). Landed in
   `875f452`.
+- [Translucent block culling](./translucent-block-culling.md) — Why an interior face
+  between two identical translucent blocks (ice, glass, stained glass, honey, slime)
+  is not drawn, and why only the camera-facing side of a solid translucent cube's face
+  pair renders. Two independent rules, both missing until #637:
+  `Block.shouldRenderFace`'s `skipRendering` clause (the "grid" bug) and vanilla's
+  ordinary back-face culling on the translucent render pipeline (the "no opacity from
+  above" bug).
 - [TTF font glyphs](./ttf-font-glyphs.md) — Rasterisation of vanilla's `ttf` glyph
   provider — an embedded TrueType/OpenType face in a resource pack's font definition
   — so that a pack declaring one draws real glyphs instead of the hollow

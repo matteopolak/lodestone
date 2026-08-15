@@ -106,8 +106,11 @@ impl ModelPipeline {
 
     /// Build the pipeline for a specific [`RenderLayer`]. `Solid`/`Cutout` use
     /// an opaque target with depth writes and back-face culling; `Translucent`
-    /// enables alpha blending, disables depth writes and back-face culling, and
-    /// expects the caller to have sorted quads back-to-front.
+    /// enables alpha blending, disables depth writes, expects the caller to
+    /// have sorted quads back-to-front, and **keeps back-face culling on** —
+    /// see [`build`](Self::build)'s `cull_back_face` doc for why that is the
+    /// vanilla-faithful choice here and not, e.g., for
+    /// [`for_fluid`](Self::for_fluid).
     #[must_use]
     pub fn for_layer(
         device: &wgpu::Device,
@@ -115,26 +118,58 @@ impl ModelPipeline {
         layer: RenderLayer,
     ) -> Self {
         let translucent = layer == RenderLayer::Translucent;
-        Self::build(device, color_format, MODEL_WGSL, translucent, true)
+        Self::build(device, color_format, MODEL_WGSL, translucent, true, true)
     }
 
     /// Build the translucent **fluid** pipeline: like a `Translucent` model
-    /// pipeline (alpha blending, no depth writes, no back-face culling) but with
-    /// a shader that does **not** cutout-discard (water is a smooth alpha, not a
-    /// mask) and tints `tint_index` quads with the water colour instead of
-    /// foliage green. Drawn after opaque terrain so the sea floor already in the
-    /// depth buffer shows through.
+    /// pipeline (alpha blending, no depth writes) but with a shader that does
+    /// **not** cutout-discard (water is a smooth alpha, not a mask) and tints
+    /// `tint_index` quads with the water colour instead of foliage green.
+    /// Drawn after opaque terrain so the sea floor already in the depth
+    /// buffer shows through.
+    ///
+    /// Back-face culling stays **off** here, unlike [`for_layer`](Self::for_layer)'s
+    /// `Translucent` — unverified against vanilla's own fluid geometry and
+    /// deliberately left unchanged rather than folded into the [`for_layer`]
+    /// fix below.
     #[must_use]
     pub fn for_fluid(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
-        Self::build(device, color_format, FLUID_WGSL, true, false)
+        Self::build(device, color_format, FLUID_WGSL, true, false, false)
     }
 
+    /// `cull_back_face` diverges from `translucent` on purpose — they used to
+    /// be the same flag, which was the bug.
+    ///
+    /// Vanilla's `RenderPipelines.TRANSLUCENT_TERRAIN`/`TRANSLUCENT_BLOCK`
+    /// both build on `TERRAIN_SNIPPET`/`BLOCK_SNIPPET`, neither of which ever
+    /// calls `.withCull(false)` — and `RenderPipeline.Builder`'s own default
+    /// is `this.cull.orElse(true)`. So real translucent terrain, ice and
+    /// glass included, renders **single-sided** exactly like opaque terrain;
+    /// nothing in the real pipeline chain disables culling for them. This
+    /// pipeline used to set `cull_mode: None` whenever `translucent` was
+    /// true, which draws **both** faces of a solid cube (e.g. ice's `Up` and
+    /// `Down` quads) along any view ray that passes through it, double-
+    /// compositing the same partial alpha and reading as far more opaque
+    /// than a single vanilla-correct blend — the owner's report that ice
+    /// "shows no opacity at all" looking down through it.
+    ///
+    /// This is safe to flip for the model path specifically because
+    /// non-cube translucent geometry here is already baked **two-sided at
+    /// the model level**, not relying on the GPU state at all — vanilla's
+    /// own pattern for thin planes. Measured: `nether_portal_ew.json` (the
+    /// real 26.2 model) bakes explicit `east` *and* `west` quads with no
+    /// `cullface` on either, so single-sided culling still shows the swirl
+    /// from both sides; it was never the disabled cull state doing that
+    /// work. `for_fluid` is deliberately left at its prior `cull_mode: None`
+    /// — fluid geometry's own two-sidedness (`docs/fluid-rendering.md`'s
+    /// `addBackFace`) was not audited here and this fix does not touch it.
     fn build(
         device: &wgpu::Device,
         color_format: wgpu::TextureFormat,
         shader_src: &str,
         translucent: bool,
         with_palette: bool,
+        cull_back_face: bool,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lodestone-model-shader"),
@@ -281,10 +316,10 @@ impl ModelPipeline {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: if translucent {
-                    None
-                } else {
+                cull_mode: if cull_back_face {
                     Some(wgpu::Face::Back)
+                } else {
+                    None
                 },
                 ..Default::default()
             },

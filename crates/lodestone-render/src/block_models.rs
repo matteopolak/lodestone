@@ -582,6 +582,17 @@ pub struct StateModel {
     /// `mesher::SnapshotModelView::force_opaque_at` through
     /// [`BlockModels::is_leaves`].
     pub is_leaves: bool,
+    /// This state's exact vanilla `HalfTransparentBlock` identity (its
+    /// `block_path`), or `None` if it is not one of them — the same real,
+    /// vanilla-sourced class list [`FLUID_OVERLAY_HALF_TRANSPARENT_BLOCKS`]
+    /// already carries. Two states with the **same** `Some` value are the same
+    /// `Block` in vanilla terms (both `ice`, or both `white_stained_glass`);
+    /// different `Some` values (ice vs. glass) or one `None` are different
+    /// blocks. This is exactly `HalfTransparentBlock.skipRendering`'s
+    /// `neighborState.is(this)` test, keyed on identity rather than a boolean,
+    /// because that test compares the *exact* `Block` instance, not "is
+    /// translucent" — see [`BlockModels::skips_rendering_against`].
+    pub half_transparent_class: Option<&'static str>,
 }
 
 impl StateModel {
@@ -597,6 +608,7 @@ impl StateModel {
             particle_tint: None,
             ambient_occlusion: true,
             is_leaves: false,
+            half_transparent_class: None,
         }
     }
 }
@@ -1787,6 +1799,15 @@ impl BlockModels {
                     let face_occludes = face_occlusion(&sprite_rects, &quads);
                     let is_leaves = resolved
                         .is_some_and(|r| FLUID_OVERLAY_LEAVES_BLOCKS.contains(&r.block.path()));
+                    // Copied from the static list itself (not borrowed from
+                    // `r.block.path()`), so this is a real `&'static str` and
+                    // `StateModel` needs no lifetime parameter.
+                    let half_transparent_class = resolved.and_then(|r| {
+                        FLUID_OVERLAY_HALF_TRANSPARENT_BLOCKS
+                            .iter()
+                            .copied()
+                            .find(|&path| path == r.block.path())
+                    });
                     StateModel {
                         quads,
                         occludes: face_occludes.iter().all(|o| *o),
@@ -1796,6 +1817,7 @@ impl BlockModels {
                         particle_tint,
                         ambient_occlusion,
                         is_leaves,
+                        half_transparent_class,
                     }
                 }
                 _ => StateModel::empty(),
@@ -2220,6 +2242,37 @@ impl BlockModels {
     #[must_use]
     pub fn is_leaves(&self, state_id: u32) -> bool {
         self.state(state_id).is_leaves
+    }
+
+    /// Vanilla's `HalfTransparentBlock.skipRendering`: whether a face between
+    /// `state_id` and `neighbour_id` is never drawn because they are the
+    /// **same** `Block` (both ice, both `white_stained_glass`, …) — see
+    /// [`StateModel::half_transparent_class`].
+    ///
+    /// This is independent of [`Self::occludes`], which is (correctly) `false`
+    /// for every member of this class — vanilla's `noOcclusion()` flag, which
+    /// is exactly why the interior faces of a wall of glass or ice are not
+    /// culled by the ordinary occlusion test and need this second, class-keyed
+    /// one instead (`Block.shouldRenderFace`'s two independent early-outs:
+    /// `neighborState.getFaceOcclusionShape(..) == Shapes.block()`, then
+    /// `state.skipRendering(neighborState, direction)`).
+    ///
+    /// Ice, blue ice and frosted ice are three different `Some` values
+    /// (`"ice"`, `"blue_ice"`, `"frosted_ice"`, per real `FrostedIceBlock`
+    /// extending `IceBlock` extending `HalfTransparentBlock` rather than
+    /// sharing one class instance) and correctly do **not** skip against each
+    /// other, matching vanilla: only literally identical blocks cull their
+    /// shared face, not "any ice-like neighbour".
+    ///
+    /// A state outside [`FLUID_OVERLAY_HALF_TRANSPARENT_BLOCKS`] — including
+    /// `copper_grate`, deliberately excluded from that list — never skips.
+    /// `LeavesBlock`'s own same-neighbour clause
+    /// (`!cutoutLeaves && neighborState.getBlock() instanceof LeavesBlock`) is
+    /// a **different** vanilla rule this does not implement.
+    #[must_use]
+    pub fn skips_rendering_against(&self, state_id: u32, neighbour_id: u32) -> bool {
+        let here = self.state(state_id).half_transparent_class;
+        here.is_some() && here == self.state(neighbour_id).half_transparent_class
     }
 
     /// Normalised atlas UVs `[u0, v0, u1, v1]` of a state's `#particle` sprite —

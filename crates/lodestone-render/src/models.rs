@@ -519,6 +519,29 @@ pub trait ModelSectionView {
     /// Whether the block at (possibly out-of-section) `(x, y, z)` fully occludes
     /// the face pointing back towards its neighbour.
     fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool;
+
+    /// Vanilla's `BlockBehaviour.skipRendering` clause of `Block.
+    /// shouldRenderFace`: whether the face of the block at `(x, y, z)` facing
+    /// its neighbour at (possibly out-of-section) `(nx, ny, nz)` is never
+    /// drawn because the two are the exact same `HalfTransparentBlock` (glass,
+    /// every stained-glass colour, tinted glass, ice, blue ice, frosted ice,
+    /// honey, slime) — see
+    /// [`BlockModels::skips_rendering_against`](crate::BlockModels::skips_rendering_against).
+    ///
+    /// Independent of [`occludes_at`](Self::occludes_at): every member of this
+    /// class answers `false` there (vanilla's `noOcclusion()`), which is
+    /// exactly why their interior faces need this second, class-keyed check —
+    /// without it, a wall of the same translucent block draws every interior
+    /// face and reads as a wireframe lattice.
+    ///
+    /// Defaults to `false`, reproducing the pre-fix behaviour exactly for a
+    /// view that has not opted in (every hermetic test/GUI-item view except
+    /// the ones this fixes).
+    fn skips_rendering_against(&self, x: i32, y: i32, z: i32, nx: i32, ny: i32, nz: i32) -> bool {
+        let _ = (x, y, z, nx, ny, nz);
+        false
+    }
+
     /// Sky/block light at section-local `(x, y, z)`, packed sky<<4 | block.
     ///
     /// This is the block's **own** cell. For an opaque full cube that value is
@@ -909,7 +932,21 @@ pub fn mesh_models_layers(view: &dyn ModelSectionView) -> (ModelMesh, ModelMesh)
                 for quad in quads {
                     if let Some(cf) = quad.cullface {
                         let nrm = face_of_direction(cf).normal();
-                        if view.occludes_at(x as i32 + nrm[0], y as i32 + nrm[1], z as i32 + nrm[2])
+                        let (nx, ny, nz) = (
+                            x as i32 + nrm[0],
+                            y as i32 + nrm[1],
+                            z as i32 + nrm[2],
+                        );
+                        // `Block.shouldRenderFace`'s two early-outs, in order:
+                        // the neighbour's shape fully occludes (`occludes_at`),
+                        // or this exact `HalfTransparentBlock` neighbours
+                        // itself (`skips_rendering_against`) — see that
+                        // method's doc for why occlusion alone cannot cull an
+                        // ice/glass wall's interior faces.
+                        if view.occludes_at(nx, ny, nz)
+                            || view.skips_rendering_against(
+                                x as i32, y as i32, z as i32, nx, ny, nz,
+                            )
                         {
                             continue;
                         }
