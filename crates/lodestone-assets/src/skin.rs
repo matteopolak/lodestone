@@ -225,8 +225,9 @@ const DEFAULT_SKINS: [DefaultSkin; 18] = [
     DefaultSkin { model: PlayerModelType::Wide, texture: "entity/player/wide/zuri" },
 ];
 
-/// `DefaultPlayerSkin.getDefaultSkin()` — index `6`, `wide/steve` — vanilla's
-/// answer when no uuid is available at all. Distinct from
+/// `DefaultPlayerSkin.getDefaultSkin()` — index `6`, `slim/steve` (the array's
+/// first nine entries are slim, so index `6` is still in the slim half) —
+/// vanilla's answer when no uuid is available at all. Distinct from
 /// [`default_skin_for_uuid`], which is the uuid-hash pick every *identified*
 /// account (including every offline-mode one, whose uuid is derived from its
 /// username rather than absent) actually gets.
@@ -588,5 +589,140 @@ mod tests {
         // The control: garbage in is an error, so the success above is not
         // vacuous.
         assert!(decode_textures_property("not base64 at all!!").is_err());
+    }
+
+    /// [`DEFAULT_SKINS`]'s own declared order, checked directly against
+    /// `DefaultPlayerSkin.java`'s array literal: nine slim identities in
+    /// `alex, ari, efe, kai, makena, noor, steve, sunny, zuri` order, then the
+    /// same nine names wide, in the same order. This is the input every
+    /// [`default_skin_for_uuid`] test below trusts implicitly, so it gets its
+    /// own control rather than being assumed.
+    #[test]
+    fn default_skins_table_matches_the_jar_array_literal_order() {
+        let names = [
+            "alex", "ari", "efe", "kai", "makena", "noor", "steve", "sunny", "zuri",
+        ];
+        for (i, name) in names.iter().enumerate() {
+            assert_eq!(
+                DEFAULT_SKINS[i],
+                DefaultSkin {
+                    model: PlayerModelType::Slim,
+                    texture: Box::leak(format!("entity/player/slim/{name}").into_boxed_str())
+                },
+                "index {i} (slim {name})"
+            );
+            assert_eq!(
+                DEFAULT_SKINS[i + 9],
+                DefaultSkin {
+                    model: PlayerModelType::Wide,
+                    texture: Box::leak(format!("entity/player/wide/{name}").into_boxed_str())
+                },
+                "index {} (wide {name})",
+                i + 9
+            );
+        }
+        assert_eq!(default_skin(), DEFAULT_SKINS[6], "getDefaultSkin() is index 6");
+        assert_eq!(
+            default_skin(),
+            DefaultSkin { model: PlayerModelType::Slim, texture: "entity/player/slim/steve" },
+            "DefaultPlayerSkin.getDefaultSkin() is slim/steve -- index 6 is still in the \
+             array's first (slim) nine, not the wide half, which only starts at index 9"
+        );
+    }
+
+    /// Three hand-derived cases against the ported formula
+    /// (`hilo = mostSigBits ^ leastSigBits; hash = (int)(hilo ^ (hilo >>> 32));
+    /// index = floorMod(hash, 18)`), each computed independently of this crate —
+    /// see the module-level derivation in [`default_skin_for_uuid`]'s own doc —
+    /// rather than asserted against this function's own output.
+    ///
+    /// * the nil uuid: `hilo = 0`, `hash = 0`, index `0` — slim/alex.
+    /// * `(1, 0)`: `hilo = 1`, `hash = 1`, index `1` — slim/ari.
+    /// * `(9, 0)` **and** `(0, 9)`: both XOR to `hilo = 9`, `hash = 9`, index `9`
+    ///   — wide/alex. Asserted as a pair, deliberately: a wrong port that only
+    ///   reads `most_sig_bits` (ignoring `least_sig_bits` entirely, a very
+    ///   plausible copy-paste mistake) would still pass the first of these but
+    ///   not the second.
+    #[test]
+    fn default_skin_for_uuid_matches_hand_derived_cases() {
+        assert_eq!(
+            default_skin_for_uuid(0, 0),
+            DefaultSkin { model: PlayerModelType::Slim, texture: "entity/player/slim/alex" },
+            "nil uuid -> index 0"
+        );
+        assert_eq!(
+            default_skin_for_uuid(1, 0),
+            DefaultSkin { model: PlayerModelType::Slim, texture: "entity/player/slim/ari" },
+            "(1, 0) -> index 1"
+        );
+        assert_eq!(
+            default_skin_for_uuid(9, 0),
+            DefaultSkin { model: PlayerModelType::Wide, texture: "entity/player/wide/alex" },
+            "(9, 0) -> index 9"
+        );
+        assert_eq!(
+            default_skin_for_uuid(0, 9),
+            default_skin_for_uuid(9, 0),
+            "least_sig_bits must feed the hash exactly as most_sig_bits does -- a port that \
+             reads only one half would fail this pairing even though each half alone still \
+             lands on a plausible index"
+        );
+    }
+
+    /// The wrong hypothesis this excludes: naively truncating each half to
+    /// `i32` and XORing those (skipping the `>>> 32` fold entirely) is a very
+    /// plausible mis-port, and it agrees with the correct formula for every
+    /// small input above -- including all three cases in the previous test.
+    /// `most_sig_bits = 1 << 32` is invisible to that truncation (its low 32
+    /// bits are all zero) but not to a correct logical-shift fold, so the two
+    /// hypotheses diverge here: truncate-and-xor gives index `0`
+    /// (`0i32 ^ 0i32`), the real formula gives index `1`
+    /// (`hilo = 1<<32`; `hilo >>> 32 = 1`; `hilo ^ 1 = (1<<32)|1`; low 32 bits
+    /// `= 1`).
+    #[test]
+    fn default_skin_for_uuid_actually_folds_the_high_word_not_just_truncates() {
+        let wrong_hypothesis = DefaultSkin {
+            model: PlayerModelType::Slim,
+            texture: "entity/player/slim/alex", // index 0
+        };
+        let got = default_skin_for_uuid(1i64 << 32, 0);
+        assert_ne!(
+            got, wrong_hypothesis,
+            "a most_sig_bits value invisible to a naive i32 truncation must still move the index"
+        );
+        assert_eq!(
+            got,
+            DefaultSkin { model: PlayerModelType::Slim, texture: "entity/player/slim/ari" },
+            "index 1, matching (1, 0)'s answer in the hand-derived test above"
+        );
+    }
+
+    /// `Math.floorMod`, not Rust's default `%`: a negative `hash` must still
+    /// land in `0..18`, never wrap negative. `most_sig_bits = -19, least_sig_bits
+    /// = 0` was hand-derived (see the module doc) to land on index `0` --
+    /// verified independently: `hilo = -19` (`0xFFFF_FFFF_FFFF_FFED`), the
+    /// logical `>>> 32` fold gives `0x1200_0012` truncated to `0x12 = 18`, and
+    /// `floorMod(18, 18) = 0`.
+    #[test]
+    fn default_skin_for_uuid_floor_mods_a_negative_hash_into_range() {
+        assert_eq!(
+            default_skin_for_uuid(-19, 0),
+            DefaultSkin { model: PlayerModelType::Slim, texture: "entity/player/slim/alex" },
+        );
+    }
+
+    /// Every reachable index actually exists (no panic, no out-of-range), swept
+    /// over a spread of inputs rather than trusted from the formula alone.
+    #[test]
+    fn default_skin_for_uuid_never_panics_across_a_spread_of_inputs() {
+        for i in 0..64i64 {
+            let hi = i.wrapping_mul(0x9E37_79B9_7F4A_7C15u64 as i64);
+            let lo = (-i).wrapping_mul(0x2545_F491_4F6C_DD1Du64 as i64);
+            let skin = default_skin_for_uuid(hi, lo);
+            assert!(
+                DEFAULT_SKINS.contains(&skin),
+                "default_skin_for_uuid({hi}, {lo}) = {skin:?} is not one of the 18 built-ins"
+            );
+        }
     }
 }

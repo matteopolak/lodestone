@@ -189,7 +189,21 @@ pub fn skin_for_profile(profile: &lodestone_game::tablist::GameProfile) -> Optio
 /// Start fetching `url` unless it has already been started, finished or failed.
 ///
 /// Idempotent, so the per-frame call site can hand it the same URLs forever.
+///
+/// `""` is refused outright rather than treated as an ordinary (doomed) URL.
+/// `entities::resolve_entity_facts` publishes a `RemoteSkin` with an empty
+/// `url` as the sentinel for "no declared skin, drawing the uuid-derived
+/// default sheet instead" (see its own `default_remote_skin` doc), and
+/// `app/redraw.rs`'s per-frame `request_all` call collects every player's
+/// `player_skin.url` unconditionally — real or synthetic. Without this guard
+/// that sentinel would reach `spawn_fetch`, open (and fail) a real GET against
+/// an empty URL once per session, and log a spurious warning for every player
+/// with no declared skin, which after this change is the common case rather
+/// than the rare one.
 pub fn request(url: &str) {
+    if url.is_empty() {
+        return;
+    }
     let start = with_map(&FETCHED, |map| {
         if map.contains_key(url) {
             return false;
@@ -462,6 +476,31 @@ mod tests {
         request(url);
         let after = requested_urls().iter().filter(|u| *u == url).count();
         assert_eq!(after - before, 1, "one fetch per URL, ever");
+    }
+
+    /// `entities::resolve_entity_facts` now publishes a `RemoteSkin` with an
+    /// empty `url` for a player with no declared `textures` property (the
+    /// uuid-hash default sentinel), and `app/redraw.rs` collects every player's
+    /// `player_skin.url` into `request_all` unconditionally — so a default
+    /// player must never reach a fetch. The control: a non-empty url in the
+    /// same call *does* get routed, so this is not passing because `request`
+    /// broke entirely.
+    #[test]
+    fn an_empty_url_is_never_routed_to_a_fetch() {
+        let before = requested_urls().len();
+        request("");
+        request("");
+        assert_eq!(
+            requested_urls().len(),
+            before,
+            "an empty url (the default-skin sentinel) must never reach spawn_fetch"
+        );
+        let real = "https://textures.minecraft.net/texture/empty-url-guard-control";
+        request(real);
+        assert!(
+            requested_urls().contains(&real.to_owned()),
+            "the guard must not have disabled routing for a real url"
+        );
     }
 
     /// The ready queue hands each sheet over exactly once — the renderer builds

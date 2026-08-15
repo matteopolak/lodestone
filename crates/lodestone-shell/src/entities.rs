@@ -2674,8 +2674,45 @@ fn resolve_entity_facts(
         player_skin: is_player
             .then(|| uuid.and_then(|id| tab_list.get(&id)))
             .flatten()
-            .and_then(|entry| crate::remote_skins::skin_for_profile(&entry.profile)),
+            .and_then(|entry| crate::remote_skins::skin_for_profile(&entry.profile))
+            .or_else(|| {
+                // No declared `textures` property reached us: every
+                // offline-mode server (whose profile carries no property at
+                // all), and any online-mode account that has never set a skin.
+                // Vanilla does **not** fall back to a fixed rig here either —
+                // `SkinManager.registerTextures` still calls
+                // `DefaultPlayerSkin.get(profileId)`, the uuid-hash pick over
+                // the 18 built-in identities `lodestone_assets::skin`
+                // (`default_skin_for_uuid`) now ports. Before this, every such
+                // player was hardcoded wide (`type_path`, unmodified — see
+                // `EntityDraw::model_type_path`), which is exactly the
+                // "other/NPC players show a plain Steve" report: not a fetch
+                // failure, a resolver that never ran for the common case.
+                //
+                // The empty `url` is a sentinel, not a real fetch target: the
+                // draw's own fallback ("`Some(url)` with no bind group
+                // installed yet resolves to the default sheet too" —
+                // `EntityDrawBatch::skin`'s doc) already treats any unknown url
+                // as "use the model's own sheet", and `remote_skins::request`
+                // refuses an empty url outright so this can never open a
+                // doomed HTTP GET.
+                is_player.then(|| uuid.map(default_remote_skin)).flatten()
+            }),
     })
+}
+
+/// [`crate::remote_skins::RemoteSkin`]-shaped default for a player whose
+/// profile declared no `textures` property — see the `or_else` above for why
+/// this exists rather than leaving `player_skin` at `None`.
+///
+/// `url` is deliberately the empty string, never a real texture URL: nothing
+/// downstream must ever attempt to fetch it, which is why
+/// [`crate::remote_skins::request`] refuses an empty url before it can reach a
+/// socket.
+fn default_remote_skin(uuid: uuid::Uuid) -> crate::remote_skins::RemoteSkin {
+    let (hi, lo) = uuid.as_u64_pair();
+    let skin = lodestone_assets::skin::default_skin_for_uuid(hi as i64, lo as i64);
+    crate::remote_skins::RemoteSkin { url: String::new(), model: skin.model }
 }
 
 /// Fold this frame's entity state into the render component set: spawn tracks
@@ -3916,7 +3953,17 @@ mod tests {
             assert!(facts_for(&world, mob, &tabs).player_skin.is_none());
 
             // And a player whose profile declares nothing -- every offline-mode
-            // server -- is `None`, resolving to the default sheet on the wide rig.
+            // server -- no longer collapses to a hardcoded wide/Steve default.
+            // `SkinManager.registerTextures` falls through to
+            // `DefaultPlayerSkin.get(profileId)` in exactly this case (no `SKIN`
+            // texture entry), so `resolve_entity_facts` must too, keyed on the
+            // same uuid the nametag above already reads off the same tab-list
+            // entry. Uuid 43 is a discriminating input, not an arbitrary one: it
+            // resolves to the *slim* rig, so a regression back to "always None,
+            // always wide" — the exact pre-fix behaviour, and the bug behind the
+            // "world renders Steve, inventory renders Alex" report — fails this,
+            // where a uuid that happened to land on wide could not tell the two
+            // apart.
             let plain = Uuid::from_u128(43);
             let mut tabs = lodestone_game::tablist::TabList::new();
             tabs.insert(lodestone_game::tablist::PlayerListEntry::new(
@@ -3925,8 +3972,27 @@ mod tests {
             let mut world = World::new();
             let entity = bare_player_entity(&mut world, plain);
             let facts = facts_for(&world, entity, &tabs);
-            assert!(facts.player_skin.is_none());
-            assert_eq!(draw_with_skin(None).model_type_path(), "player");
+            let skin = facts
+                .player_skin
+                .clone()
+                .expect("a declared-nothing player must still resolve the uuid-hash default");
+            assert_eq!(
+                skin.url, "",
+                "the default sentinel must never look like a real, fetchable URL"
+            );
+            let (hi, lo) = plain.as_u64_pair();
+            let expected = lodestone_assets::skin::default_skin_for_uuid(hi as i64, lo as i64);
+            assert_eq!(
+                expected.model,
+                lodestone_assets::PlayerModelType::Slim,
+                "uuid 43 must be the discriminating input this test relies on"
+            );
+            assert_eq!(
+                skin.model, expected.model,
+                "resolve_entity_facts must thread this entity's own uuid into \
+                 default_skin_for_uuid, not draw an unrelated default"
+            );
+            assert_eq!(draw_with_skin(facts.player_skin.clone()).model_type_path(), "player_slim");
         }
 
         /// A minimal player [`EntityDraw`] carrying `skin` and nothing else —
