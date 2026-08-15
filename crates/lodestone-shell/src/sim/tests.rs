@@ -1745,50 +1745,34 @@ fn net_particles_reaches_the_emitter_and_resolves() {
 }
 
 /// How many particles the two hold measurements below run over. High enough
-/// that the per-particle work dominates two resource moves by orders of
-/// magnitude, well under `ParticleEngine::DEFAULT_CAPACITY` (16 384) so the
-/// engine does not silently drop the tail.
+/// to be a real workload rather than an empty engine trivially satisfying
+/// the assertion below — the *world*-species guard `CLAUDE.md` asks for —
+/// and well under `ParticleEngine::DEFAULT_CAPACITY` (16 384) so the engine
+/// does not silently drop the tail.
 const HOLD_MEASUREMENT_PARTICLES: i32 = 4_000;
 
-/// The small end of the scaling measurement, a tenth of
-/// [`HOLD_MEASUREMENT_PARTICLES`]. The two are compared against each other —
-/// see [`extract_particles_does_not_hold_the_world_guard_across_the_per_particle_work`]
-/// for why a *ratio between two particle counts* replaced a ratio against wall
-/// time.
+/// The small end of the volume check, a tenth of
+/// [`HOLD_MEASUREMENT_PARTICLES`]. Measured at both this and the full count
+/// — see
+/// [`extract_particles_does_not_hold_the_world_guard_across_the_per_particle_work`]
+/// for why the guard-acquisition count has to come out identical at both ends
+/// despite the tenfold difference in particle volume.
 const HOLD_MEASUREMENT_PARTICLES_SMALL: i32 = HOLD_MEASUREMENT_PARTICLES / 10;
 
-/// How much the guarded time may grow when the particle count grows 10x.
-///
-/// A guard held *outside* the per-particle work is O(1) in the count — the same
-/// handful of resource moves either way — so the expectation is ~1.0. A guard
-/// held *across* it is O(N).
-///
-/// Measured over eight runs, averaged per [`HOLD_MEASUREMENT_REPEATS`]:
-///
-/// | shape | ratio for a 10x count | margin to this bound |
-/// |---|---|---|
-/// | correct (guard outside the work) | **0.40 - 0.97x** | 3.1x |
-/// | pre-fix (guard across the work) | **5.60 - 10.93x** | 1.9x |
-///
-/// The bound is placed between the two measured populations rather than at a
-/// round number. Note the O(N) shape does **not** reach the naive 10.0 reliably:
-/// the pre-fix extract carries O(1) setup, which is a larger share of the small
-/// measurement, so a bound of 5 would have been inside its range — an earlier
-/// draft used 5 and the control failed 1 run in 5.
-///
-/// Averaging is what made the populations separate. Single samples ran
-/// 0.6-1.6x and 4.3-8.9x, which overlap far too closely for a threshold; the
-/// spread was scheduler noise on a few tens of microseconds, and summing several
-/// extracts attacks it directly rather than hiding it behind a rounder number.
-const HOLD_SCALING_LIMIT: u128 = 3;
+/// The exact guard-acquisition count [`guard_acquisitions_for_extract`] must
+/// report, at any particle count: [`Sim::reset_lock_holds`]'s own hold (its
+/// doc explains why zeroing the counters still leaves one behind), plus
+/// `extract_particles`'s `self.clock()` read, plus the two writes
+/// `with_particles_unlocked` takes to move `ParticleSim` out of the `World`
+/// and back. See
+/// [`extract_particles_does_not_hold_the_world_guard_across_the_per_particle_work`]'s
+/// own doc for why this is derived rather than guessed.
+const EXTRACT_EXPECTED_HOLDS: u64 = 4;
 
-/// How many extracts each side of the ratio averages over.
-///
-/// Both hold measurements are a few tens of microseconds, where scheduler noise
-/// is a large fraction of a single sample. Summing several extracts before
-/// taking the ratio shrinks that without changing what is being measured, since
-/// the count — the thing the ratio is *about* — is identical in every repeat.
-const HOLD_MEASUREMENT_REPEATS: usize = 5;
+/// The exact guard-acquisition count [`guard_acquisitions_for_prefix_shape`]
+/// must report, at any particle count: [`Sim::reset_lock_holds`]'s own hold,
+/// plus the single `hold_write` that wraps the entire pre-fix extract.
+const PREFIX_EXPECTED_HOLDS: u64 = 2;
 
 /// Spawns `count` live particles around the player and returns the `Sim` and a
 /// camera to extract them with.
@@ -1813,39 +1797,42 @@ fn sim_with_many_particles() -> (Sim, Camera) {
     sim_with_particles(HOLD_MEASUREMENT_PARTICLES)
 }
 
-/// Guarded nanoseconds for one `extract_particles` over `count` particles.
-fn guarded_ns_for_extract(count: i32) -> (u64, usize) {
-    let (mut sim, camera) = sim_with_particles(count);
-    sim.reset_lock_holds();
-    let mut alive = 0;
-    for _ in 0..HOLD_MEASUREMENT_REPEATS {
-        alive = sim.extract_particles(&camera).alive;
-    }
-    (sim.lock_holds().total_ns, alive)
-}
-
-/// Guarded nanoseconds for the **pre-fix shape** over `count` particles: the
-/// whole extract run inside the write guard.
+/// [`Sim::lock_holds`]'s guard-*acquisition* count (not duration) for one
+/// `extract_particles` call over `count` particles, plus how many particles
+/// actually survived to be extracted — the volume half of the *world*-species
+/// check, since a count measured over an empty engine would satisfy any
+/// assertion trivially.
 ///
-/// `light` is the offline arm (`self.net == None`), so this *understates* the
-/// old hold — the live arm additionally took a chunk-store lock per particle
-/// inside it.
-fn guarded_ns_for_prefix_shape(count: i32) -> (u64, usize) {
+/// [`Sim::reset_lock_holds`] first, so the count below is this one call's,
+/// not the whole session's — `Sim::new`'s own setup already takes guards of
+/// its own before this function ever runs.
+fn guard_acquisitions_for_extract(count: i32) -> (u64, usize) {
     let (mut sim, camera) = sim_with_particles(count);
     sim.reset_lock_holds();
-    let mut alive = 0;
-    for _ in 0..HOLD_MEASUREMENT_REPEATS {
-        alive = lodestone_ecs::hold_write(sim.ecs(), |w| {
-            w.resource_mut::<ParticleSim>()
-                .0
-                .extract(&camera, 0.0, &|_, _, _| None)
-        })
-        .alive;
-    }
-    (sim.lock_holds().total_ns, alive)
+    let alive = sim.extract_particles(&camera).alive;
+    (sim.lock_holds().holds, alive)
 }
 
-/// **The measurement §4.1(c) could not make.**
+/// As [`guard_acquisitions_for_extract`], but for the **pre-fix shape**: the
+/// whole extract run inside one write guard — the exact shape
+/// `Sim::extract_particles` used to be before the fix this file documents.
+///
+/// `light` is the offline arm (`self.net == None`), which is also what the
+/// positive case measures against — see [`sim_with_particles`] — so the two
+/// shapes are compared on identical inputs.
+fn guard_acquisitions_for_prefix_shape(count: i32) -> (u64, usize) {
+    let (mut sim, camera) = sim_with_particles(count);
+    sim.reset_lock_holds();
+    let alive = lodestone_ecs::hold_write(sim.ecs(), |w| {
+        w.resource_mut::<ParticleSim>()
+            .0
+            .extract(&camera, 0.0, &|_, _, _| None)
+    })
+    .alive;
+    (sim.lock_holds().holds, alive)
+}
+
+/// **The measurement §4.1(c) could not make, re-expressed as a counter.**
 ///
 /// `Sim::extract_particles` was the longest `World` guard hold in the process:
 /// it took the write guard by hand and held it across the whole extract *and*
@@ -1853,108 +1840,135 @@ fn guarded_ns_for_prefix_shape(count: i32) -> (u64, usize) {
 /// bounded that structurally — "no guard spans a frame" — and said so out loud:
 /// *treat the bound as structural, not measured*. A duration claim with nothing
 /// measuring the duration is the species of vacuous test `CLAUDE.md` names, so
-/// this is the number.
+/// this used to be a ratio of **guarded time at two particle counts** instead.
 ///
-/// The assertion is a ratio of **guarded time at two particle counts**, not a
-/// ratio against the call's own wall time.
+/// That duration form was itself real — it correctly distinguished the two
+/// shapes on an otherwise-idle machine — but it flaked whenever this checkout's
+/// other agents were compiling: both arms are measured *sequentially*, so a
+/// load spike landing between the small-count and large-count extract
+/// corrupts the ratio in exactly the direction that looks like a regression.
+/// Measured at 5.34x against a 3x bound on a loaded machine, standing on
+/// unmodified code. Three separate agents independently re-ran it alone and
+/// single-threaded, confirmed it passes there, and correctly concluded "not a
+/// defect" — cost paid three times for the same non-finding.
 ///
-/// It used to be the latter — guarded < 25% of wall — and that instrument was
-/// wrong in a way worth recording, because it looked like the careful choice.
-/// The reasoning was that an absolute nanosecond ceiling is a statement about
-/// one machine, whereas both sides of a ratio are measured in the same run; the
-/// doc claimed an expected value of "a fraction of a percent" against a 25%
-/// threshold, i.e. two orders of margin.
+/// The property under test was never actually about *time*: it is structural
+/// — does the `World` guard span the per-particle loop? — and `Sim::lock_holds`
+/// already answers that with a **count**, not a clock:
+/// `with_particles_unlocked` (`sim.rs`) takes the guard *exactly twice* per
+/// call — once to remove `ParticleSim` out of the `World`, once to put it back
+/// — with the entire per-particle extract running in the gap between them,
+/// under no guard at all. `extract_particles` itself takes one more, a read,
+/// for `self.clock().interp_alpha` ahead of that. That count cannot be
+/// inflated by scheduler noise or concurrent load the way a nanosecond figure
+/// can, because acquiring and releasing a lock costs the same whether or not
+/// anything else on the machine is busy, and it cannot be inflated by particle
+/// volume either, because nothing about *how many* particles get processed in
+/// the unguarded gap changes how many times the guard itself is taken.
 ///
-/// Measured, the real figure was **27-33%**, so the test failed 5 runs in 6
-/// standing still. Worse, and this is the part that makes it a bad instrument
-/// rather than a mistuned one: the guarded work is O(1) while the wall time is
-/// O(N), so the ratio is not scale-free at all — and *load* inflates wall time
-/// far more than it inflates four lock acquisitions. **A busier machine made
-/// this test more likely to pass.** It went green inside the full suite, where
-/// contention stretched the wall time, and red standalone. "Green in the batch"
-/// was therefore never evidence of anything.
-///
-/// What the property actually says is that the guard does not span the
-/// *per-particle* work — a statement about **scaling**. So: extract over
-/// [`HOLD_MEASUREMENT_PARTICLES_SMALL`] and over ten times as many, and require
-/// the guarded time not to grow with the count. Both measurements sit in one
-/// run under the same load, and neither is compared to a wall clock.
+/// The expected value is [`EXTRACT_EXPECTED_HOLDS`] rather than the "3" the
+/// paragraph above adds up to, because [`Sim::reset_lock_holds`]'s own doc
+/// says why: it records its *own* guard hold **after** zeroing the counters,
+/// so the baseline the moment it returns is 1, not 0. Missing that the first
+/// time this was written produced a failing assertion against a real,
+/// deterministic count — not flakiness, just an under-counted expectation —
+/// which is worth recording exactly because it is the failure mode "predict
+/// the exact count" trades a duration bound's vagueness for: get the count
+/// wrong and it fails **every time**, loudly, rather than most of the time,
+/// quietly. So the expected count is exact and identical at 400 particles and
+/// at 4,000 — [`EXTRACT_EXPECTED_HOLDS`], not "close to it" — which is the
+/// sharper form of "predict the expected value, don't merely bound it"
+/// `CLAUDE.md`'s *magnitude*-species note asks for.
 ///
 /// Its negative control is
 /// [`the_pre_fix_shape_of_extract_particles_fails_the_hold_bound`], which
-/// reproduces the old shape and must fail this same bound.
+/// reproduces the old shape (the whole extract inside *one* guard, plus the
+/// same reset artifact) and must report [`PREFIX_EXPECTED_HOLDS`], not
+/// [`EXTRACT_EXPECTED_HOLDS`], at both particle counts — still flat in the
+/// count, but the wrong flat number, which is exactly what distinguishes "the
+/// guard is taken twice, briefly, around O(1) resource moves" from "the guard
+/// is taken once, around the whole call, including every particle in the loop
+/// that produced this run's `alive` count".
 #[test]
 fn extract_particles_does_not_hold_the_world_guard_across_the_per_particle_work() {
-    let (small_ns, small_alive) = guarded_ns_for_extract(HOLD_MEASUREMENT_PARTICLES_SMALL);
-    let (large_ns, large_alive) = guarded_ns_for_extract(HOLD_MEASUREMENT_PARTICLES);
+    let (small_holds, small_alive) =
+        guard_acquisitions_for_extract(HOLD_MEASUREMENT_PARTICLES_SMALL);
+    let (large_holds, large_alive) = guard_acquisitions_for_extract(HOLD_MEASUREMENT_PARTICLES);
 
-    // The *world*-species guard: the flaw in a vacuous duration test lives in
-    // the input, not the assert. An extract over an empty engine would satisfy
-    // the bound below trivially, so assert the volume first — at both ends,
-    // since the ratio is meaningless if either side did no work.
+    // The *world*-species guard: the flaw in a vacuous test lives in the
+    // input, not the assert. An extract over an empty engine would satisfy the
+    // count below trivially, so assert the volume first — at both ends, since
+    // the count is meaningless as a claim about "per-particle work" if either
+    // side did no work.
     assert!(
         small_alive >= HOLD_MEASUREMENT_PARTICLES_SMALL as usize
             && large_alive >= HOLD_MEASUREMENT_PARTICLES as usize,
         "the measurement needs real volume at both ends; alive={small_alive} and {large_alive}"
     );
-    // A clock that cannot see the small case cannot produce a ratio either.
-    assert!(
-        small_ns > 0,
-        "the hold meter reported 0 ns over {small_alive} particles, so no ratio below is \
-         meaningful — the meter, not the guard, is what failed"
+
+    // The exact, load-independent claim: precisely `EXTRACT_EXPECTED_HOLDS`
+    // guard acquisitions — the reset call's own hold, a clock read, then
+    // remove `ParticleSim` and put it back — regardless of how many particles
+    // sat in the unguarded gap between the last two.
+    assert_eq!(
+        small_holds, EXTRACT_EXPECTED_HOLDS,
+        "extract_particles over {small_alive} particles took {small_holds} World guard \
+         acquisitions, not the expected {EXTRACT_EXPECTED_HOLDS} (reset's own hold, a clock \
+         read, remove ParticleSim, put it back)"
     );
-    eprintln!(
-        "extract_particles guarded time: {small_ns} ns over {small_alive} particles, \
-         {large_ns} ns over {large_alive} — ratio {:.2}x for a 10x count \
-         (bound {HOLD_SCALING_LIMIT}x)",
-        large_ns as f64 / small_ns as f64
-    );
-    assert!(
-        u128::from(large_ns) < u128::from(small_ns) * HOLD_SCALING_LIMIT,
-        "the `World` guard must not span the per-particle work: guarded time grew from \
-         {small_ns} ns to {large_ns} ns for a 10x particle count, which scales with the \
-         count rather than staying flat"
+    assert_eq!(
+        large_holds, EXTRACT_EXPECTED_HOLDS,
+        "extract_particles over {large_alive} particles took {large_holds} World guard \
+         acquisitions, not the expected {EXTRACT_EXPECTED_HOLDS} — a 10x particle count must \
+         not change how many times the guard is acquired, or the guard has started spanning \
+         the per-particle work again"
     );
 }
 
-/// The negative control for the bound above, and the reason it is evidence
+/// The negative control for the count above, and the reason it is evidence
 /// rather than decoration: the *pre-fix shape* — extract run inside the write
-/// guard — must fail the same assertion, measured by the same counter.
+/// guard — must report the wrong count, measured by the same instrument.
 ///
 /// This is deliberately hand-written rather than a switch on `Sim`: a test
 /// switch would have to survive in production code, and what needs proving is
 /// that the detector distinguishes two shapes, not that a flag works.
 ///
-/// Under the scaling formulation this control is *stronger* than it was against
-/// wall time. Holding the guard across the extract makes the guarded time equal
-/// the work, so it is O(N) and lands near the full 10x — whereas the old
-/// wall-time form asked it to exceed 25% of a quantity it *was*, which is
-/// nearly tautological and would have been satisfied by any hold at all.
+/// Unlike the duration form this replaces, this control's expectation does not
+/// depend on load or timing at all: `lodestone_ecs::hold_write` wraps the
+/// *entire* extract in one guard by construction (see this function's own
+/// body), so the guard-acquisition count is exactly
+/// [`PREFIX_EXPECTED_HOLDS`] — deterministically, on any machine, at any
+/// particle count — never "close to it" or "usually that".
 #[test]
 fn the_pre_fix_shape_of_extract_particles_fails_the_hold_bound() {
-    let (small_ns, small_alive) =
-        guarded_ns_for_prefix_shape(HOLD_MEASUREMENT_PARTICLES_SMALL);
-    let (large_ns, large_alive) = guarded_ns_for_prefix_shape(HOLD_MEASUREMENT_PARTICLES);
+    let (small_holds, small_alive) =
+        guard_acquisitions_for_prefix_shape(HOLD_MEASUREMENT_PARTICLES_SMALL);
+    let (large_holds, large_alive) =
+        guard_acquisitions_for_prefix_shape(HOLD_MEASUREMENT_PARTICLES);
 
     assert!(
         small_alive >= HOLD_MEASUREMENT_PARTICLES_SMALL as usize
             && large_alive >= HOLD_MEASUREMENT_PARTICLES as usize,
         "same input volume as the positive case; alive={small_alive} and {large_alive}"
     );
-    assert!(small_ns > 0, "the hold meter reported 0 ns over {small_alive} particles");
-    eprintln!(
-        "pre-fix shape guarded time: {small_ns} ns over {small_alive} particles, \
-         {large_ns} ns over {large_alive} — ratio {:.2}x for a 10x count \
-         (must reach {HOLD_SCALING_LIMIT}x)",
-        large_ns as f64 / small_ns as f64
+
+    assert_eq!(
+        small_holds, PREFIX_EXPECTED_HOLDS,
+        "the pre-fix shape must take exactly {PREFIX_EXPECTED_HOLDS} World guards over \
+         {small_alive} particles (reset's own hold, plus the whole extract wrapped in one \
+         `hold_write`), got {small_holds}"
     );
-    assert!(
-        u128::from(large_ns) >= u128::from(small_ns) * HOLD_SCALING_LIMIT,
-        "the detector must fire on the shape it exists to reject: holding the guard across \
-         the extract grew guarded time only from {small_ns} ns to {large_ns} ns for a 10x \
-         particle count, so the bound in \
-         `extract_particles_does_not_hold_the_world_guard_across_the_per_particle_work` \
-         is not discriminating"
+    assert_eq!(
+        large_holds, PREFIX_EXPECTED_HOLDS,
+        "the pre-fix shape must take exactly {PREFIX_EXPECTED_HOLDS} World guards over \
+         {large_alive} particles, got {large_holds}"
+    );
+    assert_ne!(
+        small_holds, EXTRACT_EXPECTED_HOLDS,
+        "the detector must fire on the shape it exists to reject: this control's guard count \
+         must disagree with the correct shape's count of {EXTRACT_EXPECTED_HOLDS} in \
+         `extract_particles_does_not_hold_the_world_guard_across_the_per_particle_work`, or \
+         that bound is not discriminating"
     );
 }
 
