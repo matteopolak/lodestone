@@ -58,6 +58,11 @@ pub fn pause_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
         selected: nav.pause_index(),
         gui_scale: nav.gui_scale(),
         backdrop: MenuBackdrop::Dim,
+        // Vanilla blurs behind the pause menu — `PauseScreen` never overrides
+        // `isInGameUi()`, so `Screen::extractBackground`'s default fork
+        // applies (see `blur`'s module doc). Not implied by `backdrop`; see
+        // `MenuFrame::blur`'s own doc.
+        blur: true,
         vanilla: true,
         // `PauseScreen.init` adds a `StringWidget` with the screen title at
         // y=40 when the pause menu is showing (`PauseScreen.java`); the
@@ -183,6 +188,9 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
         selected: nav.death_index(),
         gui_scale: nav.gui_scale(),
         backdrop: MenuBackdrop::DeathGradient,
+        // `DeathScreen` does not override `isInGameUi()` either — same fork
+        // as `pause_frame`, see `MenuFrame::blur`'s own doc.
+        blur: true,
         vanilla: true,
         labels,
         ..Default::default()
@@ -412,6 +420,10 @@ pub fn command_block_frame(
         selected: usize::MAX,
         hovered: state.hovered,
         backdrop: MenuBackdrop::Dim,
+        // `blur` stays at its `..Default::default()` `false`: vanilla's
+        // `AbstractCommandBlockEditScreen` overrides `isInGameUi()` to
+        // `true`, the fork `Screen::extractBackground` skips the blur for —
+        // see `MenuFrame::blur`'s own doc.
         vanilla: true,
         labels,
         ..Default::default()
@@ -472,6 +484,8 @@ pub fn sign_edit_frame(state: &sign_edit::SignEditState) -> MenuFrame<'static> {
         selected: usize::MAX,
         hovered: state.done_hovered.then_some(nav::sign_edit_row::DONE),
         backdrop: MenuBackdrop::Dim,
+        // `blur` stays `false` for `command_block_frame`'s own reason:
+        // `AbstractSignEditScreen` overrides `isInGameUi()` to `true` too.
         vanilla: true,
         labels,
         ..Default::default()

@@ -547,9 +547,30 @@ pub fn frame_for<'a>(
         // for why its content is a short placeholder rather than vanilla's
         // real auto-scrolling poem.
         Screen::Credits => Some(credits_frame()),
-        // Social Interactions — see `super::social::frame`'s own doc
-        // for the singleplayer/multiplayer fork.
-        Screen::Social => Some(super::social::frame(nav.social(), ui.kind())),
+        // Social Interactions is **always** in-world — `UiState::open_social_from_pause`
+        // only opens `Screen::Social` from `Screen::Paused`, and there is no
+        // title-screen entry point at all (see `Screen::Social`'s own doc) —
+        // so like `Screen::Statistics` immediately below, this has no
+        // out-of-world case to still return `Some` for. This arm used to be
+        // `Some(super::social::frame(..))` unconditionally, which routes
+        // through `draw_menu`'s `Clear` pass and, by construction, never
+        // renders the world that frame — the identical defect Statistics'
+        // own doc records at length, recurring here because the two screens
+        // share no code. The fix is the same shape: `None` here, so
+        // `draw_menu` falls through to the world path, and
+        // `nav::social_overlay_frame`'s frame is drawn with
+        // `MenuRenderer::render_overlay` once the world (and its HUD/container
+        // passes) have painted — see that function's own doc for the one call
+        // site this needs that this renderer's own file ownership cannot add
+        // (`app/redraw.rs`).
+        //
+        // `owns_frame(Screen::Social)` is deliberately left `true` regardless,
+        // for `owns_frame(Screen::Statistics)`'s own reason: every non-render
+        // caller (mouse/keyboard routing, the wheel arm in `app/lifecycle.rs`)
+        // still wants Social treated as a menu-row screen. See
+        // `frame_for_defers_to_an_overlay_for_social` for the coverage the
+        // general `owns_frame`/`frame_for` sweep cannot give this one screen.
+        Screen::Social => None,
         // Statistics is **always** in-world — `UiState::open_statistics_from_pause`
         // only opens it from `Screen::Paused`, and there is no title-screen
         // entry point at all (see `Screen::Statistics`'s own doc) — so unlike

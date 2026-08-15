@@ -82,6 +82,7 @@ use super::{
 };
 
 mod account_screen;
+mod blur;
 mod dispatch;
 mod draw;
 mod favicon;

@@ -305,20 +305,21 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
         assert_eq!(ui.screen(), screen, "failed to reach {screen:?}");
         reached += 1;
         let built = frame_for(&ui, &nav, &statuses, &mut fav).is_some();
-        if screen == Screen::Statistics {
+        if matches!(screen, Screen::Statistics | Screen::Social) {
             // The one other documented exception, alongside `Screen::Settings`
-            // while `settings_in_world()`: this loop reaches Statistics the
-            // only way a player can (`ui.open_statistics_from_pause()`,
-            // which is always in-world — there is no title-screen route for
-            // this test to take instead, unlike Settings), so it always hits
-            // the case where `frame_for` deliberately answers `None` and
-            // `owns_frame` deliberately stays `true` (see that arm's own
-            // doc). `frame_for_defers_to_an_overlay_for_statistics` below is
-            // what covers the frame this loop cannot reach.
-            assert!(!built, "Screen::Statistics must defer to the overlay path");
+            // while `settings_in_world()`: this loop reaches Statistics and
+            // Social the only way a player can (`ui.open_statistics_from_pause()`/
+            // `ui.open_social_from_pause()`, both always in-world — there is
+            // no title-screen route for this test to take instead, unlike
+            // Settings), so it always hits the case where `frame_for`
+            // deliberately answers `None` and `owns_frame` deliberately stays
+            // `true` (see each arm's own doc).
+            // `frame_for_defers_to_an_overlay_for_statistics`/`_for_social`
+            // below are what cover the frame this loop cannot reach.
+            assert!(!built, "{screen:?} must defer to the overlay path");
             assert!(
                 owns_frame(screen),
-                "owns_frame(Statistics) must stay true regardless — see that arm's own doc"
+                "owns_frame({screen:?}) must stay true regardless — see that arm's own doc"
             );
         } else {
             assert_eq!(
@@ -3017,6 +3018,61 @@ fn frame_for_defers_to_an_overlay_for_statistics() {
     );
 }
 
+/// The Social Interactions half of the same defect class as Statistics —
+/// found in a backdrop audit rather than a player report this time, but the
+/// shape is identical: no out-of-world route at all
+/// (`UiState::open_social_from_pause` only opens `Screen::Social` from
+/// `Screen::Paused`), so the general sweep above cannot cover it either and
+/// this is the dedicated gate.
+#[test]
+fn frame_for_defers_to_an_overlay_for_social() {
+    let nav = test_nav("social-overlay");
+    let mut fav = FaviconCache::new();
+    let statuses = StatusCache::with_probe(unavailable_probe());
+
+    let mut ui = UiState::new();
+    ui.enter_dev_world();
+    ui.pause();
+    ui.open_social_from_pause();
+    assert_eq!(ui.screen(), Screen::Social, "premise: reached the screen");
+    assert!(
+        frame_for(&ui, &nav, &statuses, &mut fav).is_none(),
+        "Social must defer to an overlay over the still-rendering world, not \
+         the Clear pass — see that arm's own doc"
+    );
+    assert!(owns_frame(Screen::Social), "owns_frame must stay true regardless");
+
+    let overlay = crate::menu::nav::social_overlay_frame(&ui, &nav)
+        .expect("the overlay frame must exist once the screen is open");
+    assert_eq!(
+        overlay.backdrop,
+        MenuBackdrop::Dim,
+        "the paused world must stay visible behind Social, not the panorama"
+    );
+    assert!(
+        overlay.blur,
+        "vanilla blurs behind Social exactly as it does behind Statistics — \
+         see MenuFrame::blur's own doc"
+    );
+    assert_eq!(overlay.gui_scale, nav.gui_scale());
+    assert_eq!(overlay.panorama_speed, Some(nav.panorama_speed()));
+    assert_eq!(overlay.cursor, nav.menu_cursor());
+    assert!(
+        !geometry(&overlay, 1280.0, 720.0).is_empty(),
+        "the overlay frame must actually rasterise to vertices, not just \
+         carry the right metadata — the same layer a whole corpus stopping \
+         one level above the draw has missed before in this codebase"
+    );
+
+    // -- control ----------------------------------------------------------
+    assert_ne!(
+        overlay.backdrop,
+        MenuBackdrop::default(),
+        "the default backdrop is Panorama, so this control must fail if the \
+         fix regresses to it"
+    );
+}
+
 /// The Server Links screen never had this bug in the first place — it was
 /// built overlay-only from the start (see `Screen::ServerLinks`'s own doc) —
 /// but the gate is cheap and the shape is identical, so it is worth pinning
@@ -3044,6 +3100,79 @@ fn frame_for_defers_to_an_overlay_for_server_links() {
         .expect("the overlay frame must exist once the screen is open");
     assert_eq!(overlay.backdrop, MenuBackdrop::Dim);
     assert_ne!(overlay.backdrop, MenuBackdrop::default());
+}
+
+/// The resource-pack prompt's backdrop, audited alongside the Social fix
+/// above and found to carry **two** bugs of the identical defect class,
+/// neither reachable from `owns_frame_agrees_with_frame_for_on_every_screen`'s
+/// general sweep: that loop only ever reaches this screen the way
+/// `every_mouse_routable_screen_has_a_frame_to_hit_test`'s own
+/// `"ResourcePackPrompt"` case does not either — through
+/// `ui.begin(SessionKind::Multiplayer)`, the *no*-world case, never through a
+/// live world. See `nav::resource_pack_prompt_overlay_frame`'s own doc for
+/// the record citation this fix is derived from.
+#[test]
+fn resource_pack_prompt_overlay_frame_is_dim_and_blurred_in_world_and_untouched_otherwise() {
+    let mut nav_out = test_nav("prompt-overlay-out-of-world");
+    let mut ui_out = UiState::new();
+    ui_out.begin(crate::menu::SessionKind::Multiplayer);
+    nav_out.show_resource_pack_prompt(
+        &mut ui_out,
+        &crate::net::PendingResourcePackPrompt::for_test(uuid::Uuid::from_u128(1), false),
+    );
+    assert_eq!(ui_out.screen(), Screen::ResourcePackPrompt, "premise");
+    assert!(!ui_out.resource_pack_prompt_in_world(), "premise: no level yet");
+    let out_frame = crate::menu::nav::resource_pack_prompt_overlay_frame(&ui_out, &nav_out)
+        .expect("the overlay frame must exist once the screen is open");
+    assert_eq!(
+        out_frame.backdrop,
+        MenuBackdrop::default(),
+        "no level -- vanilla's own `level == null` fork wants the panorama, \
+         untouched from the frame builder's own default"
+    );
+    assert!(
+        !out_frame.blur,
+        "this port scopes the blur pass to render_overlay screens with a \
+         live world -- see render::blur's own module doc on the Connecting \
+         case being a stated cut, not an oversight"
+    );
+
+    let mut nav_in = test_nav("prompt-overlay-in-world");
+    let mut ui_in = UiState::new();
+    ui_in.enter_dev_world();
+    nav_in.show_resource_pack_prompt(
+        &mut ui_in,
+        &crate::net::PendingResourcePackPrompt::for_test(uuid::Uuid::from_u128(2), false),
+    );
+    assert_eq!(ui_in.screen(), Screen::ResourcePackPrompt, "premise");
+    assert!(ui_in.resource_pack_prompt_in_world(), "premise: a live world");
+    let in_frame = crate::menu::nav::resource_pack_prompt_overlay_frame(&ui_in, &nav_in)
+        .expect("the overlay frame must exist once the screen is open");
+    assert_eq!(
+        in_frame.backdrop,
+        MenuBackdrop::Dim,
+        "a live world must stay visible behind the prompt, not the panorama \
+         -- the bug this test exists to catch: `resource_pack_prompt_frame` \
+         builds via `..Default::default()`, whose backdrop is `Panorama`, \
+         and nothing used to override it"
+    );
+    assert!(
+        in_frame.blur,
+        "PackConfirmScreen does not override isInGameUi() either"
+    );
+    // The second bug this audit found: the canvas stamp was missing
+    // entirely, not just the backdrop.
+    assert_eq!(in_frame.gui_scale, nav_in.gui_scale());
+    assert_eq!(in_frame.panorama_speed, Some(nav_in.panorama_speed()));
+    assert_eq!(in_frame.cursor, nav_in.menu_cursor());
+
+    // -- control ------------------------------------------------------------
+    assert_ne!(
+        in_frame.backdrop,
+        out_frame.backdrop,
+        "the two cases must actually diverge, or the assertions above are \
+         not discriminating between them"
+    );
 }
 
 /// **The layer `stats.rs`'s own zebra test cannot reach.**
