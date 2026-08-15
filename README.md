@@ -6,10 +6,12 @@ redistributed; everything is ported from the published protocol, the decompiled 
 under `.cache/` (never checked in — see [`docs/legal-notices.md`](./docs/legal-notices.md)),
 and Mojang's own data generators.
 
-**Lodestone is not affiliated with, endorsed by, or associated with Mojang Studios, Microsoft,
-or Minecraft in any way.** "Minecraft" is a trademark of Mojang Synergies AB. This is an
-independent, unofficial project; see [`docs/legal-notices.md`](./docs/legal-notices.md) for
-what that means for licensing, third-party design references, and data sources.
+> [!IMPORTANT]
+> **Lodestone is not affiliated with, endorsed by, or associated with Mojang Studios,
+> Microsoft, or Minecraft in any way.** "Minecraft" is a trademark of Mojang Synergies AB.
+> This is an independent, unofficial project; see
+> [`docs/legal-notices.md`](./docs/legal-notices.md) for what that means for licensing,
+> third-party design references, and data sources.
 
 ## Goals
 
