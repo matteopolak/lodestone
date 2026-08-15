@@ -470,8 +470,15 @@ pub(crate) fn run_command_as(
     // is the honest answer rather than a throwaway sim), so `/summon` refuses
     // over RCON exactly as `/setblock`/`/fill` already do for a different
     // missing resource.
-    let world =
-        CommandWorld { rules: &config.world, players: &candidates, state: &config.world, mobs: None };
+    let world = CommandWorld {
+        rules: &config.world,
+        players: &candidates,
+        state: &config.world,
+        mobs: None,
+        // RCON has no live border to reach — same honest gap as `mobs: None`
+        // just above.
+        border: None,
+    };
     let source = CommandSource::console(
         caller_name,
         crate::commands::overworld_dimension(),

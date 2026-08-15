@@ -50,7 +50,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::block_entities::BlockEntityHandle;
-use crate::border::WorldBorder;
+use crate::border::{BorderFeed, WorldBorder};
 use crate::chunk::ChunkSource;
 use crate::mobs::{Detonation, LiveMobSource, MobHandle, MobSim};
 use lodestone_entity::ai::mob::EatenBlock;
@@ -866,6 +866,13 @@ fn run_command_block_command<W: ChunkSource + ?Sized>(
         players: &[],
         state: world_state,
         mobs: Some(mobs),
+        // Issue #580: not threaded to this helper — a command block running
+        // `/worldborder` is a real but niche case, and this function already
+        // accepts a comparable gap for `PlayerRegistry` (see its own doc
+        // comment) rather than widening its signature for it. `None` is the
+        // honest answer, not a silent drop: the command still runs and every
+        // other built-in still works, `/worldborder` just refuses here.
+        border: None,
     };
     let Some(outcome) = commands.run(&command_world, &source, command) else {
         return false;
@@ -1046,6 +1053,10 @@ pub(crate) async fn run_tick_loop<W>(
         // change them, which is exactly the behaviour before #327.
         crate::world_state::WorldStateHandle::default(),
         follow,
+        // Same compatibility shape as every feed above: a fresh, unshared
+        // border. It still ticks (a resize's lerp would still advance), it
+        // is just never resized by anything and never read by a connection.
+        BorderFeed::default(),
     )
     .await
 }
@@ -1125,6 +1136,15 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // plus the shared player-anchor set, which together turn `tick_area` from the
     // whole simulated world into a fallback for when no player is in it.
     follow: crate::tick_area::TickFollow,
+    // Issue #326's remainder (#580): the world border, now the *shared* handle
+    // a `/worldborder` command mutates through `BorderFeed::with` and every
+    // connection reads through `BorderFeed::get` — see `crate::border`'s
+    // module doc for the "interim shape" this replaces. Before this
+    // parameter existed, this loop ticked a private `WorldBorder::default()`
+    // no caller could ever reach, and every `serve_connection*` entry point
+    // built its own throwaway `BorderFeed::default()`, so a resize command
+    // would have mutated a border nothing read and nothing ticked.
+    border: BorderFeed,
 ) where
     W: ChunkSource,
 {
@@ -1271,16 +1291,9 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     )
     .with_world_seed(crate::worldgen_data::active_world_seed());
     let mut despawn_rng = crate::mob_spawn::SpawnRng::new(NATURAL_SPAWN_SEED ^ 0x5DEE_C0DE);
-    // Issue #326 / `docs/plans/world-state.md` B1: the world border, ticked
-    // first each loop (per `ServerLevel.tick`'s order) and owned by this
-    // thread with no lock, exactly like `weather`/`game_tick`. A **static
-    // default today** — nothing calls `lerp_size_between`/`set_size` yet, so
-    // the loop ticks an inert border and every connection joins against the
-    // same full-size default (see `crate::border`'s module doc for why both
-    // halves agree and what shape B deletes). The resize entry point is
-    // `BorderFeed::with`; wiring it to the world loop is the follow-up this
-    // landing deliberately does not claim.
-    let mut border = WorldBorder::default();
+    // Issue #326 / #580: the world border, ticked first each loop (per
+    // `ServerLevel.tick`'s order). `border` is now the shared handle passed
+    // in — see this function's own parameter comment.
 
     loop {
         let now = tokio::time::Instant::now();
@@ -1324,11 +1337,11 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // returns, which is what keeps a chunk-boundary crossing from putting a
         // whole area's worth of column fetches inside one unserviced window.
         let area_moved = area.recompute();
-        // Issue #326 B1: border ticks first, per `ServerLevel.tick`'s order
-        // (`WorldBorder.tick` then the rest of the level's tick). Inert today —
-        // a static full-size default — but this is where a resize's lerp
-        // advances once a caller exists to start one.
-        border.tick();
+        // Issue #326 B1 / #580: border ticks first, per `ServerLevel.tick`'s
+        // order (`WorldBorder.tick` then the rest of the level's tick) — now
+        // against the shared feed, so a `/worldborder` resize's lerp actually
+        // advances tick over tick.
+        border.with(WorldBorder::tick);
         // **Dropped items settle against the live world, not the sim's snapshot.**
         //
         // `MobSim::tick` would use `MobSim`'s own `ChunkWorld`, which is a static
@@ -3726,6 +3739,7 @@ mod tests {
                 crate::region_source::ScheduledTickHandle::default(),
                 crate::world_state::WorldStateHandle::default(),
                 crate::tick_area::TickFollow::default(),
+                BorderFeed::default(),
             )
             .await;
         });
@@ -3801,6 +3815,7 @@ mod tests {
                 crate::region_source::ScheduledTickHandle::default(),
                 world_state,
                 crate::tick_area::TickFollow::default(),
+                BorderFeed::default(),
             )
             .await;
         });
@@ -3866,6 +3881,7 @@ mod tests {
                 crate::region_source::ScheduledTickHandle::default(),
                 crate::world_state::WorldStateHandle::default(),
                 crate::tick_area::TickFollow::default(),
+                BorderFeed::default(),
             )
             .await;
         });
@@ -3958,6 +3974,7 @@ mod tests {
                 crate::region_source::ScheduledTickHandle::default(),
                 crate::world_state::WorldStateHandle::default(),
                 crate::tick_area::TickFollow::default(),
+                BorderFeed::default(),
             )
             .await;
         });

@@ -189,6 +189,15 @@ pub struct CommandWorld<'a> {
     /// connection's `ChatCommand` arm always has the real handle in scope and
     /// passes `Some`.
     pub mobs: Option<&'a crate::mobs::MobHandle>,
+    /// `/worldborder`'s read/write surface (issue #580) — the same
+    /// [`crate::border::BorderFeed`] `crate::tick::run_tick_loop_with_weather`
+    /// now ticks and every production connection reads for its join
+    /// broadcast and enforcement. `Option` for the same reason [`Self::mobs`]
+    /// is: RCON and this module's own test helper build a [`CommandWorld`]
+    /// with no live border to reach, and a default feed nothing ticks would
+    /// be an island rather than a degradation. A live connection's
+    /// `ChatCommand` arm always has the real handle and passes `Some`.
+    pub border: Option<&'a crate::border::BorderFeed>,
 }
 
 /// Read/write access to the world's game rules, abstracted over *which* store.

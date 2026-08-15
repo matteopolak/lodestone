@@ -140,6 +140,7 @@ mod time;
 mod weather;
 pub mod wire;
 mod world_spawn_commands;
+mod worldborder;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -236,6 +237,7 @@ impl ServerCommands {
         default_gamemode::register(&mut registrar);
         help::register(&mut registrar);
         execute::register(&mut registrar);
+        worldborder::register(&mut registrar);
         Self::from_registrar(registrar)
     }
 
