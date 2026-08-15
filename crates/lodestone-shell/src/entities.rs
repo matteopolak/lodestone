@@ -1715,6 +1715,14 @@ fn render_pitch(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
 /// query in [`extract_entity_draws`] for why the two are not interchangeable.
 /// It drives `Skeleton::pose`'s humanoid crouch branch, so a sneaking remote
 /// player hunches exactly as the local self-avatar does.
+///
+/// `swim_amount` is `LivingEntity.getSwimAmount()`, interpolated for this
+/// frame — the same [`SwimRamp`]-integrated value [`extract_entity_draws`]
+/// already computes and carries on [`EntityDraw::swim_amount`] for the
+/// whole-body prone rotation. This is the second, independent consumer: it
+/// drives `Skeleton::pose`'s humanoid swim branch — the arm-over-arm stroke
+/// and leg kick — which reads it off `AnimInput` rather than `EntityDraw`,
+/// since that is the field `Skeleton::pose` actually takes.
 fn render_anim(
     from: &InterpFrom,
     to: &InterpTo,
@@ -1726,6 +1734,7 @@ fn render_anim(
     aggressive: bool,
     crouching: bool,
     is_passenger: bool,
+    swim_amount: f32,
 ) -> AnimInput {
     let body = render_yaw(from, to, clock);
     let head = clamp_head_to_body(body, render_head_yaw(from, to, clock), MAX_HEAD_YAW);
@@ -1741,6 +1750,7 @@ fn render_anim(
         arm_pose_left_hand: arm_pose.left_hand,
         crouching,
         is_passenger,
+        swim_amount,
     }
 }
 
@@ -2370,6 +2380,7 @@ pub fn extract_entity_draws(
                 aggressive,
                 crouching,
                 is_passenger,
+                swim_amount,
             ),
             name_tag: name_tag.0.clone(),
             hurt,
@@ -4848,6 +4859,56 @@ mod tests {
         assert!(
             receded < 1.0,
             "swim_amount did not recede after leaving Pose::Swimming: still {receded}"
+        );
+    }
+
+    /// The *second* consumer of the same ramp the test above proves reaches
+    /// [`EntityDraw::swim_amount`]: [`render_anim`] now also threads it into
+    /// [`EntityDraw::anim`]'s [`AnimInput::swim_amount`], which is the field
+    /// `Skeleton::pose`'s humanoid swim branch (the arm-over-arm stroke, the
+    /// leg kick, the head pitch) actually reads — `Skeleton::pose` never sees
+    /// `EntityDraw::swim_amount` itself. Before this, `render_anim` did not
+    /// take a `swim_amount` parameter at all, so `AnimInput` had no field to
+    /// carry it and the arm-stroke animation could not exist no matter what
+    /// `tick_swim_ramp` computed. A partial ramp (not `0.0`, not `1.0`) is the
+    /// discriminating value: a `render_anim` that hardcoded `0.0` for the new
+    /// field, or one that swapped it for an unrelated already-in-scope `f32`,
+    /// would both pass a `0.0`-or-`1.0`-only check.
+    #[test]
+    fn the_swim_ramp_also_reaches_anim_input_not_just_the_top_level_field() {
+        let mut interp = EntityInterpolator::new();
+        (snap(3, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(0.0);
+        let draw_for = |interp: &EntityInterpolator, id: i32| -> EntityDraw {
+            interp
+                .draws()
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("no draw for entity {id}"))
+        };
+        let ingest_entity = interp
+            .world_mut()
+            .resource::<EntityIndex>()
+            .get(3)
+            .expect("entity 3 is spawned");
+        interp
+            .world_mut()
+            .entity_mut(ingest_entity)
+            .insert(Pose(lodestone_model::EntityPose::Swimming));
+
+        // One tick — `SWIM_AMOUNT_PER_TICK == 0.09`, so this lands on a
+        // partial ramp, not on the `0.0` both fields start at.
+        interp.update(0.05);
+        let draw = draw_for(&interp, 3);
+        assert!(
+            draw.swim_amount > 0.0,
+            "precondition: the ramp must have moved off 0.0 for this test to discriminate"
+        );
+        assert_eq!(
+            draw.anim.swim_amount, draw.swim_amount,
+            "EntityDraw::anim.swim_amount ({}) must equal EntityDraw::swim_amount ({}) — \
+             render_anim is not threading the ramp into AnimInput",
+            draw.anim.swim_amount, draw.swim_amount
         );
     }
 

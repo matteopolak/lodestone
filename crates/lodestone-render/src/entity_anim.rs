@@ -504,6 +504,26 @@ pub struct AnimInput {
     /// still take the item pose on top rather than being pinned to the sit
     /// rotation.
     pub is_passenger: bool,
+    /// `LivingEntityRenderState.swimAmount`, i.e. `LivingEntity.getSwimAmount`
+    /// interpolated for this frame — a `0..1` ramp toward the swim pose, `0.0`
+    /// for every entity that has never reported [`Pose.SWIMMING`]. Mirrors
+    /// [`crate::entity_anim::AnimInput::crouching`]'s shape: a wire this build
+    /// already carries end to end (`crate::entities::SwimRamp`/`tick_swim_ramp`
+    /// on the shell side), just not into this struct until now.
+    ///
+    /// Drives [`Skeleton::pose`]'s [`AnimFamily::Humanoid`] swim branch —
+    /// `HumanoidModel.setupAnim`'s two `swimAmount > 0.0F` clauses: the head
+    /// pitching toward `-PI/4` and the arm-over-arm stroke plus leg flutter.
+    /// This is the **limb-level** swim animation and is a different thing from
+    /// the whole-body prone rotation `apply_swim_rotation` in
+    /// `lodestone_shell::gpu::entity_passes` already applies — that ports
+    /// `AvatarRenderer.setupRotations`'s player-only body pitch, gated on
+    /// `type_path` at its call site; this field's branch is the base
+    /// `HumanoidModel.setupAnim` clause and applies to every [`AnimFamily::Humanoid`]
+    /// rig with nonzero `swim_amount`, remote mobs included, with no type gate
+    /// of its own — vanilla runs it unconditionally for every renderer whose
+    /// model extends `HumanoidModel`.
+    pub swim_amount: f32,
 }
 
 impl AnimInput {
@@ -520,6 +540,7 @@ impl AnimInput {
         arm_pose_left_hand: false,
         crouching: false,
         is_passenger: false,
+        swim_amount: 0.0,
     };
 }
 
@@ -1010,6 +1031,21 @@ impl Skeleton {
             // we do not decode yet. The item-pose branch landed with #57
             // (`pose_arms_for_item`) and the crouch branch is below.
             AnimFamily::Humanoid => {
+                // `HumanoidModel.setupAnim`'s swim head-pitch clause — only the
+                // `swimAmount > 0.0F` half; `isFallFlying` is state this module's
+                // own doc already lists as absent. Transcribed exactly:
+                // `head.xRot = Mth.rotLerpRad(swimAmount, head.xRot, -PI/4)`.
+                // `poses[h].x_rot` already holds `headPitch * DEG` from the
+                // family-independent head block above this match, matching
+                // vanilla's own `head.xRot = state.xRot * DEG` immediately
+                // before this branch.
+                if input.swim_amount > 0.0
+                    && let Some(h) = s.head
+                {
+                    poses[h].x_rot =
+                        rot_lerp_rad(input.swim_amount, poses[h].x_rot, -std::f32::consts::FRAC_PI_4);
+                }
+
                 let arm = |phase: f32| (pos * WALK_FREQ + phase).cos() * 2.0 * amt * 0.5;
                 let leg = |phase: f32| (pos * WALK_FREQ + phase).cos() * 1.4 * amt;
                 // A zombie rig runs `HumanoidModel.setupAnim` too, but
@@ -1133,12 +1169,58 @@ impl Skeleton {
                 }
 
                 match self.arms {
-                    // AnimationUtils.bobModelPart on each arm, opposite signs.
+                    // AnimationUtils.bobModelPart on each arm, opposite signs,
+                    // then `HumanoidModel.setupAnim`'s swim arm-stroke clause
+                    // (see [`Self::pose_swim_arms`]) — vanilla runs both inside
+                    // the same base-class call a zombie's raised-arm override
+                    // (`animateZombieArms`) runs strictly *after* and wholly
+                    // overwrites, so neither belongs on the `Zombie` arm.
                     HumanoidArms::Swinging => {
                         bob(poses, s.right_arm, input.age_ticks, 1.0);
                         bob(poses, s.left_arm, input.age_ticks, -1.0);
+
+                        // `if (!state.isUsingItem)` — approximated as `arm_pose
+                        // == Empty` since every `ArmPose` variant this build
+                        // tracks (`Item`, `BowAndArrow`, the crossbow poses)
+                        // corresponds to a real vanilla `isUsingItem() == true`
+                        // state (`Item` doubles as vanilla's eat/drink pose; see
+                        // [`ArmPose::Item`]'s own doc). The `rightArmPose`/
+                        // `leftArmPose != SPEAR` and `attackArm` conjuncts vanilla
+                        // also gates on are not modelled — `SPEAR` is not a
+                        // tracked [`ArmPose`] and this build does not track which
+                        // arm is attacking — so both swim arms always take the
+                        // full `swim_amount` rather than being selectively zeroed
+                        // for a mid-swing attacking arm. Documented gap, not a
+                        // guess: the untracked half of a real vanilla conjunction.
+                        if input.swim_amount > 0.0 && input.arm_pose == ArmPose::Empty {
+                            self.pose_swim_arms(poses, input);
+                        }
                     }
                     HumanoidArms::Zombie => self.animate_zombie_arms(poses, input),
+                }
+
+                // `HumanoidModel.setupAnim`'s swim leg-kick clause — outside the
+                // `isUsingItem` gate above (vanilla's legs kick regardless of the
+                // arms) and not gated by [`Self::arms`] either (a swimming
+                // zombie's raised-arm override never touches its legs, so the
+                // kick survives for every [`AnimFamily::Humanoid`] rig).
+                // Transcribed exactly: `Mth.lerp(swimAmount, legXRot, 0.3 *
+                // cos(animationPos * 0.33333334F [+ PI for the left leg]))`.
+                if input.swim_amount > 0.0 {
+                    if let Some(i) = s.left_leg {
+                        poses[i].x_rot = lerp(
+                            input.swim_amount,
+                            poses[i].x_rot,
+                            0.3 * (pos * 0.333_333_34 + std::f32::consts::PI).cos(),
+                        );
+                    }
+                    if let Some(i) = s.right_leg {
+                        poses[i].x_rot = lerp(
+                            input.swim_amount,
+                            poses[i].x_rot,
+                            0.3 * (pos * 0.333_333_34).cos(),
+                        );
+                    }
                 }
             }
 
@@ -1211,6 +1293,73 @@ impl Skeleton {
         }
         bob(poses, s.right_arm, input.age_ticks, 1.0);
         bob(poses, s.left_arm, input.age_ticks, -1.0);
+    }
+
+    /// `HumanoidModel.setupAnim`'s `swimAmount > 0.0F` arm-stroke block
+    /// (the `!state.isUsingItem` half — see the call site's own doc for the
+    /// gate), transcribed exactly from the 26.2 client. Three windows of
+    /// `animationPos % 26.0`: the recovery reach (`< 14`), the catch
+    /// (`14..22`), and the pull back to the side (`22..26`);
+    /// `quadraticArmUpdate(x) = -65x + x²` shapes the entry curve of the
+    /// first window's `z_rot`. Every value is a *lerp from whatever the walk
+    /// swing and idle bob already left the arm at* toward that window's
+    /// stroke target, not an assignment — so a mid-ramp `swim_amount` blends
+    /// continuously between walking and stroking rather than snapping.
+    ///
+    /// # Vanilla mixes lerp kinds per *arm*, not per axis
+    ///
+    /// Every left-arm component below uses the wrap-aware [`rot_lerp_rad`];
+    /// every right-arm component uses the plain [`lerp`]. Kept exactly as the
+    /// decompile has it rather than "fixed" to be consistent — the difference
+    /// is bit-for-bit what a real client draws, and the two only diverge when
+    /// a `to - from` gap exceeds `PI`, which the target angles below (all in
+    /// `[0, PI]` or `[PI/2, PI]`-ish ranges reached by a bounded per-frame
+    /// ramp) are not expected to.
+    fn pose_swim_arms(&self, poses: &mut [PartPose], input: &AnimInput) {
+        let s = &self.slots;
+        let amount = input.swim_amount;
+        let swim_pos = input.limb_swing.rem_euclid(26.0);
+        let quad = |x: f32| -65.0 * x + x * x;
+        let pi = std::f32::consts::PI;
+
+        if swim_pos < 14.0 {
+            let z_lean = 1.8707964 * quad(swim_pos) / quad(14.0);
+            if let Some(i) = s.left_arm {
+                poses[i].x_rot = rot_lerp_rad(amount, poses[i].x_rot, 0.0);
+                poses[i].y_rot = rot_lerp_rad(amount, poses[i].y_rot, pi);
+                poses[i].z_rot = rot_lerp_rad(amount, poses[i].z_rot, pi + z_lean);
+            }
+            if let Some(i) = s.right_arm {
+                poses[i].x_rot = lerp(amount, poses[i].x_rot, 0.0);
+                poses[i].y_rot = lerp(amount, poses[i].y_rot, pi);
+                poses[i].z_rot = lerp(amount, poses[i].z_rot, pi - z_lean);
+            }
+        } else if swim_pos < 22.0 {
+            let t = (swim_pos - 14.0) / 8.0;
+            if let Some(i) = s.left_arm {
+                poses[i].x_rot = rot_lerp_rad(amount, poses[i].x_rot, std::f32::consts::FRAC_PI_2 * t);
+                poses[i].y_rot = rot_lerp_rad(amount, poses[i].y_rot, pi);
+                poses[i].z_rot = rot_lerp_rad(amount, poses[i].z_rot, 5.012389 - 1.8707964 * t);
+            }
+            if let Some(i) = s.right_arm {
+                poses[i].x_rot = lerp(amount, poses[i].x_rot, std::f32::consts::FRAC_PI_2 * t);
+                poses[i].y_rot = lerp(amount, poses[i].y_rot, pi);
+                poses[i].z_rot = lerp(amount, poses[i].z_rot, 1.2707963 + 1.8707964 * t);
+            }
+        } else {
+            let t = (swim_pos - 22.0) / 4.0;
+            let x_target = std::f32::consts::FRAC_PI_2 - std::f32::consts::FRAC_PI_2 * t;
+            if let Some(i) = s.left_arm {
+                poses[i].x_rot = rot_lerp_rad(amount, poses[i].x_rot, x_target);
+                poses[i].y_rot = rot_lerp_rad(amount, poses[i].y_rot, pi);
+                poses[i].z_rot = rot_lerp_rad(amount, poses[i].z_rot, pi);
+            }
+            if let Some(i) = s.right_arm {
+                poses[i].x_rot = lerp(amount, poses[i].x_rot, x_target);
+                poses[i].y_rot = lerp(amount, poses[i].y_rot, pi);
+                poses[i].z_rot = lerp(amount, poses[i].z_rot, pi);
+            }
+        }
     }
 
     /// `HumanoidModel.poseRightArm`/`poseLeftArm` for the ranged [`ArmPose`]s:
@@ -1388,6 +1537,22 @@ impl Skeleton {
 /// getting it backwards silently swaps a crossbow's start and end pose.
 fn lerp(alpha: f32, from: f32, to: f32) -> f32 {
     from + alpha * (to - from)
+}
+
+/// `Mth.rotLerpRad(alpha, from, to)`: [`lerp`] with the `to - from` difference
+/// first wrapped into `(-PI, PI]`, so a lerp across the wrap point (e.g.
+/// `from` just under `PI`, `to` just over `-PI`) takes the short way round
+/// instead of spinning the long way through zero. Used by the swim branch's
+/// yRot/zRot arm blends, which cross that seam as the stroke cycles.
+fn rot_lerp_rad(alpha: f32, from: f32, to: f32) -> f32 {
+    let mut diff = to - from;
+    while diff < -std::f32::consts::PI {
+        diff += std::f32::consts::TAU;
+    }
+    while diff >= std::f32::consts::PI {
+        diff -= std::f32::consts::TAU;
+    }
+    from + alpha * diff
 }
 
 /// `Ease.outQuart`: `1 - (1 - t)^4`.
@@ -2158,6 +2323,196 @@ mod tests {
             (mid[arm].col(1) - rest[arm].col(1)).length() > 0.2,
             "attack animation did not move the arm"
         );
+    }
+
+    /// `parts[i].parent`-relative isolation of one joint, the same technique
+    /// [`posing_at_rest_keeps_every_joint_where_the_rest_pose_put_it`] uses —
+    /// factors out the whole parent chain (root/body yaw, mount offsets, …)
+    /// so the comparison is purely about the one joint's own rotation.
+    fn local_of(parts: &[BakedPart], posed: &[Mat4], i: usize) -> Mat4 {
+        match parts[i].parent {
+            Some(p) => posed[p].inverse() * posed[i],
+            None => posed[i],
+        }
+    }
+
+    /// `HumanoidModel.setupAnim`'s swim head-pitch clause:
+    /// `head.xRot = Mth.rotLerpRad(swimAmount, head.xRot, -PI/4)`. At
+    /// `AnimInput::REST`'s `head_pitch_deg: 0.0`, `head.xRot` going in is
+    /// `0.0`, so a full `swim_amount` must land exactly on `-PI/4` — an exact
+    /// prediction from the formula, not merely "the head moved".
+    ///
+    /// The `swim_amount: 0.0` arm is the control: it proves the assertion
+    /// distinguishes "the branch ran" from "the head never moves at all",
+    /// which a test that only checked the `1.0` case could not.
+    #[test]
+    fn swim_head_pitches_to_the_predicted_angle() {
+        let models = entity_models();
+        let entry = models.iter().find(|e| e.name == "player_wide").unwrap();
+        let parts = bake_entity_parts(&(entry.build)());
+        let skel = Skeleton::from_parts(&parts)
+            .with_humanoid_arms(crate::entity::humanoid_arms_for("player_wide"));
+        let head = skel.index_of("head").unwrap();
+
+        let expected = affine_to_mat4(&Affine::of_pose(&PartPose {
+            x_rot: -std::f32::consts::FRAC_PI_4,
+            ..parts[head].rest
+        }));
+
+        let full_swim = skel.pose(&AnimInput {
+            swim_amount: 1.0,
+            ..AnimInput::REST
+        });
+        let actual = local_of(&parts, &full_swim, head);
+        for c in 0..3 {
+            let d = (actual.col(c) - expected.col(c)).length();
+            assert!(
+                d < 1e-4,
+                "head basis {c} off by {d} from the predicted -PI/4 pitch at swim_amount=1.0"
+            );
+        }
+
+        let no_swim = skel.pose(&AnimInput::REST);
+        let control = local_of(&parts, &no_swim, head);
+        let d_control = (control.col(2) - expected.col(2)).length();
+        assert!(
+            d_control > 0.3,
+            "control: the rest head already sits at the swim-pitch target ({d_control}), so \
+             the positive assertion above cannot distinguish the branch running from not"
+        );
+    }
+
+    /// `HumanoidModel.setupAnim`'s swim arm-stroke clause
+    /// ([`Skeleton::pose_swim_arms`]'s own doc has the full transcription),
+    /// predicted here independently from the same 26.2 decompile rather than
+    /// by calling that method — a transcription mistake in the
+    /// implementation must not also be baked into the prediction it is
+    /// checked against.
+    ///
+    /// Two swim positions, chosen to discriminate the window logic rather
+    /// than only exercise a boundary: `swim_pos == 0.0` (`quadraticArmUpdate`
+    /// zero, so the first window's z-lean term is zero) and `swim_pos ==
+    /// 18.0` (the *second* window, `t == 0.5`, where a build that only
+    /// implemented the first window would predict the wrong angle). `amt:
+    /// 0.0` keeps the ordinary walk cycle at zero so it cannot contribute.
+    #[test]
+    fn swim_arm_stroke_matches_the_vanilla_formula_across_two_windows() {
+        let models = entity_models();
+        let entry = models.iter().find(|e| e.name == "player_wide").unwrap();
+        let parts = bake_entity_parts(&(entry.build)());
+        let skel = Skeleton::from_parts(&parts)
+            .with_humanoid_arms(crate::entity::humanoid_arms_for("player_wide"));
+        let right = skel.index_of("right_arm").unwrap();
+        let left = skel.index_of("left_arm").unwrap();
+        let pi = std::f32::consts::PI;
+
+        let check = |limb_swing: f32, right_target: (f32, f32, f32), left_target: (f32, f32, f32), label: &str| {
+            let posed = skel.pose(&AnimInput {
+                swim_amount: 1.0,
+                limb_swing,
+                ..AnimInput::REST
+            });
+            let expected_right = affine_to_mat4(&Affine::of_pose(&PartPose {
+                x_rot: right_target.0,
+                y_rot: right_target.1,
+                z_rot: right_target.2,
+                ..parts[right].rest
+            }));
+            let expected_left = affine_to_mat4(&Affine::of_pose(&PartPose {
+                x_rot: left_target.0,
+                y_rot: left_target.1,
+                z_rot: left_target.2,
+                ..parts[left].rest
+            }));
+            let actual_right = local_of(&parts, &posed, right);
+            let actual_left = local_of(&parts, &posed, left);
+            let mut mismatches = Vec::new();
+            for c in 0..3 {
+                let dr = (actual_right.col(c) - expected_right.col(c)).length();
+                if dr >= 1e-4 {
+                    mismatches.push(format!("{label} right_arm basis {c} off by {dr}"));
+                }
+                let dl = (actual_left.col(c) - expected_left.col(c)).length();
+                if dl >= 1e-4 {
+                    mismatches.push(format!("{label} left_arm basis {c} off by {dl}"));
+                }
+            }
+            assert!(mismatches.is_empty(), "{}", mismatches.join("; "));
+        };
+
+        // swim_pos == 0.0: quadraticArmUpdate(0) == 0, so z_lean == 0.
+        check(0.0, (0.0, pi, pi), (0.0, pi, pi), "window 1 (swim_pos=0)");
+
+        // swim_pos == 18.0, second window, t == (18-14)/8 == 0.5:
+        // xRot = (PI/2)*0.5; zRot(right) = 1.2707963 + 1.8707964*0.5;
+        // zRot(left) = 5.012389 - 1.8707964*0.5.
+        let t = 0.5;
+        check(
+            18.0,
+            (std::f32::consts::FRAC_PI_2 * t, pi, 1.2707963 + 1.8707964 * t),
+            (std::f32::consts::FRAC_PI_2 * t, pi, 5.012389 - 1.8707964 * t),
+            "window 2 (swim_pos=18)",
+        );
+
+        // Control: at swim_amount == 0.0 the arm must sit nowhere near the
+        // window-1 target, or the positive checks above would pass whether
+        // or not `pose_swim_arms` ever runs. Basis 1 (the y-axis column), not
+        // 0: `Rz(PI) . Ry(PI)` happens to fix the x-axis (a double flip
+        // cancels there), so column 0 is the wrong column to discriminate on
+        // — column 1 (and 2) move by a full 2.0, which is why the first
+        // version of this control picked the one column that cannot see the
+        // difference.
+        let no_swim = skel.pose(&AnimInput::REST);
+        let control = local_of(&parts, &no_swim, right);
+        let window_1_target = affine_to_mat4(&Affine::of_pose(&PartPose {
+            x_rot: 0.0,
+            y_rot: pi,
+            z_rot: pi,
+            ..parts[right].rest
+        }));
+        let d_control = (control.col(1) - window_1_target.col(1)).length();
+        assert!(
+            d_control > 0.3,
+            "control: the rest arm already matches the swim target ({d_control})"
+        );
+    }
+
+    /// `HumanoidModel.setupAnim`'s swim leg-kick clause is unconditional —
+    /// not gated by `isUsingItem`, and (unlike the arm block) not gated by
+    /// [`HumanoidArms`] either, since a swimming zombie's raised-arm override
+    /// never touches its legs. `zombie` is used here specifically to prove
+    /// that: the arm block above only ever runs for `Swinging`, so exercising
+    /// the leg kick on the *other* arm rig is the discriminating case.
+    #[test]
+    fn swim_leg_kick_applies_even_on_the_zombie_arm_rig() {
+        let models = entity_models();
+        let entry = models.iter().find(|e| e.name == "zombie").unwrap();
+        let parts = bake_entity_parts(&(entry.build)());
+        let skel = Skeleton::from_parts(&parts)
+            .with_humanoid_arms(crate::entity::humanoid_arms_for("zombie"));
+        assert_eq!(skel.arms, HumanoidArms::Zombie, "zombie must be the non-swinging rig");
+        let right_leg = skel.index_of("right_leg").unwrap();
+
+        // swim_pos == 0.0: rightLeg.xRot = lerp(1.0, _, 0.3*cos(0)) == 0.3.
+        // y_rot/z_rot: vanilla's unconditional 0.005 rad anti-z-fight nudge
+        // (`this.rightLeg.yRot = 0.005F; this.rightLeg.zRot = 0.005F;`),
+        // which the swim block's x_rot-only assignment does not touch.
+        let posed = skel.pose(&AnimInput {
+            swim_amount: 1.0,
+            limb_swing: 0.0,
+            ..AnimInput::REST
+        });
+        let expected = affine_to_mat4(&Affine::of_pose(&PartPose {
+            x_rot: 0.3,
+            y_rot: 0.005,
+            z_rot: 0.005,
+            ..parts[right_leg].rest
+        }));
+        let actual = local_of(&parts, &posed, right_leg);
+        for c in 0..3 {
+            let d = (actual.col(c) - expected.col(c)).length();
+            assert!(d < 1e-4, "zombie right_leg basis {c} off by {d} at swim_amount=1.0");
+        }
     }
 
     /// Every ported model must classify and pose without panicking, and every

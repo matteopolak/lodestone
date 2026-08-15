@@ -630,7 +630,7 @@ impl Sim {
     #[must_use]
     pub fn local_body_anim(&self) -> AnimInput {
         let partial_tick = self.clock().interp_alpha;
-        self.body_anim(&self.interpolated_player(), &self.body_pose.render(partial_tick))
+        self.body_anim(&self.interpolated_player(), &self.body_pose.render(partial_tick), partial_tick)
     }
 
     #[must_use]
@@ -700,7 +700,7 @@ impl Sim {
             // fields; this reuses it rather than re-deriving `body_pose.render`
             // a second time at a different partial tick.
             body_yaw_deg: walk.body_yaw,
-            anim: self.body_anim(&interp, &walk),
+            anim: self.body_anim(&interp, &walk, partial_tick),
             scale: 1.0,
             slim: crate::skin_fetch::current_model().is_slim(),
             equipment,
@@ -709,7 +709,9 @@ impl Sim {
 
     /// The `AnimInput` half of [`Self::third_person_body_state`], taking the two
     /// values that caller already has in hand so nothing is interpolated twice at
-    /// a different partial tick.
+    /// a different partial tick, plus the `partial_tick` itself for the one field
+    /// ([`AnimInput::swim_amount`]) that needs to blend between two tick-quantized
+    /// physics values rather than reading a single already-current one.
     ///
     /// Split out for [`Self::local_body_anim`] — see its doc for why.
     #[must_use]
@@ -717,6 +719,7 @@ impl Sim {
         &self,
         interp: &PlayerState,
         walk: &lodestone_entity::pose::RenderPose,
+        partial_tick: f32,
     ) -> AnimInput {
         AnimInput {
             // `walk.head_yaw` is `EntityPose::render`'s `relative_head_yaw_lerp`
@@ -781,6 +784,20 @@ impl Sim {
             is_passenger: self.read(|w| {
                 w.get::<Riding>(self.local).is_some_and(|riding| riding.0.is_some())
             }),
+            // `Mth.lerp(partialTick, swimAmountO, swimAmount)` — the same blend
+            // `entities::extract_entity_draws` does for a tracked remote entity's
+            // `SwimRamp`, except the local player already carries the real
+            // physics-integrated value (`lodestone_physics::player::PlayerState`'s
+            // own `swim_amount`/`swim_amount_o`, updated every tick by
+            // `update_swim_amount`) rather than an approximation reconstructed
+            // client-side from a synced `Pose`. This used to be a bare `0.0`
+            // wherever this `AnimInput` reached `ThirdPersonBodyState` (see that
+            // struct's own doc on `swim_amount`), so our own third-person body
+            // stood bolt upright while swimming; that gap is `ThirdPersonBodyState`
+            // gaining its own `swim_amount` field from `interp` directly; this
+            // one is the *arm-stroke* input, which reads the same interpolated
+            // number but through `AnimInput` rather than `EntityDraw`.
+            swim_amount: interp.swim_amount_o + (interp.swim_amount - interp.swim_amount_o) * partial_tick,
         }
     }
 }
