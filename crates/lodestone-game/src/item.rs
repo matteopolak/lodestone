@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use lodestone_model::{ArmorTrim, Identifier, ItemEnchantment, Text, ToolPatch};
+use lodestone_model::{ArmorTrim, AuthoredEnchantment, Identifier, ItemEnchantment, Text, ToolPatch};
 
 /// The default maximum stack size when an item carries no
 /// `minecraft:max_stack_size` component. Matches vanilla's `Item.Properties`
@@ -74,6 +74,22 @@ pub const DYED_COLOR_COMPONENT: &str = "minecraft:dyed_color";
 /// was added to close: without a branch here a potion's colour is silently dropped
 /// converting a decoded stack into this crate's shape.
 pub const POTION_COLOR_COMPONENT: &str = "minecraft:potion_contents";
+/// Well-known component identifier carrying the raw `minecraft:potion_contents`
+/// `potion` field — the network `minecraft:potion` registry id itself, not
+/// [`POTION_COLOR_COMPONENT`]'s already-mixed colour. **Not a real vanilla
+/// component key** (there is no wire component with this name); it exists purely
+/// so [`ItemStack`]'s crate-boundary conversion can carry the potion's *identity*
+/// across, which a tooltip title and effect lore need and the mixed colour alone
+/// cannot reconstruct — `swiftness`/`long_swiftness`/`strong_swiftness` mix to the
+/// same colour but must resolve to different lore.
+pub const POTION_EFFECT_COMPONENT: &str = "lodestone:potion_effect";
+/// Well-known component identifier for [`lodestone_model::AuthoredEnchantment`].
+/// **Not a real vanilla component key**, for the same reason
+/// [`POTION_EFFECT_COMPONENT`] is not: it carries an identity this client itself
+/// authored for a stack it built out of band, never one decoded off the wire. See
+/// [`AuthoredEnchantment`]'s own doc for why it must never be confused with
+/// [`ENCHANTMENTS_COMPONENT`].
+pub const AUTHORED_ENCHANTMENT_COMPONENT: &str = "lodestone:authored_enchantment";
 /// Well-known component identifier for `minecraft:custom_model_data`.
 ///
 /// Vanilla's own "make this item look different" channel, and half of how real
@@ -139,6 +155,14 @@ pub enum ComponentValue {
     /// Enchantments applied to the stack (`minecraft:enchantments`), carried
     /// verbatim and in wire order from [`lodestone_model::ItemEnchantment`].
     Enchantments(Vec<ItemEnchantment>),
+    /// An [`AuthoredEnchantment`] for a stack this client itself built rather
+    /// than decoded — see that type's own doc. A variant of its own, not a
+    /// `(Str, Int)` pair, for the same reason [`Trim`](Self::Trim) is: half of
+    /// it (a path with no level, or a level with no path) is meaningless, and
+    /// never [`Enchantments`](Self::Enchantments), so it cannot be mistaken for
+    /// a real, network-id-keyed enchantment list by a caller that only checks
+    /// that key.
+    AuthoredEnchantment(AuthoredEnchantment),
     /// An opaque, adapter-supplied payload compared byte-for-byte.
     ///
     /// The bytes are whatever canonical encoding the producing adapter chose
@@ -464,6 +488,42 @@ impl ItemStack {
         );
     }
 
+    /// The stack's raw `minecraft:potion` registry id — see
+    /// [`POTION_EFFECT_COMPONENT`] for why this is carried separately from
+    /// [`potion_color`](Self::potion_color).
+    #[must_use]
+    pub fn potion_effect_id(&self) -> Option<i32> {
+        self.components
+            .get_int(POTION_EFFECT_COMPONENT)
+            .and_then(|v| i32::try_from(v).ok())
+    }
+
+    /// Sets or clears the raw `minecraft:potion` registry id.
+    pub fn set_potion_effect_id(&mut self, id: Option<i32>) {
+        self.write_component(
+            POTION_EFFECT_COMPONENT,
+            id.map(|v| ComponentValue::Int(i64::from(v))),
+        );
+    }
+
+    /// The stack's [`AuthoredEnchantment`] — see that type's own doc for what it
+    /// is and why it is never [`enchantments()`](Self::enchantments).
+    #[must_use]
+    pub fn authored_enchantment(&self) -> Option<AuthoredEnchantment> {
+        match self.components.get_str(AUTHORED_ENCHANTMENT_COMPONENT) {
+            Some(ComponentValue::AuthoredEnchantment(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Sets or clears the stack's [`AuthoredEnchantment`].
+    pub fn set_authored_enchantment(&mut self, value: Option<AuthoredEnchantment>) {
+        self.write_component(
+            AUTHORED_ENCHANTMENT_COMPONENT,
+            value.map(ComponentValue::AuthoredEnchantment),
+        );
+    }
+
     /// The stack's enchantments in wire order, or an empty slice when it has
     /// none.
     ///
@@ -683,6 +743,21 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             components.insert(key, ComponentValue::Int(i64::from(argb)));
         }
 
+        // Same crate-boundary loss as the colour above, for the potion's identity
+        // rather than its tint — without this branch a tooltip title/lore built
+        // from a game-crate stack can never tell `swiftness` from `long_swiftness`.
+        if let Some(id) = stack.components.potion
+            && let Ok(key) = POTION_EFFECT_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::Int(i64::from(id)));
+        }
+
+        if let Some(authored) = stack.components.authored_enchantment
+            && let Ok(key) = AUTHORED_ENCHANTMENT_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::AuthoredEnchantment(authored));
+        }
+
         // Same crate-boundary loss as the dye above, and with the same symptom
         // seen from the other side: remote players, mobs and armour stands drew
         // their trims off the *model* stack while the local player — whose stack
@@ -777,6 +852,8 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             enchantments: stack.enchantments().to_vec(),
             dyed_color: stack.dyed_color(),
             potion_color: stack.potion_color(),
+            potion: stack.potion_effect_id(),
+            authored_enchantment: stack.authored_enchantment(),
             trim: stack.trim(),
             map_id: stack.map_id(),
             // This crate's own component map has no `pot_decorations` slot — its
@@ -1167,6 +1244,8 @@ mod tests {
                 enchantments: vec![ItemEnchantment { id: 12, level: 4 }],
                 dyed_color: Some(0x00_11_22_33),
                 potion_color: Some(0xFF_38_5D_C6),
+                potion: Some(14),
+                authored_enchantment: Some(lodestone_model::AuthoredEnchantment { path: "sharpness", level: 5 }),
                 trim: Some(ArmorTrim {
                     material: "netherite".to_string(),
                     pattern: "silence".to_string(),
