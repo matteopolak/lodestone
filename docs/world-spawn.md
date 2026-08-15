@@ -129,12 +129,42 @@ for the wrong reason.
   chunk is at Chebyshev **r=15** (842 columns), so simply widening the box is not
   affordable on the join critical path — the sampler samples noise rather than
   composing columns, which is the whole reason vanilla can do this cheaply.
-- **`RespawnPoint` is stored, never used.** A death resolves against the *world*
-  spawn, so a player with a bed still respawns at spawn. Vanilla's full path needs
-  the placement teleport and the ticket search of `PlayerSpawnFinder.findSpawn`
-  (see `docs/plans/world-state.md` unit P2).
-- **No player-state persistence at all.** `find_initial_spawn` gives a *fresh*
-  spawn; "rejoin puts me back where I was" is a separate feature.
+- **`RespawnPoint` is stored *and* used, updating an older claim in this doc.**
+  `apply_client_command`'s `PERFORM_RESPAWN` arm calls `resolve_bed_respawn`,
+  which re-reads the bed block at death time and falls back to the world spawn
+  only when it is gone (broken or walled in) — vanilla's own
+  `Optional.empty()` arm. What is still missing is the placement teleport and
+  the ticket search of `PlayerSpawnFinder.findSpawn` (`docs/plans/world-state.md`
+  unit P2), and — not yet fixed — `resolve_bed_respawn` re-reads the bed
+  through whatever dimension the player **died in**, not the dimension the bed
+  is actually in: a bed set in the overworld, followed by a death in the
+  Nether, re-validates against Nether terrain at the bed's coordinates. Since
+  `RespawnPoint` carries no dimension tag, this almost always finds "no bed"
+  and degrades to the world spawn (safe, but silently drops the player's bed
+  spawn for that death) rather than mis-teleporting them — the sibling bug to
+  the one below, not yet closed the same way.
+- **Player-state persistence exists** (`crates/lodestone-server/src/player_data.rs`),
+  including the join-time position restore this doc used to say did not exist
+  at all — `server.rs`'s `ConfigurationFinished` arm reads a saved player's
+  position as `join_pos`, in place of a fresh `find_initial_spawn` result, when
+  one is on disk. **That restore used to trust the saved position
+  unconditionally**, which was a real bug: `PlayerData`'s `dimension` field was
+  captured as a hardcoded `"minecraft:overworld"` regardless of where the
+  player actually was, so a player who died or disconnected in the Nether had
+  their Nether-relative position saved under a dimension tag that claimed it
+  was an overworld one — and the next join placed them at that raw coordinate
+  *in the overworld*, landing them at a semi-arbitrary point that is rarely at
+  surface height. This is the concrete mechanism behind the "I respawn buried
+  in the ground" report. Fixed: `persist_player`/`live_publish_player` now
+  capture the connection's real current dimension
+  (`SourceRef::dimension()`), and `join_position_for_saved_player`
+  (`server.rs`) only trusts a saved position when its dimension tag really is
+  the overworld, falling back to the world spawn otherwise — the same
+  degradation `resolve_bed_respawn`'s "bed is gone" arm already uses. An
+  unparseable tag (every save written before this fix) degrades the same way.
+  This does not repair an already-corrupted save (the true dimension of an old
+  save's raw position cannot be recovered), only stops the bug for saves
+  written from here on.
 
 ## Configuration
 

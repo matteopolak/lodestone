@@ -431,6 +431,7 @@ async fn player_inventory_and_position_survive_a_disconnect() {
         &inventory,
         experience,
         Vec::new(),
+        lodestone_server::dimension::Dimension::Overworld,
     );
     store.write(uuid, &saved).expect("write player data");
     server.shutdown().await;
