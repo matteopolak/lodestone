@@ -92,7 +92,7 @@ use crate::chunk::{
     is_air_or_fluid, is_water,
 };
 use crate::fall::{FallSample, FallTracker};
-use crate::container_click::{Click, MenuKind, MenuLayout, SlotKind, Station, do_click_with};
+use crate::container_click::{Click, MayPickup, MenuKind, MenuLayout, SlotKind, Station, do_click_with};
 use crate::crafting::CraftingState;
 use crate::inventory::{PlayerInventory, window_zero_menu_slot};
 use crate::mob_spawn::SpawnRng;
@@ -7880,6 +7880,7 @@ fn apply_container_clicked<P: ServerProtocol>(
     claimed_slots: &[(i32, Option<ItemStack>)],
     claimed_cursor: Option<&ItemStack>,
     creative: bool,
+    xp_level: i32,
 ) -> (Option<ServerDirective>, Vec<ItemStack>) {
     // Which menu, and where its non-player slots live.
     let mut open = open_container;
@@ -7909,6 +7910,7 @@ fn apply_container_clicked<P: ServerProtocol>(
                 claimed_cursor,
                 creative,
                 station,
+                xp_level,
             );
         }
         let is_enchanting = open
@@ -7978,6 +7980,11 @@ fn apply_container_clicked<P: ServerProtocol>(
         click,
         creative,
         Some(&recipe),
+        // `Player`/`Container`/`CraftingTable` layouts have no `mayPickup`
+        // override anywhere in vanilla — only `ItemCombinerMenu`'s result
+        // slot does, and that shape is handled by `apply_workstation_clicked`
+        // above, never reaching here.
+        None,
     );
     *inventory.click_state_mut() = state;
 
@@ -8150,6 +8157,7 @@ fn apply_workstation_clicked<P: ServerProtocol>(
     claimed_cursor: Option<&ItemStack>,
     creative: bool,
     station: Station,
+    xp_level: i32,
 ) -> (Option<ServerDirective>, Vec<ItemStack>) {
     let layout = MenuLayout::item_combiner(station);
     let cells: Vec<Option<ItemStack>> = inventory.workstation().map(<[_]>::to_vec).unwrap_or_default();
@@ -8158,7 +8166,25 @@ fn apply_workstation_clicked<P: ServerProtocol>(
     let before = slots.clone();
     let mut state = inventory.click_state().clone();
     let recipe = |grid_cells: &[Option<ItemStack>]| workstation_result(station, grid_cells, creative, rename.as_deref());
-    let dropped = do_click_with(&layout, &mut slots, &mut state, click, creative, Some(&recipe));
+    // `AnvilMenu.mayPickup`: `(player.hasInfiniteMaterials() ||
+    // player.experienceLevel >= this.cost.get()) && this.cost.get() > 0`.
+    // `this.cost` is `crate::anvil::compute`'s own `cost` field, re-derived
+    // from the pre-click cells and pending rename — never stored, the same
+    // "recompute rather than cache" choice `workstation_result` above already
+    // makes. `Grindstone`/`Smithing` pass `None`: neither's vanilla result
+    // slot overrides `mayPickup` (`GrindstoneMenu`'s anonymous result `Slot`
+    // only overrides `mayPlace`/`onTake`; `SmithingMenu` inherits
+    // `ItemCombinerMenu`'s own default-true `mayPickup`).
+    let anvil_cost = crate::anvil::compute(
+        cells.first().and_then(Option::as_ref),
+        cells.get(1).and_then(Option::as_ref),
+        rename.as_deref(),
+        creative,
+    )
+    .cost;
+    let anvil_may_pickup = move |_index: usize, _item: &ItemStack| (creative || xp_level >= anvil_cost) && anvil_cost > 0;
+    let may_pickup: Option<MayPickup<'_>> = (station == Station::Anvil).then_some(&anvil_may_pickup as _);
+    let dropped = do_click_with(&layout, &mut slots, &mut state, click, creative, Some(&recipe), may_pickup);
     *inventory.click_state_mut() = state;
 
     let mut new_cells = cells.clone();
@@ -8261,7 +8287,7 @@ fn apply_enchanting_clicked<P: ServerProtocol>(
     let mut slots = read(inventory, &cells);
     let before = slots.clone();
     let mut state = inventory.click_state().clone();
-    let dropped = do_click_with(&layout, &mut slots, &mut state, click, creative, None);
+    let dropped = do_click_with(&layout, &mut slots, &mut state, click, creative, None, None);
     *inventory.click_state_mut() = state;
 
     let mut new_cells = cells;
@@ -10040,22 +10066,46 @@ where
                 &changed_slots,
                 carried_item.as_ref(),
                 *game_mode == GameMode::Creative,
+                experience.level(),
             );
             spawn_dropped_stacks(mobs, *player_pos, *player_rot, drops_rng, dropped);
 
             let mut experience_changed = false;
             if let (Some(station), Some(cells)) = (workstation_take, pre_click_cells) {
                 let get = |i: usize| cells.get(i).and_then(Option::as_ref);
+                // Issue #617: `apply_container_clicked` may have refused the
+                // take outright (`container_click`'s `MayPickup` gate, wired
+                // for the anvil in `apply_workstation_clicked`), so charging
+                // XP off the *pre-click* cells alone — as if a take always
+                // succeeds — would zero out a player's levels for a click
+                // that left the item sitting in the result slot. A real take
+                // always clears the anvil's input cell 0
+                // (`container_click::take_result`'s `Station::Anvil` arm, the
+                // only place that clears it), so that transition is the
+                // signal an actual take happened.
+                let took_result = get(0).is_some()
+                    && inventory
+                        .workstation()
+                        .and_then(<[_]>::first)
+                        .is_some_and(Option::is_none);
                 match station {
                     Station::Anvil => {
-                        let outcome = crate::anvil::compute(get(0), get(1), inventory.pending_rename(), *game_mode == GameMode::Creative);
-                        if outcome.result.is_some() && *game_mode != GameMode::Creative {
-                            experience.take_levels(outcome.cost);
-                            experience_changed = true;
+                        if took_result {
+                            let outcome = crate::anvil::compute(get(0), get(1), inventory.pending_rename(), *game_mode == GameMode::Creative);
+                            if outcome.result.is_some() && *game_mode != GameMode::Creative {
+                                experience.take_levels(outcome.cost);
+                                experience_changed = true;
+                            }
                         }
                     }
                     Station::Grindstone => {
-                        if crate::anvil::grindstone_result(get(0), get(1)).is_some() {
+                        // The grindstone's own result slot never overrides
+                        // `mayPickup` (`GrindstoneMenu`'s anonymous result
+                        // `Slot` only overrides `mayPlace`/`onTake`), so a
+                        // take here can never be refused — `took_result`
+                        // therefore only guards against a click that clicked
+                        // the result index without one being present at all.
+                        if took_result && crate::anvil::grindstone_result(get(0), get(1)).is_some() {
                             let awarded = crate::anvil::grindstone_xp(get(0), get(1), drops_rng);
                             if awarded > 0 {
                                 experience.give_points(i32::try_from(awarded).unwrap_or(i32::MAX));
@@ -14077,6 +14127,7 @@ mod tests {
             &[],
             None,
             false,
+            i32::MAX,
         );
         assert_eq!(inventory.native(9), None);
         assert_eq!(
@@ -14095,6 +14146,7 @@ mod tests {
             &[],
             None,
             false,
+            i32::MAX,
         );
         assert_eq!(inventory.native(4), Some(&stack("minecraft:stone", 4)));
         assert!(inventory.click_state().carried.is_none());
@@ -14124,6 +14176,7 @@ mod tests {
             &[(9, Some(stack("minecraft:diamond_block", 64)))],
             None,
             false,
+            i32::MAX,
         );
         assert_eq!(inventory.native(9), None, "the claim must not be stored");
         assert!(dropped.is_empty());
@@ -14146,6 +14199,7 @@ mod tests {
             &[(9, None)],
             Some(&stack("minecraft:stone", 1)),
             false,
+            i32::MAX,
         );
         assert_eq!(correction, None, "an honest prediction needs no correction");
     }
@@ -14171,6 +14225,7 @@ mod tests {
                 &[],
                 None,
                 false,
+                i32::MAX,
             );
         }
         assert_eq!(
@@ -14190,6 +14245,7 @@ mod tests {
             &[],
             None,
             false,
+            i32::MAX,
         );
         assert_eq!(
             inventory
@@ -14240,6 +14296,7 @@ mod tests {
             &[],
             None,
             false,
+            i32::MAX,
         );
 
         let carried = inventory.click_state().carried.as_ref().expect("the repaired pickaxe must be on the cursor");
@@ -14252,6 +14309,132 @@ mod tests {
             cells[1], None,
             "all 3 diamonds were used by the repair (repair_item_count_cost == addition.count)"
         );
+    }
+
+    /// Issue #617: the anvil result can be taken for free without enough XP
+    /// levels, because `container_click` had no `Slot.mayPickup` gate at all.
+    /// End to end through `apply_container_clicked` (not just
+    /// `container_click`'s own unit tests): a 0-XP survival player must be
+    /// refused outright — item stays in the result slot, cursor stays empty,
+    /// nothing consumed — matching `AnvilMenu.mayPickup`'s
+    /// `(hasInfiniteMaterials() || experienceLevel >= cost) && cost > 0`.
+    ///
+    /// Two companion arms make the refusal above meaningful rather than
+    /// vacuous: exactly enough levels succeeds, and creative with *zero*
+    /// levels succeeds too (the `hasInfiniteMaterials()` clause) — so this is
+    /// not merely "every anvil click above now fails".
+    #[test]
+    fn a_0_xp_survival_player_cannot_take_a_costed_anvil_result_but_creative_and_enough_levels_can() {
+        let same_repair_fixture = |inventory: &mut PlayerInventory| {
+            inventory.open_workstation(2);
+            let mut input = stack("minecraft:diamond_pickaxe", 1);
+            input.components.damage = Some(1200);
+            input.components.max_damage = Some(1561);
+            if let Some(ws) = inventory.workstation_mut() {
+                ws[0] = Some(input);
+                ws[1] = Some(stack("minecraft:diamond", 3));
+            }
+        };
+        let open_anvil = || OpenContainer {
+            window_id: 7,
+            pos: BlockPos::new(0, 0, 0),
+            shape: MenuKind::ItemCombiner { inputs: 2, station: Station::Anvil },
+            container_size: 3,
+            state_id: 0,
+        };
+
+        // The real cost this exact fixture prices to — read from `anvil::compute`
+        // itself (the single already-tested source of truth for the formula;
+        // this test is about the `xp_level`-vs-`cost` *wiring*, not re-deriving
+        // the repair-cost arithmetic a second time), not guessed.
+        let mut priced_input = stack("minecraft:diamond_pickaxe", 1);
+        priced_input.components.damage = Some(1200);
+        priced_input.components.max_damage = Some(1561);
+        let cost = crate::anvil::compute(
+            Some(&priced_input),
+            Some(&stack("minecraft:diamond", 3)),
+            None,
+            false,
+        )
+        .cost;
+        assert!(cost > 0, "the fixture must actually cost XP levels, or this test proves nothing");
+
+        // 0 XP levels, survival: refused. Nothing moves, nothing is consumed.
+        {
+            let mut inventory = PlayerInventory::new();
+            let block_entities = BlockEntityHandle::new();
+            same_repair_fixture(&mut inventory);
+            let mut open = open_anvil();
+            apply_container_clicked(
+                &ContainerTagProto,
+                &mut inventory,
+                &block_entities,
+                Some(&mut open),
+                7,
+                Click { slot: 2, button: 0, click_type: 0 },
+                &[],
+                None,
+                false,
+                0,
+            );
+            assert!(
+                inventory.click_state().carried.is_none(),
+                "0 XP levels must not take a {cost}-cost anvil result"
+            );
+            let cells = inventory.workstation().expect("still open");
+            assert!(cells[0].is_some(), "the base item must stay put when the take is refused");
+            assert!(cells[1].is_some(), "the addition must stay put when the take is refused");
+        }
+
+        // Exactly `cost` XP levels, survival: succeeds — the `>=`, not `>`, half
+        // of `AnvilMenu.mayPickup`'s comparison.
+        {
+            let mut inventory = PlayerInventory::new();
+            let block_entities = BlockEntityHandle::new();
+            same_repair_fixture(&mut inventory);
+            let mut open = open_anvil();
+            apply_container_clicked(
+                &ContainerTagProto,
+                &mut inventory,
+                &block_entities,
+                Some(&mut open),
+                7,
+                Click { slot: 2, button: 0, click_type: 0 },
+                &[],
+                None,
+                false,
+                cost,
+            );
+            assert!(
+                inventory.click_state().carried.is_some(),
+                "exactly {cost} XP levels must take the result"
+            );
+        }
+
+        // Creative, 0 XP levels: succeeds unconditionally —
+        // `player.hasInfiniteMaterials()`'s own exemption clause.
+        {
+            let mut inventory = PlayerInventory::new();
+            let block_entities = BlockEntityHandle::new();
+            same_repair_fixture(&mut inventory);
+            let mut open = open_anvil();
+            apply_container_clicked(
+                &ContainerTagProto,
+                &mut inventory,
+                &block_entities,
+                Some(&mut open),
+                7,
+                Click { slot: 2, button: 0, click_type: 0 },
+                &[],
+                None,
+                true,
+                0,
+            );
+            assert!(
+                inventory.click_state().carried.is_some(),
+                "creative must take regardless of XP levels"
+            );
+        }
     }
 
     /// The anvil's genuinely bespoke take rule (`AnvilMenu.onTake`): a take
@@ -14291,6 +14474,7 @@ mod tests {
             &[],
             None,
             false,
+            i32::MAX,
         );
 
         let carried = inventory.click_state().carried.as_ref().expect("must take the renamed sword");
@@ -14341,6 +14525,7 @@ mod tests {
             &[],
             None,
             false,
+            i32::MAX,
         );
 
         let carried = inventory.click_state().carried.as_ref().expect("must take a plain sword back");
@@ -14382,6 +14567,7 @@ mod tests {
             &[],
             None,
             false,
+            i32::MAX,
         );
 
         let carried = inventory.click_state().carried.as_ref().expect("must take the upgraded sword");
@@ -14542,6 +14728,7 @@ mod tests {
             &[],
             None,
             false,
+            i32::MAX,
         );
         assert_eq!(inventory.native(9), None);
 
@@ -14556,6 +14743,7 @@ mod tests {
             &[],
             None,
             false,
+            i32::MAX,
         );
         let furnace_fuel = block_entities.with(|reg| match reg.get(pos) {
             Some(BlockEntity::Furnace(f)) => f.fuel().cloned(),
@@ -14593,6 +14781,7 @@ mod tests {
                 &[],
                 None,
                 false,
+                i32::MAX,
             );
         }
         assert_eq!(
@@ -14646,6 +14835,7 @@ mod tests {
                     .map(|count| stack("minecraft:oak_planks", count))
                     .as_ref(),
                 false,
+                i32::MAX,
             );
             assert!(
                 matches!(&correction, Some(ServerDirective::Send { packet_id, .. }) if *packet_id == CONTENT),
@@ -14669,6 +14859,7 @@ mod tests {
             &[],
             None,
             false,
+            i32::MAX,
         );
         assert!(dropped.is_empty());
         assert_eq!(
@@ -14706,6 +14897,7 @@ mod tests {
             &[],
             Some(&stack("minecraft:crafting_table", 1)),
             false,
+            i32::MAX,
         );
         assert_eq!(
             correction, None,
@@ -14755,6 +14947,7 @@ mod tests {
             &[],
             None,
             false,
+            i32::MAX,
         );
         assert!(dropped.is_empty(), "36 empty slots have room for 8 chests");
         let chests: u32 = (0..crate::inventory::PLAYER_NATIVE_SIZE)
@@ -14801,6 +14994,7 @@ mod tests {
             &[],
             None,
             false,
+            i32::MAX,
         );
 
         assert!(dropped.is_empty());
@@ -14847,6 +15041,7 @@ mod tests {
             &[],
             None,
             false,
+            i32::MAX,
         );
 
         let furnace_input = block_entities.with(|reg| match reg.get(pos) {
