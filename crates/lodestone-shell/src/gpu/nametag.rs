@@ -820,6 +820,10 @@ mod tests {
             // Not on fire: these literals exist to position a nametag, not to
             // draw the entity, so no flame billboard is wanted.
             on_fire: false,
+            // Not invisible and not an armour stand — same reasoning as
+            // `on_fire`, these literals exist to position a nametag.
+            invisible: false,
+            armor_stand: None,
             // Not a player, so no skin can apply.
             player_skin: None,
             variant_sheet: None,
@@ -897,6 +901,10 @@ mod tests {
             // Not on fire: these literals exist to position a nametag, not to
             // draw the entity, so no flame billboard is wanted.
             on_fire: false,
+            // Not invisible and not an armour stand — same reasoning as
+            // `on_fire`, these literals exist to position a nametag.
+            invisible: false,
+            armor_stand: None,
             // Not a player, so no skin can apply.
             player_skin: None,
             variant_sheet: None,
@@ -996,6 +1004,10 @@ mod tests {
             // Not on fire: these literals exist to position a nametag, not to
             // draw the entity, so no flame billboard is wanted.
             on_fire: false,
+            // Not invisible and not an armour stand — same reasoning as
+            // `on_fire`, these literals exist to position a nametag.
+            invisible: false,
+            armor_stand: None,
             // Not a player, so no skin can apply.
             player_skin: None,
             variant_sheet: None,

@@ -849,6 +849,56 @@ pub struct EntityDraw {
     /// different, local-player-only purpose, and this field must never feed
     /// it. See `docs/entity-rendering.md`'s "Mob fire" section.
     pub on_fire: bool,
+    /// Bit `0x20` of the same shared-flags byte [`Self::on_fire`] reads bit
+    /// `0x01` of — vanilla's `Entity.isInvisible()`. Bridged off the ingest
+    /// entity's `EntityFlags` through `EntityIndex` in
+    /// [`extract_entity_draws`], the same way `on_fire` is; `false` for an
+    /// entity that has never reported the byte.
+    ///
+    /// Gates only the entity's own body/rig — `RenderState::prepare_entities`
+    /// (`gpu/entity_passes.rs`) skips the model batch entirely when this is
+    /// set, matching `LivingEntityRenderer.submit`'s `isBodyVisible` gate on
+    /// its `submitModel` call. Armour and held items are unaffected: they are
+    /// drawn by `prepare_armour`/`merge_held_items`/`special_item_instances`,
+    /// each of which re-resolves the entity's pose independently rather than
+    /// reusing the body pass's instance, matching vanilla's own
+    /// `shouldRenderLayers` running unconditionally regardless of body
+    /// visibility. The nametag pass reads this same `entities` slice too and
+    /// is equally untouched by the body-batch skip — an invisible, named
+    /// entity still shows its tag, which is the "server hologram" case issue
+    /// #643 reports (an invisible, custom-named armour stand).
+    ///
+    /// **Not implemented, on purpose, rather than half-built:**
+    /// `state.isInvisibleToPlayer` — vanilla still shows an invisible entity,
+    /// translucently, to a spectator or a teammate whose team has
+    /// `canSeeFriendlyInvisibles`. This draw site has no notion of the
+    /// *local* viewer's own game mode, and doing this faithfully needs a
+    /// translucent render path this renderer does not have. The glowing
+    /// outline (bit `0x40`, `Entity.isCurrentlyGlowing()`) is the same story
+    /// — it needs a real outline pass — and is left decoded-and-unread on the
+    /// shared-flags byte rather than added here as a field with no consumer,
+    /// which is the exact island shape this repo's evidence standards call
+    /// out.
+    pub invisible: bool,
+    /// This entity's own `ArmorStand.DATA_CLIENT_FLAGS` byte, `None` for
+    /// every non-`armor_stand` type and for one that has never reported it.
+    /// Bridged off the ingest entity's
+    /// [`lodestone_ecs::entity::ArmorStandFlags`] through `EntityIndex` in
+    /// [`extract_entity_draws`], the same way [`Self::invisible`] is.
+    ///
+    /// `small` is not read from here a second time — [`resolve_entity_facts`]
+    /// already folds it into [`Self::scale`] (a uniform half-scale,
+    /// approximating vanilla's separate small-model bake). `show_arms` and
+    /// `no_base_plate` are consumed in `gpu/entity_passes.rs`'s
+    /// `prepare_entities`, which collapses the named part's own matrix to a
+    /// point instead of drawing it — the corpus's `armor_stand` model has
+    /// real `left_arm`/`right_arm`/`base_plate` parts to hide, matching
+    /// vanilla's `ArmorStandModel.setupAnim` toggling `ModelPart.visible` on
+    /// the same three. `marker` has no consumer: vanilla's own use of it is a
+    /// render-type switch (`ArmorStandRenderer.getRenderType`, cutout instead
+    /// of the default humanoid render type) with no equivalent pipeline state
+    /// here, so it stays decoded-and-unread rather than approximated.
+    pub armor_stand: Option<lodestone_ecs::entity::ArmorStandFlags>,
     /// This player's declared skin, carried through from
     /// [`EntityFacts::player_skin`] — `None` for every non-player.
     ///
@@ -1553,6 +1603,12 @@ pub fn extract_pickup_draws(
             // a tracked entity with `EntityFlags`) and vanishes in 3 ticks — not
             // worth threading a real flag lookup through for.
             on_fire: false,
+            // Same reasoning as `on_fire`: a synthetic pickup-flight item has
+            // no `EntityFlags` to read invisible off, and vanishes too fast
+            // to matter if it did.
+            invisible: false,
+            // An item entity is never an armour stand.
+            armor_stand: None,
             // An item entity is never a player either.
             player_skin: None,
             variant_sheet: None,
@@ -2143,9 +2199,15 @@ pub fn extract_entity_draws(
     // network id never appears on its own entity, only the vehicle's it
     // names, so "is riding" is "does this component exist" for any tracked
     // (non-local) entity. See `AnimInput::is_passenger`.
-    (tameds, vehicles): (
+    // `ArmorStandFlags` lives on the ingest entity too (`ingest::
+    // apply_entity_metadata` folds `MetadataClass::ArmorStand`'s byte into
+    // it), bridged the same way `tameds`/`vehicles` are — nested into this
+    // tuple rather than added as a seventeenth top-level parameter, for the
+    // same `SystemParam`-arity reason `vehicles` was.
+    (tameds, vehicles, armor_stands): (
         Query<&lodestone_ecs::entity::Tamed>,
         Query<&lodestone_ecs::entity::Vehicle>,
+        Query<&lodestone_ecs::entity::ArmorStandFlags>,
     ),
     tracks: Query<(
         &MinecraftEntityId,
@@ -2303,6 +2365,22 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| flags.get(entity).ok())
             .is_some_and(|flags| flags.0 & 0x01 != 0);
+        // Bit `0x20` of the same shared-flags byte `on_fire` reads bit `0x01`
+        // of. `false` for an entity that has never reported the byte, exactly
+        // like `on_fire` — see `EntityDraw::invisible`.
+        let invisible = index
+            .get(id.0)
+            .and_then(|entity| flags.get(entity).ok())
+            .is_some_and(|flags| flags.0 & 0x20 != 0);
+        // An armour stand's own client-flags byte, bridged off the ingest
+        // entity through `index` exactly as `on_fire`/`invisible` above are.
+        // `None` for every entity that is not an `ArmorStand` (the adapter
+        // withholds the byte for those) and for one that has never reported
+        // it yet — see `EntityDraw::armor_stand`.
+        let armor_stand = index
+            .get(id.0)
+            .and_then(|entity| armor_stands.get(entity).ok())
+            .copied();
         // The imitated block state of a falling block. Bridged off the ingest
         // entity through `index` exactly as `on_fire` above and `hurt` below are,
         // because `lodestone_ecs::ingest::apply_falling_block_state` inserts the
@@ -2389,6 +2467,8 @@ pub fn extract_entity_draws(
             creeper_swelling,
             swim_amount,
             on_fire,
+            invisible,
+            armor_stand,
             player_skin: player_skin.0.clone(),
             experience_orb_value,
         });
@@ -2503,6 +2583,16 @@ fn resolve_entity_facts(
     let head_yaw = entity.get::<HeadYaw>()?.0;
 
     let scale = if entity.get::<Baby>().is_some_and(|baby| baby.0) {
+        0.5
+    } else if entity
+        .get::<lodestone_ecs::entity::ArmorStandFlags>()
+        .is_some_and(|flags| flags.small)
+    {
+        // `ArmorStand.isSmall()` (`ArmorStandRenderer.submit`) bakes and draws
+        // an entirely separate, smaller model rather than scaling the big one
+        // — this renderer has no second bake, so a uniform half-scale stands
+        // in for it, the same approximation already made for a baby mob two
+        // lines up.
         0.5
     } else {
         1.0
@@ -3604,6 +3694,52 @@ mod tests {
         assert!(facts.on_ground);
     }
 
+    /// `ArmorStand.isSmall()` halves the whole model — issue #643's `small`
+    /// clause, folded into [`EntityFacts::scale`] the same way [`Baby`]
+    /// already is (a uniform half-scale approximating vanilla's separate
+    /// small-model bake). Two arms, not one: `small: false` must leave scale
+    /// at the ordinary `1.0` — without this half, a version that scaled
+    /// *every* armour stand by `0.5` regardless of the flag would still pass
+    /// a `small: true` -only assertion.
+    #[test]
+    fn resolve_entity_facts_halves_scale_for_a_small_armor_stand() {
+        let mut world = World::new();
+        let entity = bare_entity(&mut world);
+        world.entity_mut(entity).insert(lodestone_ecs::entity::ArmorStandFlags {
+            small: true,
+            show_arms: false,
+            no_base_plate: false,
+            marker: false,
+        });
+        let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+        assert_eq!(facts.scale, 0.5, "small: true must halve the resolved scale");
+
+        let mut world = World::new();
+        let entity = bare_entity(&mut world);
+        world.entity_mut(entity).insert(lodestone_ecs::entity::ArmorStandFlags {
+            small: false,
+            show_arms: false,
+            no_base_plate: false,
+            marker: false,
+        });
+        let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+        assert_eq!(
+            facts.scale, 1.0,
+            "small: false must leave scale at the ordinary 1.0, not halve it too"
+        );
+
+        // Absence (never reported) must also read as ordinary scale, per
+        // this codebase's usual "unreported = the least surprising default"
+        // rule for every other bool here.
+        let mut world = World::new();
+        let entity = bare_entity(&mut world);
+        let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+        assert_eq!(
+            facts.scale, 1.0,
+            "an entity with no ArmorStandFlags at all must not be scaled down"
+        );
+    }
+
     /// The same shape of gap as the velocity fix above, one field over:
     /// `SET_EQUIPMENT` already folds into the [`Equipment`] component and the
     /// old `entity_snapshot` dropped it, so `EntityInterpolator` could never
@@ -4026,6 +4162,8 @@ mod tests {
                 swim_amount: 0.0,
                 death_time: 0.0,
                 on_fire: false,
+                invisible: false,
+                armor_stand: None,
                 player_skin: skin,
                 // A player, not an experience orb.
                 experience_orb_value: None,

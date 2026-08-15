@@ -140,6 +140,8 @@ fn a_woolly_sheep_draws_more_silhouette_than_a_sheared_one() {
         swim_amount: 0.0,
         death_time: 0.0,
         on_fire: false,
+        invisible: false,
+        armor_stand: None,
         // Not a player, so no skin can apply.
         player_skin: None,
         // Not an experience orb, so the orb billboard pass never claims it.

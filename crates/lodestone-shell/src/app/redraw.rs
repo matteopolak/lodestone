@@ -1316,6 +1316,13 @@ impl WindowApp {
                 // *same* `body_pose.render(partial_tick)` call as the limb swing, so
                 // the swing and the walk cannot drift by a frame.
                 .with_avatar_pose(self.sim.local_body_anim())
+                // The local player's own uuid (issue #646), so the
+                // inventory avatar's *default* skin resolves through the
+                // same `default_skin_for_uuid` call the world side already
+                // uses for every other player with no declared skin —
+                // see `ContainerFrame::avatar_uuid`'s doc. `None` off a
+                // live session, which keeps the pre-login bootstrap default.
+                .with_avatar_uuid(self.sim.local_uuid())
                 // The anvil's XP cost and the enchanting table's three level
                 // costs (`docs/container-cost-screens.md`'s "What is not yet
                 // wired" gap). `&[]` on the player-inventory screen (no

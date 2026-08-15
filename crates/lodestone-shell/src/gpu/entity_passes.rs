@@ -160,6 +160,49 @@ fn apply_swim_rotation(
     instance.aabb_max = feet + glam::Vec3::splat(radius);
 }
 
+/// Hides an armour stand's arms and/or base plate, per its
+/// `ArmorStand.DATA_CLIENT_FLAGS` byte — issue #643's remaining half, once
+/// the byte itself reaches `EntityDraw::armor_stand`.
+///
+/// Vanilla toggles `ModelPart.visible` directly
+/// (`ArmorStandModel.setupAnim`: `leftArm.visible = state.showArms`,
+/// `basePlate.visible = state.showBasePlate`). This renderer has no
+/// per-part visibility flag — [`lodestone_render::EntityInstance`] carries
+/// one *matrix* per part, not a flag — so "invisible" is expressed as "this
+/// part's own matrix collapses every one of its vertices to a single point",
+/// which draws zero-area geometry instead.
+///
+/// **Scale-to-zero, not zero the matrix outright.** Multiplying by a matrix
+/// with a zero *scale* keeps the result a valid affine transform: every
+/// vertex of the part maps to that part's own origin. A bare all-zero
+/// matrix would zero the homogeneous `w` too, which is a divide-by-zero in
+/// the perspective divide rather than a degenerate point.
+///
+/// Only `no_base_plate` and `show_arms` are handled: `small` is folded into
+/// [`crate::entities`]'s scale resolution instead (see `EntityFacts`'s doc),
+/// and `marker` has no renderer equivalent — see `EntityDraw::armor_stand`'s
+/// doc for why.
+fn hide_armor_stand_parts(
+    instance: &mut lodestone_render::EntityInstance,
+    wearer: &lodestone_render::EntityMesh,
+    flags: lodestone_ecs::entity::ArmorStandFlags,
+) {
+    let mut hide = |part_name: &str| {
+        if let Some(index) = wearer.skeleton.index_of(part_name)
+            && let Some(part) = instance.part_transforms.get_mut(index)
+        {
+            *part *= glam::Mat4::from_scale(glam::Vec3::ZERO);
+        }
+    };
+    if flags.no_base_plate {
+        hide("base_plate");
+    }
+    if !flags.show_arms {
+        hide("left_arm");
+        hide("right_arm");
+    }
+}
+
 fn flame_hitbox_width(type_path: &str, age_scale: f32) -> Option<f32> {
     let entity_type = lodestone_data::entity_type::EntityType::from_name(type_path)?;
     let dims = lodestone_data::entity_dimensions::base_dimensions_for(entity_type);
@@ -522,6 +565,20 @@ impl RenderState {
         // shared group would draw one breed's sheet on every breed.
         let mut groups: Vec<(bool, u8, Option<String>, Option<&'static str>, Vec<_>)> = Vec::new();
         for e in entities {
+            // `LivingEntityRenderer.submit`'s `isBodyVisible` gate on its own
+            // `submitModel` call: an invisible entity draws no body/rig at
+            // all, full stop, for *this* pass. Armour (`prepare_armour`) and
+            // held items (`merge_held_items`/`special_item_instances`) are
+            // separate passes that re-resolve the entity's pose from scratch
+            // rather than reusing the instance built below, so they are
+            // unaffected — matching vanilla's own `shouldRenderLayers`
+            // running unconditionally regardless of body visibility. So is
+            // the nametag pass, which reads this same `entities` slice
+            // independently: an invisible, named entity still shows its tag.
+            // See `EntityDraw::invisible`.
+            if e.invisible {
+                continue;
+            }
             // `resolve_posed`, not `resolve`, and this is the *only* call site that
             // needs it: the pitch selects the **placement**, and a
             // projectile placed by the mob matrix draws 1.501 blocks high and
@@ -560,6 +617,15 @@ impl RenderState {
             // own doc for why only the player is ported.
             if e.type_path == "player" {
                 apply_swim_rotation(&mut instance, e.feet, e.yaw, e.death_time, e.pitch, e.swim_amount);
+            }
+            // `ArmorStandModel.setupAnim`'s `leftArm.visible = state.showArms`
+            // and `basePlate.visible = state.showBasePlate`. See
+            // `hide_armor_stand_parts`'s own doc for why a matrix, not a flag,
+            // is how this renderer expresses "invisible part".
+            if let Some(flags) = e.armor_stand
+                && let Some(wearer) = self.entities.models.get(instance.model)
+            {
+                hide_armor_stand_parts(&mut instance, wearer, flags);
             }
             let instance = instance.with_light(entity_light(&self.entity_light, e));
             // `CreeperRenderer.getWhiteOverlayProgress` through
@@ -1736,6 +1802,8 @@ mod tests {
             swim_amount: 0.0,
             death_time: 0.0,
             on_fire,
+            invisible: false,
+            armor_stand: None,
             player_skin: None,
             variant_sheet: None,
             // A flame subject, not an orb.
@@ -1962,6 +2030,142 @@ mod tests {
         assert_ne!(
             part0, part1,
             "part_transforms[0] did not rotate with the body"
+        );
+    }
+
+    /// `hide_armor_stand_parts` collapses exactly the named parts — and no
+    /// others — to a degenerate, zero-scale matrix.
+    ///
+    /// Pure geometry, no GPU: this inspects `EntityInstance::part_transforms`
+    /// directly rather than reading back pixels. "Did this specific named
+    /// part's own matrix degenerate, and no other part's" is not a claim a
+    /// full-frame pixel readback can localise this precisely — the visible
+    /// *consequence* (a hologram's base plate and arms contributing no
+    /// pixels while its head/body/legs still do) is covered separately by
+    /// `tests/armor_stand_hologram_pixels.rs`'s rasterized gate. Two
+    /// different instruments for two different claims.
+    ///
+    /// Three configurations, not two: `ArmorStandFlags::default()` already
+    /// has `show_arms: false` (vanilla's own default — an armour stand's
+    /// arms are hidden unless explicitly shown), so "all flags false" is
+    /// *not* the all-visible case here, unlike almost every other bool flag
+    /// in this codebase. Using it as the sole baseline would have made the
+    /// arms half of this test pass by accident even if `show_arms` were
+    /// read backwards. `all_visible` (`show_arms: true`) is the real
+    /// nothing-hidden baseline instead.
+    #[test]
+    fn hide_armor_stand_parts_collapses_only_the_named_parts() {
+        let models = lodestone_render::EntityModelSet::load();
+        let mesh = models
+            .get("armor_stand")
+            .expect("armor_stand must be in the corpus");
+        let base_plate = mesh
+            .skeleton
+            .index_of("base_plate")
+            .expect("armor_stand must have a base_plate part");
+        let left_arm = mesh
+            .skeleton
+            .index_of("left_arm")
+            .expect("armor_stand must have a left_arm part");
+        let right_arm = mesh
+            .skeleton
+            .index_of("right_arm")
+            .expect("armor_stand must have a right_arm part");
+        let head = mesh
+            .skeleton
+            .index_of("head")
+            .expect("armor_stand must have a head part");
+
+        // A part's own linear (3x3) determinant collapses to exactly `0.0`
+        // under `M * diag(0, 0, 0, 1)` — the affine matrix's 4x4 determinant
+        // reduces to the linear part's, since the bottom row stays
+        // `(0, 0, 0, 1)` — while an ordinary rotate+translate bone keeps a
+        // determinant with magnitude close to `1.0`. `1e-6` separates the two
+        // by many orders of magnitude; there is no near-miss case here.
+        let degenerate = |m: glam::Mat4| m.determinant().abs() < 1e-6;
+
+        let resolve = || {
+            models
+                .resolve(
+                    "armor_stand",
+                    glam::Vec3::ZERO,
+                    0.0,
+                    1.0,
+                    &lodestone_render::AnimInput::REST,
+                )
+                .expect("armor_stand must resolve")
+        };
+
+        let mut mismatches: Vec<String> = Vec::new();
+        let mut check = |label: &str, flags: lodestone_ecs::entity::ArmorStandFlags,
+                          expect_degenerate: &[(&str, usize, bool)]| {
+            let mut instance = resolve();
+            hide_armor_stand_parts(&mut instance, mesh, flags);
+            for (part_name, index, want_degenerate) in expect_degenerate {
+                let got = degenerate(instance.part_transforms[*index]);
+                if got != *want_degenerate {
+                    mismatches.push(format!(
+                        "{label}: {part_name} degenerate={got}, expected {want_degenerate}"
+                    ));
+                }
+            }
+        };
+
+        // Nothing hidden: proves the function does not degenerate parts it
+        // was not told to.
+        check(
+            "all_visible",
+            lodestone_ecs::entity::ArmorStandFlags {
+                small: false,
+                show_arms: true,
+                no_base_plate: false,
+                marker: false,
+            },
+            &[
+                ("base_plate", base_plate, false),
+                ("left_arm", left_arm, false),
+                ("right_arm", right_arm, false),
+                ("head", head, false),
+            ],
+        );
+
+        // `no_base_plate` alone: only the base plate degenerates, arms and
+        // head (an unrelated part with no flag of its own) do not.
+        check(
+            "no_base_plate_only",
+            lodestone_ecs::entity::ArmorStandFlags {
+                small: false,
+                show_arms: true,
+                no_base_plate: true,
+                marker: false,
+            },
+            &[
+                ("base_plate", base_plate, true),
+                ("left_arm", left_arm, false),
+                ("right_arm", right_arm, false),
+                ("head", head, false),
+            ],
+        );
+
+        // The real vanilla default (`ArmorStandFlags::default()`): arms
+        // hidden, base plate and head untouched — the discriminating case
+        // this test exists for, since it is neither "all hidden" nor
+        // "nothing hidden".
+        check(
+            "default_flags",
+            lodestone_ecs::entity::ArmorStandFlags::default(),
+            &[
+                ("base_plate", base_plate, false),
+                ("left_arm", left_arm, true),
+                ("right_arm", right_arm, true),
+                ("head", head, false),
+            ],
+        );
+
+        assert!(
+            mismatches.is_empty(),
+            "hide_armor_stand_parts mismatches:\n{}",
+            mismatches.join("\n")
         );
     }
 }

@@ -141,6 +141,9 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         // A dropped item entity carries no `EntityFlags` lookup in this
         // hand-built fixture.
         on_fire: false,
+        invisible: false,
+        // An item entity is never an armour stand.
+        armor_stand: None,
         // Not a player, so no skin can apply.
         player_skin: None,
         // Not an experience orb, so the orb billboard pass never claims it.
@@ -486,6 +489,8 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         swim_amount: 0.0,
         death_time: 0.0,
         on_fire: false,
+        invisible: false,
+        armor_stand: None,
         // Not a player, so no skin can apply.
         player_skin: None,
         // Not an experience orb, so the orb billboard pass never claims it.

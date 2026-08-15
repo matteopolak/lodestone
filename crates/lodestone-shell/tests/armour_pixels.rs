@@ -191,6 +191,8 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
         swim_amount: 0.0,
         death_time: 0.0,
         on_fire: false,
+        invisible: false,
+        armor_stand: None,
         // Not a player, so no skin can apply.
         player_skin: None,
         // A zombie has no variant texture axis, so the model sheet applies.
