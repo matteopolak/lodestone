@@ -781,17 +781,31 @@ impl<T: Transport> Driver<T> {
     }
 
     /// Drives the online-mode encryption handshake a `Directive::BeginEncryption`
-    /// carries (issue #65): generate the shared secret, RSA-wrap it and the
-    /// verify token, hand the ciphertext to the adapter to frame the reply,
-    /// send that reply in the clear, flip the connection's cipher on, then —
-    /// only if the server asked for it — prove ownership to the session
-    /// server via [`lodestone_auth::join_server`].
+    /// carries (issue #65): generate the shared secret, and — only if the
+    /// server asked for it — prove ownership to the session server via
+    /// [`lodestone_auth::join_server`] *first*. Only once that succeeds (or
+    /// was not required) does it RSA-wrap the secret and verify token, hand
+    /// the ciphertext to the adapter to frame the reply, send that reply in
+    /// the clear, and flip the connection's cipher on.
     ///
-    /// Ordering matters and mirrors [`Connection::enable_encryption`]'s own
-    /// contract: the `EncryptionResponse` packet must reach the wire
-    /// *before* the cipher is enabled (the server switches its cipher on the
-    /// instant it accepts that packet, so everything after must already be
-    /// enciphered on our side too).
+    /// Two orderings matter here, both load-bearing:
+    ///
+    /// * The session-server join must complete *before* the
+    ///   `EncryptionResponse` packet reaches the wire, matching
+    ///   `ClientHandshakePacketListenerImpl.handleHello` (`authenticateServer`
+    ///   runs to completion before `setEncryption` ever sends the
+    ///   `ServerboundKeyPacket`). A hosting server's own
+    ///   `ServerLoginPacketListenerImpl.handleKey` starts its
+    ///   `hasJoinedServer` check the instant it receives that packet, with no
+    ///   wait for the client — sending it first races our own join against
+    ///   the server's check of it, and losing that race reads as a genuine
+    ///   unverified session on the far side (Velocity's own online-mode gate
+    ///   answers exactly this with `velocity.error.online-mode-only`).
+    /// * The `EncryptionResponse` packet must reach the wire *before* the
+    ///   cipher is enabled locally, matching [`Connection::enable_encryption`]'s
+    ///   own contract: the server switches its cipher on the instant it
+    ///   accepts that packet, so everything after must already be enciphered
+    ///   on our side too.
     #[cfg(not(target_arch = "wasm32"))]
     async fn begin_encryption(
         &mut self,
@@ -840,6 +854,38 @@ impl<T: Transport> Driver<T> {
             }
         };
 
+        // Prove ownership to the session server *before* the
+        // `EncryptionResponse` ever reaches the wire — matching
+        // `ClientHandshakePacketListenerImpl.handleHello`, which runs
+        // `authenticateServer` (our `join_server`) to completion and only
+        // then calls `setEncryption`, which is what actually sends the
+        // `ServerboundKeyPacket`. That ordering is load-bearing, not
+        // stylistic: a hosting server's own `ServerLoginPacketListenerImpl
+        // .handleKey` starts its `hasJoinedServer` check the instant it
+        // receives that packet, on its own thread, with no wait for the
+        // client. Sending our response first (as this used to) races our own
+        // HTTP POST to Mojang against the server's HTTP GET to the same
+        // session server — and losing that race is indistinguishable from a
+        // real unverified-session failure from the far side: Velocity's own
+        // online-mode check answers exactly this case with
+        // `velocity.error.online-mode-only`. Doing the join first, and only
+        // building/sending the encryption response after it succeeds, makes
+        // the join durable at the session server before the host can
+        // possibly ask about it — the same guarantee vanilla's ordering
+        // gives.
+        if should_authenticate {
+            // `.expect()` is safe: the early return above guarantees `Some`
+            // whenever `should_authenticate` is true.
+            let session = self
+                .auth_session
+                .as_ref()
+                .expect("should_authenticate implies auth_session is Some (checked above)");
+            let hash = lodestone_auth::server_hash(&server_id, &secret, &public_key);
+            if let Err(error) = lodestone_auth::join_server(&self.http, session, &hash).await {
+                return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Auth(error))));
+            }
+        }
+
         // The adapter owns only the version-specific packet id and byte-array
         // framing (`docs/`); it performs no crypto and no I/O.
         let directive = match self.adapter.build_encryption_response(&enc_secret, &enc_token) {
@@ -872,19 +918,6 @@ impl<T: Transport> Driver<T> {
             return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Transport(
                 error,
             ))));
-        }
-
-        if should_authenticate {
-            // `.expect()` is safe: the early return above guarantees `Some`
-            // whenever `should_authenticate` is true.
-            let session = self
-                .auth_session
-                .as_ref()
-                .expect("should_authenticate implies auth_session is Some (checked above)");
-            let hash = lodestone_auth::server_hash(&server_id, &secret, &public_key);
-            if let Err(error) = lodestone_auth::join_server(&self.http, session, &hash).await {
-                return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Auth(error))));
-            }
         }
 
         Step::Continue

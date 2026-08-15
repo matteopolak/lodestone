@@ -141,10 +141,25 @@ pub async fn try_cached_session(
 
     match flow::refresh_token(client, client_id, &refresh).await {
         Ok(ms_token) => {
+            // The refresh token rotates on every use, and it has already
+            // rotated at Microsoft's end the instant this call returned —
+            // the *old* value in `secrets` is dead from here on regardless of
+            // what happens next. Persist the new one now, before the
+            // XBL/XSTS/Mojang-login/profile chain below gets a chance to
+            // fail: that used to run first, so a transient failure anywhere
+            // in it (a network blip, a Mojang 5xx) propagated via `?` before
+            // `save_refresh_token` was ever reached, silently orphaning the
+            // account — the on-disk credential stayed the pre-rotation
+            // token, which Microsoft now rejects with `invalid_grant` on
+            // every future attempt, forcing a full interactive re-sign-in
+            // over a failure that had nothing to do with the refresh itself.
+            // Keyed by `profile_id` (this call's own selection) rather than
+            // waiting on `session.profile.id` below — the two are the same
+            // account by construction, since this is a refresh *for*
+            // `profile_id`, not a fresh sign-in that could resolve to
+            // something else.
+            secrets.save_refresh_token(profile_id, &ms_token.refresh_token)?;
             let session = flow::session_from_ms_token(client, &ms_token.access_token).await?;
-            // The refresh token rotates on every use; persist the new one or
-            // the *next* launch's refresh fails even though this one worked.
-            secrets.save_refresh_token(session.profile.id, &ms_token.refresh_token)?;
             Ok(CachedSessionOutcome::Ready(session))
         }
         Err(AuthError::RefreshTokenInvalid) => Ok(CachedSessionOutcome::SessionExpired {
