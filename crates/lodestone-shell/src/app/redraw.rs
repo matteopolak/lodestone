@@ -224,6 +224,16 @@ impl WindowApp {
             }
         };
 
+        // The menu background blur reads the pixels already drawn into this
+        // frame, so it needs the texture behind `frame.view()` *before* anything
+        // draws into it — captured once here rather than at each of the several
+        // `render_overlay` sites below. Without this call `MenuRenderer`'s own
+        // frame texture stays `None` forever and the whole blur pass is a silent
+        // no-op: built, tested, reaching no pixels.
+        if let Some(menu) = self.menu.as_mut() {
+            menu.begin_frame(frame.colour_texture().clone());
+        }
+
         let aspect = w as f32 / h as f32;
         // Recompute the targeted block from the interpolated camera each frame.
         self.sim.update_target(aspect);
@@ -1616,6 +1626,15 @@ impl WindowApp {
             && let Some(menu) = self.menu.as_mut()
         {
             menu.render_overlay(device, queue, frame.view(), &links_frame, w, h);
+        }
+
+        // Social Interactions is the third screen of this exact shape, and it
+        // had the same defect Statistics did: `frame_for` returns `None`, so
+        // without this block it draws *nothing*.
+        if let Some(social_frame) = crate::menu::nav::social_overlay_frame(&self.ui, &self.nav)
+            && let Some(menu) = self.menu.as_mut()
+        {
+            menu.render_overlay(device, queue, frame.view(), &social_frame, w, h);
         }
 
         // Issue #474: the command block edit screen was drawn **nowhere**.
