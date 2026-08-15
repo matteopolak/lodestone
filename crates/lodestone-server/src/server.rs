@@ -1867,6 +1867,46 @@ fn player_store<S: ChunkSource + ?Sized>(source: &S) -> Option<crate::player_dat
 /// has to complete before the task ends — handing it to a pool there would race
 /// the runtime shutting the pool down, which loses exactly the save that matters
 /// most.
+/// Where a returning player should re-enter the world, given their saved
+/// state (if any, `saved`) and the world spawn as the fallback (`world_spawn`).
+///
+/// **This is the fix for "I respawn buried in the ground."** A saved position
+/// is trusted verbatim only when [`PlayerData::dimension`](crate::player_data::PlayerData)
+/// says it was actually recorded in the overworld — this crate's one join
+/// dimension (a fresh connection always joins there, before any portal
+/// trip). Before this existed, a player who died or disconnected in the
+/// Nether had their Nether-relative position saved, and the next join used
+/// that raw coordinate as an *overworld* one — a semi-arbitrary point that is
+/// rarely at overworld surface height, since the Nether's own placeable band
+/// and its 8:1 coordinate scale share nothing with overworld terrain shape at
+/// the same numbers. See [`crate::player_data::PlayerData::capture`]'s own
+/// doc comment for the write-side half of this fix.
+///
+/// [`crate::dimension::Dimension::from_key`] returning `None` — an
+/// unparseable tag, which is every save written before this field was
+/// captured accurately — degrades the same way a genuinely non-overworld tag
+/// does: fall back to the world spawn rather than trust a position whose
+/// dimension is not actually known. This does not retroactively repair an
+/// already-corrupted save (the true dimension of an old save's raw position
+/// is not recoverable), but it stops the bug for every save written from here
+/// on, and it is the same "correct degradation" shape used throughout this
+/// crate for a gap rather than inventing a wrong answer.
+#[cfg(not(target_arch = "wasm32"))]
+fn join_position_for_saved_player(
+    saved: Option<&crate::player_data::PlayerData>,
+    world_spawn: Vec3,
+) -> Vec3 {
+    saved.map_or(world_spawn, |data| {
+        if crate::dimension::Dimension::from_key(&data.dimension)
+            == Some(crate::dimension::Dimension::Overworld)
+        {
+            data.spawn_state().pos
+        } else {
+            world_spawn
+        }
+    })
+}
+
 /// Builds the [`PlayerData`](crate::player_data::PlayerData) snapshot
 /// [`persist_player`] would write and [`live_publish_player`] would mirror,
 /// without doing either — the construction half, factored out so both the
@@ -1888,6 +1928,13 @@ fn player_save_snapshot(
     inventory: &PlayerInventory,
     experience: &crate::experience::PlayerExperience,
     preserved: &[(String, lodestone_core::Nbt)],
+    // The dimension `player_pos`/`fallback` are expressed in — the caller's
+    // own current `SourceRef::dimension()`, not always the overworld. See
+    // `PlayerData::capture`'s own doc comment for why this is load-bearing
+    // rather than a label: a Nether-relative position saved under the wrong
+    // (or no) dimension tag is what the next join used to place a player
+    // inside overworld terrain at a semi-arbitrary point.
+    dimension: crate::dimension::Dimension,
 ) -> crate::player_data::PlayerData {
     let pos = player_pos.map_or(fallback, |(x, y, z)| Vec3::new(x, y, z));
     crate::player_data::PlayerData::capture(
@@ -1899,6 +1946,7 @@ fn player_save_snapshot(
         inventory,
         *experience,
         preserved.to_vec(),
+        dimension,
     )
 }
 
@@ -1919,12 +1967,14 @@ fn persist_player(
     // worse than the bug it replaces.
     experience: &crate::experience::PlayerExperience,
     preserved: &[(String, lodestone_core::Nbt)],
+    dimension: crate::dimension::Dimension,
 ) {
     let Some(store) = store else {
         return;
     };
     let data = player_save_snapshot(
         player_pos, player_rot, fallback, vitals, game_mode, inventory, experience, preserved,
+        dimension,
     );
     if let Err(err) = store.write(uuid, &data) {
         tracing::warn!("could not save player data for {uuid}: {err}");
@@ -1950,9 +2000,11 @@ fn live_publish_player(
     inventory: &PlayerInventory,
     experience: &crate::experience::PlayerExperience,
     preserved: &[(String, lodestone_core::Nbt)],
+    dimension: crate::dimension::Dimension,
 ) {
     let data = player_save_snapshot(
         player_pos, player_rot, fallback, vitals, game_mode, inventory, experience, preserved,
+        dimension,
     );
     live_save.publish(store.cloned(), uuid, data);
 }
@@ -2223,6 +2275,13 @@ pub(crate) async fn serve_connection_with_mob_events_shared<T, P, S, E>(
     // See `serve_connection_inner`'s own parameter comments.
     sleep_vote: &SleepVote,
     sleep_feed: &SleepFeed,
+    // Issues #326/#580: the shared world border — the same handle
+    // `crate::tick::run_tick_loop_with_weather` now ticks and a `/worldborder`
+    // command mutates through `BorderFeed::with`. This is the **only**
+    // border-carrying entry point; every other `serve_connection_inner`
+    // caller still passes a fresh `BorderFeed::default()` no loop reads, the
+    // same compatibility shape `sleep_vote`/`sleep_feed` above already use.
+    border: &BorderFeed,
     // Issues #327/#328/#323: the world's shared scalars, the *same* handle
     // `run_tick_loop` ticks. See `serve_connection_inner`'s parameter comment.
     world: &crate::world_state::WorldStateHandle,
@@ -2262,7 +2321,7 @@ where
         sleep_vote,
         sleep_feed,
         &CommandDispatch::none(),
-        &BorderFeed::default(),
+        border,
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
@@ -3388,11 +3447,11 @@ where
                 // Where the player actually re-enters the world. `spawn.pos`
                 // stays the **world** spawn: it is what `serve_play` uses for a
                 // respawn, and overwriting it with the player's last position
-                // would respawn a dead player back where they died.
+                // would respawn a dead player back where they died. See
+                // `join_position_for_saved_player`'s own doc comment for why a
+                // saved position is not always trusted verbatim.
                 #[cfg(not(target_arch = "wasm32"))]
-                let join_pos = saved_player
-                    .as_ref()
-                    .map_or(spawn.pos, |data| data.spawn_state().pos);
+                let join_pos = join_position_for_saved_player(saved_player.as_ref(), spawn.pos);
                 #[cfg(target_arch = "wasm32")]
                 let join_pos = spawn.pos;
                 // Vanilla's `playerGameType`, restored — a player who typed
@@ -9644,6 +9703,10 @@ async fn dispatch_play_packet<T, P, S>(
     // `LOCAL_PLAYER_ENTITY_ID` in singleplayer) — see `serve_play`'s own
     // binding and `crate::sleep`'s module doc.
     sleep_vote: &SleepVote,
+    // Issue #580. `ChatCommand`'s `CommandWorld` needs this to reach
+    // `/worldborder`'s read/write surface — the same `BorderFeed` `serve_play`
+    // already carries for the join broadcast and the vitals-tick damage read.
+    border: &BorderFeed,
     player_entity_id: i32,
     // This connection's login name, for the death message
     // (`DeathCause::death_message`'s victim argument — vanilla's
@@ -10928,6 +10991,9 @@ where
                 // spawned mob is picked up by the tick loop's own next
                 // publish (see `crate::commands::summon`'s module doc).
                 mobs: Some(mobs),
+                // `/worldborder`'s read/write surface (issue #580) — the same
+                // shared `BorderFeed` this connection already holds.
+                border: Some(border),
             };
             match commands.builtins.run(&command_world, &source, &command) {
                 Some(outcome) => {
@@ -11724,6 +11790,7 @@ where
                         &inventory,
                         &experience,
                         &preserved_player_fields,
+                        source.dimension(),
                     );
                     return Ok(ServeSummary { username, chunks_sent, inventory });
                 };
@@ -11774,6 +11841,7 @@ where
                     &mut game_mode,
                     &mut respawn,
                     sleep_vote,
+                    border,
                     player_entity_id,
                     &username,
                     world_spawn,
@@ -12164,6 +12232,7 @@ where
                         &inventory,
                         &experience,
                         &preserved_player_fields,
+                        source.dimension(),
                     );
                 }
 
@@ -13000,6 +13069,7 @@ where
             &inventory,
             &experience,
             &preserved_player_fields,
+            source.dimension(),
         );
     }
 }
@@ -13703,6 +13773,7 @@ where
             &mut game_mode,
             &mut respawn,
             sleep_vote,
+            border,
             player_entity_id,
             &username,
             world_spawn,
@@ -16460,6 +16531,92 @@ mod tests {
         let handles = dimension_scoped_handles(Some(&sibling));
         assert!(handles.block_entities.is_none());
         assert!(handles.block_ticks.is_none());
+    }
+
+    /// No saved player at all: falls back to the world spawn, exactly as
+    /// before this fix existed.
+    #[test]
+    fn join_position_for_saved_player_is_world_spawn_with_no_save() {
+        let spawn = Vec3::new(8.0, 71.0, 8.0);
+        assert_eq!(join_position_for_saved_player(None, spawn), spawn);
+    }
+
+    /// **The discriminating gate for issue #614's "buried in the ground"
+    /// report.** The same raw position, saved under two different dimension
+    /// tags: the overworld-tagged save is trusted verbatim (predicted to
+    /// equal the saved position exactly, not merely "differs from spawn"),
+    /// and the Nether-tagged one must fall back to the world spawn rather
+    /// than being joined into the overworld as a raw coordinate — which is
+    /// exactly the bug a player who died or disconnected in the Nether hit.
+    #[test]
+    fn join_position_for_saved_player_distrusts_a_non_overworld_position() {
+        let spawn = Vec3::new(8.0, 71.0, 8.0);
+        // Deliberately not equal to `spawn` on any axis, so a bug that
+        // silently returned the wrong constant could not hide.
+        let raw = Vec3::new(15.0, 64.0, -3.0);
+        let inventory = PlayerInventory::default();
+
+        let overworld_save = crate::player_data::PlayerData::capture(
+            raw,
+            Rotation::new(0.0, 0.0),
+            20.0,
+            300,
+            GameMode::Survival,
+            &inventory,
+            crate::experience::PlayerExperience::default(),
+            Vec::new(),
+            crate::dimension::Dimension::Overworld,
+        );
+        assert_eq!(
+            join_position_for_saved_player(Some(&overworld_save), spawn),
+            raw,
+            "an overworld-tagged save must be trusted verbatim"
+        );
+
+        let nether_save = crate::player_data::PlayerData::capture(
+            raw,
+            Rotation::new(0.0, 0.0),
+            20.0,
+            300,
+            GameMode::Survival,
+            &inventory,
+            crate::experience::PlayerExperience::default(),
+            Vec::new(),
+            crate::dimension::Dimension::Nether,
+        );
+        assert_eq!(
+            join_position_for_saved_player(Some(&nether_save), spawn),
+            spawn,
+            "a Nether-tagged save must fall back to the world spawn rather than be \
+             joined as a raw overworld coordinate"
+        );
+    }
+
+    /// An unparseable/unknown dimension tag — every save written before this
+    /// field was captured accurately — must degrade the same way a genuine
+    /// non-overworld tag does, not be treated as trustworthy by default.
+    #[test]
+    fn join_position_for_saved_player_distrusts_an_unparseable_dimension_tag() {
+        let spawn = Vec3::new(8.0, 71.0, 8.0);
+        let raw = Vec3::new(15.0, 64.0, -3.0);
+        let inventory = PlayerInventory::default();
+        let mut save = crate::player_data::PlayerData::capture(
+            raw,
+            Rotation::new(0.0, 0.0),
+            20.0,
+            300,
+            GameMode::Survival,
+            &inventory,
+            crate::experience::PlayerExperience::default(),
+            Vec::new(),
+            crate::dimension::Dimension::Overworld,
+        );
+        save.dimension = "not a real dimension key".to_string();
+        assert_eq!(
+            join_position_for_saved_player(Some(&save), spawn),
+            spawn,
+            "an unparseable dimension tag must not be trusted as the overworld"
+        );
     }
 
     /// A protocol double carrying only what `apply_client_command`'s

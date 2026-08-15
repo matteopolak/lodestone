@@ -204,6 +204,18 @@ impl PlayerData {
     /// value's own `preserved`), so a field this server does not model survives a
     /// full load/modify/save cycle rather than only surviving until the first
     /// save.
+    ///
+    /// `dimension` is the dimension `pos` is expressed in — **load-bearing**,
+    /// not cosmetic: before this parameter existed, every save wrote the
+    /// `Default` impl's hardcoded `"minecraft:overworld"` regardless of where
+    /// the player actually was, so a player who died or disconnected in the
+    /// Nether had their Nether-relative `pos` persisted under a dimension tag
+    /// that claimed it was an overworld coordinate. The next join placed them
+    /// at that raw position *in the overworld* — a semi-arbitrary point that
+    /// is rarely at overworld surface height, which is the "I respawn buried
+    /// in the ground" report this fixes. See the join-time consumer in
+    /// `crate::server` for the other half: reading this field back and
+    /// declining to trust a non-overworld position as an overworld one.
     #[must_use]
     pub fn capture(
         pos: Vec3,
@@ -214,6 +226,7 @@ impl PlayerData {
         inventory: &PlayerInventory,
         experience: crate::experience::PlayerExperience,
         preserved: Vec<(String, Nbt)>,
+        dimension: crate::dimension::Dimension,
     ) -> Self {
         Self {
             pos,
@@ -227,6 +240,7 @@ impl PlayerData {
                 .map(|slot| inventory.native(slot).cloned())
                 .collect(),
             preserved,
+            dimension: dimension.key().to_owned(),
             ..Self::default()
         }
     }
