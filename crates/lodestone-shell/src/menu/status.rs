@@ -434,31 +434,34 @@ const RELAY_PING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5
 /// instead of [`lodestone_net::WsWebTransport`]). What is new here is only the
 /// glue: which URL to dial and how to bound the wait, both in `crate::platform`.
 ///
-/// # One relay, one backend
+/// # One relay, any number of backends
 ///
-/// `lodestone-relay` forwards to a single fixed `--target` chosen at startup —
-/// it is a protocol-blind byte pipe, not a router keyed on the handshake's
-/// server-address field. So every row in a browser server list that pings
-/// through the relay reaches the **same** backend server regardless of which
-/// row's `host`/`port` triggered the probe; those fields still travel in the
-/// handshake (a real server may virtual-host on them), but the relay itself
-/// does not look at them to choose where to forward. This is an existing
-/// property of `lodestone-relay`'s design, not something introduced or fixed
-/// here — worth knowing so a browser server list with several rows is not
-/// mistaken for one that can reach several independent backends.
+/// `lodestone-relay` used to forward to a single fixed `--target` chosen at
+/// startup, which made every row in a browser server list ping the **same**
+/// backend regardless of which row's `host`/`port` triggered the probe — a
+/// shipped bug (a made-up address showed a real, live MOTD that belonged to
+/// whatever `--target` happened to point at). The relay is still a
+/// protocol-blind byte pipe — it never parses a Minecraft packet — but the
+/// *destination* now travels with each connection as a `?host=&port=` query
+/// pair, via [`crate::platform::relay::relay_ws_url_for`]; see that function's
+/// doc and `lodestone_relay`'s crate doc for the full reasoning. So this now
+/// really does reach a different backend per row when the rows name different
+/// servers — see `crates/lodestone-relay/tests/roundtrip.rs`'s
+/// `each_connection_reaches_its_own_destination` for the discriminating proof.
 ///
 /// # Errors
 ///
 /// Three distinct failure shapes reach the caller as `Err`, each naming the
 /// obstacle rather than leaving the row looking like it never started:
-/// the relay refused the WebSocket upgrade (down, or `/relay` not proxied —
-/// see `crate::platform::relay::relay_ws_url`'s "deployed builds" note); the
-/// status exchange itself failed (bad handshake, malformed JSON, EOF); or
-/// [`RELAY_PING_TIMEOUT`] elapsed before either resolved.
+/// the relay refused the WebSocket upgrade (down, `/relay` not proxied, or no
+/// destination resolvable — see `crate::platform::relay::relay_ws_url`'s
+/// "deployed builds" note and `relay_ws_url_for`'s doc); the status exchange
+/// itself failed (bad handshake, malformed JSON, EOF); or [`RELAY_PING_TIMEOUT`]
+/// elapsed before either resolved.
 #[cfg(target_arch = "wasm32")]
 async fn relay_probe(entry: ServerEntry, protocol: i32) -> Result<ServerStatus, String> {
-    let url = crate::platform::relay::relay_ws_url();
     let port = entry.effective_port();
+    let url = crate::platform::relay::relay_ws_url_for(&entry.host, port);
 
     let ping = async {
         let transport = lodestone_net::WsWebTransport::connect(&url)

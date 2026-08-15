@@ -49,7 +49,7 @@ async fn joins_real_server_through_relay_over_websocket() {
         .await
         .expect("bind relay listener");
     let relay_addr = listener.local_addr().expect("relay local addr");
-    tokio::spawn(lodestone_relay::serve(listener, MC_SERVER.to_string()));
+    tokio::spawn(lodestone_relay::serve(listener, Some(MC_SERVER.to_string())));
 
     // 2. Dial the relay over WebSocket — no raw TCP to the server anywhere in
     //    the client path.

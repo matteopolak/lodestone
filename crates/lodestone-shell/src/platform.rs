@@ -220,6 +220,33 @@ pub mod assets {
         /// all-six-or-nothing) is honoured: `web/Trunk.toml`'s hook stages
         /// per-face and reports which resolved.
         pub panorama: Vec<(String, Vec<u8>)>,
+        /// `minecraft/sounds.json` — the event registry `crate::audio`'s wasm32
+        /// `ShellAudio` parses with [`lodestone_assets::sound::SoundRegistry::parse`],
+        /// the same file native's `AssetObjectStore` reads off disk. Small (~626 KB)
+        /// relative to the corpus it indexes, so unlike the corpus itself it is a
+        /// reasonable thing to fetch and stage whole.
+        ///
+        /// Empty is the honest "no store, no CDN reachable" default — `ShellAudio`
+        /// degrades to `None` exactly as native does with no `sounds.json` on disk,
+        /// never a silent stub.
+        pub sounds_json: Vec<u8>,
+        /// A curated subset of the `.ogg` corpus, staged the same way `panorama`
+        /// is: keyed by the asset-index name (`minecraft/sounds/<path>.ogg`, no
+        /// `assets/` prefix), so `crate::audio`'s wasm32 arm can feed this straight
+        /// into a [`lodestone_assets::MemorySource`] after prepending `assets/` —
+        /// the exact prefix [`lodestone_assets::sound::ResolvedSound::file_path`]
+        /// already produces for the native lookup, so no second path scheme exists.
+        ///
+        /// **Never the full 4751-object / 80 MB corpus** — that is what would blow
+        /// `web/`'s gzip ceiling (`just wasm-size`), not what this field is for.
+        /// The intended source is a build-time staging step (mirroring
+        /// `web/Trunk.toml`'s `post_build` panorama hook) that resolves a small,
+        /// deliberately-chosen set out of a local asset-object store — block
+        /// break/place/step, a handful of UI-adjacent and common mob events — and
+        /// reports which of them resolved. Any subset is honoured; an event whose
+        /// sample is not staged degrades exactly as a missing native object does
+        /// (`ShellAudio::report_failure`, warn once then debug).
+        pub sound_objects: Vec<(String, Vec<u8>)>,
     }
 
     static BUNDLE: OnceLock<Bundle> = OnceLock::new();
@@ -380,6 +407,16 @@ pub mod relay {
     /// Builds a relay WebSocket URL from an origin's scheme and host, appending
     /// the fixed `/relay` path `web/Trunk.toml`'s proxy listens on.
     ///
+    /// This is the relay **endpoint** only — where the browser's WebSocket
+    /// connects — and it stays exactly this simple on purpose. The **destination**
+    /// (which real Minecraft server the relay should bridge to) is per-connection
+    /// data layered on top by [`relay_ws_url_for`], not a second thing this
+    /// function needs to know; see that function's doc for why the split is
+    /// deliberate and `lodestone_relay`'s crate doc for the full reasoning
+    /// (`crates/lodestone-relay/src/lib.rs` — the relay used to dial one fixed
+    /// `--target` for every connection, which is a bug this repo shipped and
+    /// fixed: every server-list row showed the *same* backend's MOTD).
+    ///
     /// **Deliberately not `cfg`-gated to `wasm32`, unlike the rest of this
     /// module** — it touches no `web_sys`, so it compiles and runs on every
     /// target, which is what gives it a real native `cargo test` (see the
@@ -407,6 +444,62 @@ pub mod relay {
         relay_ws_url_from(https, &host)
     }
 
+    /// Appends a per-connection `host`/`port` destination to a relay URL, as
+    /// `?host=<percent-encoded>&port=<port>` — the query parameter
+    /// `crates/lodestone-relay`'s `destination_from_query` reads off the
+    /// WebSocket upgrade request before deciding where to dial.
+    ///
+    /// # Why the destination travels separately from [`relay_ws_url`]
+    ///
+    /// The relay endpoint is one fixed thing per page load (this origin's own
+    /// `/relay`); the destination is a *choice the player made* — whichever
+    /// server-list row or direct-connect address they picked — and can differ
+    /// between two connections made moments apart (pinging one row while
+    /// joining another). Folding it into [`relay_ws_url`] would make that
+    /// function's "one relay, one definition" property a lie the moment two
+    /// different destinations were needed in the same session. Every caller
+    /// that dials the relay for a specific server — [`crate::menu::status`]'s
+    /// `relay_probe` and `net.rs`'s browser join — calls this on top of
+    /// [`relay_ws_url`], never a URL of its own construction.
+    ///
+    /// Pure string formatting, not `cfg`-gated, for the same testability reason
+    /// as [`relay_ws_url_from`].
+    #[must_use]
+    pub fn with_destination(relay_url: &str, host: &str, port: u16) -> String {
+        format!("{relay_url}?host={}&port={port}", percent_encode(host))
+    }
+
+    /// [`relay_ws_url`] plus [`with_destination`] — the URL every real
+    /// per-server relay dial should use. Kept as one call so a caller cannot
+    /// accidentally dial [`relay_ws_url`] bare and silently hit whatever the
+    /// relay's own `--target` fallback (if any) resolves to instead of the
+    /// server the player actually chose.
+    #[cfg(target_arch = "wasm32")]
+    #[must_use]
+    pub fn relay_ws_url_for(host: &str, port: u16) -> String {
+        with_destination(&relay_ws_url(), host, port)
+    }
+
+    /// Percent-encodes everything outside the URL query "unreserved" set
+    /// (`ALPHA / DIGIT / "-" / "." / "_" / "~"`, RFC 3986 §2.3) so a hostname
+    /// containing `&`, `=`, `%`, or non-ASCII bytes cannot be mistaken for query
+    /// syntax or corrupt a neighbouring parameter. Real Minecraft server
+    /// addresses are almost always plain ASCII hostnames or IP literals, for
+    /// which this is a no-op — the encoding exists for the address a player
+    /// *could* type, not the common case.
+    fn percent_encode(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for byte in s.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    out.push(byte as char);
+                }
+                _ => out.push_str(&format!("%{byte:02X}")),
+            }
+        }
+        out
+    }
+
     /// Resolves after `duration`, via a JS `setTimeout` rather than
     /// `tokio::time::timeout` — see the module doc for why the latter cannot be
     /// used here at all (it hangs, it does not merely fail to fire).
@@ -430,7 +523,7 @@ pub mod relay {
 
     #[cfg(test)]
     mod tests {
-        use super::relay_ws_url_from;
+        use super::{relay_ws_url_from, with_destination};
 
         // Predicted values, not a round-trip through the function under test —
         // `decode(encode(x)) == x` would prove nothing about the scheme mapping.
@@ -459,6 +552,37 @@ pub mod relay {
             assert_eq!(
                 relay_ws_url_from(false, "lodestone.example:9001"),
                 "ws://lodestone.example:9001/relay"
+            );
+        }
+
+        #[test]
+        fn destination_appends_a_query_pair_with_no_percent_escaping_needed() {
+            assert_eq!(
+                with_destination("ws://127.0.0.1:8080/relay", "hypixel.net", 25565),
+                "ws://127.0.0.1:8080/relay?host=hypixel.net&port=25565"
+            );
+        }
+
+        #[test]
+        fn two_different_destinations_on_the_same_relay_url_produce_two_different_urls() {
+            // The exact discriminating property the relay-side bug lacked: this
+            // client-side half must be capable of asking for two distinct
+            // servers, not just capable of asking for *a* server.
+            let base = "ws://127.0.0.1:8080/relay";
+            let a = with_destination(base, "survival.example", 25565);
+            let b = with_destination(base, "hypixel.net", 25565);
+            assert_ne!(a, b, "two different hosts must produce two different URLs");
+        }
+
+        #[test]
+        fn a_host_with_reserved_query_characters_is_percent_encoded() {
+            // `&` and `=` are query syntax; an unescaped one would either start
+            // a new (bogus) parameter or corrupt this one. `:` is not in the
+            // unreserved set either (it is a `gen-delim`), which matters for a
+            // bracketed IPv6 literal such as `[::1]`.
+            assert_eq!(
+                with_destination("ws://127.0.0.1:8080/relay", "a&b=c", 1),
+                "ws://127.0.0.1:8080/relay?host=a%26b%3Dc&port=1"
             );
         }
     }
