@@ -360,7 +360,13 @@ pub struct Text {
 
 /// A resolved run of text with its fully-inherited style, produced by
 /// [`Text::to_spans`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Hash` (alongside the derived `Eq`) is what lets a `Vec<TextSpan>` key a
+/// wrap cache the way a plain `String` already keys `hud::ChatWrapCache` —
+/// see `hud::ChatWrapCacheSpans`, the span-aware sibling that exists because a
+/// `TextColor::Rgb` cannot survive being flattened to a `§`-coded `String`
+/// first.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TextSpan {
     /// The plain text of this run.
     pub text: String,

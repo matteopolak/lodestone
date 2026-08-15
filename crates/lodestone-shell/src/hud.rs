@@ -37,7 +37,7 @@ use lodestone_render::{
 };
 
 use lodestone_assets::ItemAtlas;
-use lodestone_model::text::{TextColor, TextSpan};
+use lodestone_model::text::{TextColor, TextSpan, TextStyle};
 
 use item_icon::{ColourStream, IconAssets, IconRenderer, IconSink, SpecialIconDraw};
 
@@ -1186,7 +1186,35 @@ pub struct HudFrame<'a> {
     /// Recent chat lines, oldest-first; drawn bottom-left. Each is a legacy
     /// `§`-code string paired with its **age in seconds**, which drives the
     /// vanilla fade-out (older lines dim, then vanish, while the box is closed).
+    ///
+    /// **Lossy: a `TextColor::Rgb` cannot survive this field.** `§` codes name
+    /// only the sixteen legacy colours (`TextColor::legacy_code()` returns
+    /// `None` for a hex colour), so any caller that reaches this field via
+    /// `Text::to_legacy_string` has already dropped every hex colour a 1.16+
+    /// server sent — that flattening happens one layer up, in
+    /// `lodestone_game::chat::ChatLog::recent`/`recent_ages`. Prefer
+    /// [`Self::chat_spans`]; this field exists for callers that have not been
+    /// switched to the span-carrying accessor yet.
     pub chat: &'a [(&'a str, f32)],
+    /// The hex-carrying sibling of [`Self::chat`]: the same oldest-first,
+    /// age-paired chat lines, but as [`TextSpan`] runs from
+    /// `lodestone_game::chat::ChatLog::recent_spans`/`recent_ages_spans`
+    /// instead of a `§`-flattened `String`.
+    ///
+    /// **When this is non-empty, the draw uses it and ignores [`Self::chat`]
+    /// entirely** — the two are alternatives, not layers to composite, so a
+    /// caller populating both would just be paying to flatten the same `Text`
+    /// twice. Empty (the default, see [`HudFrame::new`]) falls back to
+    /// [`Self::chat`], which is what every caller not yet switched over does.
+    ///
+    /// This is the still-open half of `docs/text-colour.md`'s "Chat is still
+    /// hex-blind" section: `ChatLog` itself has carried a span-returning read
+    /// path for a while, but nothing between the session layer and this frame
+    /// threaded it through. Wiring a caller in means switching
+    /// `Session::recent_chat` (`crates/lodestone-shell/src/sim/session.rs`) to
+    /// call `recent_ages_spans` instead of `recent_ages`, and `app/redraw.rs`
+    /// to fill this field instead of [`Self::chat`].
+    pub chat_spans: &'a [(&'a [TextSpan], f32)],
     /// Sound-subtitle captions (issue #198), **oldest first** — vanilla's own
     /// order, with row 0 at the bottom of the stack. Drawn bottom-right, above the
     /// hotbar, and empty whenever `showSubtitles` is off or nothing is audible.
@@ -1228,6 +1256,10 @@ pub struct HudFrame<'a> {
     /// frame-to-frame state) wraps from scratch, which is correct, just not
     /// free; the running app always supplies one.
     pub chat_wrap: Option<&'a ChatWrapCache>,
+    /// The [`Self::chat_spans`] sibling of [`Self::chat_wrap`] — see
+    /// [`ChatWrapCacheSpans`]. `None` wraps from scratch every frame, exactly
+    /// like `chat_wrap`'s own `None` case.
+    pub chat_wrap_spans: Option<&'a ChatWrapCacheSpans>,
     /// The player list to draw, `Some` only while the tab overlay is held.
     ///
     /// **This used to be `Option<&[String]>`** — a flat list of pre-formatted
@@ -1443,6 +1475,7 @@ impl<'a> HudFrame<'a> {
             show_debug: true,
             crosshair: true,
             chat: &[],
+            chat_spans: &[],
             sound_subtitles: &[],
             chat_input: None,
             chat_caret_visible: true,
@@ -1451,6 +1484,7 @@ impl<'a> HudFrame<'a> {
             chat_scrollbar: None,
             chat_options: ChatDisplayOptions::default(),
             chat_wrap: None,
+            chat_wrap_spans: None,
             players: None,
             sidebar: None,
             boss_bars: &[],
@@ -2431,67 +2465,126 @@ impl HudGeometry {
         // constant.
         let max_visual_rows = (chat_box_h / chat_line_h).floor().max(1.0) as usize;
         let mut row_i = 0usize;
-        // Each logical entry can wrap into several visual rows, all sharing
-        // that entry's age/alpha. Vanilla stacks a wrapped message's *last*
-        // split line nearest the bottom edge and its earlier lines above it
-        // (`ChatComponent.addMessageToDisplayQueue`'s per-line `addFirst`,
-        // `ChatComponent.java`, combined with `forEachLine`'s
-        // `lineIndex → chatBottom - lineIndex * entryHeight`,
-        // `ChatComponent.java`) — reversing each entry's own wrapped
-        // rows before stacking reproduces that order.
-        'entries: for (line, age) in frame.chat.iter().rev() {
-            // While open, every line is fully lit; while closed, lines fade over
-            // their last two seconds of a ten-second life and then disappear.
-            let alpha = if chat_open {
-                1.0
-            } else {
-                chat_line_alpha(*age)
-            };
-            if alpha <= 0.0 {
-                // Older-than-visible lines end the stack: everything above is
-                // older still, so there is nothing more to draw.
-                break;
+        // [`HudFrame::chat_spans`] is the alternative, hex-carrying source; see
+        // its own doc for why a non-empty one wins outright rather than being
+        // composited with `chat`. Everything below this `if` mirrors the `else`
+        // branch move for move — same fade, same cache shape, same stacking —
+        // with a `Vec<TextSpan>` in place of a `§`-coded `String` at each step,
+        // because the *decision* logic (fade, row budget, stacking order) does
+        // not care which draw vocabulary carries the text.
+        if !frame.chat_spans.is_empty() {
+            'entries_spans: for (spans, age) in frame.chat_spans.iter().rev() {
+                let alpha = if chat_open {
+                    1.0
+                } else {
+                    chat_line_alpha(*age)
+                };
+                if alpha <= 0.0 {
+                    break;
+                }
+                // The span sibling of `strip_legacy`: vanilla's
+                // `ChatFormatting.stripFormatting` removes every `§`+code pair
+                // wholesale (colour and the five format flags alike), which
+                // for a span list already past that decode is "every run
+                // draws with `TextStyle::default()`".
+                let stripped: Option<Vec<TextSpan>> =
+                    (!opts.colors).then(|| strip_style_spans(spans));
+                let display: &[TextSpan] = stripped.as_deref().unwrap_or(spans);
+                let sub_rows = match frame.chat_wrap_spans {
+                    Some(cache) => cache.rows(display, chat_box_w, chat_pose_scale, |t| {
+                        b.wrap_spans(t, chat_box_w, chat_pose_scale)
+                    }),
+                    None => std::rc::Rc::from(b.wrap_spans(display, chat_box_w, chat_pose_scale)),
+                };
+                for sub in sub_rows.iter().rev() {
+                    if row_i >= max_visual_rows {
+                        break 'entries_spans;
+                    }
+                    let y = chat_bottom - (row_i as f32 + 1.0) * chat_line_h;
+                    if y < margin {
+                        break 'entries_spans;
+                    }
+                    b.rect_px(
+                        0.0,
+                        y - 1.0,
+                        chat_box_w,
+                        chat_line_h,
+                        [0.0, 0.0, 0.0, chat_bg_opacity * alpha],
+                    );
+                    b.text_spans(
+                        sub,
+                        margin,
+                        y,
+                        chat_pose_scale,
+                        [0.92, 0.94, 1.0],
+                        alpha * chat_text_opacity,
+                    );
+                    row_i += 1;
+                }
             }
-            // `options.chat.color == false` strips every legacy code before
-            // wrapping/drawing (`ComponentRenderUtils.stripColor`) rather than
-            // just ignoring them while drawing, matching vanilla.
-            let stripped = if opts.colors { None } else { Some(strip_legacy(line)) };
-            let display: &str = stripped.as_deref().unwrap_or(line);
-            // Wrapped once per message, not once per frame (issue #527 (a)):
-            // the cache keys on the display text plus this frame's box width
-            // and pose scale, so a frame with no new line, no resize and no
-            // options edit performs zero wraps. Without a cache attached this
-            // is the old behaviour, just spelled through the same call.
-            let sub_rows = match frame.chat_wrap {
-                Some(cache) => cache.rows(display, chat_box_w, chat_pose_scale, |t| {
-                    b.wrap_legacy(t, chat_box_w, chat_pose_scale)
-                }),
-                None => std::rc::Rc::from(b.wrap_legacy(display, chat_box_w, chat_pose_scale)),
-            };
-            for sub in sub_rows.iter().rev() {
-                if row_i >= max_visual_rows {
-                    break 'entries;
+        } else {
+            // Each logical entry can wrap into several visual rows, all sharing
+            // that entry's age/alpha. Vanilla stacks a wrapped message's *last*
+            // split line nearest the bottom edge and its earlier lines above it
+            // (`ChatComponent.addMessageToDisplayQueue`'s per-line `addFirst`,
+            // `ChatComponent.java`, combined with `forEachLine`'s
+            // `lineIndex → chatBottom - lineIndex * entryHeight`,
+            // `ChatComponent.java`) — reversing each entry's own wrapped
+            // rows before stacking reproduces that order.
+            'entries: for (line, age) in frame.chat.iter().rev() {
+                // While open, every line is fully lit; while closed, lines fade over
+                // their last two seconds of a ten-second life and then disappear.
+                let alpha = if chat_open {
+                    1.0
+                } else {
+                    chat_line_alpha(*age)
+                };
+                if alpha <= 0.0 {
+                    // Older-than-visible lines end the stack: everything above is
+                    // older still, so there is nothing more to draw.
+                    break;
                 }
-                let y = chat_bottom - (row_i as f32 + 1.0) * chat_line_h;
-                if y < margin {
-                    break 'entries;
+                // `options.chat.color == false` strips every legacy code before
+                // wrapping/drawing (`ComponentRenderUtils.stripColor`) rather than
+                // just ignoring them while drawing, matching vanilla.
+                let stripped = if opts.colors { None } else { Some(strip_legacy(line)) };
+                let display: &str = stripped.as_deref().unwrap_or(line);
+                // Wrapped once per message, not once per frame (issue #527 (a)):
+                // the cache keys on the display text plus this frame's box width
+                // and pose scale, so a frame with no new line, no resize and no
+                // options edit performs zero wraps. Without a cache attached this
+                // is the old behaviour, just spelled through the same call.
+                let sub_rows = match frame.chat_wrap {
+                    Some(cache) => cache.rows(display, chat_box_w, chat_pose_scale, |t| {
+                        b.wrap_legacy(t, chat_box_w, chat_pose_scale)
+                    }),
+                    None => std::rc::Rc::from(b.wrap_legacy(display, chat_box_w, chat_pose_scale)),
+                };
+                for sub in sub_rows.iter().rev() {
+                    if row_i >= max_visual_rows {
+                        break 'entries;
+                    }
+                    let y = chat_bottom - (row_i as f32 + 1.0) * chat_line_h;
+                    if y < margin {
+                        break 'entries;
+                    }
+                    b.rect_px(
+                        0.0,
+                        y - 1.0,
+                        chat_box_w,
+                        chat_line_h,
+                        [0.0, 0.0, 0.0, chat_bg_opacity * alpha],
+                    );
+                    b.text_legacy(
+                        sub,
+                        margin,
+                        y,
+                        chat_pose_scale,
+                        [0.92, 0.94, 1.0],
+                        alpha * chat_text_opacity,
+                    );
+                    row_i += 1;
                 }
-                b.rect_px(
-                    0.0,
-                    y - 1.0,
-                    chat_box_w,
-                    chat_line_h,
-                    [0.0, 0.0, 0.0, chat_bg_opacity * alpha],
-                );
-                b.text_legacy(
-                    sub,
-                    margin,
-                    y,
-                    chat_pose_scale,
-                    [0.92, 0.94, 1.0],
-                    alpha * chat_text_opacity,
-                );
-                row_i += 1;
             }
         }
 
@@ -4169,6 +4262,269 @@ mod chat_wrap_cache_tests {
     }
 }
 
+/// The [`TextSpan`] sibling of [`strip_legacy`]: vanilla's
+/// `ChatFormatting.stripFormatting` deletes every `§`+code pair wholesale —
+/// colour and all five format flags — for `options.chat.color == false`
+/// (`StringUtil.stripColor`, `.cache/mc/26.2/client-src/net/minecraft/util/StringUtil.java`).
+/// A span list is already past that decode, so the equivalent operation is
+/// resetting every run's style to [`TextStyle::default`]: nothing to delete,
+/// because there is no literal code left to find.
+///
+/// Deliberately does not merge the now-identically-styled runs back together.
+/// [`Builder::wrap_spans`]/[`Builder::text_spans`] do not require merged runs
+/// to wrap or draw correctly — only the strings and the (now-uniform) styles
+/// — and merging would be pure allocation for a path that only exists while
+/// the option is off.
+fn strip_style_spans(spans: &[TextSpan]) -> Vec<TextSpan> {
+    spans
+        .iter()
+        .map(|s| TextSpan {
+            text: s.text.clone(),
+            style: TextStyle::default(),
+        })
+        .collect()
+}
+
+/// Greedy word-wrap of a styled span list into rows that each fit
+/// `max_width_px`, measured by calling `measure` on each candidate row's
+/// spans. The [`TextSpan`] sibling of [`wrap_legacy_with`]: same greedy
+/// break-on-space / hard-break-an-overlong-word algorithm (mirroring
+/// vanilla's `GuiMessage.splitLines`), generalised from "carry the single
+/// most recent `§` code onto the continuation line" to "every character
+/// keeps its own already-resolved style" — a styled chat line can carry more
+/// than one colour change per wrapped row (a sender name in one colour
+/// immediately followed by a hex-coloured body, say), which a
+/// single-pending-code model cannot represent.
+///
+/// Works over a flat `(char, TextStyle)` stream built from `spans` rather
+/// than over the spans themselves, which is what lets a word — or a wrap
+/// point — fall in the middle of a style run: `spans` only promises that
+/// each *run* has one style, not that a run boundary lines up with a space.
+/// [`merge_styled_chars`] folds a finished row's stream back into minimal
+/// [`TextSpan`] runs before it is measured or returned, so [`Builder::text_spans`]
+/// still draws the fewest quads the styling actually requires.
+///
+/// Never returns an empty vector: an empty `spans` yields one empty row, and
+/// a `max_width_px <= 0.0` (or a line that already fits) is returned as a
+/// single unwrapped row rather than looping forever trying to shrink it —
+/// exactly [`wrap_legacy_with`]'s own guarantees, so [`ChatWrapCacheSpans`]
+/// can share its caller's expectations about the shape of the result.
+fn wrap_spans_with(
+    measure: impl Fn(&[TextSpan]) -> f32,
+    spans: &[TextSpan],
+    max_width_px: f32,
+) -> Vec<Vec<TextSpan>> {
+    if spans.is_empty() {
+        return vec![Vec::new()];
+    }
+    if max_width_px <= 0.0 || measure(spans) <= max_width_px {
+        return vec![spans.to_vec()];
+    }
+
+    let chars: Vec<(char, TextStyle)> = spans
+        .iter()
+        .flat_map(|s| s.text.chars().map(move |c| (c, s.style)))
+        .collect();
+
+    let mut rows: Vec<Vec<TextSpan>> = Vec::new();
+    let mut current: Vec<(char, TextStyle)> = Vec::new();
+    let flush = |rows: &mut Vec<Vec<TextSpan>>, current: &mut Vec<(char, TextStyle)>| {
+        rows.push(merge_styled_chars(current));
+        current.clear();
+    };
+
+    // Walk word-by-word exactly as `wrap_legacy_with` walks `s.split(' ')`,
+    // except a "word" here is a `(char, TextStyle)` slice rather than a `&str`
+    // — the space between words carries the style of the character right
+    // before it, matching how a bare space has no `§` code of its own to
+    // carry either.
+    let mut word_start = 0usize;
+    for i in 0..=chars.len() {
+        if i != chars.len() && chars[i].0 != ' ' {
+            continue;
+        }
+        let word = &chars[word_start..i];
+        word_start = i + 1;
+
+        let before_word = current.len();
+        if !current.is_empty() {
+            let space_style = current.last().map_or_else(TextStyle::default, |&(_, s)| s);
+            current.push((' ', space_style));
+        }
+        current.extend_from_slice(word);
+        if measure(&merge_styled_chars(&current)) <= max_width_px {
+            continue;
+        }
+        current.truncate(before_word);
+        if !current.is_empty() {
+            flush(&mut rows, &mut current);
+        }
+        current.extend_from_slice(word);
+        if measure(&merge_styled_chars(&current)) > max_width_px {
+            // The word alone overflows even a fresh line: hard-break it
+            // character by character, exactly as `wrap_legacy_with` does.
+            current.clear();
+            for &(ch, style) in word {
+                let was_empty = current.is_empty();
+                current.push((ch, style));
+                if !was_empty && measure(&merge_styled_chars(&current)) > max_width_px {
+                    current.pop();
+                    flush(&mut rows, &mut current);
+                    current.push((ch, style));
+                }
+            }
+        }
+    }
+    rows.push(merge_styled_chars(&current));
+    rows
+}
+
+/// Folds a `(char, TextStyle)` stream into the fewest [`TextSpan`] runs that
+/// still draw the same styling — consecutive characters sharing a style
+/// collapse into one run. Shared by [`wrap_spans_with`]'s row-measuring and
+/// row-flushing paths so a candidate row is measured with the exact spans it
+/// will later be drawn with.
+fn merge_styled_chars(chars: &[(char, TextStyle)]) -> Vec<TextSpan> {
+    let mut out: Vec<TextSpan> = Vec::new();
+    for &(ch, style) in chars {
+        match out.last_mut() {
+            Some(last) if last.style == style => last.text.push(ch),
+            _ => out.push(TextSpan {
+                text: ch.to_string(),
+                style,
+            }),
+        }
+    }
+    out
+}
+
+/// The [`Self::chat_spans`](HudFrame::chat_spans) sibling of [`ChatWrapCache`]:
+/// same persisted-wrap-result shape (a pure function of `(line, chat box
+/// width, chat pose scale, font)`, recomputed only on a miss), keyed on
+/// `Vec<TextSpan>` instead of `String` because a hex-coloured line has no
+/// `§`-coded string to key on in the first place. `TextSpan`'s `Hash` (added
+/// alongside its existing `Eq` in `lodestone-model`) is what makes that key
+/// usable in a [`std::collections::HashMap`] at all.
+#[derive(Debug, Default)]
+pub struct ChatWrapCacheSpans {
+    inner: std::cell::RefCell<ChatWrapInnerSpans>,
+}
+
+#[derive(Debug, Default)]
+struct ChatWrapInnerSpans {
+    geometry: Option<(u32, u32)>,
+    rows: std::collections::HashMap<Vec<TextSpan>, std::rc::Rc<[Vec<TextSpan>]>>,
+}
+
+impl ChatWrapCacheSpans {
+    /// Cleared wholesale past this many distinct lines — same bound and same
+    /// reasoning as [`ChatWrapCache::MAX_ENTRIES`].
+    const MAX_ENTRIES: usize = 256;
+
+    /// The wrapped rows for `spans` at this geometry, computing them with
+    /// `wrap` only on a miss.
+    fn rows(
+        &self,
+        spans: &[TextSpan],
+        width_px: f32,
+        scale: f32,
+        wrap: impl FnOnce(&[TextSpan]) -> Vec<Vec<TextSpan>>,
+    ) -> std::rc::Rc<[Vec<TextSpan>]> {
+        let geometry = (width_px.to_bits(), scale.to_bits());
+        let mut inner = self.inner.borrow_mut();
+        if inner.geometry != Some(geometry) {
+            inner.geometry = Some(geometry);
+            inner.rows.clear();
+        }
+        if let Some(hit) = inner.rows.get(spans) {
+            return std::rc::Rc::clone(hit);
+        }
+        if inner.rows.len() >= Self::MAX_ENTRIES {
+            inner.rows.clear();
+        }
+        let rows: std::rc::Rc<[Vec<TextSpan>]> = wrap(spans).into();
+        inner.rows.insert(spans.to_vec(), std::rc::Rc::clone(&rows));
+        rows
+    }
+}
+
+#[cfg(test)]
+mod chat_wrap_cache_spans_tests {
+    use super::{ChatWrapCacheSpans, TextSpan};
+    use lodestone_model::text::TextStyle;
+
+    fn span(text: &str) -> TextSpan {
+        TextSpan {
+            text: text.to_string(),
+            style: TextStyle::default(),
+        }
+    }
+
+    /// The span-cache twin of `chat_wrap_cache_tests`'s own counter gate: a
+    /// repeat frame at the same geometry must not re-wrap, and a geometry
+    /// change must.
+    #[test]
+    fn a_repeat_line_at_the_same_geometry_wraps_exactly_once() {
+        let cache = ChatWrapCacheSpans::default();
+        let wraps = std::cell::Cell::new(0usize);
+        let wrap = |_: &[TextSpan]| {
+            wraps.set(wraps.get() + 1);
+            vec![vec![span("hello")], vec![span("world")]]
+        };
+
+        let line = [span("hello"), span(" world")];
+        let first = cache.rows(&line, 80.0, 1.0, &wrap);
+        assert_eq!(wraps.get(), 1, "the first call must wrap");
+        let second = cache.rows(&line, 80.0, 1.0, &wrap);
+        assert_eq!(wraps.get(), 1, "the second call at the same geometry must not");
+        assert_eq!(&*first, &*second);
+
+        let other = [span("another line")];
+        let _ = cache.rows(&other, 80.0, 1.0, &wrap);
+        assert_eq!(wraps.get(), 2, "different spans at the same geometry is a genuine miss");
+
+        let _ = cache.rows(&line, 120.0, 1.0, &wrap);
+        assert_eq!(wraps.get(), 3, "a width change must invalidate the cache");
+        let _ = cache.rows(&line, 120.0, 2.0, &wrap);
+        assert_eq!(wraps.get(), 4, "a scale change must invalidate the cache");
+    }
+
+    /// The discriminating case a `String`-keyed cache cannot express: two
+    /// entries with identical *text* but different *colour* must not collide
+    /// — otherwise the second message would silently draw with the first
+    /// one's wrap AND (downstream, in the draw itself) risk the wrong cached
+    /// row shape if colour ever affected wrap width. Sharpened to actually
+    /// affect width: one span is bold (`Font::advance_bold`'s `+1`/glyph),
+    /// so a text-only key would serve the narrower non-bold wrap to the bold
+    /// line too.
+    #[test]
+    fn same_text_different_style_is_not_a_cache_collision() {
+        let cache = ChatWrapCacheSpans::default();
+        let wraps = std::cell::Cell::new(0usize);
+        let wrap = |s: &[TextSpan]| {
+            wraps.set(wraps.get() + 1);
+            vec![s.to_vec()]
+        };
+
+        let plain = [span("same text")];
+        let mut bold_style = TextStyle::default();
+        bold_style.bold = Some(true);
+        let bold = [TextSpan {
+            text: "same text".to_string(),
+            style: bold_style,
+        }];
+
+        let _ = cache.rows(&plain, 80.0, 1.0, &wrap);
+        assert_eq!(wraps.get(), 1);
+        let _ = cache.rows(&bold, 80.0, 1.0, &wrap);
+        assert_eq!(
+            wraps.get(),
+            2,
+            "identical text with a different style must not reuse the plain entry's wrap"
+        );
+    }
+}
+
 /// The RGB of one of the sixteen legacy `§` colour codes (`0`..=`9`, `a`..=`f`),
 /// or `None` for a format/reset code. These are the standard Minecraft chat
 /// foreground colours; the shell paints them locally, which is a rendering
@@ -4285,6 +4641,15 @@ impl<'a> Builder<'a> {
     /// GPU, an atlas, or a loaded jar.
     fn wrap_legacy(&self, s: &str, max_width_px: f32, scale: f32) -> Vec<String> {
         wrap_legacy_with(|t| self.legacy_width(t, scale), s, max_width_px)
+    }
+
+    /// The [`TextSpan`] sibling of [`Builder::wrap_legacy`]: a thin wrapper
+    /// over [`wrap_spans_with`] bound to this `Builder`'s own
+    /// [`Builder::spans_width`], kept separate for the same reason —
+    /// unit-testing the wrap *decision* against an injected width table with
+    /// no GPU, atlas, or jar involved.
+    fn wrap_spans(&self, spans: &[TextSpan], max_width_px: f32, scale: f32) -> Vec<Vec<TextSpan>> {
+        wrap_spans_with(|s| self.spans_width(s, scale), spans, max_width_px)
     }
 
     /// Draw one hotbar slot's icon into the `size`×`size` rect at `(x, y)`: the
@@ -6790,6 +7155,72 @@ mod tests {
         );
     }
 
+    /// The [`TextSpan`] sibling of [`wrap_uses_real_per_glyph_widths_not_a_flat_character_count`]:
+    /// same real-per-glyph-width table over the same `"iiiiiWWWWW"` input, so
+    /// [`wrap_spans_with`] is proven against a real width hypothesis rather
+    /// than the fixed-advance fallback. Sharpened past that test in the one
+    /// way a span list can be: the ten glyphs are split across two
+    /// *differently-styled* runs, so the wrap point falls **inside** the
+    /// styled boundary — the case `wrap_legacy_with` cannot even express,
+    /// since a `§` code and the run it colours are just characters to it.
+    #[test]
+    fn wrap_spans_breaks_by_real_width_and_keeps_style_across_the_break() {
+        let real_width = |spans: &[TextSpan]| -> f32 {
+            spans
+                .iter()
+                .flat_map(|s| s.text.chars())
+                .map(|c| match c {
+                    'i' => 2.0,
+                    'W' => 6.0,
+                    _ => 0.0,
+                })
+                .sum()
+        };
+        let max_width_px = 20.0;
+        let red = TextSpan {
+            text: "iiiii".to_string(),
+            style: TextStyle {
+                color: Some(TextColor::Red),
+                ..TextStyle::default()
+            },
+        };
+        let blue = TextSpan {
+            text: "WWWWW".to_string(),
+            style: TextStyle {
+                color: Some(TextColor::Blue),
+                ..TextStyle::default()
+            },
+        };
+        let spans = [red, blue];
+
+        let rows = wrap_spans_with(real_width, &spans, max_width_px);
+        let first_row = &rows[0];
+        let joined: String = first_row.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(
+            joined, "iiiiiW",
+            "must break after the 6th glyph (16px), same as the legacy gate's real-width \
+             hypothesis: {rows:?}"
+        );
+        assert_eq!(
+            first_row.len(),
+            2,
+            "the wrap point falls mid-style, so the row must keep two separate runs \
+             rather than merging across the boundary: {first_row:?}"
+        );
+        assert_eq!(
+            first_row[0].style.color,
+            Some(TextColor::Red),
+            "the `i`s before the break must keep their colour"
+        );
+        assert_eq!(
+            first_row[1].style.color,
+            Some(TextColor::Blue),
+            "the lone `W` carried onto this row must keep *its own* colour, not the \
+             red run's — a single-pending-style model (one colour per row) would get \
+             this wrong on a row that starts one style and ends in another"
+        );
+    }
+
     /// Proves `chat_options.colors` is read, not merely stored. `§c` is
     /// zero-width whether it recolours or is stripped, so the two frames'
     /// vertex *counts* are equal by construction — the option's whole effect
@@ -7116,6 +7547,125 @@ mod tests {
         assert!(
             opened > 0,
             "an open chat box shows history regardless of age"
+        );
+    }
+
+    /// The discriminating fixture for the whole chat-hex bug: one line
+    /// carrying all three colour conventions a real server mixes — a modern
+    /// `TextColor::Rgb` component style, a legacy-named component style, and
+    /// a `§` code embedded *inside* a literal (the shape the owner's report
+    /// actually showed: `"§f§lG§r§f §r§8| §rLumberjack..."` is entirely this
+    /// third convention). A fixture using only named colours cannot tell
+    /// "hex survives" from "everything survives", because a named colour
+    /// gets through the lossy `chat: &[(&str, f32)]` path too — see the
+    /// control below, which proves that path really does lose it.
+    #[test]
+    fn chat_spans_carry_hex_named_and_inline_legacy_colour_to_distinct_vertices() {
+        use lodestone_model::text::Text;
+
+        let hex = Text {
+            content: lodestone_model::text::TextContent::Literal("Hex".to_string()),
+            style: TextStyle {
+                color: Some(TextColor::Rgb(0x1a_2b3c)),
+                ..TextStyle::default()
+            },
+            ..Text::default()
+        };
+        // The inline convention: no component-level colour at all, the `§c`
+        // lives inside the literal text itself, exactly as a plugin server
+        // (or the owner's server) embeds one.
+        let inline_legacy = Text::literal("\u{00a7}cRed");
+        let named = Text {
+            content: lodestone_model::text::TextContent::Literal("Gray".to_string()),
+            style: TextStyle {
+                color: Some(TextColor::Gray),
+                ..TextStyle::default()
+            },
+            ..Text::default()
+        };
+        let root = Text {
+            extra: vec![hex, inline_legacy, named],
+            ..Text::default()
+        };
+        let spans = root.to_spans();
+        assert_eq!(
+            spans.len(),
+            3,
+            "sanity: three runs in, three runs out — {spans:?}"
+        );
+
+        let stats = DebugStats::default();
+        let chat_spans = [(spans.as_slice(), 0.0_f32)];
+        let geo = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat_spans: &chat_spans,
+                ..HudFrame::new(&stats)
+            },
+            640,
+            480,
+        );
+        assert!(
+            geo.vertex_count() > 0,
+            "sanity: the line must draw something at all"
+        );
+
+        let byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        let has_colour = |rgb: (u8, u8, u8)| {
+            geo.verts
+                .chunks_exact(6)
+                .any(|v| (byte(v[2]), byte(v[3]), byte(v[4])) == rgb)
+        };
+        // Pairwise-distinct RGB triples, per this repo's own fixture rule —
+        // a transposition or a fallback-to-base cannot hide behind a shared
+        // value. Vanilla's `red` and `gray` are hand-transcribed from
+        // `TextColor.java`'s `named("red", 16733525)` / `named("gray",
+        // 11184810)` rather than read back through `TextColor::rgb()`,
+        // which would make this `decode(encode(x)) == x`.
+        let expected = [
+            ("hex", (0x1a_u8, 0x2b_u8, 0x3c_u8)),
+            ("inline §c", (0xff_u8, 0x55_u8, 0x55_u8)),
+            ("named gray", (0xaa_u8, 0xaa_u8, 0xaa_u8)),
+        ];
+        let missing: Vec<&str> = expected
+            .iter()
+            .filter(|(_, rgb)| !has_colour(*rgb))
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these colours never reached a vertex: {missing:?} (full expected set: {expected:?})"
+        );
+
+        // Control: the same three-way message, but through the lossy
+        // `chat: &[(&str, f32)]` path (`Text::to_legacy_string`, which has
+        // no representation for `TextColor::Rgb`). This must show the loss —
+        // if it did not, the assertion above would be proving nothing about
+        // which path actually carries the colour.
+        let flattened = root.to_legacy_string();
+        let chat_legacy = [(flattened.as_str(), 0.0_f32)];
+        let legacy_geo = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat: &chat_legacy,
+                ..HudFrame::new(&stats)
+            },
+            640,
+            480,
+        );
+        let legacy_byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        let legacy_has_colour = |rgb: (u8, u8, u8)| {
+            legacy_geo
+                .verts
+                .chunks_exact(6)
+                .any(|v| (legacy_byte(v[2]), legacy_byte(v[3]), legacy_byte(v[4])) == rgb)
+        };
+        assert!(
+            !legacy_has_colour((0x1a, 0x2b, 0x3c)),
+            "control failed: the legacy-string path was expected to lose the hex colour \
+             (that is the bug), but it drew it anyway — this test's premise is wrong"
         );
     }
 
