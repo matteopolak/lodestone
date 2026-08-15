@@ -2824,6 +2824,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-dedicated-server"
+version = "0.1.0"
+dependencies = [
+ "lodestone-auth",
+ "lodestone-server",
+ "lodestone-v770",
+ "reqwest",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lodestone-ecs"
 version = "0.1.0"
 dependencies = [
@@ -5549,6 +5562,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

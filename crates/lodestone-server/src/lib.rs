@@ -352,6 +352,19 @@ pub mod region_source;
 /// world has no network listener for an admin console.
 #[cfg(not(target_arch = "wasm32"))]
 mod rcon;
+/// The dedicated-server binary's admin console (stdin, no socket). Native
+/// only, like `rcon`, whose command-execution shape it reuses.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod console;
+/// `eula.txt`: the gate a dedicated server must not start without. Native
+/// only, like `region_source`/`rcon` — a browser singleplayer world has no
+/// such gate to pass.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod eula;
+/// `server.properties`: vanilla's config file for a dedicated server, and the
+/// typed subset this crate reads from it. Native only, like `eula` above.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod properties;
 mod scheduled_tick;
 mod server;
 mod sleep;
@@ -450,7 +463,9 @@ pub use hopper::{
 };
 pub use integrated::IntegratedServer;
 #[cfg(not(target_arch = "wasm32"))]
-pub use integrated::{LanConfig, LanDiscovery};
+pub use integrated::{LanConfig, LanDiscovery, PublishConfig};
+#[cfg(not(target_arch = "wasm32"))]
+pub use properties::{ServerProperties, parse_seed};
 pub use crafting::{BUNDLED_CRAFTING_RECIPES, CraftingState, recipe_book};
 pub use inventory::{HOTBAR_SIZE, OFFHAND_NATIVE, PLAYER_NATIVE_SIZE, PlayerInventory};
 pub use loot::{LootContext, LootTable, LootTableBuilder, LootTableResolver, LootTableSet, roll_loot};

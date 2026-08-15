@@ -907,6 +907,36 @@ impl LanDiscovery {
     }
 }
 
+/// Per-connection configuration for [`IntegratedServer::publish_with_config`]
+/// — the subset of [`LanConfig`] that is meaningful for a *second* listener
+/// added to an already-running world, rather than for building one from
+/// scratch.
+///
+/// `Default` reproduces [`publish`](IntegratedServer::publish)'s previous,
+/// pre-`PublishConfig` behaviour exactly: commands refused, nobody banned or
+/// whitelisted, every connection offline. See
+/// [`publish_with_config`](IntegratedServer::publish_with_config)'s own doc
+/// comment for why that unread-field shape was a real gap, not a deliberate
+/// simplification.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+pub struct PublishConfig {
+    /// Ops, whitelist and the two ban lists this listener enforces at join.
+    /// The `Default` is empty, exactly [`LanConfig::access`]'s own default.
+    pub access: crate::access::AccessHandle,
+    /// The command dispatcher every accepted connection's `/`-commands reach,
+    /// for a root the built-in tree does not own. `CommandDispatch::none()`
+    /// by default, which **refuses** rather than permits — the built-in tree
+    /// itself (`/gamerule`, `/gamemode`, …) is unaffected either way, since
+    /// it is consulted first regardless of this field.
+    pub commands: crate::command::CommandDispatch,
+    /// Online-mode encryption plus session-server ownership verification
+    /// (issue #273). `None` — the default — keeps every connection offline,
+    /// matching every other constructor's default. See
+    /// [`LanConfig::online_mode`]'s own doc comment for what `Some` does.
+    pub online_mode: Option<OnlineModeConfig>,
+}
+
 impl IntegratedServer {
     /// Starts a single-client, in-memory integrated server (singleplayer) and
     /// returns the handle plus the **client** transport endpoint.
@@ -2266,6 +2296,26 @@ impl IntegratedServer {
         &self.world_state
     }
 
+    /// This world's shared player registry, for a host that wants RCON or an
+    /// admin console to see and target real connections rather than nobody.
+    ///
+    /// The **same** handle every accepted connection (local or published)
+    /// joins, on the same argument [`world_state`](Self::world_state) and
+    /// [`mobs`](Self::mobs) make — not a copy. `None` for a constructor with
+    /// no [`HostCore`] (see that type's own doc comment for which
+    /// constructors build one), where there is no shared registry to hand
+    /// out. Before this accessor existed, [`crate::rcon::RconConfig::players`]
+    /// and this crate's own `crate::console` had no way to reach a
+    /// dedicated server's real players at all — every `/list`/`/say`/targeted
+    /// command over RCON or the stdin console would have seen an empty
+    /// registry regardless of who was connected, an unread-field island of
+    /// the same shape `PublishConfig` fixed for `publish`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn players(&self) -> Option<&PlayerRegistry> {
+        self.host.as_ref().map(|host| &host.player_registry)
+    }
+
     /// The live mob simulation, for a host that needs to read or seed the
     /// population from outside the tick loop (issue #303).
     ///
@@ -3018,6 +3068,47 @@ impl IntegratedServer {
         addr: impl tokio::net::ToSocketAddrs,
         discovery_motd: Option<String>,
     ) -> std::io::Result<std::net::SocketAddr> {
+        self.publish_with_config(addr, discovery_motd, PublishConfig::default())
+            .await
+    }
+
+    /// [`publish`](Self::publish) with real per-connection configuration —
+    /// access control and online-mode authentication — instead of the inert
+    /// defaults `publish` hardcodes.
+    ///
+    /// # Why this exists as a second method rather than widening `publish`
+    ///
+    /// `publish`'s accept loop used to hand every accepted connection
+    /// `CommandDispatch::none()` and `AccessHandle::default()` unconditionally
+    /// and had no `online_mode` parameter at all — so a world published through
+    /// it (the shell's own mid-session "Open to LAN" for a persistent
+    /// singleplayer world) could not be whitelisted, could not ban anyone, and
+    /// could not require online-mode authentication no matter what the caller
+    /// configured, because nothing carried that configuration to this
+    /// listener. `crate::access`/`OnlineModeConfig` existed and were wired
+    /// into [`open_to_lan`](Self::open_to_lan)'s own accept loop already —
+    /// this was the other, unconsumed half: the exact island shape
+    /// `CLAUDE.md` calls out ("the code exists" is not evidence a feature
+    /// works). [`PublishConfig::default`] reproduces `publish`'s previous
+    /// behaviour exactly, so no existing caller (the shell's own) changes
+    /// behaviour; a caller that wants real access control — the dedicated
+    /// server binary — passes a real one.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`publish`](Self::publish).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn publish_with_config(
+        &mut self,
+        addr: impl tokio::net::ToSocketAddrs,
+        discovery_motd: Option<String>,
+        config: PublishConfig,
+    ) -> std::io::Result<std::net::SocketAddr> {
+        let PublishConfig {
+            access,
+            commands,
+            online_mode,
+        } = config;
         if self.publish_task.is_some() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -3063,6 +3154,13 @@ impl IntegratedServer {
         // fresh default — see `HostCore::tickets`'s own doc comment.
         let tickets = host.tickets.clone();
         let signal = self.shutdown.clone();
+        // Moved out here for the same reason `open_to_lan`'s own
+        // `conn_commands`/`conn_access`/`conn_online_mode` are: the accept
+        // loop lives inside an `async move`, so a `.clone()` written there
+        // would move the original in on the first iteration.
+        let conn_commands = commands;
+        let conn_access = access;
+        let conn_online_mode = online_mode;
 
         let task = spawn(async move {
             loop {
@@ -3077,6 +3175,9 @@ impl IntegratedServer {
                         let mobs = mobs.clone();
                         let world_state = world_state.clone();
                         let tickets = tickets.clone();
+                        let commands = conn_commands.clone();
+                        let access = conn_access.clone();
+                        let online_mode = conn_online_mode.clone();
                         // Same composition `open_to_lan`'s own accept loop
                         // uses: the shared player registry is what puts every
                         // publish-time joiner (and the original local player)
@@ -3099,18 +3200,43 @@ impl IntegratedServer {
                             .push(subscriber);
                         drop(spawn(async move {
                             let mut conn = Connection::new(socket);
-                            let _ = serve_connection_with_mob_events_and_commands_shared(
-                                &mut conn, &*protocol, &source, &entities, view_radius,
-                                &block_entities, &mobs, &tickets,
-                                &conn_block_ticks, &conn_explosions,
-                                &crate::command::CommandDispatch::none(),
-                                &crate::server::ResourcePackPushFeed::default(),
-                                &crate::plugin_channels::PluginChannelRegistry::default(),
-                                &world_state,
-                                &crate::access::AccessHandle::default(),
-                                peer_ip,
-                            )
-                            .await;
+                            // Same fork `open_to_lan`'s own accept loop makes,
+                            // for the same reason: `serve_connection_with_online_mode`
+                            // is additive over the plain wrapper, never a
+                            // signature change, so picking between them per
+                            // connection is the whole difference online-mode
+                            // authentication makes here.
+                            let _ = match &online_mode {
+                                Some(online_mode) => {
+                                    serve_connection_with_online_mode(
+                                        &mut conn, &*protocol, &source, &entities, view_radius,
+                                        &block_entities, &mobs, &tickets,
+                                        &conn_block_ticks, &conn_explosions,
+                                        &commands,
+                                        &crate::server::ResourcePackPushFeed::default(),
+                                        &crate::plugin_channels::PluginChannelRegistry::default(),
+                                        &world_state,
+                                        &access,
+                                        peer_ip,
+                                        online_mode,
+                                    )
+                                    .await
+                                }
+                                None => {
+                                    serve_connection_with_mob_events_and_commands_shared(
+                                        &mut conn, &*protocol, &source, &entities, view_radius,
+                                        &block_entities, &mobs, &tickets,
+                                        &conn_block_ticks, &conn_explosions,
+                                        &commands,
+                                        &crate::server::ResourcePackPushFeed::default(),
+                                        &crate::plugin_channels::PluginChannelRegistry::default(),
+                                        &world_state,
+                                        &access,
+                                        peer_ip,
+                                    )
+                                    .await
+                                }
+                            };
                             alive.store(false, std::sync::atomic::Ordering::Relaxed);
                         }));
                     }

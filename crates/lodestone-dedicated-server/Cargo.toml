@@ -1,0 +1,46 @@
+[package]
+name = "lodestone-dedicated-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A standalone, headless dedicated server binary over lodestone-server — server.properties, eula.txt, an admin console and clean shutdown, no client crate in the graph."
+
+[lints]
+workspace = true
+
+# The whole point of splitting this crate off `lodestone-server` (a library
+# only, no `[[bin]]`) rather than adding a `[[bin]]` target there: that crate
+# also compiles for `wasm32-unknown-unknown` as part of the browser bundle
+# (see its own `Cargo.toml`), and a binary target pulling in `tokio`'s
+# `rt-multi-thread`/`signal` and a real `TcpListener` would either have to be
+# `cfg`-gated off wasm32 inside a library crate (fragile — see this repo's own
+# wasm-hazard record for how easily a `cfg` gate goes stale) or would simply
+# fail that target outright. A separate crate needs no gate at all: it is
+# never a dependency of `lodestone-shell`, `lodestone-render` or the browser
+# bundle, so nothing there ever tries to build it for wasm32.
+[[bin]]
+name = "lodestone-server"
+path = "src/main.rs"
+
+[dependencies]
+lodestone-server = { path = "../lodestone-server" }
+# `V770ServerProtocol` — 26.2 is the one family that implements
+# `ServerProtocol` (see the repo's own `CLAUDE.md`: `Family`/`ServerFamily`
+# are different tables for exactly that reason), so it is the only protocol a
+# dedicated server can host regardless of what a client might join with.
+lodestone-v770 = { workspace = true }
+# `has_joined`'s crypto-provider install, required once before the first
+# `reqwest` TLS call online-mode makes — the same requirement
+# `lodestone-server`'s own `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`
+# comment names for `lodestone-auth`/`reqwest` there. Native-only in that
+# crate for the identical reason it is a plain dependency (not target-gated)
+# here: this whole binary is native-only.
+lodestone-auth = { workspace = true }
+# `OnlineModeConfig::new` takes a `reqwest::Client` by value — the same
+# workspace entry `lodestone-server` itself builds `OnlineModeConfig` against,
+# so no new TLS/feature configuration enters the graph.
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["signal", "io-std"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
