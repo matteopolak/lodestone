@@ -394,6 +394,12 @@ pub mod tick_area;
 /// `pub` so `crate::chunk_store::ChunkStore`'s own public accessors can name
 /// [`ticket::TicketStoreHandle`]/[`ticket::ChunkStatus`] in their signatures.
 pub mod ticket;
+/// Villager merchant-offer purchase mechanics and restock cadence — issue
+/// #245's "refresh" half. Consumes `lodestone_data::villager_trades` and
+/// `crate::mobs::villager::Profession` read-only; nothing here is wired to
+/// the network or to `MobSim` yet — see the module's own doc for exactly
+/// what remains.
+pub mod villager_trade;
 mod vitals;
 mod weather;
 /// Lightning: per-chunk strike-target selection during a thunderstorm, the
