@@ -152,29 +152,31 @@ audit:
   responder that sends `ClientAction::RenameItem` on every edit, including
   vanilla's "identical to the item's own unmodified name normalises to empty
   string" rule.
+* **`ResourcePackResponse`** — **fixed, twice over.** It first got a producer
+  as an unconditional auto-decline (`net.rs`'s `auto_resource_pack_response`,
+  landed against exactly the `SetFlying` failure mode this section describes
+  below) — correct at the time, but a dead end: it answered every push
+  without ever showing the player anything, so a server's resource pack
+  could never actually be seen or installed. It now has a **real** producer
+  set instead: `net.rs`'s `route_resource_pack_pushed`/`apply_pack_response`/
+  `spawn_pack_download` send every status in vanilla's own sequence
+  (`ACCEPTED` → `DOWNLOADED` → `SUCCESSFULLY_LOADED`/a failure status, or an
+  immediate `DECLINED`/`INVALID_URL`), driven by the per-server
+  `menu::servers::ServerPackPolicy` and — when that policy says to ask — a
+  real accept/decline dialog (`Screen::ResourcePackPrompt`,
+  `menu::confirm::ResourcePackPromptNav`). `ClientEvent::ResourcePackPushed`/
+  `Popped` are still `Route::NOWHERE` below — they are answered directly in
+  `net.rs`'s own loop, not through the `forward`/`poll_net` path.
 
-**Twelve are confirmed genuine islands — zero hits for the bare variant name
+**Eleven are confirmed genuine islands — zero hits for the bare variant name
 anywhere in `lodestone-shell` or `lodestone-controller`, in any form**:
 `ContainerButtonClick`, `EditBook`, `PingRequest`, `RecipeBookSeenRecipe`,
-`ResourcePackResponse`, `SeenAdvancements`, `SelectBundleItem`, `SetBeaconEffects`,
+`SeenAdvancements`, `SelectBundleItem`, `SetBeaconEffects`,
 `SetContainerSlotState`, `SpectatorAction`, `Stab`, `TeleportToEntity`. Each is
 screen- or input-blocked in the same shape as the seventeen in `KNOWN_UNPRODUCED`
-above (an editor/UI that does not exist yet, or a keybind that is not wired), with
-one exception worth flagging ahead of the others:
+above (an editor/UI that does not exist yet, or a keybind that is not wired).
 
-* **`ResourcePackResponse`** is **not** screen-blocked — there is nothing to build,
-  only a response to send. `crates/lodestone-model/src/event.rs` already decodes
-  `ClientboundResourcePackPushPacket`/`Pop` into `ClientEvent::ResourcePackPushed`/
-  `Popped` and classifies both `Route::NOWHERE` (i.e. known-unrouted, not merely
-  unaudited) — `lodestone-shell` has zero consumers for either event and zero
-  producers of the response. A server with a `required` resource pack disconnects a
-  client that never answers, which is exactly the `SetFlying` failure mode:
-  correct-looking encoder, no producer, remote kick. Filed as its own tracked gap
-  rather than folded into the general "twelve islands" bucket, because closing it
-  needs no screen — an auto-decline response the moment the push arrives would be
-  a legitimate, if minimal, fix.
-
-Filed as one narrow follow-up rather than twelve separate issues, per the pattern
+Filed as one narrow follow-up rather than eleven separate issues, per the pattern
 this doc's own "How to change it" section already sets: each needs its own
 screen or input binding designed, none is a one-line fix, and grouping them keeps
 the tracker from drowning in near-duplicate "no producer" reports.

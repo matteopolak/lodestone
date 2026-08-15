@@ -287,6 +287,12 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
                 ui.open_world_select();
                 ui.open_confirm();
             }
+            // Reached the way a live push reaches it — over the loading
+            // screen, matching `open_resource_pack_prompt`'s guard.
+            Screen::ResourcePackPrompt => {
+                ui.begin(SessionKind::Multiplayer);
+                ui.open_resource_pack_prompt();
+            }
         }
         assert_eq!(ui.screen(), screen, "failed to reach {screen:?}");
         reached += 1;
@@ -1672,7 +1678,15 @@ fn the_edit_form_shows_both_fields_and_marks_the_focused_one() {
         "an addressless form must not offer a working Done button"
     );
     assert!(f.rows[CANCEL_ROW].enabled, "Cancel always works");
-    assert!(!f.rows[RESOURCE_PACK_ROW].enabled, "present, but inactive");
+    assert!(
+        f.rows[RESOURCE_PACK_ROW].enabled,
+        "the resource-pack row is live now that `EditForm::pack_status` \
+         has somewhere real to go"
+    );
+    assert_eq!(
+        f.rows[RESOURCE_PACK_ROW].label, "Server Resource Packs: Prompt",
+        "Prompt is the default for a new entry"
+    );
     for row in [NAME_FIELD, ADDRESS_FIELD, RESOURCE_PACK_ROW, DONE_ROW, CANCEL_ROW] {
         assert!(f.rows[row].slot.is_some(), "row {row} must be vanilla-placed");
     }

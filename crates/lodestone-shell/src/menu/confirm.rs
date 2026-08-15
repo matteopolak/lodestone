@@ -503,6 +503,230 @@ pub fn frame(nav: &ConfirmNav) -> MenuFrame<'static> {
     }
 }
 
+/// The live resource-pack accept/decline dialog —
+/// `ClientCommonPacketListenerImpl.PackConfirmScreen`, a second
+/// `ConfirmScreen` subclass sharing this file's geometry
+/// ([`confirm_rects`]/[`row_slot`]/[`ConfirmWidgets`]) but **not**
+/// [`Screen::Confirm`](super::Screen::Confirm)/[`ConfirmNav`] — see
+/// [`Screen::ResourcePackPrompt`](super::Screen::ResourcePackPrompt)'s own
+/// doc for why the two must not share a screen (`owns_frame` answers per
+/// *variant*, and this one is a live-session overlay while `Confirm` is
+/// always a full menu screen).
+///
+/// Two buttons, vanilla's own wording: `Proceed`/`Disconnect` for a
+/// `required` pack, `Yes`/`No` for an optional one
+/// (`CommonComponents.GUI_PROCEED`/`GUI_DISCONNECT` vs `GUI_YES`/`GUI_NO`,
+/// `ClientCommonPacketListenerImpl`'s `PackConfirmScreen` constructor call).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResourcePackPromptNav {
+    /// Accept then decline, in [`ACCEPT_ROW`]/[`DECLINE_ROW`] order — vanilla
+    /// adds its affirmative button first (`ConfirmScreen.addButtons`).
+    pub widgets: ConfirmWidgets,
+    focus: FocusSet,
+    hovered: Option<usize>,
+    id: uuid::Uuid,
+    required: bool,
+    title: String,
+    message: String,
+}
+
+/// The affirmative button's row — see [`YES_ROW`] for why this mirrors it
+/// rather than sharing the constant: two independently openable screens,
+/// each with its own [`FocusSet`], so a shared row constant would imply a
+/// coupling that does not exist.
+pub const ACCEPT_ROW: usize = 0;
+/// The negative button's row. See [`ACCEPT_ROW`].
+pub const DECLINE_ROW: usize = 1;
+
+/// What one key or click did to this screen. Named `Accept`/`Decline`
+/// rather than reusing [`ConfirmOutcome`]'s `Yes`/`No`: this answer also
+/// carries whether the session must end, which `ConfirmOutcome` has no
+/// field for and should not grow one just for this caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourcePackPromptOutcome {
+    /// A widget or the focus layer dealt with it; nothing for the caller to do.
+    Handled,
+    /// The player accepted.
+    Accept,
+    /// The player declined — Escape, the negative button, or a click on it
+    /// (vanilla's `shouldCloseOnEsc() == false` on `ConfirmScreen`, so
+    /// Escape runs the callback with `false` rather than a bare close, the
+    /// same rule [`ConfirmNav::handle_key`] already follows for the world
+    /// list's confirmation).
+    Decline,
+}
+
+impl FocusChildren for ResourcePackPromptNav {
+    fn get(&self, id: usize) -> Option<&dyn FocusTarget> {
+        self.widgets.get(id)
+    }
+
+    fn get_mut(&mut self, id: usize) -> Option<&mut dyn FocusTarget> {
+        self.widgets.get_mut(id)
+    }
+}
+
+impl ResourcePackPromptNav {
+    /// Builds the dialog for `prompt` — nothing focused, matching
+    /// [`ConfirmNav::delete_world`]'s reasoning: a held Enter carrying over
+    /// from whatever screen this opened on top of must not answer the pack
+    /// question it never saw.
+    #[must_use]
+    pub fn new(prompt: &crate::net::PendingResourcePackPrompt) -> Self {
+        let (accept_label, decline_label) = if prompt.required {
+            ("Proceed", "Disconnect")
+        } else {
+            ("Yes", "No")
+        };
+        let button = |row: usize, label: &str| {
+            let (x, y, w, h) = row_slot(row).resolve(SEED_CANVAS.0, SEED_CANVAS.1);
+            Widget::button(x, y, w, h, label)
+        };
+        let widgets = ConfirmWidgets {
+            buttons: [button(ACCEPT_ROW, accept_label), button(DECLINE_ROW, decline_label)],
+        };
+        let mut focus = FocusSet::new();
+        focus.add_renderable_widget(ACCEPT_ROW);
+        focus.add_renderable_widget(DECLINE_ROW);
+        Self {
+            widgets,
+            focus,
+            hovered: None,
+            id: prompt.id,
+            required: prompt.required,
+            title: prompt.title.clone(),
+            message: prompt.message.clone(),
+        }
+    }
+
+    /// The pack id this dialog answers for —
+    /// [`NetClient::respond_to_resource_pack`](crate::net::NetClient::respond_to_resource_pack)'s
+    /// first argument.
+    #[must_use]
+    pub fn id(&self) -> uuid::Uuid {
+        self.id
+    }
+
+    /// Whether declining ends the session — decides the button wording
+    /// above, and is read again by the caller of
+    /// [`ResourcePackPromptOutcome::Decline`] so a UI-layer disconnect
+    /// message can distinguish the two, though the net thread's own
+    /// `respond_to_resource_pack` decides the session outcome independently
+    /// (this is *display*, not the authority — see that method's doc).
+    #[must_use]
+    pub fn required(&self) -> bool {
+        self.required
+    }
+
+    /// The title line.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The message line, already carrying the server's own prompt text if it
+    /// supplied one — see [`crate::net::PendingResourcePackPrompt`]'s doc.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// The focused row, or `None` — the state this screen opens in.
+    #[must_use]
+    pub fn focused_row(&self) -> Option<usize> {
+        self.focus.focused()
+    }
+
+    /// The row the cursor is over. See [`ConfirmNav::hovered`].
+    #[must_use]
+    pub fn hovered(&self) -> Option<usize> {
+        self.hovered
+    }
+
+    /// The mouse moved onto row `row`.
+    pub fn hover(&mut self, row: usize) {
+        if row <= DECLINE_ROW {
+            self.hovered = Some(row);
+        }
+    }
+
+    /// A click on row `row`. See [`ConfirmNav::click_row`] for why this is
+    /// its own entry point rather than "hover then Enter".
+    pub fn click_row(&mut self, row: usize) -> ResourcePackPromptOutcome {
+        if row > DECLINE_ROW {
+            return ResourcePackPromptOutcome::Handled;
+        }
+        self.focus.set_focused(&mut self.widgets, Some(row));
+        Self::answer(row)
+    }
+
+    /// One key, in [`ConfirmNav::handle_key`]'s own order.
+    pub fn handle_key(&mut self, key: MenuKey) -> ResourcePackPromptOutcome {
+        if key == MenuKey::Escape {
+            return ResourcePackPromptOutcome::Decline;
+        }
+        if let MenuKey::Char(ch) = key {
+            self.focus.char_typed(&mut self.widgets, ch);
+            return ResourcePackPromptOutcome::Handled;
+        }
+        let Some(event) = KeyEvent::from_menu_key(key) else {
+            return ResourcePackPromptOutcome::Handled;
+        };
+        match self.focus.screen_key_pressed(&mut self.widgets, event) {
+            KeyOutcome::Close => ResourcePackPromptOutcome::Decline,
+            KeyOutcome::Consumed | KeyOutcome::FocusMoved => ResourcePackPromptOutcome::Handled,
+            KeyOutcome::Declined if key == MenuKey::Enter => match self.focus.focused() {
+                Some(row) => Self::answer(row),
+                None => ResourcePackPromptOutcome::Handled,
+            },
+            KeyOutcome::Declined => ResourcePackPromptOutcome::Handled,
+        }
+    }
+
+    fn answer(row: usize) -> ResourcePackPromptOutcome {
+        match row {
+            ACCEPT_ROW => ResourcePackPromptOutcome::Accept,
+            DECLINE_ROW => ResourcePackPromptOutcome::Decline,
+            _ => ResourcePackPromptOutcome::Handled,
+        }
+    }
+}
+
+/// Builds the resource-pack prompt's frame — the same shape [`frame`] builds
+/// for the world-delete confirmation, over this nav's own title/message/
+/// buttons instead.
+#[must_use]
+pub fn resource_pack_prompt_frame(nav: &ResourcePackPromptNav) -> MenuFrame<'static> {
+    let rows: Vec<MenuRow> = (0..=DECLINE_ROW)
+        .map(|row| MenuRow {
+            label: nav.widgets.buttons[row].message.clone(),
+            enabled: nav.widgets.buttons[row].active,
+            slot: Some(row_slot(row)),
+            ..Default::default()
+        })
+        .collect();
+    let line = |text: String, placement: ConfirmPlacement| MenuLabel {
+        text,
+        origin: Origin::Confirm(placement),
+        dx: 0.0,
+        dy: 0.0,
+        align: Align::Centre,
+        colour: super::widget::ACTIVE_LABEL,
+        scale: 1.0,
+    };
+    MenuFrame {
+        rows,
+        selected: nav.focused_row().unwrap_or(usize::MAX),
+        hovered: nav.hovered(),
+        vanilla: true,
+        labels: vec![
+            line(nav.title().to_string(), ConfirmPlacement::Title),
+            line(nav.message().to_string(), ConfirmPlacement::Message),
+        ],
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

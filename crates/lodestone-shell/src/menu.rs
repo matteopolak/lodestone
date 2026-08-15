@@ -341,6 +341,32 @@ pub enum Screen {
     /// [`nav::MenuNav::confirm`], the same split every other widget-bearing
     /// screen here makes.
     Confirm,
+    /// A server pushed a resource pack and the player's own
+    /// [`crate::menu::servers::ServerPackPolicy`] says to ask —
+    /// `ClientCommonPacketListenerImpl`'s `PackConfirmScreen`. Accept or
+    /// decline, with the pack's own prompt message when the server supplied
+    /// one, and a distinct pair of buttons when the pack is `required`
+    /// (`Proceed`/`Disconnect`) versus optional (`Yes`/`No`) — see
+    /// [`net::PendingResourcePackPrompt`](crate::net::PendingResourcePackPrompt).
+    ///
+    /// **Not [`Self::Confirm`]**, despite both being vanilla `ConfirmScreen`
+    /// subclasses, and the reason is [`render::owns_frame`]'s: this screen
+    /// can open over the loading screen (a push can arrive during
+    /// Configuration, before Play) or over a live, still-rendering,
+    /// still-ticking world — the same "overlay, not a menu screen" shape as
+    /// [`Self::Death`]/[`Self::Paused`] — while `Confirm` is unconditionally
+    /// a full-frame menu screen (it is only ever reached from
+    /// [`Self::WorldSelect`]). `owns_frame` answers per *variant*, not per
+    /// call site, so the two meanings cannot share one.
+    ///
+    /// Reachable from [`Self::Connecting`], [`Self::Playing`],
+    /// [`Self::Chat`], [`Self::Container`] and [`Self::Paused`] — anywhere a
+    /// live session can be when the push arrives — and returns to
+    /// **whichever of those it opened from**
+    /// ([`UiState::open_resource_pack_prompt`] records it), unlike
+    /// `Confirm`'s single fixed return screen: a pack can be pushed before
+    /// Play (still `Connecting`) as easily as mid-session.
+    ResourcePackPrompt,
 }
 
 impl Screen {
@@ -366,7 +392,7 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 21] = [
+    pub const ALL: [Screen; 22] = [
         Screen::MainMenu,
         Screen::ServerList,
         Screen::ServerEdit,
@@ -388,6 +414,7 @@ impl Screen {
         Screen::Advancements,
         Screen::CreateWorld,
         Screen::Confirm,
+        Screen::ResourcePackPrompt,
     ];
 }
 
@@ -425,6 +452,15 @@ pub struct UiState {
     /// while the player's own `E`-opened inventory is the only thing on
     /// screen, since that has no window id at all.
     container_server_window: Option<i32>,
+    /// Where [`Screen::ResourcePackPrompt`] returns to — whichever live
+    /// screen it opened over. Unlike [`Self::settings_return`] this has no
+    /// fixed pair of possible sources: the prompt can open over
+    /// [`Screen::Connecting`] (a push during Configuration, before Play) as
+    /// easily as over [`Screen::Playing`]/[`Screen::Chat`]/
+    /// [`Screen::Container`]/[`Screen::Paused`] mid-session. `MainMenu` here
+    /// is never observed — [`Self::open_resource_pack_prompt`] only ever
+    /// records one of the five live screens named above.
+    resource_pack_prompt_return: Screen,
 }
 
 impl Default for UiState {
@@ -438,6 +474,7 @@ impl Default for UiState {
             death_message: None,
             connect_phase: loading::ConnectPhase::default(),
             container_server_window: None,
+            resource_pack_prompt_return: Screen::MainMenu,
         }
     }
 }
@@ -711,6 +748,12 @@ impl UiState {
                     // And for Advancements, whose tree is data-pack data
                     // but whose *progress* belongs to a session.
                     | Screen::Advancements
+                    // Same reasoning again: a disconnect while the
+                    // resource-pack prompt is up (the server dropped the
+                    // connection, or kicked us for taking too long to
+                    // answer) must not strand the player staring at a
+                    // question whose answer now goes nowhere.
+                    | Screen::ResourcePackPrompt
             )
         {
             self.death_message = None;
@@ -938,6 +981,41 @@ impl UiState {
     pub fn close_confirm(&mut self) {
         if self.screen == Screen::Confirm {
             self.screen = Screen::WorldSelect;
+        }
+    }
+
+    /// Whether [`Screen::ResourcePackPrompt`] is currently showing — the
+    /// query `app/session.rs`'s `drive_ui_from_session` uses to decide
+    /// whether it still needs opening (idempotent: calling
+    /// [`open_resource_pack_prompt`](Self::open_resource_pack_prompt) again
+    /// while already showing would re-latch [`Self::resource_pack_prompt_return`]
+    /// to the *prompt itself*).
+    #[must_use]
+    pub fn is_resource_pack_prompt(&self) -> bool {
+        self.screen == Screen::ResourcePackPrompt
+    }
+
+    /// Open the resource-pack prompt over whichever live screen the player
+    /// is on — see [`Screen::ResourcePackPrompt`]'s doc for the five it can
+    /// open from. A stray call from anywhere else (the main menu, an
+    /// already-showing prompt) does nothing, the same guard shape as every
+    /// other `open_*` here.
+    pub fn open_resource_pack_prompt(&mut self) {
+        if matches!(
+            self.screen,
+            Screen::Connecting | Screen::Playing | Screen::Chat | Screen::Container | Screen::Paused
+        ) {
+            self.resource_pack_prompt_return = self.screen;
+            self.screen = Screen::ResourcePackPrompt;
+        }
+    }
+
+    /// Back to whichever screen [`open_resource_pack_prompt`](Self::open_resource_pack_prompt)
+    /// recorded — either answer, same as [`close_confirm`](Self::close_confirm)'s
+    /// "either way".
+    pub fn close_resource_pack_prompt(&mut self) {
+        if self.screen == Screen::ResourcePackPrompt {
+            self.screen = self.resource_pack_prompt_return;
         }
     }
 
@@ -1171,6 +1249,17 @@ impl UiState {
             // a *cancel* is the same observable thing — no world is deleted either
             // way, because deletion only happens on the affirmative answer.
             Screen::Confirm => self.close_confirm(),
+            // In practice `MenuNav::key_resource_pack_prompt` intercepts
+            // Escape before this is reached, and it must: like `Screen::
+            // Confirm` above, this screen's Escape is vanilla's *negative
+            // answer* (`ConfirmScreen`'s own `shouldCloseOnEsc() == false`
+            // rule), so the callback has to run and send a real Decline
+            // rather than silently closing the overlay. This arm keeps the
+            // match exhaustive and unwinds one level for a caller that
+            // reaches here some other way — an honest simplification, since
+            // it cannot itself submit the `MenuAction::ResourcePackResponse`
+            // this screen's real Escape path sends.
+            Screen::ResourcePackPrompt => self.close_resource_pack_prompt(),
         }
     }
 

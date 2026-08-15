@@ -1304,6 +1304,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   up within a frame or two, not just on the next atlas/model build. See "How to change
   it" below for `resources::pack_generation` and `Sim::reload_resource_pack_atlas`,
   the live-reload chain.
+- [Server resource packs](./resource-packs.md) — The end-to-end flow for a
+  server-pushed resource pack: the accept/decline prompt
+  (`Screen::ResourcePackPrompt`), the per-server policy that can skip it
+  (`menu::servers::ServerPackPolicy`), the download/verify/apply pipeline (`net.rs`),
+  and how a downloaded pack actually reaches the block atlas (`resources.rs`). Landed
+  against a player report that a server's pack never prompted at all and the "Server
+  Resource Packs" row was permanently greyed out.
 - [Riding](./riding.md) — `ClientboundSetPassengersPacket` tells the client which
   entities are riding which. Before this change it was a **complete island**: decoded
   at `crates/protocol/v770/src/adapter/entity.rs`'s `SET_PASSENGERS` arm,

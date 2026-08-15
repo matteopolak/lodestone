@@ -26,6 +26,8 @@ use lodestone_render::{
 #[cfg(not(target_arch = "wasm32"))]
 use lodestone_render::blocks_json_registry;
 
+use uuid::Uuid;
+
 use crate::blocks::{DemoClassifier, ShellClassifier};
 
 /// Everything the render pipeline needs to turn block-state ids into pixels,
@@ -480,6 +482,92 @@ pub fn pack_generation() -> u64 {
     PACK_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// A server-pushed resource pack currently installed for this session — the
+/// bytes `net.rs`'s resource-pack flow downloaded and SHA-1-verified, held
+/// **entirely in memory**. There is deliberately nowhere on disk for these
+/// bytes to land: `lodestone_assets::ZipSource::from_bytes` reads a zip
+/// archive straight out of a `Vec<u8>` (the same version-free parser a local
+/// third-party `.zip` pack already goes through — see [`open_pack_source`]),
+/// so there is no extraction step and therefore no path a malicious archive
+/// entry could escape to. `None` when no server pack is installed, or once
+/// it is withdrawn ([`clear_server_pack`]).
+///
+/// Keyed by the pack id so a pop naming a *different*, already-superseded id
+/// cannot remove a newer push it raced with — see [`clear_server_pack`].
+static SERVER_PACK: std::sync::RwLock<Option<(Uuid, Vec<u8>)>> = std::sync::RwLock::new(None);
+
+/// Installs (or replaces) the live server pack, after checking it actually
+/// opens as one. A corrupt or truncated download must not silently blank
+/// the block atlas on the next reload — the same fail-closed discipline
+/// [`BlockResources::try_vanilla`] uses for the bundled pack — so this returns `false`
+/// (vanilla's own `FAILED_RELOAD`) rather than installing bytes that will
+/// only fail later, deeper in the pipeline, with a worse error.
+///
+/// Bumps [`pack_generation`] on success, which is the entire live-reload
+/// signal: `Sim::reload_resource_pack_atlas` already polls it every frame
+/// for the local-pack-selection screen, and does not care *why* the atlas is
+/// stale, so a server pack reaches the world exactly the same way a locally
+/// selected one does — no second wiring path to fall out of sync with the
+/// first.
+#[must_use]
+pub fn set_server_pack(id: Uuid, bytes: Vec<u8>) -> bool {
+    if let Err(e) = ZipSource::from_bytes(bytes.clone()) {
+        tracing::warn!(target: "assets", "server resource pack {id} did not open: {e}");
+        return false;
+    }
+    if let Ok(mut guard) = SERVER_PACK.write() {
+        *guard = Some((id, bytes));
+    }
+    PACK_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    true
+}
+
+/// Withdraws the live server pack — `ClientboundResourcePackPopPacket`.
+/// `Some(id)` clears only if `id` is the pack currently installed (so a pop
+/// racing a newer push cannot remove the newer one); `None` clears
+/// unconditionally, matching vanilla's own "remove every pack". Bumps
+/// [`pack_generation`] only when something actually changed, so an
+/// already-absent pack does not trigger a pointless reload.
+pub fn clear_server_pack(id: Option<Uuid>) {
+    let Ok(mut guard) = SERVER_PACK.write() else {
+        return;
+    };
+    let changed = match id {
+        Some(id) => {
+            if guard.as_ref().is_some_and(|(current, _)| *current == id) {
+                *guard = None;
+                true
+            } else {
+                false
+            }
+        }
+        None => guard.take().is_some(),
+    };
+    drop(guard);
+    if changed {
+        PACK_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The live server pack as a [`ResourceSource`], if one is installed and
+/// still opens. A pack that verified when it was installed but no longer
+/// parses would be a `set_server_pack` bug, not a runtime state this should
+/// ever hit — but the same fail-open-with-a-warning discipline every other
+/// pack open in this module uses applies here too, rather than a `panic!` or
+/// a silently empty world.
+#[must_use]
+fn server_pack_source() -> Option<Box<dyn ResourceSource>> {
+    let guard = SERVER_PACK.read().ok()?;
+    let (id, bytes) = guard.as_ref()?;
+    match ZipSource::from_bytes(bytes.clone()) {
+        Ok(source) => Some(Box::new(source) as Box<dyn ResourceSource>),
+        Err(e) => {
+            tracing::warn!(target: "assets", "server resource pack {id} stopped opening: {e}");
+            None
+        }
+    }
+}
+
 /// The process-wide requested block-atlas mip depth (the live `mipmapLevels`
 /// video setting). `None` means "not read from `options.json` yet" — the same
 /// lazy-seed shape as [`SELECTED_PACKS`], resolved on first use by
@@ -602,12 +690,19 @@ fn load_persisted_selection() -> Vec<String> {
 ///   process.
 #[must_use]
 fn selected_pack_sources() -> Vec<Box<dyn ResourceSource>> {
+    // The live server pack, if any, always goes first — highest priority,
+    // matching vanilla's own `Pack.Position.TOP` for a downloaded pack. It
+    // is never part of `selected`/`scan_resource_packs`: a server pack does
+    // not live in the packs folder and is not player-toggleable from the
+    // local Resource Packs screen, the same way vanilla's own
+    // `DownloadedPackSource` keeps it out of `PackRepository`.
+    let mut out: Vec<Box<dyn ResourceSource>> = server_pack_source().into_iter().collect();
+
     let selected = selected_packs();
     if selected.is_empty() {
-        return Vec::new();
+        return out;
     }
     let discovered = scan_resource_packs();
-    let mut out = Vec::new();
     for id in selected {
         let Some(pack) = discovered.iter().find(|p| p.id == id) else {
             tracing::warn!(target: "assets", "selected pack {id} is no longer in the packs folder");
@@ -1521,6 +1616,122 @@ mod tests {
             mipmap_levels(),
             lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS
         );
+    }
+
+    /// Builds a real, valid single-entry zip archive in memory — the same
+    /// parser `ZipSource::from_bytes` (and therefore `set_server_pack`) reads
+    /// production packs through, not a hand-rolled byte string standing in
+    /// for one. `path` is the in-archive path; `contents` is what a
+    /// `read(path)` on the resulting [`ZipSource`] must return.
+    fn build_test_pack_zip(path: &str, contents: &[u8]) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file(path, zip::write::SimpleFileOptions::default())
+            .expect("start_file");
+        std::io::Write::write_all(&mut writer, contents).expect("write pack entry");
+        writer
+            .finish()
+            .expect("finish zip")
+            .into_inner()
+    }
+
+    /// `set_server_pack` must actually reach `selected_pack_sources` — the
+    /// chain `net.rs`'s downloader depends on to make textures change, and
+    /// the whole point of the feature over a dialog that lies. Proven by
+    /// **content**, not by a generation bump alone (`pack_generation`
+    /// increasing is necessary but not sufficient — see the sibling tests
+    /// above for why a bump alone is not evidence the *value* moved): the
+    /// installed pack's own bytes, read back through the exact function the
+    /// block-atlas loader calls, must be the fixture's bytes and not some
+    /// other pack's.
+    #[test]
+    fn a_set_server_pack_reaches_selected_pack_sources_and_outranks_local_selection() {
+        let id = Uuid::from_u128(0xF00D);
+        let marker = b"a distinctive server-pushed texture, not the local one";
+        let zip = build_test_pack_zip("assets/minecraft/textures/block/marker.png", marker);
+        assert!(
+            set_server_pack(id, zip),
+            "a real, valid zip must be accepted"
+        );
+
+        let sources = selected_pack_sources();
+        assert!(
+            !sources.is_empty(),
+            "the server pack must appear even with no local pack selected"
+        );
+        let read_back = sources[0]
+            .read("assets/minecraft/textures/block/marker.png")
+            .expect("the server pack's own entry must be readable");
+        assert_eq!(
+            read_back, marker,
+            "selected_pack_sources' first source did not read back the server \
+             pack's own bytes — a stale/other pack would fail this, and an \
+             empty stack would panic on the `expect` above"
+        );
+
+        // It must be **first** (highest priority) even when a local
+        // selection is also present — vanilla's own `Pack.Position.TOP` for
+        // a downloaded pack.
+        set_selected_packs(vec!["some-local-pack".to_string()]);
+        let sources = selected_pack_sources();
+        assert!(
+            sources[0]
+                .read("assets/minecraft/textures/block/marker.png")
+                .is_some(),
+            "the server pack must still be first ahead of an (unresolvable, \
+             but present-in-the-selection) local pack"
+        );
+
+        clear_server_pack(None);
+        set_selected_packs(vec![]);
+    }
+
+    /// A corrupt/truncated download must not be installed — `set_server_pack`
+    /// is the point that turns `FAILED_DOWNLOAD` bytes into
+    /// `FAILED_RELOAD`'s "installed but unusable", so this is the boundary
+    /// that has to refuse them.
+    #[test]
+    fn a_corrupt_pack_is_refused_and_never_reaches_selected_pack_sources() {
+        let id = Uuid::from_u128(0xBAD);
+        let garbage = b"not a zip file at all".to_vec();
+        assert!(!set_server_pack(id, garbage), "corrupt bytes must be refused");
+        // And refusing it must not have installed a poisoned entry that a
+        // later read would trip over.
+        let sources = selected_pack_sources();
+        assert!(
+            sources.is_empty() || sources[0].read("assets/minecraft/textures/block/marker.png").is_none(),
+            "a refused pack must not appear in the stack"
+        );
+    }
+
+    /// `clear_server_pack` must only remove the pack it names — a stale pop
+    /// for a superseded id must not remove a *newer* push that raced with
+    /// it, and `None` (a bare pop-all) must remove whatever is live.
+    #[test]
+    fn clear_server_pack_only_clears_a_matching_id() {
+        let old_id = Uuid::from_u128(1);
+        let new_id = Uuid::from_u128(2);
+        assert!(set_server_pack(
+            old_id,
+            build_test_pack_zip("a.txt", b"old")
+        ));
+        assert!(set_server_pack(
+            new_id,
+            build_test_pack_zip("a.txt", b"new")
+        ));
+
+        // A pop for the superseded id must not remove the live (newer) one.
+        clear_server_pack(Some(old_id));
+        let sources = selected_pack_sources();
+        assert_eq!(
+            sources.first().and_then(|s| s.read("a.txt")),
+            Some(b"new".to_vec()),
+            "a stale pop must not have removed the newer push"
+        );
+
+        // The matching id does clear it.
+        clear_server_pack(Some(new_id));
+        assert!(selected_pack_sources().is_empty());
     }
 
     /// The vanilla load must carry a real `en_us.json` that resolves known keys,

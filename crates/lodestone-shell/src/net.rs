@@ -541,6 +541,95 @@ impl SkyDefaultCell {
 /// A [`SkyDefaultCell`] shared between `Sim` and the render thread's samplers.
 pub type SharedSkyDefault = Arc<SkyDefaultCell>;
 
+/// One server-pushed resource pack awaiting the player's accept/decline
+/// answer — `ClientboundResourcePackPushPacket`'s fields, plus the message
+/// this dialog draws.
+///
+/// `message` is vanilla's `preparePackPrompt` header (`multiplayer
+/// .{requiredT,t}exturePrompt.line2`), with the server's own optional prompt
+/// component appended — pre-flattened to plain text and folded onto one
+/// line, the same "one clipped line, not a wrapped `MultiLineTextWidget`"
+/// simplification [`crate::menu::confirm`]'s module doc already makes and
+/// names for the identical reason: there is no font at menu-frame-build time
+/// to wrap against.
+#[derive(Debug, Clone)]
+pub struct PendingResourcePackPrompt {
+    /// Pack id, echoed back in the response.
+    pub id: Uuid,
+    /// Download URL, already known to parse as `http`/`https` — see
+    /// [`parse_resource_pack_url`].
+    url: String,
+    /// SHA-1 hash the server supplied (hex; may be empty).
+    hash: String,
+    /// Whether declining disconnects — vanilla will not silently drop a
+    /// player over a pack they never answered, so this also decides the
+    /// button labels (`Proceed`/`Disconnect` vs `Yes`/`No`).
+    pub required: bool,
+    /// `multiplayer.{requiredT,t}exturePrompt.line1` — the title line.
+    pub title: String,
+    /// The body line described above.
+    pub message: String,
+}
+
+#[cfg(test)]
+impl PendingResourcePackPrompt {
+    /// A minimal prompt for a menu-side test that only needs *some* live
+    /// prompt to exist (routing/hit-test gates) rather than one shaped by a
+    /// real push — `url`/`hash` are private to this module, so a sibling
+    /// module's test cannot build the struct literal directly.
+    pub fn for_test(id: Uuid, required: bool) -> Self {
+        Self {
+            id,
+            url: "https://example.invalid/pack.zip".to_string(),
+            hash: String::new(),
+            required,
+            title: "t".to_string(),
+            message: "m".to_string(),
+        }
+    }
+}
+
+/// The pending-prompt cell: written by the net thread when it decides a push
+/// needs the player's own answer, read every frame by
+/// `app/session.rs`'s `drive_ui_from_session` to reconcile
+/// `Screen::ResourcePackPrompt`, and cleared the moment an answer is queued
+/// (accepted, declined, or superseded by a second push).
+#[derive(Debug, Default)]
+pub struct PackPromptCell(Mutex<Option<PendingResourcePackPrompt>>);
+
+impl PackPromptCell {
+    fn set(&self, prompt: PendingResourcePackPrompt) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(prompt);
+    }
+
+    /// Clears the cell only if it currently holds `id` — an answer to a
+    /// superseded prompt must not erase a *newer* one it raced with.
+    fn clear_if(&self, id: Uuid) -> Option<PendingResourcePackPrompt> {
+        let mut guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if guard.as_ref().is_some_and(|p| p.id == id) {
+            guard.take()
+        } else {
+            None
+        }
+    }
+
+    /// Unconditionally clears the cell — `ClientboundResourcePackPopPacket`
+    /// with no id, vanilla's "remove every pack".
+    fn clear_all(&self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    /// This frame's pending prompt, if any.
+    #[must_use]
+    pub fn get(&self) -> Option<PendingResourcePackPrompt> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+/// A [`PackPromptCell`] shared between the net thread and the render/menu
+/// thread.
+pub type SharedPackPrompt = Arc<PackPromptCell>;
+
 /// A decoded, version-free update the app can act on without touching tokio.
 #[derive(Debug, Clone)]
 pub enum NetUpdate {
@@ -946,6 +1035,43 @@ pub enum NetUpdate {
     },
 }
 
+/// The [`crate::menu::servers::ServerPackPolicy`] the *next*
+/// [`NetClient::connect_impl`] should start under, and reset to the default
+/// ([`Prompt`](crate::menu::servers::ServerPackPolicy::Prompt)) the moment it
+/// is read — see [`take_pending_server_pack_policy`].
+///
+/// A plain global rather than a `connect`/`connect_as` parameter:
+/// `Sim::connect` (`sim/session.rs`) owns that fixed signature, threaded
+/// through every call site regardless of session kind, and only a
+/// *saved-server* multiplayer join has a policy to carry at all — a direct
+/// quick-connect, a LAN join and singleplayer never do. `app/menus.rs`'s
+/// `MenuAction::Connect(entry)` arm already holds the whole `ServerEntry` at
+/// the one call site that matters, so it calls
+/// [`set_pending_server_pack_policy`] immediately before `Sim::connect`
+/// dials; every other path leaves the default in place, matching a fresh
+/// `ServerData`'s own `PROMPT`.
+static PENDING_PACK_POLICY: Mutex<crate::menu::servers::ServerPackPolicy> =
+    Mutex::new(crate::menu::servers::ServerPackPolicy::Prompt);
+
+/// Sets [`PENDING_PACK_POLICY`] for the connect this call immediately
+/// precedes. See that static's own doc.
+pub fn set_pending_server_pack_policy(policy: crate::menu::servers::ServerPackPolicy) {
+    *PENDING_PACK_POLICY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = policy;
+}
+
+/// Reads and resets [`PENDING_PACK_POLICY`] to
+/// [`Prompt`](crate::menu::servers::ServerPackPolicy::Prompt) — called
+/// exactly once per [`NetClient::connect_impl`], so a policy set for one
+/// join can never leak into the next.
+fn take_pending_server_pack_policy() -> crate::menu::servers::ServerPackPolicy {
+    let mut guard = PENDING_PACK_POLICY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    std::mem::replace(&mut *guard, crate::menu::servers::ServerPackPolicy::default())
+}
+
 /// A live client running on a background thread. Drop to request shutdown.
 #[derive(Debug)]
 pub struct NetClient {
@@ -1005,6 +1131,14 @@ pub struct NetClient {
     /// The local player's UUID, published by the net thread as soon as the
     /// connecting profile is known. See [`SharedLocalUuid`].
     local_uuid: SharedLocalUuid,
+    /// The server-pushed resource pack currently awaiting the player's
+    /// accept/decline answer, if any — the ground truth `app/session.rs`'s
+    /// `drive_ui_from_session` reconciles into `Screen::ResourcePackPrompt`.
+    /// See [`Self::pending_resource_pack_prompt`].
+    pending_pack_prompt: SharedPackPrompt,
+    /// The player's answer to a shown prompt, queued for the net thread's own
+    /// loop — [`Self::respond_to_resource_pack`].
+    pack_response_tx: Sender<(Uuid, bool)>,
     /// The driver's `World` and session entity, for a **loopback** client that has
     /// no `ClientBuilder` to hand them to.
     ///
@@ -1613,6 +1747,15 @@ impl NetClient {
         let command_tree_thread = Arc::clone(&command_tree);
         let local_uuid: SharedLocalUuid = Arc::new(OnceLock::new());
         let local_uuid_thread = Arc::clone(&local_uuid);
+        let pack_prompt: SharedPackPrompt = Arc::new(PackPromptCell::default());
+        let pack_prompt_thread = Arc::clone(&pack_prompt);
+        let (pack_response_tx, pack_response_rx) = mpsc::channel();
+        // The policy the player set ahead of time on this server's own row
+        // (`menu::servers::ServerPackPolicy`), or `Prompt` for a
+        // direct/quick connect and every singleplayer/LAN session — see
+        // `take_pending_server_pack_policy`'s own doc for why this is a
+        // one-shot global read here rather than a `connect_impl` parameter.
+        let pack_policy = take_pending_server_pack_policy();
 
         // Native: the driver gets its own OS thread, so a slow tick never touches the
         // frame loop.
@@ -1633,6 +1776,9 @@ impl NetClient {
                     biome_names_thread,
                     command_tree_thread,
                     local_uuid_thread,
+                    pack_prompt_thread,
+                    pack_response_rx,
+                    pack_policy,
                     session,
                     offline,
                 )
@@ -1666,6 +1812,9 @@ impl NetClient {
             biome_names_thread,
             command_tree_thread,
             local_uuid_thread,
+            pack_prompt_thread,
+            pack_response_rx,
+            pack_policy,
             session,
             offline,
         ));
@@ -1685,6 +1834,8 @@ impl NetClient {
             command_tree,
             sky_default: Arc::new(SkyDefaultCell::default()),
             local_uuid,
+            pending_pack_prompt: pack_prompt,
+            pack_response_tx,
             #[cfg(test)]
             session: None,
         }
@@ -1705,6 +1856,28 @@ impl NetClient {
     /// dropped (the shell keeps rendering regardless).
     pub fn send_action(&self, action: ClientAction) {
         let _ = self.action_tx.send(action);
+    }
+
+    /// This frame's pending resource-pack prompt, if the server pushed one
+    /// this policy is set to ask about. The ground truth
+    /// `app/session.rs`'s `drive_ui_from_session` reconciles into
+    /// `Screen::ResourcePackPrompt`.
+    #[must_use]
+    pub fn pending_resource_pack_prompt(&self) -> Option<PendingResourcePackPrompt> {
+        self.pending_pack_prompt.get()
+    }
+
+    /// The player's answer to a shown [`pending_resource_pack_prompt`]
+    /// (Self::pending_resource_pack_prompt). `accept = false` on a
+    /// **required** pack ends the session — vanilla self-disconnects rather
+    /// than waiting for the server to notice a client that will never load
+    /// it (`PackConfirmScreen`'s callback,
+    /// `multiplayer.requiredTexturePrompt.disconnect`).
+    ///
+    /// Best-effort like [`send_action`](Self::send_action): silently
+    /// dropped if the net thread has already gone away.
+    pub fn respond_to_resource_pack(&self, id: Uuid, accept: bool) {
+        let _ = self.pack_response_tx.send((id, accept));
     }
 
     /// Ask the net thread to add a TCP listener to the **already-running**
@@ -2010,6 +2183,10 @@ impl NetClient {
             command_tree: Arc::new(CommandTreeCell::default()),
             sky_default: Arc::new(SkyDefaultCell::default()),
             local_uuid: Arc::new(OnceLock::new()),
+            pending_pack_prompt: Arc::new(PackPromptCell::default()),
+            // Its receiver is dropped with `_publish_rx`'s reasoning above:
+            // nothing on a loopback ever calls `respond_to_resource_pack`.
+            pack_response_tx: mpsc::channel().0,
             // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
             session: None,
         };
@@ -2068,6 +2245,10 @@ impl NetClient {
             command_tree: Arc::new(CommandTreeCell::default()),
             sky_default: Arc::new(SkyDefaultCell::default()),
             local_uuid: Arc::new(OnceLock::new()),
+            pending_pack_prompt: Arc::new(PackPromptCell::default()),
+            // See `loopback`'s identical field for why an immediately-dropped
+            // receiver is fine here.
+            pack_response_tx: mpsc::channel().0,
             // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
             session: None,
         };
@@ -2208,6 +2389,9 @@ async fn run_async(
     biome_names: SharedBiomeNames,
     command_tree: SharedCommandTree,
     local_uuid: SharedLocalUuid,
+    pack_prompt: SharedPackPrompt,
+    pack_response_rx: Receiver<(Uuid, bool)>,
+    pack_policy: crate::menu::servers::ServerPackPolicy,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
     offline: OfflineIdentity,
 ) {
@@ -2786,7 +2970,7 @@ async fn run_async(
         ));
 
         let mut handed_actions: u64 = 0;
-        loop {
+        'session: loop {
             // Flush queued outbound actions first so player movement (queued at
             // 20 Hz) reaches the client promptly rather than waiting on the next
             // inbound event. `send_action` is sync and cheap.
@@ -2809,6 +2993,23 @@ async fn run_async(
                 }
                 if handed_actions == 1 || handed_actions.is_multiple_of(20) {
                     tracing::debug!(target: "net", "handed {handed_actions} action(s) to client handle (encode is the adapter's job)");
+                }
+            }
+            // The player's answer to a shown resource-pack prompt
+            // (`NetClient::respond_to_resource_pack`) — drained here for the
+            // same reason outbound actions are: this loop is the only place
+            // that both holds `handle` and can end the session, and a
+            // required pack's decline has to do the latter. `apply_pack_response`
+            // returns whether the session must end (a required pack the
+            // player declined); the disconnect itself is the same shape as
+            // the `Ok(None)` arm below (send `NetUpdate::Disconnected`, then
+            // break) so the two self-disconnect paths cannot drift apart.
+            while let Ok((id, accept)) = pack_response_rx.try_recv() {
+                if apply_pack_response(id, accept, &pack_prompt, &handle) {
+                    let _ = tx.send(NetUpdate::Disconnected(Box::new(
+                        lodestone_model::Text::literal(REQUIRED_PACK_DISCONNECT_REASON),
+                    )));
+                    break 'session;
                 }
             }
             // Issue #562: "Open to LAN" without a restart. `publish_to_lan`
@@ -2914,13 +3115,46 @@ async fn run_async(
                 tokio::time::timeout(Duration::from_millis(15), events.recv()).await;
             match netbuf_timeout_result {
                 Ok(Some(event)) => {
-                    // Issue #613: answered here, before generic `forward`ing,
-                    // because `handle` (the only thing that can send an
-                    // outbound action) is in scope in this loop and not
-                    // inside `forward` itself. See `auto_resource_pack_response`'s
-                    // own doc for what this is and why.
-                    if let Some(action) = auto_resource_pack_response(&event) {
-                        let _ = handle.send_action(action);
+                    // Issue #613's original auto-decline is now the *routing*
+                    // this arm does before generic `forward`ing — answered
+                    // here, not inside `forward`, because `handle` (the only
+                    // thing that can send an outbound action) and the
+                    // downloader's own `Arc<ClientHandle>` clone are in scope
+                    // in this loop and not inside `forward` itself. See
+                    // `route_resource_pack_pushed`'s own doc for the full
+                    // decision table, and this crate's evidence standards on
+                    // why nothing here is left unanswered.
+                    if let ClientEvent::ResourcePackPushed {
+                        id,
+                        ref url,
+                        ref hash,
+                        required,
+                        ref prompt,
+                    } = event
+                    {
+                        route_resource_pack_pushed(
+                            id,
+                            url,
+                            hash,
+                            required,
+                            prompt.as_ref(),
+                            pack_policy,
+                            &pack_prompt,
+                            &handle,
+                        );
+                    } else if let ClientEvent::ResourcePackPopped { id } = event {
+                        // A withdrawn pack must not go on rendering, and a
+                        // still-open prompt for it must not go on asking —
+                        // `DownloadedPackSource::popPack`/`popAll`'s own
+                        // effect, ported without the manager's generation
+                        // bookkeeping (see `crate::resources::clear_server_pack`).
+                        crate::resources::clear_server_pack(id);
+                        match id {
+                            Some(id) => {
+                                let _ = pack_prompt.clear_if(id);
+                            }
+                            None => pack_prompt.clear_all(),
+                        }
                     }
                     if forward(
                         &tx,
@@ -3013,6 +3247,9 @@ fn run(
     biome_names: SharedBiomeNames,
     command_tree: SharedCommandTree,
     local_uuid: SharedLocalUuid,
+    pack_prompt: SharedPackPrompt,
+    pack_response_rx: Receiver<(Uuid, bool)>,
+    pack_policy: crate::menu::servers::ServerPackPolicy,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
     offline: OfflineIdentity,
 ) {
@@ -3040,6 +3277,9 @@ fn run(
         biome_names,
         command_tree,
         local_uuid,
+        pack_prompt,
+        pack_response_rx,
+        pack_policy,
         session,
         offline,
     ));
@@ -3169,29 +3409,387 @@ async fn open_lan_world(
     ))
 }
 
-/// Issue #613: `ClientAction::ResourcePackResponse` had a real encoder
-/// (`ClientboundResourcePackPushPacket`/`Pop` already decode into
-/// `ClientEvent::ResourcePackPushed`/`Popped`) and **zero producers** —
-/// `SetFlying`'s own island shape, except a server-marked `required` pack
-/// disconnects a client that never answers
-/// (`ServerCommonPacketListenerImpl.handleResourcePackResponse` never runs,
-/// so vanilla treats the pack as permanently pending and eventually kicks the
-/// player). No resource-pack screen exists yet to let the player accept or
-/// decline, so this always declines — a real client with no such screen
-/// would do the same rather than hang the connection. `ResourcePackPopped`
-/// has nothing to answer and returns `None`.
-///
-/// Factored out of the net loop (rather than inlined at its one call site) so
-/// it is unit-testable without the async loop and the live `ClientHandle`
-/// around it.
-fn auto_resource_pack_response(event: &ClientEvent) -> Option<ClientAction> {
-    match event {
-        ClientEvent::ResourcePackPushed { id, .. } => Some(ClientAction::ResourcePackResponse {
-            id: *id,
-            response: ResourcePackResponseKind::Declined,
-        }),
-        _ => None,
+/// Vanilla's own text for the disconnect a player triggers by declining a
+/// **required** pack — `multiplayer.requiredTexturePrompt.disconnect`
+/// (`en_us.json`). Sent by this client itself
+/// (`ClientCommonPacketListenerImpl.PackConfirmScreen`'s callback
+/// self-disconnects on `result == false && required`, rather than waiting
+/// for the server to notice a client that will never load the pack).
+const REQUIRED_PACK_DISCONNECT_REASON: &str = "This server requires a custom resource pack";
+
+/// Vanilla's own cap on a single downloaded pack
+/// (`PackDownloader.MAX_PACK_SIZE_BYTES`, `DownloadedPackSource.java`) — 250
+/// MiB. A hostile or merely broken server cannot fill memory (or, once this
+/// machine's own history of hitting zero free disk is considered, anything
+/// downstream that persists it) past a bound this client did not invent —
+/// [`download_pack_bytes`] aborts the stream the instant it is exceeded,
+/// mid-download, rather than discovering it only after buffering the whole
+/// reply.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_PACK_SIZE_BYTES: u64 = 262_144_000;
+
+/// `ClientCommonPacketListenerImpl.parseResourcePackUrl`: only `http`/`https`
+/// is accepted; anything else — including a URL vanilla's own `new URL(..)`
+/// would fail to parse at all — is `ServerboundResourcePackPacket
+/// .Action.INVALID_URL`, before the server-pack policy is even consulted.
+/// This client has no URL-parsing library dependency to reuse for the
+/// "otherwise malformed" half of that check, so the scheme prefix is the
+/// whole test; a URL that passes it and is still unreachable fails at
+/// [`download_pack_bytes`] instead, as `FAILED_DOWNLOAD`.
+fn resource_pack_url_is_valid(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// Vanilla's `preparePackPrompt`, folded onto the single line this dialog
+/// draws — see [`PendingResourcePackPrompt`]'s doc for why one line rather
+/// than vanilla's title-plus-wrapped-message pair. `required` selects
+/// `multiplayer.{requiredT,t}exturePrompt.line{1,2}`
+/// (`ClientCommonPacketListenerImpl`/`en_us.json`, quoted verbatim); `prompt`
+/// is the server's own optional message, appended the way
+/// `multiplayer.texturePrompt.serverPrompt` appends it (there: a blank line
+/// and a header; here, since this is one line: an em dash).
+fn pack_prompt_text(required: bool, prompt: Option<&lodestone_model::Text>) -> (String, String) {
+    let title = if required {
+        "This server requires the use of a custom resource pack."
+    } else {
+        "This server recommends the use of a custom resource pack."
     }
+    .to_string();
+    let mut message = if required {
+        "Rejecting this custom resource pack will disconnect you from this server."
+    } else {
+        "Would you like to download and install it automagically?"
+    }
+    .to_string();
+    if let Some(prompt) = prompt {
+        let plain = prompt.to_plain_string();
+        if !plain.trim().is_empty() {
+            message = format!("{message} — {plain}");
+        }
+    }
+    (title, message)
+}
+
+/// What [`route_resource_pack_pushed`] does with one push, decided
+/// independently of anything that can send a packet — see that function's
+/// doc for the full decision table this implements. Pulled out as its own
+/// pure function (rather than inlined into the `match` that also sends the
+/// responses) so the table itself is unit-testable without a live
+/// `ClientHandle`, which this crate has no hermetic double for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackPushDecision {
+    /// `policy == Enabled`: accept with no prompt.
+    AutoAccept,
+    /// `policy == Disabled` and the pack is not `required`: decline with no
+    /// prompt.
+    AutoDecline,
+    /// `Prompt`, or `Disabled` with `required` — ask the player.
+    Prompt,
+}
+
+/// Vanilla's own condition from `handleResourcePackPush`, reproduced rather
+/// than simplified so this and the Java cannot silently drift:
+/// `serverPackStatus != PROMPT && (!required || serverPackStatus != DISABLED)`
+/// is the auto-apply half; everything else prompts.
+fn decide_resource_pack_push(
+    policy: crate::menu::servers::ServerPackPolicy,
+    required: bool,
+) -> PackPushDecision {
+    use crate::menu::servers::ServerPackPolicy;
+    let auto_applies =
+        policy != ServerPackPolicy::Prompt && (!required || policy != ServerPackPolicy::Disabled);
+    if !auto_applies {
+        return PackPushDecision::Prompt;
+    }
+    match policy {
+        ServerPackPolicy::Enabled => PackPushDecision::AutoAccept,
+        ServerPackPolicy::Disabled => PackPushDecision::AutoDecline,
+        ServerPackPolicy::Prompt => unreachable!("excluded by `auto_applies` above"),
+    }
+}
+
+/// Routes one `ClientboundResourcePackPushPacket`, replacing issue #613's
+/// original unconditional auto-decline. Vanilla's own decision
+/// (`ClientCommonPacketListenerImpl.handleResourcePackPush`), enumerated:
+///
+/// 1. **Invalid URL** → `INVALID_URL`, unconditionally, before the policy is
+///    consulted at all — see [`resource_pack_url_is_valid`].
+/// 2. **Auto-apply** when `policy != Prompt && (!required || policy !=
+///    Disabled)` — vanilla's own condition, reproduced rather than
+///    simplified so the two cannot silently drift: [`ServerPackPolicy::
+///    Enabled`](crate::menu::servers::ServerPackPolicy::Enabled) always
+///    auto-applies (a real accept: `ACCEPTED` then the download starts);
+///    [`Disabled`](crate::menu::servers::ServerPackPolicy::Disabled)
+///    auto-applies (a decline: `DECLINED`, nothing more) for an *optional*
+///    pack, but **not** for a required one — vanilla will not silently drop
+///    a player over a pack they never personally answered.
+/// 3. **Prompt** otherwise (`Prompt`, or `Disabled` with `required`): the
+///    pending-prompt cell is set, and [`apply_pack_response`] — driven by
+///    [`NetClient::respond_to_resource_pack`] — does the rest once the
+///    player answers.
+///
+/// Nothing here leaves a push unanswered: every branch either sends a
+/// response immediately or arms the prompt, which itself always answers
+/// (accept or decline) once the player acts on it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the full push, plus everything a response needs to answer it"
+)]
+fn route_resource_pack_pushed(
+    id: Uuid,
+    url: &str,
+    hash: &str,
+    required: bool,
+    prompt: Option<&lodestone_model::Text>,
+    policy: crate::menu::servers::ServerPackPolicy,
+    pack_prompt: &SharedPackPrompt,
+    handle: &Arc<ClientHandle>,
+) {
+    if !resource_pack_url_is_valid(url) {
+        let _ = handle.send_action(ClientAction::ResourcePackResponse {
+            id,
+            response: ResourcePackResponseKind::InvalidUrl,
+        });
+        return;
+    }
+
+    match decide_resource_pack_push(policy, required) {
+        PackPushDecision::AutoAccept => begin_accept(id, url, hash, Arc::clone(handle)),
+        PackPushDecision::AutoDecline => {
+            let _ = handle.send_action(ClientAction::ResourcePackResponse {
+                id,
+                response: ResourcePackResponseKind::Declined,
+            });
+        }
+        PackPushDecision::Prompt => {
+            let (title, message) = pack_prompt_text(required, prompt);
+            pack_prompt.set(PendingResourcePackPrompt {
+                id,
+                url: url.to_string(),
+                hash: hash.to_string(),
+                required,
+                title,
+                message,
+            });
+        }
+    }
+}
+
+/// The player's answer to a shown prompt
+/// ([`NetClient::respond_to_resource_pack`]). Returns whether the session
+/// must now end — `true` only for a **declined required** pack, vanilla's
+/// own self-disconnect (see [`REQUIRED_PACK_DISCONNECT_REASON`]).
+///
+/// A stale answer — the id does not match what is currently pending, because
+/// a second push already superseded it, or a double-click queued the answer
+/// twice — is silently ignored: [`PackPromptCell::clear_if`] only clears (and
+/// this function only acts) when the id still matches.
+fn apply_pack_response(
+    id: Uuid,
+    accept: bool,
+    pack_prompt: &SharedPackPrompt,
+    handle: &Arc<ClientHandle>,
+) -> bool {
+    let Some(pending) = pack_prompt.clear_if(id) else {
+        return false;
+    };
+    if accept {
+        begin_accept(id, &pending.url, &pending.hash, Arc::clone(handle));
+        false
+    } else {
+        let _ = handle.send_action(ClientAction::ResourcePackResponse {
+            id,
+            response: ResourcePackResponseKind::Declined,
+        });
+        pending.required
+    }
+}
+
+/// Accepts pack `id`: sends `ACCEPTED` immediately — matching vanilla's own
+/// `PackLoadFeedback.Update.ACCEPTED`, sent the instant the request is
+/// registered and before any byte has moved — then starts the download.
+fn begin_accept(id: Uuid, url: &str, hash: &str, handle: Arc<ClientHandle>) {
+    let _ = handle.send_action(ClientAction::ResourcePackResponse {
+        id,
+        response: ResourcePackResponseKind::Accepted,
+    });
+    spawn_pack_download(id, url.to_string(), hash.to_string(), handle);
+}
+
+/// Downloads, verifies, and applies pack `id`, reporting the rest of
+/// vanilla's status sequence (`DOWNLOADED`, then `SUCCESSFULLY_LOADED` or a
+/// failure status) as each step completes.
+///
+/// **A dedicated OS thread with its own `current_thread` runtime**, the same
+/// shape [`crate::remote_skins`]'s `spawn_fetch` uses for the identical
+/// reason: this must not block [`run_async`]'s own loop, which also drives
+/// movement, keep-alives and every other inbound/outbound packet — a slow or
+/// stalled download must degrade visibly (a `FAILED_DOWNLOAD` eventually, or
+/// never resolving because the player never asked for it again) rather than
+/// stall the whole session the way an oversized `select!` arm did elsewhere
+/// in this crate.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_pack_download(id: Uuid, url: String, hash: String, handle: Arc<ClientHandle>) {
+    // Cloned so the spawn-failure fallback below still has a handle to
+    // answer through — `spawn`'s closure takes the original by `move`.
+    let for_failure = Arc::clone(&handle);
+    let spawned = std::thread::Builder::new()
+        .name("lodestone-resourcepack".to_owned())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::warn!(target: "assets", "no runtime for a resource-pack download: {e}");
+                    let _ = handle.send_action(ClientAction::ResourcePackResponse {
+                        id,
+                        response: ResourcePackResponseKind::FailedDownload,
+                    });
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                let bytes = match download_pack_bytes(&url).await {
+                    Ok(bytes) => bytes,
+                    Err(reason) => {
+                        tracing::warn!(
+                            target: "assets",
+                            "resource pack {id} failed to download from {url}: {reason}"
+                        );
+                        let _ = handle.send_action(ClientAction::ResourcePackResponse {
+                            id,
+                            response: ResourcePackResponseKind::FailedDownload,
+                        });
+                        return;
+                    }
+                };
+                if !verify_pack_hash(&bytes, &hash) {
+                    tracing::warn!(
+                        target: "assets",
+                        "resource pack {id}: SHA-1 mismatch, discarding {} downloaded bytes",
+                        bytes.len()
+                    );
+                    let _ = handle.send_action(ClientAction::ResourcePackResponse {
+                        id,
+                        response: ResourcePackResponseKind::FailedDownload,
+                    });
+                    return;
+                }
+                tracing::info!(target: "assets", bytes = bytes.len(), "downloaded a server resource pack");
+                let _ = handle.send_action(ClientAction::ResourcePackResponse {
+                    id,
+                    response: ResourcePackResponseKind::Downloaded,
+                });
+                // `set_server_pack` is the "apply" half: it prepends this pack,
+                // highest priority, to the same `selected_pack_sources` stack a
+                // local third-party pack goes through, and bumps
+                // `pack_generation` so `Sim::reload_resource_pack_atlas` (already
+                // polled every frame) rebuilds the block atlas from it. `false`
+                // means the bytes did not open as a pack at all (corrupt zip, no
+                // readable `pack.mcmeta`) — vanilla's `FAILED_RELOAD`.
+                if crate::resources::set_server_pack(id, bytes) {
+                    let _ = handle.send_action(ClientAction::ResourcePackResponse {
+                        id,
+                        response: ResourcePackResponseKind::SuccessfullyLoaded,
+                    });
+                } else {
+                    tracing::warn!(target: "assets", "resource pack {id} did not open as a pack");
+                    let _ = handle.send_action(ClientAction::ResourcePackResponse {
+                        id,
+                        response: ResourcePackResponseKind::FailedReload,
+                    });
+                }
+            });
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(target: "assets", "could not spawn a resource-pack download: {e}");
+        let _ = for_failure.send_action(ClientAction::ResourcePackResponse {
+            id,
+            response: ResourcePackResponseKind::FailedDownload,
+        });
+    }
+}
+
+/// Browser build: report the download as failed rather than attempting one.
+///
+/// Two things are missing and neither is a shim away, the same gap
+/// [`crate::remote_skins`]'s wasm32 arm names for a remote skin fetch:
+/// `reqwest` is not part of this crate's wasm32 dependency graph (native-only
+/// section of `Cargo.toml`), and — unlike a skin, which only needs bytes —
+/// applying a pack would also want a place to cache it, and this target's
+/// filesystem calls degrade to `Err(Unsupported)` rather than doing
+/// anything a later read could see. `FailedDownload` rather than leaving the
+/// accept pending: a pending response that nothing will ever finish can
+/// neither be retried nor stop looking answered, which is the same argument
+/// `remote_skins.rs`'s spawn-failure branch makes for its own case.
+#[cfg(target_arch = "wasm32")]
+fn spawn_pack_download(id: Uuid, _url: String, _hash: String, handle: Arc<ClientHandle>) {
+    tracing::warn!(
+        target: "assets",
+        "not downloading a server resource pack in a browser: this path needs \
+         reqwest, which is native-only here. Declining; the world renders with \
+         whichever pack is already selected."
+    );
+    let _ = handle.send_action(ClientAction::ResourcePackResponse {
+        id,
+        response: ResourcePackResponseKind::FailedDownload,
+    });
+}
+
+/// Streams the pack over HTTP(S), aborting the instant either the declared
+/// `Content-Length` or the actual bytes received exceed
+/// [`MAX_PACK_SIZE_BYTES`] — the second check is the one that matters against
+/// a hostile server, since `Content-Length` is whatever the far end claims.
+#[cfg(not(target_arch = "wasm32"))]
+async fn download_pack_bytes(url: &str) -> Result<Vec<u8>, String> {
+    // `reqwest::Client::new()` panics with no rustls crypto provider
+    // installed — see this file's other `reqwest::Client::new()` call sites'
+    // own comments. Every native call site here already relies on
+    // `main.rs` having installed one before any net thread spawns.
+    let client = reqwest::Client::new();
+    let mut resp = client.get(url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    if let Some(len) = resp.content_length() {
+        if len > MAX_PACK_SIZE_BYTES {
+            return Err(format!(
+                "server declared {len} bytes, over the {MAX_PACK_SIZE_BYTES}-byte cap"
+            ));
+        }
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        body.extend_from_slice(&chunk);
+        if body.len() as u64 > MAX_PACK_SIZE_BYTES {
+            return Err(format!(
+                "exceeded the {MAX_PACK_SIZE_BYTES}-byte cap mid-stream"
+            ));
+        }
+    }
+    Ok(body)
+}
+
+/// `DownloadedPackSource.tryParseSha1Hash`: a hash that is not exactly 40
+/// hex characters is treated as **absent** — vanilla's own leniency for a
+/// server that sends an empty string — and verification is skipped, not
+/// failed. A present, well-formed hash that does not match the downloaded
+/// bytes is always rejected.
+#[cfg(not(target_arch = "wasm32"))]
+fn verify_pack_hash(bytes: &[u8], hash: &str) -> bool {
+    if hash.len() != 40 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return true;
+    }
+    use sha1::{Digest, Sha1};
+    let digest = Sha1::digest(bytes);
+    let computed = digest.iter().fold(String::with_capacity(40), |mut s, b| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+        s
+    });
+    computed.eq_ignore_ascii_case(hash)
 }
 
 /// Forward one event; `Err` signals the loop to stop.
@@ -3602,38 +4200,160 @@ mod tests {
     // `tests/no_production_source_names_testsupport.rs`.
     use lodestone_testsupport::unique_username;
 
-    /// Issue #613: a pushed resource pack must get an immediate, correctly-id'd
-    /// decline — the producer half of `ClientAction::ResourcePackResponse`,
-    /// which had an encoder and no producer at all before this.
+    /// Vanilla's own `handleResourcePackPush` condition, reproduced as a
+    /// truth table over the three policies × required/optional — the
+    /// **discriminating** input the module doc's evidence standards ask
+    /// for: `Enabled` and `Disabled` must answer *differently* for the same
+    /// `required`, and `Disabled` must answer differently for
+    /// required-vs-optional, or this table would not actually be testing
+    /// the condition rather than a constant.
     #[test]
-    fn a_pushed_resource_pack_is_auto_declined_with_the_pushed_id() {
-        let id = uuid::Uuid::from_u128(0x617);
-        let event = ClientEvent::ResourcePackPushed {
-            id,
-            url: "https://example.invalid/pack.zip".to_owned(),
-            hash: String::new(),
-            required: true,
-            prompt: None,
-        };
-        match auto_resource_pack_response(&event) {
-            Some(ClientAction::ResourcePackResponse { id: answered, response }) => {
-                assert_eq!(answered, id, "the response must name the pack that was pushed");
-                assert_eq!(response, ResourcePackResponseKind::Declined);
-            }
-            other => panic!("expected an auto-decline, got {other:?}"),
-        }
+    fn the_push_decision_matches_vanillas_own_condition() {
+        use crate::menu::servers::ServerPackPolicy;
+        let cases = [
+            (ServerPackPolicy::Enabled, false, PackPushDecision::AutoAccept),
+            (ServerPackPolicy::Enabled, true, PackPushDecision::AutoAccept),
+            (ServerPackPolicy::Disabled, false, PackPushDecision::AutoDecline),
+            // The one vanilla will not let a policy silently answer: a
+            // *required* pack under `Disabled` still asks, because a
+            // disconnect must be something the player actually chose.
+            (ServerPackPolicy::Disabled, true, PackPushDecision::Prompt),
+            (ServerPackPolicy::Prompt, false, PackPushDecision::Prompt),
+            (ServerPackPolicy::Prompt, true, PackPushDecision::Prompt),
+        ];
+        let mismatches: Vec<_> = cases
+            .into_iter()
+            .filter_map(|(policy, required, expected)| {
+                let got = decide_resource_pack_push(policy, required);
+                (got != expected).then_some((policy, required, expected, got))
+            })
+            .collect();
+        assert!(
+            mismatches.is_empty(),
+            "decide_resource_pack_push disagreed with vanilla: {mismatches:?}"
+        );
     }
 
-    /// The companion control: an unrelated event (and `ResourcePackPopped`,
-    /// which has nothing to answer) must not produce a response — proving the
-    /// match above is actually discriminating on the event, not returning
-    /// `Some` unconditionally.
+    /// Only `http`/`https` reach the policy at all — everything else,
+    /// including a scheme-free host and an empty string, is
+    /// `INVALID_URL` territory (`parseResourcePackUrl`).
     #[test]
-    fn an_unrelated_event_and_a_pack_pop_get_no_auto_response() {
-        assert!(auto_resource_pack_response(&ClientEvent::WinGame).is_none());
+    fn only_http_and_https_urls_are_valid() {
+        assert!(resource_pack_url_is_valid("https://example.invalid/pack.zip"));
+        assert!(resource_pack_url_is_valid("http://example.invalid/pack.zip"));
+        assert!(!resource_pack_url_is_valid("ftp://example.invalid/pack.zip"));
+        assert!(!resource_pack_url_is_valid("example.invalid/pack.zip"));
+        assert!(!resource_pack_url_is_valid(""));
+        // A control: the detector can actually say yes, so the three
+        // rejections above are not "always false".
+        assert!(resource_pack_url_is_valid("https://x.invalid"));
+    }
+
+    /// The required/optional wording differs (vanilla's two distinct
+    /// `en_us.json` line pairs), and the server's own prompt text — when
+    /// present — must reach the player rather than being silently dropped
+    /// by the one-line fold.
+    #[test]
+    fn the_prompt_text_distinguishes_required_and_carries_the_server_prompt() {
+        let (req_title, req_message) = pack_prompt_text(true, None);
+        let (opt_title, opt_message) = pack_prompt_text(false, None);
+        assert_ne!(req_title, opt_title, "required vs optional must read differently");
+        assert_ne!(req_message, opt_message);
+        assert!(req_message.contains("disconnect"), "{req_message:?}");
+        assert!(!opt_message.contains("disconnect"), "{opt_message:?}");
+
+        let server_line = lodestone_model::Text::literal("Custom textures required for PvP");
+        let (_, with_prompt) = pack_prompt_text(false, Some(&server_line));
         assert!(
-            auto_resource_pack_response(&ClientEvent::ResourcePackPopped { id: None }).is_none()
+            with_prompt.contains("Custom textures required for PvP"),
+            "{with_prompt:?}"
         );
+        assert_ne!(
+            with_prompt, opt_message,
+            "a supplied server prompt must change the message, not be silently dropped"
+        );
+    }
+
+    /// `verify_pack_hash`'s three cases: a correct hash passes, a wrong one
+    /// (of the same *length*, so this is not merely "any 40 hex chars
+    /// passes") fails, and an absent/malformed hash is leniently skipped
+    /// rather than treated as a mismatch — vanilla's own
+    /// `tryParseSha1Hash` behaviour.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pack_hash_verification_matches_vanillas_leniency() {
+        let bytes = b"a small fake pack".to_vec();
+        // The real SHA-1 of `bytes`, computed independently of
+        // `verify_pack_hash`'s own `sha1` call so this is an outside
+        // expectation, not `decode(encode(x)) == x`.
+        use sha1::{Digest, Sha1};
+        let real_hash = Sha1::digest(&bytes)
+            .iter()
+            .fold(String::new(), |mut s, b| {
+                use std::fmt::Write as _;
+                let _ = write!(s, "{b:02x}");
+                s
+            });
+        assert!(verify_pack_hash(&bytes, &real_hash), "the real hash must verify");
+        assert!(
+            verify_pack_hash(&bytes, &real_hash.to_uppercase()),
+            "hex case must not matter"
+        );
+        // A wrong hash of the *same length* (40 hex chars) must fail —
+        // pairwise-distinct from the real one, not just "any string".
+        let wrong_hash = "0".repeat(40);
+        assert_ne!(wrong_hash, real_hash);
+        assert!(!verify_pack_hash(&bytes, &wrong_hash), "a wrong hash must not verify");
+        // Absent/malformed hashes are skipped, not failed.
+        assert!(verify_pack_hash(&bytes, ""), "an empty hash must be lenient, per vanilla");
+        assert!(
+            verify_pack_hash(&bytes, "not-a-hash"),
+            "a malformed hash must be lenient, not a mismatch"
+        );
+    }
+
+    /// [`PackPromptCell`]'s own contract: a fresh prompt is readable, a
+    /// matching-id answer clears it, and a **stale** answer (wrong id) must
+    /// not clear a newer prompt it raced with — the control is that clearing
+    /// with the *right* id afterward still works, proving the cell was not
+    /// simply broken.
+    #[test]
+    fn the_pack_prompt_cell_clears_only_on_a_matching_id() {
+        let cell = PackPromptCell::default();
+        assert!(cell.get().is_none());
+
+        let a = uuid::Uuid::from_u128(11);
+        let b = uuid::Uuid::from_u128(22);
+        cell.set(PendingResourcePackPrompt {
+            id: a,
+            url: "https://a.invalid/pack.zip".to_string(),
+            hash: String::new(),
+            required: false,
+            title: "t".to_string(),
+            message: "m".to_string(),
+        });
+        assert_eq!(cell.get().map(|p| p.id), Some(a));
+
+        // A stale answer for a different id must not clear the live prompt.
+        assert!(cell.clear_if(b).is_none());
+        assert_eq!(cell.get().map(|p| p.id), Some(a), "a wasn't cleared");
+
+        // The matching id does clear it.
+        let cleared = cell.clear_if(a).expect("the matching id must clear");
+        assert_eq!(cleared.id, a);
+        assert!(cell.get().is_none());
+
+        // `clear_all` (a pack-pop with no id) removes whatever is pending.
+        cell.set(PendingResourcePackPrompt {
+            id: b,
+            url: "https://b.invalid/pack.zip".to_string(),
+            hash: String::new(),
+            required: true,
+            title: "t".to_string(),
+            message: "m".to_string(),
+        });
+        cell.clear_all();
+        assert!(cell.get().is_none());
     }
 
     /// The island assertion for the signed-in-account wiring, and the reason it

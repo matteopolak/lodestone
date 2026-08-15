@@ -285,11 +285,18 @@ pub fn frame_for<'a>(
                         slot: Some(manage_server_slot(ADDRESS_FIELD)),
                         ..Default::default()
                     },
-                    // Present and inactive — see `RESOURCE_PACK_ROW`'s doc on
-                    // why: `ServerEntry` has no `pack_status` to cycle.
+                    // `ServerData.ServerPackStatus::getName` as the
+                    // `CycleButton`'s own drawn text (`ManageServerScreen.java`
+                    // draws "Name: Value" through `CommonComponents
+                    // .optionNameValue`-shaped labels) — live now that
+                    // `EditForm::pack_status` has somewhere real to go. See
+                    // `RESOURCE_PACK_ROW`'s doc.
                     MenuRow {
-                        label: "Server Resource Packs".to_string(),
-                        enabled: false,
+                        label: format!(
+                            "Server Resource Packs: {}",
+                            form.pack_status().label()
+                        ),
+                        enabled: true,
                         slot: Some(manage_server_slot(RESOURCE_PACK_ROW)),
                         ..Default::default()
                     },
