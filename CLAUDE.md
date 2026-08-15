@@ -791,6 +791,15 @@ the flaw is a property of what it was pointed at:
 | **magnitude** | the assert's *predicate*, not its subject | yes, if you ask "how much?" |
 | duration | test lifetime vs system counters | **no** |
 | **world** | **the input data** | **no** |
+| **self-reference** | the gate's *own* text satisfying the pattern it searches for | **no** |
+
+*self-reference* is the newest and the sneakiest, because the gate is a good idea implemented into a
+circle. Several gates here defend a wiring line by grepping a file's **literal source text** — the
+`chat_opts` detector is the pattern, and it works. One written the same way was placed **inside the file
+it greps**, using `include_str!` on its own path: its own assertion string matched, so it passed even with
+the real line deleted. **A source-grep gate must live in a different file from the one it greps**, and its
+neuter is not optional — delete the line it defends and watch it go red, because that is the only thing
+that distinguishes it from a gate matching itself.
 
 *magnitude* is the one that reads as rigorous: **predict the value, do not merely assert the sign of the
 change** — compute *both* the correct and the suspected-wrong hypothesis from outside constants and require
