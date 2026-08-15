@@ -359,8 +359,9 @@ that guard is one typo away from being decorative.
 
 | knob | effect |
 |---|---|
-| `web/Trunk.toml` `[serve] headers` | COOP/COEP, so the page is cross-origin isolated. Already set — `SharedArrayBuffer` is available and threads are not automatically fatal. |
-| `LODESTONE_NO_RELAY=1` | `just run-wasm` serves the page without the WebSocket→TCP relay. What you want for most iterations. |
+| `web/Trunk.toml` `[serve] headers` | COOP/COEP, so the page is cross-origin isolated under standalone `trunk serve`. `lodestone-web-server` (`web/server/`) sets the identical two headers itself. |
+| `LODESTONE_WEB_LISTEN` | `just run-wasm`'s listen address for the page **and** `/relay` (one port); default `127.0.0.1:8080`. Set to `127.0.0.1:0` for an OS-assigned port. |
+| `LODESTONE_RELAY_TARGET` | the real Minecraft server `/relay` bridges to; default `127.0.0.1:25565`. |
 | `just wasm-size` | fails above **1,600,000 B** gzip. |
 | `web/[profile.release]` | `opt-level = "z"`, fat LTO, one codegen unit, `panic = "abort"`, `strip`. **`panic = "abort"` is why a trap is fatal rather than recoverable.** |
 
