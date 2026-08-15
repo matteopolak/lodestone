@@ -584,6 +584,17 @@ Know its scope, because outside it the instrument is *silent* rather than wrong 
   xtask: a trustworthy version needs real parsing, and a hand-rolled Rust lexer will be wrong about
   lifetimes (three scanners here already were). Grep is the interim instrument — and asking "what reads
   this?" is the habit, not just the tool.
+
+  **And the sibling species is now the most common defect in this repo: a correct function fed a constant
+  by its *producer*.** Five in one day, each reported as a broken feature and each actually a supplying
+  path that never learned the real value: `creeper_swelling` (`prepare_entities` resolved every entity
+  through a path whose swell is a hard `0.0`), `ThirdPersonBodyState` (`swim_amount` hardcoded, so remote
+  players swim and your own body does not), the anvil rename box, `NearbyEntity::living` (`collision_rule`
+  defaulting to `Always`, so a team's `never` rule was invisible and players pushed each other), and
+  `Bundle`'s empty sound lists. In every case the consumer was already correct and well tested. So when a
+  feature "does not work" and the function that implements it looks right, **stop reading the consumer and
+  go find who constructs its input** — and the count that finds it is not "how many sites assign this
+  field" but **"how many production sites assign it something other than the default"**. Zero is the tell.
 - **Do not quote a coverage number from memory or from a doc — run it and quote that.** Legacy families
   are thin, and *decode* and *connectedness* are different axes; five issue bodies inherited one
   wrong-axis figure. Serverbound decode lives in `crates/protocol/v770/src/server_protocol.rs`, **not**
