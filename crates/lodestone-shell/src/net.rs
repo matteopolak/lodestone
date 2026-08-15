@@ -2811,7 +2811,59 @@ async fn run_async(
             }
             // A short timeout keeps the outbound drain responsive even when the
             // server is quiet (no inbound events to wake us).
-            match tokio::time::timeout(Duration::from_millis(15), events.recv()).await {
+            //
+            // **Native only.** `tokio::time::timeout` needs a timer driver, which
+            // comes from the entered `current_thread` runtime this function's
+            // native caller builds (see this file's `run`) — but on `wasm32`
+            // there is no entered runtime at all (`spawn_local` is not
+            // `#[tokio::main]`), the same gap `read_packet_timed`'s own doc
+            // comment already names for the read side. The two symptoms are not
+            // the same, though, and the difference is worth recording: a naive
+            // guess would be that `timeout()` just never *fires* (the 15 ms
+            // never elapses, degrading gracefully to an untimed wait). Measured
+            // instead, with a one-shot `tracing::debug!` bracketing the call
+            // during the wasm32 join stall this diagnoses: the "enter" line logs
+            // exactly once per session and the "exit" line **never logs at
+            // all**, even though `events.recv()` already has a backlog of
+            // `ChunkLoaded` events queued and would resolve immediately on its
+            // own. That rules out "the sleep never elapses" — the call hangs on
+            // its *first* poll, before the inner future is ever reached, which
+            // is consistent with `tokio::time::timeout`'s own deadline
+            // computation reaching for a clock with no driver behind it on this
+            // target (the same `Instant`/`SystemTime` trap class `lodestone-time`
+            // exists to confine elsewhere in this crate — see `crate::spawn`'s
+            // doc comment for the sibling case in `lodestone-server`).
+            //
+            // Once this call stops returning, this loop stops looping: it never
+            // reaches `events.recv()` again, so the bounded `ClientEvent`
+            // channel (`DEFAULT_EVENT_BUFFER` deep) fills, `Driver::run`'s own
+            // `self.events.send(event).await` then blocks, and *that* task stops
+            // calling `read_packet` — which is what starves the reader half of
+            // the `memory_pair` duplex `CLAUDE.md` localised this stall to. The
+            // near-full buffer was a downstream symptom of this call never
+            // returning, not an undersized constant: `DEFAULT_MEMORY_BUFFER`
+            // stays untouched.
+            //
+            // The fix is not "a working wasm32 timer" — there is no timer driver
+            // to build one on top of without a new dependency — it is to stop
+            // asking for one. An untimed `events.recv()` gives up the "outbound
+            // actions flush even when the server is quiet" property this
+            // comment's first line describes, which matters least exactly when
+            // it is missing least: a live session's server keeps producing
+            // `ClientEvent`s (movement/entity sync, chunk churn) at well under
+            // 15 ms in practice, so the loop wakes on its own. A genuinely idle
+            // connection (nothing queued to send *and* nothing arriving) has
+            // nothing that needs flushing anyway. Same accepted, documented gap
+            // as `read_timeout` just above — not a silent one.
+            #[cfg(target_arch = "wasm32")]
+            tracing::debug!(target: "netbuf", "events:recv (untimed on wasm32)");
+            #[cfg(target_arch = "wasm32")]
+            let netbuf_timeout_result: Result<Option<ClientEvent>, tokio::time::error::Elapsed> =
+                Ok(events.recv().await);
+            #[cfg(not(target_arch = "wasm32"))]
+            let netbuf_timeout_result =
+                tokio::time::timeout(Duration::from_millis(15), events.recv()).await;
+            match netbuf_timeout_result {
                 Ok(Some(event)) => {
                     if forward(
                         &tx,
