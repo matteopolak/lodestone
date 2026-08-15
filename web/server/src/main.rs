@@ -81,6 +81,7 @@ use axum::http::{HeaderName, HeaderValue};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
+use lodestone_relay::destination_from_query;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tower_http::services::{ServeDir, ServeFile};
@@ -209,67 +210,14 @@ async fn relay_handler(
     ws.on_upgrade(move |socket| bridge(socket, target))
 }
 
-/// Reads `host`/`port` off `/relay`'s query string. Mirrors
-/// `lodestone_relay::destination_from_query` — see this file's module doc,
-/// "Per-connection destination", for why this cannot just call it.
-#[must_use]
-fn destination_from_query(query: Option<&str>) -> Option<(String, u16)> {
-    let query = query?;
-    let mut host: Option<String> = None;
-    let mut port: Option<u16> = None;
-    for pair in query.split('&') {
-        let Some((key, value)) = pair.split_once('=') else {
-            continue;
-        };
-        match key {
-            "host" => host = Some(percent_decode(value)),
-            "port" => port = percent_decode(value).parse().ok(),
-            _ => {}
-        }
-    }
-    let host = host?;
-    let port = port?;
-    if host.is_empty() {
-        return None;
-    }
-    Some((host, port))
-}
-
-/// Minimal percent-decoding for query-parameter values (`%XX` -> byte, `+` ->
-/// space). Mirrors `lodestone_relay::percent_decode` byte-for-byte — see this
-/// file's module doc, "Per-connection destination".
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
-                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                    Some(byte) => {
-                        out.push(byte);
-                        i += 3;
-                    }
-                    None => {
-                        out.push(bytes[i]);
-                        i += 1;
-                    }
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
+// The destination query is parsed by `lodestone_relay::destination_from_query`,
+// the same function the standalone relay binary uses. This file used to carry a
+// private copy of it — written when those helpers were not yet `pub` — and the
+// copy was the hazard, not the duplication of effort: the *transport* types are
+// what forced `bridge` to be re-expressed here, and a query string is not a
+// transport. Two parsers of one wire contract compile independently, pass
+// independently, and diverge the first time anyone adds a field to it, with the
+// divergence surfacing in this crate, the deployed one.
 /// Bridges one accepted browser WebSocket to a fresh TCP connection to
 /// `target`. See this file's module doc for why this does not call
 /// `lodestone_relay::bridge` directly — the forwarding logic below is
