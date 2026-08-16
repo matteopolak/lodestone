@@ -129,4 +129,12 @@ impl MobController for SpeedProbe {
     fn find_nearest_target(&mut self) -> Option<Vec3> {
         Some(self.nearby)
     }
+    // Permissive like every other perception method here: the drowned's
+    // trident goal (`RangedAttackGoal::with_required_main_hand`) is the one
+    // production reader of `main_hand_item` today, so answering "holding a
+    // trident" lets that goal reach `start()` through this probe too, instead
+    // of this file's own permissive design silently excluding it.
+    fn main_hand_item(&self) -> Option<&str> {
+        Some("trident")
+    }
 }

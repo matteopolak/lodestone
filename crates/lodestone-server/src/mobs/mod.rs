@@ -80,10 +80,15 @@ use lodestone_entity::ai::navigating_mob::{
 use lodestone_entity::ai::mob::{EatenBlock, ProjectileLaunch};
 use lodestone_entity::ai::{Goal, GoalSelector, MobController, NavigatingMob};
 use lodestone_entity::attribute::default_attributes;
+use lodestone_entity::equipment::{
+    self, attack_damage_from_attributes, defenses_from_attributes,
+    knockback_resistance_from_attributes,
+};
 use lodestone_entity::explosion::Aabb as ExplosionAabb;
 use lodestone_entity::item_entity::{ItemEntityRegistry, ItemLifecycle, ItemMotion};
 use lodestone_entity::pathfinding::{Aabb, BlockCues, MobShape, PathType, PathWorld};
 use lodestone_entity::projectile::{Projectile, ProjectileRegistry, TrackedProjectile};
+use lodestone_entity::spawn_equipment::{self, EquipRandom};
 use lodestone_entity::{
     AttributeMap, DamageFlags, Defenses, HurtCooldown, HurtDecision, RayView, entity_damage,
     seen_percent,
@@ -324,6 +329,21 @@ fn combat_defaults(entity_type: &ResourceKey) -> (f32, f32, Defenses, f64) {
     };
     let knockback_resistance = attr(&attrs, "knockback_resistance");
     (max_health, attack_damage, defenses, knockback_resistance)
+}
+
+/// [`SpawnRng`] already exposes vanilla-shaped `next_f32`/`next_int` draws;
+/// this is the seam [`lodestone_entity::spawn_equipment`] needs to read them
+/// without that crate depending on this one's RNG type. A local `impl` of a
+/// foreign trait for a local type — always allowed under the orphan rule,
+/// since `SpawnRng` is declared in this crate (`mob_spawn.rs`).
+impl EquipRandom for SpawnRng {
+    fn next_f32(&mut self) -> f32 {
+        SpawnRng::next_f32(self)
+    }
+
+    fn next_int(&mut self, bound: i32) -> i32 {
+        SpawnRng::next_int(self, bound)
+    }
 }
 
 /// Vanilla `LivingEntity.getAgeScale()`'s generic fallback: half size while a
@@ -2165,6 +2185,27 @@ pub struct MobSim<'w> {
     /// denomination, on its own stream so awarding XP cannot shift which roll a mob
     /// spawn or a block drop sees.
     orb_rng: SpawnRng,
+    /// `Mob.populateDefaultEquipmentSlots`'s own `RandomSource` draws — the
+    /// armour-upgrade roll and each species' weapon roll — on its own stream
+    /// for [`orb_rng`](Self::orb_rng)'s reason: rolling a drowned's trident
+    /// must not shift which denomination an orb merges into or which roll a
+    /// despawn check sees.
+    equipment_rng: SpawnRng,
+    /// `DifficultyInstance.getSpecialMultiplier()` fed to every spawn's
+    /// [`lodestone_entity::spawn_equipment::populate_default_equipment_slots`]
+    /// call. `0.0` by default — vanilla's own value for a fresh world's
+    /// effective difficulty (`< 2.0`) — so armour never rolls until a caller
+    /// wires a real regional-difficulty reading through
+    /// [`set_spawn_difficulty`](Self::set_spawn_difficulty). The drowned's
+    /// trident roll is independent of this (`Drowned` does not call `super`),
+    /// so it works with no wiring at all.
+    spawn_special_multiplier: f32,
+    /// `getDifficulty() == Difficulty.HARD`, the second (non-continuous) input
+    /// [`base_armor_roll`](lodestone_entity::spawn_equipment::base_armor_roll)
+    /// needs alongside `spawn_special_multiplier` — see that function's own
+    /// doc for why a saturated `special_multiplier` does not imply this.
+    /// `false` by default.
+    spawn_hard_difficulty: bool,
     /// Live `FallingBlockEntity`s, keyed by network entity id — the falling
     /// sand/gravel a `crate::gravity_tick::TICK_GRAVITY` scheduled tick created.
     ///
@@ -2678,6 +2719,9 @@ impl<'w> MobSim<'w> {
             item_state: HashMap::new(),
             orbs: HashMap::new(),
             orb_rng: SpawnRng::new(orbs::ORB_BEHAVIOR_SEED),
+            equipment_rng: SpawnRng::new(EQUIPMENT_ROLL_SEED),
+            spawn_special_multiplier: 0.0,
+            spawn_hard_difficulty: false,
             falling_blocks: HashMap::new(),
             next_id: 1,
             tick_count: 0,
@@ -2737,6 +2781,38 @@ impl<'w> MobSim<'w> {
     /// between attempts is also asserting how many draws each mechanism makes.
     pub fn set_tame_rng(&mut self, rng: SpawnRng) -> &mut Self {
         self.tame_rng = rng;
+        self
+    }
+
+    /// Replaces the RNG [`spawn_species`](Self::spawn_species)'s equipment roll
+    /// draws from — the same injection point [`set_tame_rng`](Self::set_tame_rng)
+    /// exists for, and for the identical reason: predicting which armour tier
+    /// or weapon a spawn rolls needs a known first draw, not "it sometimes
+    /// happens".
+    pub fn set_equipment_rng(&mut self, rng: SpawnRng) -> &mut Self {
+        self.equipment_rng = rng;
+        self
+    }
+
+    /// Sets the `DifficultyInstance` inputs every subsequent
+    /// [`spawn_species`](Self::spawn_species) call feeds to
+    /// [`lodestone_entity::spawn_equipment::populate_default_equipment_slots`]'s
+    /// armour-upgrade roll: `special_multiplier` (`DifficultyInstance
+    /// ::getSpecialMultiplier`, `0.0`..`1.0`) and whether the world's base
+    /// difficulty is Hard.
+    ///
+    /// This is the consumer `crate::regional_difficulty`'s own module doc
+    /// names as not existing anywhere in this tree — a caller that already
+    /// resolves a `DifficultyInstance` (from world difficulty, game time and
+    /// moon phase) feeds
+    /// [`DifficultyInstance::special_multiplier`](crate::regional_difficulty::DifficultyInstance::special_multiplier)
+    /// and [`DifficultyInstance::is_hard`](crate::regional_difficulty::DifficultyInstance::is_hard)-shaped
+    /// values here. Left at the `0.0`/`false` defaults, a spawn never rolls
+    /// armour, which is vanilla's own behaviour for a fresh world's effective
+    /// difficulty (below `2.0`).
+    pub fn set_spawn_difficulty(&mut self, special_multiplier: f32, hard: bool) -> &mut Self {
+        self.spawn_special_multiplier = special_multiplier;
+        self.spawn_hard_difficulty = hard;
         self
     }
 
@@ -3060,7 +3136,7 @@ impl<'w> MobSim<'w> {
     ///   every hostile species in the roster is already above that floor
     ///   (slowest is a zombie's `0.23`).
     pub fn spawn_species(&mut self, entity_type: ResourceKey, pos: Vec3) -> &mut SimMob<'w> {
-        let attrs = default_attributes(&entity_type).unwrap_or_else(AttributeMap::new);
+        let mut attrs = default_attributes(&entity_type).unwrap_or_else(AttributeMap::new);
         // Always spawns adult-shaped; a caller wanting a baby applies
         // `set_age(BABY_START_AGE)` afterward, which re-derives the shape
         // through the same function (see `SimMob::set_age`'s own doc).
@@ -3091,13 +3167,32 @@ impl<'w> MobSim<'w> {
         let visited_budget = (follow_range * 16.0).floor() as i32;
         let hostile = species::is_hostile_species(&entity_type);
 
-        // Built *before* `entity_type` is moved into the spawn, so the species
-        // path is borrowed rather than cloned. `SpeciesContext` wants the raw
-        // attribute — every roster goal supplies its own `speedModifier`
-        // multiplier on top, matching vanilla's own move-control order — so it
-        // is *not* `ai_ground_speed`-converted here; the conversion happens
-        // once, below, for the kinematic follower's own rate.
-        let goals = roster::goals_for(entity_type.path(), &SpeciesContext::new(base_speed));
+        // Captured before `entity_type` moves into `spawn_with_type` below, so
+        // the equipment roll (which also needs the species path, after the
+        // move) has its own owned copy rather than fighting the borrow.
+        let species_path = entity_type.path().to_owned();
+
+        // Built *before* `entity_type` is moved into the spawn. `SpeciesContext`
+        // wants the raw attribute — every roster goal supplies its own
+        // `speedModifier` multiplier on top, matching vanilla's own
+        // move-control order — so it is *not* `ai_ground_speed`-converted
+        // here; the conversion happens once, below, for the kinematic
+        // follower's own rate.
+        let goals = roster::goals_for(&species_path, &SpeciesContext::new(base_speed));
+
+        // `Mob.populateDefaultEquipmentSlots` — what this mob spawns holding
+        // and wearing (`lodestone_entity::spawn_equipment`'s module doc has
+        // the full per-species table). Folded into `attrs` *before*
+        // `spawn_with_type` reads combat stats from a fresh
+        // `default_attributes` call of its own, so the two cannot disagree on
+        // the base and only equipment is layered on top here.
+        let equipped = spawn_equipment::populate_default_equipment_slots(
+            &species_path,
+            &mut self.equipment_rng,
+            self.spawn_special_multiplier,
+            self.spawn_hard_difficulty,
+        );
+        equipment::apply_equipment(&mut attrs, equipped.iter());
 
         let mob = self.spawn_with_type(
             pos,
@@ -3128,6 +3223,16 @@ impl<'w> MobSim<'w> {
         // tick, and would invite a second source of truth for a number
         // `visited_budget` above already derives from this exact read.
         mob.mob.set_follow_range(follow_range);
+        // What the mob's main hand holds (a drowned's trident roll is the one
+        // production reader today, through `MobController::main_hand_item` and
+        // `RangedAttackGoal`'s `requires_main_hand` gate), and `equip_attrs`
+        // folded above overriding `spawn_with_type`'s bare-species combat
+        // numbers with the equipped versions — armour, weapon damage,
+        // netherite's knockback resistance.
+        mob.mob.set_main_hand_item(equipped.main_hand.clone());
+        mob.defenses = defenses_from_attributes(&attrs);
+        mob.attack_damage = attack_damage_from_attributes(&attrs);
+        mob.knockback_resistance = knockback_resistance_from_attributes(&attrs);
         mob
     }
 
@@ -6560,6 +6665,10 @@ const BREED_XP_SEED: u64 = 0x4252_4545_445f_5850;
 /// Default seed for [`MobSim::patrol_rng`]. See [`TAME_ROLL_SEED`] for why it
 /// is separate.
 const PATROL_SPAWN_SEED: u64 = 0x5041_5452_4f4c_5f52;
+
+/// Default seed for [`MobSim::equipment_rng`]. See [`TAME_ROLL_SEED`] for why
+/// it is separate.
+const EQUIPMENT_ROLL_SEED: u64 = 0x4551_5549_505f_524f;
 
 /// The `early_game.json` timeline's `gameplay/can_pillager_patrol_spawn` gate,
 /// transcribed as a plain tick count rather than read from a general timeline
