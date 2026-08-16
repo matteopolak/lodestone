@@ -882,15 +882,6 @@ impl<S: ChunkSource> ChunkStore<S> {
         );
     }
 
-    /// Refreshes the spawn ticket's countdown without moving it — vanilla's
-    /// `Ready.keepAlive()`. A caller that never refreshes lets it expire
-    /// naturally after 20 ticks, which is correct for "just enough terrain to
-    /// join into," not a bug to route around.
-    pub(crate) fn refresh_spawn_ticket(&self) -> bool {
-        self.tickets
-            .refresh_ticket(TicketOwner::Spawn, TicketKind::PlayerSpawn)
-    }
-
     /// Grants a persistent, simulating `FORCED` ticket at `pos` — vanilla's
     /// `/forceload`, `TicketLevel = ChunkLevel.byStatus(ENTITY_TICKING) = 31`.
     /// `id` distinguishes more than one forced region; the caller owns

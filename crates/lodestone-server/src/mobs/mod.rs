@@ -1693,13 +1693,6 @@ impl<'w> SimMob<'w> {
         self.mob.parent_position()
     }
 
-    /// The breeding-partner position [`MobSim::tick`] last fed this mob, which
-    /// is what `BreedGoal` pursues.
-    #[must_use]
-    pub fn partner_candidate(&self) -> Option<Vec3> {
-        self.mob.love_partner_position()
-    }
-
     /// Who owns this mob, if anyone. `None` for a wild (untamed) mob.
     #[must_use]
     pub fn owner(&self) -> Option<MobOwner> {
@@ -3465,16 +3458,6 @@ impl<'w> MobSim<'w> {
     /// between attempts is also asserting how many draws each mechanism makes.
     pub fn set_tame_rng(&mut self, rng: SpawnRng) -> &mut Self {
         self.tame_rng = rng;
-        self
-    }
-
-    /// Replaces the RNG [`spawn_species`](Self::spawn_species)'s equipment roll
-    /// draws from — the same injection point [`set_tame_rng`](Self::set_tame_rng)
-    /// exists for, and for the identical reason: predicting which armour tier
-    /// or weapon a spawn rolls needs a known first draw, not "it sometimes
-    /// happens".
-    pub fn set_equipment_rng(&mut self, rng: SpawnRng) -> &mut Self {
-        self.equipment_rng = rng;
         self
     }
 
@@ -9418,88 +9401,6 @@ pub const DEMO_SPECIES: &[&str] = &[
     "enderman",
     "snow_golem",
 ];
-
-/// Native tick-loop driver for issue #217: ticks the live [`MobSim`] behind
-/// `handle` once every [`MOB_TICK_INTERVAL`], forever, republishing snapshots
-/// to `out` after every tick.
-///
-/// # Superseded as of issue #284 — no longer what production spawns
-///
-/// [`crate::IntegratedServer::open_in_memory_with_mobs`] used to spawn this
-/// function directly, side-by-side with
-/// [`crate::block_entities::run_block_entity_tick_loop`]. As of #284 it spawns
-/// [`crate::tick::run_tick_loop`] instead, which ticks both the mob sim and
-/// every block entity from **one** loop body instrumented with MSPT/TPS/
-/// overrun accounting (issue #285) — see that module's own doc comment for
-/// why one loop replaced two. This function still exists, still does exactly
-/// what its doc says, and is still exercised by its own test below; it is
-/// simply no longer the production driver. Kept rather than deleted because
-/// its test is a real, direct regression gate on `MobSim::tick` +
-/// `LiveMobSource::publish` composing correctly in isolation from block
-/// entities.
-///
-/// # Issue #12 update: `handle` is now shared, not owned
-///
-/// This function used to build its own `ChunkWorld`/`MobSim` locally (borrowed
-/// for its own stack frame) — the reason a connection could never reach a
-/// live mob's health, per this module's own combat-census history. It now
-/// takes a pre-built [`MobHandle`] instead ([`MobHandle::seeded`] is the
-/// direct replacement for what this function used to do at its own top,
-/// including the `set_next_id(1000)`/[`seed_demo_mobs`] seeding), so the
-/// exact same [`MobSim`] this loop ticks is also the one
-/// `crate::server::apply_attack` mutates through a clone of the same handle.
-/// Ticking without a shared handle would still be a closed loop — the same
-/// "computed but never reaches the wire" island issue #217 originally closed
-/// for AI motion, this time for combat.
-///
-/// # Scope cuts, explicit, unchanged by the above
-///
-/// * The `ChunkWorld` snapshot [`MobHandle::seeded`] loads is **static** for
-///   the handle's whole lifetime — nothing re-queries the original
-///   `world_source` after the initial load, so a mob does not path across a
-///   chunk boundary outside the area it was seeded with. Widening this to
-///   grow with the player's view is future work; a fixed area around spawn is
-///   an honest, working scope cut rather than a silent limitation.
-/// * No natural spawning — see [`seed_demo_mobs`]'s own doc comment.
-/// * No despawn pass (`MobSim::despawn_pass` needs a player position this
-///   task has no way to learn; it is not plumbed through
-///   [`EntitySource`], which is deliberately read-only and one-directional).
-///   A long singleplayer session therefore keeps the same fixed demo
-///   population forever rather than vanilla's natural cap-driven churn — an
-///   explicit, documented cut, not an oversight.
-///
-/// Native only: uses `tokio::time::interval`, which (like
-/// `server.rs`'s `serve_play`/`KEEP_ALIVE_INTERVAL` family — see that
-/// module's own doc comment) is not available on `wasm32`. A `wasm32` session
-/// therefore gets no live mob sim yet, exactly the same kind of documented gap
-/// `PlayerVitals` already has on that target.
-#[cfg(not(target_arch = "wasm32"))]
-// No caller left outside this file's own `#[cfg(test)]` module since #284
-// (see the "Superseded" section above) — the lib target genuinely has none,
-// so plain `dead_code` would fire there even though the function is real and
-// still tested.
-#[allow(dead_code)]
-pub(crate) async fn run_mob_tick_loop(handle: MobHandle, out: LiveMobSource) {
-    // `snapshots()`, not `sim.iter().map(SimMob::snapshot)`: the latter only
-    // ever lowered mobs, so a projectile or dropped item registered on this
-    // `sim` (issues #211/#215) would tick correctly and still never reach
-    // `LiveMobSource` — ticking without publishing is still an island, just
-    // one hop further along.
-    out.publish(handle.with(|sim| sim.snapshots()));
-
-    // 50ms, matching vanilla's 20 TPS and this crate's own `VITALS_TICK_INTERVAL`
-    // (`server.rs`) — kept as a local constant rather than sharing that one
-    // because it is `server.rs`-private and the two are allowed to drift
-    // independently (mob AI has no reason to share a literal with drowning
-    // damage beyond both wanting "one vanilla tick").
-    const MOB_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
-    let mut tick = tokio::time::interval(MOB_TICK_INTERVAL);
-    loop {
-        tick.tick().await;
-        handle.with(MobSim::tick);
-        out.publish(handle.with(|sim| sim.snapshots()));
-    }
-}
 
 /// Issue #455's host half: the `follow_range` attribute reaching the controller
 /// that bounds target acquisition, and the miss case that made it wrong.

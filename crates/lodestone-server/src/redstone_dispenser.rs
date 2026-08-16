@@ -266,17 +266,6 @@ fn step(d: Direction) -> (f64, f64, f64) {
     }
 }
 
-/// `DefaultDispenseItemBehavior.execute`'s velocity/position math is owned by
-/// `crate::block_drops`'s item-entity constants where this crate already
-/// models one (see that module's own doc comment); this function is only the
-/// facing lookup [`dispense_position`] needs, kept here so `direction_to_str`
-/// round-trips through the same helper every other family in this crate uses.
-#[allow(dead_code)]
-#[must_use]
-pub fn facing_name(state: &str) -> &'static str {
-    direction_to_str(facing(state))
-}
-
 /// `RandomSource.triangle(mean, spread)` (`RandomSource.java:59-61`):
 /// `mean + spread * (next() - next())`. Two draws, always in this order —
 /// [`plain_toss`]'s own doc comment names why draw order matters here as much

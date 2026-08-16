@@ -136,18 +136,6 @@ impl<'w> MobSim<'w> {
         self.falling_blocks.len()
     }
 
-    /// The current position of a tracked falling block, if any — the entity-space
-    /// position (block centre in `x`/`z`), not a block position.
-    #[must_use]
-    pub fn falling_block_position(&self, id: i32) -> Option<Vec3> {
-        self.falling_blocks.get(&id).map(|f| f.motion.position)
-    }
-
-    /// The block state a tracked falling block is imitating, if any.
-    #[must_use]
-    pub fn falling_block_state(&self, id: i32) -> Option<&str> {
-        self.falling_blocks.get(&id).map(|f| f.state.as_str())
-    }
 }
 
 #[cfg(test)]

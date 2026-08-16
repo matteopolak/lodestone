@@ -381,13 +381,6 @@ impl<'w> MobSim<'w> {
         self.fishing_bobbers.iter().find(|(_, b)| b.owner == owner).map(|(&id, _)| id)
     }
 
-    /// A live bobber's current position, for a caller that needs to draw the
-    /// line or check distance without holding the sim's internals.
-    #[must_use]
-    pub fn fishing_bobber_position(&self, id: i32) -> Option<Vec3> {
-        self.fishing_bobbers.get(&id).map(|b| b.position)
-    }
-
     /// Every live bobber's [`crate::protocol::EntitySnapshot`], appended by
     /// [`MobSim::snapshots`]. No metadata: `DATA_HOOKED_ENTITY`/`DATA_BITING`
     /// need new `MetadataField` variants and an encoder arm in

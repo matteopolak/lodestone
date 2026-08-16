@@ -534,12 +534,11 @@ impl BlockTickFeed {
     /// #465). See the struct doc comment: outbound must be per-connection
     /// because it is drain-all, inbound must be shared because the tick loop
     /// is the only drainer.
-    // Deliberately unused in production today: its one intended caller is
-    // `IntegratedServer::bind`'s `LanSubscriber`, in `integrated.rs`, which is
-    // not this change's to edit. Kept (rather than deferred until that landing)
-    // so the LAN fix is genuinely one line, and exercised by
-    // `a_subscriber_shares_the_inbound_queue_and_splits_the_outbound_one`.
-    #[allow(dead_code)]
+    ///
+    /// Called from `IntegratedServer`'s `LanSubscriber` construction (both the
+    /// single-connection `publish`/`publish_with_config` path and the
+    /// multi-connection `open_to_lan` relay), and exercised directly by
+    /// `a_subscriber_shares_the_inbound_queue_and_splits_the_outbound_one`.
     pub(crate) fn subscriber(&self) -> Self {
         Self(Arc::default(), Arc::clone(&self.1), Arc::default())
     }

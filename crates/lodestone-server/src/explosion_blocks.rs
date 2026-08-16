@@ -106,8 +106,11 @@
 //!   wither/dragon special cases. A creeper is the only producer, so `true` is
 //!   exact here.
 //! * **Fire.** `ServerExplosion::createFire` runs only when the blast's own `fire`
-//!   flag is set, and a creeper's is `false`. See [`fire_positions`], which
-//!   implements it for whichever future producer sets it.
+//!   flag is set, and a creeper's is `false`. Not modelled: no producer here
+//!   ever sets that flag, and an untested, uncalled implementation of it was
+//!   removed rather than left as dead weight — reimplement against
+//!   `crate::random_tick::is_air_variant` and `block_solidity::legacy_solid`
+//!   (one in three, air-over-solid) the day a fire-flagged blast exists.
 //! * **Block entities.** A destroyed chest's contents are not spilled.
 //! * ~~**`wasExploded` (TNT chain reaction).**~~ Landed, but not in this
 //!   module: [`destroy_blocks`] here has no loot/drop knowledge at all (see
@@ -396,54 +399,6 @@ pub fn destroy_blocks<S: ChunkSource>(
         changes.push((pos, crate::chunk::AIR.to_owned()));
     }
     changes
-}
-
-/// `ServerExplosion::createFire` — which of `to_blow` a *fire-flagged* blast sets
-/// alight: one in three, where the cell is air and the cell below is solid.
-///
-/// Not reachable from a creeper (whose `fire` flag is `false`) and implemented
-/// anyway, because it is the natural producer for [`crate::fire`] the moment a
-/// ghast fireball or a bed-in-the-nether lands. Draws one value per candidate
-/// position, in the order given.
-///
-/// The support test is `legacy_solid` where vanilla reads `isSolidRender`. They
-/// differ on blocks that occlude without a full collision box (and vice versa);
-/// with no `isSolidRender` census in this crate, `legacy_solid` is the closest
-/// available fact and the disagreement can only place or withhold a fire on an
-/// unusual support, never affect an ordinary one.
-#[must_use]
-pub fn fire_positions<S: ChunkSource>(
-    world: &S,
-    env: BlastEnv,
-    to_blow: &[BlockPos],
-    rng: &mut SpawnRng,
-) -> Vec<BlockPos> {
-    let mut out = Vec::new();
-    for &pos in to_blow {
-        if rng.next_int(3) != 0 {
-            continue;
-        }
-        if !env.contains(pos) {
-            continue;
-        }
-        let here = world.block_state(pos.x, pos.y, pos.z);
-        if !crate::random_tick::is_air_variant(&here) {
-            continue;
-        }
-        let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
-        if !env.contains(below) {
-            continue;
-        }
-        let below_state = world.block_state(below.x, below.y, below.z);
-        let solid = block_states::state_id(&below_state)
-            .and_then(lodestone_data::block_solidity::legacy_solid)
-            .unwrap_or(false);
-        if !solid {
-            continue;
-        }
-        out.push(pos);
-    }
-    out
 }
 
 #[cfg(test)]

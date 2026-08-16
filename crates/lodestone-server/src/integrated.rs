@@ -3586,11 +3586,6 @@ impl IntegratedServer {
             .map(crate::ecs::ServerTickWitness::count)
     }
 
-    /// Signals the serving task to stop without awaiting it. Idempotent.
-    pub fn trigger_shutdown(&self) {
-        self.shutdown.trigger();
-    }
-
     /// Signals shutdown and awaits the serving task to completion.
     ///
     /// Prefer this over dropping when you want to be sure the task has wound

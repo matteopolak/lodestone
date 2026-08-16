@@ -425,10 +425,6 @@ impl WorldBorder {
         self.warning_time = warning_time;
     }
 
-    /// `WorldBorder.setAbsoluteMaxSize` (`WorldBorder.java:216-219`).
-    pub fn set_absolute_max_size(&mut self, absolute_max_size: i32) {
-        self.absolute_max_size = absolute_max_size;
-    }
 }
 
 /// A shared handle to a [`WorldBorder`] — the single memory both halves of the

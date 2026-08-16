@@ -196,27 +196,6 @@ pub struct RconConfig {
 }
 
 impl RconConfig {
-    /// A config on loopback at the default port: the integrated server's admin
-    /// console, not a dedicated box's. `loopback` rather than `0.0.0.0` is
-    /// deliberate — singleplayer's RCON should not be reachable from the LAN
-    /// unless someone explicitly widens `addr`.
-    #[must_use]
-    pub fn localhost(password: impl Into<String>, commands: CommandDispatch) -> Self {
-        Self {
-            addr: SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, DEFAULT_RCON_PORT)),
-            password: password.into(),
-            commands,
-            builtins: ServerCommands::new(),
-            world: crate::world_state::WorldStateHandle::default(),
-            players: None,
-            world_source: None,
-            block_ticks: None,
-            mobs: None,
-            border: None,
-            access: None,
-        }
-    }
-
     /// A config at an explicit address, with the built-in tree and an empty
     /// world/registry.
     ///

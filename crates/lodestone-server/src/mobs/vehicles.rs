@@ -43,12 +43,6 @@ impl<'w> MobSim<'w> {
         id
     }
 
-    /// The number of live vehicles.
-    #[must_use]
-    pub fn vehicle_count(&self) -> usize {
-        self.vehicles.len()
-    }
-
     /// The entity type of a tracked vehicle, if `id` is one.
     ///
     /// This is also the **"is this entity a vehicle"** test a right-click

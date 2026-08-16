@@ -787,13 +787,6 @@ impl NaturalSpawner {
         }
     }
 
-    /// Whether any player is loaded. Vanilla spawns nothing without one, and the
-    /// caller can skip the whole cycle rather than pay for the census.
-    #[must_use]
-    pub fn has_players(&self) -> bool {
-        !self.players.is_empty()
-    }
-
     /// Every species one biome's spawn list names for `category`, in declaration
     /// order.
     ///
