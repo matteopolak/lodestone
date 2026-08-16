@@ -2183,8 +2183,9 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             let cx = hit.pos.x.div_euclid(16);
             let cz = hit.pos.z.div_euclid(16);
             let mut column = world.column(cx, cz);
-            for event in crate::random_tick::propagate_and_react(
+            for event in crate::random_tick::propagate_and_react_with_entities(
                 &mut column, cx * 16, cz * 16, hit.pos.x, hit.pos.y, hit.pos.z, &mut block_ticks, game_tick,
+                Some(&block_entities),
             ) {
                 let (ex, ey, ez) = event.pos;
                 world.set_block(ex, ey, ez, &event.to);
@@ -2331,7 +2332,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     // arm in `react_to_notification` schedules rather than settles,
                     // so this cascades with vanilla's delay per layer instead of
                     // resolving the whole column in one tick.
-                    for event in crate::random_tick::propagate_and_react(
+                    for event in crate::random_tick::propagate_and_react_with_entities(
                         &mut column,
                         min_x,
                         min_z,
@@ -2340,6 +2341,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                         z,
                         &mut block_ticks,
                         game_tick,
+                        Some(&block_entities),
                     ) {
                         let (ex, ey, ez) = event.pos;
                         world.set_block(ex, ey, ez, &event.to);
@@ -2911,7 +2913,9 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     world.set_block(x, y, z, &new_state);
                     block_tick_out.publish(x, y, z, new_state);
                 }
-                for event in crate::random_tick::propagate_and_react(&mut column, min_x, min_z, x, y, z, &mut block_ticks, game_tick) {
+                for event in crate::random_tick::propagate_and_react_with_entities(
+                    &mut column, min_x, min_z, x, y, z, &mut block_ticks, game_tick, Some(&block_entities),
+                ) {
                     let (ex, ey, ez) = event.pos;
                     publish_openable_sound(&block_tick_out, BlockPos::new(ex, ey, ez), &event.from, &event.to, game_tick);
                     world.set_block(ex, ey, ez, &event.to);
@@ -3025,7 +3029,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 let cx = pos.x.div_euclid(16);
                 let cz = pos.z.div_euclid(16);
                 let mut column = world.column(cx, cz);
-                for event in crate::random_tick::propagate_and_react(
+                for event in crate::random_tick::propagate_and_react_with_entities(
                     &mut column,
                     cx * 16,
                     cz * 16,
@@ -3034,6 +3038,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     pos.z,
                     &mut block_ticks,
                     game_tick,
+                    Some(&block_entities),
                 ) {
                     let (ex, ey, ez) = event.pos;
                     world.set_block(ex, ey, ez, &event.to);
