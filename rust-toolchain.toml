@@ -28,7 +28,13 @@
 # Validated at this pin: `cargo build --release --workspace --all-targets` (292
 # crates, 0 errors, 0 ICEs) and `cargo bench -p lodestone-worldgen --no-run`.
 channel = "nightly-2026-08-07"
-components = ["rustfmt", "clippy"]
+# `rustc-codegen-cranelift-preview` is load-bearing, not optional: .cargo/config.toml
+# sets `profile.dev.codegen-backend = "cranelift"`, so without this component every
+# debug build fails outright rather than falling back to LLVM. Declared here for the
+# same reason `targets` is below — a pin installed with `--profile minimal` carries
+# only what it names, and the previously-floating `nightly` happened to already have
+# things this one does not.
+components = ["rustfmt", "clippy", "rustc-codegen-cranelift-preview"]
 # `targets` is load-bearing, not decoration. Pinning the channel above was done with
 # `rustup toolchain install --profile minimal`, which installs the host target only —
 # and the previously-floating `nightly` happened to already carry
