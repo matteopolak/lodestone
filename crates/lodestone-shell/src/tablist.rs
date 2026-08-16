@@ -639,7 +639,7 @@ mod tests {
                 players: Some(view),
                 ..HudFrame::new(&stats)
             };
-            hud.render(device, queue, frame.view(), &hud_frame, w, h);
+            hud.render(device, queue, frame.view(), frame.view(), &hud_frame, w, h);
             target.read_texels(device, queue)
         };
 
@@ -781,7 +781,7 @@ mod tests {
                 players,
                 ..HudFrame::new(&stats)
             };
-            hud.render(device, queue, frame.view(), &hud_frame, w, h);
+            hud.render(device, queue, frame.view(), frame.view(), &hud_frame, w, h);
             let pixels = target.read_texels(device, queue);
             count_changed(&pixels, w, h, w / 4, 0, w / 2, h / 4)
         };

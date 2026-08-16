@@ -217,7 +217,7 @@ fn hud_text_draws_vanilla_proportional_glyphs_with_a_drop_shadow() {
         };
         let acquired = target.acquire().expect("headless acquire");
         clear(device, queue, acquired.view());
-        hud.render(device, queue, acquired.view(), &frame, W, H);
+        hud.render(device, queue, acquired.view(), acquired.view(), &frame, W, H);
         target.read_texels(device, queue)
     };
 

@@ -281,11 +281,13 @@ fn a_block_item_in_the_hotbar_reaches_pixels() {
     // Render one frame with `hud` over a black backdrop and read it back.
     let mut shoot = |hud: &mut HudRenderer| -> Vec<u8> {
         let frame = target.acquire().expect("headless acquire");
+        let raw_view = frame.create_view(target.raw_view_format());
         clear_view(device, queue, frame.view(), [0, 0, 0]);
         hud.render_with_item_models(
             device,
             queue,
             frame.view(),
+            &raw_view,
             Some(render.depth_view()),
             &hud_frame,
             Some(models),

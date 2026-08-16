@@ -557,11 +557,13 @@ fn a_chest_item_in_the_hotbar_reaches_pixels() {
 
     let mut shoot = |hud: &mut HudRenderer| -> Vec<u8> {
         let frame = target.acquire().expect("headless acquire");
+        let raw_view = frame.create_view(target.raw_view_format());
         clear_view(device, queue, frame.view(), [0, 0, 0]);
         hud.render_with_item_models(
             device,
             queue,
             frame.view(),
+            &raw_view,
             Some(render.depth_view()),
             &hud_frame,
             Some(models),
@@ -860,11 +862,13 @@ fn a_player_head_item_in_the_hotbar_reaches_pixels() {
 
     let mut shoot = |hud: &mut HudRenderer| -> Vec<u8> {
         let frame = target.acquire().expect("headless acquire");
+        let raw_view = frame.create_view(target.raw_view_format());
         clear_view(device, queue, frame.view(), [0, 0, 0]);
         hud.render_with_item_models(
             device,
             queue,
             frame.view(),
+            &raw_view,
             Some(render.depth_view()),
             &hud_frame,
             Some(models),

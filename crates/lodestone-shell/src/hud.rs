@@ -5909,6 +5909,7 @@ impl HudRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         view: &wgpu::TextureView,
+        raw_view: &wgpu::TextureView,
         frame: &HudFrame,
         width: u32,
         height: u32,
@@ -5917,6 +5918,7 @@ impl HudRenderer {
             device,
             queue,
             view,
+            raw_view,
             None,
             frame,
             None,
@@ -5952,12 +5954,24 @@ impl HudRenderer {
     /// clip depth ~0.5. Nothing later in the frame reads depth, so clearing it
     /// here is free. Keeping it strictly between 1 and 3 is what leaves stack
     /// counts and durability bars on top of the icon rather than buried in it.
+    ///
+    /// `raw_view` is a second view of the *same* backing texture as `view`,
+    /// reinterpreted at [`lodestone_render::target::RenderTarget::raw_view_format`]
+    /// — the non-colour-managed sibling of `view`'s (sRGB) format. Only the
+    /// flat-colour pass (text, stack counts, durability bars — `self.pipeline`,
+    /// built at [`Self::new`] against that same raw format) draws into it;
+    /// vanilla's own 2-D GUI blending is not colour-managed at all, and this is
+    /// what makes our blend match it byte-for-byte instead of composited in
+    /// linear space. Every other pass here (sprites, glint, 3-D item models)
+    /// keeps using `view`, since those pipelines were built against `view`'s
+    /// own (sRGB) format.
     #[allow(clippy::too_many_arguments)]
     pub fn render_with_item_models(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         view: &wgpu::TextureView,
+        raw_view: &wgpu::TextureView,
         depth: Option<&wgpu::TextureView>,
         frame: &HudFrame,
         models: Option<&BlockModels>,
@@ -6122,7 +6136,7 @@ impl HudRenderer {
         if colour_count > 0 {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hud-colour-pass"),
-                color_attachments: &[Some(item_icon::load_colour_attachment(view))],
+                color_attachments: &[Some(item_icon::load_colour_attachment(raw_view))],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
@@ -6187,12 +6201,19 @@ impl HudRenderer {
     /// thing deciding z. Collapsing these four passes back into fewer, or
     /// drawing all of `verts` in pass 1, reproduces the bug — see
     /// [`crate::container::RecipeBookPanelGeometry::chrome_vertex_count`].
+    ///
+    /// `raw_view` is the same non-colour-managed reinterpretation
+    /// [`Self::render_with_item_models`] takes — see that method's doc. Every
+    /// pass here that draws `self.pipeline` (the flat-colour chrome fallback
+    /// and the count-digit/durability overlay) uses it instead of `view`; the
+    /// sprite/model passes are unaffected and keep `view`.
     #[allow(clippy::too_many_arguments)]
     pub fn render_recipe_book_panel(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         view: &wgpu::TextureView,
+        raw_view: &wgpu::TextureView,
         depth: Option<&wgpu::TextureView>,
         geo: &crate::container::RecipeBookPanelGeometry,
         gui_scale: u32,
@@ -6344,7 +6365,7 @@ impl HudRenderer {
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hud-recipe-panel-colour-pass"),
-                color_attachments: &[Some(item_icon::load_colour_attachment(view))],
+                color_attachments: &[Some(item_icon::load_colour_attachment(raw_view))],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
@@ -6385,10 +6406,16 @@ impl HudRenderer {
         );
         // Passes 3 and 4: flat sprites, then the icon-overlay colour range —
         // count digits and durability bars — which must land over *both* kinds
-        // of icon. Sharing one pass matches
-        // `ContainerRenderer::render_with_icons_scaled`'s own
-        // `container-item-pass`.
-        if item_count > 0 || colour_count > chrome_count {
+        // of icon. Order matches `ContainerRenderer::render_with_icons_scaled`'s
+        // own `container-item-pass`, but the two now run as **separate** render
+        // passes rather than one shared pass: pass 3's icon-sprite pipeline is
+        // still built against `view`'s (sRGB) format, while pass 4's
+        // `self.pipeline` is built against `raw_view`'s — and a `wgpu` pass's
+        // colour attachment format is fixed for every pipeline drawn into it, so
+        // mixing the two in one pass no longer validates. Both passes `Load`
+        // the same underlying texture (see `item_icon::load_colour_attachment`),
+        // so splitting them changes nothing about what lands on screen.
+        if item_count > 0 {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hud-recipe-panel-sprite-pass"),
                 color_attachments: &[Some(item_icon::load_colour_attachment(view))],
@@ -6398,13 +6425,21 @@ impl HudRenderer {
                 multiview_mask: None,
             });
             self.icons.draw_sprites(&mut pass, item_count);
-            if colour_count > chrome_count
-                && let Some(buffer) = &self.recipe_panel_buffer
-            {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(chrome_count..colour_count, 0..1);
-            }
+        }
+        if colour_count > chrome_count
+            && let Some(buffer) = &self.recipe_panel_buffer
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hud-recipe-panel-count-pass"),
+                color_attachments: &[Some(item_icon::load_colour_attachment(raw_view))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(chrome_count..colour_count, 0..1);
         }
         queue.submit(std::iter::once(encoder.finish()));
     }
@@ -9249,7 +9284,7 @@ mod tests {
                 chat,
                 ..HudFrame::new(&stats)
             };
-            hud.render(device, queue, frame.view(), &hud_frame, w, h);
+            hud.render(device, queue, frame.view(), frame.view(), &hud_frame, w, h);
             let pixels = target.read_texels(device, queue);
             let (mut bright, mut dark) = (0usize, 0usize);
             for y in y_min..h {
@@ -9353,7 +9388,7 @@ mod tests {
                 xp,
                 ..HudFrame::new(&stats)
             };
-            hud.render(device, queue, frame.view(), &hud_frame, w, h);
+            hud.render(device, queue, frame.view(), frame.view(), &hud_frame, w, h);
             let pixels = target.read_texels(device, queue);
             let mut green = 0usize;
             for y in y0..h {
@@ -9465,7 +9500,7 @@ mod tests {
                 boss_bars: if progress.is_some() { &bars } else { &[] },
                 ..HudFrame::new(&stats)
             };
-            hud.render(device, queue, frame.view(), &hud_frame, w, h);
+            hud.render(device, queue, frame.view(), frame.view(), &hud_frame, w, h);
             target.read_texels(device, queue)
         };
 
@@ -9651,7 +9686,7 @@ mod tests {
                 food: None,
                 ..HudFrame::new(&stats)
             };
-            hud.render(device, queue, frame.view(), &hud_frame, w, h);
+            hud.render(device, queue, frame.view(), frame.view(), &hud_frame, w, h);
             let pixels = target.read_texels(device, queue);
             let (mut min_x, mut max_x, mut min_y, mut max_y) = (u32::MAX, 0u32, u32::MAX, 0u32);
             let mut found = false;
@@ -9816,7 +9851,7 @@ mod tests {
                 action_bar,
                 ..HudFrame::new(&stats)
             };
-            hud.render(device, queue, frame.view(), &hud_frame, w, h);
+            hud.render(device, queue, frame.view(), frame.view(), &hud_frame, w, h);
             let pixels = target.read_texels(device, queue);
             (
                 bright_in(&pixels, title_y0, title_y1),
@@ -9960,7 +9995,7 @@ mod tests {
         let mut score = |hud: &mut HudRenderer, tag: &str| -> (usize, usize) {
             let frame = target.acquire().expect("headless acquire");
             clear_view(device, queue, frame.view(), BG);
-            hud.render(device, queue, frame.view(), &hud_frame, w, h);
+            hud.render(device, queue, frame.view(), frame.view(), &hud_frame, w, h);
             let pixels = target.read_texels(device, queue);
             const TOL: i32 = 24;
             let (mut opaque, mut matched) = (0usize, 0usize);

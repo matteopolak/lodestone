@@ -208,7 +208,7 @@ fn render_tab_bright_pixels(
         players: Some(view),
         ..HudFrame::new(stats)
     };
-    hud.render(device, queue, frame.view(), &hud_frame, w, h);
+    hud.render(device, queue, frame.view(), frame.view(), &hud_frame, w, h);
     let pixels = target.read_texels(device, queue);
     count_bright(&pixels, w, w / 4, h / 4, w / 2, h / 2)
 }
@@ -231,7 +231,7 @@ fn render_sidebar_changed_pixels(
         sidebar: side,
         ..HudFrame::new(stats)
     };
-    hud.render(device, queue, frame.view(), &hud_frame, w, h);
+    hud.render(device, queue, frame.view(), frame.view(), &hud_frame, w, h);
     let pixels = target.read_texels(device, queue);
     count_changed(&pixels, w, w * 2 / 3, h / 4, w / 3, h / 2)
 }
