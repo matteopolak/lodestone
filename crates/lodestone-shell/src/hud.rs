@@ -5578,6 +5578,43 @@ impl HudRenderer {
         suggestion_layout(w, h, pose, popup, |s| measure_text(font, s, pose))
     }
 
+    /// [`chat_interaction_at`]'s own renderer-side wrapper, matching
+    /// [`Self::suggestion_layout`]'s relationship to the free
+    /// [`suggestion_layout`] function: this is the only place that knows
+    /// which font is attached, so it is the only place that can build the
+    /// `measure` closure the free function needs.
+    ///
+    /// **Approximates real per-run width with the concatenated plain text.**
+    /// A `TextSpan`'s bold flag widens each of its glyphs by one pixel
+    /// (`Font::advance_bold`); folding every run's text together before
+    /// measuring loses that per-run distinction, so a hit-test boundary next
+    /// to a bold/non-bold seam can be off by a glyph or two. Acceptable for a
+    /// pointer hit-test (nothing here needs sub-pixel precision the way a
+    /// layout gate does); worth revisiting with a real per-span measure if
+    /// that ever proves visible.
+    #[must_use]
+    pub fn chat_interaction_at(
+        &self,
+        framebuffer_width: u32,
+        framebuffer_height: u32,
+        gui_scale: u32,
+        opts: ChatDisplayOptions,
+        chat_open: bool,
+        entries: &[(Vec<lodestone_game::text::InteractiveSpan>, f32)],
+        cursor: (f32, f32),
+    ) -> Option<lodestone_game::text::InteractiveSpan> {
+        let (cw, ch) =
+            crate::menu::render::logical_canvas(gui_scale, framebuffer_width, framebuffer_height);
+        let (cx, cy) = Self::canvas_cursor(framebuffer_width, framebuffer_height, gui_scale, cursor);
+        let pose = chat_pose_scale(opts);
+        let font = self.font.as_deref();
+        let measure = |spans: &[TextSpan]| -> f32 {
+            let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+            measure_text(font, &joined, pose)
+        };
+        chat_interaction_at(entries, cw, ch, opts, chat_open, measure, cx, cy)
+    }
+
     /// A physical-pixel cursor position in the logical-canvas pixels
     /// [`Self::suggestion_layout`] returns its rect in — the framebuffer divided
     /// by the effective integer GUI scale, vanilla's `guiScaled*`.

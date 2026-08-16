@@ -209,11 +209,18 @@ impl ApplicationHandler for WindowApp {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } if self.ui.is_chat_open() => {
-                if state == ElementState::Pressed
-                    && button == MouseButton::Left
-                    && let Some(row) = self.suggestion_row_under_cursor()
-                {
-                    self.chat_input.suggestion_click(row);
+                if state == ElementState::Pressed && button == MouseButton::Left {
+                    if let Some(row) = self.suggestion_row_under_cursor() {
+                        // The suggestion popup gets first refusal, matching
+                        // `CommandSuggestions.mouseClicked`'s own precedence
+                        // over the scrollback beneath it.
+                        self.chat_input.suggestion_click(row);
+                    } else {
+                        // A click on a scrollback line's own click_event —
+                        // see `dispatch_chat_click_under_cursor`'s doc for
+                        // which actions run immediately and which do not.
+                        self.dispatch_chat_click_under_cursor();
+                    }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } if self.ui.is_chat_open() => {
