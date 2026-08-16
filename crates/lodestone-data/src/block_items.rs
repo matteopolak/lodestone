@@ -104,13 +104,6 @@ pub fn block_placed_by(item: &str) -> Option<Block> {
     block_for_item_id(crate::items::item_id(item)?)
 }
 
-/// Whether `item` places a block at all — [`block_for_item`] reduced to a
-/// predicate, for callers that only need the yes/no.
-#[must_use]
-pub fn is_block_item(item: &str) -> bool {
-    block_for_item(item).is_some()
-}
-
 /// The **inverse** of [`block_for_item_id`]: the item that picking `block`
 /// yields — vanilla's `Block.asItem()` (`Item.byBlock(this)`), which is what
 /// `BlockBehaviour.getCloneItemStack`'s default `new ItemStack(this.asItem())`

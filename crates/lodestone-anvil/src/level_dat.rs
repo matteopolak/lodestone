@@ -453,24 +453,6 @@ impl LevelDat {
         self.set_data_field(LAST_PLAYED_FIELD, Nbt::Long(at_millis))
     }
 
-    /// Replaces `GameType`.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::MissingDataCompound`] if the root has no `"Data"` compound.
-    pub fn set_game_type(&mut self, game_type: i32) -> Result<()> {
-        self.set_data_field(GAME_TYPE_FIELD, Nbt::Int(game_type))
-    }
-
-    /// Replaces `LevelName`.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::MissingDataCompound`] if the root has no `"Data"` compound.
-    pub fn set_level_name(&mut self, name: &str) -> Result<()> {
-        self.set_data_field(LEVEL_NAME_FIELD, Nbt::String(name.to_string()))
-    }
-
     /// Sets (or inserts) one field of the `"Data"` compound **in place**,
     /// leaving field order and every other entry untouched.
     ///
