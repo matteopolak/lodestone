@@ -157,25 +157,33 @@ const CLIENT_BRAND: &str = "vanilla";
 
 /// The environment variable that opts a session in to secure (signed) chat.
 ///
-/// **Off by default, and this is a mitigation rather than a preference.** A
-/// real server kicked the repo owner with a chat-validation failure the first
-/// time this client signed for real: an unsigned message a server merely marks
-/// unverified is strictly better than a signed one it rejects with a
-/// disconnect, so the whole path — key fetch, session announcement, and
-/// per-message signing — stays dormant unless a caller deliberately turns it
-/// on to work on it. Set to `1`/`true` to enable.
+/// **On by default; set to `0`/`false` to opt out.**
+///
+/// This was an opt-*in* for most of its life, and the reason is worth keeping:
+/// a real server once kicked the owner with a chat-validation failure the first
+/// time this client signed for real, and an unsigned message a server merely
+/// marks unverified is strictly better than a signed one it rejects with a
+/// disconnect. That kick was traced to the last-seen acknowledgement window
+/// advancing on *unsigned* echoes, which is fixed — only signed `PLAYER_CHAT`
+/// echoes advance it now, matching vanilla's own null-check.
+///
+/// The escape hatch stays because the failure mode is a disconnect rather than
+/// a degraded message: a server whose enforcement we mismatch is unplayable
+/// until someone can turn signing off from the outside.
 #[cfg(not(target_arch = "wasm32"))]
 pub const SECURE_CHAT_ENV: &str = "LODESTONE_SECURE_CHAT";
 
-/// Whether this process opts in to signing chat — see [`SECURE_CHAT_ENV`].
+/// Whether this process signs chat — see [`SECURE_CHAT_ENV`].
 ///
 /// Read at every call site rather than cached in a `OnceLock` so a test can
 /// set and clear it around one case without poisoning the rest of the binary.
+/// **An unset or unparseable value means enabled**, so a typo in the variable
+/// degrades to the default rather than silently disabling signing.
 #[cfg(not(target_arch = "wasm32"))]
 fn secure_chat_enabled() -> bool {
-    matches!(
+    !matches!(
         std::env::var(SECURE_CHAT_ENV).as_deref(),
-        Ok("1" | "true" | "TRUE" | "yes")
+        Ok("0" | "false" | "FALSE" | "no")
     )
 }
 
@@ -1408,7 +1416,7 @@ impl<T: Transport> Driver<T> {
     /// session (offline play, the key fetch hasn't completed, or it failed),
     /// passes through unchanged, so unsigned chat keeps working exactly as
     /// it did before this existed. `chat_session` is only ever populated
-    /// behind [`secure_chat_enabled`], so with the opt-in unset this is the
+    /// behind [`secure_chat_enabled`], so with signing opted *out* this is the
     /// identity function and every message goes out unsigned. The signing itself is
     /// [`sign_chat_action`], a free function so it is unit-testable without a
     /// live `Connection` — see this module's `tests`.
