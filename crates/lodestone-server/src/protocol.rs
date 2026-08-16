@@ -502,6 +502,23 @@ pub enum MetadataField {
     /// own doc) — a real field, pushed unconditionally, whose value simply
     /// never varies yet.
     CrystalShowBottom(bool),
+    /// `WitherBoss.DATA_ID_INV` — the invulnerable "emerging" countdown
+    /// (`crate::wither::INVULNERABLE_TICKS` down to `0`) that drives the
+    /// client-side shield visual while a freshly-summoned wither is still
+    /// rising out of the ground.
+    ///
+    /// **Index 19, one of six `INT` claimants** in the committed jar dump
+    /// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`):
+    /// `Dolphin.MOISTNESS_LEVEL`, `Horse.DATA_ID_TYPE_VARIANT`,
+    /// `Panda.SNEEZE_COUNTER`, `Sniffer.DATA_DROP_SEED_AT_TICK`,
+    /// `SulfurCube.MAX_FUSE`, `WitherBoss.DATA_ID_INV` (index 19 also carries
+    /// several non-`INT` claimants such as `ArmorStand.DATA_RIGHT_ARM_POSE`
+    /// and `TamableAnimal.DATA_OWNERUUID_ID`, which a different serializer
+    /// already separates). The serializer alone cannot separate one `INT`
+    /// claimant from another, so only the producer disambiguates, exactly as
+    /// [`DragonPhase`](Self::DragonPhase) documents for its own index; never
+    /// push this variant for anything but a `minecraft:wither`.
+    WitherInvulnerableTicks(i32),
 }
 
 /// One generated trade offer, ready for the wire (issue #245) —
@@ -2782,9 +2799,12 @@ pub trait ServerProtocol: Send + Sync {
     /// `minecraft:*` key. `ambient`/`visible`/`show_icon` are vanilla's own
     /// three independent flags (a beacon/conduit application sets `ambient`
     /// and both display flags; `/effect give … true` sets neither display
-    /// flag); `blend` is the fourth wire flag, vanilla's own darkened-screen
-    /// hint for a small set of effects (nausea/darkness) — `false` for
-    /// everything else. The default emits nothing.
+    /// flag). `blend` is **not** an effect-type hint (nausea/darkness have no
+    /// special case in `ClientboundUpdateMobEffectPacket` itself) — it is the
+    /// call site: `ServerPlayer.onEffectAdded` (a genuinely new instance)
+    /// passes `true`, `onEffectUpdated` (an existing instance refreshed —
+    /// same or higher amplifier, longer duration) passes `false`. The
+    /// default emits nothing.
     #[allow(clippy::too_many_arguments)]
     fn encode_update_mob_effect(
         &self,

@@ -5679,14 +5679,56 @@ where
             // stacking rule (including the hidden-effect chain), so a second
             // application of the same effect behaves correctly rather than
             // overwriting.
-            effects.apply(&effect, duration, amplifier);
+            //
+            // Read the "already present" fact *before* calling `apply` — that is
+            // exactly the distinction `ServerPlayer.onEffectAdded` (a brand-new
+            // instance) vs. `onEffectUpdated` (an existing one refreshed) makes,
+            // and it is what the encoded packet's `blend` flag carries (see
+            // `ServerProtocol::encode_update_mob_effect`'s own doc). Without this
+            // arm, `/effect give` changed real server state — movement speed,
+            // damage taken, hunger drain — with zero client feedback: no icon, no
+            // particles, no screen tint.
+            let already_present = effects.get(&effect).is_some();
+            if effects.apply(&effect, duration, amplifier)
+                && let Some(instance) = effects.get(&effect)
+            {
+                apply(
+                    conn,
+                    state,
+                    proto.encode_update_mob_effect(
+                        player_entity_id,
+                        &effect,
+                        instance.amplifier(),
+                        instance.duration(),
+                        false,
+                        true,
+                        true,
+                        !already_present,
+                    ),
+                )
+                .await?;
+            }
         }
         crate::commands::Effect::ClearEffects { effect } => {
+            // The counterpart to `ApplyEffect` above — `LivingEntity
+            // .removeEffectNoUpdate` (single) / `onEffectsRemoved` (all) each
+            // send `ClientboundRemoveMobEffectPacket` per cleared effect, so
+            // `/effect clear` must tell the client which icons to drop rather
+            // than leaving them stuck on screen.
             match effect {
                 Some(id) => {
-                    effects.remove(&id);
+                    if effects.remove(&id) {
+                        apply(conn, state, proto.encode_remove_mob_effect(player_entity_id, &id)).await?;
+                    }
                 }
-                None => effects.clear(),
+                None => {
+                    let cleared: Vec<String> =
+                        effects.active().into_iter().map(|(id, _)| id.to_owned()).collect();
+                    effects.clear();
+                    for id in cleared {
+                        apply(conn, state, proto.encode_remove_mob_effect(player_entity_id, &id)).await?;
+                    }
+                }
             }
         }
         crate::commands::Effect::Message(line) => {
@@ -7188,6 +7230,29 @@ where
             {
                 let construction = mobs.with(|sim| {
                     sim.try_construct_golem(
+                        &|x, y, z| source.block_state(x, y, z).to_owned(),
+                        (target.x, target.y, target.z),
+                    )
+                });
+                if let Some(construction) = construction {
+                    for cell in &construction.consumed {
+                        source.set_block(cell.x, cell.y, cell.z, "minecraft:air");
+                        changed.push((*cell, "minecraft:air".to_string()));
+                    }
+                }
+            }
+            // A placed wither skeleton skull (or wall skull) may complete the
+            // soul-sand-and-skull pattern — vanilla `WitherSkullBlock
+            // .setPlacedBy` → `checkSpawn`. Same shape as the golem trigger
+            // above: `MobSim::try_construct_wither` is a pure detection query
+            // with no block-write authority of its own (see its own doc
+            // comment), so this is the caller that owns clearing the
+            // consumed pattern cells to air.
+            if block_name == "minecraft:wither_skeleton_skull"
+                || block_name == "minecraft:wither_skeleton_wall_skull"
+            {
+                let construction = mobs.with(|sim| {
+                    sim.try_construct_wither(
                         &|x, y, z| source.block_state(x, y, z).to_owned(),
                         (target.x, target.y, target.z),
                     )
@@ -9162,6 +9227,11 @@ fn apply_use_item(
     hand: u8,
     yaw: f32,
     pitch: f32,
+    // `FishingRodItem.use`'s cast/retrieve dispatch needs the caster's own
+    // entity id, both to own the bobber (`MobSim::cast_fishing_bobber`'s
+    // `owner`) and to find it again on the next click
+    // (`MobSim::player_active_bobber`).
+    player_entity_id: i32,
 ) -> UseItemOutcome {
     let native = if hand == 1 {
         crate::inventory::OFFHAND_NATIVE
@@ -9225,6 +9295,42 @@ fn apply_use_item(
                 UseItemOutcome::Nothing
             }
         };
+    }
+
+    // `FishingRodItem.use`: overrides `Item.use` entirely, exactly like the
+    // launch-intent items above, so it sits ahead of the `Consumable`/
+    // `Equippable` arms rather than as one of them. A rod already carrying a
+    // live bobber reels it in; otherwise it casts a fresh one.
+    if path == "fishing_rod" {
+        let Some((x, y, z)) = player_pos else {
+            return UseItemOutcome::Nothing;
+        };
+        if let Some(bobber_id) = mobs.with(|sim| sim.player_active_bobber(player_entity_id)) {
+            // `FishingRodItem.use`'s "already fishing" arm — reel it in.
+            // `FishingRetrieve::rod_damage` is vanilla's own `hurtAndBreak`
+            // tier for the rod; this crate models no item durability at all
+            // (see the flint-and-steel precedent in `apply_use_item_on`, whose
+            // own comment discloses the same gap), so the catch itself lands
+            // for real — loot spawned, xp awarded — and only the durability
+            // half is the disclosed no-op.
+            mobs.with(|sim| sim.retrieve_fishing_bobber(bobber_id, Vec3::new(x, y, z), 0));
+        } else {
+            // `FishingRodItem.use`'s cast arm. `luck`/`lure_speed` are `0, 0`
+            // — no enchantment model reaches this call site yet (see
+            // `MobSim::cast_fishing_bobber`'s own doc).
+            mobs.with(|sim| {
+                sim.cast_fishing_bobber(
+                    player_entity_id,
+                    Vec3::new(x, y, z),
+                    y + EYE_HEIGHT,
+                    yaw,
+                    pitch,
+                    0,
+                    0,
+                )
+            });
+        }
+        return UseItemOutcome::Nothing;
     }
 
     // Arm 1: `DataComponents.CONSUMABLE` → `Consumable.startConsuming`, whose
@@ -11031,6 +11137,7 @@ where
                 hand,
                 yaw,
                 pitch,
+                player_entity_id,
             );
             // Both slots are overwritten rather than merged, whatever the outcome:
             // a fresh `USE_ITEM` restarts the charge, and a `USE_ITEM` for
