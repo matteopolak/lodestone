@@ -404,8 +404,58 @@ currently missing). That is the recommended #548: **less graph, more floor.**
 
 ## 9. Open questions that need running code or the oracle
 
-- The actual cost split (parse vs. read vs. enumerate vs. queue) — U1's first deliverable;
-  everything conditional in this plan keys off it.
+- ~~The actual cost split (parse vs. read vs. enumerate vs. queue)~~ — **answered, partially.**
+  U1's counters (`redstone_counters.rs`) were already landed by an earlier session; this pass
+  used them for the first time against a "large" fixture rather than the single-cell one —
+  `measured_cost_split_for_a_fifteen_cell_dust_run`, a 15-long dust run lit from one end
+  (`MAX_PUSH_DEPTH`-scale, chosen as the largest single number this family already names, until
+  U6's real contraption corpus exists). Isolated reading (see the concurrency caveat below):
+  `notifications_issued=659, cell_reads=3038, reactions_total=155, signal_queries=152,
+  wire_recomputes=152, state_parses=0, schedules_requested=0, schedules_deduped=0` — i.e.
+  **4.61 cell reads per notification**, matching §1.2's "six neighbours plus per-conductor reads"
+  hypothesis in shape (a small constant, not growing with run length), and **zero
+  `state_parses`**, which is a genuine surprise the hypothesis did not predict: `own_signal` (the
+  hook point) is apparently not on the hot path a dust settle actually takes for this fixture,
+  which is worth a follow-up before trusting Layer A's sizing without also checking *which*
+  parse site would shrink. This is deliberately **not a gate** (see the test's own doc comment):
+  the single-cell test above it already shows the naive prediction at this scale is exactly
+  `CLAUDE.md`'s "do not predict the round number" trap (a first attempt predicted
+  `wire_recomputes == 15` and measured 145 for the *one-cell* case, because one settle's own
+  7-centre fan-out compounds at every step a longer run advances), so this records real numbers
+  and asserts only invariants that hold regardless of the exact compounding.
+
+  **The counters are process-global and the isolation guard does not cover the whole binary.**
+  Running this measurement under `--test-threads=2` alongside an unrelated test in a *different*
+  module (`random_tick::tests`, which also calls `propagate_and_react` and therefore also bumps
+  `notifications_issued`/`cell_reads` through the same static atomics) produced `659`, `667` and
+  `674` across three runs — genuine contamination, not flakiness in the redstone logic: rerunning
+  the identical fixture alone (`--test-threads=1`, or filtered to just this one test) reproduces
+  `659`/`3038` exactly every time. `redstone_counters.rs`'s own `TEST_LOCK` only serialises tests
+  *within its own module* against each other; it does not (and structurally cannot, being
+  module-private) protect against any other test module in the crate that also drives
+  `propagate_and_react` while the `redstone-counters` feature is on. This is the same species of
+  hazard `CLAUDE.md` already names for `docs/README.md` drift and the docs-index gate — a guard
+  that covers less than its own name suggests — and it means **any future counters-based
+  measurement must be run either alone or with `--test-threads=1`**, or the reading is a
+  hypothesis about contamination, not about redstone. Not mechanically fixed here (it would mean
+  either widening the lock crate-wide or moving every counter-touching test under one module),
+  but recorded so the next reading is not silently wrong the same way. §6's other counters
+  (`wire_recomputes`, `signal_queries`, `reactions_total`, `schedules_*`) were **not** affected in
+  this instance only because the contaminating test (a piston fixture) never touches the dust/
+  torch/repeater/comparator/observer hook points — a coincidence of *which* test happened to run
+  concurrently, not a property of the guard.
+
+  **`TickClock` (`tick.rs`, issue #548's other named instrument) was checked and found
+  unusable for this without editing off-limits files.** Its `ScheduledAndPhysics` phase bucket
+  sits outside `scheduled.with`'s closure by construction (see its own doc), so it times fire,
+  fluid, random ticks, falling blocks, vehicles, TNT, minecarts and dragons in the same bucket as
+  redstone — not attributable to redstone specifically in a real server. More immediately: there
+  is **no query path** exposed anywhere outside `tick.rs` itself (`phase_stats`/
+  `worst_phase_window` have zero call sites in the rest of the crate), so reading it from a live
+  server would mean wiring a new RCON/console command through `server.rs`/`commands/`, both
+  off-limits to this pass. The U1 counters above were the reachable instrument and are also the
+  more precise one (structural counts, not coarse wall-clock time sharing a bucket with five other
+  systems) — consistent with §6's own preference for counters over durations.
 - Vanilla's exact behaviour when a neighbour update crosses into an unloaded chunk (drop?
   defer?) — read `CollectingNeighborUpdater`/chunk-ticket sources, then gate at a real border
   with the live oracle before freezing Layer C's border semantics.
