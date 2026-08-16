@@ -3995,6 +3995,7 @@ where
             | ServerBound::SetCommandBlock { .. }
             | ServerBound::SignUpdate { .. }
             | ServerBound::EditBook { .. }
+            | ServerBound::SetBeacon { .. }
             | ServerBound::PickItemFromBlock { .. }
             | ServerBound::PickItemFromEntity { .. }
             | ServerBound::TeleportToEntity { .. }
@@ -4176,6 +4177,7 @@ fn container_title(menu: &str) -> &'static str {
         "minecraft:smithing" => "Smithing Table",
         "minecraft:enchantment" => "Enchant",
         "minecraft:merchant" => "Villager",
+        "minecraft:beacon" => "Beacon",
         _ => "Container",
     }
 }
@@ -4295,8 +4297,17 @@ where
     let mut opened = OpenContainer {
         window_id,
         pos,
-        shape: MenuKind::Container {
-            size: own_slots.len(),
+        // Every menu this function opens is a plain `generic_*` container
+        // shape *except* the beacon, whose one payment slot has its own
+        // restricted `may_place`/`max_stack_size` (`MenuKind::Beacon`'s own
+        // doc) — everything else here keyed on the block entity's own
+        // `menu_name()`, matching this function's one caller.
+        shape: if menu == "minecraft:beacon" {
+            MenuKind::Beacon
+        } else {
+            MenuKind::Container {
+                size: own_slots.len(),
+            }
         },
         container_size: own_slots.len(),
         state_id: 0,
@@ -6449,6 +6460,15 @@ where
         }
     }
 
+    // A beacon's pyramid tier is recomputed fresh from the world on every
+    // open — see `BeaconData::levels`'s own doc for why nothing refreshes it
+    // in the background instead.
+    block_entities.with(|reg| {
+        if let Some(BlockEntity::Beacon(beacon)) = reg.get_mut(pos) {
+            beacon.levels = crate::beacon::beacon_levels(source, pos.x, pos.y, pos.z);
+        }
+    });
+
     let existing_menu = block_entities.with(|reg| reg.get(pos).and_then(BlockEntity::menu_name));
     if let Some(menu) = existing_menu {
         return open_container_screen(
@@ -8572,6 +8592,82 @@ fn apply_edit_book(
     Some((native, item))
 }
 
+/// [`ServerBound::SetBeacon`]'s consumer — `BeaconMenu.updateEffects`,
+/// reached the same way `handleSetBeaconPacket` gates it: only while a
+/// beacon is currently open (vanilla's own `containerMenu instanceof
+/// BeaconMenu` check).
+///
+/// `levels` is **not** re-derived here — `BeaconMenu.getLevels()` reads the
+/// block entity's own tracked field, last refreshed when the menu opened
+/// (see `BeaconData::levels`'s own doc), the same snapshot vanilla's real
+/// `ContainerData` would hold between its own 80-tick background
+/// recomputes.
+///
+/// Returns the directives to resend (the refreshed payment slot, then all
+/// three data values) once the submission actually changed something, or
+/// `Vec::new()` for a refused one — no payment item, or
+/// `crate::beacon::validate_beacon_effects` refuses the pair. Vanilla
+/// disconnects the client on a refusal (`handleSetBeaconPacket`'s own
+/// `this.disconnect(...)`); this crate instead treats it as a malformed
+/// packet whose effect is dropped rather than the connection, the same
+/// convention `PlayerInventory::set_selected_hotbar_slot`'s own doc already
+/// states for an out-of-range packet field.
+fn apply_set_beacon<P: ServerProtocol>(
+    proto: &P,
+    block_entities: &BlockEntityHandle,
+    tracked: Option<&mut OpenContainer>,
+    primary: Option<String>,
+    secondary: Option<String>,
+) -> Vec<ServerDirective> {
+    let Some(tracked) = tracked else { return Vec::new() };
+    if tracked.shape != MenuKind::Beacon {
+        return Vec::new();
+    }
+    let pos = tracked.pos;
+    let updated = block_entities.with(|reg| {
+        let Some(BlockEntity::Beacon(beacon)) = reg.get_mut(pos) else {
+            return None;
+        };
+        beacon.payment.as_ref()?;
+        if !crate::beacon::validate_beacon_effects(primary.as_deref(), secondary.as_deref(), beacon.levels) {
+            return None;
+        }
+        beacon.primary_effect = primary;
+        beacon.secondary_effect = secondary;
+        // `paymentSlot.remove(1)`.
+        let consumed_all = beacon.payment.as_ref().is_some_and(|item| item.count <= 1);
+        if consumed_all {
+            beacon.payment = None;
+        } else if let Some(payment) = &mut beacon.payment {
+            payment.count -= 1;
+        }
+        Some((
+            beacon.levels,
+            beacon.primary_effect.clone(),
+            beacon.secondary_effect.clone(),
+            beacon.payment.clone(),
+        ))
+    });
+    let Some((levels, primary, secondary, payment)) = updated else {
+        return Vec::new();
+    };
+    let state_id = tracked.next_state_id();
+    vec![
+        proto.encode_container_slot(tracked.window_id, state_id, 0, payment.as_ref()),
+        proto.encode_container_data(tracked.window_id, 0, i32::from(levels)),
+        proto.encode_container_data(
+            tracked.window_id,
+            1,
+            crate::beacon::encode_beacon_effect(primary.as_deref()),
+        ),
+        proto.encode_container_data(
+            tracked.window_id,
+            2,
+            crate::beacon::encode_beacon_effect(secondary.as_deref()),
+        ),
+    ]
+}
+
 /// [`ServerBound::ContainerButtonClick`]'s consumer —
 /// `EnchantmentMenu.clickMenuButton`. `slot` (`button_id`, `0..3`) selects
 /// which of the three offers; the lapis price is `slot + 1` and the XP price
@@ -10427,6 +10523,22 @@ where
                     spilled.push(leftover);
                 }
             }
+            // `BeaconMenu.removed`: the payment slot is dropped straight to
+            // the floor — `player.drop(itemStack, false)` — **not** merged
+            // into the inventory the way the crafting-grid/workstation
+            // return above is, and unlike those two, a beacon's own slot is
+            // not this crate's scratch-container state at all (it lives on
+            // the block entity, `BeaconData::payment`), so it needs its own
+            // take here rather than falling out of `take_workstation`.
+            if open_container.as_ref().is_some_and(|open| open.window_id == window_id && open.shape == MenuKind::Beacon)
+                && let Some(pos) = open_container.as_ref().map(|open| open.pos)
+                && let Some(payment) = block_entities.with(|reg| match reg.get_mut(pos) {
+                    Some(BlockEntity::Beacon(beacon)) => beacon.payment.take(),
+                    _ => None,
+                })
+            {
+                spilled.push(payment);
+            }
             spawn_dropped_stacks(mobs, *player_pos, *player_rot, drops_rng, spilled);
             if open_container.as_ref().is_some_and(|open| open.window_id == window_id) {
                 // Furnace XP, paid out **on close** rather than per cook — vanilla's
@@ -10562,6 +10674,15 @@ where
                     proto.encode_container_slot(0, 0, menu_slot, Some(&item)),
                 )
                 .await?;
+            }
+        }
+        // Issue #616's remainder, `SET_BEACON`. See `apply_set_beacon`'s own
+        // doc for the gate.
+        ServerBound::SetBeacon { primary, secondary } => {
+            let directives =
+                apply_set_beacon(proto, block_entities, open_container.as_mut(), primary, secondary);
+            for directive in directives {
+                apply(conn, state, directive).await?;
             }
         }
         // The enchanting table's "choose an offer" button
@@ -12824,6 +12945,82 @@ where
                             Some(crate::vitals::HurtDirection::PURE_ROLL),
                         )
                         .await?;
+                    }
+                }
+
+                // Beacons — issue #616's remainder. Vanilla's own 80-tick
+                // world-time gate (`BeaconBlockEntity.tick`'s
+                // `level.getGameTime() % 80L == 0L`), run per-connection
+                // rather than from a global tick loop: `effects`/the wire
+                // notify below are per-connection state, the same
+                // architecture the `effects.tick()` block right after this
+                // one already uses. **Not** gated on `!effects.is_empty()`
+                // the way that block is — a beacon must be able to apply a
+                // *first* effect to a player who currently has none.
+                if let Some((px, py, pz)) = player_pos
+                    && world.time().game_time % 80 == 0
+                {
+                    let candidates: Vec<(BlockPos, Option<String>, Option<String>)> = block_entities
+                        .with(|reg| {
+                            reg.iter()
+                                .filter_map(|(pos, entity)| match entity {
+                                    BlockEntity::Beacon(b) if b.primary_effect.is_some() => Some((
+                                        *pos,
+                                        b.primary_effect.clone(),
+                                        b.secondary_effect.clone(),
+                                    )),
+                                    _ => None,
+                                })
+                                .collect()
+                        });
+                    for (pos, primary, secondary) in candidates {
+                        // Recomputed live, not read from the block entity's
+                        // own (possibly stale — `BeaconData::levels`'s own
+                        // doc) stored field: effect application must not
+                        // outlive a pyramid the player has since broken.
+                        let levels = crate::beacon::beacon_levels(source.get(), pos.x, pos.y, pos.z);
+                        if levels == 0
+                            || !crate::beacon::beam_unobstructed(source.get(), pos.x, pos.y, pos.z, 384)
+                        {
+                            continue;
+                        }
+                        let (range, application) =
+                            crate::beacon::beacon_effects(levels, primary.as_deref(), secondary.as_deref());
+                        // Vanilla's own box: `range` blocks horizontally,
+                        // from `range` below the beacon to the top of the
+                        // world above it (`AABB(pos).inflate(range)
+                        // .expandTowards(0, height, 0)`) — approximated as
+                        // "no lower than `range` below" with no upper bound,
+                        // since `ChunkSource` has no height accessor of its
+                        // own (`crate::beacon`'s own module doc names the
+                        // same gap).
+                        let dx = px - f64::from(pos.x);
+                        let dz = pz - f64::from(pos.z);
+                        let dy = py - f64::from(pos.y);
+                        if dx.mul_add(dx, dz * dz) > range * range || dy < -range {
+                            continue;
+                        }
+                        for grant in &application {
+                            effects.apply(&grant.effect, grant.duration_ticks, grant.amplifier);
+                            apply(
+                                conn,
+                                &mut state,
+                                proto.encode_update_mob_effect(
+                                    // Self-facing, per every other
+                                    // `encode_update_mob_effect`-adjacent
+                                    // call in this loop.
+                                    LOCAL_PLAYER_ENTITY_ID,
+                                    &grant.effect,
+                                    grant.amplifier,
+                                    grant.duration_ticks,
+                                    true,
+                                    true,
+                                    true,
+                                    false,
+                                ),
+                            )
+                            .await?;
+                        }
                     }
                 }
 
@@ -15616,6 +15813,133 @@ mod tests {
             _ => None,
         });
         assert_eq!(furnace_fuel, Some(stack("minecraft:coal", 1)));
+    }
+
+    /// [`apply_set_beacon`]'s happy path: a level-1 pyramid, a payment item
+    /// present, a valid tier-1 primary — the payment is consumed and the
+    /// selection lands on the block entity.
+    #[test]
+    fn set_beacon_consumes_payment_and_stores_a_valid_selection() {
+        let block_entities = BlockEntityHandle::new();
+        let pos = BlockPos::new(0, 64, 0);
+        block_entities.with(|reg| {
+            reg.insert(
+                pos,
+                BlockEntity::Beacon(crate::block_entities::BeaconData {
+                    levels: 1,
+                    primary_effect: None,
+                    secondary_effect: None,
+                    payment: Some(stack("minecraft:emerald", 3)),
+                }),
+            );
+        });
+        let mut open = OpenContainer {
+            window_id: 7,
+            pos,
+            shape: MenuKind::Beacon,
+            container_size: 1,
+            state_id: 0,
+        };
+
+        let directives = apply_set_beacon(
+            &ContainerTagProto,
+            &block_entities,
+            Some(&mut open),
+            Some("minecraft:speed".to_owned()),
+            None,
+        );
+        assert!(!directives.is_empty(), "a successful selection must resend the menu");
+
+        let after = block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::Beacon(b)) => b.clone(),
+            _ => panic!("beacon must still be there"),
+        });
+        assert_eq!(after.primary_effect.as_deref(), Some("minecraft:speed"));
+        assert_eq!(after.secondary_effect, None);
+        assert_eq!(after.payment, Some(stack("minecraft:emerald", 2)), "exactly one payment item is spent");
+    }
+
+    /// **Control**: no payment item present must refuse the selection
+    /// entirely — vanilla's own `paymentSlot.hasItem()` gate. Without this,
+    /// the happy-path test above (which does have payment) could not tell a
+    /// correct gate from one that never checked at all.
+    #[test]
+    fn set_beacon_refuses_without_a_payment_item() {
+        let block_entities = BlockEntityHandle::new();
+        let pos = BlockPos::new(0, 64, 0);
+        block_entities.with(|reg| {
+            reg.insert(
+                pos,
+                BlockEntity::Beacon(crate::block_entities::BeaconData {
+                    levels: 4,
+                    primary_effect: None,
+                    secondary_effect: None,
+                    payment: None,
+                }),
+            );
+        });
+        let mut open = OpenContainer {
+            window_id: 7,
+            pos,
+            shape: MenuKind::Beacon,
+            container_size: 1,
+            state_id: 0,
+        };
+
+        let directives = apply_set_beacon(
+            &ContainerTagProto,
+            &block_entities,
+            Some(&mut open),
+            Some("minecraft:speed".to_owned()),
+            None,
+        );
+        assert!(directives.is_empty());
+        let after = block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::Beacon(b)) => b.clone(),
+            _ => panic!("beacon must still be there"),
+        });
+        assert_eq!(after.primary_effect, None, "a refused submission must not write the selection");
+    }
+
+    /// **Control**: an invalid pair for the pyramid's own level (here, a
+    /// secondary on a level-1 pyramid) must be refused, and the payment must
+    /// stay untouched — not spent on a rejected submission.
+    #[test]
+    fn set_beacon_refuses_an_invalid_pair_and_keeps_the_payment() {
+        let block_entities = BlockEntityHandle::new();
+        let pos = BlockPos::new(0, 64, 0);
+        block_entities.with(|reg| {
+            reg.insert(
+                pos,
+                BlockEntity::Beacon(crate::block_entities::BeaconData {
+                    levels: 1,
+                    primary_effect: None,
+                    secondary_effect: None,
+                    payment: Some(stack("minecraft:diamond", 1)),
+                }),
+            );
+        });
+        let mut open = OpenContainer {
+            window_id: 7,
+            pos,
+            shape: MenuKind::Beacon,
+            container_size: 1,
+            state_id: 0,
+        };
+
+        let directives = apply_set_beacon(
+            &ContainerTagProto,
+            &block_entities,
+            Some(&mut open),
+            Some("minecraft:speed".to_owned()),
+            Some("minecraft:regeneration".to_owned()),
+        );
+        assert!(directives.is_empty());
+        let after = block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::Beacon(b)) => b.clone(),
+            _ => panic!("beacon must still be there"),
+        });
+        assert_eq!(after.payment, Some(stack("minecraft:diamond", 1)), "a refused submission must not spend payment");
     }
 
     /// The crafting **table**'s 3×3 menu, which has no block entity at all (issue

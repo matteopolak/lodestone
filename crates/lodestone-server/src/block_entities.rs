@@ -110,6 +110,39 @@ pub enum BlockEntity {
     /// remainder). See [`SignData`] for the fields and [`apply_sign_update`]
     /// for the editor gate `SIGN_UPDATE` is checked against.
     Sign(SignData),
+    /// `minecraft:beacon` (issue #616's `SET_BEACON` remainder). See
+    /// [`BeaconData`] for the fields and `crate::beacon` for the pyramid
+    /// detection, effect-selection validation and periodic-application
+    /// arithmetic this variant's own state feeds.
+    Beacon(BeaconData),
+}
+
+/// A placed beacon's pyramid tier, selected powers and payment item —
+/// vanilla's `BeaconBlockEntity`, reduced to what `SET_BEACON` and the
+/// periodic effect sweep actually touch. The beam-continuity/colour state
+/// (`beamSections`) is not carried here at all: nothing in this crate renders
+/// a beam, and [`crate::beacon::beam_unobstructed`] recomputes the one bit
+/// that gates effect application (non-emptiness) fresh from the world each
+/// time it is needed, rather than caching it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BeaconData {
+    /// The pyramid tier beneath this beacon, `0..=4` — refreshed by
+    /// `crate::server` from [`crate::beacon::beacon_levels`] whenever the
+    /// menu opens or a `SET_BEACON` is handled, **not** on every tick (see
+    /// this crate's own `BeaconData` doc for why nothing here ticks
+    /// continuously). A menu left open while the pyramid is being dismantled
+    /// will not see the number change until the next such refresh — a real,
+    /// minor divergence from vanilla's own 80-tick background recompute.
+    pub levels: u8,
+    /// The selected primary power's canonical key, or `None` if unset.
+    pub primary_effect: Option<String>,
+    /// The selected secondary power's canonical key (level-4 pyramids only —
+    /// see [`crate::beacon::validate_beacon_effects`]), or `None`.
+    pub secondary_effect: Option<String>,
+    /// The single payment-slot item, if any — vanilla's `BeaconMenu`'s own
+    /// one-slot `beacon` container. Consumed one at a time by a successful
+    /// `SET_BEACON` (`BeaconMenu.updateEffects`'s own `paymentSlot.remove(1)`).
+    pub payment: Option<ItemStack>,
 }
 
 /// A placed sign's text and edit-permission state — vanilla's
@@ -309,6 +342,7 @@ impl BlockEntity {
                     "minecraft:sign"
                 }
             }
+            BlockEntity::Beacon(_) => "minecraft:beacon",
         }
     }
 
@@ -325,7 +359,7 @@ impl BlockEntity {
             BlockEntity::Container { slots, .. } => Some(slots),
             BlockEntity::Composter(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
-            | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {
+            | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) => {
                 None
             }
         }
@@ -387,6 +421,7 @@ impl BlockEntity {
             // interaction opens the dedicated text-edit screen `SIGN_UPDATE`
             // answers, not a menu.
             | BlockEntity::Sign(_) => None,
+            BlockEntity::Beacon(_) => Some("minecraft:beacon"),
         }
     }
 
@@ -403,6 +438,8 @@ impl BlockEntity {
             BlockEntity::Furnace(f) => vec![f.input().cloned(), f.fuel().cloned(), f.output().cloned()],
             BlockEntity::Hopper(h) => h.slots().to_vec(),
             BlockEntity::Container { slots, .. } => slots.clone(),
+            // `BeaconMenu`'s single payment slot (`PAYMENT_SLOT = 0`).
+            BlockEntity::Beacon(b) => vec![b.payment.clone()],
             BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => Vec::new(),
         }
@@ -434,6 +471,11 @@ impl BlockEntity {
                     *cell = item;
                 }
             }
+            BlockEntity::Beacon(b) => {
+                if slot == 0 {
+                    b.payment = item;
+                }
+            }
             BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {}
         }
@@ -451,6 +493,14 @@ impl BlockEntity {
     pub fn data_properties(&self) -> Vec<i32> {
         match self {
             BlockEntity::Furnace(f) => (0..4).map(|i| f.container_data(i)).collect(),
+            // `BeaconBlockEntity`'s own `ContainerData`: `DATA_LEVELS`,
+            // `DATA_PRIMARY`, `DATA_SECONDARY`, in that order
+            // (`BeaconBlockEntity.NUM_DATA_VALUES = 3`).
+            BlockEntity::Beacon(b) => vec![
+                i32::from(b.levels),
+                crate::beacon::encode_beacon_effect(b.primary_effect.as_deref()),
+                crate::beacon::encode_beacon_effect(b.secondary_effect.as_deref()),
+            ],
             BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Container { .. } | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {
@@ -493,8 +543,17 @@ impl BlockEntity {
             // 26.2 carries no `tick()` at all (unlike a hanging sign's older
             // wind-sway variant, which this port does not model), so an
             // idle-until-edited sign matches vanilla exactly.
+            // A beacon's pyramid/beam recompute and periodic effect
+            // application are player-position-dependent (`crate::beacon`'s
+            // functions all take a `ChunkSource` and, for the effects
+            // themselves, need `ActiveEffects` and the wire) — none of which
+            // this registry holds a handle to, the same reason a spawner is
+            // driven outside this path. `crate::server`'s per-connection tick
+            // section is the real driver; see `BeaconData`'s own doc for the
+            // "refreshed on player action, not every tick" tradeoff that
+            // follows from not having a driver here.
             BlockEntity::Container { .. } | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
-            | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {}
+            | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) => {}
         }
     }
 }
@@ -547,6 +606,7 @@ pub fn block_entity_for_item(item: &str) -> Option<(&'static str, BlockEntity)> 
             "minecraft:dropper",
             BlockEntity::container_of_size("minecraft:dropper", CONTAINER_3X3_SIZE),
         )),
+        "minecraft:beacon" => Some(("minecraft:beacon", BlockEntity::Beacon(BeaconData::default()))),
         "minecraft:command_block" => Some((
             "minecraft:command_block",
             BlockEntity::CommandBlock(crate::command_block::CommandBlockData::new()),
