@@ -185,6 +185,13 @@ pub enum Origin {
     /// `-`/`+` step pair plus a label, not `OptionsList`'s or `KeyBindsList`'s
     /// shape — see [`super::create_world::GameRulesEditor`]'s own module doc.
     CreateWorldGameRules(super::create_world::GameRulePlacement),
+    /// A row of Create New World's Data Packs sub-screen, resolved by
+    /// [`super::create_world::data_pack_placement_anchor`] (issue #592's More
+    /// tab). A data-carrying variant for the same reason
+    /// [`Origin::CreateWorldGameRules`] is: this screen's rows scroll and each
+    /// carries a live index — see
+    /// [`super::create_world::DataPacksEditor`]'s own module doc.
+    CreateWorldDataPacks(super::create_world::DataPackPlacement),
 }
 
 impl Origin {
@@ -246,7 +253,7 @@ impl Origin {
     #[must_use]
     pub fn is_scrolling_list_row(self) -> bool {
         use super::confirm::ConfirmPlacement;
-        use super::create_world::GameRulePlacement;
+        use super::create_world::{DataPackPlacement, GameRulePlacement};
         use super::key_binds::KeyPlacement;
         use super::language::LanguagePlacement;
         use super::options::Placement;
@@ -276,6 +283,7 @@ impl Origin {
             | Origin::CreateWorldGameRules(
                 GameRulePlacement::Minus { .. } | GameRulePlacement::Plus { .. } | GameRulePlacement::Name { .. },
             )
+            | Origin::CreateWorldDataPacks(DataPackPlacement::Row { .. })
             | Origin::Packs(
                 PacksPlacement::Row { .. }
                 | PacksPlacement::MoveButton { .. }
@@ -355,6 +363,9 @@ impl Origin {
             }
             Origin::CreateWorldGameRules(placement) => {
                 super::create_world::game_rule_placement_anchor(placement, width, height)
+            }
+            Origin::CreateWorldDataPacks(placement) => {
+                super::create_world::data_pack_placement_anchor(placement, width, height)
             }
             Origin::Social(placement) => super::social::placement_anchor(placement, width, height),
             Origin::Language(placement) => {

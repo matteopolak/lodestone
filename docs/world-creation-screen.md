@@ -60,20 +60,24 @@ had to change once it landed.
 |---|---|
 | **Game** (`createWorld.tab.game.title`) | Name, Game Mode, Difficulty, Allow Cheats |
 | **World** (`createWorld.tab.world.title`) | Seed, World Type, Structures, Bonus Chest, Online Mode |
-| **More** (`createWorld.tab.more.title`) | nothing |
+| **More** (`createWorld.tab.more.title`) | Game Rules, Data Packs |
 
 Vanilla's `GameTab` also has an Experiments button and `WorldTab` a
 "Customize Type" button this client has no experiments/preset-editor screen
 for — left absent rather than drawn inert, the same call every field in this
 tree already makes for a control with no backing model. `MoreTab` is three
-buttons (Game Rules, Experiments, Data Packs) and none of the three models
-exist here (no game-rule table, no experiments screen, no data-pack loader —
-`world_select.rs`'s own module docs on the missing `LevelStorageSource`
-still apply). **More is still selectable and enabled**, not disabled: unlike
-Statistics's Items/Mobs — which vanilla itself disables *because the
-underlying list is empty* (`StatsScreen.setTabActiveStateAndTooltip`) —
-nothing about More is data-driven-empty. It is feature-not-yet-built, and
-disabling the tab would misrepresent that as vanilla's own behaviour.
+buttons in vanilla (Game Rules, Experiments, Data Packs); this screen builds
+two of them for real (issue #592) — see
+[Game Rules](#game-rules-sub-screen-issue-592) and
+[Data Packs](#data-packs-sub-screen-issue-592) below — and leaves Experiments
+absent, the same "no backing model, so don't draw it inert" rule as the two
+buttons in the paragraph above (no `DataConfiguration`/feature-flag model
+anywhere in this client). **More is still selectable and enabled**, not
+disabled: unlike Statistics's Items/Mobs — which vanilla itself disables
+*because the underlying list is empty*
+(`StatsScreen.setTabActiveStateAndTooltip`) — nothing about More is
+data-driven-empty. Experiments is feature-not-yet-built, and disabling the
+tab for it would misrepresent that as vanilla's own behaviour.
 
 `ONLINE_MODE_ROW` has no vanilla tab at all (see its own doc below) and lives
 on World, after Bonus Chest — a network-exposure setting for the world being
@@ -126,40 +130,100 @@ arithmetic (`docs/ui-framework.md` already names this legitimate — even
 `TitleScreen` itself uses no layout class), just now arranged per tab instead
 of in one flat column.
 
-## World type (issue #519's UI half)
+## World type (issue #519's UI half, wired end to end by issue #592)
 
 `WorldTypePreset` cycles all seven bundled `world_preset/*.json` documents
 (`generator.minecraft.*` captions, verbatim) and is collected on
 `WorldCreationConfig::world_type` — real state, real cycling, on the World
-tab. **Decorative for all seven today**, and unevenly so:
+tab. **Wired for all seven now** — choosing any preset reaches the served
+world:
 
-| preset | generator | reachable from `lodestone-shell` without a `lodestone-server` change? |
+| preset | generator | how it is reached |
 |---|---|---|
-| `Normal` | `overworld_chunk_source` | yes |
-| `LargeBiomes` | `overworld_chunk_source_of_type(seed, WorldType::LargeBiomes)` | yes |
-| `Amplified` | `overworld_chunk_source_of_type(seed, WorldType::Amplified)` | yes |
-| `SingleBiomeSurface` | `single_biome_chunk_source` | no — not yet re-exported from `lodestone-server`'s root |
-| `Flat` | `flat_chunk_source` | no |
-| `FlatAllDimensions` | `flat_chunk_source` (all-dimensions settings) | no |
-| `DebugAllBlockStates` | `debug_chunk_source` | no |
+| `Normal` | `overworld_chunk_source` | `WorldTypePreset::backend_world_type` → `overworld_chunk_source_of_type` |
+| `LargeBiomes` | `overworld_chunk_source_of_type(seed, WorldType::LargeBiomes)` | same |
+| `Amplified` | `overworld_chunk_source_of_type(seed, WorldType::Amplified)` | same |
+| `SingleBiomeSurface` | `single_biome_chunk_source` | `net.rs`'s `preset_chunk_source` |
+| `Flat` | `flat_chunk_source` | `net.rs`'s `preset_chunk_source` |
+| `FlatAllDimensions` | `flat_chunk_source` (all-dimensions settings) | `net.rs`'s `preset_chunk_source` |
+| `DebugAllBlockStates` | `debug_chunk_source` | `net.rs`'s `preset_chunk_source` |
 
 See [`worldgen-world-type-selection.md`](./worldgen-world-type-selection.md)
 for the full entry-point table and what each generator actually does — that
 doc is the authority; do not re-derive the names here.
 
-**The remaining hop for the first three is one call site, and it is
-deliberately untouched by this pass.** `net.rs`'s `Origin::Integrated`
-construction calls `lodestone_server::overworld_chunk_source(seed)` exactly
-once; making it read `WorldCreationConfig::world_type` means adding a field
-to `Origin::Integrated` and a parameter to `NetClient::open_singleplayer`/
-`open_to_lan`, threaded from `session.rs`'s `begin_singleplayer`. Left open
-because `net.rs` had a live, unrelated concurrent edit in flight the session
-this landed (`net::NetUpdate::LanPublishError`), and a new field on a shared
-struct under concurrent edit is exactly the collision shape `CLAUDE.md`
-warns about. The other four presets are additionally blocked on
-`crates/lodestone-server/src/lib.rs` re-exporting their entry points, which
-is a change to a crate outside this screen's ownership. Both are tracked in
-the Create New World option-port follow-up issue in the tracker.
+**The chain, now landed in full.** `begin_singleplayer` (`app/session.rs`)
+reads `WorldCreationConfig::world_type` for a `Created` launch only (the same
+rule `seed` uses) and threads the whole `WorldTypePreset` — not just a
+`lodestone_server::WorldType` projection of it — through
+`launch_singleplayer`/`launch_open_to_lan_online` (`app/launch.rs`) into
+`NetClient::open_singleplayer`/`open_to_lan`. `net.rs`'s `Origin::Integrated`
+carries it to `preset_chunk_source`, which replaced the single hardcoded
+`overworld_chunk_source(seed)` call and covers all seven presets:
+`Normal`/`LargeBiomes`/`Amplified` go through
+`WorldTypePreset::backend_world_type`, and the other four call
+`single_biome_chunk_source`/`flat_chunk_source`/`debug_chunk_source` directly
+— reachable once `crates/lodestone-server/src/lib.rs` re-exported those entry
+points. `SingleBiomeSurface` always uses the bundled default biome
+(`minecraft:plains`) rather than a player choice — no UI for that yet, a
+disclosed simplification. Verified end to end (not just at the generator
+level) by `tests/singleplayer_terrain_arrives.rs`'s
+`a_singleplayer_world_honours_the_selected_world_type_end_to_end`, which
+reuses `lodestone-server/tests/world_type_selection.rs`'s own measured 64/130
+top-of-world heights at seed 4242 as an outside oracle.
+
+## Game Rules sub-screen (issue #592)
+
+More's first button opens a real, if disclosed-simplified, rule editor —
+vanilla's `WorldCreationGameRulesScreen` narrowed to one control shape
+(`-`/`+` step pair plus a `"name: value"` label) instead of vanilla's
+per-type widget split (checkbox for a boolean rule, free-text box for an
+integer one), because an integer rule needs to step down from its default as
+often as up. Every one of `lodestone_server::game_rules::GAME_RULES`' 60
+rules is listed, live, from `create_world.rs`'s `GameRulesEditor`.
+
+**Wired, not decorative**: edits apply to `GameRulesEditor::values`
+immediately on click (no separate Done-commits/Cancel-discards split, since
+nothing reads the values until Create is pressed), and
+`GameRulesEditor::changed_entries` — every rule whose value differs from its
+vanilla default — becomes `WorldCreationConfig::game_rules`.
+`begin_singleplayer` sends it as
+`lodestone_model::action::ClientAction::SetGameRules` once the session
+reaches Play. Empty for a world whose rules were never touched, which sends
+nothing rather than a no-op packet.
+
+## Data Packs sub-screen (issue #592)
+
+More's second button opens a pack selector — vanilla's Data Packs screen is
+the identical `PackSelectionScreen` widget the standalone
+[Resource Packs screen](./resource-packs.md) uses, pointed at a world-scoped
+pack repository instead of the global one. This screen does **not** reuse
+`menu/packs.rs`'s `PacksNav` directly: that type is wired straight to the
+*global* resource-pack config and the live texture stack, and repurposing it
+here would make selecting a data pack while creating a world also reshuffle
+the running client's textures.
+
+What **is** reused: `crate::resources::scan_resource_packs_in` and
+`crate::resources::DiscoveredPack`. A data pack and a resource pack share the
+identical on-disk shape (`pack.mcmeta` plus an optional `pack.png`) to a
+scanner that only ever reads those two files, so only the directory differs
+— `crate::resources::data_packs_dir` (`datapacks/`, alongside
+`resourcepacks/` in the same platform data directory) instead of
+`resource_packs_dir`. `create_world.rs`'s `DataPacksEditor` is one scrollable
+list with a per-row toggle rather than vanilla's two-column
+Available/Selected shape (a further disclosed simplification, the same kind
+`GameRulesEditor` already makes) — there is nothing downstream to have a
+priority *order* affect, since nothing here ever loads a pack's contents. The
+built-in "Vanilla" row is always present, always selected, never a toggle
+target, matched by construction (`DataPacksEditor::rebuild` always seeds it
+first) the same way `menu/packs.rs`'s `PackRow::builtin` is.
+
+**Fully decorative**: `DataPacksEditor::selected_ids()` becomes
+`WorldCreationConfig::data_packs`, but this crate has no data-pack loader at
+all — no recipe/loot-table/tag override machinery to apply one to, unlike
+Game Rules, which only needed a `ClientAction` this client already had both a
+producer and a consumer for. The scan and the selection UI are real; nothing
+downstream reads the result yet.
 
 ## Hover outline (issue #567)
 
@@ -250,10 +314,11 @@ visits.
   as Survival**, because `LevelDat::for_new_world` writes `hardcore: 0` and this
   layer has no business hand-editing that compound; that is the same gap as the
   four fields below, one field narrower.
-- **Decorative — world type.** Cycles all seven presets for real; three have
-  a reachable generator and are only missing the `net.rs` threading hop
-  (above), four more are additionally blocked on a `lodestone-server`
-  re-export.
+- **Wired since issue #592 — world type, all seven presets.** See its own
+  section above.
+- **Wired since issue #592 — Game Rules.** See its own section above.
+- **Decorative — Data Packs.** A real scan and a real selectable list, but no
+  data-pack loader exists to read the result — see its own section above.
 - **Decorative — difficulty, structures, bonus chest and allow-cheats.**
   Collected and cycled/toggled for real, but nothing downstream reads any of
   them — see "What is still queued" below.
@@ -261,11 +326,15 @@ visits.
 ## What is still queued
 
 The seed and the name reach disk, and the game mode partly does (see above).
-Difficulty, structures, bonus chest, allow-cheats and the hardcore flag need
-deeper session-setup wiring (an ECS/server-side initial state, not just a
-menu-side constant) than the seed's one-parameter threading, and are left as
-documented follow-up — along with world type's own `net.rs` hop and the
-four presets blocked on a `lodestone-server` re-export (both above).
+World type and Game Rules are wired end to end (issue #592). Difficulty,
+structures, bonus chest, allow-cheats and the hardcore flag need deeper
+session-setup wiring (an ECS/server-side initial state, not just a menu-side
+constant) than the seed's one-parameter threading, and are left as documented
+follow-up. Data Packs' selection is collected but has no loader to consume
+it, and Experiments/"Customize Type" have no UI at all yet — no
+feature-flag/`DataConfiguration` model and no preset-editor model exist in
+this client. "Customize Type" additionally needs threading through `net.rs`
+and `lodestone-server`, both outside `menu/**`'s ownership.
 
 ## How to change it
 
@@ -300,7 +369,14 @@ never written to disk except the fields named "Wired" above).
   — reused for this screen's two-button footer.
 - `menu/layout.rs` — `TAB_BAR_HEIGHT`, `tab_bar_geometry`, `tab_bar_row_rect`
   — the [shared tab widget](./statistics-screen.md#the-tab-widget-issue-564).
-- `menu/widget.rs` — `TAB_SPRITES`, `tab_underline_colour`, `tab_label_dy`.
+- `menu/widget.rs` — `TAB_SPRITES`, `tab_underline_colour`, `tab_label_dy`,
+  `ListSpec`/`ScrollList` (the Game Rules and Data Packs sub-screens' own
+  scroll bands).
+- `lodestone_server::game_rules::GAME_RULES` — the Game Rules sub-screen's
+  own table, with its external oracle (`game_rule_defaults_match_the_jar`).
+- `resources.rs` — `data_packs_dir`, `scan_resource_packs_in`,
+  `DiscoveredPack` (the Data Packs sub-screen's directory scan, shared
+  verbatim with [Resource Packs](./resource-packs.md)).
 - `lodestone_model::common::Difficulty` — reused directly rather than a
   local copy, since every vanilla difficulty is a legitimate creation-time
   choice.
