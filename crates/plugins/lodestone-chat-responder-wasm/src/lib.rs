@@ -53,7 +53,13 @@ impl Guest for ChatResponder {
         #[cfg(feature = "spin")]
         return spin_forever();
 
-        #[cfg(not(feature = "spin"))]
+        #[cfg(feature = "alloc-loop")]
+        return alloc_loop();
+
+        #[cfg(feature = "network")]
+        return attempt_network();
+
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network")))]
         return respond(events);
     }
 }
@@ -73,7 +79,71 @@ fn spin_forever() -> ! {
     }
 }
 
-#[cfg(not(feature = "spin"))]
+/// THE MEMORY-CEILING FIXTURE. Grows linear memory in fixed chunks until the
+/// host's `ResourceLimiter` denies the next `memory.grow`, reporting how far it
+/// got before that happened. `try_reserve_exact` rather than plain allocation:
+/// a denied `memory.grow` makes the global allocator return null, and an
+/// *infallible* allocation turns that into `handle_alloc_error` — an abort, which
+/// would make this indistinguishable from the preemption fixture and would not
+/// let a single tick report a byte count. `try_reserve_exact` surfaces the same
+/// denial as an ordinary `Err`, so the guest can measure its own ceiling instead
+/// of merely dying at it.
+///
+/// Capacity only, never written: the point under test is `memory.grow`, which the
+/// allocator calls when it needs more pages regardless of whether the bytes are
+/// ever initialised, so there is no reason to pay fuel for a fill.
+#[cfg(feature = "alloc-loop")]
+fn alloc_loop() -> Vec<Action> {
+    const CHUNK: usize = 4 * 1024 * 1024;
+    // 512 * 4 MiB = 2 GiB, comfortably past any `with_memory_limit` value the
+    // gate configures, so the loop is guaranteed to hit either the host's ceiling
+    // or wasm32's own 4 GiB linear-memory address-space limit, never its own cap.
+    const MAX_CHUNKS: usize = 512;
+
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
+    let mut grown: usize = 0;
+    let mut denied = false;
+    for _ in 0..MAX_CHUNKS {
+        let mut chunk: Vec<u8> = Vec::new();
+        match chunk.try_reserve_exact(CHUNK) {
+            Ok(()) => {
+                grown += CHUNK;
+                chunks.push(chunk);
+            }
+            Err(_) => {
+                denied = true;
+                break;
+            }
+        }
+    }
+    vec![Action::SendChat(format!("alloc: bytes={grown} denied={denied}"))]
+}
+
+/// THE NETWORK-DENIAL FIXTURE. Attempts one real TCP connect. There is no
+/// `lodestone:plugin` import for this — the WIT world defines no sockets
+/// interface at all — so this is not exercising a capability the host might
+/// grant; it is exercising `wasm32-unknown-unknown`'s own `std::net`, whose
+/// entire implementation is `sys::unsupported` (see `src/host.rs`'s header: "no
+/// clock, no socket … for a guest to find"). The point of running it here rather
+/// than reasoning about it from the platform docs is that a *test* is evidence
+/// and a claim about the standard library is not.
+#[cfg(feature = "network")]
+fn attempt_network() -> Vec<Action> {
+    // Must match `NETWORK_PROBE_ADDR` in
+    // `crates/lodestone-wasm-host/tests/network_denial.rs`. Duplicated rather than
+    // shared: this crate is deliberately not importable from the native
+    // workspace (its `Cargo.toml` header explains why a `cdylib` guest cannot be
+    // a normal path/git dependency of a workspace member).
+    let addr = "127.0.0.1:47899";
+    let result = std::net::TcpStream::connect(addr);
+    vec![Action::SendChat(format!(
+        "net: ok={} err={}",
+        result.is_ok(),
+        result.err().map(|e| e.to_string()).unwrap_or_default()
+    ))]
+}
+
+#[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network")))]
 fn respond(events: Vec<Event>) -> Vec<Action> {
     {
         let mut actions = Vec::new();
