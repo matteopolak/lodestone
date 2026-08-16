@@ -1299,7 +1299,7 @@ impl Sim {
     /// module's docs for why the composition is a named symbol.
     #[must_use]
     pub fn consume_state(&self) -> Option<crate::consume::ConsumeState> {
-        let (using, ticks, held) = self.read(|w| {
+        let (using, ticks, held, food, game_mode) = self.read(|w| {
             let using = w.resource::<crate::interact::UsingItem>().0;
             let ticks = w.resource::<lodestone_ecs::player::ItemUseTicks>().0;
             let slot = w.get::<SelectedSlot>(self.local).map_or(0, |s| s.0);
@@ -1307,9 +1307,14 @@ impl Sim {
                 .get::<lodestone_ecs::SessionMenus>(self.local)
                 .and_then(|menus| menus.0.player().player_native(slot).cloned())
                 .map(|stack| stack.item().to_string());
-            (using, ticks, held)
+            let food = w.get::<Vitals>(self.local).and_then(|v| v.food);
+            let game_mode = w.get::<ServerGameMode>(self.local).and_then(|m| m.0);
+            (using, ticks, held, food, game_mode)
         });
-        crate::consume::ConsumeState::resolve(using, ticks, held.as_deref())
+        // `!crate::hud::can_hurt_player`, not a second creative/spectator check —
+        // see `consume.rs`'s `emit_consume_particles`, which reads the same pair.
+        let invulnerable = !crate::hud::can_hurt_player(game_mode);
+        crate::consume::ConsumeState::resolve(using, ticks, held.as_deref(), food, invulnerable)
     }
 
     /// `(currUsageTime, useDuration)` for `ItemInHandRenderer.applyEatTransform`
