@@ -2141,18 +2141,6 @@ impl HudGeometry {
         self.sprite_verts.len() / SPRITE_FLOATS_PER_VERTEX
     }
 
-    /// Number of textured item-sprite vertices.
-    #[must_use]
-    pub fn item_vertex_count(&self) -> usize {
-        self.item_verts.len() / SPRITE_FLOATS_PER_VERTEX
-    }
-
-    /// Number of 3-D item-model vertices (three per triangle, six per quad).
-    #[must_use]
-    pub fn model_vertex_count(&self) -> usize {
-        self.model_verts.len()
-    }
-
     /// Build the whole HUD for `width`×`height` pixels from a [`HudFrame`],
     /// drawing the survival vitals (hotbar, XP, hearts, hunger) as procedural
     /// quads. This is the jar-less / headless path.

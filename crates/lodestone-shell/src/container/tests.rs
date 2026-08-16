@@ -2339,9 +2339,9 @@ fn inventory_and_crafting_each_blit_one_whole_panel() {
 
 #[test]
 fn build_inner_without_a_background_falls_back_to_the_flat_fill_and_still_dims() {
-    // No background attached: `build`/`build_with_icons` (used by every
-    // existing test and gate in this file) must keep drawing something —
-    // this is the jar-less path and the pixel gate's negative control.
+    // No background attached: `build` (used by every existing test and gate
+    // in this file) must keep drawing something — this is the jar-less path
+    // and the pixel gate's negative control.
     let menu = Menu::player();
     let frame = ContainerFrame::new(Some(&menu), "Inventory");
     let geo = ContainerGeometry::build(&frame, VIEW.0, VIEW.1);

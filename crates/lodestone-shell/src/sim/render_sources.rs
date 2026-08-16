@@ -417,22 +417,6 @@ impl Sim {
         })
     }
 
-    /// How many chest lids are currently animating or open — for the debug
-    /// overlay and for the live gate, which needs to distinguish "the block event
-    /// never arrived" from "the lid is drawn shut".
-    #[must_use]
-    pub fn chest_lid_count(&self) -> usize {
-        self.chest_lids.len()
-    }
-
-    /// How many bells are currently shaking — the bell sibling of
-    /// [`Self::chest_lid_count`], and for the same reason: it distinguishes "the
-    /// block event never arrived" from "the bell is drawn at rest".
-    #[must_use]
-    pub fn bell_shake_count(&self) -> usize {
-        self.bell_shakes.len()
-    }
-
     /// The interpolated entities to draw this frame, resolved by the renderer
     /// into instanced draws. Empty off a live server.
     #[must_use]

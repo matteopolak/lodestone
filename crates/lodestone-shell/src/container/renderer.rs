@@ -155,16 +155,6 @@ impl ContainerRenderer {
         self.player_preview.is_some()
     }
 
-    /// Whether the inventory avatar is bound — the "is this attached" gate for the
-    /// avatar, in the same shape as
-    /// [`background_attached`](Self::background_attached) and for the same reason:
-    /// without it a missing jar silently degrades to an empty recess and a
-    /// coverage-only assertion still passes.
-    #[must_use]
-    pub fn player_preview_attached(&self) -> bool {
-        self.player_preview.is_some()
-    }
-
     /// Bind a real skin to the inventory avatar: a declared rig, and optionally
     /// the sheet to draw it with (`None` uses the pack's own sheet for that rig).
     ///
@@ -451,8 +441,8 @@ impl ContainerRenderer {
     /// Draws the container overlay over the current frame, with **no** item
     /// icons: slot contents fall back to the colour swatch. The plain entry
     /// point, kept so existing callers and the headless gates are unchanged.
-    /// Always lays out against [`crate::config::AUTO_GUI_SCALE`]; use
-    /// [`render_scaled`](Self::render_scaled) for the real windowed path,
+    /// Always lays out against [`crate::config::AUTO_GUI_SCALE`]; the real
+    /// windowed path uses [`render_with_icons_scaled`](Self::render_with_icons_scaled),
     /// which has a persisted `Options.gui_scale` to honour.
     pub fn render(
         &mut self,
@@ -464,24 +454,6 @@ impl ContainerRenderer {
         height: u32,
     ) {
         self.render_with_icons(device, queue, view, None, frame, None, width, height);
-    }
-
-    /// As [`render`](Self::render), but against an explicit `gui_scale` (`0` =
-    /// auto) so the drawn panel matches whatever scale [`hit_test_with_scale`]
-    /// is being called with for the same frame.
-    pub fn render_scaled(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        view: &wgpu::TextureView,
-        frame: &ContainerFrame<'_>,
-        gui_scale: u32,
-        width: u32,
-        height: u32,
-    ) {
-        self.render_with_icons_scaled(
-            device, queue, view, None, frame, None, gui_scale, width, height,
-        );
     }
 
     /// Draws the container overlay including **real item icons**.
@@ -533,7 +505,8 @@ impl ContainerRenderer {
     }
 
     /// As [`render_with_icons`](Self::render_with_icons), but against an
-    /// explicit `gui_scale` (`0` = auto) — see [`render_scaled`](Self::render_scaled).
+    /// explicit `gui_scale` (`0` = auto) — the real windowed path, which has a
+    /// persisted `Options.gui_scale` to honour.
     #[allow(clippy::too_many_arguments)]
     pub fn render_with_icons_scaled(
         &mut self,

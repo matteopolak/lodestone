@@ -3424,27 +3424,6 @@ pub fn tracked_entity_count(world: &World) -> usize {
     world.resource::<TrackIndex>().0.len()
 }
 
-/// Record which item a dropped-item entity is carrying, in a `World` the caller
-/// owns. See [`EntityInterpolator::set_item_stack`] for the live chain.
-///
-/// Sets the stack count to `1` — the neutral value for a caller that only
-/// knows identity. [`fold_entities`] does not go through this function; it
-/// writes [`TrackedStack`] directly so it can carry the real reported count.
-pub fn set_item_stack_in(world: &mut World, entity_id: i32, item: ResourceLocation) {
-    world.resource_mut::<ItemStacks>().0.insert(
-        entity_id,
-        TrackedStack {
-            id: item,
-            count: 1,
-            foil: false,
-            // Identity-only caller, no stack in hand to read a colour off —
-            // the same honest `None` `count`/`foil` already default to here.
-            dyed_color: None,
-            potion_color: None,
-        },
-    );
-}
-
 /// Tracks and interpolates every visible entity between server ticks.
 ///
 /// # This is a harness, not the production path, since §4.1(c)
@@ -3559,14 +3538,6 @@ impl EntityInterpolator {
                 potion_color: None,
             },
         );
-    }
-
-    /// Forget the item recorded for `entity_id`, so it draws as an empty stack.
-    ///
-    /// Only reached when the server *explicitly* reports an empty stack; a
-    /// snapshot that is merely silent about the item leaves the record alone.
-    pub fn clear_item_stack(&mut self, entity_id: i32) {
-        self.world.resource_mut::<ItemStacks>().0.remove(&entity_id);
     }
 
     /// The item recorded for `entity_id`, if any.

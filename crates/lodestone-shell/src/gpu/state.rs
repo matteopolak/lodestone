@@ -428,12 +428,6 @@ impl RenderState {
         self.terrain_culling = enabled;
     }
 
-    /// Whether the per-frame terrain cull is currently enabled.
-    #[must_use]
-    pub fn terrain_culling(&self) -> bool {
-        self.terrain_culling
-    }
-
     /// Replace the distance-fog settings (colour + range) **and the sky disc's
     /// centre colour**, which travel together in [`FogSettings`]. The shell
     /// drives this from its configured render distance and the eye-in-fluid

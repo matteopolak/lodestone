@@ -510,13 +510,6 @@ impl EditBox {
         self.on_value_change();
     }
 
-    /// `setValue` as a builder step.
-    #[must_use]
-    pub fn with_value(mut self, value: impl AsRef<str>) -> Self {
-        self.set_value(value);
-        self
-    }
-
     /// `getHighlighted()` — the selected substring, which is empty when
     /// `cursorPos == highlightPos`.
     #[must_use]

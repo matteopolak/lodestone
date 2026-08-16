@@ -160,14 +160,6 @@ pub const LIST_WINDOW_PX: f32 = crate::config::MIN_SCALED_HEIGHT as f32
     - options::FOOTER_HEIGHT
     - options::LIST_TOP_INSET;
 
-/// Rows per window. Simpler than `options.rs`'s version: every row here is the
-/// same height, so there is no header-padding case to walk one entry at a
-/// time — a floor division is exact.
-#[must_use]
-pub fn visible_rows_len() -> usize {
-    (LIST_WINDOW_PX / ROW_H).floor().max(1.0) as usize
-}
-
 /// `getRowLeft()` on a `width`-wide canvas (`AbstractSelectionList.java`,
 /// this list's own `x = 0`).
 #[must_use]

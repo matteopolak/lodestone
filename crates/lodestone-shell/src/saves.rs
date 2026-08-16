@@ -37,7 +37,7 @@
 //! [`default_world_dir`] survives as exactly one thing: the folder name
 //! `"world"` a *dedicated* server uses, which is what an already-existing
 //! Lodestone save from before this change is called. Nothing calls it to *open*
-//! a world any more — [`list_worlds`] finds that directory like any other.
+//! a world any more — [`list_worlds_in`] finds that directory like any other.
 //!
 //! # How it works
 //!
@@ -111,8 +111,8 @@
 //! `servers.json` and `hidden_players.json`. On macOS that yields
 //! `~/Library/Application Support/lodestone/saves/<world>`.
 //!
-//! **Tests must never call the no-argument [`saves_dir`]/[`list_worlds`]/
-//! [`create_world`].** Every one of them has an explicit-root
+//! **Tests must never call the no-argument [`saves_dir`]/[`create_world`].**
+//! Every one of them has an explicit-root
 //! twin (`*_in`) taking the root as a parameter, and that is what a test uses —
 //! a temp directory, never the developer's own saves. The split is a
 //! `#[cfg(test)]`-free fork for `CLAUDE.md`'s reason: an early return on
@@ -177,7 +177,7 @@ pub fn saves_dir() -> PathBuf {
 /// Nothing opens a world through this any more (see the module doc); it exists
 /// so the name that reading (1) chose is still written down in one place, and so
 /// the gate below can assert it is a child of [`saves_dir`] — which is what
-/// makes [`list_worlds`] find such a world without a migration step.
+/// makes [`list_worlds_in`] find such a world without a migration step.
 #[must_use]
 pub fn default_world_dir() -> PathBuf {
     saves_dir().join(DEFAULT_WORLD_NAME)
@@ -382,14 +382,6 @@ pub fn format_epoch_millis_utc(millis: i64) -> Option<String> {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if m <= 2 { y + 1 } else { y };
     Some(format!("{year:04}-{m:02}-{d:02} {hour:02}:{minute:02}"))
-}
-
-/// Every world under the real [`saves_dir`], sorted for the world-select list.
-///
-/// See the module doc: a test calls [`list_worlds_in`] with a temp root.
-#[must_use]
-pub fn list_worlds() -> Vec<WorldSummary> {
-    list_worlds_in(&saves_dir())
 }
 
 /// Every world under `root`, sorted by [`WorldSummary::cmp_for_list`].

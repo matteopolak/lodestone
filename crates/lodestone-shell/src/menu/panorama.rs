@@ -727,12 +727,6 @@ impl PanoramaRenderer {
         }
     }
 
-    /// Side length of one cubemap face, as loaded.
-    #[must_use]
-    pub fn face_size(&self) -> u32 {
-        self.size
-    }
-
     /// How many of the six bound faces came from the asset-object store —
     /// [`PanoramaFaces::from_object_store`], carried through.
     ///

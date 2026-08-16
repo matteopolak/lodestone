@@ -4,7 +4,7 @@
 //! # What it is
 //!
 //! `crate::saves`'s no-argument helpers ([`lodestone::saves::saves_dir`],
-//! `list_worlds`, `create_world`) resolve against
+//! `create_world`) resolve against
 //! `crate::menu::servers::data_dir()`, which on this machine is
 //! `~/Library/Application Support/lodestone`. A test that called `create_world`
 //! would create a world folder there — and, unlike an assertion failure, that
@@ -62,10 +62,9 @@ use std::path::{Path, PathBuf};
 /// names end in the same substring — which is what the first draft of this array
 /// did, reporting seven files that were entirely correct. A gate that cries wolf
 /// gets its allowlist grown until it means nothing.
-const FORBIDDEN: [&str; 4] = [
+const FORBIDDEN: [&str; 3] = [
     "saves::saves_dir()",
     "saves::default_world_dir()",
-    "saves::list_worlds()",
     "saves::create_world(",
 ];
 

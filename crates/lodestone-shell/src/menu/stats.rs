@@ -447,11 +447,6 @@ pub const HEADER_HEIGHT: f32 = layout::TAB_BAR_HEIGHT;
 pub const LIST_WINDOW_PX: f32 =
     crate::config::MIN_SCALED_HEIGHT as f32 - HEADER_HEIGHT - options::FOOTER_HEIGHT - options::LIST_TOP_INSET;
 
-#[must_use]
-pub fn visible_rows_len() -> usize {
-    (LIST_WINDOW_PX / ROW_H).floor().max(1.0) as usize
-}
-
 /// Top of the list band — the y a row at scroll `0.0` starts at.
 #[must_use]
 pub fn band_top() -> f32 {

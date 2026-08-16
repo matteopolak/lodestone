@@ -282,13 +282,6 @@ impl KeyEvent {
         self.modifiers & MOD_ALT != 0
     }
 
-    /// `hasControlDown()` — the literal Control bit, **not** the one the editing
-    /// shortcuts use. See [`Self::has_control_down_with_quirk`].
-    #[must_use]
-    pub const fn has_control_down(self) -> bool {
-        self.modifiers & MOD_CONTROL != 0
-    }
-
     /// `hasControlDownWithQuirk()`: [`EDIT_SHORTCUT_MODIFIER`], i.e. Cmd on
     /// macOS and Ctrl elsewhere. This is the one `EditBox` tests for word-wise
     /// cursor motion and whole-word delete.
@@ -700,27 +693,6 @@ impl FocusNavigationEvent {
         }
     }
 
-    /// `getVerticalDirectionForInitialFocus()`.
-    #[must_use]
-    pub fn vertical_direction_for_initial_focus(self) -> ScreenDirection {
-        match self {
-            Self::Arrow { direction, .. } => {
-                if direction.axis() == ScreenAxis::Vertical {
-                    direction
-                } else {
-                    ScreenDirection::Down
-                }
-            }
-            Self::Initial => ScreenDirection::Down,
-            Self::Tab { forward } => {
-                if forward {
-                    ScreenDirection::Down
-                } else {
-                    ScreenDirection::Up
-                }
-            }
-        }
-    }
 }
 
 /// `gui/ComponentPath`, over child **ids** rather than component references —
@@ -1072,18 +1044,6 @@ impl FocusSet {
     #[must_use]
     pub fn focused(&self) -> Option<usize> {
         self.focused
-    }
-
-    /// `Screen.clearWidgets()`. Drops the focus too, which
-    /// `Screen.rebuildWidgets` gets by calling `clearFocus()` right after
-    /// (`Screen.java`) — the reason a screen that rebuilds every frame
-    /// can never hold focus, and the reason this port keeps
-    /// [`super::nav::EditForm`]'s widgets alive instead.
-    pub fn clear_widgets(&mut self) {
-        self.children.clear();
-        self.renderables.clear();
-        self.narratables.clear();
-        self.focused = None;
     }
 
     /// `AbstractContainerEventHandler.setFocused(child)`: unfocus the outgoing
