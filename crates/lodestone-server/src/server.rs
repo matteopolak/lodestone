@@ -3996,6 +3996,7 @@ where
             | ServerBound::InteractEntity { .. }
             | ServerBound::UseItem { .. }
             | ServerBound::ReleaseUseItem
+            | ServerBound::SwapItemInHand
             | ServerBound::VehicleMoved { .. }
             | ServerBound::PlayerInput { .. }
             | ServerBound::CreativeModeSlotSet { .. }
@@ -11591,6 +11592,34 @@ where
                 // here. Recorded because its absence otherwise reads as an
                 // oversight next to the `Attack` arm two branches down.
                 let _ = fired;
+            }
+        }
+        // The `F`-key hand swap. See `ServerBound::SwapItemInHand`'s own doc
+        // comment for why both directives below are the only place either
+        // slot's new contents ever reaches the client — there is no local
+        // client prediction to correct, unlike `RenameItem`/`EditBook`'s
+        // resends just above.
+        ServerBound::SwapItemInHand => {
+            let main_native = usize::from(inventory.selected_hotbar_slot());
+            let main_item = inventory.native(main_native).cloned();
+            let off_item = inventory.native(OFFHAND_NATIVE).cloned();
+            inventory.set_native(main_native, off_item.clone());
+            inventory.set_native(OFFHAND_NATIVE, main_item.clone());
+            if let Some(menu_slot) = window_zero_menu_slot(main_native) {
+                apply(
+                    conn,
+                    state,
+                    proto.encode_container_slot(0, 0, menu_slot, off_item.as_ref()),
+                )
+                .await?;
+            }
+            if let Some(menu_slot) = window_zero_menu_slot(OFFHAND_NATIVE) {
+                apply(
+                    conn,
+                    state,
+                    proto.encode_container_slot(0, 0, menu_slot, main_item.as_ref()),
+                )
+                .await?;
             }
         }
         // The steering half. The client owns the boat it rides

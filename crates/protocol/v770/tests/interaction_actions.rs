@@ -540,17 +540,27 @@ fn the_drop_ordinals_decode_to_item_dropped_with_the_stack_flag_the_right_way_ro
         matches!(release_use, ServerBound::ReleaseUseItem),
         "ordinal 5 is the bow's release and must lift, got {release_use:?}"
     );
-    // 6 and 7 still have no model, which is what keeps the narrowing claim above
-    // honest now that 5 has moved.
-    for ordinal in [6, 7] {
-        let decoded = proto.decode(
-            lodestone_core::State::Play,
-            play::serverbound::PLAYER_ACTION,
-            &body(ordinal),
-        );
-        assert!(
-            matches!(decoded, ServerBound::Ignored),
-            "ordinal {ordinal} has no server-side model yet, got {decoded:?}"
-        );
-    }
+    // Ordinal 6, SWAP_ITEM_WITH_OFFHAND, **now lifts too** — the `F`-key hand
+    // swap. Same inversion as ordinal 5 above: this control asserted `Ignored`
+    // until the swap gained a server-side consumer.
+    let swap = proto.decode(
+        lodestone_core::State::Play,
+        play::serverbound::PLAYER_ACTION,
+        &body(6),
+    );
+    assert!(
+        matches!(swap, ServerBound::SwapItemInHand),
+        "ordinal 6 is the offhand swap and must lift, got {swap:?}"
+    );
+    // 7 (STAB) still has no model, which is what keeps the narrowing claim
+    // above honest now that 5 and 6 have both moved.
+    let stab = proto.decode(
+        lodestone_core::State::Play,
+        play::serverbound::PLAYER_ACTION,
+        &body(7),
+    );
+    assert!(
+        matches!(stab, ServerBound::Ignored),
+        "ordinal 7 has no server-side model yet, got {stab:?}"
+    );
 }
