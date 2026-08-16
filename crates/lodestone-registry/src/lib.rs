@@ -168,6 +168,97 @@ pub fn adapter_for_protocol(protocol: i32) -> Option<Box<dyn VersionAdapter>> {
     resolve_adapter(FAMILIES, protocol)
 }
 
+/// One compiled-in family's entry in the protocol → [`lodestone_physics::PhysicsProfile`]
+/// mapping. See [`physics_profile_for_protocol`] for the actual family →
+/// profile table and why two of the four map to an approximation rather than a
+/// validated fit.
+#[derive(Clone, Copy)]
+struct PhysicsFamily {
+    /// Same list [`Family::protocols`] uses for this family — borrowed from the
+    /// family crate's own `PROTOCOLS`, never restated, so this table cannot
+    /// disagree with [`adapter_for_protocol`] about which protocol numbers
+    /// belong to which family.
+    protocols: &'static [i32],
+    /// Which profile this family gets. A `fn` pointer rather than a stored
+    /// value because [`lodestone_physics::PhysicsProfile`] is not `const`-
+    /// constructible from a `static` initializer in a `&[PhysicsFamily]` (its
+    /// constructors are inherent `const fn`s, not a `const` item), and a `fn`
+    /// pointer keeps this table exactly the same shape as [`Family::make`].
+    profile: fn() -> lodestone_physics::PhysicsProfile,
+}
+
+/// Only two [`lodestone_physics::PhysicsProfile`]s exist
+/// (`mc_1_8`/`mc_1_21`), against **four** client families. This table is the
+/// one place that says which of the two each family gets, and it is
+/// deliberately not a 1:1 fit for two of them:
+///
+/// - **`v47` (1.8.9) → `mc_1_8`.** Exact family match — this is the profile
+///   the movement core was ported and golden-traced against for that era.
+/// - **`v770` (26.2) → `mc_1_21`.** Exact family match, and the only mapping
+///   that mattered before this table existed: every production construction
+///   site hardcoded `mc_1_21()` unconditionally, which happened to be correct
+///   only because `v770` was the only family ever actually joined.
+/// - **`v340` (1.12.2) and `v735` (protocol 754, 1.16.5) → `mc_1_21`, as an
+///   approximation, not a validated fit.** Neither vanilla era is a clean
+///   match for either profile: both post-date the 1.9 input-pipeline rewrite
+///   ([`InputModel::UnitSquareProjection`], which `mc_1_21` selects and
+///   `mc_1_8` does not), so `mc_1_8` would run the *wrong* structural input
+///   algorithm for either of them, not merely an imprecise one. But 1.12.2
+///   pre-dates Update Aquatic's swimming-pose system entirely and 1.16.5,
+///   while post-Update-Aquatic, has not been checked against
+///   [`FluidModel::Modern`]'s exact constants — so `mc_1_21`'s fluid half is
+///   unvalidated fidelity for both, not a known-correct one. `mc_1_21` is
+///   still the nearer pick: the input model is live on *every* tick a player
+///   takes, while the fluid model only diverges while actually in a fluid, so
+///   getting the input pipeline structurally right dominates. Treat movement
+///   through v340/v735 as "the modern profile, unvalidated for this era" —
+///   not as bit-exact parity — until a v340/v735-specific profile is ported
+///   and golden-traced the way `mc_1_8` was.
+const PHYSICS_FAMILIES: &[PhysicsFamily] = &[
+    #[cfg(feature = "v47")]
+    PhysicsFamily {
+        protocols: lodestone_v47::PROTOCOLS,
+        profile: lodestone_physics::PhysicsProfile::mc_1_8,
+    },
+    #[cfg(feature = "v770")]
+    PhysicsFamily {
+        protocols: &[lodestone_v770::PROTOCOL],
+        profile: lodestone_physics::PhysicsProfile::mc_1_21,
+    },
+    #[cfg(feature = "v340")]
+    PhysicsFamily {
+        protocols: lodestone_v340::PROTOCOLS,
+        profile: lodestone_physics::PhysicsProfile::mc_1_21,
+    },
+    #[cfg(feature = "v735")]
+    PhysicsFamily {
+        protocols: lodestone_v735::PROTOCOLS,
+        profile: lodestone_physics::PhysicsProfile::mc_1_21,
+    },
+];
+
+/// Resolves `protocol` to the [`lodestone_physics::PhysicsProfile`] its family
+/// gets, per [`PHYSICS_FAMILIES`]'s table and doc comment.
+///
+/// Unlike [`adapter_for_protocol`] this never returns `None`: a session always
+/// needs *some* physics profile — the offline demo world included, which has
+/// no live adapter at all but still simulates a player — so an unrecognised or
+/// unresolvable protocol number (including every number in a
+/// `--no-default-features` build, where [`PHYSICS_FAMILIES`] is empty) falls
+/// back to `mc_1_21`, i.e. exactly what every production call site
+/// unconditionally hardcoded before this function existed. Threading a real
+/// protocol number through this is a pure improvement over that baseline, not
+/// a regression risk: the worst case reproduces the old constant.
+#[must_use]
+pub fn physics_profile_for_protocol(protocol: i32) -> lodestone_physics::PhysicsProfile {
+    PHYSICS_FAMILIES
+        .iter()
+        .find(|family| family.protocols.contains(&protocol))
+        .map_or_else(lodestone_physics::PhysicsProfile::mc_1_21, |family| {
+            (family.profile)()
+        })
+}
+
 /// A compiled-in family's **server** side: the thing that lets the integrated
 /// server speak this family's wire format.
 ///
@@ -291,6 +382,16 @@ mod tests {
             // resolve to `None` and be *reported*, not fail to compile.
             assert!(compiled_server_families().is_empty());
             assert!(server_protocol_for_protocol(776).is_none());
+            // No family compiled means `physics_profile_for_protocol` has
+            // nothing to match, so it must fall back to the same `mc_1_21`
+            // every production call site hardcoded before this function
+            // existed — never `None`, and never a panic. This is also what
+            // `cargo check -p lodestone-shell --no-default-features` depends
+            // on staying true.
+            assert_eq!(
+                physics_profile_for_protocol(776),
+                lodestone_physics::PhysicsProfile::mc_1_21()
+            );
         }
     }
 
@@ -303,12 +404,36 @@ mod tests {
         assert!(compiled_families().contains(&"v47"));
     }
 
+    /// `v47` is 1.8.9, the one family with an exact-match [`PhysicsProfile`]
+    /// (`mc_1_8`) — see [`PHYSICS_FAMILIES`]'s doc comment for why the other
+    /// three families do not get this.
+    #[cfg(feature = "v47")]
+    #[test]
+    fn v47_maps_to_the_1_8_physics_profile() {
+        assert_eq!(
+            physics_profile_for_protocol(47),
+            lodestone_physics::PhysicsProfile::mc_1_8()
+        );
+    }
+
     #[cfg(feature = "v770")]
     #[test]
     fn resolves_v770_when_enabled() {
         let adapter = adapter_for_protocol(776).expect("v770 family compiled in");
         assert!(adapter.supports(776));
         assert!(supported_protocols().contains(&776));
+    }
+
+    /// `v770` (26.2) is the other exact-match family, and the only one that
+    /// mattered before this table existed — every production site hardcoded
+    /// this exact constant unconditionally.
+    #[cfg(feature = "v770")]
+    #[test]
+    fn v770_maps_to_the_modern_physics_profile() {
+        assert_eq!(
+            physics_profile_for_protocol(776),
+            lodestone_physics::PhysicsProfile::mc_1_21()
+        );
     }
 
     /// The serverbound twin resolves the same family the clientbound one does.
@@ -343,9 +468,52 @@ mod tests {
         assert!(compiled_families().contains(&"v735"));
     }
 
+    /// `v735` speaks protocol 754 (1.16.5) — the folder name is not the
+    /// protocol number, so this resolves through the real adapter's number,
+    /// never the crate's. 1.16.5 gets `mc_1_21` as the nearer of the two
+    /// available profiles, **not** as a validated fit — see
+    /// [`PHYSICS_FAMILIES`]'s doc comment for what is and is not actually
+    /// checked here.
+    #[cfg(feature = "v735")]
+    #[test]
+    fn v735_maps_to_the_modern_physics_profile_as_an_approximation() {
+        assert_eq!(
+            physics_profile_for_protocol(754),
+            lodestone_physics::PhysicsProfile::mc_1_21()
+        );
+    }
+
+    /// `v340` (1.12.2) gets the same approximate mapping as `v735`, for the
+    /// same reason: post-1.9 input model, pre-Update-Aquatic fluids, and
+    /// neither of the two available profiles is a validated fit — see
+    /// [`PHYSICS_FAMILIES`]'s doc comment.
+    #[cfg(feature = "v340")]
+    #[test]
+    fn v340_maps_to_the_modern_physics_profile_as_an_approximation() {
+        let adapter = adapter_for_protocol(340).expect("v340 family compiled in");
+        assert!(adapter.supports(340));
+        assert_eq!(
+            physics_profile_for_protocol(340),
+            lodestone_physics::PhysicsProfile::mc_1_21()
+        );
+    }
+
     #[test]
     fn unknown_protocol_resolves_to_none() {
         assert!(adapter_for_protocol(-1).is_none());
+    }
+
+    /// An unrecognised protocol number must still return a usable profile —
+    /// never `None`, never a panic — because a session (including the
+    /// offline demo world, which has no live adapter at all) always needs
+    /// *some* [`PhysicsProfile`], and the safe fallback is the same constant
+    /// every production call site hardcoded before this function existed.
+    #[test]
+    fn unknown_protocol_falls_back_to_the_modern_physics_profile() {
+        assert_eq!(
+            physics_profile_for_protocol(-1),
+            lodestone_physics::PhysicsProfile::mc_1_21()
+        );
     }
 
     /// Every compiled-in family's registry entry agrees with the family's own
