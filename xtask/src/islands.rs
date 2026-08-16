@@ -42,6 +42,19 @@ use std::path::{Path, PathBuf};
 use syn::visit::Visit;
 use syn::{Attribute, Expr, Fields, ImplItem, Item, Lit, Member, Meta};
 
+/// Method names whose *receiver* is a collection being grown, not read.
+/// `self.field.push(..)` / `.insert(..)` / `.extend(..)` / `.entry(..)` is a
+/// real, non-default mutation of `field` that no `Expr::Assign` or
+/// `Expr::Binary` syntax captures -- measured false positive:
+/// `Brain::{sensors, behaviors, activity_requirements,
+/// activity_any_requirements, activity_memories_to_erase_when_stopped,
+/// active_activities}` (`crates/lodestone-entity/src/brain/mod.rs`) are all
+/// initialised empty in `Brain::default()`-shaped constructors and grown
+/// exclusively this way in `add_sensor`/`add_activity`/`add_activity_any_of`,
+/// so without this, every one of them reads as "every production assignment
+/// is default-like" despite being populated on every real construction.
+const COLLECTION_GROWTH_METHODS: &[&str] = &["push", "insert", "extend", "entry"];
+
 /// Trait names whose `impl` methods are excluded from the dead-function
 /// scan. These are reached by the compiler (derive expansion), by `dyn`
 /// dispatch through the trait object, or by a framework's own reflection —
@@ -561,6 +574,25 @@ impl<'a, 'ast> Visit<'ast> for Collector<'a> {
             node.method.to_string(),
             self.realm,
         );
+        // See `COLLECTION_GROWTH_METHODS`: a call to one of these on a
+        // directly-field-accessed receiver (`self.field.push(x)`,
+        // `self.field.entry(k).or_insert(v)` -- the receiver of `.entry` is
+        // `self.field`) is a real mutation of that field, not a read.
+        // Deliberately only matches a *direct* `Expr::Field` receiver, not
+        // an arbitrary expression that might resolve to one -- consistent
+        // with this scanner's bare-syntax model elsewhere.
+        let method_name = node.method.to_string();
+        if COLLECTION_GROWTH_METHODS.contains(&method_name.as_str()) {
+            if let Expr::Field(field_expr) = &*node.receiver {
+                if let Member::Named(ident) = &field_expr.member {
+                    self.out.field_assigns.push(FieldAssignRecord {
+                        field_name: ident.to_string(),
+                        is_default_like: false,
+                        realm: self.realm,
+                    });
+                }
+            }
+        }
         syn::visit::visit_expr_method_call(self, node);
     }
 
@@ -686,6 +718,36 @@ impl<'a, 'ast> Visit<'ast> for Collector<'a> {
         syn::visit::visit_expr_binary(self, node);
     }
 
+    fn visit_expr_reference(&mut self, node: &'ast syn::ExprReference) {
+        // Taking a mutable reference to a field and passing it on
+        // (`step_vertical(..., &mut self.fall_speed)`, or
+        // `std::mem::take(&mut self.field)`/`std::mem::replace`/
+        // `std::mem::swap`, all of which take their target this way) mutates
+        // the field through the callee with no `Expr::Assign`/`Expr::Binary`
+        // syntax at this call site at all. Measured false positive:
+        // `NavigatingMob::fall_speed` (`crates/lodestone-entity/src/ai/
+        // navigating_mob.rs`) is written exclusively by passing `&mut
+        // self.fall_speed` into `step_vertical`, and `NavigatingMob::
+        // {attacks, launches, eaten, self_damage}` are drained the same way
+        // via `std::mem::take(&mut self.field)` -- both shapes had no
+        // recorded non-default assignment at all before this. Deliberately
+        // conservative: this cannot know whether the callee actually writes
+        // through the pointer, but that only risks under-flagging a truly
+        // dead field, the same bias this whole scanner already has.
+        if node.mutability.is_some() {
+            if let Expr::Field(field_expr) = &*node.expr {
+                if let Member::Named(ident) = &field_expr.member {
+                    self.out.field_assigns.push(FieldAssignRecord {
+                        field_name: ident.to_string(),
+                        is_default_like: false,
+                        realm: self.realm,
+                    });
+                }
+            }
+        }
+        syn::visit::visit_expr_reference(self, node);
+    }
+
     fn visit_expr_field(&mut self, node: &'ast syn::ExprField) {
         if let Member::Named(ident) = &node.member {
             bump(
@@ -695,6 +757,31 @@ impl<'a, 'ast> Visit<'ast> for Collector<'a> {
             );
         }
         syn::visit::visit_expr_field(self, node);
+    }
+
+    fn visit_pat_struct(&mut self, node: &'ast syn::PatStruct) {
+        // A struct pattern (`let PathParams { max_path_length, .. } =
+        // params;`, a `match`/`if let` arm, or a destructured function
+        // parameter) *reads* every field it binds, out of the value being
+        // matched -- a read this scanner otherwise never sees, because
+        // `visit_expr_field` only models `.field` expression access, not
+        // pattern binding. Measured false positive:
+        // `PathFinder::find_path` (`crates/lodestone-entity/src/
+        // pathfinding/search.rs`) destructures `PathParams {
+        // max_path_length, reach_range, visited_multiplier }` and uses only
+        // the bindings from then on -- no `.field` access anywhere -- so all
+        // three read as "zero production readers" without this. Each
+        // `FieldPat`'s `member` names the field regardless of whether the
+        // pattern is shorthand (`{ field }`) or has its own sub-pattern
+        // (`{ field: x }`, `{ field: x @ 1..=5 }`); the `..` rest token is
+        // not a `FieldPat` at all and is correctly not counted as a read of
+        // anything.
+        for field_pat in &node.fields {
+            if let Member::Named(ident) = &field_pat.member {
+                bump(&mut self.out.field_read_counts, ident.to_string(), self.realm);
+            }
+        }
+        syn::visit::visit_pat_struct(self, node);
     }
 
     fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
@@ -1795,6 +1882,170 @@ mod tests {
             one.dead_functions
         );
         assert!(one.dead_functions.iter().any(|f| f.name == "truly_dead"));
+        Ok(())
+    }
+
+    /// The real, measured false positive: `PathFinder::find_path`
+    /// (`crates/lodestone-entity/src/pathfinding/search.rs`) destructures
+    /// `PathParams { max_path_length, reach_range, visited_multiplier }`
+    /// with a `let PathParams { .. } = params;` pattern and only ever uses
+    /// the bindings afterward -- no `.field` expression access anywhere --
+    /// so before `visit_pat_struct`, all three fields read as "zero
+    /// production readers".
+    #[test]
+    fn struct_pattern_destructuring_counts_as_a_field_read() -> Result<()> {
+        let workspace = workspace_with_lib(
+            "struct-pattern-read",
+            r#"
+                pub struct Params {
+                    pub max_path_length: f32,
+                    pub reach_range: i32,
+                }
+
+                pub fn find_path(params: Params) -> f32 {
+                    let Params { max_path_length, .. } = params;
+                    max_path_length
+                }
+            "#,
+        )?;
+        let report = islands_report(&workspace)?;
+        let one = report.crates.iter().find(|c| c.crate_name == "one").unwrap();
+
+        assert!(
+            !one
+                .dead_fields
+                .iter()
+                .any(|f| f.field_name == "max_path_length"),
+            "a field bound by a struct-pattern destructure was wrongly flagged dead: {:?}",
+            one.dead_fields
+        );
+        Ok(())
+    }
+
+    /// The real, measured false positive: `Brain::sensors`
+    /// (`crates/lodestone-entity/src/brain/mod.rs`) is initialised empty and
+    /// grown exclusively via `self.sensors.push(sensor)` in `add_sensor` --
+    /// a real, meaningful mutation with no `Expr::Assign`/`Expr::Binary`
+    /// shape, so before this fix its only recorded assignment was the
+    /// `Vec::new()` at construction, reading as "every production
+    /// assignment is default-like".
+    #[test]
+    fn collection_growth_via_push_counts_as_a_non_default_mutation() -> Result<()> {
+        let workspace = workspace_with_lib(
+            "collection-growth",
+            r#"
+                pub struct Brain {
+                    pub sensors: Vec<u32>,
+                }
+
+                pub fn new_brain() -> Brain {
+                    Brain { sensors: Vec::new() }
+                }
+
+                impl Brain {
+                    pub fn add_sensor(&mut self, sensor: u32) {
+                        self.sensors.push(sensor);
+                    }
+                }
+            "#,
+        )?;
+        let report = islands_report(&workspace)?;
+        let one = report.crates.iter().find(|c| c.crate_name == "one").unwrap();
+
+        assert!(
+            !one
+                .default_only_fields
+                .iter()
+                .any(|f| f.field_name == "sensors"),
+            "a Vec field grown only via .push was wrongly called default-only: {:?}",
+            one.default_only_fields
+        );
+        Ok(())
+    }
+
+    /// The real, measured false positive: `NavigatingMob::fall_speed`
+    /// (`crates/lodestone-entity/src/ai/navigating_mob.rs`) is mutated
+    /// exclusively by passing `&mut self.fall_speed` into `step_vertical`,
+    /// which writes through the pointer -- no `Expr::Assign`/`Expr::Binary`
+    /// at the call site names the field at all, so before this fix its only
+    /// recorded assignment was the `0.0` literal at construction.
+    #[test]
+    fn passing_mut_reference_to_a_field_counts_as_a_non_default_mutation() -> Result<()> {
+        let workspace = workspace_with_lib(
+            "mut-ref-field",
+            r#"
+                pub struct Mob {
+                    pub fall_speed: f64,
+                }
+
+                fn step_vertical(fall_speed: &mut f64) {
+                    *fall_speed += 1.0;
+                }
+
+                pub fn new_mob() -> Mob {
+                    Mob { fall_speed: 0.0 }
+                }
+
+                impl Mob {
+                    pub fn tick(&mut self) {
+                        step_vertical(&mut self.fall_speed);
+                    }
+                }
+            "#,
+        )?;
+        let report = islands_report(&workspace)?;
+        let one = report.crates.iter().find(|c| c.crate_name == "one").unwrap();
+
+        assert!(
+            !one
+                .default_only_fields
+                .iter()
+                .any(|f| f.field_name == "fall_speed"),
+            "a field mutated only through &mut passed to a function was wrongly called \
+             default-only: {:?}",
+            one.default_only_fields
+        );
+        Ok(())
+    }
+
+    /// The real, measured false positive: `NavigatingMob::attacks`
+    /// (`crates/lodestone-entity/src/ai/navigating_mob.rs`) is drained via
+    /// `std::mem::take(&mut self.attacks)` in `take_new_attacks` -- the same
+    /// `&mut self.field` shape as `step_vertical` above, isolated here with
+    /// no `.push` in the fixture so this test cannot pass on the collection-
+    /// growth fix alone; it must be the `&mut`-reference fix that catches it.
+    #[test]
+    fn mem_take_drain_counts_as_a_non_default_mutation() -> Result<()> {
+        let workspace = workspace_with_lib(
+            "mem-take-drain",
+            r#"
+                pub struct Queue {
+                    pub attacks: Vec<u32>,
+                }
+
+                pub fn new_queue() -> Queue {
+                    Queue { attacks: Vec::new() }
+                }
+
+                impl Queue {
+                    pub fn take_new_attacks(&mut self) -> Vec<u32> {
+                        std::mem::take(&mut self.attacks)
+                    }
+                }
+            "#,
+        )?;
+        let report = islands_report(&workspace)?;
+        let one = report.crates.iter().find(|c| c.crate_name == "one").unwrap();
+
+        assert!(
+            !one
+                .default_only_fields
+                .iter()
+                .any(|f| f.field_name == "attacks"),
+            "a field drained via std::mem::take(&mut self.field) was wrongly called \
+             default-only: {:?}",
+            one.default_only_fields
+        );
         Ok(())
     }
 }
