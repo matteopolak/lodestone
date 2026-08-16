@@ -14,11 +14,11 @@
 //! pass silently. Fixture fields that are wire-adjacent and same-typed are
 //! kept pairwise-distinct so a transposition cannot survive.
 
-use lodestone_core::{Ctx, Encode, Writer};
+use lodestone_core::{Ctx, Encode, Reader, Writer};
 use lodestone_model::{
-    ClientEvent, CollisionRule, ConnectionState, Difficulty, DisplaySlot, EquipmentSlot,
-    ObjectiveMode, ObjectiveRenderType, SoundCategory, TeamAction, TeamColor, VersionAdapter,
-    Visibility,
+    ClientAction, ClientEvent, CollisionRule, ConnectionState, Difficulty, DisplaySlot,
+    EquipmentSlot, ObjectiveMode, ObjectiveRenderType, SoundCategory, TeamAction, TeamColor,
+    VersionAdapter, Visibility,
 };
 use lodestone_v47::V47Adapter;
 use lodestone_v47::packet_ids::play;
@@ -792,6 +792,165 @@ fn scoreboard_team_remove_and_membership_modes() {
     match only_event(dispatch(play::clientbound::SCOREBOARD_TEAM, add_members.as_slice())) {
         ClientEvent::TeamUpdate { action, .. } => {
             assert_eq!(action, TeamAction::AddMembers(vec!["Carol".to_owned()]));
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// title — hand-assembled bytes, action-multiplexed. 1.8 has no action-bar
+// case (added in 1.11), so only title/subtitle/times/clear/reset are tested.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn title_text_and_subtitle_actions_are_distinguishable() {
+    let mut title = Writer::default();
+    title.var_i32(0);
+    title.string("\"Title\"");
+    match only_event(dispatch(play::clientbound::TITLE, title.as_slice())) {
+        ClientEvent::TitleText { text } => assert_eq!(text.to_legacy_string(), "Title"),
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    let mut subtitle = Writer::default();
+    subtitle.var_i32(1);
+    subtitle.string("\"Subtitle\"");
+    match only_event(dispatch(play::clientbound::TITLE, subtitle.as_slice())) {
+        ClientEvent::SubtitleText { text } => assert_eq!(text.to_legacy_string(), "Subtitle"),
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
+fn title_times_action_reads_pairwise_distinct_fields_in_order() {
+    let mut w = Writer::default();
+    w.var_i32(2); // action: TIMES
+    w.i32(11); // fade_in
+    w.i32(1); // stay
+    w.i32(4); // fade_out
+    match only_event(dispatch(play::clientbound::TITLE, w.as_slice())) {
+        ClientEvent::TitlesAnimation { fade_in, stay, fade_out } => {
+            assert_eq!(fade_in, 11);
+            assert_eq!(stay, 1);
+            assert_eq!(fade_out, 4);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
+fn title_clear_and_reset_actions_set_reset_times_distinctly() {
+    let mut clear = Writer::default();
+    clear.var_i32(3);
+    match only_event(dispatch(play::clientbound::TITLE, clear.as_slice())) {
+        ClientEvent::TitlesCleared { reset_times } => assert!(!reset_times),
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    let mut reset = Writer::default();
+    reset.var_i32(4);
+    match only_event(dispatch(play::clientbound::TITLE, reset.as_slice())) {
+        ClientEvent::TitlesCleared { reset_times } => assert!(reset_times),
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// craft_progress_bar
+// ---------------------------------------------------------------------------
+
+#[test]
+fn craft_progress_bar_dispatches_container_data_with_distinct_fields() {
+    let mut w = Writer::default();
+    w.u8(3); // window_id
+    w.i16(7); // property
+    w.i16(21); // value
+    match only_event(dispatch(play::clientbound::CRAFT_PROGRESS_BAR, w.as_slice())) {
+        ClientEvent::ContainerData { window_id, property, value } => {
+            assert_eq!(window_id, 3);
+            assert_eq!(property, 7);
+            assert_eq!(value, 21);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tab_complete — round trip through the same adapter instance, since 1.8's
+// reply carries neither a transaction id nor a replacement range and must be
+// reconstructed from the outgoing request `pending_tab_complete` remembered.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tab_complete_request_encodes_text_with_no_looked_at_block() {
+    let adapter = V47Adapter::new();
+    let (packet_id, payload) = adapter
+        .encode_action(
+            ConnectionState::Play,
+            &ClientAction::CommandSuggestion {
+                id: 7,
+                command: "/gib Ste".to_owned(),
+            },
+        )
+        .expect("encode_action")
+        .expect("protocol 47 can encode CommandSuggestion");
+    assert_eq!(packet_id, play::serverbound::TAB_COMPLETE);
+    let mut reader = Reader::new(&payload);
+    let text = reader.string(32_767).expect("text");
+    let has_block = reader.bool().expect("has_block");
+    assert_eq!(text, "/gib Ste");
+    assert!(!has_block);
+}
+
+#[test]
+fn tab_complete_reply_reconstructs_id_and_range_from_the_request_it_answers() {
+    let adapter = V47Adapter::new();
+    adapter
+        .encode_action(
+            ConnectionState::Play,
+            &ClientAction::CommandSuggestion {
+                id: 7,
+                command: "/gib Ste".to_owned(),
+            },
+        )
+        .expect("encode_action")
+        .expect("protocol 47 can encode CommandSuggestion");
+
+    let mut w = Writer::default();
+    w.var_i32(2);
+    w.string("Steve");
+    w.string("Stella");
+    match only_event(dispatch_with(&adapter, play::clientbound::TAB_COMPLETE, w.as_slice())) {
+        ClientEvent::CommandSuggestionsReceived { id, start, length, suggestions } => {
+            // Echoes the id the request used, not the wire (which has none).
+            assert_eq!(id, 7);
+            // "/gib Ste" is 8 bytes; the last word ("Ste") starts at byte 5.
+            assert_eq!(start, 5);
+            assert_eq!(length, 3);
+            assert_eq!(
+                suggestions.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+                vec!["Steve", "Stella"]
+            );
+            assert!(suggestions.iter().all(|s| s.tooltip.is_none()));
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
+fn tab_complete_reply_with_no_pending_request_falls_back_to_zeroed_range() {
+    // A reply with no matching outgoing request (e.g. a stray/duplicate
+    // packet) must not panic or desync — id/start/length fall back to 0
+    // rather than reading uninitialized state.
+    let adapter = V47Adapter::new();
+    let mut w = Writer::default();
+    w.var_i32(1);
+    w.string("Steve");
+    match only_event(dispatch_with(&adapter, play::clientbound::TAB_COMPLETE, w.as_slice())) {
+        ClientEvent::CommandSuggestionsReceived { id, start, length, .. } => {
+            assert_eq!(id, 0);
+            assert_eq!(start, 0);
+            assert_eq!(length, 0);
         }
         other => panic!("unexpected event: {other:?}"),
     }

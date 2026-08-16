@@ -9,11 +9,11 @@
 //! action/mode-multiplexed packet, per this repo's own evidence rule that
 //! `decode(encode(x)) == x` cannot prove a wire shape is right.
 
-use lodestone_core::{Ctx, Encode, Writer};
+use lodestone_core::{Ctx, Encode, Reader, Writer};
 use lodestone_model::{
-    AdapterError, AnimationAction, BossAction, BossColor, BossOverlay, ClientEvent,
-    CollisionRule, ConnectionState, Difficulty, Directive, DisplaySlot, GameMode, ObjectiveMode,
-    ObjectiveRenderType, TeamAction, TeamColor, Vec3, VersionAdapter, Visibility,
+    AdapterError, AnimationAction, BossAction, BossColor, BossOverlay, ChatKind, ClientAction,
+    ClientEvent, CollisionRule, ConnectionState, Difficulty, Directive, DisplaySlot, GameMode,
+    ObjectiveMode, ObjectiveRenderType, TeamAction, TeamColor, Vec3, VersionAdapter, Visibility,
 };
 use lodestone_testsupport::assert_emits_set;
 use lodestone_v735::V735Adapter;
@@ -790,4 +790,145 @@ fn scoreboard_score_holder_and_objective_are_not_transposed() {
             number_format: None,
         }],
     );
+}
+
+// ---------------------------------------------------------------------------
+// title — hand-assembled bytes, action-multiplexed. Same shape as 1.12.2's:
+// an action-bar text case at `2`, times shifted to `3`, clear/reset at `4`/`5`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn title_text_and_subtitle_actions_are_distinguishable() {
+    let mut title = Writer::default();
+    title.var_i32(0);
+    title.string("\"Title\"");
+    let directives = dispatch(play::clientbound::TITLE, &title.into_vec()).expect("handle");
+    assert_emits_set(
+        &directives,
+        &[ClientEvent::TitleText { text: lodestone_model::Text::literal("Title") }],
+    );
+
+    let mut subtitle = Writer::default();
+    subtitle.var_i32(1);
+    subtitle.string("\"Subtitle\"");
+    let directives = dispatch(play::clientbound::TITLE, &subtitle.into_vec()).expect("handle");
+    assert_emits_set(
+        &directives,
+        &[ClientEvent::SubtitleText { text: lodestone_model::Text::literal("Subtitle") }],
+    );
+}
+
+#[test]
+fn title_action_bar_case_maps_to_chat_game_info() {
+    let mut w = Writer::default();
+    w.var_i32(2);
+    w.string("\"Action bar\"");
+    let directives = dispatch(play::clientbound::TITLE, &w.into_vec()).expect("handle");
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::Chat { text, kind, sender, ack })] => {
+            assert_eq!(text.to_legacy_string(), "Action bar");
+            assert_eq!(*kind, ChatKind::GameInfo);
+            assert!(sender.is_none());
+            assert!(ack.is_none());
+        }
+        other => panic!("unexpected directives: {other:?}"),
+    }
+}
+
+#[test]
+fn title_times_action_reads_pairwise_distinct_fields_in_order() {
+    let mut w = Writer::default();
+    w.var_i32(3);
+    w.i32(11); // fade_in
+    w.i32(1); // stay
+    w.i32(4); // fade_out
+    let directives = dispatch(play::clientbound::TITLE, &w.into_vec()).expect("handle");
+    assert_emits_set(
+        &directives,
+        &[ClientEvent::TitlesAnimation { fade_in: 11, stay: 1, fade_out: 4 }],
+    );
+}
+
+#[test]
+fn title_clear_and_reset_actions_are_distinct() {
+    let mut clear = Writer::default();
+    clear.var_i32(4);
+    let directives = dispatch(play::clientbound::TITLE, &clear.into_vec()).expect("handle");
+    assert_emits_set(&directives, &[ClientEvent::TitlesCleared { reset_times: false }]);
+
+    let mut reset = Writer::default();
+    reset.var_i32(5);
+    let directives = dispatch(play::clientbound::TITLE, &reset.into_vec()).expect("handle");
+    assert_emits_set(&directives, &[ClientEvent::TitlesCleared { reset_times: true }]);
+}
+
+// ---------------------------------------------------------------------------
+// craft_progress_bar
+// ---------------------------------------------------------------------------
+
+#[test]
+fn craft_progress_bar_dispatches_container_data_with_distinct_fields() {
+    let mut w = Writer::default();
+    w.u8(3); // window_id
+    w.i16(7); // property
+    w.i16(21); // value
+    let directives =
+        dispatch(play::clientbound::CRAFT_PROGRESS_BAR, &w.into_vec()).expect("handle");
+    assert_emits_set(
+        &directives,
+        &[ClientEvent::ContainerData { window_id: 3, property: 7, value: 21 }],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// tab_complete — full parity with 26.2's shape (transaction id, start,
+// length, matches with optional tooltips), so unlike v47/v340 no
+// client-tracked state is needed on either side of the round trip.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tab_complete_request_encodes_transaction_id_and_text() {
+    let adapter = V735Adapter::new();
+    let (packet_id, payload) = adapter
+        .encode_action(
+            ConnectionState::Play,
+            &ClientAction::CommandSuggestion { id: 7, command: "/gib Ste".to_owned() },
+        )
+        .expect("encode_action")
+        .expect("protocol 754 can encode CommandSuggestion");
+    assert_eq!(packet_id, play::serverbound::TAB_COMPLETE);
+    let mut reader = Reader::new(&payload);
+    let id = reader.var_i32().expect("id");
+    let text = reader.string(32_767).expect("text");
+    assert_eq!(id, 7);
+    assert_eq!(text, "/gib Ste");
+}
+
+#[test]
+fn tab_complete_reply_reads_id_range_and_tooltips_straight_off_the_wire() {
+    let mut w = Writer::default();
+    w.var_i32(7); // transaction id
+    w.var_i32(5); // start
+    w.var_i32(3); // length
+    w.var_i32(2); // count
+    w.string("Steve");
+    w.bool(false); // no tooltip
+    w.string("Stella");
+    w.bool(true);
+    w.string("\"a player\""); // tooltip, JSON text component
+
+    let directives = dispatch(play::clientbound::TAB_COMPLETE, &w.into_vec()).expect("handle");
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::CommandSuggestionsReceived { id, start, length, suggestions })] => {
+            assert_eq!(*id, 7);
+            assert_eq!(*start, 5);
+            assert_eq!(*length, 3);
+            assert_eq!(suggestions.len(), 2);
+            assert_eq!(suggestions[0].text, "Steve");
+            assert_eq!(suggestions[0].tooltip, None);
+            assert_eq!(suggestions[1].text, "Stella");
+            assert_eq!(suggestions[1].tooltip.as_deref(), Some("a player"));
+        }
+        other => panic!("unexpected directives: {other:?}"),
+    }
 }

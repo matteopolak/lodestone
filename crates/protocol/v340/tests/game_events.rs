@@ -10,12 +10,12 @@
 //! their fixtures are hand-assembled with a raw `Writer` instead — there is
 //! no derived encoder for them to (mis)round-trip against.
 
-use lodestone_core::{Ctx, Encode, Writer};
+use lodestone_core::{Ctx, Encode, Reader, Writer};
 use lodestone_model::{
-    AdapterError, AnimationAction, BossAction, BossColor, BossOverlay, ClientEvent,
-    CollisionRule, ConnectionState, Directive, DisplaySlot, EntityEquipment, EquipmentSlot,
-    ObjectiveMode, ObjectiveRenderType, SoundCategory, TeamAction, TeamColor, VersionAdapter,
-    Visibility,
+    AdapterError, AnimationAction, BossAction, BossColor, BossOverlay, ChatKind, ClientAction,
+    ClientEvent, CollisionRule, ConnectionState, Directive, DisplaySlot, EntityEquipment,
+    EquipmentSlot, ObjectiveMode, ObjectiveRenderType, SoundCategory, TeamAction, TeamColor,
+    VersionAdapter, Visibility,
 };
 use lodestone_v340::V340Adapter;
 use lodestone_v340::packet_ids::play;
@@ -658,4 +658,175 @@ fn boss_bar_unknown_action_is_a_decode_error() {
     w.var_i32(9);
     let err = dispatch_err(play::clientbound::BOSS_BAR, &w.into_vec());
     assert!(matches!(err, AdapterError::Decode(_)));
+}
+
+// ---------------------------------------------------------------------------
+// title — hand-assembled bytes, action-multiplexed. 1.12.2 adds an
+// action-bar text case at `2` that 1.8 does not have, which pushes the
+// times/clear/reset actions up by one from v47's numbering.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn title_text_and_subtitle_actions_are_distinguishable() {
+    let mut title = Writer::default();
+    title.var_i32(0);
+    title.string("\"Title\"");
+    match dispatch(play::clientbound::TITLE, title.as_slice()).as_slice() {
+        [Directive::Emit(ClientEvent::TitleText { text })] => {
+            assert_eq!(text.to_legacy_string(), "Title");
+        }
+        other => panic!("unexpected directives: {other:?}"),
+    }
+
+    let mut subtitle = Writer::default();
+    subtitle.var_i32(1);
+    subtitle.string("\"Subtitle\"");
+    match dispatch(play::clientbound::TITLE, subtitle.as_slice()).as_slice() {
+        [Directive::Emit(ClientEvent::SubtitleText { text })] => {
+            assert_eq!(text.to_legacy_string(), "Subtitle");
+        }
+        other => panic!("unexpected directives: {other:?}"),
+    }
+}
+
+#[test]
+fn title_action_bar_case_maps_to_chat_game_info() {
+    let mut w = Writer::default();
+    w.var_i32(2); // action: ACTIONBAR — 1.12.2 only, absent from 1.8
+    w.string("\"Action bar\"");
+    match dispatch(play::clientbound::TITLE, w.as_slice()).as_slice() {
+        [Directive::Emit(ClientEvent::Chat { text, kind, sender, ack })] => {
+            assert_eq!(text.to_legacy_string(), "Action bar");
+            assert_eq!(*kind, ChatKind::GameInfo);
+            assert!(sender.is_none());
+            assert!(ack.is_none());
+        }
+        other => panic!("unexpected directives: {other:?}"),
+    }
+}
+
+#[test]
+fn title_times_action_is_shifted_by_the_action_bar_case() {
+    let mut w = Writer::default();
+    w.var_i32(3); // action: TIMES (4 in 1.8's numbering, shifted by ACTIONBAR)
+    w.i32(11); // fade_in
+    w.i32(1); // stay
+    w.i32(4); // fade_out
+    match dispatch(play::clientbound::TITLE, w.as_slice()).as_slice() {
+        [Directive::Emit(ClientEvent::TitlesAnimation { fade_in, stay, fade_out })] => {
+            assert_eq!(*fade_in, 11);
+            assert_eq!(*stay, 1);
+            assert_eq!(*fade_out, 4);
+        }
+        other => panic!("unexpected directives: {other:?}"),
+    }
+}
+
+#[test]
+fn title_clear_and_reset_actions_are_shifted_and_distinct() {
+    let mut clear = Writer::default();
+    clear.var_i32(4);
+    match dispatch(play::clientbound::TITLE, clear.as_slice()).as_slice() {
+        [Directive::Emit(ClientEvent::TitlesCleared { reset_times })] => assert!(!reset_times),
+        other => panic!("unexpected directives: {other:?}"),
+    }
+
+    let mut reset = Writer::default();
+    reset.var_i32(5);
+    match dispatch(play::clientbound::TITLE, reset.as_slice()).as_slice() {
+        [Directive::Emit(ClientEvent::TitlesCleared { reset_times })] => assert!(reset_times),
+        other => panic!("unexpected directives: {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// craft_progress_bar
+// ---------------------------------------------------------------------------
+
+#[test]
+fn craft_progress_bar_dispatches_container_data_with_distinct_fields() {
+    let mut w = Writer::default();
+    w.u8(3); // window_id
+    w.i16(7); // property
+    w.i16(21); // value
+    match dispatch(play::clientbound::CRAFT_PROGRESS_BAR, w.as_slice()).as_slice() {
+        [Directive::Emit(ClientEvent::ContainerData { window_id, property, value })] => {
+            assert_eq!(*window_id, 3);
+            assert_eq!(*property, 7);
+            assert_eq!(*value, 21);
+        }
+        other => panic!("unexpected directives: {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tab_complete — round trip through the same adapter instance, since
+// 1.12.2's reply carries neither a transaction id nor a replacement range
+// (both added in 1.13) and must be reconstructed from the outgoing request
+// `pending_tab_complete` remembered.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tab_complete_request_encodes_text_with_no_assume_command_or_looked_at_block() {
+    let adapter = V340Adapter::new();
+    let (packet_id, payload) = adapter
+        .encode_action(
+            ConnectionState::Play,
+            &ClientAction::CommandSuggestion {
+                id: 7,
+                command: "/gib Ste".to_owned(),
+            },
+        )
+        .expect("encode_action")
+        .expect("protocol 340 can encode CommandSuggestion");
+    assert_eq!(packet_id, play::serverbound::TAB_COMPLETE);
+    let mut reader = Reader::new(&payload);
+    let text = reader.string(32_767).expect("text");
+    let assume_command = reader.bool().expect("assume_command");
+    let has_block = reader.bool().expect("has_block");
+    assert_eq!(text, "/gib Ste");
+    assert!(!assume_command);
+    assert!(!has_block);
+}
+
+#[test]
+fn tab_complete_reply_reconstructs_id_and_range_from_the_request_it_answers() {
+    let adapter = V340Adapter::new();
+    adapter
+        .encode_action(
+            ConnectionState::Play,
+            &ClientAction::CommandSuggestion {
+                id: 7,
+                command: "/gib Ste".to_owned(),
+            },
+        )
+        .expect("encode_action")
+        .expect("protocol 340 can encode CommandSuggestion");
+
+    let mut w = Writer::default();
+    w.var_i32(2);
+    w.string("Steve");
+    w.string("Stella");
+    match adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::TAB_COMPLETE,
+            w.as_slice(),
+        )
+        .expect("handle_packet")
+        .as_slice()
+    {
+        [Directive::Emit(ClientEvent::CommandSuggestionsReceived { id, start, length, suggestions })] => {
+            assert_eq!(*id, 7);
+            // "/gib Ste" is 8 bytes; the last word ("Ste") starts at byte 5.
+            assert_eq!(*start, 5);
+            assert_eq!(*length, 3);
+            assert_eq!(
+                suggestions.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+                vec!["Steve", "Stella"]
+            );
+        }
+        other => panic!("unexpected directives: {other:?}"),
+    }
 }
