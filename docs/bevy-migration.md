@@ -563,15 +563,26 @@ being default-on is the thing most likely to surprise.
 **Landed** (`8be6544`). See [`entity-components.md`](./entity-components.md) for
 the shipped shape and three places it differs from the plan below:
 
-- **`EntitySnapshot` did not die at this stage, but has since.** As written on
-  2026-08-04 this bullet was accurate: the type survived because its producer
-  (`net.rs`) and consumer (`sim.rs`) were on opposite sides of a boundary this
-  stage did not close. Re-verified 2026-08-14: `grep -rn EntitySnapshot crates/`
-  now returns zero hits tree-wide. `docs/entity-components.md`'s "Widened, not
-  deleted" section records the follow-up ("Stage 1b") that deleted it once §4.1(c)
-  put ingest and the interpolator in the same `World`, removing the `'static`
-  obstacle this bullet named. Read that section, not this one, for the current
-  shape.
+- **`EntitySnapshot` did not die at this stage, but has since — scoped to
+  `lodestone-shell`.** As written on 2026-08-04 this bullet was accurate: the
+  type survived because its producer (`net.rs`) and consumer (`sim.rs`) were on
+  opposite sides of a boundary this stage did not close. `docs/entity-components.md`'s
+  "Widened, not deleted" section records the follow-up ("Stage 1b") that deleted
+  it once §4.1(c) put ingest and the interpolator in the same `World`, removing
+  the `'static` obstacle this bullet named. Read that section, not this one, for
+  the current shape.
+  **Re-verified 2026-08-15: do not run a bare `grep -rn EntitySnapshot crates/`
+  and read "zero hits" off it — `crates/lodestone-server/src/protocol.rs`
+  defines its own, unrelated `pub struct EntitySnapshot`** (the server's
+  broadcast-diff type, predating and independent of this stage's client-side
+  type of the same name), so a tree-wide grep today returns ~140 hits: that
+  server type plus its own call sites, and a long tail of `lodestone-shell`
+  doc comments that *reference* the deleted client type by name while
+  explaining its replacement. The claim this bullet makes is about the
+  client-side type only — scope the grep to `crates/lodestone-shell/` (or
+  `crates/lodestone-client/`), where it does return zero hits outside such
+  comments, or the same-named server type will make "is it really gone"
+  unanswerable by grep alone.
 - **`EntityView` is the sanctioned intermediate, exactly as planned** —
   components authoritative, the struct derived on demand for
   `ClientHandle::entities()` — not the reverse.
@@ -901,6 +912,12 @@ misled twice).
 ---
 
 ### Stage 6 — the async bot tier
+
+**Optional — confirmed skippable, tracked separately.** Filed as its own issue so the boundary is
+explicit rather than implied by "it's the last stage": Stages 0–5 plus §4.1(c) already give a plugin
+native-equivalent power without this one, and this stage is a plugin-tier convenience
+(`SharedState`/`ClientHandle` reimplemented over the ECS for async bot code) rather than a
+correctness requirement. Not started.
 
 **Moves:** `SharedState` (`state.rs`) and `ClientHandle`'s query methods →
 `ClientHandle { world: Arc<RwLock<bevy World>>, entity: Entity }`, reimplemented over the ECS —
