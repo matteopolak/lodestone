@@ -243,3 +243,24 @@ pub struct EntityDestroy {
     #[mc(varint)]
     pub entity_ids: Vec<i32>,
 }
+
+/// Clientbound `spawn_entity_experience_orb` — spawns an experience orb.
+///
+/// Wire layout: varint entity id, three `f64` coordinates, `i16` xp count —
+/// verified against minecraft-data's 1.16.2 `packet_spawn_entity_experience_orb`
+/// (byte-identical to 1.12.2's shape).
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:spawn_entity_experience_orb", state = Play, bound = Client)]
+pub struct SpawnEntityExperienceOrb {
+    /// Entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// X coordinate.
+    pub x: f64,
+    /// Y coordinate.
+    pub y: f64,
+    /// Z coordinate.
+    pub z: f64,
+    /// Experience count carried by this orb.
+    pub count: i16,
+}
