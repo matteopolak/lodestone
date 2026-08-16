@@ -234,3 +234,65 @@ fn malformed_mcmeta_is_rejected() {
     assert!(TextureMeta::parse(br#"{"animation":[]}"#).is_err());
     assert!(TextureMeta::parse(br#"{"animation":{"frames":5}}"#).is_err());
 }
+
+/// [`Image::first_animation_frame`] crops the **top** slice, in row order —
+/// discriminating input: two rows of distinct, non-repeating colours (never a
+/// uniform fill, which a mis-cropped image could satisfy by accident). A
+/// 2×4 strip, two 2×2 frames, cropped to `frame_height = 2` must keep frame
+/// 0's own two rows and drop frame 1's, not the reverse and not a resize.
+#[test]
+fn first_animation_frame_keeps_the_top_frame_only() {
+    // Row 0 (frame 0, row 0): red, green. Row 1 (frame 0, row 1): blue, white.
+    // Row 2 (frame 1, row 0): black, yellow. Row 3 (frame 1, row 1): cyan, magenta.
+    #[rustfmt::skip]
+    let rgba: Vec<u8> = vec![
+        255, 0, 0, 255,    0, 255, 0, 255,
+        0, 0, 255, 255,    255, 255, 255, 255,
+        0, 0, 0, 255,      255, 255, 0, 255,
+        0, 255, 255, 255,  255, 0, 255, 255,
+    ];
+    let strip = Image {
+        width: 2,
+        height: 4,
+        rgba,
+    };
+    let frame0 = strip.first_animation_frame(2);
+    assert_eq!((frame0.width, frame0.height), (2, 2));
+    assert_eq!(frame0.pixel(0, 0), [255, 0, 0, 255], "row 0 col 0, red");
+    assert_eq!(frame0.pixel(1, 0), [0, 255, 0, 255], "row 0 col 1, green");
+    assert_eq!(frame0.pixel(0, 1), [0, 0, 255, 255], "row 1 col 0, blue");
+    assert_eq!(
+        frame0.pixel(1, 1),
+        [255, 255, 255, 255],
+        "row 1 col 1, white"
+    );
+    // Frame 1's colours must not appear anywhere in the cropped result — the
+    // control that would catch cropping the *bottom* half instead, or not
+    // cropping at all.
+    for y in 0..frame0.height {
+        for x in 0..frame0.width {
+            let px = frame0.pixel(x, y);
+            assert_ne!(px, [0, 0, 0, 255], "frame 1's black leaked in at ({x},{y})");
+            assert_ne!(
+                px,
+                [255, 255, 0, 255],
+                "frame 1's yellow leaked in at ({x},{y})"
+            );
+        }
+    }
+}
+
+/// A `frame_height` at or past the image's own height is a safe no-op, not a
+/// panic and not a truncation — the case a static (non-animated) sheet takes
+/// every time this is called with its own declared height.
+#[test]
+fn first_animation_frame_is_a_no_op_when_frame_height_covers_the_whole_image() {
+    let img = Image {
+        width: 2,
+        height: 2,
+        rgba: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+    };
+    assert_eq!(img.first_animation_frame(2), img);
+    assert_eq!(img.first_animation_frame(9), img);
+    assert_eq!(img.first_animation_frame(0), img);
+}

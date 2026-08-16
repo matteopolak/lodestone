@@ -101,6 +101,31 @@ impl Image {
             self.rgba[i + 3],
         ]
     }
+
+    /// Crops the top `frame_height`-tall slice off a vertically-stacked
+    /// animation strip — frame `0` of a `*.png.mcmeta`-animated texture
+    /// (`{"animation": {"height": frame_height, ...}}`), which the jar always
+    /// stores as one tall PNG of `width × (width * frame_count)` (square
+    /// frames) rather than as separate files.
+    ///
+    /// Returns `self` unchanged (not a copy with the same dimensions — the
+    /// literal same [`Image`], no reallocation) when `frame_height` is `0` or
+    /// at least the image's own height, so passing a non-animated texture's
+    /// full height through this is a safe no-op rather than a special case a
+    /// caller has to detect first.
+    #[must_use]
+    pub fn first_animation_frame(&self, frame_height: u32) -> Self {
+        if frame_height == 0 || frame_height >= self.height {
+            return self.clone();
+        }
+        let row_bytes = (self.width as usize) * 4;
+        let take = (frame_height as usize) * row_bytes;
+        Image {
+            width: self.width,
+            height: frame_height,
+            rgba: self.rgba[..take.min(self.rgba.len())].to_vec(),
+        }
+    }
 }
 
 /// Expands a tightly packed `channels`-per-pixel buffer to RGBA8 via `f`.
