@@ -444,3 +444,26 @@ pub struct Spectate {
     /// Uuid of the entity to spectate/teleport to.
     pub target: Uuid,
 }
+
+/// Clientbound `block_action` — a block-triggering "block event": a note
+/// block playing, a piston starting to move, a chest lid opening or closing,
+/// a beacon beam changing. Verified against minecraft-data's 1.12.2
+/// `packet_block_action` (identical to 1.8's shape): packed `position`,
+/// then `byte1`/`byte2` (opaque per-block-type parameters — meaning depends
+/// on `block_id` and is a rendering/audio concern for the consumer, not
+/// something the adapter interprets), then a varint legacy block *type* id
+/// (not an `id:meta` composite — this space has no metadata component at
+/// all, unlike `block_change`'s).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:block_action", state = Play, bound = Client)]
+pub struct BlockAction {
+    /// Block position the event occurred at.
+    pub location: Position,
+    /// First event parameter, meaning depends on `block_id`.
+    pub byte1: u8,
+    /// Second event parameter, meaning depends on `block_id`.
+    pub byte2: u8,
+    /// Legacy numeric block *type* id (no metadata), e.g. `25` = note block.
+    #[mc(varint)]
+    pub block_id: i32,
+}

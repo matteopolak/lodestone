@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
 use lodestone_data::block_entity_types::block_entity_type;
+use lodestone_data::block_states;
 use lodestone_model::{
     AdapterError, BlockActionKind, BlockFace, ChatKind, ChatMode, ChunkPos, ClientAction,
     ClientEvent, ClientSettings, ConnectionState, Directive, DisplayedSkinParts, EntityInteraction,
@@ -25,8 +26,8 @@ use crate::packets::entity::{
     NamedEntitySpawn, RelEntityMove, SpawnEntityLiving, SpawnObject,
 };
 use crate::packets::game::{
-    BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook, EntityAction,
-    JoinGame, KickDisconnect, Respawn, ServerboundArmAnimation, ServerboundChat,
+    BlockAction, BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook,
+    EntityAction, JoinGame, KickDisconnect, Respawn, ServerboundArmAnimation, ServerboundChat,
     ServerboundPositionLook, Spectate, TeleportConfirm, UpdateHealth, UseEntity, UseEntityAt,
     UseEntityInteract,
 };
@@ -1111,6 +1112,59 @@ impl V340Adapter {
                 instabuild: flags & ABILITY_INSTABUILD != 0,
                 flying_speed,
                 walking_speed,
+            })]);
+        }
+        if packet_id == play::clientbound::BLOCK_ACTION {
+            // Packed position, two opaque bytes, then a varint legacy block
+            // *type* id — verified against minecraft-data's 1.12.2
+            // `packet_block_action` (identical to 1.8's shape). Without this,
+            // no note block ever plays, no piston ever animates, and no
+            // chest lid ever opens for a 1.12.2 connection: those are all
+            // this packet, not `block_change`.
+            let body: BlockAction = decode_body_exact(payload)?;
+            let block_id = u8::try_from(body.block_id).map_err(|_| {
+                AdapterError::Decode(format!(
+                    "block_action block id {} is outside the legacy 0..=255 block-type space",
+                    body.block_id
+                ))
+            })?;
+            // `block_action`'s wire shape carries no metadata component at
+            // all (unlike `block_change`'s `id:meta` composite), and every
+            // block that can trigger this event resolves to the same
+            // canonical block *family* key regardless of metadata — only
+            // within-family blockstate properties such as piston facing vary
+            // with it, and this event's `block` field only ever needs the
+            // family (see `ClientEvent::BlockEvent`'s doc). But `meta = 0` is
+            // not always a populated slot in the legacy flattening table:
+            // measured (`lodestone_v340::canonical::resolve`, a debug probe
+            // over every meta) that a legacy chest/ender_chest/trapped_chest
+            // id has **no** entry at meta `0` or `1` at all — those metas
+            // were never a real chest orientation, only `2..=5` (facing)
+            // were — so a fixed `meta = 0` would silently resolve every
+            // chest-lid `block_action` to air. Scanning every meta and
+            // taking the first `Resolved` slot is family-only-safe (any
+            // meta the table does populate names the same block) and
+            // correct for every id this packet has been observed to carry.
+            let state = (0u8..16)
+                .find_map(|meta| match canonical::resolve(block_id, meta) {
+                    canonical::CanonicalBlockState::Resolved(state) => Some(state),
+                    _ => None,
+                })
+                .unwrap_or_else(canonical::air_state_id);
+            let key: ResourceKey = block_states::block_name(state)
+                .unwrap_or("minecraft:air")
+                .parse()
+                .map_err(|_| {
+                    AdapterError::Decode(format!(
+                        "resolved block name for legacy block_action id {block_id} is not a \
+                         valid resource key"
+                    ))
+                })?;
+            return Ok(vec![Directive::Emit(ClientEvent::BlockEvent {
+                pos: body.location.0,
+                b0: body.byte1,
+                b1: body.byte2,
+                block: key,
             })]);
         }
         // Everything else in play is intentionally ignored for now.
