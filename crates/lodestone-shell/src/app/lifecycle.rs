@@ -1317,7 +1317,7 @@ impl WindowApp {
         if let Some(sheet) = crate::resources::load_particle_atlas() {
             render.install_particle_sheet_atlas(gpu.device(), gpu.queue(), sheet.atlas());
         }
-        let mut hud = HudRenderer::new(gpu.device(), format);
+        let mut hud = HudRenderer::new(gpu.device(), target.raw_view_format());
         // Attach the vanilla GUI sprite atlas so the survival vitals draw from
         // real textures; on a jar-less run this is `None` and the HUD keeps its
         // procedural fallback.

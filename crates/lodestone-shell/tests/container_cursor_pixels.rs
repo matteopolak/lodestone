@@ -408,6 +408,7 @@ fn the_recipe_book_draws_under_the_carried_stack() {
             .with_cursor(Some(cursor))
             .with_book_open(true);
         let acquired = target.acquire().expect("headless acquire");
+        let raw_view = acquired.create_view(target.raw_view_format());
         clear_view(device, queue, acquired.view());
         renderer.render_with_icons_scaled_between_strata(
             device,
@@ -425,6 +426,7 @@ fn the_recipe_book_draws_under_the_carried_stack() {
                         device,
                         queue,
                         acquired.view(),
+                        &raw_view,
                         None,
                         &book_geo,
                         AUTO_GUI_SCALE,
@@ -439,6 +441,7 @@ fn the_recipe_book_draws_under_the_carried_stack() {
                 device,
                 queue,
                 acquired.view(),
+                &raw_view,
                 None,
                 &book_geo,
                 AUTO_GUI_SCALE,

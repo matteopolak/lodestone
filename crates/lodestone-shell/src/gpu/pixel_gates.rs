@@ -445,7 +445,7 @@ fn hud_chat_text_rasterizes_to_pixels() {
             }
             queue.submit(std::iter::once(enc.finish()));
         }
-        hud.render(device, queue, ht_frame.view(), frame, w, h);
+        hud.render(device, queue, ht_frame.view(), ht_frame.view(), frame, w, h);
         let pixels = target.read_texels(device, queue);
         pixels
             .chunks_exact(4)
@@ -546,7 +546,7 @@ fn hud_sidebar_rasterizes_to_pixels() {
             }
             queue.submit(std::iter::once(enc.finish()));
         }
-        hud.render(device, queue, ht_frame.view(), frame, w, h);
+        hud.render(device, queue, ht_frame.view(), ht_frame.view(), frame, w, h);
         let pixels = target.read_texels(device, queue);
         pixels
             .chunks_exact(4)

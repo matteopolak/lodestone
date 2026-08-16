@@ -234,6 +234,14 @@ impl WindowApp {
             menu.begin_frame(frame.colour_texture().clone());
         }
 
+        // A second, non-colour-managed view of the same swapchain texture —
+        // vanilla's own 2-D GUI blending is not colour-managed at all, so the
+        // HUD's flat-colour pass (text, stack counts, durability bars) needs
+        // this instead of `frame.view()`'s (sRGB) one to match it byte-for-byte.
+        // Captured once here, the same pattern as `frame.colour_texture()`
+        // above, since every HUD draw call this frame wants the identical view.
+        let hud_raw_view = frame.create_view(target.raw_view_format());
+
         let aspect = w as f32 / h as f32;
         // Recompute the targeted block from the interpolated camera each frame.
         self.sim.update_target(aspect);
@@ -1159,6 +1167,7 @@ impl WindowApp {
             device,
             queue,
             frame.view(),
+            &hud_raw_view,
             Some(render.depth_view()),
             &hud_frame,
             item_models,
@@ -1498,6 +1507,7 @@ impl WindowApp {
                             device,
                             queue,
                             frame.view(),
+                            &hud_raw_view,
                             Some(render.depth_view()),
                             &geo,
                             self.nav.gui_scale(),

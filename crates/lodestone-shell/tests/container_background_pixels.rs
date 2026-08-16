@@ -219,7 +219,7 @@ fn the_real_container_art_draws_and_it_dims_the_hotbar_behind_it() {
     // below is measured against.
     let acquired = target.acquire().expect("headless acquire");
     clear_view(device, queue, acquired.view());
-    hud.render(device, queue, acquired.view(), &hud_frame, W, H);
+    hud.render(device, queue, acquired.view(), acquired.view(), &hud_frame, W, H);
     let hud_only = target.read_texels(device, queue);
     let hud_only_brightness = mean_brightness(&hud_only, hotbar_rect);
 
@@ -229,7 +229,7 @@ fn the_real_container_art_draws_and_it_dims_the_hotbar_behind_it() {
     dim_lit.attach_background(device, queue, format, background);
     let acquired = target.acquire().expect("headless acquire");
     clear_view(device, queue, acquired.view());
-    hud.render(device, queue, acquired.view(), &hud_frame, W, H);
+    hud.render(device, queue, acquired.view(), acquired.view(), &hud_frame, W, H);
     dim_lit.render(device, queue, acquired.view(), &frame, W, H);
     let dimmed = target.read_texels(device, queue);
     let dimmed_brightness = mean_brightness(&dimmed, hotbar_rect);
@@ -241,7 +241,7 @@ fn the_real_container_art_draws_and_it_dims_the_hotbar_behind_it() {
     let empty_frame = ContainerFrame::empty();
     let acquired = target.acquire().expect("headless acquire");
     clear_view(device, queue, acquired.view());
-    hud.render(device, queue, acquired.view(), &hud_frame, W, H);
+    hud.render(device, queue, acquired.view(), acquired.view(), &hud_frame, W, H);
     dim_control.render(device, queue, acquired.view(), &empty_frame, W, H);
     let control = target.read_texels(device, queue);
     let control_brightness = mean_brightness(&control, hotbar_rect);

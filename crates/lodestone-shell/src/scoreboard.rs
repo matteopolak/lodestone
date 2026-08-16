@@ -244,7 +244,7 @@ mod tests {
                 sidebar: side,
                 ..HudFrame::new(&stats)
             };
-            hud.render(device, queue, frame.view(), &hud_frame, w, h);
+            hud.render(device, queue, frame.view(), frame.view(), &hud_frame, w, h);
             let pixels = target.read_texels(device, queue);
             count_changed(&pixels, w, h, w * 2 / 3, h / 4, w / 3, h / 2)
         };

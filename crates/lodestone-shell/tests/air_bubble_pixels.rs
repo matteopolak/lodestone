@@ -245,7 +245,7 @@ fn the_air_bubble_row_reaches_the_screen_through_the_real_hud_path() {
     let mut shoot = |frame: &HudFrame| -> Vec<u8> {
         let acquired = target.acquire().expect("headless acquire");
         clear_view(device, queue, acquired.view(), backdrop);
-        hud.render(device, queue, acquired.view(), frame, W, H);
+        hud.render(device, queue, acquired.view(), acquired.view(), frame, W, H);
         target.read_texels(device, queue)
     };
 
