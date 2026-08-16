@@ -2514,6 +2514,15 @@ of these caught the *brief* being wrong rather than the code.
   silently blind. Written 2026-08-14 against a verified tree; the
   `protocol/v770/src/adapter.rs` split (`d983d0e7`..`5ac277f8`) is the precedent,
   including its warning.
+- [Distant terrain LOD (the rd-512 mesh tier)](./plans/distant-terrain-lod.md) — A
+  design and staged implementation plan for a Distant Horizons-class far-terrain tier:
+  a world-anchored surface pyramid (heightfield + baked surface colour + water
+  surface, at halving resolution per band) that fills the horizon from the edge of the
+  real-chunk near field out to render distance 512 chunks, drawn by a dedicated
+  heightfield pipeline. It is the follow-on that
+  `docs/plans/progressive-chunk-generation.md` names and deliberately does not
+  attempt: that plan is generation-side and honestly tops out at rd 64; this one
+  answers whether 512 is reachable at all, and at what fidelity.
 - [Issue batching: ~250 open issues as agent-sized, file-disjoint dispatch batches](./plans/issue-batching.md) —
   A dispatch plan that clusters the 255 open issues (surveyed 2026-08-04) into batches
   one agent can close in one sitting, scheduled into waves whose file sets are
@@ -2556,6 +2565,13 @@ of these caught the *brief* being wrong rather than the code.
   tier needs is a seam the public bevy-plugin API must expose anyway, none of those
   seams is reachable today, and the JVM tier itself should not start until the
   adjudication window and player registry exist.
+- [Progressive chunk generation ("mip levels" for worldgen)](./plans/progressive-chunk-generation.md) —
+  A design and staged implementation plan for serving distant chunk columns at a
+  reduced generation stage — shaping, carving and structures but no ores, vegetation
+  or top-layer — and upgrading them to full generation as the player approaches, so
+  the server can stream a much larger view radius without paying full generation for
+  columns the player can barely see. The owner's framing: mip levels for chunk
+  generation. Two hard correctness constraints come with it, verbatim from the owner:
 - [Plan: incremental random-tick section counters (issue #507 follow-up)](./plans/random-tick-counter.md) —
   The plan for replacing `random_tick.rs`'s per-tick section scan with vanilla's
   incrementally maintained `tickingBlockCount` — a per-section counter kept correct
