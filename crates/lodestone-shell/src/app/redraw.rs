@@ -29,10 +29,6 @@ impl WindowApp {
         let target_fps = self.current_target_fps(frame_start);
         let step = self.pacer.begin_frame(frame_start, target_fps);
         let dt = step.dt;
-        // `Runner::Winit`: the host event loop drives this driver's `App`
-        // itself, once per `RedrawRequested`, by calling `update()` directly
-        // — no internal timer, so packet ingest is never gated on frame rate.
-        self.ecs.update();
         // Issues #202/#203/#443/#444: pushed down before `step`, not after
         // like View Bobbing below — `step` is what actually reads them this
         // call (`apply_mouse`'s look-inversion, the toggle-mode and

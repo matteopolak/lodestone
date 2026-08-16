@@ -16,8 +16,6 @@ impl WindowApp {
         // — seeding from `config` would make frame one see a "change" back to the
         // stored value and quietly undo the flag 600 ms in.
         let persisted = crate::config::Options::load();
-        let mut ecs = lodestone_ecs::app::App::new();
-        ecs.add_plugins(lodestone_ecs::CorePlugin);
         Self {
             config,
             sim,
@@ -60,7 +58,6 @@ impl WindowApp {
             last_menu_click: None,
             last_log: Instant::now(),
             applied_fog,
-            ecs,
             recipe_book: None,
             recipe_book_revision: 0,
             recipe_panel: RecipePanelState::default(),
