@@ -95,6 +95,12 @@ pub mod level_dat;
 pub mod nbt_diff;
 pub mod player_dat;
 pub mod region;
+/// Third-party schematic/structure formats (`.litematic`, `.schem`, vanilla
+/// `.nbt`) — turns a downloaded build into a flat list of non-air block
+/// placements. See the module's own doc for the format details and the
+/// worked example that pins its bit-packing math. Independent of
+/// [`region`]/[`level_dat`]: nothing here reads or writes a world.
+pub mod schematic;
 pub mod world_gen_settings;
 
 pub use compression::CompressionScheme;
@@ -310,6 +316,19 @@ pub enum Error {
     /// this is an error rather than a default.
     #[error(r#"world_gen_settings.dat has no numeric "seed" field"#)]
     MissingSeed,
+
+    /// [`schematic::load_schematic_file`] found no extension this crate maps
+    /// to a [`schematic::SchematicFormat`] — including the legacy MCEdit
+    /// `.schematic` format, deliberately refused rather than mis-parsed as a
+    /// Sponge `.schem` (see that module's own doc).
+    #[error("no supported schematic format recognised for {0}")]
+    SchematicUnknownFormat(String),
+    /// A schematic/structure file's NBT decoded, but was missing a field (or
+    /// had the wrong tag type for one) that [`schematic`] needs for the
+    /// format it was asked to parse. Carries the field's name, or a
+    /// `.`-joined path for a nested one.
+    #[error("schematic file is missing or has a malformed \"{0}\" field")]
+    SchematicMalformed(String),
 
     /// An on-disk file carried a `DataVersion` this build cannot read, and was
     /// refused rather than mis-decoded. See
