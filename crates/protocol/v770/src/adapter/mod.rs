@@ -44,7 +44,7 @@ use lodestone_model::{
     TeamColor, TeamParameters, TeleportFlags, TestBlockMode as ModelTestBlockMode,
     TestInstanceAction, TestInstanceData, TestInstanceStatus, Text, TextColor, ToolBlocks,
     ToolMining, ToolPatch, ToolRule, TrackedWaypoint, Vec3, Vec3f, VersionAdapter, Visibility,
-    WaypointId, WaypointOperation, WaypointPosition, WorldSink,
+    WaypointId, WaypointOperation, WaypointPosition, WorldSink, WrittenBookContent,
 };
 use lodestone_world::{
     BiomePatch, ChunkPos as WorldChunkPos, LightPatch, LoadedChunk, NibbleArray, PalettedContainer,

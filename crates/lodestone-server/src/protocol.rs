@@ -1364,6 +1364,26 @@ pub enum ServerBound {
         /// `ChatFormatting::stripFormatting` map.
         lines: [String; 4],
     },
+    /// A book-and-quill draft save or signing submission
+    /// (`ServerboundEditBookPacket`, issue #616's remainder). Carries no
+    /// `ItemStack` — the packet only names a slot and the new text;
+    /// `crate::server`'s consumer looks the carried book up in the tracked
+    /// `PlayerInventory` itself, mirroring `handleEditBook`'s own
+    /// `this.player.getInventory().getItem(slot)`.
+    EditBook {
+        /// The native inventory slot holding the book — a hotbar index
+        /// (`0..9`) or the off-hand (`40`); every other value is refused the
+        /// same way vanilla's own `Inventory.isHotbarSlot(slot) || slot ==
+        /// 40` gate refuses it.
+        slot: i32,
+        /// Draft or final page text, wire-shape only (raw, unfiltered) —
+        /// this crate runs no chat-filtering service, matching every other
+        /// text-carrying variant's convention.
+        pages: Vec<String>,
+        /// `Some(title)` when this is a signing submission (transmute to
+        /// `minecraft:written_book`); `None` for an ordinary draft save.
+        title: Option<String>,
+    },
     /// A packet the loop does not need to act on (teleport confirmations,
     /// look-only or status-only movement, and several other decoded-but-
     /// unmodelled families — see `crates/protocol/v770/src/server_protocol.rs`'s

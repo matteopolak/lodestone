@@ -573,6 +573,83 @@ fn read_profile_properties(
     Ok(properties)
 }
 
+/// One `Filterable<String>` (`Filterable.streamCodec`): the raw string
+/// (capped at `max`), then an optional filtered alternate (same cap),
+/// discarded — see [`ItemComponents::writable_book_content`]'s own doc for
+/// why only the raw half is ever worth keeping here.
+fn read_filterable_string(reader: &mut Reader<'_>, max: usize) -> Result<String, AdapterError> {
+    let raw = reader.string(max).map_err(dec_err)?;
+    if reader.bool().map_err(dec_err)? {
+        reader.string(max).map_err(dec_err)?;
+    }
+    Ok(raw)
+}
+
+/// `WritableBookContent.STREAM_CODEC`
+/// (`Filterable.streamCodec(ByteBufCodecs.stringUtf8(1024)).apply(ByteBufCodecs.list(100))`):
+/// a VarInt page count capped at 100, then that many
+/// [`read_filterable_string`] entries capped at 1024 characters each.
+fn read_writable_book_content(reader: &mut Reader<'_>) -> Result<Vec<String>, AdapterError> {
+    let count = reader.var_i32().map_err(dec_err)?;
+    if !(0..=100).contains(&count) {
+        return Err(AdapterError::Decode(format!(
+            "writable_book_content page count {count} exceeds ByteBufCodecs.list's max of 100"
+        )));
+    }
+    let mut pages = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        pages.push(read_filterable_string(reader, 1024)?);
+    }
+    Ok(pages)
+}
+
+/// `WrittenBookContent.STREAM_CODEC`: `Filterable<String>` title (cap 32),
+/// plain `author` (`ByteBufCodecs.STRING_UTF8`, cap 32767), VarInt
+/// `generation`, a `ByteBufCodecs.list()`-capped (no explicit bound, so
+/// `Integer.MAX_VALUE` — read defensively bounded below) list of
+/// `Filterable<Component>` pages, then a `resolved` bool — in that
+/// declaration order, which is also `STREAM_CODEC`'s composite order (see
+/// `WrittenBookContent.java`).
+///
+/// Each page is read as network-NBT (`ComponentSerialization.STREAM_CODEC`,
+/// the same chat-component wire shape `minecraft:custom_name` and
+/// `minecraft:item_name` already use) via [`Text::from_nbt`], then the
+/// optional filtered alternate — network-NBT too — is read and discarded for
+/// the same reason [`read_filterable_string`]'s is.
+fn read_written_book_content(reader: &mut Reader<'_>) -> Result<WrittenBookContent, AdapterError> {
+    let title = read_filterable_string(reader, 32)?;
+    let author = reader.string(32767).map_err(dec_err)?;
+    let generation = reader.var_i32().map_err(dec_err)?;
+    let generation = u8::try_from(generation.clamp(0, 3)).unwrap_or(0);
+    // No wire-declared cap on this list; bounded here at 4096 (vanilla's own
+    // `MAX_PAGES`-adjacent constants are all far smaller) purely to keep a
+    // malformed count from requesting an enormous allocation before the first
+    // page is even read — the same defensive-capacity convention
+    // `decode_container_click`'s own doc comment already documents.
+    let count = read_count(reader, "written_book_content page")?;
+    if count > 4096 {
+        return Err(AdapterError::Decode(format!(
+            "written_book_content declares {count} pages, implausibly many"
+        )));
+    }
+    let mut pages = Vec::with_capacity(count.min(256));
+    for _ in 0..count {
+        let raw = Text::from_nbt(&read_network_nbt(reader).map_err(dec_err)?);
+        if reader.bool().map_err(dec_err)? {
+            read_network_nbt(reader).map_err(dec_err)?; // filtered alternate, discarded
+        }
+        pages.push(raw);
+    }
+    let resolved = reader.bool().map_err(dec_err)?;
+    Ok(WrittenBookContent {
+        title,
+        author,
+        generation,
+        pages,
+        resolved,
+    })
+}
+
 /// `MobEffectInstance.STREAM_CODEC.apply(ByteBufCodecs.list())`: a VarInt count then
 /// that many `(MobEffect id, MobEffectInstance.Details)` pairs. Only the effect id
 /// and amplifier are kept — the colour mix needs nothing else — but every field is
@@ -708,6 +785,20 @@ fn read_component_patch(
             // from that slot onward. See [`read_resolvable_profile`].
             Some("minecraft:profile") => {
                 components.profile = Some(read_resolvable_profile(reader)?);
+            }
+            // Decoded for the same reason as the trim, map id, pot decorations,
+            // potion contents and profile above: `WritableBookContent
+            // .STREAM_CODEC` has no length prefix, so an unsigned book-and-quill
+            // in any inventory used to truncate the rest of the packet. See
+            // [`read_writable_book_content`].
+            Some("minecraft:writable_book_content") => {
+                components.writable_book_content = Some(read_writable_book_content(reader)?);
+            }
+            // Same reasoning, one component over: `WrittenBookContent
+            // .STREAM_CODEC` is equally unprefixed. See
+            // [`read_written_book_content`].
+            Some("minecraft:written_book_content") => {
+                components.written_book_content = Some(read_written_book_content(reader)?);
             }
             // Both of these are `ByteBufCodecs.VAR_INT` (`DataComponents.java`)
             // and both *override* the prototype value seeded above. They are
