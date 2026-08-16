@@ -592,8 +592,13 @@ impl PendingResourcePackPrompt {
 /// The pending-prompt cell: written by the net thread when it decides a push
 /// needs the player's own answer, read every frame by
 /// `app/session.rs`'s `drive_ui_from_session` to reconcile
-/// `Screen::ResourcePackPrompt`, and cleared the moment an answer is queued
-/// (accepted, declined, or superseded by a second push).
+/// `Screen::ResourcePackPrompt`, and cleared by [`apply_pack_response`] once
+/// the net thread's own loop actually *drains* an answer — **not** the
+/// moment [`NetClient::respond_to_resource_pack`] queues one; that call only
+/// sends on a channel this cell knows nothing about, and the drain can lag
+/// it by up to 15 ms. `MenuNav::resource_pack_answered_id` exists precisely
+/// because a caller once read this doc as "synchronous" and reconciled
+/// against this cell as if it already reflected the answer.
 #[derive(Debug, Default)]
 pub struct PackPromptCell(Mutex<Option<PendingResourcePackPrompt>>);
 
@@ -1311,6 +1316,13 @@ enum Origin {
         /// that world's stored seed wins and this is ignored; see
         /// [`lodestone_server::region_source::resolve_world_seed`].
         seed: i64,
+        /// Which bundled overworld generator to build (issue #592's item 1) —
+        /// a **creation** parameter, same rule as `seed` immediately above:
+        /// only consulted when there is no existing world on disk to defer to.
+        /// Not cfg-gated on `wasm32`, unlike `world_dir`/`lan_port`/
+        /// `online_mode` below: world generation itself runs identically on
+        /// both targets, only persistence and LAN hosting are native-only.
+        world_type: lodestone_server::WorldType,
         /// Chunk radius the server streams around the player.
         view_radius: i32,
         /// Where to save this world, or `None` for a throwaway in-memory one.
@@ -1700,6 +1712,7 @@ impl NetClient {
         server_protocol: Box<dyn lodestone_server::ServerProtocol>,
         protocol: i32,
         seed: i64,
+        world_type: lodestone_server::WorldType,
         view_radius: i32,
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
         #[cfg(not(target_arch = "wasm32"))] world_dir: Option<std::path::PathBuf>,
@@ -1708,6 +1721,7 @@ impl NetClient {
             Origin::Integrated {
                 protocol: server_protocol,
                 seed,
+                world_type,
                 view_radius,
                 #[cfg(not(target_arch = "wasm32"))]
                 world_dir,
@@ -1750,6 +1764,7 @@ impl NetClient {
         server_protocol: Box<dyn lodestone_server::ServerProtocol>,
         protocol: i32,
         seed: i64,
+        world_type: lodestone_server::WorldType,
         view_radius: i32,
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
         world_dir: Option<std::path::PathBuf>,
@@ -1760,6 +1775,7 @@ impl NetClient {
             Origin::Integrated {
                 protocol: server_protocol,
                 seed,
+                world_type,
                 view_radius,
                 world_dir,
                 lan_port: Some(port),
@@ -2280,6 +2296,20 @@ impl NetClient {
         world.run_schedule(lodestone_ecs::NetIngest);
     }
 
+    /// Seeds the pending resource-pack prompt cell directly, bypassing
+    /// `route_resource_pack_pushed` — the net thread that would normally set
+    /// it in production does not exist on a loopback client. `respond_to_resource_pack`
+    /// on a loopback is likewise a real send into a receiver-less channel
+    /// (see [`loopback`](Self::loopback)'s own doc): nothing ever drains it
+    /// and clears this cell, which is exactly the "net thread has not caught
+    /// up yet" state `app/tests.rs`'s regression gate on
+    /// `MenuNav::resource_pack_answered_id` needs to hold deterministically,
+    /// rather than racing a real 15 ms drain.
+    #[cfg(test)]
+    pub(crate) fn set_pending_resource_pack_prompt_for_test(&self, prompt: PendingResourcePackPrompt) {
+        self.pending_pack_prompt.set(prompt);
+    }
+
     /// Like [`loopback`](Self::loopback) but also hands back the inbound
     /// [`NetUpdate`] sender, so tests can drive the phase/status mapping in
     /// [`crate::sim`] without a live server. Also returns the captured-action
@@ -2480,6 +2510,7 @@ async fn run_async(
             Origin::Integrated {
                 protocol: server_protocol,
                 seed,
+                world_type,
                 view_radius,
                 #[cfg(not(target_arch = "wasm32"))]
                 world_dir,
@@ -2544,7 +2575,13 @@ async fn run_async(
                 // `docs/world-open-latency.md`); the ~12 ms in
                 // `docs/chunk-memory-pool-footprint.md` predates carvers, ores and
                 // vegetation composing in and is not the figure to reason from.
-                let source = lodestone_server::overworld_chunk_source(seed);
+                //
+                // `world_type` (issue #592's item 1) picks the noise settings
+                // document `overworld_chunk_source_of_type` builds the generator
+                // from — `Overworld` reproduces the old unconditional
+                // `overworld_chunk_source(seed)` call exactly, since that
+                // function is defined as this one at `WorldType::Overworld`.
+                let source = lodestone_server::overworld_chunk_source_of_type(seed, world_type);
                 // Open to LAN (issue #535's scope 1). Taken before the
                 // in-memory constructors below because it is a *different
                 // server*: `IntegratedServer::open_to_lan` binds a TCP listener

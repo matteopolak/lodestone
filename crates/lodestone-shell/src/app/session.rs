@@ -222,17 +222,33 @@ impl WindowApp {
         // rebuilds `MenuNav`'s own dialog state unconditionally (a second
         // push must not inherit a stale focus or pack id — see that
         // method's own doc), so it is only called on the **edge** into
-        // "something is pending" via `!self.ui.is_resource_pack_prompt()`;
-        // the *closing* edge needs no action here at all —
-        // `apply_resource_pack_prompt` already closed the screen and
-        // cleared `NetClient`'s cell (through `respond_to_resource_pack`)
-        // the instant the player answered, so by the time this reads
-        // `None` there is nothing left to reconcile.
+        // "something is pending" via `!self.ui.is_resource_pack_prompt()`.
+        //
+        // That edge alone used to be the owner's exact report ("accepting
+        // the custom resource pack didn't do anything, and it kept the
+        // choice menu open"): `apply_resource_pack_prompt` closes the screen
+        // the moment the player answers, but `respond_to_resource_pack` only
+        // *queues* the answer for the net thread's own loop to drain — up to
+        // 15 ms later, never "the instant" a doc comment here used to claim
+        // — so this reconcile, which can run again the very same frame (the
+        // click handler and `redraw` share one winit dispatch), still reads
+        // the *same* pending prompt back from the still-uncleared shared
+        // cell and reopens it right away, indistinguishable from the click
+        // having done nothing. `MenuNav::resource_pack_already_answered`
+        // is the fix: it remembers the id this side already answered so the
+        // edge does not re-fire for it, and is forgotten once the ground
+        // truth itself reports nothing pending (the net thread has, by then,
+        // actually cleared its cell).
         if let Some(net) = self.sim.net() {
-            if let Some(prompt) = net.pending_resource_pack_prompt() {
-                if !self.ui.is_resource_pack_prompt() {
-                    self.nav.show_resource_pack_prompt(&mut self.ui, &prompt);
+            match net.pending_resource_pack_prompt() {
+                Some(prompt) => {
+                    if !self.ui.is_resource_pack_prompt()
+                        && !self.nav.resource_pack_already_answered(prompt.id)
+                    {
+                        self.nav.show_resource_pack_prompt(&mut self.ui, &prompt);
+                    }
                 }
+                None => self.nav.clear_resource_pack_answered(),
             }
         }
         // A transition may have changed grab intent (Connected → Playing grabs;
@@ -683,6 +699,18 @@ impl WindowApp {
             SingleplayerLaunch::Open(_) => resolve_launch_seed(None),
             SingleplayerLaunch::Created { config, .. } => resolve_launch_seed(Some(config)),
         };
+        // Issue #592's item 1, same rule as `seed` immediately above: only
+        // `Created` carries a `WorldCreationConfig` to read a chosen preset
+        // from, and only a **new** world's generator is ever built from this
+        // — an existing `Open`ed world has no stored world-type field to
+        // override either, so it takes the same `Overworld` default the
+        // unconditional `overworld_chunk_source(seed)` call used before this
+        // was threaded. Not cfg-gated to native, unlike `online_mode` below:
+        // `launch_singleplayer` needs this on wasm32 too.
+        let world_type = match &launch {
+            SingleplayerLaunch::Open(_) => lodestone_server::WorldType::Overworld,
+            SingleplayerLaunch::Created { config, .. } => config.world_type.backend_world_type(),
+        };
         // Issue #273's shell-side control: only `SingleplayerLaunch::Created`
         // carries a `WorldCreationConfig` to hold this on — `Open` (Play
         // Selected World) has none, so an existing world always takes the
@@ -716,12 +744,32 @@ impl WindowApp {
             .saturating_add(1);
         #[cfg(not(target_arch = "wasm32"))]
         let launch_result = if online_mode {
-            launch_open_to_lan_online(self.config.protocol, view_radius, session, seed, world_dir)
+            launch_open_to_lan_online(
+                self.config.protocol,
+                view_radius,
+                session,
+                seed,
+                world_type,
+                world_dir,
+            )
         } else {
-            launch_singleplayer(self.config.protocol, view_radius, session, seed, world_dir)
+            launch_singleplayer(
+                self.config.protocol,
+                view_radius,
+                session,
+                seed,
+                world_type,
+                world_dir,
+            )
         };
         #[cfg(target_arch = "wasm32")]
-        let launch_result = launch_singleplayer(self.config.protocol, view_radius, session, seed);
+        let launch_result = launch_singleplayer(
+            self.config.protocol,
+            view_radius,
+            session,
+            seed,
+            world_type,
+        );
         match launch_result {
             Ok(net) => {
                 self.sim.attach_net(net);

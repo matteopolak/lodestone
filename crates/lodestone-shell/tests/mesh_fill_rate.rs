@@ -188,6 +188,7 @@ fn open_session(view_radius: i32, world_dir: std::path::PathBuf, sim: &Sim) -> O
         server_protocol,
         protocol,
         0,
+        lodestone_server::WorldType::Overworld,
         view_radius,
         Some((sim.ecs().clone(), sim.local_player())),
         Some(world_dir),

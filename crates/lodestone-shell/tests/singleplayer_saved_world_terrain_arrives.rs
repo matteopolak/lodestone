@@ -185,6 +185,7 @@ fn a_saved_world_serves_terrain_for_a_column_it_never_saved() {
         server_protocol,
         protocol,
         SEED,
+        lodestone_server::WorldType::Overworld,
         OWNER_VIEW_RADIUS,
         None,
         Some(dir.clone()),

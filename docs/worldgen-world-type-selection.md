@@ -158,32 +158,49 @@ entirely the world-creation screen (below).
   biome table by their own preset's choice, and `single_biome_surface`
   deliberately withholds it rather than needing it widened.
 
-### The one remaining seam: the world-creation screen
+### The world-creation screen: three of seven wired, four still to go
 
-Nothing outside `lodestone-worldgen`/`lodestone-server` constructs any
-non-default generator yet. `crates/lodestone-shell/src/menu/create_world.rs`
-(owned elsewhere, untouched by this module) would need to: offer the seven
-presets as choices, persist which one was picked alongside the seed the same
-way world metadata already persists a seed, and at world-open time call the
-matching entry point instead of the `Overworld`-only
-`overworld_generator`/`overworld_chunk_source`:
+**`normal`/`amplified`/`large_biomes` are wired end to end, as of issue
+#592's item 1.** `crates/lodestone-shell/src/menu/create_world.rs`'s
+`WorldTypePreset::backend_world_type` converts the player's choice to
+`WorldType`; `crates/lodestone-shell/src/app/session.rs`'s
+`begin_singleplayer` reads it from `WorldCreationConfig` for a `Created`
+launch (same rule as the seed — an `Open`ed existing world always takes
+`Overworld`, since there is no persisted world-type field to override it
+with), threads it through `app/launch.rs`'s `launch_singleplayer`/
+`launch_open_to_lan_online` into `NetClient::open_singleplayer`/
+`open_to_lan`, and `net.rs`'s `Origin::Integrated` carries it to the
+`overworld_chunk_source_of_type` call that used to hardcode `Overworld`
+unconditionally. Verified over a real `NetClient` session by
+`crates/lodestone-shell/tests/singleplayer_terrain_arrives.rs`'s
+`a_singleplayer_world_honours_the_selected_world_type_end_to_end`, reusing
+this module's own measured 64/130 top-of-world heights below rather than
+re-deriving them.
 
-| preset | entry point |
-|---|---|
-| `normal` | `overworld_generator`/`overworld_chunk_source` (unchanged) |
-| `amplified` | `overworld_generator_of_type`/`overworld_chunk_source_of_type(seed, WorldType::Amplified)` |
-| `large_biomes` | same, `WorldType::LargeBiomes` |
-| `single_biome_surface` | `single_biome_generator`/`single_biome_chunk_source(seed, biome)` — `biome` defaults to `world_preset_single_biome_default_biome()` |
-| `flat` | `flat_generator`/`flat_chunk_source(world_preset_flat_settings(false))`, or `flat_level_generator_preset_settings(id)` for a Customize-screen alternate |
-| `flat_all_dimensions` | same, `world_preset_flat_settings(true)` |
-| `debug_all_block_states` | `debug_generator`/`debug_chunk_source()` — no parameters |
+**The other four remain unreachable from outside this crate**, blocked on
+the same re-export gap named below — selecting one of them in the UI
+currently falls back to `Overworld` rather than erroring:
+
+| preset | entry point | reachable from `lodestone-shell` today? |
+|---|---|---|
+| `normal` | `overworld_generator`/`overworld_chunk_source` (unchanged) | yes |
+| `amplified` | `overworld_generator_of_type`/`overworld_chunk_source_of_type(seed, WorldType::Amplified)` | yes |
+| `large_biomes` | same, `WorldType::LargeBiomes` | yes |
+| `single_biome_surface` | `single_biome_generator`/`single_biome_chunk_source(seed, biome)` — `biome` defaults to `world_preset_single_biome_default_biome()` | no |
+| `flat` | `flat_generator`/`flat_chunk_source(world_preset_flat_settings(false))`, or `flat_level_generator_preset_settings(id)` for a Customize-screen alternate | no |
+| `flat_all_dimensions` | same, `world_preset_flat_settings(true)` | no |
+| `debug_all_block_states` | `debug_generator`/`debug_chunk_source()` — no parameters | no |
 
 All seven functions are `pub` in `worldgen_data.rs`, but only
 `WorldType`/`overworld_generator_of_type`/`overworld_chunk_source_of_type`
 are currently re-exported from the crate root (`lib.rs`); the single-biome/
 flat/debug entry points are reached today only from `worldgen_data.rs`'s own
-tests. A UI wiring this up from outside `lodestone-server` needs those
-re-exported too — a `lib.rs` change, not a `worldgen_data.rs` one.
+tests. Closing the remaining four needs those re-exported too — a `lib.rs`
+change, not a `worldgen_data.rs` one — plus the same `create_world.rs`/
+`app/session.rs`/`app/launch.rs`/`net.rs` threading the first three already
+have, plus a UI affordance for `single_biome_surface`'s own `biome`
+parameter (vanilla's `WorldTab` cycles a preset list rather than exposing
+this directly).
 
 ## Configuration
 

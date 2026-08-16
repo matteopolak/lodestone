@@ -61,12 +61,26 @@ const OWNER_VIEW_RADIUS: i32 = 33;
 const SMALL_VIEW_RADIUS: i32 = 1;
 
 fn open_session(seed: i64, view_radius: i32, world_dir: Option<PathBuf>) -> Option<NetClient> {
+    open_session_of_type(seed, lodestone_server::WorldType::Overworld, view_radius, world_dir)
+}
+
+/// [`open_session`], but naming the [`lodestone_server::WorldType`] rather
+/// than hardcoding [`lodestone_server::WorldType::Overworld`] — see
+/// [`a_singleplayer_world_honours_the_selected_world_type_end_to_end`] below,
+/// which is the one caller that needs a different arm.
+fn open_session_of_type(
+    seed: i64,
+    world_type: lodestone_server::WorldType,
+    view_radius: i32,
+    world_dir: Option<PathBuf>,
+) -> Option<NetClient> {
     let protocol = lodestone::Config::default().protocol;
     let server_protocol = lodestone_registry::server_protocol_for_protocol(protocol)?;
     Some(NetClient::open_singleplayer(
         server_protocol,
         protocol,
         seed,
+        world_type,
         view_radius,
         None,
         world_dir,
@@ -145,6 +159,85 @@ fn a_singleplayer_world_arrives_with_terrain_at_the_owners_render_distance() {
         net.is_chunk_loaded(ChunkPos { x: 0, z: 0 })
     });
     assert_spawn_column_has_terrain(&net, OWNER_VIEW_RADIUS);
+}
+
+/// Issue #592's item 1: `WorldTypePreset::Amplified` reaching
+/// `NetClient::open_singleplayer` all the way from a create-world config must
+/// actually change the served terrain, not just carry a differently-named
+/// generator that the wire never uses.
+///
+/// The expected values are not derived here — they are read from
+/// `crates/lodestone-server/tests/world_type_selection.rs`'s own
+/// `NORMAL_TOP_Y`/`AMPLIFIED_TOP_Y` constants (64/130 at seed 4242, chunk
+/// `(0, 0)`, **local** `(0, 0)`, i.e. block `(0, *, 0)` — not the spawn
+/// column at `(8, 8)` a couple of blocks over, which is a different noise
+/// sample and would not reproduce either number). That file already proves
+/// `overworld_generator_of_type` itself is a real, effective parameter one
+/// layer down; this test's only job is the layer this issue actually
+/// threaded — `Origin::Integrated`'s new `world_type` field reaching the
+/// `overworld_chunk_source_of_type` call in `net.rs`'s `run_async`, and the
+/// live session serving what it built rather than something byte-identical
+/// to the default.
+#[test]
+fn a_singleplayer_world_honours_the_selected_world_type_end_to_end() {
+    const SEED: i64 = 4242;
+    const BLOCK_X: i32 = 0;
+    const BLOCK_Z: i32 = 0;
+    const NORMAL_TOP_Y: i32 = 64;
+    const AMPLIFIED_TOP_Y: i32 = 130;
+
+    fn top_non_air_y(net: &NetClient) -> i32 {
+        let air = net
+            .block_at(BlockPos::new(BLOCK_X, DEFINITELY_AIR_Y, BLOCK_Z))
+            .expect("a loaded chunk must answer for a y inside the world");
+        (SEARCH_BOTTOM..=SEARCH_TOP)
+            .rev()
+            .find(|&y| {
+                net.block_at(BlockPos::new(BLOCK_X, y, BLOCK_Z))
+                    .is_some_and(|id| id != air)
+            })
+            .expect("the column arrived but is entirely air")
+    }
+
+    let Some(overworld) = open_session_of_type(
+        SEED,
+        lodestone_server::WorldType::Overworld,
+        SMALL_VIEW_RADIUS,
+        None,
+    ) else {
+        assert!(!cfg!(feature = "live"), "the default build must host singleplayer");
+        return;
+    };
+    pump_until(&overworld, "the spawn chunk", |net| {
+        net.is_chunk_loaded(ChunkPos { x: 0, z: 0 })
+    });
+    assert_eq!(
+        top_non_air_y(&overworld),
+        NORMAL_TOP_Y,
+        "the default arm must still serve exactly what it served before world_type \
+         was threaded — a changed default here means the wiring touched the \
+         Overworld path, not just added a new one"
+    );
+
+    let Some(amplified) = open_session_of_type(
+        SEED,
+        lodestone_server::WorldType::Amplified,
+        SMALL_VIEW_RADIUS,
+        None,
+    ) else {
+        return; // Already asserted unreachable-only-without-`live` above.
+    };
+    pump_until(&amplified, "the spawn chunk", |net| {
+        net.is_chunk_loaded(ChunkPos { x: 0, z: 0 })
+    });
+    assert_eq!(
+        top_non_air_y(&amplified),
+        AMPLIFIED_TOP_Y,
+        "Origin::Integrated's world_type field must reach net.rs's \
+         overworld_chunk_source_of_type call — a live singleplayer session \
+         selecting Amplified must serve Amplified terrain over the real wire, \
+         not silently fall back to the Overworld default"
+    );
 }
 
 /// One full section face is `16 * 16 = 256` quads; a real terrain column is
@@ -258,6 +351,7 @@ fn a_sim_at_the_owners_render_distance_drains_real_terrain_meshes() {
         server_protocol,
         protocol,
         4242,
+        lodestone_server::WorldType::Overworld,
         OWNER_VIEW_RADIUS,
         None,
         None,

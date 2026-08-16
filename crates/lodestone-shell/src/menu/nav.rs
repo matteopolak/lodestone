@@ -1341,6 +1341,24 @@ pub struct MenuNav {
     /// [`Screen::ResourcePackPrompt`](super::Screen::ResourcePackPrompt) is
     /// not showing — see [`Self::open_resource_pack_prompt`].
     resource_pack_prompt: Option<crate::menu::confirm::ResourcePackPromptNav>,
+    /// The id of the resource-pack prompt this side last answered
+    /// (Accept/Decline), kept until `app/session.rs`'s
+    /// `drive_ui_from_session` observes the ground truth
+    /// (`NetClient::pending_resource_pack_prompt`) catch up to `None`.
+    ///
+    /// [`Self::apply_resource_pack_prompt`] closes this screen the instant
+    /// the player answers, but `NetClient::respond_to_resource_pack` only
+    /// *queues* the answer for the net thread's own loop to drain — up to
+    /// 15 ms later on native, and only on that loop's next iteration on
+    /// wasm32 — so the shared cell a fresh reconcile reads is still `Some`
+    /// with the *same* id for a little while after. Without this, the
+    /// reconcile's own "not currently showing, but the ground truth says
+    /// pending" edge re-triggers on that stale read and reopens the exact
+    /// prompt just answered, which is indistinguishable from "Accept did
+    /// nothing" — the owner's report. This field lets the reconcile tell
+    /// "still the prompt I already answered" apart from "a new one", without
+    /// changing which thread clears the shared cell or when.
+    resource_pack_answered_id: Option<uuid::Uuid>,
     /// A double-click on a server row joins it — vanilla's
     /// `ServerSelectionList.java`, `if (doubleClick) join()`,
     /// unconditional on where in the row the click landed. The primitive is
@@ -1491,6 +1509,7 @@ impl MenuNav {
             command_block: None,
             sign_edit: None,
             resource_pack_prompt: None,
+            resource_pack_answered_id: None,
             command_tree: None,
             lan_published: false,
         }
@@ -3643,12 +3662,36 @@ impl MenuNav {
                     return MenuAction::None;
                 };
                 ui.close_resource_pack_prompt();
+                // Record *before* returning: `app/session.rs`'s reconcile can
+                // run again as soon as this frame (see
+                // `Self::resource_pack_answered_id`'s own doc for why the
+                // shared cell this compares against is not cleared yet), so
+                // the flag has to be set the instant we decide to close, not
+                // after the caller gets around to sending the response.
+                self.resource_pack_answered_id = Some(prompt.id());
                 MenuAction::ResourcePackResponse {
                     id: prompt.id(),
                     accept: outcome == ResourcePackPromptOutcome::Accept,
                 }
             }
         }
+    }
+
+    /// Whether `id` is the resource-pack prompt this side already answered —
+    /// see [`Self::resource_pack_answered_id`]'s own doc. `app/session.rs`'s
+    /// reconcile is the one caller.
+    #[must_use]
+    pub fn resource_pack_already_answered(&self, id: uuid::Uuid) -> bool {
+        self.resource_pack_answered_id == Some(id)
+    }
+
+    /// Forgets the last-answered id once the ground truth
+    /// (`NetClient::pending_resource_pack_prompt`) catches up to `None` — see
+    /// [`Self::resource_pack_answered_id`]'s own doc. Idempotent, so calling
+    /// it every frame the ground truth is empty (as `app/session.rs` does) is
+    /// cheap and safe.
+    pub fn clear_resource_pack_answered(&mut self) {
+        self.resource_pack_answered_id = None;
     }
 
     /// The World Creation screen (issue #190). Every key is routed through
