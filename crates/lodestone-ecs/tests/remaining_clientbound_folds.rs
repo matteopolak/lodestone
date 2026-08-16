@@ -153,6 +153,7 @@ fn every_new_event() -> Vec<ClientEvent> {
             entries: vec![RecipeBookEntry {
                 display_id: 4,
                 result_items: vec![12],
+                station_items: vec![58],
                 notification: true,
                 highlight: false,
             }],
@@ -310,6 +311,7 @@ fn a_removed_recipe_leaves_has_data_set() {
                 entries: vec![RecipeBookEntry {
                     display_id: 7,
                     result_items: vec![1],
+                    station_items: vec![61],
                     notification: false,
                     highlight: false,
                 }],
