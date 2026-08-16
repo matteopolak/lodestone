@@ -14,6 +14,10 @@
 //!   half (surviving a restart) is out of scope until world persistence
 //!   exists at all — see that module's doc for the hazard to avoid when
 //!   someone builds it.
+//! - [`reentrancy`] (native only) — a reusable test harness for the
+//!   `EcsHandle` reentrancy-deadlock class of bug, so a plugin author can
+//!   check their own plugin before shipping it instead of discovering the
+//!   hazard the way it shipped in production.
 //!
 //! See [`docs/plugin-api.md`](../../../../docs/plugin-api.md) for the plugin
 //! ABI this crate sits on top of, and `crates/plugins/README.md` for what
@@ -24,5 +28,11 @@
 pub mod config;
 pub mod paths;
 pub mod persistent_data;
+// Not built for wasm32: a browser has no real threads and `std::thread::spawn`
+// traps there, and this is a development-time tool a plugin author runs on
+// their own machine, never code that ships inside a running client. See the
+// module's own doc for the full reasoning.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod reentrancy;
 
 pub use persistent_data::{ChunkDataStore, EntityDataStore, PersistentDataPlugin, namespaced_key};

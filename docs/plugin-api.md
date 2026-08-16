@@ -1046,11 +1046,24 @@ hatch (`lodestone-shell` direct dependency), with issue #20 as the named remaini
 backstop cover every call site rather than only `hold_read`/`hold_write`'s. Candidate (2) — a
 plugin-prelude wrapper type exposing only `hold_read`/`hold_write` — is not needed on top of this: it
 would only matter for a plugin that already has an `EcsHandle` in hand, which per the above should not
-happen for a plugin following the doctrine at all. Issue #179's reusable reentrancy test harness
-should exercise this shape directly: build a plugin `App` with only `lodestone-ecs` as a dependency
-and assert (by construction, e.g. a compile-fail/trybuild-style check or a grep of the plugin's own
-manifest) that no `EcsHandle`-typed value is reachable from a system, rather than only re-running
-`mining_deadlock.rs`'s one historical shape.
+happen for a plugin following the doctrine at all.
+
+**Issue #179's reusable reentrancy test harness is landed**, in
+`crates/plugins/lodestone-plugin-support/src/reentrancy.rs`, and it covers both halves this section
+names rather than only re-running `mining_deadlock.rs`'s one historical shape:
+
+- `assert_ecs_only_dependency_graph` is the static check this section suggested — a text scan of a
+  plugin's own `Cargo.toml` refusing a dependency on `lodestone-shell`/`lodestone-client`, the two
+  crates that can hand a system a real `EcsHandle`. A plugin passing it has, by construction, no route
+  to the deadlock at all.
+- `assert_schedule_completes_under_write_guard` / `assert_plugin_is_reentrancy_safe` is the runtime
+  watchdog for the escape-hatch case: `mining_deadlock.rs`'s
+  `within_budget(move || hold_write(&ecs, |world| world.run_schedule(...)))`, generalised to any
+  plugin's `App` and any `ScheduleLabel`. `tests/reentrancy_harness.rs` in the same crate is the
+  control — a toy plugin that captures its own `EcsHandle` as a resource and takes a raw
+  `handle.read()` from inside a system, proving the watchdog actually reports `Wedged` for a bypass of
+  `hold_read`/`hold_write`'s panic-based ledger, paired with a benign-plugin gate proving it does not
+  false-positive on ordinary systems.
 
 ## How to change it, and the gotchas
 
