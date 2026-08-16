@@ -147,19 +147,6 @@ impl SnapshotView {
         Some((cz * self.width_x + cx) as usize)
     }
 
-    /// How many columns of the requested square were actually loaded — the honest
-    /// measure of how much world a search has to work with.
-    #[must_use]
-    pub fn loaded_columns(&self) -> usize {
-        self.loaded.iter().filter(|l| **l).count()
-    }
-
-    /// Total column slots in the snapshot square.
-    #[must_use]
-    pub fn column_slots(&self) -> usize {
-        self.loaded.len()
-    }
-
     /// Facts at a cell for the **physics** path: outside the snapshot is air.
     fn physics_facts(&self, x: i32, y: i32, z: i32) -> &BlockFacts {
         match self.state_at(x, y, z) {

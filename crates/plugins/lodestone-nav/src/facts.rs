@@ -280,13 +280,6 @@ impl FactsTable {
         self.resolved
     }
 
-    /// The first state id whose name is `name`, if any. Linear; for tests and
-    /// for resolving a throwaway block once at session start, never per tick.
-    #[must_use]
-    pub fn find_by_name(&self, census: &dyn BlockCensus, name: &str) -> Option<u32> {
-        #[allow(clippy::cast_possible_truncation)]
-        (0..self.facts.len() as u32).find(|&s| census.name(s) == Some(name))
-    }
 }
 
 /// One state's facts from the census's three answers plus the name-keyed table.
