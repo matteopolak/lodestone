@@ -168,7 +168,7 @@ audit:
   `Popped` are still `Route::NOWHERE` below — they are answered directly in
   `net.rs`'s own loop, not through the `forward`/`poll_net` path.
 
-**Eleven were confirmed genuine islands; seven have since gained real
+**Eleven were confirmed genuine islands; eight have since gained real
 producers** — zero hits for the bare variant name anywhere in `lodestone-shell`
 or `lodestone-controller`, in any form, at the time this section was written:
 `ContainerButtonClick`, `EditBook`, `PingRequest`, `RecipeBookSeenRecipe`,
@@ -216,9 +216,20 @@ Since fixed:
   (`self.ui.is_container_open()`), and `Sim::send_select_bundle_item` sends.
   Needed the `minecraft:bundle_contents` item component to exist first — see
   `lodestone_model::ItemComponents::bundle_contents`'s own doc.
+* **`RecipeBookSeenRecipe`** — `Sim::send_recipe_book_seen_recipe`
+  (`sim/session.rs`), called from `app/session.rs`'s
+  `WindowApp::sync_recipe_book_seen` every frame the recipe-book panel is
+  open, the same shape `restore_recipe_book_settings`/`sync_recipe_toasts`
+  already use. Transcribes vanilla's real trigger
+  (`RecipeButton.init` → `RecipeBookPage.recipeShown` →
+  `RecipeBookComponent.recipeShown` → `LocalPlayer.removeRecipeHighlight`):
+  a recipe is reported seen the moment a `RecipeButton` for it is populated
+  onto a visible page, not on a click, and only while that page is on
+  screen. `WindowApp::recipe_book_seen: HashSet<i32>` dedups so a recipe
+  whose button stays on screen for many frames is reported exactly once.
 
-Remaining: `RecipeBookSeenRecipe`, `SetContainerSlotState`, `SpectatorAction`,
-`Stab`, `TeleportToEntity`.
+Remaining: `SetContainerSlotState`, `SpectatorAction`, `Stab`,
+`TeleportToEntity`.
 
 Filed as one narrow follow-up rather than eleven separate issues, per the pattern
 this doc's own "How to change it" section already sets: each needs its own
