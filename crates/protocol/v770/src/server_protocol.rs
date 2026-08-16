@@ -64,7 +64,8 @@ use lodestone_model::command_tree::{
 };
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode,
-    ItemStack, ResourceKey, Rotation, SoundCategory, Text, TextContent, Vec3, Vec3f,
+    ItemComponents, ItemStack, ResourceKey, Rotation, SoundCategory, Text, TextContent, Vec3,
+    Vec3f, WrittenBookContent,
 };
 use lodestone_server::{
     Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, EntitySnapshot, HOTBAR_SIZE,
@@ -1995,11 +1996,122 @@ fn write_optional_item_stack(w: &mut Writer, item: Option<&ItemStack>) {
             Some(id) => {
                 w.var_i32(i32::try_from(stack.count).unwrap_or(i32::MAX));
                 w.var_i32(id);
-                w.var_i32(0); // added components
-                w.var_i32(0); // removed components
+                write_item_component_patch(w, &stack.components);
             }
             None => w.var_i32(0),
         },
+    }
+}
+
+/// Reverse of [`lodestone_data::data_component_types::component_type_name`]:
+/// finds the numeric `minecraft:data_component_type` registry id for a name
+/// by linear scan over the same table, the identical "no reverse export,
+/// search the forward one" shape [`villager_registry_wire_id`] above already
+/// uses and for the same reason.
+fn component_type_id(name: &str) -> Option<i32> {
+    (0..lodestone_data::data_component_types::DATA_COMPONENT_TYPE_COUNT as i32)
+        .find(|&id| lodestone_data::data_component_types::component_type_name(id) == Some(name))
+}
+
+/// Writes an item stack's outbound `DataComponentPatch` — the tail of
+/// `ItemStack.OPTIONAL_STREAM_CODEC` this function's caller writes for
+/// `container_set_slot`/`container_set_content`/`merchant_offers`: a VarInt
+/// added-component count, that many `(type id, payload)` entries, then a
+/// VarInt removed-component count.
+///
+/// **Scope.** Only the two book components issue #616's `EDIT_BOOK` needed
+/// (`writable_book_content`/`written_book_content`) are ever written here;
+/// `removed` is always `0` because this crate only ever *adds* a component to
+/// a stack it itself produces, never removes one from a stack a client
+/// already has. Every other modeled [`ItemComponents`] field
+/// (`custom_name`, `enchantments`, `dyed_color`, `trim`, …) still writes as
+/// an empty patch — a real, pre-existing gap this function does not close
+/// (each needs its own outbound stream-codec writer, mirrored against the
+/// jar the way the two below are, and that is its own project). **Not a
+/// regression**: before this function existed, this crate's clientbound
+/// direction wrote an unconditional `0`/`0` for every stack regardless of
+/// what it carried, so no component of any kind ever reached the wire
+/// outbound.
+fn write_item_component_patch(w: &mut Writer, components: &ItemComponents) {
+    let count = i32::from(components.writable_book_content.is_some())
+        + i32::from(components.written_book_content.is_some());
+    // `DataComponentPatch.STREAM_CODEC`'s own `encode`/`decode` (verified
+    // against the jar): **both** counts are written up front — `positiveCount`
+    // then `negativeCount` — before a single entry follows, not
+    // added-count/entries/removed-count. Writing the removed count after the
+    // entries (this function's own first draft) round-trips through nothing
+    // but itself; the real decoder reads both counts before it reads its
+    // first entry, exactly the "predict the value, do not merely round-trip
+    // against your own encoder" trap this repo's evidence standards warn
+    // about, caught here by `book_content_wiring.rs`'s round trip through
+    // the independently-written client decoder.
+    w.var_i32(count);
+    w.var_i32(0); // removed components: this crate never sends a removal.
+    if let Some(pages) = &components.writable_book_content {
+        write_writable_book_content_entry(w, pages);
+    }
+    if let Some(content) = &components.written_book_content {
+        write_written_book_content_entry(w, content);
+    }
+}
+
+/// One added `minecraft:writable_book_content` entry: the component type id,
+/// then `WritableBookContent.STREAM_CODEC`'s payload — a VarInt page count,
+/// then per page a `Filterable<String>` (the raw string, then `false` for
+/// "no filtered alternate"; this crate runs no chat-filtering service, the
+/// same call the decode-side reader in `adapter/inventory.rs` makes for the
+/// reverse direction).
+fn write_writable_book_content_entry(w: &mut Writer, pages: &[String]) {
+    w.var_i32(component_type_id("minecraft:writable_book_content").unwrap_or(0));
+    w.var_i32(i32::try_from(pages.len()).unwrap_or(i32::MAX));
+    for page in pages {
+        w.string(page);
+        w.bool(false);
+    }
+}
+
+/// One added `minecraft:written_book_content` entry:
+/// `WrittenBookContent.STREAM_CODEC`'s composite order exactly — title as a
+/// `Filterable<String>`, plain `author` string, VarInt `generation`, a
+/// VarInt-counted list of `Filterable<Component>` pages (each
+/// [`written_book_page_nbt`] then a `false` filtered-alternate flag), then
+/// the `resolved` bool.
+fn write_written_book_content_entry(w: &mut Writer, content: &WrittenBookContent) {
+    w.var_i32(component_type_id("minecraft:written_book_content").unwrap_or(0));
+    w.string(&content.title);
+    w.bool(false); // no filtered alternate
+    w.string(&content.author);
+    w.var_i32(i32::from(content.generation));
+    w.var_i32(i32::try_from(content.pages.len()).unwrap_or(i32::MAX));
+    for page in &content.pages {
+        write_network_nbt(w, &written_book_page_nbt(page))
+            .expect("a written-book page built from `Text::literal` always encodes");
+        w.bool(false); // no filtered alternate
+    }
+    w.bool(content.resolved);
+}
+
+/// Serializes one written-book page to network-NBT. Deliberately narrower
+/// than a general `Text` serializer would need to be, the same scope
+/// discipline [`text_to_nbt`]'s own doc comment insists on for its one
+/// caller: every page this crate itself signs is `Text::literal` with no
+/// style, click, hover or insertion (`apply_edit_book`'s own
+/// `Text::literal(page)` map in `lodestone-server`), so only the `Literal`
+/// and `Translate` content shapes are handled — the only two [`TextContent`]
+/// variants that exist — and neither ever carries style/click/hover/
+/// insertion here, so nothing is silently dropped for a page this crate
+/// produces. A page decoded from a real client's own written book (richer
+/// than a literal) is not reachable through this encoder, because this
+/// crate never re-serializes a stack it decoded — it only ever encodes
+/// stacks it constructed itself.
+fn written_book_page_nbt(text: &Text) -> Nbt {
+    match &text.content {
+        TextContent::Literal(literal) => {
+            Nbt::Compound(vec![("text".to_owned(), Nbt::String(literal.clone()))])
+        }
+        TextContent::Translate { key, .. } => {
+            Nbt::Compound(vec![("translate".to_owned(), Nbt::String(key.clone()))])
+        }
     }
 }
 
@@ -3594,9 +3706,20 @@ impl ServerProtocol for V770ServerProtocol {
                 let _ = decoded;
                 ServerBound::Ignored
             }
+            // Issue #616's remainder. `ServerboundEditBookPacket` carries no
+            // `ItemStack` at all (see `EditBook`'s own doc comment) — the
+            // component-patch decode gap that blocks the item-carrying
+            // serverbound packets (`CONTAINER_CLICK`/`SET_CREATIVE_MODE_SLOT`)
+            // does not apply here. `crate::server`'s consumer looks the book
+            // up in the tracked `PlayerInventory` by `slot` itself, mirroring
+            // `handleEditBook`'s own `this.player.getInventory().getItem(slot)`.
             State::Play if packet_id == play::serverbound::EDIT_BOOK => {
-                let _ = decode_full::<EditBook>(payload);
-                ServerBound::Ignored
+                match decode_full::<EditBook>(payload) {
+                    Some(EditBook { slot, pages, title }) => {
+                        ServerBound::EditBook { slot, pages, title }
+                    }
+                    None => ServerBound::Ignored,
+                }
             }
             // Block-entity text, not item state — arguably miscategorized
             // alongside the inventory-model packets above. Wire shape only,

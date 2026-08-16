@@ -68,7 +68,7 @@ use lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE;
 use lodestone_entity::{DamageFlags, ItemLifecycle};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, EntityAttributeSnapshot, GameMode, ItemStack,
-    ResourceKey, Rotation, Text, TextContent, Vec3, Vec3f,
+    ResourceKey, Rotation, Text, TextContent, Vec3, Vec3f, WrittenBookContent,
 };
 use lodestone_data::block_items;
 use lodestone_net::{Connection, NetError, Transport};
@@ -94,7 +94,7 @@ use crate::chunk::{
 use crate::fall::{FallSample, FallTracker};
 use crate::container_click::{Click, MayPickup, MenuKind, MenuLayout, SlotKind, Station, do_click_with};
 use crate::crafting::CraftingState;
-use crate::inventory::{PlayerInventory, window_zero_menu_slot};
+use crate::inventory::{HOTBAR_SIZE, OFFHAND_NATIVE, PlayerInventory, window_zero_menu_slot};
 use crate::mob_spawn::SpawnRng;
 use crate::mobs::{MobHandle, PerceivedPlayer, PlayerIdentity, PlayerPerception};
 use crate::neighbor_update::Direction;
@@ -3994,6 +3994,7 @@ where
             | ServerBound::ContainerButtonClick { .. }
             | ServerBound::SetCommandBlock { .. }
             | ServerBound::SignUpdate { .. }
+            | ServerBound::EditBook { .. }
             | ServerBound::PickItemFromBlock { .. }
             | ServerBound::PickItemFromEntity { .. }
             | ServerBound::TeleportToEntity { .. }
@@ -8506,6 +8507,71 @@ fn apply_rename_item<P: ServerProtocol>(
     ]
 }
 
+/// [`ServerBound::EditBook`]'s consumer — `ServerGamePacketListenerImpl
+/// .updateBookContents`/`.signBook`, reached the same way `handleEditBook`
+/// gates it: `slot` must be a hotbar index or the off-hand (vanilla's
+/// `Inventory.isHotbarSlot(slot) || slot == 40`), and the item sitting there
+/// must be a `minecraft:writable_book` — vanilla's `carried.has(DataComponents
+/// .WRITABLE_BOOK_CONTENT)` gate, which is always true for that item because
+/// `Items.WRITABLE_BOOK` registers the component as a **prototype default**
+/// (`WritableBookContent.EMPTY`), not only after a first edit. This crate has
+/// no general item-prototype default-component census to reproduce that
+/// distinction (see `ItemComponents`'s own doc on *effective* vs. *patch*
+/// fields), so the item's own canonical key stands in for it here — every
+/// `minecraft:writable_book` this crate can ever produce is editable, exactly
+/// as vanilla's default makes it.
+///
+/// `pages`/`title` reach here already filtered to nothing (this crate runs no
+/// chat-filtering service, the same call every other text-carrying consumer
+/// makes) and already length/count-capped by the wire decode (`EditBook`'s
+/// own `#[mc(max = 100)]` list cap and its `pages`/`title` string caps).
+///
+/// Returns the native slot written and the item now sitting there, for the
+/// caller to resend via `CONTAINER_SET_SLOT` — `None` when the gate refuses
+/// (out-of-range slot, no item there, or not a writable book), matching
+/// `updateBookContents`/`signBook`'s own silent no-op on a failed `has` check.
+fn apply_edit_book(
+    inventory: &mut PlayerInventory,
+    slot: i32,
+    pages: Vec<String>,
+    title: Option<String>,
+    author: &str,
+) -> Option<(usize, ItemStack)> {
+    let native = usize::try_from(slot).ok()?;
+    if !(native < usize::from(HOTBAR_SIZE) || native == OFFHAND_NATIVE) {
+        return None;
+    }
+    let mut item = inventory.native(native)?.clone();
+    if item.item.path() != "writable_book" {
+        return None;
+    }
+    match title {
+        // `signBook`: transmute to a written book, dropping the draft
+        // component (`writtenBook.remove(DataComponents
+        // .WRITABLE_BOOK_CONTENT)`) and setting the written one — generation
+        // `0` and `resolved: true`, matching `signBook`'s own literal
+        // `new WrittenBookContent(title, author, 0, pages, true)`.
+        Some(title) => {
+            item.item = "minecraft:written_book".parse().ok()?;
+            item.components.writable_book_content = None;
+            item.components.written_book_content = Some(WrittenBookContent {
+                title,
+                author: author.to_owned(),
+                generation: 0,
+                pages: pages.into_iter().map(Text::literal).collect(),
+                resolved: true,
+            });
+        }
+        // `updateBookContents`: overwrite the draft pages in place, no
+        // transmute.
+        None => {
+            item.components.writable_book_content = Some(pages);
+        }
+    }
+    inventory.set_native(native, Some(item.clone()));
+    Some((native, item))
+}
+
 /// [`ServerBound::ContainerButtonClick`]'s consumer —
 /// `EnchantmentMenu.clickMenuButton`. `slot` (`button_id`, `0..3`) selects
 /// which of the three offers; the lapis price is `slot + 1` and the XP price
@@ -10478,6 +10544,25 @@ where
                     crate::block_entities::apply_sign_update(entity, player_uuid, is_front_text, stripped);
                 }
             });
+        }
+        // Issue #616's remainder, `EDIT_BOOK`. See `apply_edit_book`'s own
+        // doc for the gate; resent via `CONTAINER_SET_SLOT` on window `0`
+        // (the player's own inventory screen, not whatever menu happens to
+        // be open — `handleEditBook` operates on `this.player.getInventory()`
+        // directly and never checks `containerMenu`), the same "window 0,
+        // state id 0" pattern every other server-initiated inventory-slot
+        // write in this function already uses.
+        ServerBound::EditBook { slot, pages, title } => {
+            if let Some((native, item)) = apply_edit_book(inventory, slot, pages, title, username)
+                && let Some(menu_slot) = window_zero_menu_slot(native)
+            {
+                apply(
+                    conn,
+                    state,
+                    proto.encode_container_slot(0, 0, menu_slot, Some(&item)),
+                )
+                .await?;
+            }
         }
         // The enchanting table's "choose an offer" button
         // (`EnchantmentMenu.clickMenuButton`) — issue #253's other last-mile
@@ -14180,6 +14265,90 @@ mod tests {
     /// A parsed `minecraft:` item key for the tests above.
     fn item_key(path: &str) -> lodestone_model::ResourceKey {
         lodestone_model::ResourceKey::new("minecraft", path).expect("a static item key parses")
+    }
+
+    /// [`apply_edit_book`]'s draft-save path: a writable book in a hotbar
+    /// slot gets its pages overwritten in place, no transmute.
+    #[test]
+    fn edit_book_draft_save_updates_pages_without_transmuting() {
+        let mut inv = PlayerInventory::new();
+        inv.set_native(0, Some(ItemStack::new(item_key("writable_book"), 1)));
+        let result = apply_edit_book(
+            &mut inv,
+            0,
+            vec!["Page one".to_owned()],
+            None,
+            "Steve",
+        );
+        let (native, item) = result.expect("a writable book in a hotbar slot must be editable");
+        assert_eq!(native, 0);
+        assert_eq!(item.item, item_key("writable_book"));
+        assert_eq!(
+            item.components.writable_book_content,
+            Some(vec!["Page one".to_owned()])
+        );
+        assert_eq!(inv.native(0), Some(&item));
+    }
+
+    /// The signing path: a title present transmutes the stack to
+    /// `minecraft:written_book` and stamps the signer's name as author —
+    /// `ServerGamePacketListenerImpl.signBook`'s own literal `0`/`true` for
+    /// generation/resolved.
+    #[test]
+    fn edit_book_signing_transmutes_to_written_book() {
+        let mut inv = PlayerInventory::new();
+        inv.set_native(
+            crate::inventory::OFFHAND_NATIVE,
+            Some(ItemStack::new(item_key("writable_book"), 1)),
+        );
+        let (native, item) = apply_edit_book(
+            &mut inv,
+            i32::try_from(crate::inventory::OFFHAND_NATIVE).unwrap(),
+            vec!["Once upon a time".to_owned(), "The End".to_owned()],
+            Some("My Book".to_owned()),
+            "Alex",
+        )
+        .expect("a writable book in the off-hand must be signable");
+        assert_eq!(native, crate::inventory::OFFHAND_NATIVE);
+        assert_eq!(item.item, item_key("written_book"));
+        assert_eq!(item.components.writable_book_content, None);
+        let content = item
+            .components
+            .written_book_content
+            .expect("signing must set written_book_content");
+        assert_eq!(content.title, "My Book");
+        assert_eq!(content.author, "Alex");
+        assert_eq!(content.generation, 0);
+        assert!(content.resolved);
+        assert_eq!(content.pages.len(), 2);
+    }
+
+    /// **Control**: a slot outside the hotbar or off-hand must be refused —
+    /// vanilla's own `Inventory.isHotbarSlot(slot) || slot == 40` gate.
+    /// Without this, an implementation that skipped the slot check entirely
+    /// would still pass the two tests above (both use in-range slots).
+    #[test]
+    fn edit_book_refuses_a_main_storage_slot() {
+        let mut inv = PlayerInventory::new();
+        inv.set_native(9, Some(ItemStack::new(item_key("writable_book"), 1)));
+        assert_eq!(
+            apply_edit_book(&mut inv, 9, vec!["x".to_owned()], None, "Steve"),
+            None
+        );
+    }
+
+    /// **Control**: an item that is not a writable book must be refused —
+    /// vanilla's `carried.has(DataComponents.WRITABLE_BOOK_CONTENT)` gate.
+    /// Without this, any item in the targeted slot would silently gain book
+    /// content.
+    #[test]
+    fn edit_book_refuses_a_non_book_item() {
+        let mut inv = PlayerInventory::new();
+        inv.set_native(0, Some(ItemStack::new(item_key("stone"), 1)));
+        assert_eq!(
+            apply_edit_book(&mut inv, 0, vec!["x".to_owned()], None, "Steve"),
+            None
+        );
     }
 
     /// The packet-shaping function itself, not the equipment maths

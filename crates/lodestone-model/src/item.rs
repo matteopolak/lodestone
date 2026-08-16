@@ -257,6 +257,33 @@ pub struct ItemComponents {
     /// not yet round-trip through a real client. Defaults to `0`, matching
     /// vanilla's own `getOrDefault(DataComponents.REPAIR_COST, 0)`.
     pub repair_cost: u32,
+    /// `minecraft:writable_book_content`: an unsigned book-and-quill's draft
+    /// pages, in order — vanilla's `WritableBookContent`
+    /// (`world/item/component/WritableBookContent.java`), a list of up to 100
+    /// `Filterable<String>` pages capped at 1024 characters each.
+    ///
+    /// Only the *raw* half of each `Filterable` is kept — the *filtered*
+    /// alternate exists for a chat-filtering service this crate does not run,
+    /// the same "no filtering service, so raw is the only value that matters"
+    /// call [`crate::text`]'s own chat handling already makes. `None` for
+    /// every item but a `minecraft:writable_book` that has been edited at
+    /// least once; a freshly crafted one carries no component at all.
+    ///
+    /// Decoded rather than left unmodeled for the same reason as
+    /// [`trim`](Self::trim): `WritableBookContent.STREAM_CODEC` has no length
+    /// prefix, so a writable book sitting in *any* container used to truncate
+    /// the rest of that packet.
+    pub writable_book_content: Option<Vec<String>>,
+    /// `minecraft:written_book_content`: a signed book's title, author,
+    /// generation and page text — vanilla's `WrittenBookContent`
+    /// (`world/item/component/WrittenBookContent.java`). `None` for every
+    /// item but a `minecraft:written_book`.
+    ///
+    /// Decoded for the same reason as
+    /// [`writable_book_content`](Self::writable_book_content): its stream
+    /// codec is equally unprefixed, so a written book anywhere in an
+    /// inventory used to truncate the rest of that packet.
+    pub written_book_content: Option<WrittenBookContent>,
     /// True when the stack's patch carried at least one component this build
     /// does not model, so decoding stopped early and the modeled fields above
     /// may be incomplete. The modeled fields that were decoded remain valid.
@@ -266,6 +293,39 @@ pub struct ItemComponents {
     /// the item's prototype value, which is the best available answer, but is not
     /// guaranteed to be the effective one.
     pub has_unmodeled: bool,
+}
+
+/// `minecraft:written_book_content`'s modeled shape — vanilla's
+/// `WrittenBookContent` record (`title`, `author`, `generation`, `pages`,
+/// `resolved`), with each `Filterable<T>` collapsed to its raw value for the
+/// same reason [`ItemComponents::writable_book_content`] is: this crate runs
+/// no chat-filtering service, so the *filtered* alternate is never the value
+/// a consumer wants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrittenBookContent {
+    /// The book's title, as typed at signing time (≤32 characters).
+    pub title: String,
+    /// The signing player's plain-text display name
+    /// (`ServerGamePacketListenerImpl.signBook`'s
+    /// `player.getPlainTextName()`), not the uuid.
+    pub author: String,
+    /// Copy generation: `0` original, `1` copy, `2` copy of a copy, `3`
+    /// tattered — vanilla's `WrittenBookContent.MAX_GENERATION`. Every book
+    /// this crate itself signs starts at `0`; a build with no book-cloning
+    /// item yet never produces `1..=3`.
+    pub generation: u8,
+    /// Page contents, in order, as chat components — signing turns each raw
+    /// page string into `Component.literal(page)`
+    /// (`ServerGamePacketListenerImpl.signBook`), so this is never anything
+    /// richer than a literal for a book this crate produces, but the field is
+    /// typed as [`Text`] because a page decoded off the wire (from a real
+    /// vanilla server, or a future click/hover-bearing book) is not
+    /// guaranteed to be one.
+    pub pages: Vec<Text>,
+    /// Whether this book's pages have finished click/hover-event resolution
+    /// (`WrittenBookContent.resolved`). Always `true` for a book this crate
+    /// signs — its pages are plain literals with nothing left to resolve.
+    pub resolved: bool,
 }
 
 /// The four sherds of a `minecraft:decorated_pot` — vanilla's `PotDecorations`
