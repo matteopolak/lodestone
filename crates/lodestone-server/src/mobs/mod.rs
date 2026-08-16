@@ -6075,6 +6075,19 @@ impl<'w> MobSim<'w> {
         flags: DamageFlags,
         knockback_power: f64,
     ) -> Option<AttackOutcome> {
+        // A wither lives in `self.withers`, not `self.mobs` (see
+        // `TrackedWither`'s own doc), so `self.attack` below — which reads
+        // and writes `self.mobs` exclusively — silently finds nothing and
+        // this whole function returns `None` for a wither target. That was
+        // the actual state until this branch: `MobSim::damage_wither` was a
+        // real, tested armoured-phase/invulnerability gate with **zero**
+        // production callers, so every summoned wither was permanently
+        // unkillable by melee. Routed here instead of widening `attack`
+        // itself: a wither has no armour, anger, gossip or knockback state,
+        // so none of `attack`'s villager/pack-alert machinery applies to it.
+        if self.withers.contains_key(&target_id) {
+            return self.attack_wither(target_id, raw_damage);
+        }
         let target_was_villager = self
             .get(target_id)
             .is_some_and(|m| m.entity_type.path() == "villager");
@@ -6111,6 +6124,25 @@ impl<'w> MobSim<'w> {
             }
         }
         Some(outcome)
+    }
+
+    /// [`attack_from_player`](Self::attack_from_player)'s wither branch — a
+    /// melee hit is never an arrow or a wind charge and never bypasses the
+    /// emergence-invulnerability gate, so both of
+    /// [`damage_wither`](Self::damage_wither)'s bool parameters are fixed
+    /// `false`; `damage_wither` itself already applies the powered-armour
+    /// and invulnerable-emergence refusals and removes the wither on a
+    /// killing blow. A wither never moves (see `mobs::wither`'s own module
+    /// doc), so the outcome's `velocity` is always zero rather than a
+    /// knockback impulse.
+    fn attack_wither(&mut self, target_id: i32, raw_damage: f32) -> Option<AttackOutcome> {
+        let health = self.damage_wither(target_id, raw_damage, false, false)?;
+        Some(AttackOutcome {
+            health,
+            killed: health <= 0.0,
+            damage_dealt: raw_damage,
+            velocity: Vec3::new(0.0, 0.0, 0.0),
+        })
     }
 
     /// The number of live mobs.

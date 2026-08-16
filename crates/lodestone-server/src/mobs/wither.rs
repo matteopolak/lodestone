@@ -97,6 +97,16 @@ pub(super) fn wither_entity_type() -> ResourceKey {
     "minecraft:wither".parse().expect("`minecraft:wither` is a valid resource key")
 }
 
+/// The wither's own hitbox — width then height, in blocks. A
+/// [`TrackedWither`](super::TrackedWither) carries no `MobShape` the way a
+/// goal-driven `SimMob` does (this module doc's "no movement" disclosure is
+/// the same reason: nothing needed one until now), so
+/// [`MobSim::resolve_projectile_impacts`](super::MobSim::resolve_projectile_impacts)'s
+/// wither candidate search (`mobs/projectiles.rs`) needs its own constant
+/// rather than a shared shape lookup. See `docs/wither-fight.md` for the
+/// vanilla citation.
+pub(super) const HITBOX: (f32, f32) = (0.9, 3.5);
+
 /// What [`MobSim::try_construct_wither`] built. Mirrors `golem::GolemConstruction`'s
 /// shape (species/id/consumed) even though there is only one wither species,
 /// so a caller's block-placement handling can treat the two the same way.
@@ -683,5 +693,82 @@ mod tests {
         let after = sim.wither_health(wither_id).unwrap();
         assert_eq!(after, (before + pure::OWNER_HEAL_ON_KILL).min(MAX_HEALTH), "the owner must heal 5.0 HP, capped at max health");
         assert!(after > before, "control: the heal must actually be observable, not a no-op against full health");
+    }
+
+    /// **The discriminating gate for the melee-combat island**: before
+    /// `MobSim::attack_from_player` grew a wither branch, a wither lived
+    /// only in `self.withers`, `self.attack` reads and writes only
+    /// `self.mobs`, and `self.get_mut(wither_id)` returns `None` — so this
+    /// call landed on `self.attack(target_id, ..)?`'s early return and
+    /// `attack_from_player` returned `None` for *every* melee hit against a
+    /// wither, silently. A wither still emerging must refuse the hit
+    /// outright (the same invulnerability gate `damage_wither` already has
+    /// its own coverage for); this only proves the *routing* — that a
+    /// melee hit reaches a live, active wither at all.
+    #[test]
+    fn a_players_melee_hit_damages_an_active_wither() {
+        let mut sim = sim();
+        let wither_id = sim.spawn_wither_at(Vec3::new(0.0, 64.0, 0.0));
+        for _ in 0..220 {
+            sim.tick_withers();
+        }
+        let before = sim.wither_health(wither_id).expect("still live");
+        let outcome = sim.attack_from_player(
+            wither_id,
+            Some(crate::PlayerIdentity { uuid: uuid::Uuid::new_v4(), entity_id: 1 }),
+            Vec3::new(3.0, 64.0, 0.0),
+            7.0,
+            lodestone_entity::DamageFlags::default(),
+            0.0,
+        );
+        let outcome = outcome.expect("a melee hit against an active wither must land");
+        assert!(outcome.damage_dealt > 0.0, "control: the outcome must report real damage, not a no-op");
+        let after = sim.wither_health(wither_id).expect("still live after a non-lethal hit");
+        assert!(after < before, "a player's melee attack must actually reduce the wither's health");
+    }
+
+    /// The reciprocal control for the test above: a still-emerging wither's
+    /// invulnerability gate must still refuse a melee hit through the new
+    /// routing, exactly as it already does for `damage_wither` called
+    /// directly — proving the branch in `attack_from_player` did not bypass
+    /// that gate on its way in.
+    #[test]
+    fn a_players_melee_hit_is_refused_while_the_wither_is_still_emerging() {
+        let mut sim = sim();
+        let wither_id = sim.spawn_wither_at(Vec3::new(0.0, 64.0, 0.0));
+        let before = sim.wither_health(wither_id).expect("still live");
+        let outcome = sim.attack_from_player(
+            wither_id,
+            None,
+            Vec3::new(3.0, 64.0, 0.0),
+            7.0,
+            lodestone_entity::DamageFlags::default(),
+            0.0,
+        );
+        assert!(outcome.is_none(), "an emerging wither must refuse a melee hit outright");
+        assert_eq!(sim.wither_health(wither_id), Some(before), "control: health must be unchanged by the refused hit");
+    }
+
+    /// The projectile counterpart of the two tests above: before
+    /// `resolve_projectile_impacts` grew a wither candidate search, an
+    /// arrow's own nearest-mob scan only read `self.mobs`, so an arrow shot
+    /// at a wither found no target and passed straight through — the same
+    /// island, one call site over.
+    #[test]
+    fn a_players_arrow_damages_an_active_wither() {
+        let mut sim = sim();
+        let wither_id = sim.spawn_wither_at(Vec3::new(0.0, 64.0, 0.0));
+        for _ in 0..220 {
+            sim.tick_withers();
+        }
+        let before = sim.wither_health(wither_id).expect("still live");
+        sim.spawn_projectile_from(
+            "minecraft:arrow".parse().expect("valid key"),
+            lodestone_entity::projectile::Projectile::throwable(Vec3::new(3.0, 64.0, 0.0), Vec3::new(-10.0, 0.0, 0.0)),
+            None,
+        );
+        sim.resolve_projectile_impacts();
+        let after = sim.wither_health(wither_id).expect("still live after a non-lethal hit");
+        assert!(after < before, "a player's arrow must actually reduce the wither's health");
     }
 }
