@@ -213,8 +213,8 @@ pub use light::{
 pub use lodestone_assets::fluid::FluidState;
 pub use mesh::{Mesh, MeshStats, face_winding_is_outward, mesh_greedy, mesh_simple};
 pub use mesher::{
-    BuiltSection, LightGrid, MeshJob, SectionSnapshot, SectionSource, build_batch, column_of,
-    dirty_jobs, neighbour_columns, neighbourhood_coords,
+    BuiltSection, LightGrid, MeshJob, SectionSnapshot, SectionSource, build_batch, dirty_jobs,
+    neighbour_columns, neighbourhood_coords,
 };
 pub use map_item::{
     MAP_BRIGHTNESS, MAP_COLOR_BASE, MAP_SIZE as MAP_TEXTURE_SIZE, map_color_rgba, map_quad_mesh,

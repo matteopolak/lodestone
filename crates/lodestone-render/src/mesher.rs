@@ -145,12 +145,6 @@ pub fn neighbour_columns(cx: i32, cz: i32) -> [(i32, i32); 9] {
     out
 }
 
-/// The `(chunk_x, chunk_z)` column a section belongs to.
-#[must_use]
-pub fn column_of(coord: SectionCoord) -> (i32, i32) {
-    (coord.0, coord.2)
-}
-
 /// The mesh jobs a column load at `(cx, cz)` dirties, over the vertical section
 /// range `section_ys`.
 ///

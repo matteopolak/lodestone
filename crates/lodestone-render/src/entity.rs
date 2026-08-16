@@ -2330,7 +2330,7 @@ pub fn armour_layer_tint_with_dye(layer: &ArmourLayer, dyed_color: Option<u32>) 
 // A dropped item is an entity that is **not** a cuboid part rig, so none of the
 // machinery above applies to it: it has no skeleton, no per-mob sheet, and no
 // `entity_models` corpus entry. What it has is an *item model* — the same baked
-// geometry [`BlockModels::item_quads`](crate::BlockModels::item_quads) already
+// geometry [`BlockModels::item_forms`](crate::BlockModels::item_forms) already
 // supplies for a hotbar icon — drawn in the world through the ordinary
 // [`ModelPipeline`](crate::ModelPipeline) rather than the entity pipeline.
 //

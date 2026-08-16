@@ -2,7 +2,7 @@
 //! `display.gui` transform into the matrices that put a mini-block in a slot.
 //!
 //! Geometry for a block item is baked once against the block atlas (see
-//! [`BlockModels::item_quads`](crate::BlockModels::item_quads)); what makes it
+//! [`BlockModels::item_forms`](crate::BlockModels::item_forms)); what makes it
 //! *look* like an inventory icon rather than a block sitting at the world origin
 //! is entirely the pair of matrices this module builds. There is no GPU here and
 //! no state — every function is a pure matrix construction, so the fidelity
