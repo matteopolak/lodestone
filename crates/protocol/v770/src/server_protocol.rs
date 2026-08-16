@@ -3689,9 +3689,24 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
+            // `ServerboundContainerSlotStateChangedPacket` — a crafter's
+            // per-slot enable/disable toggle. `crate::server`'s consumer
+            // checks the currently open menu is really a crafter before
+            // touching `crate::block_entities::BlockEntity::Crafter`, the
+            // same "don't trust the wire id alone" shape
+            // `ContainerButtonClick`'s own handler already has for the
+            // enchanting table.
             State::Play if packet_id == play::serverbound::CONTAINER_SLOT_STATE_CHANGED => {
-                let _ = decode_full::<ContainerSlotStateChanged>(payload);
-                ServerBound::Ignored
+                match decode_full::<ContainerSlotStateChanged>(payload) {
+                    Some(ContainerSlotStateChanged { slot_id, container_id, new_state }) => {
+                        ServerBound::ContainerSlotStateChanged {
+                            window_id: container_id,
+                            slot_id,
+                            new_state,
+                        }
+                    }
+                    None => ServerBound::Ignored,
+                }
             }
             // `ServerboundSetCreativeModeSlotPacket`: big-endian `i16` slot
             // (`ByteBufCodecs.SHORT`), then an [`read_optional_item_stack`]

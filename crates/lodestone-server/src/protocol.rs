@@ -1336,6 +1336,27 @@ pub enum ServerBound {
         /// Which of the three enchantment offers was chosen.
         button_id: i32,
     },
+    /// The client toggled a crafter slot's enabled/disabled state
+    /// (`ServerboundContainerSlotStateChangedPacket`).
+    /// `ServerGamePacketListenerImpl.handleContainerSlotStateChanged`:
+    /// `this.player.containerMenu instanceof CrafterMenu crafterMenu &&
+    /// crafterMenu.getContainer() instanceof CrafterBlockEntity
+    /// crafterBlockEntity` — refused for every other open menu, which this
+    /// crate's consumer reproduces by checking `open_container`'s own tracked
+    /// menu shape (`crate::container_click::MenuKind`) rather than trusting
+    /// `window_id` alone.
+    ContainerSlotStateChanged {
+        /// The window the client believes is open, matching
+        /// [`ContainerButtonClick`](Self::ContainerButtonClick)'s own
+        /// `window_id`.
+        window_id: i32,
+        /// Which of the crafter's 9 grid slots (`CrafterMenu`'s own `x + y *
+        /// 3` addressing — the same order `BlockEntity::Crafter`'s own
+        /// `slots` field uses).
+        slot_id: i32,
+        /// `true` to enable, `false` to disable.
+        new_state: bool,
+    },
     /// The command-block GUI's "Done" button
     /// (`ServerboundSetCommandBlockPacket`) — issue #48's remainder.
     /// `crate::server`'s consumer is `ServerGamePacketListenerImpl
