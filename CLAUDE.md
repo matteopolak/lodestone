@@ -603,6 +603,23 @@ Know its scope, because outside it the instrument is *silent* rather than wrong 
   lifetimes (three scanners here already were). Grep is the interim instrument — and asking "what reads
   this?" is the habit, not just the tool.
 
+  **A third species is upstream of both, and it is the cheapest to find once you know the shape: a value
+  the decoder reads off the wire and *discards at the decode site*.** Two in one day. The recipe-unlock
+  toast's crafting-station icon was `let _category = …` in `read_recipe_display` — the walk over the
+  trailing `SlotDisplay` was already written and correct, and its result was dropped on the floor. v47's
+  `SPAWN_ENTITY_LIVING` decodes each mob's metadata entries (it must, to consume the trailing bytes) and
+  then discards every one, so **no 1.8 mob carries baby, colour, sheared or on-fire state at all**.
+
+  Neither existing instrument sees it. `connectedness` reports the packet as decoded *and* connected,
+  because it is — the packet reaches a real fold, just without that field. The zero-production-readers
+  query needs a field to ask about, and here **no field was ever declared**, so there is nothing to count
+  reads of. The tell is lexical and greppable: **`let _`, a discarded tuple element, or a loop that parses
+  and does not bind**, sitting in a decoder. Both instances read as deliberate — a `let _` is exactly how
+  you *correctly* consume bytes you do not model — which is why they survive review. So when a feature is
+  missing and the packet demonstrably arrives, **grep the decode path for a discard before suspecting the
+  consumer**; and when you write one, say in the comment whether the value is unmodelled *by decision* or
+  merely not carried yet, because those read identically six months later.
+
   **And the sibling species is now the most common defect in this repo: a correct function fed a constant
   by its *producer*.** Five in one day, each reported as a broken feature and each actually a supplying
   path that never learned the real value: `creeper_swelling` (`prepare_entities` resolved every entity
