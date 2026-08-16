@@ -991,6 +991,42 @@ impl WindowApp {
             .then(|| self.chat_input.suggestion_ghost())
             .flatten();
         let suggestion_list = chat_open.then(|| self.chat_input.suggestion_list()).flatten();
+        // The hover half of chat interactivity (`docs/chat.md`'s
+        // "Interactivity": the hit-test already finds a `hover_event`, but
+        // nothing drew a tooltip from it). Gated on `chat_open` the same way
+        // `dispatch_chat_click_under_cursor`'s own call site gates clicks —
+        // vanilla has no interactive text at all on the passive, fading
+        // closed-chat overlay, only inside the open `ChatScreen`.
+        //
+        // Not routed through `Self::chat_interaction`: that method takes
+        // `&self` as a whole and `self.render.as_mut()` is already a live
+        // exclusive borrow for the rest of this function (`render`, bound a
+        // few lines above), so a whole-`self` call here does not borrow-check.
+        // `hud` and `chat_display_opts` are the exact two inputs that method
+        // would have re-derived from `self.hud`/`self.nav` anyway, so this
+        // calls the same `HudRenderer::chat_interaction_at` directly off the
+        // already-borrowed local instead of duplicating its logic.
+        //
+        // `to_legacy_string` (not a flatten to spans) because
+        // `Builder::text_legacy`/`wrap_legacy` is what a tooltip box draws
+        // with, matching `SuggestionLayer::Tooltip`'s own plain-string shape
+        // just above.
+        let chat_hover_tooltip_text: Option<String> = chat_open
+            .then(|| {
+                let entries = self.sim.recent_chat_interactive(100);
+                hud.chat_interaction_at(
+                    w,
+                    h,
+                    self.nav.gui_scale(),
+                    chat_display_opts,
+                    chat_open,
+                    &entries,
+                    self.cursor,
+                )
+            })
+            .flatten()
+            .and_then(|hit| hit.hover)
+            .map(|hover| hover.value.to_legacy_string());
 
         let mut hud_frame = HudFrame::new(&self.sim.stats);
         hud_frame.show_debug = self.show_debug;
@@ -1040,6 +1076,14 @@ impl WindowApp {
                 self.cursor,
             )),
         });
+        // Without this line the hit-test finds the hover exactly as well as it
+        // did before this fix, and zero pixels change -- see this local's own
+        // doc for the `chat_open` gate.
+        hud_frame.chat_hover_tooltip =
+            chat_hover_tooltip_text.as_deref().map(|text| crate::hud::ChatHoverTooltip {
+                text,
+                cursor: crate::hud::HudRenderer::canvas_cursor(w, h, self.nav.gui_scale(), self.cursor),
+            });
         // Without this the whole chat-option chain is an island: the fields are
         // persisted, `ChatDisplayOptions` is read by the draw, and the live
         // client would still show vanilla defaults forever.

@@ -1239,6 +1239,13 @@ pub struct HudFrame<'a> {
     /// The command-suggestion dropdown, `Some` only while it is up. See
     /// [`SuggestionPopup`] and [`draw_command_suggestions`].
     pub chat_suggestions: Option<SuggestionPopup<'a>>,
+    /// A `hover_event` tooltip under the cursor, `Some` only while a
+    /// hover-carrying span is under it. [`chat_interaction_at`] finds the
+    /// same span `WindowApp::chat_interaction` dispatches clicks from; this
+    /// is its hover half finally reaching a draw — see `docs/chat.md`'s
+    /// "Interactivity" section for why that used to stop one hop short of
+    /// pixels.
+    pub chat_hover_tooltip: Option<ChatHoverTooltip<'a>>,
     /// The scrollback's scroll indicator — vanilla's own scrollbar
     /// (`ChatComponent.extractRenderState`'s `if (total > 0 && isForeground)`
     /// block), `Some` only while there is [`crate::chat::ChatScroll`] state to
@@ -1489,6 +1496,7 @@ impl<'a> HudFrame<'a> {
             chat_caret_visible: true,
             chat_suggestion_ghost: None,
             chat_suggestions: None,
+            chat_hover_tooltip: None,
             chat_scrollbar: None,
             chat_options: ChatDisplayOptions::default(),
             chat_wrap: None,
@@ -1940,6 +1948,29 @@ pub struct SuggestionPopup<'a> {
     /// belongs to the event loop, which resolves the row through
     /// [`SuggestionLayout::row_at`] against this same layout.
     pub cursor: Option<(f32, f32)>,
+}
+
+/// What [`HudFrame::chat_hover_tooltip`] needs to draw a `hover_event`
+/// tooltip near the cursor — vanilla's `GuiGraphics.setTooltipForNextFrame`.
+///
+/// `show_item`/`show_entity` are drawn with the same field, and that is a
+/// deliberate narrowing rather than an oversight: `lodestone_model::text::
+/// HoverEvent`'s own doc says their payload is "preserved as a literal text
+/// node" precisely so no information is lost even though this model does
+/// not interpret it — the raw text is real content, just not vanilla's
+/// icon/attribute tooltip render. `docs/chat.md` names this gap explicitly
+/// rather than claiming full parity.
+#[derive(Debug, Clone, Copy)]
+pub struct ChatHoverTooltip<'a> {
+    /// The tooltip body, legacy `§`-coded via [`lodestone_model::Text::
+    /// to_legacy_string`] so a coloured `show_text` hover keeps its colour.
+    /// May contain a literal `\n` — vanilla's `show_text` tooltips are
+    /// routinely multi-line (an enchanted book's enchantment list, for
+    /// instance), and this is split on it before word-wrap.
+    pub text: &'a str,
+    /// The pointer, in logical-canvas pixels — [`HudRenderer::canvas_cursor`]'s
+    /// own output, the same anchor [`SuggestionPopup::cursor`] uses.
+    pub cursor: (f32, f32),
 }
 
 /// The popup's resolved rect — vanilla's `SuggestionsList.rect`, plus the row
@@ -3290,6 +3321,14 @@ impl HudGeometry {
             draw_advancement_toast(&mut b, toast);
         }
 
+        // A chat `hover_event` tooltip, drawn absolutely last — vanilla's own
+        // tooltip layer composites over everything, including toasts
+        // (`GuiGraphics.renderDeferredTooltip`, called at the very end of
+        // `Gui.render`).
+        if let Some(tooltip) = &frame.chat_hover_tooltip {
+            draw_chat_hover_tooltip(&mut b, tooltip);
+        }
+
         Self {
             verts: b.verts,
             sprite_verts: b.sprite_verts,
@@ -3399,6 +3438,76 @@ fn draw_sound_subtitles(b: &mut Builder, captions: &[crate::audio::subtitles::Su
         }
         let tw = b.text_width(&caption.text, scale);
         b.text(&caption.text, cx - (tw / 2.0).floor(), text_y, scale, ink);
+    }
+}
+
+/// Padding, in logical-canvas pixels, around [`ChatHoverTooltip`]'s text.
+const CHAT_TOOLTIP_PAD: f32 = 3.0;
+/// Max wrap width for [`ChatHoverTooltip`]'s body — vanilla's tooltip has
+/// both an explicit per-component line break and its own wrap width
+/// (`ClientTooltipComponent`/`Screen.getTooltipFromItem`), and a hover body
+/// that never breaks would run off the edge of the canvas for anything
+/// longer than a couple of words.
+const CHAT_TOOLTIP_MAX_WIDTH: f32 = 200.0;
+
+/// The pure half of [`draw_chat_hover_tooltip`]: wraps the tooltip body and
+/// resolves its background rect in logical-canvas pixels (`x, y, w, h`),
+/// taking the width-measuring/wrapping primitives as parameters exactly the
+/// way [`wrap_legacy_with`] already does — so a gate can predict **the same
+/// rect the draw fills** without a `Builder`, the same discipline
+/// [`recipe_toast_rect`] established for the recipe toast.
+///
+/// Splits on a literal `\n` first — vanilla's `show_text` tooltips are
+/// routinely multi-line — then greedily word-wraps each resulting line.
+fn chat_hover_tooltip_layout(
+    tooltip: &ChatHoverTooltip,
+    canvas_w: f32,
+    wrap: impl Fn(&str, f32) -> Vec<String>,
+    width: impl Fn(&str) -> f32,
+) -> (Vec<String>, f32, f32, f32, f32) {
+    const LINE_H: f32 = font::GLYPH_H as f32 + 1.0;
+
+    let rows: Vec<String> = tooltip
+        .text
+        .split('\n')
+        .flat_map(|line| wrap(line, CHAT_TOOLTIP_MAX_WIDTH))
+        .collect();
+    let tw = rows.iter().map(|row| width(row)).fold(0.0f32, f32::max);
+    let th = rows.len() as f32 * LINE_H;
+    let (mx, my) = tooltip.cursor;
+    // `renderTooltip`'s own offset from the cursor, clamped onto the canvas —
+    // the same expression `SuggestionLayer::Tooltip` above uses.
+    let tx = (mx + 12.0).min((canvas_w - tw - CHAT_TOOLTIP_PAD * 2.0).max(0.0));
+    let ty = (my - 12.0).max(0.0);
+    (rows, tx, ty, tw + CHAT_TOOLTIP_PAD * 2.0, th + CHAT_TOOLTIP_PAD * 2.0)
+}
+
+/// Draws [`HudFrame::chat_hover_tooltip`], vanilla's `GuiGraphics.
+/// renderTooltip` narrowed to placement and text — the same deliberate
+/// cosmetic narrowing [`SuggestionLayer::Tooltip`] above already documents
+/// for the identical shape (`TooltipRenderUtil`'s border gradient is not
+/// modelled; this is a flat panel).
+fn draw_chat_hover_tooltip(b: &mut Builder, tooltip: &ChatHoverTooltip) {
+    const LINE_H: f32 = font::GLYPH_H as f32 + 1.0;
+    let (rows, tx, ty, w, h) = chat_hover_tooltip_layout(
+        tooltip,
+        b.w,
+        |line, max_w| b.wrap_legacy(line, max_w, 1.0),
+        |s| b.legacy_width(s, 1.0),
+    );
+    if rows.is_empty() {
+        return;
+    }
+    b.rect_px(tx, ty, w, h, SUGGESTION_FILL);
+    for (i, row) in rows.iter().enumerate() {
+        b.text_legacy(
+            row,
+            tx + CHAT_TOOLTIP_PAD,
+            ty + CHAT_TOOLTIP_PAD + i as f32 * LINE_H,
+            1.0,
+            [1.0, 1.0, 1.0],
+            1.0,
+        );
     }
 }
 
@@ -10071,6 +10180,59 @@ mod tests {
     }
 }
 
+/// Covered sample cells and their bounding box inside `rect`, an
+/// `(x0, y0, x1, y1)` NDC box — a real CPU rasteriser over the actual
+/// triangle geometry, not a vertex-sample count. Shared by every rasterised
+/// coverage gate in this file (`recipe_toast_gate`, `chat_hover_tooltip_gate`)
+/// rather than one copy per gate, so a fix to the rasteriser cannot land in
+/// one gate and not the other. Returns the box because a bare fraction
+/// cannot distinguish a uniform-but-wrong frame from a localised blob.
+#[cfg(test)]
+fn coverage(
+    verts: &[f32],
+    rect: (f32, f32, f32, f32),
+    res: usize,
+) -> (usize, usize, Option<(f32, f32, f32, f32)>) {
+    let (rx0, ry0, rx1, ry1) = rect;
+    let to_ndc = |i: usize| -1.0 + 2.0 * (i as f32 + 0.5) / res as f32;
+    let (mut covered, mut inside) = (0usize, 0usize);
+    let mut bbox: Option<(f32, f32, f32, f32)> = None;
+    for gy in 0..res {
+        for gx in 0..res {
+            let (px, py) = (to_ndc(gx), to_ndc(gy));
+            if px < rx0 || px > rx1 || py < ry0 || py > ry1 {
+                continue;
+            }
+            inside += 1;
+            let mut hit = false;
+            for tri in verts.chunks_exact(FLOATS_PER_VERTEX * 3) {
+                let (ax, ay) = (tri[0], tri[1]);
+                let (bx, by) = (tri[FLOATS_PER_VERTEX], tri[FLOATS_PER_VERTEX + 1]);
+                let (cx, cy) = (tri[FLOATS_PER_VERTEX * 2], tri[FLOATS_PER_VERTEX * 2 + 1]);
+                let d = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+                if d.abs() < f32::EPSILON {
+                    continue;
+                }
+                let w0 = ((bx - px) * (cy - py) - (cx - px) * (by - py)) / d;
+                let w1 = ((cx - px) * (ay - py) - (ax - px) * (cy - py)) / d;
+                let w2 = 1.0 - w0 - w1;
+                if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                    hit = true;
+                    break;
+                }
+            }
+            if hit {
+                covered += 1;
+                bbox = Some(match bbox {
+                    None => (px, py, px, py),
+                    Some((x0, y0, x1, y1)) => (x0.min(px), y0.min(py), x1.max(px), y1.max(py)),
+                });
+            }
+        }
+    }
+    (covered, inside, bbox)
+}
+
 /// Gate for the recipe-unlock toast draw (issue #163).
 ///
 /// The toast timing (`RecipeToastQueue`) landed unit-tested in `lodestone-game`
@@ -10110,55 +10272,6 @@ mod recipe_toast_gate {
 
     const W: u32 = 640;
     const H: u32 = 480;
-
-    /// Covered sample cells and their bounding box inside `rect`, an
-    /// `(x0, y0, x1, y1)` NDC box — same CPU rasteriser the panel gate uses.
-    /// Returns the box because a bare fraction cannot distinguish a
-    /// uniform-but-wrong frame from a localised blob.
-    fn coverage(
-        verts: &[f32],
-        rect: (f32, f32, f32, f32),
-        res: usize,
-    ) -> (usize, usize, Option<(f32, f32, f32, f32)>) {
-        let (rx0, ry0, rx1, ry1) = rect;
-        let to_ndc = |i: usize| -1.0 + 2.0 * (i as f32 + 0.5) / res as f32;
-        let (mut covered, mut inside) = (0usize, 0usize);
-        let mut bbox: Option<(f32, f32, f32, f32)> = None;
-        for gy in 0..res {
-            for gx in 0..res {
-                let (px, py) = (to_ndc(gx), to_ndc(gy));
-                if px < rx0 || px > rx1 || py < ry0 || py > ry1 {
-                    continue;
-                }
-                inside += 1;
-                let mut hit = false;
-                for tri in verts.chunks_exact(FLOATS_PER_VERTEX * 3) {
-                    let (ax, ay) = (tri[0], tri[1]);
-                    let (bx, by) = (tri[FLOATS_PER_VERTEX], tri[FLOATS_PER_VERTEX + 1]);
-                    let (cx, cy) = (tri[FLOATS_PER_VERTEX * 2], tri[FLOATS_PER_VERTEX * 2 + 1]);
-                    let d = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
-                    if d.abs() < f32::EPSILON {
-                        continue;
-                    }
-                    let w0 = ((bx - px) * (cy - py) - (cx - px) * (by - py)) / d;
-                    let w1 = ((cx - px) * (ay - py) - (ax - px) * (cy - py)) / d;
-                    let w2 = 1.0 - w0 - w1;
-                    if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
-                        hit = true;
-                        break;
-                    }
-                }
-                if hit {
-                    covered += 1;
-                    bbox = Some(match bbox {
-                        None => (px, py, px, py),
-                        Some((x0, y0, x1, y1)) => (x0.min(px), y0.min(py), x1.max(px), y1.max(py)),
-                    });
-                }
-            }
-        }
-        (covered, inside, bbox)
-    }
 
     /// The toast rect in NDC, from [`recipe_toast_rect`] — **the same expression
     /// the draw calls**, never a restated `canvas_w - 160.0`.
@@ -10244,6 +10357,158 @@ mod recipe_toast_gate {
             half_x,
             cw - 160.0,
             "a fixed-margin transcription would fail to move at all"
+        );
+    }
+}
+
+/// Gate for the chat `hover_event` tooltip (`docs/chat.md`'s
+/// "Interactivity": the hit-test already found the hover, but nothing drew
+/// it — the one link that stopped short of pixels).
+///
+/// Same instrument as `recipe_toast_gate`: a real triangle rasteriser over
+/// NDC, not a vertex-sample count — `band_coverage`-shaped blindness (a quad
+/// larger than the probe rect reads as zero) and the `opaque_ink`
+/// clip-to-`i32` bug are both this repo's own measured false-negative
+/// shapes for exactly this kind of gate, so this reuses the fixed
+/// `coverage` helper rather than a new one.
+#[cfg(test)]
+mod chat_hover_tooltip_gate {
+    use super::*;
+
+    const W: u32 = 640;
+    const H: u32 = 480;
+
+    fn bare_frame<'a>(stats: &'a DebugStats) -> HudFrame<'a> {
+        let mut f = HudFrame::new(stats);
+        f.show_debug = false;
+        f.crosshair = false;
+        f
+    }
+
+    /// The no-font fallback path [`Builder::wrap_legacy`]/
+    /// [`Builder::legacy_width`] themselves fall back to — `item_icon::text_w`
+    /// over the legacy-stripped string — reproduced with no `Builder` so the
+    /// test can predict the draw's exact rect from outside it, the same
+    /// discipline `recipe_toast_rect` established.
+    fn no_font_width(s: &str) -> f32 {
+        item_icon::text_w(&strip_legacy(s), 1.0)
+    }
+
+    fn no_font_wrap(line: &str, max_w: f32) -> Vec<String> {
+        wrap_legacy_with(no_font_width, line, max_w)
+    }
+
+    fn predicted_rect(tooltip: &ChatHoverTooltip, canvas_w: f32) -> (f32, f32, f32, f32) {
+        let (_, x, y, w, h) =
+            chat_hover_tooltip_layout(tooltip, canvas_w, no_font_wrap, no_font_width);
+        (x, y, w, h)
+    }
+
+    fn rect_px_to_ndc(rect: (f32, f32, f32, f32), cw: f32, ch: f32) -> (f32, f32, f32, f32) {
+        let (x, y, w, h) = rect;
+        (
+            2.0 * x / cw - 1.0,
+            1.0 - 2.0 * (y + h) / ch,
+            2.0 * (x + w) / cw - 1.0,
+            1.0 - 2.0 * y / ch,
+        )
+    }
+
+    /// **The control's premise, verified rather than assumed**: with no
+    /// hover tooltip, nothing at all paints in the rect a tooltip at this
+    /// cursor would fill.
+    #[test]
+    fn no_tooltip_frame_paints_nothing_in_the_tooltip_rect() {
+        let stats = DebugStats::default();
+        let (cw, ch) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, W, H);
+        let tooltip = ChatHoverTooltip { text: "Nether Star", cursor: (100.0, 100.0) };
+        let rect = rect_px_to_ndc(predicted_rect(&tooltip, cw), cw, ch);
+
+        let geo = HudGeometry::build(&bare_frame(&stats), W, H);
+        let (covered, inside, bbox) = coverage(&geo.verts, rect, 96);
+        assert!(inside > 0, "the predicted tooltip rect must contain sample points");
+        assert_eq!(
+            covered, 0,
+            "something other than the tooltip already paints its {inside}-cell \
+             rect (bbox {bbox:?}) — the positive gate's premise is false"
+        );
+    }
+
+    /// A hovered `hover_event` fills the predicted rect — the positive half,
+    /// only meaningful because the control above just proved nothing else
+    /// paints there.
+    #[test]
+    fn a_hover_tooltip_covers_its_own_predicted_rect() {
+        let stats = DebugStats::default();
+        let (cw, ch) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, W, H);
+        let tooltip = ChatHoverTooltip { text: "Nether Star", cursor: (100.0, 100.0) };
+        let rect = rect_px_to_ndc(predicted_rect(&tooltip, cw), cw, ch);
+
+        let mut frame = bare_frame(&stats);
+        frame.chat_hover_tooltip = Some(tooltip);
+        let geo = HudGeometry::build(&frame, W, H);
+        let (covered, inside, bbox) = coverage(&geo.verts, rect, 96);
+        let fraction = covered as f32 / inside as f32;
+        assert!(
+            fraction > 0.9,
+            "the tooltip background must fill its predicted rect: covered \
+             {covered}/{inside} ({fraction:.3}) in rect {rect:?}, bbox {bbox:?}"
+        );
+    }
+
+    /// Multi-line: a literal `\n` in the hover body (an enchanted book's
+    /// enchantment list, vanilla-shaped) must grow the box taller than a
+    /// single-line tooltip with the same widest line — the discriminating
+    /// check that this draws `rows.len()` lines, not just the first one
+    /// found and the rest silently dropped.
+    #[test]
+    fn a_multi_line_hover_body_is_taller_than_one_line() {
+        let stats = DebugStats::default();
+        let (cw, _) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, W, H);
+        let one_line = ChatHoverTooltip { text: "Sharpness V", cursor: (100.0, 100.0) };
+        let two_lines = ChatHoverTooltip { text: "Sharpness V\nCurse of Binding", cursor: (100.0, 100.0) };
+
+        let (_, _, h1, _) = predicted_rect(&one_line, cw);
+        let (_, _, h2, _) = predicted_rect(&two_lines, cw);
+        assert!(
+            h2 > h1,
+            "a two-line hover body ({h2}) must be taller than a one-line body ({h1})"
+        );
+
+        let mut frame = bare_frame(&stats);
+        frame.chat_hover_tooltip = Some(two_lines.clone());
+        let geo = HudGeometry::build(&frame, W, H);
+        let (_, ch) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, W, H);
+        let rect = rect_px_to_ndc(predicted_rect(&two_lines, cw), cw, ch);
+        let (covered, inside, bbox) = coverage(&geo.verts, rect, 96);
+        let fraction = covered as f32 / inside as f32;
+        assert!(
+            fraction > 0.9,
+            "the two-line tooltip must fill its own (taller) predicted rect: \
+             covered {covered}/{inside} ({fraction:.3}) in rect {rect:?}, bbox {bbox:?}"
+        );
+    }
+
+    /// The chain from `chat_interaction()` down to `HudFrame` -- proving the
+    /// *producer*, not just that the draw paints when handed a frame by
+    /// hand. `chat_interaction_at` (already exhaustively gated above by
+    /// `chat_interaction_at_finds_a_hover_and_a_neighbouring_pixel_does_not`)
+    /// is exercised directly here through `to_legacy_string`, the exact
+    /// conversion `app/redraw.rs`'s frame-building code applies before
+    /// handing the text to `HudFrame::chat_hover_tooltip`.
+    #[test]
+    fn a_hover_events_value_survives_to_legacy_string_for_the_frame() {
+        use lodestone_model::text::{HoverAction, HoverEvent};
+
+        let hover = HoverEvent {
+            action: HoverAction::ShowText,
+            value: Box::new(lodestone_model::Text::literal("Diamond Sword")),
+        };
+        let text = hover.value.to_legacy_string();
+        assert_eq!(
+            text, "Diamond Sword",
+            "a plain-text hover_event's payload must survive verbatim to the \
+             string the tooltip frame field carries"
         );
     }
 }
