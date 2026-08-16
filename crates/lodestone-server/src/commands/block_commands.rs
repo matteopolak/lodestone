@@ -4,14 +4,27 @@
 //!
 //! [`crate::commands::Effect::SetBlock`]/[`Effect::Fill`](crate::commands::Effect::Fill)
 //! carry no player identity because a block edit is not a per-player thing —
-//! but *delivery* still rides the directed-effect channel, aimed at the caller's
-//! own uuid, because applying it needs the chunk source (`SourceRef<'_, S>`)
-//! that only the issuing connection's own `ChatCommand` arm has in scope; see
-//! that arm's own handling of these two variants in `crate::server` for where
-//! the actual [`ChunkSource::set_block`](crate::chunk::ChunkSource::set_block)
-//! call and the [`crate::tick::BlockTickFeed`] broadcast happen. A command run
-//! over RCON has no such connection and so cannot reach either one yet — see
-//! `crate::rcon`'s module doc for the roster of what RCON can and cannot do.
+//! but *delivery* still rides the directed-effect channel, aimed at the
+//! caller's own uuid, because applying it needs a chunk source: a live
+//! connection's own `ChatCommand` arm (`crate::server::dispatch_play_packet`)
+//! has one (`SourceRef<'_, S>`) and applies the effect inline, and RCON's own
+//! dispatcher (`crate::rcon::run_command_as`) does the same over its stored
+//! `RconConfig::world_source`. Either way the actual
+//! [`ChunkSource::set_block`](crate::chunk::ChunkSource::set_block) call and
+//! the [`crate::tick::BlockTickFeed`] broadcast happen at the one place that
+//! *has* both, never inside this module.
+//!
+//! # The console has no uuid, so it gets the crate's own "no player" sentinel
+//!
+//! [`CommandSource::uuid`] is `None` for the console
+//! (`SourceEntity`'s own doc: "`None` on `CommandSource` is the console"),
+//! and `Effect` delivery needs a concrete uuid to address. Rather than
+//! refusing outright — which is what this module did before RCON had
+//! anywhere to apply the effect — a console source uses `Uuid::nil()`, the
+//! same "not a real player, cannot collide with one" sentinel `crate::rcon`'s
+//! own console identity already uses. A live connection never reaches this
+//! fallback: [`CommandSource::player`] always carries a real uuid, so
+//! `Uuid::nil()` is unambiguous console-only.
 //!
 //! # `/fill`'s volume cap
 //!
@@ -48,9 +61,9 @@ pub(super) fn register(registrar: &mut Registrar) {
     let (pos_node, pos_key) = registrar.arg(setblock, "pos", BlockPosArg);
     let (block_node, block_key) = registrar.arg(pos_node, "block", BlockArg);
     registrar.exec(block_node, move |ctx| {
-        let Some(uuid) = ctx.source.uuid() else {
-            return Err("That command can only be used by a player".to_string());
-        };
+        // See this module's own doc for why `None` (the console) falls back
+        // to `Uuid::nil()` rather than refusing outright.
+        let uuid = ctx.source.uuid().unwrap_or(uuid::Uuid::nil());
         let pos = resolve_block_pos(ctx, *ctx.get(pos_key));
         let block = ctx.get(block_key).block.to_string();
         ctx.effect(uuid, crate::commands::Effect::SetBlock { pos, block: block.clone() });
@@ -65,9 +78,9 @@ pub(super) fn register(registrar: &mut Registrar) {
     let (to_node, to_key) = registrar.arg(from_node, "to", BlockPosArg);
     let (fill_block_node, fill_block_key) = registrar.arg(to_node, "block", BlockArg);
     registrar.exec(fill_block_node, move |ctx| {
-        let Some(uuid) = ctx.source.uuid() else {
-            return Err("That command can only be used by a player".to_string());
-        };
+        // See this module's own doc for why `None` (the console) falls back
+        // to `Uuid::nil()` rather than refusing outright.
+        let uuid = ctx.source.uuid().unwrap_or(uuid::Uuid::nil());
         let from = resolve_block_pos(ctx, *ctx.get(from_key));
         let to = resolve_block_pos(ctx, *ctx.get(to_key));
         let block = ctx.get(fill_block_key).block.to_string();

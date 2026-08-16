@@ -4,11 +4,13 @@
 //! for. The listener, the auth state machine and the command execution are
 //! exercised over a real loopback socket; nothing here reaches a live server.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use lodestone_server::{
     ChunkColumn, ChunkSource, CommandCaller, CommandDispatch, CommandResponse, CommandSink,
-    IntegratedServer, RconConfig, ServerBound, ServerDirective, ServerProtocol, UNKNOWN_COMMAND,
+    IntegratedServer, LanConfig, RconConfig, ServerBound, ServerDirective, ServerProtocol,
+    UNKNOWN_COMMAND,
 };
 use lodestone_testsupport::{AsyncRconClient, rcon_frame};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -91,6 +93,70 @@ fn rcon_server(
         .start_rcon(RconConfig::new(([127, 0, 0, 1], 0).into(), "hunter2", commands))
         .expect("bind the RCON listener");
     (server, addr)
+}
+
+/// An all-air world that *records* every write, keyed by position — the
+/// production `set_block` forwarding `ChunkStore::set_block` does
+/// (`self.source.set_block(...)`, before it ever touches its own cache), so
+/// this is what a real `IntegratedServer::open_to_lan`-hosted `/setblock`/
+/// `/fill` over RCON actually reaches.
+#[derive(Default)]
+struct RecordingWorld(Arc<Mutex<HashMap<(i32, i32, i32), String>>>);
+
+impl ChunkSource for RecordingWorld {
+    fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+        ChunkColumn::new(0, 16)
+    }
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        self.0
+            .lock()
+            .expect("recording world lock poisoned")
+            .get(&(x, y, z))
+            .cloned()
+            .unwrap_or_else(|| "minecraft:air".to_string())
+    }
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        self.0
+            .lock()
+            .expect("recording world lock poisoned")
+            .insert((x, y, z), name.to_string());
+    }
+}
+
+/// A LAN-hosted server with an RCON listener — the *realistic* pairing
+/// (`LanConfig::rcon`), unlike [`rcon_server`] above, which uses the simpler
+/// [`IntegratedServer::open_in_memory`] that builds no live `MobHandle`/
+/// `ChunkSource`/`BorderFeed` for RCON to reach at all. This is the
+/// constructor `/setblock`/`/fill`/`/summon`/`/worldborder` over RCON need to
+/// have anything real behind them.
+///
+/// `LanConfig::rcon` is left `None` and [`IntegratedServer::start_rcon`] is
+/// called separately, exactly like [`rcon_server`] above, rather than through
+/// `open_to_lan`'s own internal call: that call's return value (the real
+/// bound address, needed because port `0` lets the OS choose) is discarded
+/// inside `open_to_lan` itself, so there is no way to learn it from the
+/// outside otherwise.
+async fn lan_rcon_server(
+    edits: Arc<Mutex<HashMap<(i32, i32, i32), String>>>,
+) -> (IntegratedServer, std::net::SocketAddr) {
+    let mut server = IntegratedServer::open_to_lan(
+        "127.0.0.1:0",
+        SilentProtocol,
+        RecordingWorld(edits),
+        LanConfig {
+            view_radius: 0,
+            // Off, so this measures RCON's own wiring and binds no UDP port a
+            // parallel test could contend for.
+            query: false,
+            ..LanConfig::default()
+        },
+    )
+    .await
+    .expect("open_to_lan must bind");
+    let rcon_addr = server
+        .start_rcon(RconConfig::new(([127, 0, 0, 1], 0).into(), "hunter2", CommandDispatch::none()))
+        .expect("bind the RCON listener");
+    (server, rcon_addr)
 }
 
 /// The round-trip, driven with the exact client the live oracle tests use
@@ -246,6 +312,125 @@ async fn one_write_delivers_the_whole_auth_response_to_a_single_read() {
     assert_eq!(&buf[4..8], &11i32.to_le_bytes(), "echoed request id");
     assert_eq!(&buf[8..12], &2i32.to_le_bytes(), "TYPE_AUTH_RESPONSE");
     assert_eq!(&buf[12..14], &[0, 0], "null-terminated empty payload");
+
+    server.shutdown().await;
+}
+
+/// `/setblock` over RCON now actually writes — driven through the real
+/// `open_to_lan` entry point so `RconConfig::world_source`/`block_ticks` are
+/// the same handles the tick loop and any real connection would share, not a
+/// test double standing in for them.
+#[tokio::test]
+async fn rcon_setblock_writes_through_the_real_world_source() {
+    let edits: Arc<Mutex<HashMap<(i32, i32, i32), String>>> = Arc::default();
+    let (server, addr) = lan_rcon_server(edits.clone()).await;
+
+    let mut client = AsyncRconClient::connect(addr, "hunter2")
+        .await
+        .expect("connect and authenticate");
+    let response = client
+        .command("setblock 5 64 -3 minecraft:stone")
+        .await
+        .expect("command round-trips");
+    assert_eq!(response, "Changed the block at 5, 64, -3 to minecraft:stone");
+
+    assert_eq!(
+        edits.lock().unwrap().get(&(5, 64, -3)),
+        Some(&"minecraft:stone".to_string()),
+        "the write must reach the world source `set_block` a real connection's own \
+         ChatCommand arm would call, not be dropped as it was before RconConfig \
+         carried one"
+    );
+
+    server.shutdown().await;
+}
+
+/// `/fill` over RCON, the same wiring as `/setblock` but exercising the
+/// publish-per-block loop and a volume greater than one.
+#[tokio::test]
+async fn rcon_fill_writes_every_position_and_reports_the_real_count() {
+    let edits: Arc<Mutex<HashMap<(i32, i32, i32), String>>> = Arc::default();
+    let (server, addr) = lan_rcon_server(edits.clone()).await;
+
+    let mut client = AsyncRconClient::connect(addr, "hunter2")
+        .await
+        .expect("connect and authenticate");
+    let response = client
+        .command("fill 0 64 0 1 64 1 minecraft:glass")
+        .await
+        .expect("command round-trips");
+    assert_eq!(response, "Successfully filled 4 block(s) with minecraft:glass");
+
+    let recorded = edits.lock().unwrap();
+    for x in 0..=1 {
+        for z in 0..=1 {
+            assert_eq!(recorded.get(&(x, 64, z)), Some(&"minecraft:glass".to_string()), "({x}, 64, {z})");
+        }
+    }
+    assert_eq!(recorded.len(), 4, "exactly the four cells in the box, no more");
+    drop(recorded);
+
+    server.shutdown().await;
+}
+
+/// `/summon` over RCON reaches the same live `MobHandle` the tick loop
+/// advances — before `RconConfig::mobs` existed this refused unconditionally
+/// (`CommandWorld::mobs` was always `None`), so the mob was never even
+/// attempted.
+#[tokio::test]
+async fn rcon_summon_spawns_into_the_live_mob_handle() {
+    let edits: Arc<Mutex<HashMap<(i32, i32, i32), String>>> = Arc::default();
+    let (server, addr) = lan_rcon_server(edits).await;
+
+    let mut client = AsyncRconClient::connect(addr, "hunter2")
+        .await
+        .expect("connect and authenticate");
+    let response = client
+        .command("summon minecraft:pig 12 64 12")
+        .await
+        .expect("command round-trips");
+    assert!(response.contains("pig"), "unexpected response: {response}");
+
+    let mobs = server.mobs().expect("open_to_lan must build a live MobHandle");
+    let snapshots = mobs.with(|sim| sim.snapshots());
+    assert!(
+        snapshots.iter().any(|s| s.entity_type.to_string() == "minecraft:pig"),
+        "the summoned pig must actually be in the simulation the tick loop ticks, \
+         not a throwaway sim nothing streams: {snapshots:?}"
+    );
+
+    server.shutdown().await;
+}
+
+/// `/worldborder` over RCON now reads and mutates the *same* handle the tick
+/// loop ticks (`IntegratedServer::border`), not a value with nowhere to go —
+/// verified as a set-then-get round trip since that is the only externally
+/// observable surface RCON has, and the honest scope this closes (see
+/// `RconConfig::border`'s own doc comment for what remains open: no accepted
+/// LAN connection reads this feed yet).
+#[tokio::test]
+async fn rcon_worldborder_set_and_get_round_trip_the_real_shared_border() {
+    let edits: Arc<Mutex<HashMap<(i32, i32, i32), String>>> = Arc::default();
+    let (server, addr) = lan_rcon_server(edits).await;
+
+    let mut client = AsyncRconClient::connect(addr, "hunter2")
+        .await
+        .expect("connect and authenticate");
+    let set = client
+        .command("worldborder set 250")
+        .await
+        .expect("command round-trips");
+    assert_eq!(set, "Set the world border to 250.0 blocks wide");
+
+    let get = client
+        .command("worldborder get")
+        .await
+        .expect("command round-trips");
+    assert_eq!(
+        get, "The world border is currently 250 blocks wide",
+        "a second RCON command reading the border must see the first command's write, \
+         which only holds if both go through the same stored handle"
+    );
 
     server.shutdown().await;
 }
