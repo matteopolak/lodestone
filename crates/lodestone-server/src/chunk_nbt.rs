@@ -1332,6 +1332,23 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
                 ],
             )
         }
+        // `BeaconBlockEntity.saveAdditional`: `primary_effect`/`secondary_effect`
+        // as bare strings (only written when set — `storeEffect`'s own
+        // `if (effect != null)` guard), `Levels` an int. The payment slot is
+        // menu-only scratch space in vanilla too (`BeaconMenu`'s own
+        // `SimpleContainer`, never part of `BeaconBlockEntity`'s saved state —
+        // `removed` drops it back to the player on menu close), so it is
+        // deliberately not written here.
+        BlockEntity::Beacon(beacon) => {
+            let mut fields = vec![("Levels".to_owned(), Nbt::Int(i32::from(beacon.levels)))];
+            if let Some(primary) = &beacon.primary_effect {
+                fields.push(("primary_effect".to_owned(), Nbt::String(primary.clone())));
+            }
+            if let Some(secondary) = &beacon.secondary_effect {
+                fields.push(("secondary_effect".to_owned(), Nbt::String(secondary.clone())));
+            }
+            ("minecraft:beacon", fields)
+        }
     };
 
     let mut fields = vec![
@@ -1554,6 +1571,12 @@ fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)> {
                 last_execution,
             })
         }
+        "minecraft:beacon" => BlockEntity::Beacon(crate::block_entities::BeaconData {
+            levels: int_field(nbt, "Levels").unwrap_or(0).clamp(0, 4) as u8,
+            primary_effect: string_field(nbt, "primary_effect").map(str::to_owned),
+            secondary_effect: string_field(nbt, "secondary_effect").map(str::to_owned),
+            payment: None,
+        }),
         _ => BlockEntity::Opaque {
             id: id.to_owned(),
             nbt: nbt.clone(),
@@ -1671,6 +1694,68 @@ mod sign_nbt_tests {
             .find(|(name, _)| name == "id")
             .map(|(_, value)| value.clone());
         assert_eq!(id, Some(lodestone_core::Nbt::String("minecraft:hanging_sign".to_owned())));
+    }
+}
+
+#[cfg(test)]
+mod beacon_nbt_tests {
+    use super::{block_entity_from_nbt, block_entity_to_nbt};
+    use crate::block_entities::{BeaconData, BlockEntity};
+    use lodestone_model::BlockPos;
+
+    /// A round trip through this file's own decoder — no independent second
+    /// implementation exists for beacon NBT elsewhere in this crate (unlike
+    /// the sign arm beside this one, which validates against
+    /// `lodestone_world::SignText::parse`), so this is `decode(encode(x)) ==
+    /// x` plus a direct field-shape assertion below, not a two-implementation
+    /// join. Primary and secondary are pairwise-distinct effects and levels
+    /// is a non-round, non-zero, non-default value (`3`), so a transposition
+    /// or a stuck-at-default bug cannot survive unnoticed.
+    #[test]
+    fn a_beacons_nbt_round_trips_through_this_files_own_decoder() {
+        let beacon = BeaconData {
+            levels: 3,
+            primary_effect: Some("minecraft:strength".to_owned()),
+            secondary_effect: Some("minecraft:regeneration".to_owned()),
+            payment: None,
+        };
+        let nbt = block_entity_to_nbt(BlockPos::new(4, 70, -2), &BlockEntity::Beacon(beacon.clone()));
+        let (pos, decoded) = block_entity_from_nbt(&nbt).expect("must decode");
+        assert_eq!(pos, BlockPos::new(4, 70, -2));
+        assert_eq!(decoded, BlockEntity::Beacon(beacon));
+    }
+
+    /// **Control**: an unset secondary must decode back to `None`, not a
+    /// stale or default effect string — without this, an encoder that always
+    /// wrote *some* secondary field would still pass the round trip above,
+    /// since that fixture's own secondary happens to be `Some`.
+    #[test]
+    fn an_unset_secondary_effect_round_trips_to_none() {
+        let beacon = BeaconData {
+            levels: 1,
+            primary_effect: Some("minecraft:speed".to_owned()),
+            secondary_effect: None,
+            payment: None,
+        };
+        let nbt = block_entity_to_nbt(BlockPos::new(0, 64, 0), &BlockEntity::Beacon(beacon.clone()));
+        let (_, decoded) = block_entity_from_nbt(&nbt).expect("must decode");
+        assert_eq!(decoded, BlockEntity::Beacon(beacon));
+    }
+
+    /// The `id` field must name the beacon's own block-entity type, the same
+    /// direct field-shape assertion `hanging_sign_nbt_names_its_own_block_entity_type`
+    /// makes for the sign arm beside this one.
+    #[test]
+    fn beacon_nbt_names_its_own_block_entity_type() {
+        let nbt = block_entity_to_nbt(BlockPos::new(0, 64, 0), &BlockEntity::Beacon(BeaconData::default()));
+        let lodestone_core::Nbt::Compound(fields) = &nbt else {
+            panic!("must be a compound")
+        };
+        let id = fields
+            .iter()
+            .find(|(name, _)| name == "id")
+            .map(|(_, value)| value.clone());
+        assert_eq!(id, Some(lodestone_core::Nbt::String("minecraft:beacon".to_owned())));
     }
 }
 

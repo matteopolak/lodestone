@@ -99,7 +99,7 @@ use lodestone_data::block_states::{block_name, properties};
 use lodestone_data::entity_types::entity_type_id;
 use lodestone_data::items::{item_id, item_name};
 use lodestone_data::menus::menu_id;
-use lodestone_data::mob_effects::mob_effect_name;
+use lodestone_data::mob_effects::{mob_effect_id, mob_effect_name};
 use crate::entity_variants;
 use crate::packet_ids::{MINECRAFT_VERSION, configuration, handshaking, login, play, status};
 use crate::packets::chunk::ChunkShape;
@@ -1250,10 +1250,9 @@ fn read_optional_item_stack(r: &mut Reader) -> Option<Option<ItemStack>> {
 /// only if present, the effect's `minecraft:mob_effect` registry id as a
 /// direct VarInt.
 ///
-/// Returns the effect's canonical name on success so a future consumer has
-/// something to act on immediately; today's decode arm for `SET_BEACON`
-/// still discards it (`ServerBound` has no beacon-effect variant — see
-/// this module's `SET_BEACON` decode arm doc comment for why).
+/// Returns the effect's canonical name on success — this module's own
+/// `SET_BEACON` decode arm lifts both calls straight into a real
+/// `ServerBound::SetBeacon`.
 fn read_optional_mob_effect(r: &mut Reader) -> Option<Option<&'static str>> {
     if !r.bool().ok()? {
         return Some(None);
@@ -2271,6 +2270,59 @@ fn encode_container_data_body(window_id: i32, property: i32, value: i32) -> Vec<
     w.var_i32(window_id);
     w.i16(property as i16);
     w.i16(value as i16);
+    w.into_vec()
+}
+
+/// Hand-written encoder for the clientbound `update_mob_effect` packet
+/// (`ClientboundUpdateMobEffectPacket`), the exact mirror of
+/// `V770Adapter::handle_play_entity`'s `UPDATE_MOB_EFFECT` decode arm
+/// (`adapter/entity.rs`): VarInt entity id, VarInt `minecraft:mob_effect`
+/// registry id, VarInt amplifier, VarInt duration (ticks), then one `u8`
+/// bitset (`ambient` `0x1`, `visible` `0x2`, `show_icon` `0x4`, `blend`
+/// `0x8`). An effect this crate cannot resolve to a registry id degrades to
+/// writing nothing at all (`ServerDirective::None`) rather than a malformed
+/// packet id — see this function's own caller.
+#[allow(clippy::too_many_arguments)]
+fn encode_update_mob_effect_body(
+    entity_id: i32,
+    effect_id: i32,
+    amplifier: u32,
+    duration_ticks: i32,
+    ambient: bool,
+    visible: bool,
+    show_icon: bool,
+    blend: bool,
+) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(entity_id);
+    w.var_i32(effect_id);
+    w.var_i32(i32::try_from(amplifier).unwrap_or(i32::MAX));
+    w.var_i32(duration_ticks);
+    let mut flags = 0u8;
+    if ambient {
+        flags |= 0x1;
+    }
+    if visible {
+        flags |= 0x2;
+    }
+    if show_icon {
+        flags |= 0x4;
+    }
+    if blend {
+        flags |= 0x8;
+    }
+    w.u8(flags);
+    w.into_vec()
+}
+
+/// Hand-written encoder for the clientbound `remove_mob_effect` packet
+/// (`ClientboundRemoveMobEffectPacket`), the exact mirror of
+/// `V770Adapter::handle_play_entity`'s `REMOVE_MOB_EFFECT` decode arm: VarInt
+/// entity id, VarInt `minecraft:mob_effect` registry id.
+fn encode_remove_mob_effect_body(entity_id: i32, effect_id: i32) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(entity_id);
+    w.var_i32(effect_id);
     w.into_vec()
 }
 
@@ -3693,18 +3745,28 @@ impl ServerProtocol for V770ServerProtocol {
             // `ServerboundSetBeaconPacket`: two `Optional<Holder<MobEffect>>`
             // values (primary then secondary power), each read by
             // [`read_optional_mob_effect`] — the exact inverse of
-            // `crate::adapter::encode_set_beacon`.
+            // `crate::adapter::encode_set_beacon`. Issue #616's remainder:
+            // this used to decode-and-discard; now lifted into a real
+            // `ServerBound::SetBeacon`, `crate::beacon`'s validation and
+            // `crate::server`'s consumer being the two things that were
+            // missing, not this decode.
             State::Play if packet_id == play::serverbound::SET_BEACON => {
                 let mut r = Reader::new(payload);
                 // See `SET_CREATIVE_MODE_SLOT`'s comment above for why these
                 // are qualified as `self::` rather than bare calls.
-                let decoded = (|| -> Option<()> {
-                    let _primary = self::read_optional_mob_effect(&mut r)?;
-                    let _secondary = self::read_optional_mob_effect(&mut r)?;
-                    r.ensure_empty().ok()
+                let decoded = (|| -> Option<(Option<&'static str>, Option<&'static str>)> {
+                    let primary = self::read_optional_mob_effect(&mut r)?;
+                    let secondary = self::read_optional_mob_effect(&mut r)?;
+                    r.ensure_empty().ok()?;
+                    Some((primary, secondary))
                 })();
-                let _ = decoded;
-                ServerBound::Ignored
+                match decoded {
+                    Some((primary, secondary)) => ServerBound::SetBeacon {
+                        primary: primary.map(str::to_owned),
+                        secondary: secondary.map(str::to_owned),
+                    },
+                    None => ServerBound::Ignored,
+                }
             }
             // Issue #616's remainder. `ServerboundEditBookPacket` carries no
             // `ItemStack` at all (see `EditBook`'s own doc comment) — the
@@ -5702,6 +5764,52 @@ impl ServerProtocol for V770ServerProtocol {
         ServerDirective::Send {
             packet_id: play::clientbound::CONTAINER_SET_DATA,
             payload: encode_container_data_body(window_id, property, value),
+        }
+    }
+
+    /// See [`ServerProtocol::encode_update_mob_effect`]'s trait doc comment.
+    /// `None` for an effect this crate's registry table cannot resolve —
+    /// degrading to no packet rather than writing a bogus id `mob_effect_id`
+    /// itself already returned `None` for, matching `write_item_cost`'s own
+    /// "an unresolvable id writes nothing rather than corrupting the rest of
+    /// the packet" convention.
+    fn encode_update_mob_effect(
+        &self,
+        entity_id: i32,
+        effect: &str,
+        amplifier: u32,
+        duration_ticks: i32,
+        ambient: bool,
+        visible: bool,
+        show_icon: bool,
+        blend: bool,
+    ) -> ServerDirective {
+        match mob_effect_id(effect) {
+            Some(effect_id) => ServerDirective::Send {
+                packet_id: play::clientbound::UPDATE_MOB_EFFECT,
+                payload: encode_update_mob_effect_body(
+                    entity_id,
+                    effect_id,
+                    amplifier,
+                    duration_ticks,
+                    ambient,
+                    visible,
+                    show_icon,
+                    blend,
+                ),
+            },
+            None => ServerDirective::None,
+        }
+    }
+
+    /// See [`ServerProtocol::encode_remove_mob_effect`]'s trait doc comment.
+    fn encode_remove_mob_effect(&self, entity_id: i32, effect: &str) -> ServerDirective {
+        match mob_effect_id(effect) {
+            Some(effect_id) => ServerDirective::Send {
+                packet_id: play::clientbound::REMOVE_MOB_EFFECT,
+                payload: encode_remove_mob_effect_body(entity_id, effect_id),
+            },
+            None => ServerDirective::None,
         }
     }
 

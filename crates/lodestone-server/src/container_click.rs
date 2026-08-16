@@ -157,6 +157,24 @@ pub enum MenuKind {
     /// here; the item slot is enchanted in place. Positionless scratch space,
     /// same story as [`ItemCombiner`](Self::ItemCombiner).
     Enchanting,
+    /// `BeaconMenu`'s one payment slot, then the standard 27+9 player tail —
+    /// the same shape as [`Container`](Self::Container) `{ size: 1 }` except
+    /// for its own restricted `may_place`/`max_stack_size` (issue #616's
+    /// remainder): only a [`crate::beacon::is_beacon_payment_item`] item, one
+    /// at a time. A distinct variant rather than reusing `Container` because
+    /// `Container`'s own `may_place` accepts anything (right, for a chest;
+    /// wrong here — vanilla's own `PaymentSlot.mayPlace`/`getMaxStackSize`
+    /// really do restrict it).
+    ///
+    /// **Known gap**: `quick_move_targets` below reuses `Container`'s exact
+    /// two-range shift-click shape rather than `BeaconMenu.quickMoveStack`'s
+    /// own upfront `!paymentSlot.hasItem() && mayPlace && count == 1` gate,
+    /// so shift-clicking a stack of more than one payment-eligible item can
+    /// split one off into the slot where vanilla would skip straight to the
+    /// storage/hotbar shuffle instead. `may_place`/`max_stack_size` still
+    /// refuse the wrong item or a second one outright — only the *shift-click
+    /// routing* for a multi-item stack differs.
+    Beacon,
 }
 
 /// Which workstation an [`MenuKind::ItemCombiner`] is — the anvil and
@@ -259,6 +277,19 @@ impl MenuLayout {
         }
     }
 
+    /// `BeaconMenu`'s one payment slot (menu index `0`) then the standard
+    /// 27+9 player tail (`addStandardInventorySlots(inventory, 36, 137)`).
+    #[must_use]
+    pub fn beacon() -> Self {
+        let mut slots = vec![SlotKind::Container(0)];
+        slots.extend((9..36).map(SlotKind::Player));
+        slots.extend((0..9).map(SlotKind::Player));
+        Self {
+            kind: MenuKind::Beacon,
+            slots,
+        }
+    }
+
     /// Total menu slots.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -301,7 +332,11 @@ impl MenuLayout {
                 MenuKind::Enchanting if cell == 1 => item.item.to_string() == "minecraft:lapis_lazuli",
                 _ => true,
             },
-            Some(SlotKind::Container(_)) => true,
+            Some(SlotKind::Container(idx)) => match self.kind {
+                // `BeaconMenu.PaymentSlot.mayPlace`.
+                MenuKind::Beacon => idx == 0 && crate::beacon::is_beacon_payment_item(&item.item.to_string()),
+                _ => true,
+            },
         }
     }
 
@@ -317,6 +352,12 @@ impl MenuLayout {
         // regardless of the item's own cap — the table only ever enchants one
         // item at a time.
         if self.kind == MenuKind::Enchanting && self.kind_of(index) == Some(SlotKind::Grid(0)) {
+            return 1;
+        }
+        // `BeaconMenu.PaymentSlot.getMaxStackSize` overrides to `1`
+        // regardless of the item's own cap, the same override shape as the
+        // enchanting table's item slot above.
+        if self.kind == MenuKind::Beacon && self.kind_of(index) == Some(SlotKind::Container(0)) {
             return 1;
         }
         max_stack_size(item)
@@ -417,6 +458,19 @@ impl MenuLayout {
                     return vec![(1, 2, false)];
                 }
                 vec![(0, 1, false), (2, self.slots.len(), false)]
+            }
+            // `BeaconMenu.quickMoveStack`'s own shape, approximated as
+            // `Container { size: 1 }`'s two-range form — see
+            // [`MenuKind::Beacon`]'s own doc for the one known gap
+            // (vanilla's `count == 1` upfront gate is not reproduced; the
+            // payment slot's own `may_place`/`max_stack_size` still refuse
+            // the wrong item or a second one).
+            MenuKind::Beacon => {
+                if index == 0 {
+                    vec![(1, self.slots.len(), true)]
+                } else {
+                    vec![(0, 1, false)]
+                }
             }
         }
     }

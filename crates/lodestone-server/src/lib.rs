@@ -105,6 +105,11 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod access;
 mod advancements;
+/// Beacon pyramid detection, primary/secondary effect selection and periodic
+/// effect application (issue #616's `SET_BEACON` remainder) — pure, testable
+/// derivations; `crate::server` owns the block entity, the menu, and every
+/// side effect (payment consumption, `ActiveEffects::apply`, the wire).
+pub mod beacon;
 mod block_breaking;
 mod block_entities;
 /// Rolling a broken block's loot table and popping the result as item entities

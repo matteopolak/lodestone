@@ -1364,6 +1364,18 @@ pub enum ServerBound {
         /// `ChatFormatting::stripFormatting` map.
         lines: [String; 4],
     },
+    /// A beacon's power-selection submission (`ServerboundSetBeaconPacket`,
+    /// issue #616's remainder). `crate::server`'s consumer is
+    /// `BeaconMenu.updateEffects`: re-derive the pyramid tier, validate the
+    /// pair with `crate::beacon::validate_beacon_effects`, and on success
+    /// consume one payment item and resync the menu's data slots.
+    SetBeacon {
+        /// The chosen primary power's canonical key, or `None` to clear it.
+        primary: Option<String>,
+        /// The chosen secondary power's canonical key (level-4 pyramids
+        /// only), or `None`.
+        secondary: Option<String>,
+    },
     /// A book-and-quill draft save or signing submission
     /// (`ServerboundEditBookPacket`, issue #616's remainder). Carries no
     /// `ItemStack` — the packet only names a slot and the new text;
@@ -2764,6 +2776,40 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes the clientbound `update_mob_effect` packet
+    /// (`ClientboundUpdateMobEffectPacket`) — a status effect newly applied
+    /// or refreshed on the entity at `entity_id`, `effect` a canonical
+    /// `minecraft:*` key. `ambient`/`visible`/`show_icon` are vanilla's own
+    /// three independent flags (a beacon/conduit application sets `ambient`
+    /// and both display flags; `/effect give … true` sets neither display
+    /// flag); `blend` is the fourth wire flag, vanilla's own darkened-screen
+    /// hint for a small set of effects (nausea/darkness) — `false` for
+    /// everything else. The default emits nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_update_mob_effect(
+        &self,
+        entity_id: i32,
+        effect: &str,
+        amplifier: u32,
+        duration_ticks: i32,
+        ambient: bool,
+        visible: bool,
+        show_icon: bool,
+        blend: bool,
+    ) -> ServerDirective {
+        let _ = (entity_id, effect, amplifier, duration_ticks, ambient, visible, show_icon, blend);
+        ServerDirective::None
+    }
+
+    /// Encodes the clientbound `remove_mob_effect` packet
+    /// (`ClientboundRemoveMobEffectPacket`) — `effect` cleared entirely from
+    /// the entity at `entity_id` (an expired duration, or an explicit
+    /// `/effect clear`). The default emits nothing.
+    fn encode_remove_mob_effect(&self, entity_id: i32, effect: &str) -> ServerDirective {
+        let _ = (entity_id, effect);
+        ServerDirective::None
+    }
+
     /// Encodes the clientbound `initialize_border` packet (vanilla
     /// `ClientboundInitializeBorderPacket`, wire id 43 in 26.2) — the border
     /// state a player is told about on join, sent by `PlayerList.sendLevelInfo`
@@ -3235,6 +3281,33 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_container_data(&self, window_id: i32, property: i32, value: i32) -> ServerDirective {
         (**self).encode_container_data(window_id, property, value)
+    }
+
+    fn encode_update_mob_effect(
+        &self,
+        entity_id: i32,
+        effect: &str,
+        amplifier: u32,
+        duration_ticks: i32,
+        ambient: bool,
+        visible: bool,
+        show_icon: bool,
+        blend: bool,
+    ) -> ServerDirective {
+        (**self).encode_update_mob_effect(
+            entity_id,
+            effect,
+            amplifier,
+            duration_ticks,
+            ambient,
+            visible,
+            show_icon,
+            blend,
+        )
+    }
+
+    fn encode_remove_mob_effect(&self, entity_id: i32, effect: &str) -> ServerDirective {
+        (**self).encode_remove_mob_effect(entity_id, effect)
     }
 
     fn encode_set_held_slot(&self, slot: u8) -> ServerDirective {
