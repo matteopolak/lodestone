@@ -9557,6 +9557,56 @@ fn finish_consuming(
     ))
 }
 
+/// `OminousBottleAmplifier.onConsume`: finishing a drink of
+/// `minecraft:ominous_bottle` grants `minecraft:bad_omen` for 120000 ticks
+/// and consumes the bottle — issue #241's remaining producer gap
+/// (`item_use.rs`'s own disclosed "potions" gap, closed for exactly this one
+/// item rather than generally).
+///
+/// A separate function from [`finish_consuming`] rather than a branch inside
+/// it: that function's success arm is deliberately food-only — its own call
+/// sites play the burp sound and `item_consume_finished` effect specifically
+/// *because* the item was food (see those call sites' own comments) — and an
+/// ominous bottle is not food and must not burp. Same `still_there`/
+/// `consume_one` shape as [`finish_consuming`], reused rather than
+/// restated.
+///
+/// **Disclosed narrowing**: vanilla rolls a uniform `0..=4` amplifier onto
+/// the bottle's own `minecraft:ominous_bottle_amplifier` component when a
+/// pillager patrol captain drops it
+/// ([`crate::mobs::MobSim::drop_ominous_bottle`]'s own doc has the loot-table
+/// citation); every bottle drunk here grants amplifier `0` instead, because
+/// persisting the real per-stack roll needs a new
+/// `lodestone_model::ItemComponents` field this session's ownership does not
+/// reach (`crates/lodestone-model/**`) — see `docs/raids-and-patrols.md` §5
+/// for the exact hunk. Amplifier `0` is a real, working value rather than a
+/// no-op: `absorb_raid_omen(0, 0) == 1` still starts a genuine raid once Bad
+/// Omen converts, so this is "always the weakest roll", not "does nothing".
+fn finish_drinking_ominous_bottle(
+    inventory: &mut PlayerInventory,
+    effects: &mut crate::mob_effects::ActiveEffects,
+    use_in_progress: &ItemInUse,
+    game_mode: GameMode,
+) -> Option<(usize, Option<ItemStack>)> {
+    if use_in_progress.item != "minecraft:ominous_bottle" {
+        return None;
+    }
+    let still_there = inventory
+        .native(use_in_progress.native)
+        .is_some_and(|stack| stack.item.to_string() == use_in_progress.item);
+    if !still_there {
+        return None;
+    }
+    effects.apply("minecraft:bad_omen", 120_000, 0);
+    if !consume_one(inventory, use_in_progress.native, game_mode) {
+        return None;
+    }
+    Some((
+        use_in_progress.native,
+        inventory.native(use_in_progress.native).cloned(),
+    ))
+}
+
 /// Applies a `RELEASE_USE_ITEM` that ends a bow draw: computes the charge, refuses
 /// a shot too weak or unarmed, and launches the arrow.
 ///
@@ -13261,6 +13311,40 @@ where
                                 ),
                             )
                             .await?;
+                        } else if let Some((native, remainder)) = finish_drinking_ominous_bottle(
+                            &mut inventory,
+                            &mut effects,
+                            &started,
+                            game_mode,
+                        ) {
+                            if let Some(menu_slot) = window_zero_menu_slot(native) {
+                                apply(
+                                    conn,
+                                    &mut state,
+                                    proto.encode_container_slot(
+                                        0,
+                                        0,
+                                        menu_slot,
+                                        remainder.as_ref(),
+                                    ),
+                                )
+                                .await?;
+                            }
+                            apply(
+                                conn,
+                                &mut state,
+                                proto.encode_update_mob_effect(
+                                    LOCAL_PLAYER_ENTITY_ID,
+                                    "minecraft:bad_omen",
+                                    0,
+                                    120_000,
+                                    true,
+                                    true,
+                                    true,
+                                    false,
+                                ),
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -13562,7 +13646,7 @@ where
                     let (difficulty, _) = world.difficulty();
                     if difficulty != lodestone_model::Difficulty::Peaceful
                         && let Some(amplifier) = effects.amplifier_of("minecraft:bad_omen")
-                        && !mobs.with(|sim| sim.occupied_homes_in_range(pos, 64)).is_empty()
+                        && !mobs.with(|sim| sim.occupied_village_pois_in_range(pos, 64)).is_empty()
                     {
                         effects.remove("minecraft:bad_omen");
                         apply(
@@ -13604,6 +13688,86 @@ where
                         )
                         .await?;
                         mobs.with(|sim| sim.create_or_extend_raid(origin, difficulty, amplifier));
+                    }
+                }
+
+                // Issue #246's remaining gap, closed: `Raid.tick`'s own
+                // `hero.addEffect(HERO_OF_THE_VILLAGE, 48000, raidOmenLevel - 1)`
+                // loop, fired the moment a raid this player earned a killing
+                // blow in reaches `RaidStatus::Victory`. That transition
+                // happens inside the shared background sim task, which has no
+                // connection's `ActiveEffects` to grant an effect onto —
+                // `MobSim::take_hero_of_the_village_grants` is the queue this
+                // drains instead (see its own doc). Checked every tick,
+                // independent of whether *this* connection's player currently
+                // carries Bad Omen or Raid Omen at all: the killing blow that
+                // earned the grant may have landed many ticks, and waves,
+                // before the raid's last one actually clears.
+                for amplifier in mobs.with(|sim| sim.take_hero_of_the_village_grants(player_uuid)) {
+                    let amplifier = u32::try_from(amplifier).unwrap_or(0);
+                    effects.apply("minecraft:hero_of_the_village", 48_000, amplifier);
+                    apply(
+                        conn,
+                        &mut state,
+                        proto.encode_update_mob_effect(
+                            LOCAL_PLAYER_ENTITY_ID,
+                            "minecraft:hero_of_the_village",
+                            amplifier,
+                            48_000,
+                            true,
+                            true,
+                            true,
+                            false,
+                        ),
+                    )
+                    .await?;
+                }
+
+                // Issue #276's post-kill controller, wired for real:
+                // `dragon::MobSim::record_dragon_death` (now reached from a
+                // real hit through `MobSim::attack_dragon`, and from the
+                // death-flight health-drive clause in `tick_one_dragon`)
+                // queues the exit-portal geometry and egg placement a kill
+                // needs but cannot apply itself — `MobSim` holds `world`
+                // immutably and owns no connection, the same reason
+                // `take_hero_of_the_village_grants` above is a queue rather
+                // than an inline effect. `home`, not `source`, resolves the
+                // sibling: it is "the only thing that knows the world's
+                // siblings" regardless of which dimension *this* connection
+                // currently occupies (`SourceRef::Dimension`'s own doc), so
+                // whichever connected player's tick reaches this first —
+                // not necessarily the one standing in the End — can apply it.
+                for death in mobs.with(|sim| sim.take_dragon_deaths()) {
+                    if let Some(destination) = home.get().sibling(crate::dimension::Dimension::End) {
+                        for (pos, state) in &death.exit_portal_blocks {
+                            destination.set_block(pos.x, pos.y, pos.z, state);
+                        }
+                        if death.outcome.place_dragon_egg {
+                            // `EnderDragonFight.setDragonKilled`'s own
+                            // `level.getHeightmapPos(MOTION_BLOCKING,
+                            // EndPodiumFeature.getLocation(origin))` — the
+                            // highest solid block in the podium's own
+                            // column. Scanned for real (rather than assumed
+                            // to be the bedrock pole's own top) by walking
+                            // down from just above the portal's domed air
+                            // clearing (`exit_portal_blocks`'s own
+                            // `origin.y + 32` ceiling), so a column a player
+                            // has already built on still gets the real
+                            // surface.
+                            let mut egg_y = death.origin.y + 33;
+                            while egg_y > death.origin.y
+                                && destination.block_state(death.origin.x, egg_y, death.origin.z) == "minecraft:air"
+                            {
+                                egg_y -= 1;
+                            }
+                            destination.set_block(death.origin.x, egg_y + 1, death.origin.z, "minecraft:dragon_egg");
+                        }
+                        // `outcome.spawn_gateway` is a real signal with
+                        // nothing to apply it to: `fight::FightState`'s own
+                        // doc comment discloses that no gateway position
+                        // formula or shuffled 20-position pool is ported
+                        // anywhere in this repo. A disclosed gap, not a
+                        // silent one.
                     }
                 }
 
@@ -14287,6 +14451,32 @@ where
                         vitals.health(),
                         vitals.food().food_level(),
                         vitals.food().saturation(),
+                    ),
+                )
+                .await?;
+            } else if let Some((native, remainder)) =
+                finish_drinking_ominous_bottle(inventory, effects, &started, game_mode)
+            {
+                if let Some(menu_slot) = window_zero_menu_slot(native) {
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_container_slot(0, 0, menu_slot, remainder.as_ref()),
+                    )
+                    .await?;
+                }
+                apply(
+                    conn,
+                    state,
+                    proto.encode_update_mob_effect(
+                        LOCAL_PLAYER_ENTITY_ID,
+                        "minecraft:bad_omen",
+                        0,
+                        120_000,
+                        true,
+                        true,
+                        true,
+                        false,
                     ),
                 )
                 .await?;
@@ -18161,5 +18351,57 @@ mod tests {
             Some(&registry),
         );
         assert_eq!(result, None);
+    }
+
+    /// Issue #241's ominous-bottle consumer half: drinking
+    /// `minecraft:ominous_bottle` to completion grants `minecraft:bad_omen`
+    /// (120000 ticks, amplifier 0 — see [`finish_drinking_ominous_bottle`]'s
+    /// own doc for the disclosed fixed-amplifier narrowing) and consumes the
+    /// bottle, mirroring [`finish_consuming`]'s `still_there`/`consume_one`
+    /// shape exactly.
+    #[test]
+    fn finish_drinking_ominous_bottle_grants_bad_omen_and_consumes_the_bottle() {
+        let mut inv = PlayerInventory::new();
+        inv.set_native(0, Some(stack("minecraft:ominous_bottle", 1)));
+        let mut effects = crate::mob_effects::ActiveEffects::new();
+        let started = ItemInUse {
+            native: 0,
+            item: "minecraft:ominous_bottle".to_owned(),
+            finish_tick: 0,
+            last_effect_remaining: None,
+        };
+
+        assert!(effects.get("minecraft:bad_omen").is_none(), "precondition: no Bad Omen carried yet");
+        let result = finish_drinking_ominous_bottle(&mut inv, &mut effects, &started, GameMode::Survival);
+        let (native, remainder) = result.expect("a present ominous bottle must finish");
+        assert_eq!(native, 0);
+        assert!(remainder.is_none(), "the sole stack of 1 must be fully consumed, leaving the slot empty");
+        assert_eq!(inv.native(0), None, "the bottle must actually leave the inventory");
+
+        let instance = effects.get("minecraft:bad_omen").expect("Bad Omen must now be carried");
+        assert_eq!(instance.amplifier(), 0);
+        assert_eq!(instance.duration(), 120_000, "OminousBottleAmplifier.EFFECT_DURATION");
+    }
+
+    /// **Control**: any other item (even another drinkable, like a plain
+    /// potion) must not grant Bad Omen or be consumed through this path —
+    /// this function's whole reason to be separate from [`finish_consuming`]
+    /// is that it is a one-item special case, not a general drink handler.
+    #[test]
+    fn finish_drinking_ominous_bottle_ignores_every_other_item() {
+        let mut inv = PlayerInventory::new();
+        inv.set_native(0, Some(stack("minecraft:potion", 1)));
+        let mut effects = crate::mob_effects::ActiveEffects::new();
+        let started = ItemInUse {
+            native: 0,
+            item: "minecraft:potion".to_owned(),
+            finish_tick: 0,
+            last_effect_remaining: None,
+        };
+
+        let result = finish_drinking_ominous_bottle(&mut inv, &mut effects, &started, GameMode::Survival);
+        assert!(result.is_none(), "a plain potion must not be handled by the ominous-bottle path");
+        assert!(effects.get("minecraft:bad_omen").is_none(), "no effect must be granted");
+        assert_eq!(inv.native(0), Some(&stack("minecraft:potion", 1)), "the potion must stay in hand, untouched");
     }
 }

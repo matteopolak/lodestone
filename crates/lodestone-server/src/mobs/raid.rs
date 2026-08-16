@@ -106,6 +106,15 @@ pub(super) struct Raid {
     /// `Raid.postRaidTicks` — the 40-tick delay between "no raiders, no more
     /// waves" and actually declaring [`RaidStatus::Victory`].
     pub post_raid_ticks: i32,
+    /// `Raid.heroesOfTheVillage` — every player-uuid credited with a killing
+    /// blow on one of this raid's raiders, across every wave
+    /// ([`MobSim::add_raid_hero`], `Raider.die`'s
+    /// `raidWhenKilled.addHeroOfTheVillage(killer)`). Consulted once, on
+    /// [`RaidStatus::Victory`], to queue a `minecraft:hero_of_the_village`
+    /// grant per hero — see [`MobSim::tick_raids`]'s own doc for where that
+    /// happens and [`MobSim::take_hero_of_the_village_grants`] for how a
+    /// connection collects it.
+    pub heroes: std::collections::HashSet<Uuid>,
 }
 
 impl Raid {
@@ -118,12 +127,10 @@ impl Raid {
 /// absorbing a Bad-Omen-turned-Raid-Omen effect of `amplifier`, clamped to
 /// `0..=`[`MAX_RAID_OMEN_LEVEL`].
 ///
-/// **Not yet called by production code.** The trigger — detecting a player
-/// carrying `minecraft:bad_omen` crossing into a village and converting it to
-/// `minecraft:raid_omen` on their own `ActiveEffects` — needs
-/// `crate::server`'s per-connection effect state and (for "is this a
-/// village") the POI census, neither of which this file owns or can reach.
-/// See `docs/raids-and-patrols.md` §5 for the exact hunk this needs.
+/// Reached from production through [`MobSim::create_or_extend_raid`], which
+/// `crate::server`'s per-connection Bad-Omen-to-Raid-Omen conversion calls on
+/// Raid Omen's own last tick — see that method's own doc for the trigger's
+/// full shape.
 #[must_use]
 pub fn absorb_raid_omen(existing_level: i32, amplifier: u32) -> i32 {
     (existing_level + amplifier as i32 + 1).clamp(0, MAX_RAID_OMEN_LEVEL)
@@ -134,9 +141,9 @@ impl<'w> MobSim<'w> {
     /// `omen_level` (`1..=5` — the value [`absorb_raid_omen`] would have
     /// produced). Returns the assigned raid id, or `None` on
     /// `Difficulty::Peaceful` ([`num_groups`] is `0`, so there is nothing to
-    /// wave through) — the same "the code exists but is not called yet" gap
-    /// [`absorb_raid_omen`]'s own doc discloses: nothing in this crate's
-    /// off-limits files calls this yet, either.
+    /// wave through). Reached from production through
+    /// [`create_or_extend_raid`](Self::create_or_extend_raid), the same as
+    /// [`absorb_raid_omen`].
     pub fn start_raid(&mut self, center: Vec3, difficulty: Difficulty, omen_level: i32) -> Option<i32> {
         let total_waves = num_groups(difficulty);
         if total_waves <= 0 {
@@ -159,9 +166,34 @@ impl<'w> MobSim<'w> {
                 ticks_active: 0,
                 status: RaidStatus::Ongoing,
                 post_raid_ticks: 0,
+                heroes: std::collections::HashSet::new(),
             },
         );
         Some(id)
+    }
+
+    /// `Raider.die`'s player-kill half: records `uuid` as a hero-of-the-village
+    /// candidate for raid `id`. A no-op if `id` no longer names a live raid
+    /// (the kill outraced the raid's own removal, which cannot currently
+    /// happen in one tick but costs nothing to guard). See
+    /// [`raid_containing_raider`](Self::raid_containing_raider) for how a
+    /// caller resolves a killed entity id back to its raid.
+    pub(super) fn add_raid_hero(&mut self, id: i32, uuid: Uuid) {
+        if let Some(raid) = self.raids.get_mut(&id) {
+            raid.heroes.insert(uuid);
+        }
+    }
+
+    /// `Raider.getCurrentRaid`'s query, from the entity-id side this sim
+    /// indexes mobs by rather than a raid-membership field on [`super::SimMob`]
+    /// itself (see this file's own module doc for why): the raid `entity_id`
+    /// currently belongs to as a live raider of the *current* wave, if any.
+    #[must_use]
+    pub(super) fn raid_containing_raider(&self, entity_id: i32) -> Option<i32> {
+        self.raids
+            .iter()
+            .find(|(_, raid)| raid.raiders.contains(&entity_id))
+            .map(|(&id, _)| id)
     }
 
     /// One tick of every active raid — `Raid.tick`, narrowed to the parts
@@ -182,10 +214,23 @@ impl<'w> MobSim<'w> {
     /// * **Spawn placement is a coarse random ring** around the raid centre
     ///   rather than vanilla's `findRandomSpawnPos`'s real
     ///   village-boundary-aware search — see [`wave_spawn_position`].
+    ///
+    /// On [`RaidStatus::Victory`], every uuid in the raid's own
+    /// [`Raid::heroes`] set is queued into [`Self::pending_hero_grants`] with
+    /// the raid's final omen level — `Raid.tick`'s own
+    /// `hero.addEffect(HERO_OF_THE_VILLAGE, 48000, raidOmenLevel - 1)` loop,
+    /// deferred to a queue rather than applied here because this method has
+    /// no connection/`ActiveEffects` to apply an effect *to* (see
+    /// [`Self::take_hero_of_the_village_grants`]'s own doc for who drains it
+    /// and why a queue is the right shape). The 48000-tick timeout branch
+    /// just below does **not** queue a grant — vanilla only awards Hero of
+    /// the Village from the real `VICTORY` transition, never from a raid
+    /// that simply expired.
     pub(super) fn tick_raids(&mut self) {
         let ids: Vec<i32> = self.raids.keys().copied().collect();
         let mut finished: Vec<i32> = Vec::new();
         let mut to_spawn: Vec<i32> = Vec::new();
+        let mut hero_grants: Vec<(Uuid, i32)> = Vec::new();
         for id in ids {
             // Prune this wave's raider list against the live mob set first —
             // an immutable read of `self.mobs` through `self.get`, taken
@@ -226,6 +271,9 @@ impl<'w> MobSim<'w> {
                 raid.post_raid_ticks += 1;
             } else {
                 raid.status = RaidStatus::Victory;
+                for &hero in &raid.heroes {
+                    hero_grants.push((hero, raid.omen_level));
+                }
                 finished.push(id);
             }
         }
@@ -239,6 +287,7 @@ impl<'w> MobSim<'w> {
         for id in finished {
             self.raids.remove(&id);
         }
+        self.pending_hero_grants.extend(hero_grants);
     }
 
     /// Every active raid's boss bar, appended to `out` by
@@ -301,12 +350,42 @@ impl<'w> MobSim<'w> {
     /// [`absorb_raid_omen`] produced at [`MobSim::start_raid`] time. Vanilla
     /// reads this for `getEnchantOdds` (a loot bonus with no enchantment
     /// model to feed here — see `docs/raids-and-patrols.md` §5) and for the
-    /// Hero of the Village effect amplifier on victory (not built either);
-    /// exposed so a gate can assert the value actually reached the raid
-    /// rather than only that a raid started.
+    /// Hero of the Village effect amplifier on victory
+    /// ([`take_hero_of_the_village_grants`](Self::take_hero_of_the_village_grants)
+    /// — the amplifier `- 1` conversion happens there, matching
+    /// `Raid.tick`'s own arithmetic); exposed so a gate can assert the value
+    /// actually reached the raid rather than only that a raid started.
     #[must_use]
     pub fn raid_omen_level(&self, id: i32) -> Option<i32> {
         self.raids.get(&id).map(|r| r.omen_level)
+    }
+
+    /// Every raid-victory-earned Hero of the Village grant queued for `uuid`,
+    /// each already converted to `Raid.tick`'s own amplifier
+    /// (`raidOmenLevel - 1`) — drained, not merely read, so a connection that
+    /// checks every tick never double-grants the same victory.
+    ///
+    /// A queue rather than an inline application because [`tick_raids`] runs
+    /// inside the shared [`MobSim`] background task with no access to any
+    /// connection's own `ActiveEffects` (`crate::server`'s per-connection
+    /// state); `crate::server`'s own tick loop calls this once per tick with
+    /// its own player's uuid, exactly the same producer/consumer split
+    /// [`push_raid_boss_bars`](Self::push_raid_boss_bars) already uses for
+    /// boss-bar state, here keyed by uuid instead of broadcast to every
+    /// connection since only the actual hero should receive the effect. A
+    /// player who is a hero of two raids finishing in the same tick gets two
+    /// grants back, one per raid's own omen level — not folded into one.
+    pub fn take_hero_of_the_village_grants(&mut self, uuid: Uuid) -> Vec<i32> {
+        let mut amplifiers = Vec::new();
+        self.pending_hero_grants.retain(|&(hero, omen_level)| {
+            if hero == uuid {
+                amplifiers.push(omen_level - 1);
+                false
+            } else {
+                true
+            }
+        });
+        amplifiers
     }
 
     /// Every live raid id, ascending.
@@ -373,18 +452,19 @@ impl<'w> MobSim<'w> {
     /// [`absorb_raid_omen`] produces from `amplifier` against a starting
     /// level of `0`.
     ///
-    /// **The occupied-POI signal is [`super::MobSim::occupied_homes_in_range`]
-    /// only** — the live bed-claim ledger, restricted to `home` POIs. That is
-    /// narrower than vanilla's `#village` tag (which also covers `meeting`
-    /// and every acquirable job site): this crate's workstation claims have
-    /// no matching range query, and the disk-backed
-    /// `crate::poi_storage::PoiStorage::occupied_in_range` can never see a
-    /// live claim at all, since neither claim ledger persists (see
-    /// `crate::mobs::villager`'s own module doc). A village with claimed
-    /// workstations but no claimed bed therefore does not yet trigger a
-    /// raid here — a real, disclosed narrowing, not a silent one.
+    /// **The occupied-POI signal is [`super::MobSim::occupied_village_pois_in_range`]**
+    /// — the live bed, workstation *and* bell claim ledgers unioned, matching
+    /// vanilla's real `#village` tag (`home` + `meeting` +
+    /// `#acquirable_job_site`) rather than beds alone. The disk-backed
+    /// `crate::poi_storage::PoiStorage::occupied_in_range` still can never
+    /// see any of the three, since none of the three claim ledgers persist
+    /// (see `crate::mobs::villager`'s own module doc) — that narrowing is
+    /// real and stays disclosed. A village whose villagers have claimed jobs
+    /// and a bell but genuinely no bed (no `SleepInBed`/work-rest schedule
+    /// has claimed one) still centres correctly now, which the beds-only
+    /// query this method used to call could not do.
     ///
-    /// Native-only, for [`super::MobSim::occupied_homes_in_range`]'s own
+    /// Native-only, for [`super::MobSim::occupied_village_pois_in_range`]'s own
     /// reason.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn create_or_extend_raid(
@@ -393,7 +473,7 @@ impl<'w> MobSim<'w> {
         difficulty: Difficulty,
         amplifier: u32,
     ) -> Option<i32> {
-        let nearby = self.occupied_homes_in_range(origin, 64);
+        let nearby = self.occupied_village_pois_in_range(origin, 64);
         let center = if nearby.is_empty() {
             Vec3::new(f64::from(origin.x), f64::from(origin.y), f64::from(origin.z))
         } else {
@@ -657,5 +737,108 @@ mod raid_tests {
             .expect("Easy is not Peaceful, so a raid must start");
         assert_eq!(sim.raid_ids(), vec![id]);
         assert_eq!(sim.raid_omen_level(id), Some(4), "absorb_raid_omen(0, 3) == 4");
+    }
+
+    /// The POI-signal widening this pass makes: a village whose only claimed
+    /// `#village` POI is a workstation (no bed claimed at all) must still
+    /// trigger a raid, because vanilla's real tag is `home` + `meeting` +
+    /// `#acquirable_job_site`, not beds alone. Before
+    /// `occupied_village_pois_in_range` replaced the beds-only
+    /// `occupied_homes_in_range` call here, this exact scene found nothing
+    /// and `create_or_extend_raid` returned `None`.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn create_or_extend_raid_uses_a_claimed_workstation_with_no_bed_at_all() {
+        let mut world = flat_world();
+        world.set_block(10, 1, 0, "minecraft:composter");
+        let mut sim = MobSim::new(&world);
+        sim.spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(10.0, 1.0, 0.0));
+        sim.tick();
+        assert!(
+            sim.occupied_homes_in_range(lodestone_model::BlockPos::new(0, 1, 0), 64).is_empty(),
+            "no bed exists in this scene at all — the beds-only query must find nothing"
+        );
+        assert!(
+            !sim.occupied_village_pois_in_range(lodestone_model::BlockPos::new(0, 1, 0), 64).is_empty(),
+            "the claimed composter must still count toward the union query"
+        );
+
+        let id = sim
+            .create_or_extend_raid(lodestone_model::BlockPos::new(0, 1, 0), Difficulty::Normal, 0)
+            .expect("a claimed workstation within 64 blocks must start a raid, even with no claimed bed");
+        assert_eq!(sim.raid_omen_level(id), Some(1), "absorb_raid_omen(0, 0) == 1");
+    }
+
+    /// Issue #246's remaining gap, end to end within this crate: a player who
+    /// lands the killing blow on a raider is credited as a hero
+    /// (`add_raid_hero`, resolved through `raid_containing_raider` exactly as
+    /// production's `attack_from_player` does), and once the raid the raider
+    /// belonged to reaches [`RaidStatus::Victory`], `take_hero_of_the_village_grants`
+    /// hands that player's uuid back the raid's own omen-level-derived
+    /// amplifier — `Raid.tick`'s `raidOmenLevel - 1` — and only once.
+    ///
+    /// Easy (3 waves, weakest escalation) so the tick budget stays small: the
+    /// test kills every wave's raiders itself via the real
+    /// `attack_from_player` path (not `damage_self`, unlike the
+    /// seven-wave-escalation test above) specifically so hero-crediting is
+    /// exercised, not bypassed.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_killing_blow_on_a_raider_earns_hero_of_the_village_on_raid_victory() {
+        use crate::mobs::{DamageFlags, PlayerIdentity};
+
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim.start_raid(Vec3::new(0.0, 1.0, 0.0), Difficulty::Easy, 1).expect("Easy has 3 waves");
+        let hero_uuid = Uuid::from_u128(0x1234_5678);
+        let hero = PlayerIdentity { uuid: hero_uuid, entity_id: 99 };
+
+        // Nobody has won anything yet — the queue must be empty before any
+        // raid finishes, the control for "always returns something" reading
+        // this test's later assertion.
+        assert!(
+            sim.take_hero_of_the_village_grants(hero_uuid).is_empty(),
+            "no raid has reached Victory yet, so nothing should be queued"
+        );
+
+        for _ in 0..(300 * 4 + 100) {
+            sim.tick_raids();
+            let Some((_, _, alive)) = sim.raid_state(id) else { break };
+            if alive > 0 {
+                for mob_id in current_raiders(&sim, id) {
+                    sim.attack_from_player(
+                        mob_id,
+                        Some(hero),
+                        Vec3::new(0.0, 1.0, 0.0),
+                        1_000.0,
+                        DamageFlags::default(),
+                        0.0,
+                    );
+                }
+                sim.tick();
+            }
+        }
+        assert!(sim.raid_state(id).is_none(), "the raid must have reached Victory and been removed by now");
+
+        let grants = sim.take_hero_of_the_village_grants(hero_uuid);
+        assert_eq!(
+            grants,
+            vec![0],
+            "start_raid was called directly with omen_level 1, so raid.omen_level == 1 \
+             and the amplifier (raidOmenLevel - 1) must be 0"
+        );
+
+        // Drained, not merely read: a second call must find nothing left for
+        // the same uuid, and an unrelated uuid must never have received
+        // anything at all.
+        assert!(
+            sim.take_hero_of_the_village_grants(hero_uuid).is_empty(),
+            "a grant must be drained, not repeatable"
+        );
+        let bystander = Uuid::from_u128(0x9999);
+        assert!(
+            sim.take_hero_of_the_village_grants(bystander).is_empty(),
+            "a player who landed no killing blow must never be queued a grant"
+        );
     }
 }
