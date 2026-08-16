@@ -53,9 +53,9 @@ pub use behaviors::{LookAtTargetSink, MoveToTargetSink, RandomStroll, SetPlayerL
 pub use driver::BrainGoal;
 pub use gate::{GateBehavior, OrderPolicy, RunningPolicy};
 pub use memory::{Memories, MemoryModuleType, MemoryStatus, MemoryValue, WalkTarget};
-pub use mob::BrainMob;
+pub use mob::{BrainMob, NearbyBrainEntity};
 pub use roster::{BRAIN_SPECIES, brain_for, is_brain_species, scaffold};
-pub use sensor::{NearestPlayerSensor, Sensor};
+pub use sensor::{HurtBySensor, NearestHostileSensor, NearestPlayerSensor, Sensor};
 
 use std::collections::HashMap;
 
@@ -78,6 +78,25 @@ pub struct Brain {
     sensors: Vec<Box<dyn Sensor>>,
     behaviors: Vec<BehaviorEntry>,
     activity_requirements: HashMap<Activity, Vec<(MemoryModuleType, MemoryStatus)>>,
+    /// A second, **disjunctive** requirement table for activities registered
+    /// through [`add_activity_any_of`](Self::add_activity_any_of): the
+    /// activity is eligible if *any* listed `(memory, status)` pair holds,
+    /// rather than [`activity_requirements`](Self::activity_requirements)'
+    /// all-must-hold rule.
+    ///
+    /// Exists for villager-shaped panic triggers: vanilla's own
+    /// `VillagerPanicTrigger` is an imperative `Behavior` that calls
+    /// `brain.setActiveActivityIfPossible(Activity.PANIC)` directly from
+    /// inside `start()`, which this crate's [`Behavior`] trait has no seam
+    /// for (it receives `&mut Memories` and `&mut dyn BrainMob`, never `&mut
+    /// Brain` — deliberately, so a behaviour cannot reach into the scheduler
+    /// that owns it). The declarative equivalent already wired through
+    /// [`BrainGoal::tick`](super::BrainGoal)'s per-tick
+    /// `set_active_activity_to_first_valid` call is "PANIC is eligible
+    /// whenever hurt OR a hostile is nearby, and takes precedence over IDLE
+    /// in the candidate list" — which needs OR, not AND, hence this table
+    /// rather than reusing [`activity_requirements`](Self::activity_requirements).
+    activity_any_requirements: HashMap<Activity, Vec<(MemoryModuleType, MemoryStatus)>>,
     activity_memories_to_erase_when_stopped: HashMap<Activity, Vec<MemoryModuleType>>,
     core_activities: Vec<Activity>,
     active_activities: Vec<Activity>,
@@ -99,6 +118,7 @@ impl Brain {
             sensors: Vec::new(),
             behaviors: Vec::new(),
             activity_requirements: HashMap::new(),
+            activity_any_requirements: HashMap::new(),
             activity_memories_to_erase_when_stopped: HashMap::new(),
             core_activities: vec![Activity::CORE],
             active_activities: Vec::new(),
@@ -180,6 +200,50 @@ impl Brain {
         self.behaviors.sort_by_key(|e| e.priority);
     }
 
+    /// Registers an activity exactly like [`add_activity`](Self::add_activity),
+    /// except its eligibility is **disjunctive**: it is eligible if *any* of
+    /// `any_conditions` holds, not only if all of them do. See
+    /// [`activity_any_requirements`](Self::activity_any_requirements)'s own
+    /// doc for why this exists and when to reach for it over `add_activity`.
+    ///
+    /// `any_conditions` must not be empty — an activity with no way to become
+    /// eligible is better expressed by omitting the call entirely, and an
+    /// empty list here would otherwise silently mean "never eligible" (vacuously
+    /// true for `all()`, vacuously false for `any()` — the two registration
+    /// paths disagree on an empty list for exactly this reason, so this method
+    /// asserts rather than silently picking one).
+    pub fn add_activity_any_of(
+        &mut self,
+        activity: Activity,
+        behaviors: Vec<(i32, Box<dyn BehaviorControl>)>,
+        any_conditions: Vec<(MemoryModuleType, MemoryStatus)>,
+        memories_to_erase_when_stopped: Vec<MemoryModuleType>,
+    ) {
+        assert!(
+            !any_conditions.is_empty(),
+            "add_activity_any_of needs at least one condition; an activity that \
+             should always be eligible belongs in add_activity with an empty list, \
+             not here, where an empty list means the opposite"
+        );
+        self.activity_any_requirements
+            .insert(activity, any_conditions);
+        if !memories_to_erase_when_stopped.is_empty() {
+            self.activity_memories_to_erase_when_stopped
+                .insert(activity, memories_to_erase_when_stopped);
+        }
+        for (priority, control) in behaviors {
+            for ty in control.required_memories() {
+                self.memories.register(ty);
+            }
+            self.behaviors.push(BehaviorEntry {
+                priority,
+                activity,
+                control: Some(control),
+            });
+        }
+        self.behaviors.sort_by_key(|e| e.priority);
+    }
+
     /// Attaches a time-of-day schedule as `(start_tick, activity)` pairs sorted
     /// ascending; the latest pair whose start is at or before the current day
     /// time wins.
@@ -242,12 +306,22 @@ impl Brain {
     }
 
     fn activity_requirements_are_met(&self, activity: Activity) -> bool {
-        match self.activity_requirements.get(&activity) {
-            None => false,
-            Some(conditions) => conditions
+        // The two registration paths are mutually exclusive per activity in
+        // practice (whichever `add_activity*` call named it last wins the
+        // table it lands in), checked in a fixed order so a caller that
+        // somehow registered both is not left to platform-dependent map
+        // iteration to decide which rule applies.
+        if let Some(conditions) = self.activity_requirements.get(&activity) {
+            return conditions
                 .iter()
-                .all(|&(ty, status)| self.memories.check(ty, status)),
+                .all(|&(ty, status)| self.memories.check(ty, status));
         }
+        if let Some(any_conditions) = self.activity_any_requirements.get(&activity) {
+            return any_conditions
+                .iter()
+                .any(|&(ty, status)| self.memories.check(ty, status));
+        }
+        false
     }
 
     /// Switches to `activity` if its requirements are met, otherwise falls back
@@ -613,6 +687,53 @@ mod tests {
         brain.set_active_activity_if_possible(Activity::FIGHT);
         assert!(brain.is_active(Activity::IDLE));
         assert!(!brain.is_active(Activity::FIGHT));
+    }
+
+    /// [`Brain::add_activity_any_of`]'s whole reason to exist: an activity
+    /// eligible when **either** of two memories holds, which
+    /// [`Brain::add_activity`]'s all-must-hold rule cannot express. Checked
+    /// in both directions (only A, only B, neither) so this cannot be
+    /// satisfied by an accidental `all()` that happens to pass on the one
+    /// case tried.
+    #[test]
+    fn add_activity_any_of_is_eligible_when_either_condition_holds() {
+        let mut brain = Brain::new();
+        brain.register_memory(MemoryModuleType::HURT_BY);
+        brain.register_memory(MemoryModuleType::NEAREST_HOSTILE);
+        brain.add_activity_any_of(
+            Activity::PANIC,
+            Vec::new(),
+            vec![
+                (MemoryModuleType::HURT_BY, MemoryStatus::ValuePresent),
+                (MemoryModuleType::NEAREST_HOSTILE, MemoryStatus::ValuePresent),
+            ],
+            Vec::new(),
+        );
+        brain.add_activity(Activity::IDLE, Vec::new(), Vec::new(), Vec::new());
+
+        // Neither memory set: PANIC is not eligible, IDLE remains active.
+        brain.set_active_activity_to_first_valid(&[Activity::PANIC, Activity::IDLE]);
+        assert!(brain.is_active(Activity::IDLE));
+
+        // Only HURT_BY: eligible.
+        brain
+            .memories_mut()
+            .set(MemoryModuleType::HURT_BY, MemoryValue::Pos(lodestone_model::Vec3::default()));
+        brain.set_active_activity_to_first_valid(&[Activity::PANIC, Activity::IDLE]);
+        assert!(brain.is_active(Activity::PANIC), "HURT_BY alone must be enough");
+
+        // Back to neither: falls out of PANIC (not sticky).
+        brain.memories_mut().erase(MemoryModuleType::HURT_BY);
+        brain.set_active_activity(Activity::IDLE);
+        assert!(!brain.activity_requirements_are_met(Activity::PANIC));
+
+        // Only NEAREST_HOSTILE: eligible too, proving it is a real OR and not
+        // just "the first condition in the list happens to work".
+        brain
+            .memories_mut()
+            .set(MemoryModuleType::NEAREST_HOSTILE, MemoryValue::Entity(7));
+        brain.set_active_activity_to_first_valid(&[Activity::PANIC, Activity::IDLE]);
+        assert!(brain.is_active(Activity::PANIC), "NEAREST_HOSTILE alone must be enough");
     }
 
     #[test]

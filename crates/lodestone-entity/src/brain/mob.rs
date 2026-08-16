@@ -9,6 +9,28 @@
 
 use lodestone_model::Vec3;
 
+/// One entity a brain's perception can see, for sensors that need more than
+/// "the nearest player" — [`super::sensor::NearestHostileSensor`] is the one
+/// production reader today, and a target-acquisition behaviour (a ram target,
+/// a golem's attacker) is the shape this exists for next.
+///
+/// Deliberately thin: an id, a position, and the one classification question
+/// [`NearestHostileSensor`](super::sensor::NearestHostileSensor) needs
+/// answered by the host rather than re-derived here — this crate has no
+/// species table to decide hostility from, so the host (which already knows
+/// [`MobCategory`]/the roster) resolves it once per entity rather than this
+/// crate re-implementing a second, possibly-drifting hostility classifier.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NearbyBrainEntity {
+    /// The entity's id, for writing into an `Entity`-shaped memory value.
+    pub id: i32,
+    /// The entity's current position.
+    pub position: Vec3,
+    /// Whether the host classifies this entity as hostile to the perceiving
+    /// mob — vanilla's `Monster`/hostile-category test, resolved by the host.
+    pub hostile: bool,
+}
+
 /// The mob-facing operations a brain behaviour or sensor may perform.
 ///
 /// # This trait deliberately overlaps [`MobController`], and that has a cost
@@ -97,5 +119,20 @@ pub trait BrainMob {
     /// [`MobController`]: crate::ai::MobController
     fn last_hurt_by(&self) -> Option<Vec3> {
         None
+    }
+
+    /// Every entity the mob can currently perceive nearby — the feed
+    /// [`super::sensor::NearestHostileSensor`] filters and reduces to a single
+    /// nearest hostile. Defaults to empty so every existing implementor
+    /// (including hermetic test doubles) keeps compiling; only a host that
+    /// actually tracks nearby entities (e.g. `MobSim`) overrides it.
+    ///
+    /// No range cut is specified here on purpose — vanilla's own sensors carry
+    /// their own radius (`NearestHostileSensor` uses `8.0`), so a host is free
+    /// to pre-filter to a generous radius and let the *sensor* apply the exact
+    /// cut, exactly as [`nearest_visible_player`](Self::nearest_visible_player)
+    /// already delegates its own range decision to the host.
+    fn nearby_entities(&self) -> Vec<NearbyBrainEntity> {
+        Vec::new()
     }
 }

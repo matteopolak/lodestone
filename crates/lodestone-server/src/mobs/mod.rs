@@ -74,6 +74,7 @@ use lodestone_data::{block_states, collision_shapes, entity_dimensions, entity_t
 // through the whole module.
 use lodestone_physics::{CollisionView, EntityDimensions, Vec3d, collision::collide};
 use lodestone_entity::ai::roster::{self, SpeciesContext};
+use lodestone_entity::brain::{NearbyBrainEntity, is_brain_species};
 use lodestone_entity::ai::navigating_mob::{
     BABY_START_AGE, DEFAULT_FOLLOW_RANGE, PARENT_AGE_AFTER_BREEDING,
 };
@@ -476,6 +477,17 @@ const AVOID_RANGE_Y: f64 = 3.0;
 /// (`ai/goal/BreedGoal.java:11`, `PARTNER_TARGETING = …range(8.0)…`, applied to
 /// `getBoundingBox().inflate(8.0)` at `:64`).
 const BREED_RANGE: f64 = 8.0;
+
+/// The horizontal/vertical box [`feed_perception`](MobSim::feed_perception)
+/// pre-filters candidates to before handing them to a brain-driven mob's
+/// [`lodestone_entity::brain::NearbyBrainEntity`] feed.
+///
+/// Deliberately wider than `NearestHostileSensor::RANGE` (`8.0`, in
+/// `lodestone_entity::brain::sensor`): this is a coarse host-side cut so the
+/// feed is cheap to build, and the *sensor* applies vanilla's real range on
+/// top, exactly the two-stage split that sensor's own doc describes.
+const NEARBY_HOSTILE_SCAN_RANGE: f64 = 16.0;
+const NEARBY_HOSTILE_SCAN_RANGE_Y: f64 = 8.0;
 
 /// How close two parents must be for `BreedGoal` to actually produce a child
 /// (`ai/goal/BreedGoal.java:57`, `this.animal.distanceToSqr(this.partner) < 9.0`).
@@ -4062,6 +4074,7 @@ impl<'w> MobSim<'w> {
         let mut owner = vec![None; n];
         let mut patrol_group = vec![None; n];
         let mut stared_at = vec![false; n];
+        let mut nearby_entities: Vec<Vec<NearbyBrainEntity>> = vec![Vec::new(); n];
 
         // --- persistent anger (issue #458, primitive 1) --------------------
         //
@@ -4250,6 +4263,30 @@ impl<'w> MobSim<'w> {
                     true,
                 )
             });
+
+            // --- nearby entities (brain target-acquisition primitive) ------
+            // Only built for brain-driven species: every other species'
+            // `BrainMob::nearby_entities` default (empty) is never read, so
+            // scanning the whole mob list for a goal-driven zombie would be
+            // pure waste — the same cost-avoidance `avoided_species`'s
+            // `is_empty()` check above already applies to a different feed.
+            if is_brain_species(&species) {
+                nearby_entities[i] = self
+                    .mobs
+                    .iter()
+                    .filter(|other| {
+                        other.id != me.id
+                            && (other.position().x - pos.x).abs() <= NEARBY_HOSTILE_SCAN_RANGE
+                            && (other.position().z - pos.z).abs() <= NEARBY_HOSTILE_SCAN_RANGE
+                            && (other.position().y - pos.y).abs() <= NEARBY_HOSTILE_SCAN_RANGE_Y
+                    })
+                    .map(|other| NearbyBrainEntity {
+                        id: other.id,
+                        position: other.position(),
+                        hostile: species::is_hostile_species(other.entity_type()),
+                    })
+                    .collect();
+            }
         }
 
         for (i, m) in self.mobs.iter_mut().enumerate() {
@@ -4270,7 +4307,8 @@ impl<'w> MobSim<'w> {
                 .set_parent_candidate(parent[i])
                 .set_owner(owner[i])
                 .set_patrol_group_target(patrol_group[i])
-                .set_stared_at(stared_at[i]);
+                .set_stared_at(stared_at[i])
+                .set_nearby_entities(std::mem::take(&mut nearby_entities[i]));
         }
     }
 
