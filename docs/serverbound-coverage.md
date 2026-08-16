@@ -168,13 +168,33 @@ audit:
   `Popped` are still `Route::NOWHERE` below — they are answered directly in
   `net.rs`'s own loop, not through the `forward`/`poll_net` path.
 
-**Eleven are confirmed genuine islands — zero hits for the bare variant name
-anywhere in `lodestone-shell` or `lodestone-controller`, in any form**:
+**Eleven were confirmed genuine islands; four have since gained real
+producers** — zero hits for the bare variant name anywhere in `lodestone-shell`
+or `lodestone-controller`, in any form, at the time this section was written:
 `ContainerButtonClick`, `EditBook`, `PingRequest`, `RecipeBookSeenRecipe`,
 `SeenAdvancements`, `SelectBundleItem`, `SetBeaconEffects`,
 `SetContainerSlotState`, `SpectatorAction`, `Stab`, `TeleportToEntity`. Each is
 screen- or input-blocked in the same shape as the seventeen in `KNOWN_UNPRODUCED`
 above (an editor/UI that does not exist yet, or a keybind that is not wired).
+
+Since fixed:
+
+* **`ResourcePackResponse`** — see the entry above; it went through two
+  producers, the second one real.
+* **`SetBeaconEffects`** — the beacon screen's power buttons and confirm/cancel
+  (`crate::container::beacon`) call `Sim::send_set_beacon_effects` from
+  `app::container_input::WindowApp::handle_beacon_click` on a valid confirm.
+* **`EditBook`** — the book-and-quill editor (`crate::menu::book_edit`,
+  `crate::menu::text_area`) sends on Done/Finalize from `WindowApp::try_use`'s
+  writable-book fork.
+* **`SeenAdvancements`** — `Sim::send_seen_advancements`, called every frame
+  the Advancements screen's open tab or open/closed state changes
+  (`app::advancements_screen::WindowApp::advancement_progress`, via the pure
+  `seen_advancements_transition` helper it delegates to).
+
+Remaining: `ContainerButtonClick`, `PingRequest`, `RecipeBookSeenRecipe`,
+`SelectBundleItem`, `SetContainerSlotState`, `SpectatorAction`, `Stab`,
+`TeleportToEntity`.
 
 Filed as one narrow follow-up rather than eleven separate issues, per the pattern
 this doc's own "How to change it" section already sets: each needs its own

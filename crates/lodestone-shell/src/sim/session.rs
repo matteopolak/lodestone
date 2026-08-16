@@ -1518,6 +1518,23 @@ impl Sim {
         }
     }
 
+    /// Report which Advancements tab is open, or that the screen was closed,
+    /// so the server knows which of the player's unlocked advancements have
+    /// actually been shown — sent whenever the selected tab changes
+    /// (including the default tab on open) and once more when the screen
+    /// closes. See `docs/serverbound-coverage.md` for the wider audit this
+    /// closes one line of.
+    ///
+    /// [`ClientAction::SeenAdvancements`] was already encoded by every
+    /// protocol family with no shell caller anywhere — the outbound-island
+    /// shape `ClientAction::SetFlying` was caught in. Best-effort like
+    /// [`Self::send_select_trade`] — a closed session drops it.
+    pub fn send_seen_advancements(&self, tab: Option<lodestone_model::ResourceKey>) {
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::SeenAdvancements { tab });
+        }
+    }
+
     /// Set a container slot's contents by creative fiat — vanilla's
     /// `ServerboundSetCreativeModeSlotPacket`, sent by the creative-inventory
     /// screen (issue #158).
