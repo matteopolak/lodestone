@@ -11,7 +11,6 @@
 //!
 //! # Layout
 //!
-//! * [`entity`] — the [`EntityTracker`] store and packet-driven lifecycle.
 //! * [`interpolation`] — the 20 Hz-to-render blending seam.
 //! * [`metadata`] — version-free metadata values plus the version schema seam.
 //! * [`attribute`] — vanilla's attribute arithmetic and default table.
@@ -47,7 +46,6 @@ pub mod ai;
 pub mod attribute;
 pub mod brain;
 pub mod damage;
-pub mod entity;
 pub mod equipment;
 pub mod explosion;
 pub mod interpolation;
@@ -68,7 +66,6 @@ pub use brain::{
 pub use damage::{
     DamageFlags, DamageOutcome, Defenses, HurtCooldown, HurtDecision, apply_reductions,
 };
-pub use entity::{EntityKind, EntityState, EntityTracker};
 pub use equipment::{
     EquipmentSlot, ItemModifier, PlayerCombatStats, apply_equipment, player_combat_stats,
 };

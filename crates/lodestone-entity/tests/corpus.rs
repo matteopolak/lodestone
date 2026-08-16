@@ -11,11 +11,9 @@
 //! * The attribute set drifting between the report and our table (a new
 //!   attribute added upstream, or one we invented) — an exact set comparison.
 //! * A wrong default/min/max — cross-checked against an independent source.
-//! * An entity type our tracker cannot represent — every one is constructed.
 
 use lodestone_entity::attribute::{default_def, known_attribute_paths};
-use lodestone_entity::entity::{EntityKind, EntityTracker};
-use lodestone_model::{Identifier, Rotation, Vec3};
+use lodestone_model::Identifier;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -137,35 +135,4 @@ fn attribute_ranges_cross_check_vendor() {
         "attribute range disagreements with vendor minecraft-data:\n{}",
         mismatches.join("\n")
     );
-}
-
-#[test]
-#[ignore = "reads the gitignored .cache jar report"]
-fn every_entity_type_can_be_tracked() {
-    let report = read_json(".cache/mc/26.2/generated/reports/registries.json")
-        .expect("generated registries.json present under .cache");
-    let entries = report["minecraft:entity_type"]["entries"]
-        .as_object()
-        .expect("entity_type entries");
-
-    let mut tracker = EntityTracker::new();
-    for (i, (name, meta)) in entries.iter().enumerate() {
-        let id = i as i32 + 1;
-        let key = Identifier::from_str(name).expect("valid entity id");
-        // Round-trip the identifier through EntityKind.
-        let numeric = meta["protocol_id"].as_i64().unwrap_or(-1) as i32;
-        let kind = EntityKind::with_id(key.clone(), numeric);
-        assert_eq!(kind.key.to_string(), *name);
-        tracker.spawn(
-            id,
-            Some(uuid::Uuid::from_u128(u128::from(id as u32))),
-            kind,
-            Vec3::new(0.0, 64.0, 0.0),
-            Rotation::default(),
-            Vec3::default(),
-        );
-    }
-    // Whole-corpus coverage: the tracker holds one of every declared type.
-    assert_eq!(tracker.len(), entries.len());
-    assert_eq!(entries.len(), 158, "26.2 declares 158 entity types");
 }
