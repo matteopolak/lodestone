@@ -2326,8 +2326,8 @@ impl IconRenderer {
         let carried = build_special_batches(device, s, &special[carried_from..]);
         s.batches = base;
         s.carried_batches = carried;
-        s.banner_layers = build_banner_layer_batches(device, &special[..carried_from]);
-        s.carried_banner_layers = build_banner_layer_batches(device, &special[carried_from..]);
+        s.banner_layers = build_banner_layer_batches(device, s, &special[..carried_from]);
+        s.carried_banner_layers = build_banner_layer_batches(device, s, &special[carried_from..]);
 
         if !s.batches.is_empty()
             || !s.carried_batches.is_empty()
@@ -2465,6 +2465,7 @@ fn build_special_batches(
 /// with another icon's layers. See [`SpecialBannerLayerBatch`]'s doc.
 fn build_banner_layer_batches(
     device: &wgpu::Device,
+    s: &SpecialIcons,
     special: &[SpecialIconDraw],
 ) -> Vec<SpecialBannerLayerBatch> {
     special
@@ -2478,9 +2479,25 @@ fn build_banner_layer_batches(
             else {
                 return None;
             };
+            // The `"flag"` part's own **local** transform, not the raw item
+            // placement — `banner_flag_model`'s cube sits under a `"flag"`
+            // child part with its own `PartPose::offset(0.0, -44.0, 0.0)`
+            // relative to the root, exactly like the opaque `Mesh` draw above
+            // resolves via `mesh.part_transforms`. Skipping that composition
+            // (an earlier version of this function did) draws the mask
+            // vertices in the *root's* space instead of the flag's, which for
+            // a 16×16 icon lands the geometry entirely outside the visible
+            // cell — measured live: `moved px=0` in every case, opaque flag
+            // and translucent layer both present, until this was fixed.
+            let flag_mesh = s.models.get("banner_flag")?;
+            let flag_index = flag_mesh.index_of("flag")?;
+            let flag_world = flag_mesh
+                .part_transforms(*placement, &[])
+                .into_iter()
+                .nth(flag_index)?;
             let instances = upload_instances_tinted(
                 device,
-                &[*placement],
+                &[flag_world],
                 &[],
                 &[lodestone_render::InstanceTint::rgb(*color)],
             )?;
@@ -2669,10 +2686,16 @@ impl IconRenderer {
         // `gpu/first_person.rs`'s hand one. Third, so a mask's soft edges
         // blend against pixels the opaque pass already wrote rather than
         // against whatever this pass loaded.
+        // **`index_of("flag")`, not `.parts.first()`.** `banner_flag_model`'s root
+        // part carries no cube of its own (only a `"flag"` child does), so its own
+        // `PartRange` is `index_count == 0` — `.first()` would silently select that
+        // empty range and draw zero indices. See `gpu/frame.rs`'s identical fix for
+        // the measurement that found this.
         if let Some(s) = &self.special
             && !banner_layers.is_empty()
             && let Some(flag) = s.gpu_models.get("banner_flag")
-            && let Some(part_range) = flag.parts.first()
+            && let Some(flag_index) = s.models.get("banner_flag").and_then(|mesh| mesh.index_of("flag"))
+            && let Some(part_range) = flag.parts.get(flag_index)
             && part_range.index_count > 0
         {
             pass.set_pipeline(&s.banner_layer_pipeline);

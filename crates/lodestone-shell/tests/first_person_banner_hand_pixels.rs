@@ -252,26 +252,28 @@ fn a_held_banner_draws_its_own_dye_colour_not_nothing() {
     );
 }
 
-/// Count of non-sky pixels in `pixels` within `tol` (summed per-channel abs
-/// diff) of `target` — the per-bucket sibling of [`hand_mean_rgb`], used
-/// below to prove *two* colours coexist in the same held-item region rather
-/// than reading one blended average.
-fn count_near(pixels: &[u8], sky: [u8; 3], target: [u8; 3], tol: i32) -> usize {
+/// Per-pixel `[r, g, b]` for every pixel in `pixels` that differs from `sky`
+/// by more than a rounding wobble — the per-pixel sibling of [`hand_mean_rgb`],
+/// used below to compare two renders directly rather than against a guessed
+/// absolute target colour. **Absolute target colours were tried first and
+/// were the wrong premise**: the hand pass's own entity-light term renders
+/// this scene far dimmer than vanilla's raw `textureDiffuseColor` bytes (the
+/// sibling test above's own red/light_blue means top out under 30/255, not
+/// near 176 or 218) — a fixed `(249, 255, 254)` "white" target was simply
+/// never going to match, no matter how correct the draw. Comparing one
+/// render against another, at whatever brightness this scene actually
+/// renders at, has no such premise to get wrong.
+fn non_sky_rgb(pixels: &[u8], sky: [u8; 3]) -> Vec<(u32, [u8; 3])> {
     pixels
         .chunks_exact(4)
-        .filter(|px| {
-            let d_sky = (i32::from(px[0]) - i32::from(sky[0])).abs()
+        .enumerate()
+        .filter_map(|(i, px)| {
+            let d = (i32::from(px[0]) - i32::from(sky[0])).abs()
                 + (i32::from(px[1]) - i32::from(sky[1])).abs()
                 + (i32::from(px[2]) - i32::from(sky[2])).abs();
-            if d_sky <= 8 {
-                return false;
-            }
-            let d = (i32::from(px[0]) - i32::from(target[0])).abs()
-                + (i32::from(px[1]) - i32::from(target[1])).abs()
-                + (i32::from(px[2]) - i32::from(target[2])).abs();
-            d <= tol
+            (d > 8).then_some((i as u32, [px[0], px[1], px[2]]))
         })
-        .count()
+        .collect()
 }
 
 /// Pixel gate: a held banner draws its **loom patterns**, not just its base
@@ -281,25 +283,19 @@ fn count_near(pixels: &[u8], sky: [u8; 3], target: [u8; 3], tol: i32) -> usize {
 /// pattern-layer pass over the flag (`RenderState::prepare_special_hand`,
 /// mirroring the world block-entity pass's `banner_layer_pipeline`).
 ///
-/// # Why two colours in one cell is the discriminating claim
+/// # The discriminating claim: adding a pattern must change the image
 ///
-/// A flat tint — the old mechanism, or any regression back toward it — can
-/// only ever produce *one* colour across the whole flag. A `minecraft:creeper`
-/// pattern drawn in black over a `minecraft:white_banner`'s base is a
-/// **local** mask: the creeper-shaped region should read black
-/// (`DyeColor::Black`'s `textureDiffuseColor`, `(29, 29, 33)`) while the
-/// uncovered rest of the flag stays the base white
-/// (`DyeColor::White`, `(249, 255, 254)`). Counting pixels near *each* target
-/// colour separately — never averaging them together — is what tells "two
-/// colours coexist" from "one blended grey", which a mean-RGB assertion like
-/// the sibling test above cannot: averaging white and black would itself read
-/// as a mid grey, indistinguishable from a single grey tint.
-///
-/// The negative control is the same white banner with **no** pattern layers:
-/// `banner_pattern_layers` still draws the base mask (so the flag is not
-/// blank), but nothing should read as black, because there is no black layer
-/// to draw. A gate that skipped this control could not tell "the pattern
-/// drew" from "the mesh happens to have some dark texels regardless".
+/// Two renders of the **same** `minecraft:red_banner`, one with **no**
+/// pattern layers and one with a `minecraft:lime`-coloured `minecraft:creeper`
+/// pattern added. A flat tint — the old mechanism, or any regression back
+/// toward it — cannot respond to `banner_patterns` at all, so the two images
+/// would be pixel-identical. A real masked layer draw changes exactly the
+/// creeper-shaped region: this gate counts pixels that moved by a real
+/// margin between the two renders (not a rounding wobble) and requires the
+/// **surviving mean** (pixels that did *not* move — the base still showing
+/// through) to stay red-dominated while the **moved** pixels' mean shifts
+/// measurably toward green, since lime is the green-dominant colour that
+/// discriminates hardest against red here.
 #[test]
 #[ignore = "requires a GPU adapter and the vanilla client.jar"]
 fn a_held_banner_draws_its_own_loom_pattern_not_just_its_base_colour() {
@@ -324,18 +320,11 @@ fn a_held_banner_draws_its_own_loom_pattern_not_just_its_base_colour() {
     let cam = camera();
     let sky = sky_bytes();
 
-    // Vanilla's `DyeColor.textureDiffuseColor` for the two colours this test
-    // discriminates between — re-typed from the same jar constants
-    // `lodestone_render::banner_pattern`'s own test module cross-checks, not
-    // guessed: WHITE = 16383998 = 0xF9FFFE, BLACK = 1908001 = 0x1D1D21.
-    const WHITE_RGB: [u8; 3] = [0xF9, 0xFF, 0xFE];
-    const BLACK_RGB: [u8; 3] = [0x1D, 0x1D, 0x21];
-
     let mut shoot = |patterns: Vec<lodestone_model::BannerPatternLayer>| -> Vec<u8> {
         let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
         state.set_entity_light_source(|_| Some(SKY_LIT));
         state.set_sky_darken_source(|| Some(1.0));
-        let item: ResourceLocation = "minecraft:white_banner".parse().expect("valid item id");
+        let item: ResourceLocation = "minecraft:red_banner".parse().expect("valid item id");
         state.set_main_hand_source(move || {
             Some(MainHandItem {
                 item: item.clone(),
@@ -350,7 +339,7 @@ fn a_held_banner_draws_its_own_loom_pattern_not_just_its_base_colour() {
         assert!(
             stats.first_person_item_drawn,
             "the hand pass did not report a first-person item drawn for a held \
-             white_banner"
+             red_banner"
         );
         target.read_texels(device, queue)
     };
@@ -358,48 +347,86 @@ fn a_held_banner_draws_its_own_loom_pattern_not_just_its_base_colour() {
     let plain_pixels = shoot(Vec::new());
     let patterned_pixels = shoot(vec![lodestone_model::BannerPatternLayer {
         pattern_asset_id: "creeper".to_string(),
-        color: "black".to_string(),
+        color: "lime".to_string(),
     }]);
 
-    let plain_white = count_near(&plain_pixels, sky, WHITE_RGB, 24);
-    let plain_black = count_near(&plain_pixels, sky, BLACK_RGB, 24);
-    let patterned_white = count_near(&patterned_pixels, sky, WHITE_RGB, 24);
-    let patterned_black = count_near(&patterned_pixels, sky, BLACK_RGB, 24);
+    let plain = non_sky_rgb(&plain_pixels, sky);
+    let patterned = non_sky_rgb(&patterned_pixels, sky);
+
+    // Index the plain render by pixel index for the moved/unmoved split below.
+    let plain_by_index: std::collections::HashMap<u32, [u8; 3]> = plain.into_iter().collect();
+
+    let mut moved_sum = [0i64; 3];
+    let mut moved_n = 0usize;
+    let mut unmoved_sum = [0i64; 3];
+    let mut unmoved_n = 0usize;
+    for (i, prgb) in &patterned {
+        match plain_by_index.get(i) {
+            Some(qrgb) => {
+                let d = (i32::from(prgb[0]) - i32::from(qrgb[0])).abs()
+                    + (i32::from(prgb[1]) - i32::from(qrgb[1])).abs()
+                    + (i32::from(prgb[2]) - i32::from(qrgb[2])).abs();
+                if d > 24 {
+                    for c in 0..3 {
+                        moved_sum[c] += i64::from(prgb[c]);
+                    }
+                    moved_n += 1;
+                } else {
+                    for c in 0..3 {
+                        unmoved_sum[c] += i64::from(prgb[c]);
+                    }
+                    unmoved_n += 1;
+                }
+            }
+            // A non-sky pixel in the patterned render with no counterpart in
+            // the plain one (the silhouette grew) counts as moved too.
+            None => {
+                for c in 0..3 {
+                    moved_sum[c] += i64::from(prgb[c]);
+                }
+                moved_n += 1;
+            }
+        }
+    }
 
     eprintln!("=== first-person held banner pattern-layer pixel gate ===");
-    eprintln!("plain white_banner:     white-ish px={plain_white}, black-ish px={plain_black}");
-    eprintln!("+creeper (black):       white-ish px={patterned_white}, black-ish px={patterned_black}");
+    eprintln!("plain red_banner:    non-sky px={}", plain_by_index.len());
+    eprintln!("+creeper (lime):     non-sky px={}, moved px={moved_n}, unmoved px={unmoved_n}", patterned.len());
+    if moved_n > 0 {
+        let m = moved_sum.map(|s| s as f64 / moved_n as f64);
+        eprintln!("moved-pixel mean rgb   = {m:?}");
+    }
+    if unmoved_n > 0 {
+        let u = unmoved_sum.map(|s| s as f64 / unmoved_n as f64);
+        eprintln!("unmoved-pixel mean rgb = {u:?}");
+    }
 
-    // --- the negative control: no pattern layer means no black pixels -----
+    // --- the discriminating claim: the mask moved a real number of pixels -
     assert!(
-        plain_white > 30,
-        "a plain white_banner must still show its own (white) base colour — \
-         got only {plain_white} white-ish px, which means the base translucent \
-         layer itself is not reaching pixels"
-    );
-    assert_eq!(
-        plain_black, 0,
-        "a plain white_banner with zero pattern layers read {plain_black} \
-         black-ish pixels — there is no black layer to draw, so any black \
-         pixels here mean the count is picking up something other than the \
-         pattern mask (a shading artefact, or a control that is not controlling \
-         anything)"
-    );
-
-    // --- the positive claim: adding the pattern adds real black pixels, and
-    // the base colour is still visible in the uncovered region -------------
-    assert!(
-        patterned_black > 20,
-        "adding a black `creeper` pattern layer produced only {patterned_black} \
-         black-ish pixels (0 in the unpatterned control above) — the pattern \
-         mask is not reaching pixels, which is the exact gap `banner_item_rig`'s \
-         own doc named: colour without pattern"
+        moved_n > 20,
+        "adding a lime `creeper` pattern layer moved only {moved_n} pixels by \
+         more than a rounding wobble relative to the unpatterned render — the \
+         pattern mask is not reaching pixels, which is the exact gap \
+         `banner_item_rig`'s own doc named: colour without pattern"
     );
     assert!(
-        patterned_white > 20,
-        "the patterned banner's white-ish pixel count ({patterned_white}) collapsed \
-         from the plain banner's ({plain_white}) — the pattern mask is covering the \
-         *whole* flag rather than just the creeper-shaped region, which is not what \
-         a masked layer draw should do"
+        unmoved_n > 20,
+        "adding the pattern moved every non-sky pixel ({moved_n} of {}) — a masked \
+         layer draw should leave the uncovered rest of the flag (and the whole \
+         untinted pole/bar) unchanged, so this looks like a full-flag tint \
+         rather than a local mask",
+        patterned.len()
+    );
+    // --- which colour moved: lime is green-dominant, unlike red_banner's own
+    // red-dominant base, so the *moved* pixels' green channel must exceed
+    // their own red channel — the discriminator a flat "everything got a bit
+    // darker" shift could not satisfy, since that would move every channel
+    // down together rather than flipping their order.
+    let moved_mean = moved_sum.map(|s| s as f64 / moved_n as f64);
+    assert!(
+        moved_mean[1] > moved_mean[0],
+        "the pixels the creeper pattern moved average rgb={moved_mean:?} — green \
+         must exceed red for a lime pattern over a red base, or this is not the \
+         pattern's own colour reaching the mask"
     );
 }

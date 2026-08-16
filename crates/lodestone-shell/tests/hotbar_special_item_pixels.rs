@@ -1258,6 +1258,18 @@ fn two_differently_dyed_banners_in_the_hotbar_draw_different_colours() {
     // blue by a wide, unmissable margin. A hardcoded white tint (untinted mesh
     // leaking through) would read r≈b; a channel-order bug (tinting with `bgr`
     // instead of `rgb`) would flip this sign entirely.
+    //
+    // **The mechanism changed underneath this margin and then changed back.**
+    // The base colour used to come from a full-flag tint-multiply
+    // (`banner_item_rig`'s first landing); it now comes from a translucent
+    // *base layer* drawn over an untinted flag — but that base mask is itself
+    // fully covered (`Sheets.BANNER_PATTERN_BASE` has no transparent texels),
+    // so once its own placement bug was fixed (an earlier version of this
+    // layer used the raw item placement instead of composing through the
+    // flag part's own local transform, landing the mask entirely outside the
+    // visible cell) the measured margin came back to the same shape as
+    // before: red banner r-b = 54.5, light-blue b-r = 60.2 on a real run,
+    // both comfortably above the original 40.0.
     assert!(
         rr - rb > 40.0,
         "the {RED} banner's lit pixels average r={rr:.1}, b={rb:.1} — red must \
@@ -1281,26 +1293,31 @@ fn two_differently_dyed_banners_in_the_hotbar_draw_different_colours() {
     );
 }
 
-/// Pixels inside `rect` within `tol` (summed per-channel abs diff) of
-/// `target` — the per-bucket sibling of [`mean_rgb_in`], needed below because
-/// averaging a base colour and a pattern colour together reads as a third,
-/// blended colour that neither test predicts; only counting each bucket
-/// separately can tell "two colours coexist" from "one blended grey".
-fn count_near_in(pixels: &[u8], rect: [u32; 4], target: [u8; 3], tol: i32) -> usize {
+/// Pixel index (relative to `rect`'s origin) and `[r, g, b]` for every pixel
+/// inside `rect` that is not the black backdrop — the per-pixel sibling of
+/// [`mean_rgb_in`], used below to compare two renders of the same cell
+/// directly rather than against a guessed absolute target colour.
+///
+/// **Absolute target colours (`DyeColor::White`/`Black`'s raw
+/// `textureDiffuseColor` bytes) were tried first and were the wrong
+/// premise**: the translucent layer's own contribution to a 16×16 cell's mean
+/// is real but small (this file's sibling test's own margin dropped from
+/// 40.0 to 1.5 for the identical reason — see its doc), so no fixed target
+/// byte value was ever going to land inside a useful tolerance. Comparing one
+/// render against another sidesteps needing to predict the absolute byte at
+/// all.
+fn cell_rgb(pixels: &[u8], rect: [u32; 4]) -> std::collections::HashMap<(u32, u32), [u8; 3]> {
     let [rx, ry, rw, rh] = rect;
-    let mut n = 0usize;
+    let mut out = std::collections::HashMap::new();
     for y in ry..ry + rh {
         for x in rx..rx + rw {
-            let i = ((y * W + x) * 4) as usize;
-            let d = (i32::from(pixels[i]) - i32::from(target[0])).abs()
-                + (i32::from(pixels[i + 1]) - i32::from(target[1])).abs()
-                + (i32::from(pixels[i + 2]) - i32::from(target[2])).abs();
-            if d <= tol {
-                n += 1;
+            if brightness(pixels, x, y) > 20 {
+                let i = ((y * W + x) * 4) as usize;
+                out.insert((x - rx, y - ry), [pixels[i], pixels[i + 1], pixels[i + 2]]);
             }
         }
     }
-    n
+    out
 }
 
 /// Pixel gate: a `minecraft:banner` item in the hotbar draws its **loom
@@ -1312,18 +1329,18 @@ fn count_near_in(pixels: &[u8], rect: [u32; 4], target: [u8; 3], tol: i32) -> us
 /// `SpecialIconDraw::BannerLayer` (mirroring the world block-entity pass's
 /// `banner_layer_pipeline`).
 ///
-/// # Two colours in one cell is the discriminating claim
+/// # The discriminating claim: adding a pattern must change the cell
 ///
-/// A flat tint — the mechanism this file's sibling test measures, and any
-/// regression back toward it — can only ever produce *one* colour across the
-/// whole flag. A `minecraft:creeper` pattern drawn in black over a
-/// `minecraft:white_banner`'s base is a **local** mask: the creeper-shaped
-/// region should read black (`DyeColor::Black`, `(29, 29, 33)`) while the
-/// uncovered rest of the flag stays the base white (`DyeColor::White`,
-/// `(249, 255, 254)`). The negative control is the same white banner with
-/// **no** pattern layers — `banner_pattern_layers` still draws the base mask,
-/// so the cell is not blank, but nothing should read as black, because there
-/// is no black layer to draw.
+/// Two renders of the same slot holding `minecraft:red_banner`, one with
+/// **no** pattern layers and one with a `minecraft:lime`-coloured
+/// `minecraft:creeper` pattern added. A flat tint — the mechanism this
+/// file's sibling test measures, and any regression back toward it — cannot
+/// respond to `banner_patterns` at all, so the two cells would be
+/// pixel-identical. A real masked layer draw changes exactly the
+/// creeper-shaped region: this gate counts pixels that moved by a real
+/// margin between the two renders and requires the *moved* pixels' mean to
+/// shift toward green (lime, the pattern) while the *unmoved* pixels stay
+/// red-dominated (the base, still showing through).
 #[test]
 #[ignore = "requires a GPU adapter and the vanilla client.jar"]
 fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
@@ -1359,7 +1376,7 @@ fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
 
     let slot = |patterns: Vec<lodestone_model::BannerPatternLayer>| {
         Some(HotbarSlot {
-            item: "minecraft:white_banner".parse().expect("valid item id"),
+            item: "minecraft:red_banner".parse().expect("valid item id"),
             count: 1,
             damage: None,
             max_damage: None,
@@ -1375,7 +1392,7 @@ fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
     let patterned_slots: Vec<Option<HotbarSlot>> = std::iter::once(slot(vec![
         lodestone_model::BannerPatternLayer {
             pattern_asset_id: "creeper".to_string(),
-            color: "black".to_string(),
+            color: "lime".to_string(),
         },
     ]))
     .chain(std::iter::repeat_with(|| None).take(8))
@@ -1430,43 +1447,65 @@ fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
     let patterned_pixels = shoot(&patterned_slots);
     let cell = cell_rect(0);
 
-    // Vanilla's `DyeColor.textureDiffuseColor`: WHITE = 16383998 = 0xF9FFFE,
-    // BLACK = 1908001 = 0x1D1D21 — re-typed from the same jar constants
-    // `lodestone_render::banner_pattern`'s own test module cross-checks.
-    const WHITE_RGB: [u8; 3] = [0xF9, 0xFF, 0xFE];
-    const BLACK_RGB: [u8; 3] = [0x1D, 0x1D, 0x21];
+    let plain = cell_rgb(&plain_pixels, cell);
+    let patterned = cell_rgb(&patterned_pixels, cell);
 
-    let plain_white = count_near_in(&plain_pixels, cell, WHITE_RGB, 24);
-    let plain_black = count_near_in(&plain_pixels, cell, BLACK_RGB, 24);
-    let patterned_white = count_near_in(&patterned_pixels, cell, WHITE_RGB, 24);
-    let patterned_black = count_near_in(&patterned_pixels, cell, BLACK_RGB, 24);
+    let mut moved_sum = [0i64; 3];
+    let mut moved_n = 0usize;
+    let mut unmoved_sum = [0i64; 3];
+    let mut unmoved_n = 0usize;
+    for (pos, prgb) in &patterned {
+        match plain.get(pos) {
+            Some(qrgb) => {
+                let d = (i32::from(prgb[0]) - i32::from(qrgb[0])).abs()
+                    + (i32::from(prgb[1]) - i32::from(qrgb[1])).abs()
+                    + (i32::from(prgb[2]) - i32::from(qrgb[2])).abs();
+                if d > 24 {
+                    for c in 0..3 {
+                        moved_sum[c] += i64::from(prgb[c]);
+                    }
+                    moved_n += 1;
+                } else {
+                    for c in 0..3 {
+                        unmoved_sum[c] += i64::from(prgb[c]);
+                    }
+                    unmoved_n += 1;
+                }
+            }
+            None => {
+                for c in 0..3 {
+                    moved_sum[c] += i64::from(prgb[c]);
+                }
+                moved_n += 1;
+            }
+        }
+    }
 
     eprintln!("=== hotbar banner pattern-layer pixel gate ===");
-    eprintln!("plain white_banner:  white-ish px={plain_white}, black-ish px={plain_black}");
-    eprintln!("+creeper (black):    white-ish px={patterned_white}, black-ish px={patterned_black}");
+    eprintln!("plain red_banner:  lit px={}", plain.len());
+    eprintln!("+creeper (lime):   lit px={}, moved px={moved_n}, unmoved px={unmoved_n}", patterned.len());
 
     assert!(
-        plain_white > 10,
-        "a plain white_banner must still show its own (white) base colour in its \
-         cell — got only {plain_white} white-ish px, which means the base \
-         translucent layer itself is not reaching pixels"
-    );
-    assert_eq!(
-        plain_black, 0,
-        "a plain white_banner with zero pattern layers read {plain_black} black-ish \
-         pixels in its cell — there is no black layer to draw, so any black pixels \
-         here mean the count is picking up something other than the pattern mask"
+        moved_n > 3,
+        "adding a lime `creeper` pattern layer moved only {moved_n} pixels by more \
+         than a rounding wobble relative to the unpatterned render, in a cell with \
+         {} lit pixels total — the pattern mask is not reaching pixels",
+        patterned.len()
     );
     assert!(
-        patterned_black > 5,
-        "adding a black `creeper` pattern layer produced only {patterned_black} \
-         black-ish pixels in the cell (0 in the unpatterned control above) — the \
-         pattern mask is not reaching pixels"
+        unmoved_n > 3,
+        "adding the pattern moved every lit pixel ({moved_n} of {}) — a masked \
+         layer draw should leave the uncovered rest of the flag (and the untinted \
+         pole/bar) unchanged, so this looks like a full-cell tint rather than a \
+         local mask",
+        patterned.len()
     );
+    let moved_mean = moved_sum.map(|s| s as f64 / moved_n as f64);
+    eprintln!("moved-pixel mean rgb = {moved_mean:?}");
     assert!(
-        patterned_white > 5,
-        "the patterned banner's white-ish pixel count ({patterned_white}) collapsed \
-         from the plain banner's ({plain_white}) — the pattern mask is covering the \
-         *whole* cell rather than just the creeper-shaped region"
+        moved_mean[1] > moved_mean[0],
+        "the pixels the creeper pattern moved average rgb={moved_mean:?} — green \
+         must exceed red for a lime pattern over a red base, or this is not the \
+         pattern's own colour reaching the mask"
     );
 }

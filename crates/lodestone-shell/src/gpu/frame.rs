@@ -894,9 +894,22 @@ impl RenderState {
             //
             // The geometry is the flag part's, and only the flag's: the pole and
             // bar carry no patterns.
+            //
+            // **`index_of("flag")`, not `.parts.first()`.** `banner_flag_model`'s
+            // root part carries no cube of its own (only a `"flag"` child does), so
+            // its own `PartRange` is `index_count == 0` — `.first()` silently
+            // selected that empty range, passing every guard here and drawing zero
+            // indices every frame. This is the pre-existing island in the world's
+            // own banner-pattern pass, found while wiring the GUI-icon and
+            // first-person-hand siblings and re-deriving the same guard for them.
             if !banner_layer_batches.is_empty()
                 && let Some(flag) = self.block_entities.gpu_models.get("banner_flag")
-                && let Some(range) = flag.parts.first()
+                && let Some(flag_index) = self
+                    .block_entities
+                    .models
+                    .get("banner_flag")
+                    .and_then(|mesh| mesh.index_of("flag"))
+                && let Some(range) = flag.parts.get(flag_index)
                 && range.index_count > 0
             {
                 pass.set_pipeline(&self.block_entities.banner_layer_pipeline);
