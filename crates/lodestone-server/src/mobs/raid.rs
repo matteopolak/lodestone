@@ -316,6 +316,100 @@ impl<'w> MobSim<'w> {
         ids.sort_unstable();
         ids
     }
+
+    /// `Raids.getNearbyRaid` — the id of the nearest *ongoing* raid whose
+    /// centre lies within `max_dist_sqr` of `pos`, or `None`. Vanilla's own
+    /// `ServerLevel::getRaidAt` calls this with `9216` (`96²`); passed
+    /// through rather than hardcoded here since [`create_or_extend_raid`]
+    /// is this method's only caller and already carries that citation.
+    #[must_use]
+    fn raid_near(&self, pos: Vec3, max_dist_sqr: f64) -> Option<i32> {
+        let mut closest: Option<(i32, f64)> = None;
+        for (&id, raid) in &self.raids {
+            if raid.status != RaidStatus::Ongoing {
+                continue;
+            }
+            let dx = raid.center.x - pos.x;
+            let dy = raid.center.y - pos.y;
+            let dz = raid.center.z - pos.z;
+            let dist_sqr = dx * dx + dy * dy + dz * dz;
+            if dist_sqr < max_dist_sqr {
+                match closest {
+                    Some((_, best)) if dist_sqr >= best => {}
+                    _ => closest = Some((id, dist_sqr)),
+                }
+            }
+        }
+        closest.map(|(id, _)| id)
+    }
+
+    /// `Raids.createOrExtendRaid`'s "extend, don't duplicate" half: bumps an
+    /// already-active raid's omen level via [`absorb_raid_omen`] rather than
+    /// starting a second raid on top of it, capped at
+    /// [`MAX_RAID_OMEN_LEVEL`] exactly as `Raid.getRaidOmenLevel() <
+    /// Raid.getMaxRaidOmenLevel()`'s own guard.
+    fn extend_raid_omen(&mut self, id: i32, amplifier: u32) {
+        if let Some(raid) = self.raids.get_mut(&id)
+            && raid.omen_level < MAX_RAID_OMEN_LEVEL
+        {
+            raid.omen_level = absorb_raid_omen(raid.omen_level, amplifier);
+        }
+    }
+
+    /// `Raids.createOrExtendRaid` — issue #241's raid trigger. `origin` is
+    /// vanilla's `raidOmenPosition`: the block a Raid Omen carrier stood on
+    /// when Bad Omen converted, remembered by the caller across the 600-tick
+    /// countdown and spent here on Raid Omen's own last tick (see
+    /// `crate::server`'s wiring for both halves — this method only ever
+    /// sees the second).
+    ///
+    /// Averages every occupied `#village`-tagged POI within 64 blocks of
+    /// `origin` into a raid centre (falling back to `origin` itself when
+    /// none are found, matching vanilla's own `count == 0` branch), then
+    /// either [`extend_raid_omen`](Self::extend_raid_omen)s an
+    /// already-ongoing raid found by [`raid_near`](Self::raid_near) within
+    /// 96 blocks (`9216`, vanilla's own `ServerLevel::getRaidAt` constant)
+    /// or [`start_raid`](Self::start_raid)s a fresh one with the omen level
+    /// [`absorb_raid_omen`] produces from `amplifier` against a starting
+    /// level of `0`.
+    ///
+    /// **The occupied-POI signal is [`super::MobSim::occupied_homes_in_range`]
+    /// only** — the live bed-claim ledger, restricted to `home` POIs. That is
+    /// narrower than vanilla's `#village` tag (which also covers `meeting`
+    /// and every acquirable job site): this crate's workstation claims have
+    /// no matching range query, and the disk-backed
+    /// `crate::poi_storage::PoiStorage::occupied_in_range` can never see a
+    /// live claim at all, since neither claim ledger persists (see
+    /// `crate::mobs::villager`'s own module doc). A village with claimed
+    /// workstations but no claimed bed therefore does not yet trigger a
+    /// raid here — a real, disclosed narrowing, not a silent one.
+    ///
+    /// Native-only, for [`super::MobSim::occupied_homes_in_range`]'s own
+    /// reason.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn create_or_extend_raid(
+        &mut self,
+        origin: lodestone_model::BlockPos,
+        difficulty: Difficulty,
+        amplifier: u32,
+    ) -> Option<i32> {
+        let nearby = self.occupied_homes_in_range(origin, 64);
+        let center = if nearby.is_empty() {
+            Vec3::new(f64::from(origin.x), f64::from(origin.y), f64::from(origin.z))
+        } else {
+            let (sx, sy, sz) = nearby.iter().fold((0i64, 0i64, 0i64), |(sx, sy, sz), p| {
+                (sx + i64::from(p.x), sy + i64::from(p.y), sz + i64::from(p.z))
+            });
+            let n = nearby.len() as f64;
+            Vec3::new(sx as f64 / n, sy as f64 / n, sz as f64 / n)
+        };
+        if let Some(id) = self.raid_near(center, 9216.0) {
+            self.extend_raid_omen(id, amplifier);
+            Some(id)
+        } else {
+            self.start_raid(center, difficulty, absorb_raid_omen(0, amplifier))
+        }
+    }
 }
 
 /// A coarse spawn ring around the raid centre — `random angle, 20..40
@@ -495,5 +589,73 @@ mod raid_tests {
         let raiders = current_raiders(&sim, id);
         assert!(raiders.contains(&captain), "the captain must be one of the wave's own raiders");
         assert_eq!(raiders.first().copied(), Some(captain), "the captain is the first raider spawned, not an arbitrary one");
+    }
+
+    /// Issue #241's raid trigger, wired end to end within this crate:
+    /// `create_or_extend_raid` reads the live bed-claim ledger through
+    /// `occupied_homes_in_range` for real (not a POI record built by hand),
+    /// so this proves the whole `Raids.createOrExtendRaid` path — occupied-POI
+    /// averaging, omen absorption and the first `start_raid` call — against a
+    /// villager that actually claimed a bed through a real tick, the same
+    /// shape `villager_bed_claim_tests` already proves for the claim itself.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn create_or_extend_raid_uses_a_real_claimed_bed_as_its_centre() {
+        let mut world = flat_world();
+        world.set_block(10, 1, 0, "minecraft:red_bed[facing=north,occupied=false,part=foot]");
+        let mut sim = MobSim::new(&world);
+        sim.spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(10.0, 1.0, 0.0));
+        sim.tick();
+        assert!(
+            !sim.occupied_homes_in_range(lodestone_model::BlockPos::new(0, 1, 0), 64).is_empty(),
+            "the villager must have claimed the bed before the raid trigger can see it"
+        );
+
+        let id = sim
+            .create_or_extend_raid(lodestone_model::BlockPos::new(0, 1, 0), Difficulty::Normal, 0)
+            .expect("a claimed bed within 64 blocks must start a raid");
+        assert_eq!(sim.raid_omen_level(id), Some(1), "absorb_raid_omen(0, 0) == 1");
+        let (wave, total, _) = sim.raid_state(id).expect("raid must be tracked immediately, before its first tick");
+        assert_eq!((wave, total), (0, 5), "Normal has 5 waves, none spawned yet");
+    }
+
+    /// A second omen absorbed near an already-active raid **extends** it
+    /// (`raid_near`/`extend_raid_omen`) rather than starting a duplicate —
+    /// the discriminating case `raid_near` exists for, since two omens near
+    /// the same village must not spawn two overlapping raids.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_second_omen_near_an_active_raid_extends_it_instead_of_duplicating() {
+        let mut world = flat_world();
+        world.set_block(10, 1, 0, "minecraft:red_bed[facing=north,occupied=false,part=foot]");
+        let mut sim = MobSim::new(&world);
+        sim.spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(10.0, 1.0, 0.0));
+        sim.tick();
+
+        let first = sim
+            .create_or_extend_raid(lodestone_model::BlockPos::new(0, 1, 0), Difficulty::Normal, 0)
+            .expect("the first omen must start a raid");
+        let second = sim
+            .create_or_extend_raid(lodestone_model::BlockPos::new(1, 1, 0), Difficulty::Normal, 0)
+            .expect("the second omen must find the same raid, not refuse");
+        assert_eq!(first, second, "must be the same raid id, not a duplicate");
+        assert_eq!(sim.raid_omen_level(first), Some(2), "absorb_raid_omen(1, 0) == 2, the second absorption");
+    }
+
+    /// **Control for the extend arm above**: with no active raid nearby,
+    /// `create_or_extend_raid` must still create one rather than silently
+    /// doing nothing — proves `raid_near` returning `None` is not mistaken
+    /// for "an extend that did nothing".
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn create_or_extend_raid_with_no_nearby_raid_creates_a_fresh_one() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        assert!(sim.raid_ids().is_empty());
+        let id = sim
+            .create_or_extend_raid(lodestone_model::BlockPos::new(0, 1, 0), Difficulty::Easy, 3)
+            .expect("Easy is not Peaceful, so a raid must start");
+        assert_eq!(sim.raid_ids(), vec![id]);
+        assert_eq!(sim.raid_omen_level(id), Some(4), "absorb_raid_omen(0, 3) == 4");
     }
 }
