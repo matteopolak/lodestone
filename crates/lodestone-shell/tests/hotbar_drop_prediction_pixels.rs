@@ -125,6 +125,7 @@ fn hotbar_records(menus: &Menus) -> Vec<Option<HotbarSlot>> {
                     enchanted: false,
                     dyed_color: None,
                     potion_color: None,
+                    banner_patterns: Vec::new(),
                 })
             })
         })

@@ -312,6 +312,21 @@ pub struct ItemComponents {
     /// carry, and there should not be one — a field for it would always read as
     /// unset from a real server.
     pub bundle_contents: Vec<ItemStack>,
+    /// `minecraft:banner_patterns`: a banner or shield stack's loom-applied
+    /// pattern layers, in the stack's own stored order — vanilla draws them
+    /// in exactly that order and no other
+    /// (`BannerRenderer.submitPatterns`). Empty for every non-banner,
+    /// non-shield item and for a plain banner carrying no patterns; the two
+    /// are indistinguishable here, the same absent-patch-field-and-explicitly-
+    /// empty convention [`enchantments`](Self::enchantments) already uses.
+    ///
+    /// Decoded rather than treated as unmodeled for the same reason as
+    /// [`trim`](Self::trim) and the rest of that group:
+    /// `BannerPatternLayers.STREAM_CODEC`'s `Layer` carries no length prefix,
+    /// so a banner or shield sitting in *any* container — inventory, chest,
+    /// shulker box, a loom's own input slot — used to truncate the rest of
+    /// the packet from that slot onward.
+    pub banner_patterns: Vec<BannerPatternLayer>,
     /// True when the stack's patch carried at least one component this build
     /// does not model, so decoding stopped early and the modeled fields above
     /// may be incomplete. The modeled fields that were decoded remain valid.
@@ -382,6 +397,29 @@ pub struct PotDecorations {
     pub right: Option<ResourceKey>,
     /// The sherd on the pot's front face, or `None` for a plain brick.
     pub front: Option<ResourceKey>,
+}
+
+/// One stored layer of `minecraft:banner_patterns` — vanilla's
+/// `BannerPatternLayers.Layer` record (a `Holder<BannerPattern>` plus a
+/// `DyeColor`), carried the same way [`ArmorTrim`] carries its two holders:
+/// as bare asset/name strings rather than the registry's own value, since
+/// that is the form a renderer actually keys sprites by
+/// (`lodestone_render::banner_pattern`'s `PatternLayer`/`StoredPatternLayer`).
+///
+/// `color` is a vanilla `DyeColor` snake_case name (`DyeColor::getName()`,
+/// e.g. `"light_blue"`) rather than a typed enum: this crate is the base of
+/// the model/game/render layering and defines no `DyeColor` of its own —
+/// `lodestone_render::banner_pattern::DyeColor` is the canonical type, and a
+/// consumer there parses this string back with `DyeColor::from_name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BannerPatternLayer {
+    /// The pattern's bare asset id (e.g. `"creeper"`), matching
+    /// `BannerPattern::assetId()` — never a full `minecraft:`-namespaced
+    /// identifier, and never the numeric registry id the wire itself sends
+    /// for a non-inline holder.
+    pub pattern_asset_id: String,
+    /// The layer's dye colour, by vanilla's own snake_case name.
+    pub color: String,
 }
 
 /// `minecraft:profile`'s identity half — vanilla's `ResolvableProfile`

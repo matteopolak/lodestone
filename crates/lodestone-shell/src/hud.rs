@@ -6919,6 +6919,7 @@ mod tests {
                 enchanted: false,
                 dyed_color: None,
                 potion_color: None,
+                banner_patterns: Vec::new(),
             }),
             None,
             None,
@@ -10469,6 +10470,7 @@ mod recipe_toast_gate {
             enchanted: false,
             dyed_color: None,
             potion_color: None,
+            banner_patterns: Vec::new(),
         }
     }
 

@@ -354,6 +354,11 @@ impl WindowApp {
                         // colour.
                         dyed_color: st.dyed_color(),
                         potion_color: st.potion_color(),
+                        // Same crate-boundary loss as the dye/potion pair above,
+                        // for a banner's loom patterns rather than its colour —
+                        // without this a banner in the hotbar drew its base
+                        // colour only, never its pattern.
+                        banner_patterns: st.banner_patterns().to_vec(),
                     })
                 })
             })
@@ -381,6 +386,11 @@ impl WindowApp {
                 // though the identical stack's hotbar icon showed the real one.
                 dyed_color: record.dyed_color,
                 potion_color: record.potion_color,
+                // Same crate-boundary loss as the dye/potion pair above: without
+                // this a held banner drew its base colour but never its own
+                // loom patterns, even though the identical stack's hotbar icon
+                // now does.
+                banner_patterns: record.banner_patterns.clone(),
             });
         // The item id, re-derived rather than cloned: issue #154's spyglass
         // FOV/vignette needs the bare location further down in this function

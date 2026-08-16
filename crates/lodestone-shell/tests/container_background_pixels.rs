@@ -198,6 +198,7 @@ fn the_real_container_art_draws_and_it_dims_the_hotbar_behind_it() {
         enchanted: false,
         dyed_color: None,
         potion_color: None,
+        banner_patterns: Vec::new(),
     };
     let slots: Vec<Option<HotbarSlot>> = std::iter::once(Some(diamond))
         .chain(std::iter::repeat_with(|| None).take(8))

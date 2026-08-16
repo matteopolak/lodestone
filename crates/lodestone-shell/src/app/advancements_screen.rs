@@ -267,9 +267,10 @@ pub(super) fn advancement_toast_view(
                 max_damage: None,
                 enchanted: false,
                 // An advancement's icon is a bare item id, never a real stack —
-                // no dye/potion component exists to read here.
+                // no dye/potion/pattern component exists to read here.
                 dyed_color: None,
                 potion_color: None,
+                banner_patterns: Vec::new(),
             }),
         visible_portion: 1.0,
     }

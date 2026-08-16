@@ -139,6 +139,14 @@ pub struct ItemIcon {
     /// [`dyed_color`](Self::dyed_color)'s doc for the same "no live stack means
     /// `None`" contract.
     pub potion_color: Option<u32>,
+    /// The stack's `minecraft:banner_patterns`, straight off
+    /// `lodestone_game::item::ItemStack::banner_patterns`. Empty for every
+    /// non-banner item, for a plain banner carrying no loom patterns, and for
+    /// a producer with no live stack (a recipe result, an advancement icon)
+    /// — the same "no live stack means the empty/absent state" contract
+    /// [`dyed_color`](Self::dyed_color) documents, fed into
+    /// [`push_special_icon`]'s translucent pattern-layer draws.
+    pub banner_patterns: Vec<lodestone_model::BannerPatternLayer>,
 }
 
 /// `ItemStack.hasFoil()` for a shell-side [`lodestone_game::item::ItemStack`],
@@ -232,25 +240,47 @@ pub(crate) struct IconSink<'o> {
     pub glint: &'o mut Vec<f32>,
 }
 
-/// One special-renderer icon to draw: a baked block-entity mesh, the sheet it
-/// samples, and where in GUI pixel space to put it.
-///
-/// `placement` goes straight into `BlockEntityMesh::part_transforms` in place of
-/// the world's `block_entity_placement_matrix` — that substitution is the whole
-/// seam between the world's chest and the one in your hand.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct SpecialIconDraw {
-    /// The [`BlockEntityModelSet`] model name, e.g. [`lodestone_render::CHEST_SINGLE`].
-    pub model: &'static str,
-    /// The jar texture stem, e.g. `entity/chest/normal`.
-    pub texture: &'static str,
-    /// GUI-pixel-space placement, from [`gui_item_pose`].
-    pub placement: Mat4,
-    /// Gamma-space `[r, g, b]` multiplied into every texel, `[255, 255, 255]`
-    /// for every kind but the banner's flag — see
-    /// [`lodestone_render::banner_item_rig`]'s doc for why that one is tinted
-    /// rather than drawn through a real translucent mask layer.
-    pub tint: [u8; 3],
+/// One special-renderer icon draw. Two shapes, because a banner needs a
+/// second, translucent kind of draw no other special renderer does — see
+/// [`push_special_icon`]'s banner branch.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SpecialIconDraw {
+    /// A baked block-entity mesh, the sheet it samples, and where in GUI
+    /// pixel space to put it — a chest, a shulker box, a skull, or (now
+    /// always **untinted**) a banner's own pole/bar and flag.
+    ///
+    /// `placement` goes straight into `BlockEntityMesh::part_transforms` in
+    /// place of the world's `block_entity_placement_matrix` — that
+    /// substitution is the whole seam between the world's chest and the one
+    /// in your hand.
+    Mesh {
+        /// The [`BlockEntityModelSet`] model name, e.g. [`lodestone_render::CHEST_SINGLE`].
+        model: &'static str,
+        /// The jar texture stem, e.g. `entity/chest/normal`.
+        texture: &'static str,
+        /// GUI-pixel-space placement, from [`gui_item_pose`].
+        placement: Mat4,
+        /// Gamma-space `[r, g, b]` multiplied into every texel. `[255, 255,
+        /// 255]` (a no-op) for every kind, banner included — colour rides
+        /// [`Self::BannerLayer`] now, not this field.
+        tint: [u8; 3],
+    },
+    /// One translucent banner/shield pattern-mask layer, drawn over a
+    /// banner's own flag mesh through the alpha-blended banner-layer
+    /// pipeline — the GUI-icon sibling of
+    /// `super::super::gpu::block_entities::BannerLayerDrawBatch` and
+    /// `super::super::gpu::first_person::HandBannerLayerDraw`. See
+    /// [`push_special_icon`]'s doc for why colour lives here rather than on
+    /// [`Self::Mesh`]'s own `tint`.
+    BannerLayer {
+        /// Bare pattern asset id, keying [`SpecialIcons::banner_patterns`].
+        pattern: String,
+        /// GUI-pixel-space placement — the same one the banner's own flag
+        /// [`Self::Mesh`] entry carries, so the mask sits exactly over it.
+        placement: Mat4,
+        /// Gamma-space `[r, g, b]` bytes to tint the mask by.
+        color: [u8; 3],
+    },
 }
 
 /// The block-entity mesh and sheet for one special-renderer `kind`, keyed on the
@@ -378,6 +408,7 @@ pub(crate) fn draw_item_icon_counted(
                         sink.special,
                         &slot.item,
                         kind,
+                        &slot.banner_patterns,
                         *transformation,
                         &icon.display.get(DisplaySlot::Gui),
                         x,
@@ -545,6 +576,7 @@ pub(crate) fn draw_item_icon_popped(
                         sink.special,
                         &slot.item,
                         kind,
+                        &slot.banner_patterns,
                         *transformation,
                         &icon.display.get(DisplaySlot::Gui),
                         x,
@@ -684,11 +716,18 @@ fn push_item_model(
 /// `transform`'s `display.gui` pose via
 /// [`lodestone_render::compose_special_node_transform`] — see that
 /// function's doc for why it is a right-, not left-, multiply.
+///
+/// `patterns` is the slot's own decoded `minecraft:banner_patterns` (empty
+/// for every non-banner slot and for a producer with no live stack, e.g. a
+/// recipe result) — only consulted on the `minecraft:banner` branch, to
+/// build the translucent [`SpecialIconDraw::BannerLayer`] entries that carry
+/// the banner's actual colour.
 #[allow(clippy::too_many_arguments)]
 fn push_special_icon(
     out: &mut Vec<SpecialIconDraw>,
     item: &ResourceLocation,
     kind: &str,
+    patterns: &[lodestone_model::BannerPatternLayer],
     node_transform: Option<lodestone_assets::ItemNodeTransform>,
     transform: &DisplayTransform,
     x: f32,
@@ -699,31 +738,53 @@ fn push_special_icon(
     let placement = lodestone_render::compose_special_node_transform(outer, node_transform);
 
     // The banner rig is two meshes sharing one placement — see
-    // `lodestone_render::banner_item_rig`'s doc — so it is pushed as two draws
-    // rather than through the single-`(model, texture)` path every other kind
-    // uses below.
+    // `lodestone_render::banner_item_rig`'s doc — so it is pushed as two
+    // (untinted) mesh draws, plus one translucent `BannerLayer` entry per
+    // resolved pattern layer (base colour first, then every loom pattern in
+    // order), rather than through the single-mesh path every other kind uses
+    // below.
     if kind == "minecraft:banner"
         && let Some(rig) = lodestone_render::banner_item_rig(item.path())
+        && let Some(base) = lodestone_render::banner_item_base_color(item.path())
     {
-        out.push(SpecialIconDraw {
+        out.push(SpecialIconDraw::Mesh {
             model: rig.body.0,
             texture: rig.body.1,
             placement,
             tint: [255, 255, 255],
         });
-        out.push(SpecialIconDraw {
+        out.push(SpecialIconDraw::Mesh {
             model: rig.flag.0,
             texture: rig.flag.1,
             placement,
-            tint: rig.flag_tint,
+            tint: [255, 255, 255],
         });
+        let stored: Vec<lodestone_render::StoredPatternLayer> = patterns
+            .iter()
+            .filter_map(|layer| {
+                Some(lodestone_render::StoredPatternLayer {
+                    pattern_asset_id: layer.pattern_asset_id.clone(),
+                    color: lodestone_render::DyeColor::from_name(&layer.color)?,
+                })
+            })
+            .collect();
+        for layer in lodestone_render::banner_pattern_layers(base, &stored) {
+            let Some(pattern) = layer.sprite.path().rsplit('/').next() else {
+                continue;
+            };
+            out.push(SpecialIconDraw::BannerLayer {
+                pattern: pattern.to_string(),
+                placement,
+                color: lodestone_render::gamma_rgb_to_bytes(layer.color),
+            });
+        }
         return;
     }
 
     let Some((model, texture)) = special_icon_geometry(kind, item) else {
         return;
     };
-    out.push(SpecialIconDraw {
+    out.push(SpecialIconDraw::Mesh {
         model,
         texture,
         placement,
@@ -1143,6 +1204,24 @@ struct SpecialIcons {
     /// A grouped batch cannot straddle the two, because the group is what a
     /// single draw call binds.
     carried_batches: Vec<SpecialBatch>,
+    /// The banner **pattern-layer** pass — the GUI-icon sibling of
+    /// `super::super::gpu::block_entities::BlockEntityRenderer
+    /// ::banner_layer_pipeline`: alpha-blended, depth-write off, and
+    /// `fs_main_no_cutout` so a mask's soft edges blend instead of being
+    /// discarded.
+    banner_layer_pipeline: wgpu::RenderPipeline,
+    /// One texture bind group per banner **mask**, keyed by the bare pattern
+    /// asset id — the GUI-icon sibling of
+    /// `super::super::gpu::block_entities::BlockEntityRenderer
+    /// ::banner_patterns`. Empty without a vanilla pack, matching that fail-
+    /// open exactly.
+    banner_patterns: HashMap<String, wgpu::BindGroup>,
+    /// This frame's uploaded pattern-layer draws, ordered — the slot-layer
+    /// sibling of [`Self::batches`].
+    banner_layers: Vec<SpecialBannerLayerBatch>,
+    /// The carried stack's pattern-layer draws — the sibling of
+    /// [`Self::carried_batches`].
+    carried_banner_layers: Vec<SpecialBannerLayerBatch>,
 }
 
 /// One uploaded special-icon batch: the mesh and sheet to bind, one instance
@@ -1153,6 +1232,22 @@ struct SpecialBatch {
     texture: &'static str,
     count: u32,
     parts: Vec<Option<wgpu::Buffer>>,
+}
+
+/// One banner pattern-mask layer, uploaded and ready to draw — the GUI-icon
+/// sibling of `super::super::gpu::block_entities::BannerLayerDrawBatch`.
+///
+/// **Strictly ordered, and never batched across icons**: each entry is one
+/// draw of the *same* flag geometry with its own mask and its own colour, and
+/// two banners in adjacent slots reusing the same pattern in opposite orders
+/// could not both be right if these were coalesced.
+#[derive(Debug)]
+struct SpecialBannerLayerBatch {
+    /// Bare pattern asset id, keying [`SpecialIcons::banner_patterns`].
+    pattern: String,
+    /// A one-instance buffer carrying the flag's own GUI-pixel-space
+    /// placement and this layer's gamma-space colour as the instance tint.
+    instances: wgpu::Buffer,
 }
 
 impl SpecialIcons {
@@ -1235,6 +1330,28 @@ impl SpecialIcons {
         );
         let cam_bind_group = pipeline.camera_bind_group(device, &cam_buffer);
 
+        // The banner masks — the GUI-icon sibling of
+        // `gpu/block_entities.rs`'s identical load. `base` is included: it is
+        // layer 0 of every banner's mask list, tinted by the stack's own base
+        // colour.
+        let mut banner_patterns = HashMap::new();
+        if let Some(manager) = crate::resources::vanilla_manager() {
+            match lodestone_assets::banner_pattern_atlas::BannerPatternAtlas::load(&manager) {
+                Ok(masks) => {
+                    let ids: Vec<String> = masks.pattern_ids().map(str::to_string).collect();
+                    for id in ids {
+                        if let Some(img) = masks.get(&id) {
+                            let view = entity_sheet_texture(device, queue, img);
+                            banner_patterns
+                                .insert(id, pipeline.texture_bind_group(device, &view, &sampler));
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(target: "assets", "load banner patterns (icon pass): {e}"),
+            }
+        }
+        let banner_layer_pipeline = pipeline.banner_layer_pipeline(device, color_format);
+
         Some(SpecialIcons {
             pipeline,
             models,
@@ -1244,6 +1361,10 @@ impl SpecialIcons {
             cam_bind_group,
             batches: Vec::new(),
             carried_batches: Vec::new(),
+            banner_layer_pipeline,
+            banner_patterns,
+            banner_layers: Vec::new(),
+            carried_banner_layers: Vec::new(),
         })
     }
 
@@ -2181,6 +2302,8 @@ impl IconRenderer {
         if let Some(s) = self.special.as_mut() {
             s.batches.clear();
             s.carried_batches.clear();
+            s.banner_layers.clear();
+            s.carried_banner_layers.clear();
         }
         if special.is_empty() {
             return;
@@ -2203,8 +2326,14 @@ impl IconRenderer {
         let carried = build_special_batches(device, s, &special[carried_from..]);
         s.batches = base;
         s.carried_batches = carried;
+        s.banner_layers = build_banner_layer_batches(device, &special[..carried_from]);
+        s.carried_banner_layers = build_banner_layer_batches(device, &special[carried_from..]);
 
-        if !s.batches.is_empty() || !s.carried_batches.is_empty() {
+        if !s.batches.is_empty()
+            || !s.carried_batches.is_empty()
+            || !s.banner_layers.is_empty()
+            || !s.carried_banner_layers.is_empty()
+        {
             // `gui_ortho(width, height)`, exactly as the model stream's camera —
             // the placements were composed in the same GUI pixel space, so the
             // two passes must project through the same matrix or a chest and the
@@ -2252,22 +2381,34 @@ fn build_special_batches(
         // stays icon-major throughout.
         let mut per_key_tint: Vec<Vec<[u8; 3]>> = Vec::new();
         for draw in special {
-            let Some(mesh) = s.models.get(draw.model) else {
+            // Only `Mesh` entries batch here — `BannerLayer` entries are
+            // strictly ordered and drawn in a separate, unbatched pass; see
+            // `build_banner_layer_batches`.
+            let SpecialIconDraw::Mesh {
+                model,
+                texture,
+                placement,
+                tint,
+            } = draw
+            else {
                 continue;
             };
-            if !s.textures.contains_key(draw.texture) {
+            let Some(mesh) = s.models.get(*model) else {
+                continue;
+            };
+            if !s.textures.contains_key(*texture) {
                 continue;
             }
-            let transforms = mesh.part_transforms(draw.placement, &[]);
-            match keys.iter().position(|k| *k == (draw.model, draw.texture)) {
+            let transforms = mesh.part_transforms(*placement, &[]);
+            match keys.iter().position(|k| *k == (*model, *texture)) {
                 Some(i) => {
                     per_key[i].extend(transforms);
-                    per_key_tint[i].push(draw.tint);
+                    per_key_tint[i].push(*tint);
                 }
                 None => {
-                    keys.push((draw.model, draw.texture));
+                    keys.push((*model, *texture));
                     per_key.push(transforms);
-                    per_key_tint.push(vec![draw.tint]);
+                    per_key_tint.push(vec![*tint]);
                 }
             }
         }
@@ -2315,6 +2456,40 @@ fn build_special_batches(
         }
     }
     out
+}
+
+/// Upload one stratum's [`SpecialIconDraw::BannerLayer`] entries as one-instance
+/// buffers, in order — the GUI-icon sibling of [`build_special_batches`], and
+/// never merged with it: a layer needs its own pipeline, its own mask bind
+/// group, and (unlike an opaque batch) must never be reordered or coalesced
+/// with another icon's layers. See [`SpecialBannerLayerBatch`]'s doc.
+fn build_banner_layer_batches(
+    device: &wgpu::Device,
+    special: &[SpecialIconDraw],
+) -> Vec<SpecialBannerLayerBatch> {
+    special
+        .iter()
+        .filter_map(|draw| {
+            let SpecialIconDraw::BannerLayer {
+                pattern,
+                placement,
+                color,
+            } = draw
+            else {
+                return None;
+            };
+            let instances = upload_instances_tinted(
+                device,
+                &[*placement],
+                &[],
+                &[lodestone_render::InstanceTint::rgb(*color)],
+            )?;
+            Some(SpecialBannerLayerBatch {
+                pattern: pattern.clone(),
+                instances,
+            })
+        })
+        .collect()
 }
 
 /// Which **stratum** an icon draw belongs to — vanilla's `graphics.nextStratum()`
@@ -2419,7 +2594,11 @@ impl IconRenderer {
             IconStratum::Slots => s.batches.as_slice(),
             IconStratum::Carried => s.carried_batches.as_slice(),
         });
-        if count == 0 && specials.is_empty() {
+        let banner_layers = self.special.as_ref().map_or(&[][..], |s| match stratum {
+            IconStratum::Slots => s.banner_layers.as_slice(),
+            IconStratum::Carried => s.carried_banner_layers.as_slice(),
+        });
+        if count == 0 && specials.is_empty() && banner_layers.is_empty() {
             return;
         }
         let Some(depth_view) = depth else {
@@ -2483,6 +2662,33 @@ impl IconRenderer {
                 }
             }
         }
+
+        // A banner's own translucent pattern-layer draws, over the same flag
+        // geometry the opaque loop above just drew — the GUI-icon sibling of
+        // `gpu/frame.rs`'s world-space banner-layer pass and
+        // `gpu/first_person.rs`'s hand one. Third, so a mask's soft edges
+        // blend against pixels the opaque pass already wrote rather than
+        // against whatever this pass loaded.
+        if let Some(s) = &self.special
+            && !banner_layers.is_empty()
+            && let Some(flag) = s.gpu_models.get("banner_flag")
+            && let Some(part_range) = flag.parts.first()
+            && part_range.index_count > 0
+        {
+            pass.set_pipeline(&s.banner_layer_pipeline);
+            pass.set_bind_group(0, &s.cam_bind_group, &[]);
+            pass.set_vertex_buffer(0, flag.vertices.slice(..));
+            pass.set_index_buffer(flag.indices.slice(..), wgpu::IndexFormat::Uint32);
+            for layer in banner_layers {
+                let Some(mask) = s.banner_patterns.get(&layer.pattern) else {
+                    continue;
+                };
+                pass.set_bind_group(1, mask, &[]);
+                pass.set_vertex_buffer(1, layer.instances.slice(..));
+                let end = part_range.index_start + part_range.index_count;
+                pass.draw_indexed(part_range.index_start..end, 0, 0..1);
+            }
+        }
     }
 }
 
@@ -2505,6 +2711,7 @@ mod pop_tests {
             enchanted: false,
             dyed_color: None,
             potion_color: None,
+            banner_patterns: Vec::new(),
         }
     }
 
@@ -2809,6 +3016,7 @@ mod tint_wiring_tests {
             enchanted: false,
             dyed_color,
             potion_color,
+            banner_patterns: Vec::new(),
         }
     }
 

@@ -441,7 +441,7 @@ impl RenderState {
         // this branch exists to fix, which is the shape of an island counter.
         stats.first_person_item_drawn = matches!(
             first_person_hand,
-            Some(FirstPersonHand::Item(..) | FirstPersonHand::Special(_))
+            Some(FirstPersonHand::Item(..) | FirstPersonHand::Special(..))
         );
 
         // Build every mining-crack overlay mesh before the pass (buffers can't be

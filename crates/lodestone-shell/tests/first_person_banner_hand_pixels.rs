@@ -14,9 +14,17 @@
 //! surfaces are resolved through **different pipelines with different group-0
 //! layouts** and a fix to one does not imply the other is fixed.
 //!
-//! `lodestone_render::banner_item_rig` closes the narrower half of that gap —
-//! see its own doc for why a tint-multiply over the plain flag mesh, not the
-//! real translucent mask layer.
+//! `lodestone_render::banner_item_rig` landed the geometry, and the first
+//! version of this file closed only the narrower half of the gap: a
+//! tint-multiply over the plain flag mesh, base colour only, no loom
+//! patterns. That is now the real thing — `minecraft:banner_patterns` decodes
+//! for an item stack (`crates/protocol/v770`), `rig.flag` draws **untinted**,
+//! and `RenderState::prepare_special_hand` issues a second, translucent
+//! pattern-layer pass over the same flag geometry the world's block-entity
+//! banner renderer uses (`banner_layer_pipeline`) — see
+//! [`a_held_banner_draws_its_own_loom_pattern_not_just_its_base_colour`]
+//! below for the pattern half specifically; this test (the first one in the
+//! file) still covers the base-colour half.
 //!
 //! # The measurement
 //!
@@ -31,6 +39,9 @@
 //! untinted" — the two banners' mean channel values must disagree in the
 //! direction their own `textureDiffuseColor` predicts (red R > B, light-blue
 //! B > R, by a wide margin, and the two banners' own red channels far apart).
+//! Neither banner carries a pattern layer, so both draw the base translucent
+//! mask only — proving the base colour reaches pixels is this test's whole
+//! job; the pattern gate below is a separate, later addition.
 //!
 //! Fail-closed like its siblings: no GPU adapter or no `client.jar` is a
 //! failure, never a skip.
@@ -155,6 +166,7 @@ fn a_held_banner_draws_its_own_dye_colour_not_nothing() {
                 foil: false,
                 dyed_color: None,
                 potion_color: None,
+                banner_patterns: Vec::new(),
             })
         });
         let frame = target.acquire().expect("headless acquire");
@@ -237,5 +249,157 @@ fn a_held_banner_draws_its_own_dye_colour_not_nothing() {
         (rr - br).abs() > 8.0,
         "the two banners' red channels ({rr:.1} vs {br:.1}) are too close — they \
          may be drawing with the same tint rather than each item's own colour"
+    );
+}
+
+/// Count of non-sky pixels in `pixels` within `tol` (summed per-channel abs
+/// diff) of `target` — the per-bucket sibling of [`hand_mean_rgb`], used
+/// below to prove *two* colours coexist in the same held-item region rather
+/// than reading one blended average.
+fn count_near(pixels: &[u8], sky: [u8; 3], target: [u8; 3], tol: i32) -> usize {
+    pixels
+        .chunks_exact(4)
+        .filter(|px| {
+            let d_sky = (i32::from(px[0]) - i32::from(sky[0])).abs()
+                + (i32::from(px[1]) - i32::from(sky[1])).abs()
+                + (i32::from(px[2]) - i32::from(sky[2])).abs();
+            if d_sky <= 8 {
+                return false;
+            }
+            let d = (i32::from(px[0]) - i32::from(target[0])).abs()
+                + (i32::from(px[1]) - i32::from(target[1])).abs()
+                + (i32::from(px[2]) - i32::from(target[2])).abs();
+            d <= tol
+        })
+        .count()
+}
+
+/// Pixel gate: a held banner draws its **loom patterns**, not just its base
+/// colour — the half `banner_item_rig`'s doc names as still missing after the
+/// tint-multiply landing, closed by decoding `minecraft:banner_patterns` for
+/// an item stack (`crates/protocol/v770`) and a real translucent
+/// pattern-layer pass over the flag (`RenderState::prepare_special_hand`,
+/// mirroring the world block-entity pass's `banner_layer_pipeline`).
+///
+/// # Why two colours in one cell is the discriminating claim
+///
+/// A flat tint — the old mechanism, or any regression back toward it — can
+/// only ever produce *one* colour across the whole flag. A `minecraft:creeper`
+/// pattern drawn in black over a `minecraft:white_banner`'s base is a
+/// **local** mask: the creeper-shaped region should read black
+/// (`DyeColor::Black`'s `textureDiffuseColor`, `(29, 29, 33)`) while the
+/// uncovered rest of the flag stays the base white
+/// (`DyeColor::White`, `(249, 255, 254)`). Counting pixels near *each* target
+/// colour separately — never averaging them together — is what tells "two
+/// colours coexist" from "one blended grey", which a mean-RGB assertion like
+/// the sibling test above cannot: averaging white and black would itself read
+/// as a mid grey, indistinguishable from a single grey tint.
+///
+/// The negative control is the same white banner with **no** pattern layers:
+/// `banner_pattern_layers` still draws the base mask (so the flag is not
+/// blank), but nothing should read as black, because there is no black layer
+/// to draw. A gate that skipped this control could not tell "the pattern
+/// drew" from "the mesh happens to have some dark texels regardless".
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_held_banner_draws_its_own_loom_pattern_not_just_its_base_colour() {
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!(
+            "GPU gate opted in but the vanilla pack did not load; set LODESTONE_ASSETS \
+             to a pack root with client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        )
+    });
+
+    let cam = camera();
+    let sky = sky_bytes();
+
+    // Vanilla's `DyeColor.textureDiffuseColor` for the two colours this test
+    // discriminates between — re-typed from the same jar constants
+    // `lodestone_render::banner_pattern`'s own test module cross-checks, not
+    // guessed: WHITE = 16383998 = 0xF9FFFE, BLACK = 1908001 = 0x1D1D21.
+    const WHITE_RGB: [u8; 3] = [0xF9, 0xFF, 0xFE];
+    const BLACK_RGB: [u8; 3] = [0x1D, 0x1D, 0x21];
+
+    let mut shoot = |patterns: Vec<lodestone_model::BannerPatternLayer>| -> Vec<u8> {
+        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        state.set_entity_light_source(|_| Some(SKY_LIT));
+        state.set_sky_darken_source(|| Some(1.0));
+        let item: ResourceLocation = "minecraft:white_banner".parse().expect("valid item id");
+        state.set_main_hand_source(move || {
+            Some(MainHandItem {
+                item: item.clone(),
+                foil: false,
+                dyed_color: None,
+                potion_color: None,
+                banner_patterns: patterns.clone(),
+            })
+        });
+        let frame = target.acquire().expect("headless acquire");
+        let stats = state.render(device, queue, frame.view(), &cam, None, &[]);
+        assert!(
+            stats.first_person_item_drawn,
+            "the hand pass did not report a first-person item drawn for a held \
+             white_banner"
+        );
+        target.read_texels(device, queue)
+    };
+
+    let plain_pixels = shoot(Vec::new());
+    let patterned_pixels = shoot(vec![lodestone_model::BannerPatternLayer {
+        pattern_asset_id: "creeper".to_string(),
+        color: "black".to_string(),
+    }]);
+
+    let plain_white = count_near(&plain_pixels, sky, WHITE_RGB, 24);
+    let plain_black = count_near(&plain_pixels, sky, BLACK_RGB, 24);
+    let patterned_white = count_near(&patterned_pixels, sky, WHITE_RGB, 24);
+    let patterned_black = count_near(&patterned_pixels, sky, BLACK_RGB, 24);
+
+    eprintln!("=== first-person held banner pattern-layer pixel gate ===");
+    eprintln!("plain white_banner:     white-ish px={plain_white}, black-ish px={plain_black}");
+    eprintln!("+creeper (black):       white-ish px={patterned_white}, black-ish px={patterned_black}");
+
+    // --- the negative control: no pattern layer means no black pixels -----
+    assert!(
+        plain_white > 30,
+        "a plain white_banner must still show its own (white) base colour — \
+         got only {plain_white} white-ish px, which means the base translucent \
+         layer itself is not reaching pixels"
+    );
+    assert_eq!(
+        plain_black, 0,
+        "a plain white_banner with zero pattern layers read {plain_black} \
+         black-ish pixels — there is no black layer to draw, so any black \
+         pixels here mean the count is picking up something other than the \
+         pattern mask (a shading artefact, or a control that is not controlling \
+         anything)"
+    );
+
+    // --- the positive claim: adding the pattern adds real black pixels, and
+    // the base colour is still visible in the uncovered region -------------
+    assert!(
+        patterned_black > 20,
+        "adding a black `creeper` pattern layer produced only {patterned_black} \
+         black-ish pixels (0 in the unpatterned control above) — the pattern \
+         mask is not reaching pixels, which is the exact gap `banner_item_rig`'s \
+         own doc named: colour without pattern"
+    );
+    assert!(
+        patterned_white > 20,
+        "the patterned banner's white-ish pixel count ({patterned_white}) collapsed \
+         from the plain banner's ({plain_white}) — the pattern mask is covering the \
+         *whole* flag rather than just the creeper-shaped region, which is not what \
+         a masked layer draw should do"
     );
 }

@@ -399,6 +399,153 @@ fn read_armor_trim(reader: &mut Reader<'_>) -> Result<ArmorTrim, AdapterError> {
     Ok(ArmorTrim { material, pattern })
 }
 
+/// `minecraft:banner_pattern` registry paths, in vanilla **bootstrap register-
+/// call order** (`BannerPatterns.bootstrap`, `BannerPatterns.java`) — not the
+/// class's field-declaration order, which disagrees with it for six entries
+/// (`BORDER`/`GRADIENT`/`GRADIENT_UP`/`BRICKS` are declared before
+/// `CURLY_BORDER` but registered after it). See [`TRIM_MATERIAL_IDS`] for the
+/// same caveat this table shares: this client keeps no dynamic-registry
+/// store, so a `Holder::REFERENCE` id has nothing else to resolve against —
+/// exact for a vanilla server, provisional for a datapack that redefines the
+/// registry.
+const BANNER_PATTERN_IDS: &[&str] = &[
+    "base",
+    "square_bottom_left",
+    "square_bottom_right",
+    "square_top_left",
+    "square_top_right",
+    "stripe_bottom",
+    "stripe_top",
+    "stripe_left",
+    "stripe_right",
+    "stripe_center",
+    "stripe_middle",
+    "stripe_downright",
+    "stripe_downleft",
+    "small_stripes",
+    "cross",
+    "straight_cross",
+    "triangle_bottom",
+    "triangle_top",
+    "triangles_bottom",
+    "triangles_top",
+    "diagonal_left",
+    "diagonal_up_right",
+    "diagonal_up_left",
+    "diagonal_right",
+    "circle",
+    "rhombus",
+    "half_vertical",
+    "half_horizontal",
+    "half_vertical_right",
+    "half_horizontal_bottom",
+    "border",
+    "gradient",
+    "gradient_up",
+    "bricks",
+    "curly_border",
+    "globe",
+    "creeper",
+    "skull",
+    "flower",
+    "mojang",
+    "piglin",
+    "flow",
+    "guster",
+];
+
+/// Vanilla `DyeColor.STREAM_CODEC` (`ByteBufCodecs.idMapper`) id order —
+/// `DyeColor.java`'s enum declaration order, `0..=15`, `WHITE` first. A bare
+/// VarInt with no `+1` and no `0` sentinel, unlike the `ByteBufCodecs.holder`
+/// shape [`BANNER_PATTERN_IDS`] resolves — the same idMapper-vs-holder
+/// distinction [`read_pot_decorations`]' own doc documents for
+/// `ByteBufCodecs.registry`.
+const DYE_COLOR_NAMES: [&str; 16] = [
+    "white",
+    "orange",
+    "magenta",
+    "light_blue",
+    "yellow",
+    "lime",
+    "pink",
+    "gray",
+    "light_gray",
+    "cyan",
+    "purple",
+    "blue",
+    "brown",
+    "green",
+    "red",
+    "black",
+];
+
+/// Decodes `minecraft:banner_patterns`' payload — `BannerPatternLayers
+/// .STREAM_CODEC`, `Layer.STREAM_CODEC.apply(ByteBufCodecs.list())`
+/// (`BannerPatternLayers.java`): a VarInt element count (unbounded on the wire
+/// — `ByteBufCodecs.list()`'s no-arg overload caps at `Integer.MAX_VALUE`, not
+/// a real limit) followed by that many `Layer`s. Each `Layer`
+/// (`BannerPatternLayers.Layer.STREAM_CODEC`) is a `Holder<BannerPattern>` —
+/// the same `ByteBufCodecs.holder(registry, DIRECT_STREAM_CODEC)` shape
+/// [`read_armor_trim`] decodes: `0` introduces an inline `(Identifier assetId,
+/// String translationKey)` pair, any `n > 0` references [`BANNER_PATTERN_IDS`]
+/// at `n - 1` — followed by a bare-VarInt `DyeColor`
+/// (`ByteBufCodecs.idMapper`, resolved against [`DYE_COLOR_NAMES`]).
+///
+/// Decoded rather than left unmodeled for the same reason as `minecraft:trim`,
+/// map id, pot decorations, profile, the two book contents and bundle
+/// contents above: none of `Layer`'s sub-codecs is length-prefixed, so a
+/// banner or shield sitting in *any* container — inventory, chest, shulker
+/// box, a loom's own input slot — used to truncate the rest of the packet
+/// from that slot onward.
+///
+/// A layer whose pattern or colour does not resolve is **dropped**, not
+/// defaulted — mirrors `lodestone_shell::block_entities`'s own
+/// `banner_patterns` NBT reader (a placed banner's block-entity form of this
+/// same data): a wrong-coloured or wrong-patterned layer is harder to notice
+/// than a missing one. The bytes are consumed either way, which is what keeps
+/// the rest of the packet aligned regardless.
+///
+/// Bounded at 64 layers defensively, the same margin [`read_bundle_contents`]
+/// uses: vanilla's own renderer caps at [`lodestone_render`]'s
+/// `MAX_PATTERN_LAYERS` (16) plus the base layer, and a survival loom cannot
+/// add more than one layer per application, so a declared count above this is
+/// a malformed packet, not a legitimately decorated banner or shield.
+fn read_banner_pattern_layers(reader: &mut Reader<'_>) -> Result<Vec<BannerPatternLayer>, AdapterError> {
+    let count = read_count(reader, "banner_patterns layer")?;
+    if count > 64 {
+        return Err(AdapterError::Decode(format!(
+            "banner_patterns declares {count} layers, implausibly many"
+        )));
+    }
+    let mut layers = Vec::with_capacity(count);
+    for _ in 0..count {
+        let pattern_asset_id = match reader.var_i32().map_err(dec_err)? {
+            0 => {
+                let asset_id = reader.string(32767).map_err(dec_err)?;
+                let _translation_key = reader.string(32767).map_err(dec_err)?;
+                Some(
+                    asset_id
+                        .strip_prefix("minecraft:")
+                        .unwrap_or(&asset_id)
+                        .to_owned(),
+                )
+            }
+            holder => BANNER_PATTERN_IDS
+                .get((holder - 1) as usize)
+                .map(|s| (*s).to_owned()),
+        };
+        let color_id = reader.var_i32().map_err(dec_err)?;
+        let color = usize::try_from(color_id)
+            .ok()
+            .and_then(|i| DYE_COLOR_NAMES.get(i))
+            .map(|s| (*s).to_owned());
+        if let (Some(pattern_asset_id), Some(color)) = (pattern_asset_id, color) {
+            layers.push(BannerPatternLayer { pattern_asset_id, color });
+        }
+    }
+    Ok(layers)
+}
+
 /// Decodes `minecraft:pot_decorations`' payload — `PotDecorations.STREAM_CODEC`,
 /// which is `ByteBufCodecs.registry(Registries.ITEM).apply(ByteBufCodecs.list(4))`.
 ///
@@ -963,6 +1110,15 @@ fn read_component_patch(
                     let _ = reader.bytes(reader.remaining());
                     return Ok((components, false));
                 }
+            }
+
+            // Decoded for the same reason as the trim, map id, pot decorations,
+            // profile, the two book contents and bundle contents above: none of
+            // `BannerPatternLayers.Layer`'s sub-codecs is length-prefixed, so a
+            // banner or shield in any container truncated the rest of the packet
+            // from that slot onward. See [`read_banner_pattern_layers`].
+            Some("minecraft:banner_patterns") => {
+                components.banner_patterns = read_banner_pattern_layers(reader)?;
             }
 
             other => {

@@ -1660,16 +1660,7 @@ impl RenderState {
                 // gamma-space bytes `InstanceTint` carries. Doing this in linear
                 // would wash every dye toward white — vanilla is not
                 // colour-managed, and the shader multiplies in gamma too.
-                let rgb = layer.color.map(|c| {
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        clippy::cast_sign_loss,
-                        reason = "clamped into 0..=255 first"
-                    )]
-                    {
-                        (c.clamp(0.0, 1.0) * 255.0).round() as u8
-                    }
-                });
+                let rgb = lodestone_render::gamma_rgb_to_bytes(layer.color);
                 let Some(buffer) = upload_instances_tinted(
                     device,
                     &[layer.transform],

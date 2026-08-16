@@ -100,7 +100,7 @@ pub use anim::{AnimFrame, AnimSample, AnimSlotUniform, AnimUniform, SpriteAnimat
 pub use arena::{ArenaAllocation, ArenaBuffer, ArenaError};
 pub use banner_pattern::{
     DyeColor, MAX_PATTERN_LAYERS, PatternLayer, StoredPatternLayer, banner_pattern_layers,
-    shield_pattern_layers,
+    gamma_rgb_to_bytes, shield_pattern_layers,
 };
 pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
 pub use block_entity::{
@@ -122,7 +122,8 @@ pub use block_entity::{
     LECTERN_BOOK_PAGE_FLIP, LecternSpawn, MovingPistonSpawn, SHULKER_BOX, SHULKER_COLOURS,
     SHULKER_DEFAULT_TEXTURE_STEM, SKULL_HUMANOID, SKULL_MOB, SKULL_TYPES, ShulkerFacing,
     BannerItemRig, ShulkerSpawn, SkullOrientation, SkullSpawn, SkullType, banner_flag_x_rot,
-    banner_ground_placement_matrix, banner_item_rig, banner_phase, banner_texture_stems,
+    banner_ground_placement_matrix, banner_item_base_color, banner_item_rig, banner_phase,
+    banner_texture_stems,
     banner_wall_placement_matrix, bell_shake_angle,
     bell_texture_stems, block_entity_placement_matrix, block_entity_texture_stems,
     book_part_poses, book_texture_stems, campfire_item_matrix, chest_lid_openness, chest_lid_x_rot,

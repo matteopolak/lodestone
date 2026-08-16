@@ -540,6 +540,7 @@ mod tests {
             enchanted: false,
             dyed_color: None,
             potion_color: None,
+            banner_patterns: Vec::new(),
         }
     }
 
