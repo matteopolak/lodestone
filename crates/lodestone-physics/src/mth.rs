@@ -148,12 +148,6 @@ pub fn clamp_f32(value: f32, min: f32, max: f32) -> f32 {
     }
 }
 
-/// `Mth.clamp(int, int, int)` → `min(max(value, min), max)`.
-#[must_use]
-pub fn clamp_i32(value: i32, min: i32, max: i32) -> i32 {
-    value.max(min).min(max)
-}
-
 /// `Mth.lerp(double, double, double)` → `p0 + alpha * (p1 - p0)`.
 ///
 /// Kept in vanilla's expression order; do not algebraically simplify.
@@ -166,18 +160,6 @@ pub fn lerp_f64(alpha: f64, p0: f64, p1: f64) -> f64 {
 #[must_use]
 pub fn lerp_f32(alpha: f32, p0: f32, p1: f32) -> f32 {
     p0 + alpha * (p1 - p0)
-}
-
-/// `Mth.frac(double)` → `num - lfloor(num)` (note the `long` floor).
-#[must_use]
-pub fn frac_f64(num: f64) -> f64 {
-    num - lfloor(num) as f64
-}
-
-/// `Mth.frac(float)` → `num - floor(num)`.
-#[must_use]
-pub fn frac_f32(num: f32) -> f32 {
-    num - floor(num as f64) as f32
 }
 
 /// `Mth.wrapDegrees(double)`.

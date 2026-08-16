@@ -64,12 +64,6 @@ impl Vec3d {
         Self::new(self.x * fx, self.y * fy, self.z * fz)
     }
 
-    /// `Vec3.multiply(Vec3)`.
-    #[must_use]
-    pub fn multiply(self, o: Vec3d) -> Self {
-        self.multiply_each(o.x, o.y, o.z)
-    }
-
     /// `Vec3.lengthSqr`.
     #[must_use]
     pub fn length_sqr(self) -> f64 {
@@ -231,14 +225,6 @@ impl Aabb {
             max_z += za;
         }
         Self::new(min_x, min_y, min_z, max_x, max_y, max_z)
-    }
-
-    /// `AABB.setMinY`.
-    #[must_use]
-    pub fn with_min_y(&self, min_y: f64) -> Self {
-        Self::new(
-            self.min_x, min_y, self.min_z, self.max_x, self.max_y, self.max_z,
-        )
     }
 
     /// `AABB.inflate(double)` — grow by `d` on all six faces (`deflate` is
