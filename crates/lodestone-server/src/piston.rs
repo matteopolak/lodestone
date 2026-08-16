@@ -47,17 +47,19 @@
 //!
 //! ## What is deliberately not here, and why #316 stays open
 //!
-//! The intermediate state now exists, so the two consequences that depended on
-//! its absence are gone: a client is sent a real `moving_piston` cell plus its
-//! block entity and animates the travel. What is still missing:
+//! The intermediate state now exists, so a push animates, and a move **is**
+//! interruptible: [`interrupt`] (`PistonMovingBlockEntity.finalTick`) fires from
+//! two sites [`crate::random_tick`] wires on the retract path — the piston's own
+//! arm cell, always, and (sticky only) [`relative_n`]`(pos, facing, 2)`, the cell
+//! a sticky pull would grab from, which can belong to a *different* piston's
+//! still-extending head two cells away. See [`interrupt`]'s own doc for the
+//! `source`-vs-carried write split, and `docs/redstone-pistons.md` for the
+//! live-oracle and hermetic evidence each site has. What is still missing:
 //!
-//! * **A move is not interruptible.** Vanilla's `triggerEvent` calls `finalTick()`
-//!   on a block entity it finds mid-animation and can start a second move in the
-//!   same tick; here a pending commit runs to completion. A **0-tick pulse**
-//!   depends on exactly that interruption, so it still cannot work.
 //! * `TRIGGER_DROP` (block event 2) has no distinct behaviour: nothing routes a
 //!   piston block *event* at all, so the "head is mid-extension, drop it" case is
-//!   unreachable rather than merely unimplemented.
+//!   unreachable rather than merely unimplemented — though nothing needs it, since
+//!   the interrupt logic above already covers what `TRIGGER_DROP` names.
 //! * Entities in the push path are not shoved: that is `PistonMovingBlockEntity`'s
 //!   `moveCollidedEntities`/`moveStuckEntities`, which needs an entity AABB sweep
 //!   this crate has no piston-aware collision pass for. The intermediate state it
@@ -73,10 +75,11 @@
 //! That is a property of the whole redstone family here, not of this module, and
 //! the resolver itself is border-agnostic — it is the lookup that is not.
 //!
-//! So: contraption **resolution** is faithful and tested; contraption **timing**
-//! is not. Issue #316 asks for BUD-switch and 0-tick traces matched tick-for-tick
-//! against a real 26.2 server, and that verification is unreachable while the
-//! intermediate state does not exist.
+//! So: contraption **resolution** is faithful and tested; the interrupt is
+//! faithful, live-verified for the arm site and hermetically verified for the
+//! two-cell sticky site; a captured, tick-for-tick trace of a full community
+//! contraption (BUD switch, 0-tick pulse generator) does not exist. That
+//! remaining verification is what #316 stays open on.
 //!
 //! ## How to change it
 //!
@@ -1084,14 +1087,26 @@ pub fn finish_move(start: &MoveStart) -> Vec<MoveWrite> {
 /// [`crate::scheduled_tick::ScheduledTickQueue::take_matching`], which is
 /// where the corresponding scheduled commit is removed so it cannot also fire
 /// later against a cell this function has already rewritten. Vanilla's own
-/// interrupt site (`PistonBaseBlock.triggerEvent`'s `b0 == 1 || b0 == 2`
-/// branch) only ever inspects the piston's own **arm** cell
-/// (`pos.relative(direction)`) — never a cell further out that a run may have
-/// pushed a block into. A block already carried past the arm keeps its own,
-/// independent countdown and commits on schedule regardless of what happens
-/// to the piston that pushed it; also confirmed live (the pushed block's own
+/// `PistonBaseBlock.triggerEvent` (`b0 == 1 || b0 == 2` branch) checks **two**
+/// cells on retract, never a cell further out that a run may have pushed a
+/// block into:
+///
+/// * the piston's own **arm** cell (`pos.relative(direction)`), unconditionally;
+/// * (sticky pistons only) [`relative_n`]`(pos, direction, 2)` — the cell a
+///   sticky pull would grab from, which can hold a *different* piston's
+///   still-extending head. Interrupting it there also suppresses that event's
+///   own pull decision entirely (vanilla's `if (!pistonPiece)` guard), which the
+///   caller reproduces by forcing its resolved push list empty rather than by
+///   anything in this function.
+///
+/// A block already carried past either site keeps its own, independent
+/// countdown and commits on schedule regardless of what happens to the piston
+/// that pushed it. The arm site is confirmed live (the pushed block's own
 /// moving entity, positioned two cells from the base, was untouched by the
-/// arm's interruption and committed to `minecraft:dirt` on its own timer).
+/// arm's interruption and committed to `minecraft:dirt` on its own timer,
+/// `redstone_piston_order_oracle_gate.rs`); the two-cell site is hermetically
+/// verified only (`crate::random_tick`'s own test module) — see
+/// `docs/redstone-pistons.md` for why a live two-piston race is unattempted.
 #[must_use]
 pub fn interrupt(pos: BlockPos, entity: &MovingBlockEntity) -> MoveWrite {
     if entity.source {
