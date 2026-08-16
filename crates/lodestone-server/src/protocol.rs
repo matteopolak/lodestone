@@ -9,7 +9,7 @@
 //! encoders/decoders (plan §3).
 
 use lodestone_core::State;
-use lodestone_model::command_tree::CommandTree;
+use lodestone_model::command_tree::{CommandSuggestionsResponse, CommandTree};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode,
     ItemStack, ResourceKey, Rotation, SoundCategory, Text, Vec3, Vec3f,
@@ -1003,6 +1003,70 @@ pub enum ServerBound {
         /// its rider's, so it is carried rather than dropped.
         pitch: f32,
     },
+    /// A spectator clicking a player's name in the tab list
+    /// (`ServerboundTeleportToEntityPacket`), asking to be moved to that
+    /// player's position. Vanilla's `handleTeleportToEntityPacket`
+    /// (`ServerGamePacketListenerImpl.java`) resolves the uuid against every
+    /// loaded level's entities and teleports on the first hit, gated on
+    /// `player.isSpectator()`.
+    ///
+    /// This crate's consumer (`crate::server`'s dispatch arm) narrows the
+    /// search to connected players only — `PlayerRegistry::candidates` is the
+    /// one uuid-keyed, position-carrying source this crate has; there is no
+    /// uuid index for non-player entities (`MobSim` resolves mobs by integer
+    /// id), so a spectator targeting a mob's uuid is a disclosed gap rather
+    /// than a silent one. The target's own facing is not carried through
+    /// either — `PlayerCandidate` has no rotation field — so the teleport
+    /// keeps the spectator's current yaw/pitch rather than matching vanilla's
+    /// `entity.getYRot()/getXRot()`.
+    TeleportToEntity {
+        /// The uuid of the entity to teleport to.
+        uuid: Uuid,
+    },
+    /// The client swung its arm (`ServerboundSwingPacket`). Vanilla's
+    /// `LivingEntity.swing` (called from `handleAnimate`) broadcasts a
+    /// `ClientboundAnimatePacket` to every player *tracking* the swinger —
+    /// **not** back to the swinger itself, which already plays the animation
+    /// locally the instant it sends this packet.
+    ///
+    /// This crate has no per-connection tracking-radius model, so the
+    /// consumer (`crate::server`'s dispatch arm, via
+    /// [`crate::players::PlayerRegistry::swing`]) narrows "tracking players"
+    /// to "every other connected player", the same narrowing chat and
+    /// position already make. Singleplayer has nobody else to broadcast to,
+    /// so it is silently a no-op there, matching the `Chat` variant's own
+    /// documented posture.
+    Swing {
+        /// `0` main hand, `1` off hand.
+        hand: u8,
+    },
+    /// A spectator clicking a nearby entity to attach their camera to it
+    /// (`ServerboundSpectatorActionPacket`). Vanilla's `handleSpectatorAction`
+    /// gates on `player.isSpectator()`, resolves the wire's network entity id
+    /// against the current level, checks the world border and a 3-block
+    /// interaction range, and — if `target.isPickable()` — calls
+    /// `this.player.setCamera(target)`, which sends
+    /// `ClientboundSetCameraPacket`.
+    ///
+    /// This crate's consumer (`crate::server`'s dispatch arm) resolves the id
+    /// against both id-keyed sources it has — `MobHandle::position` for a mob,
+    /// `PlayerRegistry::candidates` for a player — and applies the same
+    /// gating this crate can express: spectator mode, and a plain
+    /// centre-to-centre distance check (no per-entity bounding box exists
+    /// here, so this narrows vanilla's box-aware range check) rather than
+    /// `isPickable`, which this crate has no model for. There is no
+    /// server-side "current camera" state and therefore no reset path: a real
+    /// client resets its own rendered viewpoint locally (sneaking out of
+    /// spectator-camera mode sends no packet in vanilla either), so a single
+    /// one-shot `SET_CAMERA` is the whole of vanilla's own server-side
+    /// contribution to this feature.
+    SpectatorAction {
+        /// The network entity id the client wants to attach its camera to, or
+        /// `None` for the wire's "no target" encoding. Vanilla's own handler
+        /// does nothing at all for `None` (there is no reset-to-self branch),
+        /// so this crate's consumer mirrors that rather than inventing one.
+        target_entity_id: Option<i32>,
+    },
     /// The client's movement-input flags for the current tick
     /// (`ServerboundPlayerInputPacket`, issue #12). Decoded for exactly one
     /// reason: `sprint` is half of vanilla's melee knockback-bonus gate
@@ -1154,6 +1218,25 @@ pub enum ServerBound {
         /// The message text exactly as the player typed it, capped at 256
         /// characters by the wire format.
         message: String,
+    },
+    /// A tab-completion request (`ServerboundCommandSuggestionPacket`, the
+    /// wire half of issue #48 that `ChatCommand` alone does not cover).
+    ///
+    /// `command` is the **whole input line, including the leading `/`** — that
+    /// is the wire format (`crates/protocol/v770/src/packets/game.rs`'s
+    /// `CommandSuggestion` struct documents the same layout from the
+    /// client-encode side), unlike [`ChatCommand`](Self::ChatCommand), which
+    /// has the slash stripped by the *different* packet that carries it.
+    /// `crate::server`'s consumer strips it before consulting
+    /// [`crate::ServerCommands::suggest`], mirroring vanilla's
+    /// `ServerGamePacketListenerImpl.handleCustomCommandSuggestions`, which
+    /// skips exactly one leading `/` off its `StringReader` before parsing.
+    CommandSuggestion {
+        /// Transaction id, echoed back verbatim in the response so the client
+        /// can discard a reply to a request it has since abandoned.
+        id: i32,
+        /// The full input line as typed, including the leading `/`.
+        command: String,
     },
     /// A custom plugin-message payload from the client
     /// (`ServerboundCustomPayloadPacket`, issue #335) — the version-free
@@ -1881,6 +1964,24 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes vanilla's `ClientboundCommandSuggestionsPacket` (id 15) — the
+    /// answer to a `ServerboundCommandSuggestionPacket` (`ServerBound::CommandSuggestion`),
+    /// `ServerGamePacketListenerImpl.handleCustomCommandSuggestions`'s reply.
+    ///
+    /// `response.id` echoes the request's transaction id verbatim; `start`/`length`
+    /// name the byte range of the *request's* command text the suggestions
+    /// replace. `crate::commands::ServerCommands::suggest` is the source of the
+    /// candidate strings — see `crate::server`'s `ServerBound::CommandSuggestion`
+    /// consumer for how the range is derived from the request.
+    ///
+    /// The default emits nothing, so a protocol family without server-side
+    /// tab-completion need not override it and a client typing `/` there simply
+    /// gets no suggestions, exactly as it gets no `COMMANDS` tree either.
+    fn encode_command_suggestions(&self, response: &CommandSuggestionsResponse) -> ServerDirective {
+        let _ = response;
+        ServerDirective::None
+    }
+
     /// Encodes vanilla's `ClientboundSetPassengersPacket` — the packet that makes
     /// a player *be* in a boat.
     ///
@@ -2417,6 +2518,33 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes `ClientboundAnimatePacket` — the arm-swing animation, the
+    /// [`ServerBound::Swing`] consumer's whole output. `action` is vanilla's
+    /// own byte constant (`0` main-hand swing, `3` off-hand swing); this
+    /// method carries it verbatim rather than a `hand` field, so a future
+    /// caller that wants `WAKE_UP`/`CRITICAL_HIT`/`MAGIC_CRITICAL_HIT` (`2`,
+    /// `4`, `5`) is not blocked on a new method.
+    ///
+    /// The default emits nothing, so a protocol family with no animation
+    /// support need not override it — a swing that reaches this call and
+    /// produces nothing is a documented gap, not a silently wrong packet.
+    fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
+        let _ = (entity_id, action);
+        ServerDirective::None
+    }
+
+    /// Encodes `ClientboundSetCameraPacket` — attaches the receiving client's
+    /// rendered viewpoint to `entity_id`, the whole of
+    /// [`ServerBound::SpectatorAction`]'s consumer output. See that variant's
+    /// own doc comment for why there is no corresponding "reset to self"
+    /// encoder.
+    ///
+    /// The default emits nothing, matching every other encoder in this trait.
+    fn encode_set_camera(&self, entity_id: i32) -> ServerDirective {
+        let _ = entity_id;
+        ServerDirective::None
+    }
+
     /// Encodes a **dimension change** — the same `ClientboundRespawnPacket` pair
     /// [`encode_respawn`](Self::encode_respawn) sends, aimed at another level.
     ///
@@ -2942,6 +3070,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).encode_commands(tree)
     }
 
+    fn encode_command_suggestions(&self, response: &CommandSuggestionsResponse) -> ServerDirective {
+        (**self).encode_command_suggestions(response)
+    }
+
     fn encode_set_passengers(&self, vehicle_id: i32, passenger_ids: &[i32]) -> ServerDirective {
         (**self).encode_set_passengers(vehicle_id, passenger_ids)
     }
@@ -3199,6 +3331,14 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_teleport(&self, x: f64, y: f64, z: f64, yaw: f32, pitch: f32) -> ServerDirective {
         (**self).encode_teleport(x, y, z, yaw, pitch)
+    }
+
+    fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
+        (**self).encode_animate(entity_id, action)
+    }
+
+    fn encode_set_camera(&self, entity_id: i32) -> ServerDirective {
+        (**self).encode_set_camera(entity_id)
     }
 
     fn encode_recipe_book_add(
