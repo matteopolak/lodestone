@@ -54,6 +54,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "v770_clientbound_decode_by_id"
+path = "fuzz_targets/v770_clientbound_decode_by_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "v770_serverbound_decode"
 path = "fuzz_targets/v770_serverbound_decode.rs"
 test = false
