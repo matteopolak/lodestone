@@ -187,59 +187,69 @@ NBT (compound tags, integers, block-state strings, item ids); the closest
 thing to free text is `Metadata.Name`/`Metadata.Author`, both plain
 human-authored labels quoted verbatim in the table above.
 
-### Downloaded, not yet measured further
-
-`.cache/redstone-benchmarks/` is not committed, so the table above is the
-durable record. Re-running `redstone_contraptions_report` after fetching
-these four regenerates the numbers in "Findings" below from scratch — nothing
-here should be treated as a citation of a specific past run's output rather
-than a reproducible measurement.
-
 ## Findings
 
-Scene: all four fixtures placed on a fresh, otherwise-empty flat overworld
-(bedrock/dirt/dirt/grass_block), no mobs, no other players, this machine
-under concurrent load from other agents' `cargo` builds during the
-measurement (named per this repo's own "name the scene" rule — see the
-`TickStats` caveat above for why the duration-based figures specifically are
-not to be trusted as absolute numbers from this run).
+### Status: not yet run — say this plainly rather than fabricate a number
 
-Component counts, from the loader's own parse (not from the file's
-self-reported `TotalBlocks`, which counts every non-air block including
-plain building material — see the per-file `by_name` breakdown for the
-redstone-specific share):
+**Nothing in this section is an executed measurement yet.** The machine this
+harness was built on was, for the whole of that session, running 30+
+concurrent `rustc` processes from other agents' live builds (`ps aux`,
+non-zero `vm.swapusage`, and a `cargo check -p lodestone-anvil` that sat
+"Blocking waiting for file lock on build directory" for over twenty minutes
+without the lock ever freeing) — a documented condition of this repo's
+shared checkout, not a defect in this harness. A parallel attempt with an
+isolated `CARGO_TARGET_DIR` (to sidestep the lock specifically) made zero
+forward progress over a monitored 100-second window under the same CPU
+pressure. So this code is committed **manually verified, not
+compiler-verified**: every public function/type it calls was confirmed
+against the real source (`grep`s cited throughout this doc and the test
+file's own comments), and its `ServerProtocol` double mirrors
+`tests/tick_loop_light.rs`'s already-working one method-for-method. Run
+`cargo check -p lodestone-anvil --all-targets` first, then
+`cargo test -p lodestone-anvil --test redstone_benchmark -- --ignored --nocapture`
+after fetching the fixtures above, and replace this whole section with the
+real output.
 
-| file | non-air blocks placed | redstone components | dominant families |
-|---|---|---|---|
-| `raid_farm.litematic` | (fill in from a real run — see below) | | |
-| `Raid_Farm_Schematic_2.litematic` | | | |
-| `IanXO4_Practical_Stacking_Raid_Farm_suggested.litematic` | | | |
-| `bee-and-crop-farm.litematic` | | | |
+Component counts (non-air blocks, and how many are redstone components) are
+independently obtainable without Rust at all — direct NBT inspection of each
+downloaded file — and the four numbers below **were** measured this way, so
+they are real, reproducible facts about the fixtures rather than a
+prediction. `PuffingFishHQ`'s `raid_farm.litematic` carries 1393 total
+NBT-declared blocks (`Metadata.TotalBlocks`) across a 20×154×12 region;
+`CowKingTroller`'s `Raid_Farm_Schematic_2.litematic` carries 3775 across
+21×158×45; `fairhard`'s `IanXO4_Practical_Stacking_Raid_Farm_suggested.litematic`
+carries 3274 across 32×167×32; `OfNullAndVoid`'s `bee-and-crop-farm.litematic`
+carries 8515 across 49×21×49. These are `TotalBlocks`, not this loader's own
+post-air-filter count or its redstone-component breakdown — get those from a
+real run of `redstone_contraptions_report`, which prints both per file.
 
-**The central finding, reproduced on real downloaded contraptions rather
-than the 15-cell synthetic dust run this harness's brief cited:**
-`redstone_counters` reads at or near **zero** for every one of the four
-fixtures above, for the full reason given under "What loading this way does
-not reproduce" — a schematic file captures a circuit's **steady state**
-(every wire's power level, every repeater's `locked`/`powered`, every
-torch's `lit`, already resolved), and this harness's loader writes that
-state with a raw `ChunkSource::set_block`, which triggers no neighbour
-notification. Nothing in the circuit is scheduled to run, so nothing does,
-and the counters that would attribute cost to neighbour scanning have
-nothing to count. This is not a bug in the four fixtures or in the harness;
-it is the direct, mechanical consequence of the one gap named above (no
-public path to re-inject `PendingBlockTicks`/`PendingFluidTicks`, and no
-public path to drive a real placement/break packet that would trigger the
-production propagation path from outside `lodestone-server`).
+**The mechanistic prediction this harness was built to test, stated as a
+prediction and not yet confirmed by a run:** `redstone_counters` should read
+at or near **zero** for all four fixtures, for the reason given under "What
+loading this way does not reproduce" — a schematic file captures a circuit's
+**steady state** (every wire's power level, every repeater's
+`locked`/`powered`, every torch's `lit`, already resolved), and this
+harness's loader writes that state with a raw `ChunkSource::set_block`,
+which triggers no neighbour notification. Nothing in the circuit is
+scheduled to run, so nothing does, and the counters that would attribute
+cost to neighbour scanning would have nothing to count. If a real run
+contradicts this prediction, that is itself the more interesting finding —
+it would mean some other producer (a hopper hopper-tick, a random tick near
+a redstone-adjacent block) reaches `redstone_counters`' hooks without a
+propagation pass, which this doc's mechanism argument above does not
+account for, and the doc should be corrected from the real output rather
+than the prediction defended.
 
-**This reproduces, and now explains, the `state_parses=0` surprise the task
-brief flagged from the 15-cell dust-run measurement**: `own_signal` (the
-`state_parses` counter's one call site) is only reached from inside a live
-propagation pass, and a world with nothing scheduled and nothing perturbed
-never enters one — the same mechanism, at two very different scales. It is
-not evidence any redstone family is unmodelled; `redstone_oracle_gate.rs`'s
-own live-server-verified propagation tests exercise `own_signal` constantly
-when a *change* actually happens.
+**If the prediction holds, it would explain — via the same mechanism, not
+by re-running it — the `state_parses=0` surprise the task brief flagged from
+an earlier 15-cell synthetic dust run**: `own_signal` (the `state_parses`
+counter's one call site) is only reached from inside a live propagation
+pass, and a world with nothing scheduled and nothing perturbed never enters
+one. That would not be evidence any redstone family is unmodelled —
+`redstone_oracle_gate.rs`'s own live-server-verified propagation tests
+exercise `own_signal` constantly when a *change* actually happens — only
+that loading a steady-state snapshot and loading a live-perturbed circuit
+are different inputs, and this harness currently only builds the former.
 
 **What this means for issue #548**: a steady, unperturbed contraption's
 *ongoing* cost is genuinely close to zero in this engine today — which is
