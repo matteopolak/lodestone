@@ -1017,6 +1017,10 @@ fn client_event_carriers_cover_play_state_gameplay_packets_without_protocol_ids(
             offset: Vec3f::new(0.1, 0.2, 0.3),
             max_speed: 0.4,
             count: 8,
+            options: ParticleOptions::Dust {
+                color: [0.9, 0.1, 0.2],
+                scale: 1.5,
+            },
         },
         ClientEvent::ContainerContent {
             window_id: 1,

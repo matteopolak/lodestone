@@ -483,6 +483,29 @@ pub enum Behaviour {
     /// ticks** rather than the back half of life. Getting the fade wrong is what
     /// makes signal smoke vanish halfway up. See [`Particle::tick_campfire_smoke`].
     CampfireSmoke,
+    /// `DustParticle` (`ParticleTypes.DUST`) via `DustParticleBase` — the
+    /// `minecraft:dust` particle option's colour, randomised once per
+    /// particle and held for its whole life. Shares `dust.json`'s sheet
+    /// (`generic_0`…`generic_7`, the same eight textures as [`Sheet::Generic`]
+    /// itself — confirmed against the real pack rather than assumed from the
+    /// registry name) and the same age-driven sheet animation as
+    /// [`Self::AshSmoke`]. See [`crate::emit::dust`].
+    Dust,
+    /// `DustColorTransitionParticle` (`ParticleTypes.DUST_COLOR_TRANSITION`) —
+    /// the sculk-to-redstone sibling of [`Self::Dust`]. Same physics and
+    /// sheet; the colour itself lerps from `from` to `to` over the particle's
+    /// life instead of staying fixed. Vanilla recomputes the lerp every frame
+    /// from a partial tick (`DustColorTransitionParticle.lerpColors`); this
+    /// port advances it once per game tick instead, the same granularity
+    /// [`Self::Crit`]'s desaturation already uses rather than a per-frame
+    /// interpolation. See [`crate::emit::dust_color_transition`].
+    DustColorTransition {
+        /// Randomised starting colour (`DustColorTransitionOptions::fromColor`,
+        /// after `DustParticleBase::randomizeColor`).
+        from: [f32; 3],
+        /// Randomised ending colour.
+        to: [f32; 3],
+    },
 }
 
 impl Behaviour {
@@ -494,7 +517,9 @@ impl Behaviour {
                 | Self::SimpleAnimated { .. }
                 | Self::SweepAttack
                 | Self::Spell
-                | Self::HugeExplosion,
+                | Self::HugeExplosion
+                | Self::Dust
+                | Self::DustColorTransition { .. },
                 SpriteSource::Sheet { sheet, .. },
             ) => Some(sheet),
             _ => None,
@@ -526,7 +551,9 @@ impl Behaviour {
             | Self::Suspended
             | Self::HugeExplosionSeed
             | Self::HugeExplosion
-            | Self::Portal => Layer::Opaque,
+            | Self::Portal
+            | Self::Dust
+            | Self::DustColorTransition { .. } => Layer::Opaque,
         }
     }
 }
@@ -800,8 +827,13 @@ impl Particle {
             // `quadSize * clamp((age + a) / lifetime * 32, 0, 1)` — a fast fade
             // *in* over the first 1/32 of life, not a fade out. `NoteParticle`
             // and `HeartParticle` both override `getQuadSize` with this exact
-            // expression too.
-            Behaviour::Crit | Behaviour::AshSmoke | Behaviour::Note | Behaviour::Heart => {
+            // expression too, and so does `DustParticleBase`.
+            Behaviour::Crit
+            | Behaviour::AshSmoke
+            | Behaviour::Note
+            | Behaviour::Heart
+            | Behaviour::Dust
+            | Behaviour::DustColorTransition { .. } => {
                 self.quad_size * (normalised() * 32.0).clamp(0.0, 1.0)
             }
             // `quadSize * (1 - s * s * 0.5)`.
@@ -927,8 +959,27 @@ impl Particle {
                 self.colour[1] *= 0.96;
                 self.colour[2] *= 0.9;
             }
-            Behaviour::AshSmoke | Behaviour::Spell | Behaviour::HugeExplosion => {
+            Behaviour::AshSmoke | Behaviour::Spell | Behaviour::HugeExplosion | Behaviour::Dust => {
                 self.set_sprite_from_age();
+            }
+            // `DustColorTransitionParticle` additionally lerps its colour —
+            // vanilla does this every *frame* from `extract`'s partial tick
+            // (`lerpColors`); this port advances it once per tick instead, at
+            // the same granularity `Behaviour::Crit`'s desaturation already
+            // uses. `age` runs 1..=lifetime here (checked and incremented at
+            // the top of `tick_base` before this runs), matching vanilla's
+            // `(age + partialTickTime) / (lifetime + 1.0F)` closely enough
+            // that the two ends of the transition still land on `from`/`to`.
+            Behaviour::DustColorTransition { from, to } => {
+                self.set_sprite_from_age();
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "tick counts are small; mirrors Java's int-to-float promotion"
+                )]
+                let a = self.age as f32 / (self.lifetime as f32 + 1.0);
+                for i in 0..3 {
+                    self.colour[i] = from[i] + (to[i] - from[i]) * a;
+                }
             }
             Behaviour::SimpleAnimated { fade } => {
                 self.set_sprite_from_age();

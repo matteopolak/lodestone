@@ -7,8 +7,8 @@
 //! and the server-rolled sound `seed` is asserted to survive decode untouched.
 
 use lodestone_model::{
-    ClientEvent, ConnectionState, Directive, ResourceKey, SoundCategory, Text, Vec3, Vec3f,
-    VersionAdapter,
+    ClientEvent, ConnectionState, Directive, ParticleOptions, ResourceKey, SoundCategory, Text,
+    Vec3, Vec3f, VersionAdapter,
 };
 use lodestone_v770::V770Adapter;
 use lodestone_v770::packet_ids::play;
@@ -203,7 +203,50 @@ fn level_particles_decodes_registry_particle() {
             },
             max_speed: 0.1,
             count: 5,
+            options: ParticleOptions::None,
         })]
+    );
+}
+
+/// The gap this pass closed: before it, `LEVEL_PARTICLES`'s trailing option
+/// bytes were captured (`#[mc(remaining)]`) and then thrown away entirely, so
+/// `minecraft:dust` decoded a particle event with no colour at all. Registry
+/// id 21 (`PARTICLE_TYPE_NAMES[21]`, generated from the real 26.2 registry
+/// report) is `minecraft:dust`, whose payload is a packed RGB24 `i32` plus an
+/// `f32` scale (`DustParticleOptions::STREAM_CODEC`). Pairwise-distinct R/G/B
+/// bytes (`0x11`, `0x22`, `0x33`) so a channel transposition in the decode
+/// could not survive this test unnoticed, matching `ARGB.red/green/blue`'s
+/// `>> 16`/`>> 8`/plain `& 0xFF` order.
+#[test]
+fn level_particles_decodes_a_dust_payload() {
+    let adapter = V770Adapter::new();
+    let mut bytes = Vec::new();
+    bytes.push(0x00); // override limiter = false
+    bytes.push(0x00); // always show = false
+    bytes.extend_from_slice(&2.0f64.to_be_bytes()); // x
+    bytes.extend_from_slice(&65.0f64.to_be_bytes()); // y
+    bytes.extend_from_slice(&3.0f64.to_be_bytes()); // z
+    bytes.extend_from_slice(&0.0f32.to_be_bytes()); // x dist
+    bytes.extend_from_slice(&0.0f32.to_be_bytes()); // y dist
+    bytes.extend_from_slice(&0.0f32.to_be_bytes()); // z dist
+    bytes.extend_from_slice(&0.0f32.to_be_bytes()); // max speed
+    bytes.extend_from_slice(&1i32.to_be_bytes()); // count
+    bytes.push(21); // particle id 21 = dust
+    bytes.extend_from_slice(&0x0011_2233i32.to_be_bytes()); // packed RGB24
+    bytes.extend_from_slice(&1.5f32.to_be_bytes()); // scale
+
+    let directives = handle(&adapter, play::clientbound::LEVEL_PARTICLES, &bytes);
+    let Directive::Emit(ClientEvent::Particles { particle, options, .. }) = &directives[0] else {
+        panic!("expected a Particles directive, got {directives:?}");
+    };
+    assert_eq!(*particle, key("minecraft:dust"));
+    assert_eq!(
+        *options,
+        ParticleOptions::Dust {
+            color: [0x11 as f32 / 255.0, 0x22 as f32 / 255.0, 0x33 as f32 / 255.0],
+            scale: 1.5,
+        },
+        "the RGB24 payload must unpack in ARGB's red/green/blue order, not transposed"
     );
 }
 

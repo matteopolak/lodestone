@@ -120,10 +120,43 @@ emit.rs` doc comments on `note`/`heart`/`angry_villager`/`happy_villager`/`witch
 - `Behaviour::Spell` (`witch`) reuses `AshSmoke`'s per-tick `set_sprite_from_age()` call but
   needs its own layer (`Translucent`, not `Opaque`).
 
-**Explicitly blocked, not attempted:** `dust` carries a real `ParticleOptions` payload
-(`DustParticleOptions`) that this workspace has no generic decoder for. Building one without
-the shared decoder would mean hand-rolling a second, narrower one; flagged rather than
-special-cased, per the brief for this pass.
+**Built.** `dust` and `dust_color_transition` both carry a real `ParticleOptions` payload
+(`DustParticleOptions`/`DustColorTransitionOptions`) — issue #683's `DEBUG no emitter wired
+for particle type "dust"; dropped`, on a live server, is what this closed. The shared decoder
+this section used to say did not exist anywhere in the workspace is now
+`decode_particle_options` (`crates/protocol/v770/src/adapter/chunk.rs`), called from the
+`LEVEL_PARTICLES` handler right after it resolves the registry name: it reads a packed RGB24
+big-endian `i32` (`ARGB.red/green/blue`'s own `>> 16`/`>> 8`/plain `& 0xFF`, unpacked to
+`[0, 1]` the same way `ARGB.redFloat` does) plus a big-endian `f32` scale for `dust`, and two
+such colours for `dust_color_transition`, landing in
+`lodestone_model::event::ParticleOptions::Dust`/`DustColorTransition`. Every name this
+decoder does not recognise still resolves to `ParticleOptions::None` — correct for the
+overwhelming majority of registry entries (a bare `SimpleParticleType`), not a placeholder.
+
+Both share `dust.json`/`dust_color_transition.json`'s sheet — the same eight
+`generic_0..generic_7` textures as `Sheet::Generic` itself, confirmed against the real pack
+rather than assumed from the registry name, so no new `Sheet` variant was needed.
+`Behaviour::Dust`/`Behaviour::DustColorTransition { from, to }`
+(`crates/lodestone-particle/src/lib.rs`) transcribe `DustParticleBase`'s shared physics
+(`friction = 0.96`, `speedUpWhenYMotionIsBlocked`, `xd/yd/zd *= 0.1`, `quadSize *= 0.75 *
+scale`, the `(int)(8.0 / (nextDouble()*0.8+0.2))` lifetime redraw, and the same fast-fade-in
+`getQuadSize` formula `Crit`/`AshSmoke`/`Note`/`Heart` already share) plus
+`DustParticle`/`DustColorTransitionParticle`'s own per-channel `randomizeColor` draws
+(`crates/lodestone-particle/src/emit.rs`'s `dust`/`dust_color_transition`). The colour
+transition itself lerps once per game tick rather than vanilla's per-*frame* partial-tick
+recompute (`DustColorTransitionParticle.lerpColors`) — the same tick-granularity
+simplification `Behaviour::Crit`'s desaturation already makes, documented on the `Behaviour`
+variant itself.
+
+**Caught by the decoder's own test, not by inspection:** the first version matched the
+namespace-*stripped* path (`"dust"`) against `particle_type_name`'s fully-qualified output
+(`"minecraft:dust"`), so every dust particle silently fell back to `ParticleOptions::None` —
+exactly the "assertion" species of vacuous fix this repo's evidence standards warn about, a
+correct-looking decoder function fed the wrong name by its own caller. A test whose expected
+`ParticleOptions::Dust { .. }` value is derived from the RGB bytes rather than from re-running
+the decoder (`level_particles_decodes_a_dust_payload`,
+`crates/protocol/v770/tests/sound_particle_screen.rs`) is what caught it — `None != Dust {..}`,
+not a green pass.
 
 **Correction: `firework` was never in this bucket, and the claim above that it needed a
 `ParticleOptions` decoder was wrong.** `ParticleTypes.FIREWORK`
@@ -234,8 +267,11 @@ client-predicted per-block-state emitter.
   `Block.animateTick` — so no dispatch table however complete could have produced them. It rides
   the collision snapshot `Sim::tick_particles` already holds, so it costs no extra lock.
 * **Still not wired:** `enchant` (its motes travel toward a target the enchanting-table block
-  entity supplies, a different wiring shape from everything here), and `dust`/`dust_color_transition`
-  and the other option-carrying types, which still want the shared `ParticleOptions` decoder.
+  entity supplies, a different wiring shape from everything here). `dust`/`dust_color_transition`
+  are now built — see "Built" above — but the other option-carrying types (`block`,
+  `block_marker`, `falling_dust`, `item`, …) still want their own arm in
+  `decode_particle_options`; the decoder itself is no longer the blocker, only the per-type
+  payload shape.
 
 ## Verification
 
@@ -270,11 +306,19 @@ transcribed vanilla constant, documented inline with its Java source line.
   and `emit.rs` doc comments for the per-type Java source.
 - `Particles::spawn_one`/`spawn_particles` (`crates/lodestone-shell/src/particles.rs`) — the
   dispatch this pass extended.
-- No protocol or ECS changes. The `ParticleOptions` decoder that `dust`/`sculk_charge` are
-  blocked on does not exist yet anywhere in the workspace — `explosion`/`explosion_emitter`
-  and `firework` are **not** in that list (see "Built"/"Correction" above); none of the three
-  needed the decoder, only the render `Behaviour`/`emit::` function this pass and the firework
-  fix added.
+- `decode_particle_options` (`crates/protocol/v770/src/adapter/chunk.rs`) and
+  `lodestone_model::event::ParticleOptions` — the shared decoder `dust`/`dust_color_transition`
+  needed, now built (see "Built" above). `explosion`/`explosion_emitter` and `firework` are
+  **not** in that list (see "Built"/"Correction" above); none of the three needed the decoder,
+  only the render `Behaviour`/`emit::` function this pass and the firework fix added.
+  `sculk_charge` is **not** fixed by this pass despite the name grouping it with `dust` above in
+  an earlier draft of this doc: `ParticleTypes.SCULK_CHARGE` is
+  `SculkChargeParticleOptions(float roll)`, a real one-field payload
+  (`.cache/mc/26.2/client-src/net/minecraft/core/particles/SculkChargeParticleOptions.java`),
+  and `decode_particle_options` does not have an arm for it — its existing dispatch arm
+  (`Particles::spawn_one`'s `"sculk_charge"` case) spawns and animates correctly but reads no
+  roll, matching this doc's own "explicitly not attempted" convention rather than a discovered
+  bug.
 
 ## How to change it
 
@@ -285,11 +329,19 @@ transcribed vanilla constant, documented inline with its Java source line.
   `instant_effect` both use `spell_N`, not `witch_N`; `angry_villager` uses `angry.png`, a
   single frame, not `angry_villager.png`). Add a `Sheet`/`Behaviour` variant only if the tick
   shape is genuinely new; several types share one class and can share a `Behaviour`.
-- Before touching `dust` or `sculk_charge`: build the shared `ParticleOptions` decoder first
-  (protocol-side, brokered — not `lodestone-particle`'s to build alone). Special-casing one of
-  these without it just produces a second narrow decoder to reconcile later. `explosion`/
-  `explosion_emitter` and `firework` looked like they belonged on this list too, and did not —
-  see "Built"/"Correction" above for how that was checked before being ruled out, not assumed.
+- The shared `ParticleOptions` decoder now exists (`decode_particle_options`,
+  `crates/protocol/v770/src/adapter/chunk.rs`) — adding another option-carrying type (`block`,
+  `block_marker`, `falling_dust`, `item`, `sculk_charge`, …) means a new arm there plus, if the
+  payload's own colour/scale/whatever needs to reach the emitter, a new
+  `lodestone_model::event::ParticleOptions` variant threaded through `NetUpdate::Particles` and
+  `Particles::spawn_particles`/`spawn_one` (`crates/lodestone-shell/src/particles.rs`) the same
+  way `Dust`/`DustColorTransition` are. **Match on the fully-namespaced registry name**
+  (`"minecraft:dust"`, not `"dust"`) inside the decoder — `particle_type_name` returns the
+  namespaced form, and matching the stripped path silently decodes nothing for every particle;
+  this pass's own first draft made exactly that mistake and only a test whose expected value
+  came from re-deriving the RGB bytes independently caught it. `explosion`/`explosion_emitter`
+  and `firework` looked like they belonged on this list too, and did not — see
+  "Built"/"Correction" above for how that was checked before being ruled out, not assumed.
 - **Read the type's `particles/<type>.json` frame list out of the jar, never infer it.** Half of
   vanilla's multi-frame sheets are listed descending and one (`enchant`) is alphabetic. A wrong
   order animates backwards and every test still passes, because the sprite resolves either way.
