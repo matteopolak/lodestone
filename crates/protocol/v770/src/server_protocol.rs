@@ -3761,9 +3761,16 @@ impl ServerProtocol for V770ServerProtocol {
                 let _ = decode_full::<RecipeBookSeenRecipe>(payload);
                 ServerBound::Ignored
             }
+            // Issue #616's remainder: this used to decode-and-discard; now a
+            // real `ServerBound::SelectTrade`, with `crate::server`'s
+            // consumer resolving the villager from this connection's own
+            // tracked open-merchant state (the packet itself carries no
+            // window id — see that variant's own doc comment).
             State::Play if packet_id == play::serverbound::SELECT_TRADE => {
-                let _ = decode_full::<SelectTrade>(payload);
-                ServerBound::Ignored
+                match decode_full::<SelectTrade>(payload) {
+                    Some(p) => ServerBound::SelectTrade { index: p.index },
+                    None => ServerBound::Ignored,
+                }
             }
             // `ServerboundSetBeaconPacket`: two `Optional<Holder<MobEffect>>`
             // values (primary then secondary power), each read by

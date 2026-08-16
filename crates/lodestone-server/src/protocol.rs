@@ -1434,6 +1434,17 @@ pub enum ServerBound {
         /// `minecraft:written_book`); `None` for an ordinary draft save.
         title: Option<String>,
     },
+    /// A merchant trade-row selection (`ServerboundSelectTradePacket`, issue
+    /// #616's remainder). Carries no window id — vanilla's own consumer,
+    /// `ServerGamePacketListenerImpl.handleSelectTrade`, checks only that
+    /// `player.containerMenu instanceof MerchantMenu`, so `crate::server`'s
+    /// consumer resolves the villager from this connection's own tracked
+    /// open-merchant state rather than from anything on the wire.
+    SelectTrade {
+        /// Index into the open merchant's accumulated offer list
+        /// (`crate::mobs::villager::trades::offers_up_to`'s own order).
+        index: i32,
+    },
     /// A packet the loop does not need to act on (teleport confirmations,
     /// look-only or status-only movement, and several other decoded-but-
     /// unmodelled families — see `crates/protocol/v770/src/server_protocol.rs`'s
