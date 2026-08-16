@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use super::*;
 use crate::config::{Config, Mode};
 use lodestone_ecs::player::SWIMMING_EYE_HEIGHT;
+use lodestone_physics::UseEffects;
 
 fn test_config() -> Config {
     Config {
@@ -4713,6 +4714,57 @@ fn end_use_live_sends_nothing_with_no_prior_press() {
     let sent_again: Vec<ClientAction> =
         std::iter::from_fn(|| actions.try_recv().ok()).collect();
     assert!(sent_again.is_empty(), "still nothing on a repeated release");
+}
+
+/// `ItemUseEffects`'s real writer (issue #671): before this, the component
+/// existed, was read by `compute_movement_intent`, and had zero production
+/// writers — every query resolved `None` and the use-item slowdown/sprint
+/// veto were both permanently inert. `use_item_live` must now resolve the
+/// held item and write a **non-default** value through, not just leave the
+/// component at whatever `Default` already gave it — a gate that only
+/// checked "is it `Some`" would still pass a producer that always writes
+/// `UseEffects::DEFAULT` regardless of what is actually held.
+#[test]
+fn use_item_live_writes_the_held_items_use_effects_not_a_constant() {
+    let (net, _actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+
+    let read_effects = |sim: &mut Sim| -> Option<UseEffects> {
+        let local = sim.local;
+        sim.write(|w| w.get::<ItemUseEffects>(local).and_then(|e| e.0))
+    };
+
+    // Precondition: nothing in progress yet.
+    assert_eq!(read_effects(&mut sim), None, "no use in progress yet");
+
+    // A spear must resolve to the SPEAR override (sprint allowed, no slow).
+    give_main_hand_item(&mut sim, "minecraft:wooden_spear");
+    sim.use_item_live();
+    assert_eq!(
+        read_effects(&mut sim),
+        Some(UseEffects::SPEAR),
+        "charging a spear must write UseEffects::SPEAR, not a constant DEFAULT"
+    );
+    sim.end_use_live();
+    assert_eq!(
+        read_effects(&mut sim),
+        None,
+        "releasing must clear the component back to None"
+    );
+
+    // An ordinary item (a bow) must resolve to DEFAULT, distinguishing this
+    // from a producer that always writes SPEAR.
+    give_main_hand_item(&mut sim, "minecraft:bow");
+    sim.use_item_live();
+    assert_eq!(
+        read_effects(&mut sim),
+        Some(UseEffects::DEFAULT),
+        "drawing a bow must write UseEffects::DEFAULT"
+    );
+    sim.end_use_live();
+    assert_eq!(read_effects(&mut sim), None);
 }
 
 /// Vanilla's `getCurrentItemAttackStrengthDelay`/`getAttackStrengthScale`

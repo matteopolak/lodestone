@@ -19,9 +19,9 @@ use lodestone_controller::{InputState, RawInput, apply_look_inverted};
 pub use lodestone_ecs::{SessionEnd, SessionEndKind, SessionPhase};
 use lodestone_ecs::entity::{Attributes, EntityIndex, EntityKind, MinecraftEntityId, Position};
 use lodestone_ecs::player::{
-    ActionQueue, AttackStrengthTicker, CollisionSource, Dead, Egress, MovementIntent,
-    NearbyEntities, PhysicsState, PlayerCollision, PrevPosition, Profile, SelectedSlot, Submersion,
-    reset_local_player,
+    ActionQueue, AttackStrengthTicker, CollisionSource, Dead, Egress, ItemUseEffects,
+    MovementIntent, NearbyEntities, PhysicsState, PlayerCollision, PrevPosition, Profile,
+    SelectedSlot, Submersion, reset_local_player,
 };
 use lodestone_ecs::session::{
     ActionBarOverlay, HudEffects, Phase, Riding, RespawnCount, ServerDifficulty, ServerEntityId,

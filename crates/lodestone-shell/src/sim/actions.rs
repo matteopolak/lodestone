@@ -29,6 +29,7 @@ use super::*;
 // That fix's veto registry -- see `attack_entity`.
 use lodestone_ecs::player::{FireworkBoost, ItemUseTicks};
 use lodestone_ecs::veto::{ActionVetoes, VerbContext, Verdict};
+use lodestone_physics::UseEffects;
 
 /// `TridentItem.THROW_THRESHOLD_TIME` (`TridentItem.java`) — how long the use
 /// button must be held before a release does anything at all. That fix.
@@ -558,6 +559,7 @@ impl Sim {
     /// the server has no `useItem` in progress — but there is nothing to
     /// justify sending it for.
     pub(crate) fn end_use_live(&mut self) {
+        let local = self.local;
         let (was_using, held_ticks) = self.write(|w| {
             let was_using = {
                 let mut using = w.resource_mut::<UsingItem>();
@@ -567,6 +569,13 @@ impl Sim {
             // actionable, so a use that ends for any reason cannot leave a
             // duration behind for an unrelated later one to inherit.
             let held = w.resource_mut::<ItemUseTicks>().0.take();
+            // Cleared the same unconditional way: a stray `Some` here would
+            // otherwise survive into the next tick's `compute_movement_intent`
+            // read and keep applying a use-item slowdown to a player who is no
+            // longer using anything.
+            if let Some(mut effects) = w.get_mut::<ItemUseEffects>(local) {
+                effects.0 = None;
+            }
             (was_using, held)
         });
         if !was_using {
@@ -863,6 +872,33 @@ impl Sim {
         // and not in frames — a 200 fps client must not reach the threshold ten
         // times sooner than a 20 fps one.
         self.write(|w| w.resource_mut::<ItemUseTicks>().0 = Some(0));
+        // [`ItemUseEffects`]'s writer (issue #671): resolve which
+        // [`UseEffects`] the held main-hand item arms — the same
+        // `player_menu().player_native(selected_slot())` lookup
+        // [`Self::start_firework_boost_if_gliding`] just made two lines
+        // above, read again here rather than threaded through because that
+        // call intentionally returns nothing this one needs. An empty main
+        // hand resolves to `UseEffects::DEFAULT`, matching `UseEffects::for_item`'s
+        // own doc — there is no vanilla item id an empty hand could report,
+        // and `DEFAULT` (no sprinting, a fifth of input) is the correct
+        // fallback in that case as much as for any unrecognised id. Set once,
+        // for the duration of the press — mirroring how `UsingItem`/
+        // `ItemUseTicks` above are also start/end edges rather than
+        // re-derived every tick, since vanilla itself cannot change which
+        // item a use is charging mid-use.
+        let use_effects = self
+            .player_menu()
+            .player_native(self.selected_slot())
+            .filter(|stack| !stack.is_empty())
+            .map_or(UseEffects::DEFAULT, |stack| {
+                UseEffects::for_item(&stack.item().to_string())
+            });
+        let local = self.local;
+        self.write(|w| {
+            if let Some(mut effects) = w.get_mut::<ItemUseEffects>(local) {
+                effects.0 = Some(use_effects);
+            }
+        });
         // A firework rocket used while gliding is the boost, and it
         // is not an interaction with anything the branches below resolve — so it
         // is decided here, before them, off the held stack alone.
