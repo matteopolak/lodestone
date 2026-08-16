@@ -1292,6 +1292,9 @@ mod tests {
                 pot_decorations: None,
                 // Same story: no slot for a player-head owner identity.
                 profile: None,
+                // Same story: no slot for either book component.
+                writable_book_content: None,
+                written_book_content: None,
                 tool: ToolPatch::Set(tool),
                 max_stack_size: Some(1),
                 max_damage: Some(1561),
