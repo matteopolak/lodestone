@@ -1805,6 +1805,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   farmer profession, ported from the real 26.2 registry data. Losing the workstation
   loses the job. Interacting with a professioned villager opens a real
   `minecraft:merchant` screen carrying generated offers.
+- [Villager trade generation and refresh (issue #245)](./villager-trade-generation.md) —
+  The data and economics half of villager trading: a complete, per-profession,
+  per-level trade table transcribed from the real 26.2 registry data (all thirteen
+  workstation professions, not just farmer), and the purchase/restock mechanics —
+  offer uses, demand-driven price fluctuation, and restock cadence — that turn that
+  static table into a live, buyable state per villager.
 - [Wandering trader (issue #240)](./wandering-trader.md) — The entity-spawn slice of
   the wandering trader: `MobSim::spawn_wandering_trader` spawns a real
   `minecraft:wandering_trader` with 1–2 `minecraft:trader_llama` escorts leashed to
@@ -1829,6 +1835,17 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `GAME_EVENT` codes — `START_RAINING` (1), `STOP_RAINING` (2), `RAIN_LEVEL_CHANGE`
   (7), `THUNDER_LEVEL_CHANGE` (8) — and the client turns two scalars in `0.0..=1.0`
   into:
+- [The wither boss fight](./wither-fight.md) — The server-side state for the wither
+  boss fight: the summon-structure block pattern (soul sand/soil plus three wither
+  skulls), the 220-tick invulnerable "emerging" phase, the powered-armor
+  arrow/wind-charge immunity below half health, and the skull-projectile combat rules
+  (flat damage, unconditional impact blast, the `minecraft:wither` status effect on a
+  landed hit, and an owner heal on a kill). Lives at
+  `crates/lodestone-server/src/wither.rs` (the pure port) and
+  `crates/lodestone-server/src/mobs/{wither.rs,wither_pattern.rs}` (the `MobSim`
+  integration and the structure matcher), ported from 26.2's decompiled
+  `WitherBoss`/`WitherSkull`/`WitherSkullBlock` under
+  `.cache/mc/26.2/src/net/minecraft/world/{entity/boss/wither,entity/projectile/hurtingprojectile,level/block}/`.
 - [The workstation economy: anvil, grindstone, smithing table, enchanting table](./workstation-economy.md) —
   The server-side maths and click wiring for the four cost-driven container screens
   issues #253–#255 ask for: the anvil (repair-with-material, repair-by-combining,
