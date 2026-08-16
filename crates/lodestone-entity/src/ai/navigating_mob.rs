@@ -368,6 +368,30 @@ pub struct NavigatingMob<'w> {
     /// [`love_ticks`](Self::love_ticks) for the same reason — vanilla ages it
     /// every tick regardless of whether any goal ran.
     hurt_by_ticks: i32,
+    /// The position of whoever most recently damaged this mob's **owner** —
+    /// the owner-scoped twin of [`last_hurt_by`](Self::last_hurt_by). A
+    /// player is a `LivingEntity` like any other, so `OwnerHurtByTargetGoal`
+    /// reading `owner.getLastHurtByMob()` is the *same* field and the *same*
+    /// 100-tick clear vanilla applies to a mob's own record — hence sharing
+    /// [`LAST_HURT_BY_TICKS`] rather than a separate constant. Recorded by
+    /// [`set_owner_hurt_by`](Self::set_owner_hurt_by), decayed in
+    /// [`advance`](Self::advance), and read by
+    /// [`MobController::owner_hurt_by`] — what
+    /// [`OwnerHurtByTargetGoal`](super::goals::OwnerHurtByTargetGoal)
+    /// retaliates against.
+    owner_hurt_by: Option<Vec3>,
+    /// Ticks remaining on [`owner_hurt_by`](Self::owner_hurt_by), decayed the
+    /// same way as [`hurt_by_ticks`](Self::hurt_by_ticks).
+    owner_hurt_by_ticks: i32,
+    /// The position of whoever this mob's **owner** most recently attacked —
+    /// drives [`OwnerHurtTargetGoal`](super::goals::OwnerHurtTargetGoal),
+    /// which reads vanilla's `owner.getLastHurtMob()` (again the owner's own
+    /// `LivingEntity` field, same [`LAST_HURT_BY_TICKS`] clear). Recorded by
+    /// [`set_owner_hurt_target`](Self::set_owner_hurt_target).
+    owner_hurt_target: Option<Vec3>,
+    /// Ticks remaining on [`owner_hurt_target`](Self::owner_hurt_target),
+    /// decayed the same way as [`hurt_by_ticks`](Self::hurt_by_ticks).
+    owner_hurt_target_ticks: i32,
     /// Ticks remaining on "took damage recently", the panic window
     /// ([`PANIC_DAMAGE_TICKS`]). Set by [`note_hurt`](Self::note_hurt) for
     /// **every** hit, including one with no identifiable attacker, because
@@ -583,6 +607,10 @@ impl<'w> NavigatingMob<'w> {
             no_action_time: 0,
             last_hurt_by: None,
             hurt_by_ticks: 0,
+            owner_hurt_by: None,
+            owner_hurt_by_ticks: 0,
+            owner_hurt_target: None,
+            owner_hurt_target_ticks: 0,
             damage_ticks: 0,
             follow_range: DEFAULT_FOLLOW_RANGE,
             angry_target: None,
@@ -1188,6 +1216,40 @@ impl<'w> NavigatingMob<'w> {
         self
     }
 
+    /// Records that this mob's **owner** was just damaged by an attacker at
+    /// `attacker` — vanilla's `LivingEntity::setLastHurtByMob`, called on the
+    /// *owner's* entity rather than this one. The host (which alone knows who
+    /// owns whom, and resolves a hit against a player) calls this on every
+    /// tamed pet belonging to that player the instant the hit resolves; see
+    /// [`owner_hurt_by`](Self::owner_hurt_by)'s own doc comment for the decay
+    /// rule. `None` clears the record without restarting the countdown.
+    pub fn set_owner_hurt_by(&mut self, attacker: Option<Vec3>) -> &mut Self {
+        if let Some(attacker) = attacker {
+            self.owner_hurt_by = Some(attacker);
+            self.owner_hurt_by_ticks = LAST_HURT_BY_TICKS;
+        } else {
+            self.owner_hurt_by = None;
+            self.owner_hurt_by_ticks = 0;
+        }
+        self
+    }
+
+    /// Records that this mob's **owner** just attacked `target` — vanilla's
+    /// `LivingEntity::setLastHurtMob`, called on the owner's entity. Same
+    /// host-drives-it shape as [`set_owner_hurt_by`](Self::set_owner_hurt_by);
+    /// see [`owner_hurt_target`](Self::owner_hurt_target)'s doc comment for
+    /// the decay rule.
+    pub fn set_owner_hurt_target(&mut self, target: Option<Vec3>) -> &mut Self {
+        if let Some(target) = target {
+            self.owner_hurt_target = Some(target);
+            self.owner_hurt_target_ticks = LAST_HURT_BY_TICKS;
+        } else {
+            self.owner_hurt_target = None;
+            self.owner_hurt_target_ticks = 0;
+        }
+        self
+    }
+
     /// The block cell the mob's feet occupy, for the fluid classification
     /// below. The follower snaps `pos.y` to the floor it stands on, so this is
     /// the cell *containing* the feet, not the floor beneath them.
@@ -1292,6 +1354,22 @@ impl<'w> NavigatingMob<'w> {
             self.hurt_by_ticks -= 1;
             if self.hurt_by_ticks == 0 {
                 self.last_hurt_by = None;
+            }
+        }
+        // Same decay, applied to the owner-scoped twins — see
+        // [`owner_hurt_by`](Self::owner_hurt_by)'s own doc comment for why
+        // they share vanilla's ordinary `lastHurtByMob`/`lastHurtMob` clear
+        // rather than a bespoke window.
+        if self.owner_hurt_by_ticks > 0 {
+            self.owner_hurt_by_ticks -= 1;
+            if self.owner_hurt_by_ticks == 0 {
+                self.owner_hurt_by = None;
+            }
+        }
+        if self.owner_hurt_target_ticks > 0 {
+            self.owner_hurt_target_ticks -= 1;
+            if self.owner_hurt_target_ticks == 0 {
+                self.owner_hurt_target = None;
             }
         }
         if self.damage_ticks > 0 {
@@ -1414,6 +1492,14 @@ impl MobController for NavigatingMob<'_> {
 
     fn last_hurt_by(&self) -> Option<Vec3> {
         self.last_hurt_by
+    }
+
+    fn owner_hurt_by(&self) -> Option<Vec3> {
+        self.owner_hurt_by
+    }
+
+    fn owner_hurt_target(&self) -> Option<Vec3> {
+        self.owner_hurt_target
     }
 
     fn temptation(&self) -> Option<Vec3> {
@@ -3351,6 +3437,47 @@ mod tests {
             MobController::last_hurt_by(&early),
             None,
             "the attacker must be forgotten exactly at LAST_HURT_BY_TICKS"
+        );
+    }
+
+    /// The owner-scoped twins decay on exactly the same window as
+    /// [`last_hurt_by`](NavigatingMob::last_hurt_by) — see
+    /// `owner_hurt_by`/`owner_hurt_target`'s own doc comments for why they
+    /// share [`LAST_HURT_BY_TICKS`] rather than a bespoke constant. Same
+    /// exact-tick-boundary shape as the test above, for both records at once
+    /// since they are independent fields set by independent host calls.
+    #[test]
+    fn owner_combat_records_decay_on_the_same_window_as_last_hurt_by() {
+        let world = FluidArena::dry();
+        let attacker = Vec3::new(4.5, 0.0, 0.5);
+        let victim = Vec3::new(-2.0, 0.0, 6.0);
+
+        let mut mob = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
+        mob.set_owner_hurt_by(Some(attacker));
+        mob.set_owner_hurt_target(Some(victim));
+        for _ in 0..LAST_HURT_BY_TICKS - 1 {
+            mob.advance();
+        }
+        assert_eq!(
+            MobController::owner_hurt_by(&mob),
+            Some(attacker),
+            "owner_hurt_by must still be live one tick before the window closes"
+        );
+        assert_eq!(
+            MobController::owner_hurt_target(&mob),
+            Some(victim),
+            "owner_hurt_target must still be live one tick before the window closes"
+        );
+        mob.advance();
+        assert_eq!(
+            MobController::owner_hurt_by(&mob),
+            None,
+            "owner_hurt_by must clear exactly at LAST_HURT_BY_TICKS"
+        );
+        assert_eq!(
+            MobController::owner_hurt_target(&mob),
+            None,
+            "owner_hurt_target must clear exactly at LAST_HURT_BY_TICKS"
         );
     }
 

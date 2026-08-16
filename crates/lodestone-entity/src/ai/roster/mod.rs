@@ -70,8 +70,8 @@
 use super::goal::Goal;
 use super::goals::{
     AvoidEntityGoal, BreedGoal, FloatGoal, HurtByTargetGoal, LookAtPlayerGoal, MeleeAttackGoal,
-    NearestAttackableTargetGoal, RandomLookAroundGoal, RandomStrollGoal, SitWhenOrderedToGoal,
-    SwellGoal,
+    NearestAttackableTargetGoal, OwnerHurtByTargetGoal, OwnerHurtTargetGoal, RandomLookAroundGoal,
+    RandomStrollGoal, SitWhenOrderedToGoal, SwellGoal,
 };
 
 pub mod equine;
@@ -336,6 +336,20 @@ pub fn swell(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// propagation is not modelled anywhere yet.
 pub fn hurt_by_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(HurtByTargetGoal::new())
+}
+
+/// `OwnerHurtByTargetGoal(this)` — a target-selector goal, no arguments.
+/// Retaliates against whoever last hurt this mob's owner. See
+/// [`OwnerHurtByTargetGoal`]'s own doc comment.
+pub fn owner_hurt_by_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(OwnerHurtByTargetGoal::new())
+}
+
+/// `OwnerHurtTargetGoal(this)` — a target-selector goal, no arguments. Joins
+/// whatever fight this mob's owner just started. See
+/// [`OwnerHurtTargetGoal`]'s own doc comment.
+pub fn owner_hurt_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(OwnerHurtTargetGoal::new())
 }
 
 /// `NearestAttackableTargetGoal<>(this, Player.class, true)` — a target-selector

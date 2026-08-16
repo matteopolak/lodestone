@@ -952,6 +952,91 @@ impl Goal for HurtByTargetGoal {
     }
 }
 
+/// Retaliates against whoever last damaged this mob's **owner**.
+///
+/// Vanilla `OwnerHurtByTargetGoal` (flag TARGET), reading
+/// `owner.getLastHurtByMob()` — same shape as [`HurtByTargetGoal`], read from
+/// [`MobController::owner_hurt_by`] instead of `last_hurt_by`. Ignores line of
+/// sight, same as `HurtByTargetGoal`.
+#[derive(Debug, Default)]
+pub struct OwnerHurtByTargetGoal {
+    target: Option<Vec3>,
+}
+
+impl OwnerHurtByTargetGoal {
+    /// Creates the goal.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Goal for OwnerHurtByTargetGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Target])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        self.target = mob.owner_hurt_by();
+        self.target.is_some()
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        mob.attack_target().is_some()
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        mob.set_attack_target(self.target);
+    }
+
+    fn stop(&mut self, mob: &mut dyn MobController) {
+        mob.set_attack_target(None);
+        self.target = None;
+    }
+}
+
+/// Joins whatever fight this mob's **owner** just started.
+///
+/// Vanilla `OwnerHurtTargetGoal` (flag TARGET), reading
+/// `owner.getLastHurtMob()` — same shape as [`HurtByTargetGoal`], read from
+/// [`MobController::owner_hurt_target`] instead of `last_hurt_by`.
+#[derive(Debug, Default)]
+pub struct OwnerHurtTargetGoal {
+    target: Option<Vec3>,
+}
+
+impl OwnerHurtTargetGoal {
+    /// Creates the goal.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Goal for OwnerHurtTargetGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Target])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        self.target = mob.owner_hurt_target();
+        self.target.is_some()
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        mob.attack_target().is_some()
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        mob.set_attack_target(self.target);
+    }
+
+    fn stop(&mut self, mob: &mut dyn MobController) {
+        mob.set_attack_target(None);
+        self.target = None;
+    }
+}
+
 /// Follows a nearby entity offering a tempting item, stopping just short of it.
 ///
 /// Vanilla `TemptGoal` (flags MOVE + LOOK). After it ends, a `calm_down` cooldown
@@ -1832,6 +1917,8 @@ mod tests {
         attack: Option<Vec3>,
         stroll: Option<Vec3>,
         hurt_by: Option<Vec3>,
+        owner_hurt_by: Option<Vec3>,
+        owner_hurt_target: Option<Vec3>,
         tempt: Option<Vec3>,
         parent: Option<Vec3>,
         baby: bool,
@@ -1914,6 +2001,12 @@ mod tests {
         }
         fn last_hurt_by(&self) -> Option<Vec3> {
             self.hurt_by
+        }
+        fn owner_hurt_by(&self) -> Option<Vec3> {
+            self.owner_hurt_by
+        }
+        fn owner_hurt_target(&self) -> Option<Vec3> {
+            self.owner_hurt_target
         }
         fn temptation(&self) -> Option<Vec3> {
             self.tempt
@@ -2475,6 +2568,50 @@ mod tests {
         assert!(goal.can_use(&mut mob));
         goal.start(&mut mob);
         assert_eq!(mob.attack_target(), Some(Vec3::new(-3.0, 64.0, 0.0)));
+    }
+
+    #[test]
+    fn owner_hurt_by_retaliates_against_whoever_hurt_the_owner() {
+        let mut goal = OwnerHurtByTargetGoal::new();
+        let mut mob = ScriptMob {
+            owner_hurt_by: Some(Vec3::new(-3.0, 64.0, 0.0)),
+            ..Default::default()
+        };
+        assert!(goal.can_use(&mut mob));
+        goal.start(&mut mob);
+        assert_eq!(mob.attack_target(), Some(Vec3::new(-3.0, 64.0, 0.0)));
+    }
+
+    #[test]
+    fn owner_hurt_by_does_not_fire_with_no_fed_record() {
+        let mut goal = OwnerHurtByTargetGoal::new();
+        let mut mob = ScriptMob::default();
+        assert!(
+            !goal.can_use(&mut mob),
+            "with no owner_hurt_by record fed, the goal must not become eligible"
+        );
+    }
+
+    #[test]
+    fn owner_hurt_target_joins_whatever_the_owner_attacked() {
+        let mut goal = OwnerHurtTargetGoal::new();
+        let mut mob = ScriptMob {
+            owner_hurt_target: Some(Vec3::new(4.0, 64.0, 1.0)),
+            ..Default::default()
+        };
+        assert!(goal.can_use(&mut mob));
+        goal.start(&mut mob);
+        assert_eq!(mob.attack_target(), Some(Vec3::new(4.0, 64.0, 1.0)));
+    }
+
+    #[test]
+    fn owner_hurt_target_does_not_fire_with_no_fed_record() {
+        let mut goal = OwnerHurtTargetGoal::new();
+        let mut mob = ScriptMob::default();
+        assert!(
+            !goal.can_use(&mut mob),
+            "with no owner_hurt_target record fed, the goal must not become eligible"
+        );
     }
 
     #[test]
