@@ -1454,6 +1454,31 @@ impl Sim {
         }
     }
 
+    /// Confirm a beacon's primary/secondary power selection — vanilla's
+    /// `ServerboundSetBeaconPacket` (`BeaconConfirmButton.onPress`,
+    /// `BeaconScreen.java`), sent when the player presses the beacon
+    /// screen's confirm button (issue #613's `SetBeaconEffects` remainder).
+    ///
+    /// [`ClientAction::SetBeaconEffects`] was already encoded by every
+    /// protocol family with no shell caller anywhere — the outbound-island
+    /// shape `ClientAction::SetFlying` was caught in. Best-effort like
+    /// [`Self::send_select_trade`] — a closed session drops it. The caller
+    /// is expected to have already gated this on
+    /// `crate::container::beacon::BeaconSelection::can_confirm`
+    /// (`app::container_input::WindowApp::handle_beacon_click` does), the
+    /// same "predict, don't validate here" shape every other producer in
+    /// this file takes: the server is the authority and corrects a wrong
+    /// send via its own `container_set_data` broadcast.
+    pub fn send_set_beacon_effects(
+        &self,
+        primary: Option<lodestone_model::ResourceKey>,
+        secondary: Option<lodestone_model::ResourceKey>,
+    ) {
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::SetBeaconEffects { primary, secondary });
+        }
+    }
+
     /// Set a container slot's contents by creative fiat — vanilla's
     /// `ServerboundSetCreativeModeSlotPacket`, sent by the creative-inventory
     /// screen (issue #158).

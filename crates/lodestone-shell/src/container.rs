@@ -33,6 +33,10 @@
 /// module doc for why it lives here rather than as an [`crate::menu::edit_box::EditBox`].
 mod anvil_rename;
 mod background;
+/// The beacon screen's power-selection buttons and confirm/cancel click
+/// surface (issue #613's `SetBeaconEffects` remainder) — see its own module
+/// doc.
+pub mod beacon;
 /// The shared GUI vertex builder — colour, item-sprite, glint, block-model and
 /// background streams. `pub(crate)` because it now has three consumers: the
 /// container screen, the creative screen and the Advancements screen

@@ -210,6 +210,66 @@ impl WindowApp {
         true
     }
 
+    /// Resolves a click against the beacon screen's power buttons and
+    /// confirm/cancel controls (issue #613's `SetBeaconEffects` remainder),
+    /// given first refusal for the same reason
+    /// [`Self::handle_merchant_click`]'s own doc gives — this screen's
+    /// buttons never overlap a real slot either, but a contended screen is
+    /// exactly where a click path that forgets to check gets away with it.
+    ///
+    /// A power-button hit only ever updates local pending state
+    /// ([`crate::container::beacon::BeaconSelection`]); the wire send
+    /// happens on confirm, gated on
+    /// [`crate::container::beacon::BeaconSelection::can_confirm`] the same
+    /// way vanilla's own `BeaconConfirmButton.active` gates the press —
+    /// `updateEffects` never runs server-side for an inactive confirm
+    /// either, so a click that lands there while it is disabled is simply
+    /// consumed and does nothing, matching what the player sees.
+    pub(super) fn handle_beacon_click(&mut self, menu: &Menu, w: u32, h: u32) -> bool {
+        if menu.special_layout() != Some(lodestone_game::menu::SpecialLayout::Beacon) {
+            return false;
+        }
+        let levels = self
+            .sim
+            .open_menu()
+            .and_then(|open| open.data.iter().find(|(p, _)| *p == 0).map(|(_, v)| *v))
+            .unwrap_or(0);
+        let Some(hit) = crate::container::beacon::button_hit_test(
+            menu,
+            self.nav.gui_scale(),
+            w,
+            h,
+            self.cursor.0,
+            self.cursor.1,
+            levels,
+            self.beacon_selection.primary.as_ref(),
+        ) else {
+            return false;
+        };
+        match hit {
+            crate::container::beacon::BeaconHit::Power {
+                is_primary: true,
+                effect,
+            } => self.beacon_selection.select_primary(effect),
+            crate::container::beacon::BeaconHit::Power {
+                is_primary: false,
+                effect,
+            } => self.beacon_selection.select_secondary(effect),
+            crate::container::beacon::BeaconHit::Confirm => {
+                let has_payment = menu.slot_item(0).is_some();
+                if self.beacon_selection.can_confirm(has_payment) {
+                    self.sim.send_set_beacon_effects(
+                        self.beacon_selection.primary.clone(),
+                        self.beacon_selection.secondary.clone(),
+                    );
+                    self.sim.close_open_menu();
+                }
+            }
+            crate::container::beacon::BeaconHit::Cancel => self.sim.close_open_menu(),
+        }
+        true
+    }
+
     /// Report this panel's open/filter state for `book_type` to the server —
     /// vanilla's `ServerboundRecipeBookChangeSettingsPacket`, sent from
     /// `RecipeBookComponent`'s own toggle and filter handlers.

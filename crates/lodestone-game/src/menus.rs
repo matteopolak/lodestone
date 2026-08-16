@@ -737,15 +737,20 @@ impl Menus {
 /// [`Menu::stonecutter`], [`Menu::cartography_table`] and
 /// [`Menu::dispenser`] all still build on [`Menu::generic`] and stay
 /// `MenuKind::Generic`, attaching only a [`SpecialLayout`] for
-/// `lodestone-shell` to draw the right panel and slot positions. Three of
+/// `lodestone-shell` to draw the right panel and slot positions. Two of
 /// these screens have a real button-driven sub-feature this pass does not
-/// model — the loom's pattern grid, the stonecutter's recipe list, and (not
-/// yet added here at all) the beacon's power/effect buttons — because each
-/// needs data this tree does not carry yet (a banner-pattern/recipe registry,
-/// or beacon-specific `container_set_data` properties). The slots themselves
-/// need none of that: they are the same "accept anything, let the server's
-/// `container_set_slot` correct a wrong guess" order already established
-/// above.
+/// model — the loom's pattern grid and the stonecutter's recipe list —
+/// because each needs data this tree does not carry yet (a
+/// banner-pattern/recipe registry). The slots themselves need none of that:
+/// they are the same "accept anything, let the server's `container_set_slot`
+/// correct a wrong guess" order already established above.
+///
+/// The beacon (also part of issue #28's family) is no longer in that list:
+/// [`Menu::beacon`] builds the real `BeaconMenu` shape, and its
+/// primary/secondary power buttons and confirm/cancel controls — not menu
+/// slots, driven off `container_data` and screen-local selection state — are
+/// `lodestone-shell`'s `container::beacon` module's job (issue #613's
+/// `SetBeaconEffects` remainder).
 ///
 /// The villager's trade list is no longer in that list: [`Menu::merchant`]
 /// builds the real `MerchantMenu` shape (issue #245's UI half), and the trade
@@ -788,6 +793,10 @@ fn build_menu(menu_type: Option<&ResourceKey>, container_size: usize) -> Menu {
         // result — see `Menu::merchant`'s doc comment for what is and is not
         // modelled.
         (Some("merchant"), 3) => Menu::merchant(),
+        // The beacon screen (issue #613's `SetBeaconEffects` remainder).
+        // `container_size == 1` matches `BeaconMenu`'s one payment slot
+        // (`BeaconMenu.SLOT_COUNT`).
+        (Some("beacon"), 1) => Menu::beacon(),
         _ => Menu::generic(container_size),
     }
 }

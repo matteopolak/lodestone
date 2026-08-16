@@ -145,7 +145,11 @@ fn time_string(duration_ticks: i32) -> String {
 /// from the id rather than a hand-maintained beneficial/harmful table. Distinct
 /// ids get distinct tints; the same id is stable across frames and runs (a
 /// fixed-key hasher, never `RandomState`).
-fn tint_for(path: &str) -> [f32; 3] {
+/// `pub(crate)` since issue #613's beacon screen (`container::beacon`) reuses
+/// this same hash-derived swatch colour for its power buttons — the
+/// identical "no real sprite exists, so tint a flat quad" simplification
+/// this HUD chip already established.
+pub(crate) fn tint_for(path: &str) -> [f32; 3] {
     use std::hash::{Hash, Hasher};
     let mut h = std::hash::DefaultHasher::new();
     path.hash(&mut h);

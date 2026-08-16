@@ -134,6 +134,16 @@ pub enum SpecialLayout {
     /// `ItemStack`s rendered as "fake items" — is not part of this layout;
     /// see `lodestone_shell::container::merchant`.
     Merchant,
+    /// `BeaconMenu`: one payment slot at `(136,110)`, panel `230×219`
+    /// (`BeaconMenu.java:50-53`) — `addStandardInventorySlots(inventory, 36,
+    /// 137)` puts the player section at `x = 36` rather than the usual `8`,
+    /// the second special layout (after [`Merchant`](Self::Merchant)) whose
+    /// player section is not left-aligned. The primary/secondary power
+    /// buttons and the confirm/cancel controls are not menu slots at all —
+    /// vanilla drives them off `container_data` and its own screen-local
+    /// selection state, not `AbstractContainerMenu` slots; see
+    /// `lodestone_shell::container::beacon`.
+    Beacon,
 }
 
 /// Where a menu's crafting grid and result live, in **menu-slot** indices.
@@ -594,6 +604,25 @@ impl Menu {
             slot.kind = SlotKind::Output;
         }
         menu.special_layout = Some(SpecialLayout::Merchant);
+        menu
+    }
+
+    /// Builds the beacon menu: a single payment slot (`0`), then the
+    /// player's main storage and hotbar (`BeaconMenu.java:41-54`).
+    ///
+    /// `PaymentSlot.mayPlace`'s `ItemTags.BEACON_PAYMENT_ITEMS` restriction is
+    /// not modelled — the same "accept anything, let the server's own
+    /// `container_set_slot` correct a wrong guess" convention
+    /// [`Self::item_combiner`]'s doc comment already applies to the anvil,
+    /// grindstone and smithing table. The slot is not marked
+    /// [`SlotKind::Output`] either: unlike those three, the payment slot both
+    /// accepts an item (a placement) and later loses it (consumed by a
+    /// successful `SET_BEACON`, `BeaconMenu.updateEffects`'s own
+    /// `paymentSlot.remove(1)`) — never a take-only result.
+    #[must_use]
+    pub fn beacon() -> Self {
+        let mut menu = Self::generic(1);
+        menu.special_layout = Some(SpecialLayout::Beacon);
         menu
     }
 

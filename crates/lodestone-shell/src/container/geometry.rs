@@ -739,6 +739,12 @@ impl ContainerGeometry {
         // (`AnvilScreen.java`, `EnchantmentScreen.java`).
         draw_container_costs(&mut b, menu, &layout, frame, x, y);
 
+        // The beacon's primary/secondary power buttons and confirm/cancel
+        // controls (issue #613's `SetBeaconEffects` remainder) — see
+        // `crate::container::beacon`'s module doc for why these draw as
+        // tinted swatches rather than real sprites.
+        draw_beacon_panel(&mut b, menu, frame, x, y);
+
         // Every well first, so the colour stream splits cleanly into "chrome"
         // and "what goes on top of an icon". The icons are drawn between the two
         // halves (they are a separate pass, and the 3-D ones need a depth
@@ -1235,6 +1241,101 @@ fn draw_enchanting_costs(b: &mut Builder<'_>, menu: &Menu, frame: &ContainerFram
             colour,
         );
     }
+}
+
+/// The beacon's own "Primary Power"/"Secondary Power" backdrop colour —
+/// `BeaconScreen.extractLabels`' literal `-2039584` (an opaque light-grey),
+/// re-expressed as normalised RGBA.
+const BEACON_LABEL_COLOUR: [f32; 4] = [0xf0 as f32 / 255.0, 0xe0 as f32 / 255.0, 0xe0 as f32 / 255.0, 1.0];
+
+/// `BeaconScreen.extractLabels`/`init` (`BeaconScreen.java`): the two
+/// centred "Primary Power"/"Secondary Power" labels, the eight power
+/// buttons and the confirm/cancel controls — see `crate::container::beacon`'s
+/// module doc for why the buttons draw as tinted swatches rather than real
+/// vanilla sprites (no GUI PNGs are bundled in this tree at all; every
+/// container background here is loaded live from the player's own
+/// `client.jar`, and this repo has no potion-effect icon atlas either — the
+/// status-effect HUD chips already establish the same "flat tinted swatch"
+/// simplification `crate::effects::tint_for` exists for).
+///
+/// A no-op for every non-beacon screen.
+fn draw_beacon_panel(b: &mut Builder<'_>, menu: &Menu, frame: &ContainerFrame<'_>, x: f32, y: f32) {
+    if menu.special_layout() != Some(SpecialLayout::Beacon) {
+        return;
+    }
+    let levels = frame
+        .cost_data
+        .iter()
+        .find(|(p, _)| *p == 0)
+        .map_or(0, |(_, v)| *v);
+
+    // `PRIMARY_EFFECT_LABEL`/`SECONDARY_EFFECT_LABEL`, centred at local
+    // `(62, 10)`/`(169, 10)` (`BeaconScreen.extractLabels`). No language
+    // table reaches this module — see `draw_anvil_cost`'s own doc for the
+    // identical gap — so this is the resolved English wording.
+    for (text, cx) in [("Primary Power", 62.0), ("Secondary Power", 169.0)] {
+        let w = b.font.map_or(0.0, |f| f.width(text, 1.0));
+        b.shadowed_label(text, x + cx - w / 2.0, y + 10.0, 1.0, BEACON_LABEL_COLOUR);
+    }
+
+    for button in super::beacon::power_buttons()
+        .into_iter()
+        .chain(super::beacon::upgrade_button(frame.beacon_primary))
+    {
+        let unlocked = i32::from(button.tier) < levels;
+        let selected = if button.is_primary {
+            frame.beacon_primary == Some(&button.effect)
+        } else {
+            frame.beacon_secondary == Some(&button.effect)
+        };
+        let tint = crate::effects::tint_for(button.effect.path());
+        // Dimmed to a third brightness when the pyramid has not unlocked
+        // this tier yet (`BUTTON_DISABLED_SPRITE`'s own darker art), lifted
+        // halfway to white when selected (`BUTTON_SELECTED_SPRITE`'s own
+        // brighter highlight) — approximations of those two sprite swaps,
+        // not a transcription of their exact pixels.
+        let mut colour = if unlocked {
+            [tint[0], tint[1], tint[2], 1.0]
+        } else {
+            [tint[0] / 3.0, tint[1] / 3.0, tint[2] / 3.0, 1.0]
+        };
+        if selected {
+            colour = [
+                (colour[0] + 1.0) / 2.0,
+                (colour[1] + 1.0) / 2.0,
+                (colour[2] + 1.0) / 2.0,
+                1.0,
+            ];
+        }
+        b.rect_px(
+            x + button.x,
+            y + button.y,
+            super::beacon::BUTTON,
+            super::beacon::BUTTON,
+            colour,
+        );
+    }
+
+    // `BeaconConfirmButton`/`BeaconCancelButton.updateStatus` — confirm is
+    // only bright when it would actually do something (a payment item
+    // present and a primary chosen), cancel is always live.
+    let has_payment = menu.slot_item(0).is_some();
+    let can_confirm = frame.beacon_primary.is_some() && has_payment;
+    let confirm = super::beacon::confirm_rect();
+    let confirm_colour = if can_confirm {
+        [80.0 / 255.0, 200.0 / 255.0, 80.0 / 255.0, 1.0]
+    } else {
+        [50.0 / 255.0, 90.0 / 255.0, 50.0 / 255.0, 1.0]
+    };
+    b.rect_px(x + confirm.x, y + confirm.y, confirm.w, confirm.h, confirm_colour);
+    let cancel = super::beacon::cancel_rect();
+    b.rect_px(
+        x + cancel.x,
+        y + cancel.y,
+        cancel.w,
+        cancel.h,
+        [200.0 / 255.0, 80.0 / 255.0, 80.0 / 255.0, 1.0],
+    );
 }
 
 /// Everything one frame's drag preview needs, resolved once (part 2).

@@ -784,6 +784,18 @@ struct WindowApp {
     /// from whatever is in slot 0 the next time an anvil is open, so a stale
     /// value between sessions is never visible.
     anvil_rename: crate::container::AnvilRenameState,
+    /// The beacon screen's pending primary/secondary power selection (issue
+    /// #613's `SetBeaconEffects` remainder) — see
+    /// [`crate::container::beacon::BeaconSelection`]'s own module doc.
+    /// Synced from `container_data` once per frame in `redraw`, the same
+    /// place [`Self::anvil_rename`] is, and edited by
+    /// [`Self::handle_beacon_click`](crate::app::container_input).
+    ///
+    /// Not reset on close, matching [`anvil_rename`](Self::anvil_rename)'s
+    /// own precedent: [`crate::container::beacon::BeaconSelection::sync`]
+    /// re-seeds it from the menu's own `container_data` the next time a
+    /// beacon is open, so a stale value between sessions is never visible.
+    beacon_selection: crate::container::beacon::BeaconSelection,
 }
 
 #[cfg(test)]

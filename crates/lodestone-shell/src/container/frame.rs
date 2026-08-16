@@ -185,6 +185,15 @@ pub struct ContainerFrame<'a> {
     /// "per-frame input record" contract every other field here keeps. See
     /// [`with_anvil_name`](Self::with_anvil_name).
     pub anvil_name: Option<&'a str>,
+    /// The beacon screen's currently pending primary power selection — see
+    /// `crate::container::beacon::BeaconSelection`. `None` (the default)
+    /// draws every power button unselected, which is what keeps every
+    /// existing caller (headless builds, the pixel gates,
+    /// `tests/container_screen.rs`) unchanged. See
+    /// [`with_beacon_selection`](Self::with_beacon_selection).
+    pub beacon_primary: Option<&'a lodestone_model::ResourceKey>,
+    /// See [`Self::beacon_primary`].
+    pub beacon_secondary: Option<&'a lodestone_model::ResourceKey>,
 }
 
 impl<'a> ContainerFrame<'a> {
@@ -213,6 +222,8 @@ impl<'a> ContainerFrame<'a> {
             selected_trade: 0,
             trades_label: DEFAULT_TRADES_LABEL,
             anvil_name: None,
+            beacon_primary: None,
+            beacon_secondary: None,
         }
     }
 
@@ -239,6 +250,8 @@ impl<'a> ContainerFrame<'a> {
             selected_trade: 0,
             trades_label: DEFAULT_TRADES_LABEL,
             anvil_name: None,
+            beacon_primary: None,
+            beacon_secondary: None,
         }
     }
 
@@ -398,6 +411,20 @@ impl<'a> ContainerFrame<'a> {
     #[must_use]
     pub fn with_anvil_name(mut self, name: Option<&'a str>) -> Self {
         self.anvil_name = name;
+        self
+    }
+
+    /// Attach the beacon screen's pending primary/secondary power selection
+    /// — see [`Self::beacon_primary`]/[`Self::beacon_secondary`]. `None`
+    /// (the default) draws every power button unselected.
+    #[must_use]
+    pub fn with_beacon_selection(
+        mut self,
+        primary: Option<&'a lodestone_model::ResourceKey>,
+        secondary: Option<&'a lodestone_model::ResourceKey>,
+    ) -> Self {
+        self.beacon_primary = primary;
+        self.beacon_secondary = secondary;
         self
     }
 }

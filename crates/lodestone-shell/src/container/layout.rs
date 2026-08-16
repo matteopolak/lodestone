@@ -98,6 +98,7 @@ pub fn slot_layout(menu: &Menu) -> SlotLayout {
 /// | `Cartography` | `0@15,15` `1@15,52` `2@145,39` | `CartographyTableMenu.java` |
 /// | `Dispenser` | `0..9` a 3×3 grid from `62,17`, step `18` | `DispenserMenu.java` |
 /// | `Hopper` | `0..5` a row from `44,20`, step `18` | `HopperMenu.java` |
+/// | `Beacon` | `0@136,110` | `BeaconMenu.java` |
 ///
 /// Every one of these calls vanilla's standard `addStandardInventorySlots`
 /// for the player section (`ItemCombinerMenu.java`,
@@ -205,32 +206,46 @@ fn special_layout_positions(menu: &Menu) -> Option<SlotLayout> {
             slots.push(slot(1, 162.0, 37.0));
             slots.push(slot(2, 220.0, 37.0));
         }
+        // `BeaconMenu.java:50-53` — one payment slot, no result slot at all.
+        (SpecialLayout::Beacon, 1) => {
+            slots.push(slot(0, 136.0, 110.0));
+        }
         _ => return None,
     }
     // Every one of these calls `addStandardInventorySlots(inventory, x,
     // main_y)` with a **fixed** `main_y` — `84.0` for every screen except the
     // hopper, whose real panel is *shorter* (`imageHeight = 133`, not `166`)
-    // and whose own constructor passes `51` (`HopperMenu.java`), not `84`.
-    // Getting this one wrong is exactly the "plausible but transposed"
-    // failure mode this whole function warns about: `84.0` would still
-    // produce a valid-looking layout, just one that overlaps the hopper's
-    // own five slots.
+    // and whose own constructor passes `51` (`HopperMenu.java`), not `84`,
+    // and the beacon, whose taller panel (`imageHeight = 219`) passes `137`
+    // (`BeaconMenu.java:53`). Getting this one wrong is exactly the
+    // "plausible but transposed" failure mode this whole function warns
+    // about: `84.0` would still produce a valid-looking layout, just one
+    // that overlaps the hopper's or beacon's own slots.
     let main_y = if special == SpecialLayout::Hopper {
         51.0
+    } else if special == SpecialLayout::Beacon {
+        137.0
     } else {
         84.0
     };
-    // `x = 8` for every screen but the merchant, whose player section starts
-    // at `x = 108` (`MerchantMenu.java`) — see `append_main_inventory_at`.
+    // `x = 8` for every screen but the merchant (`x = 108`,
+    // `MerchantMenu.java`) and the beacon (`x = 36`, `BeaconMenu.java:53`) —
+    // see `append_main_inventory_at`.
     let main_x = if special == SpecialLayout::Merchant {
         108.0
+    } else if special == SpecialLayout::Beacon {
+        36.0
     } else {
         8.0
     };
-    // `176` for every screen but the merchant, whose panel is `276` wide
-    // (`MerchantScreen.java`'s `super(menu, inventory, title, 276, 166)`).
+    // `176` for every screen but the merchant (`276`,
+    // `MerchantScreen.java`'s `super(menu, inventory, title, 276, 166)`) and
+    // the beacon (`230`, `BeaconScreen.java`'s `super(menu, inventory,
+    // title, 230, 219)`).
     let width = if special == SpecialLayout::Merchant {
         276.0
+    } else if special == SpecialLayout::Beacon {
+        230.0
     } else {
         176.0
     };

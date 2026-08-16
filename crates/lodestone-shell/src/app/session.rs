@@ -74,6 +74,7 @@ impl WindowApp {
             hosted_world: None,
             merchant_selected: 0,
             anvil_rename: crate::container::AnvilRenameState::new(),
+            beacon_selection: crate::container::beacon::BeaconSelection::new(),
         }
     }
 
