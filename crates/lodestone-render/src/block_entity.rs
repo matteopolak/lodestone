@@ -3103,6 +3103,69 @@ pub fn special_item_rig(kind: &str, item_path: &str) -> Option<(&'static str, &'
     }
 }
 
+/// The `minecraft:banner` item rig — [`special_item_rig`]'s own doc table lists
+/// this `kind` as one of the six that resolve to `None` ("needs the ordered
+/// translucent pattern-mask pass, not one rig"), which was the honest state the
+/// day that table was written and is also the reason a banner drew nothing at
+/// all in a hotbar slot, an inventory slot or the first-person hand — not a
+/// missing draw call, a `kind` this dispatcher never recognised.
+///
+/// This is a **narrower** fix than the translucent pass that table asks for: it
+/// gets a banner drawing its correct dye colour, not (yet) its loom patterns.
+///
+/// # Why a tint-multiply and not the real mask layer
+///
+/// A placed banner's colour comes entirely from
+/// [`BlockEntityModelSet::resolve_banner`]'s translucent `layers` list —
+/// `submitBanner`'s opaque body+flag pass (`Sheets.BANNER_BASE`, the plain
+/// wood/cloth sheet [`BANNER_BASE_TEXTURE_STEM`] names) is drawn **untinted**,
+/// and everything the player perceives as colour is the separate translucent
+/// `submitPatterns` draw layered over it — first the base mask tinted by the
+/// banner's base colour, then up to 16 pattern masks. Both the GUI icon pass
+/// ([`crate::lib`]'s `special` stream) and the first-person hand pass draw a
+/// single opaque, per-part-instanced mesh today (see [`special_item_rig`]);
+/// neither has a second, blended pass to layer a mask draw over, and building
+/// one — plus decoding `minecraft:banner_patterns` for an item stack at all,
+/// which today only a placed banner's block-entity NBT carries (see
+/// `crate::banner_pattern`'s module doc) — is real, separate work.
+///
+/// So this multiplies the opaque flag texture directly by the base colour
+/// instead. For the overwhelmingly common plain banner (no loom patterns) this
+/// is visually close to correct — the real base layer is itself a full-coverage
+/// tint over the same UVs, so "replace with base colour" and "multiply by base
+/// colour" agree almost everywhere the weave texture is near-white — and it is
+/// wrong only in the way every approximation here is: a banner carrying loom
+/// patterns draws as a plain tinted flag, no pattern, until
+/// `minecraft:banner_patterns` reaches this crate. The body (pole/bar) is left
+/// **untinted**, matching vanilla's own opaque pass exactly.
+///
+/// Returns `None` for an item path that is not `<dye>_banner` — a shield, or a
+/// datapack item naming this `kind` over something else.
+#[must_use]
+pub fn banner_item_rig(item_path: &str) -> Option<BannerItemRig> {
+    let name = item_path.strip_suffix("_banner")?;
+    let color = crate::banner_pattern::DyeColor::from_name(name)?;
+    let packed = color.packed_rgb();
+    Some(BannerItemRig {
+        body: (BANNER_BODY, BANNER_BASE_TEXTURE_STEM),
+        flag: (BANNER_FLAG, BANNER_BASE_TEXTURE_STEM),
+        flag_tint: [(packed >> 16) as u8, (packed >> 8) as u8, packed as u8],
+    })
+}
+
+/// [`banner_item_rig`]'s result: two opaque draws sharing one placement, only
+/// the second of which is tinted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BannerItemRig {
+    /// `(model, texture)` for the pole/bar — draw **untinted**.
+    pub body: (&'static str, &'static str),
+    /// `(model, texture)` for the flag — draw tinted by [`Self::flag_tint`].
+    pub flag: (&'static str, &'static str),
+    /// The base colour, gamma-space `[r, g, b]` bytes, to multiply into the
+    /// flag's texels.
+    pub flag_tint: [u8; 3],
+}
+
 // A skull item's own placement, deliberately, is **not** the world skull
 // functions' `scale(-1, -1, 1)`. An earlier version of this file added exactly
 // that flip here, reasoning from `skull_ground_placement_matrix`'s own doc
