@@ -92,6 +92,32 @@ impl AcquiredFrame {
         &self.colour_texture
     }
 
+    /// A fresh view of this frame's backing texture, reinterpreted as
+    /// `format` — for a pass that wants a *different* colour-space reading of
+    /// the same pixels than [`Self::view`] gives it.
+    ///
+    /// The motivating caller is the HUD's flat-colour blend
+    /// (`docs/tab-list.md`'s sRGB/linear mismatch): [`Self::view`] is always
+    /// the *corrected* format ([`RenderTarget::format`] — sRGB-decoding, right
+    /// for anything that samples a gamma-encoded texture), but vanilla's own
+    /// 2-D GUI blending is not colour-managed at all — it composites directly
+    /// on raw gamma bytes. A flat-colour pipeline that wants to match that
+    /// needs a *raw* (non-sRGB) view of the identical swapchain texture, which
+    /// is exactly [`RenderTarget::raw_view_format`].
+    ///
+    /// `format` must be one `configure`/`create_texture` actually declared
+    /// reachable for this texture (`view_formats`) — both [`HeadlessTarget`]
+    /// and [`SurfaceTarget`] declare their own [`RenderTarget::format`] and
+    /// [`RenderTarget::raw_view_format`] pair up front for exactly this, so
+    /// passing either of those two back here is always legal.
+    #[must_use]
+    pub fn create_view(&self, format: wgpu::TextureFormat) -> wgpu::TextureView {
+        self.colour_texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(format),
+            ..Default::default()
+        })
+    }
+
     /// Present the frame. A no-op for headless targets; schedules presentation
     /// of a swapchain frame on `queue` (wgpu 30 presents via the queue).
     pub fn present(self, queue: &wgpu::Queue) {
@@ -101,10 +127,34 @@ impl AcquiredFrame {
     }
 }
 
+/// The non-colour-managed sibling of a format returned by
+/// [`RenderTarget::format`]/[`RenderTarget::raw_view_format`]: strips an sRGB
+/// suffix if present, otherwise leaves the format alone (it is already raw).
+/// Shared by [`HeadlessTarget`] and [`SurfaceTarget`] so both compute the pair
+/// the same way — see [`AcquiredFrame::create_view`]'s doc for why a target
+/// needs both a corrected and a raw format at all.
+#[must_use]
+fn raw_counterpart(format: wgpu::TextureFormat) -> wgpu::TextureFormat {
+    format.remove_srgb_suffix()
+}
+
 /// A surface the renderer can draw to.
 pub trait RenderTarget {
     /// Colour format of the target.
     fn format(&self) -> wgpu::TextureFormat;
+    /// The non-colour-managed sibling of [`Self::format`] — same underlying
+    /// texture, a raw (non-sRGB) reinterpretation of it. Every pipeline built
+    /// so far in this codebase targets [`Self::format`]; this exists for the
+    /// one class of draw that must *not* be colour-managed: vanilla's own 2-D
+    /// GUI blending happens directly on raw gamma bytes
+    /// (`docs/tab-list.md`), so a flat-colour pipeline that wants to match it
+    /// byte-for-byte needs this format instead. Obtain the actual view via
+    /// [`AcquiredFrame::create_view`]. Default implementation returns
+    /// [`Self::format`] unchanged, which is correct whenever that format is
+    /// already non-sRGB (no reinterpretation needed).
+    fn raw_view_format(&self) -> wgpu::TextureFormat {
+        self.format()
+    }
     /// Current `(width, height)` in pixels.
     fn size(&self) -> (u32, u32);
     /// Resize / reconfigure the target. Ignores zero dimensions.
@@ -166,6 +216,24 @@ impl HeadlessTarget {
         height: u32,
         format: wgpu::TextureFormat,
     ) -> (wgpu::Texture, wgpu::TextureView) {
+        // Declare both the sRGB and non-sRGB counterparts of `format` up
+        // front, whichever actually differ from it, so a caller can always
+        // legally request either `RenderTarget::format`'s or
+        // `RenderTarget::raw_view_format`'s view via `AcquiredFrame::create_view`
+        // regardless of which one `format` itself already is — exactly as a
+        // real swapchain target does. Without this, a GPU test built against a
+        // headless target could exercise only whichever colour-space `format`
+        // happened to be constructed with, never the other one.
+        let mut extra = Vec::new();
+        let raw = format.remove_srgb_suffix();
+        if raw != format {
+            extra.push(raw);
+        }
+        let srgb = format.add_srgb_suffix();
+        if srgb != format && srgb != raw {
+            extra.push(srgb);
+        }
+        let view_formats: &[wgpu::TextureFormat] = &extra;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("lodestone-render headless target"),
             size: wgpu::Extent3d {
@@ -178,7 +246,7 @@ impl HeadlessTarget {
             dimension: wgpu::TextureDimension::D2,
             format,
             usage: Self::USAGE,
-            view_formats: &[],
+            view_formats,
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         (texture, view)
@@ -255,6 +323,10 @@ impl RenderTarget for HeadlessTarget {
         self.format
     }
 
+    fn raw_view_format(&self) -> wgpu::TextureFormat {
+        raw_counterpart(self.format)
+    }
+
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
@@ -309,6 +381,15 @@ pub struct SurfaceTarget<'window> {
     /// alike, since both go through this one swapchain — comes out uniformly
     /// darker than native.
     view_format: wgpu::TextureFormat,
+    /// The format [`RenderTarget::raw_view_format`] reports and
+    /// [`AcquiredFrame::create_view`] is meant to be called with for the HUD's
+    /// flat-colour pass. Always [`Self::view_format`]'s non-sRGB counterpart:
+    /// on native that differs from `config.format` (which is already sRGB)
+    /// and must be declared in `config.view_formats` up front, same as
+    /// `view_format` is on the WebGPU backend; on the WebGPU backend it is
+    /// simply `config.format` itself (already raw — see `Self::view_format`'s
+    /// doc), needing no extra declaration.
+    raw_view_format: wgpu::TextureFormat,
     /// The present mode `get_default_config` chose for this adapter/surface,
     /// kept so [`Self::set_present_mode`] can restore *exactly* what we started
     /// with rather than a mode that merely sounds equivalent.
@@ -371,14 +452,27 @@ impl<'window> SurfaceTarget<'window> {
         // swapchain texture through an sRGB view. `view_formats` must be
         // declared up front for `configure` to permit it at `create_view` time.
         let view_format = choose_view_format(config.format);
+        // See `Self::raw_view_format`'s doc: the mirror-image declaration, for
+        // the HUD's flat-colour pass, which wants the *non*-sRGB counterpart
+        // of `config.format` (a no-op on the WebGPU backend, where
+        // `config.format` already is that counterpart).
+        let raw_view_format = raw_counterpart(config.format);
+        let mut view_formats = Vec::new();
         if let Some(srgb) = view_format {
-            config.view_formats = vec![srgb];
+            view_formats.push(srgb);
+        }
+        if raw_view_format != config.format && view_format != Some(raw_view_format) {
+            view_formats.push(raw_view_format);
+        }
+        if !view_formats.is_empty() {
+            config.view_formats = view_formats;
         }
         surface.configure(device, &config);
         let default_present_mode = config.present_mode;
         Some(Self {
             surface,
             view_format: view_format.unwrap_or(config.format),
+            raw_view_format,
             config,
             default_present_mode,
         })
@@ -427,6 +521,10 @@ impl<'window> SurfaceTarget<'window> {
 impl RenderTarget for SurfaceTarget<'_> {
     fn format(&self) -> wgpu::TextureFormat {
         self.view_format
+    }
+
+    fn raw_view_format(&self) -> wgpu::TextureFormat {
+        self.raw_view_format
     }
 
     fn size(&self) -> (u32, u32) {
@@ -527,6 +625,58 @@ mod tests {
                 choose_view_format(configured),
                 None,
                 "native-shaped input {configured:?} must not get a view format override"
+            );
+        }
+    }
+
+    /// Format-decision gate for the HUD flat-colour raw-view choice — the
+    /// mirror image of [`web_backend_non_srgb_swapchain_gets_an_srgb_view_format`]
+    /// above. Vanilla's 2-D GUI blending is not colour-managed
+    /// (`docs/tab-list.md`): it composites directly on raw gamma bytes, so a
+    /// flat-colour pipeline that wants to match it needs the *non*-sRGB
+    /// counterpart of whatever `get_default_config` chose, on every backend.
+    /// On native that counterpart is a real reinterpretation (`config.format`
+    /// starts sRGB); this asserts the decision `SurfaceTarget::new` makes
+    /// given a native-shaped capability list.
+    #[test]
+    fn native_srgb_swapchain_gets_a_raw_non_srgb_counterpart() {
+        for configured in [
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        ] {
+            let got = raw_counterpart(configured);
+            let want = configured.remove_srgb_suffix();
+            assert_eq!(
+                got, want,
+                "native-shaped input {configured:?}: expected raw counterpart {want:?}, got {got:?}"
+            );
+            assert!(
+                !got.is_srgb(),
+                "raw counterpart for {configured:?} must not be sRGB, got {got:?}"
+            );
+            assert_ne!(
+                got, configured,
+                "native input {configured:?} is sRGB, so its raw counterpart must actually differ \
+                 — an equal result would mean the HUD's flat-colour pass silently landed back on \
+                 the colour-managed view"
+            );
+        }
+    }
+
+    /// Companion arm: on the WebGPU backend `config.format` is already
+    /// non-sRGB (there is no sRGB canvas format to choose at all — see
+    /// [`SurfaceTarget::view_format`]'s doc), so the raw counterpart needs no
+    /// reinterpretation: it is `config.format` itself, and declaring anything
+    /// new for it would be pure waste. Confirms the raw-view fix is exactly as
+    /// backend-conditional as the corrected-view fix already is — neither
+    /// change should regress the other's platform.
+    #[test]
+    fn web_backend_non_srgb_swapchain_needs_no_raw_view_override() {
+        for configured in [wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureFormat::Bgra8Unorm] {
+            assert_eq!(
+                raw_counterpart(configured),
+                configured,
+                "web-shaped input {configured:?} is already raw; its raw counterpart must equal itself"
             );
         }
     }
