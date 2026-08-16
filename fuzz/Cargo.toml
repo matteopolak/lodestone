@@ -21,7 +21,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
-# Issue #549 Track A: cargo-fuzz/libFuzzer targets on the highest-value
+# cargo-fuzz/libFuzzer targets ("Track A" of this workspace's fuzzing design)
+# on the highest-value
 # untrusted-input surfaces — a malformed packet from a hostile server (or, for
 # the serverbound target, a hostile client against our integrated server)
 # should never panic. This crate is additive to `crates/lodestone-fuzz`

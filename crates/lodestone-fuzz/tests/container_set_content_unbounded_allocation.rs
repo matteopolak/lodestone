@@ -1,5 +1,5 @@
-//! Bug found by `fuzz/fuzz_targets/v770_clientbound_decode.rs` (issue #549's
-//! Track A, the first libFuzzer target added to this repo): a **9-byte**
+//! Bug found by `fuzz/fuzz_targets/v770_clientbound_decode.rs` (this
+//! session's first libFuzzer target added to this repo): a **9-byte**
 //! `CONTAINER_SET_CONTENT` (play clientbound packet id 18) payload from a
 //! hostile or merely broken server crashes any connecting lodestone client
 //! with an out-of-memory abort, before a single item is decoded.
@@ -16,57 +16,59 @@
 //! ```
 //!
 //! This is the **same defect class** `docs/fuzz-harness.md` already documents
-//! as fixed once (issue #417, `lodestone-macros`' `decode_vec`) — an
-//! attacker-controlled VarInt length feeding `Vec::with_capacity` before any
-//! check against `reader.remaining()` — but this specific decode arm is
-//! hand-written, not generated through `decode_vec`, so the #417 fix never
-//! touched it. It is a second, independent instance of the same hole, in a
-//! different file, found by treating "no panic on arbitrary bytes" as a
-//! *reachability* problem (coverage-guided fuzzing) rather than by re-reading
-//! every hand-rolled decoder for the same shape by hand.
+//! as fixed once, in `lodestone-macros`' `decode_vec` — an attacker-controlled
+//! VarInt length feeding `Vec::with_capacity` before any check against
+//! `reader.remaining()` — but this specific decode arm is hand-written, not
+//! generated through `decode_vec`, so that fix never touched it. It is a
+//! second, independent instance of the same hole, in a different file, found
+//! by treating "no panic on arbitrary bytes" as a *reachability* problem
+//! (coverage-guided fuzzing) rather than by re-reading every hand-rolled
+//! decoder for the same shape by hand.
 //!
 //! `crates/protocol/v770/**` is out of scope for this session (owned by a
 //! live agent) — this file only reports and measures the bug through the
 //! real production entry point (`V770Adapter::handle_packet`, via
 //! `lodestone_fuzz::decode_clientbound`), it does not patch
-//! `adapter/inventory.rs`. The fix, when applied, is the same shape #417
-//! used: cap the reservation at `len.min(reader.remaining())` — every
-//! `ItemStack` this loop can decode consumes at least one byte (a present/
-//! absent flag at minimum), so no more than `remaining()` elements can ever
-//! be produced regardless of what `len` claims.
+//! `adapter/inventory.rs`. The fix, when applied, is the same shape
+//! `decode_vec`'s fix used: cap the reservation at
+//! `len.min(reader.remaining())` — every `ItemStack` this loop can decode
+//! consumes at least one byte (a present/absent flag at minimum), so no more
+//! than `remaining()` elements can ever be produced regardless of what `len`
+//! claims.
 //!
 //! ## This test's own status: expected to FAIL once the bug above is fixed
 //!
 //! Unlike `length_prefix_allocation.rs` (which asserts the *fixed* behaviour
-//! for issue #417, because that fix already landed), this file asserts the
+//! for `decode_vec`, because that fix already landed), this file asserts the
 //! *current, buggy* behaviour — it is a live, executable bug report, exactly
 //! the shape `length_prefix_allocation.rs`'s own module doc says it used to
-//! be before #417's fix landed ("This file originally both stated the
-//! property and demonstrated that it was **violated**"). When
-//! `adapter/inventory.rs` is fixed, `container_set_content_allocation_is_capped_to_a_small_multiple_of_available_bytes`
+//! be before its fix landed ("This file originally both stated the property
+//! and demonstrated that it was **violated**"). When `adapter/inventory.rs`
+//! is fixed,
+//! `container_set_content_allocation_is_disproportionate_to_the_tiny_payload`
 //! below will start failing — that is the signal to flip its assertion to
 //! the bounded form (see that file's `huge_length_prefix_no_longer_forces_disproportionate_allocation`
 //! for the shape to copy) rather than a spurious CI failure to chase down.
 //!
 //! ## Why the claimed length is 2,000,000, not the fuzzer's own ~136,000,000
 //!
-//! The fuzzer's actual crashing input (`fuzz/artifacts/v770_clientbound_decode/oom-*`)
-//! claimed a length of roughly 136 million items, which really did trigger
-//! libFuzzer's out-of-memory killer in under a second. Reproducing that exact
-//! magnitude in a `cargo test` that runs on a machine shared with other
-//! agents' builds is itself the hazard `CLAUDE.md`'s memory section warns
-//! about ("unbounded test memory force-rebooted the machine") — so, per the
-//! same precedent `length_prefix_allocation.rs` already set for issue #417
-//! (chose 2,000,000 over `i32::MAX` for the identical reason), this file
-//! proves the same defect at a bounded, safe magnitude instead. 2,000,000 is
-//! enough: `ItemStack` is well over a handful of bytes, so
+//! The fuzzer's actual crashing input claimed a length of roughly 136 million
+//! items, which really did trigger libFuzzer's out-of-memory killer in under
+//! a second. Reproducing that exact magnitude in a `cargo test` that runs on
+//! a machine shared with other agents' builds is itself the hazard
+//! `CLAUDE.md`'s memory section warns about ("unbounded test memory
+//! force-rebooted the machine") — so, per the same precedent
+//! `length_prefix_allocation.rs` already set for its own bug (chose
+//! 2,000,000 over `i32::MAX` for the identical reason), this file proves the
+//! same defect at a bounded, safe magnitude instead. 2,000,000 is enough:
+//! `ItemStack` is well over a handful of bytes, so
 //! `Vec::with_capacity(2_000_000)` of it is already tens of megabytes — four
 //! to five orders of magnitude past `SMALL_CEILING` below, which is all the
 //! measurement needs to say.
 
 // Second file in this crate with this allow (the first is
-// `length_prefix_allocation.rs`, for issue #417's already-fixed instance of
-// the identical defect shape) — see that file's own comment for the safety
+// `length_prefix_allocation.rs`, for its own already-fixed instance of the
+// identical defect shape) — see that file's own comment for the safety
 // argument, unchanged here: `alloc`/`dealloc` are pure pass-throughs to
 // `System` plus a thread-local counter, no allocation logic of their own to
 // get wrong, and each `tests/*.rs` file compiles as its own separate
@@ -86,8 +88,8 @@ struct CountingAlloc;
 
 thread_local! {
     /// See `length_prefix_allocation.rs`'s identically-named cell for the
-    /// full per-thread-contamination reasoning (issue #450) — copied here
-    /// rather than shared because each `tests/*.rs` file is its own crate.
+    /// full per-thread-contamination reasoning — copied here rather than
+    /// shared because each `tests/*.rs` file is its own crate.
     static PEAK_SINGLE_ALLOC: Cell<usize> = const { Cell::new(0) };
 }
 

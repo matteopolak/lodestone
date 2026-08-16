@@ -1,7 +1,7 @@
 //! libFuzzer target: `V770ServerProtocol::decode` (serverbound decode) must
 //! never panic on arbitrary bytes, in any connection state.
 //!
-//! Issue #549 Track A. The other half of `v770_clientbound_decode.rs`'s
+//! The other half of `v770_clientbound_decode.rs`'s
 //! threat model: this is the attack surface our *integrated server* faces
 //! from a connecting client, not what a server can do to us. v770 is the only
 //! family fuzzed on this side because it is the only one that implements
