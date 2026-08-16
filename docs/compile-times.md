@@ -120,14 +120,51 @@ Cranelift compiled both `portable_simd` crates cleanly — exit 0, no errors,
 the same warning set as the matching LLVM build. No per-package LLVM carve-out
 was needed for either.
 
-**What was not verified, and is the honest gap**: `lodestone-shell`,
-`lodestone-render`, `lodestone-server`, and all four `crates/protocol/*`
-families under Cranelift. `lodestone-shell`/`lodestone-server` were blocked by
-the concurrent breakage above for the whole session; the rest were not
-attempted for lack of time. `lodestone-render` in particular (wgpu bindings,
-the FFI referenced in `crates/lodestone-shell`'s own doc comments) is a more
-plausible place for a real Cranelift gap than a pure-Rust SIMD kernel — do not
-read the table above as "Cranelift works for the whole workspace."
+**Follow-up, 2026-08-16: the gap above is closed.** Re-run once the shared
+tree was quiet in `lodestone-server` (confirmed via `git status`/a scoped
+`cargo check -p lodestone-server --lib` going green immediately before this
+pass — the earlier session's `E0063`/`E0277` breakage in `integrated.rs` was
+a live, concurrent edit that resolved itself, not anything this task touched).
+Each crate below was built in its own **isolated `CARGO_TARGET_DIR`** (`v770`
+and `lodestone-shell` share one scratch dir with each other, since
+`lodestone-shell` depends on `lodestone-server` depends on `v770` — reusing
+the dependency chain already compiled there rather than paying for it twice):
+
+| crate | LLVM real / user / sys | Cranelift real / user / sys | wall speedup |
+|---|---|---|---|
+| `lodestone-render` (wgpu bindings, the FFI surface flagged below as the likeliest gap) | 85.26s / 25.77s / 3.98s | 42.38s / 10.74s / 3.14s | 2.0x |
+| `lodestone-v47` | 32.12s / 16.85s / 2.63s | 12.71s / 6.10s / 1.66s | 2.5x |
+| `lodestone-v340` (the ~18k-line family) | 69.70s / 18.51s / 2.77s | 15.30s / 7.62s / 1.98s | 4.6x |
+| `lodestone-v735` (speaks protocol 754, not 735 — folder name ≠ protocol number) | 73.64s / 14.50s / 2.16s | 10.05s / 4.16s / 1.38s | 7.3x |
+| `lodestone-v770` (pulls in the full `lodestone-server` dependency chain, incl. `hickory-resolver`/tokio/auth) | 199.14s / 117.98s / 11.94s | 82.80s / 34.82s / 8.01s | 2.4x |
+| `lodestone-shell` | 146.83s / 93.80s / 9.88s | 61.97s / 32.75s / 5.63s | 2.4x |
+| `lodestone-server` (explicit, though already exercised as a dependency of the two rows above) | 46.53s / 59.96s / 4.68s | 18.52s / 16.45s / 2.46s | 2.5x |
+
+**Every crate this repo has now tested under Cranelift — all seven above plus
+the three from the first pass — compiles clean: exit 0, zero errors, the same
+warning set as the matching LLVM build.** The wgpu/FFI gap flagged as "more
+plausible" than the SIMD crates did not materialize either: `lodestone-render`
+is clean and 2x faster. No per-package LLVM carve-out was needed anywhere in
+the workspace.
+
+**Not landed as a default this session either, despite step 2 (this table)
+coming back fully clean — a disk-driven call, not a technical one.** This
+machine measured as low as **10 GiB free** (of 460 GiB total) partway through
+this verification pass, with three other agents compiling concurrently.
+Flipping `profile.dev.package."*".codegen-backend = "cranelift"` invalidates
+sccache's fingerprint for every rustc invocation in the workspace — the same
+"flip cost" `-Z threads=8`'s own landing accepted, but at full-workspace scope
+rather than one flag, meaning every live agent's next build pays a cold
+rebuild wave **at the same time**, on a machine that could not currently
+absorb even one more isolated crate build without staying under ~10 GiB. This
+repo's own health notes are explicit that purging `target/` to make room is
+not an option while other agents are mid-compile, so there was no safe way to
+both land this and let the induced rebuild wave complete this session.
+**Recommendation stands from the original filing: land
+`[unstable]\ncodegen-backend = true` in `.cargo/config.toml` plus the
+`profile.dev.package` override in `Cargo.toml`, but time it for a moment the
+shared checkout has disk headroom for a full-workspace cold-rebuild wave** —
+re-check `df -h` immediately before landing it, not from this doc's numbers.
 
 **Not landed as a default.** Flipping `profile.dev.package."*".codegen-backend
 = "cranelift"` (or even a narrower per-crate override for just the three
@@ -149,13 +186,14 @@ RUSTFLAGS="-Z codegen-backend=cranelift" cargo build -Z codegen-backend \
   -p <crate> --lib
 ```
 
-Follow-up for whoever picks this up next: once the shared tree is quiet,
-re-run this exact isolated-`CARGO_TARGET_DIR` comparison against
-`lodestone-shell`, `lodestone-render`, `lodestone-server`, and the protocol
-families; if all come back clean, land `[unstable]\ncodegen-backend = true` in
-`.cargo/config.toml` plus the profile override in `Cargo.toml`, with an
-explicit LLVM override for any crate that turns out incompatible (a compile
-error naming the incompatible crate is preferable to guessing one up front).
+**Done, 2026-08-16** (see the "Follow-up" table above): `lodestone-shell`,
+`lodestone-render`, `lodestone-server`, and all four protocol families are now
+verified clean under Cranelift. What is left is purely a scheduling question,
+not a technical one — land `[unstable]\ncodegen-backend = true` in
+`.cargo/config.toml` plus the profile override in `Cargo.toml` the next time
+`df -h` shows enough headroom to absorb a full-workspace cold-rebuild wave
+across every other live agent at once (this pass saw as low as 10 GiB free).
+No LLVM carve-out is needed for any crate tested so far.
 
 ## Landed: parallel front-end (`-Z threads=N`)
 
