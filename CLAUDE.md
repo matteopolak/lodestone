@@ -40,6 +40,24 @@ just run          # cargo run --release -p lodestone-shell --bin lodestone   -- 
 just run-wasm     # cd web && trunk serve --release   -- launch the BROWSER build on :8080
 ```
 
+**PGO is opt-in and stays off by default** — the only measurement so far is 14.6% fewer instructions
+retired on a worldgen probe, which is a proxy rather than frame or tick time, and the build-side cost is
+unmeasured. It is four recipes rather than a `--pgo` flag because the justfile's header forbids a recipe
+that parses an argument and branches on it (the same reason `run-wasm` is its own name), and because the
+cycle is inherently interactive — an instrumented binary only learns a useful profile from a
+representative workload, which for a game means playing it:
+
+```bash
+just pgo-instrument   # RUSTFLAGS=-Cprofile-generate … cargo run --release   -- then play, then quit
+just pgo-merge        # xcrun llvm-profdata merge   -- fold the .profraw files into one .profdata
+just run-pgo          # RUSTFLAGS=-Cprofile-use … cargo run --release   -- play the optimised build
+just build-pgo        # the same, build only
+just pgo-probe        # ./scripts/pgo-probe.sh   -- reproduce the docs/pgo-experiment.md comparison
+```
+
+All of them use a private target dir (`LODESTONE_PGO_DIR`, default `target/pgo`), because cargo keys its
+cache on `RUSTFLAGS` and sharing `target/` would cost every other build on the machine a cold rebuild.
+
 `just run-wasm` is the browser surface, not a flag on `just run`: `web/` is its own workspace with its
 own `Cargo.lock`, and trunk -- not cargo -- drives the build, so the two share no invocation to
 parameterise. `--release` is mandatory there for a reason unlike the native one's: a debug wasm build

@@ -40,6 +40,12 @@ jflag := if jobs != "" { "-j " + jobs } else { "" }
 # its own.
 relay_defaults := "--listen 127.0.0.1:25580 --target 127.0.0.1:25565"
 
+# Private target dir for the PGO recipes at the bottom of this file. Separate
+# from {{tdir}} on purpose: those recipes set RUSTFLAGS, and cargo keys its
+# cache on RUSTFLAGS, so pointing them at the shared dir would cost every
+# other build on this machine a full cold rebuild each time you switch.
+pgo_dir := env("LODESTONE_PGO_DIR", "target/pgo")
+
 # --- Health checks (CLAUDE.md "Build and test") ---------------------------
 
 # cargo check --workspace --all-targets
@@ -375,3 +381,44 @@ regen-blast-fire:
 # recipe deliberately does not touch the shared target dir at all.
 pgo-probe:
     ./scripts/pgo-probe.sh
+
+# --- PGO for the game binary (opt-in, three steps) ------------------------
+#
+# PGO is deliberately NOT a default profile setting: the owner's call is that
+# it stays off until a real-workload measurement justifies it, and the only
+# number we have is 14.6% fewer instructions retired on a worldgen probe --
+# a proxy, not frame time or tick time. See docs/pgo-experiment.md.
+#
+# These are three recipes rather than a `--pgo` flag on `run` for the reason
+# this file's header gives: a flag would mean parsing an argument and
+# branching on it inside a recipe body, which is the one thing that header
+# forbids -- the same reason `run-wasm` is its own name rather than
+# `run --surface wasm`. Three names, three raw invocations.
+#
+# The cycle is inherently interactive: an instrumented binary only learns a
+# useful profile from a representative workload, and for a game that means
+# PLAYING it. So `pgo-instrument` builds and launches; you play for a few
+# minutes doing whatever you care about being fast; you quit; `pgo-merge`
+# folds the .profraw files into one .profdata; `run-pgo` rebuilds against it.
+#
+# All three use a private target dir (LODESTONE_PGO_DIR, default
+# target/pgo) because RUSTFLAGS differs from every other recipe here and a
+# shared target dir would cost every concurrent build a cold rebuild.
+# `pgo-merge` needs llvm-profdata: `xcrun llvm-profdata` on macOS, or the
+# one in ~/.rustup/toolchains/*/lib/rustlib/*/bin/.
+
+# cargo run --release with -Cprofile-generate -- play a representative session, then quit
+pgo-instrument:
+    RUSTFLAGS="-Cprofile-generate={{pgo_dir}}/raw" cargo run --release -p lodestone-shell --bin lodestone {{jflag}} --target-dir {{pgo_dir}}/build
+
+# xcrun llvm-profdata merge -- fold the recorded .profraw files into one .profdata
+pgo-merge:
+    xcrun llvm-profdata merge -o {{pgo_dir}}/merged.profdata {{pgo_dir}}/raw
+
+# cargo build --release with -Cprofile-use -- the optimised binary, not installed anywhere
+build-pgo:
+    RUSTFLAGS="-Cprofile-use={{pgo_dir}}/merged.profdata -Cllvm-args=-pgo-warn-missing-function" cargo build --release -p lodestone-shell --bin lodestone {{jflag}} --target-dir {{pgo_dir}}/build
+
+# cargo run --release with -Cprofile-use -- play the PGO-optimised build
+run-pgo *args:
+    RUSTFLAGS="-Cprofile-use={{pgo_dir}}/merged.profdata -Cllvm-args=-pgo-warn-missing-function" cargo run --release -p lodestone-shell --bin lodestone {{jflag}} --target-dir {{pgo_dir}}/build -- {{args}}
