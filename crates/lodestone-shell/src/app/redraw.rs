@@ -410,6 +410,23 @@ impl WindowApp {
             render.set_shulker_source(f);
         }
 
+        // Decorated pots. Same per-frame install and the same failure mode as
+        // shulker boxes: a 26.2 decorated pot has no block model, so without
+        // this call site every pot is a hole in the terrain mesh, not a
+        // missing decoration.
+        if let Some(f) = self.sim.decorated_pot_source() {
+            render.set_decorated_pot_source(f);
+        }
+
+        // Conduits. Same hole-in-the-world failure mode as shulker boxes and
+        // decorated pots, plus the per-frame staleness hazard `bell_source`
+        // documents: the closure this installs reads `Sim::conduit_ticks`,
+        // advanced once per tick in `Sim::step`, so a stale install both
+        // leaves a hole *and* freezes whichever conduits were already tracked.
+        if let Some(f) = self.sim.conduit_source() {
+            render.set_conduit_source(f);
+        }
+
         // Banners. The pattern compositing, the mask atlas, the flag mesh, the
         // sway and the translucent layer pipeline were all landed with zero
         // consumers; this call site plus `prepare_block_entities`' arm is what

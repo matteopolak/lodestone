@@ -231,6 +231,48 @@ impl Sim {
         Some(move |eye: glam::Vec3| crate::block_entities::shulker_spawns(&handle, eye))
     }
 
+    /// This frame's decorated pots, for
+    /// [`RenderState::set_decorated_pot_source`](crate::gpu::RenderState::set_decorated_pot_source).
+    ///
+    /// As thin as [`Self::shulker_source`] and for the same reason: a pot's
+    /// facing and stored sherds both resolve from its block state and NBT at
+    /// draw time, with no client-side animation clock in front of them (see
+    /// [`lodestone_render::DecoratedPotSpawn`]'s own doc on the not-yet-wired
+    /// hit wobble). Installed per frame anyway, for [`Self::skull_source`]'s
+    /// reason — a source that outlived a disconnect would hand out spawns
+    /// from a dead world's handle.
+    #[must_use]
+    pub fn decorated_pot_source(
+        &self,
+    ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::DecoratedPotSpawn> + Send + Sync + 'static>
+    {
+        let handle = self.net.as_ref()?.shared_handle();
+        Some(move |eye: glam::Vec3| crate::block_entities::decorated_pot_spawns(&handle, eye))
+    }
+
+    /// This frame's conduits, for
+    /// [`RenderState::set_conduit_source`](crate::gpu::RenderState::set_conduit_source).
+    ///
+    /// Captures [`Self::conduit_ticks`] and the partial tick, like
+    /// [`Self::bell_source`] — `isActive`/`isHunting` and the rotation
+    /// counters live in that tracker, advanced once per tick in
+    /// [`Self::step`] (`crate::block_entities::conduit_positions`/
+    /// `conduit_scan_frame`), and this closure only reads what is already
+    /// there for this frame's partial tick. A stale install freezes every
+    /// conduit's spin and never notices a newly hunting one.
+    #[must_use]
+    pub fn conduit_source(
+        &self,
+    ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::ConduitSpawn> + Send + Sync + 'static>
+    {
+        let handle = self.net.as_ref()?.shared_handle();
+        let ticks = self.conduit_ticks.clone();
+        let partial_tick = self.clock().interp_alpha;
+        Some(move |eye: glam::Vec3| {
+            crate::block_entities::conduit_spawns(&handle, eye, &ticks, partial_tick)
+        })
+    }
+
     /// This frame's lectern books, for
     /// [`RenderState::set_lectern_source`](crate::gpu::RenderState::set_lectern_source).
     ///

@@ -771,6 +771,16 @@ pub struct Sim {
     /// `progress`), which is why an untracked position draws from the NBT rather
     /// than from zero. See `crate::block_entities::PistonMoves`.
     moving_pistons: crate::block_entities::PistonMoves,
+    /// Per-position conduit animation state (issue #23).
+    ///
+    /// The fifth block-entity clock and, like
+    /// [`enchanting_table_books`](Self::enchanting_table_books) and
+    /// [`moving_pistons`](Self::moving_pistons), started by looking at the
+    /// world rather than by a packet — here a periodic 5×5×5 frame scan
+    /// rather than proximity or NBT. Advanced once per tick in [`Self::step`]
+    /// from `crate::block_entities::conduit_positions` and
+    /// `conduit_scan_frame`; see `crate::block_entities::ConduitTicks`.
+    conduit_ticks: crate::block_entities::ConduitTicks,
 
     /// This frame's item pickups (`take_item_entity`), awaiting the fly-to-collector
     /// animation — issue #365.

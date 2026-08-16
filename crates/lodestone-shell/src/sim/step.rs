@@ -641,6 +641,21 @@ impl Sim {
                 // `block_entities::moving_piston_seeds`.
                 let pistons = crate::block_entities::moving_piston_seeds(&handle);
                 self.moving_pistons.tick(&pistons);
+                // Conduits, on the same fixed 20 Hz — `ConduitTicks::tick` owns
+                // its own rescan cadence internally (see that method's doc), so
+                // this call site only has to supply this tick's candidate set
+                // and a way to re-scan one. `eye` is the plain player position
+                // rather than the render camera's eye (which this GPU-less loop
+                // has none of) — matching `conduit_positions`' own
+                // `VIEW_DISTANCE` cutoff, the same one `bell_spawns`/
+                // `banner_spawns` apply from the *render* eye each frame; the
+                // few-block difference between the two only shifts which
+                // conduits are tracked a tick early or late at the boundary.
+                let eye = glam::Vec3::new(player.x as f32, player.y as f32, player.z as f32);
+                let conduits = crate::block_entities::conduit_positions(&handle, eye);
+                self.conduit_ticks.tick(&conduits, |pos| {
+                    crate::block_entities::conduit_scan_frame(&handle, pos)
+                });
             }
             // The HUD status effects and the title/action-bar overlays used to be
             // aged by three hand-written `tick(1)` calls right here. They are now
