@@ -1879,6 +1879,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   patch of every major Minecraft release from 1.7.10 through 26.2 — this is the
   checked-in, provenance-tracked record of that release's **protocol number**, its
   save-format **`DataVersion`**, and its **release date**:
+- [Vibration substrate (issue #459, step 2)](./vibration-substrate.md) — A
+  world-event type (`VibrationEvent`) and a host-side "nearest audible event"
+  resolution — the real, fully-open prerequisite issue #459 named for the warden
+  (and reusable beyond it, for a future sculk sensor). Step 1 of that issue (the Brain
+  driver reaching production) and step 3 (the warden's own anger/dig/emerge behaviour)
+  are both separate, tracked elsewhere; this is step 2 only.
 - [View bobbing, the damage tilt, and view lag](./view-bobbing.md) — Three separate
   mechanisms that a screenshot makes look like one:
 - [Villager professions and trading (issues #243, #245)](./villager-professions-and-trading.md) —
