@@ -785,15 +785,6 @@ impl Text {
         }
     }
 
-    /// The old name for [`to_spans`](Self::to_spans), kept only so an in-flight
-    /// call site keeps compiling. Expansion is now the default, so this is a
-    /// straight forward.
-    #[must_use]
-    #[deprecated(note = "expansion is now the default: call `to_spans`")]
-    pub fn to_spans_expanding_legacy(&self) -> Vec<TextSpan> {
-        self.to_spans()
-    }
-
     /// Renders this tree back to a legacy `§`-code string. Colour and each
     /// active format flag are emitted as codes ahead of each run; a `§r` reset
     /// is emitted whenever a run turns a flag *off* relative to the previous
