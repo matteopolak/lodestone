@@ -219,11 +219,13 @@ fn style_inheritance_uses_child_value_then_parent() {
     // Parent turns bold on and sets red; child leaves bold unspecified (should
     // inherit true) but explicitly turns italic on and colour blue.
     let parent = TextStyle {
+        font: None,
         color: Some(TextColor::Red),
         bold: Some(true),
         ..TextStyle::default()
     };
     let child = TextStyle {
+        font: None,
         color: Some(TextColor::Blue),
         italic: Some(true),
         ..TextStyle::default()
@@ -240,10 +242,12 @@ fn explicit_false_is_not_inherited_over() {
     // The load-bearing case: a child that explicitly disables bold must stay
     // not-bold even though the parent is bold. Some(false) != None.
     let parent = TextStyle {
+        font: None,
         bold: Some(true),
         ..TextStyle::default()
     };
     let child = TextStyle {
+        font: None,
         bold: Some(false),
         ..TextStyle::default()
     };
@@ -256,18 +260,21 @@ fn to_spans_resolves_inheritance_down_the_tree() {
     let text = Text {
         content: TextContent::Literal("A".into()),
         style: TextStyle {
+            font: None,
             bold: Some(true),
             ..TextStyle::default()
         },
         extra: vec![Text {
             content: TextContent::Literal("B".into()),
             style: TextStyle {
+                font: None,
                 color: Some(TextColor::Red),
                 ..TextStyle::default()
             },
             extra: vec![Text {
                 content: TextContent::Literal("C".into()),
                 style: TextStyle {
+                    font: None,
                     bold: Some(false),
                     ..TextStyle::default()
                 },
@@ -1489,6 +1496,7 @@ const LEGACY_FIXTURE_VISIBLE: &str = "red bold green plain dropped";
 /// detect a transposition at all.
 fn alternating_style() -> TextStyle {
     TextStyle {
+        font: None,
         color: Some(TextColor::Gold),
         bold: Some(true),
         italic: Some(false),

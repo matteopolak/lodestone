@@ -320,6 +320,7 @@ mod tests {
         let hex = Text {
             content: TextContent::Literal("Hex".to_string()),
             style: TextStyle {
+                font: None,
                 color: Some(TextColor::Rgb(0x1a_2b3c)),
                 ..TextStyle::default()
             },
@@ -329,6 +330,7 @@ mod tests {
         let named = Text {
             content: TextContent::Literal("Gray".to_string()),
             style: TextStyle {
+                font: None,
                 color: Some(TextColor::Gray),
                 ..TextStyle::default()
             },

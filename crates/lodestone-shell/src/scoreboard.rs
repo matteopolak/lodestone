@@ -82,6 +82,7 @@ fn score_spans(
         NumberFormat::Styled(color) => vec![TextSpan {
             text: value.to_string(),
             style: TextStyle {
+                font: None,
                 color: Some(*color),
                 ..TextStyle::default()
             },

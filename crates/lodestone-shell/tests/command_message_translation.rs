@@ -233,6 +233,7 @@ fn the_op_broadcast_is_grey_italic_and_the_nested_message_inherits_it() {
         vec![Text::literal("Server"), feedback.clone()],
     );
     broadcast.style = TextStyle {
+        font: None,
         color: Some(TextColor::Gray),
         italic: Some(true),
         ..TextStyle::default()

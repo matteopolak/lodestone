@@ -317,6 +317,7 @@ mod tests {
         let styled = |text: &str, color: TextColor| TextSpan {
             text: text.to_owned(),
             style: TextStyle {
+                font: None,
                 color: Some(color),
                 ..TextStyle::default()
             },
@@ -385,6 +386,7 @@ mod tests {
             BossBar {
                 title: Text {
                     style: lodestone_model::TextStyle {
+                        font: None,
                         color: Some(lodestone_model::TextColor::Rgb(HEX)),
                         ..lodestone_model::TextStyle::default()
                     },

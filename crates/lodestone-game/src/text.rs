@@ -397,6 +397,7 @@ mod tests {
         let root = Text {
             content: TextContent::Literal("parent ".to_string()),
             style: TextStyle {
+                font: None,
                 color: Some(TextColor::Red),
                 bold: Some(true),
                 ..TextStyle::default()
@@ -404,6 +405,7 @@ mod tests {
             extra: vec![Text {
                 content: TextContent::Literal("child".to_string()),
                 style: TextStyle {
+                    font: None,
                     italic: Some(true),
                     ..TextStyle::default()
                 },
@@ -438,6 +440,7 @@ mod tests {
                     Text {
                         content: TextContent::Literal("Victim".to_string()),
                         style: TextStyle {
+                            font: None,
                             color: Some(TextColor::Aqua),
                             ..TextStyle::default()
                         },
@@ -448,6 +451,7 @@ mod tests {
                 fallback: None,
             },
             style: TextStyle {
+                font: None,
                 color: Some(TextColor::Gold),
                 ..TextStyle::default()
             },
@@ -505,6 +509,7 @@ mod tests {
     fn a_leafs_own_click_and_hover_reach_its_span() {
         let mut msg = Text {
             style: TextStyle {
+                font: None,
                 color: Some(TextColor::Aqua),
                 ..TextStyle::default()
             },
