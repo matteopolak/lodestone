@@ -660,6 +660,20 @@ and puts the wrong number on the XP bar. **Port from `write`/`read`, never from 
 declaration** — for a record whose fields are all the same type, those are three different orders that all
 look authoritative.
 
+**Vanilla's `Mth.cos`/`Mth.sin` are a quantized lookup table, not `f32::cos`/`f32::sin`, and substituting the
+standard library diverges exactly at the poles.** Measured: a fishing bobber cast straight down (`pitch == 90.0`)
+launched *upward*, because at the pole the library's result lands on the wrong side of zero by float noise while
+the table does not. Use `lodestone_physics::mth`. The general shape is that **a port's numeric substitution is
+invisible in the middle of the range and wrong at the edge**, so a fixture sitting at a cardinal angle, an axis,
+or a zero crossing is testing something a mid-range fixture cannot — and those are precisely the inputs a person
+writing a test reaches for as "simple".
+
+**And sampling only the destination cell after a move tunnels through thin geometry.** The same fix: the bobber's
+settling code read the single cell below its *already-moved* position, so a fast fall could cross a one-block
+floor within a tick and land on neither side of that sample, dropping into the void. **Scan every integer cell
+the movement crossed**, not the endpoint. Any per-tick "am I on the ground / in water / inside a block" check
+written against a post-move position has this bug latent in it, and it only shows at high speed.
+
 **Assertions of an absence need a control proving the detector works.** "No corrective teleport", "no
 trailing bytes", "zero unresolved" are only as good as the evidence the mechanism *would* have fired.
 Run the control and observe it fail; do not describe what it would do.
