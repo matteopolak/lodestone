@@ -91,7 +91,7 @@ fn open_session(seed: i64, view_radius: i32, world_dir: Option<PathBuf>) -> Opti
         server_protocol,
         protocol,
         seed,
-        lodestone_server::WorldType::Overworld,
+        lodestone::menu::create_world::WorldTypePreset::Normal,
         view_radius,
         None,
         world_dir,

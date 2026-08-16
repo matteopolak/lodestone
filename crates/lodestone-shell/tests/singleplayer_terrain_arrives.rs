@@ -61,16 +61,22 @@ const OWNER_VIEW_RADIUS: i32 = 33;
 const SMALL_VIEW_RADIUS: i32 = 1;
 
 fn open_session(seed: i64, view_radius: i32, world_dir: Option<PathBuf>) -> Option<NetClient> {
-    open_session_of_type(seed, lodestone_server::WorldType::Overworld, view_radius, world_dir)
+    open_session_of_type(
+        seed,
+        lodestone::menu::create_world::WorldTypePreset::Normal,
+        view_radius,
+        world_dir,
+    )
 }
 
-/// [`open_session`], but naming the [`lodestone_server::WorldType`] rather
-/// than hardcoding [`lodestone_server::WorldType::Overworld`] — see
-/// [`a_singleplayer_world_honours_the_selected_world_type_end_to_end`] below,
-/// which is the one caller that needs a different arm.
+/// [`open_session`], but naming the
+/// [`WorldTypePreset`](lodestone::menu::create_world::WorldTypePreset) rather
+/// than hardcoding [`WorldTypePreset::Normal`](lodestone::menu::create_world::WorldTypePreset::Normal)
+/// — see [`a_singleplayer_world_honours_the_selected_world_type_end_to_end`]
+/// below, which is the one caller that needs a different arm.
 fn open_session_of_type(
     seed: i64,
-    world_type: lodestone_server::WorldType,
+    world_type: lodestone::menu::create_world::WorldTypePreset,
     view_radius: i32,
     world_dir: Option<PathBuf>,
 ) -> Option<NetClient> {
@@ -201,7 +207,7 @@ fn a_singleplayer_world_honours_the_selected_world_type_end_to_end() {
 
     let Some(overworld) = open_session_of_type(
         SEED,
-        lodestone_server::WorldType::Overworld,
+        lodestone::menu::create_world::WorldTypePreset::Normal,
         SMALL_VIEW_RADIUS,
         None,
     ) else {
@@ -221,7 +227,7 @@ fn a_singleplayer_world_honours_the_selected_world_type_end_to_end() {
 
     let Some(amplified) = open_session_of_type(
         SEED,
-        lodestone_server::WorldType::Amplified,
+        lodestone::menu::create_world::WorldTypePreset::Amplified,
         SMALL_VIEW_RADIUS,
         None,
     ) else {
@@ -238,6 +244,89 @@ fn a_singleplayer_world_honours_the_selected_world_type_end_to_end() {
          selecting Amplified must serve Amplified terrain over the real wire, \
          not silently fall back to the Overworld default"
     );
+}
+
+/// Issue #592's item 2: the four presets that were blocked on
+/// `lodestone-server`'s `lib.rs` re-exporting `single_biome_chunk_source`/
+/// `flat_chunk_source`/`debug_chunk_source` (landed on `main` ahead of this
+/// pass) must also reach the wire through `net.rs`'s `preset_chunk_source`,
+/// not just compile.
+///
+/// `Flat`/`DebugAllBlockStates` get a **strong**, externally-sourced check —
+/// the exact block states `crates/lodestone-server/src/worldgen_data.rs`'s
+/// own `flat_chunk_source_set_block_persists_and_stays_chunk_local`/
+/// `debug_chunk_source_set_block_persists_and_stays_chunk_local` tests already
+/// measure at those crate-internal `ChunkSource`s directly (a `classic_flat`
+/// column's `(0, -61, 0)` is `minecraft:grass_block[snowy=false]`; the debug
+/// grid's `(1, 60, 1)` is `minecraft:barrier`) — reused here rather than
+/// re-derived, and now asked of a **live session** instead of a bare
+/// `ChunkSource`, which is the layer this issue actually threaded.
+/// `SingleBiomeSurface` gets the same weak-but-real "terrain arrived" check
+/// [`open_session`] uses: there is no independently measured oracle value for
+/// it reachable from this crate (its default biome, `minecraft:plains`, has
+/// no fixed sea-level surface block asserted anywhere this crate can cite
+/// without re-deriving vanilla's biome/surface rules), so this stops at
+/// proving the session reaches real, non-air terrain rather than guessing a
+/// stronger assertion.
+#[test]
+fn the_four_newly_wired_presets_serve_their_own_generator_end_to_end() {
+    use lodestone::menu::create_world::WorldTypePreset;
+
+    // `lodestone_data::block_states::block_name` returns only the *base* name
+    // (`"minecraft:grass_block"`), never a bracketed property string — the
+    // property values are a separate accessor. So a state that carries
+    // properties has to be matched on both, not on a hand-assembled name
+    // string that no lookup in this crate ever produces.
+    fn state_id_with(name: &str, props: &[(&str, &str)]) -> u32 {
+        (0..lodestone_data::block_states::STATE_COUNT)
+            .find(|&id| {
+                lodestone_data::block_states::block_name(id) == Some(name)
+                    && lodestone_data::block_states::properties(id) == Some(props)
+            })
+            .unwrap_or_else(|| panic!("{name} with {props:?} is not in the 26.2 block-state table"))
+    }
+
+    let Some(flat) = open_session_of_type(4242, WorldTypePreset::Flat, SMALL_VIEW_RADIUS, None)
+    else {
+        assert!(!cfg!(feature = "live"), "the default build must host singleplayer");
+        return;
+    };
+    pump_until(&flat, "the spawn chunk", |net| net.is_chunk_loaded(ChunkPos { x: 0, z: 0 }));
+    assert_eq!(
+        flat.block_at(BlockPos::new(0, -61, 0)),
+        Some(state_id_with("minecraft:grass_block", &[("snowy", "false")])),
+        "a live session selecting WorldTypePreset::Flat must serve the exact classic_flat \
+         layer stack `flat_chunk_source`'s own test measures, not silently fall back to \
+         the Normal default"
+    );
+
+    let Some(debug) =
+        open_session_of_type(4242, WorldTypePreset::DebugAllBlockStates, SMALL_VIEW_RADIUS, None)
+    else {
+        return; // Already asserted unreachable-only-without-`live` above.
+    };
+    pump_until(&debug, "the spawn chunk", |net| net.is_chunk_loaded(ChunkPos { x: 0, z: 0 }));
+    assert_eq!(
+        debug.block_at(BlockPos::new(1, 60, 1)),
+        // Barrier is waterloggable in 26.2, defaulting `false` — not a
+        // stateless block, so the bracketed property has to be matched too.
+        Some(state_id_with("minecraft:barrier", &[("waterlogged", "false")])),
+        "a live session selecting WorldTypePreset::DebugAllBlockStates must serve the exact \
+         debug grid `debug_chunk_source`'s own test measures"
+    );
+
+    let Some(single_biome) = open_session_of_type(
+        4242,
+        WorldTypePreset::SingleBiomeSurface,
+        SMALL_VIEW_RADIUS,
+        None,
+    ) else {
+        return;
+    };
+    pump_until(&single_biome, "the spawn chunk", |net| {
+        net.is_chunk_loaded(ChunkPos { x: 0, z: 0 })
+    });
+    assert_spawn_column_has_terrain(&single_biome, SMALL_VIEW_RADIUS);
 }
 
 /// One full section face is `16 * 16 = 256` quads; a real terrain column is
@@ -351,7 +440,7 @@ fn a_sim_at_the_owners_render_distance_drains_real_terrain_meshes() {
         server_protocol,
         protocol,
         4242,
-        lodestone_server::WorldType::Overworld,
+        lodestone::menu::create_world::WorldTypePreset::Normal,
         OWNER_VIEW_RADIUS,
         None,
         None,

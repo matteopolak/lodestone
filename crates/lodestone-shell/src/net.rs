@@ -1319,13 +1319,16 @@ enum Origin {
         /// that world's stored seed wins and this is ignored; see
         /// [`lodestone_server::region_source::resolve_world_seed`].
         seed: i64,
-        /// Which bundled overworld generator to build (issue #592's item 1) —
-        /// a **creation** parameter, same rule as `seed` immediately above:
+        /// Which bundled generator to build (issue #592's items 1 and 2) — a
+        /// **creation** parameter, same rule as `seed` immediately above:
         /// only consulted when there is no existing world on disk to defer to.
         /// Not cfg-gated on `wasm32`, unlike `world_dir`/`lan_port`/
         /// `online_mode` below: world generation itself runs identically on
         /// both targets, only persistence and LAN hosting are native-only.
-        world_type: lodestone_server::WorldType,
+        /// The full Create New World preset, not just the three-way
+        /// `lodestone_server::WorldType` it used to carry — [`preset_chunk_source`]
+        /// is what resolves all seven.
+        world_type: crate::menu::create_world::WorldTypePreset,
         /// Chunk radius the server streams around the player.
         view_radius: i32,
         /// Where to save this world, or `None` for a throwaway in-memory one.
@@ -1715,7 +1718,7 @@ impl NetClient {
         server_protocol: Box<dyn lodestone_server::ServerProtocol>,
         protocol: i32,
         seed: i64,
-        world_type: lodestone_server::WorldType,
+        world_type: crate::menu::create_world::WorldTypePreset,
         view_radius: i32,
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
         #[cfg(not(target_arch = "wasm32"))] world_dir: Option<std::path::PathBuf>,
@@ -1767,7 +1770,7 @@ impl NetClient {
         server_protocol: Box<dyn lodestone_server::ServerProtocol>,
         protocol: i32,
         seed: i64,
-        world_type: lodestone_server::WorldType,
+        world_type: crate::menu::create_world::WorldTypePreset,
         view_radius: i32,
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
         world_dir: Option<std::path::PathBuf>,
@@ -2599,12 +2602,14 @@ async fn run_async(
                 // `docs/chunk-memory-pool-footprint.md` predates carvers, ores and
                 // vegetation composing in and is not the figure to reason from.
                 //
-                // `world_type` (issue #592's item 1) picks the noise settings
-                // document `overworld_chunk_source_of_type` builds the generator
-                // from — `Overworld` reproduces the old unconditional
-                // `overworld_chunk_source(seed)` call exactly, since that
-                // function is defined as this one at `WorldType::Overworld`.
-                let source = lodestone_server::overworld_chunk_source_of_type(seed, world_type);
+                // `world_type` (issue #592's items 1 and 2) picks which of the
+                // seven bundled generators to build — [`preset_chunk_source`]
+                // is the full mapping; `Normal` reproduces the old
+                // unconditional `overworld_chunk_source(seed)` call exactly.
+                // `(min_y, height)` come back alongside the erased source
+                // because only `OverworldChunkSource` exposes those as an
+                // inherent accessor — see `preset_chunk_source`'s own doc.
+                let (source, min_y, height) = preset_chunk_source(seed, world_type);
                 // Open to LAN (issue #535's scope 1). Taken before the
                 // in-memory constructors below because it is a *different
                 // server*: `IntegratedServer::open_to_lan` binds a TCP listener
@@ -2639,8 +2644,17 @@ async fn run_async(
                 #[cfg(not(target_arch = "wasm32"))]
                 let (server, client_io, lan_address) = match lan_port {
                     Some(port) => {
-                        match open_lan_world(server_protocol, source, &world_dir, view_radius, port, online_mode)
-                            .await
+                        match open_lan_world(
+                            server_protocol,
+                            source,
+                            min_y,
+                            height,
+                            &world_dir,
+                            view_radius,
+                            port,
+                            online_mode,
+                        )
+                        .await
                         {
                             Ok((server, address, save)) => {
                                 if let Some(save) = save {
@@ -2697,14 +2711,13 @@ async fn run_async(
                     // the world-open stall (10.86 s → 75.6 ms,
                     // `docs/world-open-latency.md`) had exactly that shape.
                     //
-                    // `min_y`/`height` come off the source rather than being
-                    // written as `(-64, 384)` here: `region_source`'s own
-                    // gotcha is that they must match the world the columns came
-                    // from, and a literal at this call site is a copy that can
-                    // drift from the generator that produced them.
+                    // `min_y`/`height` come off `preset_chunk_source` rather
+                    // than being written as `(-64, 384)` here: `region_source`'s
+                    // own gotcha is that they must match the world the columns
+                    // came from, and a literal at this call site is a copy that
+                    // can drift from the generator that produced them.
                     let (server, client_io) = match &world_dir {
                         Some(dir) => {
-                            let (min_y, height) = (source.min_y(), source.height());
                             match lodestone_server::IntegratedServer::open_persistent_with_mobs(
                                 server_protocol,
                                 dir,
@@ -3408,6 +3421,102 @@ fn run(
     ));
 }
 
+/// Builds the chunk source (and its declared `(min_y, height)`) for a freshly
+/// created singleplayer/LAN world, from the Create New World screen's own
+/// [`WorldTypePreset`](crate::menu::create_world::WorldTypePreset) — issue
+/// #592's item 2, unblocked once `crates/lodestone-server/src/lib.rs`
+/// re-exported `single_biome_chunk_source`/`flat_chunk_source`/
+/// `debug_chunk_source` (landed on `main` ahead of this pass; see that
+/// preset's own module doc for the three already-wired presets' history).
+///
+/// Not `#[cfg(not(target_arch = "wasm32"))]`: every function this calls lives
+/// in `lodestone-server`'s `worldgen_data` module, which carries no wasm32
+/// gate of its own, and this crate's `Origin::Integrated` construction calls
+/// it unconditionally (both the native LAN/persistent path and the wasm32
+/// `open_in_memory_with_items` path need a source).
+///
+/// # Returns `Arc<dyn ChunkSource>`, not four different concrete types
+///
+/// `Normal`/`LargeBiomes`/`Amplified`/`SingleBiomeSurface` all build a
+/// [`lodestone_server::OverworldChunkSource`]; `Flat`/`FlatAllDimensions`
+/// build a `FlatChunkSource`; `DebugAllBlockStates` builds a
+/// `DebugChunkSource` — three different concrete types the rest of this
+/// module's single construction site cannot be generic over per-call (it is
+/// one call site serving whichever preset the player picked, not one per
+/// preset). Erasing to `Arc<dyn ChunkSource>` is what
+/// `lodestone_server::chunk`'s `impl<S: ChunkSource + ?Sized> ChunkSource for
+/// Arc<S>` exists for — the same mechanism `IntegratedServer::publish` already
+/// uses to hand every connection a type-erased source — and every downstream
+/// consumer here (`RegionChunkSource::new`, `open_persistent_with_mobs`,
+/// `open_in_memory_with_mobs`, `open_in_memory_with_items`, `open_to_lan`) is
+/// generic over `S: ChunkSource`, so `Arc<dyn ChunkSource>` satisfies every
+/// one of those bounds with no further changes.
+///
+/// # Why `(min_y, height)` come back as plain values, not a method call
+///
+/// Only `OverworldChunkSource` exposes `min_y()`/`height()` as an inherent
+/// accessor; `FlatChunkSource`/`DebugChunkSource` do not, and the trait itself
+/// declares neither (so a caller holding only `Arc<dyn ChunkSource>` cannot
+/// ask). For `Flat`/`FlatAllDimensions`/`DebugAllBlockStates` this builds a
+/// throwaway `OverworldChunkSource` for the same seed purely to read its
+/// bounds — cheap (wrapping a generator does not generate a column) and
+/// correct rather than a guess: `worldgen_data::flat_generator`/
+/// `debug_generator` are documented to read their own `min_y`/`height` off
+/// that exact overworld noise-settings document, not an independent one, so
+/// the two are guaranteed equal without this crate hardcoding `(-64, 384)` —
+/// exactly the literal-drift gotcha `open_persistent_with_mobs`'s own call
+/// site already warns against.
+fn preset_chunk_source(
+    seed: i64,
+    preset: crate::menu::create_world::WorldTypePreset,
+) -> (Arc<dyn lodestone_server::ChunkSource>, i32, i32) {
+    use crate::menu::create_world::WorldTypePreset;
+    match preset {
+        WorldTypePreset::Normal => {
+            let s = lodestone_server::overworld_chunk_source(seed);
+            let (min_y, height) = (s.min_y(), s.height());
+            (Arc::new(s), min_y, height)
+        }
+        WorldTypePreset::LargeBiomes => {
+            let s = lodestone_server::overworld_chunk_source_of_type(
+                seed,
+                lodestone_server::WorldType::LargeBiomes,
+            );
+            let (min_y, height) = (s.min_y(), s.height());
+            (Arc::new(s), min_y, height)
+        }
+        WorldTypePreset::Amplified => {
+            let s = lodestone_server::overworld_chunk_source_of_type(
+                seed,
+                lodestone_server::WorldType::Amplified,
+            );
+            let (min_y, height) = (s.min_y(), s.height());
+            (Arc::new(s), min_y, height)
+        }
+        WorldTypePreset::SingleBiomeSurface => {
+            // No UI for choosing the biome yet — see this function's own doc
+            // and `WorldTypePreset`'s module doc for why the bundled default
+            // is used rather than guessing at a picker.
+            let biome = lodestone_server::world_preset_single_biome_default_biome();
+            let s = lodestone_server::single_biome_chunk_source(seed, &biome);
+            let (min_y, height) = (s.min_y(), s.height());
+            (Arc::new(s), min_y, height)
+        }
+        WorldTypePreset::Flat | WorldTypePreset::FlatAllDimensions => {
+            let all_dimensions = matches!(preset, WorldTypePreset::FlatAllDimensions);
+            let settings = lodestone_server::world_preset_flat_settings(all_dimensions);
+            let s = lodestone_server::flat_chunk_source(settings);
+            let bounds = lodestone_server::overworld_chunk_source(seed);
+            (Arc::new(s), bounds.min_y(), bounds.height())
+        }
+        WorldTypePreset::DebugAllBlockStates => {
+            let s = lodestone_server::debug_chunk_source();
+            let bounds = lodestone_server::overworld_chunk_source(seed);
+            (Arc::new(s), bounds.min_y(), bounds.height())
+        }
+    }
+}
+
 /// The world name a LAN ping advertises — the world directory's own final
 /// component, or a generic label for a throwaway in-memory world.
 ///
@@ -3458,7 +3567,9 @@ fn lan_online_mode(enabled: bool) -> Option<lodestone_server::OnlineModeConfig> 
 #[cfg(not(target_arch = "wasm32"))]
 async fn open_lan_world(
     protocol: Box<dyn lodestone_server::ServerProtocol>,
-    source: lodestone_server::OverworldChunkSource,
+    source: std::sync::Arc<dyn lodestone_server::ChunkSource>,
+    min_y: i32,
+    height: i32,
     world_dir: &Option<std::path::PathBuf>,
     view_radius: i32,
     port: u16,
@@ -3483,13 +3594,14 @@ async fn open_lan_world(
     };
     let motd = lan_motd(world_dir.as_deref());
     let (server, save) = match world_dir {
-        // `min_y`/`height` off the source, never a `(-64, 384)` literal — the
-        // same gotcha `open_persistent_with_mobs`' call site carries.
+        // `min_y`/`height` come from the caller's `preset_chunk_source`, never
+        // a `(-64, 384)` literal here — the same gotcha
+        // `open_persistent_with_mobs`' call site carries.
         Some(dir) => {
-            let (min_y, height) = (source.min_y(), source.height());
             // Singleplayer publish-to-LAN only ever opens the overworld's own
-            // region store — `source` here is an `OverworldChunkSource`, never
-            // the Nether or the End.
+            // region store — `source` here is type-erased (issue #592's item
+            // 2: it may be any of seven generators, not only
+            // `OverworldChunkSource`), but always overworld-shaped data.
             let region = lodestone_server::region_source::RegionChunkSource::new(
                 source,
                 dir,

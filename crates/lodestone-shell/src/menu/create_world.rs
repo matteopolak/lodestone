@@ -108,24 +108,24 @@
 //!   real, but nothing downstream reads any of them: they need deeper
 //!   session-setup wiring (server-side initial state) than the seed's
 //!   one-parameter threading, and are left as documented follow-up.
-//! - **Wired since issue #592's item 1 — three of seven world types.** Cycles
-//!   all seven bundled presets for real (issue #519's generator half landed
-//!   all seven; this is their UI), and choosing `Normal`/`LargeBiomes`/
-//!   `Amplified` now reaches the served world:
-//!   `WorldTypePreset::backend_world_type` converts the UI choice,
-//!   `begin_singleplayer` (`app/session.rs`) reads it from
-//!   `WorldCreationConfig` for a **`Created`** launch only (same rule as
-//!   `seed`), threads it through `launch_singleplayer`/
-//!   `launch_open_to_lan_online` (`app/launch.rs`) into
-//!   `NetClient::open_singleplayer`/`open_to_lan`, and `net.rs`'s
-//!   `Origin::Integrated` carries it to the one construction site that used
-//!   to hardcode `overworld_chunk_source(seed)`. **Still decorative — the
-//!   other four** (`SingleBiomeSurface`/`Flat`/`FlatAllDimensions`/
-//!   `DebugAllBlockStates`): their entry points are blocked on a
-//!   `lodestone-server` re-export this crate cannot make (see
-//!   [`WorldTypePreset::backend_world_type`]'s own doc). Selecting one of the
-//!   four falls back to `Overworld` rather than erroring, the same policy
-//!   `is_backend_wired` names.
+//! - **Wired since issue #592's items 1 and 2 — all seven world types.**
+//!   Cycles all seven bundled presets for real (issue #519's generator half
+//!   landed all seven; this is their UI), and choosing any of them now
+//!   reaches the served world. `Normal`/`LargeBiomes`/`Amplified` go through
+//!   `WorldTypePreset::backend_world_type`; `SingleBiomeSurface`/`Flat`/
+//!   `FlatAllDimensions`/`DebugAllBlockStates` go through `net.rs`'s
+//!   `preset_chunk_source`, once `crates/lodestone-server/src/lib.rs`
+//!   re-exported their entry points (item 2's blocker, landed on `main`
+//!   ahead of this pass). `begin_singleplayer` (`app/session.rs`) reads the
+//!   chosen [`WorldTypePreset`] from `WorldCreationConfig` for a
+//!   **`Created`** launch only (same rule as `seed`), threads the preset
+//!   itself through `launch_singleplayer`/`launch_open_to_lan_online`
+//!   (`app/launch.rs`) into `NetClient::open_singleplayer`/`open_to_lan`, and
+//!   `net.rs`'s `Origin::Integrated` carries it to the one construction site
+//!   that used to hardcode `overworld_chunk_source(seed)`. `SingleBiomeSurface`
+//!   always uses the bundled default biome (`minecraft:plains`) rather than a
+//!   player choice — no UI for that yet, a disclosed simplification, not a
+//!   fallback to `Overworld`.
 //! - **Decorative — the world name and the "will be saved in" folder.**
 //!   There is still no `LevelStorageSource` (`world_select`'s own module
 //!   docs, unchanged by this issue), so a name is collected and shown but
@@ -239,39 +239,43 @@ fn content_rows_for_tab(tab: usize) -> &'static [usize] {
 /// this client does not model, so this enum is the seven fixed presets rather
 /// than an open list.
 ///
-/// ## Backend wiring — three of seven, and which three
+/// ## Backend wiring — all seven, now (issue #592's items 1 and 2)
 ///
 /// [`Self::caption`] is real for all seven (`generator.minecraft.*`,
-/// verbatim). **Selecting one is only decorative for four of the seven now**
-/// — see `docs/worldgen-world-type-selection.md`'s own "How to change it"
-/// table for exactly which entry point each preset needs:
+/// verbatim), and **selecting any of the seven now reaches a real, distinct
+/// generator** — see `docs/worldgen-world-type-selection.md`'s own "How to
+/// change it" table for exactly which entry point each preset needs.
 ///
-/// - [`Self::Normal`]/[`Self::LargeBiomes`]/[`Self::Amplified`] are **wired,
-///   end to end.** [`Self::backend_world_type`] converts the choice,
-///   `begin_singleplayer` (`app/session.rs`) reads it from
-///   `WorldCreationConfig` for a **`Created`** launch and threads it through
-///   `launch_singleplayer`/`launch_open_to_lan_online` (`app/launch.rs`) into
-///   `NetClient::open_singleplayer`/`open_to_lan`, and `net.rs`'s
-///   `Origin::Integrated` carries it to the `overworld_chunk_source_of_type`
-///   call that used to hardcode `overworld_chunk_source(seed)` (i.e.
-///   `WorldType::Overworld`) unconditionally. Verified end to end by
-///   `tests/singleplayer_terrain_arrives.rs`'s
-///   `a_singleplayer_world_honours_the_selected_world_type_end_to_end`, which
-///   reuses `lodestone-server/tests/world_type_selection.rs`'s own measured
-///   64/130 top-of-world heights at seed 4242 rather than re-deriving them —
-///   a real `NetClient::open_singleplayer` session selecting `Amplified` must
-///   serve the 130 figure over the wire, not the 64 the Overworld default
-///   would give the identical column.
+/// - [`Self::Normal`]/[`Self::LargeBiomes`]/[`Self::Amplified`] go through
+///   [`Self::backend_world_type`] and `overworld_chunk_source_of_type`
+///   (issue #592's item 1) — see that method's own doc.
 /// - [`Self::SingleBiomeSurface`]/[`Self::Flat`]/[`Self::FlatAllDimensions`]/
-///   [`Self::DebugAllBlockStates`] are **still blocked on a
-///   `lodestone-server` change**: their entry points
-///   (`single_biome_chunk_source`/`flat_chunk_source`/`debug_chunk_source`)
-///   are real and individually verified, but not yet re-exported from that
-///   crate's root — `crates/lodestone-server/src/lib.rs` is off limits to
-///   this agent (another is live in it), so this cannot be closed from here.
-///   Selecting one of these four does not error; [`Self::backend_world_type`]
-///   falls back to [`lodestone_server::WorldType::Overworld`], same as
-///   selecting [`Self::Normal`] — see that method's own doc.
+///   [`Self::DebugAllBlockStates`] go through `net.rs`'s
+///   `preset_chunk_source`, which calls `single_biome_chunk_source`/
+///   `flat_chunk_source`/`debug_chunk_source` directly (issue #592's item 2,
+///   unblocked once `crates/lodestone-server/src/lib.rs` re-exported those
+///   entry points — landed on `main` ahead of this pass, so the item is
+///   simply the shell-side threading now). `SingleBiomeSurface` always uses
+///   `world_preset_single_biome_default_biome()` (`minecraft:plains`) rather
+///   than a player-chosen biome — there is no UI for that choice yet, see
+///   the issue's own note on why vanilla's own `WorldTab` does not expose it
+///   directly either.
+///
+/// In every case, `begin_singleplayer` (`app/session.rs`) reads the chosen
+/// [`WorldTypePreset`] from `WorldCreationConfig` for a **`Created`** launch
+/// and threads the preset itself (not just a `lodestone_server::WorldType`
+/// projection of it) through `launch_singleplayer`/`launch_open_to_lan_online`
+/// (`app/launch.rs`) into `NetClient::open_singleplayer`/`open_to_lan`, and
+/// `net.rs`'s `Origin::Integrated` carries it to `preset_chunk_source`, which
+/// used to hardcode `overworld_chunk_source(seed)` (i.e. `Self::Normal`)
+/// unconditionally. The `Normal`/`LargeBiomes`/`Amplified` leg is verified end
+/// to end by `tests/singleplayer_terrain_arrives.rs`'s
+/// `a_singleplayer_world_honours_the_selected_world_type_end_to_end`, which
+/// reuses `lodestone-server/tests/world_type_selection.rs`'s own measured
+/// 64/130 top-of-world heights at seed 4242 rather than re-deriving them —
+/// a real `NetClient::open_singleplayer` session selecting `Amplified` must
+/// serve the 130 figure over the wire, not the 64 the Overworld default
+/// would give the identical column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorldTypePreset {
     #[default]
@@ -314,27 +318,30 @@ impl WorldTypePreset {
 
     /// Whether the launch path builds this preset's own generator rather than
     /// silently falling back to [`Self::Normal`] — see this type's own doc.
+    ///
+    /// `true` for all seven, now that `net.rs`'s `preset_chunk_source` covers
+    /// every variant (issue #592's items 1 and 2). Kept as a named predicate
+    /// rather than deleted: a caller that wants to warn about a decorative
+    /// choice should still ask this rather than assume, so a preset added
+    /// later without its own `preset_chunk_source` arm has somewhere to
+    /// report `false` from instead of silently falling through to `Normal`.
     #[must_use]
     pub fn is_backend_wired(self) -> bool {
-        matches!(
-            self,
-            WorldTypePreset::Normal | WorldTypePreset::LargeBiomes | WorldTypePreset::Amplified
-        )
+        true
     }
 
-    /// The `lodestone_server::WorldType` this preset resolves to, now that the
-    /// `net.rs` threading hop (issue #592's item 1) exists.
-    ///
-    /// [`Self::is_backend_wired`] is the caller-facing "does this do anything"
-    /// question; this is the *value* to pass once the answer is yes. The four
-    /// presets [`Self::is_backend_wired`] reports `false` for have no
-    /// `lodestone_server::WorldType` variant at all yet — they need
-    /// `single_biome_chunk_source`/`flat_chunk_source`/`debug_chunk_source`,
-    /// not this enum, once those are re-exported (issue #592's item 2) — so
-    /// they fall back to [`lodestone_server::WorldType::Overworld`] here,
-    /// same as selecting [`Self::Normal`]. That fallback is exactly what
-    /// [`Self::is_backend_wired`] exists to let a caller warn about instead of
-    /// silently accepting.
+    /// The `lodestone_server::WorldType` this preset resolves to, for the
+    /// three presets shaped as one — `net.rs`'s `preset_chunk_source` is the
+    /// full seven-way mapping now (issue #592's item 2); this is the narrower
+    /// three-way piece it delegates to for
+    /// [`Self::Normal`]/[`Self::LargeBiomes`]/[`Self::Amplified`].
+    /// [`Self::SingleBiomeSurface`]/[`Self::Flat`]/[`Self::FlatAllDimensions`]/
+    /// [`Self::DebugAllBlockStates`] have no `lodestone_server::WorldType` of
+    /// their own — they go through `single_biome_chunk_source`/
+    /// `flat_chunk_source`/`debug_chunk_source` directly instead, so this
+    /// falls back to [`lodestone_server::WorldType::Overworld`] for them; a
+    /// caller building a chunk source from a full [`WorldTypePreset`] should
+    /// call `net.rs`'s `preset_chunk_source`, not this method.
     #[must_use]
     pub fn backend_world_type(self) -> lodestone_server::WorldType {
         match self {
@@ -1724,13 +1731,18 @@ mod tests {
     }
 
     #[test]
-    fn exactly_the_three_backend_ready_presets_report_wired() {
-        // The control this needs: not "some report true", but *exactly* the
-        // three `docs/worldgen-world-type-selection.md` names as reachable
-        // with no `lodestone-server` change (`overworld_chunk_source_of_type`
-        // already `pub` at that crate's root) — collected, not asserted
-        // inside the loop, so a wrong-by-one set is still fully reported.
-        let wired: Vec<WorldTypePreset> = [
+    fn every_preset_now_reports_wired() {
+        // Used to assert exactly the three presets needing no
+        // `lodestone-server` change (`overworld_chunk_source_of_type` already
+        // `pub` at that crate's root) reported true and the other four
+        // reported false. Issue #592's item 2 closed that gap: `lib.rs` now
+        // re-exports `single_biome_chunk_source`/`flat_chunk_source`/
+        // `debug_chunk_source` and `net.rs`'s `preset_chunk_source` covers
+        // all seven, so `is_backend_wired` is unconditionally `true` — see
+        // its own doc for why the predicate is kept rather than deleted.
+        // Collected, not asserted inside the loop, so a regression is still
+        // fully reported rather than stopping at the first wrong preset.
+        let unwired: Vec<WorldTypePreset> = [
             WorldTypePreset::Normal,
             WorldTypePreset::LargeBiomes,
             WorldTypePreset::Amplified,
@@ -1740,16 +1752,9 @@ mod tests {
             WorldTypePreset::DebugAllBlockStates,
         ]
         .into_iter()
-        .filter(|p| p.is_backend_wired())
+        .filter(|p| !p.is_backend_wired())
         .collect();
-        assert_eq!(
-            wired,
-            vec![
-                WorldTypePreset::Normal,
-                WorldTypePreset::LargeBiomes,
-                WorldTypePreset::Amplified,
-            ]
-        );
+        assert!(unwired.is_empty(), "preset(s) reporting unwired: {unwired:?}");
     }
 
     /// [`WorldTypePreset::backend_world_type`]'s exact mapping — the value a
