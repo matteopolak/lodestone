@@ -708,6 +708,34 @@ started painting everywhere. When a coverage check is point- or vertex-sampled, 
 doc**, and prefer testing the rasterised result (or the quad's own rect against the probe) when the thing you
 are guarding against might be *bigger* than the window you are looking through.
 
+**Three things already paint into a hermetic pixel gate's frame, and each one silently defeats a detector.**
+Measured while building a flat-terrain hole detector, and each cost a wrong reading before it was found:
+
+| hazard | symptom | fix |
+|---|---|---|
+| `RenderState` draws an **unconditional first-person bare arm** whenever no third-person body is reported | an *identical* 29-pixel "hole" at a fixed screen rect **regardless of camera yaw or pitch** | install a dummy `set_third_person_body_source` |
+| the real background is **`SkyFrame::clear_color`** — a time-of-day and eye-height resolved fog colour under a sky disc — **not** `SKY_COLOR` | a hardcoded sky constant makes the detector blind: a control with a real, deliberately-removed section found **zero** pixels | diff against a rendered no-terrain reference frame |
+| a hermetic `World`'s light defaults to `LightData::Missing`, which `SectionLight::sky_at` resolves to **0** | everything renders dark; `SkyDefault::Full` bridges an **absent neighbour** only, never a present-but-unlit section | `LightData::Uniform(15)` |
+
+The invariance under camera angle in the first row is the generalisable tell: **a "world-space" defect that does
+not move when the camera does is screen-space, and something else is painting it.**
+
+**And a harness can submit geometry and readback nothing, with every counter reporting health.** The same gate
+measured **zero pixel difference between a terrain world and an empty one** while `RenderStats` simultaneously
+reported 59 sections drawn, 59 draw calls and 15,104 quads. So a non-zero draw counter is not evidence anything
+reached the frame — **only the control firing is**, and when it does not fire the paired "pass" is *vacuous, not
+exculpatory*. If you must leave such a harness in the tree, **banner it at the top**: its doc comment will
+otherwise read as rigorous and authoritative to the next reader, which is worse than no harness at all.
+
+**A gamma/linear blend mismatch has a signature you can measure rather than argue about: the divergence is
+large against a dark background and ~0 near white** — the fixed points at black and white are where the two
+spaces agree. Measured on the HUD's per-player tab-list background, where the constant (`0x20FFFFFF`) matched
+`Options.getBackgroundColor` exactly and was never the bug: vanilla blends directly on raw gamma bytes,
+`hud.wgsl` writes the same raw bytes uncorrected, and the render target is an `Srgb`-format view (native
+`wgpu-core` picks one by default), so the hardware blends in **linear** light. **Before adjusting a colour
+constant, sweep the background from black to white and look at where the error goes** — if it vanishes at both
+ends, the constant is right and the space is wrong.
+
 **Validate the instrument before optimising the system — a wrong counter does not merely mislead about
 magnitude, it can invert the conclusion.** Measured: `vram_bytes` was computed from `stats.total_quads`, which
 is accumulated **inside the terrain draw loops, after the cull** — a per-frame *drawn* quantity wearing a
