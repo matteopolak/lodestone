@@ -1502,15 +1502,16 @@ impl RenderState {
         let lecterns = self.lectern_source.lecterns(eye);
         let enchanting_tables = self.enchanting_table_source.enchanting_tables(eye);
         let decorated_pots = self.decorated_pot_source.decorated_pots(eye);
-        // All eight, not any subset: an early return on only `chests`/`skulls`
+        let conduits = self.conduit_source.conduits(eye);
+        // All nine, not any subset: an early return on only `chests`/`skulls`
         // would make a bell in an otherwise chestless, skull-less room draw
         // nothing, which is exactly how this pass would have grown a third
         // island — a shulker box in an empty end-city room is the fourth
         // instance of the same shape, a banner in a village the fifth, a
         // lectern in an otherwise bare village library the sixth, an
-        // enchanting table alone in a room the seventh, and a decorated pot
-        // alone the eighth. Every source added here has to join this
-        // condition.
+        // enchanting table alone in a room the seventh, a decorated pot
+        // alone the eighth, and a conduit alone the ninth. Every source
+        // added here has to join this condition.
         //
         // **`CampfireSource` is the one exception, and it is not a subset
         // oversight**: a campfire's renderer contributes no cuboid instance at
@@ -1532,6 +1533,7 @@ impl RenderState {
             && lecterns.is_empty()
             && enchanting_tables.is_empty()
             && decorated_pots.is_empty()
+            && conduits.is_empty()
             && specials.is_empty()
         {
             return (Vec::new(), Vec::new());
@@ -1618,6 +1620,19 @@ impl RenderState {
                 .filter_map(|spawn| self.block_entities.models.resolve_decorated_pot(spawn))
                 .flatten(),
         );
+
+        // Conduits. `resolve_conduit` returns one instance (inactive shell) or
+        // four (cage, both wind planes, the camera-facing eye) per conduit —
+        // `Vec::extend` folds either shape in exactly like `decorated_pots`'
+        // `.flatten()` above. The billboard orientation is computed once per
+        // frame and shared by every conduit's eye, the same way
+        // `prepare_orbs` shares one `orientation` across every orb.
+        if !conduits.is_empty() {
+            let orientation = lodestone_render::entity::camera_orientation(camera.view_matrix());
+            for spawn in &conduits {
+                instances.extend(self.block_entities.models.resolve_conduit(spawn, orientation));
+            }
+        }
 
         // Banners. `resolve_banner` returns three things at once: the
         // pole/bar `body` and the swaying `flag` are ordinary opaque instances that

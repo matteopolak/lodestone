@@ -53,8 +53,9 @@
 use std::collections::HashMap;
 
 use lodestone_render::{
-    BlockEntityModelSet, CameraUniform, EntityCameraUniform, EntityPipeline, GpuEntityModel,
-    block_entity_texture_stems, entity_camera_buffer, fog::FogUniform,
+    BlockEntityModelSet, CONDUIT_WIND_TEXTURE_STEM, CONDUIT_WIND_VERTICAL_TEXTURE_STEM,
+    CameraUniform, EntityCameraUniform, EntityPipeline, GpuEntityModel, block_entity_texture_stems,
+    entity_camera_buffer, fog::FogUniform,
 };
 
 /// GPU resources for the block-entity pass: one uploaded mesh per model, one
@@ -149,6 +150,27 @@ impl BlockEntityRenderer {
                 // logged by the loader, and a chest with no sheet draws nothing
                 // rather than a magenta box. See the module doc.
                 continue;
+            };
+            // The conduit's two wind sheets are the one animated block-entity
+            // texture in the corpus: the jar ships each as a `64×704` vertical
+            // strip (22 frames of `64×32`, `wind.png.mcmeta`'s `frametime: 3`,
+            // no `interpolate`), not a single static image. This pass has no
+            // per-material animation uniform the way the block atlas
+            // (`lodestone_render::anim`) does for terrain, and building one is
+            // out of scope for landing the conduit renderer — so both sheets
+            // are cropped to their **first** frame only and drawn static. Real
+            // shape, real rotation, real texture *choice* between `wind`/
+            // `wind_vertical`; not flowing. A documented simplification (see
+            // `lodestone_render::block_entity::conduit_texture_stems`'s doc),
+            // not a silent bug — a future animated pass only has to touch this
+            // one `if`.
+            let cropped;
+            let img = if stem == CONDUIT_WIND_TEXTURE_STEM || stem == CONDUIT_WIND_VERTICAL_TEXTURE_STEM
+            {
+                cropped = img.first_animation_frame(32);
+                &cropped
+            } else {
+                img
             };
             let view = super::entities::entity_texture_from_image(device, queue, img);
             textures.insert(stem, pipeline.texture_bind_group(device, &view, &sampler));
