@@ -11,8 +11,9 @@ use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BossAction, BossColor, BossOverlay,
     ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule,
     ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityEquipment,
-    EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile,
-    MainHand, ObjectiveMode, ObjectiveRenderType, ParticleOptions, PlayerCommand, PlayerListEntry,
+    EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, Identifier, ItemStack,
+    LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType, ParticleOptions, PlayerCommand,
+    PlayerListEntry,
     ProfileProperty, RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation, SectionPos,
     ServerAddress, SoundCategory, TeamAction, TeamColor, TeamParameters, TeleportFlags, Text,
     Vec3, Vec3f, VersionAdapter, Visibility, WorldSink,
@@ -29,12 +30,12 @@ use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::entity::{
     EntityDestroy, EntityLook, EntityMoveLook, EntityTeleport, EntityVelocityPacket,
     NamedEntitySpawn, RelEntityMove, SpawnEntityExperienceOrb, SpawnEntityLiving,
-    SpawnEntityWeather, SpawnObject,
+    SpawnEntityPainting, SpawnEntityWeather, SpawnObject,
 };
 use crate::packets::game::{
     Animation, AttachEntity, BlockAction, BlockDig, BlockPlace, ClientCommand, ClientboundChat,
     ClientboundEntityEquipment, ClientboundPositionLook, Collect, DifficultyPacket, EntityAction,
-    EntityEffect, JoinGame, KickDisconnect, NamedSoundEffect, PlayerlistHeader,
+    EntityEffect, JoinGame, KickDisconnect, NamedSoundEffect, OpenSignEntity, PlayerlistHeader,
     RemoveEntityEffect, Respawn, ScoreboardDisplayObjective, ServerboundArmAnimation,
     ServerboundChat, ServerboundPositionLook, SetPassengers, SoundEffect, Spectate,
     SpawnPosition, TeleportConfirm, UpdateHealth, UpdateTime, UseEntity, UseEntityAt,
@@ -1962,6 +1963,58 @@ impl V340Adapter {
             };
             reader.ensure_empty().map_err(dec_err)?;
             return Ok(vec![directive]);
+        }
+        if packet_id == play::clientbound::OPEN_SIGN_ENTITY {
+            let body: OpenSignEntity = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::SignEditorOpened {
+                pos: body.location.0,
+                // 1.12.2 has no front/back text distinction — that is a
+                // later (1.20) addition, so this always edits the one text
+                // a legacy sign has.
+                is_front_text: true,
+            })]);
+        }
+        if packet_id == play::clientbound::SELECT_ADVANCEMENT_TAB {
+            // An optional string, verified against minecraft-data's 1.12.2
+            // `packet_select_advancement_tab`: a presence bool then the
+            // string when present — hand-decoded because the derive macro's
+            // `Option<T>` models a `#[mc(present_if = ...)]` condition on
+            // another field, not a wire presence byte.
+            let mut reader = Reader::new(payload);
+            let present = reader.bool().map_err(dec_err)?;
+            let tab = if present {
+                let id = reader.string(32767).map_err(dec_err)?;
+                let identifier: Identifier = id
+                    .parse()
+                    .map_err(|_| AdapterError::Decode(format!("invalid tab id {id}")))?;
+                Some(identifier)
+            } else {
+                None
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::AdvancementsTabSelected {
+                tab,
+            })]);
+        }
+        if packet_id == play::clientbound::SPAWN_ENTITY_PAINTING {
+            let body: SpawnEntityPainting = decode_body(payload)?;
+            let entity_type: ResourceKey = "minecraft:painting"
+                .parse()
+                .map_err(|_| AdapterError::Decode("painting key invalid".to_owned()))?;
+            let pos = body.location.0;
+            return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+                entity_id: body.entity_id,
+                uuid: Some(body.entity_uuid),
+                entity_type,
+                pos: Vec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z)),
+                // The legacy motive name and facing direction have no home
+                // in this crate yet (no legacy motive -> modern
+                // `minecraft:painting_variant` crosswalk, and no yaw
+                // conversion for the facing byte) — dropped, same treatment
+                // as `spawn_entity_painting`'s other unmodelled fields.
+                rotation: Rotation::new(0.0, 0.0),
+                velocity: None,
+            })]);
         }
         // Everything else in play is intentionally ignored for now.
         Ok(Vec::new())
