@@ -413,6 +413,18 @@ The machine:
   16 GB total, and unbounded test memory force-rebooted the machine. When many agents are live: **pass
   `-- --test-threads=2` to `cargo test`**, **prefer `cargo check` when you only need to know it
   compiles**, and **never run two cargo commands concurrently or background one and start another**.
+- **"Idle cargo processes and zero `rustc`" is NOT a wedged lock — a `cargo test` run has no `rustc` in it.**
+  Measured: five cargo processes, all at **0.0% CPU**, oldest 22 minutes, zero `rustc` — reported by an agent
+  as the documented lock-wedge and very nearly acted on by killing them. They were healthy. The parents idle
+  *because they are waiting on their children*, and the children were **five test binaries burning 770% CPU
+  between them**. Killing on that reading destroys live agents' work and looks justified doing it.
+
+  **Sample the children, not the parents**: `ps -Ao pid,etime,%cpu,command | grep "[t]arget/debug"`, and read
+  a **CPU sum across two samples**. Non-zero and moving means progress, however idle the parent looks. A real
+  wedge needs *no* cargo child doing work either — and before killing anything, prefer waiting, because a
+  cold `cargo check -p lodestone-shell` measures ~13 minutes under Cranelift and a full server suite runs
+  longer. The generalisable form is the one this file already applies to counters: **a process's own CPU
+  figure says nothing about the tree beneath it.**
 - **`Pages free` is NOT headroom** and a threshold on it is actively harmful — it stalled an agent that
   obeyed one. Real pressure is **non-zero `used` in `sysctl -n vm.swapusage`**, **`Swapouts` climbing in
   `vm_stat`**, and `memory_pressure`'s own free percentage; compressor *growth* across readings, never one
