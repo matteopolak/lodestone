@@ -591,6 +591,17 @@ the way the shell's driver would, running one real `GameTick`, and asserting the
 plus a negative control (a release edge and an unrelated key must not flip it). See
 `crates/plugins/README.md`.
 
+**Paired with issue #161's billboard channel.** `extract_marker_when_enabled`
+(`crates/plugins/lodestone-key-toggle/src/lib.rs`), `.in_set(ExtractSet::Debug)` on `Extract`, pushes one
+magenta `PluginBillboard` above the local player's own head while the toggle flag is set — the pairing
+`docs/autonomous-navigation.md`'s billboard section names: one plugin exercising both the input-
+interception and billboard APIs end to end, so the claimed key does something a plugin author would
+actually want a hotkey for rather than flipping a bool only a test can see.
+`enabling_the_toggle_places_a_marker_above_the_local_player` spawns a real local player entity, drives
+the press through a real `GameTick`, then runs a real `Extract` and asserts the marker's position matches
+that entity's own `PhysicsState` exactly — plus the same "nothing toggled, nothing drawn" negative
+control shape used throughout this section.
+
 **What is not built.** No modifier state (Ctrl/Shift/Alt) reaches `PluginKeyEvent` — a plugin that
 needs it is exactly as blocked as gameplay code is today, since neither is modelled as ECS state yet.
 And per the half-adopted state named earlier in this document, only the *plugin* path goes through

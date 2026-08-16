@@ -27,3 +27,8 @@ lodestone-ecs = { workspace = true }
 # builds against, so there is only ever one `bevy_ecs`/`bevy_app` in the graph.
 bevy_ecs = { workspace = true }
 bevy_app = { workspace = true }
+# `Vec3d`, for the world-space position of the marker `extract_marker_when_enabled`
+# pushes into `PluginBillboards` (issue #161's channel) — not reachable through
+# `lodestone-ecs`'s re-exports, so a direct dependency, same reasoning as `bevy_ecs`
+# above.
+lodestone-physics = { workspace = true }
