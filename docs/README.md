@@ -2515,6 +2515,18 @@ of these caught the *brief* being wrong rather than the code.
   **there is no per-tick rescan to replace**. The expensive thing is the per-event
   constant factor, and the missing thing is cross-chunk propagation — not
   incrementality, which the current model already has.
+- [Plan: regionised server ticking (issue #342)](./plans/regionised-server-ticking.md) —
+  A design document — not an implementation — for splitting the server's
+  single-threaded world tick into independently-ticked regions (Folia's model: groups
+  of nearby chunks, each ticked on its own thread, with explicit hand-off for anything
+  crossing a boundary), so throughput can scale past one core the way vanilla
+  structurally cannot. Filed deliberately as a **later** item in issue #342; this doc
+  exists to ground that "later" in the tick-loop architecture and profiling
+  instrumentation that now actually exist, rather than in the intuition the issue was
+  originally filed on. Written 2026-08-16 against a re-verified tree — every claim
+  below was checked against `crates/lodestone-server/src/tick.rs`,
+  `docs/tick-and-worldgen-profiling.md`, and `docs/plans/server-ecs-migration.md` for
+  this pass, not inherited from the issue body.
 - [Plan: render performance — culling first, then submission](./plans/render-performance.md) —
   The sequenced plan for making terrain rendering scale from the shipped render
   distance 8 to 16 and 32: frustum culling, vanilla's circular view-membership
