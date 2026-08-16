@@ -82,103 +82,134 @@ Three submodules:
 
 ### What this does not attempt, and why
 
-**No obsidian pillars anywhere in this repo.** `docs/worldgen-end.md` already
-says the pillars (`EndSpikeFeature`) and the exit portal
-(`EndPodiumFeature`) are "structure/entity work" with "a gameplay placer"
-rather than terrain generation — and that gameplay placer for the pillars has
-never been written, by this change or any other. Concretely:
+**No obsidian pillars anywhere in this repo — no longer true; see below.**
+This section originally said the pillars (`EndSpikeFeature`) and the exit
+portal (`EndPodiumFeature`) were "structure/entity work" with "a gameplay
+placer" that had never been written. `crates/lodestone-worldgen/src/end/
+spikes.rs` (`end_spikes_for_seed`, `end_spike_blocks`) and `.../end/
+podium.rs` (`end_podium`) now port both, and `MobSim::init_end_dragon_fight`
+(`mobs/dragon.rs`) wires them to real crystal/dragon spawns — see "The End's
+own furniture, and the one hunk left" below for exactly what landed and
+what a join-path owner still needs to call. (An earlier version of this doc
+said flatly "there is nothing to cage"; re-verify a "not modelled" claim
+against the tree before repeating it — this file already names three other
+docs that shipped exactly that kind of drift.)
 
-- Crystal healing and the fight's crystal count do not require pillars — a
-  crystal in this world is wherever a caller places one, not standing atop a
-  40-80-block spike.
-- The "caged vs. uncaged crystal" distinction issue #276 names
-  (`EndSpikeFeature`'s `guarded` flag wraps a short pillar's crystal in iron
-  bars) has no pillars to attach cages to and is not modelled. There is
-  nothing to cage.
-- `tick_respawn`'s `SummoningPillars` stage is ported as a state machine
-  **parameterized by a spike count**, so it stays correct if pillar placement
-  lands later. Called with the honest count in a world with none
-  (`spike_count = 0`), the formula **correctly degenerates**: `index <
-  spike_count` is `0 < 0`, always false, so the stage advances to
-  `SummoningDragon` on its first tick rather than stalling — this is vanilla's
-  own formula evaluated at the true input, not a stub. See
-  `fight::tests::respawn_stage_summoning_pillars_degenerates_instantly_with_zero_spikes`.
+- Crystal healing and the fight's crystal count still do not *require*
+  pillars — a crystal in this world is wherever a caller places one — but
+  `init_end_dragon_fight` now places all ten atop real spikes by default.
+- The "caged vs. uncaged crystal" distinction issue #276 names is real now:
+  `EndSpike::guarded` (exactly two of ten, for any seed — see
+  `end::spikes::tests::exactly_two_spikes_are_guarded_for_any_seed`) drives
+  `end_spike_blocks`' iron-bars cage.
+- `tick_respawn`'s `SummoningPillars` stage, parameterized by spike count,
+  is unchanged by this — it is a *respawn*-sequence concern (Bring back a
+  dragon), not initial-spawn, and initial spawn is the gap this update
+  closes.
 
-**No `BOSS_EVENT` wire packet.** Issue #276 draws this line itself ("this
-crate's job is the phase/health state, not the bar widget"): `boss_bar_value`
-computes the value; nothing here sends it. `ServerProtocol` (in
-`crates/lodestone-server/src/protocol.rs`) has no boss-event encoder today —
-see "What a production wiring pass still needs" below.
+**No `BOSS_EVENT` wire packet — no longer true.** `ServerProtocol::
+encode_boss_event_add`/`encode_boss_event_update_progress`/
+`encode_boss_event_remove` all exist in `protocol.rs`, and `crate::server`'s
+`sync_boss_bars` (`stream_pass`'s own call, once per connection per pass)
+diffs `EntitySource::boss_bars()` — whose one real producer is
+`MobSim::boss_bars`, which already appends the dragon's own bar — onto the
+wire. Zero remaining work here; see "What consumes this today" below for the
+full chain.
 
-**No live entity, no ticking, no streaming.** This change adds no `SimMob`,
-no `MobSim` field, and no `EntitySnapshot` producer. See "What consumes this
-today" below — the honest answer is "nothing in production yet".
+**No live entity, no ticking, no streaming — no longer true; see below.**
 
 ## What consumes this today
 
-**`MobSim` can spawn, tick, damage and stream a dragon and its crystals — but
-nothing calls any of it from a running server yet.** `mobs/dragon.rs` and
-`mobs/end_crystal.rs` add `MobSim::spawn_dragon`/`spawn_end_crystal`,
-`tick_dragons` (drives `dragon::phase`/`dragon::crystal` with real inputs:
-crystal count and positions from `MobSim`'s own crystal map, nearest-player
-distance from `MobSim::players`), `damage_dragon` (the
-`on_sitting_damage`/`on_killing_blow` clauses), `dragon_boss_bar`, and
+**The whole chain is real, from spawn to the wire, once something calls
+`init_end_dragon_fight`.** `mobs/dragon.rs` and `mobs/end_crystal.rs` give
+`MobSim::spawn_dragon`/`spawn_end_crystal`, `tick_dragons` (drives
+`dragon::phase`/`dragon::crystal` with real inputs: crystal count and
+positions from `MobSim`'s own crystal map, nearest-player distance from
+`MobSim::players`), `damage_dragon`, `dragon_boss_bar`, and
 `destroy_end_crystal`. Both kinds are plain `HashMap<i32, _>` entries — the
-same `TrackedTnt`/`TrackedMinecart` shape, not a goal-driven `SimMob`, since a
-dragon's flight is not ground pathfinding — and both are appended in
-`MobSim::snapshots()`, so a dragon or crystal that *is* spawned into a live
-sim is genuinely visible over the wire (see `mobs/dragon.rs`'s and
-`mobs/end_crystal.rs`'s own `a_dragon_is_streamed_and_visible`/
-`a_spawned_crystal_is_counted_and_streamed` tests).
+same `TrackedTnt`/`TrackedMinecart` shape, not a goal-driven `SimMob` — and
+both are appended in `MobSim::snapshots()`.
 
-**The remaining gap is `crates/lodestone-server/src/tick.rs`, which this
-change does not touch** (off limits — a concurrent agent's file, same as
-`protocol.rs`). `tick_tnt`/`tick_vehicles`/`tick_minecarts` are all driven
-from one call each inside `tick::run_tick_loop`
-(e.g. `mobs.with(|sim| sim.tick_tnt(&|x, y, z| world.block_state(x, y, z)));`)
-— `tick_dragons` needs the identical one-line addition
-(`mobs.with(MobSim::tick_dragons)`, no world-state oracle needed since the
-simplified orbit does not collide with terrain), and something needs to call
-`MobSim::spawn_dragon`/`spawn_end_crystal` at least once (there is no
-`EndDragonFight`-driven "scan on load, spawn if missing" wiring yet — that is
-exactly the job `dragon::fight::scan_state`/`FightState` is *ready* to do
-once a caller owns a `FightState` per End-dimension world and drives it from
-somewhere with real chunk/block-entity access, which `MobSim` does not have).
-So: the phase state machine, crystal healing and fight controller are real,
-individually tested, and reachable from `MobSim` — but a dragon reaches zero
-pixels in a real game today because nothing yet calls `spawn_dragon` or
-`tick_dragons` in production. Named explicitly per `CLAUDE.md`'s island rule
-rather than left implicit.
+**`tick_dragons` is called from `crate::tick::run_tick_loop`** — the
+one-line addition this doc's earlier version said `tick_tnt`/
+`tick_vehicles`/`tick_minecarts` already modelled the shape for
+(`mobs.with(super::mobs::MobSim::tick_dragons);`) has landed.
+
+**`PhaseEffect::FireFireball` reaches a real `minecraft:dragon_fireball`
+projectile** through the same `spawn_projectile_from` funnel every other
+projectile in this crate uses — see `tick_one_dragon`'s own `FireFireball`
+arm and `mobs::dragon::tests::a_strafing_dragon_now_actually_fires_a_real_fireball_projectile`.
+
+**`phase::PhaseManager::dying_health_this_tick` has a real production
+caller** — a killing blow on a flying dragon now redirects into the dying
+phase at `1.0` health instead of leaving health frozen at `1.0` forever; see
+`mobs::dragon::tests::a_killing_blow_while_flying_now_actually_finishes_the_dragon_off`.
+
+**The boss bar reaches the wire with no new call site**, exactly as
+`mobs::wither`'s own doc describes for the identical shape: `MobSim::
+boss_bars` (in `mobs/dragon.rs`) is the dragon's own producer, and
+`crate::tick::run_tick_loop` already calls it once per tick and publishes
+through `LiveMobSource` — the path `crate::server::sync_boss_bars` diffs
+against a connection's last-sent set.
+
+**The remaining gap is a production caller for `MobSim::
+init_end_dragon_fight`.** See "The End's own furniture, and the one hunk
+left" immediately below — `server.rs`/`integrated.rs` are off limits for
+this change (concurrent agents own them), so this is reported rather than
+landed.
+
+## The End's own furniture, and the one hunk left
+
+`MobSim::init_end_dragon_fight(seed, origin, min_y) -> EndDragonFightInit`
+(`mobs/dragon.rs`) is everything a join-path owner needs in one call: it
+spawns all ten end crystals atop real, seed-derived spike positions
+(`lodestone_worldgen::end::end_spikes_for_seed`), spawns the dragon itself
+(`spawn_dragon`), and returns `EndDragonFightInit::block_writes` — every
+obsidian/bedrock/iron-bars/podium block the arena needs, computed as pure
+data by `lodestone_worldgen::end::{end_spike_blocks, end_podium}` (`crates/
+lodestone-worldgen/src/end/{spikes,podium}.rs`). It places **zero** blocks
+itself, matching this crate's existing "no block-write authority" contract
+for `try_construct_wither`/`try_construct_golem`.
+
+The hunk a join-path owner still needs (shape, not literal diff — the exact
+call site depends on where "a player just entered a fresh End" is detected,
+which lives in `travel_through_end_portal`/`server.rs`'s own join-chunk-
+stream setup, an off-limits file for this change):
+
+```rust
+// Once, the first time a connection reaches a fresh End sibling with no
+// existing dragon fight (a per-world persisted flag — this crate has no
+// `FightState`/`EnderDragonFight`-equivalent storage yet, so "fresh" needs
+// its own once-per-world gate; see `dragon::fight::FightState` for the
+// fields such a gate would round-trip).
+let init = mobs.with(|sim| {
+    sim.init_end_dragon_fight(world_seed, Vec3::new(0.0, 64.0, 0.0), destination.min_y())
+});
+for write in &init.block_writes {
+    destination.set_block(write.x, write.y, write.z, &write.state);
+}
+```
+
+`origin` at `(0.0, 64.0, 0.0)` reproduces vanilla's own fixed
+`BlockPos.ZERO` fight origin (`ServerLevel`'s `dragonFight.init(this, seed,
+BlockPos.ZERO)`) at a plausible End-island y; a real caller should resolve
+the true surface y the way vanilla's own `getHeightmapPos` does rather than
+hardcoding `64`, since the main island's terrain height varies by seed.
 
 ## What a production wiring pass still needs from `protocol.rs`
 
-`crates/lodestone-server/src/protocol.rs` and the v770 adapter were held for
-a concurrent edit while this change was written, so nothing here touches
-them. A future pass needs:
+Two items remain, both narrow:
 
-- **`MetadataField::DragonPhase(i32)`** — `EnderDragon.DATA_PHASE`, wire
-  index **16**, `INT` serializer (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`).
-  Index 16 is shared by many other `INT`/non-`INT` fields across species
-  (`Creeper.DATA_SWELL_DIR`, `WitherBoss.DATA_TARGET_A`, ...), all resolved
-  the same way every other crowded index in this enum already is: the
-  *producer* (a species switch in whatever ticks the dragon) only ever emits
-  this variant for a `minecraft:ender_dragon` entity, so there is no true
-  collision at the wire.
 - **`MetadataField::CrystalBeamTarget(Option<BlockPos>)`** —
-  `EndCrystal.DATA_BEAM_TARGET`, index **8**, `OPTIONAL_BLOCK_POS`. Distinct
-  serializer from every other index-8 claimant, so no dispatch ambiguity.
-- **`MetadataField::CrystalShowBottom(bool)`** — `EndCrystal.DATA_SHOW_BOTTOM`,
-  index **9**, `BOOLEAN`. Defaults to `true` in vanilla
-  (`DEFAULT_SHOW_BOTTOM`); needed only if a crystal is ever rendered floating
-  (a respawn-summoned one has no bottom slab).
-- **A `BOSS_EVENT` encoder** — `ServerProtocol` has no `encode_boss_event` (or
-  equivalent) method today; `BOSS_EVENT` (packet id 9 in
-  `crates/protocol/v770/src/generated/packet_ids.rs`) is currently
-  **decode-only** (client-side parsing of a real server's boss bar), with no
-  server-side encode path anywhere in this crate. `dragon::fight::boss_bar_value`
-  produces exactly the `progress`/`visible` pair such an encoder would need;
-  color (`PINK`) and overlay (`PROGRESS`) never change in vanilla
-  (`EnderDragonFight.init`) and can be hardcoded at the call site.
+  `EndCrystal.DATA_BEAM_TARGET`, index **8**, `OPTIONAL_BLOCK_POS`. The wire
+  field exists and every crystal streams `CrystalBeamTarget(None)`
+  (`mobs/end_crystal.rs`'s own doc); nothing yet computes a real target (the
+  respawn sequence's summoning beam). Distinct serializer from every other
+  index-8 claimant, so no dispatch ambiguity when a real producer lands.
+- **No darken-screen bit on `BossBarSnapshot`**, the same gap
+  `docs/wither-fight.md` names for the wither's own bar —
+  `EnderDragonFight.init`'s `setCreateWorldFog(true)`/music flag have no
+  carrier either.
 
 ## How to change it
 

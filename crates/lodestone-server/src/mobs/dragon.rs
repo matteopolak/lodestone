@@ -31,12 +31,13 @@
 //!   would have blocked. This over-approximates vanilla rather than
 //!   under-approximating it — the fight is harder to hide from here, not
 //!   easier.
-//! * **`PhaseEffect::FireFireball` is computed but not consumed.** No
-//!   `minecraft:dragon_fireball` projectile producer exists in this sim, so
-//!   a strafe that reaches its firing condition transitions phase (matching
-//!   vanilla) but spawns no projectile. Disclosed rather than silently
-//!   dropped — grep this file for `FireFireball` to find the exact point a
-//!   projectile producer needs to hook in.
+//! * **`PhaseEffect::FireFireball` is computed *and* consumed.** A strafe
+//!   that reaches its firing condition spawns a real
+//!   `minecraft:dragon_fireball` through the same `spawn_projectile_from`
+//!   funnel every other projectile in this crate uses. (An earlier version
+//!   of this doc said the effect was computed but dropped; that was true
+//!   when written and is not true now — re-verify a "not consumed"
+//!   disclosure against the tree before repeating it.)
 
 use lodestone_model::{ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
@@ -105,6 +106,26 @@ pub(super) fn ender_dragon_entity_type() -> ResourceKey {
         .expect("`minecraft:ender_dragon` is a valid resource key")
 }
 
+/// [`MobSim::init_end_dragon_fight`]'s return value — the entities it
+/// really spawned, plus every block write a caller still needs to apply.
+#[derive(Debug, Clone)]
+pub struct EndDragonFightInit {
+    /// The new dragon's network id — [`MobSim::spawn_dragon`]'s own return
+    /// value, unchanged.
+    pub dragon_id: i32,
+    /// The ten new end crystals' network ids, in the same order
+    /// [`lodestone_worldgen::end::end_spikes_for_seed`] returns their
+    /// spikes.
+    pub crystal_ids: Vec<i32>,
+    /// Every obsidian/bedrock/iron-bars/podium block this fresh arena
+    /// needs, in placement order (later entries overwrite earlier ones at
+    /// the same position — see [`lodestone_worldgen::end::end_podium`]'s
+    /// own doc for why that matters at the podium's own centre column).
+    /// Not applied to any world by this call; see
+    /// [`MobSim::init_end_dragon_fight`]'s own doc for why.
+    pub block_writes: Vec<lodestone_worldgen::end::PodiumBlock>,
+}
+
 impl<'w> MobSim<'w> {
     /// `EnderDragonFight.createNewDragon` — spawns a fresh dragon at
     /// `128` blocks above `origin` (`DRAGON_SPAWN_Y`), full health, starting
@@ -129,6 +150,61 @@ impl<'w> MobSim<'w> {
             },
         );
         id
+    }
+
+    /// A fresh End dimension's initial furniture and combatant, bundled
+    /// into one call — the ten spike/crystal ring plus the dragon itself.
+    /// This is the piece `spawn_dragon` was missing a real caller for: it
+    /// had no production entry point because nothing in this crate builds
+    /// the arena a dragon needs to spawn *into*. See `docs/dragon-fight.md`
+    /// for the exact join-path hunk a caller still needs to add (`server.rs`
+    /// is off limits for this change) — this method is everything that hunk
+    /// needs to call.
+    ///
+    /// `origin` generalises vanilla's own fixed `BlockPos.ZERO` fight
+    /// origin (`ServerLevel.effectiveDragonFight`'s `dragonFight.init(this,
+    /// seed, BlockPos.ZERO)`) into a caller-supplied offset, matching
+    /// [`spawn_dragon`](Self::spawn_dragon)'s own existing parameter rather
+    /// than hardcoding a world-absolute position into a sim that has no
+    /// concept of "the world's own (0, 0, 0)" — passing [`Vec3::new`]`(0.0,
+    /// 0.0, 0.0)` reproduces vanilla's fixed placement exactly. `min_y` is
+    /// the dimension's own lowest generatable y
+    /// ([`lodestone_worldgen::end::end_spike_blocks`]'s own parameter —
+    /// this sim has no `ChunkSource` to read it from).
+    ///
+    /// Spawns the ten end crystals (`MobSim::spawn_end_crystal`) and the
+    /// dragon (`spawn_dragon`) for real — both reach [`MobSim::snapshots`]
+    /// on the very next tick through the same paths every other mob already
+    /// uses. **Places zero blocks itself**: this `MobSim` only ever reads a
+    /// world through a caller-supplied closure (the same "no block-write
+    /// authority" contract [`MobSim::try_construct_wither`]'s own doc
+    /// discloses), so [`EndDragonFightInit::block_writes`] carries every
+    /// obsidian/bedrock/iron-bars/podium write as data and the caller (who
+    /// holds the real `ChunkSource`) applies them. The podium is written
+    /// **inactive** (`active: false`) — matching vanilla's own first-arrival
+    /// state; a caller wires the *active* podium separately once the dragon
+    /// dies, through [`lodestone_worldgen::end::end_podium`] directly.
+    pub fn init_end_dragon_fight(&mut self, seed: i64, origin: Vec3, min_y: i32) -> EndDragonFightInit {
+        let spikes = lodestone_worldgen::end::end_spikes_for_seed(seed);
+        let mut block_writes = Vec::new();
+        let mut crystal_ids = Vec::with_capacity(lodestone_worldgen::end::SPIKE_COUNT);
+        for spike in &spikes {
+            block_writes.extend(lodestone_worldgen::end::end_spike_blocks(&spike, min_y));
+            let crystal_pos = Vec3::new(
+                origin.x + f64::from(spike.center_x) + 0.5,
+                origin.y + f64::from(spike.height + 1),
+                origin.z + f64::from(spike.center_z) + 0.5,
+            );
+            crystal_ids.push(self.spawn_end_crystal(crystal_pos));
+        }
+        block_writes.extend(lodestone_worldgen::end::end_podium(
+            origin.x.floor() as i32,
+            origin.y.floor() as i32,
+            origin.z.floor() as i32,
+            false,
+        ));
+        let dragon_id = self.spawn_dragon(origin);
+        EndDragonFightInit { dragon_id, crystal_ids, block_writes }
     }
 
     /// A live dragon's current health, if any.
@@ -652,5 +728,87 @@ mod tests {
         }
         assert!(sim.projectile_count() > before, "a completed strafe charge must spawn a real fireball, not just transition phase");
         assert_eq!(sim.dragon_phase(id), Some(phase::Phase::HoldingPattern), "firing also returns to HoldingPattern, matching phase::PhaseManager::tick");
+    }
+
+    /// **The discriminating gate for the island `spawn_dragon` had no
+    /// production caller for**: `init_end_dragon_fight` must actually spawn
+    /// a live dragon and all ten crystals, not merely compute the geometry.
+    /// `dragon_id`/`crystal_ids` are checked against `MobSim`'s own live
+    /// query API (`dragon_health`, `end_crystal_position`) rather than
+    /// merely asserting the returned ids are non-negative, so a version
+    /// that computed the spike layout but never actually called
+    /// `spawn_dragon`/`spawn_end_crystal` would fail this.
+    #[test]
+    fn init_end_dragon_fight_spawns_a_real_dragon_and_all_ten_crystals() {
+        let mut sim = sim();
+        let init = sim.init_end_dragon_fight(12345, Vec3::new(0.0, 64.0, 0.0), -64);
+
+        assert!(sim.dragon_health(init.dragon_id).is_some(), "the returned dragon id must resolve to a live dragon");
+        assert_eq!(sim.dragon_health(init.dragon_id), Some(MAX_HEALTH));
+
+        assert_eq!(init.crystal_ids.len(), lodestone_worldgen::end::SPIKE_COUNT, "one crystal per spike");
+        let mut mismatches = Vec::new();
+        for &id in &init.crystal_ids {
+            if sim.end_crystal_position(id).is_none() {
+                mismatches.push(format!("crystal id {id} did not resolve to a live crystal"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+        assert_eq!(sim.end_crystal_count(), lodestone_worldgen::end::SPIKE_COUNT, "no extra and no missing crystals");
+    }
+
+    /// A crystal's spawn position must be its own spike's centre (offset by
+    /// the fight origin), at `height + 1` — not e.g. every crystal landing
+    /// on the same spot, which the count check above could not catch.
+    #[test]
+    fn each_crystal_spawns_at_its_own_spikes_position() {
+        let mut sim = sim();
+        let origin = Vec3::new(0.0, 64.0, 0.0);
+        let init = sim.init_end_dragon_fight(999, origin, -64);
+        let spikes = lodestone_worldgen::end::end_spikes_for_seed(999);
+
+        let mut mismatches = Vec::new();
+        for (spike, &crystal_id) in spikes.iter().zip(init.crystal_ids.iter()) {
+            let Some(pos) = sim.end_crystal_position(crystal_id) else {
+                mismatches.push(format!("crystal {crystal_id} vanished"));
+                continue;
+            };
+            let expected = Vec3::new(
+                origin.x + f64::from(spike.center_x) + 0.5,
+                origin.y + f64::from(spike.height + 1),
+                origin.z + f64::from(spike.center_z) + 0.5,
+            );
+            if pos != expected {
+                mismatches.push(format!("expected {expected:?}, got {pos:?}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+
+    /// **Control**: the same seed and origin must always produce the same
+    /// block-write count (the arena is deterministic, not randomly sized
+    /// per call) — and that count must be well above what ten crystal
+    /// support pairs alone could account for, proving the spike
+    /// columns/cages and the podium really are all included rather than one
+    /// silently dropped.
+    #[test]
+    fn block_writes_are_deterministic_and_include_every_piece() {
+        let mut sim_a = sim();
+        let mut sim_b = sim();
+        let init_a = sim_a.init_end_dragon_fight(42, Vec3::new(0.0, 64.0, 0.0), -64);
+        let init_b = sim_b.init_end_dragon_fight(42, Vec3::new(0.0, 64.0, 0.0), -64);
+        assert_eq!(init_a.block_writes.len(), init_b.block_writes.len(), "same seed and origin must yield the same write count");
+        // Ten crystal-support pairs alone is 20 writes; the real arena (ten
+        // obsidian columns plus the podium) is far larger.
+        assert!(init_a.block_writes.len() > 200, "got only {} writes — spike columns or the podium look dropped", init_a.block_writes.len());
+        // Exactly two of the ten spikes are guarded (see
+        // `end::spikes::tests::exactly_two_spikes_are_guarded_for_any_seed`),
+        // so a real arena always carries at least one cage bar — a version
+        // that silently dropped `end_spike_blocks`' guarded branch would
+        // fail this while still passing the raw count check above.
+        assert!(
+            init_a.block_writes.iter().any(|w| w.state.starts_with("minecraft:iron_bars")),
+            "expected at least one iron-bars cage write — got none"
+        );
     }
 }
