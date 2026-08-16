@@ -1260,9 +1260,23 @@ impl RenderState {
                 // same flag geometry the opaque loop above just drew — mirrors
                 // `gpu/frame.rs`'s world-space banner-layer pass exactly, one
                 // camera space over. Empty for every non-banner kind.
+                //
+                // **`index_of("flag")`, not `.parts.first()`.** `banner_flag_model`'s
+                // root part carries no cube of its own (`PartDef::new(PartPose::ZERO)`
+                // with no `with_cube`, only a `"flag"` child) — its own part range is
+                // `index_count == 0`, so `.first()` silently draws zero indices,
+                // reaching every guard here (`layers` non-empty, the model found) and
+                // still painting nothing. Measured live: `parts.first()` was
+                // `PartRange { index_count: 0, .. }`, and switching to the real
+                // "flag" part's index is what made this pass draw at all.
                 if !layers.is_empty()
                     && let Some(flag) = self.block_entities.gpu_models.get("banner_flag")
-                    && let Some(range) = flag.parts.first()
+                    && let Some(flag_index) = self
+                        .block_entities
+                        .models
+                        .get("banner_flag")
+                        .and_then(|mesh| mesh.index_of("flag"))
+                    && let Some(range) = flag.parts.get(flag_index)
                     && range.index_count > 0
                 {
                     pass.set_pipeline(&self.block_entities.banner_layer_pipeline);
