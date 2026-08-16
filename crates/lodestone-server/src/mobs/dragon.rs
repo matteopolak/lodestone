@@ -446,11 +446,13 @@ impl<'w> MobSim<'w> {
                 })
             })
             .collect();
-        // The single public boss-bar entry point covers both boss fights —
-        // see `mobs::wither`'s own doc for why its bar is appended here
-        // rather than requiring a second call site in `crate::tick` (an
-        // off-limits, shared file for this change).
+        // The single public boss-bar entry point covers every boss/event bar
+        // this crate produces — see `mobs::wither`'s own doc for why its bar
+        // is appended here rather than requiring a second call site in
+        // `crate::tick` (an off-limits, shared file for this change). Issue
+        // #241's raid bar follows the identical shape.
         self.push_wither_boss_bars(&mut out);
+        self.push_raid_boss_bars(&mut out);
         out
     }
 }
