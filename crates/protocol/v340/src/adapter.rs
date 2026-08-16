@@ -1811,6 +1811,158 @@ impl V340Adapter {
                 options: ParticleOptions::None,
             })]);
         }
+        if packet_id == play::clientbound::EXPERIENCE {
+            let mut reader = Reader::new(payload);
+            let progress = reader.f32().map_err(dec_err)?;
+            let level = reader.var_i32().map_err(dec_err)?;
+            let total = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ExperienceChanged {
+                progress,
+                level,
+                total,
+            })]);
+        }
+        if packet_id == play::clientbound::VEHICLE_MOVE {
+            let mut reader = Reader::new(payload);
+            let x = reader.f64().map_err(dec_err)?;
+            let y = reader.f64().map_err(dec_err)?;
+            let z = reader.f64().map_err(dec_err)?;
+            let yaw = reader.f32().map_err(dec_err)?;
+            let pitch = reader.f32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::VehicleMoved {
+                pos: Vec3::new(x, y, z),
+                yaw,
+                pitch,
+            })]);
+        }
+        if packet_id == play::clientbound::SET_COOLDOWN {
+            let mut reader = Reader::new(payload);
+            let item_id = reader.var_i32().map_err(dec_err)?;
+            let cooldown_ticks = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            let item_id =
+                i16::try_from(item_id).map_err(|_| AdapterError::Decode(format!(
+                    "cooldown item id {item_id} out of legacy item-id range"
+                )))?;
+            let name = item_types::item_name(item_id).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown legacy item id {item_id} in set_cooldown"))
+            })?;
+            let group: ResourceKey = name
+                .parse()
+                .map_err(|_| AdapterError::Decode(format!("item id {name} is not a key")))?;
+            return Ok(vec![Directive::Emit(ClientEvent::ItemCooldown {
+                group,
+                duration_ticks: cooldown_ticks,
+            })]);
+        }
+        if packet_id == play::clientbound::COMBAT_EVENT {
+            // Action-multiplexed, verified field-by-field against
+            // minecraft-data's 1.12.2 `packet_combat_event`: event `0` (enter
+            // combat) carries nothing further; event `1` (end combat) reads a
+            // VarInt duration then a raw `i32` entity id (the model's
+            // `PlayerCombatEnded` has no slot for the id, so it is read and
+            // discarded — matching 26.2's own `ClientboundPlayerCombatEndPacket`,
+            // which dropped it too); event `2` (entity died) reads a VarInt
+            // player id, a raw `i32` entity id, then a JSON death-message
+            // string, both discarded except the message, matching modern
+            // `PLAYER_COMBAT_KILL`'s shape (`lodestone-v770`'s adapter).
+            let mut reader = Reader::new(payload);
+            let event = reader.var_i32().map_err(dec_err)?;
+            let directive = match event {
+                0 => Directive::Emit(ClientEvent::PlayerCombatEntered),
+                1 => {
+                    let duration_ticks = reader.var_i32().map_err(dec_err)?;
+                    reader.i32().map_err(dec_err)?; // entity id, unused downstream
+                    Directive::Emit(ClientEvent::PlayerCombatEnded { duration_ticks })
+                }
+                2 => {
+                    reader.var_i32().map_err(dec_err)?; // player id, unused downstream
+                    reader.i32().map_err(dec_err)?; // killer entity id, unused downstream
+                    let message = reader.string(32767).map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::Death {
+                        message: Text::from_json(&message),
+                    })
+                }
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "unknown combat_event action {other}"
+                    )));
+                }
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![directive]);
+        }
+        if packet_id == play::clientbound::WORLD_BORDER {
+            // Action-multiplexed, verified field-by-field against
+            // minecraft-data's 1.12.2 `packet_world_border`. Action `3`
+            // ("initialize") is the only one that carries every field, in
+            // this exact order: x, z, old_radius, new_radius, speed (VarLong
+            // lerp-time ms), portal_boundary (VarInt absolute max size),
+            // warning_time, warning_blocks — matching
+            // `ClientEvent::WorldBorderInitialized`'s field order one-for-one.
+            let mut reader = Reader::new(payload);
+            let action = reader.var_i32().map_err(dec_err)?;
+            let directive = match action {
+                0 => {
+                    let radius = reader.f64().map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::WorldBorderSizeChanged { size: radius })
+                }
+                1 => {
+                    let old_radius = reader.f64().map_err(dec_err)?;
+                    let new_radius = reader.f64().map_err(dec_err)?;
+                    let speed = reader.var_i64().map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::WorldBorderSizeLerping {
+                        old_size: old_radius,
+                        new_size: new_radius,
+                        lerp_time_ms: speed,
+                    })
+                }
+                2 => {
+                    let x = reader.f64().map_err(dec_err)?;
+                    let z = reader.f64().map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::WorldBorderCenterChanged { x, z })
+                }
+                3 => {
+                    let x = reader.f64().map_err(dec_err)?;
+                    let z = reader.f64().map_err(dec_err)?;
+                    let old_radius = reader.f64().map_err(dec_err)?;
+                    let new_radius = reader.f64().map_err(dec_err)?;
+                    let speed = reader.var_i64().map_err(dec_err)?;
+                    let portal_boundary = reader.var_i32().map_err(dec_err)?;
+                    let warning_time = reader.var_i32().map_err(dec_err)?;
+                    let warning_blocks = reader.var_i32().map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::WorldBorderInitialized {
+                        x,
+                        z,
+                        old_size: old_radius,
+                        new_size: new_radius,
+                        lerp_time_ms: speed,
+                        absolute_max_size: portal_boundary,
+                        warning_blocks,
+                        warning_time,
+                    })
+                }
+                4 => {
+                    let warning_time = reader.var_i32().map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::WorldBorderWarningDelayChanged { warning_time })
+                }
+                5 => {
+                    let warning_blocks = reader.var_i32().map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::WorldBorderWarningDistanceChanged {
+                        warning_blocks,
+                    })
+                }
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "unknown world_border action {other}"
+                    )));
+                }
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![directive]);
+        }
         // Everything else in play is intentionally ignored for now.
         Ok(Vec::new())
     }
