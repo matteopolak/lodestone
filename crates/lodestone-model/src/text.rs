@@ -195,6 +195,70 @@ impl TextColor {
     }
 }
 
+/// An interned `"namespace:path"` font identifier, as carried by
+/// [`TextStyle::font`].
+///
+/// A resource location is a plain [`String`] everywhere else in this crate's
+/// text model, but [`TextStyle`] is `Copy` — every existing consumer resolves
+/// inheritance down a tree by copying it, not cloning it, and it is embedded
+/// by value in [`TextSpan`]/[`InteractiveTextSpan`], which key a wrap cache
+/// off `Hash`. Adding a `String` field would end `Copy` for all of them.
+/// Interning keeps the field a plain `u32` instead: [`Self::intern`] leaks the
+/// backing string once per distinct id (font ids are a small, effectively
+/// bounded set — the fonts a session's active resource packs define — not one
+/// per message), and [`Self::name`] hands back the `'static` string with no
+/// lock held past the call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FontId(u32);
+
+/// Backing table for [`FontId`]. A `Mutex` rather than a lock-free structure:
+/// interning only happens while parsing a component (JSON/NBT decode), never
+/// per-frame in a draw loop, so contention is not a concern.
+struct FontInterner {
+    names: Vec<&'static str>,
+    ids: std::collections::HashMap<&'static str, u32>,
+}
+
+fn font_interner() -> &'static std::sync::Mutex<FontInterner> {
+    static INTERNER: std::sync::OnceLock<std::sync::Mutex<FontInterner>> =
+        std::sync::OnceLock::new();
+    INTERNER.get_or_init(|| {
+        std::sync::Mutex::new(FontInterner {
+            names: Vec::new(),
+            ids: std::collections::HashMap::new(),
+        })
+    })
+}
+
+impl FontId {
+    /// Interns `name` (a `"namespace:path"` resource location, e.g.
+    /// `"democracycraft:icons"`), returning the same [`FontId`] for the same
+    /// string on every call.
+    #[must_use]
+    pub fn intern(name: &str) -> Self {
+        let mut interner = font_interner()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(&id) = interner.ids.get(name) {
+            return FontId(id);
+        }
+        let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
+        let id = u32::try_from(interner.names.len()).unwrap_or(u32::MAX);
+        interner.names.push(leaked);
+        interner.ids.insert(leaked, id);
+        FontId(id)
+    }
+
+    /// The `"namespace:path"` string this id was interned from.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        let interner = font_interner()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        interner.names.get(self.0 as usize).copied().unwrap_or("minecraft:default")
+    }
+}
+
 /// Formatting attributes for a [`Text`] component.
 ///
 /// Every attribute is an [`Option`], and the distinction is load-bearing:
@@ -217,6 +281,12 @@ pub struct TextStyle {
     pub strikethrough: Option<bool>,
     /// Obfuscated (`None` = inherit).
     pub obfuscated: Option<bool>,
+    /// The `"font": "<namespace>:<name>"` a text component can request
+    /// (`None` = inherit, and at the root, the client's default font). Vanilla
+    /// resolves this against the active resource pack's `font/*.json`
+    /// definitions; this model only carries the id — a draw surface looks it
+    /// up (see `lodestone-shell`'s `hud::vanilla_font`).
+    pub font: Option<FontId>,
 }
 
 impl TextStyle {
@@ -234,6 +304,7 @@ impl TextStyle {
             underlined: self.underlined.or(parent.underlined),
             strikethrough: self.strikethrough.or(parent.strikethrough),
             obfuscated: self.obfuscated.or(parent.obfuscated),
+            font: self.font.or(parent.font),
         }
     }
 
@@ -951,6 +1022,10 @@ fn flush_legacy_segment(root: &mut Text, buffer: &mut String, style: TextStyle) 
 /// cases right.
 fn apply_legacy_code(mut style: TextStyle, code: char) -> Option<TextStyle> {
     if let Some(color) = TextColor::from_legacy_code(code) {
+        // `Style.applyLegacyFormat`'s colour branch passes `this.font`
+        // through unchanged (its constructor call ends `..., this.font`) —
+        // only colour and the five format flags are legacy-codeable, so a
+        // colour code must not drop whatever font the component itself set.
         return Some(TextStyle {
             color: Some(color),
             bold: Some(false),
@@ -958,6 +1033,7 @@ fn apply_legacy_code(mut style: TextStyle, code: char) -> Option<TextStyle> {
             underlined: Some(false),
             strikethrough: Some(false),
             obfuscated: Some(false),
+            font: style.font,
         });
     }
     match code.to_ascii_lowercase() {
@@ -1066,6 +1142,10 @@ fn json_style(fields: &[(String, JsonValue)]) -> TextStyle {
         underlined: json_bool(get("underlined")),
         strikethrough: json_bool(get("strikethrough")),
         obfuscated: json_bool(get("obfuscated")),
+        font: match get("font") {
+            Some(JsonValue::String(name)) => Some(FontId::intern(name)),
+            _ => None,
+        },
     }
 }
 
@@ -1198,6 +1278,10 @@ fn nbt_style(fields: &[(String, Nbt)]) -> TextStyle {
         underlined: nbt_bool(get("underlined")),
         strikethrough: nbt_bool(get("strikethrough")),
         obfuscated: nbt_bool(get("obfuscated")),
+        font: match get("font") {
+            Some(Nbt::String(name)) => Some(FontId::intern(name)),
+            _ => None,
+        },
     }
 }
 

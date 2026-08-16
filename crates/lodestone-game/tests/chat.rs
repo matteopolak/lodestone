@@ -43,6 +43,7 @@ fn unsigned_content_is_shown_verbatim() {
 fn decoration_carries_style() {
     use lodestone_model::TextColor;
     let style = TextStyle {
+        font: None,
         color: Some(TextColor::Gray),
         italic: Some(true),
         ..TextStyle::default()

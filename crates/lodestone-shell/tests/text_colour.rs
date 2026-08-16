@@ -199,6 +199,7 @@ fn span(text: &str, color: Option<TextColor>) -> TextSpan {
     TextSpan {
         text: text.to_string(),
         style: TextStyle {
+            font: None,
             color,
             ..TextStyle::default()
         },
@@ -566,6 +567,7 @@ fn hex_surfaces_with(coloured: bool) -> Vec<(&'static str, u32, HudGeometry)> {
 fn a_nested_component_inherits_its_parents_colour() {
     let tree = Text {
         style: TextStyle {
+            font: None,
             color: Some(TextColor::Gold),
             ..TextStyle::default()
         },

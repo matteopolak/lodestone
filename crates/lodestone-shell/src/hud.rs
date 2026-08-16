@@ -7798,6 +7798,7 @@ mod tests {
         let red = TextSpan {
             text: "iiiii".to_string(),
             style: TextStyle {
+                font: None,
                 color: Some(TextColor::Red),
                 ..TextStyle::default()
             },
@@ -7805,6 +7806,7 @@ mod tests {
         let blue = TextSpan {
             text: "WWWWW".to_string(),
             style: TextStyle {
+                font: None,
                 color: Some(TextColor::Blue),
                 ..TextStyle::default()
             },
@@ -8184,6 +8186,7 @@ mod tests {
         let hex = Text {
             content: lodestone_model::text::TextContent::Literal("Hex".to_string()),
             style: TextStyle {
+                font: None,
                 color: Some(TextColor::Rgb(0x1a_2b3c)),
                 ..TextStyle::default()
             },
@@ -8196,6 +8199,7 @@ mod tests {
         let named = Text {
             content: lodestone_model::text::TextContent::Literal("Gray".to_string()),
             style: TextStyle {
+                font: None,
                 color: Some(TextColor::Gray),
                 ..TextStyle::default()
             },
@@ -8302,6 +8306,7 @@ mod tests {
         let hex = Text {
             content: lodestone_model::text::TextContent::Literal("Hex".to_string()),
             style: TextStyle {
+                font: None,
                 color: Some(TextColor::Rgb(0x1a_2b3c)),
                 ..TextStyle::default()
             },
@@ -8315,6 +8320,7 @@ mod tests {
         let named = Text {
             content: lodestone_model::text::TextContent::Literal("Gray".to_string()),
             style: TextStyle {
+                font: None,
                 color: Some(TextColor::Gray),
                 ..TextStyle::default()
             },

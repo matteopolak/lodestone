@@ -172,17 +172,19 @@ impl BlockResources {
             "baked per-state model geometry for {} block states",
             models.state_count(),
         );
-        // The language table shares the jar; a missing or malformed file just
-        // disables translation rather than failing the whole live load.
-        let language = manager
-            .read(&Language::resource_path("minecraft", "en_us"))
-            .and_then(|bytes| match Language::from_json_bytes(&bytes) {
-                Ok(lang) => Some(lang),
-                Err(e) => {
-                    tracing::warn!(target: "assets", "parse en_us.json: {e}");
-                    None
-                }
-            });
+        // The language table is **merged** across the whole pack stack, not
+        // read from whichever pack wins (`manager.read` would do that, and
+        // used to be what this called) — a pack that ships its own partial
+        // `lang/en_us.json` (a handful of custom keys for its own items or
+        // fonts) must not blank out the ~7,000 vanilla keys underneath it.
+        // See `Language::merged_from_stack`'s own doc for the vanilla record
+        // this reproduces (`ClientLanguage.loadFrom`/`getResourceStack`) and
+        // the symptom a single-winner read produced: a raw translation key
+        // like `container.crafting` reaching the screen instead of the word.
+        // A missing file on every layer just disables translation rather
+        // than failing the whole live load; a malformed layer is skipped by
+        // `merged_from_stack` itself.
+        let language = Language::merged_from_stack(&manager, "minecraft", "en_us");
         Ok((atlas.with_models(models), language))
     }
 }
@@ -235,11 +237,11 @@ pub fn open_pack_stack(root: &Path) -> Option<ResourceManager> {
 /// had already `fetch`ed and installed the jar. [`vanilla_manager`] is the
 /// choke point that actually knows about the wasm bundle (see its own doc),
 /// but nothing in this file routed through it except [`BlockResources::try_vanilla`]
-/// and, incidentally, the font loader in `hud/vanilla_font.rs`. This is the
-/// fix: one function both targets go through, so a browser session's GUI
-/// atlas, panorama, sky, item/particle atlases, entity textures, container
-/// art and recipe corpus load from the same bytes the font already does,
-/// instead of only the block atlas doing so.
+/// and, until this became `pub(crate)`, the font loader in
+/// `hud/vanilla_font.rs`. This is the fix: one function every target goes
+/// through, so a browser session's GUI atlas, panorama, sky, item/particle
+/// atlases, entity textures, container art, recipe corpus **and font**
+/// load from the same bytes.
 ///
 /// Native: identical to `open_pack_stack(&asset_root()?)` — same discovery,
 /// same user-pack layering. Browser: the same `fetch`ed bytes
@@ -247,8 +249,15 @@ pub fn open_pack_stack(root: &Path) -> Option<ResourceManager> {
 /// user pack would still layer on top (today that list is always empty on
 /// wasm32, since [`open_pack_source`] has nothing to open there, but the
 /// call is the same shape as the native side rather than a special case).
+///
+/// `pub(crate)` so `hud/vanilla_font.rs`'s font loader can route through it
+/// too, instead of [`vanilla_manager`] (the raw jar, no pack layering): a
+/// font loaded from the jar alone can never see a resource pack's own
+/// `font/*.json` providers, no matter how faithfully the text model carries
+/// a `"font"` id or how correct the pack's own JSON is — the manager it asks
+/// never held the pack to begin with.
 #[must_use]
-fn open_vanilla_pack_stack() -> Option<ResourceManager> {
+pub(crate) fn open_vanilla_pack_stack() -> Option<ResourceManager> {
     #[cfg(target_arch = "wasm32")]
     {
         let bytes = crate::platform::assets::bundle()?.client_jar.clone();

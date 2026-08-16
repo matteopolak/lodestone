@@ -88,13 +88,13 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use lodestone_assets::font::{
     FontLoader, FontOptions, GlyphRaster, MISSING_ADVANCE, RasterFont, metrics as font_metrics,
 };
 use lodestone_assets::{ResourceLocation, ResourceManager};
-use lodestone_model::text::{TextColor, TextSpan};
+use lodestone_model::text::{FontId, TextColor, TextSpan};
 
 use super::item_icon::ColourStream;
 
@@ -156,6 +156,14 @@ struct ResolvedGlyph {
     ch: char,
     style: GlyphStyle,
     rgb: [f32; 3],
+    /// The `"font": "<ns>:<name>"` this run's [`lodestone_model::text::TextStyle`]
+    /// resolved to, if any — `None` means the default font (also what a
+    /// `§`-coded run decoded by [`VanillaFont::resolve_legacy`] always
+    /// carries, since legacy codes have no font of their own; see that
+    /// method's doc). [`VanillaFont::select_font`] is where this is actually
+    /// consulted, per glyph, with a fallback to the default font when the
+    /// named font does not cover this glyph's codepoint.
+    font: Option<FontId>,
 }
 
 /// Reorders `glyphs` in place for display, applying the Unicode
@@ -260,11 +268,22 @@ pub struct VanillaFont {
     /// interior-mutable, and every glyph draw advances it exactly once, same
     /// as vanilla.
     obfuscation_rng: AtomicU64,
+    /// Custom fonts a `"font": "<ns>:<name>"` span can name, loaded lazily
+    /// from the same resource-pack-aware manager the default font uses (see
+    /// [`jar_manager`]) and cached — `None` for an id that failed to load, so
+    /// a malformed or absent pack font is not re-resolved every frame it
+    /// appears in. See [`Self::select_font`].
+    custom: Mutex<HashMap<FontId, Option<Arc<RasterFont>>>>,
 }
 
 /// Process-wide cache. The jar is ~37 MB and the font is tiny; loading it once
 /// keeps `HudRenderer::new` cheap even when a test builds several renderers.
 static SHARED: OnceLock<Option<Arc<VanillaFont>>> = OnceLock::new();
+
+/// The id [`FontId::name`] returns for the vanilla default font — never
+/// worth a pack-stack lookup of its own since [`VanillaFont`] already carries
+/// it as [`VanillaFont::raster`].
+const DEFAULT_FONT_NAME: &str = "minecraft:default";
 
 impl VanillaFont {
     /// The process-wide vanilla font, loaded on first call from the same pack
@@ -298,6 +317,7 @@ impl VanillaFont {
                     raster,
                     obfuscation_pool,
                     obfuscation_rng: AtomicU64::new(0x9E37_79B9_7F4A_7C15),
+                    custom: Mutex::new(HashMap::new()),
                 }))
             }
             Err(e) => {
@@ -327,7 +347,51 @@ impl VanillaFont {
             raster,
             obfuscation_pool,
             obfuscation_rng: AtomicU64::new(0x9E37_79B9_7F4A_7C15),
+            custom: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Resolves and caches a custom font by id, loaded from the same
+    /// resource-pack-aware manager the default font uses ([`jar_manager`],
+    /// which layers the selected local packs and a live server-pushed pack
+    /// over the jar — see that function's own doc for why a browser session's
+    /// jar bytes are only reachable that way, and why a server pack rides
+    /// along). `None` on first failure is cached too, matching every other
+    /// pack loader's fail-open discipline: a malformed or absent pack font
+    /// must degrade to the default font, not be retried every frame it
+    /// appears in a message, and never panic — the pack is untrusted input.
+    fn custom_raster(&self, id: FontId) -> Option<Arc<RasterFont>> {
+        if id.name() == DEFAULT_FONT_NAME {
+            return None;
+        }
+        {
+            let cache = self.custom.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(entry) = cache.get(&id) {
+                return entry.clone();
+            }
+        }
+        let loaded = load_custom_font(id.name());
+        let mut cache = self.custom.lock().unwrap_or_else(PoisonError::into_inner);
+        cache.insert(id, loaded.clone());
+        loaded
+    }
+
+    /// Which [`RasterFont`] actually supplies `cp`'s pixels: `custom` when it
+    /// declares coverage for that codepoint, else the default. This is the
+    /// per-glyph fallback issue #679 asks for — a pack font that only defines
+    /// a handful of icon codepoints still draws ordinary Latin text from the
+    /// default font rather than the missing-glyph box, while a codepoint the
+    /// custom font *does* define wins even where the default font would also
+    /// have drawn something there (matching vanilla's own provider-priority
+    /// rule, extended across the font boundary rather than just within one
+    /// font's provider list).
+    fn select_font<'a>(&'a self, cp: u32, custom: Option<&'a RasterFont>) -> &'a RasterFont {
+        if let Some(custom) = custom
+            && custom.font().contains(cp)
+        {
+            return custom;
+        }
+        &self.raster
     }
 
     /// The advance of `ch` in **device** pixels at `scale`.
@@ -499,7 +563,12 @@ impl VanillaFont {
                 obfuscated: span.style.obfuscated.unwrap_or(false),
             };
             let rgb = span.style.color.map_or(base, text_color_rgb);
-            out.extend(span.text.chars().map(|ch| ResolvedGlyph { ch, style, rgb }));
+            let font = span.style.font;
+            out.extend(
+                span.text
+                    .chars()
+                    .map(|ch| ResolvedGlyph { ch, style, rgb, font }),
+            );
         }
         out
     }
@@ -574,7 +643,14 @@ impl VanillaFont {
                 }
                 continue;
             }
-            out.push(ResolvedGlyph { ch, style, rgb });
+            // A `§`-coded run carries no font of its own — see this method's
+            // doc — so every glyph it decodes stays on the default font.
+            out.push(ResolvedGlyph {
+                ch,
+                style,
+                rgb,
+                font: None,
+            });
         }
         out
     }
@@ -600,18 +676,24 @@ impl VanillaFont {
         for (position, g) in glyphs.iter().enumerate() {
             let c = [g.rgb[0], g.rgb[1], g.rgb[2], alpha];
             let c = if shadow { shadow_of(c) } else { c };
+            // Which font actually draws this glyph: the span's own
+            // `"font"`, if it covers this codepoint, else the default —
+            // resolved once per glyph so the shadow offset below and the
+            // draw call agree on the same font.
+            let custom = g.font.and_then(|id| self.custom_raster(id));
+            let font = self.select_font(g.ch as u32, custom.as_deref());
             // Per-glyph shadow offset (`Font::shadow_offset`): 1 px for a
             // sheet glyph, 0.5 for a unihex one, looked up by this glyph's
             // own codepoint rather than assumed uniform across the string —
             // a fixed offset added once, before either pass, was only
             // correct when every glyph shared it.
             let (gx, gy) = if shadow {
-                let off = self.raster.font().shadow_offset(g.ch as u32) * scale;
+                let off = font.font().shadow_offset(g.ch as u32) * scale;
                 (cursor + off, y + off)
             } else {
                 (cursor, y)
             };
-            cursor += self.glyph_styled(cs, g.ch, gx, gy, scale, c, g.style, position == 0);
+            cursor += self.glyph_styled(cs, g.ch, gx, gy, scale, c, g.style, position == 0, font);
         }
     }
 
@@ -650,17 +732,16 @@ impl VanillaFont {
         c: [f32; 4],
         style: GlyphStyle,
         first: bool,
+        font: &RasterFont,
     ) -> f32 {
         let cp = ch as u32;
-        let base_r = self.raster.raster(cp);
+        let base_r = font.raster(cp);
         // Matches by reference (not `base_r` by value): `GlyphRaster` is not
         // `Copy`, and `base_r` is matched again below to draw the glyph, so
         // moving it here would make that second match a use-after-move.
         let advance = match &base_r {
             Some(r) => r.advance(),
-            None if self.raster.font().contains(cp) => {
-                self.raster.advance(cp).unwrap_or(MISSING_ADVANCE)
-            }
+            None if font.font().contains(cp) => font.advance(cp).unwrap_or(MISSING_ADVANCE),
             None => {
                 missing_box(cs, x, y, scale, c);
                 MISSING_ADVANCE
@@ -673,7 +754,7 @@ impl VanillaFont {
         // to 0.5F because a unihex glyph is drawn at oversample 2, so bold CJK
         // shifts one source texel rather than two.
         let bold_extra = if style.bold {
-            self.raster.font().bold_offset(cp)
+            font.font().bold_offset(cp)
         } else {
             0.0
         };
@@ -890,7 +971,14 @@ fn build_obfuscation_pool(raster: &RasterFont) -> HashMap<u32, Vec<char>> {
 /// log to tell the two apart; the codepoint total alone cannot, because it moves
 /// whenever any provider does.
 fn jar_manager() -> Option<ResourceManager> {
-    let mut manager = crate::resources::vanilla_manager()?;
+    // `open_vanilla_pack_stack`, not `vanilla_manager`: the latter is the raw
+    // jar with no pack layering (it exists for GPU gates comparing rendered
+    // pixels against source art), and a font resolved against it can never
+    // see a resource pack's own `font/*.json` — see that function's own doc.
+    // This is also the manager [`load_custom_font`] uses, so a server- or
+    // locally-selected pack's custom font is discoverable the same way the
+    // default font already is.
+    let mut manager = crate::resources::open_vanilla_pack_stack()?;
     // The browser has no object store: `platform::assets::Bundle` carries the jar
     // and the blocks report only, so a wasm session keeps bitmap-only coverage
     // rather than paying a 1.5 MB fetch for `unifont.zip` on a bundle that is
@@ -915,6 +1003,39 @@ fn jar_manager() -> Option<ResourceManager> {
     Some(manager)
 }
 
+/// Loads one non-default font by its `"namespace:path"` id, from the same
+/// resource-pack-aware manager [`jar_manager`] builds for `minecraft:default`
+/// — so a server- or locally-selected pack's `assets/<ns>/font/<name>.json`
+/// is reachable exactly the way its `assets/<ns>/textures/**` already is.
+///
+/// Fail-open, like every pack loader in this crate: the pack is untrusted
+/// input (a malformed provider list, a truncated PNG, a `.zip` that does not
+/// open), and any parse failure here must degrade to the default font rather
+/// than panic the client. `None` is also what a genuinely absent font id
+/// (the server never shipped it, or the player has no matching pack
+/// selected) produces — the two cases are indistinguishable from here, and
+/// [`VanillaFont::select_font`] treats them identically: draw from the
+/// default font instead.
+fn load_custom_font(name: &str) -> Option<Arc<RasterFont>> {
+    let manager = jar_manager()?;
+    let id: ResourceLocation = name.parse().ok()?;
+    match FontLoader::new(&manager).load_raster(&id, &FontOptions::none()) {
+        Ok(raster) => {
+            tracing::info!(
+                target: "assets",
+                font = name,
+                codepoints = raster.font().codepoint_count(),
+                unihex = raster.unihex_count(),
+                "loaded a resource-pack font"
+            );
+            Some(Arc::new(raster))
+        }
+        Err(e) => {
+            tracing::warn!(target: "assets", "load resource-pack font {name}: {e}");
+            None
+        }
+    }
+}
 
 /// Vanilla's shadow colour: `ARGB.scaleRGB(color, 0.25F)` — a **gamma-space**
 /// quarter of each channel with alpha preserved.
@@ -1074,6 +1195,7 @@ mod tests {
                 ch,
                 style: GlyphStyle::default(),
                 rgb: [1.0, 1.0, 1.0],
+                font: None,
             }
         }
 
@@ -1576,6 +1698,7 @@ mod span_colour_tests {
         TextSpan {
             text: text.to_string(),
             style: TextStyle {
+                font: None,
                 color,
                 ..TextStyle::default()
             },

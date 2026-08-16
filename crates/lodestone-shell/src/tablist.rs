@@ -332,6 +332,7 @@ mod tests {
         let mut e = entry(1, "Steve", 10, GameMode::Survival);
         e.display_name = Some(Text {
             style: lodestone_model::TextStyle {
+                font: None,
                 color: Some(TextColor::Rgb(HEX)),
                 ..lodestone_model::TextStyle::default()
             },
@@ -536,11 +537,13 @@ mod tests {
         const BOTTOM: u32 = 0x00c4_7b19;
         let banner = Text {
             style: TextStyle {
+                font: None,
                 color: Some(TextColor::Rgb(TOP)),
                 ..TextStyle::default()
             },
             extra: vec![Text {
                 style: TextStyle {
+                    font: None,
                     color: Some(TextColor::Rgb(BOTTOM)),
                     ..TextStyle::default()
                 },

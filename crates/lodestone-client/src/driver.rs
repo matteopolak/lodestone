@@ -331,6 +331,7 @@ fn tag_not_secure(text: Text) -> Text {
     Text {
         content: TextContent::Literal("[Not Secure] ".to_string()),
         style: TextStyle {
+            font: None,
             color: Some(TextColor::Rgb(0x00D0_D0D0)),
             ..TextStyle::default()
         },
