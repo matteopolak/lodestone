@@ -394,3 +394,58 @@ with its machine-load caveat):
   “SIMD does not fix a latency defect” shape as this repo's own recorded
   keep-alive-timeout incident, where `spawn_blocking` moved work off the
   core thread without shortening the suspension point it was inside.
+
+## Correction: "vegetation ~68%" is a cold-patch number, and a warm-neighbourhood
+## scene answers a different question with a different dominant stage
+
+The table above's own caveat ("re-run in a quiet window... before using a
+specific figure for a decision") turned out to matter for more than machine
+jitter. `crates/lodestone-worldgen/tests/embedded_vs_fixture_stage_cost.rs`
+(added to close out issue #78's tracking) holds the table's own methodology
+constant — same cache-cold 3×3 patch, no neighbourhood warm-up — and swaps
+only the resolver, fixture tree vs. the real embedded 26.2 data
+(`lodestone_server::overworld_generator`). Both arms agree: **vegetation
+dominates a cold patch either way** (fixture 70.2%, embedded 53.6%, this
+repo at `fb104c2d`), so the original claim is not an artefact of the
+fixture tree's inert biome search as this doc's author first suspected —
+it holds up under a real 26.2 resolver too, for this specific scene.
+
+**But `bench_vegetation_walk_cost`'s tracked `embedded_stage_*_us` baseline**
+(`crates/lodestone-worldgen/benches/generation.rs`, recorded across many
+commits into `bench-results/generation.jsonl`, scene `"seed=42 chunk=(0,0)
+warm=5x5 resolver=embedded split=10stage"`) measures a **different**
+condition — a 5×5 neighbourhood pre-warmed via `generator.column(..)`
+(which uses this generator's own caches) before timing the centre chunk
+alone — and reports a **completely different ranking**: `ore` ~29%, `biome`
+~23%, `shape` ~19%, `vegetation` only ~9% (four independent runs at shas
+`ac5391d1ab0b`/`c51f85f9f985`/`a38d5e204455`/others, all agreeing within a
+few points). Neither number is wrong; they are answers to two different
+questions:
+
+| scene | question it answers | dominant stage |
+|---|---|---|
+| cold 3×3 patch (this doc's table, and the A/B test above) | cost of generating a **brand-new region** with no already-computed neighbours | vegetation (54-70%) |
+| warm 5×5, centre-chunk-only (`bench_vegetation_walk_cost`) | **marginal** cost of one more chunk at the edge of an already-explored area — `docs/plans/worldgen-rewrite.md`'s C_ss steady-state condition | ore (~29%) |
+
+A real server spends most of its worldgen time in the second condition —
+players walk into a frontier one or a few chunks at a time, not whole cold
+3×3+ patches — so **the warm/C_ss baseline is the more representative
+number for a steady-state optimisation decision**, and the SIMD-target
+reasoning two sections up ("vegetation is a poor SIMD target, profile its
+RNG draw count first") should be read as *cold-patch-scoped*, not as this
+crate's general priority order. A pass optimising for typical play should
+look at `ore`'s cost first against the warm baseline, not vegetation.
+
+One more thing this A/B run surfaced and did **not** chase down, flagged
+per this doc's own machine-state caveat rather than acted on: the embedded
+cold-patch arm's `aquifer` stage had a p50 of 1.7ms but a **max of 351.8ms**
+on one of the nine columns (dwarfing every other stage's max in either
+arm) — a ~200× gap between typical and worst-case that could be a real
+algorithmic edge case (a chunk whose aquifer barrier search walks unusually
+far) or scheduling jitter from the concurrent multi-agent build this
+measurement ran under (`pgrep -l 'rustc|cargo'` was non-empty the whole
+time, same as every other reading in this doc). **Re-run
+`embedded_vs_fixture_stage_cost` alone on a quiet machine before treating
+that number as a real aquifer cost** — this doc's own earlier section
+already names the single-run-alone re-check as the discriminator between
+an environmental artefact and a real defect.
