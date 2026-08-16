@@ -1276,6 +1276,76 @@ fn bell_source_tracks_connection_state_and_is_safe_before_login() {
     );
 }
 
+/// Issue #23 (decorated pot): [`Sim::decorated_pot_source`]'s own island
+/// detector, matching [`bell_source_tracks_connection_state_and_is_safe_before_login`]'s
+/// shape and reasoning — see that test's doc for why a plain accessor check
+/// is the honest scope here.
+#[test]
+fn decorated_pot_source_tracks_connection_state_and_is_safe_before_login() {
+    let mut sim = Sim::new(test_config());
+    assert!(
+        sim.decorated_pot_source().is_none(),
+        "no net attached at all must report no source, matching bell_source/shulker_source"
+    );
+
+    let (net, _actions, _feed) = NetClient::loopback_with_feed();
+    sim.attach_net(net);
+    let source = sim
+        .decorated_pot_source()
+        .expect("a net is attached, so a source must exist even before login completes");
+    assert_eq!(
+        source(glam::Vec3::ZERO),
+        Vec::new(),
+        "no ClientHandle has been published yet, so the closure must return \
+         no spawns rather than panicking on the empty OnceLock"
+    );
+}
+
+/// Issue #23 (conduit): [`Sim::conduit_source`]'s own island detector,
+/// matching the bell/pot siblings above.
+#[test]
+fn conduit_source_tracks_connection_state_and_is_safe_before_login() {
+    let mut sim = Sim::new(test_config());
+    assert!(
+        sim.conduit_source().is_none(),
+        "no net attached at all must report no source, matching bell_source/decorated_pot_source"
+    );
+
+    let (net, _actions, _feed) = NetClient::loopback_with_feed();
+    sim.attach_net(net);
+    let source = sim
+        .conduit_source()
+        .expect("a net is attached, so a source must exist even before login completes");
+    assert_eq!(
+        source(glam::Vec3::ZERO),
+        Vec::new(),
+        "no ClientHandle has been published yet, so the closure must return \
+         no spawns rather than panicking on the empty OnceLock"
+    );
+}
+
+/// Issue #23 (conduit): [`Sim::step`] must actually advance
+/// `Sim::conduit_ticks` once per tick while connected, not merely hold the
+/// field — the same "correct function fed a constant by its producer" trap
+/// this session's other four fixes hit. A tick where no conduit is anywhere
+/// near the player is still observable: `Sim::step` must run without
+/// panicking on the not-yet-published `ClientHandle`, matching every other
+/// per-tick block-entity fold's "empty rather than a panic" contract.
+#[test]
+fn stepping_ticks_conduits_without_panicking_before_login() {
+    let (net, _actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+
+    sim.step(5.0 / 20.0);
+
+    assert!(
+        sim.tick_count() > 0,
+        "ticks must still run while connecting, exactly like the movement-packet gate above"
+    );
+}
+
 /// Both [`CollisionSource`] implementors must actually be `Send + Sync +
 /// 'static`, or they could not be held in a `Resource` at all.
 ///
