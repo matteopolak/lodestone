@@ -217,7 +217,10 @@ impl V770Adapter {
     let count = reader.var_i32().map_err(dec_err)?;
     let count = usize::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("invalid last-seen count {count}")))?;
-    let mut last_seen = Vec::with_capacity(count);
+    // Same cap as `decode_vec` and the command-tree readers below: `count`
+    // comes off the wire and each entry costs at least one byte, so
+    // `remaining()` is a sound ceiling on how many can exist.
+    let mut last_seen = Vec::with_capacity(count.min(reader.remaining()));
     for _ in 0..count {
         let raw = reader.var_i32().map_err(dec_err)?;
         if raw == 0 {

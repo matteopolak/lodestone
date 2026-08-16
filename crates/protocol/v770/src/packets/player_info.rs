@@ -220,7 +220,12 @@ impl Decode for PlayerInfoUpdate {
         if count < 0 {
             return Err(Error::NegativeLength(count));
         }
-        let mut entries = Vec::with_capacity(count as usize);
+        // Bounded by the readable bytes, matching `decode_vec`: the count is
+        // attacker-controlled and each entry costs at least a uuid, so
+        // `remaining()` is a generous but sound ceiling. Without this a tiny
+        // payload declaring a huge count OOMs the client before a single
+        // entry is read.
+        let mut entries = Vec::with_capacity((count as usize).min(r.remaining()));
         for _ in 0..count {
             let uuid = r.uuid()?;
             let mut entry = PlayerInfoEntry {
@@ -280,7 +285,9 @@ impl Decode for PlayerInfoRemove {
         if count < 0 {
             return Err(Error::NegativeLength(count));
         }
-        let mut uuids = Vec::with_capacity(count as usize);
+        // Same cap as the update path above: a uuid is 16 bytes, so
+        // `remaining()` bounds how many can actually follow.
+        let mut uuids = Vec::with_capacity((count as usize).min(r.remaining()));
         for _ in 0..count {
             uuids.push(r.uuid()?);
         }
