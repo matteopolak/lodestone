@@ -887,6 +887,11 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
                 }
                 _ => None,
             },
+            // Same story as `pot_decorations`/`profile` above: this crate's
+            // component map has no slot for either book component, so there is
+            // nothing to carry across.
+            writable_book_content: None,
+            written_book_content: None,
             // Same story as `pot_decorations` above: this crate's component map
             // has no slot for an opaque NBT blob, so there is nothing to carry.
             custom_data: None,
