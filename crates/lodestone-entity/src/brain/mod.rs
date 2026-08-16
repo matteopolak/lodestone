@@ -49,13 +49,13 @@ mod sensor;
 
 pub use activity::Activity;
 pub use behavior::{Behavior, BehaviorControl, DEFAULT_DURATION, Leaf, Status};
-pub use behaviors::{LookAtTargetSink, MoveToTargetSink, RandomStroll, SetPlayerLookTarget};
+pub use behaviors::{LookAtTargetSink, MoveToTargetSink, RandomStroll, SetPlayerLookTarget, WalkToPoi};
 pub use driver::BrainGoal;
 pub use gate::{GateBehavior, OrderPolicy, RunningPolicy};
 pub use memory::{Memories, MemoryModuleType, MemoryStatus, MemoryValue, WalkTarget};
 pub use mob::{BrainMob, NearbyBrainEntity};
 pub use roster::{BRAIN_SPECIES, brain_for, is_brain_species, scaffold};
-pub use sensor::{HurtBySensor, NearestHostileSensor, NearestPlayerSensor, Sensor};
+pub use sensor::{HurtBySensor, NearestHostileSensor, NearestPlayerSensor, Sensor, VillagerPoiSensor};
 
 use std::collections::HashMap;
 
@@ -250,6 +250,17 @@ impl Brain {
     pub fn set_schedule(&mut self, mut schedule: Vec<(i32, Activity)>) {
         schedule.sort_by_key(|&(start, _)| start);
         self.schedule = Some(schedule);
+    }
+
+    /// Whether a schedule was ever attached via [`set_schedule`](Self::set_schedule).
+    /// [`BrainGoal::tick`](super::BrainGoal) reads this to decide whether it is
+    /// safe to call [`update_activity_from_schedule`](Self::update_activity_from_schedule)
+    /// at all — without a schedule that call falls back to treating `IDLE` as
+    /// "the scheduled activity", which would fight a species like the goat
+    /// that switches activities through its own candidate list instead.
+    #[must_use]
+    pub fn has_schedule(&self) -> bool {
+        self.schedule.is_some()
     }
 
     /// The activities currently active (core plus at most one non-core).

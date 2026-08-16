@@ -1550,7 +1550,18 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // the player standing there.
         {
             let world = Arc::clone(&world);
+            // Issue #231: the villager schedule's real clock.
+            // `world_state.time()` (read-only — `tick_time()` is what
+            // actually advances the clock, called later this same loop
+            // iteration) rather than a second `tick_time()` call, which
+            // would double-advance `day_time` once per tick. Reduced mod
+            // 24000 here rather than inside `MobSim`, matching this crate's
+            // own convention (`docs/`'s own note that "nothing here needs"
+            // the reduction except a consumer that actually places the sun —
+            // a villager schedule is exactly that consumer).
+            let day_time = (world_state.time().day_time.rem_euclid(24_000)) as i32;
             mobs.with(|sim| {
+                sim.set_day_time(day_time);
                 // The **block-state name**, not a solid/air bit. One bit per cell
                 // cannot express the shape an item comes to rest on: a bottom slab,
                 // soul sand and a patch of short grass all answered "solid" and all

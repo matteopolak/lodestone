@@ -99,9 +99,16 @@ separate, unbuilt unit; nothing here calls it.
 * **Cost gating is per-species-family, not per-instance.** Every brain-species mob
   pays the O(n) nearby scan every tick regardless of whether its own brain actually
   registers `NearestHostileSensor`; only goal-system species are excluded.
-* **Goat ram and `#230`/`#231`'s remaining items are not built.** This closes the
-  perception/eligibility blocker only — `PrepareRamNearestTarget`/`RamTarget`, the
-  work/rest schedule, and golem-summon-on-hurt are separate, unbuilt units.
+* **Goat ram and `#230`'s remaining items are not built here.** This closes the
+  perception/eligibility blocker only — `PrepareRamNearestTarget`/`RamTarget` is a
+  separate, unbuilt unit. Golem-summon-on-hurt and the villager WORK/MEET/REST
+  schedule, both named here as unbuilt when this doc was written, have since
+  landed elsewhere: golem-summon-on-hurt in `MobSim::tick_golem_summon`
+  (`mobs/mod.rs`), and the schedule in `brain::roster::villager_brain` plus
+  `BrainGoal::tick`'s schedule mode — see `docs/villager-professions-and-trading.md`
+  for the schedule's own account (it landed as the `WalkToPoi` behaviour, the
+  `set_schedule`/`has_schedule` wiring, and `crate::mobs::villager::BellClaims`,
+  the third POI-claim ledger it needed).
 
 ## Configuration
 

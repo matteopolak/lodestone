@@ -61,8 +61,10 @@ This claims the bed as a **ticket**, not as a nightly sleep — vanilla's own
 the instant `AcquirePoi` takes the ticket, independent of whether anyone
 ever lies down in the bed. So this closes issue #241's real remaining
 blocker (`docs/raids-and-patrols.md` §1/§5: `#village` POIs were never
-occupied because nothing ever claimed a bed) without needing a work/rest
-sleep cycle — that is issue #231's own separate, still-open remainder.
+occupied because nothing ever claimed a bed) without needing a full
+sleeping-pose sleep cycle — see `docs/villager-work-rest-schedule.md` for the
+part of #231 that *does* now use this claim (a villager walks to and stops
+near its claimed bed once `REST` begins; it never actually lies down).
 
 `MobSim::occupied_homes_in_range(center, radius)` is the live query a raid
 trigger reads: the in-memory equivalent of
@@ -72,6 +74,27 @@ on-disk `poi/` region set (see "No on-disk persistence" below) — the
 disk-backed query can only ever see a claim that has been persisted, and
 nothing here persists one, so a live caller needs this method instead of, or
 alongside, the disk-backed one.
+
+### Bell claiming (`BellClaims`) — the third `#village` POI, and what feeds `MEET`
+
+`villager/mod.rs` also carries `BellClaims`/`find_and_claim_bell`, the third
+sibling of `WorkstationClaims`/`BedClaims`, this time for `PoiTypes.MEETING`
+(`minecraft:bell`). The one real difference from the other two: a bell hands
+out **32** tickets (`crate::poi_storage::max_tickets`), not `1` — a village
+gathers at its bell in a crowd, not a queue of one, and
+`a_bell_holds_exactly_thirty_two_tickets_not_one` in `villager/mod.rs`'s own
+tests predicts that exact number rather than merely "more than one".
+`MobSim::tick_villager_bells` runs it every sim tick, independently of the
+job-site and bed passes, for the identical "three separate vanilla memories"
+reason the bed section above gives for its own independence.
+
+Nothing about the raid trigger needs a claimed bell —
+`occupied_homes_in_range` already covers vanilla's own occupied-`#village`-POI
+query using beds alone. The reason this ledger exists is
+`docs/villager-work-rest-schedule.md`'s `MEET` activity: without a claimed
+bell, `MemoryModuleType.MEETING_POINT` never holds a value and `MEET` can
+never become eligible, so a villager would sit in `IDLE` through the whole
+9000–11000 window regardless of how the clock ran.
 
 `SimMob::snapshot` pushes a `MetadataField::VillagerData` (index 19,
 serializer `VILLAGER_DATA`) for every `minecraft:villager`, unconditionally —

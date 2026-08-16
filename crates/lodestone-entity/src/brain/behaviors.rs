@@ -72,6 +72,75 @@ impl Behavior for RandomStroll {
     }
 }
 
+/// Walks toward a claimed point-of-interest position read from `source` (e.g.
+/// [`MemoryModuleType::JOB_SITE`]/`HOME`/`MEETING_POINT`) — vanilla's
+/// `SetWalkTargetFromBlockMemory`, simplified. A one-shot: when farther than
+/// `close_enough` from the position `source` names, it writes
+/// [`MemoryModuleType::WALK_TARGET`] so [`MoveToTargetSink`] does the actual
+/// walking; when already close enough it does nothing, leaving the mob to
+/// whatever else its current activity's other behaviours do while "at work"
+/// (or "in bed", or "at the bell").
+///
+/// **Two disclosed cuts against the jar original.** Vanilla additionally (1)
+/// walks toward an intermediate point *along the way* rather than the POI
+/// itself when the target is farther than a `tooFarDistance`, retrying up to
+/// 1000 times before giving up, and (2) tracks
+/// [`MemoryModuleType::CANT_REACH_WALK_TARGET_SINCE`] to abandon (release) a
+/// claim that has stayed unreachable for a duration. Neither is ported: this
+/// always walks straight at the claimed position and never releases a claim
+/// for being unreachable — a villager whose workstation, bed or bell sits
+/// behind unnavigable terrain keeps retrying rather than eventually giving up
+/// and re-claiming elsewhere.
+#[derive(Debug)]
+pub struct WalkToPoi {
+    source: MemoryModuleType,
+    speed: f32,
+    close_enough: i32,
+    entry: [(MemoryModuleType, MemoryStatus); 2],
+}
+
+impl WalkToPoi {
+    /// Walks toward `source`'s position at `speed`, stopping once within
+    /// `close_enough` blocks.
+    #[must_use]
+    pub fn new(source: MemoryModuleType, speed: f32, close_enough: i32) -> Self {
+        Self {
+            source,
+            speed,
+            close_enough,
+            entry: [
+                (MemoryModuleType::WALK_TARGET, MemoryStatus::ValueAbsent),
+                (source, MemoryStatus::ValuePresent),
+            ],
+        }
+    }
+}
+
+impl Behavior for WalkToPoi {
+    fn entry_condition(&self) -> &[(MemoryModuleType, MemoryStatus)] {
+        &self.entry
+    }
+
+    fn check_extra_start_conditions(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob) -> bool {
+        let Some(&MemoryValue::Pos(target)) = mem.get(self.source) else {
+            return false;
+        };
+        let d = target - mob.position();
+        let close_enough_sqr = f64::from(self.close_enough) * f64::from(self.close_enough);
+        if d.dot(d) > close_enough_sqr {
+            mem.set(
+                MemoryModuleType::WALK_TARGET,
+                MemoryValue::WalkTarget(WalkTarget::new(target, self.speed, self.close_enough)),
+            );
+        }
+        true
+    }
+
+    fn name(&self) -> &'static str {
+        "walk_to_poi"
+    }
+}
+
 /// Consumes a walk target, drives navigation toward it, and clears it once
 /// reached or unreachable. This is the only behaviour that commands movement.
 #[derive(Debug)]
@@ -739,5 +808,105 @@ impl Behavior for RamTarget {
 
     fn name(&self) -> &'static str {
         "ram_target"
+    }
+}
+
+#[cfg(test)]
+mod walk_to_poi_tests {
+    use super::*;
+
+    struct RecordingMob {
+        pos: Vec3,
+        moved_to: Option<(Vec3, f32)>,
+    }
+
+    impl BrainMob for RecordingMob {
+        fn next_i32(&mut self, _bound: i32) -> i32 {
+            0
+        }
+        fn next_f32(&mut self) -> f32 {
+            0.0
+        }
+        fn game_time(&self) -> i64 {
+            0
+        }
+        fn position(&self) -> Vec3 {
+            self.pos
+        }
+        fn move_to(&mut self, target: Vec3, speed: f32) -> bool {
+            self.moved_to = Some((target, speed));
+            true
+        }
+        fn navigation_done(&self) -> bool {
+            true
+        }
+        fn stop_navigation(&mut self) {}
+        fn look_at(&mut self, _target: Vec3) {}
+        fn random_land_pos(&mut self, _max_xz: i32, _max_y: i32) -> Option<Vec3> {
+            None
+        }
+    }
+
+    const JOB_SITE: MemoryModuleType = MemoryModuleType::JOB_SITE;
+
+    fn memories_with_job_site(pos: Option<Vec3>) -> Memories {
+        let mut mem = Memories::new();
+        mem.register(JOB_SITE);
+        mem.register(MemoryModuleType::WALK_TARGET);
+        if let Some(pos) = pos {
+            mem.set(JOB_SITE, MemoryValue::Pos(pos));
+        }
+        mem
+    }
+
+    /// Far from the claimed position: a fresh `WALK_TARGET` is written toward
+    /// it, at the configured speed and close-enough distance.
+    #[test]
+    fn writes_a_walk_target_toward_the_claim_when_far() {
+        let mut mem = memories_with_job_site(Some(Vec3::new(20.0, 0.0, 0.0)));
+        let mut mob = RecordingMob {
+            pos: Vec3::default(),
+            moved_to: None,
+        };
+        let mut b = WalkToPoi::new(JOB_SITE, 0.4, 1);
+        assert!(b.check_extra_start_conditions(&mut mem, &mut mob));
+        assert_eq!(
+            mem.get(MemoryModuleType::WALK_TARGET),
+            Some(&MemoryValue::WalkTarget(WalkTarget::new(
+                Vec3::new(20.0, 0.0, 0.0),
+                0.4,
+                1
+            )))
+        );
+    }
+
+    /// Already within `close_enough`: no walk target is written — the mob
+    /// stays put rather than jittering in place.
+    #[test]
+    fn writes_nothing_when_already_close_enough() {
+        let mut mem = memories_with_job_site(Some(Vec3::new(0.5, 0.0, 0.0)));
+        let mut mob = RecordingMob {
+            pos: Vec3::default(),
+            moved_to: None,
+        };
+        let mut b = WalkToPoi::new(JOB_SITE, 0.4, 1);
+        assert!(b.check_extra_start_conditions(&mut mem, &mut mob));
+        assert!(!mem.has_value(MemoryModuleType::WALK_TARGET));
+    }
+
+    /// No claim at all: the behaviour cannot start (its entry condition
+    /// requires the source memory present), matching the `Leaf` gate rather
+    /// than `check_extra_start_conditions` — asserted directly here since a
+    /// `WalkToPoi` used in isolation must not crash on an absent memory.
+    #[test]
+    fn does_nothing_when_the_claim_memory_holds_no_value() {
+        let mut mem = memories_with_job_site(None);
+        let mut mob = RecordingMob {
+            pos: Vec3::default(),
+            moved_to: None,
+        };
+        let mut b = WalkToPoi::new(JOB_SITE, 0.4, 1);
+        assert!(!b.check_extra_start_conditions(&mut mem, &mut mob));
+        assert!(!mem.has_value(MemoryModuleType::WALK_TARGET));
     }
 }

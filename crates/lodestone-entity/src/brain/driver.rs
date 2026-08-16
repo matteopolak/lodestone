@@ -63,6 +63,14 @@ impl BrainGoal {
     /// leaves the active set **unchanged** when nothing matches, so a list of
     /// exclusively conditional activities silently freezes the mob in whatever it
     /// was last doing.
+    ///
+    /// **One documented exception**: a `brain` for which [`Brain::has_schedule`]
+    /// is true does not need an unconditional candidate here, because
+    /// [`Self::tick`] falls through to [`Brain::update_activity_from_schedule`]
+    /// whenever `candidates` matches nothing — and a schedule's own fallback
+    /// (`Brain::scheduled_activity`'s `IDLE` default) is the unconditional
+    /// activity in that case. `roster::villager_brain`'s `[Activity::PANIC]`
+    /// candidate list relies on exactly this.
     #[must_use]
     pub fn new(brain: Brain, candidates: Vec<Activity>) -> Self {
         Self { brain, candidates }
@@ -123,6 +131,30 @@ impl Goal for BrainGoal {
     /// **before** the tick, so a behaviour that became eligible this tick is
     /// scheduled this tick rather than next.
     ///
+    /// # Candidates first, then the schedule — never both fighting each tick
+    ///
+    /// [`candidates`](Self::candidates) is checked first via
+    /// [`Brain::set_active_activity_to_first_valid`], exactly as before this
+    /// method learned about schedules. For a species with no schedule
+    /// attached (every one except the villager today) that is the *whole*
+    /// story, unchanged.
+    ///
+    /// For a species that does carry a schedule
+    /// ([`Brain::has_schedule`]), [`Brain::update_activity_from_schedule`] runs
+    /// **after**, but only when `candidates` did not just select
+    /// [`Activity::PANIC`]. This mirrors vanilla's own split rather than
+    /// inventing one: `VillagerGoalPackages` registers
+    /// `Pair.of(99, UpdateActivityFromSchedule.create())` inside every
+    /// *other* activity's own behaviour package (`WORK`, `MEET`, `REST`,
+    /// `IDLE`, `PLAY`) but not inside `getPanicPackage` — so vanilla's own
+    /// schedule-check behaviour simply never runs while `PANIC` is active,
+    /// and resumes the moment control returns to any other activity. Without
+    /// this guard, a schedule-driven activity would be re-picked over `PANIC`
+    /// on literally the same tick it started (`update_activity_from_schedule`
+    /// only compares `is_active(scheduled)`, which does not know `PANIC` is
+    /// supposed to be more urgent) and a hurt villager would never
+    /// out-visibly flee.
+    ///
     /// A `mob` that answers `None` to
     /// [`brain_mob`](MobController::brain_mob) — every test double — makes this a
     /// no-op. That is deliberate; see that method's doc.
@@ -132,6 +164,10 @@ impl Goal for BrainGoal {
         };
         self.brain
             .set_active_activity_to_first_valid(&self.candidates);
+        if self.brain.has_schedule() && !self.brain.is_active(Activity::PANIC) {
+            self.brain
+                .update_activity_from_schedule(brain_mob.day_time(), brain_mob.game_time());
+        }
         self.brain.tick(brain_mob);
     }
 }

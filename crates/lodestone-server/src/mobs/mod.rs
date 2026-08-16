@@ -1209,6 +1209,15 @@ pub struct SimMob<'w> {
     /// [`MobSim::tick_villager_beds`] — the same throttling shape as
     /// [`job_search_cooldown`](Self::job_search_cooldown).
     bed_search_cooldown: i32,
+    /// The bell this villager has claimed as `PoiTypes.MEETING`, if any —
+    /// [`bed`](Self::bed)'s sibling. Cleared alongside a ticket release when
+    /// [`MobSim::tick_villager_bells`] finds the claim gone. Native-only, for
+    /// [`bed`](Self::bed)'s own reason.
+    meeting_point: Option<BlockPos>,
+    /// Ticks until this mob's next bell search, decremented in
+    /// [`MobSim::tick_villager_bells`] — [`bed_search_cooldown`](Self::bed_search_cooldown)'s
+    /// sibling.
+    bell_search_cooldown: i32,
     /// The nearest warden-listenable vibration this tick, if this mob is a
     /// listener species ([`is_vibration_listener`]) and one was posted in
     /// range — issue #459's vibration substrate, resolved host-side by
@@ -2007,6 +2016,13 @@ impl<'w> SimMob<'w> {
         self.bed
     }
 
+    /// The bell this villager has claimed as `PoiTypes.MEETING`, if any —
+    /// [`bed`](Self::bed)'s sibling.
+    #[must_use]
+    pub fn meeting_point(&self) -> Option<BlockPos> {
+        self.meeting_point
+    }
+
     /// The nearest warden-listenable vibration this tick, if any — issue
     /// #459's substrate. See the `nearest_vibration` field's own doc for
     /// what this drives ([`MobSim::resolve_warden_anger`]).
@@ -2624,6 +2640,27 @@ pub struct MobSim<'w> {
     /// own reason.
     #[cfg(not(target_arch = "wasm32"))]
     bed_claims: villager::BedClaims,
+    /// The live bell claim ledger [`tick_villager_bells`](Self::tick_villager_bells)
+    /// reads and writes (issue #231's `MEET` schedule activity) — see
+    /// [`villager::BellClaims`]'s own doc for why this exists and what it
+    /// feeds.
+    ///
+    /// Native-only, for [`workstation_claims`](Self::workstation_claims)'s
+    /// own reason.
+    #[cfg(not(target_arch = "wasm32"))]
+    bell_claims: villager::BellClaims,
+    /// The real world time-of-day, `0..24000`, host-fed once per tick by
+    /// [`set_day_time`](Self::set_day_time) — what [`feed_perception`](Self::feed_perception)
+    /// hands every villager's [`NavigatingMob::set_day_time`] so
+    /// `crate::brain`'s villager schedule (`WORK`/`MEET`/`REST`/`IDLE`) has a
+    /// real clock to switch against, rather than the per-mob monotonic
+    /// counter `BrainMob::game_time` is (see that method's own doc for why
+    /// the two must not be confused). `0` (perpetual midnight) until a real
+    /// driver calls the setter — every hermetic test that never calls it
+    /// keeps a villager's schedule at the very start of its `IDLE` window,
+    /// which is a harmless default rather than a silent lie, since `0` is a
+    /// real, reachable time of day.
+    day_time: i32,
     /// Vibrations real producers posted this tick (issue #459's substrate) —
     /// resolved into each listener's [`SimMob::nearest_vibration`] by
     /// [`resolve_vibrations`](Self::resolve_vibrations), which also drains
@@ -3060,6 +3097,9 @@ impl<'w> MobSim<'w> {
             workstation_claims: villager::WorkstationClaims::new(),
             #[cfg(not(target_arch = "wasm32"))]
             bed_claims: villager::BedClaims::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            bell_claims: villager::BellClaims::new(),
+            day_time: 0,
             posted_vibrations: Vec::new(),
             dragons: HashMap::new(),
             withers: HashMap::new(),
@@ -3116,6 +3156,16 @@ impl<'w> MobSim<'w> {
     pub fn set_spawn_difficulty(&mut self, special_multiplier: f32, hard: bool) -> &mut Self {
         self.spawn_special_multiplier = special_multiplier;
         self.spawn_hard_difficulty = hard;
+        self
+    }
+
+    /// Host injection point: the real world time-of-day, `0..24000` — see
+    /// [`day_time`](Self::day_time)'s own field doc for what this feeds and
+    /// why. `crate::tick::run_tick_loop` is the real production caller,
+    /// reading `WorldState::time().day_time` (reduced mod 24000) once per
+    /// tick, ahead of `tick_with_terrain`.
+    pub fn set_day_time(&mut self, day_time: i32) -> &mut Self {
+        self.day_time = day_time;
         self
     }
 
@@ -3386,6 +3436,8 @@ impl<'w> MobSim<'w> {
             cat_search_cooldown: 0,
             bed: None,
             bed_search_cooldown: 0,
+            meeting_point: None,
+            bell_search_cooldown: 0,
             nearest_vibration: None,
             warden_anger: 0,
             warden_anger_target: None,
@@ -3796,6 +3848,63 @@ impl<'w> MobSim<'w> {
     #[must_use]
     pub fn occupied_homes_in_range(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
         self.bed_claims.occupied_in_range(center, radius)
+    }
+
+    /// Bell search interval — [`JOB_SEARCH_INTERVAL_TICKS`](Self::JOB_SEARCH_INTERVAL_TICKS)'s
+    /// own scope choice, reused for the identical reason.
+    #[cfg(not(target_arch = "wasm32"))]
+    const BELL_SEARCH_INTERVAL_TICKS: i32 = 100;
+
+    /// One villager-bell pass (issue #231's `MEET` schedule activity):
+    /// throttled bell search for an unclaimed villager, re-verification for
+    /// a claimed one — [`tick_villager_beds`](Self::tick_villager_beds)'s own
+    /// shape, restricted to [`villager::BellClaims`]/[`villager::find_and_claim_bell`]
+    /// and with **no occupancy exclusion** (a bell hands out 32 tickets, so
+    /// nothing here needs to check whether another villager already claimed
+    /// this exact bell — [`villager::find_and_claim_bell`]'s own search
+    /// already tries the next ticket via `try_claim` regardless).
+    ///
+    /// Independent of [`tick_villager_beds`](Self::tick_villager_beds)/
+    /// [`tick_villager_professions`](Self::tick_villager_professions): a
+    /// bell (`MemoryModuleType.MEETING_POINT`), a bed
+    /// (`MemoryModuleType.HOME`) and a job site
+    /// (`MemoryModuleType.JOB_SITE`) are three separate memories in vanilla,
+    /// and a villager can hold any combination of the three at once.
+    ///
+    /// Native-only, for [`tick_villager_professions`](Self::tick_villager_professions)'s
+    /// own reason.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tick_villager_bells(&mut self) {
+        let world = self.world;
+        let claims = &mut self.bell_claims;
+        for mob in &mut self.mobs {
+            if mob.entity_type.path() != "villager" {
+                continue;
+            }
+            if let Some(pos) = mob.meeting_point {
+                let state = world.block_state(pos.x, pos.y, pos.z);
+                let still_valid = villager::is_bell_block(villager::bare_block_id(state));
+                if !still_valid {
+                    claims.remove(pos);
+                    mob.meeting_point = None;
+                }
+                continue;
+            }
+            if mob.bell_search_cooldown > 0 {
+                mob.bell_search_cooldown -= 1;
+                continue;
+            }
+            mob.bell_search_cooldown = Self::BELL_SEARCH_INTERVAL_TICKS;
+            let feet = mob.position();
+            let origin = BlockPos::new(
+                feet.x.floor() as i32,
+                feet.y.floor() as i32,
+                feet.z.floor() as i32,
+            );
+            if let Some(pos) = villager::find_and_claim_bell(origin, world, claims) {
+                mob.meeting_point = Some(pos);
+            }
+        }
     }
 
     /// Throttles [`tick_cat_block_search`](Self::tick_cat_block_search)'s
@@ -4683,6 +4792,11 @@ impl<'w> MobSim<'w> {
         // doc for why this is a separate memory from the job site above.
         #[cfg(not(target_arch = "wasm32"))]
         self.tick_villager_beds();
+        // Issue #231: villager bell claiming — see `tick_villager_bells`'s
+        // own doc for why this is a third, independent memory from the job
+        // site and bed above.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.tick_villager_bells();
         // Issue #257: fishing bobbers. Reads `self.world` (the static
         // per-tick terrain snapshot, not the live `view` oracle the item/orb
         // passes just above use) — see `fishing::MobSim::tick_fishing_bobbers`'s
@@ -5150,11 +5264,30 @@ impl<'w> MobSim<'w> {
             }
         }
 
+        // Issue #231: a plain field read, not a per-mob computation, so it
+        // lives outside the loop below like every other constant the loop
+        // reuses (`tick_count`) — `self.mobs.iter_mut()` only borrows the
+        // `mobs` field, so this and that are disjoint borrows regardless.
+        let day_time = self.day_time;
+        let block_center = |p: BlockPos| {
+            Vec3::new(f64::from(p.x) + 0.5, f64::from(p.y) + 0.5, f64::from(p.z) + 0.5)
+        };
+
         for (i, m) in self.mobs.iter_mut().enumerate() {
             // Not folded into the chain below: `set_tame`/`set_ordered_to_sit`
             // read `m`'s own record while the chain holds `m.mob` mutably.
             let (tame, ordered_to_sit) = (m.tame, m.ordered_to_sit);
             m.mob.set_tame(tame).set_ordered_to_sit(ordered_to_sit);
+            // Issue #231: the villager POI-claim feed
+            // (`crate::brain::VillagerPoiSensor`'s own source), read before
+            // `m.mob` is borrowed mutably below — `m.workstation`/`m.bed`/
+            // `m.meeting_point` are `None` for every non-villager species,
+            // so this is safe to feed unconditionally, the same "harmless
+            // default" shape `set_nearby_entities` already is for a
+            // goal-driven mob.
+            let job_site = m.workstation.map(block_center);
+            let home = m.bed.map(block_center);
+            let meeting_point = m.meeting_point.map(block_center);
             m.mob
                 .set_nearest_player(nearest_player[i])
                 .set_temptation(temptation[i])
@@ -5169,7 +5302,11 @@ impl<'w> MobSim<'w> {
                 .set_owner(owner[i])
                 .set_patrol_group_target(patrol_group[i])
                 .set_stared_at(stared_at[i])
-                .set_nearby_entities(std::mem::take(&mut nearby_entities[i]));
+                .set_nearby_entities(std::mem::take(&mut nearby_entities[i]))
+                .set_job_site(job_site)
+                .set_home(home)
+                .set_meeting_point(meeting_point)
+                .set_day_time(day_time);
         }
     }
 
@@ -10874,6 +11011,185 @@ mod villager_bed_claim_tests {
 
         assert_eq!(sim.get(id).expect("spawned").bed(), None);
         assert!(sim.occupied_homes_in_range(BlockPos::new(0, 0, 0), 64).is_empty());
+    }
+}
+
+/// Issue #231's WORK/MEET/REST schedule: proves the chain claimed-POI ->
+/// `MobSim::set_day_time` -> `crate::brain::roster::villager_brain`'s
+/// schedule -> `WalkToPoi`/`MoveToTargetSink` -> a real position change
+/// reaches a real, spawned villager through `MobSim::tick`, the same
+/// not-an-island bar `villager_bed_claim_tests` already sets for bed
+/// claiming and `vibration_substrate_tests` sets for the warden.
+#[cfg(test)]
+mod villager_schedule_tests {
+    use super::*;
+
+    /// A flat, walkable floor wide enough that pathfinding across it never
+    /// runs off the edge — the same shape `a_grazing_mob_hands_its_eat_to_the_driver`
+    /// already establishes for a real multi-tick walk.
+    fn flat_world() -> ChunkWorld {
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -32..=32 {
+            for z in -32..=32 {
+                world.set_block(x, -1, z, "minecraft:grass_block");
+            }
+        }
+        world
+    }
+
+    fn spawn_villager(sim: &mut MobSim<'_>, pos: Vec3) -> i32 {
+        sim.spawn_species("minecraft:villager".parse().expect("valid key"), pos).id()
+    }
+
+    fn horizontal_distance(a: Vec3, b: Vec3) -> f64 {
+        (a.x - b.x).hypot(a.z - b.z)
+    }
+
+    /// **The headline case.** A villager spawns 20 blocks from a composter
+    /// (a real `farmer` job site), stays idle at a day time before `WORK`
+    /// starts (`2000`, `VILLAGER_SCHEDULE`'s own keyframe), then the clock
+    /// enters the `WORK` window and the villager visibly closes most of the
+    /// distance to its claimed workstation over real ticks — not merely
+    /// "the position changed", a magnitude check against the starting gap,
+    /// so a villager that only ever random-strolls (and might coincidentally
+    /// drift a block or two toward the composter) cannot pass this by luck.
+    #[test]
+    fn a_villager_walks_to_its_claimed_workstation_once_work_begins() {
+        let mut world = flat_world();
+        // Inside `villager::SEARCH_RADIUS` (16 blocks) so the villager's
+        // bounded job search can actually find it, and far enough past
+        // `WalkToPoi`'s own 9-block close-enough radius that "arrived" and
+        // "started here" are unambiguously different distances.
+        let composter = BlockPos::new(15, 0, 0);
+        world.set_block(composter.x, composter.y, composter.z, "minecraft:composter");
+
+        let mut sim = MobSim::new(&world);
+        let id = spawn_villager(&mut sim, Vec3::new(0.5, 0.0, 0.5));
+
+        // Before `WORK` (schedule keyframe `2000`): let the villager claim
+        // the workstation (job search is unthrottled on its first tick) but
+        // never let the clock enter `WORK`, so any position drift here is
+        // attributable only to `IDLE`'s own random stroll, not to this
+        // schedule.
+        for _ in 0..5 {
+            sim.set_day_time(500);
+            sim.tick();
+        }
+        assert_eq!(
+            sim.get(id).expect("just spawned").workstation(),
+            Some(composter),
+            "the villager must have claimed the only nearby composter before WORK ever starts"
+        );
+
+        let workstation_center = Vec3::new(
+            f64::from(composter.x) + 0.5,
+            f64::from(composter.y) + 0.5,
+            f64::from(composter.z) + 0.5,
+        );
+        let initial_distance = horizontal_distance(sim.get(id).expect("spawned").position(), workstation_center);
+
+        // Now enter the WORK window and let the schedule + WalkToPoi close
+        // the gap over real ticks.
+        for _ in 0..400 {
+            sim.set_day_time(3000);
+            sim.tick();
+        }
+        let final_distance = horizontal_distance(sim.get(id).expect("spawned").position(), workstation_center);
+
+        // Two predictions, not just "it got closer": `WalkToPoi::new(JOB_SITE,
+        // …, 9)` stops issuing a fresh walk target once within 9 blocks
+        // (`MoveToTargetSink::reached`'s own `+ 0.5` tolerance), so a working
+        // villager should end up **near that exact radius**, not merely
+        // "somewhat closer" — which a lucky IDLE stroll could also produce.
+        assert!(
+            final_distance <= 10.5,
+            "a villager working its claimed job site should stop within WalkToPoi's own \
+             9-block close-enough radius (plus MoveToTargetSink's 0.5 tolerance): \
+             started {initial_distance:.1} blocks away, ended {final_distance:.1}"
+        );
+        assert!(
+            initial_distance - final_distance > 4.0,
+            "WORK must walk the villager measurably closer to its claimed workstation: \
+             started {initial_distance:.1} blocks away, ended {final_distance:.1}"
+        );
+    }
+
+    /// [`a_villager_walks_to_its_claimed_workstation_once_work_begins`]'s own
+    /// sibling for `MEET`/bells rather than `WORK`/workstations — proving the
+    /// third POI (the one this session's own `BellClaims` adds) reaches the
+    /// identical real chain: claim -> schedule -> `WalkToPoi` -> a real
+    /// position change.
+    #[test]
+    fn a_villager_walks_to_its_claimed_bell_once_meet_begins() {
+        let mut world = flat_world();
+        let bell = BlockPos::new(15, 0, 0);
+        world.set_block(bell.x, bell.y, bell.z, "minecraft:bell[attachment=floor,facing=south]");
+
+        let mut sim = MobSim::new(&world);
+        let id = spawn_villager(&mut sim, Vec3::new(0.5, 0.0, 0.5));
+
+        // Before `MEET` (schedule keyframe `9000`): let the villager claim
+        // the bell but keep the clock in `IDLE`'s own window.
+        for _ in 0..5 {
+            sim.set_day_time(500);
+            sim.tick();
+        }
+        assert_eq!(
+            sim.get(id).expect("just spawned").meeting_point(),
+            Some(bell),
+            "the villager must have claimed the only nearby bell before MEET ever starts"
+        );
+
+        let bell_center = Vec3::new(f64::from(bell.x) + 0.5, f64::from(bell.y) + 0.5, f64::from(bell.z) + 0.5);
+        let initial_distance = horizontal_distance(sim.get(id).expect("spawned").position(), bell_center);
+
+        for _ in 0..400 {
+            sim.set_day_time(9500);
+            sim.tick();
+        }
+        let final_distance = horizontal_distance(sim.get(id).expect("spawned").position(), bell_center);
+
+        // `WalkToPoi::new(MEETING_POINT, …, 6)` — a tighter close-enough
+        // radius than the job site's `9`, matching `VillagerGoalPackages
+        // .getMeetPackage`'s own `SetWalkTargetFromBlockMemory` call.
+        assert!(
+            final_distance <= 7.5,
+            "a villager meeting at its claimed bell should stop within WalkToPoi's own \
+             6-block close-enough radius (plus MoveToTargetSink's 0.5 tolerance): \
+             started {initial_distance:.1} blocks away, ended {final_distance:.1}"
+        );
+        assert!(
+            initial_distance - final_distance > 4.0,
+            "MEET must walk the villager measurably closer to its claimed bell: \
+             started {initial_distance:.1} blocks away, ended {final_distance:.1}"
+        );
+    }
+
+    /// The schedule's own negative control: a villager with **no** claimed
+    /// job site (nothing nearby to claim) never becomes `WORK`-eligible —
+    /// `Villager.java`'s own `ImmutableSet.of(Pair.of(JOB_SITE,
+    /// VALUE_PRESENT))` — so it stays wherever `IDLE`'s random stroll leaves
+    /// it: never *reliably* walking toward a fixed faraway point regardless
+    /// of the clock. Asserted as "never claims a workstation", the
+    /// discriminating fact this control actually has available deterministically
+    /// (a stroll's own endpoint is randomised and not itself a safe assertion).
+    #[test]
+    fn a_villager_with_no_nearby_job_site_never_claims_one_regardless_of_the_clock() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = spawn_villager(&mut sim, Vec3::new(0.5, 0.0, 0.5));
+
+        for _ in 0..200 {
+            sim.set_day_time(3000);
+            sim.tick();
+        }
+
+        assert_eq!(
+            sim.get(id).expect("spawned").workstation(),
+            None,
+            "with no workstation block anywhere nearby there is nothing to claim, \
+             so WORK can never become eligible no matter how long the clock sits in its window"
+        );
     }
 }
 
