@@ -34,10 +34,13 @@
 //! "always near zero"), plus a positive control against a real captured
 //! fixture proving the fix doesn't reject legitimately large vectors.
 
-// This one file's global allocator is the only place in this crate — and,
-// per `grep -rn "allow(unsafe_code)" crates/`, the only place in the
-// workspace — that opts out of `unsafe_code = "deny"` (`Cargo.toml`'s
-// `[workspace.lints.rust]`). It is scoped as narrowly as that lint allows:
+// This file's global allocator was originally the only place in the
+// workspace (per `grep -rn "allow(unsafe_code)" crates/`) that opts out of
+// `unsafe_code = "deny"` (`Cargo.toml`'s `[workspace.lints.rust]`) — now one
+// of two, alongside `container_set_content_unbounded_allocation.rs` (a
+// second, independent instance of this exact defect shape, found by
+// `fuzz/fuzz_targets/v770_clientbound_decode.rs`). Both are scoped as
+// narrowly as that lint allows:
 // `#![allow]` is a crate-root attribute, and cargo compiles every
 // `tests/*.rs` file as its own separate binary/crate, so this cannot leak
 // into `src/lib.rs`, any other test binary, or any other crate. The

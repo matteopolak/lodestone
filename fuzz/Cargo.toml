@@ -1,0 +1,59 @@
+[package]
+name = "lodestone-fuzz-targets"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Deliberately its OWN workspace (empty `[workspace]` table below), the same
+# pattern `crates/lodestone-wasm-host`'s wasm guests use (see the root
+# `Cargo.toml`'s `exclude` comment) and cargo-fuzz's own default layout: `cargo
+# fuzz build` injects nightly-only sanitizer/coverage instrumentation flags
+# (`-Cpasses=sancov-module`, `-Zsanitizer=address`) that must not leak into a
+# plain `cargo build --workspace` for the other ~292 crates. Folding this into
+# the root workspace would also pull the whole crate graph's `Cargo.lock`
+# resolution into scope for a directory that only exists to be built by `cargo
+# fuzz`, never by `just check`/`just test`.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+# Issue #549 Track A: cargo-fuzz/libFuzzer targets on the highest-value
+# untrusted-input surfaces — a malformed packet from a hostile server (or, for
+# the serverbound target, a hostile client against our integrated server)
+# should never panic. This crate is additive to `crates/lodestone-fuzz`
+# (proptest-based, runs under a plain `cargo test`, no nightly/no corpus dir),
+# not a replacement — see that crate's own `docs/fuzz-harness.md` for why both
+# shapes coexist. Targets below reuse `lodestone-fuzz`'s existing
+# `decode_clientbound`/`Family` plumbing rather than re-deriving adapter
+# construction, so "which packet ids exist" keeps tracking the generated
+# `packet_ids` tables instead of a second hand-maintained list.
+lodestone-fuzz = { path = "../crates/lodestone-fuzz" }
+lodestone-core = { path = "../crates/lodestone-core" }
+lodestone-model = { path = "../crates/lodestone-model" }
+lodestone-server = { path = "../crates/lodestone-server" }
+lodestone-v770 = { path = "../crates/protocol/v770" }
+
+[[bin]]
+name = "v770_clientbound_decode"
+path = "fuzz_targets/v770_clientbound_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "v770_serverbound_decode"
+path = "fuzz_targets/v770_serverbound_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nbt_decode"
+path = "fuzz_targets/nbt_decode.rs"
+test = false
+doc = false
+bench = false
