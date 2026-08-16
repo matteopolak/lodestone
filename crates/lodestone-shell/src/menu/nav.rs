@@ -2314,15 +2314,6 @@ impl MenuNav {
         self.book_edit.as_ref()
     }
 
-    /// Mutable access for the input layer — `app::menus`'s click/key handlers
-    /// go through the `activate_book_edit_row`/`key_book_edit` methods below
-    /// rather than this directly, but the render dispatch's own frame builder
-    /// (`book_edit_overlay_frame`) reads through the shared-immutable
-    /// accessor above.
-    pub(super) fn book_edit_mut(&mut self) -> Option<&mut book_edit::BookEditState> {
-        self.book_edit.as_mut()
-    }
-
     /// The sign-editing screen's state, or `None` when [`Screen::SignEdit`] is
     /// not showing — see [`Self::sign_edit`]'s own field doc.
     #[must_use]
