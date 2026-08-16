@@ -292,12 +292,6 @@ impl Search {
         }
     }
 
-    /// The node with the smallest `h` reached so far, for a frontier overlay.
-    #[must_use]
-    pub fn frontier(&self) -> NavNode {
-        self.arena[self.best as usize].node
-    }
-
     /// Counters.
     #[must_use]
     pub fn stats(&self) -> SearchStats {
