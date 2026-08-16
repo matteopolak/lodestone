@@ -1068,6 +1068,7 @@ fn run_command_block_command<W: ChunkSource + ?Sized>(
         // Same reasoning as `border` above: a command block running
         // `/op`/`/deop`/`/whitelist` is a niche case not worth threading a
         // fifth handle through this helper for.
+        #[cfg(not(target_arch = "wasm32"))]
         access: None,
     };
     let Some(outcome) = commands.run(&command_world, &source, command) else {

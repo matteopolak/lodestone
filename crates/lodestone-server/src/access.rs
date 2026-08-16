@@ -42,12 +42,14 @@
 //!
 //! ## How to change it, and the gotchas
 //!
-//! * **Permission levels are stored but only partly read.** `PermissionLevel` 0–4
-//!   is on every op entry and [`AccessLists::permission_level`] answers it; gating
-//!   *command dispatch* on it belongs to issue #48's dispatcher, which owns
-//!   `CommandTree::require_permission`, and is deliberately not done here. What is
-//!   wired: `commands.rs`'s built-ins consult [`AccessHandle`] when one is
-//!   installed. See `docs/server-access-control.md`.
+//! * **Permission levels are stored and fully read.** `PermissionLevel` 0–4 is on
+//!   every op entry, [`AccessLists::permission_level`]/[`AccessLists::command_permission_level`]
+//!   answer it, and every built-in command root is gated at its vanilla level
+//!   through `crate::commands::registrar::Registrar::require_level` — no longer a
+//!   disclosed gap. Granting/revoking access itself has a real command surface
+//!   too: `crate::commands::access_commands` (`/op`/`/deop`/`/whitelist`),
+//!   scoped to RCON — see that module's own doc for why chat is deliberately
+//!   excluded. See `docs/server-access-control.md`.
 //! * **An empty `ops.json` does not mean "nobody is an operator".** A
 //!   singleplayer world has no ops file and its one player must still be able to
 //!   do everything, so [`AccessLists::default`] has `whitelist_enabled: false` and

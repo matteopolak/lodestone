@@ -115,6 +115,11 @@
 //! `lodestone-command-mc` (the Minecraft argument types), `lodestone-model` (the
 //! version-free `ArgumentParser`), and [`crate::game_rules`].
 
+/// `/op`/`/deop`/`/whitelist`. `cfg`-gated with `crate::access` (native
+/// only) and `CommandWorld::access`, the field these built-ins read/write —
+/// a browser singleplayer world has no access lists and no RCON console to
+/// reach them through.
+#[cfg(not(target_arch = "wasm32"))]
 mod access_commands;
 mod block_commands;
 mod chat_commands;
@@ -224,6 +229,7 @@ impl ServerCommands {
     #[must_use]
     pub fn new() -> Self {
         let mut registrar = Registrar::new();
+        #[cfg(not(target_arch = "wasm32"))]
         access_commands::register(&mut registrar);
         gamerule::register(&mut registrar);
         gamemode::register(&mut registrar);
