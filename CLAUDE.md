@@ -678,6 +678,20 @@ and puts the wrong number on the XP bar. **Port from `write`/`read`, never from 
 declaration** — for a record whose fields are all the same type, those are three different orders that all
 look authoritative.
 
+**A `const` has no stable address, and switching codegen backend is what makes that bite.** Measured the
+day Cranelift became the debug backend: `ai::roster::FALLBACK` was a `const`, and `is_fallback` compared
+pointers against it. A `const` is *inlined at every use site*, so it may occupy as many addresses as it has
+uses — LLVM happened to fold them to one, Cranelift did not, and two `lodestone-entity` tests began failing
+**deterministically**, reading a real unclaimed species as claimed. The fix is one word: `static`, which
+does have a single address.
+
+Two things generalise. **Pointer identity is only meaningful on a `static`** — if you find yourself
+comparing `&CONST` addresses, that is the bug, not the backend. And **a codegen-backend change is a
+behaviour change for anything resting on unspecified details**, so a green suite under LLVM is not evidence
+under Cranelift; the failures it surfaces are latent bugs it *revealed*, not bugs it *caused*, and they
+should be fixed rather than worked around. Release still builds with LLVM, so this class can differ between
+`just run` and a debug test run — which is precisely the shape that reads as "flaky".
+
 **Vanilla's `Mth.cos`/`Mth.sin` are a quantized lookup table, not `f32::cos`/`f32::sin`, and substituting the
 standard library diverges exactly at the poles.** Measured: a fishing bobber cast straight down (`pitch == 90.0`)
 launched *upward*, because at the pole the library's result lands on the wrong side of zero by float noise while
