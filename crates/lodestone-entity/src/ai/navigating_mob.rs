@@ -119,6 +119,14 @@ pub const FALL_GRAVITY_PER_TICK: f64 = 0.08;
 /// drop is rarely long enough to reach it.
 pub const FALL_VERTICAL_AIR_DRAG: f64 = 0.98;
 
+/// The upward speed (blocks/tick) a jump launches with — the default,
+/// no-Jump-Boost jump strength every mob without a distinct override gets.
+/// [`step_vertical`](NavigatingMob::step_vertical) seeds `fall_speed` with
+/// `-JUMP_POWER` the tick a rise exceeds `max_up_step`. See
+/// `docs/mob-vertical-motion.md` for the citation, the integration order this
+/// value depends on, and the measured peak height it produces.
+pub const JUMP_POWER: f64 = 0.42;
+
 /// A tiny deterministic RNG (SplitMix64) so a `NavigatingMob` needs no `rand`
 /// dependency and its stroll behaviour is reproducible in tests.
 #[derive(Debug, Clone)]
@@ -1115,51 +1123,61 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// One tick of vertical motion toward `waypoint_y`, bounded independently
-    /// of the horizontal step [`advance`](Self::advance) applies alongside it.
+    /// of the horizontal step [`advance`](Self::advance) applies alongside
+    /// it. Three cases, keyed on `dy = waypoint_y - pos_y` and whether a
+    /// jump/fall is already in progress (`*fall_speed != 0.0`, a
+    /// positive-down signed speed carried between calls) — see
+    /// `docs/mob-vertical-motion.md` for the full derivation, the measured
+    /// jump-peak height, and why the two motion cases below integrate
+    /// gravity in different orders on purpose.
     ///
-    /// A rise of at most `max_up_step` resolves in this one call — vanilla's
-    /// auto-step, which happens within the same tick's collision response
-    /// with no visible pause (`Entity.maxUpStep`, the `step_height`
-    /// attribute). A larger rise is a real jump in vanilla (`JumpControl`, a
-    /// parabolic arc under gravity); this kinematic follower has no
-    /// jump-velocity/gravity-up model to integrate, so it approximates the
-    /// arc as a climb bounded at the same per-tick rate as a step —
-    /// disclosed simplification, not a modelled jump, but bounded rather than
-    /// instant either way.
+    /// - **Auto-step** (grounded, `0.0 <= dy <= max_up_step`): resolves in
+    ///   this one call, no jump — a rise this small is absorbed within one
+    ///   tick's collision response with no visible pause.
+    /// - **Jump** (grounded, `dy > max_up_step`): seeds `*fall_speed =
+    ///   -JUMP_POWER` and integrates one tick of real projectile motion —
+    ///   this tick's displacement is the speed *already stored* (not yet
+    ///   reduced by this tick's gravity), and gravity/drag then update the
+    ///   stored speed for the *next* call. A jump already in progress
+    ///   (`*fall_speed < 0.0`) keeps integrating the same way regardless of
+    ///   `dy`, exactly like vanilla's own jump control staying committed to
+    ///   an ascent already under way.
+    /// - **Falling** (an ordinary drop, or a jump's arc past its peak):
+    ///   gravity is folded into *this* tick's own displacement before
+    ///   moving, and landing on `waypoint_y` resets `*fall_speed` to `0.0`.
     ///
-    /// A drop integrates vanilla's real fall physics instead of snapping
-    /// straight to the landing height: `LivingEntity.DEFAULT_BASE_GRAVITY`
-    /// (0.08 blocks/tick²) accelerates `*fall_speed` each call, decayed by
-    /// `LivingEntity.BASE_VERTICAL_AIR_DRAG` (0.98) — `LivingEntity::travelInAir`'s
-    /// own order: this call's *displacement* is last call's stored speed plus
-    /// gravity, applied before this call's own drag, which only shapes what
-    /// gets stored for the next call. `*fall_speed` resets to `0.0` the tick
-    /// the mob is climbing, level, or has just landed.
-    ///
-    /// An unconditional `pos.y = waypoint_y` — what this replaced — produced
-    /// two symptoms from one cause: a full-block rise "glided" up with no
-    /// jump, and a drop let the mob's rendered y reach the lower floor before
-    /// its x/z had travelled far enough to actually be over the edge, so it
-    /// visibly sank into the block under its *old* position — "phases through
-    /// the ground".
+    /// An unconditional `pos.y = waypoint_y` — what the fall case here
+    /// replaced — produced two symptoms from one cause: a full-block rise
+    /// "glided" up with no jump, and a drop let the mob's rendered y reach
+    /// the lower floor before its x/z had travelled far enough to actually
+    /// be over the edge, so it visibly sank into the block under its *old*
+    /// position — "phases through the ground". A climb bounded at the
+    /// step-per-tick rate (what the jump case here replaced in turn) fixed
+    /// the glide but still had no upward hop at all — "unnatural" jumping.
     fn step_vertical(pos_y: f64, waypoint_y: f64, max_up_step: f64, fall_speed: &mut f64) -> f64 {
         let dy = waypoint_y - pos_y;
-        if dy >= 0.0 {
-            *fall_speed = 0.0;
-            if dy <= max_up_step {
-                waypoint_y
-            } else {
-                pos_y + dy.min(max_up_step)
+        if *fall_speed == 0.0 {
+            if dy >= 0.0 && dy <= max_up_step {
+                return waypoint_y;
             }
-        } else {
-            let displacement = *fall_speed + FALL_GRAVITY_PER_TICK;
-            *fall_speed = displacement * FALL_VERTICAL_AIR_DRAG;
-            let landed = (pos_y - displacement).max(waypoint_y);
-            if landed <= waypoint_y {
-                *fall_speed = 0.0;
+            if dy > max_up_step {
+                *fall_speed = -JUMP_POWER;
             }
-            landed
+            // dy < 0.0 here (a fresh drop) leaves `*fall_speed` at `0.0` and
+            // falls through to the falling case below.
         }
+        if *fall_speed < 0.0 {
+            let displacement = *fall_speed;
+            *fall_speed = (*fall_speed + FALL_GRAVITY_PER_TICK) * FALL_VERTICAL_AIR_DRAG;
+            return pos_y - displacement;
+        }
+        let displacement = *fall_speed + FALL_GRAVITY_PER_TICK;
+        *fall_speed = displacement * FALL_VERTICAL_AIR_DRAG;
+        let landed = (pos_y - displacement).max(waypoint_y);
+        if landed <= waypoint_y {
+            *fall_speed = 0.0;
+        }
+        landed
     }
 
     /// Advances the follower one step toward the current waypoint. Public so a
@@ -2436,7 +2454,7 @@ mod tests {
     // does not expose, so driving the pure function is what makes the
     // expected values exact rather than "eventually converges".
 
-    /// Two arms, because one alone cannot separate "bounded at 0.6" from
+    /// Two arms, because one alone cannot separate "bounded" from
     /// "unbounded" (both pass a rise that already fits) or from "zero" (both
     /// fail a rise that needs any step at all).
     #[test]
@@ -2455,7 +2473,10 @@ mod tests {
         // A full block: over the step height, so it must NOT glide straight
         // to 1.0 in one call — the control this repo's evidence standards
         // require, proving the bound actually fires rather than merely
-        // existing in the source.
+        // existing in the source. It also must not be a bare
+        // `max_up_step`-sized ratchet step (the disclosed simplification
+        // this replaced): the first call's displacement is the real launch
+        // speed itself, `JUMP_POWER` (`0.42`), not `max_up_step` (`0.6`).
         let mut fall_speed = 0.0;
         let after_block = NavigatingMob::step_vertical(0.0, 1.0, 0.6, &mut fall_speed);
         assert!(
@@ -2465,15 +2486,16 @@ mod tests {
              bug), got {after_block}"
         );
         assert_eq!(
-            after_block, 0.6,
-            "the first call must climb by exactly max_up_step, not some other \
-             partial amount"
+            after_block, JUMP_POWER,
+            "the first call of a jump must move by exactly the launch speed \
+             (this integration order applies the stored speed before this \
+             tick's own gravity/drag), not `max_up_step` or any other value"
         );
-
-        // Two more calls finish a 1.0 rise bounded at 0.6/call: 0.6, then
-        // 0.4 (capped by the remaining distance, not another full 0.6).
-        let after_second = NavigatingMob::step_vertical(after_block, 1.0, 0.6, &mut fall_speed);
-        assert_eq!(after_second, 1.0, "the remaining 0.4 must not overshoot the waypoint");
+        assert!(
+            fall_speed < 0.0,
+            "a jump in progress must be recorded as an ascending (negative) \
+             speed, not left at 0.0 as a completed step would be"
+        );
     }
 
     /// Control proving the bound is load-bearing: with `max_up_step` at
@@ -2490,6 +2512,102 @@ mod tests {
             "control: an unbounded step must reproduce the instant glide, or \
              the subject test above proves nothing about the bound"
         );
+    }
+
+    /// **Predicts the exact jump peak from vanilla's own launch speed,
+    /// gravity and drag constants, re-derived independently of
+    /// `step_vertical`'s implementation** — the magnitude species of vacuous
+    /// test this repo's evidence standards warn about would settle for "rises
+    /// above 0.6"; this asserts the real number, and that it clears a full
+    /// block (`docs/mob-vertical-motion.md`'s own measured ≈1.252).
+    #[test]
+    fn a_jump_over_a_full_block_reaches_the_real_vanilla_peak_height() {
+        let mut pos_y = 0.0f64;
+        let mut fall_speed = 0.0f64;
+        let mut peak = 0.0f64;
+        for _ in 0..40 {
+            pos_y = NavigatingMob::step_vertical(pos_y, 1.0, 0.6, &mut fall_speed);
+            peak = peak.max(pos_y);
+            if fall_speed == 0.0 && pos_y >= 1.0 {
+                break;
+            }
+        }
+        // Independently re-derived: move by the stored (pre-update) speed,
+        // then update it with gravity/drag for the next tick — the same
+        // order `step_vertical`'s jump case uses, computed in a separate
+        // loop so a shared bug cannot cancel out. Only the *ascending* phase
+        // matters for a peak, so this stops the tick velocity first turns
+        // non-negative (the arc's own apex) rather than modelling landing at
+        // all.
+        let mut y = 0.0f64;
+        let mut v = -JUMP_POWER;
+        let mut expected_peak = 0.0f64;
+        loop {
+            let displacement = v;
+            v = (v + FALL_GRAVITY_PER_TICK) * FALL_VERTICAL_AIR_DRAG;
+            y -= displacement;
+            expected_peak = expected_peak.max(y);
+            if v >= 0.0 {
+                break;
+            }
+        }
+        assert!(
+            (peak - expected_peak).abs() < 1.0e-9,
+            "expected peak {expected_peak} from JUMP_POWER/gravity/drag, got {peak}"
+        );
+        assert!(
+            peak > 1.0,
+            "a jump over a 1-block rise must clear it (real vanilla mobs can \
+             hop a full block), got peak {peak}"
+        );
+        assert_eq!(pos_y, 1.0, "the arc must land exactly on the waypoint");
+        assert_eq!(fall_speed, 0.0, "landing must reset the stored speed");
+    }
+
+    /// A jump already ascending must not be re-triggered by a second call
+    /// that still sees `dy > max_up_step` — vanilla's own `MoveControl` stays
+    /// in its `JUMPING` operation (ignoring new jump requests) until the mob
+    /// is back on the ground, and re-seeding `-JUMP_POWER` mid-arc would
+    /// silently cancel the ascent already under way.
+    #[test]
+    fn a_jump_already_in_progress_is_not_re_triggered() {
+        let mut fall_speed = 0.0;
+        let first = NavigatingMob::step_vertical(0.0, 1.0, 0.6, &mut fall_speed);
+        let speed_after_first = fall_speed;
+        // Still well short of the waypoint (`dy > max_up_step` again), but a
+        // re-trigger would reset `fall_speed` to `-JUMP_POWER` outright,
+        // which is a strictly *larger* ascending speed than the naturally
+        // decayed one already in flight.
+        let second = NavigatingMob::step_vertical(first, 1.0, 0.6, &mut fall_speed);
+        assert!(
+            second > first,
+            "the ascent must keep rising on the second call, got {first} then {second}"
+        );
+        assert!(
+            fall_speed > speed_after_first,
+            "the stored speed must only ever decay toward 0 under gravity \
+             (never jump back to a more-negative value), got {speed_after_first} \
+             then {fall_speed}"
+        );
+    }
+
+    /// The descent half of a jump arc, isolated: once past its peak, it must
+    /// land exactly on the waypoint and reset the stored speed — the same
+    /// landing contract an ordinary fall already has, proven here for the
+    /// jump-then-fall handoff specifically rather than assumed from the fall
+    /// tests alone.
+    #[test]
+    fn a_jump_lands_exactly_on_the_waypoint_after_its_arc() {
+        let mut pos_y = 0.0f64;
+        let mut fall_speed = 0.0f64;
+        for _ in 0..40 {
+            pos_y = NavigatingMob::step_vertical(pos_y, 1.0, 0.6, &mut fall_speed);
+            if fall_speed == 0.0 && pos_y >= 1.0 {
+                break;
+            }
+        }
+        assert_eq!(pos_y, 1.0, "a completed jump must land exactly on the waypoint");
+        assert_eq!(fall_speed, 0.0, "landing must reset the stored speed to 0.0");
     }
 
     /// Predicts the exact y after each tick of a fast fall from vanilla's own
