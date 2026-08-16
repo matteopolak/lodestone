@@ -132,6 +132,8 @@ mod give;
 mod help;
 mod kill;
 pub mod registrar;
+mod scoreboard;
+pub mod scoreboard_store;
 mod seed;
 pub mod source;
 mod summon;
@@ -241,6 +243,7 @@ impl ServerCommands {
         help::register(&mut registrar);
         execute::register(&mut registrar);
         worldborder::register(&mut registrar);
+        scoreboard::register(&mut registrar);
         Self::from_registrar(registrar)
     }
 

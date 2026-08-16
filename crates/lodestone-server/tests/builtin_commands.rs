@@ -1799,3 +1799,205 @@ fn worldborder_a_low_permission_caller_cannot_reach_it() {
         commands.suggest("world", 0)
     );
 }
+
+// ---------------------------------------------------------------------------
+// /scoreboard, and /execute if/unless score
+// ---------------------------------------------------------------------------
+
+/// One shared production [`lodestone_server::world_state::WorldStateHandle`],
+/// for a sequence of commands that must see each other's writes — the same
+/// shape [`run_stateful`] already uses for `/time`/`/difficulty`, needed here
+/// because `add_objective` then `players set` are two separate calls into
+/// [`ServerCommands::run`].
+fn scoreboard_world<'a>(
+    state: &'a lodestone_server::world_state::WorldStateHandle,
+    players: &'a [PlayerCandidate],
+) -> CommandWorld<'a> {
+    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None }
+}
+
+#[test]
+fn objectives_add_list_and_remove_round_trip_through_the_store() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = scoreboard_world(&state, &players);
+
+    let outcome = commands
+        .run(&world, &alice, "scoreboard objectives add kills dummy")
+        .expect("root matched");
+    assert!(outcome.response.is_ran(), "{outcome:?}");
+    assert!(state.scoreboard().has_objective("kills"));
+
+    // A duplicate name is refused, not silently accepted twice.
+    let dup = commands.run(&world, &alice, "scoreboard objectives add kills dummy").expect("root matched");
+    assert!(!dup.response.is_ran(), "{dup:?}");
+
+    let listed = commands.run(&world, &alice, "scoreboard objectives list").expect("root matched");
+    assert!(listed.response.lines()[0].contains("kills"), "{listed:?}");
+
+    let removed = commands.run(&world, &alice, "scoreboard objectives remove kills").expect("root matched");
+    assert!(removed.response.is_ran(), "{removed:?}");
+    assert!(!state.scoreboard().has_objective("kills"));
+}
+
+/// `set`/`add`/`remove`/`get` against a bare word holder — the "fake player"
+/// counter case, which is why this is not routed through `EntityArg` the way
+/// every other `<targets>` in this crate is.
+#[test]
+fn players_set_add_remove_and_get_work_on_a_fake_player_name() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = scoreboard_world(&state, &players);
+
+    commands.run(&world, &alice, "scoreboard objectives add counter dummy").unwrap();
+    let set = commands.run(&world, &alice, "scoreboard players set TIMER counter 10").expect("root matched");
+    assert!(set.response.is_ran(), "{set:?}");
+    assert_eq!(state.scoreboard().get_score("TIMER", "counter"), Ok(10));
+
+    commands.run(&world, &alice, "scoreboard players add TIMER counter 5").unwrap();
+    assert_eq!(state.scoreboard().get_score("TIMER", "counter"), Ok(15));
+    commands.run(&world, &alice, "scoreboard players remove TIMER counter 3").unwrap();
+    assert_eq!(state.scoreboard().get_score("TIMER", "counter"), Ok(12));
+
+    let got = commands.run(&world, &alice, "scoreboard players get TIMER counter").expect("root matched");
+    assert!(got.response.lines()[0].contains("12"), "{got:?}");
+}
+
+/// A selector holder resolves against the live roster — `set @a` reaches
+/// every online player, not just one literal name.
+#[test]
+fn a_selector_holder_reaches_every_matched_player() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = scoreboard_world(&state, &players);
+
+    commands.run(&world, &alice, "scoreboard objectives add x dummy").unwrap();
+    commands.run(&world, &alice, "scoreboard players set @a x 1").unwrap();
+    for candidate in &players {
+        assert_eq!(
+            state.scoreboard().get_score(&candidate.username, "x"),
+            Ok(1),
+            "{} must have received the selector-targeted score",
+            candidate.username
+        );
+    }
+}
+
+/// Every one of vanilla's nine `operation` tokens reaches the store through
+/// the command, against operands where a transposition would be visible.
+#[test]
+fn players_operation_reaches_every_token_through_the_command() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = scoreboard_world(&state, &players);
+
+    commands.run(&world, &alice, "scoreboard objectives add x dummy").unwrap();
+    commands.run(&world, &alice, "scoreboard players set t x 11").unwrap();
+    commands.run(&world, &alice, "scoreboard players set s x 4").unwrap();
+    let outcome = commands.run(&world, &alice, "scoreboard players operation t x += s x").expect("root matched");
+    assert!(outcome.response.is_ran(), "{outcome:?}");
+    assert_eq!(state.scoreboard().get_score("t", "x"), Ok(15));
+}
+
+/// `/execute if score … matches <range>` and `unless` gate the chained
+/// command, and the range's own inclusivity is checked at both ends.
+///
+/// Asserted through `.effects`, not `.response.is_ran()`, matching
+/// `execute_if_entity_gates_whether_the_chained_command_runs`'s own
+/// convention: a forked condition with an emptied source set answers `Ran`
+/// with zero effects (vanilla's own "matched nobody" success), not a
+/// refusal — `is_ran()` alone cannot distinguish "ran and did nothing" from
+/// "ran and killed the caller".
+#[test]
+fn execute_if_unless_score_matches_gates_on_the_ranges_own_inclusive_ends() {
+    use lodestone_server::{DirectedEffect, Effect};
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = scoreboard_world(&state, &players);
+
+    commands.run(&world, &alice, "scoreboard objectives add x dummy").unwrap();
+    commands.run(&world, &alice, "scoreboard players set p x 5").unwrap();
+
+    let in_range = commands
+        .run(&world, &alice, "execute if score p x matches 1..5 run kill @s")
+        .expect("root matched");
+    assert_eq!(
+        in_range.effects,
+        [DirectedEffect::new(uuid(1), Effect::Kill)],
+        "5 is within 1..5 inclusive: {in_range:?}"
+    );
+
+    let out_of_range = commands
+        .run(&world, &alice, "execute if score p x matches 1..4 run kill @s")
+        .expect("root matched");
+    assert!(out_of_range.effects.is_empty(), "5 is not within 1..4: {out_of_range:?}");
+
+    let unless_out_of_range = commands
+        .run(&world, &alice, "execute unless score p x matches 1..4 run kill @s")
+        .expect("root matched");
+    assert_eq!(
+        unless_out_of_range.effects,
+        [DirectedEffect::new(uuid(1), Effect::Kill)],
+        "unless negates: {unless_out_of_range:?}"
+    );
+}
+
+/// The two-score comparison form, against operands where `<`/`>` and
+/// `<=`/`>=` would disagree if the boundary handling were wrong (`5 <= 5` is
+/// true, `5 < 5` is not). Same `.effects` convention as the range test above.
+#[test]
+fn execute_if_score_compares_two_holders_inclusively_at_the_boundary() {
+    use lodestone_server::{DirectedEffect, Effect};
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = scoreboard_world(&state, &players);
+
+    commands.run(&world, &alice, "scoreboard objectives add x dummy").unwrap();
+    commands.run(&world, &alice, "scoreboard players set a x 5").unwrap();
+    commands.run(&world, &alice, "scoreboard players set b x 5").unwrap();
+
+    let lt = commands.run(&world, &alice, "execute if score a x < b x run kill @s").expect("root matched");
+    assert!(lt.effects.is_empty(), "5 < 5 is false: {lt:?}");
+
+    let le = commands.run(&world, &alice, "execute if score a x <= b x run kill @s").expect("root matched");
+    assert_eq!(le.effects, [DirectedEffect::new(uuid(1), Effect::Kill)], "5 <= 5 is true: {le:?}");
+
+    commands.run(&world, &alice, "scoreboard players set b x 9").unwrap();
+    let gt = commands.run(&world, &alice, "execute if score a x > b x run kill @s").expect("root matched");
+    assert!(gt.effects.is_empty(), "5 > 9 is false: {gt:?}");
+}
+
+/// `/scoreboard`'s own store is the **production** `WorldStateHandle` — the
+/// same island shape `/gamerule`'s own history warns about, checked the same
+/// way that gate checks it: read the effect back off the store, not off the
+/// response text.
+#[test]
+fn the_store_a_command_writes_is_the_same_one_a_second_call_reads() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = scoreboard_world(&state, &players);
+
+    commands.run(&world, &alice, "scoreboard objectives add x dummy").unwrap();
+    commands.run(&world, &alice, "scoreboard players set p x 42").unwrap();
+    // A *second*, independently-constructed `ServerCommands` — a fresh
+    // process-wide tree, exactly like the one RCON or a command block's own
+    // tick loop builds — reading through the *same* `WorldStateHandle` must
+    // see the write, because the store lives on the handle, not on the tree.
+    let other_tree = ServerCommands::new();
+    let read = other_tree.run(&world, &alice, "scoreboard players get p x").expect("root matched");
+    assert!(read.response.lines()[0].contains("42"), "{read:?}");
+}

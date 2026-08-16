@@ -341,7 +341,7 @@ fn refuse(position: usize, message: impl Into<String>) -> ParseError {
     ParseError::new(position, ParseErrorKind::InvalidBool(message.into()))
 }
 
-fn parse_selector(reader: &mut StringReader, arg: EntityArg) -> Result<EntitySelector, ParseError> {
+pub(crate) fn parse_selector(reader: &mut StringReader, arg: EntityArg) -> Result<EntitySelector, ParseError> {
     if reader.peek() == Some('@') {
         reader.skip();
         let mut selector = parse_at_selector(reader)?;
