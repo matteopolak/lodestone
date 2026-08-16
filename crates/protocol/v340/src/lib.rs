@@ -49,6 +49,7 @@ pub mod adapter;
 pub mod entity_types;
 pub mod item_types;
 pub mod packets;
+pub mod particle_ids;
 pub mod sound_ids;
 
 /// The `id:meta` (pre-Flattening) → modern block-state table and the bridge

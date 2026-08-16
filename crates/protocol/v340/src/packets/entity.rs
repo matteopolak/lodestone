@@ -233,6 +233,50 @@ pub struct NamedEntitySpawn {
     pub metadata: EntityMetadata,
 }
 
+/// Clientbound `spawn_entity_weather` — spawns a lightning bolt.
+///
+/// Wire layout: verified against minecraft-data's 1.12.2
+/// `packet_spawn_entity_weather`: VarInt entity id, raw `i8` type (always `1`,
+/// the only weather-entity type vanilla ever sends), three `f64` coordinates.
+/// No UUID — 1.12.2 assigns weather entities none.
+#[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:spawn_entity_weather", state = Play, bound = Client)]
+pub struct SpawnEntityWeather {
+    /// Entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Weather-entity type (always `1`, lightning bolt, at this protocol
+    /// revision).
+    pub kind: i8,
+    /// X coordinate.
+    pub x: f64,
+    /// Y coordinate.
+    pub y: f64,
+    /// Z coordinate.
+    pub z: f64,
+}
+
+/// Clientbound `spawn_entity_experience_orb` — spawns an experience orb.
+///
+/// Wire layout: verified against minecraft-data's 1.12.2
+/// `packet_spawn_entity_experience_orb`: VarInt entity id, three `f64`
+/// coordinates, raw `i16` XP count. No UUID.
+#[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:spawn_entity_experience_orb", state = Play, bound = Client)]
+pub struct SpawnEntityExperienceOrb {
+    /// Entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// X coordinate.
+    pub x: f64,
+    /// Y coordinate.
+    pub y: f64,
+    /// Z coordinate.
+    pub z: f64,
+    /// XP value carried by this orb.
+    pub count: i16,
+}
+
 /// Clientbound `entity_destroy` — a varint-counted list of varint entity ids to
 /// remove.
 ///
