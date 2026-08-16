@@ -528,6 +528,28 @@ stale claim was *true and evidenced when written*, which is exactly why it survi
 about it looks wrong on inspection. **A file path in this document is a claim like any other; verify it
 before relying on it.**
 
+**A predecessor's "blocked on X" is a claim like any other, and it decays faster than a doc — because it is
+never revisited by anyone.** Four in one day, each stated confidently by a careful agent and each false:
+
+- *"`OwnerHurtByTargetGoal` needs `server.rs`, which is off-limits"* — `apply_attack` already threaded
+  `PlayerIdentity` through and `MobSim::tick` already resolved mob-hits-player. **Zero `server.rs` edits
+  were needed.**
+- *"`TITLE`/`CRAFT_PROGRESS_BAR`/`TAB_COMPLETE` have no canonical `ClientEvent` target"* — **all three
+  already existed**, produced by v770 under different names (`TitleText`, `ContainerData`,
+  `CommandSuggestionsReceived`), each with a live consumer. Four passes stopped at that wall and a fifth
+  walked through it in one grep.
+- *"`Stab` has no reference in the 26.2 source beyond an unrelated enum value"* — it is
+  `Minecraft.startAttack()` gating on `DataComponents.PIERCING_WEAPON`, and seven shipped items carry it.
+- *"secure chat is entirely absent client-side"* — landed across eight commits in six prior sessions.
+
+The mechanism is worth naming: a blocker is written at the moment of **greatest ignorance** about the
+neighbouring subsystem — you stopped precisely because you could not see the thing — and it is then quoted
+forward as a finding. **A search that failed is evidence about the search, not about the tree.** So when you
+inherit a blocker, spend the one grep before inheriting it, and **search for the capability, not the name
+you expected it to have**: three of the four above were found by looking for what the packet *does* rather
+than what the porting family calls it. When you *write* one, say what you searched for, so the next reader
+can tell a genuine absence from a missed synonym.
+
 **The highest-decay content in this repo is a doc's own status annotation** — "Landed", "still open", "not
 implemented", "blocked by". A drifted *citation* eventually fails visibly, because the path stops resolving
 or the symbol stops existing; a wrong **"Landed: no"** stays perfectly plausible forever, and nothing about
