@@ -136,6 +136,7 @@ const STILL: MovementInput = MovementInput {
     jump: false,
     sneak: false,
     sprint: false,
+    using_item: None,
 };
 
 const WALK_FORWARD: MovementInput = MovementInput {
@@ -144,6 +145,7 @@ const WALK_FORWARD: MovementInput = MovementInput {
     jump: false,
     sneak: false,
     sprint: false,
+    using_item: None,
 };
 
 /// Drop a player from `start` and return where their feet come to rest.

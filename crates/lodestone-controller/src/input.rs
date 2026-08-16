@@ -7,7 +7,7 @@
 //! press/release and accumulates raw mouse motion. Every decision about what
 //! those mean lives here, so both platforms share one implementation.
 
-use lodestone_physics::MovementInput;
+use lodestone_physics::{MovementInput, UseEffects};
 
 /// Logical actions the controller cares about, decoupled from physical key codes
 /// so each platform maps its own key type → this and everything below is shared
@@ -387,6 +387,7 @@ pub fn movement_intent(state: &InputState) -> MovementInput {
         jump: state.jump,
         sneak: state.sneak,
         sprint,
+        using_item: None,
     }
 }
 
@@ -414,6 +415,46 @@ pub fn movement_intent_with_food(state: &InputState, sprint_allowed_by_food: boo
     if !sprint_allowed_by_food {
         intent.sprint = false;
     }
+    intent
+}
+
+/// [`movement_intent_with_food`], plus vanilla's use-item movement gates.
+///
+/// `LocalPlayer.modifyInput` and `LocalPlayer.canStartSprinting` read
+/// `isUsingItem()`/[`UseEffects`] for two *separate* purposes, and both are
+/// applied here:
+///
+/// * The sprint veto — `canStartSprinting`'s `isSprintingPossible` ANDs in
+///   `!isSlowDueToUsingItem()`, where `isSlowDueToUsingItem = isUsingItem() &&
+///   !useEffects.canSprint()`. This is a **second, independent** conjunct
+///   alongside the food gate (`sprint_allowed_by_food`): either one alone can
+///   veto sprint, and neither replaces the other — a spear (`can_sprint =
+///   true`) does not override a starving player, and full food does not let
+///   you sprint while eating.
+/// * The input scale itself is not decided here at all — `using_item` just
+///   rides along unchanged onto the resulting [`MovementInput`], because
+///   `modify_input_unit_square` (in `lodestone-physics`) is the only place
+///   that knows *where* in the transform pipeline the scale applies (between
+///   the `0.98` term and the sneak scale). Setting the field here and
+///   applying it in physics keeps the two clauses split exactly the way
+///   vanilla splits them across `modifyInput` and `canStartSprinting`.
+///
+/// A third function rather than a parameter on [`movement_intent_with_food`]:
+/// same reasoning that function's own doc gives for not folding into
+/// [`movement_intent`] — the real production path is
+/// `ecs::compute_movement_intent` → `ecs::swim_adjusted_intent`, which needs
+/// both gates and this one value threaded through unchanged.
+#[must_use]
+pub fn movement_intent_with_gates(
+    state: &InputState,
+    sprint_allowed_by_food: bool,
+    using_item: Option<UseEffects>,
+) -> MovementInput {
+    let mut intent = movement_intent_with_food(state, sprint_allowed_by_food);
+    if using_item.is_some_and(|effects| !effects.can_sprint) {
+        intent.sprint = false;
+    }
+    intent.using_item = using_item;
     intent
 }
 
@@ -557,6 +598,73 @@ mod tests {
             !movement_intent_with_food(&s, true).sprint,
             "food alone must not overrule the sneak veto"
         );
+    }
+
+    /// `LocalPlayer.canStartSprinting`'s `!isSlowDueToUsingItem()` conjunct:
+    /// using a default-effects item (`can_sprint = false`) vetoes sprint even
+    /// though food alone would allow it.
+    #[test]
+    fn use_item_default_vetoes_sprint_even_with_full_food() {
+        let mut s = InputState::default();
+        s.set(Action::Sprint, true);
+        s.set(Action::Forward, true);
+        assert!(
+            movement_intent_with_gates(&s, true, None).sprint,
+            "control: with no item in use, food-allowed sprint proceeds"
+        );
+        assert!(
+            !movement_intent_with_gates(&s, true, Some(UseEffects::DEFAULT)).sprint,
+            "a default-effects use-item must veto sprint on its own, \
+             independent of food"
+        );
+    }
+
+    /// The spear override (`can_sprint = true`) must NOT veto sprint — the one
+    /// item whose use effects coincide with "not using an item" for this gate.
+    #[test]
+    fn spear_use_effects_do_not_veto_sprint() {
+        let mut s = InputState::default();
+        s.set(Action::Sprint, true);
+        s.set(Action::Forward, true);
+        assert!(
+            movement_intent_with_gates(&s, true, Some(UseEffects::SPEAR)).sprint,
+            "a spear's UseEffects.canSprint() is true; charging one must not \
+             stop a sprint"
+        );
+    }
+
+    /// The food gate and the use-item gate are two independent conjuncts, not
+    /// one standing in for the other: low food vetoes sprint even while
+    /// holding a spear (which would otherwise permit it), and a default-effects
+    /// item vetoes sprint even at full food. Neither can rescue the other.
+    #[test]
+    fn food_gate_and_use_item_gate_are_independent_conjuncts() {
+        let mut s = InputState::default();
+        s.set(Action::Sprint, true);
+        s.set(Action::Forward, true);
+        assert!(
+            !movement_intent_with_gates(&s, false, Some(UseEffects::SPEAR)).sprint,
+            "low food must veto sprint even while the use-item gate alone \
+             would allow it (spear)"
+        );
+        assert!(
+            !movement_intent_with_gates(&s, true, Some(UseEffects::DEFAULT)).sprint,
+            "a default-effects use-item must veto sprint even at full food"
+        );
+    }
+
+    /// `using_item` must ride onto the resulting `MovementInput` unchanged,
+    /// regardless of whether it happened to veto sprint this tick — physics
+    /// reads it every tick for the input-scale term, not only while sprint is
+    /// being decided.
+    #[test]
+    fn using_item_rides_onto_the_movement_input_regardless_of_sprint() {
+        let s = InputState::default();
+        assert_eq!(
+            movement_intent_with_gates(&s, true, Some(UseEffects::DEFAULT)).using_item,
+            Some(UseEffects::DEFAULT)
+        );
+        assert_eq!(movement_intent_with_gates(&s, true, None).using_item, None);
     }
 
     #[test]

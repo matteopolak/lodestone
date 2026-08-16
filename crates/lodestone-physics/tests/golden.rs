@@ -706,6 +706,7 @@ fn swim_sprint_matches_golden() {
             jump: false,
             sneak: false,
             sprint: true,
+            using_item: None,
         },
     );
 }
@@ -740,6 +741,7 @@ fn swim_look_down_dives_matches_golden() {
             jump: false,
             sneak: false,
             sprint: true,
+            using_item: None,
         },
     );
     // Tick 0 is still STANDING in both traces (`updateSwimming` reads the
@@ -813,6 +815,7 @@ fn swim_surface_look_up_no_pulldown_matches_golden() {
             jump: false,
             sneak: false,
             sprint: true,
+            using_item: None,
         },
     );
     for (t, tick) in GOLDEN_SWIM_SURFACE_LOOK_UP_NO_PULLDOWN.iter().enumerate() {
@@ -862,6 +865,7 @@ fn swim_surface_look_down_control_matches_golden() {
             jump: false,
             sneak: false,
             sprint: true,
+            using_item: None,
         },
     );
     let final_y = f64::from_bits(GOLDEN_SWIM_SURFACE_LOOK_DOWN_CONTROL.last().unwrap().pos[1]);
@@ -933,6 +937,7 @@ fn soul_sand_walk_matches_golden() {
             jump: false,
             sneak: false,
             sprint: false,
+            using_item: None,
         },
     );
 }
@@ -957,6 +962,7 @@ fn jump_boost_matches_golden() {
             jump: true,
             sneak: false,
             sprint: false,
+            using_item: None,
         },
     );
 }
@@ -983,6 +989,7 @@ fn honey_jump_matches_golden() {
             jump: true,
             sneak: false,
             sprint: false,
+            using_item: None,
         },
     );
     // Guard the intent: the honey jump must be lower than an un-reduced jump.
@@ -1041,6 +1048,7 @@ fn slime_bounce_sneak_matches_golden() {
             jump: false,
             sneak: true,
             sprint: false,
+            using_item: None,
         },
     );
     // Guard the intent: sneaking must never produce an upward bounce.
