@@ -137,6 +137,43 @@ is independent of the blend target's format), which is a `gpu.rs`/render-target
 change outside this crate's ownership boundary. Reported for brokering rather
 than made here.
 
+**Landed: the render-target-level primitive.** `RenderTarget::raw_view_format`
+(default `= format()`, correct when the base format is already non-sRGB) plus
+`AcquiredFrame::create_view(format)` now exist in `lodestone_render::target`,
+implemented for both `HeadlessTarget` and `SurfaceTarget`. Both declare *both*
+the sRGB and non-sRGB counterparts of their configured format in
+`view_formats` up front, so a caller can legally request either view of the
+identical texture at any time. This is symmetric with the existing
+corrected-view mechanism (`choose_view_format`) that fixed the wasm-darkness
+bug, and does not change what `RenderTarget::format()` reports anywhere — only
+adds the second, raw accessor. **Wiring `hud.rs`'s flat-colour pipeline
+(`self.pipeline`, `hud.wgsl`) to actually draw through it is still open** —
+`render_with_item_models`'s `hud-colour-pass` needs a second `raw_view`
+parameter threaded from `app/redraw.rs`'s `frame.create_view(target.raw_view_format())`,
+and `HudRenderer::new`'s `color_format` argument (which only ever feeds
+`self.pipeline` — the `attach_gui`/`attach_items`/`attach_glint`/
+`attach_item_models` calls already take their own separate `color_format` and
+should keep using the corrected one) needs to become the raw format at its
+`app/lifecycle.rs` call site. Reported verbatim for brokering; see the
+`lodestone-shell`-owning agent's dispatch record for the exact patch.
+
+**A GPU-verified measurement, and a correction to this doc's own "fixed
+point at black and white" phrasing.** A headless gate
+(`hud_flat_colour_blend_matches_vanilla_gamma_on_a_raw_target`,
+`crates/lodestone-shell/src/gpu/pixel_gates.rs`) builds the real `hud.wgsl`
+pipeline directly and sweeps the background from black to white. Re-deriving
+the arithmetic independently (never trust a doc's prose over the transfer
+function) shows the divergence for *this specific colour pair* —
+`TAB_ROW_FILL`'s foreground is white, itself a fixed point of the sRGB curve
+in both directions — is **not** a symmetric hump. It is monotonically
+decreasing: largest against a dark background (≈67/255 at `bg=0`) and
+shrinking smoothly to exactly `0` only at `bg=255`, where foreground and
+background coincide. That is the shape the *other* clause of this doc's own
+sentence already said ("large against a dark background..., shrinking toward
+zero as the background approaches white") — the "fixed point at black and
+white" phrasing describes a different, incorrect shape for this pair and
+should be read as superseded by that clause.
+
 ## How to change it, and the gotchas
 
 **There is no player head, and on every server we can host that is vanilla's own

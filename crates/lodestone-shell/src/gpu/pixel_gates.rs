@@ -1809,3 +1809,386 @@ fn menu_frame_blur_flag_reaches_the_real_render_overlay_path() {
         worse.len()
     );
 }
+
+/// Standard sRGB electro-optical transfer function, `[0,1] -> [0,1]`.
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+/// Its inverse (opto-electronic transfer function).
+fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
+}
+
+/// `TAB_ROW_FILL`'s alpha, `0x20 / 255` (`docs/tab-list.md`).
+const TAB_ROW_FILL_ALPHA: f32 = 32.0 / 255.0;
+
+/// Vanilla's own blend: composited directly on raw gamma bytes, no colour
+/// management at all. A white (`0xFFFFFF`) foreground at [`TAB_ROW_FILL_ALPHA`]
+/// over a grey background byte `bg` — every channel is symmetric for a grey
+/// background, so this is a scalar. Exact, not a bracket: raw-byte alpha
+/// compositing is plain linear interpolation in 8-bit space.
+fn predicted_vanilla_gamma_byte(bg: u8) -> f32 {
+    let bg_f = f32::from(bg);
+    bg_f + TAB_ROW_FILL_ALPHA * (255.0 - bg_f)
+}
+
+/// The bug's own hypothesis: the GPU treats the shader's raw-byte-derived
+/// output as *linear* light because the target view is sRGB, blends in linear
+/// space, then re-encodes on write. White's linear value is `1.0` (sRGB's own
+/// fixed point), so only the background side needs converting.
+fn predicted_linear_hypothesis_gamma_byte(bg: u8) -> f32 {
+    let bg_lin = srgb_to_linear(f32::from(bg) / 255.0);
+    let blended_lin = TAB_ROW_FILL_ALPHA + bg_lin * (1.0 - TAB_ROW_FILL_ALPHA);
+    linear_to_srgb(blended_lin) * 255.0
+}
+
+/// Build the *exact* `hud.wgsl` flat-colour pipeline `HudRenderer::new`
+/// builds in `hud.rs` (same vertex layout, same `ALPHA_BLENDING` state), but
+/// standalone against a caller-chosen `color_format` — so this gate can
+/// measure both the buggy (today's production, sRGB-target) and fixed
+/// (raw-target) blend without needing the off-limits `hud.rs`/`app/**` wiring
+/// that will eventually pick between them (see `docs/tab-list.md`'s "reported
+/// for brokering" note). Sourced from the same `shaders/hud.wgsl` file
+/// production uses, not a reimplementation.
+fn build_hud_flat_pipeline(
+    device: &wgpu::Device,
+    color_format: wgpu::TextureFormat,
+) -> (wgpu::RenderPipeline, wgpu::Buffer) {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("blend-gate-hud-shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/hud.wgsl").into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("blend-gate-hud-layout"),
+        bind_group_layouts: &[],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("blend-gate-hud-pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: (6 * 4) as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 8,
+                        shader_location: 1,
+                    },
+                ],
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("blend-gate-hud-verts"),
+        size: (6 * 6 * 4) as wgpu::BufferAddress,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    (pipeline, buffer)
+}
+
+/// Render one full-viewport quad of `fg_rgba` (`hud.wgsl`'s flat-colour
+/// pipeline, `ALPHA_BLENDING`) over a target seeded with a known raw grey
+/// background byte `bg`, and read the resulting stored byte back.
+///
+/// The background is seeded with [`wgpu::Queue::write_texture`], a literal
+/// byte copy with **no** colour-space translation on either format — unlike a
+/// `LoadOp::Clear`, whose `wgpu::Color` is specified in linear space and
+/// re-encoded on write for an sRGB target, which would silently launder the
+/// exact bug this gate exists to measure into the very fixture that sets it
+/// up. This is why the background is written, not cleared.
+fn render_flat_blend_over_grey(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    format: wgpu::TextureFormat,
+    bg: u8,
+    fg_rgba: [f32; 4],
+) -> [u8; 4] {
+    let mut target = HeadlessTarget::new(device, 4, 4, format);
+    let bg_bytes = [bg, bg, bg, 255];
+    let mut row = Vec::with_capacity(16);
+    for _ in 0..4 {
+        row.extend_from_slice(&bg_bytes);
+    }
+    let mut full = Vec::with_capacity(64);
+    for _ in 0..4 {
+        full.extend_from_slice(&row);
+    }
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: target.texture(),
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &full,
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(16), rows_per_image: Some(4) },
+        wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+    );
+
+    let (pipeline, buffer) = build_hud_flat_pipeline(device, format);
+    // Two triangles covering the whole `[-1,1]` NDC square, every vertex
+    // carrying the same flat colour (position x2, colour x4 per vertex,
+    // matching `hud.wgsl`'s vertex layout).
+    let [r, g, b, a] = fg_rgba;
+    #[rustfmt::skip]
+    let verts: [f32; 36] = [
+        -1.0, -1.0, r, g, b, a,
+         1.0, -1.0, r, g, b, a,
+        -1.0,  1.0, r, g, b, a,
+        -1.0,  1.0, r, g, b, a,
+         1.0, -1.0, r, g, b, a,
+         1.0,  1.0, r, g, b, a,
+    ];
+    queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&verts));
+
+    let frame = target.acquire().expect("headless acquire");
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("blend-gate-encoder"),
+    });
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("blend-gate-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: frame.view(),
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_vertex_buffer(0, buffer.slice(..));
+        pass.draw(0..6, 0..1);
+    }
+    queue.submit(std::iter::once(encoder.finish()));
+    let pixels = target.read_texels(device, queue);
+    [pixels[0], pixels[1], pixels[2], pixels[3]]
+}
+
+/// Issue #672: the tab list row fill (`TAB_ROW_FILL = 0x20FFFFFF`) reads "too
+/// bright" against vanilla. `docs/tab-list.md` diagnoses this as a
+/// colour-space mismatch, not a wrong constant: vanilla blends translucent
+/// GUI colour directly on raw gamma bytes, while this HUD's flat-colour
+/// pipeline (`hud.wgsl`) writes the same raw bytes into a render target whose
+/// view is sRGB-decoding, so the hardware blends in **linear** light instead.
+///
+/// Sweeps the background from black to white and renders the real
+/// `hud.wgsl`/`ALPHA_BLENDING` pipeline (built by [`build_hud_flat_pipeline`],
+/// sourced from the same `shaders/hud.wgsl` production uses) against two
+/// targets:
+///
+/// - **raw** (`Rgba8Unorm`) — what [`lodestone_render::target::RenderTarget::raw_view_format`]
+///   now exposes, and what the brokered `hud.rs` fix is meant to draw the
+///   flat-colour pass into;
+/// - **corrected** (`Rgba8UnormSrgb`) — what every pipeline in this codebase
+///   (including, still, the unfixed production HUD pass) draws into today.
+///
+/// # What is predicted exactly vs. bracketed — and a correction to the record
+///
+/// Raw-byte alpha compositing in 8-bit space is plain linear interpolation,
+/// so the **raw** target's result is predicted to the byte
+/// ([`predicted_vanilla_gamma_byte`], tolerance ±2 for rounding). The
+/// **corrected** target's result is *not* asserted to the byte — this
+/// codebase has already measured that `ALPHA_BLENDING` on an sRGB Metal
+/// target is "a real, repeatable, non-trivial function of the raw fragment
+/// alpha byte" that resists a textbook closed form — but it *is* bracketed.
+///
+/// **`docs/tab-list.md` describes this sweep's shape as "fixed point at black
+/// and white, diverges most in between" — a symmetric hump. An independent
+/// re-derivation from the sRGB transfer function (`predicted_vanilla_gamma_byte`
+/// vs. [`predicted_linear_hypothesis_gamma_byte`], checked in a standalone
+/// script before this test was written, matching CLAUDE.md's own "re-derive
+/// the arithmetic separately, do not predict the plausible round number"
+/// rule) says otherwise for *this* colour pair.** `TAB_ROW_FILL`'s foreground
+/// is white — `1.0` in both gamma and linear representations, a genuine fixed
+/// point on its own — so the *only* source of divergence is the
+/// **background**'s sRGB decode, and that curve's nonlinearity is itself
+/// asymmetric (steep near `0`, near-identity approaching `1`). The predicted
+/// shape is **monotonically decreasing** from black to white: divergence
+/// ≈67/255 at `bg=0`, shrinking smoothly to exactly `0` at `bg=255` (the only
+/// literal fixed point, because foreground and background are then both
+/// white) — not a hump peaking in the middle. This matches the *other* half
+/// of `docs/tab-list.md`'s own sentence, which independently says the
+/// divergence is "large against a dark background..., shrinking toward zero
+/// as the background approaches white" — that clause and the "fixed point at
+/// black and white" clause describe two different shapes, and the assertions
+/// below follow the one the arithmetic (and the doc's own more precise
+/// clause) supports. If the real measurement disagrees with *this*
+/// prediction too, that is a further correction to make, not a reason to
+/// assert the doc's hump shape unverified.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn hud_flat_colour_blend_matches_vanilla_gamma_on_a_raw_target() {
+    let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+        "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU (or a software adapter such as \
+         LIBGL_ALWAYS_SOFTWARE=1 / WGPU_BACKEND=gl), don't 'skip' — a silent pass here \
+         would assert nothing",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+
+    const RAW: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+    const CORRECTED: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+    // `RAW` really is `CORRECTED`'s raw counterpart, tying this measurement
+    // to the exact pair `RenderTarget::raw_view_format`/`RenderTarget::format`
+    // would hand a real caller for a target built with `CORRECTED`.
+    assert_eq!(CORRECTED.remove_srgb_suffix(), RAW);
+
+    let fg = [1.0_f32, 1.0, 1.0, TAB_ROW_FILL_ALPHA];
+    // Black to white, nine points, endpoints included — the sweep that
+    // originally identified this as a colour-space bug rather than a wrong
+    // constant.
+    let sweep: [u8; 9] = [0, 32, 64, 96, 128, 160, 192, 224, 255];
+
+    struct Row {
+        bg: u8,
+        vanilla: f32,
+        linear_hyp: f32,
+        raw_actual: u8,
+        corrected_actual: u8,
+    }
+    let mut rows = Vec::new();
+    for &bg in &sweep {
+        let raw_px = render_flat_blend_over_grey(device, queue, RAW, bg, fg);
+        let corrected_px = render_flat_blend_over_grey(device, queue, CORRECTED, bg, fg);
+        rows.push(Row {
+            bg,
+            vanilla: predicted_vanilla_gamma_byte(bg),
+            linear_hyp: predicted_linear_hypothesis_gamma_byte(bg),
+            raw_actual: raw_px[0],
+            corrected_actual: corrected_px[0],
+        });
+    }
+
+    eprintln!("=== hud flat-colour blend: black-to-white sweep ===");
+    eprintln!(
+        "{:>4} {:>10} {:>10} {:>10} {:>12} {:>10} {:>12}",
+        "bg", "vanilla*", "linear_hyp", "raw_got", "raw_err", "corr_got", "corr_err_van"
+    );
+    for r in &rows {
+        eprintln!(
+            "{:>4} {:>10.2} {:>10.2} {:>10} {:>12.2} {:>10} {:>12.2}",
+            r.bg,
+            r.vanilla,
+            r.linear_hyp,
+            r.raw_actual,
+            f32::from(r.raw_actual) - r.vanilla,
+            r.corrected_actual,
+            f32::from(r.corrected_actual) - r.vanilla,
+        );
+    }
+
+    // 1) The raw target must match vanilla's own blend to the byte. This is
+    // the assertion that fails under the wrong pipeline: swap `RAW` for
+    // `CORRECTED` in the call above and every one of these goes red (see the
+    // module doc's neuter record).
+    let mut raw_mismatches: Vec<(u8, f32, u8)> = Vec::new();
+    for r in &rows {
+        if (f32::from(r.raw_actual) - r.vanilla).abs() > 2.0 {
+            raw_mismatches.push((r.bg, r.vanilla, r.raw_actual));
+        }
+    }
+    assert!(
+        raw_mismatches.is_empty(),
+        "the RAW (non-sRGB) target must reproduce vanilla's own raw-gamma blend to within \
+         ±2/255 at every background level -- (bg, predicted_vanilla, actual) mismatches: \
+         {raw_mismatches:?}"
+    );
+
+    // 2) The corrected (sRGB) target's error against vanilla must be large
+    // against a *dark* background -- this is the bug, reproduced live rather
+    // than asserted from the doc, and it is what makes assertion 1 meaningful
+    // rather than coincidental (a pipeline indifferent to format would pass
+    // assertion 1 by luck if this one also passed). Per the module doc's
+    // re-derivation, the divergence is largest near black and falls off
+    // toward white -- not a hump peaking mid-sweep -- so this checks the dark
+    // end specifically (bg <= 64) rather than "somewhere in the middle".
+    let dark: Vec<&Row> = rows.iter().filter(|r| r.bg <= 64).collect();
+    let mut small_dark_errors: Vec<(u8, f32, u8)> = Vec::new();
+    for r in &dark {
+        let err = (f32::from(r.corrected_actual) - r.vanilla).abs();
+        if err <= 15.0 {
+            small_dark_errors.push((r.bg, r.vanilla, r.corrected_actual));
+        }
+    }
+    assert!(
+        small_dark_errors.is_empty(),
+        "expected the CORRECTED (sRGB) target to diverge from vanilla's blend by >15/255 \
+         against a dark background (bg <= 64; the bug this gate exists to reproduce) -- but \
+         these dark-sweep levels stayed close: {small_dark_errors:?}. Either the bug is gone \
+         (re-check docs/tab-list.md) or this gate's fixture is broken."
+    );
+
+    // 3) And it must collapse close to vanilla at the *white* end only —
+    // white is the one point in this sweep where foreground and background
+    // coincide (both `0xFFFFFF`), so every consistent blend model, gamma or
+    // linear, must agree there. This is deliberately **not** asserted at
+    // black too — see the module doc's correction to `docs/tab-list.md`'s
+    // "fixed point at black and white" phrasing; black is where this sweep's
+    // divergence is largest, not where it collapses.
+    let mut white_end_errors: Vec<(u8, f32, u8)> = Vec::new();
+    for r in rows.iter().filter(|r| r.bg == 255) {
+        let err = (f32::from(r.corrected_actual) - r.vanilla).abs();
+        if err > 4.0 {
+            white_end_errors.push((r.bg, r.vanilla, r.corrected_actual));
+        }
+    }
+    assert!(
+        white_end_errors.is_empty(),
+        "expected the CORRECTED (sRGB) target's divergence from vanilla to collapse to ~0 at \
+         white (foreground and background coincide there, `0xFFFFFF` over `0xFFFFFF`) -- (bg, \
+         predicted_vanilla, actual) that did not collapse: {white_end_errors:?}"
+    );
+
+    // 4) Diagnostic only, not a hard assertion: does the corrected target's
+    // actual result track the *linear*-blend hypothesis at all, tying the
+    // mechanism to the symptom? Not asserted tightly because this codebase
+    // has already measured real sRGB `ALPHA_BLENDING` hardware behaviour as a
+    // "non-trivial function" that resists a textbook closed form on at least
+    // one backend (Metal) -- a tight per-point tolerance here would risk
+    // being exactly the kind of unverified precision CLAUDE.md warns against
+    // asserting. Printed for the record; large, systematic disagreement here
+    // would be worth a follow-up even though nothing above requires it.
+    let mut max_linear_gap: f32 = 0.0;
+    for r in &rows {
+        max_linear_gap = max_linear_gap.max((f32::from(r.corrected_actual) - r.linear_hyp).abs());
+    }
+    eprintln!(
+        "corrected-target vs. linear-hypothesis: max |actual - predicted_linear| = \
+         {max_linear_gap:.2}/255 across the sweep (diagnostic only, see row table above)"
+    );
+}
