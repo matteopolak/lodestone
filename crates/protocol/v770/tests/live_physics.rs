@@ -490,6 +490,7 @@ async fn server_does_not_correct_a_walking_player() {
         jump: false,
         sneak: false,
         sprint: false,
+        using_item: None,
     };
 
     // Vanilla's send-cadence state (LocalPlayer.sendPosition).
@@ -872,6 +873,7 @@ async fn server_does_not_correct_an_elytra_flight() {
         jump: false,
         sneak: false,
         sprint: false,
+        using_item: None,
     };
 
     let mut last_sent = player.position;
