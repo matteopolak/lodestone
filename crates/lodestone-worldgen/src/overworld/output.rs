@@ -6,23 +6,53 @@
 
 use super::OverworldGenerator;
 
+/// Which stages a [`GeneratedColumn`] carries — the wire-facing tag
+/// `docs/plans/progressive-chunk-generation.md`'s Stage 1 asks for.
+///
+/// A two-tier lattice, not a bitset: `Full` is strictly "more generated than"
+/// `Shaped`, and there is no third state today. [`OverworldGenerator::column_shaped`]
+/// produces `Shaped`; [`OverworldGenerator::column`]/[`OverworldGenerator::column_timed`]
+/// produce `Full`. Nothing in this crate ever *downgrades* a column — there is no
+/// `Full` → `Shaped` conversion, by construction (see `column_shaped`'s own doc for
+/// why it is a pure prefix rather than a strip of a `Full` result).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenStage {
+    /// Stages 0a–4: structure starts/refs, fill, biome, surface, materialise,
+    /// carve (structure piece placement runs inside this last one — see
+    /// [`OverworldGenerator::column_shaped`]). No ores, no vegetation, no
+    /// top-layer freeze, no generation-time creature spawns.
+    Shaped,
+    /// Every stage — today's [`OverworldGenerator::column`].
+    Full,
+}
+
 impl OverworldGenerator {
-    /// Adopts the final (post-carve, post-ore) dense world grid straight into
-    /// a [`GeneratedColumn`] — no re-intern pass (issue #295's Job 2): a
-    /// centre-chunk-sized [`crate::dense_grid::DenseBlockGrid`]'s own
-    /// `(palette, blocks)` layout is already identical to
-    /// [`GeneratedColumn`]'s (`((ly * 16 + lz) * 16 + lx)`, verified by the
-    /// `debug_assert!` below rather than merely asserted in a doc comment).
+    /// Adopts the final dense world grid straight into a [`GeneratedColumn`] —
+    /// no re-intern pass (issue #295's Job 2): a centre-chunk-sized
+    /// [`crate::dense_grid::DenseBlockGrid`]'s own `(palette, blocks)` layout is
+    /// already identical to [`GeneratedColumn`]'s (`((ly * 16 + lz) * 16 + lx)`,
+    /// verified by the `debug_assert!` below rather than merely asserted in a
+    /// doc comment).
+    ///
+    /// `stage` selects what else gets computed. **Only `GenStage::Full` runs the
+    /// `SPAWN` stage** — a `Shaped` column must carry zero generation-time
+    /// spawn candidates by construction (`docs/plans/progressive-chunk-generation.md`:
+    /// "no mobs may exist in a chunk the player cannot interact with"), so
+    /// [`OverworldGenerator::column_shaped`] both passes `world`/`block_entities`
+    /// that were never touched by vegetation and gets an empty
+    /// `spawn_candidates` here regardless of what `world` contains — two
+    /// independent reasons for the same empty list, not one.
     pub(super) fn intern_from_dense(
         &self,
         cx: i32,
         cz: i32,
+        stage: GenStage,
         world: crate::dense_grid::DenseBlockGrid,
         biome_quarts: [(String, bool); 16],
         biome_cells: super::BiomeCells,
         block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
     ) -> GeneratedColumn {
-        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Intern);
+        let _stage_guard = crate::counters::StageGuard::enter(crate::counters::Stage::Intern);
         debug_assert_eq!(world.bounds().3, 16, "centre chunk width must be 16");
         debug_assert_eq!(world.bounds().4, self.height, "centre chunk height must match the generator's");
         debug_assert_eq!(world.bounds().5, 16, "centre chunk depth must be 16");
@@ -33,35 +63,42 @@ impl OverworldGenerator {
         // quarts, so no earlier stage has to grow a spawn-shaped call site.
         // See `crate::spawn_stage`'s module doc for what these candidates are
         // (and are not) — unconditioned on light/ground, a candidate list a
-        // server-side consumer re-validates.
-        let biome_names: [String; 16] = std::array::from_fn(|i| biome_quarts[i].0.clone());
-        let height = self.height;
-        let min_y = self.min_y;
-        let surface_y_at = |lx: usize, lz: usize| -> i32 {
-            for ly in (0..height).rev() {
-                let idx = ((ly * 16 + lz as i32) * 16 + lx as i32) as usize;
-                if blocks[idx] != 0 {
-                    return min_y + ly + 1;
+        // server-side consumer re-validates. Gated on `stage` — see this
+        // function's own doc for why `Shaped` must never produce one.
+        let spawn_candidates = if matches!(stage, GenStage::Full) {
+            let biome_names: [String; 16] = std::array::from_fn(|i| biome_quarts[i].0.clone());
+            let height = self.height;
+            let min_y = self.min_y;
+            let surface_y_at = |lx: usize, lz: usize| -> i32 {
+                for ly in (0..height).rev() {
+                    let idx = ((ly * 16 + lz as i32) * 16 + lx as i32) as usize;
+                    if blocks[idx] != 0 {
+                        return min_y + ly + 1;
+                    }
                 }
-            }
-            min_y
+                min_y
+            };
+            let biome_at = |lx: usize, lz: usize| -> String { biome_names[(lz >> 2) * 4 + (lx >> 2)].clone() };
+            crate::spawn_stage::spawn_candidates_for_chunk(
+                biome_at,
+                surface_y_at,
+                &self.spawners_by_biome,
+                self.seed,
+                cx,
+                cz,
+            )
+        } else {
+            Vec::new()
         };
-        let biome_at = |lx: usize, lz: usize| -> String { biome_names[(lz >> 2) * 4 + (lx >> 2)].clone() };
-        let spawn_candidates = crate::spawn_stage::spawn_candidates_for_chunk(
-            biome_at,
-            surface_y_at,
-            &self.spawners_by_biome,
-            self.seed,
-            cx,
-            cz,
-        );
         // Issue #516. Computed here rather than in its own stage for two
         // reasons: this is the one place that already holds the *final* palette
         // and block field (so the scan is integer-only — see
         // `motion_blocking_from_palette`), and both `column` and `column_timed`
         // route through this function, so nothing in the pipeline had to grow a
         // call site. Its cost lands in `StageTimes::intern`, which that field's
-        // own doc now says.
+        // own doc now says. Computed for both stages — it is a pure read of
+        // whatever `world` holds, not a claim about *which* stages ran, and
+        // nothing downstream consumes it yet regardless (see its own doc).
         let motion_blocking = if self.snow_support.is_empty() {
             None
         } else {
@@ -83,6 +120,7 @@ impl OverworldGenerator {
             block_entities,
             motion_blocking,
             spawn_candidates,
+            stage,
         }
     }
 }
@@ -316,9 +354,21 @@ pub struct GeneratedColumn {
     /// Empty for the overwhelming majority of chunks (any biome with no
     /// `creature` spawner entry), exactly like [`Self::block_entities`].
     spawn_candidates: Vec<crate::spawn_stage::GenerationSpawn>,
+    /// Which stages produced this column — `docs/plans/progressive-chunk-generation.md`'s
+    /// Stage 1 tag. See [`GenStage`] for the lattice and [`Self::stage`] for the
+    /// accessor.
+    stage: GenStage,
 }
 
 impl GeneratedColumn {
+    /// Which stages produced this column. A downstream store consults this to
+    /// decide whether the column may ever be mutated or persisted — see
+    /// [`GenStage`]'s own doc; this crate makes no such decision itself.
+    #[must_use]
+    pub fn stage(&self) -> GenStage {
+        self.stage
+    }
+
     /// World Y of the lowest block row.
     #[must_use]
     pub fn min_y(&self) -> i32 {

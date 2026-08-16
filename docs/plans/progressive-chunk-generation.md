@@ -438,6 +438,62 @@ binary: a shaped sweep bumps `pre_ore_computed` and structure counters only,
 byte-identity harness with one bit flipped still reports the diff; the counter gate run
 against plain `column` must fail (post-ore ≠ 0) — observed failing, not described.
 
+**Result: LANDED.** `OverworldGenerator::column_shaped(cx, cz)` in
+`crates/lodestone-worldgen/src/overworld/mod.rs` is exactly `self.pre_ore_stage(cx, cz)` —
+the same memoised call `column` itself makes first — fed through a widened
+`intern_from_dense(cx, cz, stage: GenStage, …)` with an empty `block_entities` list.
+`GenStage { Shaped, Full }` lives in `overworld/output.rs` as a field on `GeneratedColumn`
+(`GeneratedColumn::stage()`), re-exported from `overworld`. Both existing call sites
+(`column`, `column_timed`) now pass `GenStage::Full`. **Only `GenStage::Full` runs the
+`SPAWN` stage** inside `intern_from_dense` — a `Shaped` column carries an empty
+`spawn_candidates` unconditionally, satisfying "no mobs may exist in a chunk the player
+cannot interact with" independently of whatever `world` it was handed. `motion_blocking`
+is computed for both stages (a pure read of whatever blocks are present; nothing
+downstream consumes it yet either way).
+
+Gates in `crates/lodestone-worldgen/tests/stage1_shaped_seam.rs`, all `#[ignore]`d (real
+generation against the embedded production generator, seed 42) and run
+`--release`, `--features gen-counters`, `--test-threads=1`:
+
+- **(a) byte identity** — `stage1_shaped_then_full_is_byte_identical_to_cold_full`, over
+  two census-verified terrains (forest and mountains, never ocean — an ocean fixture would
+  pass vacuously per this repo's own "coincident hypotheses" rule): `column_shaped` then
+  `column` on one generator, compared via `into_raw()` against `column` cold on an
+  independent generator. **Passed on both**: forest chunk (10, −64), 39-entry palette,
+  32,163 non-air cells; mountains chunk (44, −51), 23-entry palette, 42,644 non-air cells —
+  exact tuple equality (palette, blocks, biome_quarts), not a summary statistic. **Control**
+  (in the same test, on a clone of the matching side): flipping one block id makes the
+  comparison disagree — observed, not described.
+- **(b) counter gate** — `stage1_shaped_sweep_touches_only_pre_ore_and_structure_stages`,
+  a 3×3 shaped sweep: **`pre_ore_computed=9`, `structure_starts_computed=361`,
+  `post_ore_computed=0`, vegetation `stage_entered=0`.** **Control**
+  (`stage1_control_full_sweep_trips_the_post_ore_and_vegetation_counters`), the identical
+  3×3 sweep through plain `column()` on an independent generator: **`post_ore_computed=25`,
+  vegetation `stage_entered=9`** — both nonzero, the counter gate's hypothesis observed
+  failing against the thing it exists to distinguish `column_shaped` from.
+
+A third check, `stage1_shaped_column_contains_a_real_structure`, answers the report
+question directly: **yes** — a shaped column really does contain a structure. Found via
+`structure_starts_placed_in` (mineshafts have `spacing = 1`, the densest structure set to
+search), a real `minecraft:mineshaft` start at the room piece's own chunk (−7, −29)
+(`pieces[0]` is always the room — `mineshaft.rs`'s own `the room is added first` test),
+whose `column_shaped` palette (15 entries) carries real placed structure blocks (rail/
+cobweb/plank/fence prefixes). **First cut of this check picked an arbitrary chunk
+`structure_starts_placed_in` returned non-empty for and found no telltale block there** —
+not a bug: a mineshaft corridor's bounding box can cross a chunk seam while its rails and
+planks sit on the other side. Rewritten to target the room piece's own bounding-box centre
+instead, which is guaranteed to carry the telltale material. **Control**: a nearby chunk
+with no structure start placed in it, (−24, −24), carries none of the telltale blocks —
+the detector discriminates rather than matching everything.
+
+`cargo check -p lodestone-worldgen --all-targets` (default and `--features gen-counters`)
+and `cargo check -p lodestone-worldgen --target wasm32-unknown-unknown` are clean — the new
+code adds no clock or threading call, so it carries none of this crate's documented wasm32
+hazards. `cargo test -p lodestone-worldgen --no-fail-fast` ran clean through every binary
+it reached (0 failures across every completed suite, including the structure/vegetation
+integration tests) before a 580s wall-clock budget cut it off partway through — a timeout,
+not a failure; every binary that finished reported zero failures.
+
 ### Stage 2 — the server stage model and stage-aware store
 
 **Owns:** `crates/lodestone-server`: `chunk.rs`, `chunk_store.rs`, `region_source.rs`,

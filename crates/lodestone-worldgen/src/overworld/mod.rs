@@ -228,7 +228,7 @@ use self::fill::AquiferTrees;
 pub use self::biome_cells::BiomeCells;
 pub use self::block_entities::{BeeOccupant, GeneratedBlockEntity};
 pub use self::output::{
-    GeneratedColumn, HEIGHTMAP_COLUMNS, MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
+    GenStage, GeneratedColumn, HEIGHTMAP_COLUMNS, MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::output::StageTimes;
@@ -958,7 +958,57 @@ impl OverworldGenerator {
         // on a spruce canopy. Running it before vegetation would put snow at the
         // pre-tree surface and then bury it.
         let (world, _) = self.top_layer_stage(cx, cz, world, &cached.2);
-        self.intern_from_dense(cx, cz, world, cached.2.clone(), (*cached.3).clone(), block_entities)
+        self.intern_from_dense(
+            cx,
+            cz,
+            output::GenStage::Full,
+            world,
+            cached.2.clone(),
+            (*cached.3).clone(),
+            block_entities,
+        )
+    }
+
+    /// Generates chunk `(cx, cz)` through stage 4 only: structure starts/refs,
+    /// fill, biome, surface, materialise, carve (structure piece placement runs
+    /// inside `pre_ore_stage_uncached`'s carve step, so a Shaped column already
+    /// contains villages/mineshafts/monuments — see [`fill`]'s module doc). No
+    /// ores, no vegetation, no top-layer freeze, no generation-time creature
+    /// spawns: [`GenStage::Shaped`] on the result, and [`Self::intern_from_dense`]'s
+    /// own doc for why the spawn list is empty regardless of what `world`
+    /// contains.
+    ///
+    /// # Why this is a pure prefix of [`Self::column`], not a second pipeline
+    ///
+    /// This calls exactly [`Self::pre_ore_stage`] — the same memoised stage
+    /// `column` calls first — and nothing else. It performs no write [`Self::column`]
+    /// does not already perform through that same call, so calling this for
+    /// `(cx, cz)` and then calling [`Self::column`] for the same `(cx, cz)` is
+    /// byte-identical to calling [`Self::column`] cold: the second call's
+    /// `pre_ore_stage` invocation is a memo hit (same store, same once-guard),
+    /// and every stage after `pre_ore` runs exactly as it would have from a cold
+    /// start. This is the property the plan's byte-identity gate
+    /// (`tests/stage1_shaped_seam.rs`) exercises, and it is what makes an
+    /// "upgrade" a resumption rather than a distinct code path.
+    ///
+    /// Pinned with the same [`STRUCTURE_CLOSURE_RADIUS`] view [`Self::column`]
+    /// uses (a superset of what `pre_ore_stage` alone needs for one chunk, since
+    /// that radius also covers `column`'s wider vegetation-read rim) — see that
+    /// constant's doc for why a narrower pin here would risk the exact
+    /// "recomputed 2.9–7.4×" failure mode this crate already measured once.
+    #[must_use]
+    pub fn column_shaped(&self, cx: i32, cz: i32) -> GeneratedColumn {
+        let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);
+        let cached = self.pre_ore_stage(cx, cz);
+        self.intern_from_dense(
+            cx,
+            cz,
+            output::GenStage::Shaped,
+            (*cached.0).clone(),
+            cached.2.clone(),
+            (*cached.3).clone(),
+            Vec::new(),
+        )
     }
 
     /// Stages 1-4 (fill/aquifer, biome, surface, carve) for chunk `(cx, cz)` —
@@ -1151,7 +1201,15 @@ impl OverworldGenerator {
         // believed, and `docs/plans/worldgen-parity.md` §6 predicts <5% for it.
         let (world, _) = self.top_layer_stage(cx, cz, world, &biome_quarts);
         let t_intern_start = lodestone_time::Instant::now();
-        let col = self.intern_from_dense(cx, cz, world, biome_quarts, biome_cells, block_entities);
+        let col = self.intern_from_dense(
+            cx,
+            cz,
+            output::GenStage::Full,
+            world,
+            biome_quarts,
+            biome_cells,
+            block_entities,
+        );
         let t_end = lodestone_time::Instant::now();
 
         (
