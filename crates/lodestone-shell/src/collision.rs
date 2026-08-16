@@ -1501,6 +1501,7 @@ mod tests {
             jump: false,
             sneak: false,
             sprint: false,
+            using_item: None,
         };
 
         for _ in 0..80 {
