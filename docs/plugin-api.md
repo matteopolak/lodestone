@@ -660,12 +660,31 @@ rather than `Named` so the gate proves the pipeline itself paints pixels without
 being loaded (this harness passes `None` for `vanilla`, so the atlas table is empty and any `Named` id would
 take the same fallback path anyway).
 
-**The real consumer.** No dedicated example-plugin crate was added for this one — `plugin_draw`'s own
-`a_plugin_system_in_extract_debug_reaches_the_resource_after_one_frame` test *is* the example, in the
-same sense `push_leash_lines` is `DebugLines`' first real writer: a system registered the sanctioned way,
-driving a real schedule, with a negative control (`a_billboard_does_not_survive_into_a_frame_with_no_writer`)
-proving the clear is not vacuous. `crates/plugins/lodestone-key-toggle` (issue #162, landed in the same
-pass) is the dedicated-crate-style example for the sibling seam, for anyone looking for that shape instead.
+**The real producer.** `lodestone-autopilot::extract_plan_billboards`
+(`crates/plugins/lodestone-autopilot/src/lib.rs`) is the channel's first real writer, mirroring the shape
+`push_leash_lines` is for `DebugLines`: registered `.in_set(ExtractSet::Debug)` on the `Extract` schedule,
+it pushes one `PluginBillboard { texture: PluginTexture::Solid, .. }` per remaining edge of the plan
+`AutopilotState` is actively driving — a real waypoint marker per unwalked cell of a real A\*-searched
+route, not fabricated geometry. Only `state.edge..`, so the trail shrinks as the bot advances rather than
+also drawing the ground already behind it. Proven at two tiers, split by the same
+`lodestone-shell`-must-not-depend-on-`lodestone-autopilot` boundary this document's "what stays privileged"
+section and that crate's `Cargo.toml` both enforce:
+
+- **Producer side**, in `lodestone-autopilot`'s own
+  `a_committed_plan_pushes_waypoint_billboards_into_the_extract_channel` (with
+  `no_goal_pushes_no_waypoint_billboards` as its negative control): a real plan, computed and driven through
+  the actual `TickSet::Intent`/`Physics` seam `drives_to_goal.rs` already exercises, is caught mid-flight
+  (before arrival clears it) and a real `Extract` run is asserted to carry at least one marker.
+- **Render side**, in `lodestone-shell`'s `plugin_billboards_source_draws_a_multi_waypoint_path`: since the
+  shell cannot import the plugin to drive it end to end, this gate feeds the render pipeline the same
+  *shape* the producer emits — several billboards spread along a line rather than
+  `plugin_billboards_source_draws_visible_pixels`'s single one — and partitions the pixel diff into three
+  horizontal bands, requiring each band to show real coverage on its own (measured: `[1806, 1849, 1849]`
+  changed pixels per band). An aggregate diff count alone cannot tell three markers apart from one dominant
+  billboard eclipsing the other two.
+
+`crates/plugins/lodestone-key-toggle` (issue #162) remains the dedicated-crate-style example for the
+sibling input-interception seam, for anyone looking for that shape instead.
 
 ### What stays privileged, and why
 

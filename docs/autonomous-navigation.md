@@ -47,7 +47,8 @@ the same glue that a `GameTick` system calls per tick is also callable from a he
 | `AutopilotState` (private) | `lodestone-autopilot/src/lib.rs` | The in-flight `Search`/`Plan`, current edge index, `reached_goal` (whether `plan` already ends inside the goal), and — M2's segmentation addition — a second `Search`/`Plan` pair (`continuation_search`/`continuation_plan`) for the *next* leg, plus `continuation_reached_goal`. |
 | `plan_route` | `lodestone-autopilot/src/lib.rs` | Steps a resumable `Search` one `Budget::PER_TICK` (2,000 nodes) at a time — never blocks a frame, per `docs/baritone-port.md` §2.2(2)'s "no chunks while stalled" rule. Builds the `FactsTable` from `Res<VersionData>` via `AdapterCensus`; refuses (reports `FailReason::NoVersionAdapter`) rather than guessing when no adapter is compiled in, matching `FactsTable::empty()`'s own documented policy. Since M2, also dispatches and steps the *continuation* search once the active plan's `remaining_cost_after` the current edge drops below `NavPolicy::replan_lead_ticks` — see "Segmentation" below. |
 | `drive_plan` | `lodestone-autopilot/src/lib.rs` | Turns the current plan edge into this tick's `MovementIntent`/`LookIntent` via `lodestone_nav::WalkDrive`, closed-loop (reads the player's *actual* `PlayerState` every tick, never a reference trajectory). |
-| `AutopilotPlugin` | `lodestone-autopilot/src/lib.rs` | Registers the three resources and chains `(plan_route, drive_plan)` `.after(TickSet::Intent).before(TickSet::Physics)`. |
+| `extract_plan_billboards` | `lodestone-autopilot/src/lib.rs` | `Extract` / `ExtractSet::Debug`: pushes one `lodestone_ecs::PluginBillboard` (untextured, cyan, floating `WAYPOINT_HEIGHT` above `Edge::to_surface`) per edge from `state.edge` onward — the plan's own state made visible through issue #161's channel, so a route this plugin is actually driving is not just telemetry inside `AutopilotState`. See `docs/plugin-api.md`'s "Extract-time custom draw-buffer API" section for the channel and its render half. |
+| `AutopilotPlugin` | `lodestone-autopilot/src/lib.rs` | Registers the three resources, chains `(plan_route, drive_plan)` `.after(TickSet::Intent).before(TickSet::Physics)`, and registers `extract_plan_billboards` in `Extract`'s `ExtractSet::Debug`. |
 
 ### Why `.after(TickSet::Intent)` and not `.in_set(TickSet::Intent)`
 
@@ -224,6 +225,14 @@ equally good:
    [`plugin-registration.md`](plugin-registration.md).
 3. **Clone the repo and add the three lines back.** Still available, and now the *worst* of the three:
    it forks the shell to get something registration already gives you.
+
+**Routes 2 and 3 also now draw the route.** `extract_plan_billboards` (see the resources table above)
+means a rendered client that registered `AutopilotPlugin` shows a trail of cyan markers along whatever
+plan is being driven, through the same `ExtractSet::Debug` channel and render pipeline
+`docs/plugin-api.md`'s billboard section documents — no additional wiring beyond registering the plugin
+itself. Route 1 (a headless bot with no renderer) never lights a pixel from this either way, which is
+correct: `extract_plan_billboards` still runs every `Extract` and still populates `PluginBillboards`, but
+nothing polls that resource without a `RenderState` to install the source.
 
 **Route 1 also improves: `lodestone_app::client_app()` composes the six version-free plugins for
 you**, so a bot gets the same set the shipped client runs rather than the three-plugin approximation
