@@ -1612,6 +1612,217 @@ impl Goal for CatLieOnBedGoal {
     }
 }
 
+/// A tamed cat finds its sleeping owner, lies down near them, and may leave a
+/// morning gift once the owner has slept long enough to be woken.
+///
+/// Vanilla `Cat.CatRelaxOnOwnerGoal` (`animal/feline/Cat.java`) — priority 3,
+/// no explicit flags (`Goal`'s own empty default, so it does not exclude
+/// movement or look goals the way `MeleeAttackGoal`'s `MOVE` flag would).
+///
+/// # Disclosed simplifications
+///
+/// * **The walk target is the owner's own position, not the bed foot.**
+///   Vanilla walks to `ownerPos.relative(bedDir.getOpposite())`, derived from
+///   the bed block's `facing` property. This crate's block-cue seam has no
+///   per-position block-state query outside the neighbourhood searches
+///   [`CatSitOnBlockGoal`]/[`CatLieOnBedGoal`] already use
+///   (`docs/mob-block-perception.md`), and a sleeping owner occupies the same
+///   block their bed does in every legal sleeping arrangement, so this lands
+///   within a block of vanilla's own target.
+/// * **`spaceIsOccupied` (another cat already relaxing within 2 blocks) is
+///   not modelled** — no same-species census exists on this seam; see
+///   [`neutral`](super::roster::neutral)'s module doc on why that is a host
+///   question rather than a goal one. Two cats may relax on one owner.
+/// * **The gift roll is entirely host-side.** [`MobController::request_gift`]
+///   is a bare intent; the RNG roll against the day-time-keyed gift chance,
+///   the loot-table roll and the item spawn all happen in
+///   `lodestone_server::mobs::MobSim` — the same split
+///   [`EatBlockGoal`]/[`MobController::ate`] already uses for a mutation a
+///   goal cannot perform itself.
+#[derive(Debug, Default)]
+pub struct CatRelaxOnOwnerGoal {
+    speed: f64,
+    target: Option<Vec3>,
+    on_bed_ticks: i32,
+    deep_sleep_seen: bool,
+}
+
+impl CatRelaxOnOwnerGoal {
+    /// `new Cat.CatRelaxOnOwnerGoal(this)` — the goal takes no speed
+    /// argument in the jar; its own `moveTo` calls hardcode `1.1F`.
+    #[must_use]
+    pub fn new(speed: f64) -> Self {
+        Self {
+            speed,
+            ..Default::default()
+        }
+    }
+}
+
+impl Goal for CatRelaxOnOwnerGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Move, Flag::Look])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        if !mob.is_tame() || mob.is_ordered_to_sit() {
+            return false;
+        }
+        let Some(owner_pos) = mob.owner_position() else {
+            return false;
+        };
+        if mob.owner_sleep_ticks().is_none() {
+            return false;
+        }
+        // `this.cat.distanceToSqr(this.ownerPlayer) > 100.0`.
+        if distance_sqr(mob.position(), owner_pos) > 100.0 {
+            return false;
+        }
+        self.target = Some(owner_pos);
+        true
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        mob.is_tame()
+            && !mob.is_ordered_to_sit()
+            && mob.owner_sleep_ticks().is_some()
+            && self.target.is_some()
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        if let Some(t) = self.target {
+            mob.set_in_sitting_pose(false);
+            mob.move_to(t, self.speed);
+        }
+        self.on_bed_ticks = 0;
+        self.deep_sleep_seen = false;
+    }
+
+    fn stop(&mut self, mob: &mut dyn MobController) {
+        mob.set_lying(false);
+        mob.stop_navigation();
+        // `this.ownerPlayer.getSleepTimer() >= 100 && … < CAT_WAKING_UP_GIFT_CHANCE`
+        // — the roll itself and the loot/spawn are host-side; see this
+        // struct's own doc for why.
+        if self.deep_sleep_seen {
+            mob.request_gift();
+        }
+        self.deep_sleep_seen = false;
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        let Some(t) = self.target else { return };
+        // `Player.isSleepingLongEnough`'s own `100`, sampled every tick this
+        // goal runs so `stop()` still knows it was crossed even though the
+        // owner may already have woken (and `owner_sleep_ticks()` gone back
+        // to `None`) by the tick `stop()` actually runs.
+        if mob.owner_sleep_ticks().is_some_and(|t| t >= 100) {
+            self.deep_sleep_seen = true;
+        }
+        mob.set_in_sitting_pose(false);
+        mob.move_to(t, self.speed);
+        if distance_sqr(mob.position(), t) < 2.5 {
+            self.on_bed_ticks += 1;
+            if self.on_bed_ticks > 16 {
+                mob.set_lying(true);
+            } else {
+                mob.look_at(t);
+            }
+        } else {
+            mob.set_lying(false);
+        }
+    }
+}
+
+/// A tamed, non-sitting parrot lands on its owner's shoulder once close
+/// enough and its ride cooldown has elapsed.
+///
+/// Vanilla `LandOnOwnersShoulderGoal` (`ai/goal/LandOnOwnersShoulderGoal.java`)
+/// — priority 3, no flags (matching the jar: it never overrides `flags()`).
+///
+/// # Disclosed simplifications
+///
+/// Vanilla's `canUse` also requires the **owner** to not be a spectator, not
+/// flying (creative/spectator ability), not in water and not in powder snow,
+/// and its `tick` requires an actual bounding-box intersection before
+/// mounting. None of that owner-physical-state is on this seam — `owner_position`
+/// is the only fact available — so this narrows to "close enough" (the same
+/// `< 1.0` block radius [`MeleeAttackGoal`] uses for "in range") in place of
+/// the box-intersect test, and drops the four owner-state clauses entirely. A
+/// parrot may therefore land on a swimming or flying owner's shoulder, which
+/// vanilla would refuse.
+#[derive(Debug, Default)]
+pub struct LandOnOwnersShoulderGoal {
+    sitting_on_shoulder: bool,
+}
+
+impl LandOnOwnersShoulderGoal {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Goal for LandOnOwnersShoulderGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::none()
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        // `!this.entity.isOrderedToSit() && … && this.entity.canSitOnShoulder()`
+        // (`rideCooldownCounter > 100`, `ShoulderRidingEntity.canSitOnShoulder`).
+        mob.is_tame()
+            && !mob.is_ordered_to_sit()
+            && mob.owner_position().is_some()
+            && mob.ticks_since_shoulder_dismount() > 100
+    }
+
+    // `LandOnOwnersShoulderGoal.isInterruptable`: `!isSittingOnShoulder` —
+    // once the mount request has gone out, nothing may preempt this goal out
+    // from under it, though in practice the host despawns the mob entity the
+    // same tick it drains the request.
+    fn is_interruptable(&self) -> bool {
+        !self.sitting_on_shoulder
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        !self.sitting_on_shoulder
+            && mob.is_tame()
+            && !mob.is_ordered_to_sit()
+            && mob.owner_position().is_some()
+    }
+
+    fn start(&mut self, _mob: &mut dyn MobController) {
+        self.sitting_on_shoulder = false;
+    }
+
+    fn stop(&mut self, _mob: &mut dyn MobController) {
+        self.sitting_on_shoulder = false;
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        // `!this.isSittingOnShoulder && !this.entity.isInSittingPose() &&
+        // !this.entity.isLeashed()`. The sitting-pose and leash halves are
+        // not checked here — this trait exposes no getter for either (only
+        // `set_in_sitting_pose`, a write-only pose sink, and no leash query
+        // at all) — so a leashed parrot may still be commanded to mount.
+        if self.sitting_on_shoulder {
+            return;
+        }
+        let Some(owner_pos) = mob.owner_position() else {
+            return;
+        };
+        // `this.entity.getBoundingBox().intersects(owner.getBoundingBox())`,
+        // narrowed to a plain proximity check — see this goal's own doc.
+        if distance_sqr(mob.position(), owner_pos) < 1.0 {
+            mob.request_shoulder_ride();
+            self.sitting_on_shoulder = true;
+        } else {
+            mob.move_to(owner_pos, 1.0);
+        }
+    }
+}
+
 /// Grazes: stands still, plays out an eat animation, and consumes the grass at
 /// or under the mob's feet.
 ///
@@ -1945,6 +2156,11 @@ mod tests {
         lying: bool,
         cat_sit: Option<Vec3>,
         cat_bed: Option<Vec3>,
+        owner: Option<Vec3>,
+        owner_sleep_ticks: Option<u32>,
+        gift_requested: u32,
+        shoulder_dismount_ticks: i32,
+        shoulder_ride_requested: u32,
     }
     impl MobController for ScriptMob {
         fn next_f32(&mut self) -> f32 {
@@ -2087,6 +2303,21 @@ mod tests {
         }
         fn cat_bed_target(&self) -> Option<Vec3> {
             self.cat_bed
+        }
+        fn owner_position(&self) -> Option<Vec3> {
+            self.owner
+        }
+        fn owner_sleep_ticks(&self) -> Option<u32> {
+            self.owner_sleep_ticks
+        }
+        fn request_gift(&mut self) {
+            self.gift_requested += 1;
+        }
+        fn ticks_since_shoulder_dismount(&self) -> i32 {
+            self.shoulder_dismount_ticks
+        }
+        fn request_shoulder_ride(&mut self) {
+            self.shoulder_ride_requested += 1;
         }
     }
 
@@ -2865,5 +3096,146 @@ mod tests {
             ..Default::default()
         };
         assert!(!ordered.can_use(&mut sitting_mob), "a cat ordered to sit must not chase a bed");
+    }
+
+    /// A tame, unsitting cat with a sleeping owner picks it up; an owner who
+    /// is awake, a cat that is sitting, or an untamed cat all refuse — the
+    /// four-way negative control `CatLieOnBedGoal`'s own test above uses.
+    #[test]
+    fn cat_relax_on_owner_requires_tame_not_sitting_and_a_sleeping_owner() {
+        let mut goal = CatRelaxOnOwnerGoal::new(1.1);
+        let mut ready = ScriptMob {
+            tame: true,
+            pos: Vec3::new(2.0, 64.0, 0.0),
+            owner: Some(Vec3::new(2.0, 64.0, 0.0)),
+            owner_sleep_ticks: Some(5),
+            ..Default::default()
+        };
+        assert!(goal.can_use(&mut ready), "a tame cat with a sleeping owner nearby must pick this up");
+
+        let mut awake = ScriptMob {
+            tame: true,
+            pos: Vec3::new(2.0, 64.0, 0.0),
+            owner: Some(Vec3::new(2.0, 64.0, 0.0)),
+            owner_sleep_ticks: None,
+            ..Default::default()
+        };
+        assert!(!CatRelaxOnOwnerGoal::new(1.1).can_use(&mut awake), "an awake owner must not be relaxed on");
+
+        let mut sitting_ordered = ScriptMob {
+            tame: true,
+            ordered_to_sit: true,
+            pos: Vec3::new(2.0, 64.0, 0.0),
+            owner: Some(Vec3::new(2.0, 64.0, 0.0)),
+            owner_sleep_ticks: Some(5),
+            ..Default::default()
+        };
+        assert!(
+            !CatRelaxOnOwnerGoal::new(1.1).can_use(&mut sitting_ordered),
+            "a cat ordered to sit must not go relax on its owner instead"
+        );
+
+        let mut wild = ScriptMob {
+            pos: Vec3::new(2.0, 64.0, 0.0),
+            owner: Some(Vec3::new(2.0, 64.0, 0.0)),
+            owner_sleep_ticks: Some(5),
+            ..Default::default()
+        };
+        assert!(!CatRelaxOnOwnerGoal::new(1.1).can_use(&mut wild), "an untamed cat has no owner to relax on");
+    }
+
+    /// The whole gift chain, driven end to end through the goal's own
+    /// lifecycle rather than by calling `stop()` directly: a cat that ticks
+    /// past the deep-sleep threshold while relaxing, then has the goal end
+    /// (the owner woke, so `can_continue_to_use` goes false and the caller
+    /// stops it), must have asked the host for a gift exactly once. A cat
+    /// whose owner never reaches the threshold must not.
+    #[test]
+    fn cat_relax_on_owner_requests_a_gift_only_after_the_deep_sleep_threshold() {
+        let mut deep = CatRelaxOnOwnerGoal::new(1.1);
+        let mut deep_mob = ScriptMob {
+            tame: true,
+            pos: Vec3::new(2.0, 64.0, 0.0),
+            owner: Some(Vec3::new(2.0, 64.0, 0.0)),
+            owner_sleep_ticks: Some(100),
+            ..Default::default()
+        };
+        assert!(deep.can_use(&mut deep_mob));
+        deep.start(&mut deep_mob);
+        deep.tick(&mut deep_mob);
+        // The owner wakes: `owner_sleep_ticks` goes back to `None`, ending the
+        // goal — but the deep-sleep tick was already observed.
+        deep_mob.owner_sleep_ticks = None;
+        assert!(!deep.can_continue_to_use(&mut deep_mob));
+        deep.stop(&mut deep_mob);
+        assert_eq!(deep_mob.gift_requested, 1, "a cat that saw deep sleep must request exactly one gift");
+
+        let mut shallow = CatRelaxOnOwnerGoal::new(1.1);
+        let mut shallow_mob = ScriptMob {
+            tame: true,
+            pos: Vec3::new(2.0, 64.0, 0.0),
+            owner: Some(Vec3::new(2.0, 64.0, 0.0)),
+            owner_sleep_ticks: Some(50),
+            ..Default::default()
+        };
+        assert!(shallow.can_use(&mut shallow_mob));
+        shallow.start(&mut shallow_mob);
+        shallow.tick(&mut shallow_mob);
+        shallow_mob.owner_sleep_ticks = None;
+        assert!(!shallow.can_continue_to_use(&mut shallow_mob));
+        shallow.stop(&mut shallow_mob);
+        assert_eq!(shallow_mob.gift_requested, 0, "a cat that never saw deep sleep must not request a gift");
+    }
+
+    /// A tame, unsitting parrot within range of its owner with an elapsed
+    /// ride cooldown lands on the shoulder — a real host request, not merely
+    /// arriving and standing there. A parrot still on cooldown refuses to
+    /// pick the goal up at all.
+    #[test]
+    fn land_on_owners_shoulder_mounts_once_close_and_off_cooldown() {
+        let mut goal = LandOnOwnersShoulderGoal::new();
+        let mut mob = ScriptMob {
+            tame: true,
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            owner: Some(Vec3::new(0.2, 64.0, 0.0)),
+            shoulder_dismount_ticks: 200,
+            ..Default::default()
+        };
+        assert!(goal.can_use(&mut mob), "an off-cooldown parrot near its owner must pick this goal up");
+        goal.start(&mut mob);
+        goal.tick(&mut mob);
+        assert_eq!(mob.shoulder_ride_requested, 1, "close enough must request the mount exactly once");
+        assert!(!goal.is_interruptable(), "once mounted the goal must refuse to be preempted");
+
+        let mut cooling_down = ScriptMob {
+            tame: true,
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            owner: Some(Vec3::new(0.2, 64.0, 0.0)),
+            shoulder_dismount_ticks: 10,
+            ..Default::default()
+        };
+        assert!(
+            !LandOnOwnersShoulderGoal::new().can_use(&mut cooling_down),
+            "a parrot still inside its 100-tick ride cooldown must not mount again"
+        );
+    }
+
+    /// A parrot far from its owner walks toward them instead of requesting a
+    /// mount — the goal's `tick` must not fire the intent from a distance.
+    #[test]
+    fn land_on_owners_shoulder_walks_first_when_far_away() {
+        let mut goal = LandOnOwnersShoulderGoal::new();
+        let mut mob = ScriptMob {
+            tame: true,
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            owner: Some(Vec3::new(10.0, 64.0, 0.0)),
+            shoulder_dismount_ticks: 200,
+            ..Default::default()
+        };
+        assert!(goal.can_use(&mut mob));
+        goal.start(&mut mob);
+        goal.tick(&mut mob);
+        assert_eq!(mob.shoulder_ride_requested, 0, "a distant parrot must walk, not mount");
+        assert_eq!(mob.move_calls, 1, "and it must actually command movement toward the owner");
     }
 }

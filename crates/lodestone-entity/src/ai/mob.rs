@@ -312,6 +312,63 @@ pub trait MobController {
         let _ = lying;
     }
 
+    /// How many consecutive ticks this mob's **owner** has been sleeping, or
+    /// `None` while the owner is awake (or unresolved) — vanilla
+    /// `Player.isSleeping()` plus `Player.getSleepTimer()`, read together
+    /// because [`Cat.CatRelaxOnOwnerGoal`](super::goals::CatRelaxOnOwnerGoal)
+    /// needs both: *whether* to walk to the owner at all, and later, at
+    /// `stop()`, whether `getSleepTimer() >= 100` (the host crate's own
+    /// deep-sleep threshold, `lodestone_server::sleep::DEEP_SLEEP_TICKS`) to
+    /// roll a morning gift. Folding the two into one `Option<u32>` avoids a
+    /// second method for what is really one fact sampled at two moments.
+    ///
+    /// Defaults to `None` — an untamed mob, an owner who is not resolvable,
+    /// or (the common case) an owner who is simply awake.
+    fn owner_sleep_ticks(&self) -> Option<u32> {
+        None
+    }
+
+    /// Records that this mob's relax-on-owner goal ended after the owner had
+    /// slept long enough to be woken by the deep-sleep threshold — vanilla
+    /// `Cat.CatRelaxOnOwnerGoal.stop`'s own gift roll
+    /// (`ownerPlayer.getSleepTimer() >= 100 && random.nextFloat() <
+    /// CAT_WAKING_UP_GIFT_CHANCE`).
+    ///
+    /// An **intent**, exactly like [`ate`](MobController::ate) and
+    /// [`damage_self`](MobController::damage_self): the RNG roll against the
+    /// day-time-keyed gift chance, the loot-table roll and the item spawn all
+    /// need a world and an item-entity registry this seam does not carry, so
+    /// the goal only records "ask the host to roll it" and the host resolves
+    /// the rest. Defaults to a no-op.
+    fn request_gift(&mut self) {}
+
+    /// Ticks since this mob last dismounted (or was created) — vanilla
+    /// `ShoulderRidingEntity.rideCooldownCounter`, which gates
+    /// `canSitOnShoulder()` (`> 100`) so a just-dismounted parrot cannot
+    /// re-mount the instant it lands. The host increments this once per tick
+    /// the same way it already tracks every other per-mob counter; a
+    /// controller that does not track it returns `i32::MAX`, the permissive
+    /// default (always eligible) rather than the restrictive one, matching
+    /// every other perception default on this trait that fails toward "the
+    /// goal simply never finds anything to do" rather than toward a false
+    /// negative on an unrelated species.
+    fn ticks_since_shoulder_dismount(&self) -> i32 {
+        i32::MAX
+    }
+
+    /// Records that this mob wants to land on its owner's shoulder —
+    /// vanilla `LandOnOwnersShoulderGoal.tick`'s
+    /// `this.entity.setEntityOnShoulder(owner)`.
+    ///
+    /// An **intent**: whether a shoulder slot is actually free, and the
+    /// mechanics of discarding this mob entity and attaching its identity to
+    /// the owner, all live on the host (`ShoulderRidingEntity.
+    /// setEntityOnShoulder` discards the entity and hands its saved NBT to
+    /// `ServerPlayer.setEntityOnShoulder`, the same shape
+    /// [`request_gift`](MobController::request_gift) already uses for an
+    /// effect this seam cannot perform itself). Defaults to a no-op.
+    fn request_shoulder_ride(&mut self) {}
+
     /// Whether this mob is part of an active pillager patrol — vanilla
     /// `PatrollingMonster.isPatrolling()`.
     ///

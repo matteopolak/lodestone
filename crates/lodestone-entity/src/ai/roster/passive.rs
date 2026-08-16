@@ -104,8 +104,9 @@
 
 use crate::ai::goal::Goal;
 use crate::ai::goals::{
-    AvoidEntityGoal, BreedGoal, CatLieOnBedGoal, CatSitOnBlockGoal, EatBlockGoal, FollowOwnerGoal,
-    FollowParentGoal, LookAtPlayerGoal, PanicGoal, RandomStrollGoal, TemptGoal,
+    AvoidEntityGoal, BreedGoal, CatLieOnBedGoal, CatRelaxOnOwnerGoal, CatSitOnBlockGoal,
+    EatBlockGoal, FollowOwnerGoal, FollowParentGoal, LandOnOwnersShoulderGoal, LookAtPlayerGoal,
+    PanicGoal, RandomStrollGoal, TemptGoal,
 };
 
 use super::{
@@ -320,11 +321,12 @@ pub const CAT: &[Registration] = &[
     Registration::goal(1, "FloatGoal", float_goal),
     Registration::goal(1, "TamableAnimal.TamableAnimalPanicGoal", cat_panic_1_5),
     Registration::goal(2, "SitWhenOrderedToGoal", sit_when_ordered),
-    // `Cat.CatRelaxOnOwnerGoal` — lies down near a seated owner and
-    // purrs, occasionally gifting an item. No goal type here models it: it
-    // needs "is my owner sitting/sleeping nearby" plus an item-gift side
-    // effect, neither of which any existing goal carries.
-    Registration::missing(Selector::Goal, 3, "Cat.CatRelaxOnOwnerGoal"),
+    // `Cat.CatRelaxOnOwnerGoal` — lies down near a sleeping owner and may
+    // leave a morning gift on waking. `Coverage::Modelled` now (issue #229) —
+    // see [`CatRelaxOnOwnerGoal`]'s own doc for the disclosed simplifications
+    // (bed-foot position, same-species exclusion, and the host-side gift
+    // roll).
+    Registration::goal(3, "Cat.CatRelaxOnOwnerGoal", cat_relax_on_owner),
     // `this.temptGoal = new Cat.CatTemptGoal(this, 0.6, i -> i.is(ItemTags.CAT_FOOD), true)`,
     // added at priority 4. The `canScare` third argument
     // (fleeing a sudden nearby sprinting player) is not modelled — our
@@ -391,10 +393,14 @@ pub const PARROT: &[Registration] = &[
     // seam has no equivalent search for (same class of gap `Bee.BeeWanderGoal`
     // is `Missing` for in the neutral family).
     Registration::missing(Selector::Goal, 2, "Parrot.ParrotWanderGoal"),
-    // `LandOnOwnersShoulderGoal(this)` — shoulder riding. No component
-    // here models a mob perching on a player, let alone the client-visible
-    // pose that would require.
-    Registration::missing(Selector::Goal, 3, "LandOnOwnersShoulderGoal"),
+    // `LandOnOwnersShoulderGoal(this)` — shoulder riding. `Coverage::Modelled`
+    // now (issue #229): see [`LandOnOwnersShoulderGoal`]'s own doc for the
+    // disclosed owner-physical-state simplifications. Landing despawns the
+    // parrot mob entity on the host side (vanilla discards it too — see
+    // `ShoulderRidingEntity.setEntityOnShoulder`); no client-visible perched
+    // pose is rendered, since that is a player-model render layer this
+    // crate's seam has no way to reach.
+    Registration::goal(3, "LandOnOwnersShoulderGoal", parrot_land_on_shoulder),
     // `FollowMobGoal(this, 1.0, 3.0F, 7.0F)` — a tame, non-sitting
     // parrot follows the nearest *other mob* it can imitate. No goal type here
     // models following an arbitrary nearby mob rather than the owner.
@@ -548,6 +554,15 @@ fn cat_lie_on_bed_1_1(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(CatLieOnBedGoal::new(ctx.speed * 1.1))
 }
 
+/// `new Cat.CatRelaxOnOwnerGoal(this)` — cat (`Cat.registerGoals`). No
+/// constructor speed argument in the jar (the goal's own `moveTo` calls
+/// hardcode `1.1F`); `ctx.speed` still scales it, matching every other
+/// builder here, since `1.1F` is itself a `speedModifier` multiplier on the
+/// mob's own movement-speed attribute, not a literal blocks/tick figure.
+fn cat_relax_on_owner(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(CatRelaxOnOwnerGoal::new(ctx.speed * 1.1))
+}
+
 /// `WaterAvoidingRandomStrollGoal(this, 0.8, 1.0000001E-5F)` — cat
 /// (`Cat.registerGoals`). The probability argument is the reciprocal
 /// of [`RandomStrollGoal::with_interval`]'s tick count: `1 / 1.0000001E-5 ≈
@@ -570,6 +585,12 @@ fn parrot_panic_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// tameable set — a parrot stays close.
 fn parrot_follow_owner(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(FollowOwnerGoal::new(ctx.speed, 5.0, 1.0))
+}
+
+/// `new LandOnOwnersShoulderGoal(this)` — parrot (`Parrot.registerGoals`). No
+/// constructor arguments in the jar at all.
+fn parrot_land_on_shoulder(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(LandOnOwnersShoulderGoal::new())
 }
 
 #[cfg(test)]

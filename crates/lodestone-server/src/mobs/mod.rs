@@ -775,6 +775,24 @@ pub enum MobOwner {
     Player(Uuid),
 }
 
+/// A parrot (or, in principle, any [`LandOnOwnersShoulderGoal`]-carrying
+/// species) currently riding a shoulder — [`MobSim::shoulder_riders`]' value
+/// type. Vanilla persists the whole entity's NBT
+/// (`ShoulderRidingEntity.setEntityOnShoulder`'s `saveWithoutId`); this keeps
+/// only what [`MobSim::tick_shoulder_dismounts`] needs to respawn something
+/// recognisable — a disclosed loss of the original's variant/health/name.
+///
+/// [`LandOnOwnersShoulderGoal`]: lodestone_entity::ai::goals::LandOnOwnersShoulderGoal
+#[derive(Debug, Clone)]
+struct ShoulderRider {
+    /// What to respawn on dismount.
+    entity_type: ResourceKey,
+    /// The game tick this mob mounted — `ServerPlayer.timeEntitySatOnShoulder`,
+    /// gating the 20-tick minimum ride vanilla's `removeEntitiesOnShoulder`
+    /// enforces before a dismount condition can actually take effect.
+    mounted_tick: u64,
+}
+
 /// What a lead is tied to — vanilla `Leashable.LeashData.leashHolder`, which
 /// is any `Entity` (a player, another leashable mob, or a
 /// `LeashFenceKnotEntity`). This sim has no non-living decoration-entity
@@ -1255,6 +1273,14 @@ pub struct SimMob<'w> {
     /// reason: a bounded terrain scan every tick for every cat is not free.
     /// Only meaningful for `minecraft:cat`.
     cat_search_cooldown: i32,
+    /// Ticks since this mob last dismounted a shoulder ride (or was spawned)
+    /// — vanilla `ShoulderRidingEntity.rideCooldownCounter`, incremented once
+    /// per tick alongside [`no_action_time`](Self::no_action_time) and fed to
+    /// [`MobController::ticks_since_shoulder_dismount`]. Only meaningful for
+    /// `minecraft:parrot`; a species that never mounts a shoulder simply
+    /// never has [`LandOnOwnersShoulderGoal`](lodestone_entity::ai::goals::LandOnOwnersShoulderGoal)
+    /// read it.
+    shoulder_dismount_ticks: i32,
     /// The bed this villager has claimed as `PoiTypes.HOME`, if any — `None`
     /// for an unclaimed villager or a non-villager. Cleared alongside a
     /// ticket release when [`MobSim::tick_villager_beds`] finds the claim
@@ -1559,6 +1585,15 @@ impl<'w> SimMob<'w> {
     /// does both, and is what a taming interaction should use.
     pub fn set_owner(&mut self, owner: Option<MobOwner>) -> &mut Self {
         self.owner = owner;
+        self
+    }
+
+    /// Resets this mob's own [`shoulder_dismount_ticks`](Self::shoulder_dismount_ticks)
+    /// counter — called with `0` the tick a dismounted parrot respawns, the
+    /// same way vanilla's `rideCooldownCounter` starts at `0` on a fresh
+    /// entity.
+    pub fn set_shoulder_dismount_ticks(&mut self, ticks: i32) -> &mut Self {
+        self.shoulder_dismount_ticks = ticks;
         self
     }
 
@@ -2565,6 +2600,29 @@ pub struct MobSim<'w> {
     /// see [`set_players`](Self::set_players) for why that made two of the
     /// eight perception methods unreachable, and which one line closes it.
     players: Vec<PerceivedPlayer>,
+    /// Raw `(player entity id, game tick they lay down)` pairs for every
+    /// currently sleeping player — issue #229's feed for
+    /// `CatRelaxOnOwnerGoal`/shoulder-ride dismount. Fed once per tick by
+    /// [`set_sleeping_players`](Self::set_sleeping_players) from
+    /// `crate::sleep::SleepState`'s own roster, which is keyed by entity id
+    /// (the same id [`PlayerIdentity::entity_id`] carries) rather than by
+    /// uuid — this sim resolves the join against
+    /// [`players`](Self::players)' own identities at the point of use
+    /// (`feed_perception`'s owner census, and
+    /// [`tick_shoulder_dismounts`](Self::tick_shoulder_dismounts)) rather
+    /// than pre-joining here, so a sim with no player registry (the common
+    /// singleplayer shape) still compiles and simply never resolves anyone
+    /// asleep.
+    sleeping_players: Vec<(i32, u64)>,
+    /// One tamed mob currently perched on its owner's shoulder, keyed by
+    /// owner uuid — issue #229's shoulder-riding state. **One slot per
+    /// owner**, not vanilla's two (left/right); see
+    /// [`resolve_shoulder_mounts`](Self::resolve_shoulder_mounts)'s own doc
+    /// for what that costs. The mob entity itself no longer exists in
+    /// [`mobs`](Self::mobs) while it holds this slot — only its type and the
+    /// tick it mounted survive, enough to respawn it in
+    /// [`tick_shoulder_dismounts`](Self::tick_shoulder_dismounts).
+    shoulder_riders: HashMap<Uuid, ShoulderRider>,
     /// The `nextInt(3)` / `nextInt(10)` / `nextInt(maxTemper)` draws the taming
     /// mechanisms make, on their own stream so a tame attempt cannot shift which
     /// roll a mob spawn, a despawn pass or an XP award sees — the same isolation
@@ -3124,6 +3182,8 @@ impl<'w> MobSim<'w> {
             pending_ambient_sounds: Vec::new(),
             pending_animations: Vec::new(),
             players: Vec::new(),
+            sleeping_players: Vec::new(),
+            shoulder_riders: HashMap::new(),
             tame_rng: SpawnRng::new(TAME_ROLL_SEED),
             zombie_conversion_rng: SpawnRng::new(ZOMBIE_VILLAGER_CONVERSION_SEED),
             gossip_spread_rng: SpawnRng::new(GOSSIP_SPREAD_SEED),
@@ -3340,6 +3400,17 @@ impl<'w> MobSim<'w> {
         &self.players
     }
 
+    /// Refreshes the sleeping-player roster — see
+    /// [`sleeping_players`](Self::sleeping_players)'s own field doc. The
+    /// world tick loop calls this once per tick with
+    /// `crate::sleep::SleepState`'s own `(entity id, lay-down tick)` pairs,
+    /// the same shared-state join [`set_players`](Self::set_players) already
+    /// performs for position.
+    pub fn set_sleeping_players(&mut self, sleepers: Vec<(i32, u64)>) -> &mut Self {
+        self.sleeping_players = sleepers;
+        self
+    }
+
     /// The position of the player with this identity's uuid, if they are in the
     /// current player list — the resolution vanilla's
     /// `EntityReference.get(…, ServerLevel, …)` performs for
@@ -3491,6 +3562,7 @@ impl<'w> MobSim<'w> {
             villager_xp: 0,
             job_search_cooldown: 0,
             cat_search_cooldown: 0,
+            shoulder_dismount_ticks: 0,
             bed: None,
             bed_search_cooldown: 0,
             meeting_point: None,
@@ -4451,6 +4523,10 @@ impl<'w> MobSim<'w> {
                 m.no_action_time = 0;
             }
             m.no_action_time = m.no_action_time.saturating_add(1);
+            // `ShoulderRidingEntity.tick`'s own unconditional
+            // `rideCooldownCounter++`, mirrored the same way `no_action_time`
+            // is above.
+            m.shoulder_dismount_ticks = m.shoulder_dismount_ticks.saturating_add(1);
         }
         self.feed_perception();
 
@@ -4491,6 +4567,13 @@ impl<'w> MobSim<'w> {
         // `piglin_alert_ticks`'s own doc comment for the mechanism and the
         // disclosed target-position approximation.
         let mut piglin_alerts: Vec<(Vec3, Vec3)> = Vec::new();
+        // Issue #229: `Cat.CatRelaxOnOwnerGoal.stop`'s morning-gift request,
+        // and `LandOnOwnersShoulderGoal.tick`'s shoulder-mount request — both
+        // drained per mob the same way `bred`/`grazes` are (own mob id, since
+        // resolving either needs a second look at `self.mobs`/`self.players`
+        // after the per-mob loop releases its borrow).
+        let mut gift_requests: Vec<i32> = Vec::new();
+        let mut shoulder_requests: Vec<i32> = Vec::new();
         let tick_count = self.tick_count;
         // The disconnect self-heal for a mounted mob — the mob twin of
         // `tick_vehicles`' identical guard for a boat (see that comment for
@@ -4607,6 +4690,13 @@ impl<'w> MobSim<'w> {
             // `7bf2873` explicitly deferred to here.
             if m.mob.take_bred() {
                 bred.push((m.id, m.position(), m.entity_type().clone()));
+            }
+            // Issue #229: same one-shot-flag drain shape as `take_bred` above.
+            if m.mob.take_gift_requested() {
+                gift_requests.push(m.id);
+            }
+            if m.mob.take_shoulder_ride_requested() {
+                shoulder_requests.push(m.id);
             }
             // Issue #456. The goal records *that* a block was eaten and which of
             // the two positions it was; it cannot mutate the world, because this
@@ -4822,6 +4912,11 @@ impl<'w> MobSim<'w> {
         }
         self.reap_dead();
         self.resolve_breeding(bred);
+        // Issue #229: the cat morning-gift roll/spawn and the parrot
+        // shoulder-mount request, both drained above alongside `bred`.
+        self.resolve_cat_gifts(gift_requests);
+        self.resolve_shoulder_mounts(shoulder_requests);
+        self.tick_shoulder_dismounts();
 
         // Issue #213: `explode`'s exposure/damage maths was already correct
         // and already unit-tested, but had zero production callers anywhere
@@ -5183,6 +5278,13 @@ impl<'w> MobSim<'w> {
         let mut patrol_group = vec![None; n];
         let mut stared_at = vec![false; n];
         let mut nearby_entities: Vec<Vec<NearbyBrainEntity>> = vec![Vec::new(); n];
+        // Issue #229: how long each mob's owner has been asleep, fed to
+        // `CatRelaxOnOwnerGoal` — see the per-mob computation below for the
+        // uuid/entity-id join.
+        let mut owner_sleep_ticks: Vec<Option<u32>> = vec![None; n];
+        // Issue #231: the nearest visible zombified piglin, fed to a
+        // piglin's `AVOID` brain activity.
+        let mut nearest_visible_zombified = vec![None; n];
 
         // --- persistent anger (issue #458, primitive 1) --------------------
         //
@@ -5327,8 +5429,44 @@ impl<'w> MobSim<'w> {
                 }
                 Some(MobOwner::Player(uuid)) => {
                     owner[i] = self.player_position(uuid);
+                    // Issue #229: how long that same player has been asleep,
+                    // joined through `self.players`' own uuid<->entity_id
+                    // pairing (`PlayerIdentity`) against
+                    // `self.sleeping_players`' entity-id-keyed roster — see
+                    // `sleeping_players`'s own field doc for why the join
+                    // happens here rather than the sleep roster carrying
+                    // uuids itself.
+                    if let Some(entity_id) = self
+                        .players
+                        .iter()
+                        .find_map(|p| p.identity.filter(|id| id.uuid == uuid).map(|id| id.entity_id))
+                    {
+                        owner_sleep_ticks[i] = self
+                            .sleeping_players
+                            .iter()
+                            .find(|&&(id, _)| id == entity_id)
+                            .map(|&(_, since)| self.tick_count.saturating_sub(since) as u32);
+                    }
                 }
                 None => {}
+            }
+
+            // --- nearest visible zombified piglin (issue #231) -------------
+            // A piglin's `AVOID` brain activity. No range cut lives on the
+            // mob in the jar (`PiglinSpecificSensor` reads whatever
+            // `NEAREST_VISIBLE_LIVING_ENTITIES` already gathered), so this
+            // reuses the same generous scan box `nearby_entities` above uses
+            // for brain species, restricted to `zombified_piglin` and gated
+            // on species the same way `threat[i]`/`temptation[i]` already
+            // gate on a non-empty predicate table.
+            if species == "piglin" {
+                nearest_visible_zombified[i] = nearest_by(
+                    &self.mobs,
+                    pos,
+                    SimMob::position,
+                    |other| other.id != me.id && other.entity_type().path() == "zombified_piglin",
+                    Some((NEARBY_HOSTILE_SCAN_RANGE, NEARBY_HOSTILE_SCAN_RANGE_Y)),
+                );
             }
 
             // --- patrol group target ---------------------------------------
@@ -5410,6 +5548,9 @@ impl<'w> MobSim<'w> {
             // Not folded into the chain below: `set_tame`/`set_ordered_to_sit`
             // read `m`'s own record while the chain holds `m.mob` mutably.
             let (tame, ordered_to_sit) = (m.tame, m.ordered_to_sit);
+            // Issue #229: same reason as `tame`/`ordered_to_sit` above — read
+            // before `m.mob` is borrowed mutably by the chain below.
+            let shoulder_dismount_ticks = m.shoulder_dismount_ticks;
             m.mob.set_tame(tame).set_ordered_to_sit(ordered_to_sit);
             // Issue #231: the villager POI-claim feed
             // (`crate::brain::VillagerPoiSensor`'s own source), read before
@@ -5439,6 +5580,9 @@ impl<'w> MobSim<'w> {
                 .set_job_site(job_site)
                 .set_home(home)
                 .set_meeting_point(meeting_point)
+                .set_owner_sleep_ticks(owner_sleep_ticks[i])
+                .set_nearest_visible_zombified(nearest_visible_zombified[i])
+                .set_ticks_since_shoulder_dismount(shoulder_dismount_ticks)
                 .set_day_time(day_time);
         }
     }
@@ -7467,6 +7611,174 @@ impl<'w> MobSim<'w> {
                     lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE,
                 ),
             );
+        }
+    }
+
+    /// `EnvironmentAttributes.CAT_WAKING_UP_GIFT_CHANCE` at `day_time` —
+    /// hand-transcribed from its one modifier track
+    /// (`Timelines.java`'s `CAT_WAKING_UP_GIFT_CHANCE` row: `FloatModifier.MAXIMUM`,
+    /// `EasingType.CONSTANT`, keyframes `0.0F` at tick 362 and `0.7F` at tick
+    /// 23667 within the 24000-tick day cycle) rather than read from a general
+    /// timeline engine — this crate has no `EnvironmentAttributes`/timeline
+    /// reader at all, the same disclosed gap
+    /// [`natural_spawn::surface_slime_spawn_chance`](crate::natural_spawn)'s own
+    /// doc names for the moon-phase slime chance, and building one for a
+    /// single step function would be out of proportion to what it buys.
+    ///
+    /// A `CONSTANT` easing is a step function: the attribute holds `0.0` from
+    /// tick 362 up to (not including) 23667, and `0.7` from 23667 wrapping
+    /// through midnight back to 362 — so a cat's gift only has a real chance
+    /// to land in the pre-dawn stretch of the night, which is when a player
+    /// who slept through to morning actually wakes.
+    fn cat_gift_chance(day_time: i32) -> f32 {
+        let t = day_time.rem_euclid(24_000);
+        if !(362..23_667).contains(&t) { 0.7 } else { 0.0 }
+    }
+
+    /// Resolves every [`Cat.CatRelaxOnOwnerGoal`]-driven gift request
+    /// recorded this tick (issue #229): rolls [`Self::cat_gift_chance`] at
+    /// the current [`MobSim::day_time`], and on success rolls
+    /// `gameplay/cat_morning_gift` and spawns the result at the cat's own
+    /// position — the same loot-table-then-`spawn_item` shape
+    /// [`drop_death_loot`](Self::drop_death_loot) already uses.
+    ///
+    /// [`Cat.CatRelaxOnOwnerGoal`]: lodestone_entity::ai::goals::CatRelaxOnOwnerGoal
+    ///
+    /// **Disclosed simplification**: no `randomTeleport` hop before the
+    /// drop — vanilla relocates the cat to a random point within roughly five
+    /// blocks of the owner (or its leash holder) first; this spawns the item
+    /// at the cat's current position instead, which
+    /// [`CatRelaxOnOwnerGoal`](lodestone_entity::ai::goals::CatRelaxOnOwnerGoal)'s
+    /// own goal already parked next to the sleeping owner.
+    fn resolve_cat_gifts(&mut self, gift_requests: Vec<i32>) {
+        if gift_requests.is_empty() {
+            return;
+        }
+        let chance = Self::cat_gift_chance(self.day_time);
+        let table = ResourceKey::new("minecraft", "gameplay/cat_morning_gift")
+            .expect("a static loot-table key parses");
+        let tables = crate::block_drops::bundled_tables();
+        for id in gift_requests {
+            let Some(pos) = self.get(id).map(SimMob::position) else {
+                continue;
+            };
+            let mut rng = SpawnRng::new(
+                (self.tick_count as u64)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    ^ (pos.x.to_bits() ^ pos.z.to_bits().rotate_left(31))
+                    ^ (id as u64),
+            );
+            if rng.next_f32() >= chance {
+                continue;
+            }
+            let rolled = tables.roll(&table, &crate::loot::LootContext::default(), &mut rng);
+            for stack in rolled {
+                if stack.count == 0 {
+                    continue;
+                }
+                let velocity = crate::block_drops::dropped_item_velocity(&mut rng);
+                let count = u8::try_from(stack.count).unwrap_or(u8::MAX);
+                self.spawn_item(
+                    stack.item.clone(),
+                    pos,
+                    velocity,
+                    ItemLifecycle::newly_dropped(
+                        count,
+                        lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE,
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Resolves every [`LandOnOwnersShoulderGoal`]-driven mount request
+    /// recorded this tick (issue #229): vanilla `ShoulderRidingEntity
+    /// .setEntityOnShoulder` discards the mob entity and hands its saved NBT
+    /// to `ServerPlayer.setEntityOnShoulder`. This crate has no per-player
+    /// NBT inventory to hand it to, so [`SimMob::owner`] resolved to a uuid
+    /// plus [`self.shoulder_riders`](Self::shoulder_riders) — one slot per
+    /// owner rather than vanilla's two (left/right) — is the stand-in: the
+    /// parrot mob is removed the same way [`Self::despawn_pass`] removes any
+    /// other mob, and [`Self::tick_shoulder_dismounts`] is what brings it
+    /// back.
+    ///
+    /// [`LandOnOwnersShoulderGoal`]: lodestone_entity::ai::goals::LandOnOwnersShoulderGoal
+    fn resolve_shoulder_mounts(&mut self, shoulder_requests: Vec<i32>) {
+        for id in shoulder_requests {
+            let Some(m) = self.get(id) else { continue };
+            let Some(MobOwner::Player(uuid)) = m.owner else {
+                continue;
+            };
+            if self.shoulder_riders.contains_key(&uuid) {
+                // A slot is already taken — vanilla tries the second
+                // shoulder here; this crate models one slot per owner (see
+                // this method's own doc), so a second parrot simply fails to
+                // mount and stays in the world, exactly as a vanilla parrot
+                // does once both shoulders are full.
+                continue;
+            }
+            self.shoulder_riders.insert(
+                uuid,
+                ShoulderRider {
+                    entity_type: m.entity_type().clone(),
+                    mounted_tick: self.tick_count,
+                },
+            );
+            self.mobs.retain(|m| m.id != id);
+        }
+    }
+
+    /// Dismounts every shoulder rider whose owner meets a dismount condition,
+    /// respawning the mob at the owner's position — vanilla
+    /// `ServerPlayer.removeEntitiesOnShoulder`/`respawnEntityOnShoulder`,
+    /// gated the same way on `timeEntitySatOnShoulder + 20 <
+    /// gameTime` so a parrot cannot fall off the instant it lands.
+    ///
+    /// **Disclosed simplification**: vanilla's `handleShoulderEntities` fires
+    /// on five conditions (`fallDistance > 0.5`, in water, flying, sleeping,
+    /// in powder snow) — this models only **sleeping**, because it is the
+    /// only one of the five this sim already tracks for an owner
+    /// ([`Self::sleeping_players`], built for [`Self::resolve_cat_gifts`]'s
+    /// own owner-sleep feed). The other four need per-player physical state
+    /// (fall distance, ability flags, block-at-feet) this crate's player
+    /// census does not carry.
+    fn tick_shoulder_dismounts(&mut self) {
+        if self.shoulder_riders.is_empty() {
+            return;
+        }
+        let sleeping: std::collections::HashSet<i32> =
+            self.sleeping_players.iter().map(|&(id, _)| id).collect();
+        let sleeping_owners: Vec<Uuid> = self
+            .players
+            .iter()
+            .filter_map(|p| {
+                let identity = p.identity?;
+                sleeping.contains(&identity.entity_id).then_some(identity.uuid)
+            })
+            .collect();
+        let tick_count = self.tick_count;
+        let mut to_dismount = Vec::new();
+        for (&uuid, rider) in &self.shoulder_riders {
+            if tick_count < rider.mounted_tick + 20 {
+                continue;
+            }
+            if sleeping_owners.contains(&uuid) {
+                to_dismount.push(uuid);
+            }
+        }
+        for uuid in to_dismount {
+            let Some(rider) = self.shoulder_riders.remove(&uuid) else {
+                continue;
+            };
+            let Some(owner_pos) = self.player_position(uuid) else {
+                // Owner disconnected while carrying the parrot — drop the
+                // rider entirely rather than respawn it at a stale position;
+                // there is no live position to respawn at.
+                continue;
+            };
+            self.spawn_species(rider.entity_type, owner_pos)
+                .tame(MobOwner::Player(uuid))
+                .set_shoulder_dismount_ticks(0);
         }
     }
 
@@ -11009,6 +11321,192 @@ mod golem_summon_tests {
         sim.tick();
 
         assert_eq!(iron_golem_count(&sim), 1, "a nearby hostile alone must be enough to summon, with no villager hurt");
+    }
+}
+
+/// Issue #229: the cat morning-gift and parrot shoulder-ride host wiring —
+/// driven through one real [`MobSim::tick`], not by calling the resolver
+/// methods directly, so this measures the drain-and-resolve production path
+/// (`take_gift_requested`/`take_shoulder_ride_requested` → `gift_requests`/
+/// `shoulder_requests` → `resolve_cat_gifts`/`resolve_shoulder_mounts`), the
+/// exact seam CLAUDE.md's island warnings are about: a goal that requests
+/// and a host that never drains the request is zero pixels either way.
+#[cfg(test)]
+mod cat_gift_and_shoulder_tests {
+    use super::*;
+
+    fn flat_world() -> ChunkWorld {
+        ChunkWorld::new(-64, 384)
+    }
+
+    fn cat_key() -> ResourceKey {
+        "minecraft:cat".parse().expect("valid key")
+    }
+
+    fn parrot_key() -> ResourceKey {
+        "minecraft:parrot".parse().expect("valid key")
+    }
+
+    /// `cat_gift_chance`'s two-keyframe step function, pinned against both
+    /// hypotheses a rounding-off reading could produce: inside the
+    /// pre-dawn window (`[23667, 24000)` and `[0, 362)`, wrapping) the
+    /// chance is vanilla's own `0.7F`; everywhere else it is a hard `0.0`,
+    /// not merely "lower".
+    #[test]
+    fn cat_gift_chance_matches_the_timeline_step_function() {
+        assert_eq!(MobSim::cat_gift_chance(0), 0.7, "the very start of a day is still inside the wrapped window");
+        assert_eq!(MobSim::cat_gift_chance(361), 0.7, "one tick before the low keyframe");
+        assert_eq!(MobSim::cat_gift_chance(362), 0.0, "the low keyframe itself");
+        assert_eq!(MobSim::cat_gift_chance(12_000), 0.0, "the middle of the day");
+        assert_eq!(MobSim::cat_gift_chance(23_666), 0.0, "one tick before the high keyframe");
+        assert_eq!(MobSim::cat_gift_chance(23_667), 0.7, "the high keyframe itself");
+        assert_eq!(MobSim::cat_gift_chance(23_999), 0.7, "the last tick before wrapping");
+        assert_eq!(
+            MobSim::cat_gift_chance(24_000 + 12_000),
+            0.0,
+            "a second day's middle must read the same as the first's"
+        );
+    }
+
+    /// A cat's [`MobController::request_gift`] call, drained through one real
+    /// `MobSim::tick`, must reach an actual item entity when the gift chance
+    /// is favourable — proving the production drain (`gift_requests` →
+    /// `resolve_cat_gifts`), not merely that the resolver function works when
+    /// called directly. Forty cats rather than one: at chance `0.7` the
+    /// probability every single one fails is `0.3^40`, indistinguishable
+    /// from zero, so this is not a flaky roll of the dice — it is the
+    /// deterministic-in-practice discriminator against a wiring break that
+    /// would make it fail **every** time instead.
+    #[test]
+    fn a_cats_gift_request_reaches_a_real_item_through_one_production_tick() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        sim.day_time = 23_800; // inside the 0.7 window
+        for i in 0..40 {
+            let id = sim.spawn_species(cat_key(), Vec3::new(f64::from(i) * 8.0, 64.0, 0.0)).id();
+            sim.get_mut(id).expect("just spawned").mob.request_gift();
+        }
+        assert_eq!(sim.item_count(), 0, "no item exists before the tick that drains the request");
+        sim.tick();
+        assert!(
+            sim.item_count() > 0,
+            "at a 0.7 gift chance across 40 requests, at least one real item entity must exist \
+             after one production tick"
+        );
+    }
+
+    /// The deterministic negative control for the same chain: outside the
+    /// gift window the chance is a **hard** `0.0` (not merely lower), so no
+    /// request — however many — can ever produce an item. This is what
+    /// separates "the wiring reaches the resolver" from "the resolver always
+    /// spawns something regardless of the roll".
+    #[test]
+    fn a_cats_gift_request_never_lands_outside_the_gift_window() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        sim.day_time = 12_000; // dead centre of the 0.0 window
+        for i in 0..40 {
+            let id = sim.spawn_species(cat_key(), Vec3::new(f64::from(i) * 8.0, 64.0, 0.0)).id();
+            sim.get_mut(id).expect("just spawned").mob.request_gift();
+        }
+        sim.tick();
+        assert_eq!(sim.item_count(), 0, "a 0.0 gift chance must never spawn an item, however many cats request one");
+    }
+
+    /// A parrot's [`MobController::request_shoulder_ride`] call, drained
+    /// through one real tick, removes the mob from the world and records a
+    /// shoulder rider for its owner — the mount half. Then, once the owner
+    /// is reported asleep and the 20-tick minimum ride has elapsed, the next
+    /// several ticks must dismount it: the parrot reappears as a real mob
+    /// again and the shoulder-rider slot clears. Both halves driven through
+    /// production `MobSim::tick`, not through `resolve_shoulder_mounts`/
+    /// `tick_shoulder_dismounts` called directly.
+    #[test]
+    fn a_parrots_shoulder_request_despawns_it_and_a_sleeping_owner_dismounts_it_back() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let owner_uuid = Uuid::new_v4();
+        let owner_entity_id = 500;
+        sim.set_players(vec![PerceivedPlayer {
+            identity: Some(PlayerIdentity {
+                uuid: owner_uuid,
+                entity_id: owner_entity_id,
+            }),
+            perception: PlayerPerception {
+                position: Vec3::new(0.0, 64.0, 0.0),
+                held_item: None,
+                view_direction: Vec3::new(0.0, 0.0, 1.0),
+            },
+        }]);
+        let id = sim.spawn_species(parrot_key(), Vec3::new(0.0, 64.0, 0.0)).id();
+        sim.get_mut(id).expect("just spawned").tame(MobOwner::Player(owner_uuid));
+        sim.get_mut(id).expect("just spawned").mob.request_shoulder_ride();
+
+        sim.tick();
+
+        assert_eq!(
+            sim.mobs.iter().filter(|m| m.entity_type.path() == "parrot").count(),
+            0,
+            "a mounted parrot must be removed from the world, matching vanilla's own \
+             ShoulderRidingEntity.setEntityOnShoulder discard"
+        );
+        assert_eq!(sim.shoulder_riders.len(), 1, "the mount must be recorded for its owner");
+
+        // The owner falls asleep. The dismount is gated on the 20-tick
+        // minimum ride (`ServerPlayer.timeEntitySatOnShoulder + 20`), so this
+        // must run well past that before asserting.
+        let since = sim.tick_count;
+        sim.set_sleeping_players(vec![(owner_entity_id, since)]);
+        for _ in 0..30 {
+            sim.tick();
+        }
+
+        assert_eq!(
+            sim.mobs.iter().filter(|m| m.entity_type.path() == "parrot").count(),
+            1,
+            "a sleeping owner past the ride-cooldown grace period must dismount and respawn the parrot"
+        );
+        assert!(sim.shoulder_riders.is_empty(), "the shoulder slot must clear on dismount");
+    }
+
+    /// The 20-tick minimum-ride grace period, isolated: an owner reported
+    /// asleep on the *same* tick the parrot mounts must not dismount it
+    /// immediately — vanilla's own `timeEntitySatOnShoulder + 20 <
+    /// gameTime` guard.
+    #[test]
+    fn a_freshly_mounted_parrot_does_not_dismount_before_the_grace_period() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let owner_uuid = Uuid::new_v4();
+        let owner_entity_id = 501;
+        sim.set_players(vec![PerceivedPlayer {
+            identity: Some(PlayerIdentity {
+                uuid: owner_uuid,
+                entity_id: owner_entity_id,
+            }),
+            perception: PlayerPerception {
+                position: Vec3::new(0.0, 64.0, 0.0),
+                held_item: None,
+                view_direction: Vec3::new(0.0, 0.0, 1.0),
+            },
+        }]);
+        let id = sim.spawn_species(parrot_key(), Vec3::new(0.0, 64.0, 0.0)).id();
+        sim.get_mut(id).expect("just spawned").tame(MobOwner::Player(owner_uuid));
+        sim.get_mut(id).expect("just spawned").mob.request_shoulder_ride();
+        sim.tick();
+        assert_eq!(sim.shoulder_riders.len(), 1);
+
+        let since = sim.tick_count;
+        sim.set_sleeping_players(vec![(owner_entity_id, since)]);
+        // Well under the 20-tick grace period.
+        for _ in 0..5 {
+            sim.tick();
+        }
+        assert_eq!(
+            sim.shoulder_riders.len(),
+            1,
+            "a parrot inside its 20-tick minimum ride must not dismount just because the owner sleeps"
+        );
     }
 }
 
