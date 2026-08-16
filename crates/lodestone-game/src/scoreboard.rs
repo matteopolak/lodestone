@@ -328,11 +328,6 @@ impl Scoreboard {
         self.objectives.get(name)
     }
 
-    /// Number of objectives.
-    #[must_use]
-    pub fn objective_count(&self) -> usize {
-        self.objectives.len()
-    }
 
     // --- scores ---
 

@@ -118,24 +118,6 @@ impl DebugFeedStore {
         Self::default()
     }
 
-    /// Per-block values, keyed by `(subscription, (x, y, z))`.
-    #[must_use]
-    pub fn block_values(&self) -> &BTreeMap<(Identifier, (i32, i32, i32)), Vec<u8>> {
-        &self.block_values
-    }
-
-    /// Per-chunk values, keyed by `(subscription, (x, z))`.
-    #[must_use]
-    pub fn chunk_values(&self) -> &BTreeMap<(Identifier, (i32, i32)), Vec<u8>> {
-        &self.chunk_values
-    }
-
-    /// Per-entity values, keyed by `(subscription, entity id)`.
-    #[must_use]
-    pub fn entity_values(&self) -> &BTreeMap<(Identifier, i32), Vec<u8>> {
-        &self.entity_values
-    }
-
     /// The retained debug events, oldest first.
     #[must_use]
     pub fn events(&self) -> impl Iterator<Item = &DebugFeedEvent> {

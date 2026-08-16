@@ -1220,17 +1220,11 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
 /// These centralise the "empty is `None`" convention so the container and click
 /// code never open-code `count == 0` checks.
 pub trait SlotStack {
-    /// Returns the count, treating `None` as zero.
-    fn stack_count(&self) -> i32;
     /// Returns whether the slot is empty.
     fn is_empty(&self) -> bool;
 }
 
 impl SlotStack for Option<ItemStack> {
-    fn stack_count(&self) -> i32 {
-        self.as_ref().map_or(0, ItemStack::count)
-    }
-
     fn is_empty(&self) -> bool {
         self.as_ref().is_none_or(ItemStack::is_empty)
     }
