@@ -11785,6 +11785,7 @@ where
                 // caller would see. RCON (`crate::rcon::run_command_as`) is
                 // the one production `Some`; see `access_commands`'s module
                 // doc for why that scoping is deliberate, not a gap.
+                #[cfg(not(target_arch = "wasm32"))]
                 access: None,
             };
             match commands.builtins.run(&command_world, &source, &command) {
