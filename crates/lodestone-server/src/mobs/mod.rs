@@ -170,6 +170,14 @@ mod vehicles;
 mod dragon;
 mod end_crystal;
 
+// See `mobs::wither`/`mobs::wither_pattern`'s own module docs: the wither
+// boss's `crate::wither` state driven with real inputs, plus the summon-
+// structure block-pattern matcher (`golem.rs`'s own approach, duplicated for
+// a different cell alphabet rather than widened, per that module's own
+// closed-`GolemCell`-enum shape).
+mod wither;
+mod wither_pattern;
+
 // `pub(crate)`, unlike every sidecar module above: `crate::block_drops`,
 // `crate::random_tick`, `crate::tick` and `crate::server` all need
 // `tnt::is_tnt_block`/`TICK_TNT_PRIME`/`DEFAULT_FUSE_TIME` to recognise and
@@ -2267,6 +2275,13 @@ pub struct MobSim<'w> {
     /// for [`tnt_rng`](Self::tnt_rng)'s reason: a dragon tick must not shift
     /// which roll a mob spawn, a block drop, or anything else sees.
     dragon_rng: SpawnRng,
+    /// Live withers, keyed by network entity id — see [`TrackedWither`] and
+    /// `mobs::wither`'s own module doc for the emergence/heal/skull-fire
+    /// state each one drives.
+    withers: HashMap<i32, TrackedWither>,
+    /// The wither's own dangerous-skull roll, on its own stream for the same
+    /// reason [`dragon_rng`](Self::dragon_rng) is.
+    wither_rng: SpawnRng,
 }
 
 /// One live `AbstractBoat` — wire identity, motion, and who is aboard.
@@ -2346,6 +2361,30 @@ struct TrackedDragon {
     /// The simplified orbit's current angle, in radians — this module's own
     /// state, not a vanilla field (see `mobs::dragon`'s module doc).
     orbit_angle: f64,
+}
+
+/// One live wither — wire identity, position, health, the invulnerable
+/// "emerging" countdown and skull-fire cooldown. See `mobs::wither`'s own
+/// module doc for the per-tick behaviour and exactly which parts are a real
+/// vanilla port vs. a named simplification (no movement, one firing
+/// schedule standing in for vanilla's three independent heads).
+#[derive(Debug, Clone)]
+struct TrackedWither {
+    uuid: Uuid,
+    position: Vec3,
+    yaw: f32,
+    health: f32,
+    max_health: f32,
+    /// `WitherBoss.DATA_ID_INV` — `crate::wither::INVULNERABLE_TICKS`
+    /// counting down to `0`; `0` means the wither is in its active phase.
+    invulnerable_ticks: i32,
+    /// `Entity.tickCount` — this wither's own age, read by
+    /// `crate::wither::should_heal_while_invulnerable`/`_active`.
+    age: i64,
+    /// Ticks until the next skull may fire — see `mobs::wither`'s module doc
+    /// for why this is one schedule rather than vanilla's three per-head
+    /// timers.
+    next_skull_tick: i32,
 }
 
 /// One live end crystal — wire identity and a fixed position. See
@@ -2562,6 +2601,8 @@ impl<'w> MobSim<'w> {
             #[cfg(not(target_arch = "wasm32"))]
             workstation_claims: villager::WorkstationClaims::new(),
             dragons: HashMap::new(),
+            withers: HashMap::new(),
+            wither_rng: SpawnRng::new(wither::WITHER_SKULL_SEED),
             crystals: HashMap::new(),
             dragon_rng: SpawnRng::new(dragon::DRAGON_PHASE_SEED),
         }
@@ -5910,6 +5951,7 @@ impl<'w> MobSim<'w> {
         }
         self.push_dragon_snapshots(&mut out);
         self.push_end_crystal_snapshots(&mut out);
+        self.push_wither_snapshots(&mut out);
         out
     }
 }

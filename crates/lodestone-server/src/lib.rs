@@ -153,6 +153,11 @@ mod composter;
 /// production wiring pass (spawning a live dragon/crystal pair from
 /// `mobs::MobSim`) can reach it from outside this crate's own tests.
 pub mod dragon;
+/// The wither boss fight — summon-detection support constants, the
+/// invulnerable "emerging" phase and skull-impact rules (`docs/wither-fight.md`).
+/// Public for the same reason `dragon` is: a production wiring pass reaches it
+/// from outside this crate's own tests.
+pub mod wither;
 /// The dimensions this server hosts and their geometry (`docs/nether-portals.md`).
 /// Public because [`ChunkSource::sibling`] and [`ChunkSource::dimension`] name
 /// [`dimension::Dimension`], and because a host building a multi-dimension world
