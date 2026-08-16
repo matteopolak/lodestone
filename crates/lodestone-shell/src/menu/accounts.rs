@@ -1205,13 +1205,15 @@ fn run_device_code_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
         }
     };
     rt.block_on(async move {
-        // Not `flow::MOJANG_CLIENT_ID`: that is the *official launcher's*
-        // registered Azure application id, and `lodestone_auth::login`'s own
-        // docs are explicit that using it "would misrepresent this client to
-        // Microsoft, not just violate a style rule". `resolve_client_id`
-        // reads `LODESTONE_MS_CLIENT_ID`, typed-erroring
-        // (`AuthError::MissingClientId`) rather than silently falling back —
-        // see `docs/accounts.md`'s configuration section.
+        // `resolve_client_id` returns Lodestone's own registered Azure
+        // application id (`login::DEFAULT_CLIENT_ID`), overridable via
+        // `LODESTONE_MS_CLIENT_ID`. It still errors when that variable is set
+        // to a blank value — an explicit "use nothing" is a caller mistake
+        // worth surfacing — so this match arm stays live. It is deliberately
+        // never `flow::MOJANG_CLIENT_ID`, the *official launcher's*
+        // registration: Mojang gates Minecraft API access per Azure
+        // application, so borrowing it would misrepresent this client to
+        // Microsoft. See `docs/accounts.md`'s configuration section.
         let client_id = match lodestone_auth::login::resolve_client_id() {
             Ok(id) => id,
             Err(e) => {
