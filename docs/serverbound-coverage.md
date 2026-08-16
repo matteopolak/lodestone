@@ -168,7 +168,7 @@ audit:
   `Popped` are still `Route::NOWHERE` below — they are answered directly in
   `net.rs`'s own loop, not through the `forward`/`poll_net` path.
 
-**Eleven were confirmed genuine islands; four have since gained real
+**Eleven were confirmed genuine islands; five have since gained real
 producers** — zero hits for the bare variant name anywhere in `lodestone-shell`
 or `lodestone-controller`, in any form, at the time this section was written:
 `ContainerButtonClick`, `EditBook`, `PingRequest`, `RecipeBookSeenRecipe`,
@@ -191,8 +191,18 @@ Since fixed:
   the Advancements screen's open tab or open/closed state changes
   (`app::advancements_screen::WindowApp::advancement_progress`, via the pure
   `seen_advancements_transition` helper it delegates to).
+* **`ContainerButtonClick`** — the enchanting table's three enchant-offer rows
+  (`crate::container::enchant`) call `Sim::send_container_button_click` from
+  `app::container_input::WindowApp::handle_enchant_click` on a click the
+  client-side gate (`offer_clickable`, `EnchantmentMenu.clickMenuButton`'s own
+  predicate) accepts. Vanilla's other two `ContainerButtonClick` screens
+  (stonecutter, loom) remain unproduced — both pick from a server-populated
+  recipe/pattern list this tree has no registry sync for, a different shape
+  from the enchant offers' `container_data`-driven costs. See
+  [`container-cost-screens.md`](container-cost-screens.md) for the geometry
+  and the client-side gate.
 
-Remaining: `ContainerButtonClick`, `PingRequest`, `RecipeBookSeenRecipe`,
+Remaining: `PingRequest`, `RecipeBookSeenRecipe`,
 `SelectBundleItem`, `SetContainerSlotState`, `SpectatorAction`, `Stab`,
 `TeleportToEntity`.
 

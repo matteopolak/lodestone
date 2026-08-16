@@ -516,11 +516,26 @@ impl ApplicationHandler for WindowApp {
                     let consumed_by_beacon = !consumed_by_merchant
                         && is_left_press
                         && self.handle_beacon_click(&menu, w, h);
-                    let consumed_by_recipe_panel = !consumed_by_merchant
+                    // The enchanting table's three offer rows, same
+                    // first-refusal shape as the beacon buttons just above
+                    // (issue #613's `ContainerButtonClick` remainder): never
+                    // overlaps a real slot, and by construction never overlaps
+                    // the beacon buttons either, since each only ever fires on
+                    // its own `special_layout`.
+                    let consumed_by_enchant = !consumed_by_merchant
                         && !consumed_by_beacon
                         && is_left_press
+                        && self.handle_enchant_click(&menu, w, h);
+                    let consumed_by_recipe_panel = !consumed_by_merchant
+                        && !consumed_by_beacon
+                        && !consumed_by_enchant
+                        && is_left_press
                         && self.handle_recipe_panel_click(&menu, w, h);
-                    if !consumed_by_merchant && !consumed_by_beacon && !consumed_by_recipe_panel {
+                    if !consumed_by_merchant
+                        && !consumed_by_beacon
+                        && !consumed_by_enchant
+                        && !consumed_by_recipe_panel
+                    {
                         // **`hit_test_with_book`, not `hit_test_with_scale`.** This is
                         // the one click path that was still testing against an
                         // unshifted panel while `redraw` drew a shifted one

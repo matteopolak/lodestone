@@ -1508,6 +1508,29 @@ impl Sim {
     /// same "predict, don't validate here" shape every other producer in
     /// this file takes: the server is the authority and corrects a wrong
     /// send via its own `container_set_data` broadcast.
+    /// Press one of the enchanting table's three enchant-offer buttons —
+    /// vanilla's `ServerboundContainerButtonClickPacket`
+    /// (`EnchantmentScreen.mouseClicked` → `Minecraft.gameMode.
+    /// handleInventoryButtonClick`, `EnchantmentScreen.java`), sent when the
+    /// player clicks an offer row the client-side gate already accepted
+    /// (issue #613's `ContainerButtonClick` remainder).
+    ///
+    /// [`ClientAction::ContainerButtonClick`] was already encoded by every
+    /// protocol family with no shell caller anywhere — the same
+    /// outbound-island shape [`Self::send_set_beacon_effects`]'s own doc
+    /// describes. Best-effort like that method — a closed session drops it.
+    /// The caller is expected to have already gated this on
+    /// `crate::container::enchant::offer_clickable`
+    /// (`app::container_input::WindowApp::handle_enchant_click` does), the
+    /// same "predict, don't validate here" shape every other producer in
+    /// this file takes: the server is the authority and corrects a wrong
+    /// send via its own `container_set_data` broadcast.
+    pub fn send_container_button_click(&self, window_id: i32, button_id: i32) {
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::ContainerButtonClick { window_id, button_id });
+        }
+    }
+
     pub fn send_set_beacon_effects(
         &self,
         primary: Option<lodestone_model::ResourceKey>,
