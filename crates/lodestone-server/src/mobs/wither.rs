@@ -348,12 +348,11 @@ impl<'w> MobSim<'w> {
                 rotation: Rotation::new(w.yaw, 0.0),
                 head_yaw: w.yaw,
                 velocity: Vec3::new(0.0, 0.0, 0.0),
-                // `WitherBoss.DATA_ID_INV` (index 19) has no
-                // `MetadataField` variant yet — see this crate's own report
-                // for the exact addition needed. A wither is still
-                // selector-visible and damageable without it; only the
-                // client-side "still emerging" shield visual is missing.
-                metadata: Vec::new(),
+                // `WitherBoss.DATA_ID_INV` — drives the client-side "still
+                // emerging" shield visual while the summon animation plays.
+                metadata: vec![crate::protocol::MetadataField::WitherInvulnerableTicks(
+                    w.invulnerable_ticks,
+                )],
                 object_data: 0,
                 leash_link: None,
             });
@@ -421,6 +420,36 @@ mod tests {
             .find(|s| s.id == id)
             .expect("a live wither must be streamed, or it reaches zero pixels");
         assert_eq!(snap.entity_type, wither_entity_type());
+    }
+
+    #[test]
+    fn a_wither_streams_its_real_invulnerable_ticks_as_metadata() {
+        let mut sim = sim();
+        let id = sim.spawn_wither_at(Vec3::new(0.0, 64.0, 0.0));
+        let snap = sim
+            .snapshots()
+            .into_iter()
+            .find(|s| s.id == id)
+            .expect("a live wither must be streamed");
+        assert_eq!(
+            snap.metadata,
+            vec![crate::protocol::MetadataField::WitherInvulnerableTicks(pure::INVULNERABLE_TICKS)],
+            "the client's emerging-shield visual reads this field; a wither must not stream with empty metadata"
+        );
+
+        for _ in 0..220 {
+            sim.tick_withers();
+        }
+        let snap = sim
+            .snapshots()
+            .into_iter()
+            .find(|s| s.id == id)
+            .expect("a live wither must be streamed");
+        assert_eq!(
+            snap.metadata,
+            vec![crate::protocol::MetadataField::WitherInvulnerableTicks(0)],
+            "invulnerable_ticks must track the sim's real countdown, not a frozen spawn-time value"
+        );
     }
 
     #[test]
