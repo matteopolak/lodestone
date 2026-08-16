@@ -49,13 +49,19 @@ mod sensor;
 
 pub use activity::Activity;
 pub use behavior::{Behavior, BehaviorControl, DEFAULT_DURATION, Leaf, Status};
-pub use behaviors::{LookAtTargetSink, MoveToTargetSink, RandomStroll, SetPlayerLookTarget, WalkToPoi};
+pub use behaviors::{
+    AvoidTarget, CopyMemoryWithExpiry, LookAtTargetSink, MoveToTargetSink, RandomStroll,
+    SetPlayerLookTarget, WalkToPoi,
+};
 pub use driver::BrainGoal;
 pub use gate::{GateBehavior, OrderPolicy, RunningPolicy};
 pub use memory::{Memories, MemoryModuleType, MemoryStatus, MemoryValue, WalkTarget};
 pub use mob::{BrainMob, NearbyBrainEntity};
 pub use roster::{BRAIN_SPECIES, brain_for, is_brain_species, scaffold};
-pub use sensor::{HurtBySensor, NearestHostileSensor, NearestPlayerSensor, Sensor, VillagerPoiSensor};
+pub use sensor::{
+    HurtBySensor, NearestHostileSensor, NearestPlayerSensor, NearestVisibleZombifiedSensor,
+    Sensor, VillagerPoiSensor,
+};
 
 use std::collections::HashMap;
 

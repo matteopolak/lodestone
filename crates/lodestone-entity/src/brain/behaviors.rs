@@ -457,6 +457,140 @@ impl Behavior for Panic {
     }
 }
 
+/// Copies `source` into `dest` with a randomised expiry — vanilla
+/// `CopyMemoryWithExpiry.create(predicate, source, dest, durationRange)`,
+/// minus the predicate: every jar caller's predicate reduces to "does
+/// `source` hold a value at all" once `source` is itself produced by a
+/// sensor that already applies the real filter (see
+/// [`super::roster::piglin_brain`]'s own doc for why `PiglinAi::isNearZombified`
+/// needs no separate check here). A one-shot behaviour, re-triggered every
+/// tick `source` is present — [`Brain::tick`](super::Brain::tick)'s own
+/// per-tick retry of stopped behaviours is what makes that a continuous
+/// refresh rather than a single copy.
+#[derive(Debug)]
+pub struct CopyMemoryWithExpiry {
+    source: MemoryModuleType,
+    dest: MemoryModuleType,
+    min_ttl: i64,
+    max_ttl: i64,
+    entry: [(MemoryModuleType, MemoryStatus); 2],
+}
+
+impl CopyMemoryWithExpiry {
+    /// Copies `source` into `dest`, alive for `[min_ttl, max_ttl]` ticks
+    /// (inclusive), each time `source` holds a value.
+    #[must_use]
+    pub fn new(source: MemoryModuleType, dest: MemoryModuleType, min_ttl: i64, max_ttl: i64) -> Self {
+        Self {
+            source,
+            dest,
+            min_ttl,
+            max_ttl,
+            // `Registered`, not `ValuePresent`: the real gate is
+            // `check_extra_start_conditions` below, so this entry condition
+            // exists only to get both memories registered — the same split
+            // `Panic`'s own entry condition documents.
+            entry: [(source, MemoryStatus::Registered), (dest, MemoryStatus::Registered)],
+        }
+    }
+}
+
+impl Behavior for CopyMemoryWithExpiry {
+    fn entry_condition(&self) -> &[(MemoryModuleType, MemoryStatus)] {
+        &self.entry
+    }
+
+    fn check_extra_start_conditions(&mut self, mem: &mut Memories, _mob: &mut dyn BrainMob) -> bool {
+        mem.has_value(self.source)
+    }
+
+    fn start(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob, _time: i64) {
+        let Some(value) = mem.get(self.source).cloned() else {
+            return;
+        };
+        let span = (self.max_ttl + 1 - self.min_ttl).max(1);
+        let ttl = self.min_ttl + i64::from(mob.next_i32(span as i32));
+        mem.set_with_expiry(self.dest, value, ttl);
+    }
+
+    fn name(&self) -> &'static str {
+        "copy_memory_with_expiry"
+    }
+}
+
+/// Flees [`MemoryModuleType::AVOID_TARGET`] — vanilla
+/// `SetWalkTargetAwayFrom.entity(AVOID_TARGET, speedModifier, desiredDistance,
+/// false)`, the movement half of a piglin's `AVOID` activity
+/// (`PiglinAi.initRetreatActivity`).
+///
+/// # Disclosed simplification
+///
+/// Flees to an **undirected** random point rather than vanilla's point
+/// specifically chosen to increase distance from the avoid target — the same
+/// simplification [`Panic`]'s own doc discloses for the six species sharing
+/// it, applied here to a directed-flee vanilla behaviour instead of an
+/// undirected one. `SetEntityLookTargetSometimes` (glancing back while
+/// fleeing) and `EraseMemoryIf(PiglinAi::wantsToStopFleeing, AVOID_TARGET)`
+/// (an early exit) are not ported; [`AVOID_TARGET`](MemoryModuleType::AVOID_TARGET)'s
+/// own expiry is what ends the flee here.
+#[derive(Debug)]
+pub struct AvoidTarget {
+    speed_multiplier: f32,
+    entry: [(MemoryModuleType, MemoryStatus); 1],
+}
+
+impl AvoidTarget {
+    #[must_use]
+    pub fn new(speed_multiplier: f32) -> Self {
+        Self {
+            speed_multiplier,
+            entry: [(MemoryModuleType::AVOID_TARGET, MemoryStatus::ValuePresent)],
+        }
+    }
+}
+
+impl Behavior for AvoidTarget {
+    fn entry_condition(&self) -> &[(MemoryModuleType, MemoryStatus)] {
+        &self.entry
+    }
+
+    // A generous ceiling — `AVOID_TARGET`'s own expiry
+    // ([`can_still_use`](Self::can_still_use)) is what actually ends the
+    // flee; this bound exists only so the behaviour cannot run forever if
+    // that memory somehow never clears.
+    fn min_duration(&self) -> i32 {
+        100
+    }
+
+    fn max_duration(&self) -> i32 {
+        140
+    }
+
+    fn can_still_use(&mut self, mem: &mut Memories, _mob: &mut dyn BrainMob, _time: i64) -> bool {
+        mem.has_value(MemoryModuleType::AVOID_TARGET)
+    }
+
+    fn start(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob, _time: i64) {
+        mem.erase(MemoryModuleType::WALK_TARGET);
+        mob.stop_navigation();
+    }
+
+    fn tick(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob, _time: i64) {
+        if mob.navigation_done()
+            && let Some(pos) = mob.random_land_pos(12, 7)
+        {
+            mem.set(
+                MemoryModuleType::WALK_TARGET,
+                MemoryValue::WalkTarget(WalkTarget::new(pos, self.speed_multiplier, 0)),
+            );
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "avoid_target"
+    }
+}
+
 /// Rolls `min + next_i32(max + 1 - min)` — vanilla's `UniformInt.sample`,
 /// reused by both goat-ram cooldown rolls below rather than duplicated.
 fn uniform_roll(mob: &mut dyn BrainMob, min: i32, max: i32) -> i32 {

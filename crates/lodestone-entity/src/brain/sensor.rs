@@ -237,6 +237,31 @@ impl Sensor for VillagerPoiSensor {
     }
 }
 
+/// Writes [`MemoryModuleType::NEAREST_VISIBLE_ZOMBIFIED`] from
+/// [`BrainMob::nearest_visible_zombified`] — the villager-POI-sensor shape
+/// again: a host tracks the same-species search, this sensor only copies the
+/// answer into memory each tick. Feeds a piglin's `AVOID` activity via
+/// [`super::behaviors::CopyMemoryWithExpiry`].
+#[derive(Debug, Default)]
+pub struct NearestVisibleZombifiedSensor;
+
+impl Sensor for NearestVisibleZombifiedSensor {
+    fn tick(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob) {
+        match mob.nearest_visible_zombified() {
+            Some(pos) => mem.set(MemoryModuleType::NEAREST_VISIBLE_ZOMBIFIED, MemoryValue::Pos(pos)),
+            None => mem.erase(MemoryModuleType::NEAREST_VISIBLE_ZOMBIFIED),
+        }
+    }
+
+    fn output_memories(&self) -> Vec<MemoryModuleType> {
+        vec![MemoryModuleType::NEAREST_VISIBLE_ZOMBIFIED]
+    }
+
+    fn name(&self) -> &'static str {
+        "nearest_visible_zombified"
+    }
+}
+
 /// Squared Euclidean distance — a plain helper since [`lodestone_model::Vec3`]
 /// carries no `distance_squared` of its own.
 fn distance_sqr(a: Vec3, b: Vec3) -> f64 {
