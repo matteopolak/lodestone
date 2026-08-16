@@ -744,6 +744,23 @@ pub enum NetUpdate {
         /// Second parameter byte — the event's payload.
         b1: u8,
     },
+    /// An explosion — forwarded raw, mirroring [`NetUpdate::BlockEvent`]'s
+    /// "carries no interpretation" shape: see
+    /// `lodestone_model::event::ClientEvent::Explosion`'s own doc for why
+    /// `affected_blocks` below is unconditionally empty on a 26.2 connection
+    /// and what that does and does not mean.
+    Explosion {
+        /// World-space explosion centre.
+        pos: Vec3,
+        /// Blast radius, in blocks.
+        radius: f32,
+        /// Blocks removed, as offsets from `pos` — see
+        /// `ClientEvent::Explosion::affected_blocks`'s doc for which
+        /// families populate this and which never do.
+        affected_blocks: Vec<[i8; 3]>,
+        /// This client's own knockback impulse, if the packet carried one.
+        knockback: Option<Vec3>,
+    },
     /// The server authorised the local player to edit a sign (vanilla's
     /// `ClientboundOpenSignEditorPacket`, decoded as
     /// `ClientEvent::SignEditorOpened`).
@@ -4254,6 +4271,21 @@ fn forward(
             pos: [pos.x, pos.y, pos.z],
             b0,
             b1,
+        },
+        // World/block state, same category as `BlockEvent`/`SectionBlocks`
+        // just above — forwarded raw, uninterpreted, for `Sim::poll_net` to
+        // apply. See `ClientEvent::Explosion`'s own doc for why
+        // `affected_blocks` is unconditionally empty on a 26.2 connection.
+        ClientEvent::Explosion {
+            pos,
+            radius,
+            affected_blocks,
+            knockback,
+        } => NetUpdate::Explosion {
+            pos,
+            radius,
+            affected_blocks,
+            knockback,
         },
         ClientEvent::SignEditorOpened { pos, is_front_text } => {
             NetUpdate::SignEditorOpened { pos, is_front_text }

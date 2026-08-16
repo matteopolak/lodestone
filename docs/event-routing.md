@@ -159,7 +159,7 @@ reviewable commit, not as a drive-by while landing something else.
 
 ## Islands: variants this table found reaching nothing
 
-**26 of 132** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
+**26 of 133** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
 consumer, which is a normal state for a from-scratch client.
 
 > **`EntityLeashed` left the list when a leashed mob's rope was wired.** The

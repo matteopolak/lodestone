@@ -599,8 +599,7 @@ intent seam for their own verbs.
 
 ### Extract-time custom draw-buffer API (issue #161)
 
-**The ECS/API side is landed; the render side is a brokered hunk, reported below rather than applied**
-(the agent that built this did not hold `lodestone-shell`'s `gpu/**`). `lodestone_ecs::plugin_draw`
+**Both halves are landed.** `lodestone_ecs::plugin_draw`
 (`crates/lodestone-ecs/src/plugin_draw.rs`) generalises `DebugLines`' precedent — the one working
 instance of "a plugin pushes world-space geometry into a resource, the renderer polls it" — into
 textured/billboard-style draws, the concrete gap this document's own "four concrete gaps" section named
@@ -631,32 +630,35 @@ asked for, the same tier `DebugLines`' own `push_leash_lines` test operates at; 
 boundary by design (see below), so **it does not verify a pixel changes** — only that the channel a
 render pass would poll genuinely carries a plugin's geometry.
 
-**What is not built, and exactly what it needs — the brokered hunk for whoever holds `gpu/**` next.**
-`crates/lodestone-shell/src/gpu/debug_lines.rs` is the model to extend (or a sibling `gpu/plugin_billboards.rs`
-mirroring it file-for-file): a `PluginBillboardVertex` (`repr(C)`, `bytemuck::Pod`) type, a lowering
-function from `&[lodestone_ecs::PluginBillboard]` to vertex data (billboard expansion — two triangles
-per quad, facing basis computed from the camera's own right/up vectors, exactly the information
-`RenderState::render` already has and this ECS crate structurally cannot, per "what stays privileged"
-below), a `PluginBillboardRenderer` (new pipeline — outside the model shader's four bind groups, same as
-`DebugLineRenderer`, so this has no bearing on the 4-bind-group floor) resolving `PluginTexture::Named`
-against the block/item atlas already bound elsewhere in `gpu.rs` and falling back to an untextured tint
-for `PluginTexture::Solid` or an unresolved name, and a `PluginBillboardsSource` polled type identical in
-shape to `DebugLinesSource`:
+**The render half — `crates/lodestone-shell/src/gpu/plugin_billboards.rs`.** A dedicated pipeline
+(`PluginBillboardRenderer`, outside the model shader's four bind groups, same as `DebugLineRenderer` — no
+bearing on the 4-bind-group floor) drawing camera-facing quads via an **instanced** billboard shader
+(`shaders/plugin_billboards.wgsl`, the same `right`/`up`-from-the-view-matrix idiom
+`crate::particles::ParticleRenderer` uses, not a CPU-side vertex expansion): a plain `PluginBillboardInstance`
+(`repr(C)`, `bytemuck::Pod`) carries the centre, size, an untextured/textured flag, a UV rect and the tint,
+and `plugin_billboard_vertices` — the pure, `wgpu`-free lowering function from `&[lodestone_ecs::PluginBillboard]`
+— resolves `PluginTexture::Named` against a snapshot of the **block atlas's own sprite table**
+(`RenderState::plugin_atlas_sprites`, a `ResourceLocation` string → UV rect map built once at construction and
+handed to the lowering function by the installer, not looked up by the renderer itself). An unresolved
+name — including an *item* id like `"minecraft:diamond"` this document's own example above uses, since item
+sprites live in a separate, unstitched `ItemAtlas` this pass does not bind — falls back to the same flat tint
+`PluginTexture::Solid` draws, exactly the documented fallback. `PluginBillboardsSource` is polled identically in
+shape to `DebugLinesSource`, and the install call is
+`WindowApp::install_plugin_billboards_source` (`crates/lodestone-shell/src/app/session.rs`), mirroring
+`install_debug_lines_source` exactly: clone `Sim::ecs()`'s `EcsHandle`, capture a clone of the atlas snapshot,
+call it at the same three connect paths (`begin_singleplayer`/`connect_to`'s shared
+`install_session_render_sources`, and `resumed`), needs no live connection.
 
-```text
-render_state.set_plugin_billboards_source(move || {
-    let world = ecs_handle.read();
-    lodestone_render_shell::gpu::plugin_billboard_vertices(
-        &world.resource::<lodestone_ecs::PluginBillboards>().0,
-    )
-});
-```
-
-The install call is `WindowApp::install_plugin_billboards_source` (`crates/lodestone-shell/src/app.rs`),
-mirroring `install_debug_lines_source` exactly: clone `Sim::ecs()`'s `EcsHandle`, call it at the same
-three sites (`begin_singleplayer`, `connect_to`, `resumed`), needs no live connection. Until this lands,
-`PluginBillboards` behaves exactly as `DebugLines` did before its own render half existed: real data,
-zero pixels — an accepted, disclosed stopping point per this issue's own framing, not a silent gap.
+**Proven with real pixels, not just a channel.** `crates/lodestone-shell/src/gpu/pixel_gates.rs`'s
+`plugin_billboards_source_draws_visible_pixels` renders an open-sky scene twice — once with no source
+installed, once with `set_plugin_billboards_source` returning one large untextured billboard squarely in
+view — and asserts the second frame lit pixels the first did not; its negative control,
+`no_plugin_billboards_source_installed_draws_nothing`, asserts two renders with no source installed are
+byte-identical, so the assertion above cannot be satisfied by a pass that always draws. Both are `#[ignore]`d
+GPU gates, the same tier `debug_lines_source_draws_visible_pixels` operates at, and deliberately use `Solid`
+rather than `Named` so the gate proves the pipeline itself paints pixels without depending on a vanilla atlas
+being loaded (this harness passes `None` for `vanilla`, so the atlas table is empty and any `Named` id would
+take the same fallback path anyway).
 
 **The real consumer.** No dedicated example-plugin crate was added for this one — `plugin_draw`'s own
 `a_plugin_system_in_extract_debug_reaches_the_resource_after_one_frame` test *is* the example, in the

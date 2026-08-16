@@ -566,6 +566,42 @@ impl WindowApp {
         });
     }
 
+    /// Install the plugin-billboard source: the render half of issue #161's
+    /// `ExtractSet::Debug` billboard channel (`docs/plugin-api.md`), the
+    /// channel a plugin (a waypoint, a hologram, a minimap overlay) uses to
+    /// push textured/billboard world-space geometry onto screen via
+    /// `lodestone_ecs::PluginBillboards`. `RenderState::set_plugin_billboards_source`
+    /// and the pipeline it drives already exist with no caller — same shape
+    /// as [`install_debug_lines_source`](Self::install_debug_lines_source),
+    /// whose doc this one mirrors.
+    ///
+    /// Needs no live connection, for the identical reason
+    /// `install_debug_lines_source` does not: `Sim::new`/`Sim::with_demo_world`
+    /// always add `LocalPlayerPlugin`, which `init_resource`s
+    /// `PluginBillboards` on the one `World` regardless of session kind, so
+    /// `self.sim.ecs()` is enough. Callable — and safe to call repeatedly,
+    /// since it only replaces the closure with an equivalent one — the moment
+    /// `self.render` exists.
+    pub(super) fn install_plugin_billboards_source(&mut self) {
+        let Some(render) = self.render.as_mut() else {
+            return;
+        };
+        let ecs = self.sim.ecs().clone();
+        // Resolved **now**, not inside the closure: the atlas table is a
+        // snapshot of whatever `RenderState` uploaded at connect time, and
+        // capturing it once here is what lets the closure stay a plain `Fn`
+        // with no borrow back into `render`.
+        let atlas = render.plugin_atlas_sprites();
+        render.set_plugin_billboards_source(move || {
+            lodestone_ecs::hold_read(&ecs, |world| {
+                crate::gpu::plugin_billboard_vertices(
+                    &world.resource::<lodestone_ecs::PluginBillboards>().0,
+                    &atlas,
+                )
+            })
+        });
+    }
+
     /// Arm and service the deferred Render Distance commit — vanilla's
     /// `OptionInstance.OptionInstanceSliderButton` `delayedApplyAt` /
     /// `applyUnsavedValue` pair (`OptionInstance.java, 429-435`).
@@ -1133,6 +1169,7 @@ impl WindowApp {
         }
         self.install_outline_source();
         self.install_debug_lines_source();
+        self.install_plugin_billboards_source();
     }
 }
 

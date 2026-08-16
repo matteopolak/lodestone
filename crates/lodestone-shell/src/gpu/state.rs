@@ -44,6 +44,7 @@ use super::{
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
     HandSwingSource, ItemUseSource, LecternSource, MainHandSource, MapSource, MovingPistonSource,
     NameTagRenderer, OutlineRenderer, OutlineShapeSource,
+    PluginBillboardInstance, PluginBillboardRenderer, PluginBillboardsSource,
     RenderState, SKY_COLOR, SignSource, SignTextRenderer, SkullSource, SkyDarkenSource,
     ThirdPersonBodySource, ThirdPersonBodyState, TimeOfDaySource, transparent_placeholder_atlas,
 };
@@ -108,6 +109,28 @@ impl RenderState {
         let depth = DepthBuffer::new(device, width.max(1), height.max(1));
         let outline = OutlineRenderer::new(device, color_format);
         let debug_lines = DebugLineRenderer::new(device, color_format);
+        // The billboard channel's own sprite table — the block atlas's
+        // `ResourceLocation` → UV rect index `plugin_billboard_vertices`
+        // resolves `PluginTexture::Named` against. Built once here, from the
+        // same `atlas` this constructor just uploaded, and snapshotted into
+        // an `Arc` so `install_plugin_billboards_source` (`app/session.rs`)
+        // can clone it into a closure without borrowing `RenderState`. Empty
+        // on the demo (no `vanilla` atlas) path — see `plugin_atlas_sprites`'
+        // field doc.
+        let plugin_atlas_sprites: HashMap<String, [f32; 4]> = vanilla.map_or_else(HashMap::new, |va| {
+            va.atlas()
+                .sprites()
+                .iter()
+                .map(|s| {
+                    (
+                        s.location.to_string(),
+                        [s.uv_min[0], s.uv_min[1], s.uv_max[0], s.uv_max[1]],
+                    )
+                })
+                .collect()
+        });
+        let plugin_billboards =
+            PluginBillboardRenderer::new(device, color_format, &atlas.view, &atlas.sampler);
         let entities = EntityRenderer::new(device, queue, color_format);
         let nametag = NameTagRenderer::new(device, color_format);
         let sign_text = SignTextRenderer::new(device, color_format);
@@ -262,6 +285,9 @@ impl RenderState {
             outline,
             debug_lines,
             debug_lines_source: DebugLinesSource::default(),
+            plugin_billboards,
+            plugin_billboards_source: PluginBillboardsSource::default(),
+            plugin_atlas_sprites: std::sync::Arc::new(plugin_atlas_sprites),
             entities,
             flame_frame_counter: std::cell::Cell::new(0),
             section_fade_tick: std::cell::Cell::new(0),
@@ -1534,6 +1560,32 @@ impl RenderState {
         f: impl Fn() -> Vec<DebugLineVertex> + Send + Sync + 'static,
     ) {
         self.debug_lines_source = DebugLinesSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's plugin billboards (see
+    /// [`PluginBillboardsSource`]) — [`set_debug_lines_source`](Self::set_debug_lines_source)'s
+    /// sibling for issue #161's textured/billboard channel. Until installed,
+    /// [`render`](Self::render) draws none: this pass is a real pipeline, not
+    /// a stub, but wired to nothing until a caller polls
+    /// `lodestone_ecs::PluginBillboards` and hands the result here.
+    pub fn set_plugin_billboards_source(
+        &mut self,
+        f: impl Fn() -> Vec<PluginBillboardInstance> + Send + Sync + 'static,
+    ) {
+        self.plugin_billboards_source = PluginBillboardsSource(Some(Box::new(f)));
+    }
+
+    /// This renderer's block-atlas sprite table (`ResourceLocation` string →
+    /// UV rect) — what [`crate::gpu::plugin_billboard_vertices`] resolves
+    /// [`lodestone_ecs::PluginTexture::Named`] against. A cheap `Arc` clone,
+    /// meant to be captured once by the closure
+    /// `install_plugin_billboards_source` (`app/session.rs`) hands to
+    /// [`set_plugin_billboards_source`](Self::set_plugin_billboards_source),
+    /// mirroring how that same install captures the world column for the F3
+    /// chunk-border debug line.
+    #[must_use]
+    pub fn plugin_atlas_sprites(&self) -> std::sync::Arc<HashMap<String, [f32; 4]>> {
+        std::sync::Arc::clone(&self.plugin_atlas_sprites)
     }
 
     /// Upload this frame's particle instances. Must run before

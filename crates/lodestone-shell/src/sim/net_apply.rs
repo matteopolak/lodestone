@@ -145,6 +145,35 @@ impl Sim {
                     // out, so a rung bell never opens a chest lid and vice versa.
                     self.bell_shakes.apply_block_event(pos, b0, b1);
                 }
+                NetUpdate::Explosion {
+                    pos: _,
+                    radius: _,
+                    affected_blocks: _,
+                    knockback,
+                } => {
+                    // Only the local-player knockback lands here today. The
+                    // block removals (pre-26.2 families only —
+                    // `ClientEvent::Explosion::affected_blocks`'s own doc
+                    // explains why 26.2 never populates it) and the cosmetic
+                    // particle/sound burst are deliberately not wired: this
+                    // fold's job is routing the event to the right place
+                    // (`docs/plugin-api.md`'s three-router convention this
+                    // event follows — world/block state, not per-entity or
+                    // session), not the gameplay effect itself, which is a
+                    // separate piece of work.
+                    //
+                    // An **additive** velocity delta, matching vanilla's own
+                    // `Entity::addDeltaMovement` (`ClientPacketListener`'s
+                    // `handleExplosion` calls exactly that, not an assignment)
+                    // — a second explosion's push stacks onto whatever this
+                    // one already imparted rather than overwriting it.
+                    if let Some(kb) = knockback {
+                        self.player_mut(|player| {
+                            player.velocity =
+                                player.velocity.add(Vec3d::new(kb.x, kb.y, kb.z));
+                        });
+                    }
+                }
                 NetUpdate::SignEditorOpened { pos, is_front_text } => {
                     // Read the sign's already-synced text now, while `pos` is
                     // known. `PendingSignEdit` is deliberately menu-agnostic

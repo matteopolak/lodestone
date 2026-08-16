@@ -1623,6 +1623,9 @@ impl WindowApp {
         // is the one call that actually matters — the two above are just
         // keeping the three connect paths uniform.
         self.install_debug_lines_source();
+        // Same reasoning as the debug-line install immediately above, for the
+        // billboard channel (issue #161).
+        self.install_plugin_billboards_source();
         self.hud = Some(hud);
         self.effects = Some(effects);
         self.container = Some(container);

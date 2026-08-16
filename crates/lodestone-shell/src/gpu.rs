@@ -48,6 +48,7 @@ mod moving_blocks;
 mod nametag;
 mod occlusion;
 mod outline;
+mod plugin_billboards;
 mod screen_effects;
 mod sections;
 mod sign_text;
@@ -65,6 +66,7 @@ pub use debug_lines::{
     DebugLineVertex, chunk_border_vertices, debug_line_vertices, entity_hitbox_vertices,
 };
 pub use occlusion::TerrainOcclusion;
+pub use plugin_billboards::{PluginBillboardInstance, plugin_billboard_vertices};
 pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{
@@ -81,6 +83,7 @@ use debug_lines::{DebugLineRenderer, DebugLinesSource};
 use entities::EntityRenderer;
 use nametag::NameTagRenderer;
 use outline::OutlineRenderer;
+use plugin_billboards::{PluginBillboardRenderer, PluginBillboardsSource};
 use sign_text::SignTextRenderer;
 use sources::TimeOfDaySource;
 use terrain::{ModelRenderer, SectionGpu, SectionOriginArena};
@@ -260,6 +263,22 @@ pub struct RenderState {
     /// a source.
     debug_lines: DebugLineRenderer,
     debug_lines_source: DebugLinesSource,
+    /// The render half of `ExtractSet::Debug`'s billboard channel (issue
+    /// #161, `docs/plugin-api.md`) — [`DebugLinesSource`]'s sibling for
+    /// textured/billboard-style plugin draws rather than plain lines. See
+    /// [`PluginBillboardsSource`] for why it starts empty.
+    plugin_billboards: PluginBillboardRenderer,
+    plugin_billboards_source: PluginBillboardsSource,
+    /// The block atlas's own sprite table (`ResourceLocation` string → UV
+    /// rect), snapshotted once at construction — what
+    /// [`plugin_billboard_vertices`] resolves
+    /// [`lodestone_ecs::PluginTexture::Named`] against. `Arc`-shared rather
+    /// than rebuilt per install, since `install_plugin_billboards_source`
+    /// (`app/session.rs`) needs its own clone to capture in a closure that
+    /// outlives this borrow. Empty on the demo (no vanilla atlas) path, which
+    /// is the honest answer: every `Named` billboard falls back to a flat
+    /// tint there, exactly as an unresolved id does.
+    plugin_atlas_sprites: std::sync::Arc<HashMap<String, [f32; 4]>>,
     entities: EntityRenderer,
     /// Render-frame counter driving the mob-fire billboard's texture
     /// animation — see `prepare_flame`'s doc for why this counts
