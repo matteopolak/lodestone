@@ -1106,6 +1106,13 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
             .expect("world unload lock poisoned")
             .insert((cx, cz));
     }
+
+    /// Forwarded to the wrapped generator (`self.inner`) — this wrapper has
+    /// no dragon-fight state of its own, and the real flag lives on the End's
+    /// `EndChunkSource` underneath it.
+    fn claim_dragon_fight_start(&self) -> bool {
+        self.inner.claim_dragon_fight_start()
+    }
 }
 
 /// A thread-independent handle that writes the world out.

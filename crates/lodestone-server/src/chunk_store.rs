@@ -1194,6 +1194,14 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             }
         }
     }
+
+    /// Forwarded for the same reason `world_registries`/`dimension` above are:
+    /// a cache is transparent, and answering the trait's own default here
+    /// would let a fresh End sibling's dragon fight re-initialise on every
+    /// join once wrapped behind this store.
+    fn claim_dragon_fight_start(&self) -> bool {
+        self.source.claim_dragon_fight_start()
+    }
 }
 
 #[cfg(test)]

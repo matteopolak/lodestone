@@ -572,6 +572,10 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
     fn portal_index(&self) -> Option<&crate::portal::PortalIndex> {
         Some(&self.portals)
     }
+
+    fn claim_dragon_fight_start(&self) -> bool {
+        self.primary.claim_dragon_fight_start()
+    }
 }
 
 #[cfg(test)]
@@ -715,6 +719,34 @@ mod tests {
             !wrapped.is_column_resident(9, 9),
             "a distinct, untouched column must still report not-resident — the positive check \
              above must not be a constant `true`"
+        );
+    }
+
+    /// The real production wrapping stack for a fresh End sibling —
+    /// `Arc<DimensionalSource<ChunkStore<EndChunkSource>>>` (deeper still,
+    /// with a `RegionChunkSource` layer, for a persistent world) — must
+    /// reach `EndChunkSource`'s real compare-exchange through *both* wrapper
+    /// layers, not silently answer the trait's own default `true` at either
+    /// one. Same production-bug shape
+    /// `is_column_resident_forwards_through_the_dimensional_wrapper` above
+    /// already exists to catch, one hop further down the identical stack.
+    #[test]
+    fn claim_dragon_fight_start_forwards_through_both_production_wrapper_layers() {
+        let end = crate::worldgen_data::end_chunk_source(4242);
+        let store = crate::chunk_store::ChunkStore::new(end);
+        let wrapped =
+            DimensionalSource::alone(store, Dimension::End, crate::portal::PortalIndex::new());
+
+        assert!(
+            wrapped.claim_dragon_fight_start(),
+            "the first claim through both wrapper layers must reach the real EndChunkSource \
+             and succeed"
+        );
+        assert!(
+            !wrapped.claim_dragon_fight_start(),
+            "a second claim through the same wrapper stack must reach the same flag and fail \
+             — a version that silently answered the trait's own default `true` at either \
+             wrapper layer would let this pass unboundedly"
         );
     }
 }
