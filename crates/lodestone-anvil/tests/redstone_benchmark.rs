@@ -71,33 +71,37 @@
 //! commands and full provenance (source URL, credited author, licence
 //! clarity) for every file this was written against.
 //!
-//! # Brokered hunks (not made here — `lodestone-server` is a live agent's)
+//! # Re-injection (landed)
 //!
-//! - `crates/lodestone-server/src/tick.rs`: re-export `TickPhase`,
-//!   `PhaseStats`, `WorstPhaseWindow`, `TICK_PHASE_NAMES` at the crate root
-//!   (add them to the existing `pub use tick::{BlockTickFeed, ExplosionFeed,
-//!   TickClock, TickStats};` line in `lib.rs`), and give
-//!   `IntegratedServer` a `pub fn tick_clock(&self) -> Option<&TickClock>`
-//!   beside its existing `tick_stats()`. Together these are what let an
-//!   external caller read `ScheduledAndPhysics`'s own percentiles instead of
-//!   the whole tick's.
-//! - `crates/lodestone-server/src/tick.rs`: `BlockTickFeed::request_scheduled_ticks`
-//!   is `pub(crate)`. Making it `pub`, plus a way for a caller of
-//!   `open_in_memory_with_mobs` to reach the feed instance the spawned loop
-//!   drains, would let a harness like this one re-inject a `.litematic`
-//!   region's `PendingBlockTicks`/`PendingFluidTicks` and resume a captured
-//!   circuit mid-cycle instead of only from a perturbation-free steady state.
+//! `BlockTickFeed::request_scheduled_ticks` is now `pub`, and
+//! `IntegratedServer::block_ticks()` exposes the feed instance the spawned
+//! tick loop actually drains — the two-line hunk this section used to
+//! broker. `crates/lodestone-anvil/src/schematic.rs` reads a Litematica
+//! region's own `PendingBlockTicks` (not `PendingFluidTicks` — no fixture
+//! this harness has seen carries a non-empty one, so that reader is
+//! unwritten rather than guessed unchecked), and `run_one` below reinjects
+//! every entry naming a block this crate schedules a recheck for (repeater,
+//! comparator, torch, observer) as a **second measurement phase**, after the
+//! steady-state one — see "Findings" in `docs/redstone-benchmark-harness.md`
+//! for the real numbers this produced and what they settle for issue #548.
+//!
+//! `TickPhase`/`PhaseStats`/`WorstPhaseWindow`/`TICK_PHASE_NAMES` remain
+//! unexported: `redstone_counters` already isolates the redstone-specific
+//! signal this harness needs without them, and nothing here has needed
+//! `ScheduledAndPhysics`'s whole-phase percentiles once a real reinjected
+//! measurement was available. Still a legitimate future hunk if a caller
+//! needs that phase's own percentiles specifically.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use lodestone_anvil::schematic::{self, Schematic, SchematicBlock};
+use lodestone_anvil::schematic::{self, Schematic, SchematicBlock, SchematicPendingTick};
 use lodestone_core::State;
 use lodestone_net::Connection;
 use lodestone_server::{
-    ChunkColumn, ChunkSource, IntegratedServer, ServerBound, ServerDirective, ServerProtocol,
-    redstone_counters,
+    ChunkColumn, ChunkSource, IntegratedServer, ScheduledTickQueue, ServerBound, ServerDirective,
+    ServerProtocol, TickPriority, redstone_counters,
 };
 use uuid::Uuid;
 
@@ -306,6 +310,80 @@ fn stamp(
     (min_x, max_x, min_z, max_z)
 }
 
+/// Maps a `PendingBlockTicks` entry's `Block` name onto the same
+/// scheduled-tick `kind` string `lodestone_server`'s own production dispatch
+/// (`react_to_notification`'s torch/repeater/comparator/observer arms) would
+/// have scheduled, so re-injecting one resumes it through the identical
+/// production code path a live notification would use — not a bespoke one
+/// this harness invented. `None` for any block this crate's redstone family
+/// does not model as a *scheduled* reaction (a `minecraft:fire` mid-spread
+/// tick, seen in one real fixture, ticks on its own family this harness does
+/// not re-inject — see the module doc for why only the redstone-scheduled
+/// families are in scope here).
+fn scheduled_kind_for_block(block: &str) -> Option<&'static str> {
+    match block {
+        "minecraft:repeater" => Some(lodestone_server::TICK_REPEATER),
+        "minecraft:comparator" => Some(lodestone_server::TICK_COMPARATOR),
+        "minecraft:redstone_torch" | "minecraft:redstone_wall_torch" => {
+            Some(lodestone_server::TICK_TORCH)
+        }
+        "minecraft:observer" => Some(lodestone_server::TICK_OBSERVER),
+        _ => None,
+    }
+}
+
+/// Litematica's `Priority` field is vanilla's `TickPriority` **ordinal**
+/// (`EXTREMELY_HIGH = -3 .. EXTREMELY_LOW = 3`, `NORMAL = 0`) — see
+/// `lodestone_server::TickPriority`'s own doc comment for why Rust's derived
+/// `Ord` on that enum already matches declaration order the same way. Clamped
+/// rather than panicking on an out-of-range value: a benchmark harness should
+/// degrade a fixture with an unexpected priority to `Normal`, not abort the
+/// whole run over one field.
+fn tick_priority_from_ordinal(priority: i32) -> TickPriority {
+    const TABLE: [TickPriority; 7] = [
+        TickPriority::ExtremelyHigh,
+        TickPriority::VeryHigh,
+        TickPriority::High,
+        TickPriority::Normal,
+        TickPriority::Low,
+        TickPriority::VeryLow,
+        TickPriority::ExtremelyLow,
+    ];
+    let index = (priority + 3).clamp(0, 6) as usize;
+    TABLE[index]
+}
+
+/// Every one of `pending`'s entries this harness knows how to resume,
+/// translated into world-space `(pos, kind, delay, priority)` using the exact
+/// same offset [`stamp`] used to place this schematic's blocks — so a
+/// re-injected tick lands on the same cell the block it names was actually
+/// stamped to. Entries naming a block [`scheduled_kind_for_block`] does not
+/// map are dropped, with a per-entry reason printed by the caller.
+fn pending_ticks_for_reinjection(
+    pending: &[SchematicPendingTick],
+    origin_x: i32,
+    origin_z: i32,
+    floor_top_y: i32,
+    local_min_y: i32,
+) -> Vec<((i32, i32, i32), String, u64, TickPriority, String)> {
+    let dy = floor_top_y + 1 - local_min_y;
+    pending
+        .iter()
+        .filter_map(|t| {
+            let kind = scheduled_kind_for_block(&t.block)?;
+            let pos = (origin_x + t.x, dy + t.y, origin_z + t.z);
+            // `Time` is already ticks-remaining-until-due at capture, which is
+            // exactly `BlockTickFeed::request_scheduled_ticks`'s own
+            // `trigger_tick` contract (a relative delay, not an absolute
+            // tick) — no rebasing needed. Clamped at 0: a captured `Time`
+            // this harness has not observed negative in practice, but
+            // `ScheduledTickQueue::schedule` takes a `u64`.
+            let delay = u64::try_from(t.time).unwrap_or(0);
+            Some((pos, kind.to_owned(), delay, tick_priority_from_ordinal(t.priority), t.block.clone()))
+        })
+        .collect()
+}
+
 /// Loads one contraption into a fresh in-memory flat world, runs the real
 /// tick loop for [`TICK_WINDOW`], and prints a report line. Returns nothing
 /// — this is a benchmark harness, not an assertion; see this module's own
@@ -392,7 +470,6 @@ async fn run_one(fixture: &LoadedFixture) {
     let tick_after = server.server_tick_count().unwrap_or(0);
     let stats_after = server.tick_stats();
     let snapshot = redstone_counters::snapshot();
-    server.shutdown().await;
 
     let ticks_elapsed = tick_after.saturating_sub(tick_before).max(1);
     println!(
@@ -426,6 +503,79 @@ async fn run_one(fixture: &LoadedFixture) {
         snapshot.schedules_deduped,
         snapshot.max_notifications_per_drain,
     );
+
+    // Phase 2: resume this contraption's own captured mid-cycle scheduled
+    // ticks against the now-settled world, and measure again — see this
+    // module's own doc, "Brokered hunks" (now landed in `lodestone-server`),
+    // and `docs/redstone-benchmark-harness.md`'s findings for why the
+    // steady-state numbers above are a genuine floor, not the number issue
+    // #548 needs: an inert contraption cannot exercise the neighbour-scan
+    // cost a dependency graph would actually replace.
+    let reinject = pending_ticks_for_reinjection(&schematic.pending_block_ticks, origin_x, origin_z, floor_top_y, min_y);
+    let skipped = schematic.pending_block_ticks.len() - reinject.len();
+    println!(
+        "   PendingBlockTicks in file: {} (redstone-family, reinjectable: {}, other families \
+         skipped: {skipped})",
+        schematic.pending_block_ticks.len(),
+        reinject.len(),
+    );
+    for (pos, kind, delay, priority, block) in &reinject {
+        println!("     reinjecting: {block} at {pos:?} as kind={kind:?} delay={delay} priority={priority:?}");
+    }
+    if reinject.is_empty() {
+        println!("   [WHILE ACTIVE] skipped: nothing in this fixture to reinject");
+    } else if let Some(block_ticks) = server.block_ticks() {
+        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let injected_count = reinject.len();
+        for (pos, kind, delay, priority, _block) in reinject {
+            queue.schedule(pos, kind, delay, priority);
+        }
+        // Every entry is due immediately in queue-relative terms (this local
+        // queue has no clock of its own) — `drain_due` with a ceiling
+        // argument just recovers them all as owned `ScheduledTick`s so they
+        // can cross into `request_scheduled_ticks`, which is what actually
+        // interprets `trigger_tick` as a delay against the live world's
+        // clock (see `BlockTickFeed::request_scheduled_ticks`'s own doc).
+        let to_inject = queue.drain_due(u64::MAX, usize::MAX);
+
+        redstone_counters::reset();
+        let tick_before2 = server.server_tick_count().unwrap_or(0);
+        block_ticks.request_scheduled_ticks(to_inject);
+
+        tokio::time::sleep(TICK_WINDOW).await;
+
+        let tick_after2 = server.server_tick_count().unwrap_or(0);
+        let snap2 = redstone_counters::snapshot();
+        let ticks2 = tick_after2.saturating_sub(tick_before2).max(1);
+        println!(
+            "   [WHILE ACTIVE] redstone_counters over {ticks2} ticks after reinjecting {injected_count} \
+             pending tick(s) (totals / per-tick rate): \
+             notifications_issued={} ({:.3}/tick), cell_reads={} ({:.3}/tick), \
+             state_parses={} ({:.3}/tick), signal_queries={} ({:.3}/tick), \
+             wire_recomputes={} ({:.3}/tick), schedules_requested={} schedules_deduped={}, \
+             max_notifications_per_drain={}",
+            snap2.notifications_issued,
+            snap2.notifications_issued as f64 / ticks2 as f64,
+            snap2.cell_reads,
+            snap2.cell_reads as f64 / ticks2 as f64,
+            snap2.state_parses,
+            snap2.state_parses as f64 / ticks2 as f64,
+            snap2.signal_queries,
+            snap2.signal_queries as f64 / ticks2 as f64,
+            snap2.wire_recomputes,
+            snap2.wire_recomputes as f64 / ticks2 as f64,
+            snap2.schedules_requested,
+            snap2.schedules_deduped,
+            snap2.max_notifications_per_drain,
+        );
+    } else {
+        println!(
+            "   [WHILE ACTIVE] skipped: IntegratedServer::block_ticks() returned None (should be \
+             Some for open_in_memory_with_mobs — this would itself be a finding worth reporting)"
+        );
+    }
+
+    server.shutdown().await;
 }
 
 /// **The benchmark.** `#[ignore]`d: it needs `.cache/redstone-benchmarks/`

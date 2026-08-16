@@ -89,7 +89,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 
-use lodestone_core::{Nbt, Reader, read_named_nbt};
+use lodestone_core::{Nbt, NbtTag, Reader, read_named_nbt};
 
 use crate::{Error, Result};
 
@@ -110,6 +110,44 @@ pub struct SchematicBlock {
     /// determinism — see this module's own doc for why order does not affect
     /// correctness here.
     pub state: String,
+}
+
+/// One `PendingBlockTicks` entry recovered from a Litematica region — a
+/// captured mid-cycle scheduled tick (a repeater between its own delay and
+/// firing, a lit fire block waiting to spread), in the schematic's own local
+/// coordinate space. `docs/redstone-benchmark-harness.md`'s own findings
+/// record why this matters: a schematic stamped with
+/// `ChunkSource::set_block` alone carries no perturbation, so a contraption's
+/// *ongoing* redstone cost reads as zero regardless of the engine's real
+/// per-notification cost — re-injecting these is what lets a caller resume a
+/// captured circuit instead of only measuring an inert one.
+///
+/// Only `PendingBlockTicks` is read here, not `PendingFluidTicks` — every
+/// fixture this parser has been checked against (`docs/redstone-benchmark-harness.md`'s
+/// provenance table) carries an empty fluid-tick list, so there is no real
+/// example to validate a fluid-tick reader against yet; add one when a
+/// fixture actually needs it rather than guessing the schema unchecked.
+#[derive(Debug, Clone)]
+pub struct SchematicPendingTick {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    /// The scheduled block's own name (e.g. `"minecraft:repeater"`), **not**
+    /// a full state string — Litematica's own `PendingBlockTicks` entries
+    /// carry only `Block`, not the state the block was in when scheduled.
+    pub block: String,
+    /// Ticks remaining until this tick was due to fire, relative to the
+    /// moment the region was captured — Litematica's own `Time` field,
+    /// already relative in the source file (not an absolute world tick, so
+    /// no capture-time base is needed to reinterpret it).
+    pub time: i64,
+    /// Vanilla's `TickPriority` ordinal (`EXTREMELY_HIGH = -3` .. `EXTREMELY_LOW = 3`,
+    /// `NORMAL = 0`) — Litematica's own `Priority` field, copied verbatim
+    /// from vanilla's `ScheduledTick` NBT schema. A caller mapping this onto
+    /// `lodestone_server::TickPriority` needs the ordinal-to-variant table;
+    /// this module does not depend on `lodestone-server` so it hands back
+    /// the raw number rather than guessing a mapping here.
+    pub priority: i32,
 }
 
 /// Which of the three schematic containers a file was parsed as.
@@ -141,6 +179,12 @@ pub struct Schematic {
     /// `Metadata.TotalBlocks`), when present. A cross-check against
     /// `blocks.len()`, not a substitute for it.
     pub reported_total_blocks: Option<i64>,
+    /// Every `PendingBlockTicks` entry from every region, in the schematic's
+    /// own local coordinate space — see [`SchematicPendingTick`]. Empty for
+    /// every format but Litematica (Sponge and vanilla-structure `.nbt` do
+    /// not carry this data in a shape this parser reads) and for a
+    /// Litematica file whose regions were all captured fully settled.
+    pub pending_block_ticks: Vec<SchematicPendingTick>,
 }
 
 /// Picks a [`SchematicFormat`] from a path's extension. Returns `None` for
@@ -385,6 +429,7 @@ fn parse_litematica(root: &[(String, Nbt)]) -> Result<Schematic> {
         .ok_or_else(|| Error::SchematicMalformed("Regions".into()))?;
 
     let mut blocks = Vec::new();
+    let mut pending_block_ticks = Vec::new();
     for (region_name, region_value) in regions {
         let region = compound(region_value).ok_or_else(|| {
             Error::SchematicMalformed(format!("Regions.{region_name}"))
@@ -399,6 +444,49 @@ fn parse_litematica(root: &[(String, Nbt)]) -> Result<Schematic> {
             .ok_or_else(|| Error::SchematicMalformed(format!("Regions.{region_name}.Size")))?;
         let (width, height, length) =
             (sx.unsigned_abs() as usize, sy.unsigned_abs() as usize, sz.unsigned_abs() as usize);
+
+        // `PendingBlockTicks`/`PendingFluidTicks` entries carry `x`/`y`/`z` in
+        // the same **raw, pre-sign-flip local index space** the block loop
+        // below computes `local_x`/`local_y`/`local_z` in — confirmed against
+        // a real downloaded file (`raid_farm.litematic`, whose `Position` is
+        // `(0, 0, 0)` and every `Size` axis positive, removing the sign
+        // ambiguity entirely): its two `PendingBlockTicks` entries at
+        // `(9, 117, 8)`/`(10, 117, 8)` decode, via this exact
+        // local-index-then-palette-lookup path, to real
+        // `minecraft:repeater` states — not air, and not some other block —
+        // so the coordinate space matches. A region with a negative `Size`
+        // axis has not been checked against a real file the same way; the
+        // same `dx`/`dy`/`dz` sign-adjust the block loop applies is used here
+        // too, on the reasoning that keeping this in the exact coordinate
+        // space [`SchematicBlock::x`]/`y`/`z` already use is the least
+        // surprising choice for a caller re-injecting a tick against blocks
+        // this same parser placed.
+        if let Some(entries) = field(region, "PendingBlockTicks").and_then(as_list) {
+            for entry in entries {
+                let Some(c) = compound(entry) else { continue };
+                let (Some(lx), Some(ly), Some(lz)) = (
+                    field(c, "x").and_then(as_i32),
+                    field(c, "y").and_then(as_i32),
+                    field(c, "z").and_then(as_i32),
+                ) else {
+                    continue;
+                };
+                let block = field(c, "Block").and_then(as_str).unwrap_or("minecraft:air").to_owned();
+                let time = field(c, "Time").and_then(as_i64).unwrap_or(0);
+                let priority = field(c, "Priority").and_then(as_i32).unwrap_or(0);
+                let dx = if sx >= 0 { lx } else { -lx };
+                let dy = if sy >= 0 { ly } else { -ly };
+                let dz = if sz >= 0 { lz } else { -lz };
+                pending_block_ticks.push(SchematicPendingTick {
+                    x: px + dx,
+                    y: py + dy,
+                    z: pz + dz,
+                    block,
+                    time,
+                    priority,
+                });
+            }
+        }
 
         let palette_entries = field(region, "BlockStatePalette")
             .and_then(as_list)
@@ -466,6 +554,7 @@ fn parse_litematica(root: &[(String, Nbt)]) -> Result<Schematic> {
         name,
         author,
         reported_total_blocks,
+        pending_block_ticks,
     })
 }
 
@@ -563,6 +652,7 @@ fn parse_sponge_schematic(root: &[(String, Nbt)]) -> Result<Schematic> {
         name: None,
         author: None,
         reported_total_blocks: None,
+        pending_block_ticks: Vec::new(),
     })
 }
 
@@ -620,6 +710,7 @@ fn parse_vanilla_structure(root: &[(String, Nbt)]) -> Result<Schematic> {
         name: None,
         author: None,
         reported_total_blocks: None,
+        pending_block_ticks: Vec::new(),
     })
 }
 
@@ -654,6 +745,78 @@ mod tests {
         let high = 0b10u64; // entry 21's remaining two bits, at long 1's bottom
         let data = [low as i64, high as i64];
         assert_eq!(read_dense_entry(&data, 21, 3), Some(0b101));
+    }
+
+    /// A hand-built Litematica root carrying one 1x1x1-volume region (so the
+    /// block-placement half is trivial and this test isolates
+    /// `PendingBlockTicks`) with two tick entries, one of them at a negative
+    /// coordinate to exercise `as_i32`'s `Byte`/`Short` widening. The
+    /// `x=9,y=117,z=8` / `minecraft:repeater` values mirror what
+    /// `raid_farm.litematic`'s own `PendingBlockTicks` really contains
+    /// (confirmed by hand-decoding that file's `BlockStatePalette` at those
+    /// coordinates — see this module's own doc comment on the sign-flip
+    /// transform for the full account), so a regression here would also be a
+    /// regression against real, previously-verified data.
+    #[test]
+    fn pending_block_ticks_are_read_from_every_region_with_position_and_priority_intact() {
+        let region = Nbt::Compound(vec![
+            ("Position".into(), Nbt::Compound(vec![
+                ("x".into(), Nbt::Int(0)),
+                ("y".into(), Nbt::Int(0)),
+                ("z".into(), Nbt::Int(0)),
+            ])),
+            ("Size".into(), Nbt::Compound(vec![
+                ("x".into(), Nbt::Int(1)),
+                ("y".into(), Nbt::Int(1)),
+                ("z".into(), Nbt::Int(1)),
+            ])),
+            ("BlockStatePalette".into(), Nbt::List {
+                element_type: NbtTag::Compound,
+                elements: vec![Nbt::Compound(vec![
+                    ("Name".into(), Nbt::String("minecraft:air".into())),
+                ])],
+            }),
+            ("PendingBlockTicks".into(), Nbt::List {
+                element_type: NbtTag::Compound,
+                elements: vec![
+                    Nbt::Compound(vec![
+                        ("x".into(), Nbt::Int(9)),
+                        ("y".into(), Nbt::Int(117)),
+                        ("z".into(), Nbt::Int(8)),
+                        ("Block".into(), Nbt::String("minecraft:repeater".into())),
+                        ("Time".into(), Nbt::Int(1)),
+                        ("Priority".into(), Nbt::Byte(-2)),
+                    ]),
+                    Nbt::Compound(vec![
+                        ("x".into(), Nbt::Short(-3)),
+                        ("y".into(), Nbt::Int(64)),
+                        ("z".into(), Nbt::Int(0)),
+                        ("Block".into(), Nbt::String("minecraft:fire".into())),
+                        ("Time".into(), Nbt::Int(23)),
+                        ("Priority".into(), Nbt::Int(0)),
+                    ]),
+                ],
+            }),
+        ]);
+        let root = vec![(
+            "Regions".to_owned(),
+            Nbt::Compound(vec![("only".to_owned(), region)]),
+        )];
+
+        let schematic = parse_litematica(&root).expect("hand-built region must parse");
+        assert_eq!(schematic.pending_block_ticks.len(), 2, "{:?}", schematic.pending_block_ticks);
+
+        let repeater = &schematic.pending_block_ticks[0];
+        assert_eq!((repeater.x, repeater.y, repeater.z), (9, 117, 8));
+        assert_eq!(repeater.block, "minecraft:repeater");
+        assert_eq!(repeater.time, 1);
+        assert_eq!(repeater.priority, -2, "Byte(-2) must widen to i32 -2, not wrap");
+
+        let fire = &schematic.pending_block_ticks[1];
+        assert_eq!((fire.x, fire.y, fire.z), (-3, 64, 0), "Short(-3) must widen to i32 -3");
+        assert_eq!(fire.block, "minecraft:fire");
+        assert_eq!(fire.time, 23);
+        assert_eq!(fire.priority, 0);
     }
 
     #[test]

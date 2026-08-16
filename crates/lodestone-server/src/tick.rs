@@ -536,13 +536,22 @@ impl BlockTickFeed {
         Self(Arc::default(), Arc::clone(&self.1), Arc::default())
     }
 
-    /// Hands the tick loop block ticks that a connection's own mutation
-    /// scheduled, for it to rebase and host (issue #465).
+    /// Hands the tick loop block ticks a caller wants resumed against a live
+    /// world — production-internal use is issue #465's connection-triggered
+    /// placement path (`crate::server`), and this is also the hook a
+    /// captured-contraption benchmark re-injects a schematic's own
+    /// `PendingBlockTicks` through (`crates/lodestone-anvil/tests/redstone_benchmark.rs`,
+    /// `docs/redstone-benchmark-harness.md`) — a schematic stamped with a raw
+    /// [`crate::ChunkSource::set_block`] carries no scheduled tick of its
+    /// own, so this is the only way to resume a captured circuit mid-cycle
+    /// instead of only measuring an inert, perfectly-settled one.
     ///
     /// Each entry's `trigger_tick` is a **delay in ticks**, not an absolute
-    /// tick — the publisher runs outside the tick loop and has no counter to be
-    /// absolute against.
-    pub(crate) fn request_scheduled_ticks(&self, ticks: Vec<ScheduledTick<String>>) {
+    /// tick — the publisher (a connection task, or a caller with no tick loop
+    /// of its own to be absolute against) has no live `game_tick` counter to
+    /// measure from; [`crate::tick::run_tick_loop`] rebases each one onto its
+    /// own counter on drain.
+    pub fn request_scheduled_ticks(&self, ticks: Vec<ScheduledTick<String>>) {
         if ticks.is_empty() {
             return;
         }

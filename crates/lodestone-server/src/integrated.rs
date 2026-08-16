@@ -3529,6 +3529,24 @@ impl IntegratedServer {
         self.clock.as_deref().map(TickClock::stats)
     }
 
+    /// This server's outbound/inbound block-tick hub, `Some` for every
+    /// constructor that builds a world (the same `Some`-iff rule
+    /// [`Self::tick_stats`] follows, and the same field RCON's
+    /// [`start_rcon`](Self::start_rcon) already reaches for `/setblock`).
+    ///
+    /// The inbound half — [`BlockTickFeed::request_scheduled_ticks`] — is
+    /// what lets an external caller resume a captured circuit's own
+    /// mid-cycle scheduled ticks (a repeater between delay and firing) inside
+    /// a world stamped by raw [`ChunkSource::set_block`] writes, which
+    /// schedule nothing on their own. See
+    /// `crates/lodestone-anvil/tests/redstone_benchmark.rs` for the one
+    /// caller today.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn block_ticks(&self) -> Option<&BlockTickFeed> {
+        self.block_ticks.as_ref()
+    }
+
     /// How many times a system registered on this server's own
     /// `bevy_ecs::World` has run (issue #433 Phase 0), or `None` for a handle
     /// with no world-tick task — the same `Some` iff `tick_task` rule

@@ -292,6 +292,17 @@ mod protocol;
 pub mod query;
 mod random_tick;
 mod redstone;
+/// The scheduled-tick "kind" strings [`random_tick::react_to_notification`]
+/// itself schedules for a torch/repeater/comparator/observer recheck
+/// (`redstone::TICK_TORCH`/`TICK_REPEATER`/`TICK_COMPARATOR`/`TICK_OBSERVER`),
+/// re-exported so an external caller building a [`ScheduledTick`] by hand
+/// (a benchmark harness re-injecting a schematic's own `PendingBlockTicks`
+/// through [`BlockTickFeed::request_scheduled_ticks`], for one) can name the
+/// same `kind` the production dispatch itself would have scheduled, rather
+/// than guessing or duplicating the string. `redstone` itself stays private —
+/// these four constants are the only part of its surface anything outside
+/// this crate has needed so far.
+pub use redstone::{TICK_COMPARATOR, TICK_OBSERVER, TICK_REPEATER, TICK_TORCH};
 /// `docs/plans/redstone-execution-model.md`'s U1: structural counters through
 /// the redstone notification/reaction/scheduling path, feature-gated behind
 /// `redstone-counters` (default off) — see this module's own doc comment.
