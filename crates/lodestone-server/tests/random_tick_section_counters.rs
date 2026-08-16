@@ -636,7 +636,30 @@ fn a_wrong_draw_count_does_not_reproduce_the_lcg_stream() {
 /// in a release build, so in that configuration the same corruption is asserted
 /// to change the *decision* instead, which is the defect the tripwire exists to
 /// catch.
+///
+/// # Why this uses `#[should_panic]` and not a nested `catch_unwind`
+///
+/// It used to wrap the `tick_chunk` call in its own `std::panic::catch_unwind`
+/// and inspect the payload. Measured 2026-08-16: under this workspace's default
+/// debug codegen backend (`.cargo/config.toml`'s `profile.dev.codegen-backend =
+/// "cranelift"`), that *nested* `catch_unwind` does not catch the panic — it
+/// escapes past the nested boundary and the test fails outright, reporting the
+/// raw panic text with no `expect_err` ever running. The same test, byte-for-byte,
+/// passes under the LLVM backend (`CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm`), and
+/// in both cases the panic itself fires at the same place with the same message —
+/// so the tripwire and the counter maintenance it guards are correct; only the
+/// *nested* `catch_unwind` is unreliable under Cranelift. libtest's own *outer*
+/// catch around each `#[test]` fn is unaffected (proven by the very fact that the
+/// broken nested version was reported as a clean "1 failed" rather than the whole
+/// binary aborting), so `#[should_panic(expected = ..)]` — which relies on that
+/// outer catch alone — sidesteps the bug rather than working around it blind.
 #[test]
+#[cfg_attr(
+    debug_assertions,
+    should_panic(
+        expected = "random-tick counter desync at chunk (0, 0) section_min_y 0: counters say true"
+    )
+)]
 fn corrupting_a_counter_trips_the_consumption_site_tripwire() {
     let mut column = gate_b_fixture();
     // Corrupt a *quiet* section upward: the counter now claims a section ticks
@@ -649,29 +672,26 @@ fn corrupting_a_counter_trips_the_consumption_site_tripwire() {
     let section_min_y = column.min_y + quiet_index as i32 * SECTION_ROWS;
 
     if cfg!(debug_assertions) {
+        // `gate_b_fixture` is fixed, so the quiet section the corruption lands on
+        // is deterministic, not merely observed: section 0 (y 0..16) never holds
+        // ticking content there (see the fixture's own doc comment). The
+        // `should_panic` literal above hardcodes `section_min_y 0` for exactly
+        // that reason. If the fixture ever changes so the quiet section moves,
+        // this assertion fails loudly and names the mismatch, instead of
+        // `should_panic` silently failing on a substring that no longer appears.
+        assert_eq!(
+            (quiet_index, section_min_y),
+            (0, 0),
+            "the should_panic expectation above hardcodes section_min_y 0 for this fixture; \
+             update the literal if this assertion ever fires"
+        );
         let mut scheduler = RandomTickScheduler::new(7, 7);
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            scheduler.tick_chunk(&mut column, 0, 0, 3, &mut block_ticks, 0);
-        }));
-        let payload = outcome.expect_err(
-            "control failed: `tick_chunk` accepted a corrupted counter without tripping its \
-             debug tripwire, so the tripwire proves nothing about a future bypass",
-        );
-        let message = payload
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
-            .unwrap_or_default();
-        println!("tripwire control observed: {message}");
-        assert!(
-            message.contains("random-tick counter desync"),
-            "the tripwire fired but with an unexpected message: {message}"
-        );
-        assert!(
-            message.contains(&format!("section_min_y {section_min_y}")),
-            "the tripwire must name the desynced section, got: {message}"
-        );
+        // Deliberately no `catch_unwind` here — see the function doc. The panic
+        // this triggers is expected to propagate out of the test function itself
+        // and be caught by libtest's own outer machinery, verified by
+        // `#[should_panic]`'s `expected` string above.
+        scheduler.tick_chunk(&mut column, 0, 0, 3, &mut block_ticks, 0);
     } else {
         // Release: no `debug_assert!`. The corruption is then only observable as
         // a wrong decision — which is exactly the failure mode being guarded.
