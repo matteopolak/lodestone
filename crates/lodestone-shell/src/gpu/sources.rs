@@ -234,6 +234,17 @@ pub struct ThirdPersonBodyState {
     pub anim: AnimInput,
     /// Uniform render scale. `1.0` for a normal adult.
     pub scale: f32,
+    /// `Mth.lerp(partialTick, swimAmountO, swimAmount)` — the body-pitch
+    /// ramp `gpu::entity_passes::apply_swim_rotation` reads to tip the whole
+    /// body toward horizontal while swimming, **not**
+    /// [`AnimInput::swim_amount`] on [`Self::anim`] (that one drives the
+    /// arm-stroke pose only). `sim/camera.rs::third_person_body_state` fills
+    /// this from the local player's own physics-integrated
+    /// `PlayerState::swim_amount`/`swim_amount_o`. This used to have no
+    /// source at all — [`Self::into_draw`] hardcoded `EntityDraw::swim_amount`
+    /// to `0.0` — which is why a remote player's body leaned into a swim and
+    /// the local player's own body stood bolt upright doing the same stroke.
+    pub swim_amount: f32,
     /// Which rig to draw: `true` for `player_slim` ("Alex" arms), `false` for
     /// `player_wide` ("Steve" arms) — see [`player_model_name`].
     /// `sim/camera.rs::third_person_body_state` fills this from
@@ -336,16 +347,15 @@ impl ThirdPersonBodyState {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
-            // The local player's own swim ramp is not plumbed to
-            // `ThirdPersonBodyState` yet — `SwimRamp`/`tick_swim_ramp` in
-            // `entities.rs` integrate off the ingest `Pose` component, and the
-            // local player has no ingest entity to read one from (same root
-            // cause as `hurt`/`on_fire`/`death_time` above). `0.0` by
-            // construction: our own third-person body stands upright while
-            // swimming until `sim/camera.rs::third_person_body_state` grows a
-            // source for this, the same gap that field's own doc records for
-            // the fetched skin.
-            swim_amount: 0.0,
+            // The local player's own swim ramp, now plumbed from
+            // `ThirdPersonBodyState::swim_amount` (see that field's doc) —
+            // `sim/camera.rs::third_person_body_state` reads it straight off
+            // `PlayerState::swim_amount`/`swim_amount_o`, the same
+            // physics-integrated value `AnimInput::swim_amount` already used
+            // for the arm stroke, rather than the `SwimRamp`/`tick_swim_ramp`
+            // reconstruction `entities.rs` needs for a *remote* player (whose
+            // ingest entity carries a synced `Pose` and nothing else).
+            swim_amount: self.swim_amount,
             // The local player's own body cannot report `on_fire` either, for
             // the same reason `hurt` above cannot: no ingest entity, hence no
             // `EntityFlags` to read. `false` by construction, not by omission.

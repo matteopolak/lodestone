@@ -505,6 +505,7 @@ fn freeze_confusion_and_portal_survive_third_person_unlike_the_others() {
             body_yaw_deg: 0.0,
             anim: lodestone_render::AnimInput::default(),
             scale: 1.0,
+            swim_amount: 0.0,
             slim: false,
             equipment: Vec::new(),
         })

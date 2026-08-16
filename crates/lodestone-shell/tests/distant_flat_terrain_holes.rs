@@ -140,6 +140,7 @@ fn suppress_first_person_arm(state: &mut RenderState) {
             body_yaw_deg: 0.0,
             anim: AnimInput::default(),
             scale: 1.0,
+            swim_amount: 0.0,
             slim: false,
             equipment: Vec::new(),
         })
