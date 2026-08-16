@@ -587,6 +587,14 @@ impl Particles {
             }
             "end_rod" => emit::end_rod(&mut self.engine, x, y, z, xa, ya, za),
             "electric_spark" | "glow" => emit::spark(&mut self.engine, x, y, z, xa, ya, za),
+            // `FireworkParticles.SparkParticle` via `SparkProvider` -- the plain
+            // wire particle a `LEVEL_PARTICLES` packet can name directly, not the
+            // rocket-explosion burst a `Starter`/`NoRenderParticle` spawns
+            // client-side (never sent over the wire at all). See
+            // `docs/particle-catalogue.md`'s "Correction" entry for why this was
+            // never blocked on the `ParticleOptions` decoder the way it first
+            // looked: `ParticleTypes.FIREWORK` is a `SimpleParticleType`.
+            "firework" => emit::firework(&mut self.engine, x, y, z, xa, ya, za),
             // Sheet, scale and lifetime are what separate these four; the tick
             // shape is identical. Lifetimes are each class's own constructor.
             "sculk_charge" => emit::animated_ambient(
@@ -1283,6 +1291,7 @@ mod tests {
             ((Sheet::Spell, 0u16), rect),
             ((Sheet::Glitter, 0u16), rect),
             ((Sheet::Explosion, 0u16), rect),
+            ((Sheet::Spark, 0u16), rect),
         ]));
         p
     }
@@ -1344,6 +1353,14 @@ mod tests {
             // below), so it would fail this loop's `drawn == 1` assertion for
             // a reason that has nothing to do with dispatch being broken.
             ("explosion", [0.0, 0.0, 0.0]),
+            // `firework` (`FireworkParticles.SparkParticle`/`SparkProvider`):
+            // the dispatch arm this module was missing while `emit::firework`
+            // itself already existed -- see `docs/particle-catalogue.md`'s
+            // "Correction" entry. `count == 1` here (like every other case in
+            // this loop) draws position jitter from `gaussian() * offset` and
+            // velocity from `gaussian() * max_speed` with `max_speed == 0.0`,
+            // so this proves reachability, not a specific spark velocity.
+            ("firework", [0.3, 0.1, -0.2]),
         ];
         for &(kind, offset) in cases {
             let mut p = resolvable();
@@ -1371,7 +1388,16 @@ mod tests {
     #[test]
     fn a_near_miss_kind_still_falls_into_the_catch_all() {
         let mut p = resolvable();
-        for kind in ["sweep", "note_block", "heartbeat", "totem", "explosions", "explode"] {
+        for kind in [
+            "sweep",
+            "note_block",
+            "heartbeat",
+            "totem",
+            "explosions",
+            "explode",
+            "fireworks",
+            "firework_rocket",
+        ] {
             p.spawn_particles(kind, [0.0, 64.0, 0.0], [0.0; 3], 0.0, 3);
         }
         assert!(

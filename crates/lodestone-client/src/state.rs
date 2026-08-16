@@ -22,6 +22,7 @@
 //! [`SharedState::is_chunk_loaded`], or take owned section snapshots via
 //! [`SharedState::section_at`] for meshing.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
 use lodestone_ecs::ecs::entity::Entity;
@@ -370,6 +371,18 @@ pub(crate) struct SharedState {
     /// when the `World` is built, and that is always before a `SharedState`
     /// wraps it.
     game_event_bus_enabled: bool,
+    /// Whether the driver's live [`ConnectionState`](lodestone_model::ConnectionState)
+    /// is currently `Play`, kept in lockstep with `Driver::state` by the
+    /// `Directive::SetState` arm in `driver.rs`.
+    ///
+    /// A plain [`AtomicBool`] rather than a field on [`LocalEcho`] behind the
+    /// `RwLock`: this is read on the shell's net loop every drain (issue #674 --
+    /// a per-tick `Move` submitted while the connection has dropped back into
+    /// `Configuration`, e.g. a mid-session dimension-change reconfigure, has no
+    /// encode arm and was spamming "action has no packet in current state" once
+    /// per tick), so it wants the cheapest possible read rather than a lock
+    /// shared with the rest of the echo.
+    in_play: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for SharedState {
@@ -420,6 +433,7 @@ impl Default for SharedState {
             ecs,
             session,
             game_event_bus_enabled,
+            in_play: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -494,6 +508,7 @@ impl SharedState {
             ecs,
             session,
             game_event_bus_enabled,
+            in_play: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -619,6 +634,23 @@ impl SharedState {
     /// store, paired with the read handle so the two never name different worlds.
     pub(crate) fn chunk_world_write(&self) -> ChunkWorldWrite {
         ChunkWorldWrite::from_shared(Arc::clone(&self.world))
+    }
+
+    /// Records the driver's live `ConnectionState`, kept current by every
+    /// `Directive::SetState` the driver executes -- see [`Self::in_play`].
+    pub(crate) fn set_in_play(&self, in_play: bool) {
+        self.in_play.store(in_play, Ordering::Relaxed);
+    }
+
+    /// Whether the driver's connection is currently in the `Play` state.
+    ///
+    /// `Relaxed` is enough: this gates a per-tick best-effort submission
+    /// (drop a `Move` rather than hand it to a driver that can only log and
+    /// discard it), not a correctness-critical read, and it carries no other
+    /// memory access that needs to happen-before or -after it.
+    #[must_use]
+    pub(crate) fn in_play(&self) -> bool {
+        self.in_play.load(Ordering::Relaxed)
     }
 
     /// Records the player's own outgoing movement so subsequent look/step

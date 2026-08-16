@@ -702,6 +702,13 @@ impl<T: Transport> Driver<T> {
                     tracing::debug!(?next, "state transition");
                     let entering_configuration = next == ConnectionState::Configuration;
                     self.state = next;
+                    // A mid-session reconfigure (dimension change, resource-pack
+                    // push) drops `state` back to `Configuration` while the
+                    // shell's movement queue is still live, and it has no way to
+                    // know that without this. Kept in lockstep here rather than
+                    // read straight off `self.state`, because the shell reads it
+                    // from another thread through `ClientHandle`.
+                    self.read_model.set_in_play(next == ConnectionState::Play);
                     if entering_configuration {
                         // Announce our brand on entering Configuration, as
                         // vanilla does. Protocol hygiene with no game/UI input;
