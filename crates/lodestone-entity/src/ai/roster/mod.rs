@@ -378,7 +378,19 @@ pub fn sit_when_ordered(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// carry no vanilla citation because they are not a transcription of any one
 /// species; `vanilla` is `"—"` so a multiset gate can never mistake the fallback
 /// for a real table.
-pub const FALLBACK: &[Registration] = &[
+///
+/// **A `static`, not a `const`.** [`is_fallback`] identifies the fallback table
+/// by comparing `table.as_ptr()` against this item's own address, and a `const`
+/// item has no single address — the language re-promotes (and, depending on
+/// the codegen backend, may or may not deduplicate) a fresh instance at every
+/// use site. Measured: under this workspace's Cranelift debug profile, the
+/// promoted instance `registrations_for`'s fallback arm returns and the one
+/// `FALLBACK.as_ptr()` names directly in a *different* compilation unit came
+/// back at two different addresses, so `is_fallback(registrations_for("llama"))`
+/// — llama being a real 26.2 species no family claims — read as `false`.
+/// `static` has exactly one address for the item's whole `'static` lifetime,
+/// which is the property `is_fallback`'s pointer comparison actually needs.
+pub static FALLBACK: &[Registration] = &[
     Registration::goal(5, "—", |ctx| {
         Box::new(RandomStrollGoal::new(ctx.speed))
     }),
