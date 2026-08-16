@@ -283,12 +283,89 @@ frame.
 **Deliberately not landed**: vanilla's `chatVisibility` (System/Hidden
 filtering) needs a per-line message-source tag that
 `lodestone_game::chat::ChatLog::recent` currently flattens away before it
-reaches the HUD; `chatLinks`/`chatLinksPrompt` need click detection this HUD
-has none of; `chatDelay` is a message-arrival rate limit, not a render
-concern. Landing an option field with no reader is the exact defect
-`CLAUDE.md` calls the dominant one here, so these stay out until something
-upstream can consume them — see that file's `ChatDisplayOptions` doc comment
+reaches the HUD; `chatDelay` is a message-arrival rate limit, not a render
+concern. `chatLinks`/`chatLinksPrompt` no longer belong on this list —
+click detection landed (see "Interactivity" below) — but the *option itself*
+still has no reader: this shell has no confirmation-screen state to gate an
+`open_url` click on yet, so the option that would toggle "ask before opening"
+has nothing to control. Landing an option field with no reader is the exact
+defect `CLAUDE.md` calls the dominant one here, so this one stays out until
+that screen exists — see `crate::hud::ChatDisplayOptions`'s own doc comment
 for the same note in code.
+
+### Interactivity: `click_event`/`hover_event`
+
+**The wire and the tree were never the problem.** A `click_event`/
+`hover_event` decodes correctly off both JSON and NBT into
+`Text::click`/`Text::hover` — has since before this section existed — and
+`lodestone_game::text::resolve` (used ahead of every flatten this HUD does)
+already documented passing them through untouched. The gap was
+`Text::to_spans`, the one function this whole HUD flattens a `Text` tree
+through for drawing: its `TextSpan` output has no field for either, so a
+message with a real link or a real tooltip had nowhere for either to reach
+by the time a draw call saw it — the model discarding a field
+*downstream* of a correct decode, not at the decode itself.
+
+The fix is additive on both sides of the crate boundary, and lives in two
+places:
+
+- `lodestone_model::Text::to_interactive_spans` / `InteractiveTextSpan` —
+  `to_spans`'s sibling, in the model crate that owns `Text` itself.
+  `click`/`hover`/`insertion` inherit down the tree exactly the way
+  `TextStyle` does (vanilla's own `Style.applyTo` treats them as ordinary
+  inheriting `Style` fields, not a separate mechanism), including across a
+  legacy `§` split, where every piece a run explodes into keeps the
+  enclosing component's already-resolved `click`/`hover`.
+- `lodestone_game::text::{InteractiveSpan, interactive_spans}` — this
+  crate's own thinner version (no `insertion` yet — nothing downstream reads
+  it), which resolves `translate` nodes first (the same `resolve` every
+  other projection here already runs) and then lowers onto the model
+  function above. `lodestone_game::chat::ChatLog::recent_interactive` /
+  `recent_ages_interactive` are `recent_spans`/`recent_ages_spans`'s
+  siblings built on it; `Sim::recent_chat_interactive` (`sim/session.rs`) is
+  the shell's one reader into it, mirroring `recent_chat_spans` field for
+  field.
+
+**Hit-testing reuses the chat draw's own geometry, not a second copy of it.**
+`crate::hud::chat_interaction_at` (a free function) and
+`HudRenderer::chat_interaction_at` (the renderer-side wrapper that supplies
+the attached font's measure closure, the same relationship
+`HudRenderer::suggestion_layout` has to the free `suggestion_layout`) walk
+the visible scrollback newest-first with the *exact* free functions the draw
+itself calls — `chat_width_px`/`chat_height_px`/`chat_pose_scale`/
+`chat_line_h`/`chat_bottom` — so a resize or an options edit cannot leave a
+hit-test aiming at stale pixels. `wrap_interactive_with` is
+`wrap_spans_with`'s sibling, extended to carry each character's `click`/
+`hover` through the same word-break algorithm; `interactive_span_at` walks
+one already-wrapped row measuring each character's own run style, exactly
+the way the draw's glyph advance would.
+
+**Click dispatch is real and reaches the wire, but the safety story is
+deliberately incomplete.** `WindowApp::dispatch_click_action`
+(`app/menus.rs`), wired into the existing chat-open `MouseInput` handler in
+`app/lifecycle.rs` (behind the suggestion popup, which still gets first
+refusal): `run_command` sends through `Sim::send_chat` exactly as if it had
+been typed and Enter pressed; `suggest_command` fills `ChatInput` without
+sending; `copy_to_clipboard` goes through the now test-safe
+`crate::menu::accounts::copy_to_clipboard`. `open_url`/`open_file` do
+**not** call `crate::menu::accounts::open_in_browser` — vanilla itself
+gates `open_url` behind `ConfirmLinkScreen` precisely because a chat message
+is server-supplied, untrusted content, and this shell has no such screen
+wired to chat yet. Rather than silently drop the click or open with no
+confirmation at all, the destination is surfaced as a client-authored chat
+line (`Sim::push_local_chat`) showing it in full, so the player can act on
+it deliberately. **The natural follow-up is wiring `crate::menu::confirm`'s
+existing `ConfirmScreen` machinery — already used for world deletion and the
+resource-pack prompt — to this click instead of the chat line**, at which
+point the `chatLinksPrompt` option above finally has something to gate.
+
+**Hover has no consumer yet.** `chat_interaction_at` finds a `hover_event`
+under the cursor the same way it finds a `click_event`, and
+`WindowApp::chat_interaction` returns it, but nothing renders a tooltip box
+from it — that is the one link in this chain that stops one hop short of
+pixels. `show_item`/`show_entity` are modelled by the wire/tree layer only
+as their raw payload text (`lodestone_model::text::HoverEvent`'s own doc);
+only `show_text` has anything a tooltip box could draw verbatim today.
 
 ## How to change it
 
