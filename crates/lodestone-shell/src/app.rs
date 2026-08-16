@@ -660,18 +660,6 @@ struct WindowApp {
     /// water/lava surface) rather than every frame. Seeded to the sky fog set at
     /// render bring-up so the first frame above water is a no-op.
     applied_fog: Option<FogSettings>,
-    /// This driver's own `bevy_ecs` `App` (`docs/bevy-migration.md` Stage 0),
-    /// stepped once per frame in [`WindowApp::redraw`] via `Runner::Winit`
-    /// (`app.update()` called directly, no internal timer — packet ingest
-    /// must never gate on frame rate). Only `CorePlugin` is added, and nothing
-    /// in the shell reads from it — `self.ecs.update()` is the only other
-    /// reference to this field. It is a *separate* `World` from `Sim`'s own
-    /// `EcsHandle`, which §4.1(c) made the one that `lodestone_client::SharedState`
-    /// adopts; this field predates that unification and was not folded into
-    /// it. See the two-`World`s note in `docs/bevy-migration.md`'s Stage 0
-    /// report for how this scaffold started, and §4.1(c)'s report for which
-    /// `World` actually won.
-    ecs: lodestone_ecs::app::App,
     /// The local crafting-recipe corpus (`crate::resources::load_recipe_book`),
     /// loaded once at GPU bring-up. `None` on a jar-less run or before it has
     /// loaded. Used only for the container screen's ghost-preview draw and the

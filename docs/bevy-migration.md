@@ -556,6 +556,15 @@ being default-on is the thing most likely to surprise.
 
 **Why first:** it front-loads the only risk that can kill the plan outright, for about a day.
 
+**Since removed:** this stage's own `App` field on `WindowApp` (`app.rs`, only `CorePlugin` added,
+stepped once per frame via a bare `self.ecs.update()`) was a *second*, separate `World` from `Sim`'s
+own `EcsHandle`. §4.1(c) made `Sim`'s handle the one `World` that unifies `lodestone_client::SharedState`
+and the shell, but this scaffold predated that unification and was never folded into it or deleted —
+nothing read from it, `CorePlugin` inserts no resources this crate consumes outside that dead `World`,
+and its own doc comment said as much before the field was deleted outright. If a future reader goes
+looking for "the shell's own bevy `App`" from this section, it no longer exists; `Sim::step`'s
+`run_schedule(Update)`/`run_schedule(GameTick)`/`run_schedule(Extract)` calls are the one driver now.
+
 ---
 
 ### Stage 1 — entities become entities (three copies → one)
