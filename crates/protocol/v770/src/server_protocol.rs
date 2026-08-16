@@ -3316,7 +3316,9 @@ impl ServerProtocol for V770ServerProtocol {
             //
             // 3 and 4 used to fall into the `_ => Ignored` arm below, so pressing
             // `Q` did nothing whatsoever; they now lift to
-            // `ServerBound::ItemDropped`. 5-7 still have no server-side model.
+            // `ServerBound::ItemDropped`. 6 (SWAP_ITEM_WITH_OFFHAND) now lifts to
+            // `ServerBound::SwapItemInHand`; 7 (STAB) still has no server-side
+            // model.
             State::Play if packet_id == play::serverbound::PLAYER_ACTION => {
                 match decode_full::<PlayerAction>(payload) {
                     Some(action) => {
@@ -3349,6 +3351,12 @@ impl ServerProtocol for V770ServerProtocol {
                             // never fire anything — the packet that ends the draw
                             // reached no server-side model at all.
                             5 => ServerBound::ReleaseUseItem,
+                            // The `F`-key hand swap. STAB (7) is still
+                            // genuinely unmodelled — see
+                            // `ServerBound::SwapItemInHand`'s own doc comment
+                            // for the consumer and why this and 7 stayed
+                            // paired until now.
+                            6 => ServerBound::SwapItemInHand,
                             _ => ServerBound::Ignored,
                         }
                     }
@@ -6122,9 +6130,9 @@ mod block_edit_tests {
     /// test required that it keep doing nothing. The premise had to be re-checked
     /// rather than the assertion trusted; see `DESIGN.md` §12.150.
     ///
-    /// `5..=7` are still genuinely unmodelled, and keeping them in the loop is
-    /// what stops the two drop arms from having been written as a `3..=7`
-    /// catch-all.
+    /// `7` (STAB) is still genuinely unmodelled, and keeping it in its own
+    /// assertion is what stops the two drop arms from having been written as a
+    /// `3..=7` catch-all.
     #[test]
     fn decode_player_action_drop_ordinals_lift_and_the_rest_are_ignored() {
         let proto = V770ServerProtocol;
@@ -6155,11 +6163,15 @@ mod block_edit_tests {
             proto.decode(State::Play, play::serverbound::PLAYER_ACTION, &body(5)),
             ServerBound::ReleaseUseItem,
         );
-        // SWAP_ITEM_WITH_OFFHAND and STAB: still no server-side model.
-        for ordinal in 6..=7 {
-            let decoded = proto.decode(State::Play, play::serverbound::PLAYER_ACTION, &body(ordinal));
-            assert_eq!(decoded, ServerBound::Ignored, "ordinal {ordinal}");
-        }
+        // 6 is SWAP_ITEM_WITH_OFFHAND, and it lifts now — see
+        // `ServerBound::SwapItemInHand`'s own doc comment for the consumer.
+        assert_eq!(
+            proto.decode(State::Play, play::serverbound::PLAYER_ACTION, &body(6)),
+            ServerBound::SwapItemInHand,
+        );
+        // 7 is STAB: still no server-side model.
+        let decoded = proto.decode(State::Play, play::serverbound::PLAYER_ACTION, &body(7));
+        assert_eq!(decoded, ServerBound::Ignored, "ordinal 7");
         // Past the enum: still ignored, so the arm above is a specific lift rather
         // than a catch-all that swallowed the tail.
         for ordinal in [8, 99, -1] {

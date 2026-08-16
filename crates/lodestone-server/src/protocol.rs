@@ -1020,6 +1020,21 @@ pub enum ServerBound {
     /// links into a wasm32 bundle where `Instant::now()` compiles and then panics
     /// at runtime with no log line.
     ReleaseUseItem,
+    /// The `F`-key hand swap (`ServerboundPlayerActionPacket`'s
+    /// `SWAP_ITEM_WITH_OFFHAND` ordinal, `6`) — see `crate::server`'s own
+    /// `ServerBound::SwapItemInHand` dispatch arm for the consumer.
+    ///
+    /// `ServerGamePacketListenerImpl.handlePlayerAction`'s `SWAP_ITEM_WITH_OFFHAND`
+    /// arm swaps `getItemInHand(MAIN_HAND)` with `getItemInHand(OFF_HAND)` and calls
+    /// `stopUsingItem()`; the stop-using half is not modelled here (this crate has
+    /// no in-progress "using item" state to cancel — see [`ReleaseUseItem`](Self::ReleaseUseItem)'s
+    /// own doc comment for the one piece of that state this crate does track, which
+    /// a hand swap does not touch). Unlike `CreativeModeSlotSet`/`RenameItem`, the
+    /// client applies **no local prediction** for this swap (`crates/lodestone-shell`'s
+    /// `SwapItemWithOffhand` action only ever encodes the packet), so the corrected
+    /// `container_set_slot` pair the consumer sends is not a *correction* — it is
+    /// the only place either slot's new contents ever reaches the client at all.
+    SwapItemInHand,
     /// The client reporting where the vehicle it rides has got to
     /// (`ServerboundMoveVehiclePacket`), once per tick while mounted.
     ///
