@@ -166,6 +166,15 @@ These are re-exported from `lodestone_ecs` and are the plugin ABI's ordering anc
 system function it later renames breaks every plugin that named it; a set survives internal
 refactors. `sets.rs`'s own doc comment states this as policy.
 
+**`FrameSet::Camera` is a reserved ordering anchor with no systems registered in it** — the real
+camera pose is computed by a plain method, `Sim::render_camera`, not a scheduled system, so there is
+nothing to order against there today. A plugin drives the camera instead by inserting
+`lodestone_ecs::CameraOverride { position, yaw, pitch }` on the local-player entity — `LookIntent`-style:
+insert to take control of the *drawn* frame, remove to hand it back. It deliberately carries no
+near/far/FOV field; `Sim::render_camera` derives those from the unmodified camera (render distance,
+the FOV option) so an override cannot open a clip plane wrong by omission, and it does not touch
+`PhysicsState`, the pick-ray source, or the audio listener — only the pixels drawn this frame move.
+
 **Components a plugin can read and write today** — Stage 1's output, `crates/lodestone-ecs/src/entity.rs`:
 `MinecraftEntityId`, `EntityUuid`, `EntityKind`, `Position`, `Rotation`, `HeadYaw`, `Velocity`,
 `OnGround`, `EntityFlags`, `CustomName`, `CustomNameVisible`, `Pose`, `Health`, `Baby`, `Variant`,

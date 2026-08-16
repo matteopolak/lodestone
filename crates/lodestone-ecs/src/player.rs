@@ -71,7 +71,7 @@ use bevy_ecs::world::World;
 use lodestone_entity::attribute::{
     attribute_value, movement_speed_key, sprinting_modifier_id, water_movement_efficiency_key,
 };
-use lodestone_model::{ClientAction, PlayerCommand, PlayerInput};
+use lodestone_model::{ClientAction, PlayerCommand, PlayerInput, Vec3};
 use lodestone_physics::{
     CollisionView, FluidState, MovementInput, NearbyEntity, PhysicsProfile, PlayerState, PushSelf,
     UseEffects, Vec3d, compute_fluid_state, tick_among_entities,
@@ -155,6 +155,32 @@ pub struct LookIntent {
     pub yaw: f32,
     /// Degrees, clamped to `[-90, 90]` by [`apply_look_intent`] — straight
     /// down to straight up, vanilla's own range.
+    pub pitch: f32,
+}
+
+/// A plugin's wish to drive the **render** camera pose directly for one
+/// frame — a spectator-style free camera, a cinematic path — mirroring
+/// [`LookIntent`]'s "express a wish, the shell owns the machine" contract:
+/// inserting this on the [`LocalPlayer`] entity replaces this frame's
+/// rendered camera; removing it hands control straight back to the computed
+/// first/third-person pose next frame.
+///
+/// Deliberately **render-pose only** — no near/far/FOV field. The shell's
+/// `Sim::render_camera` derives near/far/FOV from its own unmodified
+/// `Sim::camera` (render distance, vanilla FOV option) and substitutes only
+/// position/yaw/pitch, so an override cannot put the far plane inside
+/// render-distance fog or the near plane behind the eye by omission. It also
+/// does not touch `PhysicsState`, the pick-ray source (`Sim::camera`), or the
+/// audio listener — a plugin driving a spectator camera should not also
+/// relocate the player's raycast origin or where it hears the world from.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct CameraOverride {
+    /// World-space eye position for the drawn frame.
+    pub position: Vec3,
+    /// Degrees, vanilla convention (0 = south, increasing clockwise viewed
+    /// from above).
+    pub yaw: f32,
+    /// Degrees, `[-90, 90]` — straight down to straight up.
     pub pitch: f32,
 }
 

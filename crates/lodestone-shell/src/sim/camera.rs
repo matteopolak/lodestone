@@ -496,6 +496,31 @@ impl Sim {
 
     #[must_use]
     pub fn render_camera(&self, aspect: f32) -> Camera {
+        // The `CameraOverride` hook: a plugin's wish to drive the drawn frame
+        // directly, `LookIntent`-style (insert to take control, remove to
+        // hand it back). Reuses `Self::camera(aspect)`'s near/far/FOV
+        // derivation (render distance, vanilla FOV option) rather than letting
+        // the override supply them, so it cannot open either clip plane wrong
+        // by omission — only position/yaw/pitch differ. Deliberately does not
+        // touch `PhysicsState`, `Self::camera` (the pick-ray/audio-listener
+        // source), or anything below this early return: this is the *drawn*
+        // frame only, a deliberate scope limit rather than a gap.
+        if let Some(over) = self.read(|w| w.get::<CameraOverride>(self.local).copied()) {
+            let mut cam = self.camera(aspect);
+            // `CameraOverride::position` is `lodestone_model::Vec3` (f64, the
+            // world-space precision every ECS position uses); `Camera::position`
+            // is `glam::Vec3` (f32, the render layer's own precision) — the same
+            // narrowing `interpolated_player()`'s `x as f32` does a few lines
+            // below for the unmodified path.
+            cam.position = glam::Vec3::new(
+                over.position.x as f32,
+                over.position.y as f32,
+                over.position.z as f32,
+            );
+            cam.yaw = over.yaw;
+            cam.pitch = over.pitch;
+            return cam;
+        }
         // The bob lands **here and not in `Self::camera`**, which is deliberate
         // and is the difference between a wobbling camera and a wobbling *game*:
         // `Self::camera` is also the block-targeting ray origin and the audio
