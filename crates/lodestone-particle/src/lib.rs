@@ -135,6 +135,12 @@ pub enum Sheet {
     SonicBoom,
     /// `particle/glow` — the single-frame spark `electric_spark` and `glow` share.
     Glow,
+    /// `particle/spark_0` … `spark_7` — `FireworkParticles.SparkParticle`
+    /// (`ParticleTypes.FIREWORK`). A distinct physical sheet from
+    /// [`Self::Glow`]: `firework.json` names `spark_N` textures, not `glow`,
+    /// so the two spark-ish particles (`firework` and `electric_spark`/`glow`)
+    /// share nothing but a name pattern.
+    Spark,
 }
 
 impl Sheet {
@@ -237,6 +243,13 @@ impl Sheet {
                 "sonic_boom_14", "sonic_boom_15",
             ],
             Self::Glow => &["glow"],
+            // Descending, per `firework.json` — the same "reads the pack file
+            // as the list, never assumes ascending" rule `Generic`/`Effect`/
+            // `Glitter`/`Spell` above already document.
+            Self::Spark => &[
+                "spark_7", "spark_6", "spark_5", "spark_4", "spark_3", "spark_2", "spark_1",
+                "spark_0",
+            ],
         }
     }
 
@@ -305,6 +318,7 @@ impl Sheet {
             Self::Gust,
             Self::SonicBoom,
             Self::Glow,
+            Self::Spark,
         ]
     }
 
