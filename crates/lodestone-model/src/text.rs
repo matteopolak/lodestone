@@ -374,6 +374,42 @@ pub struct TextSpan {
     pub style: TextStyle,
 }
 
+/// [`TextSpan`]'s interactive sibling: the same flattened, fully-inherited run,
+/// plus whichever `click`/`hover`/`insertion` apply to it — produced by
+/// [`Text::to_interactive_spans`].
+///
+/// **A new type rather than new fields on [`TextSpan`] itself.** `click_event`/
+/// `hover_event` decode into [`Text::click`]/[`Text::hover`] correctly and
+/// always have (see `json_click`/`json_hover`/`nbt_click`/`nbt_hover`), but
+/// [`Text::to_spans`] — the function every existing consumer flattens a tree
+/// through — never read them, so they were silently discarded exactly at the
+/// tree-to-span boundary. Sixteen call sites across `lodestone-shell` build a
+/// `TextSpan` struct literal directly, so widening that type would be a
+/// breaking change landing blind in a crate two other agents hold. This is
+/// additive instead: a chat hit-test can call [`Text::to_interactive_spans`]
+/// once it exists, and nothing that already calls [`Text::to_spans`] changes.
+///
+/// No `Hash` derive (unlike [`TextSpan`]): [`HoverEvent`] carries a `Box<Text>`
+/// payload, and hashing a whole nested component tree is not a cost this type
+/// should impose on every cache lookup the way [`TextSpan`]'s flat style does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractiveTextSpan {
+    /// The plain text of this run.
+    pub text: String,
+    /// The fully-resolved style (all inheritance applied).
+    pub style: TextStyle,
+    /// The click action in effect for this run — this node's own
+    /// [`Text::click`], or the nearest ancestor's, the same
+    /// child-overrides-parent inheritance [`TextStyle::inherit`] uses.
+    pub click: Option<ClickEvent>,
+    /// The hover action in effect for this run, inherited the same way as
+    /// [`Self::click`].
+    pub hover: Option<HoverEvent>,
+    /// The shift-click insertion text in effect for this run, inherited the
+    /// same way as [`Self::click`].
+    pub insertion: Option<String>,
+}
+
 impl Text {
     /// Creates a literal text component.
     #[must_use]
@@ -572,6 +608,109 @@ impl Text {
         }
         for child in &self.extra {
             child.collect_spans(&style, translate, out, depth + 1);
+        }
+    }
+
+    /// [`Self::to_spans`]'s interactive sibling: the same flattening, plus
+    /// `click`/`hover`/`insertion` — see [`InteractiveTextSpan`]'s own doc for
+    /// why this is a separate method rather than a change to [`TextSpan`].
+    #[must_use]
+    pub fn to_interactive_spans(&self) -> Vec<InteractiveTextSpan> {
+        let mut out = Vec::new();
+        for span in self.to_interactive_spans_ignoring_legacy_codes() {
+            if !span.text.contains(LEGACY_PREFIX) {
+                out.push(span);
+                continue;
+            }
+            // Same reasoning as `to_spans`: `from_legacy` consumes every
+            // `§`+code pair, so the inner spans carry no `§` of their own and
+            // this cannot recurse. The inner text is freshly parsed from a
+            // plain string, so it has no click/hover/insertion of its own —
+            // the outer span's (already fully inherited) values apply to
+            // every piece it splits into, the same way its style does.
+            for inner in Self::from_legacy(&span.text).to_spans_ignoring_legacy_codes() {
+                out.push(InteractiveTextSpan {
+                    text: inner.text,
+                    style: inner.style.inherit(&span.style),
+                    click: span.click.clone(),
+                    hover: span.hover.clone(),
+                    insertion: span.insertion.clone(),
+                });
+            }
+        }
+        out
+    }
+
+    /// [`Self::to_spans_ignoring_legacy_codes`]'s interactive sibling.
+    #[must_use]
+    fn to_interactive_spans_ignoring_legacy_codes(&self) -> Vec<InteractiveTextSpan> {
+        let mut spans = Vec::new();
+        self.collect_interactive_spans(
+            &TextStyle::default(),
+            None,
+            None,
+            None,
+            &default_translation,
+            &mut spans,
+            0,
+        );
+        spans
+    }
+
+    /// [`Self::collect_spans`]'s interactive sibling. `parent_click`/
+    /// `parent_hover`/`parent_insertion` thread down exactly the way
+    /// `parent: &TextStyle` already does — a node's own value wins when
+    /// present, else the nearest ancestor's applies, matching vanilla's
+    /// `Style` inheritance (`click_event`/`hover_event`/`insertion` are
+    /// ordinary `Style` fields there, inherited the same way as colour).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors collect_spans's own shape, widened by the three inherited events"
+    )]
+    fn collect_interactive_spans(
+        &self,
+        parent_style: &TextStyle,
+        parent_click: Option<&ClickEvent>,
+        parent_hover: Option<&HoverEvent>,
+        parent_insertion: Option<&String>,
+        translate: &dyn Fn(&str) -> Option<String>,
+        out: &mut Vec<InteractiveTextSpan>,
+        depth: usize,
+    ) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let style = self.style.inherit(parent_style);
+        let click = self.click.as_ref().or(parent_click);
+        let hover = self.hover.as_ref().or(parent_hover);
+        let insertion = self.insertion.as_ref().or(parent_insertion);
+        let mut own = String::new();
+        match &self.content {
+            TextContent::Literal(text) => own.push_str(text),
+            TextContent::Translate {
+                key,
+                with,
+                fallback,
+            } => {
+                let pattern = translate(key)
+                    .or_else(|| fallback.clone())
+                    .unwrap_or_else(|| key.clone());
+                write_translation(&pattern, with, &mut own, translate, depth);
+            }
+        }
+        if !own.is_empty() {
+            out.push(InteractiveTextSpan {
+                text: own,
+                style: style.clone(),
+                click: click.cloned(),
+                hover: hover.cloned(),
+                insertion: insertion.cloned(),
+            });
+        }
+        for child in &self.extra {
+            child.collect_interactive_spans(
+                &style, click, hover, insertion, translate, out, depth + 1,
+            );
         }
     }
 
