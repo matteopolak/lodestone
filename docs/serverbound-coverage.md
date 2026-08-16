@@ -168,7 +168,7 @@ audit:
   `Popped` are still `Route::NOWHERE` below — they are answered directly in
   `net.rs`'s own loop, not through the `forward`/`poll_net` path.
 
-**Eleven were confirmed genuine islands; five have since gained real
+**Eleven were confirmed genuine islands; seven have since gained real
 producers** — zero hits for the bare variant name anywhere in `lodestone-shell`
 or `lodestone-controller`, in any form, at the time this section was written:
 `ContainerButtonClick`, `EditBook`, `PingRequest`, `RecipeBookSeenRecipe`,
@@ -201,10 +201,24 @@ Since fixed:
   from the enchant offers' `container_data`-driven costs. See
   [`container-cost-screens.md`](container-cost-screens.md) for the geometry
   and the client-side gate.
+* **`PingRequest`** — `Sim::send_ping_request` (`sim/session.rs`), the first
+  production caller anywhere outside `crates/protocol/`. Sent from
+  `app/redraw.rs`'s per-frame housekeeping, gated on the F3 debug overlay
+  being open and throttled to once a second (`should_send_ping_request`).
+  Real vanilla only sends this while its network-chart sub-panel shows
+  (`PingDebugMonitor.tick`); this client has no such sub-panel, so F3 itself
+  is the closest honest equivalent.
+* **`SelectBundleItem`** — `crate::container::bundle::bundle_slot_scrolled`
+  (`ScrollWheelHandler.getNextScrollWheelSelection` transcribed) resolves a
+  `MouseWheel` notch over a bundle-holding slot into the new selection;
+  `app::container_input::WindowApp::handle_bundle_scroll` reaches it from a
+  new `MouseWheel` arm gated the same way the container click arm is
+  (`self.ui.is_container_open()`), and `Sim::send_select_bundle_item` sends.
+  Needed the `minecraft:bundle_contents` item component to exist first — see
+  `lodestone_model::ItemComponents::bundle_contents`'s own doc.
 
-Remaining: `PingRequest`, `RecipeBookSeenRecipe`,
-`SelectBundleItem`, `SetContainerSlotState`, `SpectatorAction`, `Stab`,
-`TeleportToEntity`.
+Remaining: `RecipeBookSeenRecipe`, `SetContainerSlotState`, `SpectatorAction`,
+`Stab`, `TeleportToEntity`.
 
 Filed as one narrow follow-up rather than eleven separate issues, per the pattern
 this doc's own "How to change it" section already sets: each needs its own
