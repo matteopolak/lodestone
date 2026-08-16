@@ -408,7 +408,20 @@ mod tests {
     use super::super::ChunkWorld;
 
     fn sim() -> MobSim<'static> {
-        let world: &'static ChunkWorld = Box::leak(Box::new(ChunkWorld::new(-64, 384)));
+        // A real floor at `y = 63` under every test's own `y = 64.0` spawn
+        // height — a bare void `ChunkWorld` stopped being safe once idle
+        // mobs got real gravity (see `NavigatingMob::advance`'s no-waypoint
+        // branch): an ordinary (non-wither) target left to idle for many
+        // ticks would fall out of a horizontally-travelling skull's flight
+        // path instead of standing still at the height every test spawns it
+        // at.
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=16 {
+            for z in -8..=8 {
+                world.set_solid(x, 63, z, true);
+            }
+        }
+        let world: &'static ChunkWorld = Box::leak(Box::new(world));
         MobSim::new(world)
     }
 

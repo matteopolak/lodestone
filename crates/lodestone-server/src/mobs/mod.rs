@@ -9157,7 +9157,12 @@ mod follow_range_tests {
         let key = ResourceKey::from_str("minecraft:pig").expect("valid key");
         let near_a = sim.spawn_species(key.clone(), Vec3::new(0.0, 0.0, 0.0)).id();
         let near_b = sim.spawn_species(key.clone(), Vec3::new(0.3, 0.0, 0.0)).id();
-        let far = sim.spawn_species(key, Vec3::new(50.0, 0.0, 0.0)).id();
+        // Inside `flat_world`'s own `-8..=48` solid floor (with margin, so an
+        // idle pig standing on real ground does not also start falling —
+        // idle mobs have real gravity now, see `NavigatingMob::advance` —
+        // which would be a second, unrelated source of displacement this
+        // control does not mean to exercise).
+        let far = sim.spawn_species(key, Vec3::new(45.0, 0.0, 0.0)).id();
 
         for _ in 0..20 {
             sim.tick();
@@ -9174,7 +9179,7 @@ mod follow_range_tests {
         );
         assert_eq!(
             sim.get(far).expect("alive").position(),
-            Vec3::new(50.0, 0.0, 0.0),
+            Vec3::new(45.0, 0.0, 0.0),
             "control: a pig with nothing nearby must not be displaced by the \
              push pass at all"
         );
@@ -9244,6 +9249,119 @@ mod follow_range_tests {
         assert!(
             dropped.iter().any(|(item, _)| item == "minecraft:beef"),
             "the beef pool is `rolls: 1` with `uniform 1..3`, so it is never absent: {dropped:?}"
+        );
+    }
+
+    /// Issue #241's ominous-bottle producer: a pillager patrol leader
+    /// (`RaiderPredicate.CAPTAIN_WITHOUT_RAID`'s `isCaptain`) killed while
+    /// **not** a member of any active raid must drop `minecraft:ominous_bottle`.
+    /// Three controls on the same death path, each isolating one clause of
+    /// the predicate the real one needs both halves of:
+    ///
+    /// * a pillager that is a captain but **is** in an active raid must not
+    ///   drop one (`hasRaid` flips the gate),
+    /// * a pillager that is **not** a captain must not drop one even
+    ///   uninvolved in any raid (`isCaptain` flips the gate),
+    /// * a vindicator patrol leader must not drop one — only
+    ///   `entities/pillager.json` carries this loot pool in vanilla, even
+    ///   though vindicators can lead patrols too.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_pillager_patrol_captain_without_a_raid_drops_an_ominous_bottle() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:pillager").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+        sim.get_mut(id).expect("alive").set_patrol_leader(true);
+        sim.get_mut(id).expect("alive").set_health(1.0);
+
+        let outcome = sim
+            .attack(id, Vec3::new(1.0, 0.0, 0.0), 100.0, DamageFlags::default(), 0.0)
+            .expect("the pillager is a live target");
+        assert!(outcome.killed);
+
+        let dropped = sim.dropped_items();
+        assert!(
+            dropped.iter().any(|(item, count)| item == "minecraft:ominous_bottle" && *count == 1),
+            "a patrol captain with no active raid must drop exactly one ominous bottle: {dropped:?}"
+        );
+    }
+
+    /// **Control**: a pillager captain that belongs to an active raid must
+    /// not drop the bottle — `hasRaid` half of `CAPTAIN_WITHOUT_RAID`.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_pillager_captain_inside_an_active_raid_drops_no_ominous_bottle() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let raid_id = sim.start_raid(Vec3::new(0.0, 0.0, 0.0), Difficulty::Easy, 1).expect("Easy is not Peaceful");
+        let key = ResourceKey::from_str("minecraft:pillager").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+        sim.get_mut(id).expect("alive").set_patrol_leader(true);
+        sim.get_mut(id).expect("alive").set_health(1.0);
+        // Puts `id` on the raid's own raider list — the exact state
+        // `raid_containing_raider` reads to decide `hasRaid`.
+        sim.raids.get_mut(&raid_id).expect("just started").raiders.push(id);
+
+        let outcome = sim
+            .attack(id, Vec3::new(1.0, 0.0, 0.0), 100.0, DamageFlags::default(), 0.0)
+            .expect("the pillager is a live target");
+        assert!(outcome.killed);
+
+        let dropped = sim.dropped_items();
+        assert!(
+            !dropped.iter().any(|(item, _)| item == "minecraft:ominous_bottle"),
+            "a captain that belongs to an active raid must not drop the bottle: {dropped:?}"
+        );
+    }
+
+    /// **Control**: a non-captain pillager, involved in no raid, drops no
+    /// bottle — `isCaptain` half of `CAPTAIN_WITHOUT_RAID`.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_non_captain_pillager_drops_no_ominous_bottle() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:pillager").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+        sim.get_mut(id).expect("alive").set_health(1.0);
+        assert!(!sim.get(id).expect("alive").is_patrol_leader(), "control precondition: not a leader");
+
+        let outcome = sim
+            .attack(id, Vec3::new(1.0, 0.0, 0.0), 100.0, DamageFlags::default(), 0.0)
+            .expect("the pillager is a live target");
+        assert!(outcome.killed);
+
+        let dropped = sim.dropped_items();
+        assert!(
+            !dropped.iter().any(|(item, _)| item == "minecraft:ominous_bottle"),
+            "a rank-and-file pillager must not drop the bottle: {dropped:?}"
+        );
+    }
+
+    /// **Control**: a vindicator patrol leader, involved in no raid, drops
+    /// no bottle — only `entities/pillager.json` carries this loot pool in
+    /// vanilla, even though a vindicator can lead a patrol too
+    /// (`PatrollingMonster` is not species-specific).
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_vindicator_patrol_leader_drops_no_ominous_bottle() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:vindicator").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+        sim.get_mut(id).expect("alive").set_patrol_leader(true);
+        sim.get_mut(id).expect("alive").set_health(1.0);
+
+        let outcome = sim
+            .attack(id, Vec3::new(1.0, 0.0, 0.0), 100.0, DamageFlags::default(), 0.0)
+            .expect("the vindicator is a live target");
+        assert!(outcome.killed);
+
+        let dropped = sim.dropped_items();
+        assert!(
+            !dropped.iter().any(|(item, _)| item == "minecraft:ominous_bottle"),
+            "only a pillager carries this loot pool in vanilla: {dropped:?}"
         );
     }
 
@@ -9708,7 +9826,14 @@ mod primitives_tests {
         let key = ResourceKey::from_str("minecraft:enderman").expect("valid key");
         let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
 
-        let target = Vec3::new(30.0, 0.0, 30.0);
+        // Inside this module's own solid floor (`-8..=8` on both axes) —
+        // `MobSim::teleport_to` (unlike the goal-driven enderman blink) is
+        // the raw, unvalidated primitive and always lands exactly on
+        // target, but a target with no ground under it would now correctly
+        // start falling on the very next tick (idle mobs have real gravity,
+        // see `NavigatingMob::advance`), which is not what this test means
+        // to exercise.
+        let target = Vec3::new(5.0, 0.0, 5.0);
         sim.get_mut(id).expect("alive").teleport_to(target);
         assert_eq!(
             sim.position(id),
@@ -10430,8 +10555,19 @@ mod baby_metadata_tests {
 mod leash_tests {
     use super::*;
 
+    /// A real floor (issue: living mobs now fall when idle, see
+    /// `NavigatingMob::advance`'s no-waypoint branch) — this fixture used to
+    /// be a bare void `ChunkWorld`, which was harmless only because an idle
+    /// mob never touched `pos.y` at all. `-8..=24`/`-8..=8` covers every
+    /// coordinate this module's own tests spawn a mob at, with margin.
     fn flat_world() -> ChunkWorld {
-        ChunkWorld::new(-64, 384)
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=24 {
+            for z in -8..=8 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        world
     }
 
     fn player_at(uuid: Uuid, pos: Vec3) -> PerceivedPlayer {
@@ -10695,8 +10831,16 @@ mod leash_tests {
 mod wandering_trader_tests {
     use super::*;
 
+    /// A real floor — see `leash_tests::flat_world`'s own doc comment for
+    /// why a bare void `ChunkWorld` stopped being safe once idle mobs fall.
     fn flat_world() -> ChunkWorld {
-        ChunkWorld::new(-64, 384)
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=16 {
+            for z in -8..=16 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        world
     }
 
     #[test]
@@ -10769,8 +10913,16 @@ mod ambient_sound_tests {
     use crate::effects::WorldEffect;
     use lodestone_model::SoundCategory;
 
+    /// A real floor — see `leash_tests::flat_world`'s own doc comment for
+    /// why a bare void `ChunkWorld` stopped being safe once idle mobs fall.
     fn flat_world() -> ChunkWorld {
-        ChunkWorld::new(-64, 384)
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=8 {
+            for z in -8..=8 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        world
     }
 
     /// **The wire is real, not merely the derivation.** A hermetic call to
@@ -10886,8 +11038,20 @@ mod ambient_sound_tests {
 mod villager_gossip_reputation_and_curing_tests {
     use super::*;
 
+    /// A real floor near the origin — see `leash_tests::flat_world`'s own
+    /// doc comment for why a bare void `ChunkWorld` stopped being safe once
+    /// idle mobs fall. This module's "distant villager" control spawns at
+    /// `(500, 0, 500)`, deliberately left ungrounded: nothing in this module
+    /// asserts that villager's own position, only that gossip/curing never
+    /// reaches it, and x/z are untouched by falling regardless.
     fn flat_world() -> ChunkWorld {
-        ChunkWorld::new(-64, 384)
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=20 {
+            for z in -8..=20 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        world
     }
 
     fn alice() -> PlayerIdentity {
@@ -11205,8 +11369,19 @@ mod villager_gossip_reputation_and_curing_tests {
 mod golem_summon_tests {
     use super::*;
 
+    /// A real floor near the origin — see `leash_tests::flat_world`'s own
+    /// doc comment for why a bare void `ChunkWorld` stopped being safe once
+    /// idle mobs fall. This module's `hurt_villager` calls at `x = ±50` are
+    /// deliberately left ungrounded: no assertion here reads either
+    /// villager's own position, only the resulting golem-summon count.
     fn flat_world() -> ChunkWorld {
-        ChunkWorld::new(-64, 384)
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=8 {
+            for z in -8..=8 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        world
     }
 
     fn hurt_villager(sim: &mut MobSim<'_>, pos: Vec3) -> i32 {
@@ -11335,8 +11510,16 @@ mod golem_summon_tests {
 mod cat_gift_and_shoulder_tests {
     use super::*;
 
+    /// A real floor — see `leash_tests::flat_world`'s own doc comment for
+    /// why a bare void `ChunkWorld` stopped being safe once idle mobs fall.
     fn flat_world() -> ChunkWorld {
-        ChunkWorld::new(-64, 384)
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=8 {
+            for z in -8..=8 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        world
     }
 
     fn cat_key() -> ResourceKey {
@@ -11516,8 +11699,18 @@ mod cat_gift_and_shoulder_tests {
 mod cat_block_search_tests {
     use super::*;
 
+    /// A real floor — see `leash_tests::flat_world`'s own doc comment for
+    /// why a bare void `ChunkWorld` stopped being safe once idle mobs fall.
+    /// Set at `y = -1` so it never collides with a search target block a
+    /// test places at `y = 0`.
     fn flat_world() -> ChunkWorld {
-        ChunkWorld::new(-64, 384)
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=8 {
+            for z in -8..=8 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        world
     }
 
     fn spawn_cat(sim: &mut MobSim<'_>, pos: Vec3) -> i32 {
@@ -11669,8 +11862,16 @@ mod cat_block_search_tests {
 mod villager_bed_claim_tests {
     use super::*;
 
+    /// A real floor — see `leash_tests::flat_world`'s own doc comment for
+    /// why a bare void `ChunkWorld` stopped being safe once idle mobs fall.
     fn flat_world() -> ChunkWorld {
-        ChunkWorld::new(-64, 384)
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=8 {
+            for z in -8..=8 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        world
     }
 
     fn spawn_villager(sim: &mut MobSim<'_>, pos: Vec3) -> i32 {
@@ -11931,8 +12132,18 @@ mod villager_schedule_tests {
 mod vibration_substrate_tests {
     use super::*;
 
+    /// A real floor — see `leash_tests::flat_world`'s own doc comment for
+    /// why a bare void `ChunkWorld` stopped being safe once idle mobs fall.
+    /// `24` on X covers this module's own `16.1`-block "just outside the
+    /// listener radius" control with margin.
     fn flat_world() -> ChunkWorld {
-        ChunkWorld::new(-64, 384)
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=24 {
+            for z in -8..=8 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        world
     }
 
     fn spawn(sim: &mut MobSim<'_>, species: &str, pos: Vec3) -> i32 {
@@ -12030,8 +12241,19 @@ mod vibration_substrate_tests {
 mod elder_guardian_mining_fatigue_tests {
     use super::*;
 
+    /// A real floor near the origin — see `leash_tests::flat_world`'s own
+    /// doc comment for why a bare void `ChunkWorld` stopped being safe once
+    /// idle mobs fall. This module's `x = 60` position is a *player*
+    /// (`set_players`), not a spawned mob, so it is unaffected either way
+    /// and is deliberately left outside the floor.
     fn flat_world() -> ChunkWorld {
-        ChunkWorld::new(-64, 384)
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=8 {
+            for z in -8..=8 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        world
     }
 
     fn player_at(uuid: Uuid, pos: Vec3) -> PerceivedPlayer {
@@ -12174,8 +12396,16 @@ mod elder_guardian_mining_fatigue_tests {
 mod goat_horn_tests {
     use super::*;
 
+    /// A real floor — see `leash_tests::flat_world`'s own doc comment for
+    /// why a bare void `ChunkWorld` stopped being safe once idle mobs fall.
     fn flat_world() -> ChunkWorld {
-        ChunkWorld::new(-64, 384)
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=8 {
+            for z in -8..=8 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        world
     }
 
     /// **Real arithmetic, not merely "sometimes true"**: over a large sample,
