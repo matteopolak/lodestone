@@ -301,3 +301,15 @@ codegen-backend = "llvm"
 # able to fire is worth the crate's small compile-time cost. See docs/compile-times.md.
 [profile.dev.package.lodestone-testsupport]
 codegen-backend = "llvm"
+
+# Fourth of the same class, found after the other three landed:
+# `fog::ramp_gate::the_old_fraction_model_fails_this_gate` is the control proving the fog
+# ramp gate *localises* a defect rather than reporting a global fraction, and it does that
+# by catching the inner assertion's panic and matching two substrings of its message — the
+# bounding box `[224.0, 249.6]` and the magnitude `d=  224.0  got 0.5000  want 0.0000`.
+# `#[should_panic]` is the usual escape from the nested-catch_unwind bug, but it accepts a
+# single `expected` string, so converting would silently drop one of the two assertions and
+# leave a weaker control wearing the same name. Keeping the crate on LLVM preserves both.
+# See docs/compile-times.md.
+[profile.dev.package.lodestone-render]
+codegen-backend = "llvm"
