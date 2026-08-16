@@ -74,7 +74,7 @@
 //!   group, and the shell falls back — visible, but wrong. Both are derived from
 //!   the same match, so add the arm and the list entry together.
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use lodestone_assets::ResourceLocation;
 use lodestone_assets::block_entity_models::{BLOCK_ENTITY_MODELS, BlockEntityModelEntry};
 use lodestone_assets::entity::{EntityModelDef, PartPose, bake_entity_parts};
@@ -1275,6 +1275,353 @@ impl DecoratedPotSpawn {
     }
 }
 
+/// Model name of the conduit's inactive shell — `ConduitRenderer.shell`
+/// (`ModelLayers.CONDUIT_SHELL`), the 6×6×6 layer.
+pub const CONDUIT_SHELL: &str = "conduit_shell";
+
+/// Model name of the conduit's active shell ("cage") — `ConduitRenderer.cage`
+/// (`ModelLayers.CONDUIT_CAGE`), the 8×8×8 layer. A distinct mesh from
+/// [`CONDUIT_SHELL`], not a scaled reuse — see
+/// [`lodestone_assets::block_entity_models::conduit_cage_model`]'s doc.
+pub const CONDUIT_CAGE: &str = "conduit_cage";
+
+/// Model name of the conduit's wind plane — `ConduitRenderer.wind`
+/// (`ModelLayers.CONDUIT_WIND`), one 16×16×16 cube drawn twice per active
+/// frame at two different poses sharing this one mesh.
+pub const CONDUIT_WIND: &str = "conduit_wind";
+
+/// Model name of the conduit's billboarded eye — `ConduitRenderer.eye`
+/// (`ModelLayers.CONDUIT_EYE`), the near-planar 8×8 box.
+pub const CONDUIT_EYE: &str = "conduit_eye";
+
+/// `ConduitRenderer.SHELL_TEXTURE` — `entity/conduit/base`, the inactive shell's
+/// sheet.
+pub const CONDUIT_SHELL_TEXTURE_STEM: &str = "entity/conduit/base";
+
+/// `ConduitRenderer.ACTIVE_SHELL_TEXTURE` — `entity/conduit/cage`, the active
+/// cage's sheet.
+pub const CONDUIT_CAGE_TEXTURE_STEM: &str = "entity/conduit/cage";
+
+/// `ConduitRenderer.WIND_TEXTURE` — `entity/conduit/wind`, used for both wind
+/// planes whenever [`ConduitSpawn::animation_phase`] is not `1`.
+pub const CONDUIT_WIND_TEXTURE_STEM: &str = "entity/conduit/wind";
+
+/// `ConduitRenderer.VERTICAL_WIND_TEXTURE` — `entity/conduit/wind_vertical`,
+/// used for both wind planes when [`ConduitSpawn::animation_phase`] **is**
+/// `1`. Same UV layout as [`CONDUIT_WIND_TEXTURE_STEM`], different sheet —
+/// picking the texture without also picking the plane's own rotation
+/// (`wind1_rot`'s `1 =>` arm) draws a plane that spins but never actually
+/// turns to face the direction its "vertical" sheet implies.
+pub const CONDUIT_WIND_VERTICAL_TEXTURE_STEM: &str = "entity/conduit/wind_vertical";
+
+/// `ConduitRenderer.OPEN_EYE_TEXTURE` — `entity/conduit/open_eye`, drawn while
+/// [`ConduitSpawn::hunting`].
+pub const CONDUIT_OPEN_EYE_TEXTURE_STEM: &str = "entity/conduit/open_eye";
+
+/// `ConduitRenderer.CLOSED_EYE_TEXTURE` — `entity/conduit/closed_eye`, drawn
+/// otherwise (including the entire inactive branch, which never submits an
+/// eye instance at all).
+pub const CONDUIT_CLOSED_EYE_TEXTURE_STEM: &str = "entity/conduit/closed_eye";
+
+/// Every conduit sheet, for [`block_entity_texture_stems`]. **Excludes**
+/// [`CONDUIT_WIND_TEXTURE_STEM`]/[`CONDUIT_WIND_VERTICAL_TEXTURE_STEM`]'s
+/// remaining 21 animation frames — the jar ships each as a `64×704` vertical
+/// strip (22 frames at `64×32`, `frametime: 3`, no `interpolate`) and the
+/// shell's block-entity loader crops each to its first frame only. See
+/// `crates/lodestone-shell/src/gpu/block_entities.rs`'s conduit loading note
+/// for why: this pass has no per-material animation uniform the way the block
+/// atlas does, and building one is out of scope here. The wind planes are
+/// therefore correct in shape, rotation and texture *choice*, and static
+/// rather than flowing — a documented simplification, not a silent bug.
+#[must_use]
+pub fn conduit_texture_stems() -> Vec<&'static str> {
+    vec![
+        CONDUIT_SHELL_TEXTURE_STEM,
+        CONDUIT_CAGE_TEXTURE_STEM,
+        CONDUIT_WIND_TEXTURE_STEM,
+        CONDUIT_WIND_VERTICAL_TEXTURE_STEM,
+        CONDUIT_OPEN_EYE_TEXTURE_STEM,
+        CONDUIT_CLOSED_EYE_TEXTURE_STEM,
+    ]
+}
+
+/// One conduit's fully-resolved per-frame animation/activation state — the
+/// output of [`conduit_frame_scan`] plus a per-instance tick tracker folded
+/// through [`conduit_advance`], [`conduit_active_rotation_value`],
+/// [`conduit_anim_time`] and [`conduit_animation_phase`] by the caller. This
+/// struct carries already-resolved numbers, not a live clock or a block
+/// store — the same split [`BellSpawn::shake`] makes from `BellShakes`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConduitSpawn {
+    /// Block position.
+    pub pos: [i32; 3],
+    /// `ConduitBlockEntity.isActive()` — [`ConduitFrame::is_active`].
+    pub active: bool,
+    /// `ConduitBlockEntity.isHunting()` — [`ConduitFrame::is_hunting`]. Only
+    /// meaningful (and only ever read) while `active`; vanilla's own
+    /// `state.isHunting` can theoretically be true while `state.isActive` is
+    /// false for one frame of hysteresis, but the inactive branch never reads
+    /// it, so [`Self::resolve_conduit`]/[`BlockEntityModelSet::resolve_conduit`]
+    /// does not either.
+    pub hunting: bool,
+    /// [`conduit_active_rotation_value`]'s output — see that function's doc
+    /// for why the same number is read as degrees in one branch and radians
+    /// in the other.
+    pub active_rotation_value: f32,
+    /// [`conduit_anim_time`] — `tickCount + partialTick`, feeds
+    /// [`conduit_bob`].
+    pub anim_time: f32,
+    /// [`conduit_animation_phase`] — `0`, `1` or `2`.
+    pub animation_phase: u8,
+    /// Packed sky/block light. Pass [`ENTITY_FULLBRIGHT`] only when there is
+    /// genuinely no world to sample.
+    pub light: u8,
+}
+
+impl Default for ConduitSpawn {
+    fn default() -> Self {
+        ConduitSpawn {
+            pos: [0, 0, 0],
+            active: false,
+            hunting: false,
+            active_rotation_value: 0.0,
+            anim_time: 0.0,
+            animation_phase: 0,
+            light: ENTITY_FULLBRIGHT,
+        }
+    }
+}
+
+impl ConduitSpawn {
+    /// An inactive, resting, full-bright conduit at `pos` — the minimum a
+    /// hermetic gate needs.
+    #[must_use]
+    pub fn at(pos: [i32; 3]) -> Self {
+        ConduitSpawn {
+            pos,
+            ..Default::default()
+        }
+    }
+}
+
+/// Total cells [`conduit_frame_scan`]'s 5×5×5 pass ever tests, regardless of
+/// which blocks are placed — `ConduitBlockEntity.MIN_KILL_SIZE`'s own value,
+/// which is exactly this count: "hunting" is not a majority threshold, it is
+/// *every* candidate cell filled. Checked by
+/// `conduit_frame_candidate_count_is_42_and_matches_min_kill_size` as an
+/// outside-arithmetic control on the geometry alone, independent of the block
+/// predicate.
+pub const CONDUIT_FRAME_CANDIDATE_COUNT: u32 = 42;
+
+/// One conduit's activation frame — `ConduitBlockEntity.updateShape`'s
+/// `effectBlocks.size()`, plus the two booleans it and `updateHunting` derive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ConduitFrame {
+    /// `effectBlocks.size()`. `0` whenever the inner 3×3×3 was not entirely
+    /// water — `updateShape` clears the list and returns before the 5×5×5
+    /// pass ever runs in that case, so a zero here does not distinguish "no
+    /// water" from "water but zero frame blocks"; nothing downstream needs
+    /// to.
+    pub effect_block_count: u32,
+}
+
+impl ConduitFrame {
+    /// `ConduitBlockEntity.MIN_ACTIVE_SIZE` — `updateShape`'s own return
+    /// value.
+    #[must_use]
+    pub fn is_active(self) -> bool {
+        self.effect_block_count >= 16
+    }
+
+    /// `ConduitBlockEntity.MIN_KILL_SIZE` — `updateHunting`
+    /// (`effectBlocks.size() >= 42`). Exactly
+    /// [`CONDUIT_FRAME_CANDIDATE_COUNT`], so this requires *every* candidate
+    /// cell filled, not a majority.
+    #[must_use]
+    pub fn is_hunting(self) -> bool {
+        self.effect_block_count >= 42
+    }
+}
+
+/// Scans a conduit's activation frame around `pos` —
+/// `ConduitBlockEntity.updateShape`, clause by clause:
+///
+/// 1. The inner 3×3×3 (`ox,oy,oz` each `-1..=1`, all 27 cells, including the
+///    conduit's own position) must be **entirely water** —
+///    `Level.isWaterAt(pos)`, which is `getFluidState(pos).is(FluidTags.WATER)`:
+///    true for a source, for flowing water, and for a waterlogged block. A
+///    single non-water cell anywhere in the inner cube returns an *empty*
+///    frame immediately, matching vanilla's early `return false` — so
+///    `is_water` is checked over the **whole** inner cube before
+///    `is_valid_frame_block` is consulted at all. Skipping this clause (or
+///    checking it lazily, cell-by-cell mixed with the outer scan) is exactly
+///    the "one implemented conjunct" trap: a room built entirely of
+///    prismarine with one stray air pocket in the conduit's own inner cube
+///    would activate, and vanilla's would not.
+/// 2. Only once (1) holds: scan the 5×5×5 region (`-2..=2` each axis) and, at
+///    each of the (up to) [`CONDUIT_FRAME_CANDIDATE_COUNT`] cells on the three
+///    axis-aligned "plus" rings — `(ax>1||ay>1||az>1)` *and* one of
+///    `ox==0 && (ay==2||az==2)` / `oy==0 && (ax==2||az==2)` /
+///    `oz==0 && (ax==2||ay==2)` — count how many hold one of the four frame
+///    blocks: `minecraft:prismarine`, `minecraft:prismarine_bricks`,
+///    `minecraft:sea_lantern`, `minecraft:dark_prismarine`
+///    (`ConduitBlockEntity.VALID_BLOCKS`).
+///
+/// Both closures receive **absolute** world positions (`pos` already added),
+/// so a caller needs no coordinate math of its own — see
+/// `crate::block_entities::conduit_spawn` in the shell for the real block-store
+/// adapter this is built to be called from.
+#[must_use]
+pub fn conduit_frame_scan(
+    pos: [i32; 3],
+    mut is_water: impl FnMut([i32; 3]) -> bool,
+    mut is_valid_frame_block: impl FnMut([i32; 3]) -> bool,
+) -> ConduitFrame {
+    for ox in -1..=1 {
+        for oy in -1..=1 {
+            for oz in -1..=1 {
+                let test = [pos[0] + ox, pos[1] + oy, pos[2] + oz];
+                if !is_water(test) {
+                    return ConduitFrame::default();
+                }
+            }
+        }
+    }
+
+    let mut count = 0u32;
+    for ox in -2i32..=2 {
+        for oy in -2i32..=2 {
+            for oz in -2i32..=2 {
+                let (ax, ay, az) = (ox.abs(), oy.abs(), oz.abs());
+                let outside_inner = ax > 1 || ay > 1 || az > 1;
+                let on_plus_ring = (ox == 0 && (ay == 2 || az == 2))
+                    || (oy == 0 && (ax == 2 || az == 2))
+                    || (oz == 0 && (ax == 2 || ay == 2));
+                if outside_inner
+                    && on_plus_ring
+                    && is_valid_frame_block([pos[0] + ox, pos[1] + oy, pos[2] + oz])
+                {
+                    count += 1;
+                }
+            }
+        }
+    }
+    ConduitFrame {
+        effect_block_count: count,
+    }
+}
+
+/// One client tick's counter bookkeeping for a placed conduit —
+/// `ConduitBlockEntity.clientTick`'s non-scan half: `tickCount` always
+/// advances by one, `activeRotation` only advances `if (entity.isActive())`.
+/// The 40-tick-periodic shape rescan ([`conduit_frame_scan`]) is the caller's
+/// job; this only advances the two counters the animation math below reads.
+/// Returns `(tick_count, active_rotation_ticks)`.
+#[must_use]
+pub fn conduit_advance(
+    tick_count: u32,
+    active_rotation_ticks: u32,
+    active: bool,
+) -> (u32, u32) {
+    let tick_count = tick_count.wrapping_add(1);
+    let active_rotation_ticks = if active {
+        active_rotation_ticks.wrapping_add(1)
+    } else {
+        active_rotation_ticks
+    };
+    (tick_count, active_rotation_ticks)
+}
+
+/// `ConduitBlockEntity.getActiveRotation`/`ROTATION_SPEED` (`-0.0375`), folded
+/// with the partial tick exactly as `ConduitRenderer.extractRenderState` does:
+/// `getActiveRotation(isActive ? partialTicks : 0.0F)` — the partial tick is
+/// folded in only while active, so the inactive spin advances one **whole**
+/// step per tick with no sub-tick smoothing.
+///
+/// # The returned number is not one unit — read both call sites before "fixing" this
+///
+/// This returns the raw `(counter + partial) * -0.0375` vanilla calls
+/// `state.activeRotation`, and `ConduitRenderer.submit` reads it two
+/// **different** ways depending on which branch runs:
+///
+/// * **Inactive**: `rotationY(state.activeRotation * (Math.PI / 180.0))` —
+///   treated as **degrees**, converted once. See
+///   [`conduit_inactive_y_rot_radians`].
+/// * **Active**: `float rotation = state.activeRotation * (180.0F /
+///   (float)Math.PI); … rotationAxis(rotation * (float)(Math.PI / 180.0),
+///   axis)` — multiplied by `180/π` and then immediately back by `π/180`,
+///   which is the identity; the two conversions cancel and the axis rotation
+///   ends up using the raw value **as radians**, unconverted. See
+///   [`conduit_active_axis_rotation_radians`].
+///
+/// So the same field is degrees in one branch and radians in the other in the
+/// jar itself. This is transcribed literally rather than "simplified" to one
+/// unit, because simplifying it is exactly how a port gets the active spin's
+/// speed wrong by a factor of `180/π` (≈57×) while the inactive spin still
+/// looks right — the inactive branch's own conversion masks the bug.
+#[must_use]
+pub fn conduit_active_rotation_value(
+    active_rotation_ticks: u32,
+    partial_tick: f32,
+    active: bool,
+) -> f32 {
+    let counter = if active {
+        active_rotation_ticks as f32 + partial_tick
+    } else {
+        active_rotation_ticks as f32
+    };
+    counter * -0.0375
+}
+
+/// Reads [`conduit_active_rotation_value`]'s output as **degrees** and
+/// converts — the inactive branch's `rotationY(state.activeRotation * (PI/180))`.
+#[must_use]
+pub fn conduit_inactive_y_rot_radians(active_rotation_value: f32) -> f32 {
+    active_rotation_value.to_radians()
+}
+
+/// Reads [`conduit_active_rotation_value`]'s output **directly as radians** —
+/// the active branch's `rotation * (PI/180)` after its own `* (180/PI)`,
+/// which cancel. See [`conduit_active_rotation_value`]'s doc for the full
+/// derivation; this function exists so the cancellation is written down once
+/// rather than re-derived (or "simplified away") at every call site.
+#[must_use]
+pub fn conduit_active_axis_rotation_radians(active_rotation_value: f32) -> f32 {
+    active_rotation_value
+}
+
+/// `blockEntity.tickCount + partialTicks` — `ConduitRenderer.extractRenderState`'s
+/// `state.animTime`. Feeds [`conduit_bob`].
+#[must_use]
+pub fn conduit_anim_time(tick_count: u32, partial_tick: f32) -> f32 {
+    tick_count as f32 + partial_tick
+}
+
+/// `blockEntity.tickCount / 66 % 3` — **integer** division, so this steps once
+/// every 66 ticks regardless of the fractional partial tick baked into
+/// [`conduit_anim_time`] (which this does *not* take; it reads the raw tick
+/// counter directly). Selects which of the two wind planes' extra rotation
+/// applies in [`BlockEntityModelSet::resolve_conduit`], and which sprite
+/// (`wind` vs `wind_vertical`) both planes draw with.
+#[must_use]
+pub fn conduit_animation_phase(tick_count: u32) -> u8 {
+    ((tick_count / 66) % 3) as u8
+}
+
+/// The bob-height fold shared by the cage and the eye —
+/// `ConduitRenderer.submit`'s own `hh`, used as `0.3 + hh * 0.2`.
+///
+/// **Not** `ConduitBlockEntity.animationTick`'s same-named local — that one
+/// adds a `+35`-tick phase offset and a trailing `* 0.3F` this one does not
+/// have (`hh = (hh*hh+hh) * 0.3`, for a *particle* spawn position, not
+/// geometry). The two share a name and a shape, which is exactly how a port
+/// conflates them; only the version transcribed here belongs in the renderer.
+#[must_use]
+pub fn conduit_bob(anim_time: f32) -> f32 {
+    let hh = (anim_time * 0.1).sin() / 2.0 + 0.5;
+    hh * hh + hh
+}
+
 /// Model name of the open-book rig, keying both the mesh set and the shell's
 /// texture map.
 ///
@@ -1583,6 +1930,7 @@ pub fn block_entity_texture_stems() -> Vec<&'static str> {
     stems.extend(shulker_texture_stems());
     stems.extend(book_texture_stems());
     stems.extend(decorated_pot_texture_stems());
+    stems.extend(conduit_texture_stems());
     stems
 }
 
@@ -1906,6 +2254,143 @@ impl BlockEntityModelSet {
         let left = instance(DECORATED_POT_SIDE_LEFT, side_texture(&spawn.left))?;
         let right = instance(DECORATED_POT_SIDE_RIGHT, side_texture(&spawn.right))?;
         Some([base, front, back, left, right])
+    }
+
+    /// Resolves one conduit into its drawable instances — `ConduitRenderer.submit`,
+    /// branch by branch. Returns one instance (the slowly-spinning inactive
+    /// shell) or four (the tumbling cage, both wind planes, and the
+    /// camera-facing eye) — never a mix, because vanilla's own `submit` is a
+    /// single `if (!state.isActive) { … } else { … }`, not two independently
+    /// gated draws. A missing mesh drops that one instance rather than the
+    /// whole conduit, the same fail-open [`Self::resolve_decorated_pot`]'s four
+    /// sides use.
+    ///
+    /// `camera_orientation` is [`crate::entity::camera_orientation`] applied to
+    /// the frame's view matrix — only the eye instance reads it
+    /// (`poseStack.mulPose(camera.orientation)`, active branch only), but it is
+    /// taken unconditionally so building it is the caller's problem once per
+    /// frame, exactly as [`crate::entity::experience_orb_matrix`] does.
+    ///
+    /// See [`conduit_frame_scan`]/[`conduit_advance`] for how [`ConduitSpawn`]'s
+    /// fields are meant to be produced — this method only consumes an
+    /// already-resolved spawn, the same split [`Self::resolve_bell`] makes
+    /// between [`crate::block_entity::BellSpawn`] and its `BellShakes` tracker.
+    #[must_use]
+    pub fn resolve_conduit(
+        &self,
+        spawn: &ConduitSpawn,
+        camera_orientation: Mat4,
+    ) -> Vec<BlockEntityInstance> {
+        let origin = Vec3::new(
+            spawn.pos[0] as f32,
+            spawn.pos[1] as f32,
+            spawn.pos[2] as f32,
+        );
+        let make = |model: &'static str, texture: &'static str, placement: Mat4| {
+            let mesh = self.get(model)?;
+            let part_transforms = mesh.part_transforms(placement, &[]);
+            let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
+            Some(BlockEntityInstance {
+                model,
+                texture,
+                transform: placement,
+                part_transforms,
+                aabb_min,
+                aabb_max,
+                light: spawn.light,
+                tint: [255, 255, 255],
+            })
+        };
+
+        if !spawn.active {
+            // `!state.isActive`: `translate(0.5,0.5,0.5)` then
+            // `rotationY(state.activeRotation * (PI/180))` — the "degrees"
+            // reading, see [`conduit_inactive_y_rot_radians`]'s doc — then the
+            // 6×6×6 `shell` layer against `SHELL_TEXTURE` (`entity/conduit/base`).
+            let placement = Mat4::from_translation(origin + Vec3::new(0.5, 0.5, 0.5))
+                * Mat4::from_rotation_y(conduit_inactive_y_rot_radians(
+                    spawn.active_rotation_value,
+                ));
+            return make(CONDUIT_SHELL, CONDUIT_SHELL_TEXTURE_STEM, placement)
+                .into_iter()
+                .collect();
+        }
+
+        let hh = conduit_bob(spawn.anim_time);
+        // `translate(0.5F, 0.3F + hh * 0.2F, 0.5F)` — the cage's and the eye's
+        // own bob; the two wind planes stay fixed at `translate(0.5,0.5,0.5)`
+        // with **no** `hh` term. All four calls look alike at a glance; only two
+        // of them carry this.
+        let bob = 0.3 + hh * 0.2;
+        let mut out = Vec::with_capacity(4);
+
+        // Cage: tumbles about the fixed diagonal `Vector3f(0.5,1,0.5).normalize()`,
+        // using the "radians" reading of `state.activeRotation` — see
+        // [`conduit_active_axis_rotation_radians`]'s doc for why that is not a
+        // second unit conversion.
+        let axis = Vec3::new(0.5, 1.0, 0.5).normalize();
+        let cage_placement = Mat4::from_translation(origin + Vec3::new(0.5, bob, 0.5))
+            * Mat4::from_axis_angle(
+                axis,
+                conduit_active_axis_rotation_radians(spawn.active_rotation_value),
+            );
+        out.extend(make(CONDUIT_CAGE, CONDUIT_CAGE_TEXTURE_STEM, cage_placement));
+
+        // The two wind planes share **one** texture choice — vanilla computes
+        // `windSpriteId`/`windRenderType`/`windSprite` once and passes the same
+        // three to both `submitModelPart` calls.
+        let wind_texture = if spawn.animation_phase == 1 {
+            CONDUIT_WIND_VERTICAL_TEXTURE_STEM
+        } else {
+            CONDUIT_WIND_TEXTURE_STEM
+        };
+        // First wind plane: `translate(0.5,0.5,0.5)` then, only by
+        // `animationPhase`, a quarter turn about X (phase 1) or Z (phase 2) —
+        // phase 0 submits with no extra rotation at all.
+        let wind1_rot = match spawn.animation_phase {
+            1 => Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            2 => Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2),
+            _ => Mat4::IDENTITY,
+        };
+        let wind1_placement =
+            Mat4::from_translation(origin + Vec3::new(0.5, 0.5, 0.5)) * wind1_rot;
+        out.extend(make(CONDUIT_WIND, wind_texture, wind1_placement));
+
+        // Second wind plane: `translate(0.5,0.5,0.5)`, `scale(0.875)`, then
+        // `rotationXYZ(PI, 0, PI)` — JOML's `rotationXYZ(x,y,z)` composes as
+        // `rotateX(x).rotateY(y).rotateZ(z)` (each a post-multiply), so with
+        // `y == 0` this is `qX(PI) * qZ(PI)`: rotate 180° about Z first, then
+        // 180° about X. Written as two `glam::Quat`s multiplied in that same
+        // left-to-right order, not collapsed to a single axis by hand.
+        let wind2_rot =
+            Quat::from_rotation_x(std::f32::consts::PI) * Quat::from_rotation_z(std::f32::consts::PI);
+        let wind2_placement = Mat4::from_translation(origin + Vec3::new(0.5, 0.5, 0.5))
+            * Mat4::from_scale(Vec3::splat(0.875))
+            * Mat4::from_quat(wind2_rot);
+        out.extend(make(CONDUIT_WIND, wind_texture, wind2_placement));
+
+        // Eye: `translate(0.5, 0.3+hh*0.2, 0.5)`, `scale(0.5)`,
+        // `mulPose(camera.orientation)`, `mulPose(rotationZ(PI).rotateY(PI))`,
+        // `scale(1.3333334)` — net linear scale `0.5 * 1.3333334 ≈ 0.6667`, not
+        // a single `scale(1.3333334)`; the two calls are not redundant, they
+        // straddle the billboard rotation. `rotationZ(PI).rotateY(PI)` is
+        // `qZ(PI) * qY(PI)` by the same JOML post-multiply reading as the
+        // second wind plane above.
+        let eye_rot =
+            Quat::from_rotation_z(std::f32::consts::PI) * Quat::from_rotation_y(std::f32::consts::PI);
+        let eye_placement = Mat4::from_translation(origin + Vec3::new(0.5, bob, 0.5))
+            * Mat4::from_scale(Vec3::splat(0.5))
+            * camera_orientation
+            * Mat4::from_quat(eye_rot)
+            * Mat4::from_scale(Vec3::splat(1.333_333_4));
+        let eye_texture = if spawn.hunting {
+            CONDUIT_OPEN_EYE_TEXTURE_STEM
+        } else {
+            CONDUIT_CLOSED_EYE_TEXTURE_STEM
+        };
+        out.extend(make(CONDUIT_EYE, eye_texture, eye_placement));
+
+        out
     }
 
     /// Resolves one ground/standing banner into its opaque body+flag
@@ -3101,10 +3586,10 @@ mod tests {
         let set = set();
         assert_eq!(
             set.len(),
-            17,
+            21,
             "3 chest layers + 2 skull canvases + bell + 4 banner parts (standing \
              and wall, body and flag) + shulker box + book + decorated pot (base \
-             plus 4 side models)"
+             plus 4 side models) + 4 conduit layers (eye, wind, shell, cage)"
         );
         for (name, mesh) in set.iter() {
             assert!(mesh.quad_count() > 0, "{name} baked no quads");
@@ -4973,6 +5458,413 @@ mod special_item_tests {
         assert!(
             (centre - origin_centre).length() < 1e-5,
             "expected the centre point fixed at the block's own centre {origin_centre}, got {centre}"
+        );
+    }
+
+    // --- conduit ---------------------------------------------------------
+
+    /// Every offset the 42-cell "plus ring" candidate set contains — computed
+    /// once here from the exact predicate `conduit_frame_scan` uses, so the
+    /// fixture-building tests below can place blocks at a *chosen subset* of
+    /// real candidates rather than guessing coordinates that might not
+    /// qualify at all.
+    fn conduit_frame_candidates() -> Vec<[i32; 3]> {
+        let mut out = Vec::new();
+        for ox in -2i32..=2 {
+            for oy in -2i32..=2 {
+                for oz in -2i32..=2 {
+                    let (ax, ay, az) = (ox.abs(), oy.abs(), oz.abs());
+                    let outside_inner = ax > 1 || ay > 1 || az > 1;
+                    let on_plus_ring = (ox == 0 && (ay == 2 || az == 2))
+                        || (oy == 0 && (ax == 2 || az == 2))
+                        || (oz == 0 && (ax == 2 || ay == 2));
+                    if outside_inner && on_plus_ring {
+                        out.push([ox, oy, oz]);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Outside-arithmetic control on the scan's geometry alone, independent of
+    /// which blocks are placed: exactly [`CONDUIT_FRAME_CANDIDATE_COUNT`] cells
+    /// qualify, matching `ConduitBlockEntity.MIN_KILL_SIZE` — "hunting" is a
+    /// full house, not a majority.
+    #[test]
+    fn conduit_frame_candidate_count_is_42_and_matches_min_kill_size() {
+        let candidates = conduit_frame_candidates();
+        assert_eq!(candidates.len(), CONDUIT_FRAME_CANDIDATE_COUNT as usize);
+        let frame = conduit_frame_scan([0, 0, 0], |_| true, |_| true);
+        assert_eq!(frame.effect_block_count, CONDUIT_FRAME_CANDIDATE_COUNT);
+        assert!(frame.is_active());
+        assert!(frame.is_hunting());
+    }
+
+    /// The conjunction trap: a room built entirely of frame blocks (all 42
+    /// candidates present) is still an **empty** frame if even one cell of the
+    /// conduit's own inner 3×3×3 is not water — vanilla's `updateShape`
+    /// returns before the 5×5×5 pass ever runs. A resolver that scored the
+    /// outer ring independently of the inner-cube gate would activate here;
+    /// vanilla does not.
+    #[test]
+    fn conduit_frame_scan_requires_the_entire_inner_cube_to_be_water_even_with_every_frame_block_present()
+     {
+        let pos = [10, 20, 30];
+        let missing = [pos[0], pos[1] + 1, pos[2]]; // one inner-cube cell, not water
+        let frame = conduit_frame_scan(
+            pos,
+            |p| p != missing,
+            |_| true, // every 5x5x5 candidate is a valid frame block
+        );
+        assert_eq!(
+            frame.effect_block_count, 0,
+            "one non-water inner cell must zero the whole frame even though \
+             every outer candidate is a valid block"
+        );
+        assert!(!frame.is_active());
+        assert!(!frame.is_hunting());
+    }
+
+    /// The discriminating pair for activation: 15 valid frame blocks (one
+    /// short) against exactly 16 — `MIN_ACTIVE_SIZE`. Never "a bare conduit",
+    /// which cannot tell "zero" from "any number below the threshold".
+    #[test]
+    fn conduit_frame_scan_discriminates_15_from_16_valid_blocks() {
+        let pos = [0, 0, 0];
+        let candidates = conduit_frame_candidates();
+        for count in [15usize, 16usize] {
+            let placed: std::collections::HashSet<[i32; 3]> = candidates[..count]
+                .iter()
+                .map(|o| [pos[0] + o[0], pos[1] + o[1], pos[2] + o[2]])
+                .collect();
+            let frame = conduit_frame_scan(pos, |_| true, |p| placed.contains(&p));
+            assert_eq!(frame.effect_block_count, count as u32);
+            assert_eq!(
+                frame.is_active(),
+                count >= 16,
+                "count {count} active-ness mismatch"
+            );
+        }
+    }
+
+    /// The discriminating pair for hunting: 41 (active, not hunting) against
+    /// exactly 42 — every candidate filled.
+    #[test]
+    fn conduit_frame_scan_requires_all_42_candidates_to_hunt() {
+        let pos = [0, 0, 0];
+        let candidates = conduit_frame_candidates();
+        for count in [41usize, 42usize] {
+            let placed: std::collections::HashSet<[i32; 3]> = candidates[..count]
+                .iter()
+                .map(|o| [pos[0] + o[0], pos[1] + o[1], pos[2] + o[2]])
+                .collect();
+            let frame = conduit_frame_scan(pos, |_| true, |p| placed.contains(&p));
+            assert!(frame.is_active(), "{count} blocks must already be active");
+            assert_eq!(
+                frame.is_hunting(),
+                count >= 42,
+                "count {count} hunting mismatch"
+            );
+        }
+    }
+
+    /// `conduit_advance`'s two independent clauses: `tick_count` always steps,
+    /// `active_rotation_ticks` only while active. Collected across a short
+    /// active/inactive/active sequence and asserted as a table, not one
+    /// `assert!` per iteration.
+    #[test]
+    fn conduit_advance_ticks_always_and_gates_rotation_on_active() {
+        let steps = [true, true, false, false, true];
+        let mut tick_count = 0u32;
+        let mut active_rotation_ticks = 0u32;
+        let mut rows = Vec::new();
+        for active in steps {
+            (tick_count, active_rotation_ticks) =
+                conduit_advance(tick_count, active_rotation_ticks, active);
+            rows.push((tick_count, active_rotation_ticks));
+        }
+        assert_eq!(
+            rows,
+            vec![(1, 1), (2, 2), (3, 2), (4, 2), (5, 3)],
+            "tick_count must step every call; active_rotation_ticks only on an \
+             active call"
+        );
+    }
+
+    /// The unit trap, predicted exactly rather than sign-checked: the same
+    /// `conduit_active_rotation_value` output is degrees in
+    /// [`conduit_inactive_y_rot_radians`] and radians in
+    /// [`conduit_active_axis_rotation_radians`] — a ~57× (`180/π`) gap between
+    /// the two readings of the identical number. Both hypotheses computed from
+    /// outside arithmetic (`f32::to_radians`, and the identity), not from a
+    /// remembered literal.
+    #[test]
+    fn conduit_active_rotation_value_is_degrees_when_inactive_and_radians_when_active() {
+        let active_ticks = 10u32;
+        let partial = 0.5f32;
+
+        let active_value = conduit_active_rotation_value(active_ticks, partial, true);
+        let expected_active = (active_ticks as f32 + partial) * -0.0375;
+        assert!((active_value - expected_active).abs() < 1e-6);
+        // Active branch: used directly as radians.
+        let active_axis_rad = conduit_active_axis_rotation_radians(active_value);
+        assert!((active_axis_rad - expected_active).abs() < 1e-6);
+
+        let inactive_value = conduit_active_rotation_value(active_ticks, partial, false);
+        let expected_inactive = active_ticks as f32 * -0.0375;
+        assert!(
+            (inactive_value - expected_inactive).abs() < 1e-6,
+            "inactive reading must drop the partial tick entirely"
+        );
+        // Inactive branch: the same *shape* of number, but read as degrees.
+        let inactive_y_rot_rad = conduit_inactive_y_rot_radians(inactive_value);
+        let expected_inactive_rad = expected_inactive.to_radians();
+        assert!((inactive_y_rot_rad - expected_inactive_rad).abs() < 1e-6);
+
+        // Isolate the two *readings* of one identical number (zero partial
+        // tick, so the active branch's counter and the inactive branch's
+        // counter coincide at `10`): applying `conduit_active_axis_rotation_radians`
+        // (identity) against `conduit_inactive_y_rot_radians` (`to_radians`)
+        // to the same value must differ by exactly `180/pi` — treating the
+        // two readings as interchangeable is the exact bug this exists to
+        // catch.
+        let same_value = conduit_active_rotation_value(active_ticks, 0.0, true);
+        assert!(
+            (same_value - conduit_active_rotation_value(active_ticks, 0.0, false)).abs() < 1e-6,
+            "zero partial tick must make the two branches' counters coincide"
+        );
+        let as_radians = conduit_active_axis_rotation_radians(same_value).abs();
+        let as_degrees_then_radians = conduit_inactive_y_rot_radians(same_value).abs();
+        let ratio = as_radians / as_degrees_then_radians;
+        assert!(
+            (ratio - 180.0 / std::f32::consts::PI).abs() < 1e-3,
+            "expected the two readings of the same value to differ by exactly \
+             180/pi (~57.2958x), got {ratio}x"
+        );
+    }
+
+    /// `conduit_bob`'s exact formula at two discriminating `anim_time`s — `0`
+    /// (`sin == 0`) and `5π` (`sin(0.5π) == 1`) — never a round guess.
+    #[test]
+    fn conduit_bob_matches_the_exact_formula_at_discriminating_anim_times() {
+        let at_zero = conduit_bob(0.0);
+        assert!(
+            (at_zero - 0.75).abs() < 1e-5,
+            "sin(0)=0 -> hh=0.5 -> hh*hh+hh=0.75, got {at_zero}"
+        );
+        let at_peak = conduit_bob(5.0 * std::f32::consts::PI);
+        assert!(
+            (at_peak - 2.0).abs() < 1e-4,
+            "sin(pi/2)=1 -> hh=1.0 -> hh*hh+hh=2.0, got {at_peak}"
+        );
+    }
+
+    /// `tickCount / 66 % 3` steps on **integer** ticks only — checked either
+    /// side of both seams (`66`, `132`, `198`), the discriminating boundary
+    /// inputs rather than round numbers.
+    #[test]
+    fn conduit_animation_phase_steps_every_66_ticks() {
+        let cases = [
+            (0u32, 0u8),
+            (65, 0),
+            (66, 1),
+            (131, 1),
+            (132, 2),
+            (197, 2),
+            (198, 0),
+        ];
+        let mismatches: Vec<_> = cases
+            .into_iter()
+            .filter_map(|(tick, expected)| {
+                let got = conduit_animation_phase(tick);
+                (got != expected).then_some((tick, expected, got))
+            })
+            .collect();
+        assert!(mismatches.is_empty(), "{mismatches:?}");
+    }
+
+    /// The inactive branch resolves to exactly one instance — the shell —
+    /// carrying the "degrees" reading of `active_rotation_value` threaded into
+    /// its placement, matching [`conduit_inactive_y_rot_radians`] exactly
+    /// (that function's own test pins down its arithmetic; this proves
+    /// `resolve_conduit` actually plugs it in rather than the raw value).
+    #[test]
+    fn resolve_conduit_inactive_resolves_one_shell_instance_using_the_degrees_reading() {
+        let models = BlockEntityModelSet::load();
+        let spawn = ConduitSpawn {
+            active_rotation_value: -30.0,
+            ..ConduitSpawn::at([5, 10, -3])
+        };
+        let out = models.resolve_conduit(&spawn, Mat4::IDENTITY);
+        assert_eq!(out.len(), 1, "inactive must resolve to exactly one instance");
+        let inst = &out[0];
+        assert_eq!(inst.model, CONDUIT_SHELL);
+        assert_eq!(inst.texture, CONDUIT_SHELL_TEXTURE_STEM);
+
+        let expected = Mat4::from_translation(Vec3::new(5.5, 10.5, -2.5))
+            * Mat4::from_rotation_y(conduit_inactive_y_rot_radians(spawn.active_rotation_value));
+        for (a, b) in inst.transform.to_cols_array().iter().zip(expected.to_cols_array()) {
+            assert!((a - b).abs() < 1e-4, "{:?} != {:?}", inst.transform, expected);
+        }
+    }
+
+    /// The active branch resolves to exactly four instances — cage, both wind
+    /// planes, and the eye — with the right `(model, texture)` pairs, and the
+    /// cage/eye share the bob height while **both** wind planes stay fixed at
+    /// `y = 0.5`: the adjacent-same-shaped-expression trap this module's own
+    /// doc comment calls out, checked with `hh != 1` so the two Y values
+    /// cannot coincide by accident.
+    #[test]
+    fn resolve_conduit_active_resolves_cage_wind_wind_eye_with_the_bob_on_only_two_of_them() {
+        let models = BlockEntityModelSet::load();
+        // `anim_time` chosen so `conduit_bob` is not `1.0` (which would make
+        // `bob == 0.5`, coincident with the wind planes' fixed value and
+        // unable to distinguish the two).
+        let anim_time = 1.0;
+        let hh = conduit_bob(anim_time);
+        let bob = 0.3 + hh * 0.2;
+        assert!(
+            (bob - 0.5).abs() > 1e-3,
+            "bob {bob} must differ from the wind planes' fixed 0.5 for this test to discriminate"
+        );
+        let spawn = ConduitSpawn {
+            active: true,
+            hunting: false,
+            active_rotation_value: 0.0,
+            anim_time,
+            animation_phase: 0,
+            ..ConduitSpawn::at([0, 0, 0])
+        };
+        let out = models.resolve_conduit(&spawn, Mat4::IDENTITY);
+        assert_eq!(out.len(), 4, "active must resolve to exactly four instances");
+
+        let mut by_model: std::collections::HashMap<&str, Vec<&BlockEntityInstance>> =
+            std::collections::HashMap::new();
+        for inst in &out {
+            by_model.entry(inst.model).or_default().push(inst);
+        }
+        assert_eq!(by_model.get(CONDUIT_CAGE).map(Vec::len), Some(1));
+        assert_eq!(by_model.get(CONDUIT_WIND).map(Vec::len), Some(2));
+        assert_eq!(by_model.get(CONDUIT_EYE).map(Vec::len), Some(1));
+
+        let cage = by_model[CONDUIT_CAGE][0];
+        assert_eq!(cage.texture, CONDUIT_CAGE_TEXTURE_STEM);
+        let eye = by_model[CONDUIT_EYE][0];
+        assert_eq!(eye.texture, CONDUIT_CLOSED_EYE_TEXTURE_STEM);
+
+        let y_of = |inst: &BlockEntityInstance| inst.transform.col(3).y;
+        assert!(
+            (y_of(cage) - bob).abs() < 1e-4,
+            "cage Y {} != bob {bob}",
+            y_of(cage)
+        );
+        assert!(
+            (y_of(eye) - bob).abs() < 1e-4,
+            "eye Y {} != bob {bob}",
+            y_of(eye)
+        );
+        for wind in &by_model[CONDUIT_WIND] {
+            assert!(
+                (y_of(wind) - 0.5).abs() < 1e-4,
+                "wind plane Y {} must stay fixed at 0.5, not the bob {bob}",
+                y_of(wind)
+            );
+        }
+        // The two wind instances share a texture but must not share a
+        // transform (the second carries the extra `scale(0.875)` +
+        // `rotationXYZ` clause).
+        assert_ne!(
+            by_model[CONDUIT_WIND][0].transform, by_model[CONDUIT_WIND][1].transform,
+            "the two wind planes must be posed differently"
+        );
+    }
+
+    /// Both wind planes switch texture together with `animation_phase == 1`,
+    /// and only then.
+    #[test]
+    fn resolve_conduit_wind_texture_follows_animation_phase() {
+        let models = BlockEntityModelSet::load();
+        for (phase, expected) in [
+            (0u8, CONDUIT_WIND_TEXTURE_STEM),
+            (1u8, CONDUIT_WIND_VERTICAL_TEXTURE_STEM),
+            (2u8, CONDUIT_WIND_TEXTURE_STEM),
+        ] {
+            let spawn = ConduitSpawn {
+                active: true,
+                animation_phase: phase,
+                ..ConduitSpawn::at([0, 0, 0])
+            };
+            let out = models.resolve_conduit(&spawn, Mat4::IDENTITY);
+            let winds: Vec<_> = out.iter().filter(|i| i.model == CONDUIT_WIND).collect();
+            assert_eq!(winds.len(), 2);
+            for w in winds {
+                assert_eq!(w.texture, expected, "phase {phase}");
+            }
+        }
+    }
+
+    /// The eye's sprite follows `hunting`, independent of everything else
+    /// about the spawn.
+    #[test]
+    fn resolve_conduit_eye_texture_follows_hunting() {
+        let models = BlockEntityModelSet::load();
+        for (hunting, expected) in [
+            (false, CONDUIT_CLOSED_EYE_TEXTURE_STEM),
+            (true, CONDUIT_OPEN_EYE_TEXTURE_STEM),
+        ] {
+            let spawn = ConduitSpawn {
+                active: true,
+                hunting,
+                ..ConduitSpawn::at([0, 0, 0])
+            };
+            let out = models.resolve_conduit(&spawn, Mat4::IDENTITY);
+            let eye = out.iter().find(|i| i.model == CONDUIT_EYE).expect("eye");
+            assert_eq!(eye.texture, expected, "hunting {hunting}");
+        }
+    }
+
+    /// Only the eye reads `camera_orientation` — vanilla's
+    /// `poseStack.mulPose(camera.orientation)` sits inside the eye's own
+    /// `pushPose`/`popPose` pair alone. Changing it must move the eye's
+    /// transform and leave the cage's and both wind planes' untouched.
+    #[test]
+    fn resolve_conduit_only_the_eye_billboards_with_camera_orientation() {
+        let models = BlockEntityModelSet::load();
+        let spawn = ConduitSpawn {
+            active: true,
+            ..ConduitSpawn::at([0, 0, 0])
+        };
+        let identity = models.resolve_conduit(&spawn, Mat4::IDENTITY);
+        let rotated = models.resolve_conduit(&spawn, Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2));
+
+        let by_model = |out: &[BlockEntityInstance], model: &str| -> Vec<Mat4> {
+            out.iter().filter(|i| i.model == model).map(|i| i.transform).collect()
+        };
+        assert_eq!(by_model(&identity, CONDUIT_CAGE), by_model(&rotated, CONDUIT_CAGE));
+        assert_eq!(by_model(&identity, CONDUIT_WIND), by_model(&rotated, CONDUIT_WIND));
+        assert_ne!(
+            by_model(&identity, CONDUIT_EYE),
+            by_model(&rotated, CONDUIT_EYE),
+            "the eye must be the one instance that moves with camera orientation"
+        );
+    }
+
+    /// [`conduit_texture_stems`] and [`block_entity_texture_stems`] both carry
+    /// all six conduit sheets — the loader's own enumeration, checked as a set
+    /// rather than assuming the union function forwards correctly (the
+    /// `Arc<S>`-forwarding class of bug this repo has shipped before: adding a
+    /// stem list without adding it to the aggregator compiles clean and stays
+    /// silently short).
+    #[test]
+    fn conduit_texture_stems_are_all_six_and_reach_the_aggregate_loader_list() {
+        let stems = conduit_texture_stems();
+        assert_eq!(stems.len(), 6, "{stems:?}");
+        let all = block_entity_texture_stems();
+        let missing: Vec<_> = stems.iter().filter(|s| !all.contains(s)).collect();
+        assert!(
+            missing.is_empty(),
+            "conduit_texture_stems entries missing from block_entity_texture_stems: {missing:?}"
         );
     }
 }
