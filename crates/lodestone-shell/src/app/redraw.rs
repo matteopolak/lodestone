@@ -1023,6 +1023,10 @@ impl WindowApp {
             .map(|a| (a, lodestone_game::player_state::HudState::MAX_AIR, self.sim.player().eye_in_water));
         let sidebar = self.sim.sidebar();
         let boss_bars = self.sim.boss_bars();
+        // The locator bar's dots (issue #26), from the exact eye camera the
+        // 3-D pass above renders with — vanilla resolves the locator bar
+        // against `gameRenderer.mainCamera()`, not any third-person offset.
+        let locator_dots = self.sim.locator_dots(camera.position, camera.yaw);
         // Two different questions, and they used to share one boolean named
         // `crosshair` — which is why the hotbar vanished behind the pause menu
         // and the inventory (issue #61). The crosshair is the aiming reticle and
@@ -1166,6 +1170,7 @@ impl WindowApp {
         hud_frame.hotbar = world_hud.then(|| self.sim.selected_slot());
         hud_frame.hotbar_items = world_hud.then_some(hotbar_records.as_slice());
         hud_frame.xp = self.sim.xp();
+        hud_frame.locator = &locator_dots;
         hud_frame.title = self.sim.title_overlay();
         hud_frame.action_bar = self.sim.action_bar_overlay();
         hud_frame.held_item = self.sim.held_item_overlay();

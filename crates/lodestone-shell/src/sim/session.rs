@@ -827,6 +827,43 @@ impl Sim {
         self.net.as_ref()?.local_uuid()
     }
 
+    /// The locator bar's dots (issue #26) for the given camera pose —
+    /// [`lodestone_ecs::session::SessionWaypoints`] is fully decoded and
+    /// folded and, until this accessor, read by nothing at all. Empty off
+    /// a live server or once the last tracked waypoint is untracked.
+    ///
+    /// `camera_pos`/`camera_yaw` are the caller's own render camera (see
+    /// [`Self::camera`]) rather than something this method resolves itself
+    /// — session scalars in this file read components, not the camera rig,
+    /// which lives in a different seam of this same struct
+    /// (`sim/camera.rs`).
+    #[must_use]
+    pub fn locator_dots(
+        &self,
+        camera_pos: glam::Vec3,
+        camera_yaw: f32,
+    ) -> Vec<crate::hud::locator::LocatorDot> {
+        // The local player's own waypoint, when the server tracks one for
+        // them — `LocatorBar.java`'s own exclusion. `local_uuid()` is the
+        // connecting session's identity, not a per-entity component, which
+        // is why this reads it through `NetClient` rather than the ECS
+        // world the rest of this method touches.
+        let local_id = self
+            .local_uuid()
+            .map(lodestone_model::event::WaypointId::Entity);
+        self.read(|w| {
+            w.get::<lodestone_ecs::SessionWaypoints>(self.local)
+                .map_or_else(Vec::new, |store| {
+                    crate::hud::locator::locator_dots(
+                        store.0.iter(),
+                        camera_pos,
+                        camera_yaw,
+                        local_id.as_ref(),
+                    )
+                })
+        })
+    }
+
     /// The scoreboard sidebar to draw, or `None` when none is displayed (or off
     /// a live server). Folded through [`lodestone_game::scoreboard::Scoreboard`].
     #[must_use]
