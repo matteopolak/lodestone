@@ -771,7 +771,16 @@ impl Sim {
     #[must_use]
     pub fn tab_list_view(&self) -> crate::tablist::TabListView {
         let list = self.tab_list();
-        crate::tablist::tab_list_view(&list, self.translator().as_ref())
+        // The same `SessionScoreboard` read `Sim::sidebar` already does —
+        // `PlayerTabOverlay.getNameForDisplay` runs a name with no explicit
+        // display name through the player's team, so a tab list built without
+        // this reads every team-coloured player in plain white.
+        let board = self.read(|w| {
+            w.get::<lodestone_ecs::SessionScoreboard>(self.local)
+                .map(|board| board.0.clone())
+                .unwrap_or_default()
+        });
+        crate::tablist::tab_list_view(&list, Some(&board), self.translator().as_ref())
     }
 
     /// The same folded tab list [`Self::tab_list_view`] projects, unprojected —

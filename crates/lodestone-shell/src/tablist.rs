@@ -8,10 +8,19 @@
 //!
 //! ## How it works
 //!
-//! [`tab_list_view`] does three things the fold deliberately does not:
+//! [`tab_list_view`] does four things the fold deliberately does not:
 //!
 //! * resolves each entry's `display_name` (or its plain profile name) into
 //!   **styled spans**, so a server that colours a name gets a coloured row;
+//! * when an entry carries **no** explicit `display_name`, runs the plain
+//!   profile name through the player's scoreboard team —
+//!   `PlayerTabOverlay.getNameForDisplay`'s other half,
+//!   `PlayerTeam.formatNameForTeam` — via
+//!   [`Scoreboard::display_name_of`](lodestone_game::scoreboard::Scoreboard::display_name_of).
+//!   This is the more common source of a coloured tab-list name in practice: a
+//!   server that runs `/team modify <team> color` never sets a display name at
+//!   all, and a `tab_list_view` that only checked `display_name` would show
+//!   every one of its players in plain white;
 //! * applies vanilla's `limit(80)` — `PlayerTabOverlay.getPlayerInfos` caps the
 //!   overlay at 80 entries, after sorting, and a 200-player server therefore
 //!   shows the first 80 in comparator order rather than 200 rows off the bottom
@@ -46,7 +55,9 @@
 //! `translate` resolution, and the `gui/sprites/icon/ping_*` sprites out of the
 //! GUI atlas for the bars.
 
-use lodestone_game::tablist::TabList;
+use lodestone_game::scoreboard::Scoreboard;
+use lodestone_game::tablist::{PlayerListEntry, TabList};
+use lodestone_model::Text;
 use lodestone_model::text::TextSpan;
 
 /// Vanilla's cap on how many rows the overlay shows —
@@ -135,9 +146,15 @@ pub fn ping_sprite(latency: i32) -> &'static str {
 }
 
 /// Lowers the folded tab list into the view the HUD draws.
+///
+/// `scoreboard` is the same fold [`crate::sim::session::Sim::sidebar`] already
+/// reads through [`Scoreboard::display_name_of`] — `None` off a session with
+/// no scoreboard data yet, which degrades to the plain-name half of
+/// [`name_for_display`] exactly as vanilla does with no team.
 #[must_use]
 pub fn tab_list_view(
     tab_list: &TabList,
+    scoreboard: Option<&Scoreboard>,
     translate: &dyn Fn(&str) -> Option<String>,
 ) -> TabListView {
     let rows = tab_list
@@ -145,7 +162,8 @@ pub fn tab_list_view(
         .into_iter()
         .take(MAX_TAB_ROWS)
         .map(|entry| TabListRow {
-            name: lodestone_game::text::resolve(&entry.effective_name(), translate).to_spans(),
+            name: lodestone_game::text::resolve(&name_for_display(entry, scoreboard), translate)
+                .to_spans(),
             ping_sprite: ping_sprite(entry.latency),
             spectator: entry.game_mode == lodestone_model::GameMode::Spectator,
         })
@@ -157,6 +175,26 @@ pub fn tab_list_view(
         // See the module doc: vanilla's own gate is `onlineMode()`, which our
         // server reports as `false` and our client does not yet decode.
         show_head: false,
+    }
+}
+
+/// `PlayerTabOverlay.getNameForDisplay`: an explicit tab-list display name
+/// wins outright (`entry.effective_name()` already does that half); with none,
+/// the plain profile name is run through the player's scoreboard team
+/// (`PlayerTeam.formatNameForTeam`) rather than left bare.
+///
+/// This is the fold [`PlayerListEntry::effective_name`] deliberately does not
+/// do, because it lives in `lodestone-game`'s per-entry state and has no
+/// `Scoreboard` to consult — this is the view-layer half, alongside the
+/// styled-span resolution the module doc already claims.
+#[must_use]
+fn name_for_display(entry: &PlayerListEntry, scoreboard: Option<&Scoreboard>) -> Text {
+    if entry.display_name.is_some() {
+        return entry.effective_name();
+    }
+    match scoreboard {
+        Some(board) => board.display_name_of(&entry.profile.name),
+        None => Text::literal(entry.profile.name.clone()),
     }
 }
 
@@ -237,7 +275,7 @@ mod tests {
         tabs.insert(bob);
         tabs.insert(entry(1, "Alice", 12, GameMode::Survival));
 
-        let view = tab_list_view(&tabs, &no_tr);
+        let view = tab_list_view(&tabs, None, &no_tr);
         // Alice first because Bob is a spectator, and spectators sort last —
         // `PLAYER_COMPARATOR`'s second key. Alphabetically Alice would come first
         // anyway, so the *spectator flag* is the discriminating assertion here.
@@ -257,7 +295,7 @@ mod tests {
         tabs.insert(entry(1, "Aaa", 10, GameMode::Spectator));
         tabs.insert(entry(2, "Zzz", 10, GameMode::Survival));
         assert_eq!(
-            names(&tab_list_view(&tabs, &no_tr)),
+            names(&tab_list_view(&tabs, None, &no_tr)),
             vec!["Zzz".to_string(), "Aaa".to_string()]
         );
     }
@@ -270,12 +308,108 @@ mod tests {
         tabs.insert(e);
 
         let tr = |key: &str| (key == "entity.minecraft.spider").then(|| "Spider".to_string());
-        assert_eq!(names(&tab_list_view(&tabs, &tr)), vec!["Spider".to_string()]);
+        assert_eq!(names(&tab_list_view(&tabs, None, &tr)), vec!["Spider".to_string()]);
         // Negative control: no table leaks the raw key.
         assert_eq!(
-            names(&tab_list_view(&tabs, &no_tr)),
+            names(&tab_list_view(&tabs, None, &no_tr)),
             vec!["entity.minecraft.spider".to_string()]
         );
+    }
+
+    /// A **hex** colour on an explicit per-player display name survives to the
+    /// row, the same discriminating shape as
+    /// [`a_hex_coloured_banner_keeps_its_colour_on_both_sides_of_a_break`] but
+    /// for [`TabListRow::name`] rather than the header/footer — nothing in this
+    /// crate's corpus checked the row path on its own before this, only the
+    /// banner, so a regression specific to `PlayerListEntry::display_name`
+    /// could have shipped unnoticed even with the banner gate green.
+    #[test]
+    fn a_players_hex_coloured_display_name_survives_to_the_row() {
+        use lodestone_model::TextColor;
+
+        const HEX: u32 = 0x00ab_cdef;
+        let mut tabs = TabList::new();
+        let mut e = entry(1, "Steve", 10, GameMode::Survival);
+        e.display_name = Some(Text {
+            style: lodestone_model::TextStyle {
+                color: Some(TextColor::Rgb(HEX)),
+                ..lodestone_model::TextStyle::default()
+            },
+            ..Text::literal("Nicked")
+        });
+        tabs.insert(e);
+
+        let view = tab_list_view(&tabs, None, &no_tr);
+        assert_eq!(names(&view), vec!["Nicked".to_string()]);
+        let got: Vec<Option<TextColor>> =
+            view.rows[0].name.iter().map(|s| s.style.color).collect();
+        assert_eq!(
+            got,
+            vec![Some(TextColor::Rgb(HEX))],
+            "a hex TextColor::Rgb on the display name must reach the row's spans, \
+             got {got:?}"
+        );
+    }
+
+    /// `PlayerTabOverlay.getNameForDisplay`'s other half: a player with **no**
+    /// explicit display name is still coloured, through their scoreboard team —
+    /// `PlayerTeam.formatNameForTeam`. This is the common case a server that
+    /// only runs `/team modify <team> color` hits, with no display-name
+    /// component ever sent, so a `tab_list_view` that only checked
+    /// `display_name` would show every one of these players in plain white.
+    ///
+    /// The prefix and suffix are asserted too, not just the colour: vanilla
+    /// wraps the whole `prefix + name + suffix` run in the team colour, and a
+    /// gate that only checked the colour could pass against an implementation
+    /// that dropped the prefix/suffix text entirely.
+    #[test]
+    fn a_player_with_no_display_name_is_coloured_by_their_scoreboard_team() {
+        use lodestone_game::scoreboard::{Scoreboard, Team, TeamColor};
+        use lodestone_model::TextColor;
+
+        let mut tabs = TabList::new();
+        tabs.insert(entry(1, "Notch", 10, GameMode::Survival));
+
+        let mut board = Scoreboard::new();
+        let mut red = Team::new("red");
+        red.color = Some(TeamColor::Red);
+        red.prefix = Text::literal("[R] ");
+        red.members.push("Notch".to_string());
+        board.add_team(red);
+
+        let with_team = tab_list_view(&tabs, Some(&board), &no_tr);
+        assert_eq!(
+            names(&with_team),
+            vec!["[R] Notch".to_string()],
+            "the team prefix must reach the row alongside the plain name"
+        );
+        assert_eq!(
+            with_team.rows[0].name[0].style.color,
+            Some(TeamColor::Red.as_text_color()),
+            "the team's colour must reach the row"
+        );
+
+        // Negative control: with no scoreboard at all, the same player draws
+        // plain — proving the colour above came from the team and not from
+        // some other default.
+        let without_team = tab_list_view(&tabs, None, &no_tr);
+        assert_eq!(names(&without_team), vec!["Notch".to_string()]);
+        assert_eq!(without_team.rows[0].name[0].style.color, None);
+
+        // An explicit display name still wins outright over the team, exactly
+        // as `getNameForDisplay` reads: `getTabListDisplayName() != null` short-
+        // circuits before the team branch is ever reached.
+        let mut with_display = TabList::new();
+        let mut e = entry(1, "Notch", 10, GameMode::Survival);
+        e.display_name = Some(Text::literal("Explicit"));
+        with_display.insert(e);
+        let overridden = tab_list_view(&with_display, Some(&board), &no_tr);
+        assert_eq!(
+            names(&overridden),
+            vec!["Explicit".to_string()],
+            "an explicit display name must win over team formatting entirely"
+        );
+        assert_eq!(overridden.rows[0].name[0].style.color, None);
     }
 
     /// The ping bands, **at their boundaries**.
@@ -311,7 +445,7 @@ mod tests {
         for i in 0..100u128 {
             tabs.insert(entry(i + 1, &format!("p{i:03}"), 10, GameMode::Survival));
         }
-        let view = tab_list_view(&tabs, &no_tr);
+        let view = tab_list_view(&tabs, None, &no_tr);
         assert_eq!(view.len(), MAX_TAB_ROWS);
         let names = names(&view);
         assert_eq!(names[0], "p000");
@@ -329,7 +463,7 @@ mod tests {
         tabs.insert(hidden);
         tabs.insert(entry(2, "Seen", 10, GameMode::Survival));
         assert_eq!(tabs.len(), 2, "both entries stay in the fold");
-        assert_eq!(names(&tab_list_view(&tabs, &no_tr)), vec!["Seen".to_string()]);
+        assert_eq!(names(&tab_list_view(&tabs, None, &no_tr)), vec!["Seen".to_string()]);
     }
 
     /// The wording of each banner line, for assertions about the split alone.
@@ -482,7 +616,7 @@ mod tests {
         let mut tabs = TabList::new();
         tabs.insert(entry(1, "Alice", 12, GameMode::Survival));
         tabs.insert(entry(2, "Bob", 30, GameMode::Survival));
-        let bare = tab_list_view(&tabs, &no_tr);
+        let bare = tab_list_view(&tabs, None, &no_tr);
         // **Three** lines each, not one, and the reason is a control that failed:
         // with a one-line header the header band is `y = 10..19`, which is exactly
         // where the *rows* sit in the no-banner frame (`yyo = 10`), so the
@@ -492,7 +626,7 @@ mod tests {
         // everything the bare frame draws, which ends at `10 + 2 * 9 = 28`.
         tabs.header = Some(Text::literal("H1\nH2\nH3"));
         tabs.footer = Some(Text::literal("F1\nF2\nF3"));
-        let banner = tab_list_view(&tabs, &no_tr);
+        let banner = tab_list_view(&tabs, None, &no_tr);
         assert_eq!(banner.header.len(), 3, "the fixture must supply three header lines");
         assert_eq!(banner.footer.len(), 3, "the fixture must supply three footer lines");
 
@@ -632,7 +766,7 @@ mod tests {
         let mut tabs = TabList::new();
         tabs.insert(entry(1, "Alice", 12, GameMode::Survival));
         tabs.insert(entry(2, "Bob", 30, GameMode::Survival));
-        let view = tab_list_view(&tabs, &no_tr);
+        let view = tab_list_view(&tabs, None, &no_tr);
 
         // The overlay is anchored at the **top** of the screen (`yyo = 10`), not
         // vertically centred, so the sampled rect starts at the top edge. A rect
