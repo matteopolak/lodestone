@@ -16,6 +16,12 @@ use crate::redstone_target::HitAxis;
 
 use super::{ChunkWorld, MobSim, ProjectileMeta, ProjectileBlockHit};
 
+/// `Ghast.java`'s own `explosionPower` field default (`private int
+/// explosionPower = 1`, `DEFAULT_EXPLOSION_POWER`). No producer in this sim
+/// overrides it yet — no "Happy Ghast" variant, no `ExplosionPower` NBT
+/// round-trip — so every fireball explodes at this one figure.
+const GHAST_FIREBALL_EXPLOSION_POWER: f32 = 1.0;
+
 /// One projectile impact [`MobSim::resolve_projectile_impacts`] found, staged
 /// before resolution because the search borrows the mob list immutably and
 /// applying the damage needs it mutably.
@@ -333,6 +339,13 @@ impl<'w> MobSim<'w> {
         // `&mut self.mobs` while this loop still holds an immutable borrow of
         // both the projectile set and the mob list.
         let mut wither_skull_blasts: Vec<Vec3> = Vec::new();
+        // `LargeFireball.onHit`'s identical unconditional impact explosion —
+        // a ghast's own fireball, staged the same way and for the same
+        // reason. Kept as its own vec rather than merged with
+        // `wither_skull_blasts` because the two explode at different powers
+        // (`crate::wither::SKULL_EXPLOSION_POWER` vs
+        // `GHAST_FIREBALL_EXPLOSION_POWER`).
+        let mut fireball_blasts: Vec<Vec3> = Vec::new();
         for tracked in self.projectiles.iter() {
             let from = tracked.projectile.position;
             let delta = tracked.projectile.velocity;
@@ -377,6 +390,7 @@ impl<'w> MobSim<'w> {
                 (Some((entity_t, target)), block) if block.is_none_or(|b| entity_t <= b) => {
                     let entity_type = meta.map(|m| m.entity_type.path().to_owned());
                     let is_wither_skull = entity_type.as_deref() == Some("wither_skull");
+                    let is_ghast_fireball = entity_type.as_deref() == Some("fireball");
                     if is_potion_family {
                         // Vanilla's own search is over the blast AABB, not
                         // just whichever entity the collision sweep names as
@@ -391,6 +405,9 @@ impl<'w> MobSim<'w> {
                     }
                     if is_wither_skull {
                         wither_skull_blasts.push(from + delta.scale(entity_t));
+                    }
+                    if is_ghast_fireball {
+                        fireball_blasts.push(from + delta.scale(entity_t));
                     }
                     hits.push(ProjectileHit {
                         projectile: tracked.id,
@@ -421,6 +438,11 @@ impl<'w> MobSim<'w> {
                         // `WitherSkull.onHit` explodes on **any** surface,
                         // block included — not just an entity hit.
                         wither_skull_blasts.push(coarse_hit);
+                    }
+                    if meta.map(|m| m.entity_type.path()) == Some("fireball") {
+                        // `LargeFireball.onHit` — the identical "any surface"
+                        // rule for a ghast's own fireball.
+                        fireball_blasts.push(coarse_hit);
                     }
                     let cell = super::lightning::floor_block_pos(coarse_hit);
                     if let Some((_, axis, frac)) = block_entry(from, delta, cell) {
@@ -468,6 +490,11 @@ impl<'w> MobSim<'w> {
         // module doc for why.
         for &centre in &wither_skull_blasts {
             self.explode(centre, crate::wither::SKULL_EXPLOSION_POWER, DamageFlags::default());
+        }
+        // `LargeFireball.onHit`'s own unconditional blast, same ordering
+        // reasoning as the wither skull's just above.
+        for &centre in &fireball_blasts {
+            self.explode(centre, GHAST_FIREBALL_EXPLOSION_POWER, DamageFlags::default());
         }
         // Through the shared reaper, so an arrow kill drops the same loot a melee
         // kill does — the same argument `attack`'s own killing blow makes.
@@ -1163,5 +1190,94 @@ mod tests {
         let mob = sim.get(target).expect("still alive");
         assert_eq!(mob.health(), before);
         assert!(mob.effects().is_empty());
+    }
+
+    /// A ghast's fireball (`minecraft:fireball`, `LargeFireball`) deals its
+    /// own flat `6.0` on a direct entity hit — `LargeFireball.onHitEntity`'s
+    /// `hurtServer(..., 6.0F)`, not speed-scaled the way an arrow's damage is.
+    /// Same structure as `mobs::wither`'s equivalent skull test: two speeds
+    /// that both cross the gap within one tick, checked for equal damage
+    /// rather than a proportional one.
+    #[test]
+    fn a_ghast_fireball_deals_flat_not_speed_scaled_damage_on_a_direct_hit() {
+        let world = ChunkWorld::new(-4, 24);
+        let mut mismatches: Vec<String> = Vec::new();
+        let mut dealt_by_speed: Vec<f32> = Vec::new();
+        for speed in [5.0, 20.0] {
+            let mut sim = MobSim::new(&world);
+            let target = spawn_target(&mut sim, Vec3::new(3.0, 1.0, 0.0));
+            let before = sim.get(target).expect("just spawned").health();
+            sim.spawn_projectile(
+                "minecraft:fireball".parse().expect("valid key"),
+                Projectile::throwable(Vec3::new(0.0, 1.0, 0.0), Vec3::new(speed, 0.0, 0.0)),
+            );
+            sim.resolve_projectile_impacts();
+            let Some(after_mob) = sim.get(target) else {
+                mismatches.push(format!("speed {speed}: target did not survive a single fireball hit"));
+                continue;
+            };
+            let dealt = before - after_mob.health();
+            if dealt <= 0.0 {
+                mismatches.push(format!("speed {speed}: expected nonzero damage, dealt {dealt}"));
+            }
+            dealt_by_speed.push(dealt);
+        }
+        if dealt_by_speed.len() == 2 && (dealt_by_speed[0] - dealt_by_speed[1]).abs() > 1e-4 {
+            mismatches.push(format!(
+                "damage must not scale with speed (flat 6.0 base plus the unconditional blast): got {dealt_by_speed:?} at 5 vs 20 blocks/tick"
+            ));
+        }
+        assert!(mismatches.is_empty(), "ghast fireball impact mismatches:\n{}", mismatches.join("\n"));
+    }
+
+    /// **The discriminating gate for the fireball's blast half.** A ghast's
+    /// fireball explodes unconditionally on impact — `LargeFireball.onHit`'s
+    /// own blast, the identical rule [`resolve_projectile_impacts`]'s
+    /// wither-skull arm already carries — so a *second* mob standing near
+    /// the directly-hit one, never itself on the fireball's own flight path,
+    /// must still take damage from the same explosion. The control mob far
+    /// past the blast radius must take none, proving this is a real falloff
+    /// rather than "every mob in the world takes some damage".
+    ///
+    /// Fired through open air rather than at a block: a block-hit's impact
+    /// point is only known to quarter-block precision
+    /// ([`first_solid_along`]'s own doc), which can land the explosion
+    /// centre a few hundredths of a block inside the solid cell it just hit
+    /// and zero its own exposure — a real property of this sim's coarse
+    /// terrain-hit precision, not something this gate exists to probe. A
+    /// direct entity hit's impact point has no such rounding.
+    #[test]
+    fn a_ghast_fireball_exploding_on_direct_impact_damages_a_nearby_bystander_but_not_a_distant_control() {
+        let world = ChunkWorld::new(-4, 24);
+        let mut sim = MobSim::new(&world);
+        let struck = spawn_target(&mut sim, Vec3::new(3.0, 1.0, 0.0));
+        // 1.5 blocks off the flight path (which runs along `z = 0`), so the
+        // collision sweep can only ever resolve the fireball against
+        // `struck`, never against this mob directly.
+        let bystander = spawn_target(&mut sim, Vec3::new(3.0, 1.0, 1.5));
+        let control = spawn_target(&mut sim, Vec3::new(200.0, 1.0, 200.0));
+        sim.spawn_projectile(
+            "minecraft:fireball".parse().expect("valid key"),
+            Projectile::throwable(Vec3::new(0.0, 1.0, 0.0), Vec3::new(5.0, 0.0, 0.0)),
+        );
+        let bystander_before = sim.get(bystander).expect("just spawned").health();
+        let control_before = sim.get(control).expect("just spawned").health();
+
+        sim.resolve_projectile_impacts();
+
+        let bystander_after = sim.get(bystander).expect("blast alone must not be lethal here").health();
+        let control_after = sim.get(control).expect("far outside blast radius").health();
+        assert!(
+            bystander_after < bystander_before,
+            "a fireball's direct hit must still blast a mob standing 1.5 blocks away: before {bystander_before}, after {bystander_after}"
+        );
+        assert_eq!(
+            control_after, control_before,
+            "a mob 200+ blocks from the impact is outside the blast radius and must take no damage"
+        );
+        // `struck` itself must still be alive to read, or the two damage
+        // sources (the direct 6.0 plus the blast) combined would have been
+        // lethal and the control above would be measuring nothing.
+        assert!(sim.get(struck).is_some(), "fixture sanity: the directly-hit mob must survive both hits");
     }
 }

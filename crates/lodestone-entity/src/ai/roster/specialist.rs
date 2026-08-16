@@ -412,48 +412,38 @@ pub const ELDER_GUARDIAN: &[Registration] = &[
 
 /// `Ghast.registerGoals`.
 ///
-/// **Three of four rows are `Missing`, and the table exists anyway.** That is a
+/// **Two of four rows are `Missing`, and the table exists anyway.** That is a
 /// deliberate trade, so read this before "fixing" it:
 ///
 /// Without an entry, `ghast` falls to [`FALLBACK`](super::FALLBACK) and a ghast
 /// **walks around on the ground looking for something to look at**. With this
-/// entry it acquires a target and holds still. Neither is vanilla, but only one of
-/// them is a lie about what a ghast is, and only one of them records *why* the
-/// ghast is unreachable at the place the next agent will look. Losing the
-/// fallback's stroll is the price and it is worth paying: a ghast is a flying mob
-/// and ground strolling is not a degraded version of flying, it is a different
-/// animal.
-///
-/// Nothing can spawn a ghast today in any case — `seed_demo_mobs`
-/// creates zombies and nothing else — so this changes no observable behaviour
-/// in the running game. It changes what the ranged-attack roster has to do:
-/// one row.
+/// entry it acquires a target, fires on it, and otherwise holds still. Neither
+/// is fully vanilla, but only one of them is a lie about what a ghast is, and
+/// only one of them records *why* the ghast's flight is unreachable at the
+/// place the next agent will look. Losing the fallback's stroll is the price
+/// and it is worth paying: a ghast is a flying mob and ground strolling is not
+/// a degraded version of flying, it is a different animal.
 ///
 /// * **`Ghast.RandomFloatAroundGoal`** at 5 and **`Ghast.GhastLookGoal`** at 7
 ///   both drive `Ghast.GhastMoveControl`, a free-flight controller with no
 ///   pathfinding. `NavigatingMob` is ground-based A\*; there is no flying
 ///   navigation seam at all, so these are not approximations waiting on a
 ///   constant, they are waiting on a navigator.
-/// * **`Ghast.GhastShootFireballGoal`** at 7 belongs to the ranged-attack
-///   roster: charge to 20 ticks, launch a `LargeFireball`, reset to `-40`, all
-///   in `GhastShootFireballGoal.tick`. The explosion half of that is already
-///   real (`MobSim::explode`, and `encode_explode` in
-///   `protocol/v770/src/server_protocol.rs`), and the ranged-attack roster has
-///   since built the launch seam — [`MobController::launch_projectile`] and
-///   [`ProjectileKind`](crate::ai::mob::ProjectileKind), plus a generic
-///   `RangedAttackGoal` in [`super::ranged`]. This row still stays `Missing`, for
-///   a reason that is now specific rather than general: `ProjectileKind` has
-///   **no `LargeFireball` variant**, and adding one is an edit to the shared
-///   `ai/mob.rs`. So the remaining work is a variant plus a ghast-shaped goal
-///   (its charge is 20 up / 40 down, not the generic interval), and it belongs
-///   with the rest of the ranged-attack roster rather than being a second,
-///   competing ranged implementation started here.
+/// * **`Ghast.GhastShootFireballGoal`** at 7 is now real —
+///   [`super::ranged::ghast_fireball`], a `Ghast.GhastShootFireballGoal.tick`
+///   port (charge to 20 ticks, launch a
+///   [`LargeFireball`](crate::ai::mob::ProjectileKind::LargeFireball), reset to
+///   `-40`) through the same launch seam
+///   ([`MobController::launch_projectile`]) the rest of the ranged-attack
+///   roster uses. Its own doc discloses what it does not model: the
+///   line-of-sight half of the range gate (no world/raycast access on
+///   `MobController`, issue #456) and the charging sound/visual state.
 /// * **The target row** at 1 is `Player.class` with a ±4-block vertical band,
 ///   which ours does not model.
 pub const GHAST: &[Registration] = &[
     Registration::missing(Selector::Goal, 5, "Ghast.RandomFloatAroundGoal"),
     Registration::missing(Selector::Goal, 7, "Ghast.GhastLookGoal"),
-    Registration::missing(Selector::Goal, 7, "Ghast.GhastShootFireballGoal"),
+    Registration::goal(7, "Ghast.GhastShootFireballGoal", super::ranged::ghast_fireball),
     Registration::target(
         1,
         "NearestAttackableTargetGoal(Player)",
@@ -807,8 +797,10 @@ mod tests {
         let ghast = beam_ticks("ghast", GUARDIAN_SPEED, target, 200);
         assert!(
             ghast.is_empty(),
-            "a ghast's only modelled row is a target-selector goal — its fireball \
-             is issue #227's — so it must never reach an attack. Got {ghast:?}"
+            "a ghast has no beam goal at all — its own row is a fireball, which \
+             queues through take_new_launches(), a different channel from the \
+             take_new_attacks() this control measures — so it must never \
+             register as a beam-style attack. Got {ghast:?}"
         );
 
         let llama = beam_ticks("llama", GUARDIAN_SPEED, target, 200);

@@ -26,40 +26,36 @@
 //! BlazeFireballGoal::tick
 //!   -> MobController::launch_projectile(ProjectileLaunch { SmallFireball, origin, velocity })
 //!   -> NavigatingMob.launches                         (this crate ends here)
-//!   -> MobSim::tick drains take_new_launches()        <-- THE ONE REMAINING LINK
-//!   -> MobSim::spawn_projectile -> ProjectileRegistry
+//!   -> MobSim::tick drains take_new_launches()
+//!   -> MobSim::spawn_projectile_from -> ProjectileRegistry
+//!   -> MobSim::resolve_projectile_impacts applies damage/explosions on arrival
 //!   -> MobSim::snapshots() lowers it to an EntitySnapshot
 //!   -> LiveMobSource -> EntityStreamer::sync -> encode_add_entity
 //!   -> a real client sees minecraft:small_fireball appear
 //! ```
 //!
-//! # What is NOT wired, as of this module landing
+//! # This is fully wired, past this module landing
 //!
-//! **The `MobSim::tick` drain on the fourth line above does not exist yet**, and
-//! it is one patch in `crates/lodestone-server/src/mobs.rs`, a file this unit does
-//! not own (a concurrent agent holds it). Everything above and below that line is
-//! built and gated. Until that patch lands, **a ranged goal fires, computes the
-//! right shot, and no projectile is created in production** — an island of exactly
-//! the kind CLAUDE.md's first rule is about, and it is named here rather than left
-//! for someone to discover.
-//!
-//! The projectile *wire* path is not the gap. A3's survey recorded that "nothing
-//! launches a projectile in production" and that `ProjectileRegistry` is
-//! "permanently empty at runtime", which is true, but the reason is only the
-//! missing drain: `MobSim::snapshots` has lowered tracked projectiles into
-//! `EntitySnapshot`s for a while now, so a projectile that *does* get spawned
-//! already reaches a client over the same `ADD_ENTITY` path a mob uses.
-//! `projectile_reaches_a_real_client` in
+//! **This doc used to say the `MobSim::tick` drain on the fourth line above did
+//! not exist yet.** That was true when written and is not true now: the drain
+//! (`crates/lodestone-server/src/mobs/mod.rs`, in the `MobSim::tick` body —
+//! `mobs.rs` was later split into a `mobs/` directory, see
+//! `docs/plans/crate-and-file-splits.md`) calls `take_new_launches` on every mob
+//! and turns each launch into a real `spawn_projectile_from`. `MobSim::snapshots`
+//! has lowered tracked projectiles into `EntitySnapshot`s for a while now too, so
+//! a launched projectile reaches a client over the same `ADD_ENTITY` path a mob
+//! uses. `projectile_reaches_a_real_client` in
 //! `crates/lodestone-server/tests/ranged_projectile_visibility.rs` measures that
 //! end of it against a real connection.
 //!
-//! # Hit detection is B3b, and is genuinely absent
+//! # Hit detection is also real, past this module landing
 //!
-//! Nothing damages anything when a projectile arrives. `MobSim::spawn_projectile`
-//! says so itself ("hit detection against terrain/entities
-//! and the resulting damage/area-effect are **not** done here"), as does
-//! `ProjectileRegistry`'s own module doc. `tick` only
-//! ever advances motion.
+//! **This doc used to say nothing damages anything when a projectile arrives.**
+//! Also stale: `MobSim::resolve_projectile_impacts`
+//! (`crates/lodestone-server/src/mobs/projectiles.rs`) runs a per-tick collision
+//! sweep against both blocks and mobs, and `resolve_projectile_hit` applies
+//! damage through the same funnel a melee hit uses, including the wither skull's
+//! unconditional impact explosion and the ghast fireball's identical one.
 //!
 //! # How to change it
 //!
@@ -523,6 +519,96 @@ impl Goal for BlazeFireballGoal {
     }
 }
 
+// -- GhastFireballGoal ---------------------------------------------------
+
+/// `Ghast.GhastShootFireballGoal` (private, registered at priority 7 in
+/// `Ghast.registerGoals`). A charge-then-launch state machine, not a
+/// [`RangedAttackGoal`]: `chargeTime` counts up from `0` while a target is in
+/// range, fires once at `chargeTime == 20`, then the cooldown counts back up
+/// from `-40` toward `0` (`GhastShootFireballGoal.tick`).
+///
+/// **Registers no [`Flag`] at all** — its constructor never calls
+/// `setFlags`, unlike every other goal in this file — so it runs alongside
+/// [`Ghast::RandomFloatAroundGoal`](super::specialist)/`GhastLookGoal`
+/// rather than contesting MOVE/LOOK with them, and this port's empty
+/// [`FlagSet`] reproduces that exactly rather than approximating it.
+///
+/// **Not modelled**: the `hasLineOfSight` half of the range gate
+/// (`target.distanceToSqr(this.ghast) < 4096.0 && this.ghast.hasLineOfSight(target)`)
+/// — [`MobController`] has no world or raycast access (issue #456), the same
+/// gap every other goal in this file already lives with — so a ghast charges
+/// and fires through walls once a target is merely within
+/// [`GHAST_FIREBALL_RANGE_SQR`]. Also not modelled: the level-event sounds at
+/// `chargeTime == 10`/`== 20` and `Ghast.setCharging`, both purely
+/// client-visual/audio state this crate's seam has no producer for.
+#[derive(Debug)]
+pub struct GhastFireballGoal {
+    charge_time: i32,
+}
+
+/// `GhastShootFireballGoal.tick`'s own `target.distanceToSqr(this.ghast) < 4096.0`
+/// — `64.0` blocks, squared.
+const GHAST_FIREBALL_RANGE_SQR: f64 = 4096.0;
+
+impl GhastFireballGoal {
+    /// The goal as a ghast registers it — no constructor arguments in
+    /// vanilla (`new Ghast.GhastShootFireballGoal(this)`).
+    #[must_use]
+    pub fn new() -> Self {
+        Self { charge_time: 0 }
+    }
+}
+
+impl Goal for GhastFireballGoal {
+    fn flags(&self) -> FlagSet {
+        // See this struct's own doc — vanilla genuinely registers none.
+        FlagSet::none()
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        // `GhastShootFireballGoal.canUse` — `getTarget() != null`.
+        mob.attack_target().is_some()
+    }
+
+    fn start(&mut self, _mob: &mut dyn MobController) {
+        // `GhastShootFireballGoal.start` — `chargeTime = 0`.
+        self.charge_time = 0;
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        let Some(target) = mob.attack_target() else {
+            return;
+        };
+        let position = mob.position();
+        if distance_sqr(position, target) < GHAST_FIREBALL_RANGE_SQR {
+            self.charge_time += 1;
+            if self.charge_time == 20 {
+                // The fireball leaves from the ghast's own body centre-ish
+                // height and aims at the target's aim height, with no arc
+                // lift — same disclosed shape as `BlazeFireballGoal`'s shot,
+                // and the same reason: the 4-block view-vector muzzle offset
+                // vanilla applies needs a facing direction `MobController`
+                // does not expose.
+                let origin = Vec3::new(position.x, position.y + SHOOTER_SHOULDER_Y, position.z);
+                let dx = target.x - position.x;
+                let dy = (target.y + AIM_HEIGHT) - origin.y;
+                let dz = target.z - position.z;
+                mob.launch_projectile(ProjectileLaunch::aimed(
+                    ProjectileKind::LargeFireball,
+                    origin,
+                    dx,
+                    dy,
+                    dz,
+                    FIREBALL_POWER,
+                ));
+                self.charge_time = -40;
+            }
+        } else if self.charge_time > 0 {
+            self.charge_time -= 1;
+        }
+    }
+}
+
 // -- builders ----------------------------------------------------------------
 
 /// `RangedBowAttackGoal<>(this, 1.0, 20, 15.0F)`
@@ -558,6 +644,18 @@ pub fn trident_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
         40,
         10.0,
     ))
+}
+
+/// `new Ghast.GhastShootFireballGoal(this)` (`Ghast.registerGoals`).
+///
+/// `pub` because the ghast's row lives in [`super::specialist`] — the same
+/// cross-module shape [`bow_attack`]/[`trident_attack`] already have for
+/// [`super::hostile_melee`], and for the identical reason:
+/// [`GhastFireballGoal`] is a member of this ranged-attack family, not a
+/// second one started in the specialist file.
+#[must_use]
+pub fn ghast_fireball(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(GhastFireballGoal::new())
 }
 
 /// `Blaze.BlazeAttackGoal(this)` (`Blaze.registerGoals`). The `1.0` speed
@@ -823,6 +921,9 @@ pub const fn projectile_entity_type(kind: ProjectileKind) -> &'static str {
         ProjectileKind::Trident => "trident",
         ProjectileKind::WitherSkull => "wither_skull",
         ProjectileKind::DragonFireball => "dragon_fireball",
+        // Not "large_fireball" — see `ProjectileKind::LargeFireball`'s own
+        // doc: `LargeFireball`'s constructor registers as `EntityTypes.FIREBALL`.
+        ProjectileKind::LargeFireball => "fireball",
     }
 }
 
@@ -835,14 +936,15 @@ pub const fn projectile_entity_type(kind: ProjectileKind) -> &'static str {
 /// `lodestone_entity::projectile::Projectile::arrow` when this is `true` and
 /// `::throwable` when it is `false`.
 ///
-/// A small fireball (and, for the identical reason, a wither skull) is
-/// **neither** in vanilla — `AbstractHurtingProjectile` *accelerates* instead
-/// of falling (in `AbstractHurtingProjectile.tick`), and `WitherSkull extends
-/// AbstractHurtingProjectile` exactly as `SmallFireball` does — so both are
-/// reported as throwables, the closer of the two, and their trajectories are
-/// wrong past the first few ticks. Named here rather than left implicit
-/// because it is a real inaccuracy that the launch velocity being jar-exact
-/// does not fix.
+/// A small fireball (and, for the identical reason, a wither skull, a large
+/// fireball and a dragon fireball) is **neither** in vanilla —
+/// `AbstractHurtingProjectile` *accelerates* instead of falling (in
+/// `AbstractHurtingProjectile.tick`), and `Fireball extends
+/// AbstractHurtingProjectile` exactly as `SmallFireball` does (`LargeFireball
+/// extends Fireball`) — so all four are reported as throwables, the closer of
+/// the two, and their trajectories are wrong past the first few ticks. Named
+/// here rather than left implicit because it is a real inaccuracy that the
+/// launch velocity being jar-exact does not fix.
 #[must_use]
 pub const fn integrates_as_arrow(kind: ProjectileKind) -> bool {
     match kind {
@@ -851,7 +953,8 @@ pub const fn integrates_as_arrow(kind: ProjectileKind) -> bool {
         | ProjectileKind::Snowball
         | ProjectileKind::SplashPotion
         | ProjectileKind::WitherSkull
-        | ProjectileKind::DragonFireball => false,
+        | ProjectileKind::DragonFireball
+        | ProjectileKind::LargeFireball => false,
     }
 }
 
@@ -1096,6 +1199,95 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_ghast_charges_twenty_ticks_then_fires_on_a_sixty_tick_cadence() {
+        let world = Flat;
+        // A ghast has no navigation goal claimed here (`GhastFireballGoal`
+        // registers no flags at all — see its own doc), so its position
+        // never needs to move; 10 blocks out is inside the 4096-sqr range.
+        let mut mob = real_mob(&world, Vec3::new(0.0, 0.0, 0.0), 0.0);
+        let target = Vec3::new(10.0, 0.0, 0.0);
+        MobController::set_attack_target(&mut mob, Some(target));
+        let mut goal = GhastFireballGoal::new();
+        assert!(goal.can_use(&mut mob), "a ghast with a target must satisfy can_use");
+        goal.start(&mut mob);
+
+        let mut fired_at = Vec::new();
+        for tick in 1..=150 {
+            goal.tick(&mut mob);
+            for _ in mob.take_new_launches() {
+                fired_at.push(tick);
+            }
+        }
+
+        // Predicted from `Ghast.GhastShootFireballGoal.tick`, computed here
+        // rather than copied from a run: `chargeTime` starts at 0 and
+        // increments once per in-range tick, firing when it reaches 20 (tick
+        // 20) and resetting to -40. From -40 it takes 60 more increments to
+        // reach 20 again, so every fire after the first is 60 ticks later.
+        assert_eq!(
+            fired_at,
+            vec![20, 80, 140],
+            "a ghast fires at a fixed 20-tick charge then a 60-tick cadence \
+             thereafter (20 to reset from -40, Ghast.java:365-379). A goal \
+             that fired every 20 ticks, or reset to 0 instead of -40, gives a \
+             different sequence here."
+        );
+    }
+
+    #[test]
+    fn a_ghast_fireball_leaves_at_its_acceleration_power_as_a_large_fireball() {
+        let world = Flat;
+        let mut mob = real_mob(&world, Vec3::new(0.0, 0.0, 0.0), 0.0);
+        MobController::set_attack_target(&mut mob, Some(Vec3::new(10.0, 0.0, 0.0)));
+        let mut goal = GhastFireballGoal::new();
+        goal.start(&mut mob);
+        let mut first = None;
+        for _ in 1..=20 {
+            goal.tick(&mut mob);
+            if let Some(l) = mob.take_new_launches().first().copied() {
+                first = Some(l);
+                break;
+            }
+        }
+        let launch = first.expect("a ghast must have fired by tick 20");
+        assert_eq!(
+            launch.kind,
+            ProjectileKind::LargeFireball,
+            "a ghast throws minecraft:fireball (LargeFireball), not a blaze's \
+             minecraft:small_fireball"
+        );
+        let v = launch.velocity;
+        let speed = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+        assert!(
+            (speed - FIREBALL_POWER).abs() < 1e-9,
+            "LargeFireball inherits AbstractHurtingProjectile's 0.1 acceleration \
+             power unchanged — nothing in Ghast.java overrides it; got {speed}"
+        );
+    }
+
+    #[test]
+    fn a_ghast_beyond_range_never_charges_up() {
+        // `GhastShootFireballGoal.tick`'s outer gate — `distanceToSqr < 4096.0`
+        // (64 blocks). At 100 blocks the charge must never reach 20, and the
+        // `else if chargeTime > 0` branch (which only decrements a *positive*
+        // charge) must never let an out-of-range ghast wind up to a shot
+        // either.
+        let world = Flat;
+        let mut mob = real_mob(&world, Vec3::new(0.0, 0.0, 0.0), 0.0);
+        MobController::set_attack_target(&mut mob, Some(Vec3::new(100.0, 0.0, 0.0)));
+        let mut goal = GhastFireballGoal::new();
+        goal.start(&mut mob);
+        let mut fired = false;
+        for _ in 1..=200 {
+            goal.tick(&mut mob);
+            if !mob.take_new_launches().is_empty() {
+                fired = true;
+            }
+        }
+        assert!(!fired, "a target 100 blocks away is outside the 64-block range and must never draw a shot");
+    }
+
     // -- speeds, by value ----------------------------------------------------
 
     /// A priority multiset gate cannot see a wrong *speed*, and neither can "the
@@ -1312,6 +1504,9 @@ mod tests {
             ProjectileKind::Snowball,
             ProjectileKind::SplashPotion,
             ProjectileKind::Trident,
+            ProjectileKind::WitherSkull,
+            ProjectileKind::DragonFireball,
+            ProjectileKind::LargeFireball,
         ];
         for kind in kinds {
             let path = projectile_entity_type(kind);

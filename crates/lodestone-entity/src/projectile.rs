@@ -350,6 +350,16 @@ pub const SMALL_FIREBALL_IGNITE_SECONDS: f32 = 5.0;
 /// table).
 pub const WITHER_SKULL_DAMAGE: f32 = 8.0;
 
+/// `LargeFireball.onHitEntity`'s `hurtServer(..., 6.0F)` — the ghast's own
+/// fireball, registry path `fireball` (see
+/// `crate::ai::mob::ProjectileKind::LargeFireball`'s own doc for why that is
+/// not `large_fireball`). The unconditional impact explosion
+/// (`LargeFireball.onHit`'s `level().explode(...)`, both on a block and on an
+/// entity) needs the target's own liveness the same way the wither skull's
+/// does, so `MobSim`'s impact pass applies that half — this table only carries
+/// the direct hit.
+pub const LARGE_FIREBALL_DAMAGE: f32 = 6.0;
+
 /// An arrow-family impact's damage, `AbstractArrow.onHitEntity`:
 /// `Mth.ceil(Mth.clamp(speed * baseDamage, 0, Integer.MAX_VALUE))`.
 ///
@@ -409,6 +419,10 @@ pub fn impact_effect(path: &str, speed: f64) -> ImpactEffect {
         // pass applies those, matching the snowball-vs-blaze precedent above.
         "wither_skull" => ImpactEffect {
             damage: WITHER_SKULL_DAMAGE,
+            ..none
+        },
+        "fireball" => ImpactEffect {
+            damage: LARGE_FIREBALL_DAMAGE,
             ..none
         },
         _ => none,
