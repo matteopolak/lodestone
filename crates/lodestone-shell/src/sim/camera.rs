@@ -727,6 +727,16 @@ impl Sim {
             body_yaw_deg: walk.body_yaw,
             anim: self.body_anim(&interp, &walk, partial_tick),
             scale: 1.0,
+            // `Mth.lerp(partialTick, swimAmountO, swimAmount)` — the same
+            // blend `body_anim` computes for `AnimInput::swim_amount` (the
+            // arm-stroke input) below, off the same physics-integrated
+            // `PlayerState` fields. This is the *body-pitch* half
+            // (`gpu::entity_passes::apply_swim_rotation` reads
+            // `ThirdPersonBodyState::swim_amount`, not `anim.swim_amount`),
+            // and it used to have no source at all — see that field's own
+            // doc for the "stood bolt upright" symptom this fixes.
+            swim_amount: interp.swim_amount_o
+                + (interp.swim_amount - interp.swim_amount_o) * partial_tick,
             slim: crate::skin_fetch::current_model().is_slim(),
             equipment,
         })

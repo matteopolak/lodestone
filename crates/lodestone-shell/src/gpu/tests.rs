@@ -568,6 +568,11 @@ fn third_person_body_state_resolves_through_the_real_corpus() {
                 ..AnimInput::REST
             },
             scale: 1.0,
+            // Nonzero and distinct from every other numeric field above, so
+            // a transposition or a dropped assignment in `into_draw` cannot
+            // hide behind a coincidental zero — see the discriminating
+            // assertion below.
+            swim_amount: 0.42,
             slim,
             equipment: Vec::new(),
         };
@@ -579,6 +584,13 @@ fn third_person_body_state_resolves_through_the_real_corpus() {
         assert_eq!(draw.yaw, state.body_yaw_deg);
         assert_eq!(draw.scale, state.scale);
         assert_eq!(draw.anim, state.anim);
+        // The body-pitch swim ramp must reach the draw the local player's
+        // body actually renders from — this is the assertion that would have
+        // caught `swim_amount: 0.0` being hardcoded in `into_draw`.
+        assert_eq!(
+            draw.swim_amount, state.swim_amount,
+            "ThirdPersonBodyState::swim_amount did not reach EntityDraw::swim_amount"
+        );
         assert!(draw.item.is_none());
         assert!(draw.equipment.is_empty());
 
