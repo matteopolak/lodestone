@@ -65,6 +65,7 @@ exclusion itself.
 | effect | published from | vanilla |
 |---|---|---|
 | mob hurt / death sound | `MobSim::note_vocalisation`, drained by `run_tick_loop` | `LivingEntity.hurt` / `.die` |
+| mob idle ambience (moo, groan, …) | `MobSim::tick`'s per-mob `roll_ambient_sound` call, drained via `MobSim::take_ambient_sounds` by `run_tick_loop` | `Mob.baseTick`'s `ambientSoundTime` roll |
 | door / trapdoor / fence-gate open-close | `tick.rs`'s `publish_openable_sound`, at both scheduled-tick write sites | `DoorBlock.playSound` (`:247`) |
 | grazed-block break particles | `run_tick_loop`'s graze drain | `EatBlockGoal`'s level event 2001 |
 | a player's block break | `server.rs`'s `destroy_block`, excluding the breaker | `Level.destroyBlock`'s level event 2001 |
@@ -77,6 +78,22 @@ note the intent. `note_vocalisation` is called from **every** damage funnel
 `SimMob::apply_damage`, because the queue lives on the sim and `apply_damage` holds
 only the one mob — and always **before** the end-of-tick `retain`, or a killing
 blow finds no mob to read the species and position from.
+
+Idle ambience (`effects::mob_ambient_sound`, rolled by `roll_ambient_sound`) is a
+second, periodic producer alongside the damage-triggered one — before it,
+`MobSim` had no producer at all outside combat, so ordinary exploration with no
+fighting was silent but for footsteps. It reuses `WorldEffect::Sound` rather than
+adding a new variant, so it needs no new `encode_world_effect` arm and no new
+`Box<P>` forwarding arm (see the trap below) — only a new derivation function and
+a new drain call. It runs unconditionally every live tick for every mob
+(`m.health > 0.0`, mirroring `isAlive()`), so it **must not** draw from the mob's
+own `MobController` RNG stream: every AI goal draws from that same stream, and
+consuming from it here would shift every subsequent goal draw by however many
+calls this makes. It mixes `tick_count` and the mob's id instead — see
+`roll_ambient_sound`'s own doc for the exact hash and why `note_vocalisation`
+resets `ambient_sound_time` on a hurt sound (`Mob.playHurtSound` calls
+`resetAmbientSoundTime()` first, so a mob does not also roll an idle vocalisation
+on the very tick it yelped in pain).
 
 ## How to change it, and the gotchas
 

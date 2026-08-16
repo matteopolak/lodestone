@@ -1832,6 +1832,13 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         for effect in mobs.with(MobSim::take_vocalisations) {
             block_tick_out.publish_effect(effect);
         }
+        // Periodic idle mob ambience (cow moos, zombie groans, …) — the
+        // producer `MobSim::tick` rolls every tick per mob
+        // (`roll_ambient_sound`), independent of combat. Same handoff shape
+        // as the hurt/death loop just above, and for the same reason.
+        for effect in mobs.with(MobSim::take_ambient_sounds) {
+            block_tick_out.publish_effect(effect);
+        }
         // Issue #322: target-block projectile impacts. Drained here (outside
         // the `scheduled.with` region below) because `MobSim` is the only
         // thing that saw the hit; resolved *inside* it further down because a
