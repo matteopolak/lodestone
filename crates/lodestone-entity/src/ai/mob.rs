@@ -574,6 +574,12 @@ pub enum ProjectileKind {
     /// the variant lives here so `projectile_entity_type`/`integrates_as_arrow`
     /// have one shared table to read from either way.
     WitherSkull,
+    /// `minecraft:dragon_fireball` — the ender dragon's strafe attack
+    /// (`DragonStrafePlayerPhase`, `crate::dragon::phase::PhaseEffect::FireFireball`,
+    /// ported at `lodestone_server::mobs::dragon::tick_one_dragon`). Not
+    /// launched through this goal-driven seam either, for the same reason
+    /// [`WitherSkull`](Self::WitherSkull) is not.
+    DragonFireball,
 }
 
 /// One projectile a goal asked the mob to launch, in world terms.
