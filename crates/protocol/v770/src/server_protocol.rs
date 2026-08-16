@@ -332,6 +332,14 @@ const METADATA_SER_OPTIONAL_BLOCK_POS: i32 = 11;
 /// (`MobSim::push_end_crystal_snapshots`, the sole caller) disambiguates.
 const METADATA_IDX_CRYSTAL_SHOW_BOTTOM: u8 = 9;
 
+/// `WitherBoss.DATA_ID_INV` — index 19, serializer `INT` (1). Off the jar
+/// dump (`tests/support/entity_data_index_jvm.txt`: `19 WitherBoss.DATA_ID_INV
+/// 1 INT`), one of six `INT` claimants at index 19 — see
+/// `MetadataField::WitherInvulnerableTicks`'s own doc for the full list. The
+/// producer (`MobSim::push_wither_snapshots`, the sole caller) disambiguates,
+/// exactly as [`METADATA_IDX_DRAGON_PHASE`] does for its own index.
+const METADATA_IDX_WITHER_INVULNERABLE_TICKS: u8 = 19;
+
 /// The overworld world-clock's registry holder id
 /// (`WorldClocks::bootstrap` registers `minecraft:overworld` first,
 /// `minecraft:the_end` second — see `packets::time::ClockUpdate::holder_id`'s
@@ -5048,6 +5056,16 @@ impl ServerProtocol for V770ServerProtocol {
                     w.u8(METADATA_IDX_DRAGON_PHASE);
                     w.var_i32(METADATA_SER_INT);
                     w.var_i32(*phase);
+                }
+                MetadataField::WitherInvulnerableTicks(ticks) => {
+                    // `WitherBoss.DATA_ID_INV` — index 19; only
+                    // `MobSim::push_wither_snapshots` ever builds this
+                    // variant. See `METADATA_IDX_WITHER_INVULNERABLE_TICKS`'s
+                    // own doc for the five other `INT` claimants this never
+                    // collides with in practice.
+                    w.u8(METADATA_IDX_WITHER_INVULNERABLE_TICKS);
+                    w.var_i32(METADATA_SER_INT);
+                    w.var_i32(*ticks);
                 }
                 MetadataField::CrystalBeamTarget(target) => {
                     // `EndCrystal.DATA_BEAM_TARGET` — index 8,
