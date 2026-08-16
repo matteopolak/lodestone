@@ -25,14 +25,16 @@
 //!   Vanilla tracks the beam as coloured segments (for the render); only
 //!   *emptiness* gates effect application, so this checks "every block from
 //!   directly above the beacon to the scan height is beam-transparent"
-//!   rather than modelling segments or colour at all. **Known gap**: vanilla
-//!   gates on `getLightDampening() >= 15`, a general opacity value; this
-//!   checks membership in the beam-transparent block family
-//!   (air/beacon/glass/tinted glass/stained glass, both block and pane
-//!   forms) instead. The two agree for every block a player is likely to
-//!   build a beacon shaft from; they can disagree for a low-opacity block
-//!   that is not in the beam family (a carpet, say), which this treats as
-//!   blocking and vanilla would not.
+//!   rather than modelling segments or colour at all — `BeaconBlockEntity
+//!   .tickBeam`'s own gate: `state.getLightDampening() >= 15 &&
+//!   !state.is(Blocks.BEDROCK)` blocks; anything else (including every
+//!   `BeaconBeamBlock` — glass/stained-glass/pane/beacon, which all carry
+//!   `0` dampening anyway) passes. [`is_beam_transparent`] reads the real
+//!   per-block-state [`lodestone_data::light_props::dampening`] census
+//!   (the same table `lodestone-world`'s light engine uses) rather than
+//!   membership in a hand-picked block family, so a low-opacity block
+//!   outside that family — a carpet, a candle, a flower — now agrees with
+//!   vanilla instead of being treated as blocking.
 //! - [`required_levels_for`] / [`validate_beacon_effects`] — `getRequiredLevelsFor`
 //!   / `validateEffects`, clause for clause (see that function's own doc for
 //!   each one named).
@@ -100,17 +102,25 @@ fn is_base_block(state: &str) -> bool {
     BASE_BLOCKS.contains(&base_name(state))
 }
 
-/// Blocks a beacon's beam continues through, for [`beam_unobstructed`]. See
-/// this module's own doc comment for the known gap against vanilla's real
-/// light-dampening gate.
-fn is_beam_transparent(base: &str) -> bool {
-    base == "minecraft:air"
-        || base == "minecraft:beacon"
-        || base == "minecraft:glass"
-        || base == "minecraft:glass_pane"
-        || base == "minecraft:tinted_glass"
-        || base.ends_with("_stained_glass")
-        || base.ends_with("_stained_glass_pane")
+/// Blocks a beacon's beam continues through, for [`beam_unobstructed`] —
+/// `BeaconBlockEntity.tickBeam`'s own gate, `!(state.getLightDampening() >=
+/// 15 && !state.is(Blocks.BEDROCK))`. `state` carries the full block-state
+/// string [`ChunkSource::block_state`] returns (bare name or
+/// `name[prop=value,...]`), resolved to a global id via
+/// [`lodestone_data::block_states::state_id`] — the same resolution
+/// `crate::chunk::resolve_palette_state_id` already uses for this exact
+/// string shape. An id this crate cannot resolve reads as dampening `0`
+/// ([`lodestone_data::light_props::dampening`]'s own "unknown id" default),
+/// which is the same fail-open direction [`is_base_block`] already takes for
+/// an unrecognised state, not a new failure mode this function invents.
+fn is_beam_transparent(state: &str) -> bool {
+    if base_name(state) == "minecraft:bedrock" {
+        return true;
+    }
+    let Some(id) = lodestone_data::block_states::state_id(state) else {
+        return true;
+    };
+    lodestone_data::light_props::dampening(id) < 15
 }
 
 /// The beacon pyramid tier beneath `(x, y, z)` — vanilla's
@@ -151,7 +161,7 @@ pub fn beacon_levels<S: ChunkSource + ?Sized>(source: &S, x: i32, y: i32, z: i32
 pub fn beam_unobstructed<S: ChunkSource + ?Sized>(source: &S, x: i32, y: i32, z: i32, scan_height: i32) -> bool {
     for dy in 1..=scan_height {
         let state = source.block_state(x, y + dy, z);
-        if !is_beam_transparent(base_name(&state)) {
+        if !is_beam_transparent(&state) {
             return false;
         }
     }
@@ -449,6 +459,33 @@ mod tests {
         let rig = Rig::new();
         rig.set_block(0, 70, 0, "minecraft:stone");
         assert!(!beam_unobstructed(&rig, 0, 64, 0, 20));
+    }
+
+    /// The discriminating case against the old hand-picked-family
+    /// implementation: a carpet has real, low
+    /// [`lodestone_data::light_props::dampening`] (it is not a full block)
+    /// but was never in that family, so the old `is_beam_transparent` would
+    /// have refused it — a block a player is entirely likely to floor a
+    /// beacon shaft with. Vanilla's own `getLightDampening() >= 15` gate
+    /// agrees this does not block.
+    #[test]
+    fn a_carpet_shaft_is_unobstructed_even_though_it_was_never_in_the_old_family_list() {
+        let rig = Rig::new();
+        for dy in 1..=20 {
+            rig.set_block(0, 64 + dy, 0, "minecraft:white_carpet");
+        }
+        assert!(beam_unobstructed(&rig, 0, 64, 0, 20));
+    }
+
+    /// Vanilla's own carve-out: `state.getLightDampening() >= 15 &&
+    /// !state.is(Blocks.BEDROCK)` — bedrock is full dampening but explicitly
+    /// exempted, so a beacon shaft that happens to cross a bedrock cell (a
+    /// creative-mode build) is still unobstructed.
+    #[test]
+    fn bedrock_is_exempt_from_its_own_full_dampening() {
+        let rig = Rig::new();
+        rig.set_block(0, 70, 0, "minecraft:bedrock");
+        assert!(beam_unobstructed(&rig, 0, 64, 0, 20));
     }
 
     #[test]
