@@ -61,6 +61,32 @@
 //!   `Profession`, the block/POI/profession tables and leveling are plain
 //!   data with no such dependency and stay available on every target — only
 //!   the claim ledger itself, and the search that uses it, are narrowed.
+//!
+//! # Bed claiming ([`BedClaims`]) is a sibling of the above, not a new shape
+//!
+//! `PoiTypes.HOME` (`minecraft:home`, `#minecraft:beds` -> one ticket per
+//! bed) is a POI type this module's own `max_tickets` already priced, but
+//! nothing ever claimed one — issue #241 (raids)'s own trigger,
+//! `Raids.createOrExtendRaid`, needs an *occupied* `#village` POI (home,
+//! meeting or a job site) within 64 blocks before it will start a raid at
+//! all, and a bed that is never claimed can never be occupied.
+//! [`BedClaims`]/[`find_and_claim_bed`] are exactly [`WorkstationClaims`]/
+//! [`find_and_claim_workstation`]'s shape, reused rather than reinvented:
+//! same ticket accounting through `PoiRecord`, same bounded nearest-first
+//! terrain scan, same disclosed gaps (no on-disk persistence, no
+//! block-event hook, native-only). The one real difference from a job site
+//! is vanilla's own `validateBedPoi` — a bed currently `occupied=true` (someone
+//! is physically asleep in it right now) is skipped even if a ticket is
+//! free, which [`find_and_claim_bed`] ports directly.
+//!
+//! **This claims the bed as a *ticket*, not as a nightly sleep.** Vanilla's
+//! `PoiRecord.isOccupied` (which `Raids.createOrExtendRaid`'s
+//! `Occupancy.IS_OCCUPIED` query reads) is true the moment a villager's
+//! `AcquirePoi` behavior takes the ticket — independent of whether anyone is
+//! ever physically lying in the bed. So the raid trigger's occupancy check
+//! needs only this claim, not a full work/rest sleep cycle (`SleepInBed`,
+//! `LAST_SLEPT`, issue #231's own remainder) — that is a real, separate gap
+//! this module does not close.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -351,6 +377,177 @@ pub fn find_and_claim_workstation(
     None
 }
 
+/// `BlockTags.BEDS` — every one of the sixteen dyed bed blocks, all
+/// registering `PoiTypes.HOME` (`PoiTypes.bootstrap`'s
+/// `register(HOME, BlockTags.BEDS, 1, 1)`). Takes a *bare* block id, the
+/// same contract [`poi_type_for_block`] has — run a raw
+/// [`ChunkWorld::block_state`] string through [`bare_block_id`] first.
+#[must_use]
+pub fn is_bed_block(block_id: &str) -> bool {
+    matches!(
+        block_id,
+        "white_bed"
+            | "orange_bed"
+            | "magenta_bed"
+            | "light_blue_bed"
+            | "yellow_bed"
+            | "lime_bed"
+            | "pink_bed"
+            | "gray_bed"
+            | "light_gray_bed"
+            | "cyan_bed"
+            | "purple_bed"
+            | "blue_bed"
+            | "brown_bed"
+            | "green_bed"
+            | "red_bed"
+            | "black_bed"
+    )
+}
+
+/// `VillagerGoalPackages.validateBedPoi`'s block-state half: `true` when a
+/// *full* (not bare) state string carries `occupied=true` — someone is
+/// physically asleep in this bed right now, distinct from
+/// [`PoiRecord::is_occupied`]'s ticket-based sense of "occupied", which this
+/// module's own claiming logic never sets from this check.
+#[must_use]
+fn bed_state_is_occupied(state: &str) -> bool {
+    state.contains("occupied=true")
+}
+
+/// The `minecraft:home` [`ResourceKey`] every claimed bed is recorded under.
+fn home_poi_type() -> ResourceKey {
+    ResourceKey::from_str("minecraft:home").expect("a literal POI path is always valid")
+}
+
+/// The live, in-memory bed claim ledger — [`WorkstationClaims`]'s sibling
+/// for `PoiTypes.HOME`. See this module's own "Bed claiming" doc section for
+/// why this exists and what it deliberately does not model.
+///
+/// Native-only, for the identical reason [`WorkstationClaims`] is — see that
+/// type's own doc.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+pub struct BedClaims {
+    records: HashMap<(i32, i32, i32), PoiRecord>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BedClaims {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ensures a `home` record exists at `pos` — [`WorkstationClaims::discover`]'s
+    /// own semantics, reused rather than restated.
+    fn discover(&mut self, pos: BlockPos) -> &mut PoiRecord {
+        let key = (pos.x, pos.y, pos.z);
+        self.records
+            .entry(key)
+            .or_insert_with(|| PoiRecord::new(pos, home_poi_type()))
+    }
+
+    /// The bed at `pos` is gone or no longer a bed — vanilla's
+    /// `PoiManager.remove`. Any ticket held there is discarded with the
+    /// record itself.
+    pub fn remove(&mut self, pos: BlockPos) {
+        self.records.remove(&(pos.x, pos.y, pos.z));
+    }
+
+    #[must_use]
+    pub fn get(&self, pos: BlockPos) -> Option<&PoiRecord> {
+        self.records.get(&(pos.x, pos.y, pos.z))
+    }
+
+    /// Claims one ticket at `pos`, discovering the record first if needed.
+    /// `false` if the bed's one ticket is already held.
+    pub fn try_claim(&mut self, pos: BlockPos) -> bool {
+        self.discover(pos).acquire_ticket()
+    }
+
+    /// Releases a previously claimed ticket at `pos`. A no-op if nothing is
+    /// claimed there.
+    pub fn release(&mut self, pos: BlockPos) {
+        if let Some(record) = self.records.get_mut(&(pos.x, pos.y, pos.z)) {
+            record.release_ticket();
+        }
+    }
+
+    /// The live equivalent of
+    /// [`crate::poi_storage::PoiStorage::occupied_in_range`], scoped to this
+    /// ledger's own claimed beds: every claimed (ticket-occupied) bed within
+    /// `radius` real blocks of `center`. Issue #241's raid trigger is this
+    /// method's reason to exist — the on-disk `poi/` region set is never
+    /// written for a bed claimed through this ledger (see this module's "No
+    /// on-disk persistence" gap), so a live query against the ledger itself,
+    /// not a disk read, is how a claimed bed is actually found today.
+    #[must_use]
+    pub fn occupied_in_range(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
+        let radius_sq = i64::from(radius) * i64::from(radius);
+        self.records
+            .values()
+            .filter(|record| record.is_occupied())
+            .map(|record| record.pos)
+            .filter(|pos| {
+                let dx = i64::from(pos.x - center.x);
+                let dy = i64::from(pos.y - center.y);
+                let dz = i64::from(pos.z - center.z);
+                dx * dx + dy * dy + dz * dz <= radius_sq
+            })
+            .collect()
+    }
+}
+
+/// Runs one bed search from `origin`: a nearest-first scan of `world` for an
+/// unoccupied, unclaimed bed within [`SEARCH_RADIUS`], claiming the first
+/// one found.
+///
+/// Ports `AcquirePoi.create(p -> p.is(PoiTypes.HOME), MemoryModuleType.HOME,
+/// false, Optional.of((byte) 14), VillagerGoalPackages::validateBedPoi)`:
+/// the `validPoi` predicate — skip a bed with `occupied=true` right now — is
+/// [`bed_state_is_occupied`]; the ticket gate is [`BedClaims::try_claim`].
+/// Nearest-first and [`SEARCH_RADIUS`] are [`find_and_claim_workstation`]'s
+/// own disclosed narrowing, reused rather than restated — see that
+/// function's doc.
+///
+/// Native-only — see this module's own doc for why.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn find_and_claim_bed(origin: BlockPos, world: &ChunkWorld, claims: &mut BedClaims) -> Option<BlockPos> {
+    let mut candidates: Vec<BlockPos> = Vec::new();
+    for dx in -SEARCH_RADIUS..=SEARCH_RADIUS {
+        for dy in -SEARCH_RADIUS..=SEARCH_RADIUS {
+            for dz in -SEARCH_RADIUS..=SEARCH_RADIUS {
+                let pos = BlockPos::new(origin.x + dx, origin.y + dy, origin.z + dz);
+                let state = world.block_state(pos.x, pos.y, pos.z);
+                if is_bed_block(bare_block_id(state)) {
+                    candidates.push(pos);
+                }
+            }
+        }
+    }
+    candidates.sort_by_key(|p| {
+        let dx = i64::from(p.x - origin.x);
+        let dy = i64::from(p.y - origin.y);
+        let dz = i64::from(p.z - origin.z);
+        dx * dx + dy * dy + dz * dz
+    });
+    for pos in candidates {
+        let state = world.block_state(pos.x, pos.y, pos.z);
+        if !is_bed_block(bare_block_id(state)) {
+            continue;
+        }
+        if bed_state_is_occupied(state) {
+            continue;
+        }
+        if claims.try_claim(pos) {
+            return Some(pos);
+        }
+    }
+    None
+}
+
 /// `VillagerData.NEXT_LEVEL_XP_THRESHOLDS` —
 /// `.cache/mc/26.2/src/net/minecraft/world/entity/npc/villager/VillagerData.java`.
 /// Indexed `[level - 1]` for the minimum, `[level]` for the maximum a given
@@ -466,6 +663,129 @@ mod tests {
             third,
             Some((BlockPos::new(100, 71, 205), Profession::Farmer)),
             "releasing the ticket must make the workstation claimable again"
+        );
+    }
+
+    #[test]
+    fn every_bed_colour_registers_as_a_home_poi() {
+        // Enumerates the sixteen dyed bed blocks explicitly, mirroring the
+        // workstation table's own enumeration test above rather than
+        // deriving the list from `is_bed_block` itself.
+        let beds = [
+            "white_bed",
+            "orange_bed",
+            "magenta_bed",
+            "light_blue_bed",
+            "yellow_bed",
+            "lime_bed",
+            "pink_bed",
+            "gray_bed",
+            "light_gray_bed",
+            "cyan_bed",
+            "purple_bed",
+            "blue_bed",
+            "brown_bed",
+            "green_bed",
+            "red_bed",
+            "black_bed",
+        ];
+        for bed in beds {
+            assert!(is_bed_block(bed), "{bed} should register as a home POI");
+        }
+        assert!(!is_bed_block("composter"), "a workstation is not a bed");
+        assert!(!is_bed_block("air"), "air is not a bed");
+    }
+
+    /// The same discriminating shape as
+    /// [`a_second_villager_cannot_claim_an_already_claimed_workstation`]: two
+    /// villagers, one bed. A single-villager test would pass with no
+    /// occupancy modelled at all.
+    #[test]
+    fn a_second_villager_cannot_claim_an_already_claimed_bed() {
+        let mut world = ChunkWorld::new(-64, 384);
+        world.set_block(100, 71, 205, "minecraft:red_bed[facing=south,occupied=false,part=foot]");
+
+        let mut claims = BedClaims::new();
+        let first = find_and_claim_bed(BlockPos::new(100, 70, 202), &world, &mut claims);
+        assert_eq!(first, Some(BlockPos::new(100, 71, 205)));
+
+        let second = find_and_claim_bed(BlockPos::new(100, 70, 206), &world, &mut claims);
+        assert_eq!(
+            second, None,
+            "the bed has one ticket and the first villager already holds it"
+        );
+
+        // Control: releasing the ticket makes the bed claimable again, so
+        // the exclusion above is the occupancy check, not a search miss.
+        claims.release(BlockPos::new(100, 71, 205));
+        let third = find_and_claim_bed(BlockPos::new(100, 70, 206), &world, &mut claims);
+        assert_eq!(
+            third,
+            Some(BlockPos::new(100, 71, 205)),
+            "releasing the ticket must make the bed claimable again"
+        );
+    }
+
+    /// `validateBedPoi`'s own half this module ports: a bed with a free
+    /// ticket is still skipped while its block state reads `occupied=true`.
+    #[test]
+    fn a_bed_with_someone_already_in_it_is_not_claimable() {
+        let mut world = ChunkWorld::new(-64, 384);
+        world.set_block(11, 70, 233, "minecraft:blue_bed[facing=north,occupied=true,part=head]");
+
+        let mut claims = BedClaims::new();
+        let result = find_and_claim_bed(BlockPos::new(11, 70, 230), &world, &mut claims);
+        assert_eq!(
+            result, None,
+            "a bed currently occupied=true must not be claimable even with a free ticket"
+        );
+
+        // Control: the same bed, unoccupied, is claimable — the exclusion
+        // above is the `occupied=true` check, not something else about the
+        // fixture.
+        world.set_block(11, 70, 233, "minecraft:blue_bed[facing=north,occupied=false,part=head]");
+        let result = find_and_claim_bed(BlockPos::new(11, 70, 230), &world, &mut claims);
+        assert_eq!(result, Some(BlockPos::new(11, 70, 233)));
+    }
+
+    #[test]
+    fn losing_the_bed_loses_the_claim() {
+        let mut claims = BedClaims::new();
+        let pos = BlockPos::new(11, 70, 233);
+        assert!(claims.try_claim(pos));
+        assert!(claims.get(pos).is_some());
+
+        claims.remove(pos);
+        assert!(
+            claims.get(pos).is_none(),
+            "removing the bed must drop its claim, not merely free a ticket"
+        );
+    }
+
+    /// [`BedClaims::occupied_in_range`] is the primitive issue #241's raid
+    /// trigger needs: a claimed bed inside the radius comes back, one
+    /// outside does not, and an unclaimed bed (a free ticket, `is_occupied`
+    /// false) never does regardless of distance — the same
+    /// inside/outside/unoccupied discriminator
+    /// `poi_storage::occupied_in_range`'s own test already uses.
+    #[test]
+    fn occupied_in_range_finds_only_claimed_beds_inside_the_radius() {
+        let mut claims = BedClaims::new();
+        let center = BlockPos::new(0, 70, 0);
+
+        let inside = BlockPos::new(30, 70, 0);
+        let outside = BlockPos::new(70, 70, 0);
+        let unclaimed = BlockPos::new(10, 70, 0);
+
+        assert!(claims.try_claim(inside));
+        assert!(claims.try_claim(outside));
+        claims.discover(unclaimed); // registers the record but claims no ticket
+
+        let found = claims.occupied_in_range(center, 64);
+        assert_eq!(
+            found,
+            vec![inside],
+            "only the claimed bed strictly inside the 64-block radius must come back"
         );
     }
 

@@ -1172,6 +1172,16 @@ pub struct SimMob<'w> {
     /// reason: a bounded terrain scan every tick for every cat is not free.
     /// Only meaningful for `minecraft:cat`.
     cat_search_cooldown: i32,
+    /// The bed this villager has claimed as `PoiTypes.HOME`, if any — `None`
+    /// for an unclaimed villager or a non-villager. Cleared alongside a
+    /// ticket release when [`MobSim::tick_villager_beds`] finds the claim
+    /// gone (destroyed, or no longer a bed). Native-only: meaningless (and
+    /// never set) on `wasm32`, where [`villager::BedClaims`] does not exist.
+    bed: Option<BlockPos>,
+    /// Ticks until this mob's next bed search, decremented in
+    /// [`MobSim::tick_villager_beds`] — the same throttling shape as
+    /// [`job_search_cooldown`](Self::job_search_cooldown).
+    bed_search_cooldown: i32,
     /// This mob's own gossip ledger (issue #244) — `Villager.gossips`, what
     /// it believes about every UUID it has an opinion of. Empty for every
     /// non-villager species; a converted zombie villager's ledger is seeded
@@ -1926,6 +1936,12 @@ impl<'w> SimMob<'w> {
         self.workstation
     }
 
+    /// The bed this villager has claimed as `PoiTypes.HOME`, if any.
+    #[must_use]
+    pub fn bed(&self) -> Option<BlockPos> {
+        self.bed
+    }
+
     /// `VillagerData.level`, `1..=5`.
     #[must_use]
     pub fn villager_level(&self) -> i32 {
@@ -2479,6 +2495,15 @@ pub struct MobSim<'w> {
     /// gated the same way, and this crate compiles for `wasm32-unknown-unknown`).
     #[cfg(not(target_arch = "wasm32"))]
     workstation_claims: villager::WorkstationClaims,
+    /// The live bed claim ledger [`tick_villager_beds`](Self::tick_villager_beds)
+    /// reads and writes (issue #241's raid trigger). See
+    /// [`villager::BedClaims`]'s own doc for why this reuses
+    /// `crate::poi_storage::PoiRecord` and what is deliberately not built.
+    ///
+    /// Native-only, for [`workstation_claims`](Self::workstation_claims)'s
+    /// own reason.
+    #[cfg(not(target_arch = "wasm32"))]
+    bed_claims: villager::BedClaims,
     /// Live ender dragons, keyed by network entity id — see [`TrackedDragon`]
     /// and `mobs::dragon`'s own module doc for the phase/heal state each one
     /// drives and exactly what is a real port vs. a simplification.
@@ -2905,6 +2930,8 @@ impl<'w> MobSim<'w> {
             pending_projectile_block_hits: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             workstation_claims: villager::WorkstationClaims::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            bed_claims: villager::BedClaims::new(),
             dragons: HashMap::new(),
             withers: HashMap::new(),
             wither_rng: SpawnRng::new(wither::WITHER_SKULL_SEED),
@@ -3228,6 +3255,8 @@ impl<'w> MobSim<'w> {
             villager_xp: 0,
             job_search_cooldown: 0,
             cat_search_cooldown: 0,
+            bed: None,
+            bed_search_cooldown: 0,
             gossip: villager::gossip::GossipContainer::new(),
             last_gossip_decay_tick: None,
             golem_detected_until: None,
@@ -3552,6 +3581,79 @@ impl<'w> MobSim<'w> {
                 mob.set_profession(profession, Some(pos));
             }
         }
+    }
+
+    /// Bed search interval — [`JOB_SEARCH_INTERVAL_TICKS`](Self::JOB_SEARCH_INTERVAL_TICKS)'s
+    /// own scope choice, reused for the identical reason: nothing in this
+    /// codebase ports `AcquirePoi`'s own per-behavior scheduling.
+    #[cfg(not(target_arch = "wasm32"))]
+    const BED_SEARCH_INTERVAL_TICKS: i32 = 100;
+
+    /// One villager-bed pass (issue #241's raid trigger): throttled bed
+    /// search for an unclaimed villager, re-verification for a claimed one.
+    ///
+    /// Independent of [`tick_villager_professions`](Self::tick_villager_professions):
+    /// a bed (`MemoryModuleType.HOME`) and a job site
+    /// (`MemoryModuleType.JOB_SITE`) are two separate memories in vanilla,
+    /// and a villager can hold either, both, or neither at once. Same
+    /// re-verification shape as professions — see that method's own doc for
+    /// why a poll, not an event hook, is how "losing the bed loses the
+    /// claim" is implemented, and the one-tick lag that trade-off buys.
+    ///
+    /// Native-only, for [`tick_villager_professions`](Self::tick_villager_professions)'s
+    /// own reason.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tick_villager_beds(&mut self) {
+        let world = self.world;
+        let claims = &mut self.bed_claims;
+        for mob in &mut self.mobs {
+            if mob.entity_type.path() != "villager" {
+                continue;
+            }
+            if let Some(pos) = mob.bed {
+                let state = world.block_state(pos.x, pos.y, pos.z);
+                let still_valid = villager::is_bed_block(villager::bare_block_id(state));
+                if !still_valid {
+                    claims.remove(pos);
+                    mob.bed = None;
+                }
+                continue;
+            }
+            if mob.bed_search_cooldown > 0 {
+                mob.bed_search_cooldown -= 1;
+                continue;
+            }
+            mob.bed_search_cooldown = Self::BED_SEARCH_INTERVAL_TICKS;
+            let feet = mob.position();
+            let origin = BlockPos::new(
+                feet.x.floor() as i32,
+                feet.y.floor() as i32,
+                feet.z.floor() as i32,
+            );
+            if let Some(pos) = villager::find_and_claim_bed(origin, world, claims) {
+                mob.bed = Some(pos);
+            }
+        }
+    }
+
+    /// The live equivalent of
+    /// [`crate::poi_storage::PoiStorage::occupied_in_range`] restricted to
+    /// `home` POIs: every bed claimed through [`tick_villager_beds`](Self::tick_villager_beds)
+    /// within `radius` real blocks of `center`. Issue #241's raid trigger
+    /// (`Raids.createOrExtendRaid`'s own `PoiManager.getInRange(#village,
+    /// 64, IS_OCCUPIED)` query) is this method's reason to exist: a bed
+    /// claimed through [`villager::BedClaims`] is never written to the
+    /// on-disk `poi/` region set (see that type's own doc), so a caller
+    /// wiring the real trigger against *live* villagers reads this rather
+    /// than (or in addition to) [`crate::poi_storage::PoiStorage::occupied_in_range`],
+    /// which can only ever see a bed claim that has been persisted to disk.
+    ///
+    /// Native-only, for [`tick_villager_beds`](Self::tick_villager_beds)'s
+    /// own reason.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn occupied_homes_in_range(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
+        self.bed_claims.occupied_in_range(center, radius)
     }
 
     /// Throttles [`tick_cat_block_search`](Self::tick_cat_block_search)'s
@@ -4435,6 +4537,10 @@ impl<'w> MobSim<'w> {
         self.tick_leashes();
         #[cfg(not(target_arch = "wasm32"))]
         self.tick_villager_professions();
+        // Issue #241: villager bed claiming — see `tick_villager_beds`'s own
+        // doc for why this is a separate memory from the job site above.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.tick_villager_beds();
         // Issue #257: fishing bobbers. Reads `self.world` (the static
         // per-tick terrain snapshot, not the live `view` oracle the item/orb
         // passes just above use) — see `fishing::MobSim::tick_fishing_bobbers`'s
@@ -10485,6 +10591,90 @@ mod cat_block_search_tests {
         sim.tick();
 
         assert_eq!(sim.get(id).expect("spawned").mob.cat_sit_target(), None);
+    }
+}
+
+/// Issue #241's raid trigger: proves `tick_villager_beds`/`occupied_homes_in_range`
+/// are wired into the real per-tick [`MobSim`] loop, not merely correct as
+/// standalone functions — the same shape `cat_block_search_tests` already
+/// proves for the cat's own bounded terrain search, and the island class
+/// `DESIGN.md` warns a crate's own function-level tests cannot rule out.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod villager_bed_claim_tests {
+    use super::*;
+
+    fn flat_world() -> ChunkWorld {
+        ChunkWorld::new(-64, 384)
+    }
+
+    fn spawn_villager(sim: &mut MobSim<'_>, pos: Vec3) -> i32 {
+        sim.spawn_species("minecraft:villager".parse().expect("valid key"), pos).id()
+    }
+
+    /// The headline case: a villager standing near an unclaimed bed claims it
+    /// over a real tick, and the claim is visible through the same live query
+    /// the raid trigger needs (`occupied_homes_in_range`).
+    #[test]
+    fn a_villager_claims_a_nearby_bed_through_a_real_tick_and_it_becomes_findable() {
+        let mut world = flat_world();
+        world.set_block(3, 0, 0, "minecraft:red_bed[facing=north,occupied=false,part=foot]");
+        let mut sim = MobSim::new(&world);
+        let id = spawn_villager(&mut sim, Vec3::new(0.0, 0.0, 0.0));
+
+        sim.tick();
+
+        let claimed = sim.get(id).expect("just spawned").bed();
+        assert_eq!(
+            claimed,
+            Some(BlockPos::new(3, 0, 0)),
+            "the villager must claim the only nearby bed"
+        );
+        let found = sim.occupied_homes_in_range(BlockPos::new(0, 0, 0), 64);
+        assert_eq!(
+            found,
+            vec![BlockPos::new(3, 0, 0)],
+            "the raid trigger's live query must see the claim the same tick it happens"
+        );
+    }
+
+    /// Two villagers, one bed — the discriminating shape every claim gate in
+    /// this file uses: a single-villager test would pass under an
+    /// implementation with no occupancy at all.
+    #[test]
+    fn a_second_villager_cannot_claim_an_already_claimed_bed_through_the_sim() {
+        let mut world = flat_world();
+        world.set_block(3, 0, 0, "minecraft:red_bed[facing=north,occupied=false,part=foot]");
+        let mut sim = MobSim::new(&world);
+        let first = spawn_villager(&mut sim, Vec3::new(0.0, 0.0, 0.0));
+        let second = spawn_villager(&mut sim, Vec3::new(1.0, 0.0, 0.0));
+
+        sim.tick();
+
+        let first_bed = sim.get(first).expect("spawned").bed();
+        let second_bed = sim.get(second).expect("spawned").bed();
+        assert_eq!(first_bed, Some(BlockPos::new(3, 0, 0)));
+        assert_eq!(
+            second_bed, None,
+            "the bed has one ticket and the closer villager already holds it"
+        );
+    }
+
+    /// A non-villager species standing right next to a bed must never claim
+    /// it — the species filter is load-bearing, the same control
+    /// `cat_block_search_tests` already runs for its own search.
+    #[test]
+    fn a_non_villager_species_never_claims_a_bed() {
+        let mut world = flat_world();
+        world.set_block(1, 0, 0, "minecraft:red_bed[facing=north,occupied=false,part=foot]");
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:pig".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+
+        sim.tick();
+
+        assert_eq!(sim.get(id).expect("spawned").bed(), None);
+        assert!(sim.occupied_homes_in_range(BlockPos::new(0, 0, 0), 64).is_empty());
     }
 }
 

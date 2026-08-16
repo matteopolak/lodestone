@@ -1883,10 +1883,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   mechanisms that a screenshot makes look like one:
 - [Villager professions and trading (issues #243, #245)](./villager-professions-and-trading.md) —
   Workstation claiming — an unemployed villager finds a nearby job-site block,
-  claims it, and takes the matching profession — plus trade generation for the
-  farmer profession, ported from the real 26.2 registry data. Losing the workstation
-  loses the job. Interacting with a professioned villager opens a real
-  `minecraft:merchant` screen carrying generated offers.
+  claims it, and takes the matching profession — plus bed claiming (issue #241's own
+  missing raid-trigger primitive) and trade generation for the farmer profession,
+  ported from the real 26.2 registry data. Losing the workstation loses the job.
+  Interacting with a professioned villager opens a real `minecraft:merchant` screen
+  carrying generated offers.
 - [Villager gossip and reputation (issues #244, #246)](./villager-reputation.md) —
   The villager economy's opinion system: what a villager remembers about a UUID
   (gossip, issue #244) and the single reputation score that memory reduces to,

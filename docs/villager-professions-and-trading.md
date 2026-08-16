@@ -3,7 +3,8 @@
 ## What it is
 
 Workstation claiming — an unemployed villager finds a nearby job-site block,
-claims it, and takes the matching profession — plus trade generation for the
+claims it, and takes the matching profession — plus bed claiming (issue
+#241's own missing raid-trigger primitive) and trade generation for the
 farmer profession, ported from the real 26.2 registry data. Losing the
 workstation loses the job. Interacting with a professioned villager opens a
 real `minecraft:merchant` screen carrying generated offers.
@@ -39,6 +40,39 @@ re-checked every tick, and loses its profession the moment the block there
 no longer matches (destroyed, or replaced with a different workstation
 type).
 
+### Bed claiming (`BedClaims`) — issue #241's raid trigger
+
+`villager/mod.rs` also carries `BedClaims`/`find_and_claim_bed`, the
+identical shape as `WorkstationClaims`/`find_and_claim_workstation` applied
+to `PoiTypes.HOME` (`#minecraft:beds`) instead of a job site: same
+`PoiRecord` ticket accounting, same bounded nearest-first scan
+(`SEARCH_RADIUS`), same disclosed gaps. `MobSim::tick_villager_beds` runs it
+every sim tick, independently of `tick_villager_professions` — a bed
+(`MemoryModuleType.HOME`) and a job site (`MemoryModuleType.JOB_SITE`) are
+two separate memories in vanilla, so a villager can hold either, both or
+neither. The one behavioural difference from a workstation claim is
+`VillagerGoalPackages.validateBedPoi`: a bed with a free ticket is still
+skipped while its block state reads `occupied=true` (someone is physically
+asleep in it right now).
+
+This claims the bed as a **ticket**, not as a nightly sleep — vanilla's own
+`PoiRecord.isOccupied` (what `Raids.createOrExtendRaid`'s
+`PoiManager.getInRange(..., Occupancy.IS_OCCUPIED)` query reads) goes true
+the instant `AcquirePoi` takes the ticket, independent of whether anyone
+ever lies down in the bed. So this closes issue #241's real remaining
+blocker (`docs/raids-and-patrols.md` §1/§5: `#village` POIs were never
+occupied because nothing ever claimed a bed) without needing a work/rest
+sleep cycle — that is issue #231's own separate, still-open remainder.
+
+`MobSim::occupied_homes_in_range(center, radius)` is the live query a raid
+trigger reads: the in-memory equivalent of
+`crate::poi_storage::PoiStorage::occupied_in_range` scoped to claimed beds.
+It exists because a bed claimed through `BedClaims` is never written to the
+on-disk `poi/` region set (see "No on-disk persistence" below) — the
+disk-backed query can only ever see a claim that has been persisted, and
+nothing here persists one, so a live caller needs this method instead of, or
+alongside, the disk-backed one.
+
 `SimMob::snapshot` pushes a `MetadataField::VillagerData` (index 19,
 serializer `VILLAGER_DATA`) for every `minecraft:villager`, unconditionally —
 the field a client's `VillagerProfessionLayer` actually reads to pick a
@@ -67,13 +101,21 @@ turns that into an `open_screen` + `merchant_offers` send
   vanilla's `RandomSequence`-seeded sampling — see `villager/trades.rs`'s
   module doc for why. The generated *numbers* are exact; the generated
   *subset* is not what a real vanilla server with the same seed would offer.
-- **No on-disk persistence.** `WorkstationClaims` is a session-only ledger.
-  A restart loses every claim; every villager re-scans from scratch. Wiring
-  this into `crate::poi_storage::PoiStorage`'s save/restore path (the way
-  `crate::portal::PortalIndex` already is) would touch `crate::integrated`.
-- **No block-place/break event hook.** Losing a workstation is detected by
-  `tick_villager_professions`'s own re-verification, not a push from
-  wherever a block actually breaks — at most one tick of lag in practice.
+- **No on-disk persistence.** `WorkstationClaims`/`BedClaims` are both
+  session-only ledgers. A restart loses every claim; every villager
+  re-scans from scratch. Wiring this into `crate::poi_storage::PoiStorage`'s
+  save/restore path (the way `crate::portal::PortalIndex` already is) would
+  touch `crate::integrated`, off limits to this module. **This is the
+  remaining brokered hunk for issue #241's raid trigger**: the trigger
+  wiring (`server.rs`'s `ActiveEffects` noticing `minecraft:raid_omen`
+  expire, per `docs/raids-and-patrols.md` §5) needs to call
+  `MobSim::occupied_homes_in_range` (the live ledger) rather than, or
+  alongside, `PoiStorage::occupied_in_range` (the disk read) — the disk
+  query alone will never see a bed claimed only through this module.
+- **No block-place/break event hook.** Losing a workstation or a bed is
+  detected by `tick_villager_professions`/`tick_villager_beds`'s own
+  re-verification, not a push from wherever a block actually breaks — at
+  most one tick of lag in practice.
 - **Trade purchase is not wired.** `open_merchant_screen` sends real offers;
   nothing produces a `select_trade` response, so a player can see a trade
   and cannot yet buy one. Restocking and reputation-based pricing are
@@ -111,3 +153,7 @@ ServerProtocol::encode_merchant_offers}` (the wire seam),
 | a trade record with no `xp` key generates `xp: 1` (the codec default), not the plausible-but-wrong `0` | `mobs/villager/trades.rs`, `a_trade_missing_its_xp_field_uses_the_codecs_default_of_one_not_zero` |
 | an unported profession returns no offers rather than invented ones | `mobs/villager/trades.rs`, `an_unported_profession_returns_no_offers_rather_than_invented_ones` |
 | trades accumulate across levels (a level-3 farmer still offers level-1/2 trades) | `mobs/villager/trades.rs`, `trades_accumulate_across_levels` |
+| a second villager cannot claim an already-claimed bed, with a control showing a release makes it claimable again | `mobs/villager/mod.rs`, `a_second_villager_cannot_claim_an_already_claimed_bed` |
+| a bed currently `occupied=true` is not claimable even with a free ticket, with a control showing the same bed unoccupied is | `mobs/villager/mod.rs`, `a_bed_with_someone_already_in_it_is_not_claimable` |
+| the live claim is wired into the real per-tick `MobSim` loop, not just correct as a standalone function, and is visible through `occupied_homes_in_range` the same tick it happens | `mobs/mod.rs`, `villager_bed_claim_tests::a_villager_claims_a_nearby_bed_through_a_real_tick_and_it_becomes_findable` |
+| a non-villager species never claims a bed | `mobs/mod.rs`, `villager_bed_claim_tests::a_non_villager_species_never_claims_a_bed` |
