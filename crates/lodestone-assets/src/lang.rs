@@ -26,6 +26,7 @@
 use std::collections::HashMap;
 
 use crate::error::AssetError;
+use crate::manager::ResourceManager;
 use crate::source::ResourceSource;
 
 /// A loaded translation table: translation key -> format string.
@@ -98,6 +99,44 @@ impl Language {
     /// Returns [`AssetError::LangMalformed`] if the file exists but is malformed.
     pub fn en_us_from_source(source: &dyn ResourceSource) -> Result<Option<Self>, AssetError> {
         Self::from_source(source, "minecraft", "en_us")
+    }
+
+    /// Reads and **merges** every pack's own copy of
+    /// `assets/<namespace>/lang/<code>.json` across the whole `manager`
+    /// stack, lowest priority first, so a higher-priority pack's key
+    /// overrides individually rather than its file replacing the base one
+    /// wholesale.
+    ///
+    /// This is [`Self::from_source`]'s intended replacement wherever the
+    /// caller wants vanilla's own language-loading behaviour
+    /// (`ClientLanguage.loadFrom`, which walks `ResourceManager.getResourceStack`
+    /// and folds every layer's entries into one map): `from_source`/`read`
+    /// answer "what does the winning pack's file say", which is correct for a
+    /// texture or a model but wrong for a language file, where vanilla treats
+    /// every active pack's file as a partial patch rather than a full
+    /// replacement. A pack that ships only its own handful of custom keys
+    /// must still leave the ~7,000 vanilla keys underneath it resolvable.
+    ///
+    /// A layer that fails to parse is skipped (with the table still built
+    /// from whatever else is on the stack) rather than failing the whole
+    /// merge — one malformed pack must not blank every key from every other
+    /// layer. Returns `None` only when **no** layer has the file at all,
+    /// matching [`Self::from_source`]'s `Ok(None)` for "not shipped here".
+    #[must_use]
+    pub fn merged_from_stack(manager: &ResourceManager, namespace: &str, code: &str) -> Option<Self> {
+        let path = Self::resource_path(namespace, code);
+        let mut entries = HashMap::new();
+        let mut any = false;
+        for bytes in manager.read_stack(&path) {
+            match Self::from_json_bytes(&bytes) {
+                Ok(layer) => {
+                    any = true;
+                    entries.extend(layer.entries);
+                }
+                Err(_) => continue,
+            }
+        }
+        any.then_some(Self { entries })
     }
 
     /// Looks up the format string for a translation `key`, or `None` if the

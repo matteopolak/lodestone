@@ -86,6 +86,29 @@ impl ResourceManager {
         None
     }
 
+    /// Reads **every** source's own copy of `path`, lowest priority first —
+    /// the shape a *merge* needs, as opposed to [`Self::read`]'s single
+    /// winner-takes-all.
+    ///
+    /// Vanilla's own `ResourceManager.getResourceStack` returns exactly this
+    /// (every pack layer that carries the path, not just the top one), and
+    /// `ClientLanguage.loadFrom` is why the distinction matters: a language
+    /// file is not one pack's file replacing another's, it is every pack's
+    /// file layered key-by-key, later (higher-priority) packs overriding
+    /// individual keys. A pack that ships a `lang/en_us.json` defining only
+    /// its own handful of custom keys must not blank out the ~7,000 vanilla
+    /// keys underneath it — which is exactly what `read`'s single-winner
+    /// return does, and is the shape of the bug that put the raw key
+    /// `container.crafting` on screen instead of "Crafting" for a player
+    /// running nothing but a small icon-font pack. See
+    /// `Language::merged_from_stack`, the one caller.
+    pub fn read_stack(&self, path: &str) -> Vec<Vec<u8>> {
+        self.sources
+            .iter()
+            .filter_map(|source| source.read(path))
+            .collect()
+    }
+
     /// Builds the in-pack path for a namespaced asset:
     /// `assets/<namespace>/<kind>/<path>.<ext>`.
     pub fn asset_path(location: &ResourceLocation, kind: &str, ext: &str) -> String {
