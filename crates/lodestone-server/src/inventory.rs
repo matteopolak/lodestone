@@ -490,6 +490,51 @@ impl PlayerInventory {
         Some(one)
     }
 
+    /// How many of `item` the player holds across `items` (`0..36`, hotbar +
+    /// main storage — armour and the off-hand are excluded, matching
+    /// [`add`](Self::add)/[`take_matching`](Self::take_matching)'s own
+    /// range), by resource key string.
+    #[must_use]
+    pub fn count_of(&self, item: &str) -> u32 {
+        self.slots[..ITEMS_SIZE]
+            .iter()
+            .flatten()
+            .filter(|stack| stack.item.to_string() == item)
+            .map(|stack| stack.count)
+            .sum()
+    }
+
+    /// Removes exactly `count` of `item` from across `items` (`0..36`),
+    /// refusing (and changing nothing) if the player does not hold enough —
+    /// the villager-trade cost check
+    /// ([`crate::server::attempt_villager_trade`]'s own doc explains why this
+    /// scans the whole inventory rather than two fixed payment slots).
+    /// Scans in native order, draining a stack fully before moving to the
+    /// next, so a cost spread across several partial stacks is satisfied
+    /// correctly.
+    pub fn consume(&mut self, item: &str, count: u32) -> Option<()> {
+        if self.count_of(item) < count {
+            return None;
+        }
+        let mut remaining = count;
+        for slot in &mut self.slots[..ITEMS_SIZE] {
+            if remaining == 0 {
+                break;
+            }
+            if let Some(stack) = slot
+                && stack.item.to_string() == item
+            {
+                let take = remaining.min(stack.count);
+                stack.count -= take;
+                remaining -= take;
+                if stack.count == 0 {
+                    *slot = None;
+                }
+            }
+        }
+        Some(())
+    }
+
     /// `Inventory.getSlotWithRemainingSpace` — see [`add`](Self::add)'s doc
     /// comment for the order and why it matters.
     fn slot_with_remaining_space(&self, stack: &ItemStack, max: u32) -> Option<usize> {

@@ -3997,6 +3997,7 @@ where
             | ServerBound::SignUpdate { .. }
             | ServerBound::EditBook { .. }
             | ServerBound::SetBeacon { .. }
+            | ServerBound::SelectTrade { .. }
             | ServerBound::PickItemFromBlock { .. }
             | ServerBound::PickItemFromEntity { .. }
             | ServerBound::TeleportToEntity { .. }
@@ -4085,6 +4086,21 @@ impl OpenContainer {
         self.state_id = (self.state_id + 1) & 32767;
         self.state_id
     }
+}
+
+/// Which merchant screen (if any) this connection currently has open — set
+/// by [`open_merchant_screen`]'s caller, read by
+/// [`ServerBound::SelectTrade`]'s dispatch arm. Not [`OpenContainer`]: a
+/// villager is a [`crate::mobs::SimMob`], not a [`crate::block_entities::BlockEntity`],
+/// so it has no `BlockPos` for that struct's `pos` field or its slot-sync
+/// machinery to key on. Carries no `window_id` — vanilla's own consumer of
+/// the one packet this drives (`SelectTrade`) checks only "is a merchant
+/// menu open", not which window, and this struct exists for exactly that
+/// question.
+#[derive(Debug, Clone, Copy)]
+struct OpenMerchant {
+    /// The villager entity id this screen's offers came from.
+    entity_id: i32,
 }
 
 /// Per-connection bookkeeping for [`OpenContainer`]'s periodic sync
@@ -4239,6 +4255,60 @@ where
         proto.encode_merchant_offers(window_id, &offers, level, xp, true, true),
     )
     .await
+}
+
+/// Executes a merchant purchase directly against the player's held
+/// inventory, given the [`TradeRecord`](crate::mobs::villager::trades::TradeRecord)
+/// [`ServerBound::SelectTrade`]'s index resolved to.
+///
+/// # Why this is not vanilla's payment-slot flow
+///
+/// Real `MerchantMenu` mechanics need the player to place items into two
+/// payment slots and take the result from a third — that is genuinely new
+/// per-connection scratch storage the same shape as
+/// [`PlayerInventory::workstation`], **except** a villager is not a
+/// [`crate::block_entities::BlockEntity`] the way an anvil or a furnace is
+/// (it is a [`crate::mobs::SimMob`]), so it has no `BlockPos` for
+/// [`OpenContainer`]'s slot-sync machinery to key on — the sync loop that
+/// makes every *other* menu in this crate live reads a block entity by
+/// position. Standing up a second, parallel slot-storage-and-sync mechanism
+/// for exactly one menu shape was judged out of scope for the pass that
+/// connected this packet at all (see the issue's own tracking comment); this
+/// executes the trade in one step instead, the moment a row is selected.
+///
+/// # What that costs
+///
+/// The cost items are found and consumed from wherever they sit in the
+/// standard 36-slot hotbar+main inventory ([`PlayerInventory::consume`]),
+/// not from two manually-filled slots — so a player can trade without first
+/// dragging items into place, a real deviation from vanilla's UX rather than
+/// a silent one. Demand pricing ([`crate::villager_trade::OfferState`]) is
+/// not consulted: nothing yet ties a live [`crate::villager_trade::VillagerTrades`]
+/// to a specific [`crate::mobs::SimMob`], so every purchase is priced at the
+/// record's own base cost (issue #245's own disclosed "no persistence of
+/// offer state" gap, extended here to "no live state at all yet").
+///
+/// Returns `None` — inventory untouched — when the player lacks the cost
+/// items or has no room for the result, mirroring vanilla's own refusal
+/// rather than dropping the excess on the floor.
+fn attempt_villager_trade(
+    inventory: &PlayerInventory,
+    trade: &crate::mobs::villager::trades::TradeRecord,
+) -> Option<PlayerInventory> {
+    let mut trial = inventory.clone();
+    trial.consume(trade.wants_item, u32::try_from(trade.wants_count).ok()?)?;
+    if let Some((item, count)) = trade.wants_b {
+        trial.consume(item, u32::try_from(count).ok()?)?;
+    }
+    let gives = ItemStack::new(
+        trade.gives_item.parse::<ResourceKey>().ok()?,
+        u32::try_from(trade.gives_count).ok()?,
+    );
+    let (_, leftover) = trial.add(gives);
+    if leftover.is_some() {
+        return None;
+    }
+    Some(trial)
 }
 
 /// Opens a block-entity's container screen for this connection, mirroring
@@ -9984,6 +10054,10 @@ async fn dispatch_play_packet<T, P, S>(
     inventory: &mut PlayerInventory,
     block_entities: &BlockEntityHandle,
     open_container: &mut Option<OpenContainer>,
+    // Which merchant screen this connection has open, if any — see
+    // [`OpenMerchant`]'s own doc for why it is not folded into
+    // `open_container`.
+    open_merchant: &mut Option<OpenMerchant>,
     container_sync: &mut ContainerSync,
     next_window_id: &mut i32,
     mobs: &MobHandle,
@@ -10728,6 +10802,58 @@ where
                 *open_container = None;
                 *container_sync = ContainerSync::default();
             }
+            // Any window close ends whatever menu was open, merchant or not
+            // (`AbstractContainerMenu::removed` runs for every menu type);
+            // unconditional because, unlike `open_container`, `OpenMerchant`
+            // carries no `window_id` for this arm to compare against.
+            *open_merchant = None;
+        }
+        // Issue #616's remainder: a merchant trade-row selection
+        // (`ServerboundSelectTradePacket`). See `attempt_villager_trade`'s own
+        // doc for why this executes the trade in one step rather than through
+        // a payment-slot placement flow.
+        ServerBound::SelectTrade { index } => {
+            if let Some(OpenMerchant { entity_id }) = *open_merchant {
+                let resolved = mobs.with(|sim| {
+                    sim.get(entity_id)
+                        .map(|mob| (mob.profession(), mob.villager_level()))
+                });
+                if let Some((profession, level)) = resolved
+                    && let Some(index) = usize::try_from(index).ok()
+                {
+                    let offers = crate::mobs::villager::trades::offers_up_to(profession, level);
+                    if let Some(trade) = offers.get(index)
+                        && let Some(next) = attempt_villager_trade(inventory, trade)
+                    {
+                        *inventory = next;
+                        // A full window-0 resync rather than a per-slot diff:
+                        // the cost items can land anywhere across 36 slots and
+                        // the given item anywhere `add` found room, so there
+                        // is no fixed pair of menu slots to name — the same
+                        // reasoning `join_inventory_snapshot` already
+                        // documents for why this packet (not a per-slot one)
+                        // is the right shape for an arbitrary multi-slot
+                        // change.
+                        let items = read_menu(
+                            &MenuLayout::player(),
+                            inventory,
+                            Some(inventory.crafting()),
+                            &[],
+                        );
+                        apply(
+                            conn,
+                            state,
+                            proto.encode_container_content(
+                                0,
+                                0,
+                                &items,
+                                inventory.click_state().carried.as_ref(),
+                            ),
+                        )
+                        .await?;
+                    }
+                }
+            }
         }
         // Issues #253-#255's last mile: `AnvilMenu.setItemName`. See
         // `apply_rename_item`'s own doc for the gate and what gets resent.
@@ -11082,6 +11208,12 @@ where
                         next_window_id,
                     )
                     .await?;
+                    // `SelectTrade`'s only lookup: which villager this
+                    // connection is currently trading with. Set unconditionally
+                    // on every open (not merged/kept) — a second interact while
+                    // one screen is already open re-sends `open_screen` too,
+                    // which vanilla's own client treats as replacing the menu.
+                    *open_merchant = Some(OpenMerchant { entity_id });
                 }
                 // `AbstractHorse.doPlayerRide`: `interact_horse`'s empty-handed arm
                 // on a tamed adult already recorded the mount in `MobSim` (its own
@@ -12102,6 +12234,7 @@ where
         .as_ref()
         .map_or_else(PlayerInventory::default, crate::player_data::PlayerData::to_inventory);
     let mut open_container: Option<OpenContainer> = None;
+    let mut open_merchant: Option<OpenMerchant> = None;
     let mut container_sync = ContainerSync::default();
     // This connection's last-known `ServerBound::PlayerInput` sprint flag —
     // see `apply_attack`'s own doc comment for the one thing it feeds
@@ -12382,6 +12515,7 @@ where
                     &mut inventory,
                     block_entities,
                     &mut open_container,
+                    &mut open_merchant,
                     &mut container_sync,
                     &mut next_window_id,
                     mobs,
@@ -14330,6 +14464,7 @@ where
     // through the shared `dispatch_play_packet` call below identically to
     // native) — only the no-click background sync is missing on `wasm32`.
     let mut open_container: Option<OpenContainer> = None;
+    let mut open_merchant: Option<OpenMerchant> = None;
     let mut container_sync = ContainerSync::default();
     let mut next_window_id: i32 = 0;
     // Issue #249 — see the native `serve_play`'s identical binding: the
@@ -14473,6 +14608,7 @@ where
             &mut inventory,
             block_entities,
             &mut open_container,
+            &mut open_merchant,
             &mut container_sync,
             &mut next_window_id,
             mobs,
