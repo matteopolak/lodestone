@@ -1144,6 +1144,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   resolver trait a permissions *plugin* can use to take the whole decision over. One
   resource, `lodestone_ecs::permissions::Permissions`, answering one question: does
   this subject hold this permission?
+- [PGO experiment](./pgo-experiment.md) — A measured answer to "is profile-guided
+  optimization worth adding to this workspace's release build" — filed as a
+  general-improvements follow-up with no further detail beyond that question. This is
+  a report of one experiment, not a build-config change: nothing in `Cargo.toml` or
+  `.cargo/config.toml` was touched. PGO's two-pass build (instrument, train,
+  re-optimize) is expressed entirely through `RUSTFLAGS`/`llvm-profdata`, which is a
+  build-pipeline concern, not something `[profile.release]` can express as a static
+  setting.
 - [Pillager patrols](./pillager-patrols.md) — The server-side port of vanilla's
   `PatrolSpawner`: a periodic, difficulty-scaled group of pillagers spawns near a
   random connected player, one of them a *leader*, and the group marches across the
