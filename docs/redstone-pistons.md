@@ -138,27 +138,68 @@ all), and `server.rs`'s `moving_piston_records` at both connection-side sites (`
 right-click, and placement). Adding a fourth route for block updates without pairing it up is how the
 animation silently stops working on that route only.
 
-## What is not here, and why #316 stays open
+## Interruption (issue #316's own "update-order quirk")
 
-The intermediate state now exists, so a push animates. What is still missing:
+A move is now interruptible, in the one place vanilla's own `triggerEvent` checks: retracting looks
+at the piston's **arm cell** (`pos.relative(facing)`) for a still-pending commit — from that same
+piston's own extend, still mid-animation — and forces it to finish immediately
+(`PistonMovingBlockEntity.finalTick`, ported as `piston::interrupt`) *before* the retraction's own
+move is computed. A `source` entity there (an extension's not-yet-placed head) evaporates to air
+rather than materialising; a carried block would write its `moved_state`, same as ordinary
+completion, though vanilla's own interrupt site never reaches that arm because it only ever finds
+`source` entities there. `ScheduledTickQueue::take_matching` removes the interrupted commit from the
+queue at the same time, so it cannot also fire later against a cell `interrupt` has already
+rewritten. This is wired into `random_tick.rs`'s piston arm, gated to the retract path only —
+vanilla's `triggerEvent` never checks the arm on an extend, and neither does this.
+
+**A block already carried past the arm is not affected.** Vanilla's interrupt site is exactly the
+arm cell, never a cell further out a run pushed a block into — so a pushed block's own moving entity
+keeps its own, independent two-tick countdown and commits on schedule regardless of what happens to
+the piston that pushed it. Live-measured against the real 26.2 oracle
+(`redstone_piston_order_oracle_gate.rs`): interrupting the arm left it reading `minecraft:air`
+immediately, while the block it had pushed one cell further continued animating and committed to its
+real state on its own timer, untouched.
+
+**The second interrupt is modelled too, for the same-tick window sticky retraction opens.**
+`PistonBaseBlock.triggerEvent`'s `isSticky` branch checks a *different* cell from the arm above —
+`pos.offset(direction × 2)` (`piston::relative_n(pos, facing, 2)`, the cell a sticky pull would grab
+from) — and, if it holds a still-**extending** `moving_piston` entity travelling the *same* direction
+this piston is retracting along, finalTicks that one too: one piston's retraction interrupting a
+*different* piston's extension two cells away. Vanilla's own `if (!pistonPiece)` guard then skips the
+sticky-pull decision entirely for that event, rather than grabbing whatever the interrupt just left
+behind — reproduced by forcing the resolution's push list empty when the second interrupt fires, the
+same reduction the plain (non-sticky) retract path already uses when there is nothing to pull.
+**Hermetically verified, not live-oracle verified**: the discriminating pair in
+`random_tick.rs`'s own test module drives the identical final cell content two ways — once as a plain
+pushable block (a normal sticky pull, which schedules a fresh commit to grab it) and once through a
+pending commit the retraction interrupts (which must schedule none) — so a change that merely wrote
+the interrupted cell without suppressing the pull decision would still fail it. Setting up the real
+two-piston race this needs (one piston's arm sitting exactly where a second, sticky piston wants to
+pull from, both mid-animation on the same tick) via RCON `/tick step` orchestration is unattempted;
+the live oracle gate below covers only the first (arm) interrupt.
+
+**What this is not**: a full 0-tick pulse *contraption* trace (an observer or comparator reacting
+fast enough to retract before the commit, packet-traced end to end). The mechanism the contraption
+needs — retracting before a commit lands cancels it cleanly — is now modelled and live-verified for
+a single extend/retract pair; whether a *surrounding* circuit's own timing reaches the retraction
+fast enough for a specific community contraption is unverified. Still missing, and why #316 stays
+open on the rest:
 
 | vanilla behaviour | why it cannot work here |
 |---|---|
-| **0-tick pulse** generators | depend on *interrupting* a move — vanilla's `triggerEvent` calls `finalTick()` on an entity it finds mid-animation and can start a second move in the same tick; a pending commit here runs to completion |
-| `TRIGGER_DROP` (block event 2) | nothing routes a piston block *event* at all, so the case is unreachable rather than unimplemented |
-| entities shoved by the push | `PistonMovingBlockEntity.moveCollidedEntities`/`moveStuckEntities`, needing a piston-aware entity AABB sweep. The intermediate state it wanted is no longer the blocker |
+| `TRIGGER_DROP` (block event 2) | has no distinct effect in `triggerEvent` beyond the interrupt above (both `b0==1` and `b0==2` take the same branch) — nothing routes a piston block *event* at all, but nothing needs to: the interrupt logic above already covers what `TRIGGER_DROP` names |
+| entities shoved by the push | `PistonMovingBlockEntity.moveCollidedEntities`/`moveStuckEntities`, needing a piston-aware entity AABB sweep |
 | riding a pushed block | `MovingPistonBlock.getCollisionShape` delegates to the entity's interpolated shape; here a `moving_piston` cell is **empty** for two ticks, so a player standing on a pushed block briefly falls through |
-| interrupting a *committed* move | `finalTick`'s `isSourcePiston` arm (which writes air) is never reached — only `tick`'s commit branch is. Using `finalTick`'s arm on normal completion would delete the head of every extension |
+| the second interrupt, **live-verified** | modelled and hermetically tested (above); no real two-piston race has been run against the 26.2 oracle |
 
 **A push cannot cross a chunk border.** `redstone::make_lookup` reads air outside its own 16×16
 footprint, so a run pushed across `x % 16 == 15` resolves against air. That is a property of the
 whole `redstone*` family here, not of this module — `resolve` itself is border-agnostic; it is the
 lookup that is not.
 
-So **contraption resolution is faithful and tested; contraption timing is not.** Issue #316 asks for
-BUD-switch and 0-tick traces matched tick-for-tick against a real 26.2 server, and that verification
-is structurally unreachable while the intermediate state does not exist. It stays open on exactly
-that.
+So **contraption resolution is faithful and tested; the interrupt is faithful and live-verified for
+a single piston; a captured, tick-for-tick trace of a full community contraption (BUD switch, 0-tick
+pulse generator) does not exist.** That remaining verification is what #316 stays open on.
 
 ## How to change it
 

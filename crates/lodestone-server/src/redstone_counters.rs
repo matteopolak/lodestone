@@ -127,6 +127,20 @@ impl Snapshot {
 /// same reason: these are process globals that outlive any one measurement,
 /// so an absolute reading without a reset mostly reports whatever earlier
 /// work happened to run first.
+///
+/// **This module's own `TEST_LOCK` only serialises tests *within this
+/// module* against each other — it cannot, being module-private, protect
+/// against a concurrently-running test in a *different* module that also
+/// drives [`crate::random_tick::propagate_and_react`] while the
+/// `redstone-counters` feature is on.** Measured: running a counters
+/// measurement under `--test-threads=2` alongside an unrelated piston
+/// fixture in `random_tick::tests` moved `notifications_issued`/`cell_reads`
+/// run to run (659/667/674 across three runs) purely from the other test's
+/// own notifications landing on the same static atomics; the identical
+/// fixture run alone reproduces `659` exactly every time. **Any reading from
+/// this module should be taken with `--test-threads=1` or a test filter
+/// narrow enough to exclude every other `propagate_and_react` caller** —
+/// see `docs/plans/redstone-execution-model.md` §9 for the full account.
 #[inline]
 pub fn reset() {
     imp::reset();
@@ -547,6 +561,88 @@ mod tests {
              MEASURED {} — see this test's own doc comment for the derivation a mismatch means \
              is wrong",
             snap.wire_recomputes
+        );
+    }
+
+    /// **A "large" contraption in this file's own vocabulary**: a 15-long
+    /// dust run lit from one end — `MAX_PUSH_DEPTH`-scale, the largest single
+    /// number named anywhere in this crate's redstone family, used here as
+    /// the "large" yardstick until a real community-contraption corpus
+    /// exists (`docs/plans/redstone-execution-model.md`'s U6/U0). This
+    /// answers §9's still-open question ("the actual cost split") with real
+    /// counters rather than leaving it unmeasured.
+    ///
+    /// **Deliberately not a gate.** The single-cell test above already shows
+    /// that a naive prediction at this scale is exactly the trap
+    /// `CLAUDE.md` warns about — the first version of *that* test predicted
+    /// `wire_recomputes == 15` and measured 145, because one settle's own
+    /// 7-centre fan-out compounds at every step a longer run advances.
+    /// Hand-deriving the exact 15-cell number would mean re-deriving that
+    /// compounding by hand fifteen times over, which is worth doing only if
+    /// a future change needs this exact fixture to gate on. Until then this
+    /// records real measurements and asserts only invariants that hold
+    /// regardless of the exact compounding.
+    #[test]
+    fn measured_cost_split_for_a_fifteen_cell_dust_run() {
+        const RUN_LEN: i32 = 15;
+        let mut column = column_with_floor();
+        column.set_block(0, Y, ROW_Z, &redstone_torch::set_standing_lit(true));
+        for x in 1..=RUN_LEN {
+            column.set_block(x, Y, ROW_Z, &redstone_wire::set_power(0));
+        }
+
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset();
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let events = propagate_and_react(&mut column, 0, 0, 1, Y, ROW_Z, &mut block_ticks, NOW);
+        let snap = snapshot();
+
+        // PREMISE: the whole run must actually settle end to end, or this
+        // measures an aborted cascade rather than a real 15-cell contraption.
+        let far_power = redstone::wire_power(&at(&column, RUN_LEN, Y, ROW_Z));
+        assert!(
+            far_power > 0,
+            "PREMISE FAILED: the far end of a 15-cell run from a lit torch must carry non-zero \
+             power, or this is not measuring a settled 15-cell cascade. Got {far_power}"
+        );
+        assert!(!events.is_empty(), "PREMISE FAILED: the run must actually change something");
+
+        // Structural invariants that hold regardless of the exact compounding
+        // — see this test's own doc comment for why an exact count is not
+        // asserted at this length.
+        assert!(snap.notifications_issued > 0, "{snap:?}");
+        assert!(snap.wire_recomputes > 0, "{snap:?}");
+        // Every notification reads at least its own cell before dispatching
+        // — Layer A's whole target (§1.2) is shrinking this cost, not
+        // eliminating the read.
+        assert!(
+            snap.cell_reads >= snap.notifications_issued,
+            "cell_reads ({}) must be at least notifications_issued ({}) — every notification \
+             reads its own cell before dispatching",
+            snap.cell_reads,
+            snap.notifications_issued
+        );
+
+        // Not asserted, only recorded: the actual cost split. Run with
+        // `--features redstone-counters -- --nocapture` to read it.
+        eprintln!(
+            "measured 15-cell dust run: notifications_issued={} reactions_total={} \
+             cell_reads={} state_parses={} signal_queries={} wire_recomputes={} \
+             schedules_requested={} schedules_deduped={} max_notifications_per_drain={} \
+             -- cell_reads/notification={:.2} state_parses/notification={:.2} \
+             signal_queries/notification={:.2}",
+            snap.notifications_issued,
+            snap.reactions_total(),
+            snap.cell_reads,
+            snap.state_parses,
+            snap.signal_queries,
+            snap.wire_recomputes,
+            snap.schedules_requested,
+            snap.schedules_deduped,
+            snap.max_notifications_per_drain,
+            snap.cell_reads as f64 / snap.notifications_issued as f64,
+            snap.state_parses as f64 / snap.notifications_issued as f64,
+            snap.signal_queries as f64 / snap.notifications_issued as f64,
         );
     }
 }
