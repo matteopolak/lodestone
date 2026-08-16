@@ -189,79 +189,115 @@ human-authored labels quoted verbatim in the table above.
 
 ## Findings
 
-### Status: not yet run — say this plainly rather than fabricate a number
+### Status: real run, once compilation finally cleared the shared build lock
 
-**Nothing in this section is an executed measurement yet.** The machine this
-harness was built on was, for the whole of that session, running 30+
-concurrent `rustc` processes from other agents' live builds (`ps aux`,
-non-zero `vm.swapusage`, and a `cargo check -p lodestone-anvil` that sat
-"Blocking waiting for file lock on build directory" for over twenty minutes
-without the lock ever freeing) — a documented condition of this repo's
-shared checkout, not a defect in this harness. A parallel attempt with an
-isolated `CARGO_TARGET_DIR` (to sidestep the lock specifically) made zero
-forward progress over a monitored 100-second window under the same CPU
-pressure. So this code is committed **manually verified, not
-compiler-verified**: every public function/type it calls was confirmed
-against the real source (`grep`s cited throughout this doc and the test
-file's own comments), and its `ServerProtocol` double mirrors
-`tests/tick_loop_light.rs`'s already-working one method-for-method. Run
-`cargo check -p lodestone-anvil --all-targets` first, then
-`cargo test -p lodestone-anvil --test redstone_benchmark -- --ignored --nocapture`
-after fetching the fixtures above, and replace this whole section with the
-real output.
+`cargo check -p lodestone-anvil --all-targets` was blocked on this repo's
+shared `target/` build-directory lock for over twenty minutes (other agents'
+concurrent builds), and a parallel isolated-`CARGO_TARGET_DIR` attempt made
+no forward progress over a monitored 100-second window under the same
+system-wide CPU pressure (confirmed via `vm.swapusage` and 30+ concurrent
+`rustc` processes). The code was committed at that point **manually
+verified, not compiler-verified** — every public API it calls confirmed by
+hand against the real source, and its `ServerProtocol` double built
+method-for-method against `tests/tick_loop_light.rs`'s already-working one.
+The shared lock eventually freed on its own; `cargo check -p lodestone-anvil
+--all-targets` then finished clean in 20m 29s (`EXIT:0` read from the log,
+zero errors, zero warnings attributed to this crate — every warning in the
+output is pre-existing dead code in `lodestone-server`), confirming the
+manual verification was correct. `cargo test -p lodestone-anvil --test
+redstone_benchmark -- --ignored --nocapture` then ran for real (32.57s,
+`EXIT:0`) against all four fixtures. What follows is that run's actual
+output, not a prediction.
 
-Component counts (non-air blocks, and how many are redstone components) are
-independently obtainable without Rust at all — direct NBT inspection of each
-downloaded file — and the four numbers below **were** measured this way, so
-they are real, reproducible facts about the fixtures rather than a
-prediction. `PuffingFishHQ`'s `raid_farm.litematic` carries 1393 total
-NBT-declared blocks (`Metadata.TotalBlocks`) across a 20×154×12 region;
-`CowKingTroller`'s `Raid_Farm_Schematic_2.litematic` carries 3775 across
-21×158×45; `fairhard`'s `IanXO4_Practical_Stacking_Raid_Farm_suggested.litematic`
-carries 3274 across 32×167×32; `OfNullAndVoid`'s `bee-and-crop-farm.litematic`
-carries 8515 across 49×21×49. These are `TotalBlocks`, not this loader's own
-post-air-filter count or its redstone-component breakdown — get those from a
-real run of `redstone_contraptions_report`, which prints both per file.
+**Scene, and a caveat that turned out to matter more than expected**: this
+machine was still under heavy concurrent-agent load during the run. Every
+one of the four sub-runs reported **`ticks elapsed in 5s: 1`** — the real
+tick loop advanced by exactly one tick in a five-second window, not the
+~100 a healthy 20 Hz loop would manage. `TickStats`' `mspt_avg_ms` climbed
+monotonically across the four sequential sub-runs (4.284 → 22.324 → 31.755
+→ 49.803 → 54.074 ms, i.e. it kept climbing from one fixture to the next,
+not just within one), consistent with the machine getting *more* loaded
+over the course of the whole benchmark rather than any one fixture being
+more expensive — exactly the "a duration gathered while other agents build
+gets attributed to the wrong cause" hazard this doc already warned about.
+**Do not read the `TickStats` figures below as this engine's real per-tick
+cost.** They are kept for the record, but this run should be repeated on a
+quiet machine before anyone treats the millisecond figures as real, and
+`ticks elapsed = 1` means the "per-tick rate" the harness computes is really
+just "count observed during whatever fraction of one tick's neighbourhood
+this window caught" — a real per-tick *rate* needs more than one tick to
+average over.
 
-**The mechanistic prediction this harness was built to test, stated as a
-prediction and not yet confirmed by a run:** `redstone_counters` should read
-at or near **zero** for all four fixtures, for the reason given under "What
-loading this way does not reproduce" — a schematic file captures a circuit's
-**steady state** (every wire's power level, every repeater's
-`locked`/`powered`, every torch's `lit`, already resolved), and this
-harness's loader writes that state with a raw `ChunkSource::set_block`,
-which triggers no neighbour notification. Nothing in the circuit is
-scheduled to run, so nothing does, and the counters that would attribute
-cost to neighbour scanning would have nothing to count. If a real run
-contradicts this prediction, that is itself the more interesting finding —
-it would mean some other producer (a hopper hopper-tick, a random tick near
-a redstone-adjacent block) reaches `redstone_counters`' hooks without a
-propagation pass, which this doc's mechanism argument above does not
-account for, and the doc should be corrected from the real output rather
-than the prediction defended.
+Component counts, from the loader's own parse (post-air-filter, not the
+file's self-reported `TotalBlocks`):
 
-**If the prediction holds, it would explain — via the same mechanism, not
-by re-running it — the `state_parses=0` surprise the task brief flagged from
-an earlier 15-cell synthetic dust run**: `own_signal` (the `state_parses`
-counter's one call site) is only reached from inside a live propagation
-pass, and a world with nothing scheduled and nothing perturbed never enters
-one. That would not be evidence any redstone family is unmodelled —
-`redstone_oracle_gate.rs`'s own live-server-verified propagation tests
-exercise `own_signal` constantly when a *change* actually happens — only
-that loading a steady-state snapshot and loading a live-perturbed circuit
-are different inputs, and this harness currently only builds the former.
+| file | non-air blocks placed | redstone components | dominant families |
+|---|---|---|---|
+| `raid_farm.litematic` | 1393 | 142 | 102 `stone_button`, 9 `redstone_wire`, 7 `sticky_piston`, 6 `repeater`, 4 `hopper` |
+| `Raid_Farm_Schematic_2.litematic` | 3775 | 1198 | 344 `hopper`, 185 `observer`, 175 `redstone_wire`, 92 `dropper`, 76 `note_block`, 73 `comparator`, 41 `sticky_piston`, 39 `repeater`, 29 `piston`, 27 `redstone_block`, 22 `dispenser`, 72 `redstone_wall_torch`, 12 `redstone_torch` |
+| `IanXO4_Practical_Stacking_Raid_Farm_suggested.litematic` | 3274 | 167 | 62 `redstone_wire`, 32 `hopper`, 19 `observer`, 14 `piston`, 11 `sticky_piston`, 9 `repeater`, 6 `comparator` |
+| `bee-and-crop-farm.litematic` | 8515 | 713 | 279 `redstone_wire`, 164 `hopper`, 73 `comparator`, 44 `lever`, 44 `powered_rail`, 37 `repeater`, 36 `dispenser`, 36 `redstone_wall_torch` |
+
+`redstone_counters`, over the one real tick each sub-run got:
+
+| file | notifications_issued | cell_reads | state_parses | signal_queries | wire_recomputes | max_notifications_per_drain |
+|---|---|---|---|---|---|---|
+| `raid_farm.litematic` | 0 | 0 | 0 | 0 | 0 | 0 |
+| `Raid_Farm_Schematic_2.litematic` | **36** | 0 | 0 | 0 | 0 | 6 |
+| `IanXO4_..._suggested.litematic` | 0 | 0 | 0 | 0 | 0 | 0 |
+| `bee-and-crop-farm.litematic` | **106** | 0 | 0 | 0 | 0 | 6 |
+
+**The central finding, now a real result rather than a prediction:**
+`cell_reads`, `state_parses`, `signal_queries` and `wire_recomputes` are
+**exactly zero on all four real, large, downloaded contraptions**, matching
+the mechanism this doc predicted — a schematic file captures a circuit's
+steady state, this harness's loader writes it with a raw `ChunkSource::set_block`
+that triggers no neighbour notification, and the counters that would
+attribute cost to neighbour scanning have nothing to count without one.
+
+**But two of the four fixtures (`Raid_Farm_Schematic_2.litematic` and
+`bee-and-crop-farm.litematic`) registered nonzero `notifications_issued`
+(36 and 106) while every downstream counter stayed at zero** — a sharper
+and more specific version of the `state_parses=0` surprise than a flat
+all-zero result would have been. It shows *something* fired a
+`Notification` (most plausibly a random or scheduled tick incidental to the
+loaded terrain — both fixtures carry fluid-adjacent content: droppers/water
+mechanisms in the raid farm, crops and water in the bee farm — though this
+harness did not instrument *which* producer fired it, and that is worth a
+follow-up rather than asserted here) **without that notification ever
+reaching `own_signal`, `make_lookup`, or `best_neighbor_signal`** — the
+three call sites `state_parses`/`cell_reads`/`signal_queries` are bumped
+from. That is precisely `docs/plans/redstone-execution-model.md`'s own
+distinction between "a notification was issued" and "a signal was actually
+recomputed", now demonstrated on real contraptions rather than argued from
+a 15-cell synthetic dust run: a `Notification` can exist in this engine
+without the redstone read/computation path it would need to traverse to
+justify #548's dependency graph ever running. This is not evidence any
+redstone family is unmodelled — `redstone_oracle_gate.rs`'s own
+live-server-verified propagation tests exercise `own_signal` constantly
+when a *change* actually happens — it is evidence that loading a
+steady-state snapshot and loading (or perturbing) a live circuit are
+different inputs, and this harness's loader currently only builds the
+former.
 
 **What this means for issue #548**: a steady, unperturbed contraption's
-*ongoing* cost is genuinely close to zero in this engine today — which is
-itself a real, useful data point (the floor case #548's dependency-graph
-work needs to not regress), but it is not the number #548 actually needs,
-which is the cost of neighbour scanning **while something is changing**
-(a hopper clock running, a player tripping a sensor, a farm cycling). Getting
-that number needs one of the two brokered hunks above — most directly, the
-`PendingBlockTicks`/`PendingFluidTicks` re-injection: checked directly (not
-assumed) against all four fixtures' own captured NBT, `raid_farm.litematic`
-carries 2 pending block ticks and `Raid_Farm_Schematic_2.litematic` carries 1
-(both repeaters mid-cycle — exactly "something changing"); the other two
-carry none, so they would still measure near-zero even with re-injection
-landed, and are the honest zero-activity control for whatever gate ends up
-using this harness.
+*ongoing* redstone-recompute cost is genuinely, measurably zero in this
+engine today on four real farms up to 3775 blocks and 1198 redstone
+components — a real floor-case data point #548's dependency-graph rework
+needs to not regress. It is not the number #548 actually needs, which is
+the cost of neighbour scanning **while something is changing** (a hopper
+clock running, a player tripping a sensor, a farm cycling). Getting that
+number needs one of the two brokered hunks above — most directly, the
+`PendingBlockTicks`/`PendingFluidTicks` re-injection: checked directly
+against all four fixtures' own captured NBT, `raid_farm.litematic` carries
+2 pending block ticks and `Raid_Farm_Schematic_2.litematic` carries 1 (both
+repeaters mid-cycle — exactly "something changing"); the other two carry
+none, so they would still measure near-zero even with re-injection landed,
+and are the honest zero-activity control for whatever gate ends up using
+this harness.
+
+**A second, independent follow-up this run surfaced**: re-run with a
+`TICK_WINDOW` long enough to observe more than one real tick (or on a
+quieter machine) before trusting any per-tick *rate* out of this harness —
+`ticks elapsed = 1` on every sub-run here means the numbers above are raw
+one-tick counts, correct as reported, but not yet an averaged rate.
