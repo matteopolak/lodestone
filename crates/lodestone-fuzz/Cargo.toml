@@ -79,3 +79,10 @@ v770 = ["dep:lodestone-v770"]
 # `docs/fuzz-harness.md` for the current version. Pinned to the 1.x line already
 # implied by every other `workspace.dependencies` entry using unpinned majors.
 proptest = "1"
+# Only for density_builder_panics_on_non_object_json.rs, which reports a
+# finding from fuzz/fuzz_targets/density_function_json.rs (the widened Track
+# A scope, issue #549): `density::Builder::build` panics rather than
+# returning `Result` on structurally-malformed JSON. Dev-only because nothing
+# else in this crate touches worldgen.
+lodestone-worldgen-core = { path = "../lodestone-worldgen-core" }
+serde_json = { workspace = true }

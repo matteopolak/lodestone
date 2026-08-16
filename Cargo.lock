@@ -2899,7 +2899,9 @@ dependencies = [
  "lodestone-v735",
  "lodestone-v770",
  "lodestone-world",
+ "lodestone-worldgen-core",
  "proptest",
+ "serde_json",
  "uuid",
 ]
 

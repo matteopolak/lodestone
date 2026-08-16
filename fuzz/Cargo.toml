@@ -37,6 +37,14 @@ lodestone-core = { path = "../crates/lodestone-core" }
 lodestone-model = { path = "../crates/lodestone-model" }
 lodestone-server = { path = "../crates/lodestone-server" }
 lodestone-v770 = { path = "../crates/protocol/v770" }
+# Added for the widened Track A scope (issue #549's "obvious first targets"
+# list: loot tables, block-state strings, the density compiler, the unihex
+# HEX parser) — each a leaf/near-leaf crate pulled in for exactly one parse
+# entry point, not for any of these crates' own heavier subsystems.
+lodestone-data = { path = "../crates/lodestone-data" }
+lodestone-worldgen-core = { path = "../crates/lodestone-worldgen-core" }
+lodestone-assets = { path = "../crates/lodestone-assets" }
+serde_json = "1"
 
 [[bin]]
 name = "v770_clientbound_decode"
@@ -55,6 +63,34 @@ bench = false
 [[bin]]
 name = "nbt_decode"
 path = "fuzz_targets/nbt_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "loot_table_json"
+path = "fuzz_targets/loot_table_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "block_state_string"
+path = "fuzz_targets/block_state_string.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "density_function_json"
+path = "fuzz_targets/density_function_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unihex_font"
+path = "fuzz_targets/unihex_font.rs"
 test = false
 doc = false
 bench = false
