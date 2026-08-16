@@ -111,7 +111,20 @@ fn spawn_cycles_fill_to_cap_and_never_exceed_across_seeds() {
 /// eventually random-despawns; a 20-block mob, reset every check, never does.
 #[test]
 fn middle_band_mob_despawns_over_time_while_immune_mob_is_immortal() {
-    let world = ChunkWorld::new(-64, 128);
+    // A real floor under every spawned mob's (x, 0, z). This test ages mobs
+    // for hundreds of idle ticks via `tick_for`, and since
+    // `NavigatingMob::advance` now applies gravity unconditionally (idle mobs
+    // fall too, matching vanilla `LivingEntity.travel`), a void world would
+    // let each mob fall to the world floor at y=-64 before the distance
+    // checks below ever run -- turning a "distance from player" test into an
+    // accidental "distance after a 64-block fall" test. Grounding them
+    // restores the fixed-position precondition every assertion here assumes.
+    let mut world = ChunkWorld::new(-64, 128);
+    for x in -5..=135 {
+        for z in -2..=2 {
+            world.set_block(x, -1, z, "minecraft:stone");
+        }
+    }
     let mut sim = MobSim::new(&world);
     let player = Vec3::new(0.0, 0.0, 0.0);
 

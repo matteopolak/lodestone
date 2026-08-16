@@ -378,7 +378,21 @@ fn a_lethal_arrow_removes_the_mob_and_rolls_its_loot() {
 /// the launch power or the base damage is wrong.
 #[test]
 fn a_skeleton_with_a_target_shoots_an_arrow_that_damages_it() {
-    let world = empty_world();
+    // A real floor under both mobs. This is the one test in this file that
+    // ticks the sim 40 times rather than once, and `NavigatingMob::advance`
+    // now applies gravity unconditionally to idle mobs (matching vanilla
+    // `LivingEntity.travel`) -- an `empty_world()` void would let the cow
+    // and skeleton fall out from under each other over those 40 ticks,
+    // opening a vertical gap the arrow's arc cannot bridge and turning a
+    // "does the arrow hit" gate into an accidental "did the mobs desync
+    // while falling" one. Grounding them restores the fixed-height
+    // precondition the arc math here assumes.
+    let mut world = empty_world();
+    for x in -2..=8 {
+        for z in -2..=2 {
+            world.set_block(x, -1, z, "minecraft:stone");
+        }
+    }
     let mut sim = MobSim::new(&world);
 
     let victim_pos = Vec3::new(6.0, 0.0, 0.0);
