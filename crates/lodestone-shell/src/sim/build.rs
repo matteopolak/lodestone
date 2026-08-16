@@ -312,7 +312,21 @@ impl Sim {
         // `Sim::client_app()` + `add_plugins` + `Sim::from_app`, on the rendered
         // client, rather than headless only.
         let mut ecs = std::mem::take(app.world_mut());
-        ecs.insert_resource(Profile(PhysicsProfile::mc_1_21()));
+        // The physics profile is resolved from the same `config.protocol` the
+        // adapter above was, through `lodestone_registry` — the one crate
+        // allowed to know which protocol numbers belong to which version
+        // family. This is the fix for the profile always being `mc_1_21()`
+        // regardless of session: a 1.8.9 (`v47`) session now gets `mc_1_8()`.
+        // Never hardcode a family here — `config.protocol` is a bare number,
+        // and the version seam (`cargo check -p lodestone-shell
+        // --no-default-features`) requires this crate to stay ignorant of
+        // which families exist at all. See `lodestone_registry::
+        // physics_profile_for_protocol`'s own doc for the exact family →
+        // profile table and why two of the four families map to an
+        // approximation rather than a validated fit.
+        ecs.insert_resource(Profile(lodestone_registry::physics_profile_for_protocol(
+            config.protocol,
+        )));
         // Stage 5. `ParticleSim` cannot come from `InteractPlugin`: like the mesh
         // worker pool, the emitter has to be built with the sprite table for
         // whichever block-id space this session's world holds.

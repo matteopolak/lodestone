@@ -361,3 +361,16 @@ harness = false
 # the seam and a hardcoded `v770` dependency creeping into shell code.
 default = ["live"]
 live = ["lodestone-registry/v770"]
+# Test-only discriminator for `sim::build`'s physics-profile wiring
+# (`lodestone_registry::physics_profile_for_protocol`). With only `live`
+# (`v770`) compiled, every protocol this crate can ever see resolves to
+# `mc_1_21()` — the *old* hardcoded constant and the *correct* answer
+# coincide, so nothing in the default test build can tell "the registry was
+# actually consulted" from "the hardcoded call is still there". `v47`'s
+# correct answer (`mc_1_8()`) differs from that constant, which is what makes
+# `physics_profile_threads_the_configured_protocol_through_the_session` in
+# `app/tests.rs` a real assertion rather than one two hypotheses both satisfy
+# — see `CLAUDE.md`'s note on an input where the hypotheses coincide not
+# being a test. Not part of `default`; enable explicitly (`--features v47`)
+# to run that one test with a discriminating input.
+v47 = ["lodestone-registry/v47"]

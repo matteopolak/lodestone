@@ -31,6 +31,14 @@ lodestone-model = { workspace = true }
 # supposed to observe and report. Required here, the version-free build still
 # gets the function; it just answers `None`.
 lodestone-server = { path = "../lodestone-server" }
+# Required for the same reason `lodestone-server` is: `physics_profile_for_protocol`
+# is called unconditionally from `lodestone-shell` (every session, live or
+# offline, needs a `PhysicsProfile`), so feature-gating this edge would make
+# that function stop existing under `--no-default-features` instead of
+# answering with the version-free default it is supposed to return. This crate
+# has zero dependencies of its own, so pulling it in unconditionally adds
+# nothing to the version-free build.
+lodestone-physics = { path = "../lodestone-physics" }
 
 # One optional dependency per version family. Adding a family is one line here
 # plus one line in `[features]`; deleting a family is deleting its folder and

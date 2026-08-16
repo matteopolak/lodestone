@@ -2932,6 +2932,7 @@ dependencies = [
  "bevy_app",
  "bevy_ecs",
  "lodestone-ecs",
+ "lodestone-physics",
 ]
 
 [[package]]
@@ -3024,6 +3025,7 @@ name = "lodestone-registry"
 version = "0.1.0"
 dependencies = [
  "lodestone-model",
+ "lodestone-physics",
  "lodestone-server",
  "lodestone-v340",
  "lodestone-v47",
@@ -7105,8 +7107,10 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "proc-macro2",
  "serde_json",
  "sha1 0.11.0",
+ "syn 3.0.3",
  "tempfile",
  "zip",
 ]
