@@ -1166,6 +1166,12 @@ pub struct SimMob<'w> {
     /// scan [`villager::find_and_claim_workstation`] runs — see that
     /// function's own doc for why the scan itself is not free.
     job_search_cooldown: i32,
+    /// Ticks until this mob's next chest/lit-furnace/bed search, decremented
+    /// in [`MobSim::tick_cat_block_search`] — the same throttling shape as
+    /// [`job_search_cooldown`](Self::job_search_cooldown), for the identical
+    /// reason: a bounded terrain scan every tick for every cat is not free.
+    /// Only meaningful for `minecraft:cat`.
+    cat_search_cooldown: i32,
     /// This mob's own gossip ledger (issue #244) — `Villager.gossips`, what
     /// it believes about every UUID it has an opinion of. Empty for every
     /// non-villager species; a converted zombie villager's ledger is seeded
@@ -3221,6 +3227,7 @@ impl<'w> MobSim<'w> {
             villager_level: 1,
             villager_xp: 0,
             job_search_cooldown: 0,
+            cat_search_cooldown: 0,
             gossip: villager::gossip::GossipContainer::new(),
             last_gossip_decay_tick: None,
             golem_detected_until: None,
@@ -3545,6 +3552,146 @@ impl<'w> MobSim<'w> {
                 mob.set_profession(profession, Some(pos));
             }
         }
+    }
+
+    /// Throttles [`tick_cat_block_search`](Self::tick_cat_block_search)'s
+    /// bounded terrain scan — the same shape
+    /// [`JOB_SEARCH_INTERVAL_TICKS`](Self::JOB_SEARCH_INTERVAL_TICKS) is, and
+    /// for the identical reason: a scope choice, not a transcribed vanilla
+    /// constant. `MoveToBlockGoal.nextStartTick` itself re-searches every
+    /// 200-400 ticks per cat, which this approximates rather than mirrors
+    /// exactly, since this scan runs independently of whether either goal is
+    /// currently eligible to start.
+    const CAT_BLOCK_SEARCH_INTERVAL_TICKS: i32 = 100;
+    /// `CatSitOnBlockGoal`'s own bounds: `searchRange` 8, `verticalSearchRange`
+    /// 1 (the two-arg `MoveToBlockGoal` convenience constructor's implicit
+    /// default, `verticalSearchStart` 0).
+    const CAT_SIT_HORIZONTAL_RANGE: i32 = 8;
+    const CAT_SIT_VERTICAL_RANGE: i32 = 1;
+    /// `CatLieOnBedGoal`'s own bounds: `searchRange` 8, `verticalSearchStart`
+    /// -2, `verticalSearchRange` 6.
+    const CAT_BED_HORIZONTAL_RANGE: i32 = 8;
+    const CAT_BED_VERTICAL_MIN: i32 = -2;
+    const CAT_BED_VERTICAL_MAX: i32 = 6;
+
+    /// Issue #229: `CatSitOnBlockGoal`/`CatLieOnBedGoal`'s block-spiral
+    /// search, run here rather than inside either goal —
+    /// `docs/mob-block-perception.md`'s own guidance for a goal that needs to
+    /// search a neighbourhood ("must not be built on [block cues]… that is a
+    /// host-computed candidate position instead"), the same shape
+    /// [`tick_villager_professions`](Self::tick_villager_professions) already
+    /// is for the identical reason. See
+    /// [`lodestone_entity::ai::MobController::cat_sit_target`]'s own doc for
+    /// the seam this feeds.
+    ///
+    /// **Not vanilla's own expanding-square `findNearestBlock` order.**
+    /// Vanilla's search can return a farther cell than a closer one it has
+    /// not yet reached, because it stops at the first ring holding *any*
+    /// valid cell; this instead scans the whole box and keeps the closest
+    /// valid cell by real squared distance — a disclosed, and arguably more
+    /// correct, deviation, not a bug to fix toward bit-identical tie-breaking.
+    ///
+    /// Throttled per mob by [`SimMob::cat_search_cooldown`], the same shape
+    /// [`job_search_cooldown`](SimMob::job_search_cooldown) already uses.
+    ///
+    /// No `wasm32` gate — unlike [`tick_villager_professions`](Self::tick_villager_professions),
+    /// this touches no `std::fs`-backed type.
+    fn tick_cat_block_search(&mut self) {
+        let world = self.world;
+        for mob in &mut self.mobs {
+            if mob.entity_type.path() != "cat" {
+                continue;
+            }
+            if mob.cat_search_cooldown > 0 {
+                mob.cat_search_cooldown -= 1;
+                continue;
+            }
+            mob.cat_search_cooldown = Self::CAT_BLOCK_SEARCH_INTERVAL_TICKS;
+            let pos = mob.position();
+            let origin = BlockPos::new(
+                pos.x.floor() as i32,
+                pos.y.floor() as i32,
+                pos.z.floor() as i32,
+            );
+
+            // `CatSitOnBlockGoal.isValidTarget`: a chest, or a lit furnace, or
+            // a bed's non-head part.
+            let sit = Self::find_nearest_cat_block(
+                world,
+                origin,
+                Self::CAT_SIT_HORIZONTAL_RANGE,
+                -Self::CAT_SIT_VERTICAL_RANGE,
+                Self::CAT_SIT_VERTICAL_RANGE,
+                |state| {
+                    let bare = villager::bare_block_id(state);
+                    bare == "chest"
+                        || (bare == "furnace" && state.contains("lit=true"))
+                        || (bare.ends_with("_bed") && !state.contains("part=head"))
+                },
+            );
+            mob.mob.set_cat_sit_target(sit);
+
+            // `CatLieOnBedGoal.isValidTarget`: any bed part — vanilla makes
+            // no head/foot distinction here, unlike the sit goal above.
+            let bed = Self::find_nearest_cat_block(
+                world,
+                origin,
+                Self::CAT_BED_HORIZONTAL_RANGE,
+                Self::CAT_BED_VERTICAL_MIN,
+                Self::CAT_BED_VERTICAL_MAX,
+                |state| villager::bare_block_id(state).ends_with("_bed"),
+            );
+            mob.mob.set_cat_bed_target(bed);
+        }
+    }
+
+    /// The bounded box scan [`tick_cat_block_search`](Self::tick_cat_block_search)
+    /// runs for both cat goals: every cell in `[-horiz, horiz]` horizontally
+    /// and `[y_min, y_max]` vertically around `origin`, gated by the same
+    /// headroom check vanilla's own `isValidTarget` makes
+    /// (`level.isEmptyBlock(pos.above())`, approximated here as the `#air`
+    /// tag's three members — `air`/`cave_air`/`void_air` — rather than a real
+    /// per-block-state emptiness census). Returns the nearest match's
+    /// stand-on point: one block above the matched cell, block-centred,
+    /// matching `MoveToBlockGoal.getMoveToTarget` (`blockPos.above()`).
+    fn find_nearest_cat_block(
+        world: &ChunkWorld,
+        origin: BlockPos,
+        horiz: i32,
+        y_min: i32,
+        y_max: i32,
+        is_valid: impl Fn(&str) -> bool,
+    ) -> Option<Vec3> {
+        let mut best: Option<(i32, Vec3)> = None;
+        for dy in y_min..=y_max {
+            for dx in -horiz..=horiz {
+                for dz in -horiz..=horiz {
+                    let x = origin.x + dx;
+                    let y = origin.y + dy;
+                    let z = origin.z + dz;
+                    let above = world.block_state(x, y + 1, z);
+                    if !matches!(villager::bare_block_id(above), "air" | "cave_air" | "void_air") {
+                        continue;
+                    }
+                    let state = world.block_state(x, y, z);
+                    if !is_valid(state) {
+                        continue;
+                    }
+                    let dist = dx * dx + dy * dy + dz * dz;
+                    let better = match best {
+                        Some((best_dist, _)) => dist < best_dist,
+                        None => true,
+                    };
+                    if better {
+                        best = Some((
+                            dist,
+                            Vec3::new(f64::from(x) + 0.5, f64::from(y) + 1.0, f64::from(z) + 0.5),
+                        ));
+                    }
+                }
+            }
+        }
+        best.map(|(_, pos)| pos)
     }
 
     /// Ticks between gossip-spread passes — a scope choice, not a
@@ -4303,6 +4450,8 @@ impl<'w> MobSim<'w> {
         // Issue #231: golem-summon-on-hurt. No `wasm32` gate, for
         // `spread_villager_gossip`'s own reason.
         self.tick_golem_summon();
+        // Issue #229: the cat's chest/lit-furnace/bed candidate search.
+        self.tick_cat_block_search();
 
         self.tick_count += 1;
     }
@@ -10154,6 +10303,156 @@ mod golem_summon_tests {
         sim.tick();
 
         assert_eq!(iron_golem_count(&sim), 1, "a nearby hostile alone must be enough to summon, with no villager hurt");
+    }
+}
+
+/// Issue #229: `CatSitOnBlockGoal`/`CatLieOnBedGoal`'s host-computed block
+/// search (`MobSim::tick_cat_block_search`).
+#[cfg(test)]
+mod cat_block_search_tests {
+    use super::*;
+
+    fn flat_world() -> ChunkWorld {
+        ChunkWorld::new(-64, 384)
+    }
+
+    fn spawn_cat(sim: &mut MobSim<'_>, pos: Vec3) -> i32 {
+        sim.spawn_species("minecraft:cat".parse().expect("valid key"), pos).id()
+    }
+
+    /// The headline case: a chest three blocks away, with clear headroom,
+    /// must be found and fed to the sit goal's seam — and the bed seam must
+    /// stay empty, since nothing bed-shaped exists in this world.
+    #[test]
+    fn a_cat_finds_a_nearby_chest_as_its_sit_target() {
+        let mut world = flat_world();
+        world.set_block(3, 0, 0, "minecraft:chest");
+        let mut sim = MobSim::new(&world);
+        let id = spawn_cat(&mut sim, Vec3::new(0.0, 0.0, 0.0));
+
+        sim.tick();
+
+        let cat = sim.get(id).expect("just spawned");
+        let target = cat.mob.cat_sit_target();
+        assert_eq!(
+            target,
+            Some(Vec3::new(3.5, 1.0, 0.5)),
+            "the sit target must be the chest's stand-on point, got {target:?}"
+        );
+        assert_eq!(cat.mob.cat_bed_target(), None, "no bed exists in this world");
+    }
+
+    /// A bed's *foot* part must feed both seams: the sit goal accepts a bed
+    /// foot (`CatSitOnBlockGoal.isValidTarget`'s own third clause) and the
+    /// lie goal accepts any bed part.
+    #[test]
+    fn a_cat_finds_a_nearby_bed_foot_for_both_seams() {
+        let mut world = flat_world();
+        world.set_block(0, 0, 2, "minecraft:red_bed[facing=north,part=foot]");
+        let mut sim = MobSim::new(&world);
+        let id = spawn_cat(&mut sim, Vec3::new(0.0, 0.0, 0.0));
+
+        sim.tick();
+
+        let cat = sim.get(id).expect("just spawned");
+        assert!(cat.mob.cat_sit_target().is_some(), "a bed foot is a valid sit target too");
+        assert!(cat.mob.cat_bed_target().is_some(), "a bed foot is a valid lie target");
+    }
+
+    /// A bed's *head* part must be excluded from the sit seam
+    /// (`CatSitOnBlockGoal.isValidTarget`'s `v != BedPart.HEAD` clause) but
+    /// still accepted by the lie seam, which makes no part distinction at
+    /// all (`CatLieOnBedGoal.isValidTarget`).
+    #[test]
+    fn a_beds_head_part_is_excluded_from_sitting_but_not_from_lying() {
+        let mut world = flat_world();
+        world.set_block(0, 0, 2, "minecraft:red_bed[facing=north,part=head]");
+        let mut sim = MobSim::new(&world);
+        let id = spawn_cat(&mut sim, Vec3::new(0.0, 0.0, 0.0));
+
+        sim.tick();
+
+        let cat = sim.get(id).expect("just spawned");
+        assert_eq!(cat.mob.cat_sit_target(), None, "a bed head must not be a sit target");
+        assert!(cat.mob.cat_bed_target().is_some(), "a bed head is still a valid lie target");
+    }
+
+    /// An unlit furnace is not a valid sit target — only `FurnaceBlock.LIT`
+    /// qualifies (`CatSitOnBlockGoal.isValidTarget`'s second clause).
+    #[test]
+    fn an_unlit_furnace_is_not_a_sit_target_but_a_lit_one_is() {
+        let mut world = flat_world();
+        world.set_block(0, 0, 2, "minecraft:furnace[facing=north,lit=false]");
+        let mut sim = MobSim::new(&world);
+        let id = spawn_cat(&mut sim, Vec3::new(0.0, 0.0, 0.0));
+        sim.tick();
+        assert_eq!(
+            sim.get(id).expect("spawned").mob.cat_sit_target(),
+            None,
+            "an unlit furnace must not be a sit target"
+        );
+
+        let mut world2 = flat_world();
+        world2.set_block(0, 0, 2, "minecraft:furnace[facing=north,lit=true]");
+        let mut sim2 = MobSim::new(&world2);
+        let id2 = spawn_cat(&mut sim2, Vec3::new(0.0, 0.0, 0.0));
+        sim2.tick();
+        assert!(
+            sim2.get(id2).expect("spawned").mob.cat_sit_target().is_some(),
+            "a lit furnace must be a sit target"
+        );
+    }
+
+    /// A chest with no headroom (a solid block directly above it) must be
+    /// rejected — `CatSitOnBlockGoal.isValidTarget`'s
+    /// `level.isEmptyBlock(pos.above())` clause.
+    #[test]
+    fn a_chest_with_no_headroom_is_rejected() {
+        let mut world = flat_world();
+        world.set_block(0, 0, 2, "minecraft:chest");
+        world.set_block(0, 1, 2, "minecraft:stone");
+        let mut sim = MobSim::new(&world);
+        let id = spawn_cat(&mut sim, Vec3::new(0.0, 0.0, 0.0));
+
+        sim.tick();
+
+        assert_eq!(
+            sim.get(id).expect("spawned").mob.cat_sit_target(),
+            None,
+            "a chest with a solid block on top must not be a sit target"
+        );
+    }
+
+    /// An empty world (no chest, furnace or bed anywhere in range) must
+    /// leave both seams empty — the negative control.
+    #[test]
+    fn an_empty_world_finds_neither_target() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = spawn_cat(&mut sim, Vec3::new(0.0, 0.0, 0.0));
+
+        sim.tick();
+
+        let cat = sim.get(id).expect("just spawned");
+        assert_eq!(cat.mob.cat_sit_target(), None);
+        assert_eq!(cat.mob.cat_bed_target(), None);
+    }
+
+    /// A non-cat species (a villager, which also walks around chests every
+    /// day) must never receive a cat block search feed — the species filter
+    /// is load-bearing, not merely a cost optimisation.
+    #[test]
+    fn a_non_cat_species_never_receives_a_cat_block_search_feed() {
+        let mut world = flat_world();
+        world.set_block(1, 0, 0, "minecraft:chest");
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+
+        sim.tick();
+
+        assert_eq!(sim.get(id).expect("spawned").mob.cat_sit_target(), None);
     }
 }
 

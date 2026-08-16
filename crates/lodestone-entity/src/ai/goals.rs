@@ -1347,6 +1347,186 @@ impl Goal for FollowOwnerGoal {
     }
 }
 
+/// A tamed cat walks to and perches on the nearest chest or lit furnace.
+///
+/// Vanilla `CatSitOnBlockGoal(cat, speedModifier)`, a `MoveToBlockGoal`
+/// subclass (flags MOVE + JUMP, `searchRange` 8, `verticalSearchRange` 1 —
+/// the 3-arg convenience constructor's default). The block search itself is
+/// **not** run here — see [`MobController::cat_sit_target`]'s own doc for why
+/// it is a host-computed candidate, following
+/// `docs/mob-block-perception.md`'s explicit guidance for any goal that needs
+/// to search a neighbourhood.
+///
+/// # Two disclosed simplifications
+///
+/// * **`ChestBlockEntity.getOpenCount(level, pos) < 1`** (a chest another
+///   player currently has open is not a valid target) is not checked — that
+///   is live per-connection menu state the host's block search does not read.
+///   A cat may therefore perch on top of an open chest.
+/// * **`maxStayTicks`'s doubly-nested roll** (`nextInt(nextInt(1200) + 1200) +
+///   1200`) is simplified to a single `next_i32(1200) + 1200` — still
+///   randomized, still roughly the same order of magnitude, but not
+///   bit-identical to vanilla's distribution.
+#[derive(Debug, Default)]
+pub struct CatSitOnBlockGoal {
+    speed: f64,
+    target: Vec3,
+    try_ticks: i32,
+    max_stay_ticks: i32,
+    next_start_tick: i32,
+}
+
+impl CatSitOnBlockGoal {
+    /// `CatSitOnBlockGoal(cat, speedModifier)` — vanilla's own `0.8` for the
+    /// cat.
+    #[must_use]
+    pub fn new(speed: f64) -> Self {
+        Self {
+            speed,
+            ..Default::default()
+        }
+    }
+}
+
+impl Goal for CatSitOnBlockGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Move, Flag::Jump])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        if self.next_start_tick > 0 {
+            self.next_start_tick -= 1;
+            return false;
+        }
+        // `MoveToBlockGoal.nextStartTick`'s own `reducedTickDelay(200 +
+        // nextInt(200))` — unhalved, because `MoveToBlockGoal` overrides
+        // `requiresUpdateEveryTick()` to `true` (see `EatBlockGoal`'s own
+        // doc comment on this module for the halving rule this escapes).
+        self.next_start_tick = 200 + mob.next_i32(200);
+        mob.is_tame() && !mob.is_ordered_to_sit() && mob.cat_sit_target().is_some_and(|t| {
+            self.target = t;
+            true
+        })
+    }
+
+    fn can_continue_to_use(&mut self, _mob: &mut dyn MobController) -> bool {
+        self.try_ticks >= -self.max_stay_ticks && self.try_ticks <= 1200
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        mob.move_to(self.target, self.speed);
+        self.try_ticks = 0;
+        self.max_stay_ticks = mob.next_i32(1200) + 1200;
+        mob.set_in_sitting_pose(false);
+    }
+
+    fn stop(&mut self, mob: &mut dyn MobController) {
+        mob.set_in_sitting_pose(false);
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        let reached = distance_sqr(mob.position(), self.target) <= 1.0;
+        if reached {
+            self.try_ticks -= 1;
+        } else {
+            self.try_ticks += 1;
+            if self.try_ticks % 40 == 0 {
+                mob.move_to(self.target, self.speed);
+            }
+        }
+        mob.set_in_sitting_pose(reached);
+    }
+}
+
+/// A tamed cat walks to and lies on the nearest bed.
+///
+/// Vanilla `CatLieOnBedGoal(cat, speedModifier, searchRange)`, a
+/// `MoveToBlockGoal` subclass with `verticalSearchStart = -2` and
+/// `verticalSearchRange = 6` (flags MOVE + JUMP, per its own explicit
+/// `setFlags`). The search itself is host-computed — see
+/// [`MobController::cat_bed_target`]'s own doc, same reasoning as
+/// [`CatSitOnBlockGoal`].
+///
+/// `maxStayTicks`'s doubly-nested roll is simplified the same way
+/// [`CatSitOnBlockGoal`]'s own doc discloses.
+#[derive(Debug, Default)]
+pub struct CatLieOnBedGoal {
+    speed: f64,
+    target: Vec3,
+    try_ticks: i32,
+    max_stay_ticks: i32,
+    next_start_tick: i32,
+}
+
+impl CatLieOnBedGoal {
+    /// `CatLieOnBedGoal(cat, speedModifier, searchRange)` — vanilla's own
+    /// `1.1` for the cat. `searchRange` is not a constructor argument here
+    /// because the search itself lives on the host.
+    #[must_use]
+    pub fn new(speed: f64) -> Self {
+        Self {
+            speed,
+            ..Default::default()
+        }
+    }
+}
+
+impl Goal for CatLieOnBedGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Move, Flag::Jump])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        if self.next_start_tick > 0 {
+            self.next_start_tick -= 1;
+            return false;
+        }
+        // `CatLieOnBedGoal.nextStartTick` overrides the base to a fixed `40`
+        // — unlike `CatSitOnBlockGoal`'s randomised 200-400.
+        self.next_start_tick = 40;
+        mob.is_tame()
+            && !mob.is_ordered_to_sit()
+            && !mob.is_lying()
+            && mob.cat_bed_target().is_some_and(|t| {
+                self.target = t;
+                true
+            })
+    }
+
+    fn can_continue_to_use(&mut self, _mob: &mut dyn MobController) -> bool {
+        self.try_ticks >= -self.max_stay_ticks && self.try_ticks <= 1200
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        mob.move_to(self.target, self.speed);
+        self.try_ticks = 0;
+        self.max_stay_ticks = mob.next_i32(1200) + 1200;
+        mob.set_in_sitting_pose(false);
+    }
+
+    fn stop(&mut self, mob: &mut dyn MobController) {
+        mob.set_lying(false);
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        let reached = distance_sqr(mob.position(), self.target) <= 1.0;
+        if reached {
+            self.try_ticks -= 1;
+        } else {
+            self.try_ticks += 1;
+            if self.try_ticks % 40 == 0 {
+                mob.move_to(self.target, self.speed);
+            }
+        }
+        mob.set_in_sitting_pose(false);
+        if !reached {
+            mob.set_lying(false);
+        } else if !mob.is_lying() {
+            mob.set_lying(true);
+        }
+    }
+}
+
 /// Grazes: stands still, plays out an eat animation, and consumes the grass at
 /// or under the mob's feet.
 ///
@@ -1672,6 +1852,12 @@ mod tests {
         looked_at: Option<Vec3>,
         angry: Option<Vec3>,
         teleported: Vec<Vec3>,
+        tame: bool,
+        ordered_to_sit: bool,
+        sitting_pose: bool,
+        lying: bool,
+        cat_sit: Option<Vec3>,
+        cat_bed: Option<Vec3>,
     }
     impl MobController for ScriptMob {
         fn next_f32(&mut self) -> f32 {
@@ -1787,6 +1973,27 @@ mod tests {
         }
         fn teleport_to(&mut self, target: Vec3) {
             self.teleported.push(target);
+        }
+        fn is_tame(&self) -> bool {
+            self.tame
+        }
+        fn is_ordered_to_sit(&self) -> bool {
+            self.ordered_to_sit
+        }
+        fn set_in_sitting_pose(&mut self, sitting: bool) {
+            self.sitting_pose = sitting;
+        }
+        fn is_lying(&self) -> bool {
+            self.lying
+        }
+        fn set_lying(&mut self, lying: bool) {
+            self.lying = lying;
+        }
+        fn cat_sit_target(&self) -> Option<Vec3> {
+            self.cat_sit
+        }
+        fn cat_bed_target(&self) -> Option<Vec3> {
+            self.cat_bed
         }
     }
 
@@ -2403,5 +2610,123 @@ mod tests {
         goal.tick(&mut mob);
         assert_eq!(mob.move_calls, 0);
         assert_eq!(mob.bred, 0);
+    }
+
+    /// `can_use` needs all three: tame, not ordered to sit, and a host-fed
+    /// candidate — dropping any one must refuse.
+    #[test]
+    fn cat_sit_on_block_requires_tame_not_sitting_and_a_host_candidate() {
+        let mut goal = CatSitOnBlockGoal::new(0.8);
+        let mut untamed = ScriptMob {
+            tame: false,
+            cat_sit: Some(Vec3::new(3.0, 64.0, 0.0)),
+            ..Default::default()
+        };
+        assert!(!goal.can_use(&mut untamed), "an untamed cat must never sit on a block");
+
+        let mut goal2 = CatSitOnBlockGoal::new(0.8);
+        let mut sitting_order = ScriptMob {
+            tame: true,
+            ordered_to_sit: true,
+            cat_sit: Some(Vec3::new(3.0, 64.0, 0.0)),
+            ..Default::default()
+        };
+        assert!(
+            !goal2.can_use(&mut sitting_order),
+            "a cat already ordered to sit must not also chase a block"
+        );
+
+        let mut goal3 = CatSitOnBlockGoal::new(0.8);
+        let mut no_target = ScriptMob {
+            tame: true,
+            cat_sit: None,
+            ..Default::default()
+        };
+        assert!(!goal3.can_use(&mut no_target), "no host candidate means nothing to do");
+
+        let mut goal4 = CatSitOnBlockGoal::new(0.8);
+        let mut eligible = ScriptMob {
+            tame: true,
+            cat_sit: Some(Vec3::new(3.0, 64.0, 0.0)),
+            ..Default::default()
+        };
+        assert!(goal4.can_use(&mut eligible), "tame, not sitting, with a candidate must be eligible");
+    }
+
+    /// Once the mob reaches the target, the sitting pose turns on; while still
+    /// approaching, it must not.
+    #[test]
+    fn cat_sit_on_block_sets_the_pose_only_once_reached() {
+        let mut goal = CatSitOnBlockGoal::new(0.8);
+        let target = Vec3::new(5.0, 64.0, 0.0);
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            tame: true,
+            cat_sit: Some(target),
+            ..Default::default()
+        };
+        assert!(goal.can_use(&mut mob));
+        goal.start(&mut mob);
+        assert_eq!(mob.move_calls, 1, "start must issue exactly one move_to toward the target");
+
+        goal.tick(&mut mob);
+        assert!(!mob.sitting_pose, "still 5 blocks out: must not be sitting yet");
+
+        mob.pos = target;
+        goal.tick(&mut mob);
+        assert!(mob.sitting_pose, "at the target: must be sitting");
+
+        goal.stop(&mut mob);
+        assert!(!mob.sitting_pose, "stopping must clear the pose");
+    }
+
+    /// The lie-on-bed goal's two poses: reaching the bed sets `lying`, not
+    /// `sitting_pose` (a cat lies flat on a bed, it does not perch).
+    #[test]
+    fn cat_lie_on_bed_sets_lying_not_sitting_once_reached() {
+        let mut goal = CatLieOnBedGoal::new(1.1);
+        let target = Vec3::new(2.0, 64.0, 0.0);
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            tame: true,
+            cat_bed: Some(target),
+            ..Default::default()
+        };
+        assert!(goal.can_use(&mut mob));
+        goal.start(&mut mob);
+
+        goal.tick(&mut mob);
+        assert!(!mob.lying, "still approaching: must not be lying yet");
+        assert!(!mob.sitting_pose, "the bed goal never sets the sitting pose");
+
+        mob.pos = target;
+        goal.tick(&mut mob);
+        assert!(mob.lying, "at the bed: must be lying");
+
+        goal.stop(&mut mob);
+        assert!(!mob.lying, "stopping must clear the lying pose");
+    }
+
+    /// A cat already ordered to sit, or already lying, must not chase a bed —
+    /// the two poses are mutually exclusive at the `can_use` gate.
+    #[test]
+    fn cat_lie_on_bed_refuses_when_already_lying_or_ordered_to_sit() {
+        let mut already_lying = CatLieOnBedGoal::new(1.1);
+        let mut lying_mob = ScriptMob {
+            tame: true,
+            lying: true,
+            cat_bed: Some(Vec3::new(2.0, 64.0, 0.0)),
+            ..Default::default()
+        };
+        assert!(!already_lying.can_use(&mut lying_mob), "a cat already lying must not restart the goal");
+
+        let mut ordered = CatLieOnBedGoal::new(1.1);
+        let mut sitting_mob = ScriptMob {
+            tame: true,
+            ordered_to_sit: true,
+            cat_bed: Some(Vec3::new(2.0, 64.0, 0.0)),
+            ..Default::default()
+        };
+        assert!(!ordered.can_use(&mut sitting_mob), "a cat ordered to sit must not chase a bed");
     }
 }

@@ -431,6 +431,19 @@ pub struct NavigatingMob<'w> {
     /// [`MobController::is_ordered_to_sit`] gives: the order survives the goal
     /// being preempted, the pose does not.
     in_sitting_pose: bool,
+    /// Host injection point, refreshed once per tick: the nearest chest/lit
+    /// furnace candidate, or `None`. Drives [`MobController::cat_sit_target`]
+    /// — see that method's own doc for why this is a host-computed candidate
+    /// rather than an in-goal search.
+    cat_sit_target: Option<Vec3>,
+    /// Host injection point, refreshed once per tick: the nearest bed-foot
+    /// candidate, or `None`. Drives [`MobController::cat_bed_target`].
+    cat_bed_target: Option<Vec3>,
+    /// The lying **pose** — vanilla `Cat.DATA_LIES`, written by
+    /// [`CatLieOnBedGoal`](super::goals::CatLieOnBedGoal) through
+    /// [`MobController::set_lying`], and read back by the host to publish
+    /// that flag.
+    lying: bool,
     /// Host injection point: vanilla `PatrollingMonster.patrolling`. Drives
     /// [`MobController::is_patrolling`].
     patrolling: bool,
@@ -555,6 +568,9 @@ impl<'w> NavigatingMob<'w> {
             tame: false,
             ordered_to_sit: false,
             in_sitting_pose: false,
+            cat_sit_target: None,
+            cat_bed_target: None,
+            lying: false,
             patrolling: false,
             patrol_leader: false,
             patrol_target: None,
@@ -977,6 +993,21 @@ impl<'w> NavigatingMob<'w> {
     /// state every mob starts in.
     pub fn set_owner(&mut self, owner: Option<Vec3>) -> &mut Self {
         self.owner = owner;
+        self
+    }
+
+    /// Host injection point: refreshes [`CatSitOnBlockGoal`](super::goals::CatSitOnBlockGoal)'s
+    /// candidate target from the host's bounded block search. `None` when the
+    /// host found nothing (or has not searched this species at all).
+    pub fn set_cat_sit_target(&mut self, target: Option<Vec3>) -> &mut Self {
+        self.cat_sit_target = target;
+        self
+    }
+
+    /// Host injection point: refreshes [`CatLieOnBedGoal`](super::goals::CatLieOnBedGoal)'s
+    /// candidate target from the host's bounded block search.
+    pub fn set_cat_bed_target(&mut self, target: Option<Vec3>) -> &mut Self {
+        self.cat_bed_target = target;
         self
     }
 
@@ -1500,6 +1531,22 @@ impl MobController for NavigatingMob<'_> {
 
     fn set_in_sitting_pose(&mut self, sitting: bool) {
         self.in_sitting_pose = sitting;
+    }
+
+    fn cat_sit_target(&self) -> Option<Vec3> {
+        self.cat_sit_target
+    }
+
+    fn cat_bed_target(&self) -> Option<Vec3> {
+        self.cat_bed_target
+    }
+
+    fn is_lying(&self) -> bool {
+        self.lying
+    }
+
+    fn set_lying(&mut self, lying: bool) {
+        self.lying = lying;
     }
 
     fn is_patrolling(&self) -> bool {

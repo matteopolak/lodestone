@@ -250,6 +250,43 @@ pub trait MobController {
         let _ = sitting;
     }
 
+    /// Host-computed candidate target for `CatSitOnBlockGoal` — the nearest
+    /// chest or lit furnace within its search radius, or `None`. Following
+    /// `docs/mob-block-perception.md`'s own guidance ("a goal that needs to
+    /// *search* a neighbourhood… must not be built on [`block_cues_at_feet`]…
+    /// that is a host-computed candidate position instead"), the same shape
+    /// [`owner_position`](Self::owner_position)/`parent_candidate` already
+    /// use: the host owns the block registry and the bounded search, and
+    /// hands the goal an answer rather than a query.
+    ///
+    /// Defaults to `None`, the honest state for a controller with no such
+    /// feed — the goal simply never finds anything to sit on.
+    fn cat_sit_target(&self) -> Option<Vec3> {
+        None
+    }
+
+    /// Host-computed candidate target for `CatLieOnBedGoal` — the nearest bed
+    /// foot within its search radius, or `None`. A separate field from
+    /// [`cat_sit_target`](Self::cat_sit_target) because the two goals hunt
+    /// different block sets (chests/lit furnaces vs. beds) and vanilla itself
+    /// keeps them as two distinct `MoveToBlockGoal` searches.
+    fn cat_bed_target(&self) -> Option<Vec3> {
+        None
+    }
+
+    /// Whether this mob is in the lying pose — vanilla `Cat.isLying()`
+    /// (`DATA_LIES`), what [`CatLieOnBedGoal`](super::goals::CatLieOnBedGoal)
+    /// toggles once it reaches its bed.
+    fn is_lying(&self) -> bool {
+        false
+    }
+
+    /// Sets the lying pose — vanilla `Cat.setLying`. The host turns this into
+    /// the synced flag.
+    fn set_lying(&mut self, lying: bool) {
+        let _ = lying;
+    }
+
     /// Whether this mob is part of an active pillager patrol — vanilla
     /// `PatrollingMonster.isPatrolling()`.
     ///
