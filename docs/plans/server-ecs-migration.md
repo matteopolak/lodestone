@@ -18,12 +18,46 @@ issue [#433](https://github.com/matteopolak/lodestone/issues/433). Read that doc
 Everything here was re-checked against the tree for this pass, per CLAUDE.md rule 2. Line numbers
 drift under concurrent editing — treat them as "was here at 2026-08-04", and re-grep the symbol.
 
-**Confirmed as the decision record describes:**
+**Status note, 2026-08-15: Phase 0 has landed, Phase 1 has not — "nothing has landed" below is
+stale.** Re-verified against the tree: `crates/lodestone-server/Cargo.toml` now carries `bevy_app`
+and `bevy_ecs` as real dependencies (`workspace = true`, both), and
+`crates/lodestone-server/src/ecs/{mod,plugin,schedules,gate}.rs` exist. `ServerCorePlugin`
+(`ecs/plugin.rs`) matches this plan almost exactly — it installs `ServerTick`/`ServerTickWitness`
+(not `lodestone_ecs::CorePlugin`, per its own doc comment's `WorldTime`/`FrameClock`/`LockHolds`
+table, word-for-word what this plan's Phase 0 entry specifies), opens `ServerBoot`/`NetIngest`/
+`GameTick` with their set chains, and registers `advance_server_tick` in both `ServerBoot` and
+`GameTick`'s `TickSet::Simulate`. This is **production wiring, not only a test scaffold**:
+`IntegratedServer::open_in_memory_with_mobs` and the LAN constructor both call
+`crate::ecs::ServerApp::bootstrap()` synchronously (`integrated.rs`), and each keeps the returned
+`ServerTickWitness` in `Self` (`server_tick: Option<ServerTickWitness>`), so `ServerBoot` provably
+runs once per server — issue #37's own witness-counter idea (see that plugin's doc comment,
+"the exact property issue #37 … lacks"), applied here on the server side before this plan's own
+Phase 0 gate description was written up.
 
-- `crates/lodestone-server/Cargo.toml` has **no** `bevy_app`, `bevy_ecs`, or `lodestone-ecs`
-  dependency. Nothing has landed. `lodestone-world` appears only in `Cargo.toml`, under
-  `[dev-dependencies]` — so the migration adds it as a *real* dependency, which is a genuine new
-  graph edge, not a promotion of an existing one.
+**Phase 1 (the tick loop actually driving the `World`) is still not landed**, and the code says so
+itself: the `World` `ServerApp::bootstrap()` returns is bound to `let _server_world = server_world;`
+inside the tick task and never threaded into `run_tick_loop`/`run_tick_loop_with_weather`
+(`tick.rs` — `grep -n run_schedule crates/lodestone-server/src/tick.rs` is empty). The comment right
+above that binding names its own successor: *"Phase 1 replaces this binding with a `&mut` argument
+to `run_tick_loop` and runs `GameTick` once per iteration."* So `GameTick` runs exactly once, at
+construction, and never again — Phase 0's own "deliberately an island for exactly one phase" is
+real and still true today, not merely a stated intention.
+
+**One census-driven "island" this plan named is independently closed, for an unrelated reason.**
+"LAN hosting spawns no tick loop" (§"Three defects the census surfaced") is no longer true: issue
+#439 unified `bind`'s LAN path onto the same `tick::run_tick_loop_with_weather` call
+`open_in_memory_with_mobs` already used (`integrated.rs`'s own comment, "Issue #439 added
+`[tick::run_tick_loop]`, leaving a single call site"). Phase 3's broadcast-egress replacement of the
+single-consumer `BlockTickFeed`/`ExplosionFeed` (rows 7–8) is still open, but its stated *reason* —
+"LAN gets no tick loop at all" — no longer holds; both server entry points already share one loop
+and one `ServerApp::bootstrap()` call shape.
+
+**Confirmed as the decision record describes, at the time this section was first written:**
+
+- `crates/lodestone-server/Cargo.toml` had **no** `bevy_app`, `bevy_ecs`, or `lodestone-ecs`
+  dependency. That has since changed — see the status note above. `lodestone-world` appears only in
+  `Cargo.toml`, under `[dev-dependencies]` — so the migration adds it as a *real* dependency, which
+  is a genuine new graph edge, not a promotion of an existing one.
 - `ChunkSource::set_block` takes **`&self`** (`crates/lodestone-server/src/chunk.rs`), with
   interior mutability via `OverworldChunkSource.edits: Mutex<HashMap<(i32, i32), ChunkColumn>>`
   (`chunk.rs`). That `&self` is the mechanism that makes the shipped straddle possible: any
