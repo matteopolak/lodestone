@@ -270,6 +270,51 @@ impl WindowApp {
         true
     }
 
+    /// The enchanting table's three enchant-offer rows (issue #613's
+    /// `ContainerButtonClick` remainder). Unlike the beacon's power buttons,
+    /// there is no local pending state to update here — a hit *is* the send,
+    /// gated the same way [`crate::container::enchant::offer_clickable`]
+    /// gates it client-side in vanilla (`EnchantmentMenu.clickMenuButton`,
+    /// run — and only ever gates, never mutates — on the client's own menu
+    /// mirror too). The screen stays open afterwards, matching
+    /// `EnchantmentScreen`: pressing an offer never closes it.
+    pub(super) fn handle_enchant_click(&mut self, menu: &Menu, w: u32, h: u32) -> bool {
+        if menu.special_layout() != Some(lodestone_game::menu::SpecialLayout::Enchanting) {
+            return false;
+        }
+        let Some(open) = self.sim.open_menu() else { return false };
+        let mut costs = [0i32; 3];
+        for (property, value) in &open.data {
+            if let Ok(index) = usize::try_from(*property)
+                && index < 3
+            {
+                costs[index] = *value;
+            }
+        }
+        // `EnchantmentMenu`'s lapis slot is menu index 1 — the same constant
+        // `container::geometry::draw_enchanting_costs` reads.
+        const LAPIS_SLOT: usize = 1;
+        let lapis_count = menu.slot_item(LAPIS_SLOT).map_or(0, lodestone_game::item::ItemStack::count);
+        let xp_level = self.sim.xp().map_or(0, |(level, _)| level);
+        let has_infinite_materials = self.sim.has_infinite_materials();
+        let Some(row) = crate::container::enchant::button_hit_test(
+            menu,
+            self.nav.gui_scale(),
+            w,
+            h,
+            self.cursor.0,
+            self.cursor.1,
+            costs,
+            lapis_count,
+            xp_level,
+            has_infinite_materials,
+        ) else {
+            return false;
+        };
+        self.sim.send_container_button_click(open.window_id, row);
+        true
+    }
+
     /// Report this panel's open/filter state for `book_type` to the server —
     /// vanilla's `ServerboundRecipeBookChangeSettingsPacket`, sent from
     /// `RecipeBookComponent`'s own toggle and filter handlers.

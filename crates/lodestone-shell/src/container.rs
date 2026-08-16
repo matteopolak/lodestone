@@ -37,6 +37,9 @@ mod background;
 /// surface (issue #613's `SetBeaconEffects` remainder) — see its own module
 /// doc.
 pub mod beacon;
+/// The enchanting table's three enchant-offer buttons (issue #613's
+/// `ContainerButtonClick` remainder) — see its own module doc.
+pub mod enchant;
 /// The shared GUI vertex builder — colour, item-sprite, glint, block-model and
 /// background streams. `pub(crate)` because it now has three consumers: the
 /// container screen, the creative screen and the Advancements screen

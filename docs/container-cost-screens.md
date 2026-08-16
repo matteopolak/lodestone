@@ -154,6 +154,24 @@ unstarted subsystem). Both read `frame.cost_data` — the now-confirmed-live
 feed above — and both draw with the `VanillaFont`/`Builder::shadowed_label`
 machinery [`vanilla-hud-text.md`](vanilla-hud-text.md) documents.
 
+**The enchanting table's three offer rows are clickable, not just drawn (issue #613's
+`ContainerButtonClick` remainder).** `crates/lodestone-shell/src/container/enchant.rs`:
+`offer_rect` is the exact same local-widget-pixel geometry `draw_enchanting_costs` already
+draws at (`xo + 60, yo + 14 + 19*i, 108, 19`), so the clickable area and the drawn button can
+never disagree; `offer_clickable` transcribes `EnchantmentMenu.clickMenuButton`'s client-visible
+gate (lapis count, offer cost, experience level, all skipped under `has_infinite_materials`) —
+the same predicate vanilla's own client-side menu mirror runs before sending anything, since
+its `access.execute` is a no-op there. `WindowApp::handle_enchant_click`
+(`crates/lodestone-shell/src/app/container_input.rs`) wires it into the same first-refusal click
+chain the beacon buttons use (`app/lifecycle.rs`), and `Sim::send_container_button_click`
+(`crates/lodestone-shell/src/sim/session.rs`) sends `ClientAction::ContainerButtonClick`. Unlike
+the beacon buttons there is no local pending state — a clickable hit *is* the send, and the
+screen stays open afterwards (vanilla's `EnchantmentScreen` never closes on an offer press).
+Vanilla's other two `ContainerButtonClick` screens (stonecutter recipe list, loom pattern list)
+are out of scope: both need a server-populated selectable-list this tree has no registry sync
+for (`StonecutterMenu`/`LoomMenu`'s `selectableRecipes`), a different shape from the
+container-data-driven enchant offers.
+
 ## How to change it
 
 - Add a fifth `SpecialLayout` variant for a new screen the same way: a
@@ -176,6 +194,10 @@ None — no flags or env vars gate this.
 
 - `crates/lodestone-game/src/{menu.rs,menus.rs,container.rs}` — the model.
 - `crates/lodestone-shell/src/container.rs` — layout, background, draw.
+- `crates/lodestone-shell/src/container/enchant.rs`,
+  `crates/lodestone-shell/src/app/container_input.rs`'s `handle_enchant_click`,
+  `crates/lodestone-shell/src/sim/session.rs`'s `send_container_button_click` — the
+  enchant-offer click producer.
 - `crates/protocol/v770/src/adapter/inventory.rs`'s `handle_play_inventory` — `CONTAINER_SET_DATA` decode (already
   present, unmodified by this work).
 - [`container-screen.md`](container-screen.md) — the general container-screen
