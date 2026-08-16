@@ -1599,6 +1599,49 @@ pub enum ClientEvent {
         /// Whether the event is global rather than distance-limited.
         global: bool,
     },
+    /// An explosion occurred.
+    ///
+    /// One variant carrying two different wire shapes, deliberately: every
+    /// client protocol family from v47 (1.8.9) through v735 (1.16.5) sends
+    /// `packet_explosion`'s own list of removed-block offsets on this same
+    /// packet, while 26.2's `ClientboundExplodePacket` dropped that list in
+    /// favour of a bare block **count** used only to scale cosmetic particle
+    /// spawning (`ClientPacketListener::handleExplosion` ->
+    /// `Level::trackExplosionEffects`) — the real removals now arrive as
+    /// ordinary block-update events instead. See [`Self::affected_blocks`]'s
+    /// own doc for what an empty list means on each family, rather than
+    /// giving 26.2 a second variant for what is, model-side, the same event:
+    /// a blast at a position with a radius, optionally pushing this client.
+    Explosion {
+        /// World-space explosion centre.
+        pos: Vec3,
+        /// Blast radius, in blocks.
+        radius: f32,
+        /// Blocks the explosion removed, as integer offsets from `pos`
+        /// (`pos.floor() + offset` is the removed block's position) —
+        /// `packet_explosion`'s own `affected_block_offsets` on every
+        /// pre-26.2 family (v47/v340/v735), each of which puts the list
+        /// directly on this packet.
+        ///
+        /// **Always empty on a 26.2 (`v770`) connection.**
+        /// `ClientboundExplodePacket` carries only `blockCount: i32` there —
+        /// no positions at all — because the real removals now arrive as
+        /// separate block-update events. A fold reading this field for
+        /// "which blocks did this explosion remove" must treat an empty list
+        /// as "not given by this packet", not as "the explosion removed
+        /// nothing" — the two are indistinguishable from this field alone,
+        /// which is why this variant exists rather than pretending 26.2 has
+        /// the same fidelity.
+        affected_blocks: Vec<[i8; 3]>,
+        /// This client's own knockback impulse from the blast, if any — an
+        /// additive velocity delta, not an absolute velocity.
+        /// `player_motion_x/y/z` on the legacy wire (present unconditionally,
+        /// `[0.0; 3]` when this player is outside the blast — map that to
+        /// `Some([0.0; 3])` there, since the field genuinely is on the wire);
+        /// `playerKnockback` on 26.2, which is a real `Optional<Vec3>` on the
+        /// wire and should map to `None` one-for-one.
+        knockback: Option<Vec3>,
+    },
     /// Particles should spawn.
     Particles {
         /// Canonical particle type key.
@@ -3393,6 +3436,12 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::TitlesCleared { .. }
         | ClientEvent::SectionBlocksChanged { .. }
         | ClientEvent::BlockEvent { .. }
+        // A blast, same category as the two block-update variants just
+        // above: world/block state, not per-entity (no entity owns a
+        // world position) and not a local-player scalar (the knockback it
+        // may carry is a one-shot impulse, not persisted session state) —
+        // see `route`'s own doc for the convention this follows.
+        | ClientEvent::Explosion { .. }
         | ClientEvent::ItemPickup { .. }
         | ClientEvent::WeatherChanged { .. }
         | ClientEvent::BiomeClimates { .. }
@@ -3723,7 +3772,7 @@ mod route_tests {
         // Asserting the two counts agree turns it into evidence a reader can see,
         // and catches a variant named twice.
         assert_eq!(
-            total, 132,
+            total, 133,
             "the `ClientEvent` variant count changed. That is fine and expected — \
              update `docs/event-routing.md` and this number together, which is the \
              whole point of this gate firing."

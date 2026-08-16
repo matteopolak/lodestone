@@ -342,6 +342,139 @@ fn debug_lines_source_draws_visible_pixels() {
     );
 }
 
+/// Headless proof that the plugin-billboard pass — the render half of issue
+/// #161's `ExtractSet::Debug` billboard channel (`docs/plugin-api.md`) —
+/// actually draws pixels through
+/// [`RenderState::set_plugin_billboards_source`], not merely that a pipeline
+/// object exists. Same differential idiom as
+/// `debug_lines_source_draws_visible_pixels` immediately above: render the
+/// same open-sky scene with the source unset and with it returning one
+/// bright, untextured billboard squarely in view, and confirm the second
+/// frame lit pixels the first did not.
+///
+/// This is deliberately the *only* place that calls
+/// `set_plugin_billboards_source` in this repo today — this test proves the
+/// pipeline side works in isolation, the same scope
+/// `debug_lines_source_draws_visible_pixels` documents for its own pass.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn plugin_billboards_source_draws_visible_pixels() {
+    let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+        "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU (or a software adapter such as \
+         LIBGL_ALWAYS_SOFTWARE=1 / WGPU_BACKEND=gl), don't 'skip' — a silent pass here \
+         would assert nothing",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let (w, h) = (320u32, 240u32);
+    let mut target = HeadlessTarget::new(device, w, h, format);
+
+    // Open sky, no terrain at all: nothing else in the scene could account
+    // for a pixel changing between the two frames below.
+    let mut state = RenderState::new(device, queue, format, w, h, None);
+
+    let camera = Camera {
+        position: glam::Vec3::new(0.5, 64.5, -2.0),
+        yaw: 0.0,
+        pitch: 0.0,
+        fov_y_degrees: 70.0,
+        aspect: w as f32 / h as f32,
+        near: 0.05,
+        far: Camera::far_for_render_distance(8, 0),
+    };
+
+    let frame = target.acquire().expect("acquire");
+    state.render(device, queue, frame.view(), &camera, None, &[]);
+    let without_billboards = target.read_texels(device, queue);
+
+    // A large, bright, untextured (`Solid`) billboard squarely in view —
+    // `Solid` rather than `Named`, so this gate proves the pipeline itself
+    // paints pixels without depending on a vanilla atlas being loaded (this
+    // scene passes `None` for `vanilla`, so `plugin_billboard_atlas_sprites`
+    // is empty and any `Named` id would fall back to the same untextured
+    // path anyway — see `gpu/plugin_billboards.rs`'s module doc).
+    state.set_plugin_billboards_source(|| {
+        vec![PluginBillboardInstance {
+            position: [0.0, 64.0, 4.0, 0.0],
+            size_textured: [4.0, 4.0, 0.0, 0.0],
+            uv: [0.0, 0.0, 1.0, 1.0],
+            color: [1.0, 0.0, 0.0, 1.0],
+        }]
+    });
+
+    let frame = target.acquire().expect("acquire");
+    state.render(device, queue, frame.view(), &camera, None, &[]);
+    let with_billboards = target.read_texels(device, queue);
+
+    let mut changed = 0usize;
+    for (a, b) in without_billboards
+        .chunks_exact(4)
+        .zip(with_billboards.chunks_exact(4))
+    {
+        let d = (i32::from(a[0]) - i32::from(b[0])).abs()
+            + (i32::from(a[1]) - i32::from(b[1])).abs()
+            + (i32::from(a[2]) - i32::from(b[2])).abs();
+        if d > 20 {
+            changed += 1;
+        }
+    }
+
+    eprintln!("=== plugin-billboard pixel readback ===");
+    eprintln!("pixels changed by plugin billboard = {changed}");
+
+    assert!(
+        changed > 20,
+        "installing a plugin-billboards source should visibly change the frame, \
+         only {changed} px moved"
+    );
+}
+
+/// Negative control for the test above: with no source installed (the
+/// default state of a fresh [`RenderState`]), two renders of the same scene
+/// must be pixel-identical. Without this, the assertion above could be
+/// satisfied by a pass that draws unconditionally regardless of whether a
+/// source was ever installed.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn no_plugin_billboards_source_installed_draws_nothing() {
+    let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+        "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU (or a software adapter such as \
+         LIBGL_ALWAYS_SOFTWARE=1 / WGPU_BACKEND=gl), don't 'skip' — a silent pass here \
+         would assert nothing",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let (w, h) = (320u32, 240u32);
+    let mut target = HeadlessTarget::new(device, w, h, format);
+    let state = RenderState::new(device, queue, format, w, h, None);
+    let camera = Camera {
+        position: glam::Vec3::new(0.5, 64.5, -2.0),
+        yaw: 0.0,
+        pitch: 0.0,
+        fov_y_degrees: 70.0,
+        aspect: w as f32 / h as f32,
+        near: 0.05,
+        far: Camera::far_for_render_distance(8, 0),
+    };
+
+    let frame = target.acquire().expect("acquire");
+    state.render(device, queue, frame.view(), &camera, None, &[]);
+    let first = target.read_texels(device, queue);
+
+    let frame = target.acquire().expect("acquire");
+    state.render(device, queue, frame.view(), &camera, None, &[]);
+    let second = target.read_texels(device, queue);
+
+    assert_eq!(
+        first, second,
+        "an unset plugin-billboards source must draw nothing"
+    );
+}
+
 /// Negative control for the test above: with no source installed (the
 /// default state of a fresh [`RenderState`]), two renders of the same
 /// scene must be pixel-identical. Without this, the assertion above could

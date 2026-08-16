@@ -265,6 +265,18 @@ impl RenderState {
             self.debug_lines
                 .prepare(queue, &view_proj, &self.debug_lines_source.sample());
 
+        // Same constraint for the plugin-billboard pass (issue #161): sample
+        // and upload before the pass opens. Zero instances (the default,
+        // until a caller installs `set_plugin_billboards_source`) is a cheap
+        // no-op, not a wasted upload — `prepare` returns early on an empty
+        // slice, mirroring the debug-line pass immediately above.
+        let plugin_billboard_count = self.plugin_billboards.prepare(
+            queue,
+            &view_proj,
+            camera,
+            &self.plugin_billboards_source.sample(),
+        );
+
         let mut stats = RenderStats::default();
 
         // This frame's terrain cull, computed **once** and consulted by all three
@@ -1259,6 +1271,12 @@ impl RenderState {
             // is a diagnostic overlay, so it should read clearly over
             // everything real that was drawn this frame.
             self.debug_lines.draw(&mut pass, debug_line_count);
+
+            // Right beside the debug lines, for the same reason: a plugin
+            // billboard (issue #161) is a world-space overlay a plugin author
+            // wants clearly visible, not a piece of real terrain competing
+            // for draw order.
+            self.plugin_billboards.draw(&mut pass, plugin_billboard_count);
 
             // Nametags last of all, real depth-tested against
             // this same terrain+entity depth buffer — see `gpu/nametag.rs`'s

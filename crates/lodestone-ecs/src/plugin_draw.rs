@@ -36,14 +36,22 @@
 //!
 //! **This crate carries no `wgpu::Device`, and does not resolve
 //! [`PluginTexture::Named`] to an actual bound texture.** That is the render
-//! half — a `PluginBillboardRenderer`/`PluginBillboardsSource` pipeline in
-//! `lodestone_shell::gpu`, mirroring `DebugLineRenderer`/`DebugLinesSource`
-//! exactly, plus the one remaining wire (`WindowApp::install_plugin_billboards_source`,
-//! mirroring `install_debug_lines_source`) — is out of this crate's reach by
-//! design (`docs/plugin-api.md`'s "what stays privileged" list: the GPU
+//! half — `lodestone_shell::gpu::plugin_billboards`'s
+//! `PluginBillboardRenderer`/`PluginBillboardsSource`, mirroring
+//! `DebugLineRenderer`/`DebugLinesSource`, plus the wire
+//! (`WindowApp::install_plugin_billboards_source`, mirroring
+//! `install_debug_lines_source`) — is out of this crate's reach by design
+//! (`docs/plugin-api.md`'s "what stays privileged" list: the GPU
 //! device/queue/pipelines are a hardware-constraint firewall no plugin
-//! author can be asked to respect correctly). See that document's own
-//! section on this issue for the exact brokered hunk.
+//! author can be asked to respect correctly). **Landed**: a plugin billboard
+//! now reaches real pixels, proven by
+//! `lodestone_shell::gpu::pixel_gates::plugin_billboards_source_draws_visible_pixels`
+//! (a headless GPU readback gate, with
+//! `no_plugin_billboards_source_installed_draws_nothing` as its negative
+//! control) — see that crate's `gpu/plugin_billboards.rs` for the pipeline and
+//! `docs/plugin-api.md`'s section on this issue for how `PluginTexture::Named`
+//! resolves against the block atlas, and what it falls back to when it does
+//! not.
 //!
 //! # Configuration
 //!
