@@ -599,14 +599,6 @@ impl PlayerState {
         self
     }
 
-    /// Returns a copy of this state with [`Entity.fallDistance`](Self::fall_distance)
-    /// set. Only the airborne branch of `Player.isAboveGround` reads it.
-    #[must_use]
-    pub fn with_fall_distance(mut self, value: f64) -> Self {
-        self.fall_distance = value;
-        self
-    }
-
     /// `Entity.resetFallDistance()` (`Entity.java:2910-2912`) — zeroes
     /// [`Self::fall_distance`].
     ///
@@ -627,21 +619,6 @@ impl PlayerState {
     /// getter, and vanilla only ever varies it per living-entity subclass (none
     /// of which this crate models).
     pub const TICKS_REQUIRED_TO_FREEZE: u32 = 140;
-
-    /// Returns a copy of this state with [`Self::frozen_ticks`] set — a test/
-    /// resume seed, not something a normal driver calls per tick (`tick` owns
-    /// the field once movement starts).
-    #[must_use]
-    pub fn with_frozen_ticks(mut self, value: u32) -> Self {
-        self.frozen_ticks = value;
-        self
-    }
-
-    /// `Entity.isFreezing()` (`Entity.java:3890-3892`): `getTicksFrozen() > 0`.
-    #[must_use]
-    pub fn is_freezing(&self) -> bool {
-        self.frozen_ticks > 0
-    }
 
     /// `Entity.isFullyFrozen()` (`Entity.java:2834-2836`):
     /// `getTicksFrozen() >= getTicksRequiredToFreeze()`.

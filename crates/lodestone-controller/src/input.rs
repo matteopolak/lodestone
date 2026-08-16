@@ -340,12 +340,6 @@ impl InputState {
         self.jump
     }
 
-    /// Whether any movement key is held (used to gate sprint etc.).
-    #[must_use]
-    pub fn any_move(&self) -> bool {
-        self.forward || self.back || self.left || self.right
-    }
-
     /// Whether the sprint key is held (raw, ungated — used by free-fly which
     /// isn't subject to the forward-only sprint gate that walking uses).
     #[must_use]
