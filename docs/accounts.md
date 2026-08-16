@@ -292,10 +292,12 @@ built so nothing in it blocks:
   (rotated) refresh token, and upserts + selects the account in
   `AccountsMetadata` — `metadata` is **not** saved to disk by either function,
   same opt-in-save convention [`migrate::migrate_legacy_cache`] already uses.
-- [`login::resolve_client_id`] reads the `LODESTONE_MS_CLIENT_ID` environment
-  variable and returns a typed [`AuthError::MissingClientId`] if it's unset or
-  blank — see "The client-id gap" below for why there is deliberately no
-  fallback.
+- [`login::resolve_client_id`] returns [`login::DEFAULT_CLIENT_ID`],
+  Lodestone's own registered Azure public-client id, overridable via the
+  `LODESTONE_MS_CLIENT_ID` environment variable. It returns a typed
+  [`AuthError::MissingClientId`] only when that variable is *set* to a blank
+  value — an explicit "use nothing" is a caller mistake, not a request for the
+  default. See "The client id" below.
 
 Nothing here drives a poll loop for the caller. A terminal front end can
 `.wait()` the `PendingLogin`; a future GUI screen can `.poll_once()` from
@@ -324,20 +326,28 @@ instead of a raw HTTP body:
   interactive sign-in.
 - **`AuthError::MissingClientId { env }`** — see below.
 
-### The client-id gap
+### The client id
 
 `flow.rs` has always taken `client_id` as a parameter rather than hardcoding
 one — [`flow::MOJANG_CLIENT_ID`] exists, but it is Mojang's own launcher's
 registered Azure application id, not this project's, and using it would
 misrepresent this client to Microsoft (not just violate a style preference).
 Mojang gates production access to the Minecraft API per registered Azure
-application, and there is no id this crate can invent that would actually
-work. [`login::resolve_client_id`] reads `LODESTONE_MS_CLIENT_ID` and returns
-[`AuthError::MissingClientId`] — a clear, typed error naming exactly what's
-missing — rather than a panic or a confusing 401 the first time Microsoft's
-API is actually called. **Whoever deploys this client still needs to register
-their own Azure AD application and request Minecraft API access for it**;
-nothing in this change does that for you.
+application, so the id matters: it is how Microsoft knows which application is
+asking. Lodestone ships its own registration as [`login::DEFAULT_CLIENT_ID`],
+which is what makes a default possible at all — this was an unset-and-required
+variable for most of its life precisely because no *borrowed* id was
+defensible.
+
+It is deliberately **not** [`flow::MOJANG_CLIENT_ID`], the official launcher's
+registration. Borrowing that would misrepresent this client to Microsoft rather
+than merely break a style rule, and a test pins the inequality so a future
+rotation cannot quietly land on it.
+
+A public-client id is an identifier, not a credential — Azure public clients
+hold no secret, the flow is device-code with PKCE, and every launcher that
+ships one embeds it the same way. Set `LODESTONE_MS_CLIENT_ID` to run against a
+different registration (a fork, a private build, a second app for testing).
 
 ### The driver: `Directive::BeginEncryption` → an actual join
 
@@ -567,8 +577,8 @@ both look identical on disk. That distinction would need a real schema change
 ### The client-id requirement applies here too
 
 Sign-in through this screen calls [`login::resolve_client_id`] exactly like
-the connect path does, so `LODESTONE_MS_CLIENT_ID` must be set for "Add
-account" to get past the very first step — see "The client-id gap" above.
+the connect path does, so it uses the shipped registration unless
+`LODESTONE_MS_CLIENT_ID` overrides it — see "The client id" above.
 Its failure renders as an ordinary typed-error message on the sign-in screen
 ([`accounts::describe_auth_error`]), not a panic or a silent no-op.
 
@@ -597,10 +607,10 @@ own doc comment.
 - `RUST_LOG`/`tracing-subscriber` filtering controls whether the
   `AccountSecrets::open()` fallback warning and the migration `info!` line
   are visible — nothing here is gated behind a separate flag.
-- `LODESTONE_MS_CLIENT_ID` — the registered Azure public-client id
-  to authenticate as. Required for any interactive sign-in or refresh;
-  [`login::resolve_client_id`] returns a typed error rather than falling back
-  to Mojang's own launcher id. See "The client-id gap" above.
+- `LODESTONE_MS_CLIENT_ID` — **optional**; overrides the registered Azure
+  public-client id to authenticate as. Unset, [`login::DEFAULT_CLIENT_ID`]
+  applies. Setting it *blank* is a typed error rather than a fall-back to the
+  default. See "The client id" above.
 
 ## Dependencies
 

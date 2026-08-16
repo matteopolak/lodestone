@@ -317,15 +317,14 @@ set; the worker's `Cancelled` still returns the screen to `Idle`.
 
 Not proved: nothing here has been through a GPU gate or a live sign-in. The
 frames, the geometry and the wrap are all hermetic; what a real Microsoft failure
-looks like on screen still needs an actual failed sign-in with
-`LODESTONE_MS_CLIENT_ID` set.
+looks like on screen still needs an actual failed sign-in.
 
 ## Configuration
 
 None of its own. `gui_scale` sets the logical canvas through
 `render::logical_canvas`; `LODESTONE_DATA_DIR` moves `profiles.json`;
-`LODESTONE_MS_CLIENT_ID` is required for Add Account to get past its first step
-(see [`accounts.md`](./accounts.md)).
+`LODESTONE_MS_CLIENT_ID` optionally overrides the shipped Azure client id
+Add Account authenticates with (see [`accounts.md`](./accounts.md)).
 
 ## Dependencies
 

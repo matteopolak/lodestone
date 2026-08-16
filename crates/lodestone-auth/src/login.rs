@@ -42,23 +42,34 @@ fn session_is_still_usable(expires_at: u64, now: u64) -> bool {
     expires_at > now.saturating_add(SESSION_EXPIRY_MARGIN_SECS)
 }
 
-/// The environment variable naming this build's registered Azure public-client
-/// id.
+/// The environment variable overriding this build's Azure public-client id.
 ///
-/// There is no id this crate can safely default to: Mojang gates production
-/// access to the Minecraft API per Azure application, and
-/// [`crate::flow::MOJANG_CLIENT_ID`] is the *official launcher's* registered
-/// id, not ours — using it would misrepresent this client to Microsoft, not
-/// just violate a style rule. A caller must register their own Azure AD
-/// application, request Minecraft API access for it, and set this variable.
+/// Set it to run against a different Azure AD application — a fork, a private
+/// build, or a second registration for testing. Unset, [`DEFAULT_CLIENT_ID`]
+/// applies.
 pub const CLIENT_ID_ENV: &str = "LODESTONE_MS_CLIENT_ID";
 
-/// Reads [`CLIENT_ID_ENV`] from the process environment.
+/// Lodestone's own registered Azure public-client id.
+///
+/// This is **not** [`crate::flow::MOJANG_CLIENT_ID`], and the distinction is
+/// the whole point: that constant is the *official launcher's* registration,
+/// and Mojang gates production Minecraft API access per Azure application, so
+/// borrowing it would misrepresent this client to Microsoft rather than merely
+/// break a style rule. This id is Lodestone's own registration, which is why
+/// it can ship as a default at all.
+///
+/// A public-client id is an identifier, not a credential — Azure public clients
+/// hold no secret, the OAuth flow is device-code with PKCE, and every launcher
+/// that ships one embeds it the same way. Nothing here is sensitive.
+pub const DEFAULT_CLIENT_ID: &str = "0fe8ae70-f564-4969-9b9d-3438f1eb9a09";
+
+/// Reads [`CLIENT_ID_ENV`], falling back to [`DEFAULT_CLIENT_ID`].
 ///
 /// # Errors
-/// Returns [`AuthError::MissingClientId`] if the variable is unset or empty —
-/// a clear, typed error a UI can render, never a panic and never a silent
-/// fallback to Mojang's own client id.
+/// Returns [`AuthError::MissingClientId`] only when the variable is *set* to a
+/// blank or whitespace-only value — an explicit "use nothing", which is a
+/// caller mistake worth naming rather than silently papering over with the
+/// default. An **unset** variable is not an error.
 #[must_use = "the client id must be used, not discarded"]
 pub fn resolve_client_id() -> Result<String> {
     resolve_client_id_from(std::env::var_os(CLIENT_ID_ENV).as_deref())
@@ -71,9 +82,15 @@ pub fn resolve_client_id() -> Result<String> {
 /// tests exercise this function directly rather than mutating the real
 /// environment.
 fn resolve_client_id_from(value: Option<&std::ffi::OsStr>) -> Result<String> {
-    match value.and_then(|v| v.to_str()) {
-        Some(id) if !id.trim().is_empty() => Ok(id.to_owned()),
-        _ => Err(AuthError::MissingClientId { env: CLIENT_ID_ENV }),
+    match value {
+        // Unset: the shipped registration.
+        None => Ok(DEFAULT_CLIENT_ID.to_owned()),
+        Some(raw) => match raw.to_str() {
+            Some(id) if !id.trim().is_empty() => Ok(id.to_owned()),
+            // Set-but-empty is a caller mistake, not a request for the
+            // default — someone wrote the variable and meant something by it.
+            _ => Err(AuthError::MissingClientId { env: CLIENT_ID_ENV }),
+        },
     }
 }
 
@@ -425,12 +442,35 @@ mod tests {
     use std::ffi::OsString;
 
     #[test]
-    fn missing_client_id_is_a_typed_error_not_a_default() {
-        let err = resolve_client_id_from(None).unwrap_err();
-        assert!(matches!(err, AuthError::MissingClientId { env } if env == CLIENT_ID_ENV));
+    fn an_unset_variable_yields_the_shipped_registration() {
+        assert_eq!(resolve_client_id_from(None).unwrap(), DEFAULT_CLIENT_ID);
+    }
 
+    /// The shipped id must be **ours**, never the official launcher's:
+    /// Mojang gates Minecraft API access per Azure application, so defaulting
+    /// to `flow::MOJANG_CLIENT_ID` would misrepresent this client to Microsoft.
+    /// Pinning the inequality rather than the value keeps this honest if the
+    /// registration is ever rotated.
+    #[test]
+    fn the_shipped_id_is_not_the_official_launchers() {
+        assert_ne!(DEFAULT_CLIENT_ID, crate::flow::MOJANG_CLIENT_ID);
+        assert!(!DEFAULT_CLIENT_ID.trim().is_empty());
+    }
+
+    #[test]
+    fn a_set_variable_overrides_the_default() {
+        let id = resolve_client_id_from(Some(&OsString::from("an-override"))).unwrap();
+        assert_eq!(id, "an-override", "an explicit id must win over the default");
+        assert_ne!(id, DEFAULT_CLIENT_ID);
+    }
+
+    /// Set-but-blank is a caller mistake, not a request for the default —
+    /// someone wrote the variable and meant something by it, and silently
+    /// substituting the shipped id would hide the typo.
+    #[test]
+    fn set_but_blank_is_a_typed_error_rather_than_the_default() {
         let err = resolve_client_id_from(Some(&OsString::from(""))).unwrap_err();
-        assert!(matches!(err, AuthError::MissingClientId { .. }), "blank must not count as set");
+        assert!(matches!(err, AuthError::MissingClientId { env } if env == CLIENT_ID_ENV));
 
         let err = resolve_client_id_from(Some(&OsString::from("   "))).unwrap_err();
         assert!(
