@@ -87,6 +87,20 @@
 //! needs only this claim, not a full work/rest sleep cycle (`SleepInBed`,
 //! `LAST_SLEPT`, issue #231's own remainder) — that is a real, separate gap
 //! this module does not close.
+//!
+//! # Bell claiming ([`BellClaims`]) is the third sibling, and it is what feeds `MEET`
+//!
+//! [`BellClaims`]/[`find_and_claim_bell`] complete the `#village` POI trio
+//! (workstation, bed, bell) with the identical ticket-accounting shape, this
+//! time against `PoiTypes.MEETING`'s 32-ticket cap. Nothing about the raid
+//! trigger needs a bell specifically (`occupied_homes_in_range` already
+//! covers that with beds alone, matching vanilla's own `#village` tag
+//! query), but issue #231's WORK/MEET/REST schedule
+//! (`crates/lodestone-entity`'s `brain::roster::villager_brain`) does: `MEET`
+//! is only eligible once `MemoryModuleType::MEETING_POINT` holds a value,
+//! and nothing wrote that memory until this. `crate::mobs::MobSim::tick_villager_bells`/
+//! `meeting_point` are this ledger's production wiring, the same shape
+//! [`tick_villager_beds`](crate::mobs::MobSim::tick_villager_beds) already is.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -548,6 +562,121 @@ pub fn find_and_claim_bed(origin: BlockPos, world: &ChunkWorld, claims: &mut Bed
     None
 }
 
+/// `PoiTypes.MEETING`'s one registering block (`PoiTypes.bootstrap`'s
+/// `register(MEETING, ImmutableSet.of(Blocks.BELL), 32, 1)`) — a single block
+/// id, unlike [`is_bed_block`]'s sixteen-way tag match. Bare id, same
+/// contract as [`poi_type_for_block`]/[`is_bed_block`].
+#[must_use]
+pub fn is_bell_block(block_id: &str) -> bool {
+    block_id == "bell"
+}
+
+/// The `minecraft:meeting` [`ResourceKey`] every claimed bell is recorded
+/// under — [`home_poi_type`]'s sibling.
+fn meeting_poi_type() -> ResourceKey {
+    ResourceKey::from_str("minecraft:meeting").expect("a literal POI path is always valid")
+}
+
+/// The live, in-memory bell claim ledger — [`WorkstationClaims`]/[`BedClaims`]'s
+/// third sibling, for `PoiTypes.MEETING`. Where a workstation and a bed each
+/// hand out one ticket, a bell hands out
+/// [`crate::poi_storage::max_tickets`]'s `32` — vanilla villagers gather at a
+/// bell in a crowd, not a queue of one.
+///
+/// Feeds [`crate::mobs::villager::MobSim::meeting_point`] no differently from
+/// how [`BedClaims`] feeds [`MobSim::occupied_homes_in_range`] — a claimed
+/// bell is what makes a `MEET`-activity villager (`crate::brain::roster::
+/// villager_brain`'s schedule) have anywhere to walk. Native-only, for
+/// [`WorkstationClaims`]'s own reason.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+pub struct BellClaims {
+    records: HashMap<(i32, i32, i32), PoiRecord>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BellClaims {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ensures a `meeting` record exists at `pos` — [`WorkstationClaims::discover`]'s
+    /// own semantics, reused rather than restated.
+    fn discover(&mut self, pos: BlockPos) -> &mut PoiRecord {
+        let key = (pos.x, pos.y, pos.z);
+        self.records
+            .entry(key)
+            .or_insert_with(|| PoiRecord::new(pos, meeting_poi_type()))
+    }
+
+    /// The bell at `pos` is gone or no longer a bell — vanilla's
+    /// `PoiManager.remove`. Any tickets held there are discarded with the
+    /// record itself.
+    pub fn remove(&mut self, pos: BlockPos) {
+        self.records.remove(&(pos.x, pos.y, pos.z));
+    }
+
+    #[must_use]
+    pub fn get(&self, pos: BlockPos) -> Option<&PoiRecord> {
+        self.records.get(&(pos.x, pos.y, pos.z))
+    }
+
+    /// Claims one of the bell's 32 tickets at `pos`, discovering the record
+    /// first if needed. `false` only once all 32 are held.
+    pub fn try_claim(&mut self, pos: BlockPos) -> bool {
+        self.discover(pos).acquire_ticket()
+    }
+
+    /// Releases a previously claimed ticket at `pos`. A no-op if nothing is
+    /// claimed there.
+    pub fn release(&mut self, pos: BlockPos) {
+        if let Some(record) = self.records.get_mut(&(pos.x, pos.y, pos.z)) {
+            record.release_ticket();
+        }
+    }
+}
+
+/// Runs one bell search from `origin`: a nearest-first scan of `world` for a
+/// bell with a free ticket, claiming the first one found —
+/// [`find_and_claim_bed`]'s own shape, restricted to [`is_bell_block`] and
+/// with no `validateBedPoi`-equivalent extra check (a bell has no "someone is
+/// using it right now" state the way a bed does).
+///
+/// Native-only — see this module's own doc for why.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn find_and_claim_bell(origin: BlockPos, world: &ChunkWorld, claims: &mut BellClaims) -> Option<BlockPos> {
+    let mut candidates: Vec<BlockPos> = Vec::new();
+    for dx in -SEARCH_RADIUS..=SEARCH_RADIUS {
+        for dy in -SEARCH_RADIUS..=SEARCH_RADIUS {
+            for dz in -SEARCH_RADIUS..=SEARCH_RADIUS {
+                let pos = BlockPos::new(origin.x + dx, origin.y + dy, origin.z + dz);
+                let state = world.block_state(pos.x, pos.y, pos.z);
+                if is_bell_block(bare_block_id(state)) {
+                    candidates.push(pos);
+                }
+            }
+        }
+    }
+    candidates.sort_by_key(|p| {
+        let dx = i64::from(p.x - origin.x);
+        let dy = i64::from(p.y - origin.y);
+        let dz = i64::from(p.z - origin.z);
+        dx * dx + dy * dy + dz * dz
+    });
+    for pos in candidates {
+        let state = world.block_state(pos.x, pos.y, pos.z);
+        if !is_bell_block(bare_block_id(state)) {
+            continue;
+        }
+        if claims.try_claim(pos) {
+            return Some(pos);
+        }
+    }
+    None
+}
+
 /// `VillagerData.NEXT_LEVEL_XP_THRESHOLDS` —
 /// `.cache/mc/26.2/src/net/minecraft/world/entity/npc/villager/VillagerData.java`.
 /// Indexed `[level - 1]` for the minimum, `[level]` for the maximum a given
@@ -786,6 +915,78 @@ mod tests {
             found,
             vec![inside],
             "only the claimed bed strictly inside the 64-block radius must come back"
+        );
+    }
+
+    #[test]
+    fn a_bell_registers_as_a_meeting_poi_and_nothing_else_does() {
+        assert!(is_bell_block("bell"));
+        assert!(!is_bell_block("composter"), "a workstation is not a bell");
+        assert!(!is_bell_block("white_bed"), "a bed is not a bell");
+    }
+
+    /// **The magnitude half, against a bed/workstation's own 1-ticket cap**:
+    /// a bell's `PoiTypes.bootstrap` registration is `maxTickets 32`, not `1`
+    /// — a test that only checked "a second claim can happen" would pass
+    /// with a cap of 2 just as well as 32. Claims 32 tickets successfully at
+    /// the same position and asserts the 33rd is refused.
+    #[test]
+    fn a_bell_holds_exactly_thirty_two_tickets_not_one() {
+        let mut claims = BellClaims::new();
+        let pos = BlockPos::new(0, 70, 0);
+        for n in 1..=32 {
+            assert!(claims.try_claim(pos), "ticket {n} of 32 must succeed");
+        }
+        assert!(
+            !claims.try_claim(pos),
+            "a 33rd claim must be refused — the cap is 32, not unlimited"
+        );
+
+        // Control: releasing one of the 32 frees exactly one slot, not the
+        // whole ledger — the same shape `BedClaims::release`'s own test uses.
+        claims.release(pos);
+        assert!(
+            claims.try_claim(pos),
+            "releasing one of 32 tickets must make exactly one claim possible again"
+        );
+        assert!(
+            !claims.try_claim(pos),
+            "and only one — a second claim right after must still be refused"
+        );
+    }
+
+    #[test]
+    fn a_second_villager_can_still_claim_an_already_claimed_bell() {
+        let mut world = ChunkWorld::new(-64, 384);
+        world.set_block(100, 71, 205, "minecraft:bell[attachment=floor,facing=south]");
+
+        let mut claims = BellClaims::new();
+        let first = find_and_claim_bell(BlockPos::new(100, 70, 202), &world, &mut claims);
+        assert_eq!(first, Some(BlockPos::new(100, 71, 205)));
+
+        // Unlike a workstation or a bed (one ticket each), a bell hands out
+        // 32 — so a *second* villager searching the same bell must still
+        // succeed, the opposite discriminator from
+        // `a_second_villager_cannot_claim_an_already_claimed_bed`.
+        let second = find_and_claim_bell(BlockPos::new(100, 70, 206), &world, &mut claims);
+        assert_eq!(
+            second,
+            Some(BlockPos::new(100, 71, 205)),
+            "a bell has 32 tickets, so a second villager must still be able to claim it"
+        );
+    }
+
+    #[test]
+    fn losing_the_bell_loses_the_claim() {
+        let mut claims = BellClaims::new();
+        let pos = BlockPos::new(11, 70, 233);
+        assert!(claims.try_claim(pos));
+        assert!(claims.get(pos).is_some());
+
+        claims.remove(pos);
+        assert!(
+            claims.get(pos).is_none(),
+            "removing the bell must drop its claim, not merely free a ticket"
         );
     }
 

@@ -672,6 +672,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   must error cleanly, and a length prefix must not force an allocation disconnected
   from the bytes actually available. That last property is not hypothetical — this
   harness found it already violated on its first run (see "Bug found" below).
+- [Goat horns](./goat-horns.md) — The wire half of issue #230's goat work:
+  `Goat.DATA_HAS_LEFT_HORN`/ `DATA_HAS_RIGHT_HORN`, the two entity-metadata fields a
+  client's `GoatRenderer` reads to hide a broken horn's cuboid. Until this landed,
+  `MetadataField` had no goat arm at all, so every goat rendered with both horns
+  regardless of server state — the field this doc covers is what makes that state
+  exist and reach the wire.
 - [Golem construction (issue #239)](./golem-construction.md) — Block-pattern
   detection and spawn for the snow golem and the iron golem — given a just-placed
   carved pumpkin or jack o'lantern, does a valid `snow_block`/`iron_block` structure
@@ -1879,12 +1885,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   patch of every major Minecraft release from 1.7.10 through 26.2 — this is the
   checked-in, provenance-tracked record of that release's **protocol number**, its
   save-format **`DataVersion`**, and its **release date**:
-- [Vibration substrate (issue #459, step 2)](./vibration-substrate.md) — A
+- [Vibration substrate (issue #459, steps 2–3)](./vibration-substrate.md) — A
   world-event type (`VibrationEvent`) and a host-side "nearest audible event"
-  resolution — the real, fully-open prerequisite issue #459 named for the warden
-  (and reusable beyond it, for a future sculk sensor). Step 1 of that issue (the Brain
-  driver reaching production) and step 3 (the warden's own anger/dig/emerge behaviour)
-  are both separate, tracked elsewhere; this is step 2 only.
+  resolution (step 2), plus a first real consumer: warden anger and a real melee
+  consequence (step 3, `crates/lodestone-server/src/mobs/warden.rs`). Step 1 of that
+  issue (the Brain driver reaching production) is separate, tracked elsewhere. Step 3
+  here is **partial** — anger accumulation and a genuine in-range hit are built;
+  pursuit, dig/emerge and the sonic boom are not (see `warden.rs`'s own module doc for
+  exactly what and why).
 - [View bobbing, the damage tilt, and view lag](./view-bobbing.md) — Three separate
   mechanisms that a screenshot makes look like one:
 - [Villager professions and trading (issues #243, #245)](./villager-professions-and-trading.md) —
@@ -1907,6 +1915,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   workstation professions, not just farmer), and the purchase/restock mechanics —
   offer uses, demand-driven price fluctuation, and restock cadence — that turn that
   static table into a live, buyable state per villager.
+- [Villager WORK/MEET/REST schedule (issue #231, villager half)](./villager-work-rest-schedule.md) —
+  A real day/night activity schedule for villagers — `IDLE` in the morning and late
+  night, `WORK` at a claimed workstation from tick 2000, `MEET` at a claimed bell from
+  tick 9000, `REST` at a claimed bed from tick 12000 — read straight off 26.2's own
+  `data/minecraft/timeline/villager_schedule.json` rather than transcribed from a
+  pre-26.2 `Schedule` constant. A villager with the relevant POI claimed visibly walks
+  there once its window opens; one without simply falls back to `IDLE`.
 - [Wandering trader (issue #240)](./wandering-trader.md) — The entity-spawn slice of
   the wandering trader: `MobSim::spawn_wandering_trader` spawns a real
   `minecraft:wandering_trader` with 1–2 `minecraft:trader_llama` escorts leashed to

@@ -46,13 +46,14 @@ use super::activity::Activity;
 use super::behavior::{Behavior, BehaviorControl, Leaf};
 use super::behaviors::{
     LookAtTargetSink, MoveToTargetSink, Panic, PrepareRam, RamTarget, RandomStroll,
-    SetPlayerLookTarget,
+    SetPlayerLookTarget, WalkToPoi,
 };
 use super::driver::BrainGoal;
 use super::gate::GateBehavior;
 use super::memory::{MemoryModuleType, MemoryStatus};
 use super::sensor::{
     HurtBySensor, NearestHostileSensor, NearestPlayerSensor, NearestVisibleLivingEntitiesSensor,
+    VillagerPoiSensor,
 };
 use super::Brain;
 
@@ -211,11 +212,68 @@ pub fn scaffold_with_panic(stroll_speed: f32, look_distance: f32, panic_speed_mu
 /// village-bounds concept). `VillagerPanicTrigger.tick`'s
 /// `spawnGolemIfNeeded` (golem-summon-on-hurt) is a separate, unbuilt unit —
 /// nothing here calls it.
+/// `Villager.SPEED_MODIFIER` — the one figure every non-panic villager
+/// package (`WORK`, `REST`, `MEET`, `IDLE`) is built with
+/// (`ActivityData.create(Activity.WORK, VillagerGoalPackages.getWorkPackage(profession, 0.5F), …)`
+/// and its three siblings, all literal `0.5F`).
+pub const VILLAGER_SPEED_MODIFIER: f32 = 0.5;
+
+/// `data/minecraft/timeline/villager_schedule.json`'s
+/// `minecraft:gameplay/villager_activity` track (the non-baby schedule;
+/// `baby_villager_activity`'s `PLAY`/`REST` pairing is not ported — this
+/// crate has no separate baby-villager brain). Read directly off the shipped
+/// JSON, not transcribed from a Java constant, since 26.2 moved the vanilla
+/// schedule tables into data.
+const VILLAGER_SCHEDULE: &[(i32, Activity)] = &[
+    (10, Activity::IDLE),
+    (2000, Activity::WORK),
+    (9000, Activity::MEET),
+    (11000, Activity::IDLE),
+    (12000, Activity::REST),
+];
+
+/// A villager's brain: the [`scaffold`] plus a real WORK/MEET/REST/IDLE
+/// day schedule (issue #231's remaining half — professions/POI claiming
+/// itself is `crate::mobs::villager` in the server crate, out of this
+/// crate's scope) and the villager's own Activity-swap panic.
+///
+/// # What WORK/MEET/REST actually do, against `VillagerGoalPackages`
+///
+/// Each is a single [`WalkToPoi`] behaviour reading the position a host
+/// claimed into [`MemoryModuleType::JOB_SITE`]/`HOME`/`MEETING_POINT`
+/// (fed every tick by [`VillagerPoiSensor`], since this crate's `BrainMob`
+/// seam has no live claim-ledger reference for a behaviour to call back
+/// into, unlike vanilla's `AcquirePoi`/`YieldJobSite` which write the
+/// memory themselves) — same close-enough distances as vanilla's own
+/// `SetWalkTargetFromBlockMemory` calls (`9`/`1`/`6` blocks). **Not ported**:
+/// `WorkAtPoi`/`WorkAtComposter` (the actual profession-specific work
+/// animation/particle), `ShowTradesToPlayer`/`SetLookAndInteract`
+/// (villager-initiated trade UI), `SleepInBed` (the sleep pose and bed
+/// occupancy flag), `SocializeAtBell`/`StrollAroundPoi` (wandering near the
+/// claim rather than beelining to its exact centre), and `GiveGiftToHero`.
+/// A villager under this port reaches its claimed workstation, bed or bell
+/// and stands there — the day/night activity switch and the walk are real;
+/// what a villager *does* once arrived is not.
+///
+/// **`WORK` requires [`MemoryModuleType::JOB_SITE`] present and `MEET`
+/// requires [`MemoryModuleType::MEETING_POINT`] present**, exactly
+/// `Villager.java`'s own `ImmutableSet.of(Pair.of(…, VALUE_PRESENT))` —
+/// an unemployed villager or one that never claimed a bell simply never
+/// becomes eligible for that activity and the schedule falls back to
+/// `IDLE` instead (`Brain::set_active_activity_if_possible`'s own
+/// fallback). `REST` carries no such requirement in vanilla either (a
+/// homeless villager still "rests", just with nowhere to walk to — see
+/// `getRestPackage`'s own `RunOne` fallback for `HOME` absent, not ported
+/// here), so it is registered with an empty condition list.
+///
+/// See [`brain_for`]'s own doc for why [`Activity::PANIC`] is a
+/// candidate-list swap rather than part of this schedule.
 #[must_use]
 pub fn villager_brain() -> Brain {
     let mut brain = scaffold(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE);
     brain.add_sensor(Box::new(HurtBySensor));
     brain.add_sensor(Box::new(NearestHostileSensor));
+    brain.add_sensor(Box::new(VillagerPoiSensor));
     // `AnimalPanic(0.5F)` is `VillagerGoalPackages.getPanicPackage`'s own
     // `speedModifier` argument passed from `Villager.java:164`
     // (`getPanicPackage(0.5F)`), distinct from every `PANIC_SPEED_MULTIPLIER`
@@ -229,6 +287,42 @@ pub fn villager_brain() -> Brain {
         ],
         Vec::new(),
     );
+    brain.add_activity(
+        Activity::WORK,
+        vec![(
+            2,
+            leaf(WalkToPoi::new(
+                MemoryModuleType::JOB_SITE,
+                VILLAGER_SPEED_MODIFIER,
+                9,
+            )),
+        )],
+        vec![(MemoryModuleType::JOB_SITE, MemoryStatus::ValuePresent)],
+        Vec::new(),
+    );
+    brain.add_activity(
+        Activity::MEET,
+        vec![(
+            2,
+            leaf(WalkToPoi::new(
+                MemoryModuleType::MEETING_POINT,
+                VILLAGER_SPEED_MODIFIER,
+                6,
+            )),
+        )],
+        vec![(MemoryModuleType::MEETING_POINT, MemoryStatus::ValuePresent)],
+        Vec::new(),
+    );
+    brain.add_activity(
+        Activity::REST,
+        vec![(
+            2,
+            leaf(WalkToPoi::new(MemoryModuleType::HOME, VILLAGER_SPEED_MODIFIER, 1)),
+        )],
+        Vec::new(),
+        Vec::new(),
+    );
+    brain.set_schedule(VILLAGER_SCHEDULE.to_vec());
     brain
 }
 
@@ -307,11 +401,23 @@ pub fn brain_for(species: &str) -> Option<BrainGoal> {
     // ([`villager_brain`]) and a candidate list that actually offers `PANIC`
     // — `BrainGoal::idle` only ever offers `IDLE`, which would build the
     // activity and then never let it become active.
+    //
+    // **Deliberately just `[PANIC]`, not `[PANIC, IDLE]`.**
+    // `BrainGoal::tick` runs this candidate check unconditionally every
+    // tick, and `set_active_activity_to_first_valid` stops at the first
+    // eligible candidate — `IDLE` has no requirements at all
+    // (`villager_brain`'s scaffold registers it with an empty condition
+    // list), so it is *always* eligible. Leaving it in this list would mean
+    // every tick that is not itself the (throttled, every-20-ticks) schedule
+    // check would force the villager back to `IDLE`, fighting
+    // `update_activity_from_schedule` and making `WORK`/`MEET`/`REST` flicker
+    // on for one tick in twenty and off for the rest. Dropping `IDLE` here
+    // is safe precisely because `villager_brain` carries a real schedule
+    // (`Brain::has_schedule`) whose own fallback is already `IDLE` — see
+    // `BrainGoal::tick`'s own doc for the split this candidate list and the
+    // schedule now share.
     if species == "villager" {
-        return Some(BrainGoal::new(
-            villager_brain(),
-            vec![Activity::PANIC, Activity::IDLE],
-        ));
+        return Some(BrainGoal::new(villager_brain(), vec![Activity::PANIC]));
     }
     // Same shape as the villager special-case above: a goat needs both a
     // brain with an extra activity (`RAM`) and a candidate list that offers

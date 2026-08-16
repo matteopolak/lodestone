@@ -178,6 +178,26 @@ pub struct NavigatingMob<'w> {
     /// host that ticks a [`crate::brain::Brain`] has any reason to populate
     /// it.
     nearby_entities: Vec<crate::brain::NearbyBrainEntity>,
+    /// Host-injected world time-of-day, `0..24000` — feeds
+    /// [`BrainMob::day_time`], what a villager's schedule
+    /// (`crate::brain::roster::villager_brain`) switches `WORK`/`MEET`/`REST`
+    /// against. `0` (perpetual midnight) until a host that ticks a real world
+    /// clock calls [`set_day_time`](Self::set_day_time) — see that method's
+    /// own doc for why this is a *different* clock from
+    /// [`tick_count`](Self::tick_count).
+    day_time: i32,
+    /// Host-injected claimed job-site position — feeds [`BrainMob::job_site`],
+    /// which [`crate::brain::VillagerPoiSensor`] copies into
+    /// [`crate::brain::MemoryModuleType::JOB_SITE`] each tick. `None` until a
+    /// host tracking a live workstation claim calls
+    /// [`set_job_site`](Self::set_job_site).
+    job_site: Option<Vec3>,
+    /// Host-injected claimed bed position — [`job_site`](Self::job_site)'s
+    /// sibling for [`BrainMob::home`]/`MemoryModuleType::HOME`.
+    home: Option<Vec3>,
+    /// Host-injected claimed bell position — [`job_site`](Self::job_site)'s
+    /// sibling for [`BrainMob::meeting_point`]/`MemoryModuleType::MEETING_POINT`.
+    meeting_point: Option<Vec3>,
     /// The block the current path was computed toward, so `move_to` reuses the
     /// active path instead of recomputing every tick (vanilla `moveTo` reuse).
     active_target_block: Option<BlockPos>,
@@ -531,6 +551,10 @@ impl<'w> NavigatingMob<'w> {
             attack_target: None,
             main_hand: None,
             nearby_entities: Vec::new(),
+            day_time: 0,
+            job_site: None,
+            home: None,
+            meeting_point: None,
             active_target_block: None,
             last_look: None,
             jumping: false,
@@ -940,6 +964,35 @@ impl<'w> NavigatingMob<'w> {
     /// own doc for what reads it.
     pub fn set_nearby_entities(&mut self, entities: Vec<crate::brain::NearbyBrainEntity>) -> &mut Self {
         self.nearby_entities = entities;
+        self
+    }
+
+    /// Host injection point: the real world time-of-day, `0..24000` — see
+    /// [`day_time`](Self::day_time)'s own field doc for what reads it and why
+    /// it is not derived from this mob's own [`tick_count`](Self::tick_count).
+    pub fn set_day_time(&mut self, day_time: i32) -> &mut Self {
+        self.day_time = day_time;
+        self
+    }
+
+    /// Host injection point: this villager's claimed job-site position, or
+    /// `None` — see [`job_site`](Self::job_site)'s own field doc.
+    pub fn set_job_site(&mut self, job_site: Option<Vec3>) -> &mut Self {
+        self.job_site = job_site;
+        self
+    }
+
+    /// Host injection point: this villager's claimed bed position, or `None`
+    /// — [`set_job_site`](Self::set_job_site)'s sibling.
+    pub fn set_home(&mut self, home: Option<Vec3>) -> &mut Self {
+        self.home = home;
+        self
+    }
+
+    /// Host injection point: this villager's claimed bell position, or `None`
+    /// — [`set_job_site`](Self::set_job_site)'s sibling.
+    pub fn set_meeting_point(&mut self, meeting_point: Option<Vec3>) -> &mut Self {
+        self.meeting_point = meeting_point;
         self
     }
 
@@ -1827,6 +1880,30 @@ impl BrainMob for NavigatingMob<'_> {
 
     fn nearby_entities(&self) -> Vec<crate::brain::NearbyBrainEntity> {
         self.nearby_entities.clone()
+    }
+
+    /// The host-injected world time-of-day — see
+    /// [`day_time`](Self::day_time)'s own field doc.
+    fn day_time(&self) -> i32 {
+        self.day_time
+    }
+
+    /// The host-injected claimed job-site position — see
+    /// [`job_site`](Self::job_site)'s own field doc.
+    fn job_site(&self) -> Option<Vec3> {
+        self.job_site
+    }
+
+    /// The host-injected claimed bed position — see [`home`](Self::home)'s
+    /// own field doc.
+    fn home(&self) -> Option<Vec3> {
+        self.home
+    }
+
+    /// The host-injected claimed bell position — see
+    /// [`meeting_point`](Self::meeting_point)'s own field doc.
+    fn meeting_point(&self) -> Option<Vec3> {
+        self.meeting_point
     }
 
     /// Delegates to the same `attacks` queue [`MobController::attack`] writes

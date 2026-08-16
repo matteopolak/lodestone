@@ -146,7 +146,7 @@ tree (`/usr/bin/grep -rn "Poi\|gossip\|Gossip"` across `lodestone-server`, `lode
 
 | issue | verdict |
 |---|---|
-| #231 | **Half stale.** Written as if the Brain behaviour system needs standing up; `Brain`, `BrainGoal`, activities, schedule support and the villager's production scaffold all landed with the Brain-driver commit ("the Brain AI system reaches a real mob on a real path"). What is actually missing is the villager *package* and the world-facts seam (§3.2). It also bundles **piglin**, which shares only the scheduler with the economy — split out (§6). |
+| #231 | **Half stale, and the other half has since landed.** Written as if the Brain behaviour system needs standing up; `Brain`, `BrainGoal`, activities, schedule support and the villager's production scaffold all landed with the Brain-driver commit ("the Brain AI system reaches a real mob on a real path"). What was actually missing — the villager *package* and the world-facts seam (§3.2) — is now built: `docs/villager-work-rest-schedule.md` is V2, landed close to this plan's own shape (schedule mode in `BrainGoal::tick`, `WalkToPoi` behaviours, `day_time`/POI-position feed into `NavigatingMob`, `BellClaims` as the third POI ledger). Golem-summon-on-hurt (§6's own "not built here") also landed separately, in `MobSim::tick_golem_summon`. Still open: piglin's own Brain package (bundled into #231, deliberately split out below), and V2's own disclosed cuts (no `WorkAtPoi`/sleep pose/trade-UI-at-work, no baby schedule). |
 | #243 | Accurate. POI registry genuinely absent. The "shared POI-count query with the iron-golem issue" note stands — design `PoiIndex`'s query for both callers, but do not build the golem half (§6). |
 | #244 | Accurate — "no gossip propagation exists" re-verified true. |
 | #245 | **Right direction, stale mechanism.** "Pull from the 26.2 jar's registry data, not minecraft-data" is correct, but there is no extraction problem left: trades are plain JSONs on disk (§1.5). The body also doesn't know the client data half (`MERCHANT_OFFERS` decode → `SessionTrades`) already exists and that the merchant *screen* was deliberately excluded — the UI is the missing client piece, not the decode. |
@@ -283,7 +283,8 @@ banner.
 
 ### Wave 2 — two units, parallel with each other
 
-**V2 — schedule, commute, and panic: the villager Brain package (#231's villager half).**
+**V2 — schedule, commute, and panic: the villager Brain package (#231's villager half). Landed** —
+see `docs/villager-work-rest-schedule.md`; panic itself landed earlier (`docs/brain-target-acquisition.md`).
 *Primary cluster:* new `crates/lodestone-entity/src/brain/villager.rs` (the package builder:
 CORE/IDLE/WORK/MEET/REST/PANIC per `VillagerGoalPackages.java`); new behaviours beside
 `brain/behaviors.rs`; new memory consts in `brain/memory.rs`; the schedule mode in

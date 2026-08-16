@@ -71,6 +71,19 @@ pub trait BrainMob {
     /// measured against this.
     fn game_time(&self) -> i64;
 
+    /// The current time of day, `0..24000` — vanilla's `dayTime % 24000`,
+    /// what [`Brain::update_activity_from_schedule`](super::Brain::update_activity_from_schedule)
+    /// switches a scheduled activity against. Deliberately **not**
+    /// [`game_time`](Self::game_time): that is a per-mob monotonic tick
+    /// counter with no relation to the world clock (see its own doc), while a
+    /// schedule needs the *real* time of day. Defaults to `0` (perpetual
+    /// midnight) so every existing implementor, including hermetic test
+    /// doubles, keeps compiling; only a host with a real world clock overrides
+    /// it.
+    fn day_time(&self) -> i32 {
+        0
+    }
+
     /// The mob's current position.
     fn position(&self) -> Vec3;
 
@@ -134,6 +147,29 @@ pub trait BrainMob {
     /// already delegates its own range decision to the host.
     fn nearby_entities(&self) -> Vec<NearbyBrainEntity> {
         Vec::new()
+    }
+
+    /// This villager's claimed job-site position, if any — feeds
+    /// [`MemoryModuleType::JOB_SITE`](super::MemoryModuleType::JOB_SITE)
+    /// through [`super::sensor::VillagerPoiSensor`]. Defaults to `None` so
+    /// every existing implementor keeps compiling; only a host tracking a
+    /// live workstation claim (`MobSim`) overrides it.
+    fn job_site(&self) -> Option<Vec3> {
+        None
+    }
+
+    /// This villager's claimed bed position, if any — feeds
+    /// [`MemoryModuleType::HOME`](super::MemoryModuleType::HOME) the same way
+    /// [`job_site`](Self::job_site) feeds `JOB_SITE`.
+    fn home(&self) -> Option<Vec3> {
+        None
+    }
+
+    /// This villager's claimed bell position, if any — feeds
+    /// [`MemoryModuleType::MEETING_POINT`](super::MemoryModuleType::MEETING_POINT)
+    /// the same way [`job_site`](Self::job_site) feeds `JOB_SITE`.
+    fn meeting_point(&self) -> Option<Vec3> {
+        None
     }
 
     /// Records a melee hit landing on whatever occupies `target` this tick —

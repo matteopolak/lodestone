@@ -80,6 +80,18 @@ impl MemoryModuleType {
     /// performs that countdown-and-auto-clear, so no separate ticking
     /// behaviour is needed to reproduce it.
     pub const RAM_COOLDOWN_TICKS: Self = Self("ram_cooldown_ticks");
+    /// The claimed workstation position — vanilla's `MemoryModuleType.JOB_SITE`
+    /// (a `GlobalPos`, narrowed here to the position half; this crate has no
+    /// dimension concept at the brain seam). Villager `WORK` requires this
+    /// present (`Villager.java`'s own `ActivityData.create(Activity.WORK, …,
+    /// ImmutableSet.of(Pair.of(MemoryModuleType.JOB_SITE, VALUE_PRESENT)))`).
+    pub const JOB_SITE: Self = Self("job_site");
+    /// The claimed bed position — vanilla's `MemoryModuleType.HOME`.
+    pub const HOME: Self = Self("home");
+    /// The claimed bell position — vanilla's `MemoryModuleType.MEETING_POINT`.
+    /// Villager `MEET` requires this present, the same shape as `JOB_SITE`
+    /// above.
+    pub const MEETING_POINT: Self = Self("meeting_point");
 }
 
 /// The presence requirement a behaviour places on a memory.

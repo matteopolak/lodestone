@@ -193,11 +193,150 @@ impl Sensor for NearestVisibleLivingEntitiesSensor {
     }
 }
 
+/// Writes [`MemoryModuleType::JOB_SITE`]/[`MemoryModuleType::HOME`]/
+/// [`MemoryModuleType::MEETING_POINT`] from [`BrainMob::job_site`]/
+/// [`BrainMob::home`]/[`BrainMob::meeting_point`] — the villager POI-claim
+/// analogue of [`HurtBySensor`]: a host tracks the claim ledger, this sensor
+/// only copies the answer into memory each tick.
+///
+/// Vanilla feeds these through `AcquirePoi`/`YieldJobSite` behaviours writing
+/// straight into the brain rather than a `Sensor`; this crate's `BrainMob`
+/// seam has no reference back into a live claim ledger for a behaviour to
+/// call, so a sensor is the seam this port has instead — the same
+/// substitution `NearestHostileSensor` makes for vanilla's own imperative
+/// writers.
+#[derive(Debug, Default)]
+pub struct VillagerPoiSensor;
+
+impl Sensor for VillagerPoiSensor {
+    fn tick(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob) {
+        match mob.job_site() {
+            Some(pos) => mem.set(MemoryModuleType::JOB_SITE, MemoryValue::Pos(pos)),
+            None => mem.erase(MemoryModuleType::JOB_SITE),
+        }
+        match mob.home() {
+            Some(pos) => mem.set(MemoryModuleType::HOME, MemoryValue::Pos(pos)),
+            None => mem.erase(MemoryModuleType::HOME),
+        }
+        match mob.meeting_point() {
+            Some(pos) => mem.set(MemoryModuleType::MEETING_POINT, MemoryValue::Pos(pos)),
+            None => mem.erase(MemoryModuleType::MEETING_POINT),
+        }
+    }
+
+    fn output_memories(&self) -> Vec<MemoryModuleType> {
+        vec![
+            MemoryModuleType::JOB_SITE,
+            MemoryModuleType::HOME,
+            MemoryModuleType::MEETING_POINT,
+        ]
+    }
+
+    fn name(&self) -> &'static str {
+        "villager_poi"
+    }
+}
+
 /// Squared Euclidean distance — a plain helper since [`lodestone_model::Vec3`]
 /// carries no `distance_squared` of its own.
 fn distance_sqr(a: Vec3, b: Vec3) -> f64 {
     let (dx, dy, dz) = (a.x - b.x, a.y - b.y, a.z - b.z);
     dx * dx + dy * dy + dz * dz
+}
+
+#[cfg(test)]
+mod villager_poi_tests {
+    use super::*;
+
+    struct FixedPoi {
+        job_site: Option<Vec3>,
+        home: Option<Vec3>,
+        meeting_point: Option<Vec3>,
+    }
+
+    impl BrainMob for FixedPoi {
+        fn next_i32(&mut self, _bound: i32) -> i32 {
+            0
+        }
+        fn next_f32(&mut self) -> f32 {
+            0.0
+        }
+        fn game_time(&self) -> i64 {
+            0
+        }
+        fn position(&self) -> Vec3 {
+            Vec3::default()
+        }
+        fn move_to(&mut self, _target: Vec3, _speed: f32) -> bool {
+            true
+        }
+        fn navigation_done(&self) -> bool {
+            true
+        }
+        fn stop_navigation(&mut self) {}
+        fn look_at(&mut self, _target: Vec3) {}
+        fn random_land_pos(&mut self, _max_xz: i32, _max_y: i32) -> Option<Vec3> {
+            None
+        }
+        fn job_site(&self) -> Option<Vec3> {
+            self.job_site
+        }
+        fn home(&self) -> Option<Vec3> {
+            self.home
+        }
+        fn meeting_point(&self) -> Option<Vec3> {
+            self.meeting_point
+        }
+    }
+
+    /// All three memories are independent: only the two that are `Some` on
+    /// the host end up present, and a value that was never set (`home`) stays
+    /// absent rather than picking up one of the others' positions.
+    #[test]
+    fn writes_only_the_present_claims_and_leaves_the_rest_absent() {
+        let mut mob = FixedPoi {
+            job_site: Some(Vec3::new(1.0, 2.0, 3.0)),
+            home: None,
+            meeting_point: Some(Vec3::new(4.0, 5.0, 6.0)),
+        };
+        let mut mem = Memories::new();
+        mem.register(MemoryModuleType::JOB_SITE);
+        mem.register(MemoryModuleType::HOME);
+        mem.register(MemoryModuleType::MEETING_POINT);
+        let mut sensor = VillagerPoiSensor;
+        sensor.tick(&mut mem, &mut mob);
+        assert_eq!(
+            mem.get(MemoryModuleType::JOB_SITE),
+            Some(&MemoryValue::Pos(Vec3::new(1.0, 2.0, 3.0)))
+        );
+        assert!(!mem.has_value(MemoryModuleType::HOME));
+        assert_eq!(
+            mem.get(MemoryModuleType::MEETING_POINT),
+            Some(&MemoryValue::Pos(Vec3::new(4.0, 5.0, 6.0)))
+        );
+    }
+
+    /// A claim that is lost (the host now answers `None`) clears the stale
+    /// memory rather than leaving last tick's position behind — the same
+    /// clearing control every other sensor test in this file makes.
+    #[test]
+    fn losing_a_claim_clears_the_stale_memory() {
+        let mut mob = FixedPoi {
+            job_site: Some(Vec3::new(1.0, 2.0, 3.0)),
+            home: None,
+            meeting_point: None,
+        };
+        let mut mem = Memories::new();
+        mem.register(MemoryModuleType::JOB_SITE);
+        mem.register(MemoryModuleType::HOME);
+        mem.register(MemoryModuleType::MEETING_POINT);
+        let mut sensor = VillagerPoiSensor;
+        sensor.tick(&mut mem, &mut mob);
+        assert!(mem.has_value(MemoryModuleType::JOB_SITE));
+        mob.job_site = None;
+        sensor.tick(&mut mem, &mut mob);
+        assert!(!mem.has_value(MemoryModuleType::JOB_SITE));
+    }
 }
 
 #[cfg(test)]
