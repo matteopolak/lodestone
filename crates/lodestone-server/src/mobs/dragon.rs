@@ -356,7 +356,8 @@ impl<'w> MobSim<'w> {
     pub fn boss_bars(&self) -> Vec<crate::protocol::BossBarSnapshot> {
         let mut ids: Vec<i32> = self.dragons.keys().copied().collect();
         ids.sort_unstable();
-        ids.into_iter()
+        let mut out: Vec<crate::protocol::BossBarSnapshot> = ids
+            .into_iter()
             .filter_map(|id| {
                 let d = self.dragons.get(&id)?;
                 let bar = fight::boss_bar_value(false, d.health, d.max_health);
@@ -367,7 +368,13 @@ impl<'w> MobSim<'w> {
                     visible: bar.visible,
                 })
             })
-            .collect()
+            .collect();
+        // The single public boss-bar entry point covers both boss fights —
+        // see `mobs::wither`'s own doc for why its bar is appended here
+        // rather than requiring a second call site in `crate::tick` (an
+        // off-limits, shared file for this change).
+        self.push_wither_boss_bars(&mut out);
+        out
     }
 }
 
