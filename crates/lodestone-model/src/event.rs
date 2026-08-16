@@ -2768,6 +2768,12 @@ pub struct RecipeBookEntry {
     /// Item ids the recipe's result slot can display. Usually one; a display can
     /// legitimately offer several (a `composite`, or a tag-driven slot).
     pub result_items: Vec<i32>,
+    /// Item ids the display's trailing `craftingStation`/`furnace` `SlotDisplay`
+    /// can show — the small corner icon a recipe-unlock toast draws (a crafting
+    /// table, furnace, etc.). Every `RecipeDisplay` variant carries this as its
+    /// final `SlotDisplay`. Usually one entry; empty for a display whose station
+    /// slot is itself `empty` or unresolved.
+    pub station_items: Vec<i32>,
     /// Whether this unlock should raise a toast (`flags` bit 0).
     pub notification: bool,
     /// Whether its recipe-book tab should highlight (`flags` bit 1).

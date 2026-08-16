@@ -62,6 +62,8 @@ impl WindowApp {
             recipe_book_revision: 0,
             recipe_panel: RecipePanelState::default(),
             recipe_toasts: lodestone_game::recipe::RecipeToastQueue::new(),
+            recipe_toast_seen: std::collections::HashSet::new(),
+            recipe_toast_synced: false,
             bundle_selection: None,
             // No session yet, so no weather cell to read; see
             // `install_session_render_sources`.
@@ -172,6 +174,7 @@ impl WindowApp {
             self.ui.respawn_confirmed();
         }
         self.restore_recipe_book_settings();
+        self.sync_recipe_toasts();
         // The credits screen (issue #192): `Sim::has_won()` is the ground
         // truth `NetUpdate::WinGame` sets in `poll_net`, reconciled here the
         // same way `is_dead()` is reconciled above. The `!= Screen::Credits`
@@ -358,6 +361,72 @@ impl WindowApp {
         self.recipe_panel.filtering = per_type.filtering;
         self.recipe_panel.page = 0;
         self.recipe_panel.restored_type = Some(book_type);
+    }
+
+    /// Diff the server's recipe-unlock sync against what has already been
+    /// toasted, and push every newly-unlocked, notifying recipe into
+    /// [`Self::recipe_toasts`] — the missing hop between `SessionRecipeBook`
+    /// (`lodestone-ecs`, folded and read but never dispatched) and the toast
+    /// queue (built and drawn, but never fed).
+    ///
+    /// Same shape as [`Self::restore_recipe_book_settings`]: a plain per-frame
+    /// diff against `Sim::known_recipes()`, run from
+    /// [`Self::drive_ui_from_session`] so it keeps up the instant a session
+    /// exists, not gated on any screen being open (a toast can fire with no
+    /// menu on screen at all).
+    ///
+    /// The **first** sync — `known_recipes().has_data()` true for the first
+    /// time this session — seeds [`Self::recipe_toast_seen`] from the whole
+    /// current known set and toasts nothing: vanilla does not toast a fresh
+    /// join's entire unlock history, only genuinely new unlocks after that.
+    /// Every later frame toasts exactly the display ids not already in the
+    /// seen set, which both first-sync seeding and a real toast insert into,
+    /// so nothing is ever toasted twice.
+    ///
+    /// A recipe whose result or station item id does not resolve through
+    /// `lodestone_data::items::item_name` (an id outside the generated
+    /// census) is marked seen but never toasted — the same "draw nothing
+    /// rather than a wrong icon" contract `container::merchant::cost_item_stack`
+    /// documents for the same table.
+    pub(super) fn sync_recipe_toasts(&mut self) {
+        let sync = self.sim.known_recipes();
+        if !sync.has_data() {
+            // Off a server, or before the first recipe-book sync packet has
+            // landed this session — nothing to diff against yet.
+            return;
+        }
+        if !self.recipe_toast_synced {
+            self.recipe_toast_seen = sync.known().keys().copied().collect();
+            self.recipe_toast_synced = true;
+            return;
+        }
+        let now = recipe_toast_now_ms();
+        for (&display_id, recipe) in sync.known() {
+            if !self.recipe_toast_seen.insert(display_id) {
+                // Already toasted, or already folded into the first-sync seed.
+                continue;
+            }
+            if !recipe.notification {
+                continue;
+            }
+            let Some(unlocked) = recipe
+                .result_items
+                .first()
+                .copied()
+                .and_then(recipe_item_identifier)
+            else {
+                continue;
+            };
+            let Some(station) = recipe
+                .station_items
+                .first()
+                .copied()
+                .and_then(recipe_item_identifier)
+            else {
+                continue;
+            };
+            self.recipe_toasts.push(station, unlocked, now);
+        }
     }
 
     /// Staged Singleplayer entry point. Vanilla's singleplayer starts an

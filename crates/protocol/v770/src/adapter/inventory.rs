@@ -181,7 +181,7 @@ impl V770Adapter {
         if packet_id == play::clientbound::PLACE_GHOST_RECIPE {
             let mut reader = Reader::new(payload);
             let window_id = reader.var_i32().map_err(dec_err)?;
-            let Some(result_items) = read_recipe_display(&mut reader)? else {
+            let Some((result_items, _station_items)) = read_recipe_display(&mut reader)? else {
                 // An unmodeled nested display: the reader's position is no longer
                 // trustworthy, so drop the packet rather than emit a half-read
                 // event. Same contract as `read_component_patch`'s bail-out.
@@ -1472,16 +1472,22 @@ fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayI
     })
 }
 
-/// Walks one `RecipeDisplay` and returns the item ids of its **result** slot.
+/// Walks one `RecipeDisplay` and returns the item ids of its **result** slot,
+/// plus its trailing **station** slot's item ids (the small corner icon —
+/// `craftingStation`/`furnace` in vanilla's own field names).
 ///
-/// The result is what a recipe panel and a toast both key on; the ingredient
-/// slots are walked only because they must be consumed. Returns `None` when the
-/// walk hit something unmodeled, with the same "abandon the packet" contract as
-/// [`read_slot_display`].
+/// The result is what a recipe panel and a toast both key on; the station is
+/// what a recipe-unlock toast draws as its corner icon (`RecipeToast.Entry`).
+/// Every `RecipeDisplay` variant's station is its **final** walked `SlotDisplay`
+/// — `RecipeDisplays.java`'s field order puts `craftingStation`/`furnace` last in
+/// all five variants — so `walked.last()` after the loop below is always it, with
+/// no per-kind branch needed. The ingredient slots in between are walked only
+/// because they must be consumed. Returns `None` when the walk hit something
+/// unmodeled, with the same "abandon the packet" contract as [`read_slot_display`].
 ///
 /// Variant ids are `RecipeDisplays.java`'s registration order: shapeless, shaped,
 /// furnace, stonecutter, smithing.
-fn read_recipe_display(reader: &mut Reader<'_>) -> Result<Option<Vec<i32>>, AdapterError> {
+fn read_recipe_display(reader: &mut Reader<'_>) -> Result<Option<(Vec<i32>, Vec<i32>)>, AdapterError> {
     let kind = reader.var_i32().map_err(dec_err)?;
     // Each variant is a fixed sequence of `SlotDisplay`s plus, for two of them,
     // some scalars. `result_index` is which of the walked displays is the result,
@@ -1568,7 +1574,12 @@ fn read_recipe_display(reader: &mut Reader<'_>) -> Result<Option<Vec<i32>>, Adap
         }
         _ => return Ok(None),
     };
-    Ok(walked.get(result_index).cloned().or(Some(Vec::new())))
+    let result_items = walked.get(result_index).cloned().unwrap_or_default();
+    // The station is always the last `SlotDisplay` walked (see the doc comment):
+    // shapeless/shaped push `ingredients.., result, station`, and
+    // furnace/stonecutter/smithing push their fixed sequence ending in station.
+    let station_items = walked.last().cloned().unwrap_or_default();
+    Ok(Some((result_items, station_items)))
 }
 
 /// Decodes `ClientboundAwardStatsPacket`: a VarInt-counted map of
@@ -1667,7 +1678,7 @@ fn decode_recipe_book_add(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
     let mut entries = Vec::with_capacity(count.min(4096));
     for _ in 0..count {
         let display_id = reader.var_i32().map_err(dec_err)?;
-        let Some(result_items) = read_recipe_display(&mut reader)? else {
+        let Some((result_items, station_items)) = read_recipe_display(&mut reader)? else {
             return Ok(Vec::new());
         };
         // `OPTIONAL_VAR_INT`, not a bool-prefixed optional.
@@ -1688,6 +1699,7 @@ fn decode_recipe_book_add(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
         entries.push(RecipeBookEntry {
             display_id,
             result_items,
+            station_items,
             notification: flags & 0x01 != 0,
             highlight: flags & 0x02 != 0,
         });

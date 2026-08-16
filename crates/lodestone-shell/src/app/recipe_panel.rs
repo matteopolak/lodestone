@@ -363,6 +363,19 @@ pub(super) fn recipe_panel_pointer_hit(
     )
 }
 
+/// Resolves an item registry id to an [`Identifier`](lodestone_model::Identifier)
+/// through the jar-derived census — the join `WindowApp::sync_recipe_toasts`
+/// needs, since `KnownRecipe::result_items`/`station_items` are raw ids (see
+/// `lodestone_game::recipe_sync`'s own "How to change it": that crate
+/// deliberately does not reach for an item table itself).
+///
+/// `None` for an id outside the generated table, same "draw nothing rather
+/// than guess" contract as [`crate::container::merchant::cost_item_stack`],
+/// which resolves the same table for the same reason.
+pub(super) fn recipe_item_identifier(id: i32) -> Option<lodestone_model::Identifier> {
+    lodestone_data::items::item_name(id)?.parse().ok()
+}
+
 /// One toast icon: a single-item [`HotbarSlot`] for `id`.
 ///
 /// `None` for an id the [`ResourceLocation`] parser rejects, which suppresses

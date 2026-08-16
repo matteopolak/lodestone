@@ -29,6 +29,7 @@
 //! `sky_fog`, the input predicates, `DOUBLE_CLICK_WINDOW` and `WindowApp`
 //! itself are here rather than in a submodule.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -117,8 +118,8 @@ pub(crate) use pacing::{
 #[allow(unused_imports)]
 use recipe_panel::{
     RECIPE_SEARCH_MAX_LEN, RecipePanelState, auto_fill_clicks, recipe_book_type_for,
-    recipe_panel_contents, recipe_panel_geometry, recipe_panel_layout, recipe_panel_pointer_hit,
-    recipe_toast_now_ms, recipe_toast_view,
+    recipe_item_identifier, recipe_panel_contents, recipe_panel_geometry, recipe_panel_layout,
+    recipe_panel_pointer_hit, recipe_toast_now_ms, recipe_toast_view,
 };
 #[allow(unused_imports)]
 use runners::run_windowed;
@@ -687,17 +688,29 @@ struct WindowApp {
     /// book open with the same tab. Rebuilding it per frame would reset the
     /// search box on every mouse move.
     recipe_panel: RecipePanelState,
-    /// The recipe-unlock toast queue (issue #163) —
+    /// The recipe-unlock toast queue —
     /// [`lodestone_game::recipe::RecipeToastQueue`], drained into
     /// [`crate::hud::HudFrame::recipe_toast`] each frame.
     ///
-    /// **Has no live producer yet.** The only thing that can fill it is the
-    /// `recipe_book_add` decode, which does not exist in
-    /// `crates/protocol/v770` (tracked on #436), so on a real server this stays
-    /// empty and no toast draws. That is the honest degradation, not a bug: the
-    /// render path is wired and gated so the toast appears the moment decode
-    /// lands. Deliberately **no** fake producer was added to light it up early.
+    /// Pushed to by [`WindowApp::sync_recipe_toasts`], which diffs
+    /// `Sim::known_recipes()` against [`Self::recipe_toast_seen`] every frame.
+    /// The stale claim this doc comment used to carry — "has no live producer
+    /// yet, the decode does not exist" — was true when written and is not any
+    /// more: `decode_recipe_book_add` exists, folds into `SessionRecipeBook`,
+    /// and now has a reader.
     recipe_toasts: lodestone_game::recipe::RecipeToastQueue,
+    /// `RecipeDisplayId`s [`WindowApp::sync_recipe_toasts`] has already toasted
+    /// (or, for the very first sync, seeded without toasting — see that
+    /// method's doc for why the first `RecipeBookAdded` after connecting must
+    /// not fire N toasts for a fresh join's whole unlock history).
+    recipe_toast_seen: HashSet<i32>,
+    /// Whether [`WindowApp::sync_recipe_toasts`] has performed its one-time
+    /// seed of [`Self::recipe_toast_seen`] yet this session. Distinct from
+    /// `recipe_toast_seen.is_empty()`: a fresh join with zero unlocked recipes
+    /// (a brand-new player) must still latch this, or every frame would try to
+    /// re-seed and any later real unlock would be silently treated as "already
+    /// seen".
+    recipe_toast_synced: bool,
     /// The bundle slot currently tracking a scroll-driven selection highlight
     /// (issue #616's `BUNDLE_ITEM_SELECTED` / #613's `SelectBundleItem`), or
     /// `None` when no bundle is being scrolled — see

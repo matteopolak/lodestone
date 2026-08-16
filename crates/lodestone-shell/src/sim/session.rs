@@ -1453,6 +1453,27 @@ impl Sim {
         })
     }
 
+    /// The server's recipe-book **unlock** sync — `RECIPE_BOOK_ADD`/`_REMOVE`,
+    /// `PLACE_GHOST_RECIPE` and `UPDATE_RECIPES` as last folded into
+    /// `lodestone_ecs::session::SessionRecipeBook` (issue #687's missing hop 3).
+    ///
+    /// Same shape as [`Self::recipe_book_settings`] and [`Self::difficulty`]: a
+    /// plain read of a local-player session component through the ordinary
+    /// `NetIngest` path. Cloned rather than borrowed so the caller (the
+    /// recipe-toast dispatcher) can diff it against its own "already toasted"
+    /// set without holding the ECS guard across the comparison.
+    #[must_use]
+    pub fn known_recipes(&self) -> lodestone_game::recipe_sync::RecipeBookSync {
+        self.read(|w| {
+            // Full module path: like `SessionRecipeBookSettings`, this is not
+            // re-exported at `lodestone_ecs`'s crate root.
+            w.get::<lodestone_ecs::session::SessionRecipeBook>(self.local)
+                .expect("the local player always carries SessionRecipeBook")
+                .0
+                .clone()
+        })
+    }
+
     /// Report the recipe-book panel's open/filter state for one book type —
     /// vanilla's `ServerboundRecipeBookChangeSettingsPacket`.
     ///

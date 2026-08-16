@@ -54,6 +54,10 @@ use lodestone_model::Identifier;
 pub struct KnownRecipe {
     /// Item registry ids the result slot can display.
     pub result_items: Vec<i32>,
+    /// Item registry ids the recipe's station (corner icon — crafting table,
+    /// furnace, etc.) can display. See
+    /// [`lodestone_model::event::RecipeBookEntry::station_items`].
+    pub station_items: Vec<i32>,
     /// Whether the unlock should raise a toast.
     pub notification: bool,
     /// Whether its book tab should highlight.
@@ -152,6 +156,7 @@ impl RecipeBookSync {
                 for RecipeBookEntry {
                     display_id,
                     result_items,
+                    station_items,
                     notification,
                     highlight,
                 } in entries
@@ -160,6 +165,7 @@ impl RecipeBookSync {
                         *display_id,
                         KnownRecipe {
                             result_items: result_items.clone(),
+                            station_items: station_items.clone(),
                             notification: *notification,
                             highlight: *highlight,
                         },
@@ -208,6 +214,7 @@ mod tests {
         RecipeBookEntry {
             display_id,
             result_items: vec![result],
+            station_items: Vec::new(),
             notification: true,
             highlight: false,
         }
@@ -271,6 +278,27 @@ mod tests {
         let producing: Vec<i32> = store.unlocked_producing(10).map(|(id, _)| id).collect();
         assert_eq!(producing, vec![1, 3]);
         assert_eq!(store.unlocked_producing(99).count(), 0);
+    }
+
+    /// The station item id must survive the fold — this is what a recipe-unlock
+    /// toast's corner icon reads (issue #687's missing hop 3). Distinct from
+    /// `result_items` so a transposition of the two would fail this.
+    #[test]
+    fn station_items_survive_the_fold() {
+        let mut store = RecipeBookSync::new();
+        store.apply(&ClientEvent::RecipeBookAdded {
+            entries: vec![RecipeBookEntry {
+                display_id: 1,
+                result_items: vec![10],
+                station_items: vec![99],
+                notification: true,
+                highlight: false,
+            }],
+            replace: true,
+        });
+        let recipe = store.known().get(&1).expect("entry 1 is known");
+        assert_eq!(recipe.result_items, vec![10]);
+        assert_eq!(recipe.station_items, vec![99]);
     }
 
     #[test]
