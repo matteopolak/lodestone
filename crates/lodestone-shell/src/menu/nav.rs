@@ -2078,6 +2078,17 @@ impl MenuNav {
             super::Screen::CreateWorld if self.create_world.game_rules_open() => Some(
                 crate::menu::create_world::game_rules_list_spec(self.create_world.game_rules_scroll()),
             ),
+            // Create New World's Data Packs sub-screen (issue #592's More
+            // tab). Same guard shape as the Game Rules arm immediately
+            // above, gated on its own nested mode — the length is not a
+            // constant the way `GAME_RULES.len()` is, since it comes from a
+            // real directory scan.
+            super::Screen::CreateWorld if self.create_world.data_packs_open() => {
+                Some(crate::menu::create_world::data_packs_list_spec(
+                    self.create_world.data_packs_len(),
+                    self.create_world.data_packs_scroll(),
+                ))
+            }
             _ => None,
         }
     }
@@ -2173,6 +2184,14 @@ impl MenuNav {
                 self.create_world
                     .scroll_game_rules_by(notches, canvas_height);
                 self.create_world.game_rules_scroll() != before
+            }
+            // Create New World's Data Packs sub-screen. Same guard as
+            // `active_list`'s own arm — the two sets must agree.
+            super::Screen::CreateWorld if self.create_world.data_packs_open() => {
+                let before = self.create_world.data_packs_scroll();
+                self.create_world
+                    .scroll_data_packs_by(notches, canvas_height);
+                self.create_world.data_packs_scroll() != before
             }
             _ => false,
         }

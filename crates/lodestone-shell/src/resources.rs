@@ -295,6 +295,22 @@ pub fn resource_packs_dir() -> PathBuf {
     crate::menu::servers::data_dir().join("resourcepacks")
 }
 
+/// The user's `datapacks/` folder — Create New World's Data Packs sub-screen
+/// (issue #592's More tab) scans this the same way [`resource_packs_dir`] is
+/// scanned for resource packs, through the identical [`scan_resource_packs_in`]
+/// / [`DiscoveredPack`] pair: a data pack and a resource pack share the exact
+/// on-disk shape (`pack.mcmeta` plus an optional `pack.png`), so nothing about
+/// the scan itself needed to be data-pack-specific — only the directory does.
+/// Vanilla scans a *world's own* `datapacks/` folder plus the running
+/// instance's staging area; this client has no per-world folder yet at
+/// creation time (`world_select`'s own module docs — no `LevelStorageSource`),
+/// so this is the one staging location, alongside `resourcepacks/` in the same
+/// platform data directory.
+#[must_use]
+pub fn data_packs_dir() -> PathBuf {
+    crate::menu::servers::data_dir().join("datapacks")
+}
+
 /// Whether a discovered pack is a directory tree or a zip archive. Both are the
 /// same on-disk format to [`ResourceSource`], so this only exists to decide
 /// which constructor to call and what to show the user.

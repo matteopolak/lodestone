@@ -32,17 +32,20 @@
 //!   selecting `Normal`/`LargeBiomes`/`Amplified` reaches the served world;
 //!   the other four remain decorative. See [`WorldTypePreset`]'s own doc for
 //!   exactly which is which and why.
-//! - **More** (`createWorld.tab.more.title`): nothing. Vanilla's `MoreTab` is
-//!   three buttons (Game Rules, Experiments, Data Packs), and none of the three
-//!   models exist here — no game-rule table, no experiments screen, no
-//!   data-pack loader. The tab itself is still real: selectable, its own real
-//!   [`TabEntryView`](super::render::TabEntryView), just empty. That is the
-//!   honest state rather than a lie — vanilla's own More tab is never disabled
-//!   for having nothing built under it, unlike Statistics's Items/Mobs, which
+//! - **More** (`createWorld.tab.more.title`): vanilla's `MoreTab` is three
+//!   buttons (Game Rules, Experiments, Data Packs). Two now have real models
+//!   ([`GAME_RULES_ROW`]/[`GameRulesEditor`] and
+//!   [`DATA_PACKS_ROW`]/[`DataPacksEditor`], both issue #592) — Experiments
+//!   still has none (no `DataConfiguration`/feature-flag model anywhere in
+//!   this client) and stays absent rather than drawn inert, the same rule
+//!   World's own "Customize Type" gap already follows. The tab itself
+//!   is real regardless: selectable, its own real
+//!   [`TabEntryView`](super::render::TabEntryView), never disabled for having
+//!   an unbuilt feature under it — unlike Statistics's Items/Mobs, which
 //!   vanilla disables **because the underlying list is empty**
 //!   (`StatsScreen.setTabActiveStateAndTooltip`). Nothing here is
-//!   data-driven-empty; it is feature-not-yet-built, and disabling the tab
-//!   would misrepresent that as vanilla's own behaviour.
+//!   data-driven-empty; Experiments is feature-not-yet-built, and disabling
+//!   the tab for it would misrepresent that as vanilla's own behaviour.
 //! - [`ONLINE_MODE_ROW`] has no vanilla tab at all — see its own doc on why it
 //!   exists — and is placed on **World**, after Bonus Chest: it is a
 //!   network-exposure setting for the world being created, which is closer in
@@ -126,6 +129,18 @@
 //!   always uses the bundled default biome (`minecraft:plains`) rather than a
 //!   player choice — no UI for that yet, a disclosed simplification, not a
 //!   fallback to `Overworld`.
+//! - **Wired — Game Rules.** [`GameRulesEditor`]'s per-rule diff
+//!   (`WorldCreationConfig::game_rules`) reaches the server for real:
+//!   `begin_singleplayer` sends it as
+//!   [`lodestone_model::action::ClientAction::SetGameRules`] once the session
+//!   reaches Play.
+//! - **Decorative — Data Packs.** [`DataPacksEditor`]'s selection
+//!   (`WorldCreationConfig::data_packs`) is collected for real — a genuine
+//!   directory scan ([`crate::resources::data_packs_dir`]), a real
+//!   selectable list — but nothing downstream reads it: this crate has no
+//!   data-pack loader at all, unlike Game Rules, which only needed a
+//!   `ClientAction` this client already had a producer and consumer for. See
+//!   [`DataPacksEditor`]'s own module doc.
 //! - **Decorative — the world name and the "will be saved in" folder.**
 //!   There is still no `LevelStorageSource` (`world_select`'s own module
 //!   docs, unchanged by this issue), so a name is collected and shown but
@@ -198,6 +213,9 @@ pub const WORLD_TYPE_LABEL: &str = "World Type";
 /// `createWorld.customize.gameRules.title`-adjacent — vanilla's More tab
 /// button that opens `WorldCreationGameRulesScreen`.
 pub const GAME_RULES_BUTTON_LABEL: &str = "Game Rules...";
+/// `dataPack.title`-adjacent — vanilla's More tab button that opens a
+/// `PackSelectionScreen` scoped to data packs.
+pub const DATA_PACKS_BUTTON_LABEL: &str = "Data Packs...";
 
 /// `createWorld.tab.game.title`/`.world.title`/`.more.title`, verbatim from
 /// `en_us.json` — this screen's own tab bar (issue #567), built from the same
@@ -234,7 +252,7 @@ fn content_rows_for_tab(tab: usize) -> &'static [usize] {
             BONUS_CHEST_ROW,
             ONLINE_MODE_ROW,
         ],
-        MORE_TAB => &[GAME_RULES_ROW],
+        MORE_TAB => &[GAME_RULES_ROW, DATA_PACKS_ROW],
         _ => &[],
     }
 }
@@ -470,6 +488,20 @@ pub struct WorldCreationConfig {
     /// Empty for a world whose rules were never touched, which sends nothing
     /// rather than a no-op packet.
     pub game_rules: Vec<(lodestone_model::ResourceKey, String)>,
+    /// Extra data packs selected beyond the always-active Vanilla one (issue
+    /// #592's More tab), as the ids [`DataPacksEditor::selected_ids`] reports
+    /// — collected from [`CreateWorldNav`]'s own [`DataPacksEditor`] when
+    /// Create is pressed. **Fully decorative**: this crate has no data-pack
+    /// loader at all (no recipe/loot-table/tag override machinery to apply
+    /// one), so nothing downstream reads this yet — see
+    /// [`DataPacksEditor`]'s own module doc. Kept anyway, the same
+    /// disclosed-but-collected shape `game_mode`/`difficulty`/
+    /// `generate_structures`/`bonus_chest`/`allow_cheats` already use on this
+    /// struct, so a future loader has somewhere real to read the player's
+    /// choice from rather than needing this screen touched again. Empty for a
+    /// world that never had any extra pack selected, same "send nothing
+    /// rather than a no-op" rule [`Self::game_rules`] uses.
+    pub data_packs: Vec<String>,
 }
 
 impl Default for WorldCreationConfig {
@@ -490,6 +522,7 @@ impl Default for WorldCreationConfig {
             allow_cheats: false,
             online_mode: false,
             game_rules: Vec::new(),
+            data_packs: Vec::new(),
         }
     }
 }
@@ -507,10 +540,13 @@ pub const ONLINE_MODE_ROW: usize = 7;
 pub const WORLD_TYPE_ROW: usize = 8;
 pub const CREATE_ROW: usize = 9;
 pub const CANCEL_ROW: usize = 10;
-/// More tab's one real row (issue #592's Game Rules half): opens the
+/// More tab's first row (issue #592's Game Rules half): opens the
 /// scrollable rule editor — see [`CreateWorldMode::GameRules`].
 pub const GAME_RULES_ROW: usize = 11;
-const ROW_COUNT: usize = 12;
+/// More tab's second row (issue #592's Data Packs half): opens the pack
+/// selector — see [`CreateWorldMode::DataPacks`].
+pub const DATA_PACKS_ROW: usize = 12;
+const ROW_COUNT: usize = 13;
 
 const SEED_CANVAS: (f32, f32) = (854.0, 480.0);
 
@@ -548,8 +584,8 @@ pub fn row_slot(row: usize) -> Slot {
         NAME_FIELD | SEED_FIELD | GAME_RULES_ROW => {
             Slot { origin: Origin::ScreenTop, dx: X, dy: TOP, w: FIELD_W, h: super::render::EDIT_BOX_H }
         }
-        // Local row 1: Game Mode / World Type.
-        GAME_MODE_ROW | WORLD_TYPE_ROW => Slot {
+        // Local row 1: Game Mode / World Type / More's second row (Data Packs).
+        GAME_MODE_ROW | WORLD_TYPE_ROW | DATA_PACKS_ROW => Slot {
             origin: Origin::ScreenTop,
             dx: X,
             dy: TOP + ROW_H,
@@ -619,6 +655,9 @@ pub struct CreateWorldWidgets {
     /// More tab's Game Rules button (issue #592) — opens
     /// [`CreateWorldMode::GameRules`].
     pub game_rules: Widget,
+    /// More tab's Data Packs button (issue #592) — opens
+    /// [`CreateWorldMode::DataPacks`].
+    pub data_packs: Widget,
 }
 
 impl FocusChildren for CreateWorldWidgets {
@@ -636,6 +675,7 @@ impl FocusChildren for CreateWorldWidgets {
             CREATE_ROW => &self.create as &dyn FocusTarget,
             CANCEL_ROW => &self.cancel as &dyn FocusTarget,
             GAME_RULES_ROW => &self.game_rules as &dyn FocusTarget,
+            DATA_PACKS_ROW => &self.data_packs as &dyn FocusTarget,
             _ => return None,
         })
     }
@@ -654,6 +694,7 @@ impl FocusChildren for CreateWorldWidgets {
             CREATE_ROW => &mut self.create as &mut dyn FocusTarget,
             CANCEL_ROW => &mut self.cancel as &mut dyn FocusTarget,
             GAME_RULES_ROW => &mut self.game_rules as &mut dyn FocusTarget,
+            DATA_PACKS_ROW => &mut self.data_packs as &mut dyn FocusTarget,
             _ => return None,
         })
     }
@@ -714,6 +755,8 @@ pub struct CreateWorldNav {
     mode: CreateWorldMode,
     /// The rule editor's own live state — see [`GameRulesEditor`]'s doc.
     game_rules: GameRulesEditor,
+    /// The pack selector's own live state — see [`DataPacksEditor`]'s doc.
+    data_packs: DataPacksEditor,
 }
 
 /// See [`CreateWorldNav::mode`].
@@ -722,6 +765,7 @@ enum CreateWorldMode {
     #[default]
     Tabs,
     GameRules,
+    DataPacks,
 }
 
 fn button(row: usize, label: impl Into<String>) -> Widget {
@@ -759,6 +803,7 @@ impl CreateWorldNav {
             create: button(CREATE_ROW, CREATE_LABEL),
             cancel: button(CANCEL_ROW, CANCEL_LABEL),
             game_rules: button(GAME_RULES_ROW, GAME_RULES_BUTTON_LABEL),
+            data_packs: button(DATA_PACKS_ROW, DATA_PACKS_BUTTON_LABEL),
         };
         let mut focus = FocusSet::new();
         for row in 0..ROW_COUNT {
@@ -773,6 +818,7 @@ impl CreateWorldNav {
             hovered: None,
             mode: CreateWorldMode::Tabs,
             game_rules: GameRulesEditor::new(),
+            data_packs: DataPacksEditor::new(),
         };
         // Game is active from the start, so this deactivates World's four
         // fields (Seed/Structures/Bonus Chest/Online Mode) — matching what a
@@ -820,6 +866,35 @@ impl CreateWorldNav {
         self.game_rules.scroll_by(notches, canvas_height);
     }
 
+    /// Whether the Data Packs sub-screen is open — mirrors
+    /// [`Self::game_rules_open`].
+    #[must_use]
+    pub fn data_packs_open(&self) -> bool {
+        self.mode == CreateWorldMode::DataPacks
+    }
+
+    /// The pack selector's own scroll offset, in pixels — only meaningful
+    /// while [`Self::data_packs_open`].
+    #[must_use]
+    pub fn data_packs_scroll(&self) -> f32 {
+        self.data_packs.scroll()
+    }
+
+    /// How many rows the pack selector currently has (the always-present
+    /// Vanilla row plus whatever [`DataPacksEditor::refresh`] most recently
+    /// found) — `nav.rs`'s own [`super::widget::ListSpec`] needs this, unlike
+    /// [`GAME_RULES`]'s fixed length, because a real scan is variable.
+    #[must_use]
+    pub fn data_packs_len(&self) -> usize {
+        self.data_packs.len()
+    }
+
+    /// Scrolls the pack selector by `notches` of mouse wheel, at a
+    /// `canvas_height`-tall canvas.
+    pub fn scroll_data_packs_by(&mut self, notches: f32, canvas_height: f32) {
+        self.data_packs.scroll_by(notches, canvas_height);
+    }
+
     /// Sets every widget's `active` flag from [`Self::active_tab`] alone —
     /// the difficulty row is the one exception, folded into
     /// [`Self::apply_hardcore_lock`] instead, since it has a *second* gate
@@ -839,7 +914,9 @@ impl CreateWorldNav {
         self.widgets.bonus_chest.active = world;
         self.widgets.online_mode.active = world;
         self.widgets.world_type.active = world;
-        self.widgets.game_rules.active = self.active_tab == MORE_TAB;
+        let more = self.active_tab == MORE_TAB;
+        self.widgets.game_rules.active = more;
+        self.widgets.data_packs.active = more;
     }
 
     /// Difficulty is locked to Hard and its own row inactive while Hardcore
@@ -958,6 +1035,10 @@ impl CreateWorldNav {
             self.game_rules.hover_row(row);
             return;
         }
+        if self.mode == CreateWorldMode::DataPacks {
+            self.data_packs.hover_row(row);
+            return;
+        }
         if row < TAB_LABELS.len() {
             return;
         }
@@ -1020,10 +1101,21 @@ impl CreateWorldNav {
                 self.mode = CreateWorldMode::GameRules;
                 CreateWorldOutcome::Handled
             }
+            DATA_PACKS_ROW => {
+                self.mode = CreateWorldMode::DataPacks;
+                // Scan on entering the sub-screen, not on every visit to the
+                // wider Create New World screen — the same trigger
+                // `menu::packs::PacksNav::reset` uses for the Resource Packs
+                // screen, so a pack dropped into the folder mid-session is
+                // picked up the next time this row is clicked.
+                self.data_packs.refresh();
+                CreateWorldOutcome::Handled
+            }
             CREATE_ROW => {
                 self.config.name = self.widgets.name.value().to_string();
                 self.config.seed = self.widgets.seed.value().to_string();
                 self.config.game_rules = self.game_rules.changed_entries();
+                self.config.data_packs = self.data_packs.selected_ids();
                 CreateWorldOutcome::Create(self.config.clone())
             }
             CANCEL_ROW => CreateWorldOutcome::Cancel,
@@ -1040,6 +1132,12 @@ impl CreateWorldNav {
     pub fn click_row(&mut self, row: usize) -> CreateWorldOutcome {
         if self.mode == CreateWorldMode::GameRules {
             if self.game_rules.click_row(row) {
+                self.mode = CreateWorldMode::Tabs;
+            }
+            return CreateWorldOutcome::Handled;
+        }
+        if self.mode == CreateWorldMode::DataPacks {
+            if self.data_packs.click_row(row) {
                 self.mode = CreateWorldMode::Tabs;
             }
             return CreateWorldOutcome::Handled;
@@ -1082,6 +1180,12 @@ impl CreateWorldNav {
         // `AbstractGameRulesScreen.closeAndDiscardChanges` — a disclosed
         // simplification, not a missed case).
         if self.mode == CreateWorldMode::GameRules {
+            if key == MenuKey::Escape {
+                self.mode = CreateWorldMode::Tabs;
+            }
+            return CreateWorldOutcome::Handled;
+        }
+        if self.mode == CreateWorldMode::DataPacks {
             if key == MenuKey::Escape {
                 self.mode = CreateWorldMode::Tabs;
             }
@@ -1141,6 +1245,9 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
     if nav.mode == CreateWorldMode::GameRules {
         return game_rules_frame(nav);
     }
+    if nav.mode == CreateWorldMode::DataPacks {
+        return data_packs_frame(nav);
+    }
     let focused = nav.focused();
     let widget_row = |w: &Widget, row: usize| MenuRow {
         label: w.message.clone(),
@@ -1189,6 +1296,7 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
             ONLINE_MODE_ROW => widget_row(&nav.widgets.online_mode, ONLINE_MODE_ROW),
             WORLD_TYPE_ROW => widget_row(&nav.widgets.world_type, WORLD_TYPE_ROW),
             GAME_RULES_ROW => widget_row(&nav.widgets.game_rules, GAME_RULES_ROW),
+            DATA_PACKS_ROW => widget_row(&nav.widgets.data_packs, DATA_PACKS_ROW),
             // `content_rows_for_tab` is the only producer of these ids; a new
             // entry there needs a matching arm here, and an out-of-sync pair
             // is a compile-time `unreachable!()` away from being caught the
@@ -1666,6 +1774,362 @@ fn game_rules_frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
     }
 }
 
+// -- Data Packs sub-screen (issue #592's More tab) ---------------------------
+//
+// Vanilla's Data Packs button opens the same `PackSelectionScreen` widget as
+// the standalone Resource Packs screen (`super::packs`), pointed at a
+// world-scoped pack repository instead of the global one. This module does
+// not reuse `super::packs::PacksNav` directly: that type is wired straight to
+// the *global* resource-pack config (`crate::config::SelectedPacks`) and the
+// live texture stack (`crate::resources::set_selected_packs`,
+// `Sim::reload_resource_pack_atlas`) — repurposing it here would make
+// selecting a *data* pack while creating a world also reshuffle the running
+// client's *textures*, which is not what either screen does in vanilla.
+//
+// What **is** reused: `crate::resources::scan_resource_packs_in` and
+// `crate::resources::DiscoveredPack`. A data pack and a resource pack are the
+// identical on-disk shape to a scanner that only ever reads `pack.mcmeta` and
+// `pack.png` — this screen never opens a pack's actual contents (there is no
+// data-pack loader in this crate to hand them to; see
+// [`WorldCreationConfig::data_packs`]'s own doc) — so only the directory
+// differs ([`crate::resources::data_packs_dir`] instead of
+// [`crate::resources::resource_packs_dir`]).
+//
+// A further, disclosed simplification on top of that reuse: vanilla's screen
+// is two columns (Available/Selected) with reorder buttons, mirroring
+// `super::packs`'s own shape. This is one scrollable list with a per-row
+// toggle instead — the same kind of flattening `GameRulesEditor`'s own module
+// doc already argues for (one control shape instead of vanilla's several),
+// and for the same underlying reason: data-pack *priority order* has nothing
+// downstream to affect it, since nothing here ever loads a pack's contents.
+// The built-in "Vanilla" row is always present, always selected, and — like
+// `super::packs::PackRow::builtin` — never a transfer target, matched by
+// construction ([`DataPacksEditor::rebuild`] always seeds it first) rather
+// than by a flag.
+
+/// One row of the Data Packs list — the built-in Vanilla entry (`id: None`)
+/// plus one entry per pack [`crate::resources::scan_resource_packs_in`] finds
+/// under [`crate::resources::data_packs_dir`]. Carries only what this screen
+/// draws (a title and whether it is selected), not the full
+/// [`crate::resources::DiscoveredPack`]: this screen never reads a pack's
+/// icon or its declared `pack_format`, so pulling the whole struct in would
+/// drag `lodestone_assets::Image`'s no-`PartialEq` shape into this module's
+/// own derive list for nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DataPackRow {
+    /// [`crate::resources::DiscoveredPack::id`], or `None` for the built-in
+    /// Vanilla row — it is not a file on disk and can never be deselected
+    /// (see [`DataPacksEditor::click_row`]).
+    id: Option<String>,
+    title: String,
+    selected: bool,
+}
+
+/// One clickable control of the Data Packs screen — mirrors
+/// [`GameRuleControl`], narrowed to this screen's single per-row action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DataPackControl {
+    /// Toggle row `usize` (an index into [`DataPacksEditor::rows`]) between
+    /// Available and Selected. A no-op for index `0` (Vanilla).
+    Toggle(usize),
+    /// Leave the editor, keeping every selection made so far — the same
+    /// "no separate discard path" rule [`GameRulesEditor`]'s own doc records.
+    Done,
+}
+
+/// One flattened, focusable control plus its already-resolved [`Slot`] —
+/// mirrors [`GameRuleControlView`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DataPackControlView {
+    control: DataPackControl,
+    slot: Slot,
+}
+
+/// Every control for a list of `len` rows, ignoring scroll — mirrors
+/// [`all_game_rule_controls`].
+#[must_use]
+fn all_data_pack_controls(len: usize) -> Vec<DataPackControl> {
+    let mut out = Vec::with_capacity(len + 1);
+    for index in 0..len {
+        out.push(DataPackControl::Toggle(index));
+    }
+    out.push(DataPackControl::Done);
+    out
+}
+
+/// This screen's row band — narrower than [`GAME_RULE_ROW_WIDTH`] because a
+/// row here has no `-`/`+` step pair riding on its right edge, just the one
+/// full-width toggle button.
+pub const DATA_PACK_ROW_WIDTH: f32 = 280.0;
+pub const DATA_PACK_ROW_H: f32 = 20.0;
+
+#[must_use]
+fn data_pack_row_left(width: f32) -> f32 {
+    width * 0.5 - DATA_PACK_ROW_WIDTH * 0.5
+}
+
+/// This screen's list, as the generic [`super::widget::ListSpec`] the
+/// scrollbar draw and the mouse wheel both go through — mirrors
+/// [`game_rules_list_spec`]. Takes `len` explicitly, unlike that function:
+/// [`GAME_RULES`] is a fixed-length table, but a real scan's row count
+/// varies, so nothing here can close over a constant the way the Game Rules
+/// sibling does.
+#[must_use]
+pub fn data_packs_list_spec(len: usize, scroll: f32) -> super::widget::ListSpec {
+    super::widget::ListSpec::uniform(
+        DATA_PACK_ROW_H,
+        options::SUB_HEADER_HEIGHT,
+        options::FOOTER_HEIGHT,
+        len,
+        DATA_PACK_ROW_WIDTH,
+    )
+    .at(scroll)
+}
+
+/// Where one Data Packs row sits — [`Origin::CreateWorldDataPacks`]'s whole
+/// body. Mirrors [`GameRulePlacement`], narrowed to the one shape this
+/// screen's rows need (Done reuses [`Origin::Settings`]'s footer, same as
+/// [`GameRulePlacement`]'s own Done).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DataPackPlacement {
+    Row { row: u16, scroll: f32 },
+}
+
+/// The top-left of the widget a [`DataPackPlacement`] names — mirrors
+/// [`game_rule_placement_anchor`].
+#[must_use]
+pub fn data_pack_placement_anchor(placement: DataPackPlacement, width: f32, _height: f32) -> (f32, f32) {
+    match placement {
+        DataPackPlacement::Row { row, scroll } => {
+            let y = options::SUB_HEADER_HEIGHT + options::LIST_TOP_INSET + f32::from(row) * DATA_PACK_ROW_H
+                - scroll.floor();
+            (data_pack_row_left(width), y)
+        }
+    }
+}
+
+/// **Every** control at scroll offset `scroll`, then Done — mirrors
+/// [`game_rule_controls`]: absolute indices into `rows`, not a windowed
+/// slice, since [`super::render::draw`] clips a row to the band itself.
+#[must_use]
+fn data_pack_controls(rows: &[DataPackRow], scroll: f32) -> Vec<DataPackControlView> {
+    let mut out = Vec::with_capacity(rows.len() + 1);
+    for row in 0..rows.len() {
+        out.push(DataPackControlView {
+            control: DataPackControl::Toggle(row),
+            slot: Slot {
+                origin: Origin::CreateWorldDataPacks(DataPackPlacement::Row { row: row as u16, scroll }),
+                dx: 0.0,
+                dy: 0.0,
+                w: DATA_PACK_ROW_WIDTH,
+                h: DATA_PACK_ROW_H,
+            },
+        });
+    }
+    out.push(DataPackControlView {
+        control: DataPackControl::Done,
+        slot: Slot {
+            origin: Origin::Settings(options::Placement::Footer { index: 0, count: 1 }),
+            dx: 0.0,
+            dy: 0.0,
+            w: options::SMALL_BUTTON_WIDTH,
+            h: options::WIDGET_H,
+        },
+    });
+    out
+}
+
+/// The Data Packs sub-screen's own live state — mirrors [`GameRulesEditor`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataPacksEditor {
+    rows: Vec<DataPackRow>,
+    scroll: f32,
+    cursor: usize,
+}
+
+impl DataPacksEditor {
+    /// Vanilla alone — no scan yet. The real scan happens only when the
+    /// player actually opens this sub-screen
+    /// ([`CreateWorldNav::activate`]'s [`DATA_PACKS_ROW`] arm calls
+    /// [`Self::refresh`]), not on every visit to the wider Create New World
+    /// screen — the same "scan on entering that specific screen" trigger
+    /// [`super::packs::PacksNav::reset`] uses, rather than doing it in
+    /// [`super::options::SettingsNav`]'s own construction.
+    fn new() -> Self {
+        Self {
+            rows: vec![DataPackRow { id: None, title: "Vanilla".to_string(), selected: true }],
+            scroll: 0.0,
+            cursor: 0,
+        }
+    }
+
+    /// Rebuilds `rows` from `discovered` — the pure half [`Self::refresh`]
+    /// calls with a live scan, and what tests call directly with a fixture
+    /// list instead of touching the real filesystem (mirrors
+    /// [`crate::resources::scan_resource_packs_in`]'s own directory-argument
+    /// split, one level up). A previously-selected pack keeps its selection
+    /// across a rebuild if it is still present (matched by id); one that
+    /// disappeared from the folder is simply dropped, mirroring
+    /// [`super::packs::PacksNav::rebuild`]'s own "no longer on disk" rule.
+    /// Resets scroll and cursor: a rebuild only ever happens on (re-)opening
+    /// this sub-screen, never mid-scroll.
+    fn rebuild(&mut self, discovered: Vec<crate::resources::DiscoveredPack>) {
+        let previously_selected: std::collections::HashSet<String> =
+            self.rows.iter().filter(|r| r.selected).filter_map(|r| r.id.clone()).collect();
+        let mut rows = vec![DataPackRow { id: None, title: "Vanilla".to_string(), selected: true }];
+        for pack in discovered {
+            rows.push(DataPackRow {
+                selected: previously_selected.contains(&pack.id),
+                id: Some(pack.id),
+                title: pack.title,
+            });
+        }
+        self.rows = rows;
+        self.scroll = 0.0;
+        self.cursor = 0;
+    }
+
+    /// Scans [`crate::resources::data_packs_dir`] for real and rebuilds from
+    /// it.
+    fn refresh(&mut self) {
+        self.rebuild(crate::resources::scan_resource_packs_in(&crate::resources::data_packs_dir()));
+    }
+
+    /// The scroll offset, in pixels.
+    #[must_use]
+    fn scroll(&self) -> f32 {
+        self.scroll
+    }
+
+    /// How many rows are currently listed, Vanilla included.
+    #[must_use]
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Extra pack ids the player selected, in scan order — mirrors
+    /// [`GameRulesEditor::changed_entries`]'s "only report what changed"
+    /// shape: the always-on Vanilla row is never included, since there is
+    /// nothing to send that is not already every world's own default.
+    #[must_use]
+    pub fn selected_ids(&self) -> Vec<String> {
+        self.rows.iter().filter(|r| r.selected).filter_map(|r| r.id.clone()).collect()
+    }
+
+    /// The live [`super::widget::ScrollList`] at this canvas height, or
+    /// `None` when there is nothing to scroll — mirrors
+    /// [`GameRulesEditor::model`].
+    fn model(&self, canvas_height: f32) -> Option<super::widget::ScrollList> {
+        data_packs_list_spec(self.rows.len(), self.scroll).model(canvas_height)
+    }
+
+    /// One mouse-wheel notch, through the shared primitive.
+    fn scroll_by(&mut self, notches: f32, canvas_height: f32) {
+        let Some(mut list) = self.model(canvas_height) else {
+            return;
+        };
+        list.mouse_scrolled(notches);
+        self.scroll = list.scroll();
+    }
+
+    #[must_use]
+    fn visible(&self) -> Vec<DataPackControlView> {
+        data_pack_controls(&self.rows, self.scroll)
+    }
+
+    /// The cursor's position within [`Self::visible`], for the highlight —
+    /// mirrors [`GameRulesEditor::selected_row`].
+    #[must_use]
+    fn selected_row(&self) -> Option<usize> {
+        let all = all_data_pack_controls(self.rows.len());
+        let control = *all.get(self.cursor)?;
+        self.visible().iter().position(|c| c.control == control)
+    }
+
+    /// The mouse moved over visible row `row` — moves the cursor there.
+    fn hover_row(&mut self, row: usize) {
+        let visible = self.visible();
+        let Some(view) = visible.get(row).copied() else {
+            return;
+        };
+        let all = all_data_pack_controls(self.rows.len());
+        if let Some(i) = all.iter().position(|&c| c == view.control) {
+            self.cursor = i;
+        }
+    }
+
+    /// A click on visible row `row`. Returns `true` when Done was pressed —
+    /// [`CreateWorldNav::click_row`]'s cue to leave the editor.
+    fn click_row(&mut self, row: usize) -> bool {
+        self.hover_row(row);
+        let visible = self.visible();
+        let Some(view) = visible.get(row).copied() else {
+            return false;
+        };
+        match view.control {
+            DataPackControl::Toggle(index) => {
+                if let Some(r) = self.rows.get_mut(index) {
+                    // Vanilla (`id: None`) is always active — the row exists
+                    // so a player can see it is on, not so they can turn it
+                    // off.
+                    if r.id.is_some() {
+                        r.selected = !r.selected;
+                    }
+                }
+                false
+            }
+            DataPackControl::Done => true,
+        }
+    }
+}
+
+/// Builds the Data Packs sub-screen's whole frame — [`frame`]'s
+/// [`CreateWorldMode::DataPacks`] branch. Mirrors [`game_rules_frame`], minus
+/// the separate `list_labels` pass: a Data Packs row is a single toggle
+/// button whose own label already carries the pack's name and state, unlike
+/// a Game Rules row's `-`/`+` pair plus a *separate* name label.
+#[must_use]
+fn data_packs_frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
+    let editor = &nav.data_packs;
+    let visible = editor.visible();
+    let selected = editor.selected_row();
+
+    let rows: Vec<MenuRow> = visible
+        .iter()
+        .map(|view| MenuRow {
+            label: match view.control {
+                DataPackControl::Toggle(index) => editor
+                    .rows
+                    .get(index)
+                    .map_or_else(String::new, |r| toggle_label(&r.title, r.selected)),
+                DataPackControl::Done => "Done".to_string(),
+            },
+            enabled: true,
+            slot: Some(view.slot),
+            ..Default::default()
+        })
+        .collect();
+
+    MenuFrame {
+        title: "Data Packs",
+        rows,
+        selected: selected.unwrap_or(usize::MAX),
+        vanilla: true,
+        labels: vec![MenuLabel {
+            text: "Data Packs".to_string(),
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: 12.0,
+            align: Align::Centre,
+            colour: super::widget::ACTIVE_LABEL,
+            scale: 1.0,
+        }],
+        // Deliberately not set here — mirrors `game_rules_frame`'s own
+        // comment: `render::dispatch` stamps `f.list` on every frame.
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2044,9 +2508,9 @@ mod tests {
         let f = frame(&nav);
         assert_eq!(
             f.rows.len(),
-            TAB_LABELS.len() + 3,
-            "More has one content row (Game Rules, issue #592) plus the tab \
-             bar and the footer"
+            TAB_LABELS.len() + 4,
+            "More has two content rows (Game Rules and Data Packs, issue \
+             #592) plus the tab bar and the footer"
         );
 
         // Clicking the tab already showing is a no-op, not a crash and not a
@@ -2442,6 +2906,181 @@ mod tests {
             )],
             "Create must capture the editor's diff at press time, not an \
              empty default"
+        );
+    }
+
+    // -- Data Packs sub-screen (issue #592's More tab) -----------------------
+
+    /// A [`crate::resources::DiscoveredPack`] fixture — mirrors
+    /// `packs::tests::pack`, so a test never touches the real filesystem: the
+    /// path is deliberately nonexistent.
+    fn discovered_pack(name: &str) -> crate::resources::DiscoveredPack {
+        crate::resources::DiscoveredPack {
+            id: format!("file/{name}"),
+            title: name.to_string(),
+            description: String::new(),
+            pack_format: 64,
+            icon: None,
+            path: std::path::PathBuf::from("/nonexistent").join(name),
+            kind: crate::resources::PackKind::Directory,
+        }
+    }
+
+    #[test]
+    fn opening_the_editor_scans_for_real_and_lists_vanilla_alone_with_nothing_installed() {
+        // Exercises the real `DATA_PACKS_ROW` -> `activate` -> `refresh` path
+        // (a live, empty-safe scan of `crate::resources::data_packs_dir` —
+        // nothing this dev/CI machine's own data directory would ever
+        // contain), not `rebuild` directly, so the wiring from click to scan
+        // is what is under test here — the fixture-injection tests below
+        // exercise the pure list logic instead.
+        let mut nav = CreateWorldNav::new();
+        assert!(!nav.data_packs_open(), "premise: starts closed");
+        assert_eq!(nav.click_focus(DATA_PACKS_ROW), CreateWorldOutcome::Handled);
+        assert!(nav.data_packs_open(), "clicking Data Packs must open the editor");
+        assert_eq!(nav.data_packs.rows.len(), 1, "Vanilla alone, nothing installed");
+        assert_eq!(nav.data_packs.rows[0].title, "Vanilla");
+        assert!(nav.data_packs.rows[0].selected, "Vanilla starts selected");
+        assert!(
+            nav.data_packs.selected_ids().is_empty(),
+            "Vanilla itself is never reported as a selected id — there is \
+             nothing to send that is not already every world's own default"
+        );
+    }
+
+    #[test]
+    fn a_discovered_pack_starts_unselected_and_toggles_on_click() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(DATA_PACKS_ROW);
+        nav.data_packs.rebuild(vec![discovered_pack("cool_pack")]);
+        assert_eq!(nav.data_packs.rows.len(), 2, "Vanilla plus the one fixture");
+        assert!(nav.data_packs.selected_ids().is_empty(), "premise: not yet selected");
+
+        let row = nav
+            .data_packs
+            .visible()
+            .iter()
+            .position(|v| v.control == DataPackControl::Toggle(1))
+            .expect("the discovered pack's row is visible");
+        assert_eq!(nav.click_row(row), CreateWorldOutcome::Handled);
+        assert_eq!(nav.data_packs.selected_ids(), vec!["file/cool_pack".to_string()]);
+
+        // And back off — the same row, re-resolved (a selection does not
+        // reorder or remove the row in this single-list shape).
+        let row = nav
+            .data_packs
+            .visible()
+            .iter()
+            .position(|v| v.control == DataPackControl::Toggle(1))
+            .unwrap();
+        nav.click_row(row);
+        assert!(nav.data_packs.selected_ids().is_empty(), "toggles back off");
+    }
+
+    #[test]
+    fn vanillas_row_cannot_be_deselected() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(DATA_PACKS_ROW);
+        let row = nav
+            .data_packs
+            .visible()
+            .iter()
+            .position(|v| v.control == DataPackControl::Toggle(0))
+            .expect("Vanilla's own row is visible");
+        assert_eq!(nav.click_row(row), CreateWorldOutcome::Handled);
+        assert!(
+            nav.data_packs.rows[0].selected,
+            "clicking Vanilla's row must not deselect it"
+        );
+    }
+
+    #[test]
+    fn a_rebuild_keeps_a_still_present_selection_and_drops_a_removed_one() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(DATA_PACKS_ROW);
+        nav.data_packs.rebuild(vec![discovered_pack("alpha"), discovered_pack("bravo")]);
+        let alpha_row = nav
+            .data_packs
+            .visible()
+            .iter()
+            .position(|v| v.control == DataPackControl::Toggle(1))
+            .unwrap();
+        nav.click_row(alpha_row);
+        assert_eq!(nav.data_packs.selected_ids(), vec!["file/alpha".to_string()]);
+
+        // A re-scan that still has `alpha` (still selected) but drops
+        // `bravo` (never selected, and now gone).
+        nav.data_packs.rebuild(vec![discovered_pack("alpha")]);
+        assert_eq!(
+            nav.data_packs.selected_ids(),
+            vec!["file/alpha".to_string()],
+            "a still-present selection must survive a rebuild"
+        );
+        assert_eq!(nav.data_packs.rows.len(), 2, "Vanilla plus the one remaining pack");
+    }
+
+    #[test]
+    fn escape_from_the_data_packs_editor_returns_to_more_tab_not_a_full_cancel() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(DATA_PACKS_ROW);
+        assert!(nav.data_packs_open(), "premise");
+        assert_eq!(
+            nav.handle_key(MenuKey::Escape),
+            CreateWorldOutcome::Handled,
+            "must not unwind the whole Create New World screen"
+        );
+        assert!(!nav.data_packs_open(), "escape must close only the editor, back to the tabs");
+        assert_eq!(nav.active_tab(), MORE_TAB, "left on the tab it was opened from");
+    }
+
+    #[test]
+    fn create_after_selecting_a_data_pack_carries_exactly_the_selected_extra_ids() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(DATA_PACKS_ROW);
+        nav.data_packs.rebuild(vec![discovered_pack("cool_pack")]);
+        let row = nav
+            .data_packs
+            .visible()
+            .iter()
+            .position(|v| v.control == DataPackControl::Toggle(1))
+            .unwrap();
+        nav.click_row(row);
+        // Done is always the last control.
+        let done_row = nav.data_packs.visible().len() - 1;
+        assert_eq!(nav.click_row(done_row), CreateWorldOutcome::Handled);
+        assert!(!nav.data_packs_open(), "Done must leave the editor");
+        let outcome = nav.click_focus(CREATE_ROW);
+        let CreateWorldOutcome::Create(config) = outcome else {
+            panic!("expected Create, got {outcome:?}");
+        };
+        assert_eq!(
+            config.data_packs,
+            vec!["file/cool_pack".to_string()],
+            "Create must capture the editor's selection at press time, not \
+             an empty default"
+        );
+    }
+
+    /// The control for `frame`'s dispatch: the Data Packs frame must
+    /// actually carry rows drawn from the editor's own state, not a stale or
+    /// empty placeholder — the exact shape `draw_tab` shipped as dead code
+    /// for (`CLAUDE.md`'s own recorded incident): a frame that looks right in
+    /// isolation but that nothing routes real rows into.
+    #[test]
+    fn the_data_packs_frame_carries_one_row_per_pack_plus_done() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(DATA_PACKS_ROW);
+        nav.data_packs.rebuild(vec![discovered_pack("alpha"), discovered_pack("bravo")]);
+        let f = frame(&nav);
+        assert_eq!(f.rows.len(), 3 + 1, "Vanilla + two packs + Done");
+        assert_eq!(f.title, "Data Packs");
+        assert!(
+            f.rows.iter().any(|r| r.label.starts_with("Vanilla")),
+            "Vanilla's row must reach the frame"
+        );
+        assert!(
+            f.rows.iter().any(|r| r.label.starts_with("alpha")),
+            "a discovered pack's row must reach the frame"
         );
     }
 }
