@@ -619,6 +619,10 @@ pub enum InteractOutcome {
         /// accumulate (see `villager::trades::offers_up_to`).
         level: i32,
     },
+    /// `AbstractHorse.doPlayerRide` — the actor is now aboard. The caller's
+    /// cue to send `SET_PASSENGERS`, exactly as
+    /// [`MobSim::mount_mob`]'s own doc names. Consumes no item.
+    Mounted,
 }
 
 impl InteractOutcome {
@@ -632,7 +636,7 @@ impl InteractOutcome {
     pub fn consumes_item(self) -> bool {
         !matches!(
             self,
-            Self::Pass | Self::SitToggled { .. } | Self::OpenTrade { .. }
+            Self::Pass | Self::SitToggled { .. } | Self::OpenTrade { .. } | Self::Mounted
         )
     }
 
@@ -650,7 +654,8 @@ impl InteractOutcome {
             | Self::SitToggled { .. }
             | Self::Fed
             | Self::TemperRaised { .. }
-            | Self::OpenTrade { .. } => None,
+            | Self::OpenTrade { .. }
+            | Self::Mounted => None,
         }
     }
 }
@@ -1125,6 +1130,14 @@ pub struct SimMob<'w> {
     /// deal its own periodic damage or heal — see [`crate::mob_effects`]'s
     /// module doc for the splash side of this gap.
     effects: crate::mob_effects::ActiveEffects,
+    /// The **player entity id** riding this mob, or `None` — the mob-mounted-by-
+    /// player half of the passenger model (`AbstractHorse`'s `doPlayerRide` →
+    /// `Entity.startRiding`/`ridingPlayer`), independent of
+    /// [`TrackedVehicle::rider`] (boats) and [`TrackedMinecart::rider`]
+    /// (minecarts): those are AI-less item-entities in their own maps, while a
+    /// mounted mob keeps its full [`SimMob`] identity, health and (when
+    /// unridden) goal AI. See [`MobSim::mount_mob`] for the occupancy rules.
+    rider: Option<i32>,
 }
 
 impl<'w> SimMob<'w> {
@@ -2992,6 +3005,7 @@ impl<'w> MobSim<'w> {
             villager_xp: 0,
             job_search_cooldown: 0,
             effects: crate::mob_effects::ActiveEffects::new(),
+            rider: None,
         });
         self.mobs.last_mut().expect("just pushed")
     }
@@ -3438,11 +3452,39 @@ impl<'w> MobSim<'w> {
         // mutably borrowed for the whole loop.
         let mut ambient_sounds: Vec<crate::effects::WorldEffect> = Vec::new();
         let tick_count = self.tick_count;
+        // The disconnect self-heal for a mounted mob — the mob twin of
+        // `tick_vehicles`' identical guard for a boat (see that comment for
+        // why it is gated on a *non-empty* roster: `set_players` starts empty
+        // before anyone has moved, and treating that as "nobody is connected"
+        // would evict a rider the instant they mounted). Without this a mount
+        // whose rider crashed or quit stays `Some(id)` forever and never ticks
+        // its own goal AI again below.
+        if !self.players.is_empty() {
+            let connected: Vec<i32> = self
+                .players
+                .iter()
+                .filter_map(|p| p.identity.map(|identity| identity.entity_id))
+                .collect();
+            if !connected.is_empty() {
+                for mob in &mut self.mobs {
+                    if mob.rider.is_some_and(|rider| !connected.contains(&rider)) {
+                        mob.rider = None;
+                    }
+                }
+            }
+        }
         for m in &mut self.mobs {
             // Vanilla ages `invulnerableTime`/`hurtTime` every tick regardless
             // of whether the mob was hit this tick.
             m.hurt_cooldown.tick();
-            m.mob.tick(&mut m.goals);
+            // A ridden mob's movement is client-authoritative
+            // (`MobSim::apply_mob_move`), the same handover `tick_vehicles`
+            // documents for an unridden boat: running goal AI here too would
+            // fight the rider's own reports and produce jitter, so a mount's
+            // goal selector simply does not tick while ridden.
+            if m.rider.is_none() {
+                m.mob.tick(&mut m.goals);
+            }
             // Vanilla `Mob.baseTick`'s ambient-sound roll runs every tick a
             // mob is alive, independent of any goal — see
             // `roll_ambient_sound`'s own doc.
@@ -4478,12 +4520,26 @@ impl<'w> MobSim<'w> {
         max_temper: i32,
     ) -> InteractOutcome {
         let Some(item) = item else {
-            // An empty-handed right-click on an untamed horse is
-            // `doPlayerRide` — vanilla's only route to the tame roll. See
-            // `attempt_horse_tame`'s doc for the one disclosed deviation.
-            return if self.get(mob_id).is_some_and(|m| !m.is_tame()) {
+            // An empty-handed right-click is `doPlayerRide` — vanilla's only
+            // route to the tame roll (on an untamed horse; see
+            // `attempt_horse_tame`'s doc for the one disclosed deviation) and,
+            // now that a passenger model exists, to actually boarding a tamed
+            // one. A baby is excluded exactly as vanilla's own
+            // `isVehicle() || isBaby()` guard at the top of `mobInteract`
+            // routes it to `Animal.mobInteract` instead, which has no
+            // empty-handed arm at all.
+            let Some(mob) = self.get(mob_id) else {
+                return InteractOutcome::Pass;
+            };
+            if mob.is_baby() {
+                return InteractOutcome::Pass;
+            }
+            return if !mob.is_tame() {
                 self.attempt_horse_tame(mob_id, actor, max_temper)
+            } else if self.mount_mob(mob_id, actor.entity_id) {
+                InteractOutcome::Mounted
             } else {
+                // Already ridden by someone else.
                 InteractOutcome::Pass
             };
         };
@@ -5200,6 +5256,106 @@ impl<'w> MobSim<'w> {
     /// A mob by id, mutably, if present.
     pub fn get_mut(&mut self, id: i32) -> Option<&mut SimMob<'w>> {
         self.mobs.iter_mut().find(|m| m.id == id)
+    }
+
+    /// The **player entity id** riding `id`, if `id` names a mounted mob.
+    ///
+    /// The mob-mounted-by-player half of the passenger model — the twin of
+    /// [`vehicle_rider`](Self::vehicle_rider) (boats) and the minecart
+    /// equivalent in [`mobs::minecart`](crate::mobs::minecart), for a mount
+    /// that keeps its own `SimMob` identity and goal AI rather than living in
+    /// a separate AI-less map.
+    #[must_use]
+    pub fn mob_rider(&self, id: i32) -> Option<i32> {
+        self.get(id).and_then(|m| m.rider)
+    }
+
+    /// The mob `player_entity_id` is riding, if any.
+    #[must_use]
+    pub fn mob_ridden_by(&self, player_entity_id: i32) -> Option<i32> {
+        self.mobs
+            .iter()
+            .find(|m| m.rider == Some(player_entity_id))
+            .map(|m| m.id)
+    }
+
+    /// `Entity.startRiding` for a mounted mob — `AbstractHorse.doPlayerRide`'s
+    /// occupancy half. Mirrors [`mount_vehicle`](Self::mount_vehicle)'s shape
+    /// exactly; the difference is what it operates on, a full [`SimMob`]
+    /// rather than an AI-less [`TrackedVehicle`].
+    ///
+    /// Species-specific eligibility — tamed, not a baby, no sneak-click, a
+    /// saddle if the species requires one — is deliberately **not** checked
+    /// here, the same division `mount_vehicle` draws with
+    /// `using_secondary_action`: those are `interact_horse`'s (or a future
+    /// per-species interact arm's) job, because they differ by species and
+    /// this method's only responsibility is the universal occupancy rule.
+    ///
+    /// Refuses when `id` is not a live mob or already carries a *different*
+    /// rider. A player already riding something else — mob or vehicle — is
+    /// left untouched here: unlike vehicles, this crate has exactly one
+    /// producer of mob mounts today ([`MobSim::interact`]'s horse-family arm),
+    /// so cross-kind dismount-first is the caller's job until a second
+    /// producer exists, matching this method's own "one map's worry" scope.
+    ///
+    /// Returns `true` when the player is now aboard — the caller's cue to
+    /// send `SET_PASSENGERS`.
+    pub fn mount_mob(&mut self, id: i32, player_entity_id: i32) -> bool {
+        let Some(mob) = self.get(id) else {
+            return false;
+        };
+        if mob.rider.is_some_and(|rider| rider != player_entity_id) {
+            return false;
+        }
+        if let Some(previous) = self.mob_ridden_by(player_entity_id) {
+            if previous != id {
+                if let Some(old) = self.get_mut(previous) {
+                    old.rider = None;
+                }
+            }
+        }
+        if let Some(mob) = self.get_mut(id) {
+            mob.rider = Some(player_entity_id);
+        }
+        true
+    }
+
+    /// `Entity.stopRiding` for whatever mob `player_entity_id` is aboard,
+    /// returning the mob it left. Called on an explicit dismount as well as
+    /// on disconnect: a mount whose rider vanished must resume its own goal
+    /// AI ([`tick`](Self::tick) skips a ridden mob's goal tick entirely — see
+    /// that skip's own comment), or it stands frozen forever exactly as an
+    /// unhealed boat would.
+    pub fn dismount_mob(&mut self, player_entity_id: i32) -> Option<i32> {
+        let id = self.mob_ridden_by(player_entity_id)?;
+        if let Some(mob) = self.get_mut(id) {
+            mob.rider = None;
+        }
+        Some(id)
+    }
+
+    /// Accepts a client-authoritative move for the mob `player_entity_id` is
+    /// riding — the mob-mount twin of
+    /// [`apply_vehicle_move`](Self::apply_vehicle_move), and intended for the
+    /// same `VehicleMoved` wire packet: vanilla's client is authoritative over
+    /// its own ridden entity's position regardless of whether that entity is
+    /// a boat or a horse (`Player.isClientAuthoritative()` does not
+    /// distinguish them), so the two share one packet and should share one
+    /// dispatch, trying this after (or instead of)
+    /// [`apply_vehicle_move`](Self::apply_vehicle_move) depending on which one
+    /// the rider is actually aboard.
+    ///
+    /// Returns `false` if the player rides no mob (including "rides a
+    /// vehicle instead", which is not this method's map to touch).
+    pub fn apply_mob_move(&mut self, player_entity_id: i32, position: Vec3, yaw: f32) -> bool {
+        let Some(id) = self.mob_ridden_by(player_entity_id) else {
+            return false;
+        };
+        let Some(mob) = self.get_mut(id) else {
+            return false;
+        };
+        mob.mob.set_position(position).set_body_yaw(yaw);
+        true
     }
 
     /// The world this sim's mobs path over. Exposed so a caller holding only

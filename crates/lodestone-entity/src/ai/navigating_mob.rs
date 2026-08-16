@@ -545,6 +545,32 @@ impl<'w> NavigatingMob<'w> {
         self.pos
     }
 
+    /// Overwrites the mob's position directly, bypassing pathfinding and the
+    /// [`advance`](Self::advance)/[`tick`](Self::tick) follower entirely.
+    ///
+    /// The one legitimate caller is a driver that is *itself* authoritative
+    /// over this mob's movement for the duration — a ridden mount whose rider
+    /// reports position the way [`MobSim::apply_vehicle_move`](crate) does for
+    /// a boat, or a `/teleport`-style host command. Calling this while the
+    /// same tick also runs [`tick`](Self::tick) fights that follower and
+    /// produces jitter; a caller that owns the mob's movement for a stretch
+    /// must skip `tick` for exactly as long as it calls this instead.
+    pub fn set_position(&mut self, pos: Vec3) -> &mut Self {
+        self.pos = pos;
+        self
+    }
+
+    /// Overwrites the mob's body yaw directly — the rotation half of
+    /// [`set_position`](Self::set_position), for the same ridden-mount case:
+    /// vanilla drives a ridden `AbstractHorse`'s yaw from the rider's own
+    /// reported yaw (`Player.setYRot` propagating through
+    /// `Entity.positionRider`), not from [`advance`]'s movement-direction
+    /// derivation.
+    pub fn set_body_yaw(&mut self, yaw: f32) -> &mut Self {
+        self.body_yaw = yaw;
+        self
+    }
+
     /// The mob's collision body (width/height/step and traversal parameters).
     #[must_use]
     pub fn shape(&self) -> &MobShape {

@@ -74,6 +74,7 @@ use super::goals::{
     SwellGoal,
 };
 
+pub mod equine;
 pub mod hostile_melee;
 pub mod neutral;
 pub mod passive;
@@ -396,12 +397,13 @@ pub type FamilyLookup = fn(&str) -> Option<&'static [Registration]>;
 /// most one family — the first match wins, and
 /// `no_species_is_claimed_by_two_families` fails if two claim the same one, which
 /// is the failure mode of five people adding arms in parallel.
-pub const FAMILIES: [FamilyLookup; 5] = [
+pub const FAMILIES: [FamilyLookup; 6] = [
     hostile_melee::lookup,
     ranged::lookup,
     passive::lookup,
     neutral::lookup,
     specialist::lookup,
+    equine::lookup,
 ];
 
 /// The full registration table for `species`, or [`FALLBACK`] if no family
@@ -772,6 +774,23 @@ mod tests {
                     (Selector::Goal, 7, "RandomLookAroundGoal"),
                 ],
             ),
+            (
+                "horse",
+                "animal/equine/AbstractHorse.java:134-152 (registerGoals, then \
+                 its own trailing addBehaviourGoals call)",
+                &[
+                    (Selector::Goal, 1, "RunAroundLikeCrazyGoal"),
+                    (Selector::Goal, 2, "BreedGoal"),
+                    (Selector::Goal, 4, "FollowParentGoal"),
+                    (Selector::Goal, 6, "WaterAvoidingRandomStrollGoal"),
+                    (Selector::Goal, 7, "LookAtPlayerGoal(Player)"),
+                    (Selector::Goal, 8, "RandomLookAroundGoal"),
+                    (Selector::Goal, 9, "RandomStandGoal"),
+                    (Selector::Goal, 0, "FloatGoal"),
+                    (Selector::Goal, 1, "AbstractHorse.MountPanicGoal"),
+                    (Selector::Goal, 3, "TemptGoal(HORSE_TEMPT_ITEMS)"),
+                ],
+            ),
         ];
 
         for &(species, cite, want) in cases {
@@ -790,7 +809,13 @@ mod tests {
 
         // Species that share a table must actually share it, since the jar
         // reason they do (no `registerGoals` override) is a claim about the jar.
-        for (a, b) in [("cow", "mooshroom"), ("zombie", "husk"), ("spider", "cave_spider")] {
+        for (a, b) in [
+            ("cow", "mooshroom"),
+            ("zombie", "husk"),
+            ("spider", "cave_spider"),
+            ("horse", "donkey"),
+            ("horse", "mule"),
+        ] {
             let (ta, tb) = (registrations_for(a), registrations_for(b));
             assert!(
                 std::ptr::eq(ta.as_ptr(), tb.as_ptr()) && ta.len() == tb.len(),

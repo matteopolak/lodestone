@@ -809,6 +809,147 @@ fn only_gold_breeds_a_horse_and_only_once_it_is_tame() {
 }
 
 // ---------------------------------------------------------------------------
+// The mob-mounts-mob passenger model
+// ---------------------------------------------------------------------------
+
+/// `AbstractHorse.doPlayerRide`: an empty-handed click on a tamed adult horse
+/// boards the actor rather than passing or re-rolling the tame attempt.
+#[test]
+fn an_empty_handed_click_on_a_tamed_adult_horse_mounts_it() {
+    let world = pen();
+    let mut sim = MobSim::new(&world);
+    let horse = sim
+        .spawn_species(rk("minecraft:horse"), Vec3::new(0.0, 0.0, 0.0))
+        .id();
+    sim.get_mut(horse)
+        .expect("alive")
+        .tame(MobOwner::Player(alice().uuid));
+
+    assert_eq!(sim.interact(horse, alice(), None), InteractOutcome::Mounted);
+    assert_eq!(sim.mob_rider(horse), Some(alice().entity_id));
+    assert_eq!(sim.mob_ridden_by(alice().entity_id), Some(horse));
+}
+
+/// The occupancy rule `mount_mob` shares with `mount_vehicle`: a second
+/// rider's empty-handed click is refused outright rather than displacing the
+/// first, and the incumbent stays mounted.
+#[test]
+fn a_second_player_cannot_board_an_already_mounted_horse() {
+    let world = pen();
+    let mut sim = MobSim::new(&world);
+    let horse = sim
+        .spawn_species(rk("minecraft:horse"), Vec3::new(0.0, 0.0, 0.0))
+        .id();
+    sim.get_mut(horse)
+        .expect("alive")
+        .tame(MobOwner::Player(alice().uuid));
+    assert_eq!(sim.interact(horse, alice(), None), InteractOutcome::Mounted);
+
+    assert_eq!(sim.interact(horse, bob(), None), InteractOutcome::Pass);
+    assert_eq!(
+        sim.mob_rider(horse),
+        Some(alice().entity_id),
+        "the incumbent rider must not be displaced by a refused second click"
+    );
+}
+
+/// Vanilla's `isVehicle() || isBaby()` guard at the very top of
+/// `AbstractHorse.mobInteract` routes a baby straight to `Animal.mobInteract`,
+/// which has no empty-handed arm — so a tame baby horse can be fed and bred
+/// but never boarded, even though [`MobSim::mount_mob`] itself has no age
+/// check of its own (that is `interact_horse`'s job, not the universal
+/// occupancy rule's).
+#[test]
+fn a_tame_baby_horse_cannot_be_boarded_by_an_empty_handed_click() {
+    let world = pen();
+    let mut sim = MobSim::new(&world);
+    let horse = sim
+        .spawn_species(rk("minecraft:horse"), Vec3::new(0.0, 0.0, 0.0))
+        .id();
+    {
+        let mob = sim.get_mut(horse).expect("alive");
+        mob.tame(MobOwner::Player(alice().uuid));
+        mob.set_age(-24_000);
+    }
+
+    assert_eq!(sim.interact(horse, alice(), None), InteractOutcome::Pass);
+    assert_eq!(sim.mob_rider(horse), None);
+}
+
+/// `Entity.stopRiding`: an explicit dismount clears the link both ways and
+/// hands back the mob the caller left.
+#[test]
+fn dismount_mob_clears_the_link_and_returns_the_mob() {
+    let world = pen();
+    let mut sim = MobSim::new(&world);
+    let horse = sim
+        .spawn_species(rk("minecraft:horse"), Vec3::new(0.0, 0.0, 0.0))
+        .id();
+    assert!(sim.mount_mob(horse, alice().entity_id));
+
+    assert_eq!(sim.dismount_mob(alice().entity_id), Some(horse));
+    assert_eq!(sim.mob_rider(horse), None);
+    assert_eq!(sim.mob_ridden_by(alice().entity_id), None);
+    // A second dismount with nobody aboard has nothing to report.
+    assert_eq!(sim.dismount_mob(alice().entity_id), None);
+}
+
+/// The handover `tick_vehicles` documents for a boat, ported to a mounted mob:
+/// once ridden, [`MobSim::apply_mob_move`] is the only writer of position, and
+/// the mob's own goal AI must not fight a report by moving it back.
+#[test]
+fn a_ridden_mobs_position_is_client_authoritative_and_survives_tick() {
+    let world = pen();
+    let mut sim = MobSim::new(&world);
+    let horse = sim
+        .spawn_species(rk("minecraft:horse"), Vec3::new(0.0, 0.0, 0.0))
+        .id();
+    assert!(sim.mount_mob(horse, alice().entity_id));
+
+    let reported = Vec3::new(50.0, 0.0, 50.0);
+    assert!(sim.apply_mob_move(alice().entity_id, reported, 90.0));
+    sim.tick_for(20);
+
+    assert_eq!(
+        sim.get(horse).expect("alive").position(),
+        reported,
+        "a ridden mob's goal AI must not run and move it away from the rider's own report"
+    );
+}
+
+/// The disconnect self-heal, the mob twin of `tick_vehicles`' boat guard: a
+/// rider absent from a **non-empty** connected roster is evicted, so a mount
+/// whose rider crashed resumes its own goal AI instead of standing frozen.
+#[test]
+fn a_rider_absent_from_a_non_empty_roster_is_evicted_from_its_mount() {
+    let world = pen();
+    let mut sim = MobSim::new(&world);
+    let horse = sim
+        .spawn_species(rk("minecraft:horse"), Vec3::new(0.0, 0.0, 0.0))
+        .id();
+    assert!(sim.mount_mob(horse, alice().entity_id));
+
+    // An empty roster carries no information (nobody has moved yet) and must
+    // not evict anyone — the control side of this gate.
+    sim.tick();
+    assert_eq!(
+        sim.mob_rider(horse),
+        Some(alice().entity_id),
+        "an empty roster is not evidence alice disconnected"
+    );
+
+    // A non-empty roster that simply does not include alice is real
+    // information: she is gone.
+    sim.set_players(vec![seen(bob(), Vec3::new(10.0, 0.0, 10.0))]);
+    sim.tick();
+    assert_eq!(
+        sim.mob_rider(horse),
+        None,
+        "a rider absent from a non-empty roster has disconnected"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Breeding: the trigger, the cooldown, the child, the orb
 // ---------------------------------------------------------------------------
 
