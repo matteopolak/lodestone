@@ -82,28 +82,48 @@ professions, not just farmer.
 - **The gossip (#244) and reputation (#246) hook is `OfferState::special_price_diff`**
   plus `add_special_price_diff`/`reset_special_price_diff` — vanilla's own
   `addToSpecialPriceDiff`/`resetSpecialPriceDiff`, the mechanism both Hero of
-  the Village and ordinary reputation-driven pricing use. Neither issue is
-  implemented here; the field and its two mutators are, and are tested
-  (`tests::a_special_price_diff_reduces_the_next_purchases_cost`).
+  the Village and ordinary reputation-driven pricing use. The field and its
+  two mutators are tested here
+  (`tests::a_special_price_diff_reduces_the_next_purchases_cost`); #244/#246
+  themselves are now built in `crate::mobs::villager::{gossip, reputation}`
+  and `crate::mobs::MobSim` (see `docs/villager-reputation.md`) — a real
+  gossip ledger, reputation score and the `update_special_prices` caller of
+  this module's hook all exist and reach a live `SimMob`. What still does
+  **not** exist is a live per-villager `OfferState` list for
+  `update_special_prices` to call against — see this doc's own "What
+  remains" section below, unchanged by that work.
 
 ## What remains (issue #245's third piece, and the #243 broker)
 
-Not built here, named rather than silent:
-
-- **`SELECT_TRADE` is still decoded and discarded**
-  (`crates/protocol/v770/src/server_protocol.rs`'s `let _ =
-  decode_full::<SelectTrade>(payload);`). Wiring it to
-  `VillagerTrades::try_trade` needs: a `ServerBound::SelectTrade { index }`
-  variant and a real dispatch arm; a window-id → villager-entity mapping
-  threaded through `crate::server::dispatch_play_packet` (already roughly
-  thirty per-connection parameters — `next_window_id`/`open_container` are
-  the existing precedent for the shape a new one would take); and the actual
-  item exchange against `PlayerInventory`, which `TradeTake` already
-  describes exactly (item, count, on both sides) but does not perform. None
-  of this was attempted as a rushed hunk in this repo's single largest
-  choke-point function while other agents were live in adjacent files during
-  this session — the same call this repo's own precedent already made for
-  the Brain-driven half of #243.
+- **`SELECT_TRADE` is now decoded and connected, with a disclosed
+  simplification** (issue #616's remainder). `ServerBound::SelectTrade {
+  index }` (`crate::protocol`) is constructed by `V770ServerProtocol::decode`
+  and dispatched in `crate::server::dispatch_play_packet`, which tracks which
+  villager a connection's open merchant screen belongs to
+  (`crate::server::OpenMerchant`, set by the `InteractOutcome::OpenTrade`
+  arm and cleared on `ContainerClosed`) and executes the trade directly
+  through `crate::server::attempt_villager_trade` against the player's
+  36-slot hotbar+main inventory (`PlayerInventory::count_of`/`consume`, new).
+  **This does not go through `VillagerTrades::try_trade`, and does not use
+  live demand pricing** — see `attempt_villager_trade`'s own doc comment for
+  why: a villager is a `SimMob`, not a `BlockEntity`, so it has none of the
+  `BlockPos`-keyed storage `OpenContainer`'s slot-sync machinery needs, and a
+  second parallel storage-and-sync mechanism for one menu's two payment
+  slots plus a result slot was judged out of scope for this pass. Every
+  purchase is priced at the record's own base cost, and the cost items are
+  found and consumed from wherever they sit in the inventory rather than
+  from two manually-filled payment slots — a real, disclosed UX deviation
+  from vanilla's `MerchantMenu`, not a silent one.
+- **Still not built: tying a live `VillagerTrades` (with real demand/uses
+  state) to a specific `SimMob`.** `VillagerTrades::try_trade` and
+  `maybe_restock` remain unused in production; the SELECT_TRADE wiring above
+  reads the static per-level offer table fresh on every purchase rather than
+  a persisted, demand-adjusted one. Whoever builds real payment-slot
+  mechanics (a `MenuKind::Merchant` in `crate::container_click`, and
+  non-block-entity per-connection scratch storage for it, the same shape
+  `PlayerInventory::workstation` already is for the anvil/grindstone/
+  smithing table) gets this for free as a side effect, since that is also
+  where a live `VillagerTrades` instance would naturally live.
 - **Nothing calls `VillagerTrades::maybe_restock`.** Vanilla's own trigger is
   the `WorkAtPoi` Brain behavior (`body.shouldRestock(level)` /
   `body.restock()`, both inside that one behavior) — Brain package work is
