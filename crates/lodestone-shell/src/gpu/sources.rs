@@ -345,6 +345,13 @@ impl ThirdPersonBodyState {
             // `on_false` and draws the resting model, which is what shipped
             // before the variant axis existed.
             item_use: None,
+            // A `Player`'s main-arm setting is a client-side option synced on
+            // its own metadata byte, separate from `Mob.DATA_MOB_FLAGS_ID`
+            // (which only exists on `Mob`, not `Player`), and this build does
+            // not decode it — so the local player's own body always draws
+            // right-handed. Not a guess in the `MobFlags` sense: there is no
+            // decoded bit to be wrong about, unlike `item_use` above.
+            main_arm_left: false,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
             // The local player's own swim ramp, now plumbed from

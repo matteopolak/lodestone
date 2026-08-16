@@ -1324,13 +1324,15 @@ impl RenderState {
                 continue;
             }
             for (slot, id) in &draw.equipment {
-                // `Mob.getMainArm()` is `RIGHT` for every mob, so main hand is the
-                // right arm and off hand the left — the same mapping
+                // `Mob.getMainArm()` is `RIGHT` for every mob **except a
+                // left-handed one** (`draw.main_arm_left`, `Mob.isLeftHanded()`):
+                // main hand is the right arm and off hand the left, unless that
+                // flag is set, in which case both sides flip — the same mapping
                 // `merge_held_items` applies, and the only two slots that hold an
                 // *item model*. Armour goes through `prepare_armour`.
-                let arm = match slot {
-                    EquipmentSlot::MainHand => Arm::Right,
-                    EquipmentSlot::OffHand => Arm::Left,
+                let arm = match (slot, draw.main_arm_left) {
+                    (EquipmentSlot::MainHand, false) | (EquipmentSlot::OffHand, true) => Arm::Right,
+                    (EquipmentSlot::MainHand, true) | (EquipmentSlot::OffHand, false) => Arm::Left,
                     _ => continue,
                 };
                 if let Some(instance) = self.held_special_item(model, draw, arm, id, light) {
@@ -1796,6 +1798,7 @@ mod tests {
             id: 1,
             type_path: Arc::from(type_path),
             item: None,
+            main_arm_left: false,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),
             equipment_trim: Vec::new(),

@@ -800,6 +800,17 @@ pub struct EntityDraw {
     /// `RenderState::merge_held_items` must compare it against the arm it is
     /// drawing or a skeleton drawing a bow would bend its off-hand item too.
     pub item_use: Option<ItemUse>,
+    /// `Mob.getMainArm() == HumanoidArm.LEFT`, i.e.
+    /// [`lodestone_ecs::entity::MobState::left_handed`]. `false` (right-handed)
+    /// for every entity that has never reported the mob-flags byte, same as
+    /// [`AnimInput::aggressive`](lodestone_render::entity_anim::AnimInput::aggressive).
+    ///
+    /// Flips which physical arm both [`arm_pose_for`]'s pose and the held-item
+    /// mesh resolve to: a left-handed mob's main-hand item and its ranged pose
+    /// both belong on its left arm, not its right. Every equipment-slot → `Arm`
+    /// mapping in `gpu/entity_passes.rs`/`gpu/world_items.rs` must XOR against
+    /// this rather than assume `Mob.getMainArm()` is always `RIGHT`.
+    pub main_arm_left: bool,
     /// A creeper's pre-detonation swell, `0.0..~1.07`, vanilla's
     /// `Creeper.getSwelling(partialTick)` — `0.0` (and hence
     /// [`lodestone_render::entity_anim::Skeleton::pose_swelling`]'s exact
@@ -1607,6 +1618,8 @@ pub fn extract_pickup_draws(
             // A flying pickup is an item entity, not a living one: nothing can be
             // using it, so its variant resolves in `DisplaySlot::Ground` alone.
             item_use: None,
+            // An item entity is not a `Mob` and has no main arm at all.
+            main_arm_left: false,
             // An item entity is never a creeper.
             creeper_swelling: 0.0,
             // An item entity never swims — `Item.updateSwimAmount` is a
@@ -1924,24 +1937,25 @@ fn arm_pose_for(
     equipment: &[(EquipmentSlot, ResourceLocation)],
     item_use: Option<ItemUse>,
     aggressive: bool,
+    main_arm_left: bool,
 ) -> ArmPoseChoice {
     // `AbstractSkeletonRenderer.getArmPose`'s override, ahead of the base
     // using-item rule exactly as vanilla's `? :` puts it ahead of `super`.
     //
-    // `getMainArm() == arm` is vanilla's left-handed fork; a right-handed mob is
-    // assumed here, so the pose always lands in the main hand. `MobFlags`
-    // decodes the left-handed bit and nothing consumes it yet — see that
-    // accessor's doc for why.
+    // `getMainArm() == arm` is vanilla's left-handed fork. The bow always sits
+    // in the main *hand* (`main_hand_holds_bow` only ever looks at
+    // `EquipmentSlot::MainHand`), so the physical arm that draws it is simply
+    // `main_arm_left` — a left-handed skeleton draws with its left arm.
     if aggressive && mob_draws_bow_when_aggressive(type_path) && main_hand_holds_bow(equipment) {
         return ArmPoseChoice {
             pose: ArmPose::BowAndArrow,
-            left_hand: false,
+            left_hand: main_arm_left,
         };
     }
-    if let Some(choice) = in_use_arm_pose(equipment, item_use) {
+    if let Some(choice) = in_use_arm_pose(equipment, item_use, main_arm_left) {
         return choice;
     }
-    held_item_arm_pose(type_path, equipment)
+    held_item_arm_pose(type_path, equipment, main_arm_left)
 }
 
 /// `AvatarRenderer.getArmPose`'s using-item `if` chain — the poses that need the
@@ -1956,6 +1970,7 @@ fn arm_pose_for(
 fn in_use_arm_pose(
     equipment: &[(EquipmentSlot, ResourceLocation)],
     item_use: Option<ItemUse>,
+    main_arm_left: bool,
 ) -> Option<ArmPoseChoice> {
     let item_use = item_use?;
     if !item_use.using {
@@ -1995,7 +2010,12 @@ fn in_use_arm_pose(
     };
     Some(ArmPoseChoice {
         pose,
-        left_hand: item_use.off_hand,
+        // The *physical* arm, not the equipment slot: for a right-handed mob
+        // (the common case) the off hand is the left arm and this is just
+        // `item_use.off_hand`, but a left-handed mob's off hand is its right
+        // arm — hence the XOR against `main_arm_left` rather than the bare
+        // slot bit.
+        left_hand: item_use.off_hand != main_arm_left,
     })
 }
 
@@ -2014,18 +2034,20 @@ fn in_use_arm_pose(
 fn held_item_arm_pose(
     type_path: &str,
     equipment: &[(EquipmentSlot, ResourceLocation)],
+    main_arm_left: bool,
 ) -> ArmPoseChoice {
     if !renderer_is_avatar(type_path) {
         return ArmPoseChoice::default();
     }
-    for (slot, left_hand) in [
+    for (slot, off_hand) in [
         (EquipmentSlot::MainHand, false),
         (EquipmentSlot::OffHand, true),
     ] {
         if hand_is_occupied(equipment, slot) {
             return ArmPoseChoice {
                 pose: ArmPose::Item,
-                left_hand,
+                // Physical arm, same XOR as `in_use_arm_pose`.
+                left_hand: off_hand != main_arm_left,
             };
         }
     }
@@ -2331,6 +2353,12 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| mob_states.get(entity).ok())
             .is_some_and(|state| state.aggressive);
+        // `Mob.getMainArm() == LEFT` — same bridge as `aggressive` above, off
+        // the same `MobState` component, `false` for the same absent case.
+        let main_arm_left = index
+            .get(id.0)
+            .and_then(|entity| mob_states.get(entity).ok())
+            .is_some_and(|state| state.left_handed);
         // One lookup, two consumers: the arm pose below and `EntityDraw::item_use`,
         // which the held-item pass resolves the item's own definition tree against.
         // Reading it twice would let the two disagree about the same tick.
@@ -2338,7 +2366,7 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| item_uses.get(entity).ok())
             .map(|item_use| *item_use);
-        let arm_pose = arm_pose_for(&kind.0, &equipment.0, item_use, aggressive);
+        let arm_pose = arm_pose_for(&kind.0, &equipment.0, item_use, aggressive, main_arm_left);
         // `Entity.isCrouching()`. `false` for an entity that has never reported
         // the pose accessor (`Pose` absent) — which is every entity that has
         // never left `STANDING`, since the server only sends metadata that
@@ -2477,6 +2505,7 @@ pub fn extract_entity_draws(
             hurt,
             death_time,
             item_use,
+            main_arm_left,
             creeper_swelling,
             swim_amount,
             on_fire,
@@ -4464,6 +4493,7 @@ mod tests {
                 name_tag: None,
                 hurt: false,
                 item_use: None,
+                main_arm_left: false,
                 creeper_swelling: 0.0,
                 swim_amount: 0.0,
                 death_time: 0.0,
@@ -4676,33 +4706,36 @@ mod tests {
     fn an_aggressive_skeleton_with_a_bow_draws_and_nothing_else_does() {
         // The positive.
         assert_eq!(
-            arm_pose_for("skeleton", &bow_in_main_hand(), None, true).pose,
+            arm_pose_for("skeleton", &bow_in_main_hand(), None, true, false).pose,
             ArmPose::BowAndArrow
         );
         // Every `AbstractSkeletonRenderer` subclass, so the type set is not just
         // "skeleton" with the others assumed.
         for kind in ["wither_skeleton", "stray", "bogged", "parched"] {
             assert_eq!(
-                arm_pose_for(kind, &bow_in_main_hand(), None, true).pose,
+                arm_pose_for(kind, &bow_in_main_hand(), None, true, false).pose,
                 ArmPose::BowAndArrow,
                 "{kind} is drawn by AbstractSkeletonRenderer and must get the draw too"
             );
         }
-        // It lands in the main hand: vanilla's `getMainArm() == arm` term, with a
-        // right-handed mob assumed.
-        assert!(!arm_pose_for("skeleton", &bow_in_main_hand(), None, true).left_hand);
+        // It lands in the main hand for a right-handed mob: vanilla's
+        // `getMainArm() == arm` term.
+        assert!(!arm_pose_for("skeleton", &bow_in_main_hand(), None, true, false).left_hand);
+        // ...and in the *left* hand once `Mob.isLeftHanded()` is set — the term
+        // this used to hardcode a right-handed answer for.
+        assert!(arm_pose_for("skeleton", &bow_in_main_hand(), None, true, true).left_hand);
 
         // Not aggressive — the flag is the trigger, and this is the case every
         // skeleton in the world was stuck in before #379.
         assert_eq!(
-            arm_pose_for("skeleton", &bow_in_main_hand(), None, false).pose,
+            arm_pose_for("skeleton", &bow_in_main_hand(), None, false, false).pose,
             ArmPose::Empty
         );
         // Aggressive, bow, wrong renderer family. `AbstractZombieRenderer` and
         // `IllagerRenderer` have no such override, so a humanoid mob's arms hang.
         for kind in ["zombie", "husk", "drowned", "pillager"] {
             assert_eq!(
-                arm_pose_for(kind, &bow_in_main_hand(), None, true).pose,
+                arm_pose_for(kind, &bow_in_main_hand(), None, true, false).pose,
                 ArmPose::Empty,
                 "{kind} is not drawn by AbstractSkeletonRenderer and must not get the draw"
             );
@@ -4714,7 +4747,7 @@ mod tests {
         // one renderer that does not give it.
         for kind in ["player", "mannequin"] {
             assert_eq!(
-                arm_pose_for(kind, &bow_in_main_hand(), None, true).pose,
+                arm_pose_for(kind, &bow_in_main_hand(), None, true, false).pose,
                 ArmPose::Item,
                 "{kind} is drawn by AvatarRenderer: no draw pose, but a raised arm"
             );
@@ -4726,12 +4759,12 @@ mod tests {
             "minecraft:bow".parse::<ResourceLocation>().expect("key"),
         )];
         assert_eq!(
-            arm_pose_for("skeleton", &off_hand, None, true).pose,
+            arm_pose_for("skeleton", &off_hand, None, true, false).pose,
             ArmPose::Empty
         );
         // Aggressive skeleton, no bow at all.
         assert_eq!(
-            arm_pose_for("skeleton", &[], None, true).pose,
+            arm_pose_for("skeleton", &[], None, true, false).pose,
             ArmPose::Empty
         );
         // And a *non-vanilla* `bow` is a different item, not a bow.
@@ -4740,7 +4773,7 @@ mod tests {
             "mypack:bow".parse::<ResourceLocation>().expect("key"),
         )];
         assert_eq!(
-            arm_pose_for("skeleton", &modded, None, true).pose,
+            arm_pose_for("skeleton", &modded, None, true, false).pose,
             ArmPose::Empty
         );
     }
@@ -4755,7 +4788,7 @@ mod tests {
             ticks: 5,
         };
         assert_eq!(
-            arm_pose_for("player", &bow_in_main_hand(), Some(drawing), false).pose,
+            arm_pose_for("player", &bow_in_main_hand(), Some(drawing), false, false).pose,
             ArmPose::BowAndArrow,
             "a remote player drawing a bow is #57's mechanism and must be untouched"
         );
@@ -4763,7 +4796,7 @@ mod tests {
         // `? :` puts the aggressive branch first, but the answer is the same pose,
         // so what matters is that neither path is shadowed into never firing.
         assert_eq!(
-            arm_pose_for("skeleton", &bow_in_main_hand(), Some(drawing), false).pose,
+            arm_pose_for("skeleton", &bow_in_main_hand(), Some(drawing), false, false).pose,
             ArmPose::BowAndArrow
         );
     }
@@ -4905,7 +4938,7 @@ mod tests {
 
         let mut mismatches = Vec::new();
         for (kind, equipment, want_pose, want_left) in cases {
-            let got = arm_pose_for(kind, &equipment, None, false);
+            let got = arm_pose_for(kind, &equipment, None, false, false);
             if got.pose != want_pose || got.left_hand != want_left {
                 mismatches.push(format!(
                     "{kind} holding {equipment:?}: want {want_pose:?} left_hand={want_left}, \
@@ -4938,7 +4971,7 @@ mod tests {
             ticks: 5,
         };
         assert_eq!(
-            arm_pose_for("player", &bow_in_main_hand(), Some(drawing), false).pose,
+            arm_pose_for("player", &bow_in_main_hand(), Some(drawing), false, false).pose,
             ArmPose::BowAndArrow,
             "a drawn bow must not collapse into the flat held-item raise"
         );
@@ -4954,7 +4987,7 @@ mod tests {
                 .expect("key"),
         )];
         assert_eq!(
-            arm_pose_for("player", &crossbow, Some(winding), false).pose,
+            arm_pose_for("player", &crossbow, Some(winding), false, false).pose,
             ArmPose::CrossbowCharge {
                 progress: 12.0 / CROSSBOW_CHARGE_TICKS
             }
@@ -4962,7 +4995,7 @@ mod tests {
         // Using something we were never told about: the in-use half declines, and the
         // fallthrough then finds the hand genuinely empty. `Empty`, not a guess.
         assert_eq!(
-            arm_pose_for("player", &[], Some(drawing), false).pose,
+            arm_pose_for("player", &[], Some(drawing), false, false).pose,
             ArmPose::Empty
         );
         // ...but a hand that IS occupied while a *different* hand claims to be in use
@@ -4976,6 +5009,7 @@ mod tests {
                     off_hand: true,
                     ticks: 3,
                 }),
+                false,
                 false,
             )
             .pose,
@@ -4993,9 +5027,72 @@ mod tests {
                     ticks: 0,
                 }),
                 false,
+                false,
             )
             .pose,
             ArmPose::Item
+        );
+    }
+
+    /// The physical-arm XOR itself (issue: left-handed mobs render right-handed):
+    /// [`ArmPoseChoice::left_hand`] must be `off_hand != main_arm_left`, not a bare
+    /// copy of either operand — checked across all four combinations so a
+    /// transposition of the two `bool`s cannot survive, per `CLAUDE.md`'s note that
+    /// two adjacent same-typed fields (here, two `bool`s) coincide half the time by
+    /// chance.
+    #[test]
+    fn left_handedness_xors_with_the_hand_the_item_is_in() {
+        // Held-item fallthrough (`held_item_arm_pose`): main hand vs. off hand,
+        // each crossed with both handedness values.
+        let main = sword_in(EquipmentSlot::MainHand);
+        let off = sword_in(EquipmentSlot::OffHand);
+        assert!(
+            !arm_pose_for("player", &main, None, false, false).left_hand,
+            "right-handed, main-hand item -> right arm"
+        );
+        assert!(
+            arm_pose_for("player", &main, None, false, true).left_hand,
+            "left-handed, main-hand item -> left arm"
+        );
+        assert!(
+            arm_pose_for("player", &off, None, false, false).left_hand,
+            "right-handed, off-hand item -> left arm"
+        );
+        assert!(
+            !arm_pose_for("player", &off, None, false, true).left_hand,
+            "left-handed, off-hand item -> right arm"
+        );
+
+        // The in-use path (`in_use_arm_pose`) has the same XOR, independently —
+        // drawing a bow in the main hand while left-handed must draw with the
+        // left arm.
+        let drawing_main = ItemUse {
+            using: true,
+            off_hand: false,
+            ticks: 5,
+        };
+        let drawing_off = ItemUse {
+            using: true,
+            off_hand: true,
+            ticks: 5,
+        };
+        assert!(
+            !arm_pose_for("player", &bow_in_main_hand(), Some(drawing_main), false, false)
+                .left_hand
+        );
+        assert!(
+            arm_pose_for("player", &bow_in_main_hand(), Some(drawing_main), false, true)
+                .left_hand
+        );
+        let off_hand_bow = vec![(
+            EquipmentSlot::OffHand,
+            "minecraft:bow".parse::<ResourceLocation>().expect("key"),
+        )];
+        assert!(
+            arm_pose_for("player", &off_hand_bow, Some(drawing_off), false, false).left_hand
+        );
+        assert!(
+            !arm_pose_for("player", &off_hand_bow, Some(drawing_off), false, true).left_hand
         );
     }
 

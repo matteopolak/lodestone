@@ -444,12 +444,12 @@ impl RenderState {
         let light = entity_light(&self.entity_light, draw);
 
         for (slot, id) in &draw.equipment {
-            // Every `Mob` returns `HumanoidArm.RIGHT` from `getMainArm()` (only
-            // a `Player` can be left-handed, and the wire never tells us), so
-            // main hand → right arm, off hand → left arm.
-            let arm = match slot {
-                EquipmentSlot::MainHand => Arm::Right,
-                EquipmentSlot::OffHand => Arm::Left,
+            // `Mob.getMainArm()` is `RIGHT` unless `draw.main_arm_left` is set
+            // (`Mob.isLeftHanded()`, decoded off the same mob-flags byte as
+            // `Mob.isAggressive()`), in which case both hands flip sides.
+            let arm = match (slot, draw.main_arm_left) {
+                (EquipmentSlot::MainHand, false) | (EquipmentSlot::OffHand, true) => Arm::Right,
+                (EquipmentSlot::MainHand, true) | (EquipmentSlot::OffHand, false) => Arm::Left,
                 // Humanoid armour is drawn by `prepare_armour` through the
                 // entity pipeline; `Body`/`Saddle` are animal equipment with no
                 // mesh at all. See this method's docs.
@@ -464,11 +464,13 @@ impl RenderState {
             // * **and which hand it is using.** Vanilla's `using_item` is
             //   `owner.isUsingItem() && owner.getUseItem() == itemStack`, so a
             //   skeleton drawing a bow in its main hand must not also draw its
-            //   off-hand item mid-use. `ItemUse::off_hand` is exactly that test,
-            //   and dropping it is the mistake that would bend both items.
+            //   off-hand item mid-use. `ItemUse::off_hand` is exactly that test —
+            //   compared against the *slot* this loop iteration is drawing rather
+            //   than `arm.is_left()`, so the check stays correct regardless of
+            //   which physical side `main_arm_left` put this slot on.
             let using = draw
                 .item_use
-                .is_some_and(|use_| use_.using && use_.off_hand == arm.is_left());
+                .is_some_and(|use_| use_.using && use_.off_hand == (*slot == EquipmentSlot::OffHand));
             // `arm.display_slot(false)` — the *same* expression `hand_transform`
             // below reads the pose from, so the variant and the transform cannot
             // disagree about which hand this is.

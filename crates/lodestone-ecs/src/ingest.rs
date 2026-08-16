@@ -898,8 +898,10 @@ pub fn apply_entity_metadata(
         // are exactly right. Present only for entities the adapter established are
         // `Mob`s: an armour stand's index-15 byte means "show arms".
         if let Some(bits) = metadata.mob_flags {
+            let flags = lodestone_entity::metadata::MobFlags::from_bits(bits);
             entity.insert(MobState {
-                aggressive: lodestone_entity::metadata::MobFlags::from_bits(bits).aggressive(),
+                aggressive: flags.aggressive(),
+                left_handed: flags.left_handed(),
             });
         }
         // The *armour stand* client-flags byte — the other claimant of the same
@@ -1719,7 +1721,10 @@ mod tests {
         );
         assert_eq!(
             entity_for(&world, 21).get::<MobState>(),
-            Some(&MobState { aggressive: true })
+            Some(&MobState {
+                aggressive: true,
+                left_handed: false
+            })
         );
 
         // And it *latches down* as well as up: an attack goal that releases its
@@ -1737,7 +1742,10 @@ mod tests {
         );
         assert_eq!(
             entity_for(&world, 21).get::<MobState>(),
-            Some(&MobState { aggressive: false })
+            Some(&MobState {
+                aggressive: false,
+                left_handed: false
+            })
         );
 
         // A metadata packet that does not mention the byte must leave the
@@ -1765,9 +1773,64 @@ mod tests {
         );
         assert_eq!(
             entity_for(&world, 21).get::<MobState>(),
-            Some(&MobState { aggressive: true }),
+            Some(&MobState {
+                aggressive: true,
+                left_handed: false
+            }),
             "a health-only update cleared the aggressive latch — a skeleton would drop its \
              draw every time it took damage"
+        );
+    }
+
+    /// `MobFlags::LEFT_HANDED` (bit `0x02`) folds into [`MobState::left_handed`]
+    /// independently of [`MobState::aggressive`] (bit `0x04`) — the two bits are
+    /// adjacent same-typed fields on the same byte, so a fixture that only ever
+    /// sets them equal (both true or both false) cannot see a transposition
+    /// between them. `0x02` sets *only* left-handed and `0x06` sets *both*,
+    /// deliberately distinct from each other and from the all-aggressive /
+    /// all-calm bytes [`mob_flags_fold_into_mob_state`] already covers.
+    #[test]
+    fn mob_flags_left_handed_bit_folds_independently_of_aggressive() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(23, "minecraft:skeleton"));
+
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    mob_flags: Some(0x02),
+                    ..EntityMetadataUpdate::default()
+                },
+                23,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 23).get::<MobState>(),
+            Some(&MobState {
+                aggressive: false,
+                left_handed: true
+            }),
+            "left-handed alone must not also set aggressive — a transposition of the two bits \
+             would still pass a fixture that only ever sets them equal"
+        );
+
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    mob_flags: Some(0x06),
+                    ..EntityMetadataUpdate::default()
+                },
+                23,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 23).get::<MobState>(),
+            Some(&MobState {
+                aggressive: true,
+                left_handed: true
+            }),
+            "an aggressive left-handed mob must fold both bits"
         );
     }
 

@@ -396,6 +396,16 @@ impl ItemUse {
 pub struct MobState {
     /// `Mob.isAggressive()` — set by the attack goals while a target is engaged.
     pub aggressive: bool,
+    /// `Mob.isLeftHanded()` — `Mob.getMainArm() == HumanoidArm.LEFT`.
+    ///
+    /// Flips which physical arm every ranged-pose and held-item resolution
+    /// treats as the main hand: a left-handed skeleton draws its bow with its
+    /// left arm, and a left-handed mob's main-hand item renders in its left
+    /// hand rather than its right. Rides the same byte as
+    /// [`Self::aggressive`] (`Mob.DATA_MOB_FLAGS_ID`) at a different bit, so
+    /// it is folded alongside it here rather than through a separate wire
+    /// fact.
+    pub left_handed: bool,
 }
 
 /// The armour-stand client-flags byte's decoded state —
