@@ -19,6 +19,7 @@
 mod anim;
 mod font;
 pub(crate) mod item_icon;
+pub mod locator;
 pub mod vanilla_font;
 
 pub use font::glyph_rows;
@@ -1370,6 +1371,16 @@ pub struct HudFrame<'a> {
     /// experience. Drawn as a green progress bar above the hotbar with the level
     /// centred above it. Off a live server this is `None` — no bar is drawn.
     pub xp: Option<(i32, f32)>,
+    /// The locator bar's dots (issue #26), already resolved to a screen
+    /// offset and colour by [`locator::locator_dots`] — empty when the
+    /// local player is tracking no waypoint, which is also
+    /// [`HudFrame::new`]'s default. Occupies the same on-screen slot as
+    /// [`Self::xp`] (`ContextualBar` is one mutually-exclusive bar in
+    /// vanilla); a non-empty [`Self::locator`] draws instead of the XP bar
+    /// rather than alongside it — see `sprite_vitals`'s own doc for the
+    /// priority order this build models (and the one term of vanilla's it
+    /// does not).
+    pub locator: &'a [locator::LocatorDot],
     /// The title/subtitle overlay `(title, subtitle, alpha)`, drawn large and
     /// centred with a server-driven fade. `None` when no title is showing.
     ///
@@ -1513,6 +1524,7 @@ impl<'a> HudFrame<'a> {
             hotbar: None,
             hotbar_items: None,
             xp: None,
+            locator: &[],
             title: None,
             action_bar: None,
             held_item: None,
@@ -3746,11 +3758,43 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // `cluster_top` that the hearts row stacked off, which made the hearts move
     // depending on whether the player had XP — vanilla's `yLineBase` is a
     // constant (see [`VITALS_LINE_BASE_FROM_BOTTOM`]) and takes no such branch.
-    let xp_top = frame.xp.map(|_| hy - bar_h - 2.0);
+    //
+    // This is `ContextualBar::top(window)` — `guiScaledHeight - 24 - 5` —
+    // shared by every bar that can occupy this slot (`ContextualBar` is a
+    // single mutually-exclusive slot in vanilla: XP, locator, or the
+    // jumpable-vehicle bar, never more than one at once). Unconditional now
+    // (it used to live behind `frame.xp.map`) because the locator bar needs
+    // the same position on a session with no XP to show at all.
+    let bar_top = hy - bar_h - 2.0;
+    // `Hud::nextContextualInfoState`'s priority order, reduced to the two
+    // bars this build models: the locator bar wins whenever there is at
+    // least one waypoint to show, and the XP bar only draws when the
+    // locator bar has nothing. Vanilla's real order additionally prefers a
+    // *recently gained* XP flash over the locator bar for a few seconds
+    // (`Hud::willPrioritizeExperienceInfo`) and a jumpable-vehicle bar over
+    // both — neither is modelled here (this build tracks no jump-vehicle
+    // bar at all, and `anim.xp_flash`'s decay is a different effect, issue
+    // #30's rather than a port of vanilla's own timer), so a player who
+    // both has waypoints and just levelled up sees the locator bar a few
+    // seconds earlier than vanilla would. Documented rather than guessed at.
+    if !frame.locator.is_empty() {
+        b.sprite("hud/locator_bar_background", hx, bar_top, bar_w, bar_h, white);
+        // `Mth.ceil((graphics.guiWidth() - 9) / 2.0F)` — `LocatorBar.java`.
+        // Not `guiWidth/2 - 9/2`: the `ceil` sits around the whole
+        // subtraction, and the two only agree when `guiWidth` is even.
+        let dot = locator::dot_size() as f32;
+        let screen_middle = ((b.w - dot) / 2.0).ceil();
+        let dy = bar_top - 2.0;
+        for dot_info in frame.locator {
+            let dx = screen_middle + dot_info.offset as f32;
+            b.sprite(locator::DEFAULT_DOT_SPRITE, dx, dy, dot, dot, dot_info.color);
+        }
+    }
     // `nextContextualInfoState` reaches `ContextualInfo.EXPERIENCE` only when
     // `gameMode.hasExperience()`, so creative and spectator draw neither the bar nor
     // the level number — see [`HudFrame::can_hurt_player`].
-    if let (true, Some((level, progress)), Some(by)) = (frame.can_hurt_player, frame.xp, xp_top) {
+    else if let (true, Some((level, progress))) = (frame.can_hurt_player, frame.xp) {
+        let by = bar_top;
         b.sprite("hud/experience_bar_background", hx, by, bar_w, bar_h, white);
         let p = progress.clamp(0.0, 1.0);
         if p > 0.0 {
@@ -9188,6 +9232,123 @@ mod tests {
         );
 
         assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// A minimal synthetic pack covering the locator bar's two sprite ids —
+    /// same "geometry gate, not a pixel-colour gate" shape as
+    /// [`boss_bar_synthetic_atlas`], and at the bar's real native sizes:
+    /// 182x5 for the background, 9x9 for the dot (`LocatorBar::DOT_SIZE`).
+    fn locator_bar_synthetic_atlas() -> GuiAtlas {
+        let mut src = lodestone_assets::MemorySource::new("locator-bar-test");
+        for (id, size, rgba) in [
+            ("hud/locator_bar_background", (182, 5), [40, 40, 40, 255]),
+            (locator::DEFAULT_DOT_SPRITE, (9, 9), [255, 255, 255, 255]),
+            // The XP bar's own sprites, needed only for this test's
+            // mutual-exclusion control (`xp_only` below) — `b.sprite`
+            // silently draws nothing for a missing id, so without these the
+            // control would "pass" by drawing nothing for the wrong reason.
+            ("hud/experience_bar_background", (182, 5), [20, 90, 20, 255]),
+            ("hud/experience_bar_progress", (182, 5), [40, 200, 40, 255]),
+        ] {
+            src.insert(
+                format!("assets/minecraft/textures/gui/sprites/{id}.png"),
+                solid_png(size.0, size.1, rgba),
+            );
+        }
+        let manager = lodestone_assets::ResourceManager::new(vec![
+            Box::new(src) as Box<dyn lodestone_assets::ResourceSource>
+        ]);
+        GuiAtlas::build(&manager).expect("synthetic locator-bar atlas must build")
+    }
+
+    /// The locator bar's dots reach the sprite-geometry layer at their
+    /// predicted screen positions — the same class of gap
+    /// [`boss_bar_reaches_the_sprite_geometry_layer_not_just_the_model`]
+    /// closed for the boss bar, and the one `CLAUDE.md`'s `draw_tab`
+    /// incident names generally: a corpus that only ever asserts on the
+    /// *model* (here, [`locator::LocatorDot`]) cannot see a draw site that
+    /// never calls `b.sprite` at all. This one calls `HudGeometry::build_with_gui`
+    /// and reads the actual emitted quads.
+    ///
+    /// Also the mutual-exclusion contract `sprite_vitals`'s own doc names:
+    /// a non-empty `locator` must draw *instead of* the XP bar, not
+    /// alongside it, even when `frame.xp` is `Some` — `ContextualBar` is one
+    /// slot in vanilla, never two bars stacked.
+    #[test]
+    fn locator_bar_reaches_the_sprite_geometry_layer_and_outranks_the_xp_bar() {
+        let atlas = locator_bar_synthetic_atlas();
+        let stats = DebugStats::default();
+        let (w, h) = (640u32, 480u32);
+        let (cw, ch) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, w, h);
+        // `ContextualBar::left`/`top`, the same expressions `sprite_vitals`
+        // derives `hx`/`bar_top` from — not restated as an independent
+        // constant, so a change to the hotbar's own layout moves this
+        // prediction with it instead of silently drifting from it.
+        let bar_x = (cw - 182.0) / 2.0;
+        let bar_y = ch - 22.0 - 5.0 - 2.0;
+        let dot = locator::dot_size() as f32;
+        let screen_middle = ((cw - dot) / 2.0).ceil();
+
+        let render = |dots: &[locator::LocatorDot], xp: Option<(i32, f32)>| -> Vec<(f32, f32, f32, f32)> {
+            let frame = HudFrame {
+                crosshair: false,
+                show_debug: false,
+                can_hurt_player: true,
+                xp,
+                locator: dots,
+                ..HudFrame::new(&stats)
+            };
+            let geo = HudGeometry::build_with_gui(&frame, w, h, &atlas);
+            quad_boxes(&geo.sprite_verts, cw, ch)
+        };
+
+        // -- No waypoints, XP present: only the XP bar draws (the pre-existing
+        //    behaviour every XP gate elsewhere in this file already covers;
+        //    this call is the mutual-exclusion control, not new coverage).
+        let xp_only = render(&[], Some((3, 0.4)));
+        assert!(
+            !xp_only.is_empty(),
+            "control: the XP bar must still draw when there are no waypoints"
+        );
+
+        // -- Two waypoints, no XP: exactly background + two dots, at the
+        //    predicted screen rects.
+        let dots = [
+            locator::LocatorDot { offset: -40, color: [1.0, 0.0, 0.0, 1.0] },
+            locator::LocatorDot { offset: 25, color: [0.0, 1.0, 0.0, 1.0] },
+        ];
+        let quads = render(&dots, None);
+        assert_eq!(
+            quads.len(),
+            3,
+            "two waypoints must draw background + two dots, no more, no fewer: got {quads:?}"
+        );
+        let mut check = |name: &str, got: f32, want: f32| {
+            assert!(
+                (got - want).abs() < 0.5,
+                "{name}: got {got:.2}, want {want:.2} (all quads: {quads:?})"
+            );
+        };
+        check("background x0", quads[0].0, bar_x);
+        check("background x1", quads[0].2, bar_x + 182.0);
+        check("background y0", quads[0].1, bar_y);
+        check("background y1", quads[0].3, bar_y + 5.0);
+        check("dot[0] (-40) x0", quads[1].0, screen_middle - 40.0);
+        check("dot[0] (-40) x1", quads[1].2, screen_middle - 40.0 + dot);
+        check("dot[1] (+25) x0", quads[2].0, screen_middle + 25.0);
+        check("dot[1] (+25) x1", quads[2].2, screen_middle + 25.0 + dot);
+
+        // -- Both present: locator wins outright — this is the assertion
+        //    that fails if the mutual-exclusion `if`/`else if` in
+        //    `sprite_vitals` is ever loosened back into two independent
+        //    conditions, which would draw both bars stacked on one slot.
+        let both = render(&dots, Some((3, 0.4)));
+        assert_eq!(
+            both.len(),
+            3,
+            "with waypoints present the XP bar must not draw at all, even though frame.xp is \
+             Some: got {both:?}"
+        );
     }
 
     #[test]
