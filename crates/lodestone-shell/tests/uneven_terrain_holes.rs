@@ -127,16 +127,70 @@
 //! ground, and each flagged pixel is byte-identical to the no-terrain
 //! reference (a hard miss, not a blend) — the same "not an antialiasing
 //! artefact" signature the original corner investigation used to rule out a
-//! coverage-blend explanation there. This reads as a one-row-late silhouette
-//! edge at a shallow, long-range viewing angle over *ordinary* terrain — a
-//! different mechanism from the corner crack (which involves no corner at
-//! all), small enough (2 pixels out of 6 × 307,200) that it was invisible
-//! inside the original 215-pixel aggregate. **Not chased further in this
-//! pass** — same reasoning the earlier MSAA/geometry-inflation passes gave
-//! for not landing a renderer change on top of a diagnostic one. The gate
-//! below is left reporting it, by name, rather than being loosened to hide
-//! it: an oracle-based gate that cannot report an unexplained residual is not
-//! more trustworthy than the aggregate one it replaced.
+//! coverage-blend explanation there.
+//!
+//! # A later pass discriminated further: not a cull bug, not a far-plane bug
+//!
+//! Three of this module doc's own four candidate causes are now ruled out
+//! with direct measurements, not inference:
+//!
+//! - **Not CPU-side culling.** Instrumenting `TerrainCull::classify` directly
+//!   (temporarily, reverted after) for the section that owns the failing
+//!   pixel's oracle hit (`(52.56, 63.999996, 31.208405)`, section coord
+//!   `(3, 3, 1)`) showed `CullVerdict::Visible` on the exact frame that
+//!   renders the hole — not `Distance`, not `Frustum`, not `Occlusion`. The
+//!   section is resident, its mesh is non-empty (`classify` is only reached
+//!   after `section.mesh.as_ref()` succeeds), and it is pushed into the
+//!   frame's draw list. Whatever drops this pixel happens after the draw
+//!   call is issued, not before it.
+//! - **Not the far plane.** `Camera::far_for_render_distance(10, 0)` is `640`
+//!   blocks; the oracle hit is ~169 blocks out — a 3.8× margin, nowhere near
+//!   the clip plane. `DEPTH_FORMAT` is `Depth32Float`, so 32-bit float
+//!   precision is available at that fraction of the range; this is not a
+//!   depth-buffer-precision collision either.
+//! - **Row-independent, and that pins the mechanism.** `Camera::basis`'s
+//!   closed form makes the *vertical* component of a ray's direction
+//!   (`ray.y = -sin(pitch) + cos(pitch)·ndc_y·half_y`) depend only on screen
+//!   row, never on column (`right.y` is always `0`, and `up.y = cos(pitch)`
+//!   carries no yaw/column term) — an exact algebraic fact, not an
+//!   approximation. So for flat ground, the distance to the terrain-height
+//!   plane is a pure function of row, identical for every column. Measured:
+//!   the terrain/sky transition sits at the *same* row (7 → 8) across five
+//!   widely separated columns on both sides of the frame (`x = 91..95` and
+//!   `x = 551..555`), confirming the boundary is a row effect, not a
+//!   column-local one. Walking the oracle's own hits by row in that same
+//!   column shows *each row* lands in a different, closer Z-chunk than the
+//!   last (row 4 → chunk z = 8, row 5 → z = 5, row 6 → z = 3, row 7 → z = 1,
+//!   row 8 → z = 0) — i.e. at this range and grazing angle, **one whole
+//!   16-block chunk of world depth projects to under one screen pixel of
+//!   height**. That is an inherent single-sample (no-MSAA) rasterisation
+//!   regime, not a logic bug: a pixel-center sample test can legitimately
+//!   miss a triangle whose true screen-space footprint is a fraction of a
+//!   pixel tall, exactly the species this module doc's MSAA experiment
+//!   already measured for the corner crack (made the aggregate *worse*, and
+//!   the flagged pixel was a hard miss with no partial-coverage blend at
+//!   4×). The two residual pixels only became *visible* as flagged holes
+//!   because a nearby column's ring1-corner geometry happens to fill the
+//!   identical screen-space band for neighbouring columns (`x = 94, 95`),
+//!   masking the same underlying compression there; `x = 93` and `x = 553`
+//!   are simply the columns where nothing else paints over the gap **and**
+//!   the compressed row's oracle hit still happens to land inside the
+//!   circular, chunk-quantised view-distance buffer.
+//!
+//! This reads as a one-row-late silhouette edge at a shallow, long-range
+//! viewing angle over *ordinary* terrain — a different mechanism from the
+//! corner crack in its trigger (distance compression, not a convex corner)
+//! but the same mechanism in kind (a sub-pixel triangle footprint under
+//! single-sample rasterisation), small enough (2 pixels out of 6 × 307,200)
+//! that it was invisible inside the original 215-pixel aggregate. **Not
+//! fixed in this pass**: the only remedies that would touch it (MSAA,
+//! geometry inflation) are the same two this module doc already measured
+//! against the corner crack — one made the aggregate worse, the other
+//! touches shared, high-traffic render code — and neither is a targeted fix
+//! for *this* pixel pair specifically. The gate below is left reporting it,
+//! by name, rather than being loosened to hide it: an oracle-based gate that
+//! cannot report an unexplained residual is not more trustworthy than the
+//! aggregate one it replaced.
 //!
 //! # The world: a ziggurat, not a bump
 //!
@@ -670,10 +724,17 @@ fn uneven_terrain_at_moderate_distance_has_no_sky_holes() {
          170 blocks out — not near any riser/corner) sit exactly one screen row before the row \
          where the renderer starts drawing that same distant ground, and the flagged pixel itself \
          is byte-identical to the no-terrain reference (a hard miss, not an antialiased blend). \
-         That is a one-row-late silhouette edge at a shallow, long-range viewing angle over \
-         ordinary flat terrain — a different, much smaller defect from the originally-diagnosed \
-         corner crack (which this same oracle now clears as legal geometry). Not chased further \
-         in this pass; see the module doc."
+         Direct instrumentation of TerrainCull::classify confirmed the owning section is \
+         CullVerdict::Visible on the failing frame (not culled by distance/frustum/occlusion), and \
+         camera.far (640 blocks) is a 3.8x margin past the ~169-block hit, ruling out both a cull \
+         bug and a far-plane clip. Camera::basis makes a ray's vertical component depend only on \
+         screen row, never column, and at this range one whole 16-block chunk of world depth \
+         measures under one screen pixel of height — an inherent single-sample (no-MSAA) \
+         rasterisation limit, the same species already measured (and left unfixed) for the corner \
+         crack, not a renderer logic bug. See the module doc's 'A later pass discriminated \
+         further' section for the full measurement. Not chased further in this pass: the only \
+         candidate remedies are the same two already measured against the corner crack (MSAA made \
+         the aggregate worse; geometry inflation touches shared, high-traffic render code)."
     );
 }
 
