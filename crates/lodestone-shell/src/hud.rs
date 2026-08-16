@@ -4416,6 +4416,235 @@ fn merge_styled_chars(chars: &[(char, TextStyle)]) -> Vec<TextSpan> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Chat interactivity: hit-testing click_event/hover_event under the cursor.
+// ---------------------------------------------------------------------------
+//
+// `lodestone_game::text::interactive_spans` is the data half — it keeps
+// `click`/`hover` through the flatten `Text::to_spans()` cannot. This is the
+// geometry half: wrapping those spans the same way the draw wraps plain
+// `TextSpan`s ([`wrap_spans_with`]), and answering "which span is under this
+// pixel" from the same free functions the draw itself calls
+// (`chat_width_px`/`chat_height_px`/`chat_pose_scale`/`chat_line_h`/
+// `chat_bottom`), for the same reason [`suggestion_layout`]'s own doc gives:
+// a second, independently-derived copy of this geometry is exactly the
+// failure mode this repo's evidence rules warn about.
+//
+// **Uncached, unlike the draw's own [`ChatWrapCacheSpans`].** A click or a
+// hover is comparatively rare next to "every frame", so this re-wraps the
+// visible window on every query rather than adding a second persisted cache
+// keyed on the same geometry — a straightforward follow-up if hover ever
+// needs to run every frame a tooltip is showing rather than only on
+// `CursorMoved`.
+
+/// Wraps [`lodestone_game::text::InteractiveSpan`]s the same word-break
+/// algorithm [`wrap_spans_with`] applies to plain [`TextSpan`]s, extended to
+/// carry each character's `click`/`hover` through the wrap. A message with no
+/// interactivity at all wraps identically to before this function existed —
+/// the whole-line fast path below measures the plain-style projection, same
+/// as `wrap_spans_with`'s own.
+fn wrap_interactive_with(
+    measure: impl Fn(&[TextSpan]) -> f32,
+    spans: &[lodestone_game::text::InteractiveSpan],
+    max_width_px: f32,
+) -> Vec<Vec<lodestone_game::text::InteractiveSpan>> {
+    use lodestone_game::text::InteractiveSpan;
+    use lodestone_model::text::{ClickEvent, HoverEvent};
+
+    if spans.is_empty() {
+        return vec![Vec::new()];
+    }
+    let as_text_spans: Vec<TextSpan> = spans
+        .iter()
+        .map(|s| TextSpan { text: s.text.clone(), style: s.style })
+        .collect();
+    if max_width_px <= 0.0 || measure(&as_text_spans) <= max_width_px {
+        return vec![spans.to_vec()];
+    }
+
+    type Chr<'a> = (char, TextStyle, Option<&'a ClickEvent>, Option<&'a HoverEvent>);
+    let chars: Vec<Chr<'_>> = spans
+        .iter()
+        .flat_map(|s| {
+            s.text
+                .chars()
+                .map(move |c| (c, s.style, s.click.as_ref(), s.hover.as_ref()))
+        })
+        .collect();
+
+    let measure_current = |current: &[Chr<'_>]| -> f32 {
+        let merged = merge_interactive_chars(current);
+        let ts: Vec<TextSpan> =
+            merged.iter().map(|s| TextSpan { text: s.text.clone(), style: s.style }).collect();
+        measure(&ts)
+    };
+    let mut rows: Vec<Vec<InteractiveSpan>> = Vec::new();
+    let mut current: Vec<Chr<'_>> = Vec::new();
+    let flush = |rows: &mut Vec<Vec<InteractiveSpan>>, current: &mut Vec<Chr<'_>>| {
+        rows.push(merge_interactive_chars(current));
+        current.clear();
+    };
+
+    let mut word_start = 0usize;
+    for i in 0..=chars.len() {
+        if i != chars.len() && chars[i].0 != ' ' {
+            continue;
+        }
+        let word = &chars[word_start..i];
+        word_start = i + 1;
+
+        let before_word = current.len();
+        if !current.is_empty() {
+            let &(_, s, c, h) = current.last().expect("just checked non-empty");
+            current.push((' ', s, c, h));
+        }
+        current.extend_from_slice(word);
+        if measure_current(&current) <= max_width_px {
+            continue;
+        }
+        current.truncate(before_word);
+        if !current.is_empty() {
+            flush(&mut rows, &mut current);
+        }
+        current.extend_from_slice(word);
+        if measure_current(&current) > max_width_px {
+            current.clear();
+            for &(ch, style, click, hover) in word {
+                let was_empty = current.is_empty();
+                current.push((ch, style, click, hover));
+                if !was_empty && measure_current(&current) > max_width_px {
+                    current.pop();
+                    flush(&mut rows, &mut current);
+                    current.push((ch, style, click, hover));
+                }
+            }
+        }
+    }
+    rows.push(merge_interactive_chars(&current));
+    rows
+}
+
+/// [`merge_styled_chars`]'s sibling for the `(char, style, click, hover)`
+/// stream [`wrap_interactive_with`] threads through — consecutive characters
+/// sharing style **and** interaction collapse into one run, so a click
+/// boundary always lands on a span boundary too.
+fn merge_interactive_chars(
+    chars: &[(
+        char,
+        TextStyle,
+        Option<&lodestone_model::text::ClickEvent>,
+        Option<&lodestone_model::text::HoverEvent>,
+    )],
+) -> Vec<lodestone_game::text::InteractiveSpan> {
+    use lodestone_game::text::InteractiveSpan;
+
+    let mut out: Vec<InteractiveSpan> = Vec::new();
+    for &(ch, style, click, hover) in chars {
+        let continues = |last: &InteractiveSpan| {
+            last.style == style && last.click.as_ref() == click && last.hover.as_ref() == hover
+        };
+        match out.last_mut() {
+            Some(last) if continues(last) => last.text.push(ch),
+            _ => out.push(InteractiveSpan {
+                text: ch.to_string(),
+                style,
+                click: click.cloned(),
+                hover: hover.cloned(),
+            }),
+        }
+    }
+    out
+}
+
+/// The interactive span under `x` within one **already-wrapped** row —
+/// measures the prefix up to and including each character with that
+/// character's own run style, exactly the way the draw's glyph advance
+/// would, so the boundary between two differently-styled runs is the same
+/// pixel the draw would put it at.
+fn interactive_span_at<'a>(
+    row: &'a [lodestone_game::text::InteractiveSpan],
+    measure: impl Fn(&[TextSpan]) -> f32,
+    x: f32,
+) -> Option<&'a lodestone_game::text::InteractiveSpan> {
+    if x < 0.0 {
+        return None;
+    }
+    let mut prefix: Vec<TextSpan> = Vec::new();
+    for span in row {
+        for ch in span.text.chars() {
+            let before = measure(&prefix);
+            match prefix.last_mut() {
+                Some(last) if last.style == span.style => last.text.push(ch),
+                _ => prefix.push(TextSpan { text: ch.to_string(), style: span.style }),
+            }
+            let after = measure(&prefix);
+            if x >= before && x < after {
+                return Some(span);
+            }
+        }
+    }
+    None
+}
+
+/// The click/hover interaction under `(x, y)` (logical-canvas pixels) in the
+/// chat scrollback, or `None` when nothing interactive is there — the
+/// scrollback's own sibling of [`suggestion_layout`]'s popup hit-test.
+///
+/// `entries` is oldest-first, [`crate::sim::session::Sim::recent_chat_interactive`]'s
+/// own shape; this walks it newest-first exactly as
+/// [`HudGeometry::build_inner`]'s chat block does — same fade break, same
+/// wrap, same row budget, same "a message's last wrapped row sits nearest the
+/// bottom" stacking — because a hit-test built from a second copy of that
+/// arithmetic is a hit-test that can drift from what the player actually
+/// sees.
+#[must_use]
+pub fn chat_interaction_at(
+    entries: &[(Vec<lodestone_game::text::InteractiveSpan>, f32)],
+    canvas_w: f32,
+    canvas_h: f32,
+    opts: ChatDisplayOptions,
+    chat_open: bool,
+    measure: impl Fn(&[TextSpan]) -> f32,
+    x: f32,
+    y: f32,
+) -> Option<lodestone_game::text::InteractiveSpan> {
+    let margin = HUD_MARGIN;
+    let pose_scale = chat_pose_scale(opts);
+    let line_h = chat_line_h(opts, pose_scale);
+    let box_w = chat_width_px(opts.width_pct.clamp(0.0, 1.0)).min(canvas_w);
+    let height_pct = if chat_open { opts.height_pct_focused } else { opts.height_pct_unfocused };
+    let box_h = chat_height_px(height_pct.clamp(0.0, 1.0));
+    let bottom = chat_bottom(canvas_h, pose_scale);
+    let max_visual_rows = (box_h / line_h).floor().max(1.0) as usize;
+
+    if x < margin || x >= box_w || line_h <= 0.0 {
+        return None;
+    }
+
+    let mut row_i = 0usize;
+    for (spans, age) in entries.iter().rev() {
+        let alpha = if chat_open { 1.0 } else { chat_line_alpha(*age) };
+        if alpha <= 0.0 {
+            break;
+        }
+        let sub_rows = wrap_interactive_with(&measure, spans, box_w);
+        for sub in sub_rows.iter().rev() {
+            if row_i >= max_visual_rows {
+                return None;
+            }
+            let row_y = bottom - (row_i as f32 + 1.0) * line_h;
+            if row_y < margin {
+                return None;
+            }
+            if y >= row_y - 1.0 && y < row_y - 1.0 + line_h {
+                return interactive_span_at(sub, &measure, x - margin).cloned();
+            }
+            row_i += 1;
+        }
+    }
+    None
+}
+
 /// The [`Self::chat_spans`](HudFrame::chat_spans) sibling of [`ChatWrapCache`]:
 /// same persisted-wrap-result shape (a pure function of `(line, chat box
 /// width, chat pose scale, font)`, recomputed only on a miss), keyed on
@@ -4463,6 +4692,189 @@ impl ChatWrapCacheSpans {
         let rows: std::rc::Rc<[Vec<TextSpan>]> = wrap(spans).into();
         inner.rows.insert(spans.to_vec(), std::rc::Rc::clone(&rows));
         rows
+    }
+}
+
+#[cfg(test)]
+mod chat_interaction_tests {
+    use super::{TextSpan, TextStyle, chat_interaction_at, interactive_span_at, wrap_interactive_with};
+    use lodestone_game::text::InteractiveSpan;
+    use lodestone_model::text::{ClickAction, ClickEvent, HoverAction, HoverEvent};
+
+    fn plain(text: &str) -> InteractiveSpan {
+        InteractiveSpan {
+            text: text.to_string(),
+            style: TextStyle::default(),
+            click: None,
+            hover: None,
+        }
+    }
+
+    fn clickable(text: &str, url: &str) -> InteractiveSpan {
+        InteractiveSpan {
+            click: Some(ClickEvent { action: ClickAction::OpenUrl, value: url.to_string() }),
+            ..plain(text)
+        }
+    }
+
+    /// 6px per glyph, deterministic and non-trivial — the same shape as
+    /// `wrap_spans_breaks_by_real_width_and_keeps_style_across_the_break`'s
+    /// own fixed per-char table, so a wrap/hit-test bug shows up the same way
+    /// a character-count fallback would: a wrong-by-a-fixed-ratio answer.
+    fn measure(spans: &[TextSpan]) -> f32 {
+        spans.iter().flat_map(|s| s.text.chars()).count() as f32 * 6.0
+    }
+
+    #[test]
+    fn a_run_with_no_click_or_hover_wraps_unchanged() {
+        let spans = [plain("hello world")];
+        let rows = wrap_interactive_with(measure, &spans, 1000.0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], spans);
+    }
+
+    /// The word-break point is identical to [`wrap_spans_with`]'s own gate
+    /// (`wrap_spans_breaks_by_real_width_and_keeps_style_across_the_break`),
+    /// and the click on the second run survives onto its own wrapped row.
+    #[test]
+    fn wrap_keeps_click_on_the_run_it_belongs_to_across_a_break() {
+        let spans = [plain("plain "), clickable("linktext", "https://example.invalid/")];
+        // "plain " is 6 glyphs (36px), "linktext" is 8 (48px, so it must fit
+        // on its own row without hard-breaking); a width of 50px fits neither
+        // "plain " nor "linktext" *together* (84px) but fits each alone, so
+        // vanilla's own word-wrap rule (never split a word that fits on a
+        // fresh line) pushes the whole clickable word to row 2 intact.
+        let rows = wrap_interactive_with(measure, &spans, 50.0);
+        assert_eq!(rows.len(), 2, "rows: {rows:?}");
+        let row0_text: String = rows[0].iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(row0_text, "plain");
+        assert!(rows[0].iter().all(|s| s.click.is_none()));
+        let row1_text: String = rows[1].iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(row1_text, "linktext");
+        assert!(
+            rows[1].iter().all(|s| s.click.is_some()),
+            "the clickable word must carry its click onto the row it wrapped to: {:?}",
+            rows[1]
+        );
+    }
+
+    #[test]
+    fn span_at_finds_the_run_under_the_pixel_and_none_past_the_end() {
+        let row = [plain("abc"), clickable("def", "https://example.invalid/")];
+        // "abc" occupies [0, 18); "def" occupies [18, 36).
+        assert_eq!(interactive_span_at(&row, measure, 0.0), Some(&row[0]));
+        assert_eq!(interactive_span_at(&row, measure, 17.9), Some(&row[0]));
+        assert_eq!(interactive_span_at(&row, measure, 18.0), Some(&row[1]));
+        assert_eq!(interactive_span_at(&row, measure, 35.9), Some(&row[1]));
+        assert_eq!(
+            interactive_span_at(&row, measure, 36.0),
+            None,
+            "past the last glyph must miss, not fall through to the last span"
+        );
+        assert_eq!(interactive_span_at(&row, measure, -1.0), None);
+    }
+
+    fn opts() -> super::ChatDisplayOptions {
+        super::ChatDisplayOptions {
+            scale: 1.0,
+            width_pct: 1.0,
+            height_pct_unfocused: 1.0,
+            height_pct_focused: 1.0,
+            line_spacing: 1.0,
+            text_opacity: 1.0,
+            background_opacity: 1.0,
+            colors: true,
+        }
+    }
+
+    /// End-to-end: a click on part of the newest (bottom-most) message is
+    /// found under the pixel it actually occupies, missed one row up, and
+    /// missed entirely outside the box — the three cases a geometry bug
+    /// (wrong `chat_bottom`, wrong row stacking order, wrong x origin) would
+    /// each get wrong in a different direction.
+    #[test]
+    fn chat_interaction_at_finds_a_click_where_the_row_actually_is() {
+        let entries = vec![
+            (vec![plain("older line, no link here")], 5.0),
+            (vec![clickable("newest", "https://example.invalid/n")], 0.0),
+        ];
+        let canvas_w = 400.0;
+        let canvas_h = 200.0;
+        let o = opts();
+        let pose_scale = super::chat_pose_scale(o);
+        let line_h = super::chat_line_h(o, pose_scale);
+        let bottom = super::chat_bottom(canvas_h, pose_scale);
+        let margin = super::HUD_MARGIN;
+
+        // Row 0 (newest, bottom-most) spans y in [bottom - line_h - 1, bottom - 1).
+        let newest_row_y = bottom - line_h / 2.0;
+        let hit = chat_interaction_at(
+            &entries,
+            canvas_w,
+            canvas_h,
+            o,
+            true,
+            measure,
+            margin + 3.0,
+            newest_row_y,
+        );
+        assert_eq!(
+            hit.and_then(|s| s.click).map(|c| c.value),
+            Some("https://example.invalid/n".to_string()),
+            "the newest message's own click must be found on its own row"
+        );
+
+        // Row 1 (older line) sits one full line above — no click there.
+        let older_row_y = newest_row_y - line_h;
+        let miss = chat_interaction_at(
+            &entries, canvas_w, canvas_h, o, true, measure, margin + 3.0, older_row_y,
+        );
+        assert_eq!(miss.and_then(|s| s.click), None, "the older line has no click at all");
+
+        // Outside the box entirely (past the right edge) must miss too.
+        let outside = chat_interaction_at(
+            &entries, canvas_w, canvas_h, o, true, measure, canvas_w + 50.0, newest_row_y,
+        );
+        assert!(outside.is_none(), "a point outside the chat box must never hit");
+    }
+
+    /// The hover half of the same shape, and the negative control that makes
+    /// the positive result mean something: the same row, one pixel that is
+    /// **not** the tooltip-bearing run, must come back `None`.
+    #[test]
+    fn chat_interaction_at_finds_a_hover_and_a_neighbouring_pixel_does_not() {
+        let mut tipped = clickable("tip", "unused");
+        tipped.click = None;
+        tipped.hover = Some(HoverEvent {
+            action: HoverAction::ShowText,
+            value: Box::new(lodestone_model::Text::literal("tooltip body")),
+        });
+        let entries = vec![(vec![plain("see "), tipped], 0.0)];
+        let canvas_w = 400.0;
+        let canvas_h = 200.0;
+        let o = opts();
+        let pose_scale = super::chat_pose_scale(o);
+        let line_h = super::chat_line_h(o, pose_scale);
+        let bottom = super::chat_bottom(canvas_h, pose_scale);
+        let margin = super::HUD_MARGIN;
+        let row_y = bottom - line_h / 2.0;
+
+        // "see " is 4 glyphs = 24px past the margin; "tip" starts there.
+        let on_word = chat_interaction_at(
+            &entries, canvas_w, canvas_h, o, true, measure, margin + 24.0 + 3.0, row_y,
+        );
+        assert!(
+            on_word.is_some_and(|s| s.hover.is_some()),
+            "the hover-bearing word must be found under its own pixel"
+        );
+
+        let before_word = chat_interaction_at(
+            &entries, canvas_w, canvas_h, o, true, measure, margin + 3.0, row_y,
+        );
+        assert!(
+            before_word.is_some_and(|s| s.hover.is_none()),
+            "plain text one word earlier on the same row must not carry the hover"
+        );
     }
 }
 

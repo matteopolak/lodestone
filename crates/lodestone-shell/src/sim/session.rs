@@ -639,6 +639,29 @@ impl Sim {
         })
     }
 
+    /// The `click`/`hover`-carrying sibling of [`Self::recent_chat_spans`]:
+    /// same recent-lines-with-age projection through
+    /// `recent_ages_interactive`, so a chat hit-test
+    /// ([`crate::hud::chat_interaction_at`]) has something to test against.
+    /// `recent_chat_spans` cannot supply this — `TextSpan` has no field for
+    /// either, which is why the tab-list-shaped question "the field exists,
+    /// so is the feature done?" has to be asked of *this* accessor and not
+    /// that one.
+    #[must_use]
+    pub fn recent_chat_interactive(
+        &self,
+        n: usize,
+    ) -> Vec<(Vec<lodestone_game::text::InteractiveSpan>, f32)> {
+        let now = self.clock().secs;
+        let translate = self.translator();
+        self.read(|w| {
+            w.get::<SessionChat>(self.local)
+                .expect("the local player always carries SessionChat")
+                .0
+                .recent_ages_interactive(n, now, translate.as_ref())
+        })
+    }
+
     /// Push a client-authored system line into the chat feed.
     ///
     /// The one writer that is not the wire. Vanilla has the same seam —
