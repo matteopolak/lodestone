@@ -596,6 +596,16 @@ Know its scope, because outside it the instrument is *silent* rather than wrong 
 - It answers **"is this clientbound packet reaching anything"** and nothing else — not Rust call graphs,
   where it returns byte-identical output before and after a fix. For a crate-internal island, grep for
   constructors tree-wide plus a test that drives the *registry* rather than the type.
+- **A low number does not mean the work is unwritten — in every legacy family, a chunk of it was already
+  written, tested, and simply never dispatched.** The scan counts adapter match arms, so a fully round-tripped
+  codec with no arm reads identically to code that does not exist. Measured across all three: v47 had
+  `HeldItemSlot` and a clientbound abilities decoder sitting unused, v340 had `OPEN_WINDOW`/`CLOSE_WINDOW`/
+  `SET_SLOT`/`WINDOW_ITEMS`, and v735 had `UpdateHealth`/`Respawn`/`SpawnPosition`/`HeldItemSlot`/
+  `CloseWindow` — all with passing tests in the crate's own suite. The count is not wrong; it is answering
+  "is this reaching anything", and the honest answer was no. But it makes a five-minute wiring job and a
+  from-scratch port look the same. **Before writing any decoder, grep the crate for an existing struct and
+  codec for that packet** — and note the dual hazard: writing a second decoder beside a working one is worse
+  than doing nothing, because now both look plausible to the next reader.
 - **Its granularity is the packet id, so a packet that multiplexes an enum hides an unconnected arm behind
   its connected siblings.** Measured: `PLAYER_ACTION`'s `SWAP_ITEM_WITH_OFFHAND` ordinal — the F key — fell
   through to `ServerBound::Ignored`, while the packet id counted as **connected** on the strength of its
