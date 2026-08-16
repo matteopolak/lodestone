@@ -22,27 +22,32 @@
 //!
 //! # Scope: this is the plumbing, not the behaviour packages
 //!
-//! Every brain species here gets the same generic CORE+IDLE [`scaffold`]. That is
-//! deliberate and it is what this seam asks for — the *composition*, proven with
-//! the scaffold `behaviors.rs` already ships. The per-species behaviour packages
-//! (a villager's profession schedule and trading availability, a warden's
-//! vibration sensor and anger, a piglin's barter and hoglin hunt) are separate
-//! units layered on this one, and each needs machinery this crate does not have
-//! yet — the warden's needs vanilla's world-event/vibration registry, which is
-//! **absent** here (`lodestone_ecs::GameEvent` is the client plugin bus and
-//! `GAME_EVENT` is vanilla's weather packet; neither is the vibration listener).
+//! **This doc used to say every brain species gets the identical generic
+//! CORE+IDLE [`scaffold`], full stop.** That is no longer true: six species —
+//! goat, camel, armadillo, frog, sniffer, allay, the `AnimalPanic`-family
+//! half of the passive-roster brain species — now also flee a recent
+//! attacker via [`scaffold_with_panic`], each at its own jar-cited speed
+//! multiplier. Everything else about the scaffold claim
+//! still holds: this is still the composition, not the full per-species
+//! behaviour package (a villager's profession schedule and trading
+//! availability, a warden's vibration sensor and anger, a piglin's barter and
+//! hoglin hunt, are separate units layered on this one and need machinery
+//! this crate does not have yet — the warden's needs vanilla's
+//! world-event/vibration registry, which is **absent** here
+//! (`lodestone_ecs::GameEvent` is the client plugin bus and `GAME_EVENT` is
+//! vanilla's weather packet; neither is the vibration listener)).
 //!
-//! So a camel and a warden currently behave identically: they wander and watch
-//! players, through a real brain, on real paths. That is a floor, not a finish —
-//! and it is a floor above the previous state, where they wandered through
-//! `FALLBACK` goals and the brain ran for nobody.
+//! So a camel and a warden no longer behave *identically* — the camel now
+//! flees a hit at 4× speed, the warden still just wanders and watches
+//! players — but both are still a floor rather than a finish, and both
+//! reached zero pixels before the brain was wired to production at all.
 
 use super::activity::Activity;
 use super::behavior::{Behavior, BehaviorControl, Leaf};
-use super::behaviors::{LookAtTargetSink, MoveToTargetSink, RandomStroll, SetPlayerLookTarget};
+use super::behaviors::{LookAtTargetSink, MoveToTargetSink, Panic, RandomStroll, SetPlayerLookTarget};
 use super::driver::BrainGoal;
 use super::gate::GateBehavior;
-use super::sensor::NearestPlayerSensor;
+use super::sensor::{HurtBySensor, NearestPlayerSensor};
 use super::Brain;
 
 /// The walk-target speed **modifier** the scaffold's stroll writes.
@@ -148,6 +153,48 @@ pub fn scaffold(stroll_speed: f32, look_distance: f32) -> Brain {
     brain
 }
 
+/// [`scaffold`] plus a [`Panic`] behaviour in `CORE` — `AnimalPanic`'s own
+/// composition, ported for the six brain species that register it (goat,
+/// camel, armadillo, frog, sniffer, allay; axolotl is deliberately absent —
+/// vanilla gives it play-dead-on-low-health instead, a different mechanism
+/// this does not build).
+///
+/// `panic_speed_multiplier` is each species' own jar constant — see
+/// [`brain_for`]'s per-species table, not a figure this function invents.
+///
+/// **Priority `-1`, ahead of [`LookAtTargetSink`]'s `0` and
+/// [`MoveToTargetSink`]'s `1`.** [`Brain::add_activity`] sorts behaviours
+/// within an activity by priority and ticks them in that order every frame,
+/// so `Panic` must write a fresh `WALK_TARGET` *before* `MoveToTargetSink`
+/// reads it in the same tick — running it after would leave the mob stepping
+/// toward last tick's fleeing point one tick late, every tick, for the whole
+/// panic.
+#[must_use]
+pub fn scaffold_with_panic(stroll_speed: f32, look_distance: f32, panic_speed_multiplier: f32) -> Brain {
+    let mut brain = scaffold(stroll_speed, look_distance);
+    brain.add_sensor(Box::new(HurtBySensor));
+    brain.add_activity(
+        Activity::CORE,
+        vec![(-1, leaf(Panic::new(panic_speed_multiplier)))],
+        Vec::new(),
+        Vec::new(),
+    );
+    brain
+}
+
+/// `AnimalPanic`'s own speed multiplier, one row per species that registers
+/// it — `new AnimalPanic(speedMultiplier)` (or, for the sniffer, the
+/// anonymous subclass's identical constructor argument) in each species' own
+/// `registerGoals`/`*Ai.initCoreActivity`.
+const PANIC_SPEED_MULTIPLIER: &[(&str, f32)] = &[
+    ("allay", 2.5),
+    ("armadillo", 2.0),
+    ("camel", 4.0),
+    ("frog", 2.0),
+    ("goat", 2.0),
+    ("sniffer", 2.0),
+];
+
 /// The [`BrainGoal`] a brain-driven species gets, or `None` for a species that
 /// runs on the goal system.
 ///
@@ -157,8 +204,14 @@ pub fn scaffold(stroll_speed: f32, look_distance: f32) -> Brain {
 /// the host side has to know brains exist.
 #[must_use]
 pub fn brain_for(species: &str) -> Option<BrainGoal> {
-    is_brain_species(species)
-        .then(|| BrainGoal::idle(scaffold(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE)))
+    if !is_brain_species(species) {
+        return None;
+    }
+    let brain = match PANIC_SPEED_MULTIPLIER.iter().find(|&&(s, _)| s == species) {
+        Some(&(_, speed)) => scaffold_with_panic(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE, speed),
+        None => scaffold(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE),
+    };
+    Some(BrainGoal::idle(brain))
 }
 
 #[cfg(test)]
@@ -205,5 +258,144 @@ mod tests {
         let brain = scaffold(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE);
         assert!(brain.is_active(Activity::CORE), "CORE is always active");
         assert!(brain.is_active(Activity::IDLE), "IDLE is the default");
+    }
+
+    #[test]
+    fn every_panic_species_is_a_real_brain_species_and_the_table_is_sorted_and_unique() {
+        // The multiset gate this crate always wants for a hand-transcribed
+        // list: not just "every name resolves", but "no duplicate could hide
+        // a wrong figure behind a right one".
+        let mut names: Vec<&str> = PANIC_SPEED_MULTIPLIER.iter().map(|&(s, _)| s).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted, {
+            names.sort_unstable();
+            names
+        });
+        for &(species, _) in PANIC_SPEED_MULTIPLIER {
+            assert!(
+                is_brain_species(species),
+                "{species} is in PANIC_SPEED_MULTIPLIER but not BRAIN_SPECIES"
+            );
+        }
+        // Axolotl is the named exclusion — vanilla gives it play-dead instead
+        // of AnimalPanic, so it must never silently pick this table up.
+        assert!(
+            !PANIC_SPEED_MULTIPLIER.iter().any(|&(s, _)| s == "axolotl"),
+            "axolotl must not be in the AnimalPanic table"
+        );
+    }
+
+    /// A minimal [`BrainMob`] double, local to this module because
+    /// `brain::mod`'s own `TestMob` is private to its file. Only implements
+    /// what [`Panic`]/[`super::sensor::HurtBySensor`]/[`MoveToTargetSink`]
+    /// actually call.
+    struct PanicTestMob {
+        pos: lodestone_model::Vec3,
+        time: i64,
+        hurt_by: Option<lodestone_model::Vec3>,
+        nav_done: bool,
+    }
+
+    impl PanicTestMob {
+        fn new() -> Self {
+            Self {
+                pos: lodestone_model::Vec3::default(),
+                time: 0,
+                hurt_by: None,
+                nav_done: true,
+            }
+        }
+    }
+
+    impl super::super::mob::BrainMob for PanicTestMob {
+        fn next_i32(&mut self, _bound: i32) -> i32 {
+            0
+        }
+        fn next_f32(&mut self) -> f32 {
+            0.5
+        }
+        fn game_time(&self) -> i64 {
+            self.time
+        }
+        fn position(&self) -> lodestone_model::Vec3 {
+            self.pos
+        }
+        fn move_to(&mut self, _target: lodestone_model::Vec3, _speed: f32) -> bool {
+            self.nav_done = false;
+            true
+        }
+        fn navigation_done(&self) -> bool {
+            self.nav_done
+        }
+        fn stop_navigation(&mut self) {
+            self.nav_done = true;
+        }
+        fn look_at(&mut self, _target: lodestone_model::Vec3) {}
+        fn random_land_pos(&mut self, max_xz: i32, _max_y: i32) -> Option<lodestone_model::Vec3> {
+            Some(lodestone_model::Vec3::new(self.pos.x + f64::from(max_xz), self.pos.y, self.pos.z))
+        }
+        fn last_hurt_by(&self) -> Option<lodestone_model::Vec3> {
+            self.hurt_by
+        }
+    }
+
+    /// **The discriminating gate for this whole slice.** A hurt species from
+    /// [`PANIC_SPEED_MULTIPLIER`] must actually run `panic` — not merely have
+    /// a `HURT_BY`-shaped memory slot registered — while a brain species
+    /// outside that table (the warden, which has no `AnimalPanic` in the jar
+    /// at all) must never run it however hard it is hit. Ticked through
+    /// [`brain_for`]/[`Brain::tick`], the same production path
+    /// `MobSim::spawn_species` uses, so this measures the roster wiring
+    /// itself rather than a `Panic` constructed by hand.
+    #[test]
+    fn a_hurt_panic_species_runs_panic_and_a_hurt_non_panic_species_never_does() {
+        let mut goat = brain_for("goat").expect("goat is a brain species");
+        let mut mob = PanicTestMob::new();
+        mob.hurt_by = Some(lodestone_model::Vec3::new(5.0, 0.0, 0.0));
+        mob.time = 1;
+        goat.brain_mut().tick(&mut mob);
+        assert!(
+            goat.brain().running_behavior_names().contains(&"panic"),
+            "a hurt goat did not run its panic behaviour: {:?}",
+            goat.brain().running_behavior_names()
+        );
+
+        let mut warden = brain_for("warden").expect("warden is a brain species");
+        let mut mob2 = PanicTestMob::new();
+        mob2.hurt_by = Some(lodestone_model::Vec3::new(5.0, 0.0, 0.0));
+        mob2.time = 1;
+        warden.brain_mut().tick(&mut mob2);
+        assert!(
+            !warden.brain().running_behavior_names().contains(&"panic"),
+            "the warden ran a panic behaviour it was never given: {:?}",
+            warden.brain().running_behavior_names()
+        );
+    }
+
+    /// **The magnitude half**: each panic species carries its own jar
+    /// constant, not one figure copy-pasted onto all six. Distinguishing
+    /// camel's `4.0` from goat's `2.0` is what a presence-only check cannot
+    /// do — a `Panic::new(2.0)` wired onto every species would pass every
+    /// assertion above and still be wrong for camel, armadillo and allay.
+    #[test]
+    fn each_panic_species_carries_its_own_jar_speed_multiplier() {
+        let lookup = |species: &str| {
+            PANIC_SPEED_MULTIPLIER
+                .iter()
+                .find(|&&(s, _)| s == species)
+                .map(|&(_, speed)| speed)
+        };
+        assert_eq!(lookup("camel"), Some(4.0), "Camel.CamelPanic(4.0F)");
+        assert_eq!(lookup("allay"), Some(2.5), "Allay's AnimalPanic(2.5F)");
+        assert_eq!(lookup("goat"), Some(2.0), "AnimalPanic(2.0F) in GoatAi");
+        assert_eq!(lookup("frog"), Some(2.0), "AnimalPanic(2.0F) in FrogAi");
+        assert_eq!(lookup("sniffer"), Some(2.0), "AnimalPanic<Sniffer>(2.0F) in SnifferAi");
+        assert_eq!(lookup("armadillo"), Some(2.0), "ArmadilloAi.ArmadilloPanic(2.0F)");
+        assert_eq!(lookup("axolotl"), None, "axolotl has no AnimalPanic in the jar at all");
+        // The two must genuinely differ, or the presence check above could
+        // pass with every species sharing one hardcoded constant.
+        assert_ne!(lookup("camel"), lookup("goat"));
     }
 }

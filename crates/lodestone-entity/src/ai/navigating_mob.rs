@@ -1687,6 +1687,14 @@ impl BrainMob for NavigatingMob<'_> {
         let dz = (self.rng.next_unit() * span - f64::from(max_xz)).round();
         Some(Vec3::new(self.pos.x + dx, self.pos.y, self.pos.z + dz))
     }
+
+    /// Delegates to the same `last_hurt_by` field
+    /// [`MobController::last_hurt_by`] reads — fully qualified for the same
+    /// reason [`in_water`](Self::in_water) is: both traits declare it, so an
+    /// unqualified call would be `E0034`.
+    fn last_hurt_by(&self) -> Option<Vec3> {
+        MobController::last_hurt_by(self)
+    }
 }
 
 #[cfg(test)]
@@ -3015,13 +3023,13 @@ mod tests {
             early.advance();
         }
         assert_eq!(
-            early.last_hurt_by(),
+            MobController::last_hurt_by(&early),
             Some(attacker),
             "the attacker must still be remembered one tick before the window closes"
         );
         early.advance();
         assert_eq!(
-            early.last_hurt_by(),
+            MobController::last_hurt_by(&early),
             None,
             "the attacker must be forgotten exactly at LAST_HURT_BY_TICKS"
         );
@@ -3049,7 +3057,7 @@ mod tests {
             "panic must expire at PANIC_DAMAGE_TICKS ({PANIC_DAMAGE_TICKS})"
         );
         assert_eq!(
-            mob.last_hurt_by(),
+            MobController::last_hurt_by(&mob),
             Some(attacker),
             "retaliation must OUTLIVE panic — this is the assertion that fails \
              if the two windows are collapsed into one timer"
@@ -3068,7 +3076,7 @@ mod tests {
         mob.note_hurt(None);
         assert!(mob.is_panicking(), "attacker-less damage must still panic");
         assert_eq!(
-            mob.last_hurt_by(),
+            MobController::last_hurt_by(&mob),
             None,
             "attacker-less damage must not invent a retaliation target"
         );

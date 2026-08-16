@@ -292,3 +292,98 @@ impl Behavior for LookAtTargetSink {
         "look_at_target_sink"
     }
 }
+
+/// `AnimalPanic` (`world/entity/ai/behavior/AnimalPanic.java`) — flees a
+/// recent attacker at `speed_multiplier` for 100–120 ticks, re-picking a
+/// random fleeing destination every time navigation finishes. Lives in
+/// `CORE` in vanilla (goat, camel, armadillo, frog, sniffer, allay all
+/// register it there), which is why it interrupts whatever `IDLE` behaviour
+/// was running rather than competing with it for a turn — matching the
+/// `RandomStroll`/[`MoveToTargetSink`] pair's own "coordinate only through
+/// `WALK_TARGET`" shape, one activity level up.
+///
+/// **Two disclosed cuts**, both already named on [`super::sensor::HurtBySensor`]:
+/// no damage-type filter (every hurt panics, not just
+/// `DamageTypeTags.PANIC_CAUSES`), and no on-fire water-seeking branch
+/// (`AnimalPanic.getPanicPos`'s `lookForWater` needs a block/fluid read no
+/// [`BrainMob`] seam exposes). Per-species extras on top of the plain
+/// constructor — the sniffer resets its sniffing memory on start, the
+/// armadillo rolls out of its ball — are not modelled either; each is a
+/// single vanilla override with no equivalent memory in this crate yet.
+#[derive(Debug)]
+pub struct Panic {
+    speed_multiplier: f32,
+    entry: [(MemoryModuleType, MemoryStatus); 2],
+}
+
+impl Panic {
+    /// `new AnimalPanic(speedMultiplier)` — the per-species figure is the
+    /// caller's own jar citation, not this struct's.
+    #[must_use]
+    pub fn new(speed_multiplier: f32) -> Self {
+        Self {
+            speed_multiplier,
+            entry: [
+                (MemoryModuleType::IS_PANICKING, MemoryStatus::Registered),
+                (MemoryModuleType::HURT_BY, MemoryStatus::Registered),
+            ],
+        }
+    }
+}
+
+impl Behavior for Panic {
+    fn entry_condition(&self) -> &[(MemoryModuleType, MemoryStatus)] {
+        &self.entry
+    }
+
+    // `AnimalPanic`'s own constructor: `super(..., 100, 120)`.
+    fn min_duration(&self) -> i32 {
+        100
+    }
+
+    fn max_duration(&self) -> i32 {
+        120
+    }
+
+    fn check_extra_start_conditions(&mut self, mem: &mut Memories, _mob: &mut dyn BrainMob) -> bool {
+        // `AnimalPanic.checkExtraStartConditions`: a fresh hurt, or a panic
+        // already in progress (so a hurt landing mid-flee re-arms the timer
+        // rather than letting the behaviour lapse and restart from scratch).
+        mem.has_value(MemoryModuleType::HURT_BY) || mem.has_value(MemoryModuleType::IS_PANICKING)
+    }
+
+    fn can_still_use(&mut self, _mem: &mut Memories, _mob: &mut dyn BrainMob, _time: i64) -> bool {
+        true
+    }
+
+    fn start(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob, _time: i64) {
+        // `AnimalPanic.start`: mark panicking, drop whatever walk target was
+        // already in flight, and stop navigating toward it.
+        mem.set(MemoryModuleType::IS_PANICKING, MemoryValue::Unit);
+        mem.erase(MemoryModuleType::WALK_TARGET);
+        mob.stop_navigation();
+    }
+
+    fn stop(&mut self, mem: &mut Memories, _mob: &mut dyn BrainMob, _time: i64) {
+        mem.erase(MemoryModuleType::IS_PANICKING);
+    }
+
+    fn tick(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob, _time: i64) {
+        // `AnimalPanic.tick`: only pick a new fleeing point once the current
+        // one is exhausted, not every tick — a panicking mob commits to each
+        // leg of its flight rather than juddering toward a new point every
+        // frame.
+        if mob.navigation_done()
+            && let Some(pos) = mob.random_land_pos(5, 4)
+        {
+            mem.set(
+                MemoryModuleType::WALK_TARGET,
+                MemoryValue::WalkTarget(WalkTarget::new(pos, self.speed_multiplier, 0)),
+            );
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "panic"
+    }
+}
