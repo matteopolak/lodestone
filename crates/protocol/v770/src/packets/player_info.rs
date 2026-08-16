@@ -19,9 +19,8 @@
 //! carries it into `lodestone_model::event::PlayerListEntry::chat_session`,
 //! where `lodestone_client`'s driver reads it to verify their signed messages.
 
-use lodestone_core::{
-    Ctx, Decode, Error, Reader, Result, plain_text_from_nbt_component, read_network_nbt,
-};
+use lodestone_core::{Ctx, Decode, Error, Reader, Result, read_network_nbt};
+use lodestone_model::Text;
 use uuid::Uuid;
 
 /// `Action` ordinals, matching the `EnumSet` bit positions on the wire.
@@ -60,8 +59,12 @@ pub struct PlayerInfoEntry {
     pub listed: Option<bool>,
     /// Reported latency in milliseconds, from `UPDATE_LATENCY`.
     pub latency: Option<i32>,
-    /// Display-name component reduced to plain text, from `UPDATE_DISPLAY_NAME`.
-    pub display_name: Option<String>,
+    /// Display-name component, from `UPDATE_DISPLAY_NAME`. Decoded through
+    /// [`Text::from_nbt`] — the same route `adapter::chat` uses for the
+    /// identical NBT shape — rather than flattened to plain text, so an
+    /// explicit hex colour on a player's display name survives instead of
+    /// arriving as unstyled white.
+    pub display_name: Option<Text>,
     /// Profile properties, from `ADD_PLAYER`.
     ///
     /// **These carry the skin.** They were decoded and discarded into `let _`
@@ -250,7 +253,7 @@ impl Decode for PlayerInfoUpdate {
             }
             if has(action::UPDATE_DISPLAY_NAME) && r.bool()? {
                 let component = read_network_nbt(r)?;
-                entry.display_name = Some(plain_text_from_nbt_component(&component));
+                entry.display_name = Some(Text::from_nbt(&component));
             }
             if has(action::UPDATE_LIST_ORDER) {
                 let _list_order = r.var_i32()?;
@@ -310,6 +313,54 @@ mod tests {
         w.into_vec()
     }
 
+    /// Builds the network-NBT encoding of a `{"text":"...","color":"#RRGGBB"}`
+    /// component -- a two-field `TAG_Compound`, both `TAG_String`.
+    fn nbt_hex_coloured_component(text: &str, hex: &str) -> Vec<u8> {
+        fn string_field(w: &mut Writer, key: &[u8], value: &[u8]) {
+            w.u8(8); // TAG_String
+            w.u8(0);
+            w.u8(key.len() as u8);
+            w.bytes(key);
+            w.u8((value.len() >> 8) as u8);
+            w.u8((value.len() & 0xff) as u8);
+            w.bytes(value);
+        }
+        let mut w = Writer::default();
+        w.u8(10); // TAG_Compound, unnamed (network NBT drops the root name)
+        string_field(&mut w, b"text", text.as_bytes());
+        string_field(&mut w, b"color", hex.as_bytes());
+        w.u8(0); // TAG_End
+        w.into_vec()
+    }
+
+    /// A hex colour distinct from any legacy 16-colour value, so a decoder
+    /// that only understood `§`-coded colours (or dropped colour entirely,
+    /// as `plain_text_from_nbt_component` did) cannot pass this by accident.
+    #[test]
+    fn update_display_name_decodes_hex_colour_not_plain_text() {
+        use lodestone_model::TextColor;
+
+        let mut w = Writer::default();
+        w.u8(1 << action::UPDATE_DISPLAY_NAME); // only this action bit set
+        w.var_i32(1); // one entry
+        w.uuid(Uuid::from_u128(1));
+        w.bool(true); // UPDATE_DISPLAY_NAME present
+        w.bytes(&nbt_hex_coloured_component("Nicked", "#ab12ef"));
+
+        let update: PlayerInfoUpdate = decode_exact(&w.into_vec());
+        let display_name = update.entries[0]
+            .display_name
+            .clone()
+            .expect("UPDATE_DISPLAY_NAME bit was set");
+        assert_eq!(
+            display_name.style.color,
+            Some(TextColor::Rgb(0x00ab_12ef)),
+            "an explicit hex display-name colour must survive the decode, \
+             got {:?} -- plain_text_from_nbt_component would report None here",
+            display_name.style.color
+        );
+    }
+
     fn decode_exact<T: Decode>(bytes: &[u8]) -> T {
         let mut r = Reader::new(bytes);
         let value = T::decode(&mut r, CTX).expect("decode");
@@ -354,7 +405,11 @@ mod tests {
         assert_eq!(e.game_mode, Some(1));
         assert_eq!(e.listed, Some(true));
         assert_eq!(e.latency, Some(42));
-        assert_eq!(e.display_name.as_deref(), Some("Notch!"));
+        assert_eq!(
+            e.display_name,
+            Some(Text::literal("Notch!")),
+            "a plain component still decodes to a plain literal"
+        );
         assert_eq!(
             e.properties.as_deref(),
             Some(&[][..]),
