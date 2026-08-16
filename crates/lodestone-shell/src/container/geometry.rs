@@ -270,31 +270,6 @@ impl ContainerGeometry {
         )
     }
 
-    /// Builds container overlay geometry drawing **real item icons** from the
-    /// atlases. `models` may be `None`, in which case flat sprite items draw and
-    /// block items do not.
-    #[must_use]
-    pub fn build_with_icons(
-        frame: &ContainerFrame<'_>,
-        width: u32,
-        height: u32,
-        items: &ItemAtlas,
-        models: Option<&BlockModels>,
-    ) -> Self {
-        Self::build_inner(
-            frame,
-            width,
-            height,
-            crate::config::AUTO_GUI_SCALE,
-            &IconAssets {
-                items: Some(items),
-                models,
-            },
-            None,
-            None,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_inner(
         frame: &ContainerFrame<'_>,

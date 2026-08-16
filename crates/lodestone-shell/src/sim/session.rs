@@ -1223,18 +1223,6 @@ impl Sim {
         })
     }
 
-    /// Whether the open screen is a plugin-opened local menu.
-    ///
-    /// The predicate every wire-facing container path consults before sending —
-    /// see [`Self::close_open_menu`] and `WindowApp::send_menu_click`.
-    #[must_use]
-    pub fn open_menu_is_local(&self) -> bool {
-        self.read(|w| {
-            w.get::<lodestone_ecs::SessionMenus>(self.local)
-                .is_some_and(|menus| menus.0.opened_is_local())
-        })
-    }
-
     /// Predict a click against a plugin-opened local menu, sending nothing.
     ///
     /// The local counterpart to `ClientHandle::menu_click`. That one predicts *and*

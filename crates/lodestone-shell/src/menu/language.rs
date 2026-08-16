@@ -338,16 +338,6 @@ fn rect_xy(rects: &[(f32, f32, f32, f32)], index: usize) -> (f32, f32) {
     (x, y)
 }
 
-/// How many rows a canvas may show — same fixed-pixel-budget departure as
-/// [`super::options::LIST_WINDOW_PX`] and [`super::key_binds::LIST_WINDOW_PX`]:
-/// this pipeline has no scissor, so the window is derived from the shortest
-/// content band any `gui_scale` can produce.
-#[must_use]
-pub fn visible_rows_len() -> usize {
-    let window = crate::config::MIN_SCALED_HEIGHT as f32 - HEADER_HEIGHT - FOOTER_HEIGHT;
-    (window / ROW_H).floor().max(1.0) as usize
-}
-
 /// This screen's list, as the generic [`super::widget::ListSpec`] the scrollbar
 /// draw and the mouse wheel both go through.
 ///

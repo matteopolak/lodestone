@@ -192,11 +192,6 @@ const NAME_LEFT_INSET: f32 = 4.0;
 pub const LIST_WINDOW_PX: f32 =
     crate::config::MIN_SCALED_HEIGHT as f32 - options::SUB_HEADER_HEIGHT - options::FOOTER_HEIGHT - options::LIST_TOP_INSET;
 
-#[must_use]
-pub fn visible_rows_len() -> usize {
-    (LIST_WINDOW_PX / ROW_H).floor().max(1.0) as usize
-}
-
 /// This screen's list, as the generic [`super::widget::ListSpec`] —
 /// **the first and only adopter of [`super::widget::RowBand::Inset`]**.
 ///

@@ -211,8 +211,7 @@ impl Sim {
     /// Resume the browser's `AudioContext` from a real user-gesture input
     /// event — see `crate::audio::ShellAudio`'s module doc ("the autoplay
     /// gate") for why this must be called from inside a real click/keydown
-    /// handler and never eagerly, and `ShellAudio::is_suspended` for how to
-    /// observe whether it actually took.
+    /// handler and never eagerly.
     ///
     /// A plain no-op on native: there is no browser autoplay gate to lift, and
     /// native's `ShellAudio` does not even carry this method — its `cpal`

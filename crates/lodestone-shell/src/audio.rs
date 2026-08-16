@@ -113,8 +113,7 @@
 //! the same failure shape this repo already measured for a gesture-less
 //! `request_pointer_lock()`. So [`ShellAudio::from_env`] never calls `resume()`;
 //! [`ShellAudio::resume_on_gesture`] is a separate, explicit call a real input
-//! handler makes, and [`ShellAudio::is_suspended`] makes the state observable
-//! rather than a silent skip. Wiring `resume_on_gesture` to the shell's actual
+//! handler makes. Wiring `resume_on_gesture` to the shell's actual
 //! click/keydown handling is outside this file's owned paths (`app/**`); see
 //! the brokered hunk this change reports.
 
@@ -959,28 +958,11 @@ impl ShellAudio {
         Some(Self)
     }
 
-    /// Whether the underlying `AudioContext` is still `suspended` — the
-    /// ordinary state until [`Self::resume_on_gesture`] runs from a real user
-    /// input event. See this module's docs for why an eager `resume()` at
-    /// construction is wrong rather than merely unnecessary.
-    ///
-    /// `false` if [`Self::from_env`] never installed a state at all — an
-    /// audio-disabled session has nothing to be suspended.
-    #[must_use]
-    pub fn is_suspended(&self) -> bool {
-        AUDIO_STATE.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .is_some_and(|state| state.ctx.state() == web_sys::AudioContextState::Suspended)
-        })
-    }
-
     /// Resumes the audio context. Call this from an input-event handler
     /// (click/keydown) — never eagerly — so the browser's autoplay gate
     /// actually lifts. `resume()` returns a `Promise`; there is nothing this
     /// call needs to await (there is no "started" callback anyone here is
-    /// waiting on), so this is fire-and-forget and [`Self::is_suspended`] is
-    /// the way to observe whether it actually took.
+    /// waiting on), so this is fire-and-forget.
     pub fn resume_on_gesture(&self) {
         AUDIO_STATE.with(|cell| {
             if let Some(state) = cell.borrow().as_ref() {
@@ -997,8 +979,7 @@ impl ShellAudio {
                     tracing::warn!(target: "audio", "AudioContext::resume() failed: {e:?}");
                 } else if was_suspended {
                     // The one observable signal this call has: it was asked to
-                    // lift the autoplay gate at least once. `ShellAudio::is_suspended`
-                    // is the way to confirm it actually took.
+                    // lift the autoplay gate at least once.
                     tracing::info!(
                         target: "audio",
                         "AudioContext::resume() requested from a real user gesture \

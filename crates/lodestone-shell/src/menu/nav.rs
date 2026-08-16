@@ -515,14 +515,6 @@ impl EditForm {
         }
     }
 
-    /// The focused field's box, or the name field's when nothing is focused.
-    #[must_use]
-    pub fn focused_box(&self) -> &EditBox {
-        match self.field() {
-            FormField::Name => &self.fields.name,
-            FormField::Address => &self.fields.address,
-        }
-    }
 
     /// Whether the form can be saved. The label may be blank (it falls back to
     /// the host); the address may not.

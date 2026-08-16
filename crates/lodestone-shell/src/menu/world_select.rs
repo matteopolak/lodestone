@@ -149,7 +149,7 @@ pub const NO_WORLDS_LABEL_NATIVE: &str = "No worlds yet — press Create New Wor
 ///
 /// **The list is empty here permanently, not yet**, and saying so is the whole
 /// difference. A browser has no `saves/` — `read_dir` returns `Err(Unsupported)` — so
-/// [`crate::saves::list_worlds`] can only ever be empty, and a player who creates a
+/// [`crate::saves::list_worlds_in`] can only ever be empty, and a player who creates a
 /// world, plays it, and comes back to an empty list would reasonably read that as a
 /// broken save. It is not broken: the world was in memory, and the tab closing ended it.
 ///
@@ -182,7 +182,7 @@ pub const NO_WORLDS_LABEL: &str = NO_WORLDS_LABEL_BROWSER;
 
 /// A world seed and a label, kept from that fix's one-hardcoded-row era.
 ///
-/// **Not a list row any more.** The list is [`crate::saves::list_worlds`]; this
+/// **Not a list row any more.** The list is [`crate::saves::list_worlds_in`]; this
 /// type survives for exactly one caller, [`BUNDLED_WORLD`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorldEntry {

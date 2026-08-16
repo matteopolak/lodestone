@@ -281,8 +281,7 @@ pub(super) struct PlayerPreview {
     mesh: EntityMesh,
     model: &'static str,
     /// The declared rig, kept so a gate can assert *which* skin is bound rather
-    /// than only that one is — the same reason
-    /// [`super::ContainerRenderer::player_preview_attached`] exists.
+    /// than only that one is.
     skin_model: PlayerModelType,
     gpu: GpuEntityModel,
     texture: wgpu::BindGroup,

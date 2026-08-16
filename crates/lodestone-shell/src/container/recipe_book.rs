@@ -952,7 +952,7 @@ pub struct RecipeTooltipContext {
 
 /// As [`recipe_book_panel_geometry`], drawing **real item icons** from the
 /// atlases — the recipe-grid analogue of
-/// [`ContainerGeometry::build_with_icons`].
+/// [`ContainerGeometry::build`](super::geometry::ContainerGeometry::build).
 ///
 /// `font` is the only thing that can draw the search box's *text*; with `None`
 /// the box is chrome and nothing else, which is the jar-less picture (there is no
