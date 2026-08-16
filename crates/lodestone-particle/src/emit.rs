@@ -947,8 +947,8 @@ pub fn huge_explosion(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, size:
 mod tests {
     use super::{
         FULL_CUBE, Face, angry_villager, breaking_block_effect, bubble, crit, destroy_block_effect,
-        explosion_emitter, flame, happy_villager, heart, huge_explosion, note, smoke, splash,
-        sweep_attack, totem_of_undying, witch,
+        explosion_emitter, firework, flame, happy_villager, heart, huge_explosion, note, smoke,
+        splash, sweep_attack, totem_of_undying, witch,
     };
     use crate::{Behaviour, ParticleEngine, Sheet, SpriteSource};
     use lodestone_physics::Aabb;
@@ -1365,6 +1365,47 @@ mod tests {
         assert!((p.yd - 0.7).abs() < 1e-12, "yd must equal the raw input");
         assert!((p.zd - -0.2).abs() < 1e-12, "zd must equal the raw input");
         assert!(matches!(p.behaviour, Behaviour::SimpleAnimated { fade: None }));
+    }
+
+    /// `firework`'s lifetime is `48 + nextInt(12)`, bounded to `[48, 60)`,
+    /// takes its velocity directly with no jitter (the same `TotemParticle`
+    /// shape [`totem_of_undying_lifetime_is_bounded_and_velocity_is_unjittered`]
+    /// pins), and — unlike totem — leaves colour at the base white and sets
+    /// `alpha = 0.99` (`SparkProvider.createParticle`'s own line), never `1.0`.
+    #[test]
+    fn firework_lifetime_is_bounded_velocity_is_unjittered_and_alpha_is_099() {
+        let mut engine = ParticleEngine::seeded(7);
+        firework(&mut engine, 0.0, 64.0, 0.0, 0.4, -0.1, 0.6);
+        let p = &engine.particles()[0];
+        assert!(
+            (48..60).contains(&p.lifetime),
+            "lifetime {} outside vanilla's 48 + nextInt(12) range",
+            p.lifetime
+        );
+        assert!((p.xd - 0.4).abs() < 1e-12, "xd must equal the raw input");
+        assert!((p.yd - -0.1).abs() < 1e-12, "yd must equal the raw input");
+        assert!((p.zd - 0.6).abs() < 1e-12, "zd must equal the raw input");
+        assert_eq!(p.colour, [1.0, 1.0, 1.0], "SparkParticle never calls setColor");
+        assert!((p.alpha - 0.99).abs() < 1e-6, "SparkProvider sets alpha to 0.99, not 1.0");
+        assert!(matches!(p.behaviour, Behaviour::SimpleAnimated { fade: None }));
+        assert!(
+            matches!(p.sprite, SpriteSource::Sheet { sheet: Sheet::Spark, .. }),
+            "firework must draw from its own Spark sheet, not Glow \
+             (electric_spark/glow's sheet) — the two are visually similar but \
+             physically distinct textures"
+        );
+    }
+
+    /// `Sheet::Spark`'s frame order matches `firework.json`'s own declared
+    /// list (`spark_7` first, `spark_0` last) — the same "the pack file order
+    /// is the frame sequence, not an assumption" control every other
+    /// multi-frame sheet's doc already carries.
+    #[test]
+    fn spark_sheet_frames_match_firework_json_order() {
+        assert_eq!(
+            Sheet::Spark.frames(),
+            &["spark_7", "spark_6", "spark_5", "spark_4", "spark_3", "spark_2", "spark_1", "spark_0"]
+        );
     }
 
     /// The 1-in-4 "golden" branch versus the usual "green" branch: both must
@@ -1843,6 +1884,56 @@ pub fn spark(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f
     p.zd = za * scale;
     p.lifetime = 8 + engine.rng().next_int_bound(4);
     p.behaviour = Behaviour::Plain;
+    engine.add(p);
+}
+
+/// `FireworkParticles.SparkParticle` via `SparkProvider` — `ParticleTypes.FIREWORK`,
+/// the plain wire-spawned spark (not the rocket-explosion burst, which is a
+/// client-side-only `Starter`/`NoRenderParticle` this client never receives
+/// as a wire particle at all).
+///
+/// `.cache/mc/26.2/client-src/net/minecraft/client/particle/FireworkParticles.java`:
+/// `SparkParticle`'s constructor is `super(level, x, y, z, sprites, 0.1F)` —
+/// `SimpleAnimatedParticle`'s third-from-last parameter is **gravity**, not a
+/// size scale (confirmed against `SimpleAnimatedParticle.java`'s own
+/// constructor, which the [`totem_of_undying`] doc already reads the same
+/// way), and that base constructor also hardcodes `friction = 0.91F`
+/// unconditionally — `SparkParticle` never overrides either back down the way
+/// [`totem_of_undying`]'s `TotemParticle` does. Velocity is taken **directly**
+/// from the caller with no jitter (`xd = xa` etc., matching `TotemParticle`
+/// again), `quadSize *= 0.75F`, `lifetime = 48 + nextInt(12)`, no colour set
+/// (stays the base white), and `SparkProvider.createParticle` — the only
+/// creation path a plain `SimpleParticleType` particle reaches — sets
+/// `alpha = 0.99F` on every instance. `trail`/`twinkle` both default `false`
+/// and are never set here; they only matter for the child sparks a rocket's
+/// own `Starter` spawns from its `tick()`, which is a different, client-only
+/// production path this emitter does not model.
+pub fn firework(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet {
+            sheet: Sheet::Spark,
+            frame: 0,
+        },
+        rng,
+    );
+    p.friction = 0.91;
+    p.gravity = 0.1;
+    p.xd = xa;
+    p.yd = ya;
+    p.zd = za;
+    p.quad_size *= 0.75;
+    let extra = engine.rng().next_int_bound(12);
+    p.lifetime = 48 + extra;
+    p.sprite = SpriteSource::Sheet {
+        sheet: Sheet::Spark,
+        frame: Sheet::Spark.frame_for_age(0, p.lifetime),
+    };
+    p.alpha = 0.99;
+    p.behaviour = Behaviour::SimpleAnimated { fade: None };
     engine.add(p);
 }
 

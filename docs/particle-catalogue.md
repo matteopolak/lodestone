@@ -120,10 +120,27 @@ emit.rs` doc comments on `note`/`heart`/`angry_villager`/`happy_villager`/`witch
 - `Behaviour::Spell` (`witch`) reuses `AshSmoke`'s per-tick `set_sprite_from_age()` call but
   needs its own layer (`Translucent`, not `Opaque`).
 
-**Explicitly blocked, not attempted:** `firework` and `dust` carry a real `ParticleOptions`
-payload (`FireworkExplosion`, `DustParticleOptions`) that this workspace has no generic
-decoder for. Building one of these without the shared decoder would mean hand-rolling a
-second, narrower one; flagged rather than special-cased, per the brief for this pass.
+**Explicitly blocked, not attempted:** `dust` carries a real `ParticleOptions` payload
+(`DustParticleOptions`) that this workspace has no generic decoder for. Building one without
+the shared decoder would mean hand-rolling a second, narrower one; flagged rather than
+special-cased, per the brief for this pass.
+
+**Correction: `firework` was never in this bucket, and the claim above that it needed a
+`ParticleOptions` decoder was wrong.** `ParticleTypes.FIREWORK`
+(`.cache/mc/26.2/client-src/net/minecraft/core/particles/ParticleTypes.java`) is a
+`SimpleParticleType`, argument-less like `explosion_emitter`/`explosion` — its stream codec
+reads no further bytes, so there was never anything to decode. `FireworkExplosion` (the
+component this doc's first draft was actually thinking of) is a *data component* on a firework
+rocket item, not the particle payload, and is unrelated. **Built now**: `emit::firework`
+transcribes `FireworkParticles.SparkParticle` via its `SparkProvider` (the plain wire particle,
+not the rocket-explosion burst a `Starter`/`NoRenderParticle` spawns client-side and this
+client never receives over the wire at all) — `SimpleAnimatedParticle`'s constructor sets
+`friction = 0.91`/`gravity = 0.1` (its third-from-last constructor parameter is gravity, not a
+size scale), velocity is taken directly with no jitter, `quadSize *= 0.75`,
+`lifetime = 48 + nextInt(12)`, and `SparkProvider.createParticle` sets `alpha = 0.99`. A new
+`Sheet::Spark` variant (`spark_7` … `spark_0`, descending per `firework.json`) was needed —
+distinct from `Sheet::Glow`, since `firework`'s and `electric_spark`/`glow`'s sheets are
+visually similar sparks over physically different textures.
 
 **Correction (creeper explosion sound fix, `7025d90`): `explosion_emitter`/`explosion` are
 *not* in this bucket.** Both are `SimpleParticleType`
@@ -253,10 +270,11 @@ transcribed vanilla constant, documented inline with its Java source line.
   and `emit.rs` doc comments for the per-type Java source.
 - `Particles::spawn_one`/`spawn_particles` (`crates/lodestone-shell/src/particles.rs`) — the
   dispatch this pass extended.
-- No protocol or ECS changes. The `ParticleOptions` decoder that `dust`/`sculk_charge`/
-  `firework` are blocked on does not exist yet anywhere in the workspace — `explosion`/
-  `explosion_emitter` are **not** in that list (see "Built" above); they never
-  needed the decoder, only the render `Behaviour` this pass added.
+- No protocol or ECS changes. The `ParticleOptions` decoder that `dust`/`sculk_charge` are
+  blocked on does not exist yet anywhere in the workspace — `explosion`/`explosion_emitter`
+  and `firework` are **not** in that list (see "Built"/"Correction" above); none of the three
+  needed the decoder, only the render `Behaviour`/`emit::` function this pass and the firework
+  fix added.
 
 ## How to change it
 
@@ -267,12 +285,11 @@ transcribed vanilla constant, documented inline with its Java source line.
   `instant_effect` both use `spell_N`, not `witch_N`; `angry_villager` uses `angry.png`, a
   single frame, not `angry_villager.png`). Add a `Sheet`/`Behaviour` variant only if the tick
   shape is genuinely new; several types share one class and can share a `Behaviour`.
-- Before touching `dust`, `sculk_charge`, or `firework`: build the shared `ParticleOptions`
-  decoder first (protocol-side, brokered — not `lodestone-particle`'s to build alone).
-  Special-casing one of these without it just produces a second narrow decoder to reconcile
-  later. `explosion`/`explosion_emitter` looked like they belonged on this list too, and did
-  not — see "Built" above for how that was checked before being ruled out, not
-  assumed.
+- Before touching `dust` or `sculk_charge`: build the shared `ParticleOptions` decoder first
+  (protocol-side, brokered — not `lodestone-particle`'s to build alone). Special-casing one of
+  these without it just produces a second narrow decoder to reconcile later. `explosion`/
+  `explosion_emitter` and `firework` looked like they belonged on this list too, and did not —
+  see "Built"/"Correction" above for how that was checked before being ruled out, not assumed.
 - **Read the type's `particles/<type>.json` frame list out of the jar, never infer it.** Half of
   vanilla's multi-frame sheets are listed descending and one (`enchant`) is alphabetic. A wrong
   order animates backwards and every test still passes, because the sprite resolves either way.
