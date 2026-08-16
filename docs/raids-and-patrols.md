@@ -43,15 +43,31 @@ doc previously named the wrong primitive.** Traced through the decompile:
 `#village`-tagged POI within 64 blocks, averaged into a raid centre), not
 `isVillageCenter`/`sectionsToVillage`'s section-distance-propagation tracker (a
 different subsystem this trigger path never touches). `poi_storage.rs`'s
-`occupied_in_range` (see `docs/point-of-interest-storage.md`) is now that primitive —
-built and tested. What still blocks the trigger is **not** a missing spatial query
-any more; it is that `#village` POIs (beds) are never *occupied*, because villager
-bed-claiming does not exist anywhere in this codebase (confirmed while building
-golem-summon-on-hurt: `golemSpawnConditionsMet`'s `LAST_SLEPT` gate has nothing to
-read either, for the identical reason) — see §5 for the exact remaining shape.
-Everything in §2–4 below is real and works the moment something supplies a raid
-centre and starts one; a debug/admin path (a `/raid start` command, say) could
-exercise it today with no further work.
+`occupied_in_range` (see `docs/point-of-interest-storage.md`) is that primitive —
+built and tested, for the disk-backed `poi/` region set.
+
+**Villager bed-claiming — landed.** `#village` POIs (beds) are now actually
+claimed: `crate::mobs::villager::BedClaims`/`find_and_claim_bed`
+(`docs/villager-professions-and-trading.md`) is `WorkstationClaims`'s own
+shape applied to `PoiTypes.HOME`, wired into the real per-tick `MobSim` loop
+via `MobSim::tick_villager_beds`. A villager standing near an unclaimed,
+unoccupied bed claims it as a ticket the same tick — no work/rest sleep
+cycle needed, since vanilla's own `PoiRecord.isOccupied` (what
+`Occupancy.IS_OCCUPIED` reads) is ticket-based, not sleep-based.
+
+**What still blocks a fully disk-backed trigger:** a bed claimed through
+`BedClaims` is a **session-only, in-memory** ledger — the same disclosed gap
+`WorkstationClaims` already has — so it is never written to the on-disk
+`poi/` region set `PoiStorage::occupied_in_range` reads. `MobSim` now also
+exposes `occupied_homes_in_range(center, radius)`, the live equivalent of
+that disk query scoped to claimed beds, for exactly this reason: **a caller
+wiring the real trigger against live villagers should read
+`MobSim::occupied_homes_in_range`, not (only) `PoiStorage::occupied_in_range`**,
+since the disk query can only ever see a claim that has separately been
+persisted, and nothing yet persists one (persisting it touches
+`crate::integrated`, off limits to `mobs/villager`). See §5 for the exact
+remaining wiring shape, all of it in `server.rs`/`crate::integrated`, outside
+this module's ownership.
 
 ---
 
@@ -114,30 +130,30 @@ nothing this unit could set even if it owned the wire path.
   `occupied_in_range(type_predicate, center, radius, occupancy)` is
   `PoiManager.getInRange`, tested against a fixture that separately exercises its
   distance, type and occupancy filters. See `docs/point-of-interest-storage.md`.
-* **Villager bed-claiming — still missing, and it is the real remaining blocker.**
-  `#village`-tagged POIs (beds) are never `Occupancy::IsOccupied` because no
-  villager in this codebase ever claims a bed at all — confirmed while building
-  golem-summon-on-hurt (`golemSpawnConditionsMet`'s `LAST_SLEPT` gate has nothing
-  to read from either, the identical gap). Querying `occupied_in_range` today
-  against real POI data would find zero occupied beds regardless of how close a
-  player stands to a real village, which is why this was not attempted as a
-  stand-in/approximate detector (e.g. counting nearby claimed workstations only)
-  — it would under-detect every real village and risk shipping an island that
-  looks plausible and never fires. This is villager work/rest-schedule territory
-  (issue #231's remainder), in `mobs/villager/`, off limits to whoever does not
-  own that subtree.
+* **Villager bed-claiming — landed.** `crate::mobs::villager::BedClaims`/
+  `find_and_claim_bed`, wired into production via `MobSim::tick_villager_beds`
+  (`docs/villager-professions-and-trading.md`'s own account). A villager
+  claims a nearby unoccupied bed's ticket the same tick it finds one; a
+  second villager cannot claim an already-held bed; losing the bed (block
+  gone or no longer a bed) releases the ticket on the next re-verification.
+  **Session-only, like `WorkstationClaims`** — not written to the on-disk
+  `poi/` set, so `MobSim::occupied_homes_in_range(center, radius)` is the
+  live query the trigger below should use instead of (or alongside)
+  `PoiStorage::occupied_in_range`.
 * **The Bad-Omen → Raid-Omen → raid-start trigger**, real but narrow, and now
   fully specified: `raid::absorb_raid_omen(existing_level, amplifier)` is the pure
   arithmetic (`Raid.absorbRaidOmen`, clamped to `1..=5`) already written and
-  tested. The remaining wiring, once bed-claiming exists, is mechanical: (1)
+  tested. The remaining wiring, now that bed-claiming exists, is mechanical: (1)
   `server.rs`'s per-connection `ActiveEffects` notices `minecraft:bad_omen`
   expiring, removes it, and applies `minecraft:raid_omen` at the new level,
   recording the player's position (`player.getRaidOmenPosition()`'s equivalent);
   (2) on `minecraft:raid_omen`'s own expiry, call a new `MobSim`-side entry point
-  that runs `occupied_in_range(#village predicate, recorded_position, 64,
-  Occupancy::IsOccupied)`, averages the results into a centre, and calls the
-  already-built `MobSim::start_raid(center, difficulty, omen_level)` when the
-  query returns anything. All of that state lives in `server.rs`.
+  that runs `occupied_homes_in_range(recorded_position, 64)` (plus, for parity
+  with the wider `#village` tag, `occupied_in_range` over claimed job sites and
+  the meeting bell — this module only closes the `home` gap), averages the
+  results into a centre, and calls the already-built
+  `MobSim::start_raid(center, difficulty, omen_level)` when the query returns
+  anything. All of that state lives in `server.rs`.
 * **Granting Bad Omen from an ominous bottle.** `item_use.rs` already lists
   `ominous_bottle` among the drinkable-not-food items, but its `Consumable.onConsume`
   effect list (the actual Bad Omen grant) is explicitly unmodelled — the same disclosed
