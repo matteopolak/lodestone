@@ -34,16 +34,16 @@ use bevy_ecs::resource::Resource;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use lodestone_client::ClientAction;
 use lodestone_ecs::player::{
-    ActionQueue, Dead, Egress, LastPlayerInput, LocalPlayer, MovementIntent, PhysicsState,
-    SprintKeyHeld, Submersion,
+    ActionQueue, Dead, Egress, ItemUseEffects, LastPlayerInput, LocalPlayer, MovementIntent,
+    PhysicsState, SprintKeyHeld, Submersion,
 };
 use lodestone_ecs::session::{Abilities, Vitals};
 use lodestone_ecs::{GameTick, TickSet};
 use lodestone_model::PlayerInput;
-use lodestone_physics::MovementInput;
+use lodestone_physics::{MovementInput, UseEffects};
 
 use crate::action::move_action;
-use crate::input::{Action, InputState, movement_intent_with_food};
+use crate::input::{Action, InputState, movement_intent_with_gates};
 
 /// The platform's held keys and accumulated mouse motion.
 ///
@@ -72,22 +72,26 @@ pub struct RawInput(pub InputState);
 /// apart. Only the sprint bit is taken; `sneak` itself stays set, so the sink
 /// impulse and the crouch pose still see it.
 ///
-/// `sprint_allowed_by_food` (vanilla's food-level sprint gate) is threaded through unchanged to both
-/// calls — food does not depend on submersion, so it is one value for the
-/// whole tick, not something the swim recomputation could disagree with.
+/// `sprint_allowed_by_food` (vanilla's food-level sprint gate) and `using_item`
+/// (vanilla's use-item gates — see [`movement_intent_with_gates`]) are threaded
+/// through unchanged to both calls — neither depends on submersion, so each is
+/// one value for the whole tick, not something the swim recomputation could
+/// disagree with.
 #[must_use]
 pub fn swim_adjusted_intent(
     state: &InputState,
     submerged: bool,
     sprint_allowed_by_food: bool,
+    using_item: Option<UseEffects>,
 ) -> MovementInput {
-    let mut intent = movement_intent_with_food(state, sprint_allowed_by_food);
+    let mut intent = movement_intent_with_gates(state, sprint_allowed_by_food, using_item);
     if !intent.sneak || !submerged {
         return intent;
     }
     let mut without_sneak = *state;
     without_sneak.set(Action::Sneak, false);
-    intent.sprint = movement_intent_with_food(&without_sneak, sprint_allowed_by_food).sprint;
+    intent.sprint =
+        movement_intent_with_gates(&without_sneak, sprint_allowed_by_food, using_item).sprint;
     intent
 }
 
@@ -134,11 +138,14 @@ pub fn compute_movement_intent(
             Option<&Dead>,
             Option<&Vitals>,
             Option<&Abilities>,
+            Option<&ItemUseEffects>,
         ),
         With<LocalPlayer>,
     >,
 ) {
-    for (mut intent, mut sprint_key, state, submersion, dead, vitals, abilities) in &mut players {
+    for (mut intent, mut sprint_key, state, submersion, dead, vitals, abilities, using_item) in
+        &mut players
+    {
         sprint_key.0 = input.0.sprint_held();
         intent.0 = if dead.is_some() {
             // A corpse does not walk: ignore held keys while dead so the player
@@ -153,6 +160,7 @@ pub fn compute_movement_intent(
                 &input.0,
                 submersion.0.under_water() || state.0.swimming,
                 sprint_allowed_by_food,
+                using_item.and_then(|u| u.0),
             )
         };
     }
@@ -403,10 +411,10 @@ mod tests {
         state.set(Action::Sneak, true);
 
         assert!(
-            !swim_adjusted_intent(&state, false, true).sprint,
+            !swim_adjusted_intent(&state, false, true, None).sprint,
             "control: on land, sneaking still vetoes sprint"
         );
-        let intent = swim_adjusted_intent(&state, true, true);
+        let intent = swim_adjusted_intent(&state, true, true, None);
         assert!(
             intent.sprint,
             "submerged, shift must not cancel a swim-sprint"
@@ -431,10 +439,10 @@ mod tests {
 
         // Control: without the food gate (allowed = true), submerged + sneak
         // does swim-sprint, matching the test above.
-        assert!(swim_adjusted_intent(&state, true, true).sprint);
+        assert!(swim_adjusted_intent(&state, true, true, None).sprint);
         // With it denied, the swim exception must not resurrect the sprint bit.
         assert!(
-            !swim_adjusted_intent(&state, true, false).sprint,
+            !swim_adjusted_intent(&state, true, false, None).sprint,
             "low food must veto a swim-sprint too, not just the land case"
         );
     }
@@ -560,6 +568,64 @@ mod tests {
             app.world().get::<MovementIntent>(entity).unwrap().0.sprint,
             "may_fly must override the food gate, exactly like vanilla's `||`"
         );
+    }
+
+    /// The use-item gate has to reach the *system*, not just the free
+    /// functions — `ItemUseEffects` has to actually reach
+    /// `compute_movement_intent` for a player charging a default-effects item
+    /// to stop sprinting, and the resulting scale has to reach
+    /// `MovementIntent` so `lodestone-physics` can apply it. The idle tick is
+    /// the control: without it, "using an item stops sprint" could pass
+    /// against a system that vetoes sprint unconditionally.
+    #[test]
+    fn item_use_effects_reach_the_intent_system_and_veto_sprint() {
+        let (mut app, entity) = app();
+        press(&mut app, Action::Forward, true);
+        press(&mut app, Action::Sprint, true);
+        tick(&mut app);
+        assert!(
+            app.world().get::<MovementIntent>(entity).unwrap().0.sprint,
+            "control: idle (spawn_local_player's ItemUseEffects(None)) sprints normally"
+        );
+        assert_eq!(
+            app.world().get::<MovementIntent>(entity).unwrap().0.using_item,
+            None,
+            "control: idle carries no use-item scale onto the intent"
+        );
+
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(ItemUseEffects(Some(UseEffects::DEFAULT)));
+        tick(&mut app);
+        let intent = app.world().get::<MovementIntent>(entity).unwrap().0;
+        assert!(
+            !intent.sprint,
+            "a default-effects use-item must reach the system and veto sprint"
+        );
+        assert_eq!(
+            intent.using_item,
+            Some(UseEffects::DEFAULT),
+            "the use-item scale must reach MovementIntent for physics to apply"
+        );
+    }
+
+    /// The spear override must reach the system too, and — unlike the default
+    /// case above — must NOT veto sprint once it does.
+    #[test]
+    fn spear_use_effects_reach_the_intent_system_without_vetoing_sprint() {
+        let (mut app, entity) = app();
+        press(&mut app, Action::Forward, true);
+        press(&mut app, Action::Sprint, true);
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(ItemUseEffects(Some(UseEffects::SPEAR)));
+        tick(&mut app);
+        let intent = app.world().get::<MovementIntent>(entity).unwrap().0;
+        assert!(
+            intent.sprint,
+            "a spear's can_sprint must reach the system and NOT veto sprint"
+        );
+        assert_eq!(intent.using_item, Some(UseEffects::SPEAR));
     }
 
     /// A dead player holds still and is not reported as moving.

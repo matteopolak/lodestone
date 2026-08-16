@@ -172,6 +172,7 @@ impl WalkDrive {
                 jump,
                 sneak: false,
                 sprint: self.sprint,
+                using_item: None,
             },
             yaw,
         }
@@ -276,6 +277,7 @@ impl ClimbDrive {
                 jump: self.ascending,
                 sneak: false,
                 sprint: false,
+                using_item: None,
             },
             yaw: state.yaw,
         }

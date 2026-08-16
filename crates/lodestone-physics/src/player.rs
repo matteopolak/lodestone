@@ -32,6 +32,45 @@ use crate::profile::{FluidModel, InputModel, PhysicsProfile};
 /// owns that mapping and [`tick`] applies it.
 pub const DEFAULT_EYE_HEIGHT: f32 = 1.62;
 
+/// `UseEffects` (`world/item/component/UseEffects.java`) — the pair vanilla's
+/// `LocalPlayer` consults while `isUsingItem()` is true: how much to scale
+/// movement input (`itemUseSpeedMultiplier`, folded into `modifyInput`) and
+/// whether sprinting may continue at all (`canSprint`, ANDed into
+/// `canStartSprinting` as `!isSlowDueToUsingItem()`).
+///
+/// Only two values exist in the 26.2 item table, and there is no third to add
+/// a case for without a new jar reading: [`Self::DEFAULT`] (`UseEffects.
+/// DEFAULT`) is what every item without an explicit override gets — food,
+/// potions, the bow, the crossbow, the shield — and the seven spear items
+/// (wooden/stone/copper/iron/golden/diamond/netherite, via
+/// `Item.Properties.spear(...)`, `Item.java:542`) are the *only* override,
+/// [`Self::SPEAR`]. So a caller resolving "which effects apply" needs only
+/// "is the held item a spear", not a general item-effects table.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UseEffects {
+    /// Whether sprinting may continue while this item is in use
+    /// (`UseEffects.canSprint()`).
+    pub can_sprint: bool,
+    /// The movement-input scale applied while this item is in use
+    /// (`UseEffects.speedMultiplier()`).
+    pub speed_multiplier: f32,
+}
+
+impl UseEffects {
+    /// `UseEffects.DEFAULT` — every use-item except a spear: no sprinting,
+    /// input scaled to a fifth.
+    pub const DEFAULT: Self = Self {
+        can_sprint: false,
+        speed_multiplier: 0.2,
+    };
+    /// The spear override (`Item.Properties.spear(...)`) — charging a spear
+    /// neither slows movement nor blocks sprinting.
+    pub const SPEAR: Self = Self {
+        can_sprint: true,
+        speed_multiplier: 1.0,
+    };
+}
+
 /// Raw player intent for one tick, before any client-side transformation.
 ///
 /// `forward`/`strafe` are the digital movement axes (typically `-1.0`, `0.0` or
@@ -48,6 +87,17 @@ pub struct MovementInput {
     pub sneak: bool,
     /// Sprint active this tick.
     pub sprint: bool,
+    /// This tick's [`UseEffects`] if an item is being used (charging, eating,
+    /// drawing a bow, blocking with a shield, …), or `None` while idle.
+    ///
+    /// `LocalPlayer.modifyInput` applies `speed_multiplier` between the
+    /// `0.98` scale and the sneak scale (`modify_input_unit_square` below);
+    /// the sprint half of `UseEffects` (`can_sprint`) is a *separate*
+    /// conjunct on `canStartSprinting` that the caller (`lodestone-controller`'s
+    /// `compute_movement_intent`) must apply itself before ever constructing
+    /// this — by the time `sprint` reaches here it is already gated, matching
+    /// how the food-level sprint gate already works.
+    pub using_item: Option<UseEffects>,
 }
 
 impl MovementInput {
@@ -58,6 +108,7 @@ impl MovementInput {
         jump: false,
         sneak: false,
         sprint: false,
+        using_item: None,
     };
 }
 
@@ -722,12 +773,13 @@ fn modify_input(
     model: InputModel,
     strafe: f32,
     forward: f32,
+    using_item: Option<UseEffects>,
     sneak: bool,
     sneak_factor: f32,
 ) -> (f32, f32) {
     match model {
         InputModel::UnitSquareProjection => {
-            modify_input_unit_square(strafe, forward, sneak, sneak_factor)
+            modify_input_unit_square(strafe, forward, using_item, sneak, sneak_factor)
         }
         // Structural seam: 1.8 used `moveFlying` (normalise by max(1, magnitude),
         // no unit-square projection). Deliberately not modelled yet — failing
@@ -743,6 +795,7 @@ fn modify_input(
 fn modify_input_unit_square(
     strafe: f32,
     forward: f32,
+    using_item: Option<UseEffects>,
     sneak: bool,
     sneak_factor: f32,
 ) -> (f32, f32) {
@@ -751,6 +804,15 @@ fn modify_input_unit_square(
     }
     let mut sx = strafe * 0.98;
     let mut sy = forward * 0.98;
+    // `LocalPlayer.modifyInput`: `if (isUsingItem() && !isPassenger()) newInput
+    // = newInput.scale(itemUseSpeedMultiplier())` — between the `0.98` scale
+    // above and the sneak scale below. `!isPassenger()` is dropped: this crate
+    // has no riding state (see `PlayerState::on_ground`'s own note on the same
+    // gap).
+    if let Some(effects) = using_item {
+        sx *= effects.speed_multiplier;
+        sy *= effects.speed_multiplier;
+    }
     if sneak {
         sx *= sneak_factor;
         sy *= sneak_factor;
@@ -1793,6 +1855,7 @@ fn set_sprint_and_modify_input(
         profile.input_model,
         input.strafe,
         input.forward,
+        input.using_item,
         input.sneak,
         profile.sneaking_speed,
     )
@@ -3909,10 +3972,100 @@ mod tests {
     fn modern_input_path_is_selected_and_pure() {
         // The validated modern arm must be reachable through the enum dispatch and
         // produce the same result as the underlying unit-square function.
-        let via_enum = modify_input(InputModel::UnitSquareProjection, 1.0, 1.0, false, 0.3);
-        let direct = modify_input_unit_square(1.0, 1.0, false, 0.3);
+        let via_enum = modify_input(InputModel::UnitSquareProjection, 1.0, 1.0, None, false, 0.3);
+        let direct = modify_input_unit_square(1.0, 1.0, None, false, 0.3);
         assert_eq!(via_enum.0.to_bits(), direct.0.to_bits());
         assert_eq!(via_enum.1.to_bits(), direct.1.to_bits());
+    }
+
+    #[test]
+    fn use_item_default_scales_straight_input_by_the_vanilla_0_2_constant() {
+        // `UseEffects.DEFAULT.speedMultiplier` = `0.2F` (`world/item/component/
+        // UseEffects.java`), applied inside `modifyInput` between the existing
+        // `0.98` scale and the sneak scale. Straight-forward input has no
+        // diagonal clamp to interact with, so the predicted magnitude is
+        // exactly the product of the two outside-sourced record constants —
+        // not a rounded guess.
+        let (sx, sy) = modify_input_unit_square(0.0, 1.0, Some(UseEffects::DEFAULT), false, 0.3);
+        assert_eq!(sx, 0.0);
+        let expected = 1.0f32 * 0.98 * 0.2;
+        assert!(
+            (sy - expected).abs() < 1.0e-6,
+            "expected {expected}, got {sy}"
+        );
+    }
+
+    #[test]
+    fn spear_use_effects_apply_no_slowdown_the_discriminating_item() {
+        // Every use-item except a spear gets `UseEffects.DEFAULT`
+        // (`speed_multiplier = 0.2`); the seven spear items are the *only*
+        // override, at `1.0` (`Item.Properties.spear(...)`, `Item.java:542`).
+        // A fixture corpus containing only food cannot tell "the multiplier is
+        // applied" from "the multiplier is applied to the wrong item set" —
+        // the spear is the one input where the two hypotheses diverge.
+        let baseline = modify_input_unit_square(0.0, 1.0, None, false, 0.3);
+        let spear = modify_input_unit_square(0.0, 1.0, Some(UseEffects::SPEAR), false, 0.3);
+        assert_eq!(baseline.1.to_bits(), spear.1.to_bits());
+    }
+
+    #[test]
+    fn use_item_and_sneak_scales_combine_rather_than_one_overriding_the_other() {
+        // The wrong hypothesis this guards against: an implementation that
+        // treats sneaking and using-an-item as mutually exclusive branches
+        // (`if sneak { .. } else if using_item { .. }`) instead of two
+        // independent multiplies. Three distinct, independently-derived
+        // magnitudes separate "both apply" from either single-gate reading —
+        // this is not a sign check, it lands on one specific value.
+        let (_, sy) = modify_input_unit_square(0.0, 1.0, Some(UseEffects::DEFAULT), true, 0.3);
+        let both = 1.0f32 * 0.98 * 0.2 * 0.3;
+        let sneak_only = 1.0f32 * 0.98 * 0.3;
+        let use_item_only = 1.0f32 * 0.98 * 0.2;
+        assert!(
+            (sy - both).abs() < 1.0e-6,
+            "expected both scales combined ({both}), got {sy} (sneak-only would \
+             be {sneak_only}, use-item-only would be {use_item_only})"
+        );
+    }
+
+    #[test]
+    fn use_item_scale_applies_before_the_unit_square_clamp_not_after() {
+        // `LocalPlayer.modifyInput` applies `itemUseSpeedMultiplier` to the raw
+        // strafe/forward *before* `modifyInputSpeedForSquareMovement`'s
+        // `length * dist_to_unit_square` clamp to `1.0`. A diagonal input is
+        // the discriminating shape: full-magnitude diagonal input saturates
+        // that clamp, but a 5x-reduced one (0.2 multiplier) typically does
+        // not — so scaling *before* the clamp and scaling the *already-
+        // clamped* output afterward land on genuinely different magnitudes,
+        // not just a uniform 0.2x of each other.
+        let unreduced = modify_input_unit_square(1.0, 1.0, None, false, 0.3);
+        let unreduced_len = (unreduced.0 * unreduced.0 + unreduced.1 * unreduced.1).sqrt();
+        assert!(
+            (unreduced_len - 1.0).abs() < 1.0e-5,
+            "control: an un-reduced diagonal must saturate the unit-square \
+             clamp, got length {unreduced_len}"
+        );
+
+        let (rx, ry) = modify_input_unit_square(1.0, 1.0, Some(UseEffects::DEFAULT), false, 0.3);
+        // Derived independently (not from this function): raw sx = sy = 0.98,
+        // scaled to 0.196 each *before* the unit-square transform, giving a
+        // pre-clamp length of 0.196*sqrt(2) ≈ 0.27719 — under 1.0, so the
+        // clamp never engages and the diagonal's `dist_to_unit_square` factor
+        // (sqrt(2)) is folded in below full saturation.
+        let expected = 0.277_185_9_f32;
+        assert!(
+            (rx - expected).abs() < 1.0e-5 && (ry - expected).abs() < 1.0e-5,
+            "expected ({expected}, {expected}), got ({rx}, {ry})"
+        );
+        // The wrong hypothesis (scale the already-clamped unit-diagonal output
+        // by 0.2 afterward) would read {0.14142, 0.14142} instead — well
+        // outside tolerance of the correct value, so this assertion cannot be
+        // satisfied by both hypotheses at once.
+        let wrong_hypothesis = unreduced.0 * 0.2;
+        assert!(
+            (rx - wrong_hypothesis).abs() > 0.02,
+            "the pre-projection scale must diverge from naively scaling the \
+             clamped output; got {rx}, wrong hypothesis would be {wrong_hypothesis}"
+        );
     }
 
     #[test]
@@ -3920,7 +4073,7 @@ mod tests {
     fn legacy_input_fails_loudly_not_silently() {
         // The whole point of the seam: a 1.8 profile must NOT silently run modern
         // math. Until the 1.8 pipeline is modelled and JVM-validated, it panics.
-        let _ = modify_input(InputModel::LegacyMoveFlying, 1.0, 1.0, false, 0.3);
+        let _ = modify_input(InputModel::LegacyMoveFlying, 1.0, 1.0, None, false, 0.3);
     }
 
     #[test]
@@ -3988,6 +4141,7 @@ mod tests {
             jump: false,
             sneak: true,
             sprint: false,
+            using_item: None,
         };
         for _ in 0..80 {
             tick(&mut s, sneak, &SlimeFloor, &p);

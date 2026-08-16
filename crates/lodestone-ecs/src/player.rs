@@ -74,7 +74,7 @@ use lodestone_entity::attribute::{
 use lodestone_model::{ClientAction, PlayerCommand, PlayerInput};
 use lodestone_physics::{
     CollisionView, FluidState, MovementInput, NearbyEntity, PhysicsProfile, PlayerState, PushSelf,
-    Vec3d, compute_fluid_state, tick_among_entities,
+    UseEffects, Vec3d, compute_fluid_state, tick_among_entities,
 };
 
 use crate::entity::{Attributes, EntityIndex, Leashed, Position};
@@ -704,6 +704,34 @@ pub struct LastFlyingSent(pub Option<bool>);
 /// post-respawn placement teleport lands.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Dead;
+
+/// The [`UseEffects`] physics/the controller should apply this tick, or `None`
+/// while no item is being used.
+///
+/// A component rather than a resource for the same reason [`Vitals`] is: the
+/// query joins it against [`PhysicsState`]/[`MovementIntent`] in one pass, and
+/// absent (the `Default`) reads as "not using an item" — the safe default,
+/// unlike [`Vitals::food`]'s absence, which the food-sprint gate deliberately
+/// reads the *other* way (no report yet resolves to *allowed*, not *empty*).
+///
+/// `lodestone_controller::ecs::compute_movement_intent` reads this and folds
+/// it into two separate places, matching vanilla's own split between
+/// `LocalPlayer.modifyInput` and `canStartSprinting`: the input-scale term
+/// lands on [`MovementInput::using_item`] (applied inside
+/// `lodestone_physics::player`'s `modify_input_unit_square`), and the
+/// `can_sprint` half becomes an extra sprint-veto conjunct alongside the food
+/// gate — see `lodestone_controller::input::movement_intent_with_gates`.
+///
+/// **Writer not yet wired.** The shell tracks only a press/release bool today
+/// (`lodestone_shell::interact::UsingItem`, a different type despite the
+/// similar name — it has no held-item lookup, so it cannot say *which*
+/// [`UseEffects`] apply) and does not yet write this component at all. Until
+/// that lookup lands, every query reads `None` here and the slowdown/sprint
+/// veto are both correctly inert rather than silently wrong — but this is the
+/// one remaining hop: see this crate's own docs on the island shape this
+/// guards against.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
+pub struct ItemUseEffects(pub Option<UseEffects>);
 
 /// Ticks since the local player's last attack — vanilla's `attackStrengthTicker`
 /// (declared on `LivingEntity`, incremented in `Player.tick`).
@@ -1853,6 +1881,8 @@ pub fn spawn_local_player(world: &mut World, state: PlayerState) -> Entity {
                 // `WasJumping` is: a jump key already held at spawn must read as a
                 // rising edge, not as a charge already in progress.
                 crate::vehicle::RidingJumpCharge::default(),
+                // No item is in use at spawn.
+                ItemUseEffects::default(),
             ),
         ))
         .id()
@@ -1902,6 +1932,9 @@ pub fn reset_local_player(world: &mut World, entity: Entity, state: PlayerState)
             // A quit-to-title must not leave a half-charged horse jump behind
             // either — the next session's server has never heard of it.
             crate::vehicle::RidingJumpCharge::default(),
+            // A quit-to-title must not leave the previous session's item-use
+            // slowdown/sprint-veto in effect — the new session starts idle.
+            ItemUseEffects::default(),
         ),
     ));
     entity.remove::<Dead>();
@@ -2913,6 +2946,7 @@ mod tests {
             jump: false,
             sneak: false,
             sprint: true,
+            using_item: None,
         }));
         run_tick(&mut app);
         let sprinting = app.world().get::<PhysicsState>(entity).unwrap().0.movement_speed.unwrap();
