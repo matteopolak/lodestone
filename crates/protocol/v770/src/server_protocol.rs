@@ -340,6 +340,21 @@ const METADATA_IDX_CRYSTAL_SHOW_BOTTOM: u8 = 9;
 /// exactly as [`METADATA_IDX_DRAGON_PHASE`] does for its own index.
 const METADATA_IDX_WITHER_INVULNERABLE_TICKS: u8 = 19;
 
+/// `Goat.DATA_HAS_LEFT_HORN` — index 19, serializer `BOOLEAN` (8). Off the
+/// jar dump (`tests/support/entity_data_index_jvm.txt`: `19
+/// Goat.DATA_HAS_LEFT_HORN 8 BOOLEAN`) — see `MetadataField::GoatHorns`'s own
+/// doc for the full claimant list at this index. The producer
+/// (`SimMob::snapshot`'s `"goat"` arm, the sole caller) disambiguates,
+/// exactly as [`METADATA_IDX_WITHER_INVULNERABLE_TICKS`] does for its own
+/// index.
+const METADATA_IDX_GOAT_HAS_LEFT_HORN: u8 = 19;
+
+/// `Goat.DATA_HAS_RIGHT_HORN` — index 20, serializer `BOOLEAN` (8). Off the
+/// jar dump (`tests/support/entity_data_index_jvm.txt`: `20
+/// Goat.DATA_HAS_RIGHT_HORN 8 BOOLEAN`). See
+/// [`METADATA_IDX_GOAT_HAS_LEFT_HORN`]'s own doc.
+const METADATA_IDX_GOAT_HAS_RIGHT_HORN: u8 = 20;
+
 /// The overworld world-clock's registry holder id
 /// (`WorldClocks::bootstrap` registers `minecraft:overworld` first,
 /// `minecraft:the_end` second — see `packets::time::ClockUpdate::holder_id`'s
@@ -5089,6 +5104,19 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(METADATA_SER_INT);
                     w.var_i32(*ticks);
                 }
+                MetadataField::GoatHorns { has_left, has_right } => {
+                    // `Goat.DATA_HAS_LEFT_HORN`/`DATA_HAS_RIGHT_HORN` — indices
+                    // 19/20; only `SimMob::snapshot`'s `"goat"` arm ever
+                    // builds this variant. See `METADATA_IDX_GOAT_HAS_LEFT_HORN`'s
+                    // own doc for the claimants this never collides with in
+                    // practice.
+                    w.u8(METADATA_IDX_GOAT_HAS_LEFT_HORN);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*has_left);
+                    w.u8(METADATA_IDX_GOAT_HAS_RIGHT_HORN);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*has_right);
+                }
                 MetadataField::CrystalBeamTarget(target) => {
                     // `EndCrystal.DATA_BEAM_TARGET` — index 8,
                     // `OPTIONAL_BLOCK_POS`: a presence bool, then (if present)
@@ -8732,5 +8760,76 @@ mod play_ping_request_tests {
             proto.decode(State::Play, play::serverbound::PONG, &body),
             ServerBound::Ignored,
         );
+    }
+}
+
+/// `Goat.DATA_HAS_LEFT_HORN`/`DATA_HAS_RIGHT_HORN` at indices 19/20 — the
+/// same census-premise-plus-encode-exactness shape `index_thirteen_tests`
+/// already uses for its own claimed index.
+#[cfg(test)]
+mod goat_horns_tests {
+    use lodestone_core::Reader;
+    use lodestone_server::{MetadataField, ServerDirective, ServerProtocol};
+
+    use super::{
+        METADATA_IDX_GOAT_HAS_LEFT_HORN, METADATA_IDX_GOAT_HAS_RIGHT_HORN, METADATA_SER_BOOLEAN,
+        V770ServerProtocol,
+    };
+
+    const INDEX_DUMP: &str = include_str!("../tests/support/entity_data_index_jvm.txt");
+
+    fn dump_row(owner_field: &str) -> (u8, i32) {
+        for line in INDEX_DUMP.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut tok = line.split_whitespace();
+            let index: u8 = tok.next().expect("index column").parse().expect("u8");
+            let owner = tok.next().expect("owner.FIELD column");
+            let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
+            if owner == owner_field {
+                return (index, serializer);
+            }
+        }
+        panic!("{owner_field} is not in the jar dump — read the dump before changing the constant")
+    }
+
+    /// `METADATA_IDX_GOAT_HAS_LEFT_HORN`/`_RIGHT_HORN` name the accessors the
+    /// jar really puts at indices 19/20, both `BOOLEAN`.
+    #[test]
+    fn goat_horn_indices_match_the_jar_dump() {
+        let (left_index, left_ser) = dump_row("Goat.DATA_HAS_LEFT_HORN");
+        assert_eq!(left_index, METADATA_IDX_GOAT_HAS_LEFT_HORN);
+        assert_eq!(left_ser, METADATA_SER_BOOLEAN);
+        let (right_index, right_ser) = dump_row("Goat.DATA_HAS_RIGHT_HORN");
+        assert_eq!(right_index, METADATA_IDX_GOAT_HAS_RIGHT_HORN);
+        assert_eq!(right_ser, METADATA_SER_BOOLEAN);
+    }
+
+    /// The encoder writes both fields, in order, each with the `BOOLEAN`
+    /// serializer id, end to end through `encode_set_entity_data` — with the
+    /// two bools **deliberately different** (`false`/`true`) so a
+    /// transposition of the pair cannot survive this assertion, per
+    /// `DESIGN.md`'s own warning about adjacent same-typed fields.
+    #[test]
+    fn goat_horns_encode_at_indices_nineteen_and_twenty() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { payload, .. } = proto.encode_set_entity_data(
+            11,
+            &[MetadataField::GoatHorns { has_left: false, has_right: true }],
+        ) else {
+            panic!("encode_set_entity_data must emit a Send");
+        };
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.var_i32().expect("entity id"), 11);
+        assert_eq!(r.u8().expect("left horn index"), METADATA_IDX_GOAT_HAS_LEFT_HORN);
+        assert_eq!(r.var_i32().expect("left horn serializer"), METADATA_SER_BOOLEAN);
+        assert!(!r.bool().expect("left horn value"), "has_left was false");
+        assert_eq!(r.u8().expect("right horn index"), METADATA_IDX_GOAT_HAS_RIGHT_HORN);
+        assert_eq!(r.var_i32().expect("right horn serializer"), METADATA_SER_BOOLEAN);
+        assert!(r.bool().expect("right horn value"), "has_right was true");
+        assert_eq!(r.u8().expect("terminator"), 0xFF);
+        assert!(r.ensure_empty().is_ok(), "no trailing bytes");
     }
 }
