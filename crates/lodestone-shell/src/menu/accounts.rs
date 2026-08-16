@@ -1559,24 +1559,24 @@ pub(crate) fn open_in_browser(url: &str) {
 /// from each other with no lock and no ordering assumption. Every consumer is
 /// on the same thread as the `pump` it is observing.
 #[cfg(test)]
-mod test_browser_opens {
+pub(crate) mod test_browser_opens {
     use std::cell::RefCell;
 
     thread_local! {
         static OPENS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     }
 
-    pub(super) fn record(url: &str) {
+    pub(crate) fn record(url: &str) {
         OPENS.with(|o| o.borrow_mut().push(url.to_owned()));
     }
 
     /// Everything recorded so far, clearing the record. Taking rather than
     /// peeking so a test's assertions are about *its own* interval.
-    pub(super) fn taken() -> Vec<String> {
+    pub(crate) fn taken() -> Vec<String> {
         OPENS.with(|o| std::mem::take(&mut *o.borrow_mut()))
     }
 
-    pub(super) fn count() -> usize {
+    pub(crate) fn count() -> usize {
         OPENS.with(|o| o.borrow().len())
     }
 }
@@ -1629,20 +1629,20 @@ pub(crate) fn copy_to_clipboard(text: &str) {
 /// thread-local reasoning (one `#[test]` per thread, no lock, no ordering
 /// assumption).
 #[cfg(test)]
-mod test_clipboard {
+pub(crate) mod test_clipboard {
     use std::cell::RefCell;
 
     thread_local! {
         static COPIES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     }
 
-    pub(super) fn record(text: &str) {
+    pub(crate) fn record(text: &str) {
         COPIES.with(|c| c.borrow_mut().push(text.to_owned()));
     }
 
     /// Everything recorded so far, clearing the record — taking rather than
     /// peeking so a test's assertions are about its own interval.
-    pub(super) fn taken() -> Vec<String> {
+    pub(crate) fn taken() -> Vec<String> {
         COPIES.with(|c| std::mem::take(&mut *c.borrow_mut()))
     }
 }

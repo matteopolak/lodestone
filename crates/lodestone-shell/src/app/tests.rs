@@ -168,6 +168,150 @@ fn the_command_block_done_button_sends_a_real_set_command_block_action() {
     );
 }
 
+/// `WindowApp::dispatch_click_action`'s dispatch table, driven end to end for
+/// each `ClickAction` — issue #673's whole point, that a chat `click_event`
+/// actually *does something* rather than reaching a hit-test and stopping.
+/// [`WindowApp::dispatch_click_action`] is deliberately split out of
+/// [`WindowApp::dispatch_chat_click_under_cursor`] so this needs no renderer
+/// or render target (`chat_interaction` needs both, the same requirement
+/// `suggestion_row_under_cursor` already has, which would make this whole
+/// table a GPU-gated test just to prove the dispatch itself is right).
+mod chat_click_dispatch {
+    use super::*;
+    use lodestone_model::ClientAction;
+    use lodestone_model::text::{ClickAction, ClickEvent};
+
+    fn headless_app_with_loopback() -> (WindowApp, std::sync::mpsc::Receiver<ClientAction>) {
+        let mut app = WindowApp::new(Config {
+            mode: Mode::Headless,
+            ..Config::default()
+        });
+        let (net, actions) = NetClient::loopback();
+        app.sim.attach_net(net);
+        (app, actions)
+    }
+
+    /// `run_command` reaches the wire exactly as typing the same text and
+    /// pressing Enter would — `Sim::send_chat` → `compose_chat_action`'s own
+    /// leading-`/` rule, unmodified. The leading `/` is stripped, matching
+    /// `compose_chat_action`'s own `SendCommand` shape.
+    #[test]
+    fn run_command_reaches_the_wire_as_a_real_command() {
+        let (mut app, actions) = headless_app_with_loopback();
+        app.dispatch_click_action(&ClickEvent {
+            action: ClickAction::RunCommand,
+            value: "/help".to_string(),
+        });
+        assert_eq!(
+            actions.try_recv(),
+            Ok(ClientAction::SendCommand { command: "help".to_string() }),
+            "a run_command click must send exactly what typing it would have"
+        );
+        assert!(actions.try_recv().is_err(), "exactly one action per click");
+    }
+
+    /// `suggest_command` fills the chat input for the player to review and
+    /// send themselves — it must **not** reach the wire on its own, the
+    /// discriminating difference from `run_command` above.
+    #[test]
+    fn suggest_command_fills_the_input_and_sends_nothing() {
+        let (mut app, actions) = headless_app_with_loopback();
+        app.dispatch_click_action(&ClickEvent {
+            action: ClickAction::SuggestCommand,
+            value: "/give @s diamond".to_string(),
+        });
+        assert_eq!(app.chat_input.as_str(), "/give @s diamond");
+        assert!(
+            actions.try_recv().is_err(),
+            "suggest_command must never send on its own — that is what run_command is for"
+        );
+    }
+
+    /// `copy_to_clipboard` reaches the test-safe recorder — proof the OS
+    /// clipboard shell-out this click would otherwise trigger is reachable
+    /// through the real dispatch path, without ever touching a real
+    /// clipboard during `cargo test`. See `menu::accounts::copy_to_clipboard`'s
+    /// own doc for the incident this interception exists to prevent.
+    #[test]
+    fn copy_to_clipboard_reaches_the_test_safe_recorder() {
+        let (mut app, _actions) = headless_app_with_loopback();
+        let _ = crate::menu::accounts::test_clipboard::taken();
+        app.dispatch_click_action(&ClickEvent {
+            action: ClickAction::CopyToClipboard,
+            value: "copied-from-chat".to_string(),
+        });
+        assert_eq!(
+            crate::menu::accounts::test_clipboard::taken(),
+            vec!["copied-from-chat".to_string()]
+        );
+    }
+
+    /// `open_url` must **never** call the OS browser handoff on its own —
+    /// this shell has no confirmation screen wired to chat yet, so the
+    /// safe behaviour is "surface it, do not act on it automatically",
+    /// which this proves two ways: the OS-handoff recorder stays empty, and
+    /// the destination is pushed as a client-authored chat line the player
+    /// can read and act on themselves.
+    #[test]
+    fn open_url_never_opens_the_browser_and_surfaces_the_link_instead() {
+        let (mut app, _actions) = headless_app_with_loopback();
+        let _ = crate::menu::accounts::test_browser_opens::taken();
+        app.dispatch_click_action(&ClickEvent {
+            action: ClickAction::OpenUrl,
+            value: "https://example.invalid/probe".to_string(),
+        });
+        assert!(
+            crate::menu::accounts::test_browser_opens::taken().is_empty(),
+            "open_url must not open a browser without the player confirming"
+        );
+        let recent = app.sim.recent_chat(1);
+        assert_eq!(recent.len(), 1, "the link must be surfaced somewhere the player can see it");
+        assert!(
+            recent[0].0.contains("https://example.invalid/probe"),
+            "the surfaced line must show the destination in full: {:?}",
+            recent[0].0
+        );
+    }
+
+    /// `open_file` gets the identical treatment as `open_url` above — same
+    /// external-effect boundary, same "surface, do not act" answer.
+    #[test]
+    fn open_file_also_never_acts_automatically() {
+        let (mut app, _actions) = headless_app_with_loopback();
+        let _ = crate::menu::accounts::test_browser_opens::taken();
+        app.dispatch_click_action(&ClickEvent {
+            action: ClickAction::OpenFile,
+            value: "/etc/passwd".to_string(),
+        });
+        assert!(crate::menu::accounts::test_browser_opens::taken().is_empty());
+        let recent = app.sim.recent_chat(1);
+        assert_eq!(recent.len(), 1);
+        assert!(recent[0].0.contains("/etc/passwd"));
+    }
+
+    /// `change_page` and an unrecognised action are both inert — the
+    /// negative control proving the match's fallback arm does not
+    /// accidentally fall through to one of the real effects above.
+    #[test]
+    fn change_page_and_unknown_actions_do_nothing_observable() {
+        let (mut app, actions) = headless_app_with_loopback();
+        let _ = crate::menu::accounts::test_browser_opens::taken();
+        let _ = crate::menu::accounts::test_clipboard::taken();
+        let before_chat = app.sim.recent_chat(10).len();
+        let before_input = app.chat_input.as_str().to_string();
+
+        for action in [ClickAction::ChangePage, ClickAction::Other("mystery".to_string())] {
+            app.dispatch_click_action(&ClickEvent { action, value: "3".to_string() });
+        }
+
+        assert!(actions.try_recv().is_err());
+        assert!(crate::menu::accounts::test_browser_opens::taken().is_empty());
+        assert!(crate::menu::accounts::test_clipboard::taken().is_empty());
+        assert_eq!(app.sim.recent_chat(10).len(), before_chat);
+        assert_eq!(app.chat_input.as_str(), before_input);
+    }
+}
+
 /// `WorldOptions.parseSeed` (issue #190): a valid `i64` literal is used
 /// verbatim (vanilla tries `Long.parseLong` first), whitespace is
 /// trimmed, and non-numeric text falls back to the Java hash — not a new
