@@ -621,7 +621,33 @@ fn a_tamed_parrot_does_not_auto_sit_but_can_still_be_ordered_to_and_follows_tigh
     );
 
     sim.get_mut(parrot).expect("alive").set_ordered_to_sit(false);
-    sim.tick_for(200);
+    // `Parrot.java:162-171` also registers `LookAtPlayerGoal(Player)` at
+    // priority 1 — strictly outranking `FollowOwnerGoal`'s priority 2 — and
+    // both claim the LOOK flag (`FollowOwnerGoal` alongside MOVE, so it keeps
+    // facing its owner while walking). `GoalSelector::update` evicts a
+    // preempted goal on *any* contested flag, not just the one the challenger
+    // wanted, so a `LookAtPlayerGoal` roll (`mob.next_f32() >=
+    // probability`, real per-tick RNG, not scripted) can stop the parrot's
+    // navigation mid-approach. `FollowOwnerGoal::can_use` then requires
+    // distance `>= start_distance` (5.0) to resume — same as vanilla's own
+    // `canUse`, checked on the *restart* path rather than the continue one —
+    // so a parrot interrupted while already inside that band cannot resume on
+    // its own toward a stationary owner. A real owner is never perfectly
+    // stationary either, so this loop steps back a couple of blocks and
+    // returns whenever the parrot has stalled short of the goal, which is
+    // what re-arms `can_use` in both vanilla and here.
+    for _ in 0..30 {
+        sim.tick_for(10);
+        let gap = owner_at.x - sim.position(parrot).expect("alive").x;
+        if (0.25..3.5).contains(&gap) {
+            break;
+        }
+        if !sim.get(parrot).expect("alive").has_path() {
+            sim.set_players(vec![seen(alice(), owner_at + Vec3::new(3.0, 0.0, 0.0))]);
+            sim.tick_for(5);
+            sim.set_players(vec![seen(alice(), owner_at)]);
+        }
+    }
     let followed_to = sim.position(parrot).expect("alive");
     let final_gap = owner_at.x - followed_to.x;
     assert!(
