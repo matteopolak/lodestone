@@ -472,25 +472,30 @@ stale condition a repeating block's own polling produces, and
 `next_chain_position`/`chain_link_present`/`chain_link_should_run` are
 `CommandBlock.executeChain`'s walk, one hop at a time.
 
-**Two hops remain before a command block runs end-to-end, and neither is this
-module:**
+**Both hops named in an earlier draft of this document are now wired, and a
+third, narrower gap remains — none of it in this module:**
 
-1. **The wire decode.** `SET_COMMAND_BLOCK`/`SET_COMMAND_MINECART` still
-   decode into a discarded value in `crates/protocol/v770/src
-   /server_protocol.rs` — outside this unit's ownership. A real client's
-   command-block GUI has nowhere to write a command yet.
-2. **Scheduling into the tick loop.** `tick.rs` already has the exact
-   precedent (`crate::redstone_dispenser`'s `TICK_DISPENSER_FIRE` scheduled-
-   tick kind, drained with the live `block_entities`/`mobs` handles already in
-   scope there); wiring a `command:tick` kind the same way, plus threading a
-   `ServerCommands`/`CommandWorld` into that drain so a command block can
-   actually call `ServerCommands::run`, is real, bounded, additive work not
-   attempted in this pass to keep `tick.rs`'s shared-file surface small
-   alongside `/execute`.
+1. **The wire decode.** `SET_COMMAND_BLOCK` decodes into
+   `ServerBound::SetCommandBlock` (`crates/protocol/v770/src/server_protocol.rs`)
+   and `crate::server`'s handler applies it — a real client's command-block
+   GUI can write a command now. `SET_COMMAND_MINECART` is still decode-only;
+   no command-block-minecart entity exists to write into.
+2. **Scheduling into the tick loop.** `tick.rs`'s due-tick drain has a
+   `TICK_COMMAND_BLOCK` arm (the same shape as `crate::redstone_dispenser`'s
+   `TICK_DISPENSER_FIRE` arm it was written to precede) that calls
+   `crate::command_block::tick`, runs the command through a fresh
+   `ServerCommands` when the decision says to, and walks any chain behind it.
+3. **What is still open:** nothing yet calls `crate::command_block::on_power_changed`
+   from a real redstone signal — `CommandBlock.neighborChanged` would need to
+   reach into `block_entities` from `crate::random_tick::propagate_and_react`,
+   which today only rewrites the block-*state* string and has no block-entity
+   handle in scope. So today a command block runs from **"Always Active"**
+   (wired end to end) or from a `ServerCommands`/RCON caller setting it up
+   directly; an ordinary redstone pulse into an impulse or repeating-but-not-
+   automatic block does nothing yet.
 
-So: the data model and the tick math are real and tested against vanilla;
-nothing yet *calls* them from a running server. `crate::command_block`'s own
-module doc is the up-to-date source for exactly what is left.
+`crate::command_block`'s own module doc is the up-to-date source for exactly
+what is left.
 
 Per-command wire parity for the original four is asserted against
 `crates/protocol/v770/tests/fixtures/command_tree_creative.hex` — 30,248 bytes and
@@ -564,20 +569,33 @@ lives in the plugin API.**
   of which we do. So every command from a real client still arrives unsigned even
   now that the tree is sent. Revisit if secure chat ever lands, not because of
   this encoder.
-* **The serverbound suggestion request is a second, still-unreached island.**
-  `minecraft:command_suggestion` (serverbound id 15) decodes to
-  `ServerBound::Ignored` and nothing answers it, and `encode_command_suggestions`
-  does not exist. It is currently *unreachable* rather than merely unimplemented:
-  a client only asks when a node carries a custom suggestions provider, and this
-  server's tree declares **zero** — every `McArg::suggestion_provider` returns
-  `None`. Measured against the vanilla capture, that is right for
-  `minecraft:entity` (118 of them, all with no provider) and wrong for the parsers
-  vanilla does mark `minecraft:ask_server`: `resource_location` (58),
-  `score_holder` (27), `function` (5), `game_profile` (5), `brigadier:string` (9),
-  `objective` (2), `resource` (2), `time` (2), `brigadier:float` (1). Declaring a
-  provider on one of ours is what would make the request path reachable, and it
-  must land together with the answer — a provider with no responder is a client
-  waiting on a reply that never comes.
+* **The serverbound suggestion request now decodes, dispatches and answers —
+  but is still unreachable from a real client, for a *different* reason than
+  before.** `minecraft:command_suggestion` (serverbound id 15) decodes to
+  `ServerBound::CommandSuggestion { id, command }`
+  (`crates/protocol/v770/src/server_protocol.rs`), `crate::server`'s
+  `ServerBound::CommandSuggestion` arm answers it via the new
+  `ServerCommands::suggest_response` (byte-range arithmetic unit-tested in
+  `crates/lodestone-server/src/commands/mod.rs`'s `suggest_response_tests`),
+  and `ServerProtocol::encode_command_suggestions` sends a real
+  `minecraft:command_suggestions` (clientbound id 15) reply. The decode half
+  is covered by `crates/protocol/v770/tests/serverbound_wiring.rs`'s
+  `every_serverbound_variant_is_constructed_by_decode`.
+  **What is still missing is the trigger, not the answer**: a client only
+  *sends* this request when a tree node carries `FLAG_CUSTOM_SUGGESTIONS`
+  (a `minecraft:ask_server` provider id), and this server's tree still
+  declares **zero** — every `McArg::suggestion_provider` returns `None`.
+  Measured against the vanilla capture, that is right for `minecraft:entity`
+  (118 of them, all with no provider) and wrong for the parsers vanilla does
+  mark `minecraft:ask_server`: `resource_location` (58), `score_holder` (27),
+  `function` (5), `game_profile` (5), `brigadier:string` (9), `objective` (2),
+  `resource` (2), `time` (2), `brigadier:float` (1). So today the answering
+  half works end to end against a hand-crafted frame, but no real client
+  (ours or vanilla) will ever produce that frame against our own tree —
+  declaring a provider on one of our matching argument types
+  (`lodestone-command-mc`'s `McArg::suggestion_provider`, checked for parity
+  against the captured fixture the same way every other wire field is) is
+  the remaining, separately-scoped work that closes the loop.
 * **`ServerProtocol::encode_system_chat` defaults to emitting nothing**, like
   every other optional encoder. Its failure mode is silent rather than loud: the
   command still *runs*, the player just never learns what happened. A family that
@@ -675,12 +693,13 @@ Still open, and each is now additive rather than blocked:
   `stopwatch` each need a subsystem this server does not have yet (scoreboard,
   NBT storage, a loot-predicate engine, a read-only block/chunk query on
   `CommandWorld`, entity-relationship queries); functions/datapacks remain
-  entirely unattempted, as scoped. **Command blocks have a real data model and
-  tested tick math now** (`crate::command_block`) but are not yet reachable
-  from a real client (`SET_COMMAND_BLOCK`/`SET_COMMAND_MINECART` still decode
-  into `ServerBound::Ignored`, outside this unit's file ownership) or driven
-  by the tick loop (`tick.rs` wiring is scoped but not built) — see this
-  document's own `#### Command blocks` section for exactly what is left.
+  entirely unattempted, as scoped. **Command blocks now run end to end from
+  "Always Active"**: `SET_COMMAND_BLOCK` decodes and writes the block entity,
+  and `tick.rs`'s `TICK_COMMAND_BLOCK` drain runs them. What remains is
+  narrower — an ordinary redstone pulse into an impulse or repeating-but-not-
+  automatic command block does nothing yet, because nothing calls
+  `crate::command_block::on_power_changed` — see this document's own
+  `#### Command blocks` section for exactly what is left.
 * **`/publish`** (the Open-to-LAN port command) is a separate, LAN-specific
   issue and was not attempted here.
 * **`/xp query`** parses and resolves its target, then refuses rather than

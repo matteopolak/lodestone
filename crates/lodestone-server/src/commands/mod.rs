@@ -146,7 +146,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use lodestone_command::{CommandTree, NodeId, ParseErrorKind};
-use lodestone_model::command_tree::CommandTree as WireCommandTree;
+use lodestone_model::command_tree::{
+    CommandSuggestionEntry as WireCommandSuggestionEntry,
+    CommandSuggestionsResponse as WireCommandSuggestionsResponse, CommandTree as WireCommandTree,
+};
 
 pub use effect::{DirectedEffect, Effect};
 pub use registrar::{
@@ -314,6 +317,49 @@ impl ServerCommands {
         self.inner.tree.suggest_filtered(partial, &level_filter(level))
     }
 
+    /// Builds a full `minecraft:command_suggestions` response for a
+    /// `ServerBound::CommandSuggestion` request's raw wire input.
+    ///
+    /// `raw` is the **whole typed line, including the leading `/`** — the wire
+    /// format `ServerBound::CommandSuggestion`'s own doc describes — and
+    /// exactly one leading `/` is stripped here before consulting
+    /// [`Self::suggest`], mirroring vanilla's
+    /// `ServerGamePacketListenerImpl.handleCustomCommandSuggestions`, which
+    /// skips exactly one leading `/` off its `StringReader` before parsing.
+    ///
+    /// `start`/`length` name the byte range of `raw` the suggestions replace —
+    /// the token currently being typed, i.e. everything after the last space
+    /// (or after the slash, if there is none) — derived from the same
+    /// token-boundary rule [`lodestone_command::CommandTree::suggest_filtered`]
+    /// applies internally (`crates/lodestone-command/src/suggest.rs`), offset
+    /// back by the one byte the leading slash occupies in `raw` but not in the
+    /// stripped text handed to `suggest`.
+    ///
+    /// Split out from the connection loop specifically so this arithmetic is
+    /// unit-testable without a live connection — see this module's tests.
+    #[must_use]
+    pub fn suggest_response(
+        &self,
+        id: i32,
+        raw: &str,
+        level: u8,
+    ) -> WireCommandSuggestionsResponse {
+        let stripped = raw.strip_prefix('/').unwrap_or(raw);
+        let token_start = stripped.rfind(' ').map(|i| i + 1).unwrap_or(0);
+        let start = (raw.len() - stripped.len()) + token_start;
+        let suggestions = self
+            .suggest(stripped, level)
+            .into_iter()
+            .map(|text| WireCommandSuggestionEntry { text, tooltip: None })
+            .collect();
+        WireCommandSuggestionsResponse {
+            id,
+            start: start as i32,
+            length: (raw.len() - start) as i32,
+            suggestions,
+        }
+    }
+
     /// Runs `command` (no leading `/`) if a built-in root matches it.
     ///
     /// `None` means no built-in root matched and the caller should fall through
@@ -349,5 +395,77 @@ impl ServerCommands {
             argument_nodes: &self.inner.argument_nodes,
         };
         Some(dispatcher.dispatch(world, source.clone(), &parsed))
+    }
+}
+
+#[cfg(test)]
+mod suggest_response_tests {
+    use super::*;
+
+    /// A discriminating input, not the plausible round number: `start`/`length`
+    /// land somewhere other than 0 or 1, and the candidate set has exactly one
+    /// member — `/gamemode`'s argument-type suggester
+    /// (`lodestone_command_mc::GameModeArg`) returns all four mode names
+    /// unconditionally, so only `suggest_filtered`'s own prefix filter proves
+    /// this reached the right node and used the right partial.
+    #[test]
+    fn a_partial_argument_token_gets_the_right_byte_range_and_the_filtered_candidate() {
+        let commands = ServerCommands::new();
+        let raw = "/gamemode surviv";
+        let response = commands.suggest_response(42, raw, 4);
+        assert_eq!(response.id, 42, "the transaction id must echo verbatim");
+        // "/gamemode " is 10 bytes (1 slash + 8 + 1 space); "surviv" starts there.
+        assert_eq!(response.start, 10);
+        assert_eq!(response.length, 6, "the length of the partial token \"surviv\", not of the whole line");
+        assert_eq!(
+            response.suggestions.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+            vec!["survival"],
+            "\"surviv\" must filter out creative/adventure/spectator"
+        );
+        assert!(
+            response.suggestions.iter().all(|e| e.tooltip.is_none()),
+            "this server never attaches a suggestion tooltip"
+        );
+    }
+
+    /// The permission control for the test above: `/gamemode` requires level 2
+    /// (`gamemode::GAMEMODE_LEVEL`), so a level-0 source must get no
+    /// suggestions at all for the identical input — proving the byte range
+    /// above came from real permission-gated tree traversal, not from string
+    /// splitting alone. Mirrors `wire::project_filtered`'s own denied-subtree
+    /// behaviour on the suggestion axis.
+    #[test]
+    fn an_unprivileged_source_gets_no_suggestions_under_a_gated_root() {
+        let commands = ServerCommands::new();
+        let response = commands.suggest_response(1, "/gamemode surviv", 0);
+        assert!(
+            response.suggestions.is_empty(),
+            "a level-0 source must not see /gamemode's argument suggestions: {:?}",
+            response.suggestions
+        );
+        // The control: the identical call at a sufficient level is non-empty,
+        // so the emptiness above is the permission gate firing and not some
+        // other reason (a typo in the literal, an empty tree, ...).
+        let privileged = commands.suggest_response(1, "/gamemode surviv", 4);
+        assert!(!privileged.suggestions.is_empty());
+    }
+
+    /// No space in the input at all: the whole stripped text is the partial
+    /// token, `start` is exactly `1` (right after the slash) by construction,
+    /// and two *different* built-in roots share the "gam" prefix
+    /// (`gamemode`, `gamerule` — `defaultgamemode` does not, it starts with
+    /// `d`), so this also exercises multi-candidate, sorted output rather than
+    /// a single-item list that a broken sort could pass by accident.
+    #[test]
+    fn a_root_level_partial_with_no_space_matches_every_prefixed_literal() {
+        let commands = ServerCommands::new();
+        let response = commands.suggest_response(7, "/gam", 4);
+        assert_eq!(response.start, 1);
+        assert_eq!(response.length, 3, "the length of \"gam\"");
+        assert_eq!(
+            response.suggestions.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+            vec!["gamemode", "gamerule"],
+            "case-insensitively sorted, per CommandTree::suggest_filtered's own doc"
+        );
     }
 }

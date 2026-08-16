@@ -59,7 +59,8 @@ use lodestone_core::{Ctx, Decode, Encode, Nbt, NbtTag, Reader, Writer, write_net
 // names and an unqualified `CommandTree` here would read as a server-side
 // Brigadier tree, which is a different type in a different crate.
 use lodestone_model::command_tree::{
-    ArgumentParser, CommandTree as WireCommandTree, NodeKind, RawCommandNode, StringKind,
+    ArgumentParser, CommandSuggestionsResponse, CommandTree as WireCommandTree, NodeKind,
+    RawCommandNode, StringKind,
 };
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode,
@@ -110,7 +111,7 @@ use crate::packets::metadata::write_update_attributes;
 use crate::packets::game::{
     AcceptTeleportation, Attack, BlockEntityTagQuery, ChangeDifficultyClientbound,
     ChangeDifficultyServerbound, ChangeGameMode, ChatCommand, ChatMessage, ChunkBatchReceived,
-    ClientCommand, ClientTickEnd,
+    ClientCommand, ClientTickEnd, CommandSuggestion,
     ConfigurationAcknowledged, ContainerButtonClick, ContainerSlotStateChanged, EditBook,
     ABILITY_FLAG_CAN_FLY, ABILITY_FLAG_FLYING, ABILITY_FLAG_INSTABUILD,
     ABILITY_FLAG_INVULNERABLE, EntityTagQuery, GameEvent, GameLogin, GameRuleEntry, GameRuleValues,
@@ -1653,6 +1654,37 @@ fn encode_commands_body(tree: &WireCommandTree) -> Vec<u8> {
         write_command_node(&mut w, node);
     }
     w.var_i32(tree.root() as i32);
+    w.into_vec()
+}
+
+/// Encodes a whole `minecraft:command_suggestions` payload (clientbound id 15).
+///
+/// `ClientboundCommandSuggestionsPacket.STREAM_CODEC` (mirrored from the
+/// decode side in `V770Adapter::decode_command_suggestions`, which this crate's
+/// own client half uses to read a *real* server's reply): three VarInts (`id`,
+/// `start`, `length`), then a list of `Entry(String text, Optional<Component>
+/// tooltip)`. This server never attaches a tooltip to a suggestion — the
+/// `false` presence byte matches `CommandSuggestionEntry::tooltip` being
+/// `None` for every candidate `ServerCommands::suggest` produces.
+fn encode_command_suggestions_body(response: &CommandSuggestionsResponse) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(response.id);
+    w.var_i32(response.start);
+    w.var_i32(response.length);
+    w.var_i32(response.suggestions.len() as i32);
+    for entry in &response.suggestions {
+        w.string(&entry.text);
+        match &entry.tooltip {
+            Some(tooltip) => {
+                w.bool(true);
+                let component =
+                    Nbt::Compound(vec![("text".to_owned(), Nbt::String(tooltip.clone()))]);
+                write_network_nbt(&mut w, &component)
+                    .expect("plain string NBT component always encodes");
+            }
+            None => w.bool(false),
+        }
+    }
     w.into_vec()
 }
 
@@ -3385,9 +3417,19 @@ impl ServerProtocol for V770ServerProtocol {
                 })();
                 decoded.unwrap_or(ServerBound::Ignored)
             }
+            // `ServerboundSwingPacket`: a single VarInt hand ordinal. See
+            // `ServerBound::Swing`'s own doc comment for the consumer (a
+            // broadcast to every other connected player) and the "malformed
+            // input degrades rather than drops" convention this shares with
+            // `USE_ITEM`/`USE_ITEM_ON` — anything outside `0..=1` reads as
+            // the main hand.
             State::Play if packet_id == play::serverbound::SWING => {
-                let _ = decode_full::<Swing>(payload);
-                ServerBound::Ignored
+                match decode_full::<Swing>(payload) {
+                    Some(s) => ServerBound::Swing {
+                        hand: u8::try_from(s.hand).unwrap_or(0),
+                    },
+                    None => ServerBound::Ignored,
+                }
             }
             // `USE_ITEM` is decoded and connected above (the
             // right-click-in-air arm constructing `ServerBound::UseItem`) —
@@ -3419,17 +3461,26 @@ impl ServerProtocol for V770ServerProtocol {
             // misparse this packet).
             State::Play if packet_id == play::serverbound::SPECTATOR_ACTION => {
                 let mut r = Reader::new(payload);
-                let decoded = (|| -> lodestone_core::Result<()> {
+                let decoded = (|| -> lodestone_core::Result<Option<i32>> {
                     let raw = r.var_i32()?;
-                    let _target_entity_id = if raw == 0 { None } else { Some(raw - 1) };
-                    r.ensure_empty()
+                    let target_entity_id = if raw == 0 { None } else { Some(raw - 1) };
+                    r.ensure_empty()?;
+                    Ok(target_entity_id)
                 })();
-                let _ = decoded;
-                ServerBound::Ignored
+                match decoded {
+                    Ok(target_entity_id) => ServerBound::SpectatorAction { target_entity_id },
+                    Err(_) => ServerBound::Ignored,
+                }
             }
+            // `ServerboundTeleportToEntityPacket`: a single uuid — the
+            // spectator's chosen target from the tab list. See
+            // `ServerBound::TeleportToEntity`'s own doc comment for the
+            // consumer and its disclosed scope (connected players only).
             State::Play if packet_id == play::serverbound::TELEPORT_TO_ENTITY => {
-                let _ = decode_full::<TeleportToEntity>(payload);
-                ServerBound::Ignored
+                match decode_full::<TeleportToEntity>(payload) {
+                    Some(t) => ServerBound::TeleportToEntity { uuid: t.uuid },
+                    None => ServerBound::Ignored,
+                }
             }
 
             // Inventory/container: remaining packets beyond the
@@ -3816,6 +3867,21 @@ impl ServerProtocol for V770ServerProtocol {
             State::Play if packet_id == play::serverbound::CHAT_COMMAND => {
                 match decode_full::<ChatCommand>(payload) {
                     Some(p) => ServerBound::ChatCommand { command: p.command },
+                    None => ServerBound::Ignored,
+                }
+            }
+            // `ServerboundCommandSuggestionPacket` — a tab-completion request.
+            // `CommandSuggestion` is the **same** struct
+            // `adapter/serverbound.rs`'s `ClientAction::CommandSuggestion` arm
+            // encodes, so decode and encode are pinned to one another exactly
+            // as `CHAT_COMMAND` above is. Unlike `CHAT_COMMAND`, `command`
+            // carries the **whole input line including the leading `/`** — see
+            // `ServerBound::CommandSuggestion`'s own doc, and
+            // `crate::server`'s consumer strips it before consulting
+            // `ServerCommands::suggest`.
+            State::Play if packet_id == play::serverbound::COMMAND_SUGGESTION => {
+                match decode_full::<CommandSuggestion>(payload) {
+                    Some(p) => ServerBound::CommandSuggestion { id: p.id, command: p.command },
                     None => ServerBound::Ignored,
                 }
             }
@@ -4456,6 +4522,13 @@ impl ServerProtocol for V770ServerProtocol {
         ServerDirective::Send {
             packet_id: play::clientbound::COMMANDS,
             payload: encode_commands_body(tree),
+        }
+    }
+
+    fn encode_command_suggestions(&self, response: &CommandSuggestionsResponse) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::COMMAND_SUGGESTIONS,
+            payload: encode_command_suggestions_body(response),
         }
     }
 
@@ -5305,6 +5378,33 @@ impl ServerProtocol for V770ServerProtocol {
         ServerDirective::Send {
             packet_id: play::clientbound::PLAYER_POSITION,
             payload: encode_player_position_teleport(0, x, y, z, yaw, pitch),
+        }
+    }
+
+    /// `ClientboundAnimatePacket.write`: `writeVarInt` then a **plain,
+    /// unsigned byte** (`writeByte`, not a VarInt) — see
+    /// `ClientboundAnimatePacket.java`, whose own `id`/`action` fields this
+    /// mirrors field-for-field. `ServerBound::Swing`'s own doc comment names
+    /// the consumer this drives.
+    fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(entity_id);
+        w.u8(action);
+        ServerDirective::Send {
+            packet_id: play::clientbound::ANIMATE,
+            payload: w.into_vec(),
+        }
+    }
+
+    /// `ClientboundSetCameraPacket.write`: a single `writeVarInt` — the
+    /// smallest possible wire body, matching `ClientboundSetCameraPacket.java`.
+    /// `ServerBound::SpectatorAction`'s own doc comment names the consumer.
+    fn encode_set_camera(&self, entity_id: i32) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(entity_id);
+        ServerDirective::Send {
+            packet_id: play::clientbound::SET_CAMERA,
+            payload: w.into_vec(),
         }
     }
 

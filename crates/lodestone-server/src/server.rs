@@ -3995,6 +3995,10 @@ where
             | ServerBound::SetCommandBlock { .. }
             | ServerBound::PickItemFromBlock { .. }
             | ServerBound::PickItemFromEntity { .. }
+            | ServerBound::TeleportToEntity { .. }
+            | ServerBound::Swing { .. }
+            | ServerBound::SpectatorAction { .. }
+            | ServerBound::CommandSuggestion { .. }
             | ServerBound::Ignored => {}
         }
     }
@@ -9316,6 +9320,60 @@ fn apply_attack(
     });
 }
 
+/// Resolves `ServerBound::SpectatorAction`'s target against this crate's two
+/// id-keyed entity sources — the mob simulation and the player registry —
+/// and returns the entity id to attach the camera to, or `None` when any of
+/// vanilla's own gates (spectator mode, a target present, a resolvable
+/// position, in range) fail. See `ServerBound::SpectatorAction`'s own doc
+/// comment for the narrowing from vanilla's box-aware range/`isPickable`
+/// checks down to a plain centre-to-centre distance.
+fn apply_spectator_action(
+    game_mode: GameMode,
+    target_entity_id: Option<i32>,
+    player_pos: Option<(f64, f64, f64)>,
+    mobs: &MobHandle,
+    players: Option<&PlayerRegistry>,
+) -> Option<i32> {
+    if game_mode != GameMode::Spectator {
+        return None;
+    }
+    let target_id = target_entity_id?;
+    let (px, py, pz) = player_pos?;
+    let target_pos = mobs.with(|sim| sim.position(target_id)).or_else(|| {
+        players
+            .map(PlayerRegistry::candidates)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|c| c.entity_id == target_id)
+            .map(|c| c.position)
+    })?;
+    // Vanilla's `isWithinEntityInteractionRange` grows the target's actual
+    // bounding box by this constant (`Player.INTERACTION_RANGE` for
+    // spectator-camera checks) before measuring; this crate tracks no
+    // per-entity bounding box, so a plain centre-to-centre distance against
+    // the same 3-block figure is the disclosed narrowing.
+    const SPECTATOR_INTERACTION_RANGE: f64 = 3.0;
+    let dx = target_pos.x - px;
+    let dy = target_pos.y - py;
+    let dz = target_pos.z - pz;
+    if dx * dx + dy * dy + dz * dz <= SPECTATOR_INTERACTION_RANGE * SPECTATOR_INTERACTION_RANGE {
+        Some(target_id)
+    } else {
+        None
+    }
+}
+
+/// Maps a wire hand ordinal (`0` main, `1` off) to
+/// `ClientboundAnimatePacket`'s own action byte (`SWING_MAIN_HAND = 0`,
+/// `SWING_OFF_HAND = 3`) — see `ClientboundAnimatePacket.java`'s constants,
+/// which `ServerProtocol::encode_animate`'s own doc comment already names.
+/// Anything outside `0..=1` degrades to the main-hand swing, the same
+/// "malformed input degrades the effect" convention `ServerBound::Swing`'s
+/// own decode arm already applies at the wire boundary.
+fn swing_action(hand: u8) -> u8 {
+    if hand == 1 { 3 } else { 0 }
+}
+
 /// Decodes and applies one inbound packet once the connection is in
 /// [`State::Play`]: matches a keep-alive echo against the pending challenge
 /// (clearing it, so the next keep-alive tick does not mistake a live client
@@ -11080,6 +11138,17 @@ where
                 }
             }
         }
+        // A tab-completion request. See `ServerBound::CommandSuggestion`'s own
+        // doc comment for the wire shape and
+        // `crate::commands::ServerCommands::suggest_response` for the
+        // start/length arithmetic and the `/`-stripping this delegates to it,
+        // gated by `commands.permission_level` — the same resolved-once level
+        // `ChatCommand` above uses.
+        ServerBound::CommandSuggestion { id, command } => {
+            let response =
+                commands.builtins.suggest_response(id, &command, commands.permission_level);
+            apply(conn, state, proto.encode_command_suggestions(&response)).await?;
+        }
         // The F4 switcher. A *request*, not an instruction: the two directives
         // below echo the mode this server actually applied, so a client that
         // guessed is corrected. Nothing gates it today because this crate has
@@ -11090,6 +11159,62 @@ where
             *game_mode = mode;
             for directive in game_mode_directives(proto, mode) {
                 apply(conn, state, directive).await?;
+            }
+        }
+        // A spectator clicking a player's name in the tab list. See
+        // `ServerBound::TeleportToEntity`'s own doc comment for the scoping
+        // this narrows vanilla's `handleTeleportToEntityPacket` to (connected
+        // players only, current facing kept rather than matched to the
+        // target's). Silently does nothing outside spectator mode or for an
+        // unresolved uuid — the same "request, not an instruction" posture
+        // `ChangeGameMode` above takes, and matches vanilla's own handler,
+        // which has no failure reply either. Mirrors `Effect::Teleport`'s own
+        // arm (`/tp`) for how position/rotation/fall state are updated —
+        // same mechanism, a different resolver for the destination.
+        ServerBound::TeleportToEntity { uuid } => {
+            if *game_mode == GameMode::Spectator
+                && let Some(target) = players
+                    .map(PlayerRegistry::candidates)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|c| c.uuid == uuid)
+            {
+                let current = player_rot.unwrap_or(Rotation { yaw: 0.0, pitch: 0.0 });
+                *player_pos = Some((target.position.x, target.position.y, target.position.z));
+                *player_rot = Some(current);
+                let directive = proto.encode_teleport(
+                    target.position.x,
+                    target.position.y,
+                    target.position.z,
+                    current.yaw,
+                    current.pitch,
+                );
+                apply(conn, state, directive).await?;
+            }
+        }
+        // An arm swing. See `ServerBound::Swing`'s own doc comment for why
+        // this pushes to the shared broadcast log rather than replying
+        // directly (same "every connection reads it on its own drain" shape
+        // as `Chat` below), and for why the log's own reader excludes the
+        // sender. Singleplayer has no registry and therefore nobody else to
+        // tell, so this is silently a no-op there.
+        ServerBound::Swing { hand } => {
+            if let Some(registry) = players {
+                registry.swing(player_entity_id, hand);
+            }
+        }
+        // A spectator attaching its camera to a nearby entity. See
+        // `ServerBound::SpectatorAction`'s own doc comment for the resolver
+        // and the range/`isPickable` narrowing. Silently does nothing when
+        // `apply_spectator_action`'s gates are not all met — the same
+        // "request, not an instruction" posture `TeleportToEntity` above
+        // takes, and matches vanilla's own handler, which has no failure
+        // reply either.
+        ServerBound::SpectatorAction { target_entity_id } => {
+            if let Some(target_id) =
+                apply_spectator_action(*game_mode, target_entity_id, *player_pos, mobs, players)
+            {
+                apply(conn, state, proto.encode_set_camera(target_id)).await?;
             }
         }
         // Issue #469. Nothing is written to the wire here: the message is
@@ -11616,6 +11741,11 @@ where
     // log's *current end* so a joining player is not replayed the backlog of
     // everything said before they arrived.
     let mut chat_cursor = entities.players().map_or(0, PlayerRegistry::chat_cursor);
+    // This connection's read position in the shared arm-swing broadcast log —
+    // same "start at the current end" reasoning as `chat_cursor`, so a
+    // freshly joined connection is not replayed swings that happened before
+    // it arrived.
+    let mut swing_cursor = entities.players().map_or(0, PlayerRegistry::swing_cursor);
     // Issue #335. This connection's read position in the shared plugin-channel
     // broadcast queue. Started at 0 — unlike chat, a *broadcast* is
     // host-published state a new connection legitimately receives: a client
@@ -12990,6 +13120,21 @@ where
                     for line in registry.chat_since(&mut chat_cursor) {
                         apply(conn, &mut state, proto.encode_system_chat(&line.rendered()))
                             .await?;
+                    }
+                    // Arm-swing broadcast, riding the same timer and the same
+                    // cursor-over-a-shared-log shape as chat just above. The
+                    // sender exclusion lives here, at the read site, rather
+                    // than at `PlayerRegistry::swing`'s write site — see that
+                    // method's own doc comment for why.
+                    for event in registry.swings_since(&mut swing_cursor) {
+                        if event.entity_id != player_entity_id {
+                            apply(
+                                conn,
+                                &mut state,
+                                proto.encode_animate(event.entity_id, swing_action(event.hand)),
+                            )
+                            .await?;
+                        }
                     }
                     // Command effects another player's command aimed at *this*
                     // connection — `/gamemode creative Steve` typed by someone
@@ -16732,5 +16877,104 @@ mod tests {
             reset, None,
             "a same-dimension death must not signal a reset"
         );
+    }
+
+    /// `swing_action`'s two real inputs, against vanilla's own
+    /// `ClientboundAnimatePacket` constants (`SWING_MAIN_HAND = 0`,
+    /// `SWING_OFF_HAND = 3`) rather than the plausible-but-wrong `0`/`1`.
+    #[test]
+    fn swing_action_maps_hand_to_vanillas_animate_byte() {
+        assert_eq!(swing_action(0), 0, "main hand must map to SWING_MAIN_HAND");
+        assert_eq!(swing_action(1), 3, "off hand must map to SWING_OFF_HAND, not 1");
+    }
+
+    /// The control for the mapping above: malformed input degrades to the
+    /// main-hand swing rather than propagating garbage into the wire byte —
+    /// the same convention this crate's decode arms already apply.
+    #[test]
+    fn swing_action_degrades_malformed_input_to_main_hand() {
+        assert_eq!(swing_action(2), 0);
+        assert_eq!(swing_action(255), 0);
+    }
+
+    /// The positive case: a spectator within range of a resolvable player
+    /// target gets the camera attached.
+    #[test]
+    fn spectator_action_resolves_a_nearby_player_target() {
+        let registry = PlayerRegistry::new();
+        let target = registry.join("Target", Uuid::from_u128(1), Vec3::new(10.0, 64.0, 10.0));
+        let result = apply_spectator_action(
+            GameMode::Spectator,
+            Some(target.entity_id()),
+            Some((10.0, 64.0, 11.0)),
+            &MobHandle::default(),
+            Some(&registry),
+        );
+        assert_eq!(result, Some(target.entity_id()));
+    }
+
+    /// **Control 1.** The identical setup, but not in spectator mode — vanilla
+    /// gates the whole feature on `player.isSpectator()`.
+    #[test]
+    fn spectator_action_does_nothing_outside_spectator_mode() {
+        let registry = PlayerRegistry::new();
+        let target = registry.join("Target", Uuid::from_u128(1), Vec3::new(10.0, 64.0, 10.0));
+        let result = apply_spectator_action(
+            GameMode::Survival,
+            Some(target.entity_id()),
+            Some((10.0, 64.0, 11.0)),
+            &MobHandle::default(),
+            Some(&registry),
+        );
+        assert_eq!(result, None, "survival mode must never attach a camera");
+    }
+
+    /// **Control 2.** A target far outside the interaction range must not
+    /// resolve, proving the range check is load-bearing rather than
+    /// decorative (a wrong implementation that ignores distance entirely
+    /// would pass every other case here).
+    #[test]
+    fn spectator_action_rejects_a_target_out_of_range() {
+        let registry = PlayerRegistry::new();
+        let target = registry.join("Target", Uuid::from_u128(1), Vec3::new(500.0, 64.0, 500.0));
+        let result = apply_spectator_action(
+            GameMode::Spectator,
+            Some(target.entity_id()),
+            Some((10.0, 64.0, 11.0)),
+            &MobHandle::default(),
+            Some(&registry),
+        );
+        assert_eq!(result, None, "a target 500+ blocks away must not resolve");
+    }
+
+    /// **Control 3.** No target on the wire (`OptionalInt` absent) must do
+    /// nothing, matching vanilla's own handler, which has no branch for it at
+    /// all.
+    #[test]
+    fn spectator_action_does_nothing_with_no_target() {
+        let registry = PlayerRegistry::new();
+        let result = apply_spectator_action(
+            GameMode::Spectator,
+            None,
+            Some((10.0, 64.0, 11.0)),
+            &MobHandle::default(),
+            Some(&registry),
+        );
+        assert_eq!(result, None);
+    }
+
+    /// **Control 4.** An unresolvable id (no mob, no player) must do nothing
+    /// rather than attach a camera to a fabricated position.
+    #[test]
+    fn spectator_action_rejects_an_unresolvable_target() {
+        let registry = PlayerRegistry::new();
+        let result = apply_spectator_action(
+            GameMode::Spectator,
+            Some(9999),
+            Some((10.0, 64.0, 11.0)),
+            &MobHandle::default(),
+            Some(&registry),
+        );
+        assert_eq!(result, None);
     }
 }
