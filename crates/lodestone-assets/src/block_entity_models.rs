@@ -103,6 +103,26 @@ const SHULKER_SHEET: (u32, u32) = (64, 64);
 /// all.
 const BOOK_SHEET: (u32, u32) = (64, 32);
 
+/// The conduit eye sheet, 16×16 — `ConduitRenderer.createEyeLayer()`'s
+/// `LayerDefinition.create(mesh, 16, 16)`.
+const CONDUIT_EYE_SHEET: (u32, u32) = (16, 16);
+
+/// The conduit wind sheet, 64×32 — `ConduitRenderer.createWindLayer()`'s
+/// `LayerDefinition.create(mesh, 64, 32)`. Same canvas size as [`BOOK_SHEET`],
+/// named separately so a jar change to either is one edit.
+const CONDUIT_WIND_SHEET: (u32, u32) = (64, 32);
+
+/// The conduit's inactive-shell sheet, 32×16 — `ConduitRenderer.createShellLayer()`'s
+/// `LayerDefinition.create(mesh, 32, 16)`.
+const CONDUIT_SHELL_SHEET: (u32, u32) = (32, 16);
+
+/// The conduit's active-shell ("cage") sheet, 32×16 — `ConduitRenderer.createCageLayer()`'s
+/// `LayerDefinition.create(mesh, 32, 16)`. Same dimensions as
+/// [`CONDUIT_SHELL_SHEET`] but a genuinely different sheet
+/// (`entity/conduit/cage`, not `entity/conduit/base`) and a genuinely
+/// different box (8×8×8, not 6×6×6) — named separately rather than reused.
+const CONDUIT_CAGE_SHEET: (u32, u32) = (32, 16);
+
 /// `entity::FACE_ORDER` index of the `West` face — see the module doc on why
 /// this is not `Direction as usize`.
 const FACE_WEST: usize = 2;
@@ -220,6 +240,26 @@ pub const BLOCK_ENTITY_MODELS: &[BlockEntityModelEntry] = &[
         name: "decorated_pot_side_right",
         texture: "entity/decorated_pot/decorated_pot_side",
         build: decorated_pot_side_right_model,
+    },
+    BlockEntityModelEntry {
+        name: "conduit_eye",
+        texture: "entity/conduit/closed_eye",
+        build: conduit_eye_model,
+    },
+    BlockEntityModelEntry {
+        name: "conduit_wind",
+        texture: "entity/conduit/wind",
+        build: conduit_wind_model,
+    },
+    BlockEntityModelEntry {
+        name: "conduit_shell",
+        texture: "entity/conduit/base",
+        build: conduit_shell_model,
+    },
+    BlockEntityModelEntry {
+        name: "conduit_cage",
+        texture: "entity/conduit/cage",
+        build: conduit_cage_model,
     },
 ];
 
@@ -905,6 +945,116 @@ pub fn decorated_pot_side_right_model() -> EntityModelDef {
     ))
 }
 
+/// The conduit's eye — `ConduitRenderer.createEyeLayer()`:
+///
+/// ```text
+/// eye  texOffs(0, 0)  addBox(-4, -4, 0,  8, 8, 0, CubeDeformation(0.01F))  pose ZERO
+/// ```
+///
+/// A near-planar box: zero depth grown by `0.01` texels on every axis by the
+/// deformation, matching vanilla's own `CubeDeformation` rather than a hand
+/// wave at "basically a quad". This is the part `ConduitRenderer.submit`
+/// billboards toward the camera and re-skins between `open_eye`/`closed_eye`
+/// per frame — see `lodestone_render::block_entity::resolve_conduit`'s doc for
+/// the billboard and the hunting-state sprite swap, neither of which belongs
+/// in the geometry.
+#[must_use]
+pub fn conduit_eye_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO).with_child(
+        "eye",
+        PartDef::new(PartPose::ZERO)
+            .with_cube(CubeDef::new([-4.0, -4.0, 0.0], [8.0, 8.0, 0.0], [0.0, 0.0]).grown(0.01)),
+    );
+    EntityModelDef {
+        texture_width: CONDUIT_EYE_SHEET.0,
+        texture_height: CONDUIT_EYE_SHEET.1,
+        root,
+    }
+}
+
+/// The conduit's "wind" plume — `ConduitRenderer.createWindLayer()`:
+///
+/// ```text
+/// wind  texOffs(0, 0)  addBox(-8, -8, -8,  16, 16, 16)  pose ZERO
+/// ```
+///
+/// One full 16-texel cube, drawn **twice** per active frame at two different
+/// poses sharing this one mesh (`resolve_conduit`'s two `CONDUIT_WIND`
+/// instances) — vanilla reuses the same `ModelPart` for both
+/// `submitModelPart` calls in `ConduitRenderer.submit`'s active branch.
+#[must_use]
+pub fn conduit_wind_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO).with_child(
+        "wind",
+        PartDef::new(PartPose::ZERO).with_cube(CubeDef::new(
+            [-8.0, -8.0, -8.0],
+            [16.0, 16.0, 16.0],
+            [0.0, 0.0],
+        )),
+    );
+    EntityModelDef {
+        texture_width: CONDUIT_WIND_SHEET.0,
+        texture_height: CONDUIT_WIND_SHEET.1,
+        root,
+    }
+}
+
+/// The conduit's **inactive** shell — `ConduitRenderer.createShellLayer()`:
+///
+/// ```text
+/// shell  texOffs(0, 0)  addBox(-3, -3, -3,  6, 6, 6)  pose ZERO
+/// ```
+///
+/// Drawn slowly spinning (`entity/conduit/base`) whenever the frame is not
+/// complete — the `!state.isActive` branch of `ConduitRenderer.submit`. A
+/// smaller cube than [`conduit_cage_model`]'s (6×6×6 against 8×8×8): the
+/// conduit visibly grows when it activates, not just changes texture.
+#[must_use]
+pub fn conduit_shell_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO).with_child(
+        "shell",
+        PartDef::new(PartPose::ZERO).with_cube(CubeDef::new(
+            [-3.0, -3.0, -3.0],
+            [6.0, 6.0, 6.0],
+            [0.0, 0.0],
+        )),
+    );
+    EntityModelDef {
+        texture_width: CONDUIT_SHELL_SHEET.0,
+        texture_height: CONDUIT_SHELL_SHEET.1,
+        root,
+    }
+}
+
+/// The conduit's **active** shell ("cage") — `ConduitRenderer.createCageLayer()`:
+///
+/// ```text
+/// shell  texOffs(0, 0)  addBox(-4, -4, -4,  8, 8, 8)  pose ZERO
+/// ```
+///
+/// Named `"shell"` in the jar too (`createCageLayer` also calls
+/// `addOrReplaceChild("shell", …)`) — the two are still separate *models*
+/// here (`conduit_shell` vs `conduit_cage`), each its own
+/// [`BlockEntityModelEntry`] with its own sheet, since a real client never
+/// draws both in the same frame (`ConduitRenderer.submit` branches on
+/// `state.isActive` and picks exactly one).
+#[must_use]
+pub fn conduit_cage_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO).with_child(
+        "shell",
+        PartDef::new(PartPose::ZERO).with_cube(CubeDef::new(
+            [-4.0, -4.0, -4.0],
+            [8.0, 8.0, 8.0],
+            [0.0, 0.0],
+        )),
+    );
+    EntityModelDef {
+        texture_width: CONDUIT_CAGE_SHEET.0,
+        texture_height: CONDUIT_CAGE_SHEET.1,
+        root,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1359,5 +1509,82 @@ mod tests {
         );
         let quads = crate::entity::bake_entity(&decorated_pot_base_model());
         assert!(!quads.is_empty(), "the base baked no quads");
+    }
+
+    /// The four conduit sheets, by their own vanilla `LayerDefinition.create`
+    /// calls (`ConduitRenderer.createEyeLayer/createWindLayer/createShellLayer/
+    /// createCageLayer`) — a magnitude check, not a sign check: a builder that
+    /// halved or doubled a dimension would still pass
+    /// `every_entry_builds_and_resolves_by_name`'s coarse `{16,32,64}` gate.
+    #[test]
+    fn conduit_sheets_match_their_own_layer_definitions() {
+        let eye = conduit_eye_model();
+        assert_eq!((eye.texture_width, eye.texture_height), (16, 16));
+        let wind = conduit_wind_model();
+        assert_eq!((wind.texture_width, wind.texture_height), (64, 32));
+        let shell = conduit_shell_model();
+        assert_eq!((shell.texture_width, shell.texture_height), (32, 16));
+        let cage = conduit_cage_model();
+        assert_eq!((cage.texture_width, cage.texture_height), (32, 16));
+    }
+
+    /// The active shell ("cage") is a genuinely bigger box than the inactive
+    /// one — 8×8×8 against 6×6×6 — not a re-skin of the same geometry. Measured
+    /// by the baked span rather than restating the texel constants, the same
+    /// discipline [`double_halves_are_fifteen_texels_wide_at_opposite_ends`]
+    /// already uses for the chest halves.
+    #[test]
+    fn conduit_cage_is_a_larger_cube_than_the_inactive_shell() {
+        let span_x = |def: &EntityModelDef| {
+            let quads = crate::entity::bake_entity(def);
+            let mut min = f32::MAX;
+            let mut max = f32::MIN;
+            for q in &quads {
+                for p in &q.positions {
+                    min = min.min(p[0]);
+                    max = max.max(p[0]);
+                }
+            }
+            (max - min) * 16.0
+        };
+        let shell_width = span_x(&conduit_shell_model());
+        let cage_width = span_x(&conduit_cage_model());
+        assert!(
+            (shell_width - 6.0).abs() < 1e-4,
+            "inactive shell width {shell_width}, expected 6"
+        );
+        assert!(
+            (cage_width - 8.0).abs() < 1e-4,
+            "cage width {cage_width}, expected 8"
+        );
+        assert!(
+            cage_width > shell_width,
+            "the active cage ({cage_width}) must be wider than the inactive shell ({shell_width})"
+        );
+    }
+
+    /// The eye is a near-planar box (zero authored depth, grown `0.01` on every
+    /// axis) — real, thin geometry, not a literal zero-volume box a mesher
+    /// could legally cull to nothing. Measured against the deformation amount
+    /// rather than merely asserting `> 0`, so a builder that dropped `.grown`
+    /// (leaving a true zero-depth box, which some bakers special-case away)
+    /// cannot pass by accident.
+    #[test]
+    fn conduit_eye_is_a_thin_grown_box_not_a_true_zero_depth_one() {
+        let quads = crate::entity::bake_entity(&conduit_eye_model());
+        assert!(!quads.is_empty(), "the eye baked no quads");
+        let mut min = f32::MAX;
+        let mut max = f32::MIN;
+        for q in &quads {
+            for p in &q.positions {
+                min = min.min(p[2]);
+                max = max.max(p[2]);
+            }
+        }
+        let depth = (max - min) * 16.0;
+        assert!(
+            (depth - 0.02).abs() < 1e-4,
+            "eye depth {depth} texels, expected 0.02 (2 × 0.01 grow)"
+        );
     }
 }
