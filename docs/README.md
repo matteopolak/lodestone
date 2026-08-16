@@ -751,6 +751,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   nothing rendered into it, so the screen showed a black box where the player belongs.
   It is the first thing in this workspace to draw a full 3-D entity rig inside a 2-D
   GUI panel, and the first to use a GPU scissor.
+- [Island detection (`cargo xtask islands`)](./island-detection.md) — A `syn`-based
+  static scanner, `cargo xtask islands` (`xtask/src/islands.rs`), that reports four
+  things per workspace crate: functions/methods with zero production call sites,
+  struct fields with zero production readers, struct fields whose every production
+  assignment is a default-like value, and `#[allow(dead_code)]` sites. It exists
+  because `cargo xtask connectedness` answers one narrow question — "is this
+  clientbound packet reaching anything" — and is structurally blind to everything
+  else: Rust call graphs, a field nothing reads, a function that is tested but never
+  called from production. `islands` is the general-purpose instrument; `connectedness`
+  stays the packet-specific one.
 - [Item → block census](./item-block-census.md) — The authoritative 26.2 answer to
   "if a player right-clicks holding this item, which block gets placed?" —
   `lodestone_data::block_items`, generated from a headless dump of the real server's
