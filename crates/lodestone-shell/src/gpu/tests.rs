@@ -462,6 +462,8 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         item_potion_color: None,
         name_tag: None,
         item_use: None,
+        // Right-handed: this test is about armour resolution, not handedness.
+        main_arm_left: false,
         // Not a creeper: only a creeper ever swells.
         creeper_swelling: 0.0,
         // A zombie, not a player — this build's swim rotation only reads this

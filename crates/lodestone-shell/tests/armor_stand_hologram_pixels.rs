@@ -112,6 +112,7 @@ fn armor_stand_draw(feet: glam::Vec3, invisible: bool, name_tag: Option<NameTag>
         id: 1,
         type_path: std::sync::Arc::from("armor_stand"),
         item: None,
+        main_arm_left: false,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),
         equipment_trim: Vec::new(),

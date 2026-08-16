@@ -889,6 +889,8 @@ fn entity_renders_to_pixels_through_shell_path() {
             item_potion_color: None,
             name_tag: None,
             item_use: None,
+            // Right-handed: not relevant to this gate.
+            main_arm_left: false,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
             // A pig, not a player.
@@ -913,6 +915,7 @@ fn entity_renders_to_pixels_through_shell_path() {
             id: 2,
             type_path: std::sync::Arc::from("pig"),
             item: None,
+            main_arm_left: false,
             feet: glam::Vec3::new(0.0, 0.0, -12.0),
             yaw: 0.0,
             head_yaw: 0.0,
@@ -1108,6 +1111,7 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         id: 1,
         type_path: std::sync::Arc::from("zombie"),
         item: None,
+        main_arm_left: false,
         feet: glam::Vec3::new(0.0, 0.0, 3.0),
         yaw: 0.0,
         head_yaw: 0.0,
@@ -1705,6 +1709,7 @@ fn orb_draw(value: i32) -> EntityDraw {
         name_tag: None,
         hurt: false,
         item_use: None,
+        main_arm_left: false,
         creeper_swelling: 0.0,
         swim_amount: 0.0,
         death_time: 0.0,

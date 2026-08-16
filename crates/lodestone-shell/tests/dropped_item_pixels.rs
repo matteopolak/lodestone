@@ -110,6 +110,7 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         id: DROP_ID,
         type_path: std::sync::Arc::from(ITEM_ENTITY_TYPE_PATH),
         item,
+        main_arm_left: false,
         feet: DROP_POS,
         yaw: 0.0,
         head_yaw: 0.0,
@@ -469,6 +470,7 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         type_path: std::sync::Arc::from(type_path),
         // Exactly what `extract_entity_draws` produces for a non-`item` entity.
         item: None,
+        main_arm_left: false,
         feet: DROP_POS,
         yaw: 0.0,
         head_yaw: 0.0,
