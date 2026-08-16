@@ -2851,9 +2851,28 @@ fn resolve_entity_facts(
         .map_or(Reported::Unreported, |name| Reported::Reported(name.0.clone()));
     let custom_name_visible = entity.get::<CustomNameVisible>().map(|visible| visible.0);
     let name_tag = if is_player {
-        uuid.and_then(|id| tab_list.get(&id))
-            .map(|entry| entry.effective_name().to_plain_string())
-            .filter(|name| !name.is_empty())
+        uuid.and_then(|id| match tab_list.get(&id) {
+            Some(entry) => {
+                let name = entry.effective_name().to_plain_string();
+                if name.is_empty() {
+                    None
+                } else {
+                    // Same fallback the skin lookup two fields down already
+                    // has: remember every real resolution against this uuid
+                    // so a later frame whose tab-list entry has vanished (a
+                    // `player_info_remove`, or a plugin NPC that adds then
+                    // removes its entry while the entity stays spawned) can
+                    // still recover the name instead of silently dropping
+                    // the tag.
+                    crate::remote_skins::remember_name(id, &name);
+                    Some(name)
+                }
+            }
+            // No tab-list entry for this uuid *this frame* -- not the same
+            // thing as "this player has no name". Prefer whatever name was
+            // last resolved for this uuid over drawing no tag at all.
+            None => crate::remote_skins::last_known_name(&id),
+        })
     } else {
         match &custom_name {
             Reported::Reported(Some(name))
@@ -4487,6 +4506,60 @@ mod tests {
             let entity = bare_player_entity(&mut world, Uuid::from_u128(2));
             let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
             assert_eq!(facts.name_tag, None);
+        }
+
+        /// A player-type entity's resolved name tag must survive its
+        /// tab-list entry disappearing -- the same shape as
+        /// `a_players_skin_survives_a_missing_tab_list_entry_once_resolved`,
+        /// one field over. A plugin NPC (a fake player entity) commonly adds
+        /// a tab-list entry, resolves its name and skin, then removes the
+        /// entry while the entity stays spawned so it does not show up in
+        /// the visible player list. The skin path already survives this
+        /// (`remote_skins::last_known`); before this fix the name path did
+        /// not, so the exact same server that keeps a player's skin visible
+        /// could still make its nametag vanish.
+        #[test]
+        fn a_players_name_tag_survives_a_missing_tab_list_entry_once_resolved() {
+            let id = Uuid::from_u128(555_444);
+            let mut tabs = lodestone_game::tablist::TabList::new();
+            tabs.insert(lodestone_game::tablist::PlayerListEntry::new(
+                lodestone_game::tablist::GameProfile::new(id, "QuestGiver"),
+            ));
+
+            let mut world = World::new();
+            let entity = bare_player_entity(&mut world, id);
+
+            let listed = facts_for(&world, entity, &tabs);
+            assert_eq!(
+                listed.name_tag.map(|t| t.text),
+                Some("QuestGiver".to_string()),
+                "name must resolve while the entry is listed"
+            );
+
+            // The tab-list entry disappears (`player_info_remove`); the
+            // entity itself is untouched.
+            let unlisted = lodestone_game::tablist::TabList::new();
+            let after_removal = facts_for(&world, entity, &unlisted);
+            assert_eq!(
+                after_removal.name_tag.map(|t| t.text),
+                Some("QuestGiver".to_string()),
+                "a previously-resolved name must survive a missing tab-list \
+                 entry rather than silently dropping the tag"
+            );
+
+            // Control: a uuid never seen through the tab list at all, against
+            // the same empty tab list, must still show no tag -- the fallback
+            // is "remember what this uuid actually had", not "keep showing
+            // the last name resolved for anybody".
+            let never_seen = Uuid::from_u128(555_445);
+            let mut other_world = World::new();
+            let other_entity = bare_player_entity(&mut other_world, never_seen);
+            let never_facts = facts_for(&other_world, other_entity, &unlisted);
+            assert_eq!(
+                never_facts.name_tag, None,
+                "a uuid with no prior real resolution must not spuriously \
+                 inherit another uuid's remembered name"
+            );
         }
 
         /// Every other entity's tag is its `CUSTOM_NAME`, gated on

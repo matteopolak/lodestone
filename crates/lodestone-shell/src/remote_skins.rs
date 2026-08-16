@@ -141,6 +141,19 @@ static DECODED: Mutex<Option<HashMap<String, Option<RemoteSkin>>>> = Mutex::new(
 /// See `entities::resolve_entity_facts`'s use of [`remember`]/[`last_known`].
 static LAST_KNOWN: Mutex<Option<HashMap<uuid::Uuid, RemoteSkin>>> = Mutex::new(None);
 
+/// The most recent tab-list display name resolved for each player UUID.
+///
+/// Same shape and same reason as [`LAST_KNOWN`] one field over: a player-type
+/// NPC's name comes from the same tab-list profile as its skin, through the
+/// same `entities::resolve_entity_facts` per-frame re-derivation, and is
+/// vulnerable to the identical `player_info_remove`-shaped miss when a
+/// plugin adds a tab-list entry and then removes it while the entity stays
+/// spawned. Without this cache the nametag simply stops drawing the instant
+/// the entry disappears, even though nothing about the entity or its name
+/// actually changed — see `entities::resolve_entity_facts`'s use of
+/// [`remember_name`]/[`last_known_name`].
+static NAME_LAST_KNOWN: Mutex<Option<HashMap<uuid::Uuid, String>>> = Mutex::new(None);
+
 /// Every URL we have started, finished or given up on.
 static FETCHED: Mutex<Option<HashMap<String, FetchState>>> = Mutex::new(None);
 
@@ -218,6 +231,21 @@ pub fn remember(id: uuid::Uuid, skin: &RemoteSkin) {
 #[must_use]
 pub fn last_known(id: &uuid::Uuid) -> Option<RemoteSkin> {
     with_map(&LAST_KNOWN, |map| map.get(id).cloned())
+}
+
+/// Records `name` as the most recently resolved tab-list display name for
+/// `id`, so a later frame that cannot find `id` in the tab list can still
+/// recover it. See [`NAME_LAST_KNOWN`]'s doc.
+pub fn remember_name(id: uuid::Uuid, name: &str) {
+    with_map(&NAME_LAST_KNOWN, |map| {
+        map.insert(id, name.to_owned());
+    });
+}
+
+/// The last display name [`remember_name`] recorded for `id`, if any.
+#[must_use]
+pub fn last_known_name(id: &uuid::Uuid) -> Option<String> {
+    with_map(&NAME_LAST_KNOWN, |map| map.get(id).cloned())
 }
 
 /// Start fetching `url` unless it has already been started, finished or failed.
