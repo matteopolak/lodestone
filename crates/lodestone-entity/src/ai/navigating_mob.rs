@@ -2133,6 +2133,14 @@ impl BrainMob for NavigatingMob<'_> {
         MobController::last_hurt_by(self)
     }
 
+    /// Delegates to the same `angry_target` field
+    /// [`MobController::angry_target`] reads — fully qualified for the same
+    /// reason [`last_hurt_by`](Self::last_hurt_by) is: both traits declare
+    /// it, so an unqualified call would be `E0034`.
+    fn angry_target(&self) -> Option<Vec3> {
+        MobController::angry_target(self)
+    }
+
     fn nearby_entities(&self) -> Vec<crate::brain::NearbyBrainEntity> {
         self.nearby_entities.clone()
     }

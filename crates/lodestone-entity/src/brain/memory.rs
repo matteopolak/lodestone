@@ -102,6 +102,18 @@ impl MemoryModuleType {
     /// to a position, the same simplification `HURT_BY`/`NEAREST_VISIBLE_PLAYER`
     /// already make (see [`MemoryValue::Pos`]'s own doc).
     pub const AVOID_TARGET: Self = Self("avoid_target");
+    /// The position of whoever this mob holds a persistent grudge against —
+    /// [`super::mob::BrainMob::angry_target`], the Brain-system read of the
+    /// exact same [`MobController::angry_target`](crate::ai::MobController::angry_target)
+    /// field the goal system's anger-gated species already use (issue #458).
+    /// Not a vanilla `MemoryModuleType` — the warden's own
+    /// `WardenAi`/`Warden.increaseAngerAt` machinery keeps its anger and
+    /// target entirely off the `Brain`, on the entity itself, so there is no
+    /// jar memory key to match here; this crate's Brain architecture has no
+    /// other seam for "walk toward a host-resolved position", so it borrows
+    /// the shape [`RAM_TARGET`] already established rather than inventing a
+    /// second one.
+    pub const ANGER_TARGET: Self = Self("anger_target");
 }
 
 /// The presence requirement a behaviour places on a memory.

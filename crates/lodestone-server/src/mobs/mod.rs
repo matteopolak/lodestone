@@ -5681,11 +5681,46 @@ impl<'w> MobSim<'w> {
         // reporting `None`, mirroring vanilla's `stopBeingAngry` — a grudge
         // that expired must not come back if the clock is ever read again.
         let now = self.tick_count;
-        for me in &mut self.mobs {
+
+        // Issue #459 step 3 (pursuit): a warden tracks its own suspect
+        // (`SimMob::warden_anger`/`warden_anger_target`, entirely separate
+        // from the `SimMob::anger` primitive the loop below reads) and never
+        // populates `me.anger`, so without this it would always feed `None`
+        // here and its `Brain`'s `FIGHT` activity (`warden_brain`) would
+        // never become eligible. Resolved in its own pre-pass, over an
+        // immutable borrow of `self.mobs`, because it needs to look up a
+        // *different* mob's current position by id — the same reason
+        // `partner`/`parent`/`owner` above are resolved before the mutating
+        // loop rather than inside it. Gated on `AngerLevel::Angry` (not
+        // merely "has a tracked suspect") so an `Agitated` warden — anger
+        // above zero but below the chase threshold — does not already start
+        // walking, matching `resolve_warden_anger`'s own gate on the strike
+        // itself.
+        let warden_pursuit_target: Vec<Option<Vec3>> = self
+            .mobs
+            .iter()
+            .map(|me| {
+                if me.entity_type().path() != "warden"
+                    || !warden::AngerLevel::from_anger(me.warden_anger).is_angry()
+                {
+                    return None;
+                }
+                let target_id = me.warden_anger_target?;
+                self.mobs.iter().find(|m| m.id == target_id).map(SimMob::position)
+            })
+            .collect();
+
+        for (i, me) in self.mobs.iter_mut().enumerate() {
             if me.anger.is_some_and(|a| now >= a.end_time) {
                 me.anger = None;
             }
-            let target = me.anger.map(|a| a.target);
+            // A warden never sets `me.anger`, and no non-warden mob ever
+            // gets a `warden_pursuit_target` entry (the closure above
+            // returns `None` for every other species) — the two halves of
+            // this `or` can never both be `Some` for the same mob, so this
+            // is a merge of disjoint producers, not a priority order between
+            // two that could disagree.
+            let target = me.anger.map(|a| a.target).or(warden_pursuit_target[i]);
             me.mob.set_angry_target(target);
         }
 

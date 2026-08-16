@@ -34,26 +34,29 @@
 //! [`super::raid::MobSim::create_or_extend_raid`]'s own doc discloses for a
 //! single-slot stand-in of a vanilla multi-item structure.
 //!
-//! **No pursuit.** A warden does not chase its target: without
-//! `lodestone_entity::ai::roster` coverage (the warden has no `GoalSelector`
-//! at all — see `lodestone_entity::ai::roster::specialist`'s own module doc) or a
-//! Brain melee behaviour (neither exists in this crate yet), there is no
-//! production movement seam to drive toward a target. This module only ever
-//! lands a hit on a target that is *already* within
-//! [`MELEE_RANGE_SQR`] — a real, disclosed gap, not a hidden one. **No
-//! dig/emerge and no sonic boom** either: both need machinery (a pose/
-//! animation state for dig/emerge, a ranged burst-damage attack for sonic
-//! boom) this module does not build. Anger accumulation and a genuine
-//! in-range melee consequence are what this pass ships.
+//! **Pursuit now exists, on a separate seam from this module.** An angry
+//! warden's own [`Brain`](lodestone_entity::brain::Brain) runs
+//! `lodestone_entity::brain::roster::warden_brain`'s `FIGHT` activity, which
+//! walks toward [`MobController::angry_target`](lodestone_entity::ai::MobController::angry_target)
+//! — fed, once per tick, by [`MobSim::feed_perception`](super::MobSim::feed_perception)
+//! resolving [`warden_anger_target`](super::SimMob::warden_anger_target) to a
+//! live position and gated on [`AngerLevel::Angry`]. That behaviour only ever
+//! walks; it never calls `BrainMob::attack`, so this module's own
+//! [`resolve_warden_anger`] stays the single place a hit is actually
+//! resolved — one production path, not two racing ones. One disclosed lag:
+//! the position fed to the brain is *last* tick's [`resolve_warden_anger`]
+//! answer (that method runs after the per-mob brain tick each tick, the same
+//! ordering [`resolve_vibrations`](super::MobSim::resolve_vibrations)'s own
+//! doc explains), so a freshly-angered warden starts walking one tick after
+//! the anger that caused it, not the same tick. **No dig/emerge and no sonic
+//! boom** still: both need machinery (a pose/animation state for dig/emerge,
+//! a ranged burst-damage attack for sonic boom) this module does not build.
 //!
 //! # How to change it
 //!
-//! - **Pursuit**: give the warden a real movement seam (either a roster
-//!   entry despite the warden having no vanilla `GoalSelector` — a
-//!   deliberate divergence that would need its own disclosure — or a Brain
-//!   melee-pursuit behaviour, which needs building from scratch; nothing in
-//!   `crates/lodestone-entity/src/brain/behaviors.rs` does this for anyone
-//!   yet).
+//! - **Pursuit speed/stop distance**: `lodestone_entity::brain::roster::warden_brain`'s
+//!   own constants (`SCAFFOLD_STROLL_SPEED`, `WARDEN_PURSUIT_CLOSE_ENOUGH`),
+//!   not this module — this module has no movement code of its own.
 //! - **Sonic boom**: `Warden.java`'s own `TIME_TO_USE_MELEE_UNTIL_SONIC_BOOM`
 //!   (200 ticks) and
 //!   `net.minecraft.world.entity.ai.behavior.warden.SonicBoom` (10.0 true
@@ -356,6 +359,72 @@ mod warden_anger_tests {
         sim.tick();
 
         assert_eq!(sim.get(target).expect("spawned").health(), health_before, "50 blocks away is far outside a 3-block melee reach");
+    }
+
+    /// The pursuit half of issue #459 step 3, driven through real ticks
+    /// rather than by placing the target already in range. The
+    /// `lodestone-entity`-side gates (`brain::roster`'s
+    /// `a_warden_with_a_live_grudge_walks_toward_it_and_never_attacks_directly`)
+    /// prove `WalkToPoi` is wired into `warden_brain`'s `FIGHT` activity in
+    /// isolation, against a hermetic `BrainMob` double; this proves the
+    /// **whole** production chain — a host-tracked anger target, through
+    /// `feed_perception`'s per-tick resolution, through the real `Brain`,
+    /// through `NavigatingMob`'s real A\*/kinematic follower, to an actual
+    /// position change and the real hit `resolve_warden_anger` already
+    /// lands once in range — the same "which production tick path reaches
+    /// it" standard every other gate in this module already meets.
+    #[test]
+    fn an_angry_warden_starting_out_of_range_chases_its_target_down_and_lands_a_hit() {
+        // A floor wide enough for both mobs plus the warden's whole chase
+        // route, so nothing here depends on either mob standing in the void
+        // (an idle mob with no ground under it falls instead of walking).
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -4..=20 {
+            for z in -4..=4 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        let mut sim = MobSim::new(&world);
+        let warden = spawn(&mut sim, "warden", Vec3::new(0.0, 0.0, 0.0));
+        let target = spawn(&mut sim, "pig", Vec3::new(10.0, 0.0, 0.0));
+        {
+            let w = sim.get_mut(warden).expect("spawned");
+            // `MAX_ANGER`, not merely `ANGRY_THRESHOLD + 1`: closing 10
+            // blocks at the warden's own real ~0.2-block/tick ground speed
+            // (`movement_speed` 0.3 through `ai_ground_speed`) takes several
+            // dozen real ticks, and anger decays by `ANGER_DECAY_PER_TICK`
+            // every tick regardless of pursuit progress — a smaller starting
+            // value could decay all the way to `Calm` before the warden ever
+            // arrives, which would test decay rather than pursuit.
+            w.warden_anger = MAX_ANGER;
+            w.warden_anger_target = Some(target);
+        }
+        let health_before = sim.get(target).expect("spawned").health();
+        let target_pos = Vec3::new(10.0, 0.0, 0.0);
+
+        let mut hit_tick = None;
+        for t in 0..MAX_ANGER {
+            sim.tick();
+            // Pinned back every tick: a real `pig` carries its own
+            // `RandomStrollGoal` and, left alone, wanders roughly as fast as
+            // the warden closes — this test's subject is whether the warden
+            // *chases*, not an unrelated race against a second mob's own
+            // wander RNG. Re-teleporting isolates that one variable, the
+            // same "pin everything but the one thing under test" shape a
+            // hermetic gate elsewhere in this crate already uses.
+            sim.get_mut(target).expect("spawned").teleport_to(target_pos);
+            if sim.get(target).expect("spawned").health() < health_before {
+                hit_tick = Some(t);
+                break;
+            }
+        }
+
+        assert!(
+            hit_tick.is_some(),
+            "an angry warden starting 10 blocks from its target must chase it down \
+             (warden_brain's FIGHT activity) and land the real hit resolve_warden_anger \
+             already resolves once in range, inside its own anger's decay window"
+        );
     }
 
     /// A target that no longer exists must never crash the strike
