@@ -519,6 +519,36 @@ pub enum MetadataField {
     /// [`DragonPhase`](Self::DragonPhase) documents for its own index; never
     /// push this variant for anything but a `minecraft:wither`.
     WitherInvulnerableTicks(i32),
+    /// `Goat.DATA_HAS_LEFT_HORN`/`Goat.DATA_HAS_RIGHT_HORN` — the two fields
+    /// `GoatRenderer` reads to hide a broken horn's cuboid.
+    ///
+    /// **Indices 19 and 20**, each one of a large `BOOLEAN` claimant set in
+    /// the committed jar dump
+    /// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`):
+    /// index 19 alone has thirteen non-`BOOLEAN` claimants
+    /// (`Villager.DATA_VILLAGER_DATA`, `TamableAnimal.DATA_OWNERUUID_ID`, …)
+    /// plus several other `BOOLEAN` ones (`Camel.DASH`,
+    /// `Axolotl.DATA_PLAYING_DEAD`, `Strider.DATA_SUFFOCATING`, …); index 20
+    /// is the same shape. The serializer alone cannot separate a goat's own
+    /// pair from any of those, so only the producer
+    /// ([`crate::mobs::SimMob::snapshot`]'s `"goat"` arm, the sole caller)
+    /// disambiguates — never push this variant for anything but a
+    /// `minecraft:goat`.
+    ///
+    /// Pushed unconditionally for every goat (both fields `true` is the
+    /// common case), matching [`Baby`](Self::Baby)'s own "a transition needs
+    /// the same treatment as the arrival" reasoning — though in this crate
+    /// today there is no mid-game transition to reach: the value is decided
+    /// once at spawn (`Goat.finalizeSpawn`'s pre-broken-horn roll,
+    /// `crate::mobs::goat_horn_spawn_roll`) and never changes afterward,
+    /// since `RamTarget`'s own doc discloses that the block-contact
+    /// horn-breaking trigger is not ported (no block-state read on that
+    /// seam). A real, disclosed narrowing: a goat can spawn missing a horn,
+    /// but cannot yet lose one mid-game here.
+    GoatHorns {
+        has_left: bool,
+        has_right: bool,
+    },
 }
 
 /// One generated trade offer, ready for the wire (issue #245) —
