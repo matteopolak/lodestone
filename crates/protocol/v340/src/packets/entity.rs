@@ -8,6 +8,7 @@ use lodestone_macros::{Decode, Encode, Packet};
 use uuid::Uuid;
 
 use super::metadata::EntityMetadata;
+use super::position::Position;
 
 /// Clientbound `spawn_entity_living` — spawns a mob with its initial metadata.
 ///
@@ -275,6 +276,32 @@ pub struct SpawnEntityExperienceOrb {
     pub z: f64,
     /// XP value carried by this orb.
     pub count: i16,
+}
+
+/// Clientbound `spawn_entity_painting` — spawns a painting.
+///
+/// Wire layout: verified against minecraft-data's 1.12.2
+/// `packet_spawn_entity_painting`: VarInt entity id, UUID, string title (the
+/// legacy painting-motive name — this crate has no legacy motive→modern
+/// `minecraft:painting_variant` crosswalk yet, so the adapter drops it and
+/// spawns a plain `minecraft:painting`, same as any other spawn field this
+/// crate does not yet fully model), a packed [`Position`], a raw `u8`
+/// direction.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:spawn_entity_painting", state = Play, bound = Client)]
+pub struct SpawnEntityPainting {
+    /// Entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Entity UUID.
+    pub entity_uuid: Uuid,
+    /// Legacy painting-motive name (dropped — see struct docs).
+    #[mc(max = 32767)]
+    pub title: String,
+    /// Anchor block position.
+    pub location: Position,
+    /// Facing direction (`0` south, `1` west, `2` north, `3` east).
+    pub direction: u8,
 }
 
 /// Clientbound `entity_destroy` — a varint-counted list of varint entity ids to

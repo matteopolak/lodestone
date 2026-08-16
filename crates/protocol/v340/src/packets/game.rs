@@ -723,3 +723,15 @@ pub struct PlayerlistHeader {
     #[mc(max = 32767)]
     pub footer: String,
 }
+
+/// Clientbound `open_sign_entity` — the server opened a sign-editing UI.
+///
+/// Wire layout: a single packed 1.8 [`Position`](super::position::Position),
+/// verified against minecraft-data's 1.12.2 `packet_open_sign_entity`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:open_sign_entity", state = Play, bound = Client)]
+pub struct OpenSignEntity {
+    /// Block position of the sign.
+    pub location: super::position::Position,
+}
+
