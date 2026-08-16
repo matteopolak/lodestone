@@ -915,13 +915,33 @@ fn grudge_ticks(mob: &mut impl MobController) -> u64 {
 /// `TamableAnimal` — see `docs/plans/mob-ai-roster.md` §4's `FOLLOW_RANGE`
 /// citations and `roster::neutral`'s module doc for both derivations).
 ///
-/// Line of sight is not modelled (disclosed the same way the enderman stare's
-/// carved-pumpkin disguise is: the perception seam has no ray query), and
-/// the piglin's own `ALERT_INTERVAL` throttle is not reproduced as a separate
-/// timer — [`MobSim::attack`]'s "only on a *new* grudge" gate already
-/// prevents an already-angry piglin from re-alerting every subsequent hit,
-/// which is a stricter (never more frequent than vanilla) approximation of
-/// the same effect.
+/// Re-verified against `HurtByTargetGoal.alertOthers` (26.2 jar) rather than
+/// assumed: this one-shot path has **no line-of-sight check at all** — an
+/// earlier version of this comment said line of sight was disclosed-missing
+/// here, which was never true for this method. `RayView::is_clear` (used by
+/// `crate::explosion`'s exposure sampling and `crate::mobs::projectiles`)
+/// would be the primitive if one were ever needed here.
+///
+/// **What actually is missing, and is a materially bigger gap than "no line
+/// of sight": `ZombifiedPiglin` runs a wholly separate, ongoing mechanism**
+/// this crate has no analogue of at all. `ZombifiedPiglin.customServerAiStep`
+/// calls a private `maybeAlertOthers` every tick the piglin has a target —
+/// throttled by its own `ALERT_INTERVAL = [80, 120]` ticks (not the shared
+/// grudge window `ANGER_TICKS` reuses) and gated on
+/// `getSensing().hasLineOfSight(getTarget())` against the piglin's *current*,
+/// live target position — so a piglin pack keeps growing every couple of
+/// seconds as long as the alerting piglin can still see whoever it is
+/// chasing, not just once at acquisition. [`MobSim::attack`]'s "only on a
+/// *new* grudge" gate covers `HurtByTargetGoal`'s one-shot alert (accurately,
+/// per the paragraph above) and nothing else; this second mechanism has no
+/// producer anywhere in this crate. Building it needs: a per-mob
+/// `ticks_until_next_alert` counter (rolled via `ALERT_INTERVAL` on first
+/// acquisition, matching `ZombifiedPiglin.setTarget`'s override), a per-tick
+/// pass in `MobSim::tick` for angry piglins, and a line-of-sight check — the
+/// closest available stand-in for "current target position" is the stored
+/// `Anger::target: Vec3` (the attacker's position at hit time, not a live
+/// entity reference this crate tracks), which would need disclosing as an
+/// approximation rather than a byte-exact port.
 fn alert_species(species_path: &str) -> Option<(f64, f64, bool)> {
     match species_path {
         "zombified_piglin" => Some((35.0, 10.0, false)),

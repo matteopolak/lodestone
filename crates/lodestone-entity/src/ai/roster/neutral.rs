@@ -254,8 +254,17 @@ pub const ENDERMAN: &[Registration] = &[
         3,
         "NearestAttackableTargetGoal(Endermite)",
     ),
-    // `ResetUniversalAngerTargetGoal<>(this, false)` — clears anger when the
-    // `universalAnger` gamerule turns it off. No anger state, no gamerule.
+    // `ResetUniversalAngerTargetGoal<>(this, false)`. Re-verified rather than
+    // assumed: both an anger timer (`SimMob::anger`) and a `universal_anger`
+    // gamerule (`game_rules.rs`, default `false`, matching vanilla) exist now
+    // — an earlier version of this comment said neither did, and that was
+    // stale. Still `Missing` because the behaviour itself has nowhere to
+    // land: under `universal_anger`, `NeutralMob::forgetCurrentTargetAndRefreshUniversalAnger`
+    // nulls the *specific* target identity while keeping the timer alive, so
+    // any nearby player becomes valid — but this crate's anger state
+    // (`Anger { end_time, target: Vec3 }`) has no target-identity concept to
+    // null, only a stored position. Building this needs that model change
+    // first, for a gamerule vanilla ships off by default.
     Registration::missing(Selector::Target, 4, "ResetUniversalAngerTargetGoal"),
 ];
 
@@ -276,18 +285,33 @@ pub const ENDERMAN: &[Registration] = &[
 /// `ATTACK_DAMAGE 5.0`. `FOLLOW_RANGE 35.0` is inherited from `Zombie.createAttributes` and
 /// is what sizes the alert box below.
 ///
-/// Group aggro is modelled now, in two halves, neither of which is a row in
-/// this table — `ZombifiedPiglin.alertOthers` is driven from
-/// `ZombifiedPiglin.customServerAiStep`, not from a goal, so it was never
-/// going to be a `Registration` here. The propagation itself: every other
-/// zombified piglin in a box of `(FOLLOW_RANGE, 10.0, FOLLOW_RANGE)` = **±35
-/// XZ, ±10 Y** that has no live grudge yet has one set on it, matching this
-/// mob's own — `lodestone_server::mobs::MobSim::attack`'s `alert_species`
-/// census. Not modelled: line of sight, and vanilla's separate
-/// `ALERT_INTERVAL = TimeUtil.rangeOfSeconds(4, 6)` = **[80, 120]-tick**
-/// throttle on `ZombifiedPiglin.maybeAlertOthers` — the census instead fires
-/// only when the victim's own grudge is *new* (never re-alerting mid-grudge),
-/// which is a stricter, never-more-frequent stand-in. The *acquisition* half
+/// Group aggro is modelled now, in one of its **two independent** vanilla
+/// halves, neither of which is a row in this table. Re-verified against the
+/// 26.2 jar rather than assumed — an earlier version of this comment
+/// mislabelled which half this crate implements:
+///
+/// 1. **`HurtByTargetGoal(this).setAlertOthers()`** (registered above, target
+///    priority 1) fires its inherited `alertOthers()` once, from `start()`,
+///    the instant the piglin newly acquires a target — no line-of-sight
+///    check anywhere in that method. This is the half
+///    `lodestone_server::mobs::MobSim::attack`'s `alert_species` census
+///    models, gated on the victim's grudge being *new* (never re-alerting
+///    mid-grudge), which matches vanilla's own "once per acquisition" shape
+///    exactly rather than approximating it.
+/// 2. **`ZombifiedPiglin.customServerAiStep`'s private `maybeAlertOthers`**
+///    is a second, wholly separate mechanism this crate does not model at
+///    all: every tick the piglin has a target, throttled by its own
+///    `ALERT_INTERVAL = TimeUtil.rangeOfSeconds(4, 6)` = **[80, 120]-tick**
+///    timer (distinct from the shared grudge-duration window), gated on
+///    `getSensing().hasLineOfSight(getTarget())` against the piglin's
+///    *current* live target position. This is what makes a real piglin pack
+///    keep growing every few seconds while chasing you, not just once at the
+///    first hit — see `lodestone_server::mobs::alert_species`'s own doc
+///    comment for what building it needs.
+///
+/// The propagation itself (half 1): every other zombified piglin in a box of
+/// `(FOLLOW_RANGE, 10.0, FOLLOW_RANGE)` = **±35 XZ, ±10 Y** that has no live
+/// grudge yet has one set on it, matching this mob's own. The *acquisition* half
 /// — a piglin turning its fresh grudge into an actual `attack_target` — is
 /// `NearestAttackableTargetGoal(Player,isAngryAt)` below, `Coverage::Modelled`
 /// via `anger_gated_target`.
