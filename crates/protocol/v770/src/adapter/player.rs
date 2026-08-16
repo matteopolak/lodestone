@@ -104,7 +104,7 @@ impl V770Adapter {
                     name: entry.name,
                     game_mode: entry.game_mode.and_then(tab_game_mode),
                     latency: entry.latency,
-                    display_name: entry.display_name.map(Text::literal),
+                    display_name: entry.display_name,
                     listed: entry.listed,
                     // Carried through rather than dropped. The v770
                     // `ProfileProperty` and the model's are separate types by the
