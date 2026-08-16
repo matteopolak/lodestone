@@ -1,30 +1,75 @@
-//! **STATUS: THIS HARNESS PRODUCES NO SIGNAL. DO NOT TRUST EITHER TEST YET.**
+//! **STATUS: the control fires. The main gate is a real, non-vacuous clean
+//! result for a flat world — it does not reproduce the report.**
 //!
-//! The reasoning below is sound and the three pitfalls it documents are real
-//! and measured. What is *not* yet true is that the thing renders: after
-//! fixing all three, the terrain world and an empty one differ by **zero
-//! pixels anywhere in the frame**, while `RenderStats` simultaneously reports
-//! 59 sections drawn, 59 draw calls and 15,104 quads. So geometry is being
-//! submitted and nothing is landing in the readback.
+//! # What was swallowing the geometry
 //!
-//! The consequence is the important part: the control
-//! ([`a_deliberately_missing_surface_section_is_detected`]) removes a real
-//! section close enough to occupy a large screen area and **also finds zero
-//! holes**. A control that never fires makes its paired "pass" worthless, so
-//! `flat_terrain_at_moderate_distance_has_no_sky_holes` reporting `ok` is
-//! **vacuous, not exculpatory** — it is evidence about the harness, not about
-//! the terrain.
+//! Not the section-origin arena's dynamic offset (the previous leading
+//! suspicion) — the offset math was fine. The actual cause lives in the
+//! *same* uniform's spare lane: [`RenderState::upload_section`] stamps every
+//! freshly-uploaded section's origin uniform with a fade `build_time` read
+//! from `RenderState::section_fade_tick` (a `Cell<u64>` defaulting to `0`,
+//! otherwise advanced only by [`RenderState::update_animation`]), and
+//! `model.wgsl`'s `vs_main` resolves a per-section `visibility` factor as
+//! `section_visibility(camera.fog_ambient_light.w, origin.section_origin.w)`
+//! — `now` vs. `build_time`, the same clock on both sides
+//! (`lodestone_render::model_pipeline::section_visibility`). `fs_main` then
+//! mixes the lit fragment toward `camera.fog_color_start.rgb` by that factor:
+//! at `visibility == 0.0` the output **is** the fog colour, byte-for-byte,
+//! which is indistinguishable from the sky by construction. The harness
+//! uploaded every section and rendered immediately, calling neither
+//! `update_animation` at upload time nor before render, so `now` and
+//! `build_time` were both exactly `0.0` for every section on every frame —
+//! `section_visibility` was exactly `0.0`, always. `upload_section` and
+//! `render` are both the unmodified production functions; the gap was the
+//! harness never doing what `app.rs`'s real per-frame call site does
+//! (`update_animation` before every `render`), so a section that only looks
+//! like this for its first `0.75` s after upload in a real session looked
+//! like it forever here. [`render_frame`]'s doc carries the measurement and
+//! the fix: call `update_animation` with the clock advanced well past the
+//! `0.75` s fade window before rendering.
 //!
-//! Ruled out already: an unbound camera bind group (`emit_terrain_draws` binds
-//! `model.cam_bind_group` per draw) and a stale model camera buffer
-//! (`update_model_shared_camera_buffer` runs every frame). The leading
-//! unverified suspicion is the section-origin arena's dynamic offset when
-//! `upload_section` is driven directly rather than through the production
-//! `TerrainMesh`/`Sim` drain loop. Diagnostic printlns are left in place
-//! deliberately.
+//! Every other fact the production path establishes matches: the camera bind
+//! group, the shared camera buffer, the anim buffer (already initialised at
+//! tick `0`, not garbage), the palette buffer, and the origin arena's own
+//! offset allocation. Only the fade clock was unwired.
 //!
-//! Committed unfinished so the three pitfalls and the geometry argument are not
-//! lost. Delete this banner only when the control has been observed to fail.
+//! # Measured, with the fix applied
+//!
+//! `a_deliberately_missing_surface_section_is_detected` (the control): raw
+//! subject-vs-reference diff went from `0 / 307200` to **`195,419 / 307200`**
+//! differing pixels, and the sandwiched-sky detector itself went from `0` to
+//! **`11,759`** pixels across **341/640** columns, bounding box `(0, 182) –
+//! (340, 216)` — non-degenerate, localised, not a constant/round-number box.
+//! The control **is now observed to fire**.
+//!
+//! `flat_terrain_at_moderate_distance_has_no_sky_holes` (the main gate):
+//! **`ok`**, genuinely — `0` sandwiched-sky pixels at every one of the five
+//! configs (three yaws at the report's own "same level as me" pitch, a
+//! steep look-down, a slight look-up), each with real, non-trivial cull
+//! stats (53–60 sections drawn per frame, hundreds culled by distance and
+//! frustum, 0–59 by occlusion). This is a real clean result, not a vacuous
+//! one: the control above proves the exact same detector, same resolution,
+//! same distances, finds a real hole when one is deliberately introduced.
+//!
+//! # What this does and does not answer
+//!
+//! Depth-test discard and mip/gutter sampling were the two live suspects
+//! (missing geometry is structurally excluded by `ColumnSource::Complete`,
+//! and both are already-fixed per the record above); this result does not
+//! implicate either **for a flat, single-height world**. It cannot speak to
+//! Y-dependence or rotation-dependence of a hole that was not found at all in
+//! this scene, and it deliberately cannot exercise the shape the module doc
+//! below explains this harness cannot represent: a heightfield with
+//! **overhangs or multi-height terrain**, i.e. real chunk-to-chunk elevation
+//! changes, which is a plausible reading of "holes between the blocks" that
+//! this flat-world design excludes *by choice* (see "Why flat" below) to keep
+//! the detector unambiguous. If the report reproduces on genuinely uneven
+//! terrain, that is the next harness to build, not a sign this one is wrong.
+//!
+//! Absent a screenshot or a reproduction on non-flat terrain, this is the
+//! honest state: a real (non-vacuous) diagnostic finds no defect in the
+//! scenario it can test, so the next step is either a screenshot from the
+//! report or a harness over uneven terrain — not a guessed fourth cause.
 //!
 //! ---
 //!
@@ -323,9 +368,43 @@ fn upload_all(
     uploaded
 }
 
+/// Game tick to advance the render clock to before drawing, once terrain has
+/// been uploaded — see [`render_frame`]'s doc for why this is required at
+/// all.
+///
+/// `20` ticks = 1 real second; the section fade-in
+/// ([`lodestone_render::model_pipeline::SECTION_FADE_DURATION_SECS`]) is
+/// `0.75` s, so `200` ticks (10 s) clears it with a wide margin — a
+/// deliberately generous multiple, not a tight bound, because the point is
+/// to be unambiguously past the fade, not to probe its edge.
+const FADE_COMPLETE_TICK: u64 = 200;
+
 /// Render one frame through a freshly built `RenderState` (bare-arm
 /// suppressed) for `camera`, uploading terrain per `skip`/`upload_terrain`.
 /// Returns the read-back RGBA8 pixels and the frame's stats.
+///
+/// **Calls [`RenderState::update_animation`] after uploading and before
+/// rendering — this is not optional.** `RenderState::upload_section` stamps
+/// every freshly-uploaded section's origin uniform with a `build_time` read
+/// from `RenderState::section_fade_tick`, which defaults to `0` and is
+/// otherwise advanced only by `update_animation`. The model shader's
+/// per-fragment colour is `mix(fog_colour, lit_colour, section_visibility(now,
+/// build_time))` (`model.wgsl`'s `vs_main`/`fs_main`,
+/// `lodestone_render::model_pipeline::section_visibility`), and with neither
+/// call ever made, `now == build_time == 0.0` for every section on every
+/// frame, so `section_visibility` evaluates to exactly `0.0` and **every
+/// section renders as pure fog colour** — indistinguishable from the sky by
+/// construction, not by a coincidence of this scene's palette. Measured: this
+/// was the entire cause of "terrain and empty worlds differ by zero pixels
+/// while `RenderStats` reports real sections and quads" — the geometry was
+/// correct and submitted; it was uniformly faded to invisible. Production's
+/// real per-frame call site (`app.rs`) calls `update_animation` before every
+/// `render`, so a section only looks like this for its first `0.75`s after
+/// upload, which is why this gap was invisible to code reading: nothing
+/// about `upload_section` or `render` is wrong, and both are the exact
+/// production functions. Only a harness that renders sections *immediately*
+/// after uploading them, with no elapsed frames in between, can hit `now ==
+/// build_time` exactly.
 #[allow(clippy::too_many_arguments)]
 fn render_frame(
     device: &wgpu::Device,
@@ -346,6 +425,10 @@ fn render_frame(
         !upload_terrain || uploaded > 0,
         "fixture: some sections must have uploaded when terrain is requested"
     );
+    // Past the fade window (see this function's doc) — without this every
+    // section drawn below is `section_visibility == 0.0` and renders as pure
+    // fog colour, whether or not any terrain was actually uploaded.
+    state.update_animation(queue, FADE_COMPLETE_TICK);
     let frame = target.acquire().expect("headless acquire");
     let stats = state.render(device, queue, frame.view(), camera, None, &[]);
     (target.read_texels(device, queue), stats)
