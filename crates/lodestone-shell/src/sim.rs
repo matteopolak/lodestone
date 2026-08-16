@@ -945,6 +945,33 @@ impl Sim {
         lodestone_ecs::hold_write(&self.ecs, f)
     }
 
+    /// The mode a plugin has claimed `key` in (issue #162), or `None` if
+    /// unclaimed. Read by the driver before calling
+    /// `crate::app::input::resolve_key`, so the precedence chain itself stays
+    /// a pure function of plain data — see that function's own doc.
+    #[must_use]
+    pub(crate) fn plugin_key_intercept_mode(
+        &self,
+        key: &lodestone_ecs::PhysicalKey,
+    ) -> Option<lodestone_ecs::KeyInterceptMode> {
+        self.read(|w| w.resource::<lodestone_ecs::PluginKeybinds>().mode_of(key))
+    }
+
+    /// Queue one raw key transition for a plugin that has claimed `key` (in
+    /// either `KeyInterceptMode`) to observe next tick, via
+    /// `lodestone_ecs::drain_pending_plugin_key_events`
+    /// (`TickSet::Input`). The driver calls this whenever
+    /// [`Self::plugin_key_intercept_mode`] returned `Some` for the same key,
+    /// regardless of which mode — `Observe` still wants to see the event,
+    /// it just does not swallow it from gameplay.
+    pub(crate) fn queue_plugin_key_event(&mut self, key: lodestone_ecs::PhysicalKey, pressed: bool) {
+        self.write(|w| {
+            w.resource_mut::<lodestone_ecs::PendingPluginKeyEvents>()
+                .0
+                .push(lodestone_ecs::PluginKeyEvent { key, pressed });
+        });
+    }
+
     /// This `World`'s measured guard-hold statistics.
     ///
     /// The bound `lodestone_ecs::EcsHandle`'s lock discipline rests on is a

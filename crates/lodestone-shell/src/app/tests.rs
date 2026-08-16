@@ -1145,14 +1145,116 @@ fn playing() -> KeyGate {
 }
 
 fn resolve(gate: KeyGate, code: KeyCode, pressed: bool) -> Option<KeyOutcome> {
-    resolve_key(&Keybinds::new(), gate, Some(code), pressed, false)
+    resolve_key(&Keybinds::new(), gate, Some(code), pressed, false, None)
 }
 
 /// Like [`resolve`], but with Control held — only the drop-key tests need
 /// this axis, so it is a separate helper rather than a fifth argument on
 /// every existing call above.
 fn resolve_ctrl(gate: KeyGate, code: KeyCode, pressed: bool) -> Option<KeyOutcome> {
-    resolve_key(&Keybinds::new(), gate, Some(code), pressed, true)
+    resolve_key(&Keybinds::new(), gate, Some(code), pressed, true, None)
+}
+
+/// Issue #162: a plugin's `Consume` claim on a physical key wins over
+/// gameplay when nothing else has first claim on the keyboard — the
+/// positive half of the precedence-rank doc on `resolve_key`.
+#[test]
+fn a_plugin_consume_claim_wins_over_an_unbound_key_during_gameplay() {
+    let binds = Keybinds::new();
+    // `KeyCode::F13` is not bound to anything in the default table, so
+    // absent the plugin claim this would resolve to `None` — proof the
+    // outcome came from the claim, not from an incidental keybind.
+    let outcome = resolve_key(
+        &binds,
+        playing(),
+        Some(KeyCode::F13),
+        true,
+        false,
+        Some(lodestone_ecs::KeyInterceptMode::Consume),
+    );
+    assert_eq!(outcome, Some(KeyOutcome::PluginConsumed));
+}
+
+/// Both edges reach `PluginConsumed`, not just the press — the same
+/// both-edges requirement `Attack`/`Use` have, and the reason the arm has no
+/// `&& pressed` guard.
+#[test]
+fn a_plugin_consume_claim_fires_on_release_too() {
+    let binds = Keybinds::new();
+    let outcome = resolve_key(
+        &binds,
+        playing(),
+        Some(KeyCode::F13),
+        false,
+        false,
+        Some(lodestone_ecs::KeyInterceptMode::Consume),
+    );
+    assert_eq!(outcome, Some(KeyOutcome::PluginConsumed));
+}
+
+/// The precedence-rank claim itself: a plugin's `Consume` claim on a key that
+/// is *also* bound to a real gameplay action (here, forward movement) still
+/// wins — a plugin hotkey cannot be shadowed by a coincidental rebind onto
+/// the same physical key, matching `resolve_key`'s own doc.
+#[test]
+fn a_plugin_consume_claim_outranks_a_real_gameplay_binding_on_the_same_key() {
+    let binds = Keybinds::new();
+    let outcome = resolve_key(
+        &binds,
+        playing(),
+        Some(KeyCode::KeyW), // bound to `InputAction::Forward` by default
+        true,
+        false,
+        Some(lodestone_ecs::KeyInterceptMode::Consume),
+    );
+    assert_eq!(outcome, Some(KeyOutcome::PluginConsumed));
+}
+
+/// The negative control this whole design turns on: `Observe` mode must
+/// change nothing about resolution — the plugin is told about the key
+/// elsewhere (see the driver call site), but `resolve_key` itself must
+/// resolve exactly as if no plugin existed.
+#[test]
+fn a_plugin_observe_claim_does_not_change_resolution() {
+    let binds = Keybinds::new();
+    let with_observe = resolve_key(
+        &binds,
+        playing(),
+        Some(KeyCode::KeyW),
+        true,
+        false,
+        Some(lodestone_ecs::KeyInterceptMode::Observe),
+    );
+    let with_no_plugin = resolve_key(&binds, playing(), Some(KeyCode::KeyW), true, false, None);
+    assert_eq!(with_observe, with_no_plugin);
+    // Sharpen the assertion: this must be the real movement outcome, not two
+    // fixtures that coincidentally agree by both being `None`.
+    assert!(matches!(with_observe, Some(KeyOutcome::Movement(_, true))));
+}
+
+/// A container screen keeps first claim over a plugin's `Consume` mode —
+/// `resolve_key`'s own doc states this ranking, and this is the control that
+/// actually exercises it rather than trusting the doc comment.
+#[test]
+fn an_open_container_still_outranks_a_plugin_consume_claim() {
+    let binds = Keybinds::new();
+    let gate = KeyGate {
+        container_open: true,
+        gameplay: true,
+        ..KeyGate::default()
+    };
+    // The inventory-close binding still fires, exactly as it would with no
+    // plugin involved at all — the container arm's own catch-all runs
+    // first and the plugin arm below it is never reached.
+    let outcome = resolve_key(
+        &binds,
+        gate,
+        Some(KeyCode::KeyE), // `InputAction::Inventory`'s default binding
+        true,
+        false,
+        Some(lodestone_ecs::KeyInterceptMode::Consume),
+    );
+    assert_eq!(outcome, Some(KeyOutcome::CloseContainer));
 }
 
 /// Issue #15's last hop: an F-key has no printable `text`, so it is
@@ -1453,16 +1555,16 @@ fn slash_opens_chat_with_the_command_prefix_and_t_opens_it_without() {
     binds.set(InputAction::Command, Binding::Key(KeyCode::Backquote));
     binds.set(InputAction::Chat, Binding::Key(KeyCode::KeyY));
     assert_eq!(
-        resolve_key(&binds, playing(), Some(KeyCode::Backquote), true, false),
+        resolve_key(&binds, playing(), Some(KeyCode::Backquote), true, false, None),
         Some(KeyOutcome::OpenChat { command: true })
     );
     assert_eq!(
-        resolve_key(&binds, playing(), Some(KeyCode::KeyY), true, false),
+        resolve_key(&binds, playing(), Some(KeyCode::KeyY), true, false, None),
         Some(KeyOutcome::OpenChat { command: false })
     );
     // The old keys stop opening chat at all.
     assert_eq!(
-        resolve_key(&binds, playing(), Some(KeyCode::Slash), true, false),
+        resolve_key(&binds, playing(), Some(KeyCode::Slash), true, false, None),
         None
     );
 }
@@ -1810,13 +1912,13 @@ fn an_unbound_drop_key_is_swallowed_behind_a_container_and_dead_in_the_world() {
         ..KeyGate::default()
     };
     assert_eq!(
-        resolve_key(&binds, gate, Some(KeyCode::KeyQ), true, false),
+        resolve_key(&binds, gate, Some(KeyCode::KeyQ), true, false, None),
         None,
         "watched failing before this test existed: with the real binding \
          still assigned, this line reported Some(ContainerDrop {{ .. }})"
     );
     assert_eq!(
-        resolve_key(&binds, playing(), Some(KeyCode::KeyQ), true, false),
+        resolve_key(&binds, playing(), Some(KeyCode::KeyQ), true, false, None),
         None
     );
 }
@@ -1915,7 +2017,7 @@ fn an_open_chat_prompt_swallows_every_key_into_the_editor() {
     // And an unnameable physical key still reaches the editor, whose `text`
     // may be the only thing that identifies it.
     assert_eq!(
-        resolve_key(&Keybinds::new(), gate, None, true, false),
+        resolve_key(&Keybinds::new(), gate, None, true, false, None),
         Some(KeyOutcome::Chat)
     );
 }
@@ -2223,11 +2325,11 @@ fn a_rebind_moves_the_behaviour_to_the_new_key_and_off_the_old_one() {
     let mut binds = Keybinds::new();
     binds.set(InputAction::Inventory, Binding::Key(KeyCode::KeyI));
     assert_eq!(
-        resolve_key(&binds, playing(), Some(KeyCode::KeyI), true, false),
+        resolve_key(&binds, playing(), Some(KeyCode::KeyI), true, false, None),
         Some(KeyOutcome::OpenContainer)
     );
     assert_eq!(
-        resolve_key(&binds, playing(), Some(KeyCode::KeyE), true, false),
+        resolve_key(&binds, playing(), Some(KeyCode::KeyE), true, false, None),
         None,
         "the old default must stop opening the inventory"
     );
@@ -2238,11 +2340,11 @@ fn a_rebind_moves_the_behaviour_to_the_new_key_and_off_the_old_one() {
         ..KeyGate::default()
     };
     assert_eq!(
-        resolve_key(&binds, gate, Some(KeyCode::KeyI), true, false),
+        resolve_key(&binds, gate, Some(KeyCode::KeyI), true, false, None),
         Some(KeyOutcome::CloseContainer)
     );
     assert_eq!(
-        resolve_key(&binds, gate, Some(KeyCode::KeyE), true, false),
+        resolve_key(&binds, gate, Some(KeyCode::KeyE), true, false, None),
         None
     );
 }
@@ -2252,12 +2354,12 @@ fn unbinding_an_action_disables_it_without_disturbing_the_rest() {
     let mut binds = Keybinds::new();
     binds.set(InputAction::Jump, Binding::Unbound);
     assert_eq!(
-        resolve_key(&binds, playing(), Some(KeyCode::Space), true, false),
+        resolve_key(&binds, playing(), Some(KeyCode::Space), true, false, None),
         None
     );
     // The neighbouring arms are untouched.
     assert_eq!(
-        resolve_key(&binds, playing(), Some(KeyCode::KeyW), true, false),
+        resolve_key(&binds, playing(), Some(KeyCode::KeyW), true, false, None),
         Some(KeyOutcome::Movement(Action::Forward, true))
     );
 }
@@ -2273,23 +2375,23 @@ fn attack_and_use_are_keyboard_dispatchable_once_rebound_off_the_mouse() {
     binds.set(InputAction::Attack, Binding::Key(KeyCode::KeyR));
     binds.set(InputAction::Use, Binding::Key(KeyCode::KeyV));
     assert_eq!(
-        resolve_key(&binds, playing(), Some(KeyCode::KeyR), true, false),
+        resolve_key(&binds, playing(), Some(KeyCode::KeyR), true, false, None),
         Some(KeyOutcome::Attack(true))
     );
     // Hold-to-dig: the release edge must arrive, or mining never stops.
     assert_eq!(
-        resolve_key(&binds, playing(), Some(KeyCode::KeyR), false, false),
+        resolve_key(&binds, playing(), Some(KeyCode::KeyR), false, false, None),
         Some(KeyOutcome::Attack(false))
     );
     assert_eq!(
-        resolve_key(&binds, playing(), Some(KeyCode::KeyV), true, false),
+        resolve_key(&binds, playing(), Some(KeyCode::KeyV), true, false, None),
         Some(KeyOutcome::Use(true))
     );
     // The release edge must arrive too, or `ReleaseUseItem` never sends —
     // the exact bug this test's sibling assertions exist to catch (a bow
     // or shield cannot complete a use without it).
     assert_eq!(
-        resolve_key(&binds, playing(), Some(KeyCode::KeyV), false, false),
+        resolve_key(&binds, playing(), Some(KeyCode::KeyV), false, false, None),
         Some(KeyOutcome::Use(false))
     );
 }
@@ -2347,7 +2449,7 @@ fn an_unnameable_physical_key_is_ignored_by_the_binding_chain() {
     // `PhysicalKey::Unidentified` reaches the menu and chat arms (tested
     // above) but must not match any binding — there is nothing to match on.
     assert_eq!(
-        resolve_key(&Keybinds::new(), playing(), None, true, false),
+        resolve_key(&Keybinds::new(), playing(), None, true, false, None),
         None
     );
 }

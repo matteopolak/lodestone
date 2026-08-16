@@ -87,10 +87,6 @@ const KNOWN_UNPRODUCED: &[(&str, &str)] = &[
         "command minecart screen (#47 covers the command *block* only)",
     ),
     (
-        "ClientAction::SetGameRules",
-        "game-rule editor; #32's settings menu is the likely home",
-    ),
-    (
         "ClientAction::ChangeDifficulty",
         "singleplayer difficulty control in #32's settings menu",
     ),

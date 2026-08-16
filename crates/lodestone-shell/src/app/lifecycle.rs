@@ -824,9 +824,35 @@ impl ApplicationHandler for WindowApp {
                     PhysicalKey::Code(code) => Some(code),
                     _ => None,
                 };
+                // Issue #162: a plugin's claim on this physical key, read
+                // once through a short ECS guard before `resolve_key` (a pure
+                // function of plain data — see its own doc) runs its
+                // precedence chain. `None` on the overwhelmingly common path
+                // where no plugin has registered anything at all, without
+                // even taking the guard.
+                let plugin_key = code.map(|c| lodestone_ecs::PhysicalKey::named(format!("{c:?}")));
+                let plugin_mode = plugin_key
+                    .as_ref()
+                    .and_then(|key| self.sim.plugin_key_intercept_mode(key));
                 // Resolved into a local first so the immutable borrow of
                 // `self.keybinds` ends before the `&mut self` calls below.
-                let outcome = resolve_key(&self.keybinds, gate, code, pressed, self.ctrl_held);
+                let outcome = resolve_key(
+                    &self.keybinds,
+                    gate,
+                    code,
+                    pressed,
+                    self.ctrl_held,
+                    plugin_mode,
+                );
+                // Deliver the raw transition to the plugin regardless of
+                // which `KeyOutcome` this resolved to — `Observe` mode wants
+                // it exactly as much as `Consume` does; only whether
+                // gameplay *also* sees the key depends on the outcome above.
+                if plugin_mode.is_some()
+                    && let Some(key) = plugin_key.clone()
+                {
+                    self.sim.queue_plugin_key_event(key, pressed);
+                }
                 match outcome {
                     Some(KeyOutcome::Menu) => {
                         // Issue #15's last hop: a bind button mid-capture needs the
@@ -1124,6 +1150,10 @@ impl ApplicationHandler for WindowApp {
                     Some(KeyOutcome::Movement(action, held)) => {
                         self.sim.input_mut(|i| i.set(action, held));
                     }
+                    // A plugin's `Consume` claim already got the raw event
+                    // above, unconditionally; there is nothing else to do —
+                    // that is the entire point of the outcome existing.
+                    Some(KeyOutcome::PluginConsumed) => {}
                     // Either nothing is bound to this key, or a screen above
                     // swallowed it. Both are "do nothing", deliberately.
                     None => {}
