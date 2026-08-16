@@ -97,6 +97,38 @@ derives one of these, so without the exclusion the report was mostly noise:
 `lodestone-v770` alone went from 49 falsely-dead fields to 2 real ones the
 moment this landed.
 
+A field read also happens through a **struct pattern**, not only a `.field`
+expression: `let PathParams { max_path_length, .. } = params;` (equally, a
+`match`/`if let` arm or a destructured function parameter) reads
+`max_path_length` out of `params` with no `Expr::Field` anywhere in sight.
+`visit_pat_struct` records a read for every named `FieldPat` it walks —
+`PathFinder::find_path` (`crates/lodestone-entity/src/pathfinding/
+search.rs`) destructures all three of `PathParams`'s fields this way and
+would otherwise report all three as having zero production readers.
+
+"Default-only" field detection has two mutation shapes that produce no
+`Expr::Assign`/`Expr::Binary` at all, so a field genuinely populated only
+through one of them looks unpopulated:
+
+- **Growing a collection through a mutating method.** `self.field.push(x)`,
+  `.insert(k, v)`, `.extend(iter)`, and `.entry(k)` (whose *receiver* is the
+  field, even though the mutation itself happens on the `Entry` the call
+  returns) are all real, non-default mutations. `visit_expr_method_call`
+  records one whenever the method name matches and the receiver is a direct
+  `Expr::Field` — see `COLLECTION_GROWTH_METHODS`. `Brain::sensors` and five
+  sibling fields (`crates/lodestone-entity/src/brain/mod.rs`) are grown
+  exclusively this way in `add_sensor`/`add_activity`/`add_activity_any_of`.
+- **Taking a mutable reference to a field and handing it to a function.**
+  `step_vertical(..., &mut self.fall_speed)` mutates `fall_speed` through the
+  pointer with nothing at the call site naming it as a write target, and
+  `std::mem::take(&mut self.field)`/`replace`/`swap` are the same shape.
+  `visit_expr_reference` records a non-default mutation for any `&mut
+  self.field` it sees, regardless of what it is passed to — deliberately
+  conservative, since it cannot know whether the callee actually writes
+  through the pointer. `NavigatingMob::fall_speed` and four sibling `Vec`
+  fields drained via `std::mem::take` (`crates/lodestone-entity/src/ai/
+  navigating_mob.rs`) are exactly this shape.
+
 "Default-only" field detection tracks every production assignment site (a
 struct-literal field, a `..Default::default()`/`..T::default()` rest fill,
 or a plain `place.field = value`) and asks whether *any* of them assigns
@@ -218,23 +250,27 @@ structural consequence of the name-based design documented above:
 - **A default-only finding is a heuristic about literal syntax, not runtime
   behaviour.** A field assigned a non-default-*looking* expression that
   evaluates to the default at runtime (e.g. `field: some_config_value()`
-  where the config happens to always return `0`) will not be flagged, and a
-  field this scanner cannot see mutated (through a method that itself does
-  something equivalent to `field = 0` without literal `Expr::Assign` syntax,
-  e.g. `std::mem::take`) may be mis-scored either way.
-- **A `Vec`/collection field grown only through a mutating method
-  (`.push`, `.insert`, `.extend`) reads as default-only, permanently.**
-  Found dogfooding this tool on itself: `Collected::allow_dead_code` and
-  four sibling `Vec` fields in `xtask/src/islands.rs`'s own `Collected`
-  struct are constructed once via `Collected::default()` (correctly
-  default-like) and then grown exclusively via `.push(...)` throughout the
-  scan — a real, meaningful mutation this heuristic cannot see, because
-  `visit_expr_binary`'s compound-assignment fix only covers operators
-  (`+=`), not method calls. Unlike `position_reminder`'s `+=` case above,
-  there is no bounded operator list to special-case here: `.push` today,
-  some other crate's `.insert`/`.append`/a custom mutator tomorrow. Treat a
-  default-only finding on a collection-typed field as this class by default
-  and check its consumer for a growth method before trusting it.
+  where the config happens to always return `0`) will not be flagged.
+- **A collection field grown only via `.push`/`.insert`/`.extend`/`.entry`,
+  or mutated only by passing `&mut self.field` to a function (including
+  `std::mem::take`/`replace`/`swap`), is now handled** — see the two
+  mutation shapes in "How it works" above — **but only when the receiver or
+  the reference target is a *direct* `Expr::Field`.** A field reached through
+  an intermediate binding (`let s = &mut self.field; s.push(x);`) or a
+  chained accessor (`self.get_field_mut().push(x)`) is still invisible to
+  both fixes, for the same bare-syntax reason a call through a stored
+  closure is invisible to the call-count tracker. No case of this narrower
+  shape has been found in this workspace yet, but treat a default-only or
+  zero-reader finding on a field with a `_mut` accessor as worth a second
+  look before trusting it.
+- **Not every collection-typed default-only finding is a false positive —
+  verify the growth site actually exists before assuming this class covers
+  it.** `MobShape::malus_overrides` (`crates/lodestone-entity/src/
+  pathfinding/world.rs`) looks identical to the `Brain` fields above (a
+  `HashMap` initialised via `HashMap::new()`, read via `.get(&kind)`) but
+  has **no** `.insert`/`.entry` call anywhere in the workspace — it is
+  read but never populated, so it is correctly, genuinely default-only.
+  Confirmed by grep, not assumed from the shape.
 - **Findings in a crate this scanner cannot edit (anything outside
   `crates/xtask`/`xtask`, `crates/protocol/*`, `docs/`) still need a human or
   a differently-scoped agent to close them.** The tool reports; it does not
