@@ -24,12 +24,14 @@ Two halves, split the way `lodestone-server` splits every block entity: pure der
 - `beam_unobstructed` — an approximation of vanilla's `!beamSections.isEmpty()`. Vanilla
   tracks the beam as coloured segments (for the render, which this crate does not do
   server-side); only *emptiness* gates effect application, so this checks "every block from
-  directly above the beacon to a fixed scan height is beam-transparent" (air, beacon, glass,
-  tinted glass, or stained glass/pane) instead of tracking segments or colour. **Known gap**:
-  vanilla's real gate is `getLightDampening() >= 15`, a general block-opacity value; this
-  checks membership in the beam-transparent family instead, which agrees for every block a
-  player is likely to build a shaft from and can disagree for an unusual low-opacity block
-  (a carpet, say) that is not in that family.
+  directly above the beacon to a fixed scan height is beam-transparent" instead of tracking
+  segments or colour. Transparency itself is vanilla's real gate,
+  `BeaconBlockEntity.tickBeam`'s `getLightDampening() >= 15 && !state.is(Blocks.BEDROCK)`
+  blocking: `is_beam_transparent` reads the real per-block-state
+  `lodestone_data::light_props::dampening` census (the same table `lodestone-world`'s light
+  engine uses) plus the bedrock exemption, rather than membership in a hand-picked block
+  family — a carpet, a candle, or any other genuinely low-opacity block agrees with vanilla
+  now instead of being treated as blocking.
 - `required_levels_for` / `validate_beacon_effects` — the tier a power requires, and
   `BeaconBlockEntity.validateEffects`'s full gate: a secondary needs the level-4 pyramid; each
   pick's own tier must fit the pyramid actually built; the primary can never be the
@@ -94,9 +96,10 @@ Two halves, split the way `lodestone-server` splits every block entity: pure der
 - The vertical reach of a beacon's effect approximates vanilla's `AABB.inflate(range)
   .expandTowards(0, height, 0)` as "no lower than `range` below, no upper bound" — `crate::
   chunk::ChunkSource` has no height accessor to derive the real upper bound from generically.
-- The native tick loop is the only wired driver of periodic application; the `wasm32` loop's
-  own effects section (`server.rs`, the second `if !effects.is_empty()` occurrence) does not
-  yet carry the same beacon sweep — a real, known gap, not an oversight.
+- Both the native and `wasm32` loops drive periodic application: `wasm_vitals_tick`
+  (`server.rs`, the `wasm32` `serve_play`'s vitals slice) carries the same 80-tick sweep the
+  native `vitals_tick` `select!` arm does, duplicated rather than shared per this crate's
+  "known choke point" rule for `server.rs` in the root `CLAUDE.md`.
 - `apply_use_item_on`'s right-click dispatch refreshes `BeaconData::levels` for *any* beacon
   before falling into the generic `open_container_screen` path — if you add a second way to
   open a beacon's menu, refresh `levels` there too or the displayed tier can be stale.
