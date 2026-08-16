@@ -1324,7 +1324,12 @@ impl WindowApp {
         if let Some(sheet) = crate::resources::load_particle_atlas() {
             render.install_particle_sheet_atlas(gpu.device(), gpu.queue(), sheet.atlas());
         }
-        let mut hud = HudRenderer::new(gpu.device(), target.raw_view_format());
+        // Back on the target's own (sRGB) format, matching `attach_items`/
+        // `attach_glint`/`attach_item_models` below. Building this pipeline for
+        // the raw format instead made the item pipelines format-incompatible
+        // with the pass they draw into, which is why inventory icons and air
+        // bubbles stopped rendering — see the note in `app/redraw.rs`.
+        let mut hud = HudRenderer::new(gpu.device(), format);
         // Attach the vanilla GUI sprite atlas so the survival vitals draw from
         // real textures; on a jar-less run this is `None` and the HUD keeps its
         // procedural fallback.
