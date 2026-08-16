@@ -52,3 +52,31 @@ impl Sensor for NearestPlayerSensor {
         "nearest_player"
     }
 }
+
+/// Writes [`MemoryModuleType::HURT_BY`] from [`BrainMob::last_hurt_by`],
+/// clearing it once that expires. Vanilla's own `HurtBySensor` also records
+/// the *damage source* (used by [`super::behaviors::Panic`]'s jar original to
+/// filter which damage types cause a flee) — not modelled here, because
+/// [`BrainMob::last_hurt_by`] carries only a position, the same cut
+/// [`super::mob::BrainMob`]'s own doc discloses for every hurt-adjacent
+/// reading on this seam. Every hurt is panic-causing here, broader than
+/// vanilla's `DamageTypeTags.PANIC_CAUSES`.
+#[derive(Debug, Default)]
+pub struct HurtBySensor;
+
+impl Sensor for HurtBySensor {
+    fn tick(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob) {
+        match mob.last_hurt_by() {
+            Some(pos) => mem.set(MemoryModuleType::HURT_BY, MemoryValue::Pos(pos)),
+            None => mem.erase(MemoryModuleType::HURT_BY),
+        }
+    }
+
+    fn output_memories(&self) -> Vec<MemoryModuleType> {
+        vec![MemoryModuleType::HURT_BY]
+    }
+
+    fn name(&self) -> &'static str {
+        "hurt_by"
+    }
+}

@@ -84,4 +84,18 @@ pub trait BrainMob {
     /// A candidate land wander destination within the given block radii
     /// (vanilla's `LandRandomPos.getPos`). `None` means none was found.
     fn random_land_pos(&mut self, max_xz: i32, max_y: i32) -> Option<Vec3>;
+
+    /// The position of whoever last damaged this mob, if that memory has not
+    /// yet expired — feeds [`super::sensor::HurtBySensor`], the `HURT_BY`
+    /// analogue of [`MobController::last_hurt_by`]. Defaults to `None` so
+    /// every existing implementor (including the brain's own hermetic test
+    /// doubles) keeps compiling; only [`NavigatingMob`](crate::ai::NavigatingMob)
+    /// overrides it, delegating to the exact same field
+    /// `MobController::last_hurt_by` already reads — one hurt event, two
+    /// seams onto it, not two independent trackers that could disagree.
+    ///
+    /// [`MobController`]: crate::ai::MobController
+    fn last_hurt_by(&self) -> Option<Vec3> {
+        None
+    }
 }
