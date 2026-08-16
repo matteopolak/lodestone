@@ -303,10 +303,15 @@ impl<'w> MobSim<'w> {
     ///
     /// # Disclosed gaps, each with a reason rather than a shrug
     ///
-    /// * **A fireball's five seconds of fire are not applied.** [`SimMob`] has no
-    ///   burning state at all (`SimMob::ignite` is the *creeper fuse*, a different
-    ///   mechanic that happens to share the verb), so there is nothing to write
-    ///   the fire ticks into. The fireball's `5.0` damage does land.
+    /// * **A mob does not yet ignite from standing in a fire or lava block.**
+    ///   [`SimMob`] now carries a real `crate::burning::BurnState`
+    ///   ([`MobSim::tick_burning`] consumes it every tick, and a small
+    ///   fireball's own `5.0`-second ignition raises it — `SimMob::ignite` is
+    ///   a separate mechanic, the *creeper fuse*, that happens to share the
+    ///   verb), but nothing yet reads what block a mob's feet are standing in
+    ///   to raise the counter the way a player's does. So a mob can only
+    ///   catch fire from an explicit ignition source today, not by walking
+    ///   into flame.
     /// * **Players are not candidates.** This sim knows player *positions*
     ///   ([`PlayerPerception`]) and neither their entity ids nor their
     ///   `PlayerVitals`, which live per-connection. Mob-on-player damage has no
@@ -572,6 +577,18 @@ impl<'w> MobSim<'w> {
             // best identity available here and points the right way along the
             // flight path.
             target.mob.note_hurt(Some(hit.origin));
+            // A small fireball's five seconds of fire
+            // (`lodestone_entity::projectile::impact_effect`'s `ignite_seconds`,
+            // nonzero only for `small_fireball` — a ghast's large fireball and
+            // a wither skull deal their own flat damage and never call
+            // vanilla's `igniteForSeconds`) — previously computed and read
+            // nowhere in the workspace. Applied only on a landed, surviving
+            // hit (matching the damage above, which already returned early
+            // at `effect.damage <= 0.0`); a dead target has nothing left to
+            // burn.
+            if effect.ignite_seconds > 0.0 && applied > 0.0 {
+                target.ignite_for_seconds(effect.ignite_seconds);
+            }
             (applied, target.health() <= 0.0)
         };
         // `WitherSkull.onHitEntity`: a landed hit applies `MobEffects.WITHER`
@@ -1292,6 +1309,123 @@ mod tests {
             ));
         }
         assert!(mismatches.is_empty(), "ghast fireball impact mismatches:\n{}", mismatches.join("\n"));
+    }
+
+    /// **Production-path proof that a fireball's `ignite_seconds` reaches the
+    /// target.** Before this, `impact_effect` computed `5.0` for a *small*
+    /// fireball (a blaze's shot — `SmallFireball.onHitEntity`'s own
+    /// `igniteForSeconds(5.0F)`) and nothing in the workspace read it. Drives
+    /// the real [`MobSim::resolve_projectile_impacts`] entry point — the
+    /// same one every other test in this module uses as its production seam
+    /// — rather than calling `resolve_projectile_hit` in isolation.
+    ///
+    /// **Not** `minecraft:fireball` (a ghast's *large* fireball): reading
+    /// `LargeFireball.onHitEntity` shows it deals its flat `6.0` and calls no
+    /// `igniteForSeconds` at all — only the small variant ignites. The task
+    /// this fix came from named "small_fireball/fireball/wither_skull" as all
+    /// three igniting; the jar disagrees with that premise, and the fix
+    /// (`impact_effect`'s existing `ignite_seconds: 0.0` for both) was
+    /// already correct. See [`a_large_fireball_does_not_ignite`] for the
+    /// control proving that distinction.
+    #[test]
+    fn a_small_fireball_impact_ignites_its_target() {
+        let world = ChunkWorld::new(-4, 24);
+        let mut sim = MobSim::new(&world);
+        let target = spawn_target(&mut sim, Vec3::new(3.0, 1.0, 0.0));
+        assert!(!sim.get(target).expect("just spawned").is_on_fire());
+        sim.spawn_projectile(
+            "minecraft:small_fireball".parse().expect("valid key"),
+            Projectile::throwable(Vec3::new(0.0, 1.0, 0.0), Vec3::new(20.0, 0.0, 0.0)),
+        );
+        sim.resolve_projectile_impacts();
+        assert!(
+            sim.get(target).expect("survives a single small fireball hit").is_on_fire(),
+            "a small fireball hit must ignite its target through the real production entry point"
+        );
+    }
+
+    /// **Control 1**: an arrow's `impact_effect` carries no `ignite_seconds`
+    /// at all, so a mob it strikes must take damage without igniting.
+    #[test]
+    fn an_arrow_hit_does_not_ignite_its_target() {
+        let world = ChunkWorld::new(-4, 24);
+        let mut sim = MobSim::new(&world);
+        let target = spawn_target(&mut sim, Vec3::new(3.0, 1.0, 0.0));
+        let before = sim.get(target).expect("just spawned").health();
+        sim.spawn_projectile(
+            // A modest, realistic speed — `arrow_impact_damage` scales with
+            // it (unlike a fireball's flat damage), and the fireball tests'
+            // own `20.0` would one-shot this 20-health target here.
+            "minecraft:arrow".parse().expect("valid key"),
+            Projectile::throwable(Vec3::new(0.0, 1.0, 0.0), Vec3::new(4.0, 0.0, 0.0)),
+        );
+        sim.resolve_projectile_impacts();
+        let mob = sim.get(target).expect("survives a single arrow hit");
+        assert!(mob.health() < before, "control: the arrow must still deal damage");
+        assert!(!mob.is_on_fire(), "an arrow must not ignite its target");
+    }
+
+    /// **Control 2**, the discriminating one: a *large* fireball (a ghast's
+    /// shot, `minecraft:fireball`) deals real damage but — per
+    /// `LargeFireball.onHitEntity`, which never calls `igniteForSeconds` —
+    /// must not ignite. Without this control, `a_small_fireball_impact_ignites_its_target`
+    /// could pass by igniting on every projectile, fireball-shaped or not.
+    #[test]
+    fn a_large_fireball_does_not_ignite() {
+        let world = ChunkWorld::new(-4, 24);
+        let mut sim = MobSim::new(&world);
+        let target = spawn_target(&mut sim, Vec3::new(3.0, 1.0, 0.0));
+        let before = sim.get(target).expect("just spawned").health();
+        sim.spawn_projectile(
+            "minecraft:fireball".parse().expect("valid key"),
+            Projectile::throwable(Vec3::new(0.0, 1.0, 0.0), Vec3::new(20.0, 0.0, 0.0)),
+        );
+        sim.resolve_projectile_impacts();
+        let mob = sim.get(target).expect("survives a single large fireball hit");
+        assert!(mob.health() < before, "control: the large fireball must still deal damage");
+        assert!(!mob.is_on_fire(), "a large (ghast) fireball must not ignite its target");
+    }
+
+    /// **The burn actually runs its course**, driven through the same
+    /// production tick loop: an ignition of `N` seconds is `20*N` ticks
+    /// (`crate::burning::ignite_ticks_for_seconds`), each `tick_burning` call
+    /// consuming exactly one — so the mob must still be on fire after `20*N -
+    /// 1` ticks and burnt out at exactly `20*N`, the same edge
+    /// `crate::burning::BurnState`'s own unit tests pin. Health is asserted
+    /// only qualitatively (strictly lower once burnt out) rather than to an
+    /// exact figure: the burn's first tick lands the same game tick as
+    /// whatever ignited it, which can interact with the hurt-cooldown i-frame
+    /// window that `MobSim::apply_damage` already applies to every damage
+    /// source — a separately covered mechanic this test does not re-derive.
+    /// [`SimMob::ignite_for_seconds`] is the same call
+    /// `resolve_projectile_hit` makes, exercised here directly so the tick
+    /// count is exact rather than dependent on projectile travel time.
+    #[test]
+    fn an_ignited_mob_burns_for_exactly_its_duration_and_loses_health() {
+        let world = ChunkWorld::new(-4, 24);
+        let mut sim = MobSim::new(&world);
+        let target = spawn_target(&mut sim, Vec3::new(3.0, 1.0, 0.0));
+        let before = sim.get_mut(target).expect("just spawned").health();
+        sim.get_mut(target).expect("just spawned").ignite_for_seconds(5.0);
+
+        let total_ticks = crate::burning::ignite_ticks_for_seconds(5.0);
+        assert_eq!(total_ticks, 100);
+        for _ in 0..total_ticks - 1 {
+            sim.tick();
+        }
+        assert!(
+            sim.get(target).expect("a 20-health mob survives five seconds of burning").is_on_fire(),
+            "must still be burning one tick before the duration elapses"
+        );
+
+        sim.tick();
+        let mob = sim.get(target).expect("must survive the full burn");
+        assert!(!mob.is_on_fire(), "must be burnt out at exactly the duration");
+        assert!(
+            mob.health() < before,
+            "the burn must have dealt real damage: before {before}, after {}",
+            mob.health()
+        );
     }
 
     /// **The discriminating gate for the fireball's blast half.** A ghast's
