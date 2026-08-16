@@ -289,6 +289,97 @@ fn to_spans_resolves_inheritance_down_the_tree() {
     assert_eq!(spans[2].style.color, Some(TextColor::Red)); // inherited from B
 }
 
+/// `click_event`/`hover_event` decode onto [`Text::click`]/[`Text::hover`]
+/// correctly (`from_json_parses_styles_extra_and_events` already proves that),
+/// but [`Text::to_spans`] never read them — a hover tooltip or a link click
+/// had nowhere to reach once a tree was flattened for rendering.
+/// [`Text::to_interactive_spans`] is the fix: same tree, same
+/// child-overrides-parent inheritance [`to_spans_resolves_inheritance_down_the_tree`]
+/// already pins for style, extended to `click`/`hover`/`insertion`.
+#[test]
+fn to_interactive_spans_inherits_click_hover_and_insertion_down_the_tree() {
+    let open_url = ClickEvent {
+        action: ClickAction::OpenUrl,
+        value: "https://example.invalid".into(),
+    };
+    let run_command = ClickEvent {
+        action: ClickAction::RunCommand,
+        value: "/help".into(),
+    };
+    let tooltip = HoverEvent {
+        action: HoverAction::ShowText,
+        value: Box::new(Text::literal("a tooltip")),
+    };
+    // root(click=open_url, hover=tooltip, insertion="root")
+    //   -> child A(no events of its own -- must inherit all three)
+    //   -> child B(click=run_command -- overrides click, still inherits hover/insertion)
+    let text = Text {
+        content: TextContent::Literal("root".into()),
+        click: Some(open_url.clone()),
+        hover: Some(tooltip.clone()),
+        insertion: Some("root".into()),
+        extra: vec![
+            Text {
+                content: TextContent::Literal("A".into()),
+                ..Text::default()
+            },
+            Text {
+                content: TextContent::Literal("B".into()),
+                click: Some(run_command.clone()),
+                ..Text::default()
+            },
+        ],
+        ..Text::default()
+    };
+    let spans = text.to_interactive_spans();
+    assert_eq!(spans.len(), 3);
+
+    assert_eq!(spans[0].text, "root");
+    assert_eq!(spans[0].click, Some(open_url.clone()));
+    assert_eq!(spans[0].hover, Some(tooltip.clone()));
+    assert_eq!(spans[0].insertion, Some("root".into()));
+
+    assert_eq!(spans[1].text, "A");
+    assert_eq!(spans[1].click, Some(open_url.clone()), "A must inherit root's click");
+    assert_eq!(spans[1].hover, Some(tooltip.clone()), "A must inherit root's hover");
+    assert_eq!(spans[1].insertion, Some("root".into()), "A must inherit root's insertion");
+
+    assert_eq!(spans[2].text, "B");
+    assert_eq!(spans[2].click, Some(run_command), "B's own click must win over root's");
+    assert_eq!(spans[2].hover, Some(tooltip), "B must still inherit root's hover");
+    assert_eq!(spans[2].insertion, Some("root".into()), "B must still inherit root's insertion");
+}
+
+/// A legacy `§`-coded run that also carries a click/hover: the code-split
+/// pieces [`Text::to_interactive_spans`] produces must all carry the *outer*
+/// span's click/hover, since the re-parsed inner text
+/// (`Text::from_legacy(&span.text)`) has none of its own — the same
+/// find-the-discriminating-input shape as `to_spans`'s own legacy-splitting
+/// tests, extended to prove the events survive the split rather than only the
+/// style.
+#[test]
+fn to_interactive_spans_carries_click_through_a_legacy_code_split() {
+    let open_url = ClickEvent {
+        action: ClickAction::OpenUrl,
+        value: "https://example.invalid".into(),
+    };
+    let text = Text {
+        content: TextContent::Literal("plain \u{a7}claink".into()),
+        click: Some(open_url.clone()),
+        ..Text::default()
+    };
+    let spans = text.to_interactive_spans();
+    assert!(spans.len() >= 2, "the §c must split this into at least two runs");
+    for span in &spans {
+        assert_eq!(
+            span.click,
+            Some(open_url.clone()),
+            "every legacy-split piece of {:?} must still carry the outer click",
+            span.text
+        );
+    }
+}
+
 #[test]
 fn translate_substitutes_sequential_and_indexed_args() {
     let joined = Text::translate(
