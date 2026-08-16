@@ -83,10 +83,13 @@ pub struct BundleSelection {
 }
 
 /// Resolves one scroll-wheel notch over `slot` (holding `stack`) into the new
-/// tracked selection, or `None` when the slot holds no scrollable bundle (an
-/// empty bundle or a non-bundle item — `ItemStack::bundle_items_to_show`
-/// returning `0` covers both) — vanilla's `onMouseScrolled` returning `false`
-/// with nothing sent in that case.
+/// tracked selection, or `None` when the slot holds nothing scrollable —
+/// vanilla's own two-step gate, `BundleMouseActions.matches` (`is_bundle`)
+/// then `onMouseScrolled`'s own `amountOfShownItems == 0` check
+/// (`bundle_items_to_show`), kept as two checks here for the same reason:
+/// `matches` runs before *any* wheel notch is looked at (it decides which
+/// `ItemSlotMouseAction` even gets asked), where the shown-items count can
+/// only be computed for a stack already known to carry the component.
 ///
 /// `previous` is the selection already being tracked, if any, so scrolling
 /// the *same* slot continues from its current index rather than restarting
@@ -101,6 +104,9 @@ pub fn bundle_slot_scrolled(
     wheel: f64,
     previous: Option<BundleSelection>,
 ) -> Option<BundleSelection> {
+    if !lodestone_game::item::is_bundle(stack.item()) {
+        return None;
+    }
     let limit = stack.bundle_items_to_show();
     if limit == 0 {
         return None;
