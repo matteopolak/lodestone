@@ -14,6 +14,12 @@ workspace = true
 # `src/packets/chunk.rs`'s module docs.
 lodestone-canonical = { workspace = true }
 lodestone-core = { workspace = true }
+# Non-test dependency as of the `block_change`/`multi_block_change` arms in
+# `adapter.rs`: writing a resolved block state is what creates/removes a block
+# entity in vanilla (`LevelChunk.setBlockState`, no packet involved), so the
+# adapter looks up the block-entity type for the just-written state the same
+# way `lodestone-v340`'s adapter does.
+lodestone-data = { workspace = true }
 lodestone-macros = { workspace = true }
 lodestone-model = { workspace = true }
 lodestone-world = { workspace = true }
@@ -48,10 +54,6 @@ live-entity = []
 live-interaction = []
 
 [dev-dependencies]
-# Test-only: the canonical 26.2 block-state census, used by the canonicalisation
-# gate to re-read the *name* of every state id it asserts, so the expected value
-# is anchored to the jar-derived registry rather than to a literal.
-lodestone-data = { workspace = true }
 lodestone-net = { workspace = true }
 lodestone-testsupport = { workspace = true }
 tokio = { workspace = true }

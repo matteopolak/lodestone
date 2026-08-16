@@ -936,6 +936,72 @@ fn play_entity_status_emits_status_event_from_hand_built_bytes() {
 }
 
 #[test]
+fn play_held_item_slot_emits_held_slot_changed_from_hand_built_bytes() {
+    let adapter = V47Adapter::new();
+    let payload = vec![4u8]; // slot: signed byte, hotbar index 4
+
+    let directives = adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::HELD_ITEM_SLOT,
+            &payload,
+        )
+        .expect("handle");
+    assert_emits_set(&directives, &[ClientEvent::HeldSlotChanged { slot: 4 }]);
+}
+
+#[test]
+fn play_abilities_emits_abilities_changed_from_hand_built_bytes() {
+    let adapter = V47Adapter::new();
+    // flags: invulnerable(0x01) + flying(0x02) + can_fly(0x04), NOT instabuild —
+    // pairwise-distinct bools set (three true, one false) so a bit-order
+    // transposition cannot survive.
+    let mut payload = vec![0x07u8];
+    payload.extend_from_slice(&0.05f32.to_be_bytes()); // flying speed
+    payload.extend_from_slice(&0.1f32.to_be_bytes()); // walking speed
+
+    let directives = adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::ABILITIES,
+            &payload,
+        )
+        .expect("handle");
+    assert_emits_set(
+        &directives,
+        &[ClientEvent::AbilitiesChanged {
+            invulnerable: true,
+            flying: true,
+            can_fly: true,
+            instabuild: false,
+            flying_speed: 0.05,
+            walking_speed: 0.1,
+        }],
+    );
+}
+
+#[test]
+fn play_abilities_rejects_trailing_bytes() {
+    let adapter = V47Adapter::new();
+    let mut payload = vec![0x00u8];
+    payload.extend_from_slice(&0.0f32.to_be_bytes());
+    payload.extend_from_slice(&0.0f32.to_be_bytes());
+    payload.push(0xFF); // trailing garbage
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::ABILITIES,
+        &payload,
+    );
+    assert!(
+        matches!(result, Err(lodestone_model::AdapterError::Decode(_))),
+        "expected a decode error, got {result:?}"
+    );
+}
+
+#[test]
 fn play_entity_head_rotation_emits_head_yaw_degrees_from_hand_built_bytes() {
     let adapter = V47Adapter::new();
     let mut payload = var_i32(7); // entity id
