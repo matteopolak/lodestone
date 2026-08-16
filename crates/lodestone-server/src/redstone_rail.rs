@@ -109,23 +109,6 @@ impl RailShape {
         })
     }
 
-    /// `#[allow(dead_code)]`: the inverse of [`Self::from_str`], kept for
-    /// symmetry and for a future caller that needs to write a freshly
-    /// computed `SHAPE` back onto a state string; nothing in this module
-    /// needs it today since [`update_state`] only ever touches `POWERED`.
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            RailShape::NorthSouth => "north_south",
-            RailShape::EastWest => "east_west",
-            RailShape::AscendingNorth => "ascending_north",
-            RailShape::AscendingSouth => "ascending_south",
-            RailShape::AscendingEast => "ascending_east",
-            RailShape::AscendingWest => "ascending_west",
-        }
-    }
-
     /// `RailShape.isSlope()` for the six straight-only values.
     #[must_use]
     pub fn is_slope(self) -> bool {

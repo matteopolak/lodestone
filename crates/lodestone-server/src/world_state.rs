@@ -306,27 +306,6 @@ impl WorldStateHandle {
         self.with(|state| state.difficulty_locked = locked);
     }
 
-    /// `ServerLevel.getCurrentDifficultyAt` — this store's [`Difficulty`] and
-    /// `game_time` (standing in for `getOverworldClockTime()`; see
-    /// `crate::regional_difficulty`'s module doc for why the two coincide
-    /// here) plus the moon phase implied by `day_time`, folded through
-    /// [`crate::regional_difficulty::DifficultyInstance::new`].
-    ///
-    /// `local_game_time` (a chunk's inhabited time) is the caller's to supply
-    /// — this crate does not track it yet, so every call site today passes
-    /// `0`, which only ever *understates* the result (see that module's doc).
-    #[must_use]
-    pub fn regional_difficulty_at(&self, local_game_time: i64) -> crate::regional_difficulty::DifficultyInstance {
-        self.with(|state| {
-            crate::regional_difficulty::DifficultyInstance::new(
-                state.difficulty,
-                state.time.game_time,
-                local_game_time,
-                crate::regional_difficulty::moon_brightness_for_day_time(state.time.day_time),
-            )
-        })
-    }
-
     /// Sets one game rule from its wire/command string form, validating the
     /// identifier and value against [`crate::game_rules::GAME_RULES`].
     pub fn set_rule(&self, name: &str, raw: &str) -> Result<GameRuleValue, GameRuleError> {

@@ -137,12 +137,6 @@ impl ServerApp {
         &self.app
     }
 
-    /// Mutable access so a caller can `add_plugins` before
-    /// [`into_world`](Self::into_world).
-    pub fn app_mut(&mut self) -> &mut App {
-        &mut self.app
-    }
-
     /// Runs [`GameTick`] once. Phase 1 moves this call into
     /// `crate::tick::run_tick_loop`, against the `World` rather than this
     /// builder.

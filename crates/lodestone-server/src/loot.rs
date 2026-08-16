@@ -528,12 +528,6 @@ impl LootTableBuilder {
         &self.failures
     }
 
-    /// Number of tables staged so far.
-    #[must_use]
-    pub fn table_count(&self) -> usize {
-        self.tables.len()
-    }
-
     /// Builds the [`LootTableSet`], consuming the builder.
     #[must_use]
     pub fn finish(self) -> LootTableSet {

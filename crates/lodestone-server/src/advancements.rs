@@ -952,11 +952,6 @@ impl AdvancementManager {
         }
     }
 
-    /// Per-player state (immutable), e.g. for the caller to compose persistence.
-    pub fn player_progress(&self, player: Uuid) -> Option<&PlayerProgress> {
-        self.players.get(&player)
-    }
-
     /// Persist a player's advancements as NBT (the #437 hook).
     pub fn save_advancements(&self, player: Uuid) -> Nbt {
         self.players

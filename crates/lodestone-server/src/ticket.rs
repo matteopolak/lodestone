@@ -189,24 +189,12 @@ pub struct TicketType {
 
 impl TicketType {
     #[must_use]
-    pub const fn persists(&self) -> bool {
-        self.flags & FLAG_PERSIST != 0
-    }
-    #[must_use]
     pub const fn does_load(&self) -> bool {
         self.flags & FLAG_LOADING != 0
     }
     #[must_use]
     pub const fn does_simulate(&self) -> bool {
         self.flags & FLAG_SIMULATION != 0
-    }
-    #[must_use]
-    pub const fn keeps_dimension_active(&self) -> bool {
-        self.flags & FLAG_KEEP_DIMENSION_ACTIVE != 0
-    }
-    #[must_use]
-    pub const fn can_expire_if_unloaded(&self) -> bool {
-        self.flags & FLAG_CAN_EXPIRE_IF_UNLOADED != 0
     }
 }
 
