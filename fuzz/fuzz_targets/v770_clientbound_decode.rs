@@ -1,7 +1,7 @@
 //! libFuzzer target: `V770Adapter::handle_packet` (clientbound decode) must
 //! never panic on arbitrary bytes, in any connection state, at any packet id.
 //!
-//! Issue #549 Track A. This is coverage-guided, in-process fuzzing — unlike
+//! This is coverage-guided, in-process fuzzing — unlike
 //! `crates/lodestone-fuzz`'s proptest suite (bounded-iteration, runs under a
 //! plain `cargo test`, no corpus), libFuzzer explores the decoder's branch
 //! structure directly and persists a corpus of inputs that found new coverage,

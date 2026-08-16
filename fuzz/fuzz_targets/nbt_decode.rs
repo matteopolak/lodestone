@@ -1,7 +1,7 @@
 //! libFuzzer target: `lodestone_core::read_named_nbt` must never panic on
 //! arbitrary bytes.
 //!
-//! Issue #549 Track A. NBT is one of the two named "obvious first targets"
+//! NBT is one of the two named "obvious first targets"
 //! (alongside the packet decoders) — every clientbound packet field typed as
 //! NBT (`GameLogin`'s registry payloads, `SetEntityData`'s custom-name/
 //! item-component tags, `container_set_slot`'s item NBT, chunk block-entity

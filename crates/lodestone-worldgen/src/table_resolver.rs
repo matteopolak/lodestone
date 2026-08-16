@@ -12,11 +12,11 @@
 //! `configured_carver/`, `configured_feature/`, `placed_feature/`,
 //! `tags/block/`, `structure_set/`, `structure/`, `tags/worldgen/biome/`,
 //! `template_pool/`, `processor_list/`). `lodestone-server`'s
-//! `EmbeddedResolver` was the first of these; issue #407 moves 26.2's actual
-//! JSON *data* out of this crate's dependents into whichever version crate
-//! ships it, and a second embedding site is exactly when hand-rolling this a
-//! second time would go unnoticed as duplication. This type is the shared
-//! half: supply a table, get a full [`Resolver`].
+//! `EmbeddedResolver` was the first of these; a pending version-seam migration
+//! moves 26.2's actual JSON *data* out of this crate's dependents into
+//! whichever version crate ships it, and a second embedding site is exactly
+//! when hand-rolling this a second time would go unnoticed as duplication.
+//! This type is the shared half: supply a table, get a full [`Resolver`].
 //!
 //! The `build.rs` directory-scan itself still belongs to each embedding
 //! crate (it needs `OUT_DIR`, which build-time codegen shared across crates
