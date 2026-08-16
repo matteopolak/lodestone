@@ -1773,6 +1773,19 @@ impl WindowApp {
             menu.render_overlay(device, queue, frame.view(), &sign_edit_frame, w, h);
         }
 
+        // The book-editing screen (issue #613's `EditBook` remainder) — the
+        // seventh overlay, same shape as the sign-editing block immediately
+        // above and for the same reason: `menu::render::frame_for` has no arm
+        // for it (it is an overlay, not a full screen), so without a draw
+        // call here the screen would open, hit-test correctly
+        // (`nav::on_screen_frame` already calls `book_edit_overlay_frame`),
+        // and render nothing.
+        if let Some(book_edit_frame) = crate::menu::nav::book_edit_overlay_frame(&self.ui, &self.nav)
+            && let Some(menu) = self.menu.as_mut()
+        {
+            menu.render_overlay(device, queue, frame.view(), &book_edit_frame, w, h);
+        }
+
         // `key.screenshot` (issue #16), and **this position is the whole
         // correctness argument**: every pass above — world, HUD, container, and
         // the three overlay blocks — has now written into `frame.view()`, and

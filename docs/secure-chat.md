@@ -244,16 +244,22 @@ than a bullet.
   server declares signable (`ArgumentSignatures.signCommand`), which is a
   distinct and larger feature than message signing, not a small extension of
   [`sign_chat_action`].
-- Key refresh (`ChatKeyPair::due_refresh`) is not polled anywhere. A session
-  that outlives the key's lifetime keeps signing with the stale key; whatever
-  a real server does with an expired-key signature is untested here. The
-  natural place to add this is next to the existing fetch in `Driver`'s
-  `ClientEvent::Login` handler — check `due_refresh` on some periodic event
-  (a keep-alive, the same one the last-seen tick-flush already piggybacks on)
-  and re-`fetch_key_pair` when due. Whether vanilla keeps the same session UUID
-  and chain position across a refresh or starts a fresh session is unread as
-  of this writing — check `AccountProfileKeyPairManager`/`LocalChatSession`
-  before assuming either.
+- **Landed since — key refresh is now polled.** `Driver`'s `ClientEvent::KeepAlive`
+  arm (the same tick surrogate the last-seen flush already piggybacks on — this
+  driver has no client tick of its own) checks
+  `ChatKeyPair::due_refresh` against `lodestone_time::epoch_duration()` and
+  re-`fetch_key_pair`s when due. Whether vanilla keeps the same session UUID and
+  chain position across a refresh, or starts a fresh session, was unread as of
+  this writing and is **still** unread — this took the conservative reading
+  rather than resolve the question: a refreshed key becomes a brand-new
+  `ChatSession` (fresh session id, chain reset to link 0), announced exactly
+  like the join-time one via a second `ClientAction::AnnounceChatSession`. A
+  failed refresh is logged and the *stale* key keeps signing — not a fallback
+  to unsigned chat, which would immediately trip the exact last-seen-window
+  mismatch this doc's "chat-validation kick" section above documents for an
+  unsigned message sent mid-session. Whoever resolves the
+  `AccountProfileKeyPairManager`/`LocalChatSession` question should revisit
+  whether the fresh-session choice was the right one.
 - **Landed since — the receive side.** `Driver`'s `emit` now calls
   [`verify_signature`] against the sender's retained `ChatSessionInfo` and
   surfaces the result (`ChatAckInfo::verified`, and a `[Not Secure] ` text

@@ -1291,6 +1291,45 @@ impl Sim {
         })
     }
 
+    /// The currently held `minecraft:writable_book`'s edit-screen seed, or
+    /// `None` if neither hand holds one — `WindowApp::try_use`'s fork for
+    /// issue #613's `EditBook` producer, the same shape its command-block
+    /// fork already has.
+    ///
+    /// The main hand is checked first, matching vanilla's own hand
+    /// resolution (`Player.interactionResultAndUpdate` tries
+    /// `InteractionHand.MAIN_HAND` before `OFF_HAND`). `slot` is already in
+    /// `ServerboundEditBookPacket`'s own addressing — the hotbar's *inventory*
+    /// index (`0..=8`) for the main hand, or
+    /// [`lodestone_game::menu::OFFHAND_NATIVE`] (`40`) for the off hand — see
+    /// `crate::menu::book_edit`'s module doc.
+    #[must_use]
+    pub fn writable_book_in_hand(&self) -> Option<crate::menu::book_edit::BookEditOpen> {
+        const WRITABLE_BOOK: &str = "minecraft:writable_book";
+        let menu = self.player_menu();
+        let main_slot = self.selected_slot();
+        let (slot, stack) = match menu.player_native(main_slot) {
+            Some(stack) if stack.item().to_string() == WRITABLE_BOOK => {
+                (i32::try_from(main_slot).unwrap_or(0), stack)
+            }
+            _ => match menu.player_native(lodestone_game::menu::OFFHAND_NATIVE) {
+                Some(stack) if stack.item().to_string() == WRITABLE_BOOK => {
+                    (i32::try_from(lodestone_game::menu::OFFHAND_NATIVE).unwrap_or(40), stack)
+                }
+                _ => return None,
+            },
+        };
+        let pages = stack
+            .writable_book_content()
+            .map(<[String]>::to_vec)
+            .unwrap_or_default();
+        let author = self
+            .local_uuid()
+            .and_then(|id| self.tab_list().get(&id).map(|entry| entry.profile.name.clone()))
+            .unwrap_or_default();
+        Some(crate::menu::book_edit::BookEditOpen { slot, pages, author })
+    }
+
     /// The local player's in-progress eat or drink, or `None`.
     ///
     /// The same [`ConsumeState::resolve`](crate::consume::ConsumeState::resolve) join

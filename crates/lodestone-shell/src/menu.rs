@@ -49,6 +49,7 @@ pub mod advancement_data;
 /// has to be run client-side — see the module doc.
 pub mod advancement_tree;
 pub mod advancements;
+pub mod book_edit;
 pub mod command_block;
 pub mod confirm;
 pub mod create_world;
@@ -70,6 +71,7 @@ pub mod social;
 pub mod stats;
 pub mod status;
 pub mod telemetry;
+pub mod text_area;
 pub mod widget;
 pub mod world_select;
 
@@ -200,6 +202,31 @@ pub enum Screen {
     /// vanilla's `removed()`, which is unconditional. There is no Cancel that
     /// skips the send.
     SignEdit,
+    /// The book-and-quill editing screen: vanilla's `BookEditScreen`/
+    /// `BookSignScreen`, folded into one [`Screen`] with a `signing` flag on
+    /// [`crate::menu::book_edit::BookEditState`] — see that module's doc for
+    /// why. Same overlay shape as [`Screen::CommandBlockEdit`]/
+    /// [`Screen::SignEdit`] (pointer released, world keeps rendering behind
+    /// it, `isInGameUi() == true` in vanilla for both of the screens this
+    /// folds).
+    ///
+    /// **Client-local, like `CommandBlockEdit`, not server-authorised like
+    /// `SignEdit`**: vanilla opens `BookEditScreen` the instant the player
+    /// uses a `minecraft:writable_book` in hand, with no server round trip —
+    /// see `WindowApp::try_use`'s fork for a writable book, the same shape
+    /// its command-block fork already has.
+    ///
+    /// Opened by [`open_book_edit`](Self::open_book_edit); closed by
+    /// [`close_book_edit`](Self::close_book_edit). **Escape always fully
+    /// closes the whole flow, from either layout, sending nothing** —
+    /// neither `BookEditScreen` nor `BookSignScreen` overrides `onClose`, so
+    /// vanilla's default `Screen.keyPressed`'s Escape arm
+    /// (`this.onClose()` → `setScreen(null)`) drops unsaved changes outright
+    /// rather than returning `BookSignScreen`'s Cancel to the page editor.
+    /// Only a real click on Done or Finalize sends
+    /// [`crate::menu::book_edit::BookEditState::to_save_action`]/
+    /// [`to_sign_action`](crate::menu::book_edit::BookEditState::to_sign_action).
+    BookEdit,
     /// Paused overlay: pointer released, player input frozen. The world behind
     /// keeps rendering and — on a live server — keeps ticking; pausing is a
     /// *local* UI state, not a world stop. Reachable from [`Screen::Playing`]
@@ -410,7 +437,7 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 23] = [
+    pub const ALL: [Screen; 24] = [
         Screen::MainMenu,
         Screen::ServerList,
         Screen::ServerEdit,
@@ -423,6 +450,7 @@ impl Screen {
         Screen::Container,
         Screen::CommandBlockEdit,
         Screen::SignEdit,
+        Screen::BookEdit,
         Screen::Paused,
         Screen::Death,
         Screen::Error,
@@ -584,6 +612,12 @@ impl UiState {
     #[must_use]
     pub fn is_sign_edit_open(&self) -> bool {
         self.screen == Screen::SignEdit
+    }
+
+    /// Whether the book-editing screen is open over the world.
+    #[must_use]
+    pub fn is_book_edit_open(&self) -> bool {
+        self.screen == Screen::BookEdit
     }
 
     /// Whether a session is currently being established.
@@ -754,6 +788,8 @@ impl UiState {
                     // silently strand the player on a screen backed by a
                     // session that no longer exists.
                     | Screen::SignEdit
+                    // Same reasoning as `Screen::SignEdit` immediately above.
+                    | Screen::BookEdit
                     | Screen::Paused
                     | Screen::Death
                     | Screen::Error
@@ -1219,6 +1255,25 @@ impl UiState {
         }
     }
 
+    /// Open the book-editing screen over the world. Only from
+    /// [`Screen::Playing`], matching [`open_command_block`](Self::open_command_block)'s
+    /// own guard — this screen is reached the same client-local way a
+    /// command block is (see [`Screen::BookEdit`]'s own doc).
+    pub fn open_book_edit(&mut self) {
+        if self.screen == Screen::Playing {
+            self.screen = Screen::BookEdit;
+        }
+    }
+
+    /// Close the book-editing screen back to the world — Done, Finalize, or
+    /// Escape (see [`Screen::BookEdit`]'s own doc on why, unlike
+    /// [`Screen::SignEdit`], Escape here sends nothing).
+    pub fn close_book_edit(&mut self) {
+        if self.screen == Screen::BookEdit {
+            self.screen = Screen::Playing;
+        }
+    }
+
     /// Escape, interpreted by screen:
     /// - Playing → Paused, Paused → Playing
     /// - Chat → Playing (cancel the line)
@@ -1253,6 +1308,13 @@ impl UiState {
             // command block's Cancel), so this bare `close_sign_edit()` is a
             // belt-and-braces fallback, not the send path.
             Screen::SignEdit => self.close_sign_edit(),
+            // Same belt-and-braces reasoning as `Screen::CommandBlockEdit`
+            // above, not `Screen::SignEdit`'s: `MenuNav::key_book_edit`
+            // intercepts Escape first in production and sends nothing (see
+            // `Screen::BookEdit`'s own doc — Escape discards, matching
+            // vanilla's un-overridden `Screen.onClose` for both screens it
+            // folds), so this bare `close_book_edit()` never sends either.
+            Screen::BookEdit => self.close_book_edit(),
             Screen::Error => self.dismiss_error(),
             Screen::ServerEdit => self.screen = Screen::ServerList,
             Screen::ServerList => self.screen = Screen::MainMenu,
@@ -1342,6 +1404,7 @@ impl UiState {
                 | Screen::Container
                 | Screen::CommandBlockEdit
                 | Screen::SignEdit
+                | Screen::BookEdit
         ) {
             self.screen = Screen::Paused;
         }
@@ -1397,6 +1460,7 @@ impl UiState {
                 | Screen::Container
                 | Screen::CommandBlockEdit
                 | Screen::SignEdit
+                | Screen::BookEdit
                 | Screen::Paused
         ) {
             self.screen = Screen::Credits;
@@ -1425,6 +1489,7 @@ impl UiState {
                 | Screen::Container
                 | Screen::CommandBlockEdit
                 | Screen::SignEdit
+                | Screen::BookEdit
                 | Screen::Paused
         ) {
             self.death_message = message;

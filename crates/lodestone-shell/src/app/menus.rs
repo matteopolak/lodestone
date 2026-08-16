@@ -242,6 +242,18 @@ impl WindowApp {
                     net.send_action(submit.into_action());
                 }
             }
+            // The book-editing screen's Done or Finalize row — the same
+            // shape as `MenuAction::SignUpdate` immediately above:
+            // `MenuNav::activate_book_edit_row` takes `BookEditState::
+            // to_save_action`/`to_sign_action` before closing the screen, so
+            // this payload is all that is left of the widget state by the
+            // time this arm runs. Sends [`ClientAction::EditBook`] —
+            // issue #613's producer for a packet that previously had none.
+            MenuAction::EditBook(submit) => {
+                if let Some(net) = self.sim.net() {
+                    net.send_action(submit.into_action());
+                }
+            }
             // The pause menu's Open to LAN (issue #535). Native only: there is no
             // TCP listener to bind in a browser, which is the same reason
             // `Origin::Integrated`'s `lan_port` is `cfg`'d out there.
@@ -810,6 +822,20 @@ impl WindowApp {
             // is picked up the next time the screen opens.
             self.nav.set_command_tree(self.command_tree());
             self.nav.open_command_block(&mut self.ui, open);
+            self.tab_held = false;
+            self.set_grab(false);
+            return;
+        }
+        // Issue #613's `EditBook` remainder: `minecraft:writable_book` opens
+        // vanilla's `BookEditScreen` the instant it is used, entirely
+        // client-side — no server round trip, the same shape the command
+        // block fork immediately above has. See `crate::menu::book_edit`'s
+        // module doc.
+        if self.ui.screen() == crate::menu::Screen::Playing
+            && let Some(open) = self.sim.writable_book_in_hand()
+        {
+            self.sim.input_mut(InputState::release_all);
+            self.nav.open_book_edit(&mut self.ui, open);
             self.tab_held = false;
             self.set_grab(false);
             return;

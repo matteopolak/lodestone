@@ -973,6 +973,60 @@ impl<T: Transport> Driver<T> {
                 if let Some(offset) = self.chat_tracker.take_acknowledgement() {
                     auto_actions.push(ClientAction::ChatAck { offset });
                 }
+                // Secure chat key refresh (`docs/secure-chat.md`'s "still not
+                // built" list): `ChatKeyPair::due_refresh` was never polled
+                // anywhere, so a session outliving its key's lifetime kept
+                // signing with a stale key indefinitely. The keep-alive is
+                // the same periodic tick the last-seen flush immediately
+                // above already piggybacks on — vanilla's own
+                // `AccountProfileKeyPairManager` polls on a timer with no
+                // dedicated packet of its own either, so there is no "real"
+                // event to hang this off instead.
+                //
+                // Whether vanilla keeps the same session UUID and chain
+                // position across a refresh, or starts a fresh session, was
+                // unread as of `docs/secure-chat.md`'s last update. This
+                // takes the conservative reading: a new key pair becomes a
+                // **new** `ChatSession` (fresh session id, chain reset to
+                // link 0), announced exactly like the join-time one — mixing
+                // an old chain position with a key the server has not yet
+                // associated with it seemed the riskier of the two guesses.
+                #[cfg(not(target_arch = "wasm32"))]
+                if secure_chat_enabled()
+                    && let Some(session) = self.auth_session.as_ref()
+                    && self.chat_session.as_ref().is_some_and(|chat_session| {
+                        let now_millis = lodestone_time::epoch_duration().as_millis() as i64;
+                        chat_session.key_pair().due_refresh(now_millis)
+                    })
+                {
+                    let access_token = session.access_token.clone();
+                    let sender = session.profile.id;
+                    match lodestone_auth::fetch_key_pair(&self.http, &access_token).await {
+                        Ok(key_pair) => {
+                            let chat_session = lodestone_auth::ChatSession::new(sender, key_pair);
+                            auto_actions.push(ClientAction::AnnounceChatSession {
+                                session_id: chat_session.session_id(),
+                                expires_at_millis: chat_session.key_pair().expires_at_millis(),
+                                public_key: chat_session.key_pair().public_key_der().to_vec(),
+                                key_signature: chat_session.key_pair().key_signature().to_vec(),
+                            });
+                            self.chat_session = Some(chat_session);
+                        }
+                        Err(error) => {
+                            // Best-effort, matching the join-time fetch's own
+                            // failure handling: keep signing with the
+                            // (now-stale) key rather than dropping to
+                            // unsigned chat, which would trip the same
+                            // last-seen-window mismatch `docs/secure-chat.md`'s
+                            // "chat-validation kick" section documents for an
+                            // unsigned message sent mid-session.
+                            tracing::warn!(
+                                %error,
+                                "chat-signing key refresh failed; continuing with the stale key"
+                            );
+                        }
+                    }
+                }
             }
             // Vanilla answers a server-initiated ping challenge with a `pong`
             // unconditionally, with no user-facing policy to suppress it —
