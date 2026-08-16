@@ -711,14 +711,27 @@ pub fn generate_packet_ids_source(report: &PacketReport) -> Result<String> {
         report.minecraft_version
     )?;
     source.push('\n');
-    source.push_str("pub const STATE_HANDSHAKING: u8 = 0;\n");
-    source.push_str("pub const STATE_STATUS: u8 = 1;\n");
-    source.push_str("pub const STATE_LOGIN: u8 = 2;\n");
-    source.push_str("pub const STATE_CONFIGURATION: u8 = 3;\n");
-    source.push_str("pub const STATE_PLAY: u8 = 4;\n");
+    // Written from `PacketState`/`PacketBound`'s own `code_const`/`code_value`
+    // rather than transcribed literals, so this table and the `match` arms
+    // that define "handshaking is state 0" cannot drift apart -- they are
+    // now one source of truth instead of two hand-kept in sync by eye.
+    for state in PacketState::ALL {
+        writeln!(
+            source,
+            "pub const {}: u8 = {};",
+            state.code_const(),
+            state.code_value()
+        )?;
+    }
     source.push('\n');
-    source.push_str("pub const BOUND_CLIENTBOUND: u8 = 0;\n");
-    source.push_str("pub const BOUND_SERVERBOUND: u8 = 1;\n");
+    for bound in PacketBound::ALL {
+        writeln!(
+            source,
+            "pub const {}: u8 = {};",
+            bound.code_const(),
+            bound.code_value()
+        )?;
+    }
 
     for state in PacketState::ALL {
         writeln!(source, "\npub mod {} {{", state.module_name())?;
