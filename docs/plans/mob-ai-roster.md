@@ -9,6 +9,12 @@ roster **cannot be built first**: eight of the thirteen implemented goals are st
 of firing in production today, so this plan sequences a perception-and-driver spine ahead of every
 species unit.
 
+**Status note, 2026-08-15: B4 (#233, neutral/aggro) landed.** All four headline mechanisms — enderman
+teleport-on-stare, zombified piglin group aggro, bee sting-then-die, wolf pack aggro — are
+`Coverage::Modelled` and tested against a real `NavigatingMob`. See §3's B4 entry for the summary and
+`roster::neutral`'s own module doc for the full account. §4's enderman `adjustedTickDelay` literals
+below are corrected inline rather than superseded separately, since the fix is small and local.
+
 **Status note, superseded 2026-08-14 by a real re-verdict pass (not just a citation fix) — see
 §1.2 and §1.4 inline for the details.** The original note below (added during a citation pass,
 explicitly *not* a status audit) already found `crates/lodestone-entity/src/ai/roster/` real and
@@ -394,10 +400,14 @@ Each owns one file under `crates/lodestone-entity/src/ai/roster/` plus a registr
   `MobSim::spawn_projectile` call site (`crates/lodestone-server/src/mobs/projectiles.rs`).
   **Recommend splitting B3 into B3a (launch + tick reaches a client as a moving arrow
   entity) and B3b (hit detection and damage).**
-- **B4 — neutral/aggro (#233).** Owns `roster/neutral.rs` + a shared anger-timer state machine landed
-  **once**. Enderman stare, zombified piglin group alert, bee sting-then-die, wolf pack aggro.
-  Blocked on the missing event bus for propagation (§1.4) — plan a direct sim-side census instead of
-  a hook. **Touches metadata** (bee anger flags) → oracle.
+- **B4 — neutral/aggro (#233). Landed.** Owns `roster/neutral.rs` + a shared anger-timer state
+  machine (`SimMob::anger`/`MobController::angry_target`, issue #458). All four headline mechanisms
+  are real: enderman stare and teleport, zombified piglin group alert, bee sting-then-die, wolf pack
+  aggro — the last three via `NearestAttackableTargetGoal::anger_gated()` (the anger-gated acquisition
+  row) plus `MobSim::attack`'s `alert_species` same-species census (the propagation half, resolved as
+  a direct sim-side census rather than an event bus, exactly as this bullet originally planned). Bee
+  metadata (`hasStung`) was **not** needed on the wire — it stays a host-side `SimMob::stung_at` drain
+  flag, never sent to a client, so no oracle run was required for it.
 - **B5 — specialists (#232).** Owns `roster/specialist.rs`. Guardian beam is a *third* attack shape
   (charge-then-damage-tick, neither melee nor projectile); ghast fireball feeds `explosion.rs`, which
   now has a real caller and a real `encode_explode`. Warden is Brain-based → defer its sensor to
@@ -502,6 +512,11 @@ damage lands at `getAttackDuration()`.
 `FOLLOW_RANGE 64.0` (`EnderMan.createAttributes`); stare test `isLookingAtMe(player, 0.025, true, false, eyeY)`;
 `EndermanLookForPlayerGoal` `aggroTime = adjustedTickDelay(5)` and teleport when
 `teleportTime++ >= adjustedTickDelay(30)` (both in `EndermanLookForPlayerGoal`'s own tick method).
+**Corrected while landing #233**: `adjustedTickDelay` halves its argument
+(`Goal.adjustedTickDelay`/`reducedTickDelay`, `Mth.positiveCeilDiv`) and nothing in this goal's chain
+overrides `requiresUpdateEveryTick`, so the real aggro delay is **3** ticks, not the literal 5, and the
+teleport-towards delay is **15**, not 30 — the landed implementation (`roster::neutral::ENDERMAN`'s own
+doc comment) uses 3/15; this table previously quoted the unhalved literals.
 
 **Zombified piglin** (`monster/zombie/ZombifiedPiglin.java`): `MOVEMENT_SPEED 0.23F` (`ZombifiedPiglin.createAttributes`);
 `PERSISTENT_ANGER_TIME = TimeUtil.rangeOfSeconds(20, 39)` (field declaration); `ALERT_RANGE_Y = 10` (field declaration);
