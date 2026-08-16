@@ -538,6 +538,133 @@ constructor's own comment at `crates/lodestone-client/src/state.rs` says so). A 
 therefore cannot use the bus by any route; only the `adopting` path, which the test above exercises,
 can. Tracked on issue #436.
 
+### Client input interception (issue #162)
+
+**Landed.** `lodestone_ecs::input` (`crates/lodestone-ecs/src/input.rs`) is the registration point
+`TickSet::Input`'s own doc comment reserved: `PluginKeybinds` (a `Resource`, unconditionally installed
+by `LocalPlayerPlugin` — the same "reaches a running client with no driver-crate change" reasoning
+`DebugLines` already gives) lets a plugin claim a physical key in `KeyInterceptMode::Consume` (nothing
+below it in the shell's precedence chain sees the key at all) or `Observe` (the plugin is told, but
+gameplay/chat/menu chrome still resolves the key exactly as if no plugin existed).
+
+**The shell side.** `lodestone_shell::app::input::resolve_key` — the pure precedence-chain function
+this document's own doctrine already names as the "menu/chat/container swallow" seam — gained a
+`plugin_mode: Option<KeyInterceptMode>` parameter and one new arm, ranked immediately after the
+container-open swallow and ahead of every gameplay binding: behind chat/menu/container, which keep
+first claim on the keyboard regardless (clause 4 — a human's own input target always outranks
+installed intent, and an open chat box or container screen *is* the human's current input target);
+ahead of gameplay, so a plugin hotkey cannot be shadowed by a rebind onto the same physical key. Both
+edges reach the arm (no `&& pressed`), matching `Attack`/`Use`'s own both-edges requirement, so a
+consumed key's release cannot leak past it. `resolve_key`'s own tests exercise both the positive claim
+(`a_plugin_consume_claim_outranks_a_real_gameplay_binding_on_the_same_key`) and the two controls that
+matter most: `Observe` changing nothing about resolution, and an open container still winning over a
+`Consume` claim.
+
+**The raw-input system.** `lodestone_ecs::input::drain_pending_plugin_key_events`, anchored
+`.in_set(TickSet::Input)`, is that set's first system that actually reads a keyboard — closing the
+gap its own doc comment named ("reserved for whatever eventually reads a keyboard or gamepad as a
+system"; `crate::scheduler::run_due_tasks` was already anchored there for an unrelated reason, being
+the earliest slot in `GameTick`, not because it reads input). The shell queues a raw
+`PhysicalKey`/`pressed` pair into `PendingPluginKeyEvents` (a plain resource, pushed to directly from
+the platform event handler, the same shape `lodestone_shell::interact`'s `Attacking`/`RayTarget` are
+fed by) whenever `PluginKeybinds::mode_of` returned `Some` for the key — `Consume` or `Observe`, since
+`Observe` still wants the event, it just does not swallow it. `drain_pending_plugin_key_events` folds
+that queue into `Messages<PluginKeyEvent>` once per tick, so a plugin system anywhere in `GameTick` — a
+`TickSet::Intent` system turning a claimed key into `MovementIntent`/`LookIntent`, say, since `Input`
+runs before `Intent` in `CorePlugin`'s chain — reads it with an ordinary `MessageReader<PluginKeyEvent>`.
+`PluginKeyEvent { key: PhysicalKey, pressed: bool }` is observation vocabulary per clause 1: the two
+facts a real key event carries, nothing else.
+
+**Why `PhysicalKey` is a `String`, not a mirrored `winit::keyboard::KeyCode` enum.** `lodestone-ecs`
+never depends on winit — it ships to wasm and winit does not
+(`crates/lodestone-ecs/Cargo.toml`'s dependency list has no platform windowing crate at all). Matching
+winit's `KeyCode` `Debug` output verbatim (`"KeyF"`, `"Space"`, `"F3"`, `"Digit1"`, ...) costs nothing
+to keep in sync — the shell's mapping is a plain `format!("{code:?}")`, not a second table that could
+drift — and a second platform (the browser shell) feeding this seam needs only the equivalent mapping
+from its own key type to the same string vocabulary.
+
+**The real consumer.** `crates/plugins/lodestone-key-toggle`: claims one key in `Consume` mode and
+flips a shared flag on every press. Its own test drives the loop through real machinery rather than
+calling the demonstrated functions directly — registering the plugin, asserting `PluginKeybinds`
+really carries the `Consume` claim (the exact fact `resolve_key`'s new arm reads), queuing a raw event
+the way the shell's driver would, running one real `GameTick`, and asserting the shared flag flipped —
+plus a negative control (a release edge and an unrelated key must not flip it). See
+`crates/plugins/README.md`.
+
+**What is not built.** No modifier state (Ctrl/Shift/Alt) reaches `PluginKeyEvent` — a plugin that
+needs it is exactly as blocked as gameplay code is today, since neither is modelled as ECS state yet.
+And per the half-adopted state named earlier in this document, only the *plugin* path goes through
+`PluginKeybinds`/`resolve_key`'s new arm; nothing here changes that human break/place still bypass the
+intent seam for their own verbs.
+
+### Extract-time custom draw-buffer API (issue #161)
+
+**The ECS/API side is landed; the render side is a brokered hunk, reported below rather than applied**
+(the agent that built this did not hold `lodestone-shell`'s `gpu/**`). `lodestone_ecs::plugin_draw`
+(`crates/lodestone-ecs/src/plugin_draw.rs`) generalises `DebugLines`' precedent — the one working
+instance of "a plugin pushes world-space geometry into a resource, the renderer polls it" — into
+textured/billboard-style draws, the concrete gap this document's own "four concrete gaps" section named
+("no textured quads, no billboards, no per-vertex colour beyond whatever the line pipeline supports").
+
+**`PluginBillboards(pub Vec<PluginBillboard>)`**, a `Resource`, unconditionally installed by
+`LocalPlayerPlugin` (same reasoning as `DebugLines`). `PluginBillboard { position: Vec3d, size: [f32; 2],
+color: [f32; 4], texture: PluginTexture }` is always camera-facing — no orientation field, the same reason
+`CameraOverride` carries no near/far/FOV — and `PluginTexture` is either `Solid` (a flat tinted quad, the
+"no icon atlas, tint a flat quad" simplification the status-effect HUD chips and the beacon screen's power
+buttons already use) or `Named(String)` (a texture the renderer's atlas already knows by id, e.g.
+`"minecraft:diamond"` — the same naming authority `VersionAdapter::block_name`/`item_prototype` already
+give a plugin, so this adds none new). `clear_plugin_billboards`, ordered `.before(ExtractSet::Debug)`,
+empties it each frame exactly as `clear_debug_lines` does, for the identical race-avoidance reason.
+
+**Deliberately reuses `ExtractSet::Debug`'s ordering slot rather than adding a sibling `SystemSet`
+variant.** The two channels are mechanically identical (clear, then a plugin system appends, at the same
+point in `Extract`, already correctly ordered between `Entities` and `Hud`), and a new variant is an ABI
+change (this document's own ordering-anchor changelog) that buys nothing structural here. If a future
+plugin genuinely needs to order *between* debug lines and billboards, that is the trigger to split them,
+not a reason to split them pre-emptively.
+
+**Verified, at the ECS level, through a real `Extract` schedule run** (`plugin_draw`'s own tests): a
+system registered `.in_set(ExtractSet::Debug)` — the sanctioned way in — pushes a billboard and it survives
+to be read after the schedule runs; the clear genuinely empties the resource before the *next* frame with
+no writer, not merely at construction. This is a gate acting as the plugin issue #162's own instruction
+asked for, the same tier `DebugLines`' own `push_leash_lines` test operates at; it stops at the ECS
+boundary by design (see below), so **it does not verify a pixel changes** — only that the channel a
+render pass would poll genuinely carries a plugin's geometry.
+
+**What is not built, and exactly what it needs — the brokered hunk for whoever holds `gpu/**` next.**
+`crates/lodestone-shell/src/gpu/debug_lines.rs` is the model to extend (or a sibling `gpu/plugin_billboards.rs`
+mirroring it file-for-file): a `PluginBillboardVertex` (`repr(C)`, `bytemuck::Pod`) type, a lowering
+function from `&[lodestone_ecs::PluginBillboard]` to vertex data (billboard expansion — two triangles
+per quad, facing basis computed from the camera's own right/up vectors, exactly the information
+`RenderState::render` already has and this ECS crate structurally cannot, per "what stays privileged"
+below), a `PluginBillboardRenderer` (new pipeline — outside the model shader's four bind groups, same as
+`DebugLineRenderer`, so this has no bearing on the 4-bind-group floor) resolving `PluginTexture::Named`
+against the block/item atlas already bound elsewhere in `gpu.rs` and falling back to an untextured tint
+for `PluginTexture::Solid` or an unresolved name, and a `PluginBillboardsSource` polled type identical in
+shape to `DebugLinesSource`:
+
+```text
+render_state.set_plugin_billboards_source(move || {
+    let world = ecs_handle.read();
+    lodestone_render_shell::gpu::plugin_billboard_vertices(
+        &world.resource::<lodestone_ecs::PluginBillboards>().0,
+    )
+});
+```
+
+The install call is `WindowApp::install_plugin_billboards_source` (`crates/lodestone-shell/src/app.rs`),
+mirroring `install_debug_lines_source` exactly: clone `Sim::ecs()`'s `EcsHandle`, call it at the same
+three sites (`begin_singleplayer`, `connect_to`, `resumed`), needs no live connection. Until this lands,
+`PluginBillboards` behaves exactly as `DebugLines` did before its own render half existed: real data,
+zero pixels — an accepted, disclosed stopping point per this issue's own framing, not a silent gap.
+
+**The real consumer.** No dedicated example-plugin crate was added for this one — `plugin_draw`'s own
+`a_plugin_system_in_extract_debug_reaches_the_resource_after_one_frame` test *is* the example, in the
+same sense `push_leash_lines` is `DebugLines`' first real writer: a system registered the sanctioned way,
+driving a real schedule, with a negative control (`a_billboard_does_not_survive_into_a_frame_with_no_writer`)
+proving the clear is not vacuous. `crates/plugins/lodestone-key-toggle` (issue #162, landed in the same
+pass) is the dedicated-crate-style example for the sibling seam, for anyone looking for that shape instead.
+
 ### What stays privileged, and why
 
 Two things are off-limits **by construction**, not by a permission check a plugin could route

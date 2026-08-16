@@ -2065,6 +2065,34 @@ impl Plugin for LocalPlayerPlugin {
         // registration order.
         app.add_systems(Extract, push_leash_lines.in_set(ExtractSet::Debug));
 
+        // Extract-time custom draw-buffer API (issue #161) — see
+        // `crate::plugin_draw`'s module doc for the full design. Shares
+        // `ExtractSet::Debug`'s ordering slot with `DebugLines` above rather
+        // than adding a sibling set (that doc explains why), so the same
+        // `.before(ExtractSet::Debug)` clear-ordering requirement applies.
+        app.init_resource::<crate::plugin_draw::PluginBillboards>();
+        app.add_systems(
+            Extract,
+            crate::plugin_draw::clear_plugin_billboards.before(ExtractSet::Debug),
+        );
+
+        // Plugin keyboard interception (issue #162) — see `crate::input`'s
+        // module doc for the full design. Unconditional, on the same
+        // "reaches a running client with no driver-crate change" reasoning
+        // `DebugLines` above gives: every shipped `App` gets the seam whether
+        // or not a plugin uses it.
+        app.init_resource::<crate::input::PluginKeybinds>();
+        app.init_resource::<crate::input::PendingPluginKeyEvents>();
+        app.add_message::<crate::input::PluginKeyEvent>();
+        app.add_systems(
+            GameTick,
+            crate::input::drain_pending_plugin_key_events.in_set(TickSet::Input),
+        );
+        app.add_systems(
+            GameTick,
+            crate::input::age_plugin_key_events.in_set(TickSet::Send),
+        );
+
         // `.chain()` reproduces `LocalPlayer.aiStep`'s three-part ordering around
         // `super.aiStep()`, and the order is observable rather than cosmetic:
         // the toggle and the vertical impulse must land on the velocity this

@@ -1,0 +1,29 @@
+# A toy input-interception plugin (issue #162): the first, and so far only,
+# consumer of `lodestone_ecs::input`'s `PluginKeybinds`/`PluginKeyEvent`
+# registration point. Same role in this crate group as `lodestone-event-logger`
+# plays for the plugin event bus — small enough to read in one sitting, real
+# enough that its own test exercises the actual `TickSet::Input` schedule
+# rather than calling the demonstrated function directly.
+[package]
+name = "lodestone-key-toggle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The plugin ABI: `TickSet`, `PluginKeybinds`, `PluginKeyEvent`,
+# `KeyInterceptMode`, `PhysicalKey`. Re-exports `bevy_app`/`bevy_ecs` as
+# `lodestone_ecs::{app, ecs}` so this crate's own code never has to match
+# either version by hand.
+lodestone-ecs = { workspace = true }
+# Direct, in addition to `lodestone-ecs`'s re-export: `#[derive(Resource)]`
+# below emits an absolute `bevy_ecs::` path, which only resolves if this
+# crate has it as a direct dependency too — `lodestone-event-logger/Cargo.toml`
+# and `lodestone-autopilot/Cargo.toml` document the same requirement for the
+# same reason. Same `[workspace.dependencies]` pin `lodestone-ecs` itself
+# builds against, so there is only ever one `bevy_ecs`/`bevy_app` in the graph.
+bevy_ecs = { workspace = true }
+bevy_app = { workspace = true }

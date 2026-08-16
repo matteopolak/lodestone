@@ -2926,6 +2926,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-key-toggle"
+version = "0.1.0"
+dependencies = [
+ "bevy_app",
+ "bevy_ecs",
+ "lodestone-ecs",
+]
+
+[[package]]
 name = "lodestone-macros"
 version = "0.1.0"
 dependencies = [

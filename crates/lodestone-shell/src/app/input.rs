@@ -290,6 +290,16 @@ pub(crate) enum KeyOutcome {
     Use(bool),
     /// Set a movement action's held state on the controller.
     Movement(Action, bool),
+    /// A plugin claimed this physical key in
+    /// [`lodestone_ecs::KeyInterceptMode::Consume`] (see [`resolve_key`]'s own
+    /// doc for exactly where this ranks). No gameplay binding sharing the key
+    /// sees this edge at all — the driver's only job on this outcome is to do
+    /// nothing else. The raw transition itself reaches the plugin a
+    /// different way: the driver queues it into
+    /// `lodestone_ecs::PendingPluginKeyEvents` unconditionally whenever a
+    /// plugin has claimed the key (`Consume` or `Observe`), independent of
+    /// which `KeyOutcome` this function returns — see the call site.
+    PluginConsumed,
 }
 
 /// Resolve one key event to at most one [`KeyOutcome`].
@@ -319,6 +329,16 @@ pub(crate) enum KeyOutcome {
 /// the original chain was unreachable, and spelling out dead code invites
 /// someone to "fix" it by moving it up.
 ///
+/// **A plugin's `Consume` claim (`plugin_mode`) is checked immediately after
+/// the container arm, ahead of every gameplay binding below it** (issue
+/// #162). That rank is deliberate on both sides: behind chat/menu/container,
+/// which keep first claim on the keyboard regardless of what a plugin wants
+/// (`docs/plugin-api.md`'s doctrine clause 4 — a human's own input always
+/// outranks installed intent, and an open chat box or container screen *is*
+/// the human's current input target); ahead of gameplay, so a plugin hotkey
+/// cannot be shadowed by a rebind onto the same physical key. See
+/// `lodestone_ecs::input` for the registration side.
+///
 /// Everything from the debug overlay down is additionally gated on
 /// `gate.gameplay`, so those arms are inert behind any screen regardless of
 /// order — but the order is still what stops the *swallowing* arms above from
@@ -338,12 +358,22 @@ pub(crate) enum KeyOutcome {
 /// read at the driver's `match` arm, because `resolve_key` is where every
 /// other input decision already lives and a decision made outside it is
 /// invisible to this function's own tests.
+///
+/// `plugin_mode` is `lodestone_ecs::PluginKeybinds::mode_of(&physical_key)`
+/// for this event's key, read by the driver through a short
+/// `lodestone_ecs::hold_read` guard before calling this function — plain
+/// data, the same reason `gate` is passed in rather than queried here, so
+/// the precedence chain stays testable without a `World`. Only
+/// `KeyInterceptMode::Consume` affects this function's output; `Observe`
+/// resolves exactly as if no plugin existed (the driver still delivers the
+/// raw event to the plugin regardless — see the call site).
 pub(crate) fn resolve_key(
     binds: &Keybinds,
     gate: KeyGate,
     code: Option<KeyCode>,
     pressed: bool,
     ctrl: bool,
+    plugin_mode: Option<lodestone_ecs::KeyInterceptMode>,
 ) -> Option<KeyOutcome> {
     if gate.menu {
         return Some(KeyOutcome::Menu);
@@ -420,6 +450,17 @@ pub(crate) fn resolve_key(
         } else {
             None
         }
+    } else if gate.gameplay
+        && matches!(plugin_mode, Some(lodestone_ecs::KeyInterceptMode::Consume))
+    {
+        // A plugin has claimed this physical key exclusively — see this
+        // function's own doc for exactly why it ranks here (behind
+        // chat/menu/container, ahead of every gameplay binding below).
+        // **No `&& pressed`**: both edges reach here, matching `Attack`/
+        // `Use`'s own both-edges requirement, so a consumed key's release
+        // cannot leak past this arm into whatever gameplay binding happens
+        // to share the same physical key.
+        Some(KeyOutcome::PluginConsumed)
     } else if binds.is(InputAction::DebugOverlay, code) {
         // **Both edges**, and the toggle has moved to the release — that fix's
         // chords. Vanilla's own rule is

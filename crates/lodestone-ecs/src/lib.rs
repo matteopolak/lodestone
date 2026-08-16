@@ -135,11 +135,13 @@ pub mod entity;
 pub mod events;
 mod handle;
 pub mod ingest;
+pub mod input;
 pub mod items;
 pub mod permissions;
 pub mod player;
 mod plugin;
 pub mod plugin_channel;
+pub mod plugin_draw;
 pub mod plugin_message;
 pub mod recipes;
 mod resources;
@@ -176,6 +178,10 @@ pub use commands::{
     RegisteredCommand, choice_argument, command_tree_for, dispatch, player_argument, suggest,
 };
 pub use egress::{EgressFilterPlugin, EgressFilters, EgressStats, Verdict};
+pub use input::{
+    KeyInterceptMode, PendingPluginKeyEvents, PhysicalKey, PluginKeyEvent, PluginKeybinds,
+};
+pub use plugin_draw::{PluginBillboard, PluginBillboards, PluginTexture, clear_plugin_billboards};
 pub use events::{GameEvent, GameEventBus, GameEventBusPlugin};
 pub use handle::{
     EcsHandle, HoldStats, LockHolds, hold_read, hold_write, new_handle, new_ingest_handle,

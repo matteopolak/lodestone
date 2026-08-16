@@ -155,11 +155,15 @@ pub enum IngestSet {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TickSet {
     /// Poll the platform's held keys / raw device state for this tick.
-    /// Nothing lives here yet — it is reserved for whatever eventually reads
-    /// a keyboard or gamepad as a system rather than a plain resource write —
-    /// but it stays a distinct anchor from [`Self::Intent`] so a future
-    /// raw-input system and an intent-writing system are never mistaken for
-    /// the same ordering concern.
+    /// [`crate::scheduler::run_due_tasks`] was the first real occupant
+    /// (Bukkit-style scheduled tasks, anchored here because it is the
+    /// earliest slot in [`crate::GameTick`], not because it reads input), and
+    /// [`crate::input::drain_pending_plugin_key_events`] is the first system
+    /// that actually reads a keyboard here — see that function's doc for the
+    /// plugin-facing key-interception design it is one half of. It stays a
+    /// distinct anchor from [`Self::Intent`] so a raw-input system and an
+    /// intent-writing system are never mistaken for the same ordering
+    /// concern.
     Input,
     /// Write this tick's [`crate::player::MovementIntent`] (and
     /// [`crate::player::LookIntent`]).
