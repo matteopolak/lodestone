@@ -403,13 +403,6 @@ impl EndGenerator {
         self.height
     }
 
-    /// The dimension's biome source, for a caller that needs a biome without
-    /// generating a column.
-    #[must_use]
-    pub fn biome_source(&self) -> &EndBiomeSource {
-        &self.biomes
-    }
-
     /// The generated column for chunk `(cx, cz)`.
     ///
     /// Vanilla's stage order, minus the two stages this dimension has none of: fill,

@@ -223,34 +223,6 @@ impl IntProvider {
         }
     }
 
-    /// Expected value, for count-prediction tests — not consulted by
-    /// [`IntProvider::sample`] itself.
-    #[must_use]
-    pub fn expected_value(&self) -> f64 {
-        match self {
-            IntProvider::Constant(v) => f64::from(*v),
-            IntProvider::Uniform { min, max } => f64::from(min + max) / 2.0,
-            IntProvider::WeightedList(entries) => {
-                let total: i64 = entries.iter().map(|(_, w)| i64::from(*w)).sum();
-                entries
-                    .iter()
-                    .map(|(v, w)| f64::from(*v) * f64::from(*w) / total as f64)
-                    .sum()
-            }
-            // `BiasedToBottomInt.sample` is `min + nextInt(nextInt(n)+1)`
-            // with `n = max-min+1`. Closed form: `Y = nextInt(nextInt(n))`
-            // (0-based) has `E[Y] = (n-1)/4` (for fixed `Z ~ Uniform[0,n-1]`,
-            // `E[Y|Z] = Z/2`, so `E[Y] = E[Z]/2 = ((n-1)/2)/2`).
-            IntProvider::BiasedToBottom { min, max } => {
-                let n = f64::from(max - min + 1);
-                f64::from(*min) + (n - 1.0) / 4.0
-            }
-            // Symmetric (difference-of-uniforms) or plateau'd trapezoid,
-            // both mean `(min+max)/2` regardless of shape.
-            IntProvider::Trapezoid { min, max, .. } => f64::from(min + max) / 2.0,
-        }
-    }
-
     pub(crate) fn sample<R: RandomSource>(&self, random: &mut R) -> i32 {
         match self {
             IntProvider::Constant(v) => *v,
@@ -860,22 +832,6 @@ impl OreInput<'_> {
             x: self.chunk_x * 16,
             y: self.min_y, // section origin y = minSectionY*16 = min_y
             z: self.chunk_z * 16,
-        }
-    }
-
-    /// Exact (unclamped) local coordinate within the CENTRE chunk only —
-    /// `None` for anything else, including a position inside one of the 8
-    /// neighbour chunks. This is the boundary the fixture's `ore.*`/`in.*`
-    /// data is scoped to: only writes landing in the centre are reported,
-    /// even though every one of the 9 source passes can produce them.
-    #[must_use]
-    pub fn in_center(&self, x: i32, z: i32) -> Option<(i32, i32)> {
-        let lx = x - self.center_x * 16;
-        let lz = z - self.center_z * 16;
-        if (0..16).contains(&lx) && (0..16).contains(&lz) {
-            Some((lx, lz))
-        } else {
-            None
         }
     }
 

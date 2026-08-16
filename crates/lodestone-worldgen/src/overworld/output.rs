@@ -475,13 +475,6 @@ impl GeneratedColumn {
         &self.spawn_candidates
     }
 
-    /// The 16 surface quarts — see the field's own doc for when this is the wrong
-    /// question.
-    #[must_use]
-    pub fn biome_quarts_ref(&self) -> &[String; 16] {
-        &self.biome_quarts
-    }
-
     /// Issue #516: this column's `MOTION_BLOCKING` heightmap, ready to pack — 256
     /// heights in vanilla's **stored** form (`first_free_y - min_y`, so a value in
     /// `0..=height`), indexed `lx + lz * 16`.
@@ -520,21 +513,6 @@ impl GeneratedColumn {
     /// return for one column: the first **free** Y above the topmost
     /// motion-blocking-or-fluid block, or `min_y` for a column with none.
     ///
-    /// The convenience form of [`Self::motion_blocking_heightmap`] for a caller
-    /// that wants one column in world coordinates rather than the packed set —
-    /// `min_y` is added back exactly as `Heightmap.getFirstAvailable` does.
-    ///
-    /// # Panics
-    /// Panics if `lx`/`lz` are not in `0..16`.
-    #[must_use]
-    pub fn motion_blocking_first_free_y(&self, lx: usize, lz: usize) -> Option<i32> {
-        assert!(lx < 16 && lz < 16, "motion_blocking coordinates out of range");
-        self.motion_blocking
-            .as_ref()
-            .map(|stored| self.min_y + i32::from(stored[lx + lz * 16]))
-    }
-
-
     /// This is the zero-copy hand-off a downstream carrier (e.g. the integrated
     /// server's chunk column) uses to adopt the generated block field without
     /// re-interning every block. The index layout is stable and part of the

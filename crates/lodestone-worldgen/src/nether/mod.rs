@@ -180,15 +180,6 @@ impl NetherColumn {
         self.biome_at_quart(lx >> 2, lz >> 2)
     }
 
-    /// Every distinct biome in this chunk, for a census.
-    #[must_use]
-    pub fn distinct_biomes(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self.biome_quarts.iter().map(String::as_str).collect();
-        names.sort_unstable();
-        names.dedup();
-        names
-    }
-
     /// Count of non-air blocks — the cheapest "did this actually generate
     /// terrain" question, and the one an empty-column bug fails.
     #[must_use]
