@@ -31,7 +31,7 @@ use lodestone_model::{
     EntityFacts,
     EntityInteraction, EntityMetadataUpdate, EntityMovement, EntityVariant, EquipmentSlot,
     GameMode, Hand, ItemComponents,
-    ItemEnchantment, ItemPrototype, ItemStack, ItemTool, JigsawJoint, LoginProfile,
+    ItemEnchantment, ItemPrototype, ItemProfile, ItemStack, ItemTool, JigsawJoint, LoginProfile,
     LookAnchor, MainHand, MapDecoration, MapPatch, MerchantOffer as ModelMerchantOffer,
     NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
     ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry, PlayerLookAtEntity,

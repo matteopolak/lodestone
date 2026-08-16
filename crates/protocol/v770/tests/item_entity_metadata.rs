@@ -53,11 +53,15 @@ fn fixture_bytes(text: &str) -> Vec<u8> {
 /// [`with_unmodeled_component`] exists.
 const CAPTURED_COMPONENT: &str = "minecraft:repair_cost";
 
-/// A component this build still does not decode. `ResolvableProfile.STREAM_CODEC`
-/// is `either(GAME_PROFILE, Partial)` composed with `PlayerSkin.Patch.STREAM_CODEC`,
-/// so it is genuinely expensive rather than merely unfinished — a deliberately
-/// durable choice, since a cheap one gets modeled and voids this gate.
-const UNMODELED_COMPONENT: &str = "minecraft:profile";
+/// A component this build still does not decode. `minecraft:profile` held this
+/// slot until it was modeled (see `lodestone_model::ItemProfile`), which is the
+/// exact failure this file's sibling gates warned about — replaced with
+/// `minecraft:instrument`: `Instrument.STREAM_CODEC` is `ByteBufCodecs.holder`
+/// over a `DIRECT_STREAM_CODEC` that is itself a nested holder (`SoundEvent`)
+/// plus two floats plus a full chat component, so it is genuinely expensive
+/// rather than merely unfinished — a deliberately durable choice, since a cheap
+/// one gets modeled and voids this gate.
+const UNMODELED_COMPONENT: &str = "minecraft:instrument";
 
 fn component_id(name: &str) -> i32 {
     (0..)

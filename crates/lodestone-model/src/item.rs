@@ -1,4 +1,4 @@
-use crate::event::EquipmentSlot;
+use crate::event::{EquipmentSlot, ProfileProperty};
 use crate::ids::ResourceKey;
 use crate::text::Text;
 
@@ -142,6 +142,30 @@ pub struct ItemComponents {
     /// holder (a bare custom-effects patch) — the same absent-means-no-component
     /// contract every other patch field here uses.
     pub potion: Option<i32>,
+    /// `minecraft:profile`: a `player_head`/`player_wall_head` stack's owner
+    /// identity — the same `name`/`id`/`textures` shape
+    /// [`crate::event::PlayerListEntry::properties`] already carries for a
+    /// remote player's tab-list entry, decoded here for a held or displayed
+    /// head instead. `properties` is where the skin comes from: an online-mode
+    /// server signs a `minecraft:textures` entry whose value is base64 JSON
+    /// (see [`ProfileProperty`]'s own doc for the two traps in that blob).
+    ///
+    /// `None` for every non-head item and for a head with no owner set (the
+    /// plain "Player Head" block/item). Decoded rather than treated as
+    /// unmodeled for the same reason as [`trim`](Self::trim),
+    /// [`map_id`](Self::map_id) and [`pot_decorations`](Self::pot_decorations):
+    /// the clientbound component patch cannot skip an unknown component, so a
+    /// player head in any container — not just one placed as a block —
+    /// truncated the rest of the packet from that slot onward.
+    ///
+    /// **Only the identity half of the wire component is kept.** 26.2's
+    /// `ResolvableProfile` also carries a `PlayerSkin.Patch` — an optional
+    /// direct resource-id override for the body/cape/elytra texture and rig,
+    /// bypassing the Mojang session service entirely. Nothing in this client
+    /// resolves a resource-id skin yet, so those bytes are decoded (to keep the
+    /// rest of the packet aligned) and discarded rather than modeled; a
+    /// consumer that needs them has no field to read here.
+    pub profile: Option<ItemProfile>,
     /// An enchantment identity this client itself authored — never decoded off
     /// the wire. See [`AuthoredEnchantment`]'s own doc for what it is, why it
     /// exists, and why it must never be confused with
@@ -270,6 +294,34 @@ pub struct PotDecorations {
     pub right: Option<ResourceKey>,
     /// The sherd on the pot's front face, or `None` for a plain brick.
     pub front: Option<ResourceKey>,
+}
+
+/// `minecraft:profile`'s identity half — vanilla's `ResolvableProfile`
+/// (`world/item/component/ResolvableProfile.java`), which is either a full
+/// `GameProfile` (uuid + name + properties, all present) or a `Partial`
+/// (each of name/id independently optional, properties always present but
+/// possibly empty).
+///
+/// This type folds both wire shapes into one: `name` and `id` are `None`
+/// exactly when the *partial* form omitted them (the full-profile form always
+/// carries both), and `properties` is the property multimap either way —
+/// `Vec::new()` for a partial profile that declared none, never a signal of
+/// "full vs. partial" on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ItemProfile {
+    /// The profile name, when the wire carried one (always present for a full
+    /// profile; optional for a partial one, e.g. a head placed by uuid alone).
+    pub name: Option<String>,
+    /// The profile uuid, when the wire carried one (always present for a full
+    /// profile; optional for a partial one, e.g. a head placed by name alone
+    /// before the server resolves it).
+    pub id: Option<uuid::Uuid>,
+    /// The profile's property multimap — on an online-mode server, this is
+    /// where `minecraft:textures` (the base64-JSON skin declaration) lives.
+    /// Empty for an offline-mode server or a profile with no skin set, not a
+    /// distinct state from "no properties field at all": the wire component
+    /// has no such distinction either.
+    pub properties: Vec<ProfileProperty>,
 }
 
 /// A smithing-table armour trim — vanilla's `ArmorTrim` record
