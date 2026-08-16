@@ -3035,6 +3035,21 @@ pub struct MobSim<'w> {
     /// The wither's own dangerous-skull roll, on its own stream for the same
     /// reason [`dragon_rng`](Self::dragon_rng) is.
     wither_rng: SpawnRng,
+    /// This session's End dragon fight controller state
+    /// (`EnderDragonFight`'s own persisted flags), lazily created by
+    /// [`dragon::MobSim::record_dragon_death`] on the first real kill —
+    /// `None` before that, matching `EnderDragonFight.createDefault()`'s own
+    /// "no scan has happened yet" starting point. See
+    /// [`dragon::MobSim::dragon_fight_killed`]'s own doc for what reads this
+    /// and `dragon::MobSim::record_dragon_death`'s for the process-lifetime
+    /// (not yet disk-persisted) caveat.
+    dragon_fight: Option<crate::dragon::fight::FightState>,
+    /// Every dragon death since the last [`dragon::MobSim::take_dragon_deaths`]
+    /// call — the same `pending_*`/`take_*` handoff shape as
+    /// [`pending_detonations`](Self::pending_detonations), for the same
+    /// reason: this sim holds `world` immutably and owns no connection, so
+    /// it cannot place the exit portal or the egg itself.
+    pending_dragon_deaths: Vec<dragon::DragonDeathOutcome>,
 }
 
 /// One live `AbstractBoat` — wire identity, motion, and who is aboard.
@@ -3445,6 +3460,8 @@ impl<'w> MobSim<'w> {
             next_raid_id: 1,
             pending_hero_grants: Vec::new(),
             raid_rng: SpawnRng::new(raid::RAID_ROLL_SEED),
+            dragon_fight: None,
+            pending_dragon_deaths: Vec::new(),
         }
     }
 
@@ -7175,6 +7192,13 @@ impl<'w> MobSim<'w> {
         // so none of `attack`'s villager/pack-alert machinery applies to it.
         if self.withers.contains_key(&target_id) {
             return self.attack_wither(target_id, raw_damage);
+        }
+        // A dragon lives in `self.dragons`, not `self.mobs`, for the
+        // identical reason the wither branch just above exists — see
+        // `dragon::MobSim::attack_dragon`'s own doc for why nothing could
+        // ever damage a dragon at all before this.
+        if self.dragons.contains_key(&target_id) {
+            return self.attack_dragon(target_id, raw_damage);
         }
         let target_was_villager = self
             .get(target_id)
