@@ -39,7 +39,7 @@ use super::terrain::{
 };
 use super::{
     AmbientLightSource, BannerSource, BellSource, BlockEntityRenderer, BlockEntitySource,
-    CampfireSource,
+    CampfireSource, ConduitSource,
     DEFAULT_RENDER_DISTANCE_CHUNKS, DecoratedPotSource, EnchantingTableSource, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
     HandSwingSource, ItemUseSource, LecternSource, MainHandSource, MapSource, MovingPistonSource,
@@ -316,6 +316,8 @@ impl RenderState {
             shulker_source: ShulkerSource::default(),
             // Likewise `set_decorated_pot_source`.
             decorated_pot_source: DecoratedPotSource::default(),
+            // Likewise `set_conduit_source`.
+            conduit_source: ConduitSource::default(),
             // Likewise `set_map_source` (issue #184).
             map_source: MapSource::default(),
             // Likewise `set_banner_source`.
@@ -1317,6 +1319,23 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::DecoratedPotSpawn> + Send + Sync + 'static,
     ) {
         self.decorated_pot_source = DecoratedPotSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's conduits — the conduit equivalent
+    /// of [`set_shulker_source`](Self::set_shulker_source).
+    ///
+    /// Leaving it unset is a **hole in the world**, not a missing decoration:
+    /// a conduit's block model declares real geometry and every visible
+    /// triangle comes from this pass, same failure mode as chest, shulker and
+    /// decorated pot. Unlike those, the closure this installs must itself carry
+    /// a per-position tick tracker — see [`ConduitSource`]'s doc — because
+    /// `isActive`/`isHunting` and the rotation counters are computed
+    /// client-side from the block store, not read off the wire.
+    pub fn set_conduit_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::ConduitSpawn> + Send + Sync + 'static,
+    ) {
+        self.conduit_source = ConduitSource(Some(Box::new(f)));
     }
 
     /// Install the source for this frame's banners.

@@ -755,6 +755,38 @@ impl std::fmt::Debug for DecoratedPotSource {
     }
 }
 
+/// Where this frame's conduits come from.
+///
+/// **Not** as thin as [`ShulkerSource`]: a conduit's `isActive`/`isHunting` and
+/// its two tick counters are `ConduitBlockEntity.clientTick`'s own
+/// **client-computed** state (a 3×3×3-then-5×5×5 block-store scan, never sent
+/// over the wire — see `lodestone_render::block_entity::conduit_frame_scan`'s
+/// doc), so the closure this wraps has to carry a per-position tick tracker the
+/// same way [`BellSource`] carries `BellShakes`. Installed per frame anyway, for
+/// [`ShulkerSource`]'s reason: a source that outlived a disconnect would hand
+/// out spawns from a dead world's handle.
+#[derive(Default)]
+pub struct ConduitSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::ConduitSpawn> + Send + Sync>>,
+);
+
+impl ConduitSource {
+    /// This frame's conduits, or none when unset.
+    #[must_use]
+    pub(super) fn conduits(&self, eye: glam::Vec3) -> Vec<lodestone_render::ConduitSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for ConduitSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ConduitSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
 /// Where this frame's lectern books come from — same shape as
 /// [`ShulkerSource`], and for the same reason: a lectern book's pose is a
 /// compile-time constant, so the closure needs neither a partial tick nor an
