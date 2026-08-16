@@ -5814,6 +5814,10 @@ where
                 state,
                 proto,
                 vitals,
+                // No sound fires for this call today regardless (`hurt` below is
+                // `None`, and `publish_health` only plays one on a landed hit),
+                // but a position is still owed to the parameter.
+                player_pos.map(|(x, y, z)| Vec3::new(x, y, z)).unwrap_or_default(),
                 player_entity_id,
                 username,
                 crate::vitals::DeathCause::GenericKill,
@@ -9670,12 +9674,22 @@ fn consume_one(inventory: &mut PlayerInventory, native: usize, game_mode: GameMo
 /// sprint flag — see [`SPRINT_ATTACK_KNOCKBACK_POWER`]'s own doc comment for
 /// why a non-sprinting attack's knockback power is correctly `0.0`, not a
 /// bug.
+///
+/// Routes through [`MobSim::attack_from_player`] rather than the bare
+/// [`MobSim::attack`] it wraps — that method's own doc names this call site as
+/// the broker it was built for: with no identified attacker reaching the mob
+/// sim, a player-landed hit on a villager wrote no `VillagerHurt`/
+/// `VillagerKilled` gossip, so `villager::reputation`'s scoring machinery
+/// (tested, correct) never saw a real production event. `LOCAL_PLAYER_ENTITY_ID`
+/// for [`PlayerIdentity::entity_id`], matching every other self-facing
+/// identity built in this file.
 fn apply_attack(
     mobs: &MobHandle,
     player_pos: Option<(f64, f64, f64)>,
     sprinting: bool,
     inventory: &PlayerInventory,
     entity_id: i32,
+    player_uuid: uuid::Uuid,
 ) {
     let (attacker_pos, knockback_power) = match player_pos {
         Some((x, y, z)) => (
@@ -9698,8 +9712,12 @@ fn apply_attack(
     // base with no modifiers.
     let raw_damage = inventory.combat_stats().attack_damage;
     mobs.with(|sim| {
-        sim.attack(
+        sim.attack_from_player(
             entity_id,
+            Some(PlayerIdentity {
+                uuid: player_uuid,
+                entity_id: LOCAL_PLAYER_ENTITY_ID,
+            }),
             attacker_pos,
             raw_damage,
             DamageFlags::default(),
@@ -9841,18 +9859,29 @@ fn fall_sample<S: ChunkSource + ?Sized>(source: &S, x: f64, y: f64, z: f64, on_g
 /// re-arms it by construction. That is a property of the guards rather than of
 /// this function, so `death_is_announced_exactly_once_per_life` pins it.
 ///
-/// # The two animation cues, and why they are here rather than at each site
+/// # The animation and sound cues, and why they are here rather than at each site
 ///
-/// A hit also has to be *seen*, and neither `set_health` nor `player_combat_kill`
-/// carries any animation: vanilla plays the camera damage tilt off
-/// `hurt_animation` and tips the body over off `entity_event` byte 3, and this
-/// crate encoded neither, so singleplayer damage was silent and a death was a
-/// screen with a motionless avatar behind it.
+/// A hit also has to be *seen and heard*, and neither `set_health` nor
+/// `player_combat_kill` carries any animation or sound: vanilla plays the camera
+/// damage tilt off `hurt_animation`, tips the body over off `entity_event` byte
+/// 3, and plays `playHurtSound`/`getDeathSound` alongside — this crate encoded
+/// none of the three until this function grew them, so singleplayer damage was
+/// silent and a death was a screen with a motionless, silent avatar behind it.
 ///
-/// Both cues belong at this choke point for the same reason the death *count*
-/// does — the guards above already make "a hit landed" and "the hit that killed
-/// them" exactly-once properties, and re-deriving either at seven call sites is
-/// how one of them ends up sending twice on a tick that both burned and starved.
+/// All three cues belong at this choke point for the same reason the death
+/// *count* does — the guards above already make "a hit landed" and "the hit
+/// that killed them" exactly-once properties, and re-deriving any of them at
+/// fourteen call sites is how one of them ends up sending twice on a tick that
+/// both burned and starved, or silent on the one path nobody remembered.
+///
+/// The hurt/death sound comes from [`crate::effects::mob_vocalisation`] with
+/// `"minecraft:player"` — entity-type-generic despite the name, and it already
+/// resolves the real registered `minecraft:entity.player.hurt`/`.death` sound
+/// events. Pitch and the sound-variant seed are both held constant: this
+/// function has no RNG source threaded to it, and neither player sound event has
+/// more than one variant to pick between, so a constant seed costs nothing here
+/// (contrast [`crate::effects::WorldEffect::Sound`]'s own doc, which explains why
+/// a constant seed usually would).
 ///
 /// `hurt` is what distinguishes a **hit** from a mere publish: two of the call
 /// sites (the status-effect arm and the food arm) reach here for a *heal* or a
@@ -9865,6 +9894,13 @@ async fn publish_health<T, P>(
     state: &mut State,
     proto: &P,
     vitals: &PlayerVitals,
+    // The position the hurt/death sound is centred on (`WorldEffect::Sound`'s
+    // wire form quantises it to eighths of a block, so a stale or zeroed
+    // position only ever costs spatialisation accuracy, never a dropped
+    // packet). Every call site already tracks this player's last reported
+    // position for its own damage-source logic; a caller with no reported
+    // position yet (joined and never moved) passes `Vec3::default()`.
+    pos: Vec3,
     // Every caller passes `LOCAL_PLAYER_ENTITY_ID`, never a `PlayerRegistry`
     // ticket id: every packet built from this reaches `conn` directly, this
     // connection's own socket, and the client only recognises itself under
@@ -9905,6 +9941,21 @@ where
             proto.encode_hurt_animation(player_entity_id, direction.yaw_degrees()),
         )
         .await?;
+        // `LivingEntity.hurtServer`'s `playHurtSound`/`die`'s death sound,
+        // folded into this same choke point for the reason this function's doc
+        // gives. `died` picks the death sound instead of the hurt one on the
+        // killing blow, matching the `encode_entity_event` branch below rather
+        // than re-deriving its own health check.
+        if let Some(effect) = crate::effects::mob_vocalisation(
+            "minecraft:player",
+            pos,
+            vitals.health() <= 0.0,
+            false,
+            1.0,
+            0,
+        ) {
+            apply(conn, state, proto.encode_world_effect(&effect)).await?;
+        }
     }
     apply(
         conn,
@@ -10005,6 +10056,7 @@ where
             state,
             proto,
             vitals,
+            Vec3::new(x, y, z),
             // Always `LOCAL_PLAYER_ENTITY_ID`, never the registry ticket's id:
             // this packet goes straight to `conn`, this player's own socket,
             // and `GameLogin.entity_id` (`begin_play_at`) always claims that
@@ -10387,6 +10439,7 @@ where
                     state,
                     proto,
                     vitals,
+                    Vec3::new(x, y, z),
                     // Self-facing, per `fall_status_sample`'s own call site comment.
                     LOCAL_PLAYER_ENTITY_ID,
                     username,
@@ -10826,6 +10879,20 @@ where
                         && let Some(next) = attempt_villager_trade(inventory, trade)
                     {
                         *inventory = next;
+                        // `Villager.notifyTrade`'s `onReputationEventFrom`: a
+                        // completed trade is the one real production producer
+                        // of `Trading` gossip, matching
+                        // `MobSim::attack_from_player`'s villager-hit case.
+                        // `record_reputation_event` (issue #246) already exists
+                        // and was, until this call, only reachable from its own
+                        // tests.
+                        mobs.with(|sim| {
+                            sim.record_reputation_event(
+                                entity_id,
+                                crate::mobs::villager::reputation::ReputationEventType::Trade,
+                                player_uuid,
+                            );
+                        });
                         // A full window-0 resync rather than a per-slot diff:
                         // the cost items can land anywhere across 36 slots and
                         // the given item anywhere `add` found room, so there
@@ -11012,7 +11079,7 @@ where
             }
         }
         ServerBound::Attack { entity_id } => {
-            apply_attack(mobs, *player_pos, *sprinting, inventory, entity_id);
+            apply_attack(mobs, *player_pos, *sprinting, inventory, entity_id, player_uuid);
             // `Player.attack`'s `causeFoodExhaustion(0.1F)`, charged on the swing
             // rather than on a hit that landed — vanilla charges it inside `attack`
             // after the damage call, unconditionally for a living target.
@@ -13124,6 +13191,7 @@ where
                                 &mut state,
                                 proto,
                                 &vitals,
+                                Vec3::new(x, y, z),
                                 // Self-facing, per `publish_health`'s own call sites.
                                 LOCAL_PLAYER_ENTITY_ID,
                                 &username,
@@ -13156,6 +13224,7 @@ where
                             &mut state,
                             proto,
                             &vitals,
+                            Vec3::new(x, y, z),
                             // Self-facing, per `publish_health`'s own call sites.
                             LOCAL_PLAYER_ENTITY_ID,
                             &username,
@@ -13210,6 +13279,7 @@ where
                                     &mut state,
                                     proto,
                                     &vitals,
+                                    Vec3::new(x, y, z),
                                     // Self-facing, per `publish_health`'s own call sites.
                                     LOCAL_PLAYER_ENTITY_ID,
                                     &username,
@@ -13280,6 +13350,7 @@ where
                             &mut state,
                             proto,
                             &vitals,
+                            Vec3::new(x, y, z),
                             // Self-facing, per `publish_health`'s own call sites.
                             LOCAL_PLAYER_ENTITY_ID,
                             &username,
@@ -13415,6 +13486,11 @@ where
                             &mut state,
                             proto,
                             &vitals,
+                            // No terrain read backs this arm (status effects tick
+                            // regardless of a reported position), so this falls
+                            // back to the origin on a connection that has never
+                            // moved — see `publish_health`'s own parameter doc.
+                            player_pos.map(|(x, y, z)| Vec3::new(x, y, z)).unwrap_or_default(),
                             // Self-facing, per `publish_health`'s own call sites.
                             LOCAL_PLAYER_ENTITY_ID,
                             &username,
@@ -13451,6 +13527,10 @@ where
                             &mut state,
                             proto,
                             &vitals,
+                            // Hunger needs no terrain and runs even before the
+                            // first movement packet — see the wither arm just
+                            // above for the same fallback.
+                            player_pos.map(|(x, y, z)| Vec3::new(x, y, z)).unwrap_or_default(),
                             // Self-facing, per `publish_health`'s own call sites.
                             LOCAL_PLAYER_ENTITY_ID,
                             &username,
@@ -14056,6 +14136,7 @@ where
                     state,
                     proto,
                     vitals,
+                    Vec3::new(x, y, z),
                     LOCAL_PLAYER_ENTITY_ID,
                     username,
                     crate::vitals::DeathCause::OutsideBorder,
@@ -14085,6 +14166,7 @@ where
                 state,
                 proto,
                 vitals,
+                Vec3::new(x, y, z),
                 LOCAL_PLAYER_ENTITY_ID,
                 username,
                 crate::vitals::DeathCause::Drown,
@@ -14125,6 +14207,7 @@ where
                 state,
                 proto,
                 vitals,
+                Vec3::new(x, y, z),
                 LOCAL_PLAYER_ENTITY_ID,
                 username,
                 crate::vitals::DeathCause::OnFire,
@@ -14224,6 +14307,9 @@ where
                 state,
                 proto,
                 vitals,
+                // No terrain read backs this arm — see the native arm's
+                // identical fallback comment.
+                player_pos.map(|(x, y, z)| Vec3::new(x, y, z)).unwrap_or_default(),
                 LOCAL_PLAYER_ENTITY_ID,
                 username,
                 crate::vitals::DeathCause::Wither,
@@ -14247,6 +14333,7 @@ where
                 state,
                 proto,
                 vitals,
+                player_pos.map(|(x, y, z)| Vec3::new(x, y, z)).unwrap_or_default(),
                 LOCAL_PLAYER_ENTITY_ID,
                 username,
                 crate::vitals::DeathCause::Starve,
