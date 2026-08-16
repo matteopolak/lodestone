@@ -195,11 +195,21 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   beetroots jumps the crop several growth stages; on a sapling it advances the stage
   45% of the time and is consumed either way.
 - [Book-and-quill editing](./book-editing.md) — `EDIT_BOOK` (issue #616's
-  remainder): drafting and signing a `minecraft:writable_book`, server-side. Before
-  this, the packet decoded and was discarded, and `ItemComponents` (`lodestone-model`)
-  had no book-content fields at all — a written or writable book anywhere in an
-  inventory silently truncated the rest of whatever packet carried it, the same
-  decode-cliff class as `trim`/`map_id`/`pot_decorations`/`profile`.
+  remainder): drafting and signing a `minecraft:writable_book`, server-side, **and**
+  the client-side screen that produces the packet (issue #613's remainder). Before the
+  client half, `ClientAction::EditBook` was encoded by every protocol family with zero
+  producers anywhere in `lodestone-shell` — the same outbound-island shape
+  `ClientAction::SetFlying` was caught in, except here the failure mode is silent
+  (nothing disconnects; a book simply cannot be written). Before either half, the
+  packet decoded and was discarded, and `ItemComponents` (`lodestone-model`) had no
+  book-content fields at all — a written or writable book anywhere in an inventory
+  silently truncated the rest of whatever packet carried it, the same decode-cliff
+  class as `trim`/`map_id`/`pot_decorations`/`profile`.
+- [Brain target acquisition: nearby-entity perception and OR-gated activities](./brain-target-acquisition.md) —
+  Two small additions to `lodestone_entity::brain` that a previous investigation
+  identified as the actual blocker for goat ram and villager panic — not a missing
+  jump-arc port or a missing flee behaviour, but the perception and eligibility
+  machinery those features need:
 - [Break particles](./break-particles.md) — A terrain particle is a small
   camera-facing billboard textured from a random **quarter** of its block's
   `#particle` sprite, tinted by a per-state colour, and shaded by the light at its
@@ -1033,6 +1043,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   [#227](https://github.com/matteopolak/lodestone/issues/227) unit B3a. Before it,
   `RangedAttackGoal` and `BowAttack` were zero hits tree-wide and no mob in this repo
   could throw anything.
+- [Mob spawn equipment: what a mob spawns holding and wearing](./mob-spawn-equipment.md) —
+  Vanilla's `Mob.populateDefaultEquipmentSlots` and its per-species overrides, ported
+  so a mob can spawn holding a weapon or wearing armour at all. Before this, nothing
+  in the workspace produced an `(EquipmentSlot, item id)` pair for a *mob* —
+  [`equipment-combat-stats.md`](./equipment-combat-stats.md)'s attribute-modifier fold
+  existed and worked, but its only producer was a player's inventory. A drowned's
+  `RangedAttackGoal` trident builder had existed for a while with zero producers of
+  "is this drowned holding a trident", and a naturally-armoured zombie was not a thing
+  this sim could represent.
 - [Species-aware mob spawning](./mob-species-spawning.md) — `MobSim::spawn_species`
   (`crates/lodestone-server/src/mobs/mod.rs`), a spawn entry point that resolves a
   mob's body, combat stats, and baseline goal set from its real vanilla species
