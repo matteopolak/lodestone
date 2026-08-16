@@ -1531,6 +1531,39 @@ impl Sim {
         }
     }
 
+    /// Apply the world-creation Game Rules editor's overrides — vanilla's
+    /// `ServerboundSetGameRulePacket` (issue #592's More tab). Sent once, by
+    /// `app/session.rs`'s `drive_ui_from_session`, the moment a freshly
+    /// created singleplayer session reaches `SessionPhase::Connected` — there
+    /// is no server to hold this state on any earlier, since the integrated
+    /// server itself only starts inside `begin_singleplayer`.
+    ///
+    /// No-op for an empty `entries` (a world whose rules were never touched)
+    /// so a plain "Create New World" send nothing rather than a vacuous
+    /// packet. Best-effort like [`Self::send_set_beacon_effects`] — a closed
+    /// session drops it.
+    pub fn send_set_game_rules(&self, entries: Vec<(lodestone_model::ResourceKey, String)>) {
+        if entries.is_empty() {
+            return;
+        }
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::SetGameRules { entries });
+        }
+    }
+
+    /// Client-initiated round-trip latency probe — vanilla's
+    /// `ServerboundPingRequestPacket` (`PingDebugMonitor.tick`, issue #613's
+    /// `PingRequest` remainder). `time` is the caller's own clock reading in
+    /// milliseconds, echoed back on the `Pong` reply so round-trip time can
+    /// be computed; see `app.rs`'s `redraw` for the F3-gated cadence this is
+    /// called at. Best-effort like [`Self::send_select_trade`] — a closed
+    /// session drops it.
+    pub fn send_ping_request(&self, time: i64) {
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::PingRequest { time });
+        }
+    }
+
     pub fn send_set_beacon_effects(
         &self,
         primary: Option<lodestone_model::ResourceKey>,

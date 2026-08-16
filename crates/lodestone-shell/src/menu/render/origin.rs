@@ -178,6 +178,13 @@ pub enum Origin {
         /// See this variant's own doc.
         popup_w: f32,
     },
+    /// A widget of Create New World's Game Rules sub-screen, resolved by
+    /// [`super::create_world::game_rule_placement_anchor`] (issue #592's More
+    /// tab). A data-carrying variant for the same reason
+    /// [`Origin::KeyBinds`]/[`Origin::Language`] are: this screen's rows are a
+    /// `-`/`+` step pair plus a label, not `OptionsList`'s or `KeyBindsList`'s
+    /// shape — see [`super::create_world::GameRulesEditor`]'s own module doc.
+    CreateWorldGameRules(super::create_world::GameRulePlacement),
 }
 
 impl Origin {
@@ -239,6 +246,7 @@ impl Origin {
     #[must_use]
     pub fn is_scrolling_list_row(self) -> bool {
         use super::confirm::ConfirmPlacement;
+        use super::create_world::GameRulePlacement;
         use super::key_binds::KeyPlacement;
         use super::language::LanguagePlacement;
         use super::options::Placement;
@@ -265,6 +273,9 @@ impl Origin {
                 | SocialPlacement::Report { .. },
             )
             | Origin::Language(LanguagePlacement::Row { .. })
+            | Origin::CreateWorldGameRules(
+                GameRulePlacement::Minus { .. } | GameRulePlacement::Plus { .. } | GameRulePlacement::Name { .. },
+            )
             | Origin::Packs(
                 PacksPlacement::Row { .. }
                 | PacksPlacement::MoveButton { .. }
@@ -341,6 +352,9 @@ impl Origin {
             }
             Origin::KeyBinds(placement) => {
                 super::key_binds::placement_anchor(placement, width, height)
+            }
+            Origin::CreateWorldGameRules(placement) => {
+                super::create_world::game_rule_placement_anchor(placement, width, height)
             }
             Origin::Social(placement) => super::social::placement_anchor(placement, width, height),
             Origin::Language(placement) => {

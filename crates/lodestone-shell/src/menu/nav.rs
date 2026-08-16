@@ -2071,6 +2071,13 @@ impl MenuNav {
                     Some(crate::menu::options::list_spec(page, self.settings.scroll()))
                 }
             }
+            // Create New World's Game Rules sub-screen (issue #592's More
+            // tab). Gated on the nested mode, not the bare screen — the
+            // ordinary Game/World/More tabs have no list at all, so an
+            // unconditional arm here would hang a scrollbar beside them.
+            super::Screen::CreateWorld if self.create_world.game_rules_open() => Some(
+                crate::menu::create_world::game_rules_list_spec(self.create_world.game_rules_scroll()),
+            ),
             _ => None,
         }
     }
@@ -2158,6 +2165,14 @@ impl MenuNav {
                 let before = self.settings.scroll();
                 self.settings.scroll_by(notches, canvas_height);
                 self.settings.scroll() != before
+            }
+            // Create New World's Game Rules sub-screen. Same guard as
+            // `active_list`'s own arm — the two sets must agree.
+            super::Screen::CreateWorld if self.create_world.game_rules_open() => {
+                let before = self.create_world.game_rules_scroll();
+                self.create_world
+                    .scroll_game_rules_by(notches, canvas_height);
+                self.create_world.game_rules_scroll() != before
             }
             _ => false,
         }
