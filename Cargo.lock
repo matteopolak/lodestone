@@ -2671,9 +2671,12 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "lodestone-core",
+ "lodestone-net",
  "lodestone-server",
  "lz4_flex",
  "thiserror 2.0.19",
+ "tokio",
+ "uuid",
  "xxhash-rust",
 ]
 

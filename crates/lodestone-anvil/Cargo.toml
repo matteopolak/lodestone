@@ -48,4 +48,15 @@ xxhash-rust = { version = "0.8", default-features = false, features = [
 # test, where the flaw is which implementation the test resolves to. The cost is
 # real (this crate is otherwise near-leaf, and its dev targets now pull tokio
 # and bevy_ecs through the server graph); the correctness is worth it.
-lodestone-server = { path = "../lodestone-server" }
+#
+# `redstone-counters` on: `tests/redstone_benchmark.rs` (the schematic-driven
+# benchmark harness, `docs/redstone-benchmark-harness.md`) reads
+# `lodestone_server::redstone_counters::snapshot()`, which is a silent
+# always-zero no-op without this feature — see that module's own doc comment.
+lodestone-server = { path = "../lodestone-server", features = ["redstone-counters"] }
+# The real `IntegratedServer`/tick-loop entry point the benchmark harness
+# drives needs a login→play handshake over a real `Connection`, the same
+# precedent `lodestone-server`'s own `tests/tick_loop_light.rs` sets.
+lodestone-net = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
