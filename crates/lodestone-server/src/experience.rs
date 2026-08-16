@@ -321,6 +321,18 @@ impl PlayerExperience {
         level_up_cost(self.level)
     }
 
+    /// `/xp query <target> points`'s own reading — **not** [`total`](Self::total).
+    /// `ExperienceCommand.java`'s `Type.POINTS.query` is
+    /// `Mth.floor(p.experienceProgress * p.getXpNeededForNextLevel())`: points
+    /// *within the current level*, i.e. how far the bar has filled, converted
+    /// back to an integer count. A player who has spent XP enchanting can have
+    /// a `total` far below what their level implies, which is exactly why this
+    /// is a separate reading rather than a partial application of it.
+    #[must_use]
+    pub fn query_points(&self) -> i32 {
+        (self.progress * self.next_level_cost() as f32).floor() as i32
+    }
+
     /// Awards `points` — `Player.giveExperiencePoints`, transcribed including the
     /// carry re-expression that makes a large single award level correctly.
     ///
@@ -836,5 +848,24 @@ mod tests {
         let nan = PlayerExperience::restored(4, f32::NAN, 10);
         assert_eq!(nan.progress(), 0.0, "a NaN off disk must not poison the bar");
         assert_eq!(nan.level(), 4);
+    }
+
+    /// `query_points` reads the *bar*, not [`PlayerExperience::total`] — this
+    /// module's own doc names enchanting as the case where the two diverge
+    /// (spending XP lowers `total` relative to what the level implies, but
+    /// `progress`/`level` are what the bar and `/xp query … points` actually
+    /// read). `restored` sets `progress`/`level` directly so this is an
+    /// arithmetic check of the formula, independent of `give_points`'s carry
+    /// loop.
+    #[test]
+    fn query_points_reads_the_bar_not_the_lifetime_total() {
+        // level 5's cost is `level_up_cost(5) = 7 + 5*2 = 17`.
+        let xp = PlayerExperience::restored(5, 0.5, 999);
+        assert_eq!(xp.next_level_cost(), 17);
+        assert_eq!(xp.query_points(), 8, "floor(0.5 * 17) = 8, not the 999 total");
+        assert_ne!(xp.query_points(), xp.total(), "the two readings must diverge on this input");
+
+        // level 0 fresh has no bar filled at all.
+        assert_eq!(PlayerExperience::default().query_points(), 0);
     }
 }

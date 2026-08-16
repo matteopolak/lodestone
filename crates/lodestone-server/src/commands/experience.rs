@@ -114,14 +114,17 @@ fn query(
     let Some(target) = targets.first() else {
         return Err("No player was found".to_string());
     };
-    // The query answer has to come from the target's *own* live experience,
-    // which this crate cannot read cross-connection (see this module's own
-    // doc — there is no snapshot of it on `PlayerCandidate`, unlike position
-    // and game mode). Reported as unsupported rather than guessed at zero,
-    // which would silently lie to whoever typed the command.
-    let _ = points;
-    Err(format!(
-        "{}'s experience cannot be queried yet — it is not part of the player roster snapshot",
-        target.username
-    ))
+    // `PlayerCandidate::xp_level`/`xp_points` — the same producer/mirror split
+    // `game_mode` already has, republished by `crate::server::republish_experience`
+    // at every site that sends `ClientboundSetExperiencePacket` to the target's
+    // own connection. `points` here is the query formula
+    // (`Mth.floor(experienceProgress * getXpNeededForNextLevel())`, see
+    // `crate::experience::PlayerExperience::query_points`'s own doc), not the
+    // lifetime total.
+    let result = if points { target.xp_points } else { target.xp_level };
+    let unit = if points { "experience points" } else { "experience levels" };
+    // `ExperienceCommand.queryExperience`'s own message shape:
+    // `"%s has %s <points|levels>"`, and its return value is the queried number.
+    ctx.send_success(format!("{} has {result} {unit}", target.username));
+    Ok(result)
 }

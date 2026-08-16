@@ -173,6 +173,15 @@ struct TrackedPlayer {
     /// which is the same producer/mirror split `position` and `rotation` already
     /// have.
     game_mode: GameMode,
+    /// Mirror of [`crate::experience::PlayerExperience::level`] — see
+    /// [`PlayerRegistry::set_experience`] for the republish convention.
+    /// `0` until the owning connection's first republish, same default a
+    /// fresh [`crate::experience::PlayerExperience`] itself starts at.
+    xp_level: i32,
+    /// Mirror of the `/xp query … points` formula — see
+    /// [`PlayerRegistry::set_experience`] and
+    /// [`crate::commands::PlayerCandidate::xp_points`]'s own docs.
+    xp_points: i32,
 }
 
 /// A consistent single-lock read of the registry, from one viewer's point of
@@ -447,6 +456,12 @@ impl PlayerRegistry {
                 // `set_game_mode` below is the one call site that has to fire at
                 // join.
                 game_mode: GameMode::Survival,
+                // `0`, matching a fresh `PlayerExperience`'s own default — the
+                // owning connection's `join_experience` call republishes the
+                // real value (usually still `0`, unless a save restored some)
+                // immediately after.
+                xp_level: 0,
+                xp_points: 0,
             });
             entity_id
         };
@@ -587,6 +602,24 @@ impl PlayerRegistry {
         }
     }
 
+    /// Records a player's current experience level and points-within-level,
+    /// so `/xp query` run from another connection can read it — the same
+    /// producer/mirror split [`set_game_mode`](Self::set_game_mode) already
+    /// documents, called at every site that already sends
+    /// `ClientboundSetExperiencePacket` (`join_experience`'s own doc: "send
+    /// once at join, and send after every mutation" — this is that same
+    /// convention, extended to the registry). `points` is the *query*
+    /// formula (`Mth.floor(experienceProgress * getXpNeededForNextLevel())`),
+    /// not the lifetime total — see [`crate::commands::PlayerCandidate::xp_points`]'s
+    /// own doc. A no-op for an unregistered uuid, for the same reason
+    /// [`set_position`](Self::set_position) is.
+    pub fn set_experience(&self, uuid: Uuid, level: i32, points: i32) {
+        if let Some(player) = self.lock().players.iter_mut().find(|p| p.uuid == uuid) {
+            player.xp_level = level;
+            player.xp_points = points;
+        }
+    }
+
     /// Every connected player as a command-resolution candidate, from one lock
     /// acquisition.
     ///
@@ -606,6 +639,8 @@ impl PlayerRegistry {
                 username: p.username.clone(),
                 position: p.position,
                 game_mode: p.game_mode,
+                xp_level: p.xp_level,
+                xp_points: p.xp_points,
             })
             .collect()
     }
@@ -853,6 +888,34 @@ mod tests {
         // list, so both entries appear in both views.
         assert_eq!(alice_view.roster.len(), 2);
         assert_eq!(bob_view.roster.len(), 2);
+    }
+
+    /// `set_experience`/`candidates` round trip — the producer/mirror split
+    /// `/xp query` reads through when the target is a *different* connection
+    /// from the one running the command. Defaults to `0` until republished
+    /// (matching a fresh `PlayerExperience`), and a no-op for an
+    /// unregistered uuid, same as `set_position`/`set_game_mode`.
+    #[test]
+    fn set_experience_republishes_into_the_candidate_snapshot() {
+        let registry = PlayerRegistry::new();
+        let alice = registry.join("Alice", uuid(1), Vec3::new(0.0, 64.0, 0.0));
+
+        let before = registry.candidates();
+        assert_eq!(before[0].xp_level, 0);
+        assert_eq!(before[0].xp_points, 0);
+
+        // Pairwise-distinct so a transposition of the two arguments would be
+        // visible rather than coincidentally passing.
+        registry.set_experience(uuid(1), 7, 23);
+        let after = registry.candidates();
+        assert_eq!(after[0].xp_level, 7);
+        assert_eq!(after[0].xp_points, 23);
+
+        // An unregistered uuid must not panic and must not fabricate an entry.
+        registry.set_experience(uuid(99), 5, 5);
+        assert_eq!(registry.candidates().len(), 1);
+
+        drop(alice);
     }
 
     /// The entity type must be the *player* key, not whatever

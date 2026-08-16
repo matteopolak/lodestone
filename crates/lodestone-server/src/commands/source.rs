@@ -134,6 +134,15 @@ pub struct PlayerCandidate {
     pub username: String,
     pub position: Vec3,
     pub game_mode: GameMode,
+    /// `Player.experienceLevel`, the same "republished on every mutation"
+    /// mirror `game_mode` already is — see [`crate::players::PlayerRegistry::set_experience`].
+    pub xp_level: i32,
+    /// Points *within the current level* — `Mth.floor(experienceProgress *
+    /// getXpNeededForNextLevel())`, `ExperienceCommand.java`'s own `POINTS`
+    /// query formula, **not** the lifetime total
+    /// [`crate::experience::PlayerExperience::total`] tracks. `/xp query …
+    /// points` is the only reader.
+    pub xp_points: i32,
 }
 
 /// Why a selector matched nothing, or could not be resolved.
