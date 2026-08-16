@@ -140,12 +140,6 @@ impl Path {
         self.target
     }
 
-    /// The index of the next waypoint to walk toward.
-    #[must_use]
-    pub fn next_index(&self) -> usize {
-        self.next_index
-    }
-
     /// The next waypoint to walk toward, if any remain.
     #[must_use]
     pub fn next_node(&self) -> Option<PathNode> {
