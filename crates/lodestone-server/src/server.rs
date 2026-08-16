@@ -1018,6 +1018,7 @@ async fn travel_through_end_portal<T, P, S>(
     view: &mut ViewTracker,
     join_stream: &mut crate::join_scheduler::JoinChunkStream<S>,
     game_mode: GameMode,
+    mobs: &MobHandle,
 ) -> Result<Option<PortalTrip>, ServerError>
 where
     T: Transport,
@@ -1040,6 +1041,25 @@ where
     // anything — so the chunk stream below already carries the platform the
     // player is about to be standing on.
     crate::portal::ensure_end_platform(destination, platform_origin);
+
+    // The one remaining hop `docs/dragon-fight.md` names: the first
+    // connection to reach a fresh End (this session — see
+    // `ChunkSource::claim_dragon_fight_start`'s own doc comment for why this
+    // is a process-lifetime gate, not a persisted one) spawns the ten
+    // seed-derived crystals, the dragon itself, and writes every obsidian
+    // spike/podium block the arena needs, exactly as
+    // `MobSim::init_end_dragon_fight`'s own doc describes. `claim_...`
+    // returning `false` means another connection already did this for the
+    // same End sibling, so this one does nothing further.
+    if destination.claim_dragon_fight_start() {
+        let seed = crate::worldgen_data::active_world_seed();
+        let init = mobs.with(|sim| {
+            sim.init_end_dragon_fight(seed, Vec3::new(0.0, 64.0, 0.0), to.min_y())
+        });
+        for write in &init.block_writes {
+            destination.set_block(write.x, write.y, write.z, &write.state);
+        }
+    }
 
     let change = proto.encode_dimension_change(to.key(), arrival, game_mode);
     if change.is_empty() {
@@ -4213,6 +4233,7 @@ fn container_title(menu: &str) -> &'static str {
 /// (restock/leveling/purchase), named rather than silently absent. See
 /// `crate::mobs::villager::trades`'s own module doc for the same disclosure
 /// on the generation side.
+#[allow(clippy::too_many_arguments)]
 async fn open_merchant_screen<T, P>(
     conn: &mut Connection<T>,
     proto: &P,
@@ -4221,6 +4242,13 @@ async fn open_merchant_screen<T, P>(
     level: i32,
     xp: i32,
     next_window_id: &mut i32,
+    // Issue #246's own remaining scope: this villager's summed reputation
+    // toward the opening player (`MobSim::villager_reputation`) and, when
+    // carried, the Hero of the Village amplifier (`ActiveEffects::amplifier_of`)
+    // — both fed straight into `priced_villager_offers` so the displayed
+    // price already reflects them, matching what `SelectTrade` will charge.
+    reputation: i32,
+    hero_of_the_village_amplifier: Option<u32>,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -4236,18 +4264,29 @@ where
     )
     .await?;
 
-    let offers: Vec<MerchantOfferOut> = crate::mobs::villager::trades::offers_up_to(profession, level)
-        .into_iter()
-        .filter_map(|trade| {
-            Some(MerchantOfferOut {
-                wants_a: (trade.wants_item.parse::<ResourceKey>().ok()?, trade.wants_count),
-                wants_b: None,
-                gives: (trade.gives_item.parse::<ResourceKey>().ok()?, trade.gives_count),
-                max_uses: trade.max_uses,
-                xp: trade.xp,
-            })
+    let offers: Vec<MerchantOfferOut> = priced_villager_offers(
+        profession,
+        level,
+        reputation,
+        hero_of_the_village_amplifier,
+    )
+    .into_iter()
+    .filter_map(|offer| {
+        Some(MerchantOfferOut {
+            wants_a: (
+                offer.record.wants_item.parse::<ResourceKey>().ok()?,
+                offer.modified_cost_a_count(),
+            ),
+            wants_b: None,
+            gives: (
+                offer.record.gives_item.parse::<ResourceKey>().ok()?,
+                offer.record.gives_count,
+            ),
+            max_uses: offer.record.max_uses,
+            xp: offer.record.xp,
         })
-        .collect();
+    })
+    .collect();
 
     apply(
         conn,
@@ -4293,10 +4332,17 @@ where
 /// rather than dropping the excess on the floor.
 fn attempt_villager_trade(
     inventory: &PlayerInventory,
-    trade: &crate::mobs::villager::trades::TradeRecord,
+    offer: &crate::villager_trade::OfferState,
 ) -> Option<PlayerInventory> {
+    let trade = &offer.record;
     let mut trial = inventory.clone();
-    trial.consume(trade.wants_item, u32::try_from(trade.wants_count).ok()?)?;
+    // `offer.modified_cost_a_count()`, not `trade.wants_count`: issue #246's
+    // whole remaining scope was that a real reputation/Hero-of-the-Village
+    // discount was computed and never reached a price — this is that price.
+    trial.consume(
+        trade.wants_item,
+        u32::try_from(offer.modified_cost_a_count()).ok()?,
+    )?;
     if let Some((item, count)) = trade.wants_b {
         trial.consume(item, u32::try_from(count).ok()?)?;
     }
@@ -4309,6 +4355,39 @@ fn attempt_villager_trade(
         return None;
     }
     Some(trial)
+}
+
+/// This villager's priced offer list for one moment in time: the static
+/// per-level trade table ([`crate::mobs::villager::trades::offers_up_to`])
+/// with vanilla's reputation and Hero of the Village discounts folded in
+/// ([`crate::mobs::villager::reputation::update_special_prices`] — see that
+/// function's own doc for why the two are independent and additive, and both
+/// negative deltas).
+///
+/// **Demand and use-count are not persisted across calls** — every
+/// [`OfferState`](crate::villager_trade::OfferState) starts fresh at `uses: 0,
+/// demand: 0` — issue #245's own disclosed "no live per-villager `OfferState`"
+/// gap, unchanged by this. What this closes is issue #246's own remaining
+/// scope: reputation and Hero of the Village now reach a real price, computed
+/// identically at [`open_merchant_screen`] (display) and the `SelectTrade`
+/// dispatch arm (purchase) so what a player sees is what they pay.
+fn priced_villager_offers(
+    profession: crate::mobs::villager::Profession,
+    level: i32,
+    reputation: i32,
+    hero_of_the_village_amplifier: Option<u32>,
+) -> Vec<crate::villager_trade::OfferState> {
+    let mut offers: Vec<crate::villager_trade::OfferState> =
+        crate::mobs::villager::trades::offers_up_to(profession, level)
+            .into_iter()
+            .map(crate::villager_trade::OfferState::new)
+            .collect();
+    crate::mobs::villager::reputation::update_special_prices(
+        &mut offers,
+        reputation,
+        hero_of_the_village_amplifier,
+    );
+    offers
 }
 
 /// Opens a block-entity's container screen for this connection, mirroring
@@ -10874,9 +10953,25 @@ where
                 if let Some((profession, level)) = resolved
                     && let Some(index) = usize::try_from(index).ok()
                 {
-                    let offers = crate::mobs::villager::trades::offers_up_to(profession, level);
-                    if let Some(trade) = offers.get(index)
-                        && let Some(next) = attempt_villager_trade(inventory, trade)
+                    // Recomputed fresh, not read back from what
+                    // `open_merchant_screen` sent: this crate has no live
+                    // per-villager `OfferState` to hold onto between packets
+                    // (see `priced_villager_offers`'s own doc), so the
+                    // charged price is derived identically to the displayed
+                    // one rather than cached — reputation moving between the
+                    // menu opening and this click is the one, minor
+                    // divergence from vanilla's cached-offer behaviour.
+                    let reputation = mobs.with(|sim| sim.villager_reputation(entity_id, player_uuid));
+                    let hero_of_the_village_amplifier =
+                        effects.amplifier_of("minecraft:hero_of_the_village");
+                    let offers = priced_villager_offers(
+                        profession,
+                        level,
+                        reputation,
+                        hero_of_the_village_amplifier,
+                    );
+                    if let Some(offer) = offers.get(index)
+                        && let Some(next) = attempt_villager_trade(inventory, offer)
                     {
                         *inventory = next;
                         // `Villager.notifyTrade`'s `onReputationEventFrom`: a
@@ -11265,6 +11360,9 @@ where
                     outcome
                 {
                     let xp = mobs.with(|sim| sim.villager_xp(entity_id));
+                    let reputation = mobs.with(|sim| sim.villager_reputation(entity_id, player_uuid));
+                    let hero_of_the_village_amplifier =
+                        effects.amplifier_of("minecraft:hero_of_the_village");
                     open_merchant_screen(
                         conn,
                         proto,
@@ -11273,6 +11371,8 @@ where
                         level,
                         xp,
                         next_window_id,
+                        reputation,
+                        hero_of_the_village_amplifier,
                     )
                     .await?;
                     // `SelectTrade`'s only lookup: which villager this
@@ -13608,6 +13708,7 @@ where
                                     &mut view,
                                     &mut join_stream,
                                     game_mode,
+                                    mobs,
                                 )
                                 .await?
                             }

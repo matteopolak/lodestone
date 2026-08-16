@@ -80,12 +80,20 @@ loop). `MobSim` adds:
 
 ## What remains (named rather than silent)
 
-- **`update_special_prices` has no live per-villager `OfferState` list to call against
-  yet.** `crate::villager_trade`'s own doc already discloses `SELECT_TRADE` is decoded
-  and discarded and nothing calls `VillagerTrades::maybe_restock` — this module is
-  ready the instant that lands (`crate::server`, off limits for this change). This is
-  the one remaining reason the reputation score, though now written by every real
-  producer below, still moves no visible price for a player.
+- **No longer true — `update_special_prices` now has a real caller.**
+  `crate::server::priced_villager_offers` (`crates/lodestone-server/src/server.rs`)
+  builds a fresh `Vec<OfferState>` from `crate::mobs::villager::trades::offers_up_to`
+  and calls `update_special_prices` against it with the opening player's real
+  `MobSim::villager_reputation` and `ActiveEffects::amplifier_of("minecraft:hero_of_the_village")`
+  amplifier, before either sending `MERCHANT_OFFERS` (`open_merchant_screen`) or
+  charging a purchase (the `ServerBound::SelectTrade` dispatch arm, through
+  `attempt_villager_trade`) — both call sites build the list the same way, so a
+  displayed price and its charged price agree. **Demand and use-count are still not
+  persisted** — every `OfferState` starts fresh (`uses: 0, demand: 0`) on each call,
+  since this crate still has no live per-villager `OfferState` store to hold onto
+  between packets (`crate::villager_trade`'s own doc; `VillagerTrades::maybe_restock`
+  still has no caller). That remaining gap is narrower than before: restocking/demand
+  fluctuation, not "reputation reaches no price at all".
 - **Iron-golem aggression toward a low-reputation player** (named in issue #246's own
   body) has no evidenced vanilla mechanism — nothing in
   `.cache/mc/26.2/src/net/minecraft/world/entity/animal/golem/IronGolem.java` reads
