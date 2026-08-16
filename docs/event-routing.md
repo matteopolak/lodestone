@@ -159,7 +159,7 @@ reviewable commit, not as a drive-by while landing something else.
 
 ## Islands: variants this table found reaching nothing
 
-**26 of 133** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
+**25 of 133** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
 consumer, which is a normal state for a from-scratch client.
 
 > **`EntityLeashed` left the list when a leashed mob's rope was wired.** The
@@ -371,12 +371,12 @@ Both were tracked as separate follow-up issues, closed as follows:
   split into `gather_crack_targets`) and `app.rs`'s one-line call site are the
   brokered choke-point patch that lands alongside this doc update.
 
-The remaining **27**, listed for the record and not as a defect claim:
+The remaining **25**, listed for the record and not as a defect claim:
 
 `Ping`, `BlockChangedAck`, `ChunkCacheCenterChanged`, `ChunkCacheRadiusChanged`,
-`SimulationDistanceChanged`, `EntityLeashed`,
+`SimulationDistanceChanged`,
 `ItemCooldown`, `PlayerRotationSet`, `CameraSet`, `BookOpened`, `SoundStopped`,
-`PlayerCombatEntered`, `PlayerCombatEnded`, `SignEditorOpened`,
+`PlayerCombatEntered`, `PlayerCombatEnded`,
 `AdvancementsTabSelected`, `ProjectilePowerChanged`, `MountScreenOpened`,
 `TransferRequested`, `CookieRequested`, `CookieStored`, `ResourcePackPushed`,
 `ResourcePackPopped`, `CustomPayload`, `ServerDataReceived`, `PongReceived`,
