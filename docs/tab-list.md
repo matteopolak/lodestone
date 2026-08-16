@@ -34,12 +34,38 @@ instrument is silent on it rather than wrong.
 
 `tab_list_view` does what the fold deliberately does not:
 
-- resolves each entry's `display_name` (else its plain profile name) into **styled
-  spans**, so a server that colours a name gets a coloured row —
-  `PlayerTabOverlay.getNameForDisplay`;
+- resolves each entry's `display_name` (else its plain profile name, run through
+  its scoreboard team — see below) into **styled spans**, so a server that
+  colours a name gets a coloured row — `PlayerTabOverlay.getNameForDisplay`;
 - applies vanilla's `limit(80)` **after** sorting, so a 200-player server shows
   the alphabetically-and-by-order first 80 rather than 200 rows off the bottom;
 - turns the raw latency into one of six sprite ids via `ping_sprite`.
+
+**An explicit `display_name` was never the only source of a coloured row, and
+for a while this projection only checked that one.** `getNameForDisplay` reads
+`info.getTabListDisplayName() != null ? decorate(explicit) : decorate(team-
+formatted(plain name))` — a player with **no** explicit display name still gets
+coloured by their scoreboard team (`PlayerTeam.formatNameForTeam`), which is
+the more common case in practice: a server that runs `/team modify <team>
+color` never sends a display-name component at all. `tab_list_view` now takes
+the session's `Scoreboard` and, when an entry carries no explicit name, runs it
+through `Scoreboard::display_name_of` — the same team-decoration function
+`Sim::sidebar` already used for the scoreboard sidebar, so this closes the gap
+by *reusing* a fold that existed, not writing a new one. An explicit
+`display_name` still wins outright, matching `getNameForDisplay`'s own
+short-circuit.
+
+**Per-player hex colour on an explicit `display_name` was correct end to end
+all along** — `tab_list_view` has resolved through styled spans since the day
+it was rewritten, and the draw uses `text_spans`/`draw_spans`, which handles
+`TextColor::Rgb` the same way chat does. The wire hop that actually dropped it:
+`v770`'s `player_info.rs` decoded `UPDATE_DISPLAY_NAME` through
+`plain_text_from_nbt_component` (a name only, no style at all) rather than
+`Text::from_nbt` (the decoder chat's own adapter already uses for the same wire
+shape), so a component tree with real style never survived past that one
+packet — a protocol-crate fix, reported for brokering rather than made here
+(`crates/protocol/**` is off limits to this doc's own author). Nothing about
+the shell-side chain needed changing for that half once it lands.
 
 Sort order is `TabList::ordered`, which is `PLAYER_COMPARATOR`: descending
 `list_order`, then spectators last, then team name, then profile name
@@ -80,6 +106,36 @@ per-row fill is `getBackgroundColor(553648127)` = `0x20FFFFFF` — **white** at
 alpha 32. Reading it as another black wash makes the rows read as one flat block
 instead of a striped list. A spectator's name is `0x90FFFFFF` rather than opaque
 white.
+
+**The `0x20FFFFFF` constant itself is correct, and the "too bright" report is
+real anyway — check the blend, not the number.** `TAB_ROW_FILL`'s numeric value
+matches vanilla exactly (confirmed against `Options.getBackgroundColor`'s real
+default), and vanilla blends it directly on raw gamma bytes — it is not
+colour-managed. This HUD's colour-quad pipeline (`hud.wgsl`) writes the same raw
+value straight through with no gamma correction, but the render target it lands
+on is an `Srgb`-format view — native `wgpu-core`'s `Surface::get_default_config`
+sorts sRGB formats first, so the swapchain format has been `Bgra8UnormSrgb` on
+native since before this fix existed. Writing/blending onto an `Srgb` view
+happens in
+**linear** light — the hardware decodes the stored byte, blends, then
+re-encodes — so a low-alpha white overlay composites brighter than the same
+nominal blend does on vanilla's raw bytes. Computed and measured (a headless
+`Rgba8UnormSrgb` render, compared against both the gamma-blend and the
+linear-blend hypotheses): the divergence is background-dependent and large
+against a dark background (tens of `/255`), shrinking toward zero as the
+background approaches white — exactly the "fixed point at black and white,
+diverges most in between" shape a gamma/linear blend mismatch produces, and
+exactly why the black `TAB_PLATE` never looked wrong while the white row fill
+does (black is a fixed point of the sRGB transfer curve; blending it is
+identical in both spaces).
+
+The fix is not a constant change — CLAUDE.md's colour-space rule is explicit
+about that trap. It needs the HUD's flat-colour draws to blend on a **non-sRGB**
+view of the same swapchain texture (source *textures* — the font, GUI atlas,
+item icons — can stay sRGB-sampled regardless, since sampling gamma-correctness
+is independent of the blend target's format), which is a `gpu.rs`/render-target
+change outside this crate's ownership boundary. Reported for brokering rather
+than made here.
 
 ## How to change it, and the gotchas
 

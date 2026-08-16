@@ -1679,13 +1679,20 @@ pub fn heart_fill(i: usize, health: f32) -> Option<HeartFill> {
 /// once per frame with no borrow to fight.
 ///
 /// Deliberately **not** every vanilla chat option: `chatVisibility` (System/
-/// Hidden filtering), `chatColors`' link-adjacent siblings `chatLinks`/
-/// `chatLinksPrompt`, and `chatDelay` all live upstream of this draw layer —
+/// Hidden filtering) and `chatDelay` both live upstream of this draw layer —
 /// the first needs a per-line message-source tag `ChatLog::recent` currently
-/// flattens away, the other three need click/rate-limit plumbing this HUD has
-/// none of. Landing an option field with no reader is the exact defect this
+/// flattens away, the second is a message-arrival rate limit, not a render
+/// concern. Landing an option field with no reader is the exact defect this
 /// repo's own `CLAUDE.md` calls the dominant one, so those stay out until
 /// something upstream can actually consume them.
+///
+/// `chatColors`' link-adjacent siblings `chatLinks`/`chatLinksPrompt` used to
+/// belong on this list too — click detection landed
+/// ([`chat_interaction_at`]/[`HudRenderer::chat_interaction_at`]) — but the
+/// *option* still has no reader: there is no confirmation-screen state yet to
+/// gate an `open_url` click on (see `docs/chat.md`'s "Interactivity" section
+/// for the exact boundary), so the toggle that would control it still has
+/// nothing to control.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChatDisplayOptions {
     /// `options.chat.scale` (`Options.java`), `0.0..=1.0` — vanilla's
