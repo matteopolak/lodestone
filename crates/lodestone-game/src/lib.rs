@@ -54,6 +54,7 @@ pub mod container;
 pub mod custom_item;
 pub mod debug_feeds;
 pub mod effect;
+pub mod food;
 pub mod hud;
 pub mod item;
 pub mod levelstate;

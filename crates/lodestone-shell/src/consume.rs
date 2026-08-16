@@ -37,21 +37,26 @@
 //! progress, and a bug in the seam between two individually-correct halves has no
 //! subject for a test to point at otherwise.
 //!
-//! It joins four things:
+//! It joins five things:
 //!
 //! 1. [`UsingItem`](crate::interact::UsingItem) — the use button is down.
 //! 2. [`ItemUseTicks`] — how long, in 20 Hz ticks, counting **up**.
 //! 3. the selected hotbar item's registry name.
 //! 4. that item's `minecraft:consumable` component
 //!    ([`lodestone_game::consumable`]).
+//! 5. for a `minecraft:food` item, the hunger gate
+//!    ([`lodestone_game::food::can_eat`]) — a full, non-invulnerable player's
+//!    use of an ordinary food resolves to `None` here, the same `FAIL`
+//!    vanilla's server-side `Player.canEat` gives it, rather than the whole
+//!    bite animation and crumbs for a use the server was always going to
+//!    refuse.
 //!
 //! and then bounds the result by the item's own `consume_ticks`, which is what
-//! makes the animation stop on its own. That bound is load-bearing:
-//! `Sim::use_item_live` arms `ItemUseTicks` on the **press edge for any item**,
-//! including a non-consumable and including a consume the server refused (a full
-//! player's right-click on steak is vanilla's `FAIL` and starts nothing). Without
-//! the bound, holding the button after a finished bite would animate and throw
-//! crumbs forever.
+//! makes the animation stop on its own once a use the gates above *did* allow
+//! finishes. That bound is load-bearing on its own axis: `Sim::use_item_live`
+//! arms `ItemUseTicks` on the **press edge for any item**, including a
+//! non-consumable. Without the bound, holding the button after a finished bite
+//! would animate and throw crumbs forever.
 //!
 //! # How to change it, and the gotchas
 //!
@@ -71,7 +76,7 @@
 
 use lodestone_ecs::ecs::prelude::{Query, Res, ResMut, With};
 use lodestone_ecs::player::{ItemUseTicks, LocalPlayer, PhysicsState, SelectedSlot};
-use lodestone_ecs::session::SessionMenus;
+use lodestone_ecs::session::{ServerGameMode, SessionMenus, Vitals};
 use lodestone_game::consumable::{self, ConsumeAnimation, Consumable};
 
 use crate::interact::{ParticleSim, UsingItem};
@@ -91,20 +96,49 @@ pub struct ConsumeState {
 
 impl ConsumeState {
     /// The join described in the [module docs](self): `None` unless the use button
-    /// is down, an item-use clock is running, the selected item is consumable, and
-    /// the clock has not run past that item's duration.
+    /// is down, an item-use clock is running, the selected item is consumable, the
+    /// clock has not run past that item's duration, and — for an item that is
+    /// `minecraft:food` — the hunger gate [`lodestone_game::food::can_eat`] allows
+    /// it.
     ///
-    /// A free function over its four inputs rather than a `Sim` method, so both the
+    /// A free function over its inputs rather than a `Sim` method, so both the
     /// `GameTick` system and the render source resolve the *same* expression and a
     /// test can drive it without a world.
+    ///
+    /// # The food-full-hunger gate
+    ///
+    /// [`consumable::consumable_for_item`] alone answers "does this item animate
+    /// as eat/drink at all" — every `minecraft:food` item passes it regardless of
+    /// hunger, which is why a full player used to see the whole bite animation and
+    /// crumbs for a food the server was about to refuse with `FAIL`.
+    /// [`lodestone_game::food::always_eat_for_food`] narrows to the 40 items that
+    /// are actually `minecraft:food`; `None` (a drink, or anything non-food) means
+    /// no hunger gate applies at all, matching vanilla's `Consumable.startConsuming`
+    /// only checking `canEat` for food in the first place. `food_level: None`
+    /// (the server has not told us yet) does **not** gate — an unknown hunger
+    /// level must never block a use this prediction cannot actually verify either
+    /// way, and the server's own refusal is still the authority if this guesses
+    /// wrong.
     #[must_use]
-    pub fn resolve(using: bool, ticks_used: Option<u32>, item: Option<&str>) -> Option<Self> {
+    pub fn resolve(
+        using: bool,
+        ticks_used: Option<u32>,
+        item: Option<&str>,
+        food_level: Option<i32>,
+        invulnerable: bool,
+    ) -> Option<Self> {
         if !using {
             return None;
         }
         let ticks_used = ticks_used?;
         let item = item?;
         let consumable = consumable::consumable_for_item(item)?;
+        if let Some(always_eat) = lodestone_game::food::always_eat_for_food(item)
+            && let Some(level) = food_level
+            && !lodestone_game::food::can_eat(always_eat, level, invulnerable)
+        {
+            return None;
+        }
         // The bound that makes the animation self-terminating — see the module
         // docs. `>=` and not `>`: at `ticks_used == consume_ticks` vanilla's
         // `useItemRemaining` has reached 0 and `completeUsingItem` has run.
@@ -170,9 +204,12 @@ pub fn emit_consume_particles(
     using: Res<UsingItem>,
     ticks: Res<ItemUseTicks>,
     mut particles: ResMut<ParticleSim>,
-    players: Query<(&PhysicsState, &SelectedSlot, &SessionMenus), With<LocalPlayer>>,
+    players: Query<
+        (&PhysicsState, &SelectedSlot, &SessionMenus, &Vitals, &ServerGameMode),
+        With<LocalPlayer>,
+    >,
 ) {
-    let Ok((state, slot, menus)) = players.single() else {
+    let Ok((state, slot, menus, vitals, game_mode)) = players.single() else {
         return;
     };
     let held = menus
@@ -180,7 +217,13 @@ pub fn emit_consume_particles(
         .player()
         .player_native(slot.0)
         .map(|stack| stack.item().to_string());
-    let Some(consume) = ConsumeState::resolve(using.0, ticks.0, held.as_deref()) else {
+    // `!crate::hud::can_hurt_player`, not a second creative/spectator check —
+    // vanilla's `abilities.invulnerable` and `MultiPlayerGameMode.
+    // canHurtPlayer()` agree on exactly the same two game modes.
+    let invulnerable = !crate::hud::can_hurt_player(game_mode.0);
+    let Some(consume) =
+        ConsumeState::resolve(using.0, ticks.0, held.as_deref(), vitals.food, invulnerable)
+    else {
         return;
     };
     if !consume.emits_particles_this_tick() {
@@ -205,19 +248,28 @@ pub fn emit_consume_particles(
 mod tests {
     use super::*;
 
+    /// [`ConsumeState::resolve`] with the food-hunger-gate pair defaulted to
+    /// "no gate applies" (`food_level: None, invulnerable: false`) — every
+    /// test that predates the hunger gate and is not itself testing it uses
+    /// this, so the four-conjunct/duration/particle/id tests below are
+    /// unaffected by the fifth conjunct this module added.
+    fn resolve(using: bool, ticks_used: Option<u32>, item: Option<&str>) -> Option<ConsumeState> {
+        ConsumeState::resolve(using, ticks_used, item, None, false)
+    }
+
     /// The four-way join, arm by arm. Each row is a single missing conjunct, so a
     /// resolver that dropped one would pass the others and fail exactly here.
     #[test]
     fn a_consume_needs_all_four_conjuncts() {
-        let ok = ConsumeState::resolve(true, Some(4), Some("minecraft:carrot"));
+        let ok = resolve(true, Some(4), Some("minecraft:carrot"));
         assert!(ok.is_some(), "the positive case must resolve");
-        assert_eq!(ConsumeState::resolve(false, Some(4), Some("minecraft:carrot")), None);
-        assert_eq!(ConsumeState::resolve(true, None, Some("minecraft:carrot")), None);
-        assert_eq!(ConsumeState::resolve(true, Some(4), None), None);
+        assert_eq!(resolve(false, Some(4), Some("minecraft:carrot")), None);
+        assert_eq!(resolve(true, None, Some("minecraft:carrot")), None);
+        assert_eq!(resolve(true, Some(4), None), None);
         // Held, in use, clock running — and not edible. This is the arm that fires
         // on every right-click with a pickaxe, so it is the one that matters most.
         assert_eq!(
-            ConsumeState::resolve(true, Some(4), Some("minecraft:diamond_pickaxe")),
+            resolve(true, Some(4), Some("minecraft:diamond_pickaxe")),
             None
         );
     }
@@ -228,14 +280,14 @@ mod tests {
     #[test]
     fn a_consume_ends_at_its_own_duration() {
         let carrot = "minecraft:carrot";
-        assert!(ConsumeState::resolve(true, Some(31), Some(carrot)).is_some());
-        assert_eq!(ConsumeState::resolve(true, Some(32), Some(carrot)), None);
-        assert_eq!(ConsumeState::resolve(true, Some(1_000), Some(carrot)), None);
+        assert!(resolve(true, Some(31), Some(carrot)).is_some());
+        assert_eq!(resolve(true, Some(32), Some(carrot)), None);
+        assert_eq!(resolve(true, Some(1_000), Some(carrot)), None);
         // Dried kelp is 16 ticks, so the bound is per item and not a constant: the
         // tick that is still eating a carrot has already finished the kelp.
-        assert!(ConsumeState::resolve(true, Some(15), Some("minecraft:dried_kelp")).is_some());
+        assert!(resolve(true, Some(15), Some("minecraft:dried_kelp")).is_some());
         assert_eq!(
-            ConsumeState::resolve(true, Some(16), Some("minecraft:dried_kelp")),
+            resolve(true, Some(16), Some("minecraft:dried_kelp")),
             None
         );
     }
@@ -248,8 +300,7 @@ mod tests {
         let bursts = |item: &str, duration: u32| {
             (0..duration)
                 .filter(|&t| {
-                    ConsumeState::resolve(true, Some(t), Some(item))
-                        .is_some_and(|c| c.emits_particles_this_tick())
+                    resolve(true, Some(t), Some(item)).is_some_and(|c| c.emits_particles_this_tick())
                 })
                 .count()
         };
@@ -269,9 +320,8 @@ mod tests {
     /// visibly different sprites, asserted to resolve to two different ids.
     #[test]
     fn the_crumbs_carry_the_eaten_items_own_id() {
-        let carrot = ConsumeState::resolve(true, Some(8), Some("minecraft:carrot")).expect("carrot");
-        let beetroot =
-            ConsumeState::resolve(true, Some(8), Some("minecraft:beetroot")).expect("beetroot");
+        let carrot = resolve(true, Some(8), Some("minecraft:carrot")).expect("carrot");
+        let beetroot = resolve(true, Some(8), Some("minecraft:beetroot")).expect("beetroot");
         assert_ne!(
             carrot.item_id, beetroot.item_id,
             "an orange crumb and a red one must come from different item ids"
@@ -286,8 +336,8 @@ mod tests {
 
     #[test]
     fn eat_and_drink_share_one_pose_but_differ_in_sound() {
-        let carrot = ConsumeState::resolve(true, Some(8), Some("minecraft:carrot")).expect("carrot");
-        let potion = ConsumeState::resolve(true, Some(8), Some("minecraft:potion")).expect("potion");
+        let carrot = resolve(true, Some(8), Some("minecraft:carrot")).expect("carrot");
+        let potion = resolve(true, Some(8), Some("minecraft:potion")).expect("potion");
         assert!(!carrot.is_drink());
         assert!(potion.is_drink());
         assert_eq!(carrot.consumable.sound, consumable::EAT_SOUND);
@@ -295,5 +345,53 @@ mod tests {
         // Same duration, so the same `remaining_ticks` at the same tick — the pose
         // really is shared.
         assert_eq!(carrot.remaining_ticks(), potion.remaining_ticks());
+    }
+
+    /// The hunger gate itself, this issue's own discriminating pair: a plain
+    /// apple at a full bar must not resolve at all (the animation this
+    /// module drives must never start for a use the server will `FAIL`), a
+    /// golden apple at the same full bar must. Two plain foods would coincide
+    /// on both hypotheses; this is why the pair is a golden apple and a plain
+    /// one, not two ordinary foods.
+    #[test]
+    fn a_full_bar_refuses_a_plain_apple_but_not_a_golden_one() {
+        let full = lodestone_game::food::MAX_FOOD;
+        assert_eq!(
+            ConsumeState::resolve(true, Some(0), Some("minecraft:apple"), Some(full), false),
+            None,
+            "a full, non-invulnerable player must not start eating a plain apple"
+        );
+        assert!(
+            ConsumeState::resolve(true, Some(0), Some("minecraft:golden_apple"), Some(full), false)
+                .is_some(),
+            "a golden apple bypasses a full bar"
+        );
+        // The hungry control: the exact same apple, one point short of full,
+        // must resolve — proving the refusal above is the food gate and not
+        // some other broken conjunct.
+        assert!(
+            ConsumeState::resolve(true, Some(0), Some("minecraft:apple"), Some(full - 1), false)
+                .is_some(),
+            "a hungry player may still eat a plain apple"
+        );
+        // Invulnerable (creative/spectator) bypasses the gate for any food.
+        assert!(
+            ConsumeState::resolve(true, Some(0), Some("minecraft:apple"), Some(full), true).is_some(),
+            "an invulnerable player may eat a plain apple at a full bar"
+        );
+        // An unknown food level (`None`, before the server has told us) must
+        // not block — this prediction cannot verify the gate either way, and
+        // the server remains authoritative regardless.
+        assert!(
+            ConsumeState::resolve(true, Some(0), Some("minecraft:apple"), None, false).is_some(),
+            "an unknown food level must not gate the prediction"
+        );
+        // A drink has no food component and so no hunger gate at all, even
+        // at a full bar.
+        assert!(
+            ConsumeState::resolve(true, Some(0), Some("minecraft:potion"), Some(full), false)
+                .is_some(),
+            "a drink is never gated on hunger"
+        );
     }
 }
