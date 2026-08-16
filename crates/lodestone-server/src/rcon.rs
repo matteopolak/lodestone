@@ -61,15 +61,27 @@
 //!   therefore fails for RCON exactly as it does in vanilla
 //!   (`getPlayerOrException`), rather than silently doing nothing.
 //!
-//!   **`/summon` is also unreachable from RCON**, for the same reason
-//!   `/setblock`/`/fill` are: it needs a resource this listener does not carry.
-//!   `CommandWorld::mobs` is `None` here (RCON builds no `MobHandle`), which the
-//!   command refuses honestly rather than spawning into a throwaway sim nothing
-//!   ticks or streams — see that field's own doc for why `None` is the correct
-//!   answer rather than a `MobHandle::default()`. `/tp` is **not** in this
-//!   list: a teleport is an ordinary directed [`Effect`](crate::Effect) exactly
-//!   like `/gamemode <target>`, so `/tp <targets> <location>` reaches a
-//!   connected player fine over RCON — only the bare, caller-implicit form
+//!   **`/setblock`, `/fill`, `/summon` and `/worldborder` are reachable now.**
+//!   Each needs a resource that used to be a plain local variable inside
+//!   [`IntegratedServer::open_to_lan`](crate::IntegratedServer::open_to_lan)/
+//!   `open_in_memory_with_mobs_using` — the world's `ChunkSource`, its
+//!   `BlockTickFeed`, its `MobHandle`, its `BorderFeed` — and is now a stored
+//!   field [`start_rcon`](crate::IntegratedServer::start_rcon) substitutes into
+//!   [`RconConfig`] the same way it already substitutes `world`. `/setblock`/
+//!   `/fill` write through `world_source` and publish through `block_ticks`
+//!   directly here (RCON has no per-connection `ChatCommand` arm to apply them
+//!   through), rather than being dropped as the always-self-targeted
+//!   [`Effect::SetBlock`]/[`Effect::Fill`] they still are for a real
+//!   connection — see `crate::commands::block_commands`'s own doc for why they
+//!   carry no player identity. `/worldborder`'s remaining gap is disclosed on
+//!   [`IntegratedServer::border`](crate::IntegratedServer)'s own doc: the
+//!   handle is real and shared with the tick loop now, but no *accepted LAN
+//!   connection* reads it yet (that needs its own, separate per-connection
+//!   plumbing) — RCON's query/set is honest regardless, since it reads and
+//!   mutates the actual state the loop advances. `/tp` was never in this list:
+//!   a teleport is an ordinary directed [`Effect`](crate::Effect) exactly like
+//!   `/gamemode <target>`, so `/tp <targets> <location>` reaches a connected
+//!   player fine over RCON — only the bare, caller-implicit form
 //!   (`/tp <location>`) fails, and only because the console has no body to move.
 //!
 //! # Configuration
@@ -152,6 +164,27 @@ pub struct RconConfig {
     /// directed effect queue. `None` for a server with no registry, where RCON
     /// can still read and set game rules but has nobody to target.
     pub players: Option<crate::PlayerRegistry>,
+    /// The world's shared, type-erased chunk source — `/setblock`/`/fill`'s
+    /// write surface. `pub(crate)` rather than `pub`: [`IntegratedServer::start_rcon`]
+    /// is the only legitimate source for this (a host cannot construct a real
+    /// one from outside this crate, the same reason `world` is always
+    /// substituted there too), so exposing a setter would only invite a
+    /// caller to hand RCON a source nothing else shares.
+    pub(crate) world_source: Option<crate::integrated::ErasedChunkSource>,
+    /// The tick loop's outbound block-change hub — `/setblock`/`/fill`'s
+    /// publish surface, so a console edit reaches every connected player.
+    pub(crate) block_ticks: Option<crate::tick::BlockTickFeed>,
+    /// The live mob simulation — `/summon`'s spawn surface. `None` is the
+    /// honest answer for a config with no live world behind it, same as
+    /// [`CommandWorld::mobs`](crate::commands::registrar::CommandWorld::mobs)'s
+    /// own doc states for the reason a throwaway `MobHandle::default()` would
+    /// be worse than refusing.
+    pub(crate) mobs: Option<crate::mobs::MobHandle>,
+    /// The world border — `/worldborder`'s read/write surface. See this
+    /// module's own doc for the scope this closes (RCON reads/mutates the
+    /// real, tick-loop-shared state) and the scope it does not (no accepted
+    /// LAN connection reads this feed yet).
+    pub(crate) border: Option<crate::border::BorderFeed>,
 }
 
 impl RconConfig {
@@ -168,6 +201,10 @@ impl RconConfig {
             builtins: ServerCommands::new(),
             world: crate::world_state::WorldStateHandle::default(),
             players: None,
+            world_source: None,
+            block_ticks: None,
+            mobs: None,
+            border: None,
         }
     }
 
@@ -190,6 +227,10 @@ impl RconConfig {
             builtins: ServerCommands::new(),
             world: crate::world_state::WorldStateHandle::default(),
             players: None,
+            world_source: None,
+            block_ticks: None,
+            mobs: None,
+            border: None,
         }
     }
 
@@ -465,19 +506,17 @@ pub(crate) fn run_command_as(
     command: &str,
 ) -> CommandResponse {
     let candidates = config.players.as_ref().map(crate::PlayerRegistry::candidates).unwrap_or_default();
-    // `mobs: None` — RCON has no `MobHandle` in scope at all (see
-    // `crate::commands::registrar::CommandWorld::mobs`'s own doc for why that
-    // is the honest answer rather than a throwaway sim), so `/summon` refuses
-    // over RCON exactly as `/setblock`/`/fill` already do for a different
-    // missing resource.
     let world = CommandWorld {
         rules: &config.world,
         players: &candidates,
         state: &config.world,
-        mobs: None,
-        // RCON has no live border to reach — same honest gap as `mobs: None`
-        // just above.
-        border: None,
+        // `/summon`'s spawn surface — `Some` whenever `IntegratedServer::start_rcon`
+        // was called on a world with a live `MobHandle` (every constructor
+        // that builds one at all; see that field's own doc comment).
+        mobs: config.mobs.as_ref(),
+        // `/worldborder`'s read/write surface — see `RconConfig::border`'s
+        // own doc for what reading/mutating it here does and does not reach.
+        border: config.border.as_ref(),
     };
     let source = CommandSource::console(
         caller_name,
@@ -490,25 +529,44 @@ pub(crate) fn run_command_as(
                 match directed.effect {
                     // `/say`/`/me` need no player *target* at all — see this
                     // module's own doc for why they are the one self-targeted
-                    // effect kind RCON can still deliver: unlike `SetBlock`/
-                    // `Fill` (which need a chunk source RCON does not have) and
-                    // `SetRespawnPoint` (a connection-local variable), a
-                    // broadcast only needs the registry this function already
-                    // holds.
+                    // effect kind RCON could always deliver.
                     crate::commands::Effect::Broadcast { sender, message } => {
                         if let Some(players) = config.players.as_ref() {
                             players.say(&sender, &message);
                         }
                     }
-                    // `SetBlock`/`Fill`/`SetRespawnPoint` are dropped here by
-                    // construction: they are always targeted at the console's
-                    // own (nonexistent) uuid or refuse outright before reaching
-                    // this point (`/setblock`/`/fill`'s own `ctx.source.uuid()`
-                    // guard), so this arm exists only so a future one added to
+                    // `crate::commands::block_commands`'s own doc: the console
+                    // has no uuid, so `/setblock`/`/fill` target `Uuid::nil()`
+                    // rather than refusing — applied here exactly as a live
+                    // connection's own `ChatCommand` arm applies the identical
+                    // self-targeted effect
+                    // (`crate::server::dispatch_play_packet`), just against
+                    // this config's stored `world_source`/`block_ticks`
+                    // instead of a per-connection `SourceRef`.
+                    crate::commands::Effect::SetBlock { pos: (x, y, z), block } => {
+                        if let (Some(source), Some(block_ticks)) =
+                            (config.world_source.as_ref(), config.block_ticks.as_ref())
+                        {
+                            source.set_block(x, y, z, &block);
+                            block_ticks.publish(x, y, z, block);
+                        }
+                    }
+                    crate::commands::Effect::Fill { positions, block } => {
+                        if let (Some(source), Some(block_ticks)) =
+                            (config.world_source.as_ref(), config.block_ticks.as_ref())
+                        {
+                            for (x, y, z) in positions {
+                                source.set_block(x, y, z, &block);
+                                block_ticks.publish(x, y, z, block.clone());
+                            }
+                        }
+                    }
+                    // `SetRespawnPoint` is dropped here by construction: it is
+                    // always targeted at the console's own (nonexistent) uuid
+                    // — a connection-local variable RCON has no analogue for —
+                    // so this arm exists only so a future one added to
                     // `Effect` is not silently queued at a target nobody reads.
-                    crate::commands::Effect::SetBlock { .. }
-                    | crate::commands::Effect::Fill { .. }
-                    | crate::commands::Effect::SetRespawnPoint { .. } => {}
+                    crate::commands::Effect::SetRespawnPoint { .. } => {}
                     effect => {
                         if let Some(players) = config.players.as_ref() {
                             players.push_effect(directed.target, effect);

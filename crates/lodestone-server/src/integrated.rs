@@ -675,6 +675,40 @@ impl ShutdownSignal {
     }
 }
 
+/// Thin [`Debug`](std::fmt::Debug)-implementing wrapper over the type-erased
+/// chunk source, so `#[derive(Debug)]` on [`IntegratedServer`] does not need
+/// a hand-written impl (enumerating every other field) just for this one —
+/// the same reason [`HostCore`] gets its own manual impl rather than
+/// `IntegratedServer` losing its derive over `host`. [`std::ops::Deref`]
+/// rather than a public field, so call sites read `&*world_source` /
+/// `world_source.set_block(...)` exactly as they would against a bare
+/// `Arc<dyn ChunkSource>`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct ErasedChunkSource(Arc<dyn ChunkSource>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for ErasedChunkSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ErasedChunkSource").finish_non_exhaustive()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::ops::Deref for ErasedChunkSource {
+    type Target = Arc<dyn ChunkSource>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Clone for ErasedChunkSource {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
 /// A running integrated server that owns its serving task(s).
 ///
 /// Dropping the handle signals shutdown and aborts the task, so a server can
@@ -763,6 +797,37 @@ pub struct IntegratedServer {
     /// a channel, exactly as `save`/`level_dat` above reach persistence.
     #[cfg(not(target_arch = "wasm32"))]
     mobs: Option<MobHandle>,
+    /// The world's shared, type-erased [`ChunkSource`], `Some` for every
+    /// constructor that builds a world.
+    ///
+    /// RCON's `/setblock`/`/fill` read/write surface — the same handle a live
+    /// connection's own `ChatCommand` arm reaches through `chunk_source`
+    /// (`crate::server::dispatch_play_packet`'s `Effect::SetBlock`/`Effect::Fill`
+    /// arms). Before this field existed, RCON built a [`crate::commands::CommandWorld`]
+    /// with no chunk source at all and those two effects were dropped by
+    /// construction — see `crate::commands::block_commands`'s own module doc
+    /// for the connection-scoped reason they were self-targeted in the first
+    /// place, which this field is what lets RCON satisfy without one.
+    #[cfg(not(target_arch = "wasm32"))]
+    world_source: Option<ErasedChunkSource>,
+    /// The tick loop's outbound block-change hub — RCON's `/setblock`/`/fill`
+    /// publish surface, so a change made over the console reaches every
+    /// connected player exactly as a player-issued one does, rather than
+    /// only being visible on the next chunk reload.
+    #[cfg(not(target_arch = "wasm32"))]
+    block_ticks: Option<BlockTickFeed>,
+    /// The world border (issue #580's remainder) — `Some` for every
+    /// constructor that builds a real, shared one; `open_to_lan` currently
+    /// builds one that is real but **not yet read by any accepted
+    /// connection** (see that constructor's own comment, next to its
+    /// `run_tick_loop_with_weather` call, for the disclosed, separate
+    /// per-connection wiring this does not attempt). Storing it here still
+    /// closes a real gap: before this field existed, RCON's `/worldborder`
+    /// had no [`crate::border::BorderFeed`] to reach at all, so it refused
+    /// unconditionally rather than reading and mutating the actual state the
+    /// tick loop ticks.
+    #[cfg(not(target_arch = "wasm32"))]
+    border: Option<crate::border::BorderFeed>,
     /// The portal index every dimension's `ChunkSource` shares (issue #303's
     /// second half) — the same handle `with_nether` hands to
     /// [`crate::dimension::DimensionalSource::with_siblings`], read back here
@@ -1123,6 +1188,14 @@ impl IntegratedServer {
                 portals: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 poi_storage: None,
+                // No tick loop and no RCON pairing here — same reasoning as `mobs`
+                // just above.
+                #[cfg(not(target_arch = "wasm32"))]
+                world_source: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                block_ticks: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                border: None,
                 // No tick loop here, so there is nothing to share a store *with*.
                 world_state: crate::world_state::WorldStateHandle::default(),
                 live_save: crate::live_save::LiveSaveSlot::default(),
@@ -1276,6 +1349,14 @@ impl IntegratedServer {
                 portals: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 poi_storage: None,
+                // No tick loop and no RCON pairing here — same reasoning as `mobs`
+                // just above.
+                #[cfg(not(target_arch = "wasm32"))]
+                world_source: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                block_ticks: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                border: None,
                 // No tick loop here, so there is nothing to share a store *with*.
                 world_state: crate::world_state::WorldStateHandle::default(),
                 // This constructor's own connection goes through
@@ -1810,6 +1891,11 @@ impl IntegratedServer {
         let conn_sleep_vote = sleep_vote.clone();
         let conn_sleep_feed = sleep_feed.clone();
         let conn_border = border_feed.clone();
+        // A third clone, held on `Self` for RCON's `/worldborder` to reach —
+        // see that field's own doc comment for the scope this closes and the
+        // scope it deliberately does not.
+        #[cfg(not(target_arch = "wasm32"))]
+        let host_border = border_feed.clone();
         // Issues #327/#328/#323. **One** world state, cloned out here for the same
         // reason the sleep vote is: a clone made inside the `async move` below would
         // move the original out of reach of the tick task, and two stores is the bug
@@ -1978,6 +2064,14 @@ impl IntegratedServer {
             let erased: Arc<dyn ChunkSource> = source.clone();
             Arc::new(erased)
         };
+        // A single-layer erasure for RCON — it has no generic `S: ChunkSource`
+        // parameter to satisfy (unlike `serve_connection`'s `source: &Arc<S>`,
+        // which is what the double-`Arc` above exists for), so it only ever
+        // needs to call methods on `dyn ChunkSource` directly.
+        #[cfg(not(target_arch = "wasm32"))]
+        let host_world_source = ErasedChunkSource(source.clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        let host_block_ticks = block_tick_feed.clone();
 
         (
             Self {
@@ -2010,6 +2104,12 @@ impl IntegratedServer {
                 portals: Some(handle_portals),
                 #[cfg(not(target_arch = "wasm32"))]
                 poi_storage: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                world_source: Some(host_world_source),
+                #[cfg(not(target_arch = "wasm32"))]
+                block_ticks: Some(host_block_ticks),
+                #[cfg(not(target_arch = "wasm32"))]
+                border: Some(host_border),
                 world_state: world_state_for_handle,
                 live_save,
                 #[cfg(not(target_arch = "wasm32"))]
@@ -2682,6 +2782,31 @@ impl IntegratedServer {
         let tick_block_entities = block_entities.clone();
         let tick_block_ticks = hub_block_ticks.clone();
         let tick_explosions = hub_explosions.clone();
+        // RCON's `/setblock`/`/fill`/`/summon`/`/worldborder` read/write
+        // surface (see `IntegratedServer::world_source`/`block_ticks`/
+        // `border`'s own doc comments) — cloned out here for the same reason
+        // every other `*_clone` in this function is: a clone made inside the
+        // `async move` below would move the original into the coroutine.
+        #[cfg(not(target_arch = "wasm32"))]
+        let host_world_source = ErasedChunkSource(source.clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        let host_block_ticks = hub_block_ticks.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        let host_mobs = mobs.clone();
+        // Issue #580's remainder: a *named*, shared handle rather than the
+        // throwaway `BorderFeed::default()` the tick-loop call below used to
+        // construct inline. `tick_border` is what the loop actually ticks now;
+        // `host_border` is the same handle, stored so RCON can query and
+        // mutate the state the loop advances. Deliberately **not** the fuller
+        // fix: no accepted connection reads this feed yet (join broadcast,
+        // per-tick damage), which needs the same per-connection plumbing
+        // `bind`'s LAN relay would need for sleep — a separate pass, same as
+        // it always was. This just stops the handle itself from being
+        // discarded on every tick.
+        #[cfg(not(target_arch = "wasm32"))]
+        let host_border = crate::border::BorderFeed::default();
+        #[cfg(not(target_arch = "wasm32"))]
+        let tick_border = host_border.clone();
         let tick_scheduled = registries
             .as_ref()
             .map_or_else(Default::default, |r| r.scheduled.clone());
@@ -2750,12 +2875,15 @@ impl IntegratedServer {
                 // the fixed origin box it replaces, and the fix is per-connection
                 // anchor bookkeeping, not more geometry — `FollowArea` already unions.
                 lan_follow,
-                // Issue #580: LAN stays border-unwired too, same shape as the
-                // sleep vote above — a fresh, unshared feed no accepted
-                // socket reads. Threading a real one needs the same
+                // Issue #580: real and shared now — `tick_border` is the same
+                // handle `IntegratedServer::border` stores below, so RCON's
+                // `/worldborder` mutates the state this loop actually ticks.
+                // Still **not** read by any accepted connection (no join
+                // broadcast, no per-tick damage) — that needs the same
                 // per-connection plumbing `bind`'s LAN relay would need for
-                // sleep, which is a separate pass.
-                crate::border::BorderFeed::default(),
+                // sleep, which remains a separate pass; see
+                // `IntegratedServer::border`'s own doc for the split.
+                tick_border,
             )
             .await;
         });
@@ -3025,15 +3153,28 @@ impl IntegratedServer {
             level_dat: None,
             #[cfg(not(target_arch = "wasm32"))]
             entity_storage: None,
-            // LAN worlds are not persistent yet (`save` is `None` above), so
-            // there is nothing for an entity save to write to.
+            // `entity_storage`/`save` above are about *persistence*, which LAN
+            // worlds do not have yet — but `mobs` itself (the local, `MobHandle
+            // ::default()`, real and ticked by the loop just spawned) is a
+            // **live population**, not a save path, and `/summon` over RCON
+            // needs exactly this handle. `Some` here is what makes that reach
+            // something the tick loop actually advances rather than an island.
             #[cfg(not(target_arch = "wasm32"))]
-            mobs: None,
-            // Same reasoning as `entity_storage`/`mobs` just above.
+            mobs: Some(host_mobs),
+            // Portal persistence is the same "no world directory" gap as
+            // `entity_storage` above.
             #[cfg(not(target_arch = "wasm32"))]
             portals: None,
             #[cfg(not(target_arch = "wasm32"))]
             poi_storage: None,
+            // RCON's `/setblock`/`/fill`/`/summon`/`/worldborder` surface — see
+            // each field's own doc comment on `IntegratedServer`.
+            #[cfg(not(target_arch = "wasm32"))]
+            world_source: Some(host_world_source),
+            #[cfg(not(target_arch = "wasm32"))]
+            block_ticks: Some(host_block_ticks),
+            #[cfg(not(target_arch = "wasm32"))]
+            border: Some(host_border),
             world_state: handle_world_state,
             // LAN worlds are not persistent yet (see `save: None` above), and
             // each accepted connection is a different player besides — a
@@ -3346,7 +3487,23 @@ impl IntegratedServer {
         // invisible: `/gamerule keep_inventory true` would report success and
         // change nothing anyone reads. Substituting rather than asserting means a
         // host cannot get it wrong.
-        let config = crate::rcon::RconConfig { world: self.world_state.clone(), ..config };
+        //
+        // `world_source`/`block_ticks`/`mobs`/`border` the same way, now that
+        // each is a real stored field rather than a local variable
+        // `open_to_lan`/`open_in_memory_with_mobs_using` discarded at the end
+        // of their own function — see each field's own doc comment on this
+        // type for what it closes. `None` on a constructor that never built
+        // one (the two simpler `open_in_memory_with_*` variants) substitutes
+        // `None` here too, which is the same honest "nothing to reach"
+        // answer those fields already gave.
+        let config = crate::rcon::RconConfig {
+            world: self.world_state.clone(),
+            world_source: self.world_source.clone(),
+            block_ticks: self.block_ticks.clone(),
+            mobs: self.mobs.clone(),
+            border: self.border.clone(),
+            ..config
+        };
         let (task, addr) = crate::rcon::spawn_listener(self.shutdown.notify_handle(), config)?;
         self.rcon_task = Some(task);
         Ok(addr)
