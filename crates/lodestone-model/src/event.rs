@@ -3458,7 +3458,12 @@ pub fn route(event: &ClientEvent) -> Route {
         // box), no per-entity or per-session scalar to fold. Both travel the
         // shell's own stream; no `handles_event` arm needed for either.
         | ClientEvent::CommandTreeUpdated { .. }
-        | ClientEvent::CommandSuggestionsReceived { .. } => SHELL,
+        | ClientEvent::CommandSuggestionsReceived { .. }
+        // `net.rs`'s `forward` already has an unconditional arm for this
+        // (`NetUpdate::SignEditorOpened`, consumed by `sim/net_apply.rs`); this
+        // entry used to live in the "claimed by nothing" block below, stale
+        // from before that consumer landed.
+        | ClientEvent::SignEditorOpened { .. } => SHELL,
         // Chat reaches the shell feed *and* the driver's signed-message
         // acknowledgement valve.
         ClientEvent::Chat { .. } => Route {
@@ -3626,7 +3631,6 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::SoundStopped { .. }
         | ClientEvent::PlayerCombatEntered
         | ClientEvent::PlayerCombatEnded { .. }
-        | ClientEvent::SignEditorOpened { .. }
         | ClientEvent::AdvancementsTabSelected { .. }
         | ClientEvent::ProjectilePowerChanged { .. }
         | ClientEvent::MountScreenOpened { .. }
