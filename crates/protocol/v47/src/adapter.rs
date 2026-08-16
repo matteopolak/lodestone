@@ -1,13 +1,16 @@
 //! [`VersionAdapter`] implementation driving the protocol 47 join flow.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use lodestone_canonical::canonical::{self, FallbackTally};
 use lodestone_core::{Ctx, Decode, Encode, Reader};
+use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_model::{
     AdapterError, BlockActionKind, BlockFace, ChatKind, ChatMode, ChunkPos, ClientAction,
     ClientEvent, ClientSettings, ConnectionState, Directive, DisplayedSkinParts, EntityInteraction,
-    EntityMovement, GameMode, Hand, LoginProfile, PlayerCommand, Rotation, ServerAddress,
-    TeleportFlags, Text, Vec3, VersionAdapter,
+    EntityMovement, GameMode, Hand, LoginProfile, PlayerCommand, Rotation, SectionPos,
+    ServerAddress, TeleportFlags, Text, Vec3, VersionAdapter,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk, WorldSink};
 
@@ -30,7 +33,7 @@ use crate::packets::position::Position;
 use crate::packets::settings::{BrandPayload, PlayerAbilities, Settings};
 use crate::packets::slot::Slot;
 use crate::packets::window::{
-    EnchantItem, ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot,
+    EnchantItem, HeldItemSlot, ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot,
 };
 
 /// Protocol version implemented by this adapter.
@@ -176,9 +179,10 @@ fn decode_body_exact<T: Decode>(payload: &[u8]) -> Result<T, AdapterError> {
 }
 
 /// Maps a decode error to the adapter's decode-error variant. Used by the
-/// hand-decoded arms (`entity_status`/`entity_head_rotation`) that read a
-/// [`Reader`] directly rather than going through a derived [`Decode`] body,
-/// mirroring `lodestone-v770`'s own `dec_err` helper.
+/// hand-decoded arms (`entity_status`/`entity_head_rotation`/`block_change`/
+/// `multi_block_change`) that read a [`Reader`] directly rather than going
+/// through a derived [`Decode`] body, mirroring `lodestone-v770`'s own
+/// `dec_err` helper.
 fn dec_err(err: impl std::fmt::Display) -> AdapterError {
     AdapterError::Decode(err.to_string())
 }
@@ -201,6 +205,45 @@ fn json_reason_text(reason: &str) -> Text {
     } else {
         text
     }
+}
+
+/// Largest block coordinate any vanilla world can legitimately contain, on
+/// either horizontal axis: `WorldBorder.absoluteMaxSize` (`WorldBorder.java`)
+/// is 29,999,984, and the border is what bounds every world regardless of the
+/// `worldborder` command or the world's own settings. Anything past this is not
+/// an awkward-but-real position, it is invalid input.
+const ABSOLUTE_MAX_BLOCK: i32 = 29_999_984;
+
+/// Turns a wire-supplied chunk coordinate into the block coordinate of its
+/// west/north edge, refusing anything the world border makes impossible.
+///
+/// Mirrors `lodestone-v340`'s identically-named helper, added there after
+/// `lodestone-fuzz`'s `handle_packet_never_panics` target found an unchecked
+/// `chunk_x * 16` panics in debug and silently wraps in release for any
+/// `|chunk|` past `i32::MAX / 16` — a wrapped coordinate writes a block at a
+/// position the packet never named, which is a corrupted world rather than a
+/// crash. `multi_block_change` shares 1.12.2's wire shape exactly, so it
+/// shares the hazard.
+///
+/// Both halves of the guard are deliberate and neither is redundant:
+///
+/// - `checked_mul` is the **structural** half. It cannot overflow whatever the
+///   bound below says, so a future edit that loosens or removes the range check
+///   still cannot reintroduce a panic or a wrap.
+/// - the range check is the **semantic** half. It refuses out-of-range input at
+///   the decode seam instead of clamping it, because a clamp would silently
+///   invent a position exactly the way the release-mode wrap did. Refusal is
+///   the only outcome that cannot write a block somewhere it was never told to.
+fn chunk_origin_block(chunk_coord: i32, axis: &str) -> Result<i32, AdapterError> {
+    chunk_coord
+        .checked_mul(16)
+        .filter(|origin| origin.unsigned_abs() <= ABSOLUTE_MAX_BLOCK.unsigned_abs())
+        .ok_or_else(|| {
+            AdapterError::Decode(format!(
+                "multi_block_change chunk {axis} {chunk_coord} is outside the world border \
+                 (|chunk {axis} * 16| must be <= {ABSOLUTE_MAX_BLOCK})"
+            ))
+        })
 }
 
 /// Maps the low bits of a 1.8 game-mode byte to the canonical [`GameMode`].
@@ -311,8 +354,19 @@ const fn chat_mode_value(mode: ChatMode) -> i8 {
     }
 }
 
+/// The vanilla ability flag bit set when the client is invulnerable — only
+/// meaningful on the **clientbound** `abilities` packet; the serverbound
+/// direction the client sends carries only the flying bit.
+const ABILITY_INVULNERABLE: i8 = 0x01;
 /// The vanilla flying-ability flag bit set when the client is flying.
 const ABILITY_FLYING: i8 = 0x02;
+/// The vanilla ability flag bit set when the client is allowed to fly —
+/// clientbound-only, same caveat as [`ABILITY_INVULNERABLE`].
+const ABILITY_CAN_FLY: i8 = 0x04;
+/// The vanilla ability flag bit set when the client may instantly break
+/// blocks (creative mode) — clientbound-only, same caveat as
+/// [`ABILITY_INVULNERABLE`].
+const ABILITY_INSTABUILD: i8 = 0x08;
 /// Vanilla default flying speed, sent in the server-ignored serverbound field.
 const DEFAULT_FLYING_SPEED: f32 = 0.05;
 /// Vanilla default walking speed, sent in the server-ignored serverbound field.
@@ -748,6 +802,173 @@ impl V47Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::EntityHeadRotation {
                 entity_id,
                 head_yaw: unpack_degrees(packed),
+            })]);
+        }
+        if packet_id == play::clientbound::BLOCK_CHANGE {
+            // A packed 1.8 `position` (see `crate::packets::position`, x/y/z
+            // big-endian, y in the middle) plus the changed block's legacy
+            // composite id as a VarInt — verified both against minecraft-data's
+            // 1.8 `packet_block_change` and against a real 1.8.9 server capture
+            // in `tests/live_interaction.rs`'s `decode_block_change` (which
+            // decodes this exact shape independently, for its own oracle
+            // assertions). 1.8's value is pre-Flattening, identical in shape to
+            // 1.12.2's: bits `4..` are the numeric block id, the low 4 bits are
+            // metadata (`(old_block_id << 4) | meta`, the same composite
+            // `chunk.rs` already extracts per paletted section entry).
+            // `lodestone_canonical::canonical::resolve_or_air` bridges it to a
+            // real 26.2 block-state id via the table built against the real
+            // 1.13.2 server jar's own `DataFixerUpper` flattening fix — the
+            // same shared table `lodestone-v340` uses, not this crate's own
+            // encoder and not a formula (every pre-1.13 family speaks the same
+            // `id:meta` space).
+            let mut reader = Reader::new(payload);
+            let pos: Position = Position::decode(&mut reader, CTX).map_err(dec_err)?;
+            let raw = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            let raw = u16::try_from(raw)
+                .ok()
+                .filter(|&raw| raw <= 0x0FFF)
+                .ok_or_else(|| {
+                    AdapterError::Decode(format!(
+                        "block_change composite id {raw} outside the 4095-slot legacy table"
+                    ))
+                })?;
+            let old_block_id = (raw >> 4) as u8;
+            let meta = (raw & 0xF) as u8;
+            let mut tally = FallbackTally::default();
+            let state = canonical::resolve_or_air(old_block_id, meta, &mut tally);
+            let pos = pos.0;
+            world.set_block(pos.x, pos.y, pos.z, state);
+            // Writing a state is what creates/removes a block entity in
+            // vanilla (`LevelChunk.setBlockState`, no packet involved) — the
+            // same reasoning `lodestone-v340`'s `BLOCK_CHANGE` arm documents.
+            world.sync_block_entity(pos.x, pos.y, pos.z, block_entity_type(state));
+            return Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
+                section: SectionPos::new(pos.x >> 4, pos.y >> 4, pos.z >> 4),
+                blocks: vec![[
+                    pos.x.rem_euclid(16) as u8,
+                    pos.y.rem_euclid(16) as u8,
+                    pos.z.rem_euclid(16) as u8,
+                ]],
+            })]);
+        }
+        if packet_id == play::clientbound::MULTI_BLOCK_CHANGE {
+            // Chunk X/Z (i32 each), then a VarInt-counted array of records —
+            // verified against minecraft-data's 1.8 `packet_multi_block_change`
+            // (identical shape at 1.12.2, where `lodestone-v340`'s own arm
+            // documents the same field order). Each record is
+            // `horizontalPos: u8` (high nibble relative X, low nibble relative
+            // Z — minecraft-data's `protocol.json` gives the field width but
+            // not this bit order; sourced from the long-stable external wire
+            // documentation for this exact packet, not from our own encoder,
+            // and flagged here as the one field in this pass not cross-checked
+            // against either the jar or a live capture), `y: u8` (full column
+            // height, unlike 26.2's section-relative nibble), then the same
+            // legacy composite VarInt `block_change` carries. 1.8 has no
+            // sections on the wire — ordinary full-height columns — so one
+            // packet's records can span several of `lodestone-world`'s 16-tall
+            // sections; each is resolved and written individually, then
+            // grouped by section so the emitted `SectionBlocksChanged` events
+            // match what a single `block_change` would have produced for the
+            // same cell.
+            let mut reader = Reader::new(payload);
+            let chunk_x = reader.i32().map_err(dec_err)?;
+            let chunk_z = reader.i32().map_err(dec_err)?;
+            // Resolved *before* the record loop, not inside it: the whole point
+            // of refusing rather than clamping (see `chunk_origin_block`) is
+            // that nothing is written for an out-of-range packet, and a check
+            // inside the loop would already have written earlier records.
+            let origin_x = chunk_origin_block(chunk_x, "x")?;
+            let origin_z = chunk_origin_block(chunk_z, "z")?;
+            let count = reader.var_i32().map_err(dec_err)?;
+            let count = usize::try_from(count).map_err(|_| {
+                AdapterError::Decode(format!("negative multi_block_change record count {count}"))
+            })?;
+            // A full-height 1.8 column holds at most 16*16*256 = 65536 cells;
+            // cap the pre-allocation so a hostile count cannot force a large
+            // speculative allocation before the truncated body is rejected by
+            // the per-record reads below.
+            let mut by_section: HashMap<i32, Vec<[u8; 3]>> =
+                HashMap::with_capacity(count.min(16));
+            let mut tally = FallbackTally::default();
+            for _ in 0..count {
+                let horizontal = reader.u8().map_err(dec_err)?;
+                let y = i32::from(reader.u8().map_err(dec_err)?);
+                let raw = reader.var_i32().map_err(dec_err)?;
+                let raw = u16::try_from(raw)
+                    .ok()
+                    .filter(|&raw| raw <= 0x0FFF)
+                    .ok_or_else(|| {
+                        AdapterError::Decode(format!(
+                            "multi_block_change composite id {raw} outside the 4095-slot \
+                             legacy table"
+                        ))
+                    })?;
+                let old_block_id = (raw >> 4) as u8;
+                let meta = (raw & 0xF) as u8;
+                let state = canonical::resolve_or_air(old_block_id, meta, &mut tally);
+                let rel_x = i32::from(horizontal >> 4);
+                let rel_z = i32::from(horizontal & 0xF);
+                // `rel_x`/`rel_z` are 4-bit nibbles (0..=15) and `origin_*` is
+                // already bounded by the world border, so these adds cannot
+                // overflow — the guard is at `chunk_origin_block`, above.
+                let x = origin_x + rel_x;
+                let z = origin_z + rel_z;
+                world.set_block(x, y, z, state);
+                world.sync_block_entity(x, y, z, block_entity_type(state));
+                by_section
+                    .entry(y >> 4)
+                    .or_default()
+                    .push([rel_x as u8, y.rem_euclid(16) as u8, rel_z as u8]);
+            }
+            reader.ensure_empty().map_err(dec_err)?;
+            if by_section.is_empty() {
+                return Ok(Vec::new());
+            }
+            return Ok(by_section
+                .into_iter()
+                .map(|(section_y, blocks)| {
+                    Directive::Emit(ClientEvent::SectionBlocksChanged {
+                        section: SectionPos::new(chunk_x, section_y, chunk_z),
+                        blocks,
+                    })
+                })
+                .collect());
+        }
+        if packet_id == play::clientbound::HELD_ITEM_SLOT {
+            // A single signed byte, the newly-selected hotbar index — verified
+            // against minecraft-data's 1.8 `packet_held_item_slot` (identical
+            // shape at every later version through 26.2). The
+            // already-defined [`HeldItemSlot`] struct (`packets::window`) was
+            // never dispatched from here; this is that decoder's first caller.
+            let body: HeldItemSlot = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::HeldSlotChanged {
+                slot: i32::from(body.slot),
+            })]);
+        }
+        if packet_id == play::clientbound::ABILITIES {
+            // Signed-byte flags (bit 0x01 invulnerable, 0x02 flying, 0x04 can
+            // fly, 0x08 instabuild), then f32 flying speed, f32 walking speed
+            // — verified against minecraft-data's 1.8 `packet_abilities`.
+            // 1.8 reuses one packet *name* for both directions with different
+            // flag semantics (the serverbound `abilities` this crate already
+            // encodes for `SetFlying` carries only the flying bit); the
+            // clientbound shape decoded here is byte-identical, so it is
+            // hand-decoded rather than routed through the serverbound-tagged
+            // [`PlayerAbilities`] struct to avoid conflating the two
+            // directions' meaning.
+            let mut reader = Reader::new(payload);
+            let flags = reader.i8().map_err(dec_err)?;
+            let flying_speed = reader.f32().map_err(dec_err)?;
+            let walking_speed = reader.f32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::AbilitiesChanged {
+                invulnerable: flags & ABILITY_INVULNERABLE != 0,
+                flying: flags & ABILITY_FLYING != 0,
+                can_fly: flags & ABILITY_CAN_FLY != 0,
+                instabuild: flags & ABILITY_INSTABUILD != 0,
+                flying_speed,
+                walking_speed,
             })]);
         }
         // Everything else in play is intentionally ignored for now.
