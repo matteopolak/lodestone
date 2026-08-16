@@ -821,6 +821,7 @@ pub const fn projectile_entity_type(kind: ProjectileKind) -> &'static str {
         ProjectileKind::Snowball => "snowball",
         ProjectileKind::SplashPotion => "splash_potion",
         ProjectileKind::Trident => "trident",
+        ProjectileKind::WitherSkull => "wither_skull",
     }
 }
 
@@ -833,18 +834,22 @@ pub const fn projectile_entity_type(kind: ProjectileKind) -> &'static str {
 /// `lodestone_entity::projectile::Projectile::arrow` when this is `true` and
 /// `::throwable` when it is `false`.
 ///
-/// A small fireball is **neither** in vanilla — `AbstractHurtingProjectile`
-/// *accelerates* instead of falling (in `AbstractHurtingProjectile.tick`) — so it is reported as a throwable,
-/// the closer of the two, and its trajectory is wrong past the first few ticks.
-/// Named here rather than left implicit because it is a real inaccuracy that the
-/// launch velocity being jar-exact does not fix.
+/// A small fireball (and, for the identical reason, a wither skull) is
+/// **neither** in vanilla — `AbstractHurtingProjectile` *accelerates* instead
+/// of falling (in `AbstractHurtingProjectile.tick`), and `WitherSkull extends
+/// AbstractHurtingProjectile` exactly as `SmallFireball` does — so both are
+/// reported as throwables, the closer of the two, and their trajectories are
+/// wrong past the first few ticks. Named here rather than left implicit
+/// because it is a real inaccuracy that the launch velocity being jar-exact
+/// does not fix.
 #[must_use]
 pub const fn integrates_as_arrow(kind: ProjectileKind) -> bool {
     match kind {
         ProjectileKind::Arrow | ProjectileKind::Trident => true,
-        ProjectileKind::SmallFireball | ProjectileKind::Snowball | ProjectileKind::SplashPotion => {
-            false
-        }
+        ProjectileKind::SmallFireball
+        | ProjectileKind::Snowball
+        | ProjectileKind::SplashPotion
+        | ProjectileKind::WitherSkull => false,
     }
 }
 

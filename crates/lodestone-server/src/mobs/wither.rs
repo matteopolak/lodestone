@@ -555,4 +555,104 @@ mod tests {
         };
         assert!(sim.try_construct_wither(&world, (10, 6, 10)).is_none());
     }
+
+    fn spawn_target<'w>(sim: &mut MobSim<'w>, pos: Vec3) -> i32 {
+        sim.spawn(pos, lodestone_entity::pathfinding::MobShape::land(0.6, 1.95), 0.2, 32)
+            .id()
+    }
+
+    /// **The discriminating gate for the skull-impact chain**: a wither
+    /// skull's damage is flat (`WitherSkull.onHitEntity`'s `8.0F`), not
+    /// speed-scaled the way an arrow's is
+    /// (`lodestone_entity::projectile::arrow_impact_damage`) — two shots at
+    /// very different speeds must deal the *same* damage, which an
+    /// arrow-shaped formula would not. Also checks the landed hit applies
+    /// `minecraft:wither` (a real status effect, not merely "some effect").
+    #[test]
+    fn a_wither_skull_deals_flat_not_speed_scaled_damage_and_applies_wither() {
+        let mut mismatches: Vec<String> = Vec::new();
+        let mut dealt_by_speed: Vec<f32> = Vec::new();
+        // Both speeds must fully cross the 3-block gap within one tick's
+        // segment — `resolve_projectile_impacts` tests only the step about
+        // to be taken, not the whole flight, so a speed that would need more
+        // than one tick to arrive is a fixture bug, not a real "slow shot".
+        for speed in [5.0, 20.0] {
+            let mut sim = sim();
+            let wither_id = sim.spawn_wither_at(Vec3::new(0.0, 64.0, 0.0));
+            let target = spawn_target(&mut sim, Vec3::new(3.0, 64.0, 0.0));
+            let before = sim.get(target).expect("just spawned").health();
+            sim.spawn_projectile_from(
+                "minecraft:wither_skull".parse().expect("valid key"),
+                lodestone_entity::projectile::Projectile::throwable(
+                    Vec3::new(0.0, 64.0, 0.0),
+                    Vec3::new(speed, 0.0, 0.0),
+                ),
+                Some(wither_id),
+            );
+            sim.resolve_projectile_impacts();
+            let Some(after_mob) = sim.get(target) else {
+                mismatches.push(format!("speed {speed}: target did not survive a single skull hit"));
+                continue;
+            };
+            let dealt = before - after_mob.health();
+            if dealt <= 0.0 {
+                mismatches.push(format!("speed {speed}: expected nonzero damage, dealt {dealt}"));
+            }
+            dealt_by_speed.push(dealt);
+            let has_wither = after_mob.effects().get("minecraft:wither").is_some();
+            if !has_wither {
+                mismatches.push(format!("speed {speed}: expected minecraft:wither effect, found none"));
+            }
+        }
+        if dealt_by_speed.len() == 2 && (dealt_by_speed[0] - dealt_by_speed[1]).abs() > 1e-4 {
+            mismatches.push(format!(
+                "damage must not scale with speed (flat 8.0 base): got {:?} at 0.5 vs 4.0 blocks/tick",
+                dealt_by_speed
+            ));
+        }
+        assert!(mismatches.is_empty(), "wither skull impact mismatches:\n{}", mismatches.join("\n"));
+    }
+
+    /// A killing skull hit heals the shooting wither — `WitherSkull.
+    /// onHitEntity`'s `livingOwner.heal(5.0F)`, capped at max health. The
+    /// wither is first damaged so the heal is observable rather than a
+    /// silent no-op against a full-health owner.
+    #[test]
+    fn a_killing_skull_hit_heals_the_owning_wither() {
+        let mut sim = sim();
+        let wither_id = sim.spawn_wither_at(Vec3::new(0.0, 64.0, 0.0));
+        for _ in 0..220 {
+            sim.tick_withers();
+        }
+        sim.damage_wither(wither_id, 20.0, false, false);
+        let before = sim.wither_health(wither_id).unwrap();
+
+        // Bring a target to 1 HP through the public damage API so the
+        // single skull hit that follows is lethal. `SimMob::apply_damage`
+        // runs through the same i-frame gate a real hit does
+        // (`HurtDecision::Ignored`/`Topup` for a same-or-smaller follow-up
+        // hit within the cooldown window), so a real number of ticks has to
+        // pass before the skull's own hit can land at full force again.
+        let target = spawn_target(&mut sim, Vec3::new(3.0, 64.0, 0.0));
+        let starting_health = sim.get(target).expect("just spawned").health();
+        if let Some(m) = sim.get_mut(target) {
+            m.apply_damage(starting_health - 1.0, lodestone_entity::DamageFlags::default());
+        }
+        for _ in 0..30 {
+            sim.tick();
+        }
+        assert!(sim.get(target).expect("still alive at 1 hp").health() > 0.0);
+
+        sim.spawn_projectile_from(
+            "minecraft:wither_skull".parse().expect("valid key"),
+            lodestone_entity::projectile::Projectile::throwable(Vec3::new(0.0, 64.0, 0.0), Vec3::new(10.0, 0.0, 0.0)),
+            Some(wither_id),
+        );
+        sim.resolve_projectile_impacts();
+
+        assert!(sim.get(target).is_none(), "the killing skull hit must remove the target");
+        let after = sim.wither_health(wither_id).unwrap();
+        assert_eq!(after, (before + pure::OWNER_HEAL_ON_KILL).min(MAX_HEALTH), "the owner must heal 5.0 HP, capped at max health");
+        assert!(after > before, "control: the heal must actually be observable, not a no-op against full health");
+    }
 }
