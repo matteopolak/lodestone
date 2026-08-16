@@ -216,6 +216,121 @@ fn push_arg(args: &[Text], index: usize, children: &mut Vec<Text>) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Interactive spans: `to_spans()` with `click`/`hover` kept.
+// ---------------------------------------------------------------------------
+
+/// One drawn run of text with its fully-inherited style and, when the
+/// component tree set one, the `click`/`hover` interaction that applies to
+/// the whole run.
+///
+/// [`lodestone_model::Text::to_spans`] cannot supply this: its
+/// [`lodestone_model::text::TextSpan`] output carries only `text` and
+/// `style`, so every render surface that flattens through it — which is all
+/// of them, per that function's own "the one function a render surface
+/// should call" doc — already has no `click`/`hover` left by the time it
+/// reaches a draw call. `interactive_spans` walks the tree itself instead,
+/// treating `click`/`hover` as inheritable exactly the way vanilla's own
+/// `Style` does: `Style.applyTo` (`Style.java`, `.cache/mc/26.2`) folds
+/// `clickEvent`/`hoverEvent` into the same "child wins if set, else inherit
+/// the parent's" rule as colour and every format flag. Nothing here is a
+/// second decode — this module's own [`resolve`] already documents that
+/// interactivity passes through it unchanged, so this only has to add the
+/// inheritance `TextSpan` never carried.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InteractiveSpan {
+    /// This run's text.
+    pub text: String,
+    /// This run's fully-resolved style.
+    pub style: lodestone_model::text::TextStyle,
+    /// The click action covering this run, if any component from this run up
+    /// to the tree root set one.
+    pub click: Option<lodestone_model::text::ClickEvent>,
+    /// The hover action covering this run, if any component from this run up
+    /// to the tree root set one.
+    pub hover: Option<lodestone_model::text::HoverEvent>,
+}
+
+/// Flattens `text` into [`InteractiveSpan`]s: `translate` nodes resolved
+/// through `translate` first (so a hit-tested run's text matches what the HUD
+/// actually drew, exactly as [`resolve`] already does for
+/// [`crate::tablist::tab_list_view`]), then walked for `click`/`hover`
+/// inheritance alongside style.
+///
+/// Legacy `§` runs are re-expanded through the model's own
+/// [`lodestone_model::Text::from_legacy`] → [`lodestone_model::Text::to_spans`]
+/// for the *style* half, since a `§` code cannot itself carry a `click`/
+/// `hover` (those are component-tree fields, not legacy codes) — the
+/// enclosing component's already-resolved click/hover is attached to every
+/// run the legacy expansion produces.
+#[must_use]
+pub fn interactive_spans(
+    text: &Text,
+    translate: &dyn Fn(&str) -> Option<String>,
+) -> Vec<InteractiveSpan> {
+    let resolved = resolve(text, translate);
+    let mut out = Vec::new();
+    collect_interactive(
+        &resolved,
+        &lodestone_model::text::TextStyle::default(),
+        None,
+        None,
+        &mut out,
+        0,
+    );
+    out
+}
+
+fn collect_interactive(
+    node: &Text,
+    parent_style: &lodestone_model::text::TextStyle,
+    parent_click: Option<&lodestone_model::text::ClickEvent>,
+    parent_hover: Option<&lodestone_model::text::HoverEvent>,
+    out: &mut Vec<InteractiveSpan>,
+    depth: usize,
+) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let style = node.style.inherit(parent_style);
+    let click = node.click.as_ref().or(parent_click);
+    let hover = node.hover.as_ref().or(parent_hover);
+
+    // `resolve` above has already turned every `Translate` node into a
+    // `Literal` root plus literal/argument children, so this is the only
+    // content shape that can appear here — matching `resolve_node`'s own
+    // guarantee.
+    if let TextContent::Literal(literal) = &node.content
+        && !literal.is_empty()
+    {
+        if literal.contains(lodestone_model::text::LEGACY_PREFIX) {
+            // `from_legacy(literal)` carries no `click`/`hover` of its own
+            // (legacy codes cannot express either), so every run it produces
+            // takes this node's already-resolved `click`/`hover` verbatim;
+            // only the *style* half needs inheriting further.
+            for run in Text::from_legacy(literal).to_spans() {
+                out.push(InteractiveSpan {
+                    text: run.text,
+                    style: run.style.inherit(&style),
+                    click: click.cloned(),
+                    hover: hover.cloned(),
+                });
+            }
+        } else {
+            out.push(InteractiveSpan {
+                text: literal.clone(),
+                style,
+                click: click.cloned(),
+                hover: hover.cloned(),
+            });
+        }
+    }
+
+    for child in &node.extra {
+        collect_interactive(child, &style, click, hover, out, depth + 1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +519,162 @@ mod tests {
     fn plain_literal_is_returned_unchanged() {
         let msg = Text::literal("just words");
         assert_eq!(resolve_to_string(&msg, &tr), "just words");
+    }
+
+    // -- interactive_spans ---------------------------------------------------
+
+    use lodestone_model::text::{ClickAction, ClickEvent, HoverAction, HoverEvent};
+
+    fn no_tr(_: &str) -> Option<String> {
+        None
+    }
+
+    /// `to_spans()` — every render surface's own flatten — drops `click`
+    /// entirely; this is the control proving [`interactive_spans`] measures a
+    /// real gap and not a hypothetical one.
+    #[test]
+    fn to_spans_itself_has_nowhere_to_put_a_click_event() {
+        let mut msg = Text::literal("click me");
+        msg.click = Some(ClickEvent {
+            action: ClickAction::OpenUrl,
+            value: "https://example.invalid/".to_string(),
+        });
+        // `TextSpan` has no `click` field at all — this line would not compile
+        // if it ever grew one, which is the point: the type itself is the
+        // proof, not a runtime assertion.
+        let spans = msg.to_spans();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "click me");
+    }
+
+    /// A leaf with its own `click`/`hover` produces exactly one interactive
+    /// run carrying both, alongside the style `to_spans` would have produced
+    /// anyway.
+    #[test]
+    fn a_leafs_own_click_and_hover_reach_its_span() {
+        let mut msg = Text {
+            style: TextStyle {
+                color: Some(TextColor::Aqua),
+                ..TextStyle::default()
+            },
+            ..Text::literal("hi")
+        };
+        msg.click = Some(ClickEvent {
+            action: ClickAction::RunCommand,
+            value: "/spawn".to_string(),
+        });
+        msg.hover = Some(HoverEvent {
+            action: HoverAction::ShowText,
+            value: Box::new(Text::literal("tooltip")),
+        });
+
+        let spans = interactive_spans(&msg, &no_tr);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "hi");
+        assert_eq!(spans[0].style.color, Some(TextColor::Aqua));
+        assert_eq!(
+            spans[0].click,
+            Some(ClickEvent {
+                action: ClickAction::RunCommand,
+                value: "/spawn".to_string()
+            })
+        );
+        assert_eq!(spans[0].hover.as_ref().map(|h| &h.action), Some(&HoverAction::ShowText));
+    }
+
+    /// `click`/`hover` inherit into children exactly like colour —
+    /// `Style.applyTo`'s rule extended to these two fields. A child with no
+    /// click/hover of its own still carries the parent's; a child that sets
+    /// its own overrides rather than merges.
+    #[test]
+    fn click_and_hover_inherit_into_children_like_colour_does() {
+        let parent_click = ClickEvent {
+            action: ClickAction::OpenUrl,
+            value: "https://example.invalid/a".to_string(),
+        };
+        let child_click = ClickEvent {
+            action: ClickAction::OpenUrl,
+            value: "https://example.invalid/b".to_string(),
+        };
+        let msg = Text {
+            click: Some(parent_click.clone()),
+            extra: vec![
+                Text::literal("inherits"),
+                Text {
+                    click: Some(child_click.clone()),
+                    ..Text::literal("overrides")
+                },
+            ],
+            ..Text::literal("root ")
+        };
+
+        let spans = interactive_spans(&msg, &no_tr);
+        let by_text = |t: &str| spans.iter().find(|s| s.text == t).expect(t);
+        assert_eq!(by_text("root ").click, Some(parent_click.clone()));
+        assert_eq!(
+            by_text("inherits").click,
+            Some(parent_click),
+            "a child with no click of its own must inherit the parent's"
+        );
+        assert_eq!(
+            by_text("overrides").click,
+            Some(child_click),
+            "a child's own click must win over the inherited one"
+        );
+    }
+
+    /// A legacy `§` run splits into multiple spans (style-only, matching
+    /// `to_spans()`), and every one of them still carries the *component's*
+    /// click/hover — a legacy code cannot itself set or clear either.
+    #[test]
+    fn a_legacy_coded_run_keeps_the_components_click_across_every_split() {
+        let msg = Text {
+            click: Some(ClickEvent {
+                action: ClickAction::SuggestCommand,
+                value: "/help".to_string(),
+            }),
+            ..Text::literal("\u{a7}cred\u{a7}bblue")
+        };
+        let spans = interactive_spans(&msg, &no_tr);
+        assert_eq!(spans.len(), 2, "the legacy codes must still split the run");
+        assert_eq!(spans[0].text, "red");
+        assert_eq!(spans[1].text, "blue");
+        for s in &spans {
+            assert_eq!(
+                s.click.as_ref().map(|c| &c.value),
+                Some(&"/help".to_string()),
+                "every legacy-split run must keep the enclosing component's click"
+            );
+        }
+    }
+
+    /// `translate` resolution runs first, exactly as
+    /// [`crate::tablist::tab_list_view`] already resolves before flattening —
+    /// a hit-tested run's text must match what actually got drawn, and
+    /// interactivity survives the substitution untouched (`resolve`'s own
+    /// documented guarantee).
+    #[test]
+    fn translate_nodes_resolve_before_flattening_and_keep_their_click() {
+        let msg = Text {
+            click: Some(ClickEvent {
+                action: ClickAction::ChangePage,
+                value: "3".to_string(),
+            }),
+            ..Text::translate("commands.seed.success", vec![Text::literal("1234")])
+        };
+        let spans = interactive_spans(&msg, &tr);
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, "Seed: 1234");
+        assert!(spans.iter().all(|s| s.click.is_some()));
+    }
+
+    /// No click/hover anywhere in the tree means every span carries `None` —
+    /// the ordinary case must not fabricate an interaction.
+    #[test]
+    fn plain_text_carries_no_click_or_hover() {
+        let spans = interactive_spans(&Text::literal("just words"), &no_tr);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].click, None);
+        assert_eq!(spans[0].hover, None);
     }
 }

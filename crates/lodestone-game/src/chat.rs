@@ -494,6 +494,49 @@ impl ChatLog {
             .collect()
     }
 
+    /// The most recent `n` lines' [`crate::text::InteractiveSpan`]s — the
+    /// `click`/`hover`-carrying sibling of [`recent_spans`](Self::recent_spans),
+    /// paired with each entry's arrival timestamp.
+    ///
+    /// `recent_spans` cannot supply this: `Text::to_spans()`'s output type has
+    /// nowhere to put `click`/`hover`, which is why a chat HUD built only on
+    /// `recent_ages_spans` can never hit-test a link or a hover tooltip no
+    /// matter how carefully it is written — the field is gone two calls
+    /// upstream of the draw. `translate` is threaded through (unlike
+    /// `recent_spans`, which resolves through the model's built-in stub table
+    /// only) so a hit-tested run's text matches what a real language pack
+    /// actually drew, the same correction `tab_list_view` already makes over
+    /// its own `Text::to_spans()`-only predecessor.
+    #[must_use]
+    pub fn recent_interactive(
+        &self,
+        n: usize,
+        translate: &dyn Fn(&str) -> Option<String>,
+    ) -> Vec<(Vec<crate::text::InteractiveSpan>, f64)> {
+        let start = self.feed.len().saturating_sub(n);
+        self.feed
+            .iter()
+            .zip(self.times.iter())
+            .skip(start)
+            .map(|(entry, at)| (crate::text::interactive_spans(entry_display(entry), translate), *at))
+            .collect()
+    }
+
+    /// The `age`-relative sibling of [`recent_interactive`](Self::recent_interactive),
+    /// matching [`recent_ages_spans`](Self::recent_ages_spans)'s own projection.
+    #[must_use]
+    pub fn recent_ages_interactive(
+        &self,
+        n: usize,
+        now: f64,
+        translate: &dyn Fn(&str) -> Option<String>,
+    ) -> Vec<(Vec<crate::text::InteractiveSpan>, f32)> {
+        self.recent_interactive(n, translate)
+            .into_iter()
+            .map(|(spans, at)| (spans, (now - at).max(0.0) as f32))
+            .collect()
+    }
+
     /// Total retained lines.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -635,5 +678,42 @@ mod log_tests {
         let (new_spans, new_age) = &out[1];
         assert_eq!(*new_age, 1.0);
         assert_eq!(new_spans[0].style.color, Some(lodestone_model::TextColor::Aqua));
+    }
+
+    /// The whole point of [`ChatLog::recent_interactive`]: a `click_event` on
+    /// a logged message survives all the way out through the log, which
+    /// [`recent_spans`] (used by every existing chat-render call site) cannot
+    /// do — its `TextSpan` output has no field for it. Same ageing arithmetic
+    /// as [`recent_ages_spans_ages_like_recent_ages_and_keeps_the_colour`],
+    /// with a `click` riding along instead of a colour.
+    #[test]
+    fn recent_ages_interactive_ages_like_recent_ages_and_keeps_the_click() {
+        use lodestone_model::text::{ClickAction, ClickEvent};
+
+        let mut log = ChatLog::new();
+        let mut msg = Text::literal("visit");
+        msg.click = Some(ClickEvent {
+            action: ClickAction::OpenUrl,
+            value: "https://example.invalid/".to_string(),
+        });
+        log.push_system(msg, 1.0);
+        // A negative control alongside it: a message with no click must come
+        // back with `None`, not some fabricated default.
+        log.push_system(Text::literal("plain"), 9.0);
+
+        let out = log.recent_ages_interactive(2, 10.0, &|_: &str| None);
+        assert_eq!(out.len(), 2);
+        let (linked_spans, linked_age) = &out[0];
+        assert_eq!(linked_age, &9.0, "must match recent_ages's own arithmetic exactly");
+        assert_eq!(
+            linked_spans[0].click,
+            Some(ClickEvent {
+                action: ClickAction::OpenUrl,
+                value: "https://example.invalid/".to_string()
+            })
+        );
+        let (plain_spans, plain_age) = &out[1];
+        assert_eq!(plain_age, &1.0);
+        assert_eq!(plain_spans[0].click, None);
     }
 }
