@@ -60,15 +60,16 @@ model; the bell body/rim; and the shulker box — see [Shulker box](#shulker-box
 lectern, the campfire and the enchanting table, so **12 of 26** — wall banners share the `BANNER`
 registration with standing ones. **Piston head makes 13** (see [Piston head](#piston-head)), and it is
 the first entry landed through the *moving-block-model* seam rather than through `EntityPipeline` or
-the item path. **Decorated pot makes 14** (see [Decorated pot](#decorated-pot)), through the fifth
-destination this doc has needed: a render pass proven reachable with no live per-frame install yet,
-the same stage bell passed through before its own install landed. The rest are still absent. Picking
-the next few should read this list, not the original issue body.
+the item path. **Decorated pot makes 14** (see [Decorated pot](#decorated-pot)) and **conduit makes 15**
+(see [Conduit](#conduit)), both through the fifth destination this doc has needed: a render pass proven
+reachable with real pixels and no live per-frame install yet, the same stage bell passed through before
+its own install landed. The rest are still absent. Picking the next few should read this list, not the
+original issue body.
 
 **The registration list had two entries this document's "what is not built" section never mentioned
 either way: `LECTERN` (`LecternRenderer`, the open book on a lectern) and `CONDUIT` (`ConduitRenderer`,
-the shell/eye rig)** — a *silent* gap, which is worse than a recorded one. The lectern has since
-landed (see [Lectern](#lectern)); the conduit has not. **Re-derived from
+the shell/eye rig)** — a *silent* gap, which is worse than a recorded one. Both have since landed (see
+[Lectern](#lectern) and [Conduit](#conduit)). **Re-derived from
 `BlockEntityRenderers.java`'s own `register` calls rather than from this paragraph**, because the
 ledger has been wrong twice: `CONDUIT` really is registered, at the call between `SHULKER_BOX` and
 `BELL`, so it is in scope and simply unbuilt — not a phantom.
@@ -1472,6 +1473,75 @@ cargo test -p lodestone-assets --lib block_entity_models::
 cargo test -p lodestone-shell --test decorated_pot_block_entity_pixels -- --ignored --nocapture
 ```
 
+## Conduit
+
+The last registration this doc had ever gone as far as naming as a gap without describing — `isActive`/
+`isHunting` are **not a formula port**: `ConduitBlockEntity.clientTick` (`.cache/mc/26.2/client-src/net/
+minecraft/world/level/block/entity/ConduitBlockEntity.java`) computes both **client-side**, every 40
+ticks, by scanning a 3×3×3 water frame around the block and then a 5×5×5 "plus ring" of 42 candidate
+cells for one of four frame blocks (prismarine, prismarine bricks, sea lantern, dark prismarine).
+Neither boolean is ever on the wire. `lodestone_render::block_entity::conduit_frame_scan` is a pure,
+closure-parameterised transliteration of `updateShape` — the inner-cube water gate is checked in full
+before the outer ring is consulted at all, so a room built entirely of frame blocks with one stray
+non-water cell in the conduit's own inner cube still returns an empty frame, matching vanilla and not
+the "one implemented conjunct" version that would activate.
+
+### The rig — four `bakeLayer` calls, one drawn twice
+
+`ConduitRenderer.submit` is a single `if (!state.isActive) { … } else { … }`: the inactive branch draws
+one 6×6×6 `shell` (`entity/conduit/base`) slowly spinning about world Y; the active branch draws an
+8×8×8 `cage` (`entity/conduit/cage`) tumbling about the fixed diagonal axis `(0.5, 1, 0.5)`, **two**
+draws of the same 16×16×16 `wind` mesh at different poses (rotated by `animationPhase` and sharing one
+texture choice between `entity/conduit/wind`/`entity/conduit/wind_vertical`), and a camera-billboarded
+`eye` swapping `closed_eye`/`open_eye` by `isHunting`. `resolve_conduit` ports all four branches,
+including a vanilla quirk worth citing exactly: `state.activeRotation` is read as **degrees** in the
+inactive branch (`rotationY(value * PI/180)`) and as **radians**, unconverted, in the active branch
+(`value * 180/PI` immediately undone by another `* PI/180`, which cancel) — the same field, two units,
+transcribed literally rather than "simplified" to one, which is exactly how a port would get the active
+spin's speed wrong by a factor of `180/π`.
+
+There is no beam. Older-version muscle memory (and this doc's own originating task brief) expects a
+translucent beam toward a hunting target; 26.2's `ConduitBlockEntity.animationTick` spawns `NAUTILUS`
+particles toward `destroyTarget` instead — a different system, out of a `BlockEntityRenderer`'s scope
+entirely. Every conduit draw is alpha-cutout or solid, never alpha-blended, so none of the translucent-
+blend evidence standards apply here.
+
+### The wind sheets are animated, and this pass draws them static
+
+`entity/conduit/wind`/`wind_vertical` are the one animated block-entity texture in the whole module: the
+jar ships each as a `64×704` vertical strip (`wind.png.mcmeta`: 22 frames of `64×32`, `frametime: 3`, no
+`interpolate`) rather than a single image, and `gpu/block_entities.rs`'s loader has no per-material
+animation uniform the way the block atlas (`lodestone_render::anim`) does for terrain. `Image::
+first_animation_frame` crops both sheets to frame 0 at load time, so the wind planes are real shape,
+real rotation and the real texture *choice* between the two sheets — static rather than flowing. A
+documented simplification, not a silent bug; a future animated pass only has to touch that one crop.
+
+### Status: the render pass is proven reachable with real pixels; the world→spawn adapter is not built
+
+`resolve_conduit`, the four-sheet rig, `ConduitSource`/`RenderState::set_conduit_source` and
+`prepare_block_entities`'s resolve arm are all wired the same way [Decorated pot](#decorated-pot)'s are —
+`conduit_block_entity_pixels.rs` calls `set_conduit_source` directly and drives a real headless GPU
+render: an inactive conduit fills its own projected rect with a clean negative control, activating it
+repaints at least the whole former shell footprint (measured on this machine: 1,719 px changed against a
+1,225 px inactive footprint), and toggling `hunting` changes pixels confined to the eye's own small rect
+and nowhere else.
+
+**Not done: the block-store gather.** `conduit_frame_scan`/`conduit_advance` are pure functions over
+closures, not over a live `SharedHandle` — the shell-side adapter (`block_entities::conduit_spawn`/
+`conduit_spawns`, plus a per-position tick tracker the same shape `BellShakes` is for the counters
+`conduit_advance` steps) was out of this task's file ownership (`block_entities.rs`, `sim.rs`,
+`sim/build.rs`, `sim/render_sources.rs`, `app/redraw.rs` were all held by a concurrent agent) and is
+reported rather than built. Until that adapter and its `Sim::conduit_source`/`app.rs` install call land,
+a real client walking past a conduit draws nothing — the same gap this section's Decorated Pot neighbour
+above carries for the identical reason.
+
+```bash
+cargo test -p lodestone-render --lib block_entity::
+cargo test -p lodestone-assets --lib block_entity_models::
+cargo test -p lodestone-assets --test texture -- first_animation_frame
+cargo test -p lodestone-shell --test conduit_block_entity_pixels -- --ignored --nocapture
+```
+
 ## How to change it
 
 ### Adding a block-entity type
@@ -1744,11 +1814,9 @@ Against the real 26-entry registration list (see above), not the issue's origina
   `max_text_line_width`, and rich per-run text formatting — all named and reasoned about in that
   section rather than silently missing. **The "hanging signs need a different model set" item that
   used to head this list was a 1.20 memory, not a 26.2 measurement** — it was four numbers.
-- **Lectern — landed**, including the live per-frame install (see [Lectern](#lectern) above).
-  **Conduit remains the one registration nothing here has ever named in either direction** — see the
-  correction under [the registration list](#the-real-vanilla-scope-from-the-registration-list--not-the-issues-guess-list).
-  Nothing is open within lectern scope: `openness` is a compile-time constant in the jar, so there is
-  no animation left to wire.
+- **Lectern — landed**, including the live per-frame install (see [Lectern](#lectern) above). Nothing
+  is open within lectern scope: `openness` is a compile-time constant in the jar, so there is no
+  animation left to wire.
 - **Bell — landed**, including the `BLOCK_EVENT` shake trigger and the live per-frame install (see
   [Bell](#bell) above). The trigger needed `b0 == 1` decoded as a **different** thing from chest's own
   `b0 == 1` (direction packed into `b1` via `Direction.from3DDataValue`, not a viewer count) plus a
@@ -1780,6 +1848,13 @@ Against the real 26-entry registration list (see above), not the issue's origina
   install** (no `Sim::decorated_pot_source` call site in `sim.rs`/`app.rs` yet — off limits for the task
   that landed the render pass) and the hit-wobble `BLOCK_EVENT` animation, the same not-yet-decoded gap
   [Bell](#bell) once had for its own shake.
+- **Conduit — the render pass is landed** (see [Conduit](#conduit) above), proven with a real GPU pixel
+  gate: the inactive shell, the active cage/wind/eye, the client-computed `isActive`/`isHunting` scan and
+  the degrees-vs-radians rotation quirk. **Not landed: the block-store gather** — no
+  `block_entities::conduit_spawn`/`conduit_spawns`, no per-position tick tracker, and no
+  `Sim::conduit_source`/`app.rs` install call, all off limits for the task that landed the render pass,
+  same shape as decorated pot's own gap above. Also not landed: the wind sheets' real animation (drawn
+  static, frame 0 only — see the Conduit section's own note).
 - Mob spawner (draws a miniature spinning entity inside the cage —
   reuses full entity rendering, not a simple cuboid rig), brushable block, trial spawner,
   vault, copper golem statue, shelf. End portal/end gateway/beacon are their own shader effects, not
