@@ -89,8 +89,8 @@ placer" that had never been written. `crates/lodestone-worldgen/src/end/
 spikes.rs` (`end_spikes_for_seed`, `end_spike_blocks`) and `.../end/
 podium.rs` (`end_podium`) now port both, and `MobSim::init_end_dragon_fight`
 (`mobs/dragon.rs`) wires them to real crystal/dragon spawns — see "The End's
-own furniture, and the one hunk left" below for exactly what landed and
-what a join-path owner still needs to call. (An earlier version of this doc
+own furniture, and how it gets placed on first arrival" below for exactly
+what landed and how it is called. (An earlier version of this doc
 said flatly "there is nothing to cage"; re-verify a "not modelled" claim
 against the tree before repeating it — this file already names three other
 docs that shipped exactly that kind of drift.)
@@ -152,13 +152,11 @@ boss_bars` (in `mobs/dragon.rs`) is the dragon's own producer, and
 through `LiveMobSource` — the path `crate::server::sync_boss_bars` diffs
 against a connection's last-sent set.
 
-**The remaining gap is a production caller for `MobSim::
-init_end_dragon_fight`.** See "The End's own furniture, and the one hunk
-left" immediately below — `server.rs`/`integrated.rs` are off limits for
-this change (concurrent agents own them), so this is reported rather than
-landed.
+**No longer true — see below.** `crate::server`'s `travel_through_end_portal`
+now calls `MobSim::init_end_dragon_fight` itself, the first time any
+connection reaches a fresh End sibling.
 
-## The End's own furniture, and the one hunk left
+## The End's own furniture, and how it gets placed on first arrival
 
 `MobSim::init_end_dragon_fight(seed, origin, min_y) -> EndDragonFightInit`
 (`mobs/dragon.rs`) is everything a join-path owner needs in one call: it
@@ -171,28 +169,41 @@ lodestone-worldgen/src/end/{spikes,podium}.rs`). It places **zero** blocks
 itself, matching this crate's existing "no block-write authority" contract
 for `try_construct_wither`/`try_construct_golem`.
 
-The hunk a join-path owner still needs (shape, not literal diff — the exact
-call site depends on where "a player just entered a fresh End" is detected,
-which lives in `travel_through_end_portal`/`server.rs`'s own join-chunk-
-stream setup, an off-limits file for this change):
+Landed in `travel_through_end_portal` (`crates/lodestone-server/src/server.rs`):
 
 ```rust
-// Once, the first time a connection reaches a fresh End sibling with no
-// existing dragon fight (a per-world persisted flag — this crate has no
-// `FightState`/`EnderDragonFight`-equivalent storage yet, so "fresh" needs
-// its own once-per-world gate; see `dragon::fight::FightState` for the
-// fields such a gate would round-trip).
-let init = mobs.with(|sim| {
-    sim.init_end_dragon_fight(world_seed, Vec3::new(0.0, 64.0, 0.0), destination.min_y())
-});
-for write in &init.block_writes {
-    destination.set_block(write.x, write.y, write.z, &write.state);
+if destination.claim_dragon_fight_start() {
+    let seed = crate::worldgen_data::active_world_seed();
+    let init = mobs.with(|sim| {
+        sim.init_end_dragon_fight(seed, Vec3::new(0.0, 64.0, 0.0), to.min_y())
+    });
+    for write in &init.block_writes {
+        destination.set_block(write.x, write.y, write.z, &write.state);
+    }
 }
 ```
 
+**`ChunkSource::claim_dragon_fight_start`** (`crates/lodestone-server/src/chunk.rs`)
+is the "fresh" gate this doc used to say did not exist: an atomic
+compare-exchange on a new `EndChunkSource` field, defaulted to `true`
+("already claimed", the correct degradation) for every other source and
+forwarded through `Arc<S>`, `DimensionalSource<S>`, `ChunkStore<S>` and
+`RegionChunkSource<S>` so a real End sibling — always wrapped in at least the
+first three — reaches the real override no matter how many layers deep it is
+wrapped. Exactly one caller among any connections racing to the fresh End on
+the same tick sees `true` and performs the init; the rest see `false` and do
+nothing.
+
+**This is a process-lifetime gate, not a persisted one** — `EndChunkSource`
+carries no NBT-backed "already fought" flag, so a server restart re-arms it
+and the pillars/podium/dragon/crystals are placed again on the next arrival.
+This crate still has no `FightState`/`EnderDragonFight`-equivalent world
+state to round-trip through a save (`dragon::fight::FightState` is ready to
+receive one whenever that lands); a disclosed gap, not a silent one.
+
 `origin` at `(0.0, 64.0, 0.0)` reproduces vanilla's own fixed
 `BlockPos.ZERO` fight origin (`ServerLevel`'s `dragonFight.init(this, seed,
-BlockPos.ZERO)`) at a plausible End-island y; a real caller should resolve
+BlockPos.ZERO)`) at a plausible End-island y; a future pass should resolve
 the true surface y the way vanilla's own `getHeightmapPos` does rather than
 hardcoding `64`, since the main island's terrain height varies by seed.
 

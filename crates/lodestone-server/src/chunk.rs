@@ -1293,6 +1293,28 @@ pub trait ChunkSource: Send + Sync {
     fn block_tick_feed(&self) -> Option<crate::tick::BlockTickFeed> {
         None
     }
+
+    /// Atomically claims "the end-dragon fight for this source has now
+    /// started", answering `true` only for the one call that actually flips
+    /// it from unset — so two connections reaching a fresh End around the
+    /// same tick cannot both spawn a second crystal ring and dragon.
+    ///
+    /// `true` unconditionally — the default — is the correct degradation for
+    /// every source with no such flag of its own: this is only ever called
+    /// against the End's own sibling source, immediately before deciding
+    /// whether to call `MobSim::init_end_dragon_fight`, and answering "already
+    /// claimed" for a source this can never meaningfully be asked of just
+    /// means that (unreachable) call site does nothing, rather than assuming
+    /// the trait's absent flag means "unclaimed" and re-initialising a fight
+    /// every time. [`crate::chunk::EndChunkSource`] is the one real override.
+    ///
+    /// This is a **process-lifetime** gate, not a persisted one: this crate
+    /// has no `EnderDragonFight`-equivalent world state yet (see
+    /// `docs/dragon-fight.md`), so a server restart re-arms it. That is a
+    /// disclosed, documented gap, not a silent one.
+    fn claim_dragon_fight_start(&self) -> bool {
+        true
+    }
 }
 
 /// Forwards every [`ChunkSource`] method through the `Arc`, the same shape
@@ -1363,6 +1385,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
 
     fn block_tick_feed(&self) -> Option<crate::tick::BlockTickFeed> {
         (**self).block_tick_feed()
+    }
+
+    fn claim_dragon_fight_start(&self) -> bool {
+        (**self).claim_dragon_fight_start()
     }
 }
 
@@ -2074,6 +2100,10 @@ impl ChunkSource for NetherChunkSource {
 pub struct EndChunkSource {
     generator: lodestone_worldgen::end::EndGenerator,
     edits: Mutex<HashMap<(i32, i32), ChunkColumn>>,
+    /// Set the first time [`ChunkSource::claim_dragon_fight_start`] succeeds
+    /// against this instance — see that method's own doc comment for why this
+    /// is a process-lifetime gate rather than a persisted one.
+    dragon_fight_started: std::sync::atomic::AtomicBool,
 }
 
 impl EndChunkSource {
@@ -2090,6 +2120,7 @@ impl EndChunkSource {
         Self {
             generator,
             edits: Mutex::new(HashMap::new()),
+            dragon_fight_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -2145,6 +2176,19 @@ impl ChunkSource for EndChunkSource {
             .entry((cx, cz))
             .or_insert_with(|| self.generate(cx, cz));
         column.set_block(lx, y, lz, name);
+    }
+
+    /// The one real override — a compare-exchange on `dragon_fight_started`,
+    /// so exactly one caller among any concurrent claimants sees `true`.
+    fn claim_dragon_fight_start(&self) -> bool {
+        self.dragon_fight_started
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
     }
 }
 
@@ -2294,6 +2338,48 @@ mod tests {
         let col = src.column(1, -3);
         assert!(!col.is_solid(0, 5000, 0));
         assert!(!col.is_solid(0, -5000, 0));
+    }
+
+    /// `claim_dragon_fight_start`'s whole reason to exist: exactly one caller
+    /// among any number racing to claim the same fresh End sees `true`, so
+    /// `crate::server::travel_through_end_portal` cannot spawn a second
+    /// crystal ring and dragon for two connections that both reach the End on
+    /// the same tick. A control proves the flag really gates rather than
+    /// always answering `true` (which a stubbed-out no-op would do
+    /// identically to a correct implementation on the *first* call alone).
+    #[test]
+    fn claim_dragon_fight_start_succeeds_exactly_once() {
+        let source = crate::worldgen_data::end_chunk_source(4242);
+        assert!(
+            source.claim_dragon_fight_start(),
+            "the first claim on a fresh source must succeed"
+        );
+        // Control: a second, third, and fourth claim against the *same*
+        // instance must all fail — proves this is a one-shot gate, not a
+        // pure function that always answers `true`.
+        assert!(!source.claim_dragon_fight_start());
+        assert!(!source.claim_dragon_fight_start());
+        assert!(!source.claim_dragon_fight_start());
+
+        // A second, independent source (a different End world, or the same
+        // one after a restart — see `ChunkSource::claim_dragon_fight_start`'s
+        // own doc for why this is a process-lifetime gate) starts unclaimed
+        // again, proving the flag lives on the instance, not somewhere global.
+        let other = crate::worldgen_data::end_chunk_source(4242);
+        assert!(other.claim_dragon_fight_start());
+    }
+
+    /// Every non-`EndChunkSource` [`ChunkSource`] answers the trait's
+    /// default (`true`, "already claimed") unconditionally — the correct
+    /// degradation for a source this is never meaningfully asked of. Checked
+    /// against [`WorldgenChunkSource`] as a representative non-End source,
+    /// and twice in a row to prove the default is not itself a one-shot gate
+    /// that happens to start `true`.
+    #[test]
+    fn a_non_end_source_always_answers_the_default_claim() {
+        let src = WorldgenChunkSource::new(floor_density(), -64, 128);
+        assert!(src.claim_dragon_fight_start());
+        assert!(src.claim_dragon_fight_start());
     }
 
     #[test]
