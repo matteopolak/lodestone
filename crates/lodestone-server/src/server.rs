@@ -3992,6 +3992,7 @@ where
             | ServerBound::PlayerCommand { .. }
             | ServerBound::RenameItem { .. }
             | ServerBound::ContainerButtonClick { .. }
+            | ServerBound::ContainerSlotStateChanged { .. }
             | ServerBound::SetCommandBlock { .. }
             | ServerBound::SignUpdate { .. }
             | ServerBound::EditBook { .. }
@@ -10860,6 +10861,28 @@ where
             republish_experience(players, player_uuid, experience);
             for directive in directives {
                 apply(conn, state, directive).await?;
+            }
+        }
+        // A crafter's per-slot enable/disable toggle
+        // (`ServerGamePacketListenerImpl.handleContainerSlotStateChanged`).
+        // No directive to send back: `container_sync_tick`'s existing
+        // `sync_open_container` diff already re-reads `data_properties()`
+        // every 50ms and pushes whatever changed, the same path a furnace's
+        // own background tick uses — there is nothing crafter-specific to
+        // wire on the send side.
+        ServerBound::ContainerSlotStateChanged { window_id, slot_id, new_state } => {
+            let matching_pos = open_container
+                .as_ref()
+                .filter(|open| open.window_id == window_id)
+                .map(|open| open.pos);
+            if let Some(pos) = matching_pos
+                && let Some(slot) = usize::try_from(slot_id).ok()
+            {
+                block_entities.with(|reg| {
+                    if let Some(entity) = reg.get_mut(pos) {
+                        entity.set_crafter_slot_state(slot, new_state);
+                    }
+                });
             }
         }
         ServerBound::Attack { entity_id } => {

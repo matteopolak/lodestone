@@ -1349,6 +1349,29 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             }
             ("minecraft:beacon", fields)
         }
+        // `CrafterBlockEntity.saveAdditional`: `Items` (`ContainerHelper.saveAllItems`),
+        // `disabled_slots` (an int array of the disabled indices —
+        // `addDisabledSlots`), `triggered` (always `0`, see this variant's
+        // own doc for why nothing here ever sets it). `crafting_ticks_remaining`
+        // is not written: it is the auto-crafting trigger's own countdown,
+        // which never starts without the trigger itself.
+        BlockEntity::Crafter { slots, disabled } => (
+            "minecraft:crafter",
+            vec![
+                ("Items".to_owned(), items_to_nbt(slots)),
+                (
+                    "disabled_slots".to_owned(),
+                    Nbt::IntArray(
+                        disabled
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, &d)| d.then_some(i as i32))
+                            .collect(),
+                    ),
+                ),
+                ("triggered".to_owned(), Nbt::Int(0)),
+            ],
+        ),
     };
 
     let mut fields = vec![
@@ -1577,6 +1600,25 @@ fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)> {
             secondary_effect: string_field(nbt, "secondary_effect").map(str::to_owned),
             payment: None,
         }),
+        // The inverse of the `BlockEntity::Crafter` write arm above.
+        // `crafting_ticks_remaining`/`triggered` are read off disk but
+        // dropped, matching that arm's own reasoning for never writing them
+        // as anything but the countdown's rest state.
+        "minecraft:crafter" => {
+            let mut slots: [Option<ItemStack>; 9] = [None, None, None, None, None, None, None, None, None];
+            for (i, item) in items_from_nbt(field(nbt, "Items"), 9).into_iter().enumerate().take(9) {
+                slots[i] = item;
+            }
+            let mut disabled = [false; 9];
+            if let Some(Nbt::IntArray(indices)) = field(nbt, "disabled_slots") {
+                for &i in indices {
+                    if let Some(slot) = usize::try_from(i).ok().filter(|&s| s < 9) {
+                        disabled[slot] = true;
+                    }
+                }
+            }
+            BlockEntity::Crafter { slots, disabled }
+        }
         _ => BlockEntity::Opaque {
             id: id.to_owned(),
             nbt: nbt.clone(),
@@ -1756,6 +1798,63 @@ mod beacon_nbt_tests {
             .find(|(name, _)| name == "id")
             .map(|(_, value)| value.clone());
         assert_eq!(id, Some(lodestone_core::Nbt::String("minecraft:beacon".to_owned())));
+    }
+}
+
+#[cfg(test)]
+mod crafter_nbt_tests {
+    use super::{block_entity_from_nbt, block_entity_to_nbt};
+    use crate::block_entities::BlockEntity;
+    use lodestone_model::{BlockPos, ItemStack};
+
+    fn stack(item: &str, count: u32) -> ItemStack {
+        ItemStack::new(item.parse().expect("valid resource key"), count)
+    }
+
+    /// A round trip through this file's own encoder/decoder, with a real item
+    /// in one slot and two *non-adjacent* disabled indices (`1` and `6`) —
+    /// adjacent or coincident indices would not catch an off-by-one in
+    /// `disabled_slots`' int-array encoding the way spread-out ones do.
+    #[test]
+    fn a_crafters_nbt_round_trips_items_and_disabled_slots() {
+        let mut crafter = BlockEntity::crafter();
+        crafter.set_container_slot(0, Some(stack("minecraft:redstone", 3)));
+        assert!(crafter.set_crafter_slot_state(1, false));
+        assert!(crafter.set_crafter_slot_state(6, false));
+
+        let nbt = block_entity_to_nbt(BlockPos::new(4, 70, -2), &crafter);
+        let (pos, decoded) = block_entity_from_nbt(&nbt).expect("must decode");
+        assert_eq!(pos, BlockPos::new(4, 70, -2));
+        assert_eq!(decoded, crafter);
+    }
+
+    /// **Control**: a crafter with *no* disabled slots must decode back to
+    /// all-enabled, not stuck reading the fixture above's `disabled_slots` —
+    /// without this, an encoder/decoder pair that always marked every slot
+    /// disabled would still pass the round trip above by coincidence.
+    #[test]
+    fn a_crafter_with_no_disabled_slots_round_trips_to_all_enabled() {
+        let crafter = BlockEntity::crafter();
+        let nbt = block_entity_to_nbt(BlockPos::new(0, 64, 0), &crafter);
+        let (_, decoded) = block_entity_from_nbt(&nbt).expect("must decode");
+        assert_eq!(decoded, crafter);
+        assert_eq!(decoded.data_properties(), vec![0; 10]);
+    }
+
+    /// The `id` field must name the crafter's own block-entity type, the same
+    /// direct field-shape assertion the beacon/sign arms elsewhere in this
+    /// file make.
+    #[test]
+    fn crafter_nbt_names_its_own_block_entity_type() {
+        let nbt = block_entity_to_nbt(BlockPos::new(0, 64, 0), &BlockEntity::crafter());
+        let lodestone_core::Nbt::Compound(fields) = &nbt else {
+            panic!("must be a compound")
+        };
+        let id = fields
+            .iter()
+            .find(|(name, _)| name == "id")
+            .map(|(_, value)| value.clone());
+        assert_eq!(id, Some(lodestone_core::Nbt::String("minecraft:crafter".to_owned())));
     }
 }
 

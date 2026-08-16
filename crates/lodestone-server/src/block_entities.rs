@@ -115,6 +115,22 @@ pub enum BlockEntity {
     /// detection, effect-selection validation and periodic-application
     /// arithmetic this variant's own state feeds.
     Beacon(BeaconData),
+    /// `minecraft:crafter` — the 9-slot grid `CrafterBlockEntity` carries
+    /// plus its per-slot enabled/disabled bitmask (`CrafterBlockEntity`'s own
+    /// `ContainerData`, indices `0..9`). **Not modelled**: the actual
+    /// auto-crafting trigger (`CrafterBlock`'s redstone-pulse tick, recipe
+    /// matching, result dispensing into the world) — this closes
+    /// `CONTAINER_SLOT_STATE_CHANGED`'s own decode/wiring gap, not the
+    /// block's mechanism, and `data_properties`'s own doc names `triggered`
+    /// (index 9) as the disclosed always-`0` consequence.
+    Crafter {
+        /// The 9-slot 3×3 crafting grid, row-major (`CrafterMenu`'s own
+        /// `x + y * 3` addressing).
+        slots: [Option<ItemStack>; 9],
+        /// `true` where that index is disabled — `CONTAINER_SLOT_STATE_CHANGED`'s
+        /// own write surface.
+        disabled: [bool; 9],
+    },
 }
 
 /// A placed beacon's pyramid tier, selected powers and payment item —
@@ -305,6 +321,15 @@ impl BlockEntity {
             slots: vec![None; size],
         }
     }
+
+    /// A fresh, empty crafter — every slot enabled, nothing crafting.
+    #[must_use]
+    pub fn crafter() -> Self {
+        BlockEntity::Crafter {
+            slots: [None, None, None, None, None, None, None, None, None],
+            disabled: [false; 9],
+        }
+    }
 }
 
 impl BlockEntity {
@@ -343,6 +368,7 @@ impl BlockEntity {
                 }
             }
             BlockEntity::Beacon(_) => "minecraft:beacon",
+            BlockEntity::Crafter { .. } => "minecraft:crafter",
         }
     }
 
@@ -357,6 +383,10 @@ impl BlockEntity {
             // one works — the "no real container at the adjacent position"
             // scope note in the module doc no longer covers these three.
             BlockEntity::Container { slots, .. } => Some(slots),
+            // A crafter's grid is a flat 9-slot array too, same as a
+            // dispenser/dropper's `Container` — hopper adjacency into one
+            // works the identical way.
+            BlockEntity::Crafter { slots, .. } => Some(slots),
             BlockEntity::Composter(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
             | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) => {
@@ -422,6 +452,9 @@ impl BlockEntity {
             // answers, not a menu.
             | BlockEntity::Sign(_) => None,
             BlockEntity::Beacon(_) => Some("minecraft:beacon"),
+            // `MenuType.CRAFTER_3x3`'s own registry key
+            // (`.cache/mc/26.2/src`'s `MenuType.java`).
+            BlockEntity::Crafter { .. } => Some("minecraft:crafter_3x3"),
         }
     }
 
@@ -440,6 +473,9 @@ impl BlockEntity {
             BlockEntity::Container { slots, .. } => slots.clone(),
             // `BeaconMenu`'s single payment slot (`PAYMENT_SLOT = 0`).
             BlockEntity::Beacon(b) => vec![b.payment.clone()],
+            // `CrafterMenu.addSlots`'s own `x + y * 3` order — already this
+            // array's own indexing.
+            BlockEntity::Crafter { slots, .. } => slots.to_vec(),
             BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => Vec::new(),
         }
@@ -476,9 +512,51 @@ impl BlockEntity {
                     b.payment = item;
                 }
             }
+            // `CrafterBlockEntity.setItem`: writing *any* item into a slot —
+            // even setting it back to empty, per vanilla's own unconditional
+            // check before the write — re-enables it if it was disabled.
+            BlockEntity::Crafter { slots, disabled } => {
+                if let Some(cell) = slots.get_mut(slot) {
+                    if let Some(flag) = disabled.get_mut(slot) {
+                        *flag = false;
+                    }
+                    *cell = item;
+                }
+            }
             BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {}
         }
+    }
+
+    /// `CrafterBlockEntity.setSlotState` — toggles a crafter's `slot`
+    /// enabled/disabled, `CONTAINER_SLOT_STATE_CHANGED`'s own write surface.
+    /// `None` (and a `false` return) for any variant other than
+    /// [`Crafter`](Self::Crafter): a `CONTAINER_SLOT_STATE_CHANGED` reaching
+    /// a menu that is not really a crafter is exactly the case
+    /// `ServerGamePacketListenerImpl.handleContainerSlotStateChanged`'s own
+    /// `instanceof` chain refuses, reproduced here as the honest "did
+    /// nothing" rather than mutating the wrong shape.
+    ///
+    /// `slotCanBeDisabled`'s own gate — in range *and* currently empty —
+    /// applies to **both** directions, not just disabling: vanilla's method
+    /// takes an `enabled` bool and runs the identical check regardless of
+    /// which way it points, so a slot holding an item cannot be toggled
+    /// either way through this packet. Returns whether the state actually
+    /// changed, so a caller has an honest signal rather than a guaranteed
+    /// no-op read as success.
+    pub fn set_crafter_slot_state(&mut self, slot: usize, enabled: bool) -> bool {
+        let BlockEntity::Crafter { slots, disabled } = self else {
+            return false;
+        };
+        if slot >= 9 || slots[slot].is_some() {
+            return false;
+        }
+        let want_disabled = !enabled;
+        if disabled[slot] == want_disabled {
+            return false;
+        }
+        disabled[slot] = want_disabled;
+        true
     }
 
     /// This entity's menu-local `container_set_data` properties, in vanilla
@@ -501,6 +579,16 @@ impl BlockEntity {
                 crate::beacon::encode_beacon_effect(b.primary_effect.as_deref()),
                 crate::beacon::encode_beacon_effect(b.secondary_effect.as_deref()),
             ],
+            // `CrafterBlockEntity`'s own `ContainerData`: indices `0..9` are
+            // the per-slot `SLOT_ENABLED`(`0`)/`SLOT_DISABLED`(`1`) flags,
+            // index `9` is `DATA_TRIGGERED` — always `0` here, since nothing
+            // in this crate ever sets it (the auto-crafting trigger itself is
+            // not modelled; see this variant's own doc comment).
+            BlockEntity::Crafter { disabled, .. } => {
+                let mut props: Vec<i32> = disabled.iter().map(|&d| i32::from(d)).collect();
+                props.push(0);
+                props
+            }
             BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Container { .. } | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {
@@ -552,6 +640,9 @@ impl BlockEntity {
             // section is the real driver; see `BeaconData`'s own doc for the
             // "refreshed on player action, not every tick" tradeoff that
             // follows from not having a driver here.
+            // No `craftingTicksRemaining` countdown here — see this variant's
+            // own doc comment for why the trigger itself is out of scope.
+            BlockEntity::Crafter { .. } => {}
             BlockEntity::Container { .. } | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
             | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) => {}
         }
@@ -607,6 +698,7 @@ pub fn block_entity_for_item(item: &str) -> Option<(&'static str, BlockEntity)> 
             BlockEntity::container_of_size("minecraft:dropper", CONTAINER_3X3_SIZE),
         )),
         "minecraft:beacon" => Some(("minecraft:beacon", BlockEntity::Beacon(BeaconData::default()))),
+        "minecraft:crafter" => Some(("minecraft:crafter", BlockEntity::crafter())),
         "minecraft:command_block" => Some((
             "minecraft:command_block",
             BlockEntity::CommandBlock(crate::command_block::CommandBlockData::new()),
@@ -1581,5 +1673,81 @@ mod tests {
             "the background tick loop must have smelted the iron ore into an ingot by \
              10s of virtual time"
         );
+    }
+
+    #[test]
+    fn a_fresh_crafter_has_nine_empty_enabled_slots_and_the_crafter_3x3_menu() {
+        let crafter = BlockEntity::crafter();
+        assert_eq!(crafter.menu_name(), Some("minecraft:crafter_3x3"));
+        assert_eq!(crafter.type_id(), "minecraft:crafter");
+        assert_eq!(crafter.container_slots(), vec![None; 9]);
+        // 9 slot-enabled flags (0 = enabled) then `triggered` = 0 — vanilla's
+        // own `NUM_DATA = 10`.
+        assert_eq!(crafter.data_properties(), vec![0; 10]);
+    }
+
+    #[test]
+    fn set_crafter_slot_state_toggles_an_empty_slot_both_ways() {
+        let mut crafter = BlockEntity::crafter();
+        assert!(crafter.set_crafter_slot_state(3, false), "disabling an empty, enabled slot must succeed");
+        assert_eq!(
+            crafter.data_properties(),
+            vec![0, 0, 0, 1, 0, 0, 0, 0, 0, 0],
+            "index 3 must read back disabled (1), every other slot and `triggered` untouched"
+        );
+        assert!(crafter.set_crafter_slot_state(3, true), "re-enabling it must succeed");
+        assert_eq!(crafter.data_properties(), vec![0; 10]);
+    }
+
+    /// `CrafterBlockEntity.slotCanBeDisabled`'s own gate applies to **both**
+    /// directions — a slot holding an item cannot be toggled either way,
+    /// which is the specific case a fixture that only tried disabling could
+    /// not see (an already-enabled slot with an item would look identical to
+    /// a "the call was a no-op because nothing changed" false pass).
+    #[test]
+    fn set_crafter_slot_state_refuses_a_slot_holding_an_item_in_either_direction() {
+        let mut crafter = BlockEntity::crafter();
+        crafter.set_container_slot(4, Some(stack("minecraft:stick", 1)));
+        assert!(
+            !crafter.set_crafter_slot_state(4, false),
+            "a slot with an item must refuse to disable"
+        );
+        assert_eq!(crafter.data_properties()[4], 0, "must still read enabled");
+
+        // Force it disabled directly (bypassing the gate) to exercise the
+        // re-enable-refusal arm too, not just the mirror of the case above.
+        let BlockEntity::Crafter { disabled, .. } = &mut crafter else { unreachable!() };
+        disabled[4] = true;
+        assert!(
+            !crafter.set_crafter_slot_state(4, true),
+            "a slot with an item must refuse to re-enable too"
+        );
+        assert_eq!(crafter.data_properties()[4], 1, "must still read disabled");
+    }
+
+    #[test]
+    fn set_crafter_slot_state_is_out_of_range_and_wrong_variant_safe() {
+        let mut crafter = BlockEntity::crafter();
+        assert!(!crafter.set_crafter_slot_state(9, false), "index 9 is out of the 9-slot range");
+        assert!(!crafter.set_crafter_slot_state(usize::MAX, false));
+
+        let mut hopper = BlockEntity::Hopper(Hopper::new());
+        assert!(
+            !hopper.set_crafter_slot_state(0, false),
+            "a CONTAINER_SLOT_STATE_CHANGED reaching a menu that is not really a crafter \
+             must be the same honest no-op vanilla's own instanceof chain refuses"
+        );
+    }
+
+    /// `CrafterBlockEntity.setItem`: placing an item into a disabled slot
+    /// re-enables it, matching vanilla's own unconditional check.
+    #[test]
+    fn set_container_slot_re_enables_a_disabled_crafter_slot() {
+        let mut crafter = BlockEntity::crafter();
+        assert!(crafter.set_crafter_slot_state(2, false));
+        assert_eq!(crafter.data_properties()[2], 1);
+        crafter.set_container_slot(2, Some(stack("minecraft:diamond", 1)));
+        assert_eq!(crafter.data_properties()[2], 0, "placing an item must re-enable the slot");
+        assert_eq!(crafter.container_slots()[2], Some(stack("minecraft:diamond", 1)));
     }
 }
