@@ -144,6 +144,11 @@ pub const COMPOSTER_FILL: i32 = 1500;
 /// `LevelEvent.SOUND_BREWING_STAND_BREW` (`LevelEvent.java:36`). `data` unused.
 pub const SOUND_BREWING_STAND_BREW: i32 = 1035;
 
+/// `LevelEvent.SOUND_ZOMBIE_CONVERTED` (`LevelEvent.java:23`) — vanilla's
+/// `ZombieVillager.finishConversion` fires this (`data` unused) the instant a
+/// cured zombie villager becomes a real villager (issue #247).
+pub const SOUND_ZOMBIE_CONVERTED: i32 = 1027;
+
 /// Strips any `[...]` property suffix, as every canonical-name comparison in
 /// this crate does.
 fn base_name(state: &str) -> &str {
@@ -457,6 +462,25 @@ pub fn mob_ambient_sound(
         },
         pos,
         volume: 1.0,
+        pitch,
+        seed,
+    })
+}
+
+/// `ZombieVillager.startConverting`'s entity-event sound
+/// (`SoundEvents.ZOMBIE_VILLAGER_CURE`, `entity.zombie_villager.cure`) —
+/// issue #247, played the instant a golden apple starts the conversion
+/// timer. Category is always `Hostile`, matching `Monster.getSoundSource`
+/// (a converting zombie villager is still a zombie until the timer
+/// completes).
+#[must_use]
+pub fn zombie_villager_cure_sound(pos: Vec3, volume: f32, pitch: f32, seed: i64) -> Option<WorldEffect> {
+    let sound = first_real_sound(&["minecraft:entity.zombie_villager.cure".to_owned()])?;
+    Some(WorldEffect::Sound {
+        sound,
+        category: SoundCategory::Hostile,
+        pos,
+        volume,
         pitch,
         seed,
     })

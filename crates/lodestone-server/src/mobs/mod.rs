@@ -655,6 +655,14 @@ pub enum InteractOutcome {
     /// cue to send `SET_PASSENGERS`, exactly as
     /// [`MobSim::mount_mob`]'s own doc names. Consumes no item.
     Mounted,
+    /// A golden apple was used on a weakened zombie villager — vanilla
+    /// `ZombieVillager.mobInteract`'s `itemStack.consume(1, player)` branch
+    /// (issue #247). Consumes the item, matching that real `consume` call —
+    /// the no-weakness arm (`InteractionResult.CONSUME`, which does **not**
+    /// reduce the stack) is reported as [`Pass`](Self::Pass) instead; see
+    /// [`MobSim::interact`]'s zombie-villager short-circuit for why that
+    /// simplification is disclosed rather than a distinct variant.
+    ZombieVillagerConversionStarted,
 }
 
 impl InteractOutcome {
@@ -672,6 +680,10 @@ impl InteractOutcome {
         )
     }
 
+    // `ZombieVillagerConversionStarted` is *not* added to the `!matches!` list
+    // above: it falls through to the default `true` arm, matching vanilla's
+    // real `itemStack.consume(1, player)` call.
+
     /// The particle type vanilla's matching `broadcastEntityEvent` would make the
     /// client spawn, or `None` for an outcome with no visual.
     ///
@@ -687,7 +699,8 @@ impl InteractOutcome {
             | Self::Fed
             | Self::TemperRaised { .. }
             | Self::OpenTrade { .. }
-            | Self::Mounted => None,
+            | Self::Mounted
+            | Self::ZombieVillagerConversionStarted => None,
         }
     }
 }
@@ -1153,6 +1166,24 @@ pub struct SimMob<'w> {
     /// scan [`villager::find_and_claim_workstation`] runs — see that
     /// function's own doc for why the scan itself is not free.
     job_search_cooldown: i32,
+    /// This mob's own gossip ledger (issue #244) — `Villager.gossips`, what
+    /// it believes about every UUID it has an opinion of. Empty for every
+    /// non-villager species; a converted zombie villager's ledger is seeded
+    /// at conversion time (issue #247, [`villager::reputation::apply_reputation_event`]
+    /// with [`villager::reputation::ReputationEventType::ZombieVillagerCured`]).
+    gossip: villager::gossip::GossipContainer,
+    /// The tick this mob's gossip last decayed, for the 24000-tick cadence
+    /// `Villager.maybeDecayGossip` gates on — `None` before the first decay
+    /// check (matching vanilla's own `lastGossipDecayTime == 0L` sentinel:
+    /// the very first check just records the timestamp rather than decaying
+    /// immediately).
+    last_gossip_decay_tick: Option<u64>,
+    /// Live zombie-villager conversion state (issue #247) — `Some` only
+    /// while [`entity_type`](Self::entity_type) is `minecraft:zombie_villager`
+    /// and a golden apple has been used on it while weakened. `None` for
+    /// every other mob, and for a zombie villager that has not been cured
+    /// yet.
+    conversion: Option<villager::conversion::ConversionState>,
     /// This mob's live status effects — `LivingEntity.activeEffects`. Populated
     /// by a splash/lingering potion's impact
     /// ([`MobSim::resolve_projectile_impacts`] via
@@ -2311,6 +2342,18 @@ pub struct MobSim<'w> {
     /// gate drives a tame roll to both sides of its threshold instead of
     /// asserting that taming "sometimes" happens.
     tame_rng: SpawnRng,
+    /// The `random.nextInt(2401)` conversion-time roll
+    /// ([`villager::conversion::roll_conversion_ticks`]) plus the per-tick
+    /// `nextFloat()` progress draws ([`villager::conversion::conversion_progress`]),
+    /// on their own stream for [`tame_rng`](Self::tame_rng)'s reason: curing a
+    /// zombie villager must not shift which roll a tame attempt or a mob spawn
+    /// sees.
+    zombie_conversion_rng: SpawnRng,
+    /// The RNG [`spread_villager_gossip`](Self::spread_villager_gossip) draws
+    /// from for [`villager::gossip::GossipContainer::transfer_from`]'s
+    /// weighted selection, on its own stream for the same isolation reason
+    /// [`zombie_conversion_rng`](Self::zombie_conversion_rng) is separate.
+    gossip_spread_rng: SpawnRng,
     /// The `random.nextInt(7) + 1` draw
     /// `Animal.finalizeSpawnChildFromBreeding` makes for the experience orb a
     /// successful mating pops, on its own stream for [`tame_rng`](Self::tame_rng)'s
@@ -2746,6 +2789,8 @@ impl<'w> MobSim<'w> {
             pending_animations: Vec::new(),
             players: Vec::new(),
             tame_rng: SpawnRng::new(TAME_ROLL_SEED),
+            zombie_conversion_rng: SpawnRng::new(ZOMBIE_VILLAGER_CONVERSION_SEED),
+            gossip_spread_rng: SpawnRng::new(GOSSIP_SPREAD_SEED),
             breed_rng: SpawnRng::new(BREED_XP_SEED),
             mob_drops: true,
             vehicles: HashMap::new(),
@@ -3092,6 +3137,9 @@ impl<'w> MobSim<'w> {
             villager_level: 1,
             villager_xp: 0,
             job_search_cooldown: 0,
+            gossip: villager::gossip::GossipContainer::new(),
+            last_gossip_decay_tick: None,
+            conversion: None,
             effects: crate::mob_effects::ActiveEffects::new(),
             rider: None,
         });
@@ -3414,6 +3462,97 @@ impl<'w> MobSim<'w> {
         }
     }
 
+    /// Ticks between gossip-spread passes — a scope choice, not a
+    /// transcribed vanilla constant (see this method's own doc for why it
+    /// replaces vanilla's real per-*pair* 1200-tick `lastGossipTime`
+    /// cooldown with one whole-pass throttle instead), the same shape as
+    /// [`JOB_SEARCH_INTERVAL_TICKS`].
+    const GOSSIP_SPREAD_INTERVAL_TICKS: u64 = 100;
+    /// How close two villagers must be to gossip this pass — vanilla's own
+    /// trigger has no fixed radius (it is whichever villagers a Brain
+    /// `Sensor` happens to bring within `INTERACTION_RANGE` of each other
+    /// during `MeetVillagerSensor`/`gossip` behaviours), so this is this
+    /// crate's own bound, not a transcribed one.
+    const GOSSIP_SPREAD_RADIUS_SQR: f64 = 64.0; // 8 blocks
+
+    /// Issue #244: `Villager.gossip`'s nearby-villager spread
+    /// (`GossipContainer::transfer_from`, issue #244's own port), approximated
+    /// as a periodic radius-bounded scan over every villager pair rather than
+    /// vanilla's `Sensor`-driven "meet in village" Brain behaviour (Brain
+    /// package work is issue #231/#243's remainder, off limits for this
+    /// change — see `villager`'s own module doc for the same off-limits
+    /// boundary already drawn around workstation claiming).
+    ///
+    /// Both directions of a meeting pair exchange from a **pre-transfer
+    /// snapshot** of each side (`source_a`/`source_b`, cloned before either
+    /// mutates) so the second transfer never reads the first transfer's
+    /// already-updated state — an order-dependence bug a naive "transfer into
+    /// `left`, then transfer the (now different) `left` into `right`" would
+    /// have.
+    fn spread_villager_gossip(&mut self) {
+        if self.tick_count % Self::GOSSIP_SPREAD_INTERVAL_TICKS != 0 {
+            return;
+        }
+        let mut rng = self.gossip_spread_rng.clone();
+        let villagers: Vec<(usize, Vec3)> = self
+            .mobs
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.entity_type.path() == "villager")
+            .map(|(i, m)| (i, m.position()))
+            .collect();
+        for a in 0..villagers.len() {
+            for b in (a + 1)..villagers.len() {
+                let (ia, pa) = villagers[a];
+                let (ib, pb) = villagers[b];
+                let dist_sqr =
+                    (pa.x - pb.x).powi(2) + (pa.y - pb.y).powi(2) + (pa.z - pb.z).powi(2);
+                if dist_sqr > Self::GOSSIP_SPREAD_RADIUS_SQR {
+                    continue;
+                }
+                let (lo, hi) = if ia < ib { (ia, ib) } else { (ib, ia) };
+                let (left, right) = self.mobs.split_at_mut(hi);
+                let source_lo = left[lo].gossip.clone();
+                let source_hi = right[0].gossip.clone();
+                left[lo]
+                    .gossip
+                    .transfer_from(&source_hi, |bound| rng.next_int(bound), 10);
+                right[0]
+                    .gossip
+                    .transfer_from(&source_lo, |bound| rng.next_int(bound), 10);
+            }
+        }
+        self.gossip_spread_rng = rng;
+    }
+
+    /// This villager's summed reputation toward `player` (issue #246) —
+    /// `Villager.getPlayerReputation`. `0` for a non-villager mob or an
+    /// untracked player, matching
+    /// [`villager::gossip::GossipContainer::reputation`]'s own default.
+    #[must_use]
+    pub fn villager_reputation(&self, villager_id: i32, player: uuid::Uuid) -> i32 {
+        self.get(villager_id)
+            .map(|m| m.gossip.reputation(player))
+            .unwrap_or(0)
+    }
+
+    /// Applies a reputation event (issue #246) directly to `villager_id`'s
+    /// own gossip ledger — the entry point [`attack_from_player`](Self::attack_from_player)
+    /// uses internally, and what any future caller with a villager id and a
+    /// source uuid in hand (a wired `SELECT_TRADE` handler for `Trade`, a
+    /// golem-death hook for `GolemKilled`) should call once it exists. A
+    /// no-op if `villager_id` names no live mob.
+    pub fn record_reputation_event(
+        &mut self,
+        villager_id: i32,
+        event: villager::reputation::ReputationEventType,
+        source: uuid::Uuid,
+    ) {
+        if let Some(mob) = self.get_mut(villager_id) {
+            villager::reputation::apply_reputation_event(&mut mob.gossip, event, source);
+        }
+    }
+
     /// One tick, settling dropped items against a caller-supplied solidity
     /// oracle — the live world, when the caller has one.
     ///
@@ -3677,6 +3816,77 @@ impl<'w> MobSim<'w> {
             for amount in m.mob.take_self_damage() {
                 self_damage.push((m.id, amount));
             }
+            // Issue #244: `Villager.maybeDecayGossip`'s 24000-tick cadence.
+            // `None` -> `Some(tick_count)` is the "just record the timestamp,
+            // do not decay yet" first-call branch vanilla's own
+            // `lastGossipDecayTime == 0L` check takes.
+            if m.entity_type.path() == "villager" {
+                match m.last_gossip_decay_tick {
+                    None => m.last_gossip_decay_tick = Some(tick_count),
+                    Some(last) if tick_count >= last + 24000 => {
+                        m.gossip.decay();
+                        m.last_gossip_decay_tick = Some(tick_count);
+                    }
+                    Some(_) => {}
+                }
+            }
+            // Issue #247: `ZombieVillager.tick`'s conversion countdown.
+            if m.entity_type.path() == "zombie_villager"
+                && let Some(mut state) = m.conversion
+            {
+                let pos = m.position();
+                let world = self.world;
+                let progress = villager::conversion::conversion_progress(
+                    || self.zombie_conversion_rng.next_f32(),
+                    || villager::conversion::count_nearby_special_blocks(world, pos),
+                );
+                state.remaining_ticks -= progress;
+                if state.remaining_ticks <= 0 {
+                    // `ZombieVillager.finishConversion`: profession, level and
+                    // xp are already generic `SimMob` fields carried on this
+                    // same struct, so becoming a villager needs no explicit
+                    // copy of them — only the species-derived combat stats
+                    // (`combat_defaults`), category and gossip seed change.
+                    m.set_entity_type(
+                        ResourceKey::from_str("minecraft:villager").expect("static key"),
+                    );
+                    m.category = MobCategory::Creature;
+                    let (max_health, attack_damage, defenses, knockback_resistance) =
+                        combat_defaults(&m.entity_type);
+                    m.max_health = max_health;
+                    m.health = m.health.min(max_health);
+                    m.attack_damage = attack_damage;
+                    m.defenses = defenses;
+                    m.knockback_resistance = knockback_resistance;
+                    if let Some(starter) = state.starter {
+                        villager::reputation::apply_reputation_event(
+                            &mut m.gossip,
+                            villager::reputation::ReputationEventType::ZombieVillagerCured,
+                            starter,
+                        );
+                    }
+                    // `villager.addEffect(new MobEffectInstance(NAUSEA, 200, 0))`
+                    // — the "confusion" state the issue's own body names; a real
+                    // timed effect, not cosmetic-only text, so a caller reading
+                    // `SimMob::effects()` right after conversion actually finds
+                    // it.
+                    m.effects.apply("minecraft:nausea", 200, 0);
+                    m.conversion = None;
+                    let block_pos = BlockPos::new(
+                        pos.x.floor() as i32,
+                        pos.y.floor() as i32,
+                        pos.z.floor() as i32,
+                    );
+                    ambient_sounds.push(crate::effects::WorldEffect::LevelEvent {
+                        event: crate::effects::SOUND_ZOMBIE_CONVERTED,
+                        pos: block_pos,
+                        data: 0,
+                        global: false,
+                    });
+                } else {
+                    m.conversion = Some(state);
+                }
+            }
         }
         self.push_entities();
         self.pending_grazes.extend(grazes);
@@ -3847,6 +4057,9 @@ impl<'w> MobSim<'w> {
         // Issue #241: raids. Wave spawning and victory/defeat need no live
         // terrain oracle either — see `raid::MobSim::tick_raids`'s own doc.
         self.tick_raids();
+        // Issue #244: nearby-villager gossip spread. No `wasm32` gate — unlike
+        // `tick_villager_professions`, this touches no `std::fs`-backed type.
+        self.spread_villager_gossip();
 
         self.tick_count += 1;
     }
@@ -4534,6 +4747,45 @@ impl<'w> MobSim<'w> {
                 InteractOutcome::OpenTrade { profession, level }
             };
             return outcome;
+        }
+
+        // `ZombieVillager.mobInteract` (issue #247): only the golden-apple-
+        // while-weakened case gets special handling. A golden apple used
+        // without Weakness (vanilla's own `InteractionResult.CONSUME`, which
+        // does **not** reduce the stack) and every other item both fall
+        // through to the generic dispatch below, which resolves to `Pass`
+        // for a zombie villager exactly as `super.mobInteract` does for any
+        // non-tameable monster — see `InteractOutcome::ZombieVillagerConversionStarted`'s
+        // own doc for why that no-weakness arm is disclosed as `Pass` rather
+        // than a distinct variant.
+        if species == "zombie_villager" && item == Some("golden_apple") {
+            let has_weakness = mob.effects().amplifier_of("minecraft:weakness").is_some();
+            if !has_weakness {
+                return InteractOutcome::Pass;
+            }
+            let state = villager::conversion::start_converting(Some(actor.uuid), |bound| {
+                self.zombie_conversion_rng.next_int(bound)
+            });
+            let remaining_ticks = state.remaining_ticks;
+            // `SoundEvents.ZOMBIE_VILLAGER_CURE`'s own play call:
+            // `1.0F + random.nextFloat()` volume, `random.nextFloat() * 0.7F
+            // + 0.3F` pitch (`ZombieVillager.startConverting`).
+            let volume = 1.0 + self.zombie_conversion_rng.next_f32();
+            let pitch = self.zombie_conversion_rng.next_f32() * 0.7 + 0.3;
+            let seed = i64::from(self.zombie_conversion_rng.next_int(i32::MAX));
+            if let Some(mob) = self.mobs.iter_mut().find(|m| m.id == mob_id) {
+                mob.effects.remove("minecraft:weakness");
+                // `Math.min(difficulty.getId() - 1, 0)`: `0` on Easy/Normal/Hard
+                // (ids 1-3), and this crate tracks no live difficulty integer
+                // for a zombie villager's own amplifier calc — see this
+                // module's `conversion` doc for the disclosed simplification.
+                mob.effects.apply("minecraft:strength", remaining_ticks, 0);
+                mob.conversion = Some(state);
+            }
+            if let Some(effect) = crate::effects::zombie_villager_cure_sound(pos, volume, pitch, seed) {
+                self.pending_vocalisations.push(effect);
+            }
+            return InteractOutcome::ZombieVillagerConversionStarted;
         }
 
         let outcome = match species::tame_mechanism(&species) {
@@ -5376,6 +5628,86 @@ impl<'w> MobSim<'w> {
             damage_dealt,
             velocity,
         })
+    }
+
+    /// How far a witnessing villager can be from a killed one and still
+    /// gossip about the murderer (issue #246,
+    /// `tellWitnessesThatIWasMurdered`). Vanilla's own witness set comes from
+    /// the victim's `NEAREST_VISIBLE_LIVING_ENTITIES` memory, which carries
+    /// no single fixed radius of its own — this crate's own scope choice,
+    /// the same shape as [`GOSSIP_SPREAD_RADIUS_SQR`](Self::GOSSIP_SPREAD_RADIUS_SQR).
+    const VILLAGER_KILLED_WITNESS_RADIUS_SQR: f64 = 100.0; // 10 blocks
+
+    /// [`attack`](Self::attack), plus the villager-reputation half of
+    /// vanilla's `Villager.setLastHurtByMob`/`die`/
+    /// `tellWitnessesThatIWasMurdered` (issue #246): a player-identified
+    /// attacker hurting or killing a villager writes `VillagerHurt`/
+    /// `VillagerKilled` gossip, exactly as
+    /// [`villager::reputation::apply_reputation_event`] already does for the
+    /// other three event kinds this crate can produce.
+    ///
+    /// A new method rather than widening `attack`'s own signature: `attack`'s
+    /// only production caller is `crate::server::apply_attack` (off limits
+    /// for this change), and that call site has to switch to this one before
+    /// a real player attack gets reputation-wired — until then, `attack`
+    /// behaves exactly as before it, and this method exists with its own
+    /// tests, ready for that call site to adopt. `attacker` is `None` for a
+    /// caller that cannot resolve who is swinging (matching
+    /// [`PlayerIdentity`]'s own "unidentified actor" convention elsewhere in
+    /// this crate) — the gossip write is simply skipped, and this otherwise
+    /// behaves exactly like [`attack`](Self::attack).
+    ///
+    /// A hit's gossip is written to the **victim's own** ledger
+    /// (`onReputationEventFrom`'s receiver is the villager whose
+    /// `setLastHurtByMob` fired); a kill's gossip is written to **every
+    /// nearby witnessing villager's own** ledger instead, since the victim no
+    /// longer exists to hold one — matching vanilla's own
+    /// `witness.onReputationEventFrom`, not the dead villager's.
+    pub fn attack_from_player(
+        &mut self,
+        target_id: i32,
+        attacker: Option<PlayerIdentity>,
+        attacker_pos: Vec3,
+        raw_damage: f32,
+        flags: DamageFlags,
+        knockback_power: f64,
+    ) -> Option<AttackOutcome> {
+        let target_was_villager = self
+            .get(target_id)
+            .is_some_and(|m| m.entity_type.path() == "villager");
+        let target_pos_before = self.get(target_id).map(SimMob::position);
+        let outcome = self.attack(target_id, attacker_pos, raw_damage, flags, knockback_power)?;
+        if let Some(actor) = attacker
+            && target_was_villager
+        {
+            if outcome.killed {
+                if let Some(pos) = target_pos_before {
+                    for witness in &mut self.mobs {
+                        if witness.entity_type.path() != "villager" {
+                            continue;
+                        }
+                        let p = witness.position();
+                        let dist_sqr =
+                            (p.x - pos.x).powi(2) + (p.y - pos.y).powi(2) + (p.z - pos.z).powi(2);
+                        if dist_sqr > Self::VILLAGER_KILLED_WITNESS_RADIUS_SQR {
+                            continue;
+                        }
+                        villager::reputation::apply_reputation_event(
+                            &mut witness.gossip,
+                            villager::reputation::ReputationEventType::VillagerKilled,
+                            actor.uuid,
+                        );
+                    }
+                }
+            } else if let Some(mob) = self.get_mut(target_id) {
+                villager::reputation::apply_reputation_event(
+                    &mut mob.gossip,
+                    villager::reputation::ReputationEventType::VillagerHurt,
+                    actor.uuid,
+                );
+            }
+        }
+        Some(outcome)
     }
 
     /// The number of live mobs.
@@ -6695,6 +7027,14 @@ fn item_entity_type() -> ResourceKey {
 /// so a tame attempt cannot shift which roll a spawn or a despawn pass sees.
 /// Replace it per test with [`MobSim::set_tame_rng`].
 const TAME_ROLL_SEED: u64 = 0x5441_4d45_5f52_4f4c;
+
+/// Default seed for [`MobSim::zombie_conversion_rng`]. See [`TAME_ROLL_SEED`]
+/// for why it is separate. ASCII `"ZVILLAGE"`.
+const ZOMBIE_VILLAGER_CONVERSION_SEED: u64 = 0x5A56_494C_4C41_4745;
+
+/// Default seed for [`MobSim::gossip_spread_rng`]. See [`TAME_ROLL_SEED`] for
+/// why it is separate. ASCII `"GOSSIPRN"`.
+const GOSSIP_SPREAD_SEED: u64 = 0x474F_5353_4950_524E;
 
 /// Default seed for the breeding experience-orb stream. See
 /// [`TAME_ROLL_SEED`] for why it is separate.
@@ -9110,5 +9450,317 @@ mod ambient_sound_tests {
             }
             other => panic!("expected a Sound effect, got {other:?}"),
         }
+    }
+}
+
+/// Issues #244/#246/#247: gossip, reputation and zombie-villager curing,
+/// driven through real production entry points
+/// (`MobSim::interact`/`MobSim::tick`/`MobSim::attack_from_player`) rather
+/// than calling `villager::gossip`/`villager::reputation`/`villager::conversion`
+/// directly — those modules' own test suites already cover the pure
+/// arithmetic; what these gates prove is that the wiring actually reaches a
+/// live [`SimMob`], the same "reaches pixels, not just a closed loop"
+/// standard `ambient_sound_tests` above applies.
+#[cfg(test)]
+mod villager_gossip_reputation_and_curing_tests {
+    use super::*;
+
+    fn flat_world() -> ChunkWorld {
+        ChunkWorld::new(-64, 384)
+    }
+
+    fn alice() -> PlayerIdentity {
+        PlayerIdentity {
+            uuid: Uuid::from_u128(0xA11CE),
+            entity_id: 4242,
+        }
+    }
+
+    /// A golden apple on a zombie villager with no Weakness must do nothing
+    /// at all — no conversion state, `Pass`, matching vanilla's own
+    /// `InteractionResult.CONSUME`-no-reduction arm (disclosed as `Pass`,
+    /// see `InteractOutcome::ZombieVillagerConversionStarted`'s own doc).
+    #[test]
+    fn a_golden_apple_on_an_unweakened_zombie_villager_does_nothing() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species(
+                "minecraft:zombie_villager".parse().expect("valid key"),
+                Vec3::new(0.0, 0.0, 0.0),
+            )
+            .id();
+
+        let outcome = sim.interact(
+            id,
+            alice(),
+            Some(&"minecraft:golden_apple".parse().expect("valid key")),
+        );
+        assert_eq!(outcome, InteractOutcome::Pass);
+        assert!(
+            sim.get(id).expect("still alive").conversion.is_none(),
+            "no conversion state must be started without Weakness"
+        );
+    }
+
+    /// **The wire is real, not merely the derivation.** A golden apple used
+    /// on a weakened zombie villager must: report
+    /// `ZombieVillagerConversionStarted` (which consumes the item), start a
+    /// real [`villager::conversion::ConversionState`] with the actor's uuid
+    /// recorded, remove Weakness, add Strength, and publish the cure sound
+    /// through the same [`MobSim::take_vocalisations`] queue
+    /// `crate::tick::run_tick_loop` drains in production — not a hermetic
+    /// call to `effects::zombie_villager_cure_sound` in isolation.
+    #[test]
+    fn a_golden_apple_on_a_weakened_zombie_villager_starts_a_real_conversion() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species(
+                "minecraft:zombie_villager".parse().expect("valid key"),
+                Vec3::new(0.0, 0.0, 0.0),
+            )
+            .id();
+        sim.get_mut(id)
+            .expect("spawned")
+            .apply_effect("minecraft:weakness", 1000, 0);
+
+        let outcome = sim.interact(
+            id,
+            alice(),
+            Some(&"minecraft:golden_apple".parse().expect("valid key")),
+        );
+        assert_eq!(outcome, InteractOutcome::ZombieVillagerConversionStarted);
+        assert!(
+            outcome.consumes_item(),
+            "the golden apple must be consumed, matching itemStack.consume(1, player)"
+        );
+
+        let mob = sim.get(id).expect("still alive");
+        let state = mob.conversion.expect("a conversion must have started");
+        assert_eq!(state.starter, Some(alice().uuid));
+        assert!(
+            (villager::conversion::CONVERSION_WAIT_MIN..=villager::conversion::CONVERSION_WAIT_MAX)
+                .contains(&state.remaining_ticks),
+            "remaining_ticks must land in the real vanilla 3600-6000 range, got {}",
+            state.remaining_ticks
+        );
+        assert!(
+            mob.effects().amplifier_of("minecraft:weakness").is_none(),
+            "Weakness must be removed"
+        );
+        assert!(
+            mob.effects().amplifier_of("minecraft:strength").is_some(),
+            "Strength must be applied"
+        );
+
+        let vocalisations = sim.take_vocalisations();
+        assert_eq!(
+            vocalisations.len(),
+            1,
+            "exactly one cure sound must have been queued, got {vocalisations:?}"
+        );
+        match &vocalisations[0] {
+            crate::effects::WorldEffect::Sound { sound, .. } => {
+                assert_eq!(sound, "minecraft:entity.zombie_villager.cure");
+            }
+            other => panic!("expected a Sound effect, got {other:?}"),
+        }
+    }
+
+    /// **The whole timer, driven through the real production `tick()` loop**
+    /// — not a direct call to `villager::conversion::conversion_progress`.
+    /// The countdown is shortcut to a handful of ticks (private-field access,
+    /// same crate) purely so this test does not need 3600+ iterations; the
+    /// *mechanism* ticked is the same one production drives. A completed
+    /// conversion must: flip `entity_type` to `minecraft:villager`, seed
+    /// gossip with the curer's `ZombieVillagerCured` entries (issue #247's
+    /// hook into #244/#246), apply Nausea (the "confusion" state the issue's
+    /// own body names), and publish `LevelEvent(SOUND_ZOMBIE_CONVERTED)`
+    /// through the same queue production drains.
+    #[test]
+    fn a_completed_conversion_becomes_a_real_villager_with_seeded_gossip() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species(
+                "minecraft:zombie_villager".parse().expect("valid key"),
+                Vec3::new(10.0, 0.0, 10.0),
+            )
+            .id();
+        let curer = alice().uuid;
+        sim.get_mut(id).expect("spawned").conversion = Some(villager::conversion::ConversionState {
+            starter: Some(curer),
+            remaining_ticks: 3,
+        });
+
+        let mut level_events = Vec::new();
+        for _ in 0..10 {
+            sim.tick();
+            level_events.extend(sim.take_ambient_sounds());
+            if sim
+                .get(id)
+                .is_some_and(|m| m.entity_type().path() == "villager")
+            {
+                break;
+            }
+        }
+
+        let mob = sim.get(id).expect("still alive");
+        assert_eq!(mob.entity_type().path(), "villager", "must have become a real villager");
+        assert!(mob.conversion.is_none(), "conversion state must be cleared");
+        assert_eq!(
+            mob.gossip.reputation(curer),
+            125,
+            "ZombieVillagerCured's own predicted value (20*5 + 25*1), seeded onto the \
+             new villager's own ledger"
+        );
+        assert!(
+            mob.effects().amplifier_of("minecraft:nausea").is_some(),
+            "the post-cure confusion state (Nausea) must be applied"
+        );
+
+        assert!(
+            level_events.iter().any(|effect| matches!(
+                effect,
+                crate::effects::WorldEffect::LevelEvent { event, .. }
+                    if *event == crate::effects::SOUND_ZOMBIE_CONVERTED
+            )),
+            "the SOUND_ZOMBIE_CONVERTED level event must reach the production queue, got {level_events:?}"
+        );
+    }
+
+    /// `MobSim::record_reputation_event`/`villager_reputation` reach a real
+    /// spawned villager's own ledger, not a hermetic `GossipContainer`.
+    #[test]
+    fn record_reputation_event_reaches_a_real_villagers_own_ledger() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+        let player = alice().uuid;
+
+        assert_eq!(sim.villager_reputation(id, player), 0);
+        sim.record_reputation_event(id, villager::reputation::ReputationEventType::Trade, player);
+        assert_eq!(sim.villager_reputation(id, player), 2, "trading grants 2 * weight(1) = 2");
+    }
+
+    /// `MobSim::attack_from_player` (issue #246): hurting a real villager
+    /// writes negative gossip onto **that villager's own** ledger about the
+    /// attacker — driven through the real hit pipeline
+    /// (`apply_damage`/`note_hurt`), not a direct `apply_reputation_event`
+    /// call.
+    #[test]
+    fn hurting_a_real_villager_lowers_its_reputation_of_the_attacker() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+        let attacker = alice();
+
+        assert_eq!(sim.villager_reputation(id, attacker.uuid), 0);
+        let outcome = sim.attack_from_player(
+            id,
+            Some(attacker),
+            Vec3::new(1.0, 0.0, 0.0),
+            1.0,
+            DamageFlags::default(),
+            0.0,
+        );
+        assert!(outcome.is_some(), "the villager must have been hit");
+        assert_eq!(
+            sim.villager_reputation(id, attacker.uuid),
+            -25,
+            "VillagerHurt's predicted value: 25 * minor_negative.weight()(-1)"
+        );
+    }
+
+    /// **Control: a `None` attacker must write no gossip at all** — the
+    /// disclosed "unidentified actor" skip, proven by actually driving it
+    /// rather than merely asserting the branch exists.
+    #[test]
+    fn an_unidentified_attacker_writes_no_reputation_gossip() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+
+        sim.attack_from_player(id, None, Vec3::new(1.0, 0.0, 0.0), 1.0, DamageFlags::default(), 0.0);
+        assert!(
+            sim.get(id).expect("still alive").gossip.is_empty(),
+            "no attacker identity means no gossip write at all"
+        );
+    }
+
+    /// Issue #244: two villagers close enough to gossip, driven through the
+    /// real `tick()` loop's `spread_villager_gossip` pass, actually exchange
+    /// ledger entries — not a direct `GossipContainer::transfer_from` call.
+    #[test]
+    fn two_nearby_villagers_spread_gossip_through_the_real_tick_loop() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let a = sim
+            .spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+        let b = sim
+            .spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(2.0, 0.0, 0.0))
+            .id();
+        let stranger = Uuid::from_u128(0xDEAD_BEEF);
+        sim.get_mut(a)
+            .expect("spawned")
+            .gossip
+            .add(stranger, villager::gossip::GossipType::MajorPositive, 20);
+
+        for _ in 0..(MobSim::GOSSIP_SPREAD_INTERVAL_TICKS + 1) {
+            sim.tick();
+        }
+
+        assert!(
+            sim.get(b)
+                .expect("still alive")
+                .gossip
+                .entries_for(stranger)
+                .is_some(),
+            "villager b must have picked up some gossip about the stranger from villager a"
+        );
+    }
+
+    /// Control: two villagers far apart never spread, even across many
+    /// gossip-spread passes — otherwise the subject test above could pass
+    /// under an implementation with no distance gate at all.
+    #[test]
+    fn distant_villagers_never_spread_gossip() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let a = sim
+            .spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+        let b = sim
+            .spawn_species(
+                "minecraft:villager".parse().expect("valid key"),
+                Vec3::new(500.0, 0.0, 500.0),
+            )
+            .id();
+        let stranger = Uuid::from_u128(0xDEAD_BEEF);
+        sim.get_mut(a)
+            .expect("spawned")
+            .gossip
+            .add(stranger, villager::gossip::GossipType::MajorPositive, 20);
+
+        for _ in 0..(MobSim::GOSSIP_SPREAD_INTERVAL_TICKS * 3) {
+            sim.tick();
+        }
+
+        assert!(
+            sim.get(b)
+                .expect("still alive")
+                .gossip
+                .entries_for(stranger)
+                .is_none(),
+            "villagers 500 blocks apart must never spread gossip to each other"
+        );
     }
 }
