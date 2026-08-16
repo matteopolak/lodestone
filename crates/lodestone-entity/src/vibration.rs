@@ -128,13 +128,19 @@ impl VibrationEvent {
 }
 
 /// One vibration a real producer posted this tick, at a position — the unit
-/// [`nearest_listenable`] resolves over. No source-entity id yet: issue
-/// #459's step 3 (a warden redirecting anger at a projectile's owner) needs
-/// one, and this type grows it then rather than carrying an unused field now.
+/// [`nearest_listenable`] resolves over.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PostedVibration {
     pub position: Vec3,
     pub event: VibrationEvent,
+    /// `GameEvent.Context.sourceEntity()` — the host's own entity id for
+    /// whoever caused the event, if the producer knows one. Issue #459's
+    /// step 3 (`Warden.VibrationUser.onReceiveVibration`'s
+    /// `increaseAngerAt(sourceEntity)`) is this field's reason to exist: a
+    /// listener cannot get angry at *something* without an identity to be
+    /// angry at. `None` for a producer with no natural source (there is
+    /// none yet — every producer today sets this).
+    pub source: Option<i32>,
 }
 
 /// `Warden.VibrationUser.getListenerRadius` — the warden's own fixed
@@ -366,10 +372,12 @@ mod tests {
         let inside = PostedVibration {
             position: Vec3::new(15.9, 0.0, 0.0),
             event: VibrationEvent::EntityDie,
+            source: None,
         };
         let outside = PostedVibration {
             position: Vec3::new(16.1, 0.0, 0.0),
             event: VibrationEvent::EntityDie,
+            source: None,
         };
         assert_eq!(
             nearest_listenable(origin, WARDEN_LISTENER_RADIUS, &[outside]),
@@ -391,14 +399,17 @@ mod tests {
         let far = PostedVibration {
             position: Vec3::new(10.0, 0.0, 0.0),
             event: VibrationEvent::Step,
+            source: None,
         };
         let near = PostedVibration {
             position: Vec3::new(3.0, 0.0, 0.0),
             event: VibrationEvent::EntityDie,
+            source: None,
         };
         let mid = PostedVibration {
             position: Vec3::new(6.0, 0.0, 0.0),
             event: VibrationEvent::BlockDestroy,
+            source: None,
         };
         let found = nearest_listenable(origin, WARDEN_LISTENER_RADIUS, &[far, near, mid]);
         assert_eq!(found, Some(near));

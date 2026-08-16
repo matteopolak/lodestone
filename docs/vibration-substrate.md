@@ -1,13 +1,14 @@
-# Vibration substrate (issue #459, step 2)
+# Vibration substrate (issue #459, steps 2–3)
 
 ## What it is
 
 A world-event type (`VibrationEvent`) and a host-side "nearest audible event"
-resolution — the real, fully-open prerequisite issue #459 named for the
-warden (and reusable beyond it, for a future sculk sensor). Step 1 of that
-issue (the Brain driver reaching production) and step 3 (the warden's own
-anger/dig/emerge behaviour) are both separate, tracked elsewhere; this is
-step 2 only.
+resolution (step 2), plus a first real consumer: warden anger and a real
+melee consequence (step 3, `crates/lodestone-server/src/mobs/warden.rs`).
+Step 1 of that issue (the Brain driver reaching production) is separate,
+tracked elsewhere. Step 3 here is **partial** — anger accumulation and a
+genuine in-range hit are built; pursuit, dig/emerge and the sonic boom are
+not (see `warden.rs`'s own module doc for exactly what and why).
 
 ## How it works
 
@@ -56,12 +57,32 @@ this same tick is audible this same tick rather than one tick late.
 ### The one producer this crate owns today: `reap_dead`
 
 `MobSim::reap_dead` posts `VibrationEvent::EntityDie` at a dying mob's own
-position — `LivingEntity.die` posting `GameEvent.ENTITY_DIE`. Every other
+position, **with that mob's own entity id as `source`** — `LivingEntity.die`
+posting `GameEvent.ENTITY_DIE` with `GameEvent.Context.of(this)`. Every other
 vanilla producer (`block_destroy`, `block_place`, `container_open`, `step`,
 `swim`, ...) lives outside `crates/lodestone-server/src/mobs/**`'s owned
 files (`server.rs`, `block_placement.rs`, `block_entities.rs`) and is real,
 disclosed follow-up work — `post_vibration` is `pub` specifically so a
 caller there can post one without this module changing.
+
+### The step-3 consumer: warden anger (`mobs/warden.rs`)
+
+`MobSim::resolve_warden_anger`, run right after `resolve_vibrations` each
+tick, decays every warden's anger by 1/tick, absorbs this tick's
+`nearest_vibration` answer at its `source` by 35 (`Warden.increaseAngerAt`'s
+own default), and — once a warden's anger crosses 80
+(`AngerLevel.ANGRY.getMinimumAnger()`) and its target is within a 3-block
+melee reach — lands a real hit through the same `SimMob::apply_damage`
+pipeline every other hit in this crate uses. **Single-suspect**, not
+vanilla's multi-suspect `AngerManagement`: a vibration from a different
+source replaces the tracked target outright rather than being tracked
+alongside it. **No pursuit**: without `ai::roster` coverage or a Brain melee
+behaviour (neither exists for the warden), nothing moves it toward a target
+— a hit only lands on a target already in range. **No dig/emerge, no sonic
+boom.** All of this is disclosed in `warden.rs`'s own module doc, along with
+why a stale (already-reaped) target's anger is not proactively pruned — doing
+so would erase the anger a corpse-sourced vibration just granted on the same
+tick it was granted.
 
 ## How to change it, and the gotchas
 
@@ -77,15 +98,18 @@ caller there can post one without this module changing.
   the warden's, its own constant/predicate — `WARDEN_LISTENER_RADIUS` and
   `VibrationEvent::is_warden_listenable` are both named for the one listener
   this substrate currently serves, not generic.
-- **Nothing consumes `SimMob::nearest_vibration` yet.** It is resolved, real,
-  and tested at the `MobSim::tick` boundary
-  (`mobs::vibration_substrate_tests`), but no behaviour turns it into the
-  warden's own anger/dig/emerge response — that is issue #459's own step 3,
-  a real and separate remaining gap, not silently assumed done.
+- **`SimMob::nearest_vibration` now has one real consumer** (`resolve_warden_anger`),
+  but pursuit, dig/emerge and the sonic boom remain — `mobs/warden.rs`'s own
+  module doc names exactly what each would need (a movement seam the warden
+  has none of today; a pose/animation state; a ranged burst-damage attack).
 - **Travel delay and occlusion are not modelled.** Adding them means
   reproducing `VibrationSystem.Ticker`'s multi-tick walk and a block-based
-  line check, both real follow-up work once step 3 has a consumer that would
-  actually benefit from the distinction.
+  line check — real follow-up work, now with a consumer that would actually
+  benefit from the distinction.
+- **A second producer** would immediately make the warden more than a
+  one-trick reactor to nearby deaths — `block_destroy`/`step`/`container_open`
+  are the natural next ones, and each lives outside this crate's `mobs/**`
+  ownership (see the producer section above).
 
 ## Configuration
 
@@ -106,4 +130,5 @@ was chosen to avoid.
 ```bash
 cargo test -p lodestone-entity --lib --no-fail-fast -- vibration::
 cargo test -p lodestone-server --lib --no-fail-fast -- vibration_substrate_tests::
+cargo test -p lodestone-server --lib --no-fail-fast -- mobs::warden::
 ```
