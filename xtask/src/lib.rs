@@ -9593,6 +9593,22 @@ fn report_build_failure(failure: &CapturedBuild) {
     }
 }
 
+/// Overrides `[profile.dev].codegen-backend = "cranelift"` (`.cargo/config.toml`)
+/// back to LLVM for the one target that setting does not apply to.
+///
+/// `rustc_codegen_cranelift` has no wasm32 backend at all: "error: can't compile
+/// for wasm32-unknown-unknown: Support for this target has not been implemented
+/// yet". Cargo profiles are not target-scoped, so `[profile.dev]` reaches every
+/// `--target wasm32-unknown-unknown` build the same as a native one — landing
+/// Cranelift as the workspace default (see docs/compile-times.md) silently took
+/// every row of this check from PASS to FAIL, compile error rather than a
+/// runtime hazard, and nothing native-side could have shown it. `.cargo/config.toml`
+/// cannot express "cranelift except for this target" (profile tables are not
+/// conditional on target triple), so the override has to live at the call site
+/// instead — the same reasoning `docs/compile-times.md` already gives for
+/// `RUSTFLAGS` clobbering `build.rustflags`, just one level further out.
+const WASM_CODEGEN_BACKEND_ENV: (&str, &str) = ("CARGO_PROFILE_DEV_CODEGEN_BACKEND", "llvm");
+
 /// Runs `cargo build -p <name> --target wasm32-unknown-unknown [extra]` from
 /// the workspace root, capturing the build to a log file on failure. The native
 /// xtask binary's own `--target-dir` is deliberately NOT forwarded: the wasm
@@ -9609,6 +9625,7 @@ fn compile_crate_for_wasm(
         .arg("--target")
         .arg(WASM_TARGET)
         .args(wasm_crate.extra_args)
+        .env(WASM_CODEGEN_BACKEND_ENV.0, WASM_CODEGEN_BACKEND_ENV.1)
         .current_dir(workspace_root);
     run_captured_build(&mut command, workspace_root, wasm_crate.name)
 }
@@ -9618,6 +9635,7 @@ fn build_web_with_trunk(workspace_root: &Path) -> Result<(), CapturedBuild> {
     let mut command = Command::new("trunk");
     command
         .arg("build")
+        .env(WASM_CODEGEN_BACKEND_ENV.0, WASM_CODEGEN_BACKEND_ENV.1)
         .current_dir(workspace_root.join("web"));
     run_captured_build(&mut command, workspace_root, "lodestone-web-trunk")
 }
