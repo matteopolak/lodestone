@@ -36,6 +36,8 @@ fn candidate(n: u128, name: &str, x: f64, mode: GameMode) -> PlayerCandidate {
         username: name.to_string(),
         position: Vec3::new(x, 64.0, 0.0),
         game_mode: mode,
+        xp_level: 0,
+        xp_points: 0,
     }
 }
 
@@ -872,6 +874,31 @@ fn experience_add_defaults_to_points_and_the_unit_literals_select_the_other() {
         set.effects,
         [DirectedEffect::new(uuid(2), Effect::SetExperience { levels: true, amount: 5 })]
     );
+}
+
+/// `/xp query` reads a target's *republished* `PlayerCandidate` snapshot
+/// (`crate::server::republish_experience`'s producer half, mirrored here by
+/// building the roster with non-zero `xp_level`/`xp_points` directly, the same
+/// way `game_mode` is set up in [`candidate`] for `@a[gamemode=…]` tests). The
+/// two sub-literals must read different fields — a fixture where they agreed
+/// could not tell a transposition from a correct implementation.
+#[test]
+fn experience_query_reads_the_targets_republished_snapshot() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let mut bob = candidate(2, "bob", 5.0, GameMode::Creative);
+    bob.xp_level = 7;
+    bob.xp_points = 23;
+    let players = vec![candidate(1, "alice", 0.0, GameMode::Survival), bob];
+
+    let levels = run_stateful(&commands, &state, &players, &alice, "xp query bob levels")
+        .expect("root matched");
+    assert_eq!(levels.response.lines(), ["bob has 7 experience levels"]);
+
+    let points = run_stateful(&commands, &state, &players, &alice, "xp query bob points")
+        .expect("root matched");
+    assert_eq!(points.response.lines(), ["bob has 23 experience points"]);
 }
 
 /// `/clear` with no arguments targets self with no filter and no cap; the

@@ -5760,6 +5760,7 @@ where
             } else {
                 experience.give_points(amount);
             }
+            republish_experience(players, player_uuid, experience);
             apply(
                 conn,
                 state,
@@ -5777,6 +5778,7 @@ where
             } else {
                 experience.give_points(amount);
             }
+            republish_experience(players, player_uuid, experience);
             apply(
                 conn,
                 state,
@@ -7996,6 +7998,19 @@ fn join_experience<P: ServerProtocol>(
         experience.level(),
         experience.total(),
     )
+}
+
+/// [`PlayerRegistry::set_experience`]'s producer half — call this everywhere
+/// [`join_experience`]/`encode_set_experience` is sent to the owning
+/// connection, the same "send once at join, and after every mutation"
+/// moments [`join_experience`]'s own doc names. A one-line wrapper rather
+/// than inlining the `if let Some(registry) = players` at each of those call
+/// sites, so a future field on [`crate::commands::PlayerCandidate`]'s
+/// experience mirror only has one call to update, not eight.
+fn republish_experience(players: Option<&PlayerRegistry>, uuid: uuid::Uuid, experience: &crate::experience::PlayerExperience) {
+    if let Some(registry) = players {
+        registry.set_experience(uuid, experience.level(), experience.query_points());
+    }
 }
 
 /// The local player's combat-relevant attributes as wire-shaped snapshots —
@@ -10594,6 +10609,7 @@ where
                 }
             }
             if experience_changed {
+                republish_experience(players, player_uuid, experience);
                 apply(
                     conn,
                     state,
@@ -10694,6 +10710,7 @@ where
                         });
                         if points > 0 {
                             experience.give_points(i32::try_from(points).unwrap_or(i32::MAX));
+                            republish_experience(players, player_uuid, experience);
                             apply(
                                 conn,
                                 state,
@@ -10836,6 +10853,11 @@ where
                 creative,
                 fresh_seed,
             );
+            // A no-op when the click was refused (`experience` untouched, so
+            // this resends the same level/points it already holds) — cheaper
+            // to call unconditionally than to thread a "did it actually spend
+            // levels" flag out of `apply_container_button_click` just for this.
+            republish_experience(players, player_uuid, experience);
             for directive in directives {
                 apply(conn, state, directive).await?;
             }
@@ -11391,6 +11413,12 @@ where
                     username: username.to_owned(),
                     position,
                     game_mode: *game_mode,
+                    // No registry to have republished into — this connection
+                    // *is* the one live source, read directly rather than
+                    // through the mirror `set_experience` maintains for
+                    // everyone else's roster entry.
+                    xp_level: experience.level(),
+                    xp_points: experience.query_points(),
                 });
             }
             let source = crate::commands::CommandSource::player(
@@ -12178,6 +12206,7 @@ where
     // every join because `lastSentExp` starts at `-99999999`. Without it the bar has
     // no values at all — see `join_experience`.
     apply(conn, &mut state, join_experience(proto, &experience)).await?;
+    republish_experience(entities.players(), player_uuid, &experience);
     // The first `update_attributes` — the armour bar's own packet, and the one
     // this crate never sent at all until now (see `join_attributes`'s own doc
     // comment). Without it `Session::armour_value` never leaves `None` and the
@@ -12552,6 +12581,7 @@ where
                         // `give_points` with no `set_experience` behind it is the exact
                         // shape that made the XP bar invisible in the first place.
                         debug_assert!(absorbed.points > 0, "an absorbed orb pays out points");
+                        republish_experience(entities.players(), player_uuid, &experience);
                         apply(
                             conn,
                             &mut state,
@@ -14305,6 +14335,7 @@ where
     // sent anyway because the bar is drawn from the *last* values received and a
     // client that is never sent any has nothing to draw.
     apply(conn, &mut state, join_experience(proto, &experience)).await?;
+    republish_experience(entities.players(), player_uuid, &experience);
     // The armour bar's own packet — see the native `serve_play`'s identical
     // send and `join_attributes`'s own doc comment. `inventory` is the same
     // fresh-or-restored value the snapshot above already sent.
@@ -14527,6 +14558,7 @@ where
                     proto.encode_take_item_entity(absorbed.orb_entity_id, LOCAL_PLAYER_ENTITY_ID, 1),
                 )
                 .await?;
+                republish_experience(entities.players(), player_uuid, &experience);
                 apply(
                     conn,
                     &mut state,
