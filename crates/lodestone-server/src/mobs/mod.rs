@@ -226,6 +226,12 @@ mod fishing;
 // `fishing::FISHING_ROLL_SEED` is.
 mod raid;
 
+// Issue #459's step 3: the warden anger consumer for the vibration
+// substrate (`crate::mobs::vibration` — re-exported from `lodestone_entity`).
+// `pub` because `warden::AngerLevel` is part of `SimMob::warden_anger_level`'s
+// public return type.
+pub mod warden;
+
 /// Reads a computed attribute value from `attrs` by bare path (e.g.
 /// `"max_health"`), applying the registry default when the attribute is not
 /// explicitly present — mirrors [`AttributeMap::value`]'s own fallback so a
@@ -322,6 +328,24 @@ fn ai_ground_speed(requested_speed: f64) -> f64 {
 /// the "vacuous species" this repo's own evidence section warns about;
 /// re-check this comment before adding one, rather than assuming it is
 /// missing.
+/// `Goat.finalizeSpawn`'s pre-broken-horn roll:
+/// `!this.isBaby() && random.nextFloat() < 0.1F`, then
+/// `random.nextBoolean()` to pick which horn — narrowed to "not a baby" being
+/// unconditionally true here, since [`MobSim::spawn_species`] always spawns
+/// adult-shaped (see that method's own doc comment). `(has_left, has_right)`,
+/// both `true` for every non-goat species and for the roll's own miss.
+///
+/// `rng.next_int(2) == 0` stands in for `RandomSource.nextBoolean()` — the
+/// same coin-flip shape [`raid::bonus_spawns`] already uses for its own
+/// `nextInt(2)` roll, not a bit-identical transcription of Java's real
+/// `nextBoolean` implementation.
+fn goat_horn_spawn_roll(species_path: &str, rng: &mut SpawnRng) -> (bool, bool) {
+    if species_path != "goat" || rng.next_f32() >= 0.1 {
+        return (true, true);
+    }
+    if rng.next_int(2) == 0 { (false, true) } else { (true, false) }
+}
+
 fn combat_defaults(entity_type: &ResourceKey) -> (f32, f32, Defenses, f64) {
     let attrs = default_attributes(entity_type).unwrap_or_else(AttributeMap::new);
     let max_health = attr(&attrs, "max_health") as f32;
@@ -1189,10 +1213,40 @@ pub struct SimMob<'w> {
     /// listener species ([`is_vibration_listener`]) and one was posted in
     /// range — issue #459's vibration substrate, resolved host-side by
     /// [`MobSim::resolve_vibrations`]. `None` for every other mob, and for a
-    /// listener with nothing audible in range this tick. Not yet read by any
-    /// behaviour: turning this into a warden's actual anger/dig/emerge
-    /// response is issue #459's own separate, still-open step 3.
+    /// listener with nothing audible in range this tick. Consumed by
+    /// [`MobSim::resolve_warden_anger`] (issue #459's step 3) into
+    /// [`warden_anger`](Self::warden_anger)/[`warden_anger_target`](Self::warden_anger_target).
     nearest_vibration: Option<PostedVibration>,
+    /// `AngerManagement.angerBySuspect`'s value for this mob's own **single**
+    /// tracked suspect — a real, disclosed narrowing of vanilla's per-suspect
+    /// map (which tracks several candidates at once and picks the angriest
+    /// via `AngerManagement.Sorter`). `0..=`[`warden::MAX_ANGER`], decayed by
+    /// [`warden::ANGER_DECAY_PER_TICK`] every tick
+    /// ([`MobSim::resolve_warden_anger`]) the way `AngerManagement.tick`'s
+    /// own `DEFAULT_ANGER_DECREASE` does. Meaningless (always `0`) for a
+    /// non-listener species.
+    warden_anger: i32,
+    /// The entity id [`warden_anger`](Self::warden_anger) is banked against —
+    /// vanilla's `AngerManagement`'s "current suspect", narrowed to one slot.
+    /// A new vibration from a **different** source replaces this and resets
+    /// the anger to `0` before absorbing the new event — see
+    /// [`MobSim::resolve_warden_anger`]'s own doc for why that is the honest
+    /// single-slot analogue of vanilla's multi-suspect sort rather than a
+    /// silent behaviour change. `None` once anger decays to `0` or the
+    /// target stops existing.
+    warden_anger_target: Option<i32>,
+    /// `Goat.DATA_HAS_LEFT_HORN`. `true` for every non-goat species (the
+    /// field is meaningless there) and for a goat that has not lost this
+    /// horn. Rolled once at spawn (`Goat.finalizeSpawn`'s own `nextFloat() <
+    /// 0.1F` check) by [`MobSim::spawn_species`]; nothing in this crate yet
+    /// removes a horn afterward — `RamTarget`'s own doc discloses that
+    /// `hasRammedHornBreakingBlock`'s block-contact trigger is not ported
+    /// (this seam has no block-state read), so a horn lost only ever happens
+    /// at spawn, never mid-game, here.
+    has_left_horn: bool,
+    /// `Goat.DATA_HAS_RIGHT_HORN`. See [`has_left_horn`](Self::has_left_horn)'s
+    /// own doc — identical shape, the other horn.
+    has_right_horn: bool,
     /// This mob's own gossip ledger (issue #244) — `Villager.gossips`, what
     /// it believes about every UUID it has an opinion of. Empty for every
     /// non-villager species; a converted zombie villager's ledger is seeded
@@ -1955,10 +2009,44 @@ impl<'w> SimMob<'w> {
 
     /// The nearest warden-listenable vibration this tick, if any — issue
     /// #459's substrate. See the `nearest_vibration` field's own doc for
-    /// what this deliberately does not yet drive.
+    /// what this drives ([`MobSim::resolve_warden_anger`]).
     #[must_use]
     pub fn nearest_vibration(&self) -> Option<PostedVibration> {
         self.nearest_vibration
+    }
+
+    /// This mob's own tracked anger level — see the `warden_anger` field's
+    /// own doc for the single-suspect narrowing. `0` for a non-listener
+    /// species.
+    #[must_use]
+    pub fn warden_anger(&self) -> i32 {
+        self.warden_anger
+    }
+
+    /// The entity id [`warden_anger`](Self::warden_anger) is banked against,
+    /// if any.
+    #[must_use]
+    pub fn warden_anger_target(&self) -> Option<i32> {
+        self.warden_anger_target
+    }
+
+    /// `AngerLevel.byAnger` — this mob's own anger bucketed into vanilla's
+    /// three named levels.
+    #[must_use]
+    pub fn warden_anger_level(&self) -> warden::AngerLevel {
+        warden::AngerLevel::from_anger(self.warden_anger)
+    }
+
+    /// `Goat.hasLeftHorn()`. Meaningless for a non-goat species.
+    #[must_use]
+    pub fn has_left_horn(&self) -> bool {
+        self.has_left_horn
+    }
+
+    /// `Goat.hasRightHorn()`. Meaningless for a non-goat species.
+    #[must_use]
+    pub fn has_right_horn(&self) -> bool {
+        self.has_right_horn
     }
 
     /// `VillagerData.level`, `1..=5`.
@@ -2092,6 +2180,15 @@ impl<'w> SimMob<'w> {
                 profession: ResourceKey::from_str(&format!("minecraft:{}", self.profession.path()))
                     .expect("every Profession::path() is a valid identifier path"),
                 level: self.villager_level,
+            });
+        }
+        // `Goat.DATA_HAS_LEFT_HORN`/`DATA_HAS_RIGHT_HORN`, indices 19/20 — see
+        // `MetadataField::GoatHorns`'s own doc for the collision this species
+        // switch resolves and why it is pushed unconditionally.
+        if self.entity_type.path() == "goat" {
+            metadata.push(MetadataField::GoatHorns {
+                has_left: self.has_left_horn,
+                has_right: self.has_right_horn,
             });
         }
         EntitySnapshot {
@@ -2283,6 +2380,10 @@ pub struct MobSim<'w> {
     /// must not shift which denomination an orb merges into or which roll a
     /// despawn check sees.
     equipment_rng: SpawnRng,
+    /// `Goat.finalizeSpawn`'s own `nextFloat() < 0.1F` pre-broken-horn roll,
+    /// plus the `nextBoolean()` that picks which horn — on its own stream
+    /// for [`orb_rng`](Self::orb_rng)'s reason.
+    goat_horn_rng: SpawnRng,
     /// `DifficultyInstance.getSpecialMultiplier()` fed to every spawn's
     /// [`lodestone_entity::spawn_equipment::populate_default_equipment_slots`]
     /// call. `0.0` by default — vanilla's own value for a fresh world's
@@ -2915,6 +3016,7 @@ impl<'w> MobSim<'w> {
             orbs: HashMap::new(),
             orb_rng: SpawnRng::new(orbs::ORB_BEHAVIOR_SEED),
             equipment_rng: SpawnRng::new(EQUIPMENT_ROLL_SEED),
+            goat_horn_rng: SpawnRng::new(GOAT_HORN_ROLL_SEED),
             spawn_special_multiplier: 0.0,
             spawn_hard_difficulty: false,
             falling_blocks: HashMap::new(),
@@ -3285,6 +3387,10 @@ impl<'w> MobSim<'w> {
             bed: None,
             bed_search_cooldown: 0,
             nearest_vibration: None,
+            warden_anger: 0,
+            warden_anger_target: None,
+            has_left_horn: true,
+            has_right_horn: true,
             gossip: villager::gossip::GossipContainer::new(),
             last_gossip_decay_tick: None,
             golem_detected_until: None,
@@ -3403,6 +3509,12 @@ impl<'w> MobSim<'w> {
         );
         equipment::apply_equipment(&mut attrs, equipped.iter());
 
+        // `Goat.finalizeSpawn`'s own pre-broken-horn roll — see
+        // `goat_horn_spawn_roll`'s own doc. Rolled here, before `entity_type`
+        // moves into `spawn_with_type` below, for the identical reason
+        // `species_path` was captured above.
+        let (has_left_horn, has_right_horn) = goat_horn_spawn_roll(&species_path, &mut self.goat_horn_rng);
+
         let mob = self.spawn_with_type(
             pos,
             shape,
@@ -3410,6 +3522,8 @@ impl<'w> MobSim<'w> {
             visited_budget,
             entity_type,
         );
+        mob.has_left_horn = has_left_horn;
+        mob.has_right_horn = has_right_horn;
         mob.set_category(if hostile {
             MobCategory::Monster
         } else {
@@ -4590,6 +4704,10 @@ impl<'w> MobSim<'w> {
         // earlier in this tick (currently just `reap_dead`'s `entity_die`)
         // has already posted before a listener resolves its nearest answer.
         self.resolve_vibrations();
+        // Issue #459's step 3: turns this tick's `nearest_vibration` answer
+        // into real warden anger and, once angry and in range, a real melee
+        // hit — see `warden::MobSim::resolve_warden_anger`'s own doc.
+        self.resolve_warden_anger();
 
         self.tick_count += 1;
     }
@@ -6929,13 +7047,14 @@ impl<'w> MobSim<'w> {
         // while the mob still exists: a player's hit within the last
         // `PLAYER_HURT_EXPERIENCE_TIME` ticks, and not a baby
         // (`shouldDropExperience()` is `!isBaby()`).
-        let dead: Vec<(ResourceKey, Vec3, bool)> = self
+        let dead: Vec<(i32, ResourceKey, Vec3, bool)> = self
             .mobs
             .iter()
             .filter(|m| m.health <= 0.0)
             .map(|m| {
                 let by_player = m.hurt_by_player_until.is_some_and(|until| now < until);
                 (
+                    m.id,
                     m.entity_type.clone(),
                     m.position(),
                     by_player && !m.is_baby(),
@@ -6946,7 +7065,7 @@ impl<'w> MobSim<'w> {
             return;
         }
         self.mobs.retain(|m| m.health > 0.0);
-        for (entity_type, position, drops_experience) in dead {
+        for (id, entity_type, position, drops_experience) in dead {
             self.drop_death_loot(&entity_type, position);
             // Vanilla's `die` calls `dropAllDeathLoot` then `dropExperience`, in that
             // order, so the orbs land after the items.
@@ -6956,10 +7075,16 @@ impl<'w> MobSim<'w> {
             // Issue #459's vibration substrate: `LivingEntity.die` posts
             // `GameEvent.ENTITY_DIE` (`GameEvent.Context.of(this)`) at the
             // dying mob's own position — this crate's first real producer.
-            // Every other vanilla producer (`block_destroy`, `step`,
-            // `container_open`, ...) lives outside this file's owned crate
-            // paths and is real follow-up work, not modelled here.
-            self.post_vibration(position, VibrationEvent::EntityDie);
+            // `GameEvent.Context.sourceEntity()` for this call is the dying
+            // mob itself (`this`), so `source` names the same id — a warden
+            // that hears this gets angry at the corpse's own identity,
+            // matching `Warden.VibrationUser.onReceiveVibration`'s
+            // no-projectile branch (`increaseAngerAt(sourceEntity)`)
+            // faithfully rather than substituting something that reads more
+            // sensibly. Every other vanilla producer (`block_destroy`,
+            // `step`, `container_open`, ...) lives outside this file's owned
+            // crate paths and is real follow-up work, not modelled here.
+            self.post_vibration(position, VibrationEvent::EntityDie, Some(id));
         }
     }
 
@@ -6967,9 +7092,11 @@ impl<'w> MobSim<'w> {
     /// substrate. `pub` so a caller outside this crate's `mobs` module (a
     /// future block-break/container hook in `server.rs`, say) can post one
     /// without this module changing; [`reap_dead`](Self::reap_dead) is the
-    /// one producer this file owns today.
-    pub fn post_vibration(&mut self, position: Vec3, event: VibrationEvent) {
-        self.posted_vibrations.push(PostedVibration { position, event });
+    /// one producer this file owns today. `source` is
+    /// `GameEvent.Context.sourceEntity()`'s id, when the producer has one —
+    /// see [`PostedVibration::source`]'s own doc.
+    pub fn post_vibration(&mut self, position: Vec3, event: VibrationEvent, source: Option<i32>) {
+        self.posted_vibrations.push(PostedVibration { position, event, source });
     }
 
     /// Resolves this tick's nearest-vibration answer for every listener
@@ -7655,6 +7782,11 @@ const PATROL_SPAWN_SEED: u64 = 0x5041_5452_4f4c_5f52;
 /// Default seed for [`MobSim::equipment_rng`]. See [`TAME_ROLL_SEED`] for why
 /// it is separate.
 const EQUIPMENT_ROLL_SEED: u64 = 0x4551_5549_505f_524f;
+
+/// Default seed for [`MobSim::goat_horn_rng`] — `Goat.finalizeSpawn`'s own
+/// pre-broken-horn roll. See [`TAME_ROLL_SEED`] for why it is separate.
+/// ASCII `"GOATHORN"`.
+const GOAT_HORN_ROLL_SEED: u64 = 0x474F_4154_484F_524E;
 
 /// The `early_game.json` timeline's `gameplay/can_pillager_patrol_spawn` gate,
 /// transcribed as a plain tick count rather than read from a general timeline
@@ -10781,6 +10913,7 @@ mod vibration_substrate_tests {
             Some(PostedVibration {
                 position: Vec3::new(10.0, 0.0, 0.0),
                 event: VibrationEvent::EntityDie,
+                source: Some(victim),
             }),
             "the warden must hear the death at the victim's own position, the same tick"
         );
@@ -10983,5 +11116,109 @@ mod elder_guardian_mining_fatigue_tests {
         assert_eq!(ELDER_GUARDIAN_EFFECT_DURATION, 6000);
         assert_eq!(ELDER_GUARDIAN_EFFECT_AMPLIFIER, 2, "Mining Fatigue III is amplifier 2, zero-indexed");
         assert_eq!(ELDER_GUARDIAN_EFFECT_RADIUS, 50.0);
+    }
+}
+
+/// Issue #230's own remainder: `Goat.finalizeSpawn`'s pre-broken-horn roll,
+/// and the metadata field ([`crate::protocol::MetadataField::GoatHorns`])
+/// that reaches the client — wired end to end through a real
+/// `MobSim::spawn_species` call, the same not-an-island bar every other
+/// producer test in this file sets.
+#[cfg(test)]
+mod goat_horn_tests {
+    use super::*;
+
+    fn flat_world() -> ChunkWorld {
+        ChunkWorld::new(-64, 384)
+    }
+
+    /// **Real arithmetic, not merely "sometimes true"**: over a large sample,
+    /// the fraction of goats spawned missing a horn must land near
+    /// `Goat.finalizeSpawn`'s own `0.1` roll — bounded generously (5%–15%
+    /// over 2,000 trials) since this crate's `SpawnRng` is not a
+    /// bit-identical port of `java.util.Random` (a disclosed approximation
+    /// already established elsewhere in this crate, e.g. `raid::bonus_spawns`).
+    #[test]
+    fn about_one_in_ten_goats_spawn_missing_a_horn() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let trials = 2000;
+        let mut missing = 0;
+        for _ in 0..trials {
+            let id = sim.spawn_species("minecraft:goat".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0)).id();
+            let m = sim.get(id).expect("just spawned");
+            if !(m.has_left_horn() && m.has_right_horn()) {
+                missing += 1;
+            }
+        }
+        let fraction = f64::from(missing) / f64::from(trials);
+        assert!(
+            (0.05..=0.15).contains(&fraction),
+            "expected roughly 10% of {trials} goats missing a horn, got {missing} ({:.1}%)",
+            fraction * 100.0
+        );
+    }
+
+    /// The discriminating control: a goat that *does* lose a horn loses
+    /// exactly one, never both — proves the roll picks a single horn rather
+    /// than clearing the pair.
+    #[test]
+    fn a_goat_that_loses_a_horn_loses_exactly_one() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let mut saw_a_miss = false;
+        for _ in 0..500 {
+            let id = sim.spawn_species("minecraft:goat".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0)).id();
+            let m = sim.get(id).expect("just spawned");
+            let horn_count = i32::from(m.has_left_horn()) + i32::from(m.has_right_horn());
+            assert!((1..=2).contains(&horn_count), "a goat must never lose both horns at spawn");
+            if horn_count == 1 {
+                saw_a_miss = true;
+            }
+        }
+        assert!(saw_a_miss, "500 trials at a 10% roll must produce at least one miss");
+    }
+
+    /// A non-goat species is never touched by the roll — both accessors stay
+    /// their default `true`, matching every other species' "meaningless"
+    /// reading.
+    #[test]
+    fn a_non_goat_species_always_reports_both_horns() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        for _ in 0..20 {
+            let id = sim.spawn_species("minecraft:pig".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0)).id();
+            let m = sim.get(id).expect("just spawned");
+            assert!(m.has_left_horn() && m.has_right_horn());
+        }
+    }
+
+    /// The wiring proof: `SimMob::snapshot` pushes `MetadataField::GoatHorns`
+    /// for a goat, carrying whatever [`SimMob::has_left_horn`]/
+    /// [`SimMob::has_right_horn`] actually are — and pushes nothing for a
+    /// species this field does not apply to, which is the control that rules
+    /// out "always pushed regardless of species".
+    #[test]
+    fn snapshot_carries_goat_horns_for_a_goat_and_nothing_for_a_pig() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let goat = sim.spawn_species("minecraft:goat".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0)).id();
+        let pig = sim.spawn_species("minecraft:pig".parse().expect("valid key"), Vec3::new(1.0, 0.0, 0.0)).id();
+
+        let goat_mob = sim.get_mut(goat).expect("spawned");
+        goat_mob.has_left_horn = false;
+        goat_mob.has_right_horn = true;
+        let goat_snapshot = sim.get(goat).expect("spawned").snapshot();
+        assert_eq!(
+            goat_snapshot.metadata,
+            vec![crate::protocol::MetadataField::GoatHorns { has_left: false, has_right: true }],
+            "the snapshot must carry the mob's own current horn state, not the spawn default"
+        );
+
+        let pig_snapshot = sim.get(pig).expect("spawned").snapshot();
+        assert!(
+            !pig_snapshot.metadata.iter().any(|f| matches!(f, crate::protocol::MetadataField::GoatHorns { .. })),
+            "a pig must never carry a GoatHorns field"
+        );
     }
 }

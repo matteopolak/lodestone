@@ -735,6 +735,25 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
                 ("follow_range", 48.0),
             ],
         },
+        // `Warden.createAttributes()`: `MAX_HEALTH 500.0`,
+        // `MOVEMENT_SPEED 0.3`, `KNOCKBACK_RESISTANCE 1.0`,
+        // `ATTACK_KNOCKBACK 1.5`, `ATTACK_DAMAGE 30.0`, `FOLLOW_RANGE 24.0`.
+        // The warden is by far the highest-health, highest-damage entry in
+        // this table, and `knockback_resistance` at the attribute's own `1.0`
+        // ceiling means the melee/sonic-boom knockback formulas that scale by
+        // `1.0 - knockback_resistance` are always zero against it — real,
+        // not a bug in whatever consumes the attribute.
+        "warden" => TypeSpec {
+            template: BaseTemplate::Monster,
+            overrides: &[
+                ("max_health", 500.0),
+                ("movement_speed", 0.3),
+                ("knockback_resistance", 1.0),
+                ("attack_knockback", 1.5),
+                ("attack_damage", 30.0),
+                ("follow_range", 24.0),
+            ],
+        },
         // `EnderMan.createAttributes()`.
         // `follow_range` 64 is the widest in this table and feeds
         // `MobSim::spawn_species`'s A* budget directly.
