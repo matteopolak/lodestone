@@ -565,6 +565,16 @@ pub enum ProjectileKind {
     /// `minecraft:trident` — drowned
     /// (`Drowned::performRangedAttack`).
     Trident,
+    /// `minecraft:fireball` — the ghast's own attack
+    /// (`Ghast.GhastShootFireballGoal.tick`, which constructs a
+    /// `net.minecraft.world.entity.projectile.hurtingprojectile.LargeFireball`).
+    /// **The registry name is not the class name**: `LargeFireball`'s own
+    /// constructor passes `EntityTypes.FIREBALL` to its `Fireball` superclass,
+    /// so the wire id is `minecraft:fireball`, the same one a small fireball's
+    /// class is *not* named after either — checked against
+    /// `lodestone_data::generated::entity_types`, not assumed from the Java
+    /// class name.
+    LargeFireball,
     /// `minecraft:wither_skull` — the wither's own ranged attack
     /// (`WitherBoss::performRangedAttack`, ported at
     /// `lodestone_server::wither`/`lodestone_server::mobs::wither`). Not
