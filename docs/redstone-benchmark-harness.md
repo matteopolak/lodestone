@@ -93,14 +93,21 @@ useful pair for #548 specifically:
 
 `ChunkSource::set_block` is a raw write — it does not run
 `crate::server::apply_use_item_on`/`apply_block_action`'s real
-neighbour-update cascade, and there is no public API from outside
-`lodestone-server` to re-inject a `.litematic` region's own
-`PendingBlockTicks`/`PendingFluidTicks` (a repeater mid-cycle, a scheduled
-fluid update) into the running world's `ScheduledTickQueue`
-(`BlockTickFeed::request_scheduled_ticks` is `pub(crate)`). A contraption
-loaded this way starts from its captured **steady state** with nothing
-scheduled to perturb it. See "Findings" below for what that means for the
-numbers this harness actually produced.
+neighbour-update cascade, so a contraption loaded this way starts from its
+captured **steady state** with nothing scheduled to perturb it.
+
+**This is now half-fixed.** `lodestone_anvil::schematic` reads a Litematica
+region's own `PendingBlockTicks` (a repeater between its own delay and
+firing, a lit fire block waiting to spread — `SchematicPendingTick`), and
+`BlockTickFeed::request_scheduled_ticks` is now `pub`, with
+`IntegratedServer::block_ticks()` exposing the feed instance the spawned tick
+loop actually drains. `tests/redstone_benchmark.rs`'s `run_one` re-injects
+every entry naming a block this crate schedules a recheck for (repeater,
+comparator, torch, observer) as a **second measurement phase**, after the
+steady-state one. `PendingFluidTicks` is still unread — every fixture this
+harness has been pointed at carries an empty one, so there is no real example
+to check a reader against yet. See "Findings" below for what both phases
+actually measured, on real fixtures, once this landed.
 
 ## How to change it, and the gotchas
 
@@ -119,20 +126,17 @@ numbers this harness actually produced.
   row to the provenance table below in the same commit — an artefact with no
   recorded source URL/author/licence-clarity note is not something this
   harness should be pointed at again.
-- **The brokered hunks this harness would use if landed** (not made here —
-  `crates/lodestone-server/**` is a live agent's):
-  1. Re-export `TickPhase`, `PhaseStats`, `WorstPhaseWindow`,
-     `TICK_PHASE_NAMES` at `lodestone-server`'s crate root (add them to the
-     existing `pub use tick::{BlockTickFeed, ExplosionFeed, TickClock,
-     TickStats};` line in `src/lib.rs`), and give `IntegratedServer` a
-     `pub fn tick_clock(&self) -> Option<&TickClock>` beside its existing
-     `tick_stats()`. Together these let an external caller read
-     `ScheduledAndPhysics`'s own percentiles instead of the whole tick's.
-  2. Make `BlockTickFeed::request_scheduled_ticks` `pub`, and give a caller
-     of `open_in_memory_with_mobs` a way to reach the feed instance the
-     spawned loop actually drains, so a harness can re-inject a `.litematic`
-     region's `PendingBlockTicks`/`PendingFluidTicks` and resume a captured
-     circuit mid-cycle instead of only from a perturbation-free steady state.
+- **The re-injection brokered hunk has landed** — `BlockTickFeed::request_scheduled_ticks`
+  is `pub`, and `IntegratedServer::block_ticks()` exposes the feed instance
+  the spawned loop drains. `redstone_kind`/`TICK_TORCH`/`TICK_REPEATER`/
+  `TICK_COMPARATOR`/`TICK_OBSERVER` are re-exported at `lodestone-server`'s
+  crate root for the same reason: a caller building a `ScheduledTick` by hand
+  needs to name the same `kind` the production dispatch itself schedules.
+  Still not exported, and still a legitimate future hunk if a caller needs
+  it: `TickPhase`/`PhaseStats`/`WorstPhaseWindow`/`TICK_PHASE_NAMES` at the
+  crate root, plus `IntegratedServer::tick_clock()` — `redstone_counters`
+  turned out to answer #548's question without needing
+  `ScheduledAndPhysics`'s own whole-phase percentiles.
 - **The redstone-component name list** (`REDSTONE_COMPONENT_NAMES` in the
   test file) is a flat list, not a prefix test — `redstone_block`/
   `redstone_wire` share a prefix with `redstone_lamp`/`redstone_torch` but
@@ -280,24 +284,112 @@ steady-state snapshot and loading (or perturbing) a live circuit are
 different inputs, and this harness's loader currently only builds the
 former.
 
-**What this means for issue #548**: a steady, unperturbed contraption's
-*ongoing* redstone-recompute cost is genuinely, measurably zero in this
-engine today on four real farms up to 3775 blocks and 1198 redstone
-components — a real floor-case data point #548's dependency-graph rework
-needs to not regress. It is not the number #548 actually needs, which is
-the cost of neighbour scanning **while something is changing** (a hopper
-clock running, a player tripping a sensor, a farm cycling). Getting that
-number needs one of the two brokered hunks above — most directly, the
-`PendingBlockTicks`/`PendingFluidTicks` re-injection: checked directly
-against all four fixtures' own captured NBT, `raid_farm.litematic` carries
-2 pending block ticks and `Raid_Farm_Schematic_2.litematic` carries 1 (both
-repeaters mid-cycle — exactly "something changing"); the other two carry
-none, so they would still measure near-zero even with re-injection landed,
-and are the honest zero-activity control for whatever gate ends up using
-this harness.
+**What this meant for issue #548 before re-injection landed**: a steady,
+unperturbed contraption's *ongoing* redstone-recompute cost is genuinely,
+measurably zero in this engine on four real farms up to 3775 blocks and 1198
+redstone components — a real floor-case data point #548's dependency-graph
+rework needs to not regress. It was not the number #548 actually needed,
+which is the cost of neighbour scanning **while something is changing**.
 
-**A second, independent follow-up this run surfaced**: re-run with a
-`TICK_WINDOW` long enough to observe more than one real tick (or on a
-quieter machine) before trusting any per-tick *rate* out of this harness —
-`ticks elapsed = 1` on every sub-run here means the numbers above are raw
-one-tick counts, correct as reported, but not yet an averaged rate.
+**A second, independent follow-up that run surfaced**: `ticks elapsed = 1` on
+every sub-run means every number above is a raw one-tick count, correct as
+reported but not an averaged rate — re-run with a longer `TICK_WINDOW`, or on
+a quieter machine, before trusting a per-tick *rate* out of this harness for
+anything beyond a floor case.
+
+### Settling `notifications_issued > 0` with every downstream counter at zero: dead path, or miscounting instrument?
+
+Neither. Read from the source rather than inferred from behaviour —
+`crate::random_tick::react_to_notification` bumps `notifications_issued`
+**unconditionally**, for every in-bounds `Notification`, before any
+per-family dispatch. Downstream counters (`cell_reads` inside
+`crate::redstone::make_lookup`'s closure, `state_parses` inside `own_signal`,
+`signal_queries` inside `best_neighbor_signal`) are bumped **only** by the
+families that actually call `make_lookup` — dust, torch, repeater,
+comparator, observer, piston, hopper, redstone-openable, note block, rail,
+dispenser, TNT and command block all do. Two families explicitly do not:
+gravity (`gravity_tick::is_gravity_block`) and `snowy` upkeep both return
+immediately after scheduling or writing, with no `make_lookup` call at all —
+and the ordinary terminal case (a notification landing on a block that
+matches none of the reactive families, e.g. plain stone or wood) falls
+through to the same "no read" outcome. This is not a hidden defect: it is
+exactly the behaviour `redstone_counters.rs`'s own
+`a_settled_circuit_notified_at_an_unrelated_cell_costs_every_counter_zero`
+test asserts and a companion test proves is not "the counters don't work" —
+`notifications_issued` is explicitly named there as "the one counter
+genuinely allowed to be non-zero" for a notification with nothing to read.
+
+So a nonzero `notifications_issued` with every downstream counter at zero
+means "something changed and its neighbour fan-out reached only
+non-signal-reading blocks" — never a dead redstone path, and never a
+miscounting instrument. Confirmation for *this specific* run, not just the
+mechanism in the abstract: `bee-and-crop-farm.litematic` and
+`Raid_Farm_Schematic_2.litematic` are exactly the two fixtures with
+water/crop/fluid-adjacent content, which is consistent with an incidental
+random or scheduled tick (crop growth, leaf decay, a fluid update) firing a
+neighbour fan-out that mostly lands on ordinary blocks — the same shape the
+null-contraption control exercises deliberately. (The discriminator used
+here was reading `react_to_notification`'s own dispatch order, which is
+cheaper and more conclusive than an input-based experiment would have been:
+the code makes the mechanism unambiguous without needing to guess which
+world-tick producer fired first.)
+
+### The "while active" number, now real: re-injecting `PendingBlockTicks`
+
+Re-injection landed (see "How to change it" above) and was run against all
+four fixtures. First, a correction to this doc's own earlier claim: it said
+`raid_farm.litematic` and `Raid_Farm_Schematic_2.litematic` each carry
+pending ticks and that "both" are "repeaters mid-cycle". **That was only
+half right, and the wrong half was never checked against the file** — a
+hand-decode (`Reader`/`read_named_nbt` over the raw NBT, not this harness's
+own loader, which did not parse `PendingBlockTicks` at all until this
+session) shows:
+
+| file | `PendingBlockTicks` | content |
+|---|---|---|
+| `raid_farm.litematic` | 2 | both `minecraft:repeater`, `Time: 1`, priorities `-1`/`-2` — genuinely "a repeater between delay and firing" |
+| `Raid_Farm_Schematic_2.litematic` | 1 | `minecraft:fire`, `Time: 23` — a fire spread tick, not a redstone-family reaction at all |
+| `IanXO4_..._suggested.litematic` | 0 | — |
+| `bee-and-crop-farm.litematic` | 0 | — |
+
+So only `raid_farm.litematic` has anything this harness's redstone-family
+re-injection (repeater/comparator/torch/observer) can act on. Re-injecting
+its two repeater ticks and measuring `redstone_counters` over the next
+`TICK_WINDOW`, against the **same real production dispatch path** a live
+notification uses (`BlockTickFeed::request_scheduled_ticks` →
+`crate::tick::run_tick_loop`'s scheduled-tick drain →
+`react_to_notification`'s repeater arm, unchanged):
+
+| phase | notifications_issued | cell_reads | state_parses | signal_queries | wire_recomputes | schedules_requested/deduped | max_notifications_per_drain |
+|---|---|---|---|---|---|---|---|
+| steady state | 0 | 0 | 0 | 0 | 0 | 0/0 | 0 |
+| **while active** (2 repeater rechecks) | **837** | **5899** | 55 | 164 | 157 | 3/15 | 726 |
+
+Two repeater rechecks — not a player action, not a whole hopper clock, just
+the circuit resuming two ticks it was already mid-way through — cascade into
+837 notifications and 5899 raw block-state reads inside `make_lookup`, on a
+farm with 142 redstone components. That is the number issue #548's design
+question needed and the steady-state run structurally could not produce:
+the neighbour-scan cost is real, large relative to the contraption's own
+component count (≈41 cell reads per redstone component from two initiating
+events), and concentrated in exactly the `cell_reads` quantity a dependency
+graph would replace with direct activation. `cell_reads`/`notifications_issued`
+≈ 7.05, consistent with the hand-derived 15-cell dust run's own finding that
+one dust settle's fan-out revisits several cells per notification rather
+than reading exactly one.
+
+**Recommendation for #548, on this evidence**: do not close the issue on
+"neighbour scanning is not the cost" — this run shows the opposite. A
+two-event perturbation on one mid-sized real farm reads thousands of cells
+in a single tick; a farm with a running hopper clock or a repeating pulse
+generator pays this cost every cycle, not once. The steady-state zero from
+the first phase is still worth keeping as the idle-contraption control
+(§6 of `docs/plans/redstone-execution-model.md` names exactly this), and the
+two numbers together — genuinely zero at rest, genuinely large while active
+— are a more complete floor for a future implementation to be measured
+against than either alone. The remaining prerequisite before starting the
+graph itself: `PendingFluidTicks` re-injection and a wider fixture set with
+real *sustained* activity (a hopper clock, an active farm cycle rather than
+a two-tick recheck) would sharpen the "per active tick, steady-state"
+number further, since a two-event burst is a lower bound on sustained
+per-tick cost, not an average of it.
