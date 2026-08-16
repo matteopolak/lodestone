@@ -122,11 +122,21 @@
 //!   `MobSim` does not have, and the transformations need a per-species table; the
 //!   issue groups it here because a strike's entity-facing effect *is* ignition plus
 //!   a damage instance, and that part is this module.
-//! * **Mob burning.** `MobSim` has no burn state and streams no `on_fire` metadata
-//!   flag, so this is player-only, exactly as [`crate::vitals`] was for drowning.
-//! * **Water and rain extinguishing.** `Entity.baseTick`'s water block calls
-//!   `clearFire()`; wiring it needs the same feet-cell fluid read the caller already
-//!   does for hunger, and is a caller concern rather than a rule.
+//! * **A mob does not yet ignite from a fire/lava block.** `SimMob` now carries a
+//!   real [`BurnState`] (`MobSim::tick_burning` consumes it every tick, and a small
+//!   fireball's impact — `MobSim::resolve_projectile_hit` — raises it), but nothing
+//!   yet reads what block a mob's feet are standing in the way the player path
+//!   below does, so contact ignition and this module's lava/contact-damage guards
+//!   never fire for a mob. Water contact does extinguish a mob
+//!   (`MobSim::tick_burning`, through `SimMob::in_water`).
+//! * **No client-visible `on_fire` flag streams for a mob.** `SimMob::is_on_fire`
+//!   exists and a burning mob really does lose health over time, but nothing
+//!   encodes the shared-flags metadata bit a client would render a fire overlay
+//!   from — the wire encoder lives in the version crate, outside this module's
+//!   reach. The damage is real; the client-side visual is not yet wired.
+//! * **Rain does not extinguish anything**, mob or player. `Entity.baseTick`'s
+//!   water block calls `clearFire()`; wiring rain needs a weather read this
+//!   module is not given.
 //!
 //! # Dependencies
 //!

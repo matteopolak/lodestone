@@ -463,7 +463,137 @@ fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap, is_baby: bool)
     };
     let mut shape = MobShape::land(width * scale, height * scale);
     shape.max_up_step = step_height;
+    shape.can_open_doors = species_can_open_doors(entity_type);
+    shape.can_float = species_can_float(entity_type);
+    for &(kind, malus) in species_malus_overrides(entity_type) {
+        shape.malus_overrides.insert(kind, malus);
+    }
     shape
+}
+
+/// Species whose own constructor or `finalizeSpawn` unconditionally enables
+/// door-opening in the pathfinder's node evaluator, folded here since
+/// [`MobShape::land`]'s default (mirroring the evaluator's own field default)
+/// is `false` and [`species_shape`] is the only production caller that could
+/// ever set it otherwise.
+///
+/// The zombie family is deliberately **not** here: vanilla gates its
+/// door-breaking behind a spawn-time regional-difficulty coin flip, not a
+/// species constant, so it is rolled once per spawn in
+/// [`MobSim::spawn_species`] instead. See `docs/mob-species-spawning.md` for
+/// both the unconditional set below and the zombie-family roll's citation.
+fn species_can_open_doors(entity_type: &ResourceKey) -> bool {
+    matches!(
+        entity_type.path(),
+        "vindicator" | "villager" | "piglin" | "piglin_brute"
+    )
+}
+
+/// Species whose own constructor installs a float-on-liquid goal (or calls
+/// the navigator's float setter directly), so the pathfinder should treat
+/// water as swimmable rather than avoided.
+///
+/// Deliberately excludes every aquatic species this sim spawns (`guardian`,
+/// `elder_guardian`, `drowned`): their real vanilla navigation classes
+/// override the float setter as a no-op (they always swim, so the flag is
+/// structurally inert for them in vanilla too), not merely unmodelled here.
+/// Also excludes species with no ground navigation at all (`ghast`, `blaze`),
+/// for the same reason. See `docs/mob-species-spawning.md`.
+fn species_can_float(entity_type: &ResourceKey) -> bool {
+    matches!(
+        entity_type.path(),
+        "bee" | "cat"
+            | "chicken"
+            | "cow"
+            | "mooshroom"
+            | "horse"
+            | "donkey"
+            | "mule"
+            | "pig"
+            | "rabbit"
+            | "sheep"
+            | "wolf"
+            | "creeper"
+            | "enderman"
+            | "spider"
+            | "cave_spider"
+            | "witch"
+            | "pillager"
+            | "parrot"
+            | "vindicator"
+            | "villager"
+    )
+}
+
+/// Per-species `Mob.setPathfindingMalus` overrides, folded onto
+/// [`PathType::malus`]'s default table by [`species_shape`]. A species not
+/// listed carries no overrides, so the vanilla default table applies
+/// unchanged — that is the correct answer for most species, not a gap.
+///
+/// Every entry is read from that species' own constructor/`finalizeSpawn` in
+/// the 26.2 decompile, including the base `Animal` class's own
+/// `FIRE_IN_NEIGHBOR`/`FIRE` overrides folded into each `Animal`-derived
+/// species' arm below (this function has no separate "is an Animal" pass to
+/// apply them in, so they are duplicated per arm exactly as each species'
+/// own constructor chain would apply them). See `docs/mob-species-spawning.md`
+/// for the full citation table.
+fn species_malus_overrides(entity_type: &ResourceKey) -> &'static [(PathType, f32)] {
+    match entity_type.path() {
+        "bee" => &[
+            (PathType::Fire, -1.0),
+            (PathType::Water, -1.0),
+            (PathType::WaterBorder, 16.0),
+            (PathType::Cocoa, -1.0),
+            (PathType::Fence, -1.0),
+        ],
+        "cat" | "cow" | "mooshroom" | "horse" | "donkey" | "mule" | "pig" | "rabbit"
+        | "sheep" => &[(PathType::FireInNeighbor, 16.0), (PathType::Fire, -1.0)],
+        "wolf" => &[
+            (PathType::FireInNeighbor, 16.0),
+            (PathType::Fire, -1.0),
+            (PathType::PowderSnow, -1.0),
+            (PathType::OnTopOfPowderSnow, -1.0),
+        ],
+        "chicken" => &[
+            (PathType::FireInNeighbor, 16.0),
+            (PathType::Fire, -1.0),
+            (PathType::Water, 0.0),
+        ],
+        "parrot" => &[
+            (PathType::FireInNeighbor, -1.0),
+            (PathType::Fire, -1.0),
+            (PathType::Cocoa, -1.0),
+        ],
+        "blaze" => &[
+            (PathType::Water, -1.0),
+            (PathType::Lava, 8.0),
+            (PathType::FireInNeighbor, 0.0),
+            (PathType::Fire, 0.0),
+        ],
+        "strider" => &[
+            (PathType::Water, -1.0),
+            (PathType::Lava, 0.0),
+            (PathType::FireInNeighbor, 0.0),
+            (PathType::Fire, 0.0),
+        ],
+        "guardian" | "elder_guardian" => &[(PathType::Water, 0.0)],
+        "enderman" => &[(PathType::Water, -1.0)],
+        "wither_skeleton" => &[(PathType::Lava, 8.0)],
+        "drowned" => &[(PathType::Water, 0.0)],
+        "zombified_piglin" => &[(PathType::Lava, 8.0)],
+        "piglin" | "piglin_brute" | "villager" => {
+            &[(PathType::FireInNeighbor, 16.0), (PathType::Fire, -1.0)]
+        }
+        "warden" => &[
+            (PathType::UnpassableRail, 0.0),
+            (PathType::Damaging, 8.0),
+            (PathType::PowderSnow, 8.0),
+            (PathType::Lava, 8.0),
+            (PathType::Fire, 0.0),
+            (PathType::FireInNeighbor, 0.0),
+        ],
+        _ => &[],
+    }
 }
 
 /// Vanilla `Leashable.LEASH_TOO_FAR_DIST`: past this distance the lead snaps
@@ -1106,6 +1236,13 @@ pub struct SimMob<'w> {
     /// Armour/resistance/absorption state `damage::apply_reductions` reads for
     /// every incoming hit; absorption is written back after each hit.
     defenses: Defenses,
+    /// Vanilla `Entity.remainingFireTicks` — see `crate::burning`'s own module
+    /// doc for the full mechanic. Currently only ever raised by a fireball's
+    /// impact (`MobSim::resolve_projectile_hit`) and consumed by
+    /// [`MobSim::tick_burning`]; standing in a fire/lava block does not yet
+    /// ignite a mob (a separate, disclosed gap — see that module's "What is
+    /// not here" section).
+    burn: crate::burning::BurnState,
     /// Vanilla's persistent-anger state, host-side (issue #458, primitive 1):
     /// the **absolute game tick** the grudge ends at, plus where the entity it
     /// is held against was when it was set.
@@ -1465,7 +1602,13 @@ impl<'w> SimMob<'w> {
         let is_baby = self.mob.is_baby();
         if is_baby != was_baby {
             let attrs = default_attributes(&self.entity_type).unwrap_or_else(AttributeMap::new);
-            let shape = species_shape(&self.entity_type, &attrs, is_baby);
+            let mut shape = species_shape(&self.entity_type, &attrs, is_baby);
+            // `can_open_doors` for the zombie family is a spawn-time RNG roll
+            // (see `MobSim::spawn_species`), not a function of size — preserve
+            // it across this refresh rather than re-deriving the static
+            // per-species default, which would silently reset a zombie that
+            // rolled `true` back to `false` the moment it grows up.
+            shape.can_open_doors = self.mob.shape().can_open_doors;
             self.mob.set_shape(shape);
             let base_speed = attr(&attrs, "movement_speed");
             let multiplier = if is_baby {
@@ -2000,6 +2143,21 @@ impl<'w> SimMob<'w> {
     /// [`crate::mob_effects::ActiveEffects::apply`]'s own return.
     pub fn apply_effect(&mut self, effect_id: &str, duration: i32, amplifier: u32) -> bool {
         self.effects.apply(effect_id, duration, amplifier)
+    }
+
+    /// Whether this mob is visibly on fire — `Entity.isOnFire`'s
+    /// `remainingFireTicks > 0`.
+    #[must_use]
+    pub fn is_on_fire(&self) -> bool {
+        self.burn.is_on_fire()
+    }
+
+    /// `Entity.igniteForSeconds` — raises the burn counter, never lowers it
+    /// (see [`crate::burning::BurnState::ignite_for_seconds`]). The fireball
+    /// impact path (`MobSim::resolve_projectile_hit`) is the only production
+    /// caller today.
+    pub fn ignite_for_seconds(&mut self, seconds: f32) {
+        self.burn.ignite_for_seconds(seconds);
     }
 
     /// The mob's current position.
@@ -2543,6 +2701,13 @@ pub struct MobSim<'w> {
     /// plus the `nextBoolean()` that picks which horn — on its own stream
     /// for [`orb_rng`](Self::orb_rng)'s reason.
     goat_horn_rng: SpawnRng,
+    /// `Zombie.finalizeSpawn`'s own door-breaking roll
+    /// (`this.setCanBreakDoors(random.nextFloat() < difficultyModifier * 0.1F)`),
+    /// covering the whole zombie family — on its own stream for
+    /// [`orb_rng`](Self::orb_rng)'s reason: rolling whether a zombie can open
+    /// doors must not shift which denomination an orb merges into or which
+    /// roll a despawn check sees.
+    door_rng: SpawnRng,
     /// `DifficultyInstance.getSpecialMultiplier()` fed to every spawn's
     /// [`lodestone_entity::spawn_equipment::populate_default_equipment_slots`]
     /// call. `0.0` by default — vanilla's own value for a fresh world's
@@ -2861,6 +3026,12 @@ pub struct MobSim<'w> {
     /// entity id and must never collide with one being reused after a raid
     /// despawns its raiders.
     next_raid_id: i32,
+    /// Hero of the Village grants a raid victory has queued but no
+    /// connection has drained yet — see
+    /// [`raid::MobSim::take_hero_of_the_village_grants`]'s own doc for why
+    /// this is a queue rather than an inline effect application, and
+    /// [`raid::MobSim::tick_raids`]'s for where it is filled.
+    pending_hero_grants: Vec<(Uuid, i32)>,
     /// The wave-spawn-position/spawn-count RNG stream, on its own stream for
     /// [`dragon_rng`](Self::dragon_rng)'s reason.
     raid_rng: SpawnRng,
@@ -3220,6 +3391,7 @@ impl<'w> MobSim<'w> {
             orb_rng: SpawnRng::new(orbs::ORB_BEHAVIOR_SEED),
             equipment_rng: SpawnRng::new(EQUIPMENT_ROLL_SEED),
             goat_horn_rng: SpawnRng::new(GOAT_HORN_ROLL_SEED),
+            door_rng: SpawnRng::new(DOOR_BREAK_ROLL_SEED),
             spawn_special_multiplier: 0.0,
             spawn_hard_difficulty: false,
             falling_blocks: HashMap::new(),
@@ -3278,6 +3450,7 @@ impl<'w> MobSim<'w> {
             fishing_rng: SpawnRng::new(fishing::FISHING_ROLL_SEED),
             raids: HashMap::new(),
             next_raid_id: 1,
+            pending_hero_grants: Vec::new(),
             raid_rng: SpawnRng::new(raid::RAID_ROLL_SEED),
         }
     }
@@ -3663,6 +3836,7 @@ impl<'w> MobSim<'w> {
             health: max_health,
             max_health,
             defenses,
+            burn: crate::burning::BurnState::new(),
             anger: None,
             stung_at: None,
             piglin_alert_ticks: -1,
@@ -3759,7 +3933,19 @@ impl<'w> MobSim<'w> {
         // Always spawns adult-shaped; a caller wanting a baby applies
         // `set_age(BABY_START_AGE)` afterward, which re-derives the shape
         // through the same function (see `SimMob::set_age`'s own doc).
-        let shape = species_shape(&entity_type, &attrs, false);
+        let mut shape = species_shape(&entity_type, &attrs, false);
+        // The zombie family's door-breaking is a spawn-time coin flip scaled
+        // by regional difficulty, not a species constant, so `species_shape`
+        // cannot set it — rolled here, once, on its own RNG stream for the
+        // same reason every other spawn-time roll on this sim gets one (see
+        // `door_rng`'s own doc). See `docs/mob-species-spawning.md` for the
+        // vanilla formula and the "leader zombie" bonus this does not model.
+        if matches!(
+            entity_type.path(),
+            "zombie" | "husk" | "zombie_villager" | "drowned" | "zombified_piglin"
+        ) {
+            shape.can_open_doors = self.door_rng.next_f32() < self.spawn_special_multiplier * 0.1;
+        }
         let base_speed = attr(&attrs, "movement_speed");
         // `minecraft:follow_range`, read **once** and fed to both consumers, so
         // target acquisition and the A* budget cannot drift apart (issue #455).
@@ -4110,6 +4296,32 @@ impl<'w> MobSim<'w> {
     #[must_use]
     pub fn occupied_homes_in_range(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
         self.bed_claims.occupied_in_range(center, radius)
+    }
+
+    /// The full `PoiManager.getInRange(e -> e.is(PoiTypeTags.VILLAGE), …,
+    /// Occupancy.IS_OCCUPIED)` query issue #241's raid trigger actually
+    /// needs — every claimed bed, workstation *or* bell within `radius` real
+    /// blocks of `center`, unioning [`occupied_homes_in_range`](Self::occupied_homes_in_range)
+    /// with [`villager::WorkstationClaims::occupied_in_range`] and
+    /// [`villager::BellClaims::occupied_in_range`].
+    ///
+    /// [`occupied_homes_in_range`](Self::occupied_homes_in_range) alone is
+    /// narrower than vanilla's `#village` tag (`home` + `meeting` +
+    /// `#acquirable_job_site`, per `point_of_interest_type/village.json`) —
+    /// a village whose villagers have claimed jobs and a bell but no bed yet
+    /// would never trigger a raid through the beds-only query. This is the
+    /// one [`super::raid`]'s `create_or_extend_raid` and `crate::server`'s
+    /// Bad-Omen-to-Raid-Omen conversion check both use instead.
+    ///
+    /// Native-only, for [`occupied_homes_in_range`](Self::occupied_homes_in_range)'s
+    /// own reason.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn occupied_village_pois_in_range(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
+        let mut found = self.bed_claims.occupied_in_range(center, radius);
+        found.extend(self.workstation_claims.occupied_in_range(center, radius));
+        found.extend(self.bell_claims.occupied_in_range(center, radius));
+        found
     }
 
     /// Bell search interval — [`JOB_SEARCH_INTERVAL_TICKS`](Self::JOB_SEARCH_INTERVAL_TICKS)'s
@@ -5146,6 +5358,13 @@ impl<'w> MobSim<'w> {
         // block they have mined. `tick_orbs` reads `tick_count` for its merge phase, so
         // it runs before the increment below.
         self.tick_orbs(&view);
+        // A fireball's `ignite_seconds` used to reach nothing: computed by
+        // `lodestone_entity::projectile::impact_effect` and read by no
+        // production caller. `resolve_projectile_impacts` above is what can
+        // raise a mob's burn counter (through `resolve_projectile_hit`); this
+        // is the consumption half, run every tick regardless of whether a
+        // fireball landed this one.
+        self.tick_burning();
         self.tick_leashes();
         #[cfg(not(target_arch = "wasm32"))]
         self.tick_villager_professions();
@@ -5284,6 +5503,54 @@ impl<'w> MobSim<'w> {
                 mob.apply_knockback(impulse);
             }
         }
+    }
+
+    /// Advances every mob's burn counter one tick and applies the damage it
+    /// reports — the consumption half of `Entity.baseTick`'s fire section
+    /// (see `crate::burning`'s own module doc for the full mechanic), scoped
+    /// to what actually reaches a mob today.
+    ///
+    /// **What ignites a mob**: only a fireball/wither-skull impact
+    /// ([`MobSim::resolve_projectile_hit`]) currently raises the counter —
+    /// this pass never itself ignites anything. Standing in a fire or lava
+    /// block does **not** ignite a mob here; that half of `baseTick` is a
+    /// disclosed gap (`crate::burning`'s own "What is not here" section
+    /// already named "mob burning" as unwired at all — this closes the
+    /// consumption half, not the block-contact ignition half).
+    ///
+    /// **What puts it out**: water contact only, read through
+    /// [`SimMob::in_water`] (`Entity.baseTick`'s water-block `clearFire()`).
+    /// Fire immunity ([`species::is_fire_immune`]) clears the counter outright
+    /// rather than merely refusing damage, matching
+    /// [`crate::burning::BurnState::tick`]'s own `fire_immune` handling.
+    /// `standing_in` is always `None` (no fire/lava contact modelled for
+    /// mobs), so the lava-guard and per-block contact-damage halves of
+    /// [`crate::burning::BurnState::tick`] never fire from this call site —
+    /// only the every-20-ticks burn tick itself does.
+    fn tick_burning(&mut self) {
+        let mut hits: Vec<(i32, f32)> = Vec::new();
+        for m in &mut self.mobs {
+            if m.in_water() {
+                m.burn.clear();
+                continue;
+            }
+            let fire_immune = species::is_fire_immune(&m.entity_type);
+            let fire_resistance = m.effects.get("minecraft:fire_resistance").is_some();
+            let out = m.burn.tick(None, fire_immune, fire_resistance);
+            if out.damage > 0.0 {
+                hits.push((m.id, out.damage));
+            }
+        }
+        for (id, damage) in hits {
+            if let Some(m) = self.get_mut(id) {
+                let applied = m.apply_damage(
+                    damage,
+                    DamageFlags::for_damage_type_name("minecraft:on_fire").unwrap_or_default(),
+                );
+                self.note_vocalisation(id, applied);
+            }
+        }
+        self.reap_dead();
     }
 
     /// Per-tick leash physics: pull leashed mobs toward their holder, and
@@ -6894,8 +7161,21 @@ impl<'w> MobSim<'w> {
         let target_was_villager = self
             .get(target_id)
             .is_some_and(|m| m.entity_type.path() == "villager");
+        // `Raider.die`'s player-kill half (issue #246's Hero of the Village
+        // gap): resolved *before* `self.attack` below, the same reason
+        // `target_pos_before` is — `raid::MobSim::raid_containing_raider`
+        // reads the raid's still-live `raiders` list, which a kill only
+        // prunes lazily on the next `tick_raids`, but resolving after the
+        // kill would be reading state that is about to change for no reason.
+        let target_raid_id = self.raid_containing_raider(target_id);
         let target_pos_before = self.get(target_id).map(SimMob::position);
         let outcome = self.attack(target_id, attacker_pos, raw_damage, flags, knockback_power)?;
+        if let Some(actor) = attacker
+            && outcome.killed
+            && let Some(raid_id) = target_raid_id
+        {
+            self.add_raid_hero(raid_id, actor.uuid);
+        }
         // `Wolf.OwnerHurtTargetGoal`: a wolf (or any tamed pet) joins whatever
         // fight its owner just started, reading `owner.getLastHurtMob()` on
         // the *owner's* own `LivingEntity`. This is the same field vanilla's
@@ -7613,17 +7893,31 @@ impl<'w> MobSim<'w> {
         // while the mob still exists: a player's hit within the last
         // `PLAYER_HURT_EXPERIENCE_TIME` ticks, and not a baby
         // (`shouldDropExperience()` is `!isBaby()`).
-        let dead: Vec<(i32, ResourceKey, Vec3, bool)> = self
+        //
+        // `drops_ominous_bottle` is `RaiderPredicate.CAPTAIN_WITHOUT_RAID`
+        // (`hasRaid=false, isCaptain=true`) — see
+        // [`drop_ominous_bottle`](Self::drop_ominous_bottle)'s own doc for
+        // why it is resolved here rather than through
+        // [`drop_death_loot`](Self::drop_death_loot)'s generic table roll.
+        // `raid_containing_raider` reads `self.raids` only, so calling it
+        // from inside this `self.mobs.iter()` closure borrows disjointly —
+        // both borrows are shared, so nothing here needs deferring the way
+        // the mutable passes below do.
+        let dead: Vec<(i32, ResourceKey, Vec3, bool, bool)> = self
             .mobs
             .iter()
             .filter(|m| m.health <= 0.0)
             .map(|m| {
                 let by_player = m.hurt_by_player_until.is_some_and(|until| now < until);
+                let drops_ominous_bottle = m.entity_type.path() == "pillager"
+                    && m.is_patrol_leader()
+                    && self.raid_containing_raider(m.id).is_none();
                 (
                     m.id,
                     m.entity_type.clone(),
                     m.position(),
                     by_player && !m.is_baby(),
+                    drops_ominous_bottle,
                 )
             })
             .collect();
@@ -7631,8 +7925,11 @@ impl<'w> MobSim<'w> {
             return;
         }
         self.mobs.retain(|m| m.health > 0.0);
-        for (id, entity_type, position, drops_experience) in dead {
+        for (id, entity_type, position, drops_experience, drops_ominous_bottle) in dead {
             self.drop_death_loot(&entity_type, position);
+            if drops_ominous_bottle {
+                self.drop_ominous_bottle(position);
+            }
             // Vanilla's `die` calls `dropAllDeathLoot` then `dropExperience`, in that
             // order, so the orbs land after the items.
             if drops_experience {
@@ -7745,6 +8042,57 @@ impl<'w> MobSim<'w> {
                 ),
             );
         }
+    }
+
+    /// `Items.OMINOUS_BOTTLE` off a pillager patrol captain's death —
+    /// vanilla's `entities/pillager.json` loot pool, gated on
+    /// `RaiderPredicate.CAPTAIN_WITHOUT_RAID` (`hasRaid=false,
+    /// isCaptain=true`): a patrol leader ([`SimMob::is_patrol_leader`]) not
+    /// currently a member of any active raid
+    /// ([`raid::MobSim::raid_containing_raider`]). [`reap_dead`](Self::reap_dead)
+    /// resolves the gate (it needs both a live patrol-leader flag and a raid
+    /// census, neither available inside a loot roll) and calls this only
+    /// when it holds.
+    ///
+    /// **Not routed through [`drop_death_loot`](Self::drop_death_loot)'s
+    /// generic bundled-loot-table engine.** `crate::loot`'s own
+    /// `entity_properties` condition is context-blind — `LootContext` carries
+    /// no entity data at all (see that module's own doc) — so a bundled
+    /// `entities/pillager.json` would silently roll `false` on exactly the
+    /// gate this drop needs: the identical hole `block_state_property` was
+    /// before `LootContext::block_state` existed. A dedicated call site,
+    /// [`drop_death_experience`](Self::drop_death_experience)'s own shape,
+    /// until entity-conditioned loot context lands generically.
+    ///
+    /// **Disclosed narrowing**: vanilla rolls a uniform `0..=4` amplifier
+    /// onto the bottle's own `minecraft:ominous_bottle_amplifier` component
+    /// (`SetOminousBottleAmplifierFunction`); every bottle dropped here is
+    /// amplifier `0` instead of the real roll, because persisting a
+    /// per-stack amplifier needs a new field on
+    /// `lodestone_model::ItemComponents`, which this session's ownership
+    /// does not reach (`crates/lodestone-model/**` — see
+    /// `docs/raids-and-patrols.md` §5 for the exact hunk).
+    /// `crate::server::finish_drinking_ominous_bottle` is the consumer this
+    /// feeds; amplifier `0` is still a real, working value there —
+    /// `raid::absorb_raid_omen(0, 0) == 1` starts a genuine raid — so this is
+    /// "always the weakest roll", not "does nothing".
+    fn drop_ominous_bottle(&mut self, position: Vec3) {
+        if !self.mob_drops {
+            return;
+        }
+        let bottle: ResourceKey = "minecraft:ominous_bottle".parse().expect("a literal item id is always valid");
+        let mut rng = SpawnRng::new(
+            (self.tick_count as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ^ (position.x.to_bits() ^ position.z.to_bits().rotate_left(31)),
+        );
+        let velocity = crate::block_drops::dropped_item_velocity(&mut rng);
+        self.spawn_item(
+            bottle,
+            position,
+            velocity,
+            ItemLifecycle::newly_dropped(1, lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE),
+        );
     }
 
     /// `EnvironmentAttributes.CAT_WAKING_UP_GIFT_CHANCE` at `day_time` —
@@ -8521,6 +8869,10 @@ const EQUIPMENT_ROLL_SEED: u64 = 0x4551_5549_505f_524f;
 /// pre-broken-horn roll. See [`TAME_ROLL_SEED`] for why it is separate.
 /// ASCII `"GOATHORN"`.
 const GOAT_HORN_ROLL_SEED: u64 = 0x474F_4154_484F_524E;
+
+/// Default seed for [`MobSim::door_rng`]. See [`TAME_ROLL_SEED`] for why it
+/// is separate. ASCII `"DOORBRKS"`.
+const DOOR_BREAK_ROLL_SEED: u64 = 0x444F_4F52_4252_4B53;
 
 /// The `early_game.json` timeline's `gameplay/can_pillager_patrol_spawn` gate,
 /// transcribed as a plain tick count rather than read from a general timeline
@@ -12282,6 +12634,127 @@ mod vibration_substrate_tests {
     fn spawn(sim: &mut MobSim<'_>, species: &str, pos: Vec3) -> i32 {
         sim.spawn_species(format!("minecraft:{species}").parse().expect("valid key"), pos)
             .id()
+    }
+
+    /// Production-path proof for the door/float/malus shape fix: drives the
+    /// real `MobSim::spawn_species` entry point (not `species_shape` in
+    /// isolation) and reads back the `MobShape` a `NavigatingMob` would
+    /// actually path with. A vindicator opening a door is the headline case
+    /// from `Vindicator.finalizeSpawn`'s unconditional
+    /// `getNavigation().setCanOpenDoors(true)`, and `Villager`'s constructor
+    /// sets both `canOpenDoors` and `canFloat` unconditionally too.
+    #[test]
+    fn vindicator_and_villager_can_open_doors_and_float() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let vindicator = spawn(&mut sim, "vindicator", Vec3::new(0.0, 0.0, 0.0));
+        let villager = spawn(&mut sim, "villager", Vec3::new(5.0, 0.0, 0.0));
+
+        let vindicator_shape = sim.get(vindicator).expect("spawned").shape();
+        assert!(vindicator_shape.can_open_doors);
+        assert!(vindicator_shape.can_float);
+
+        let villager_shape = sim.get(villager).expect("spawned").shape();
+        assert!(villager_shape.can_open_doors);
+        assert!(villager_shape.can_float);
+    }
+
+    /// Control: an ordinary land animal with no special-cased goals gets
+    /// neither flag — the fix must not have flipped the defaults on for
+    /// everything, which would be just as wrong as the original all-`false`
+    /// bug (a pig should not open doors).
+    #[test]
+    fn a_plain_animal_still_cannot_open_doors() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let pig = spawn(&mut sim, "pig", Vec3::new(0.0, 0.0, 0.0));
+        let shape = sim.get(pig).expect("spawned").shape();
+        assert!(!shape.can_open_doors);
+        // Pigs still register `FloatGoal` in vanilla, so this one is `true`.
+        assert!(shape.can_float);
+    }
+
+    /// `Bee.finalizeSpawn`'s malus table (`WATER` -1, `FENCE` -1) is the
+    /// path-malus half of the fix: before it, `malus_overrides` had zero
+    /// `.insert` calls anywhere in the workspace, so every mob pathed as if
+    /// nothing were dangerous. `PathType::malus`'s own default for `Water` is
+    /// `8.0` (costly but passable) and for `Fence` is `-1.0` already, so
+    /// `Water` is the discriminating field here — a bee must come back
+    /// strictly more averse to water than the vanilla default, not merely
+    /// non-zero.
+    #[test]
+    fn a_bee_s_malus_overrides_reach_the_navigating_shape() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let bee = spawn(&mut sim, "bee", Vec3::new(0.0, 0.0, 0.0));
+        let shape = sim.get(bee).expect("spawned").shape();
+        assert_eq!(shape.malus(PathType::Water), -1.0);
+        assert_ne!(
+            shape.malus(PathType::Water),
+            PathType::Water.malus(),
+            "bee must diverge from the un-overridden default, not coincide with it"
+        );
+        assert_eq!(shape.malus(PathType::Fence), -1.0);
+    }
+
+    /// `Zombie.finalizeSpawn`'s door-breaking roll is a coin flip scaled by
+    /// regional difficulty (`random.nextFloat() < difficultyModifier * 0.1F`),
+    /// not a species constant — this is the control proving the roll is
+    /// actually wired to `spawn_special_multiplier` rather than a fixed
+    /// constant in either direction. At multiplier `0.0` the roll is
+    /// deterministically `false` for every draw (`x < 0.0` never holds for
+    /// `x` in `[0.0, 1.0)`), so this is exact, not statistical.
+    #[test]
+    fn zombie_door_roll_is_scaled_by_regional_difficulty_not_constant() {
+        let world = flat_world();
+
+        let mut off = MobSim::new(&world);
+        off.set_spawn_difficulty(0.0, false);
+        for i in 0..20 {
+            let z = spawn(&mut off, "zombie", Vec3::new(i as f64 * 3.0, 0.0, 0.0));
+            assert!(!off.get(z).expect("spawned").shape().can_open_doors);
+        }
+
+        // At the maximum multiplier every draw has a real (~10%) chance, so
+        // spawning enough zombies must produce at least one `true` — the
+        // reciprocal control to the all-`false` case above. `next_f32() <
+        // 1.0 * 0.1` succeeds for roughly one in ten draws; 200 spawns makes
+        // a run of all-`false` astronomically unlikely (`0.9^200 < 1e-9`)
+        // without pinning to a specific seeded count.
+        let mut on = MobSim::new(&world);
+        on.set_spawn_difficulty(1.0, false);
+        let ids: Vec<i32> = (0..200)
+            .map(|i| spawn(&mut on, "husk", Vec3::new(i as f64 * 3.0, 0.0, 0.0)))
+            .collect();
+        let any_open = ids
+            .iter()
+            .any(|&id| on.get(id).expect("spawned").shape().can_open_doors);
+        assert!(any_open, "expected at least one husk to roll door-breaking true at multiplier 1.0");
+    }
+
+    /// The roll must survive [`SimMob::set_age`]'s baby/adult shape refresh —
+    /// before the fix, growing up would silently re-derive the static
+    /// species default and discard a `true` roll.
+    #[test]
+    fn a_zombie_s_door_roll_survives_growing_up() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        sim.set_spawn_difficulty(1.0, false);
+        let ids: Vec<i32> = (0..200)
+            .map(|i| spawn(&mut sim, "zombie", Vec3::new(i as f64 * 3.0, 0.0, 0.0)))
+            .collect();
+        let id = *ids
+            .iter()
+            .find(|&&id| sim.get(id).expect("spawned").shape().can_open_doors)
+            .expect("expected at least one zombie to roll door-breaking true at multiplier 1.0");
+
+        sim.get_mut(id).expect("spawned").set_age(BABY_START_AGE);
+        sim.get_mut(id).expect("spawned").set_age(0);
+
+        assert!(
+            sim.get(id).expect("spawned").shape().can_open_doors,
+            "growing up must not reset a rolled-true door flag back to the static default"
+        );
     }
 
     /// The headline case: a mob dies within 16 blocks of a warden, and the

@@ -105,11 +105,18 @@ resistance half-work.
   transformations. It needs an entity type `MobSim` does not have and a per-species
   transformation table. The issue groups it here because a strike's entity-facing effect
   *is* ignition plus a damage instance, and that part is this module.
-* **Mob burning.** `MobSim` has no burn state and streams no `on_fire` metadata flag, so
-  this is player-only — exactly as `PlayerVitals` was for drowning.
-* **Water and rain extinguishing**, and the `on_fire` metadata flag so the client
-  renders flames (`BurnTick::on_fire_changed` reports the edge; nothing sends it).
-* **Per-entity-type fire immunity** (`Entity.fireImmune`) and `getFireImmuneTicks`.
+* **A mob does not yet ignite from a fire/lava block.** `SimMob` now carries a real
+  burn counter, consumed every tick (`MobSim::tick_burning`) and raised by a small
+  fireball's impact (`MobSim::resolve_projectile_hit`), with real damage and water
+  extinguishing — but nothing reads what block a mob's feet stand in, so
+  block-contact ignition (and this module's lava/contact-damage guards, which need
+  that read) never fire for a mob.
+* **Rain does not extinguish anything**, mob or player, and no `on_fire` metadata
+  flag streams to the client (`BurnTick::on_fire_changed` reports the edge; nothing
+  sends it) — the wire encoder for that lives in the version crate.
+* **Per-entity-type fire immunity** (`Entity.fireImmune`) now exists for the mob
+  species this sim can spawn (`crate::mobs::species::is_fire_immune`), but not for
+  a player — see this doc's "creative player passed as `fire_immune`" note above.
 * **Campfires and magma blocks**, which are `hot_floor`/`campfire` damage types with
   their own contact rules.
 

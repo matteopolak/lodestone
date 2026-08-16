@@ -106,9 +106,15 @@ where `Instant::now()` compiles and then panics at runtime with no log line.
 
 Each has a reason rather than a shrug:
 
-* **A fireball's five seconds of fire are not applied.** `SimMob` has no burning
-  state at all — `SimMob::ignite` is the creeper fuse, a different mechanic sharing a
-  verb. The `5.0` damage does land.
+* **A mob does not yet ignite from standing in a fire or lava block.** `SimMob`
+  now carries a real burn counter (`crate::burning::BurnState`), raised by a
+  *small* fireball's impact (a blaze's shot — a ghast's large fireball and a
+  wither skull deal their own flat damage and never ignite in vanilla either)
+  and consumed every tick by `MobSim::tick_burning`, which applies real damage
+  and extinguishes on water contact. `SimMob::ignite` remains a separate
+  mechanic, the creeper fuse. What is still missing is block-contact ignition
+  (walking into fire/lava) and the client-visible on-fire flag — the wire
+  encoder for that lives in the version crate, outside this crate's reach.
 * **Players are not impact candidates.** `MobSim` knows player *positions*
   (`PlayerPerception`) and neither their entity ids nor their `PlayerVitals`, which
   live per-connection. Mob-on-player damage has no path anywhere in this workspace

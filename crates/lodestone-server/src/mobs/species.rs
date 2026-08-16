@@ -142,6 +142,24 @@ pub(super) fn avoided_species(species: &str) -> &'static [&'static str] {
     }
 }
 
+/// Whether `entity_type` is fire-immune (`Entity.fireImmune()`, vanilla's own
+/// `EntityType.Builder.fireImmune()` registration flag) — an immune mob's
+/// burn counter is cleared outright rather than merely dealing no damage (see
+/// `crate::burning::BurnState::tick`'s `fire_immune` parameter for why that
+/// distinction matters for a later, longer ignition).
+///
+/// Deliberately only the species this sim can currently spawn, the same scope
+/// note [`avoided_species`] carries: the wider vanilla list also has
+/// `magma_cube`, `shulker`, `vex`, `wither`, `zoglin`, `tnt`, `end_crystal`,
+/// `area_effect_cloud` and `ender_dragon`, none of which this sim spawns as a
+/// [`super::SimMob`] today.
+pub(super) fn is_fire_immune(entity_type: &ResourceKey) -> bool {
+    matches!(
+        entity_type.path(),
+        "blaze" | "ghast" | "strider" | "warden" | "wither_skeleton" | "zombified_piglin"
+    )
+}
+
 /// The item paths in each species' vanilla food tag — what `TemptGoal` follows
 /// a player for.
 ///

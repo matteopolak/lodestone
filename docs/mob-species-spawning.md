@@ -126,6 +126,31 @@ behaviour moved.
   falls back to `AttributeMap::new()` (generic defaults: 20 health, 2 attack,
   no armor) and `species_shape` falls back to the zombie-sized box — the same
   "explicit fallback, never a silent guess" contract `resolve_mob_shape` uses.
+- **`species_shape` also sets `MobShape::can_open_doors`/`can_float` and
+  `malus_overrides` per species** — before this they were `MobShape::land`'s
+  defaults (`false`/`false`/empty) for every species, unconditionally, so no
+  mob could ever open a door, float on water, or treat lava/fire/water as more
+  dangerous than a plain floor. Three small per-species tables in
+  `mobs/mod.rs` (`species_can_open_doors`, `species_can_float`,
+  `species_malus_overrides`), each read from that species' own vanilla
+  constructor/`finalizeSpawn` (`Vindicator.finalizeSpawn`,
+  `Villager`'s constructor, `AbstractPiglin`'s constructor for doors;
+  each species' `FloatGoal` registration for floating; `Mob.setPathfindingMalus`
+  calls, folded per species including the base `Animal` class's own
+  `FIRE_IN_NEIGHBOR`/`FIRE` overrides, for the malus table). Add a new species
+  to whichever table(s) its own vanilla class touches — do not guess a value;
+  read the constructor.
+- **The zombie family's door-breaking is a spawn-time coin flip, not a static
+  species value** — `Zombie.finalizeSpawn`'s own
+  `setCanBreakDoors(random.nextFloat() < difficultyModifier * 0.1F)`, which
+  `species_shape` cannot express (it has no RNG or regional-difficulty input).
+  `MobSim::spawn_species` rolls it once, after `species_shape` runs, on its own
+  `door_rng` stream (`MobSim::set_spawn_difficulty` feeds the multiplier). The
+  roll is preserved across `SimMob::set_age`'s baby/adult shape refresh rather
+  than re-derived, since it is decided once at spawn and is not a function of
+  size. Not modelled: the "leader zombie" bonus roll that can *also* force
+  `canBreakDoors` true alongside health/knockback buffs — a separate mechanic,
+  not this bug.
 
 ## Configuration
 
