@@ -55,13 +55,14 @@ use lodestone_ecs::ecs::resource::Resource;
 use lodestone_ecs::ecs::schedule::IntoScheduleConfigs;
 use lodestone_ecs::player::PhysicsState;
 use lodestone_ecs::{
-    ChunkWorld, GameTick, LocalPlayer, LookIntent, MovementIntent, TickSet, VersionData,
+    ChunkWorld, Extract, ExtractSet, GameTick, LocalPlayer, LookIntent, MovementIntent,
+    PluginBillboard, PluginBillboards, PluginTexture, TickSet, VersionData,
 };
 use lodestone_model::BlockPos;
 use lodestone_nav::{
     AdapterCensus, Budget, FactsTable, NavPolicy, Outcome, Plan, Progress, Search, witness,
 };
-use lodestone_physics::MovementInput;
+use lodestone_physics::{MovementInput, Vec3d};
 
 pub mod drive;
 
@@ -484,14 +485,69 @@ fn drive_plan(
     }
 }
 
+/// Vertical offset above a waypoint's [`Edge::to_surface`](lodestone_nav::Edge::to_surface)
+/// a marker floats at, in blocks — enough to clear the block itself rather
+/// than sitting flush with (and half-clipped by) the ground the plan's own
+/// height already accounts for.
+const WAYPOINT_HEIGHT: f64 = 1.2;
+
+/// A waypoint marker's footprint, in blocks — small enough that a run of
+/// them along a corridor reads as a trail rather than a wall.
+const WAYPOINT_SIZE: [f32; 2] = [0.4, 0.4];
+
+/// A saturated cyan with no vanilla block or particle using it, so a
+/// waypoint marker is unambiguous at a glance. [`PluginTexture::Solid`]
+/// makes this the billboard's entire visible colour (see that variant's own
+/// doc for why this plugin does not use [`PluginTexture::Named`] here: an
+/// item id like a compass would resolve against an atlas this render pass
+/// does not bind and silently fall back to a flat tint anyway).
+const WAYPOINT_COLOR: [f32; 4] = [0.1, 0.9, 1.0, 0.9];
+
+/// `Extract` / `ExtractSet::Debug`: one [`PluginBillboard`] per **remaining**
+/// edge of the active plan — the producer half of issue #161's billboard
+/// channel. `lodestone_ecs::plugin_draw`'s own module doc names "a
+/// pathfinder's planned route" as the channel's reason to exist; before this
+/// system, nothing in the tree actually pushed one (every reference was
+/// infrastructure — the render pipeline, the resource, the wire — with zero
+/// producers, the `ClientAction::SetFlying` shape inverted).
+///
+/// Only `state.edge..` — the edges not yet walked — so the marker trail
+/// shrinks as the bot advances rather than also drawing the route already
+/// behind it (which [`Plan::witnesses_in_range`]'s own look-ahead-window
+/// reasoning already treats as the uninteresting half: nothing upcoming
+/// depends on it). Reading [`AutopilotState`] directly (not
+/// [`AutopilotStatus`]) means a caller sees the *real* geometry the executor
+/// is driving, not a status caller's guess at it.
+fn extract_plan_billboards(state: Res<AutopilotState>, mut billboards: ResMut<PluginBillboards>) {
+    let Some(plan) = state.plan.as_ref() else {
+        return;
+    };
+    for edge in plan.edges().iter().skip(state.edge) {
+        billboards.0.push(PluginBillboard {
+            position: Vec3d::new(
+                f64::from(edge.to.x) + 0.5,
+                edge.to_surface + WAYPOINT_HEIGHT,
+                f64::from(edge.to.z) + 0.5,
+            ),
+            size: WAYPOINT_SIZE,
+            color: WAYPOINT_COLOR,
+            texture: PluginTexture::Solid,
+        });
+    }
+}
+
 /// Registers [`AutopilotGoal`]/[`AutopilotStatus`] and the two [`GameTick`]
-/// systems.
+/// systems, plus [`extract_plan_billboards`] in `Extract`'s
+/// [`ExtractSet::Debug`].
 ///
 /// Does **not** register `lodestone_ecs::CorePlugin` or
 /// `lodestone_ecs::player::LocalPlayerPlugin` — a plugin depends on the
 /// engine's ordering anchors and components, never installs the engine
 /// (`docs/plugin-api.md`'s "what belongs" boundary, restated in
-/// `crates/plugins/README.md`).
+/// `crates/plugins/README.md`). That includes [`PluginBillboards`] itself:
+/// `LocalPlayerPlugin` is what `init_resource`s it and clears it
+/// `.before(ExtractSet::Debug)` every frame, exactly as it already does for
+/// [`MovementIntent`]/[`LookIntent`] — this plugin only ever appends.
 #[derive(Debug, Default)]
 pub struct AutopilotPlugin;
 
@@ -507,5 +563,6 @@ impl Plugin for AutopilotPlugin {
                 .after(TickSet::Intent)
                 .before(TickSet::Physics),
         );
+        app.add_systems(Extract, extract_plan_billboards.in_set(ExtractSet::Debug));
     }
 }

@@ -475,6 +475,99 @@ fn no_plugin_billboards_source_installed_draws_nothing() {
     );
 }
 
+/// A real committed [`lodestone_autopilot`] plan pushes **several**
+/// `PluginBillboard`s spread along a route — `extract_plan_billboards`
+/// (`crates/plugins/lodestone-autopilot/src/lib.rs`) pushes one per
+/// remaining edge, not the single billboard the precedent gate above uses.
+/// `lodestone-shell` must not depend on `lodestone-autopilot` (an
+/// LGPL-3.0-or-later external plugin — see that crate's `Cargo.toml`
+/// comment), so this gate cannot drive the real plugin through a real
+/// `Sim`; it instead feeds the render pipeline the same *shape* that
+/// producer emits — several distinct world-space markers along a line —
+/// and checks each one reaches its own region of the frame.
+///
+/// This is the `CLAUDE.md` "measure by location, never by frame average"
+/// case directly: an aggregate diff count (the precedent gate's own
+/// assertion) cannot tell three markers apart from one dominant billboard
+/// eclipsing the other two, so this gate partitions the diff into three
+/// horizontal bands and requires each to register real coverage on its own.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn plugin_billboards_source_draws_a_multi_waypoint_path() {
+    let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+        "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU (or a software adapter such as \
+         LIBGL_ALWAYS_SOFTWARE=1 / WGPU_BACKEND=gl), don't 'skip' — a silent pass here \
+         would assert nothing",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let (w, h) = (320u32, 240u32);
+    let mut target = HeadlessTarget::new(device, w, h, format);
+
+    let mut state = RenderState::new(device, queue, format, w, h, None);
+
+    let camera = Camera {
+        position: glam::Vec3::new(0.5, 64.5, -2.0),
+        yaw: 0.0,
+        pitch: 0.0,
+        fov_y_degrees: 70.0,
+        aspect: w as f32 / h as f32,
+        near: 0.05,
+        far: Camera::far_for_render_distance(8, 0),
+    };
+
+    let frame = target.acquire().expect("acquire");
+    state.render(device, queue, frame.view(), &camera, None, &[]);
+    let empty = target.read_texels(device, queue);
+
+    // Three waypoint markers spread horizontally in view — `Solid`, exactly
+    // as `extract_plan_billboards` draws them (no vanilla atlas is loaded in
+    // this scene either), at world x = -4, 0, 4 so their projections land in
+    // roughly the left, middle and right thirds of the frame.
+    state.set_plugin_billboards_source(|| {
+        [-4.0f32, 0.0, 4.0]
+            .into_iter()
+            .map(|x| PluginBillboardInstance {
+                position: [x, 64.0, 4.0, 0.0],
+                size_textured: [1.5, 1.5, 0.0, 0.0],
+                uv: [0.0, 0.0, 1.0, 1.0],
+                color: [0.1, 0.9, 1.0, 1.0],
+            })
+            .collect()
+    });
+
+    let frame = target.acquire().expect("acquire");
+    state.render(device, queue, frame.view(), &camera, None, &[]);
+    let with_path = target.read_texels(device, queue);
+
+    let diff = diff_mask(&with_path, &empty);
+    let third = (w as usize / 3).max(1);
+    let mut per_third = [0usize; 3];
+    for (i, &changed) in diff.iter().enumerate() {
+        if !changed {
+            continue;
+        }
+        let x = i % w as usize;
+        let band = (x / third).min(2);
+        per_third[band] += 1;
+    }
+
+    eprintln!("=== plugin-billboard path pixel readback ===");
+    eprintln!("changed pixels per horizontal third = {per_third:?}");
+
+    for (band, &count) in per_third.iter().enumerate() {
+        assert!(
+            count > 10,
+            "waypoint marker {band} of 3 did not register visible pixels in its own \
+             third of the frame ({count} px, full split {per_third:?}) — a real plan's \
+             remaining edges must each reach the screen, not just the first or the \
+             largest"
+        );
+    }
+}
+
 /// Negative control for the test above: with no source installed (the
 /// default state of a fresh [`RenderState`]), two renders of the same
 /// scene must be pixel-identical. Without this, the assertion above could

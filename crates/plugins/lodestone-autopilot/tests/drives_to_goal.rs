@@ -295,6 +295,75 @@ fn a_nearby_goal_is_reached_through_the_real_physics_seam() {
     );
 }
 
+/// Issue #161's producer-side proof: while a real plan is being driven, the
+/// same `Extract` schedule the shell's renderer runs every frame carries one
+/// [`lodestone_ecs::PluginBillboard`] per remaining edge — real waypoint
+/// telemetry reaching the one channel a plugin has to reach the screen with,
+/// not a resource nothing outside this crate could ever observe.
+///
+/// Sampled mid-flight, not after arrival: [`drive_plan`](lodestone_autopilot)
+/// clears `AutopilotState::plan` the moment the goal is reached, so an
+/// `Extract` run taken after `AutopilotStatus::Arrived` would measure an
+/// empty plan and prove nothing about the producer.
+#[test]
+fn a_committed_plan_pushes_waypoint_billboards_into_the_extract_channel() {
+    let (mut app, _entity) = app_on_flat_floor(4);
+    app.insert_resource(AutopilotGoal(Some(BlockPos::new(5, 1, 0))));
+
+    let mut driving = false;
+    for _ in 0..50 {
+        app.world_mut().run_schedule(GameTick);
+        if *app.world().resource::<AutopilotStatus>() == AutopilotStatus::Driving {
+            driving = true;
+            break;
+        }
+    }
+    assert!(
+        driving,
+        "expected a plan to be committed (AutopilotStatus::Driving) within 50 ticks"
+    );
+
+    app.world_mut().run_schedule(lodestone_ecs::Extract);
+
+    let billboards = app.world().resource::<lodestone_ecs::PluginBillboards>().0.clone();
+    assert!(
+        !billboards.is_empty(),
+        "a plan being actively driven must push at least one waypoint marker \
+         into PluginBillboards through the real Extract schedule"
+    );
+    for b in &billboards {
+        assert_eq!(
+            b.texture,
+            lodestone_ecs::PluginTexture::Solid,
+            "extract_plan_billboards always draws an untextured marker"
+        );
+        assert!(
+            b.position.y > 1.5,
+            "a marker must float above the flat floor's own y=1.0 surface, got {:?}",
+            b.position
+        );
+    }
+}
+
+/// The negative control for the test above: with no goal ever set, the plan
+/// stays `None` and `Extract` must carry zero waypoint markers — without
+/// this, the positive assertion could be satisfied by a system that pushes a
+/// billboard unconditionally regardless of whether a plan actually exists.
+#[test]
+fn no_goal_pushes_no_waypoint_billboards() {
+    let (mut app, _entity) = app_on_flat_floor(4);
+
+    app.world_mut().run_schedule(GameTick);
+    app.world_mut().run_schedule(lodestone_ecs::Extract);
+
+    let billboards = &app.world().resource::<lodestone_ecs::PluginBillboards>().0;
+    assert!(
+        billboards.is_empty(),
+        "with no AutopilotGoal ever set, Extract must carry no waypoint markers, got {}",
+        billboards.len()
+    );
+}
+
 /// The reason M2's segmentation change exists: a goal **provably outside the
 /// first segment's own snapshot** is still reached, by dispatching and
 /// splicing a continuation while the first segment is still being walked
