@@ -109,9 +109,10 @@ use std::collections::HashMap;
 use glam::Vec3;
 use lodestone_render::{
     BannerAttachment, BannerSpawn, BellShakeDirection, BellSpawn, ChestHalf, ChestMaterial,
-    ChestSpawn, LecternSpawn,
+    ChestSpawn, ConduitFrame, ConduitSpawn, DecoratedPotSpawn, LecternSpawn,
     SHULKER_COLOURS, ShulkerFacing, ShulkerSpawn, SignKind, SignOrientation, SignSpawn,
-    SkullOrientation, SkullSpawn, SkullType, horizontal_facing_clockwise_yaw,
+    SkullOrientation, SkullSpawn, SkullType, conduit_active_rotation_value, conduit_advance,
+    conduit_anim_time, conduit_animation_phase, conduit_frame_scan, horizontal_facing_clockwise_yaw,
     horizontal_facing_yaw,
 };
 use lodestone_render::banner_pattern::{DyeColor, StoredPatternLayer};
@@ -1875,6 +1876,417 @@ pub fn banner_spawns(
             .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
         let phase = lodestone_render::block_entity::banner_phase(block, game_time, partial_tick);
         if let Some(spawn) = banner_spawn(block, state_id, patterns, phase, light) {
+            out.push(spawn);
+        }
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
+// --- decorated pot ---------------------------------------------------------
+
+/// The decorated pot's stored sherds, parsed out of its NBT —
+/// `PotDecorations.CODEC` (`DecoratedPotBlockEntity.TAG_SHERDS`, key
+/// `"sherds"`): a plain 4-element list of item ids in **`[back, left, right,
+/// front]`** order (`PotDecorations`'s own record field order, and
+/// `ordered()`'s `Stream.of(back, left, right, front)`), with
+/// `minecraft:brick` the empty sentinel (`PotDecorations.getItem`'s `item ==
+/// Items.BRICK` check). A side whose id fails to parse, or is the sentinel,
+/// is `None` — the same "drop rather than default" rule [`banner_patterns`]
+/// documents, and the namespace is stripped for the same reason
+/// [`banner_patterns`] strips one: [`decorated_pot_pattern_texture_stem`]
+/// keys on the **bare** sherd path.
+#[must_use]
+fn decorated_pot_sherds(nbt: &lodestone_core::Nbt) -> [Option<String>; 4] {
+    use lodestone_core::Nbt;
+
+    let mut out: [Option<String>; 4] = [None, None, None, None];
+    let Nbt::Compound(fields) = nbt else {
+        return out;
+    };
+    let Some(Nbt::List { elements, .. }) =
+        fields.iter().find(|(name, _)| name == "sherds").map(|(_, v)| v)
+    else {
+        return out;
+    };
+    for (slot, elem) in out.iter_mut().zip(elements.iter()) {
+        let Nbt::String(id) = elem else { continue };
+        let path = id.strip_prefix("minecraft:").unwrap_or(id);
+        if path != "brick" {
+            *slot = Some(path.to_string());
+        }
+    }
+    out
+}
+
+/// Every decorated-pot position within [`VIEW_DISTANCE`], paired with its block
+/// state and stored sherds.
+///
+/// A third NBT-reading candidate gather beside [`sign_candidates`] and
+/// [`banner_candidates`], for the same reason those exist: [`chest_candidates`]
+/// discards `be.nbt`, and a pot's decoration lives there.
+#[must_use]
+fn decorated_pot_candidates(
+    world: &World,
+    chunks: impl IntoIterator<Item = ChunkPos>,
+    eye: Vec3,
+) -> Vec<([i32; 3], u32, [Option<String>; 4])> {
+    let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
+    let mut candidates = Vec::new();
+    for pos in chunks {
+        let Some(chunk) = world.get(pos) else {
+            continue;
+        };
+        for be in &chunk.block_entities {
+            let x = pos.x * 16 + i32::from(be.rel_x);
+            let z = pos.z * 16 + i32::from(be.rel_z);
+            let y = i32::from(be.y);
+            let centre = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+            if centre.distance_squared(eye) > cutoff {
+                continue;
+            }
+            let state_id = chunk
+                .column
+                .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            candidates.push(([x, y, z], state_id, decorated_pot_sherds(&be.nbt)));
+        }
+    }
+    candidates
+}
+
+/// One candidate resolved into a [`DecoratedPotSpawn`], or `None` if the state
+/// at that position is not a decorated pot.
+///
+/// `facing_yaw_deg` reads the block's own `facing` property —
+/// `DecoratedPotRenderer.extractRenderState`'s `Direction.toYRot()` — the same
+/// [`horizontal_facing_yaw`] [`banner_attachment`]'s wall arm already uses.
+#[must_use]
+fn decorated_pot_spawn(
+    block: [i32; 3],
+    state_id: u32,
+    sherds: [Option<String>; 4],
+    light: u8,
+) -> Option<DecoratedPotSpawn> {
+    let name = lodestone_data::block_states::block_name(state_id)?;
+    if name != "minecraft:decorated_pot" {
+        return None;
+    }
+    let facing_value = lodestone_data::block_states::properties(state_id)?
+        .iter()
+        .find(|(prop, _)| *prop == "facing")
+        .map(|(_, value)| *value)?;
+    let facing_yaw_deg = horizontal_facing_yaw(facing_value)?;
+    let [back, left, right, front] = sherds;
+    Some(DecoratedPotSpawn {
+        pos: block,
+        facing_yaw_deg,
+        front,
+        back,
+        left,
+        right,
+        light,
+    })
+}
+
+/// Every decorated pot to draw this frame — the pot sibling of
+/// [`banner_spawns`]/[`shulker_spawns`].
+#[must_use]
+pub fn decorated_pot_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<DecoratedPotSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+
+    let candidates = {
+        let world = store.read();
+        decorated_pot_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
+    let mut out = Vec::new();
+    for (block, state_id, sherds) in candidates {
+        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        if let Some(spawn) = decorated_pot_spawn(block, state_id, sherds, light) {
+            out.push(spawn);
+        }
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
+// --- conduit -----------------------------------------------------------
+
+/// Reads the block state at an absolute world position, resolving whichever
+/// chunk it falls in.
+///
+/// [`conduit_frame_scan`]'s 5×5×5 pass steps up to two cells past the
+/// conduit's own chunk on any axis, and [`lodestone_world::ChunkColumn::
+/// get_block`] only accepts **in-chunk** `0..16` coordinates (it panics
+/// otherwise) — every other candidate gather in this module sidesteps that by
+/// reading `be.rel_x`/`be.rel_z` off the block entity record itself, which a
+/// scan around a *neighbouring* cell has no equivalent of. A chunk the client
+/// has not loaded (only reachable at the render-distance boundary, since the
+/// scan never strays more than two cells from a block entity this module
+/// already filtered by [`VIEW_DISTANCE`]) reads as air, the same "no data
+/// yet" fallback [`shulker_spawn`]'s missing-`facing` default and friends
+/// already use.
+#[must_use]
+fn block_state_at(world: &World, x: i32, y: i32, z: i32) -> u32 {
+    let chunk_pos = ChunkPos {
+        x: x.div_euclid(16),
+        z: z.div_euclid(16),
+    };
+    let Some(chunk) = world.get(chunk_pos) else {
+        return lodestone_data::block_states::air_state_id();
+    };
+    let local_x = x.rem_euclid(16) as usize;
+    let local_z = z.rem_euclid(16) as usize;
+    chunk.column.get_block(local_x, y, local_z)
+}
+
+/// `Level.isWaterAt`/`getFluidState(pos).is(FluidTags.WATER)` —
+/// [`conduit_frame_scan`]'s inner-cube predicate. True for the water block
+/// itself (source or flowing share one block name here) and for any other
+/// block reporting `waterlogged=true`, matching vanilla's fluid-tag reading
+/// rather than [`crate::collision`]'s narrower block-identity `is_water`,
+/// which would refuse a waterlogged frame the way `chunk::is_water` in
+/// `lodestone-server` deliberately does for the unrelated drowning check.
+#[must_use]
+fn is_water_block(state_id: u32) -> bool {
+    let Some(name) = lodestone_data::block_states::block_name(state_id) else {
+        return false;
+    };
+    if name == "minecraft:water" {
+        return true;
+    }
+    lodestone_data::block_states::properties(state_id).is_some_and(|props| {
+        props.iter().any(|(key, value)| *key == "waterlogged" && *value == "true")
+    })
+}
+
+/// `ConduitBlockEntity.VALID_BLOCKS` — the four frame block identities
+/// [`conduit_frame_scan`]'s 5×5×5 pass counts.
+#[must_use]
+fn is_conduit_frame_block(state_id: u32) -> bool {
+    let Some(name) = lodestone_data::block_states::block_name(state_id) else {
+        return false;
+    };
+    matches!(
+        name,
+        "minecraft:prismarine"
+            | "minecraft:prismarine_bricks"
+            | "minecraft:sea_lantern"
+            | "minecraft:dark_prismarine"
+    )
+}
+
+/// Every `minecraft:conduit` position within [`VIEW_DISTANCE`] — the
+/// candidate set [`ConduitTicks::tick`] wants as its `present` argument.
+/// Reuses [`chest_candidates`] exactly as [`shulker_spawns`] does, then
+/// narrows to the one block identity: a conduit carries no NBT this module
+/// needs (its whole appearance comes from the live blocks around it via
+/// [`conduit_scan_frame`]), so there is no reason to duplicate
+/// [`banner_candidates`]'s NBT-reading shape here.
+#[must_use]
+pub fn conduit_positions(handle: &SharedHandle, eye: Vec3) -> Vec<[i32; 3]> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+    let candidates = {
+        let world = store.read();
+        chest_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+    candidates
+        .into_iter()
+        .filter_map(|(pos, state_id)| {
+            (lodestone_data::block_states::block_name(state_id)? == "minecraft:conduit")
+                .then_some(pos)
+        })
+        .collect()
+}
+
+/// Scans one conduit's activation frame against the real, live block store —
+/// [`conduit_frame_scan`]'s own doc names this function as its intended
+/// shell-side caller. Reads `handle` once rather than holding it, so this can
+/// be handed to [`ConduitTicks::tick`] as a `FnMut` without borrowing the
+/// client across a whole tick.
+#[must_use]
+pub fn conduit_scan_frame(handle: &SharedHandle, pos: [i32; 3]) -> ConduitFrame {
+    let Some(client) = handle.get() else {
+        return ConduitFrame::default();
+    };
+    let store = client.chunk_world();
+    let world = store.read();
+    conduit_frame_scan(
+        pos,
+        |p| is_water_block(block_state_at(&world, p[0], p[1], p[2])),
+        |p| is_conduit_frame_block(block_state_at(&world, p[0], p[1], p[2])),
+    )
+}
+
+/// `ConduitBlockEntity.clientTick`'s own rescan cadence — `gameTime % 40L ==
+/// 0L` gates a fresh shape scan rather than running one every tick. This
+/// module has no shared world-time clock to gate on (every other animation
+/// fold here — [`ChestLids`], [`BellShakes`], [`EnchantingTableBooks`] —
+/// already runs its own local counter rather than reading one), so
+/// [`ConduitTicks`] gates on **its own** per-position tick counter instead:
+/// a disclosed simplification, not a transcription bug — the frame only
+/// changes when a player edits blocks nearby, so a rescan cadence that is
+/// merely *close* to vanilla's costs nothing visible.
+const CONDUIT_FRAME_RESCAN_INTERVAL_TICKS: u32 = 40;
+
+/// One conduit's client-side animation clock — `ConduitBlockEntity`'s own
+/// `tickCount`/`activeRotation` counters, plus the last [`ConduitFrame`] scan.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ConduitClock {
+    tick_count: u32,
+    active_rotation_ticks: u32,
+    frame: ConduitFrame,
+}
+
+/// Per-position conduit animation state, driven by nothing on the wire at
+/// all — the conduit sibling of [`BellShakes`] and, more exactly,
+/// [`EnchantingTableBooks`]: like a book's page-flip, a conduit's activation
+/// is discovered by looking at the world (here, a periodic block-pattern
+/// scan) rather than by a `BLOCK_EVENT`, so an entry has to be created and
+/// advanced by [`tick`](Self::tick) rather than received.
+///
+/// Entries for a position no longer in [`conduit_positions`]' candidate set
+/// are dropped on the next tick — the same GC [`ChestLids`]/[`BellShakes`]
+/// already rely on, except a conduit has no "at rest" value to fall back to
+/// once dropped, so a caller must stop asking [`resolve`](Self::resolve)
+/// about a position once it stops appearing in `present`.
+#[derive(Debug, Default, Clone)]
+pub struct ConduitTicks {
+    clocks: HashMap<[i32; 3], ConduitClock>,
+}
+
+impl ConduitTicks {
+    /// An empty set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// One client tick for every conduit in `present` (this frame's candidate
+    /// set — see [`conduit_positions`]), discovering any new entry and
+    /// dropping any no longer present.
+    ///
+    /// `scan` resolves one position's [`ConduitFrame`] — a caller-supplied
+    /// closure (bind [`conduit_scan_frame`]) rather than a `World` borrow
+    /// held across the whole tick, matching [`conduit_frame_scan`]'s own
+    /// closure-based block lookup. Called once immediately for a newly
+    /// discovered position (so a conduit is never drawn one tick behind its
+    /// real activation state) and again every
+    /// [`CONDUIT_FRAME_RESCAN_INTERVAL_TICKS`] ticks thereafter.
+    pub fn tick(&mut self, present: &[[i32; 3]], mut scan: impl FnMut([i32; 3]) -> ConduitFrame) {
+        self.clocks.retain(|pos, _| present.contains(pos));
+        for &pos in present {
+            let is_new = !self.clocks.contains_key(&pos);
+            let clock = self.clocks.entry(pos).or_insert_with(|| ConduitClock {
+                tick_count: 0,
+                active_rotation_ticks: 0,
+                frame: ConduitFrame::default(),
+            });
+            if is_new {
+                clock.frame = scan(pos);
+            }
+            let (tick_count, active_rotation_ticks) =
+                conduit_advance(clock.tick_count, clock.active_rotation_ticks, clock.frame.is_active());
+            clock.tick_count = tick_count;
+            clock.active_rotation_ticks = active_rotation_ticks;
+            if clock.tick_count % CONDUIT_FRAME_RESCAN_INTERVAL_TICKS == 0 {
+                clock.frame = scan(pos);
+            }
+        }
+    }
+
+    /// One conduit's resolved [`ConduitSpawn`] for this partial tick, or
+    /// `None` for a position [`tick`](Self::tick) has not (yet, or any
+    /// longer) been told about. `light` is supplied by the caller, exactly as
+    /// every other `*_spawn` in this module takes it separately from its
+    /// animation state.
+    #[must_use]
+    pub fn resolve(&self, pos: [i32; 3], partial_tick: f32, light: u8) -> Option<ConduitSpawn> {
+        let clock = self.clocks.get(&pos)?;
+        let active = clock.frame.is_active();
+        let hunting = active && clock.frame.is_hunting();
+        let active_rotation_value =
+            conduit_active_rotation_value(clock.active_rotation_ticks, partial_tick, active);
+        Some(ConduitSpawn {
+            pos,
+            active,
+            hunting,
+            active_rotation_value,
+            anim_time: conduit_anim_time(clock.tick_count, partial_tick),
+            animation_phase: conduit_animation_phase(clock.tick_count),
+            light,
+        })
+    }
+
+    /// Number of tracked conduits (for stats and tests).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.clocks.len()
+    }
+
+    /// Whether nothing is being tracked.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.clocks.is_empty()
+    }
+}
+
+/// Every conduit to draw this frame — the conduit sibling of
+/// [`banner_spawns`]/[`shulker_spawns`]. Unlike those, the animation state
+/// itself is **not** recomputed here: `ticks` must already have been
+/// advanced this client tick ([`ConduitTicks::tick`], driven by
+/// [`conduit_positions`]/[`conduit_scan_frame`] above) — a fresh
+/// [`ConduitFrame`] needs a rescan cadence this per-frame call has no clock
+/// for. This only reads what `ticks` already knows and attaches this frame's
+/// light.
+#[must_use]
+pub fn conduit_spawns(
+    handle: &SharedHandle,
+    eye: Vec3,
+    ticks: &ConduitTicks,
+    partial_tick: f32,
+) -> Vec<ConduitSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
+    let mut out = Vec::new();
+    for pos in conduit_positions(handle, eye) {
+        let light = entity_light_at(handle, pos[0], pos[1], pos[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        if let Some(spawn) = ticks.resolve(pos, partial_tick, light) {
             out.push(spawn);
         }
     }
