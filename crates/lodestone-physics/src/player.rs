@@ -69,6 +69,30 @@ impl UseEffects {
         can_sprint: true,
         speed_multiplier: 1.0,
     };
+
+    /// Resolve which [`UseEffects`] a held item's own `use()` would arm,
+    /// from its id alone — see this type's own doc for why an id is enough:
+    /// the seven spear items (`Item.Properties.spear(...)`) are the *only*
+    /// override in the 26.2 item table, and every one of them is named
+    /// `*_spear` (`wooden_spear`, `stone_spear`, `copper_spear`,
+    /// `iron_spear`, `golden_spear`, `diamond_spear`, `netherite_spear`).
+    /// Anything else — including an empty main hand — gets [`Self::DEFAULT`],
+    /// matching vanilla's per-item `useEffects` field defaulting to
+    /// `UseEffects.DEFAULT` when a `Item.Properties` builder never overrides
+    /// it.
+    #[must_use]
+    pub fn for_item(id: &str) -> Self {
+        // Namespace-agnostic on purpose: a resource pack's own custom item
+        // could ship under a different namespace, and the *path* is the only
+        // part vanilla's own builder call keys off (`Item.Properties.spear`
+        // is applied per Java call site, not looked up by namespace).
+        let path = id.rsplit_once(':').map_or(id, |(_, path)| path);
+        if path.ends_with("_spear") {
+            Self::SPEAR
+        } else {
+            Self::DEFAULT
+        }
+    }
 }
 
 /// Raw player intent for one tick, before any client-side transformation.
@@ -3494,6 +3518,41 @@ pub fn player_flying_speed(state: &PlayerState, profile: &PhysicsProfile) -> f32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// All seven 26.2 spear items resolve to the sprint-preserving override;
+    /// every other id — including a non-spear weapon and an empty-hand
+    /// sentinel — resolves to `DEFAULT`. Pairwise-distinct items on each side
+    /// so a producer that always returns one constant cannot pass this.
+    #[test]
+    fn for_item_picks_out_exactly_the_seven_spears() {
+        for spear in [
+            "minecraft:wooden_spear",
+            "minecraft:stone_spear",
+            "minecraft:copper_spear",
+            "minecraft:iron_spear",
+            "minecraft:golden_spear",
+            "minecraft:diamond_spear",
+            "minecraft:netherite_spear",
+        ] {
+            assert_eq!(
+                UseEffects::for_item(spear),
+                UseEffects::SPEAR,
+                "{spear} must resolve to UseEffects::SPEAR"
+            );
+        }
+        for other in ["minecraft:bow", "minecraft:apple", "minecraft:shield"] {
+            assert_eq!(
+                UseEffects::for_item(other),
+                UseEffects::DEFAULT,
+                "{other} must resolve to UseEffects::DEFAULT"
+            );
+        }
+        // Namespace-agnostic — see the method's own doc for why.
+        assert_eq!(
+            UseEffects::for_item("mymodpack:crystal_spear"),
+            UseEffects::SPEAR
+        );
+    }
 
     #[test]
     fn player_speed_walk_and_sprint_bits() {
