@@ -15,10 +15,10 @@ use lodestone_v340::V340Adapter;
 use lodestone_v340::packet_ids::{handshaking, login, play};
 use lodestone_v340::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use lodestone_v340::packets::game::{
-    ClientCommand, ClientboundChat, ClientboundPositionLook, JoinGame, KickDisconnect, Respawn,
-    ServerboundArmAnimation, ServerboundChat, ServerboundFlying, ServerboundLook,
-    ServerboundPosition, ServerboundPositionLook, Spectate, SpawnPosition, TeleportConfirm,
-    UpdateHealth,
+    BlockAction, ClientCommand, ClientboundChat, ClientboundPositionLook, JoinGame,
+    KickDisconnect, Respawn, ServerboundArmAnimation, ServerboundChat, ServerboundFlying,
+    ServerboundLook, ServerboundPosition, ServerboundPositionLook, Spectate, SpawnPosition,
+    TeleportConfirm, UpdateHealth,
 };
 use lodestone_v340::packets::handshake::SetProtocol;
 use lodestone_v340::packets::login::{
@@ -923,3 +923,83 @@ fn play_abilities_rejects_trailing_bytes() {
         "expected a decode error, got {result:?}"
     );
 }
+
+fn encode_block_action(location: BlockPos, byte1: u8, byte2: u8, block_id: i32) -> Vec<u8> {
+    encode(&BlockAction {
+        location: Position(location),
+        byte1,
+        byte2,
+        block_id,
+    })
+}
+
+#[test]
+fn play_block_action_note_block_resolves_its_canonical_family() {
+    let adapter = V340Adapter::new();
+    // Pairwise-distinct b0/b1 (instrument 5, pitch 11) so a transposition of
+    // the two opaque bytes cannot survive.
+    let payload = encode_block_action(BlockPos::new(1, 64, -3), 5, 11, 25);
+
+    let directives = adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::BLOCK_ACTION,
+            &payload,
+        )
+        .expect("handle");
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::BlockEvent { pos, b0, b1, block })] => {
+            assert_eq!(*pos, BlockPos::new(1, 64, -3));
+            assert_eq!(*b0, 5);
+            assert_eq!(*b1, 11);
+            assert_eq!(block.to_string(), "minecraft:note_block");
+        }
+        other => panic!("expected BlockEvent, got {other:?}"),
+    }
+}
+
+#[test]
+fn play_block_action_piston_and_chest_resolve_distinct_families() {
+    let adapter = V340Adapter::new();
+
+    let piston = encode_block_action(BlockPos::new(0, 0, 0), 1, 0, 33);
+    let directives = adapter
+        .handle_packet(&mut World::new(), ConnectionState::Play, play::clientbound::BLOCK_ACTION, &piston)
+        .expect("handle");
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::BlockEvent { block, .. })] => {
+            assert_eq!(block.to_string(), "minecraft:piston");
+        }
+        other => panic!("expected BlockEvent, got {other:?}"),
+    }
+
+    let chest = encode_block_action(BlockPos::new(0, 0, 0), 1, 0, 54);
+    let directives = adapter
+        .handle_packet(&mut World::new(), ConnectionState::Play, play::clientbound::BLOCK_ACTION, &chest)
+        .expect("handle");
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::BlockEvent { block, .. })] => {
+            assert_eq!(block.to_string(), "minecraft:chest");
+        }
+        other => panic!("expected BlockEvent, got {other:?}"),
+    }
+}
+
+#[test]
+fn play_block_action_rejects_trailing_bytes() {
+    let adapter = V340Adapter::new();
+    let mut payload = encode_block_action(BlockPos::new(0, 0, 0), 0, 0, 25);
+    payload.push(0xFF);
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::BLOCK_ACTION,
+        &payload,
+    );
+    assert!(
+        matches!(result, Err(lodestone_model::AdapterError::Decode(_))),
+        "expected a decode error, got {result:?}"
+    );
+}
+
