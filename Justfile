@@ -363,3 +363,15 @@ oracle-blast-fire:
 # (#[ignore]d). Re-dump first with `just oracle-blast-fire` after a data bump.
 regen-blast-fire:
     LODESTONE_REGEN=1 cargo test -p lodestone-data --test block_blast {{jflag}} --target-dir {{tdir}} committed_table_matches_dump -- --ignored --nocapture
+
+# Reproduces docs/pgo-experiment.md's baseline-vs-PGO instructions-retired
+# comparison on demand (issue #556: opt-in, NOT a default build-config
+# change -- see that doc before reading anything into the number this
+# prints). Three full `--release` builds in a private CARGO_TARGET_DIR
+# (RUSTFLAGS changes between them, so a shared target dir would cost every
+# other live agent a cold-rebuild wave); expect several minutes per build on
+# a loaded machine, not the doc's original "a few minutes total" figure.
+# macOS only (the counter is proc_pid_rusage). No {{jflag}}/{{tdir}}: this
+# recipe deliberately does not touch the shared target dir at all.
+pgo-probe:
+    ./scripts/pgo-probe.sh
