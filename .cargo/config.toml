@@ -16,6 +16,32 @@ rustc-wrapper = "/opt/homebrew/bin/sccache"
 # backend) silently drops this. See docs/compile-times.md.
 rustflags = ["-Z", "threads=8"]
 
+# Cranelift for debug builds only. Measured 2026-08-15/16 across seven crates in
+# isolated target dirs: 2.0x-7.3x less wall time than LLVM, with the largest wins on the
+# protocol families (v735 7.3x, v340 4.6x) and 2.4x on both lodestone-v770 and
+# lodestone-shell. See docs/compile-times.md for the full table and the measurement
+# discipline behind it.
+#
+# The SIMD carve-out that was expected did NOT materialise: Cranelift compiles both
+# `portable_simd` crates (lodestone-worldgen-core, lodestone-worldgen) cleanly, same
+# warning set as LLVM, so no per-package LLVM override is needed anywhere.
+#
+# Scoped to `profile.dev` rather than `build.rustflags` for two reasons. It must not
+# reach `--release`: Cranelift trades runtime performance for compile speed, and this
+# repo's whole worldgen-rewrite premise is release-profile measurement. And the note
+# above about `RUSTFLAGS` clobbering `build.rustflags` applies here too -- a one-off
+# `RUSTFLAGS=...` invocation (the PGO recipes in the Justfile are exactly this) would
+# silently drop a backend set that way, whereas a profile setting survives.
+#
+# Requires the component, which rust-toolchain.toml now declares so a fresh checkout
+# is self-sufficient:
+#   rustup component add rustc-codegen-cranelift-preview --toolchain nightly-2026-08-07
+[unstable]
+codegen-backend = true
+
+[profile.dev]
+codegen-backend = "cranelift"
+
 [env]
 SCCACHE_CACHE_SIZE = "10G"
 MACOSX_DEPLOYMENT_TARGET = "26.5"
