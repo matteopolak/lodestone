@@ -65,6 +65,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   climbs its way there, across terrain it has not seen yet, without desyncing.
   Delivered as a **bevy plugin**, so it has the same power as built-in code — the
   requirement driving [`docs/bevy-migration.md`](./bevy-migration.md).
+- [Beacon: pyramid detection, power selection and periodic effects](./beacon.md) —
+  Server-side simulation for `minecraft:beacon` (issue #616's `SET_BEACON` remainder):
+  pyramid-tier detection, the primary/secondary power menu, and the periodic
+  status-effect grant to nearby players. Before this, `SET_BEACON` decoded and was
+  discarded, and there was no beacon block entity, menu, or effect-selection state
+  anywhere in `lodestone-server`.
 - [Benchmark harness](./benchmark-harness.md) — The criterion-based benchmark
   harness for epic [#78](https://github.com/matteopolak/lodestone/issues/78),
   implemented for six crates so far: `lodestone-worldgen` (chunk generation,
@@ -188,6 +194,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `crates/lodestone-server/src/bone_meal.rs`. Bone meal on wheat, carrots, potatoes or
   beetroots jumps the crop several growth stages; on a sapling it advances the stage
   45% of the time and is consumed either way.
+- [Book-and-quill editing](./book-editing.md) — `EDIT_BOOK` (issue #616's
+  remainder): drafting and signing a `minecraft:writable_book`, server-side. Before
+  this, the packet decoded and was discarded, and `ItemComponents` (`lodestone-model`)
+  had no book-content fields at all — a written or writable book anywhere in an
+  inventory silently truncated the rest of whatever packet carried it, the same
+  decode-cliff class as `trim`/`map_id`/`pot_decorations`/`profile`.
 - [Break particles](./break-particles.md) — A terrain particle is a small
   camera-facing billboard textured from a random **quarter** of its block's
   `#particle` sprite, tinted by a per-state colour, and shaded by the light at its
@@ -977,6 +989,20 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   implementor, [`NavigatingMob`](../crates/lodestone-entity/src/ai/navigating_mob.rs)
   — the same "goal exists, effect doesn't" shape a prior triage sweep found for all
   four defaults.
+- [Status-effect wire sync](./mob-effect-wire-sync.md) — The clientbound
+  `update_mob_effect`/`remove_mob_effect` encoders
+  (`ServerProtocol::encode_update_mob_effect`/`encode_remove_mob_effect`). Before
+  this, the integrated server's `ActiveEffects` (`crate::mob_effects`) changed real
+  gameplay state — `/effect give`, and now a beacon's periodic grant (see
+  [`beacon.md`](./beacon.md)) — but no client was ever told: the clientbound
+  direction of both packets had zero references anywhere in
+  `crates/protocol/v770/src/server_protocol.rs`, even though the **decode** side
+  (`V770Adapter`'s `UPDATE_MOB_EFFECT`/`REMOVE_MOB_EFFECT` arms, `adapter/entity.rs`)
+  already existed and already emits
+  `ClientEvent::MobEffectApplied`/`MobEffectRemoved`. So an applied effect changed
+  health/exhaustion/hunger correctly and put no icon on the HUD at all — the
+  "nothing consumes this" island CLAUDE.md's own evidence section calls out, on the
+  *producer* side this time rather than the consumer.
 - [Mob goal roster](./mob-goal-roster.md) — The per-species goal-set seam: a pure,
   world-free lookup from a species path (`"cow"`, `"creeper"`) to the list of `Goal`s
   vanilla's own `registerGoals()` installs for it, at vanilla's own priority numbers.
