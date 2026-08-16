@@ -747,6 +747,22 @@ it measured.
 a control, ask what else already paints here**, and derive layout from the same expression the draw uses
 rather than restating a constant. (§12.41)
 
+**And a gate's *invariant* can be false, derived from a geometric argument whose unstated assumption holds
+only at one point in the frame.** Measured: a terrain-hole gate asserted that any sky pixel sandwiched
+between two terrain pixels in a screen column is a bug, reasoning that a column's rays share one horizontal
+ground track and so cross terrain monotonically. `Camera::basis`'s `up` carries a `cos(yaw)·sin(pitch)`
+term, so that is true **only at the image's centre column** — off-centre, bearing drift lets one row graze
+past a convex corner into real sky while a lower row reacquires ground, making terrain→sky→terrain legal.
+**213 of the 215 pixels the gate reported were real sky.**
+
+Three things generalise. **A screen-space invariant asserted over a whole frame is usually a centre-of-frame
+truth**, so state which pixel the derivation was written for and ask what the term you dropped does at the
+edges. **Replace an invariant you cannot defend with a per-sample oracle** — here, casting each flagged
+pixel's own ray against real block data, transcribed independently of the renderer — which localises rather
+than aggregates. And **the deliberate-defect control is what proves the new invariant did not simply become
+permissive**: it must still classify 100% of its pixels as genuine bugs. A weakened premise that also
+silences the control has not been fixed, it has been switched off.
+
 **Measure by location, never by frame average.** A gate reporting only a fraction cannot tell a
 uniform-but-wrong frame from a localised blob. Ask *where*, not *what*, and **make failure output print a
 bounding box** — that diagnosed two premise-false controls in one step.
