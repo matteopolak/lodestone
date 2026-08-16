@@ -599,6 +599,7 @@ pub fn drive_mining(
             Option<&SessionMenus>,
             Option<&BreakIntent>,
             &mut BreakOutcome,
+            Option<&Abilities>,
         ),
         With<LocalPlayer>,
     >,
@@ -606,10 +607,18 @@ pub fn drive_mining(
     if !(egress.in_world && egress.live) {
         return;
     }
-    let Ok((state, submersion, slot, dead, menus, intent, mut outcome)) = players.single_mut()
+    let Ok((state, submersion, slot, dead, menus, intent, mut outcome, abilities)) =
+        players.single_mut()
     else {
         return;
     };
+    // `Abilities.instabuild` — vanilla's own creative-instant-break check,
+    // consulted by `Mining::start` ahead of the hardness formula. `Option`
+    // because `Abilities` only arrives once the login `PLAYER_ABILITIES`
+    // packet lands; `false` (ordinary survival formula) until then, which is
+    // also the only sane default for a spectator/session with no server
+    // connection at all.
+    let creative = abilities.is_some_and(|a| a.instabuild);
 
     let human_attacking = attacking.0 && dead.is_none();
     // `via_intent` distinguishes "no hit, human idle" from "no hit, a plugin's
@@ -712,6 +721,7 @@ pub fn drive_mining(
         state.0.on_ground,
         // `eye_in_water`, not `under_water()` — see "Trap 2" on `dig_break_inputs`.
         submersion.0.eye_in_water,
+        creative,
     );
 
     // That fix's block-break veto, asked *before* `continue_` advances the dig

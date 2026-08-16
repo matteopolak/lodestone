@@ -287,7 +287,7 @@ mod census {
 /// Bare-hand inputs on flat, dry ground — the pose every timing figure below
 /// is quoted at.
 fn dry_ground(entry: lodestone_model::BlockHardness) -> BreakInputs {
-    dig_break_inputs(entry, bare_handed_tool_mining(entry), false, true, false)
+    dig_break_inputs(entry, bare_handed_tool_mining(entry), false, true, false, false)
 }
 
 #[test]
@@ -345,7 +345,7 @@ fn a_resolved_tool_mining_speeds_up_the_dig_not_just_bare_hands() {
         correct_tool: true,
         damage_per_block: 1,
     };
-    let tooled = dig_break_inputs(census::STONE, diamond_pickaxe, false, true, false);
+    let tooled = dig_break_inputs(census::STONE, diamond_pickaxe, false, true, false, false);
     assert_eq!(tooled.tool_speed, 8.0);
     assert!(tooled.correct_tool);
     assert_eq!(
@@ -452,6 +452,7 @@ fn submerged_reads_eye_in_water_not_the_fogs_under_water() {
         false,
         true,
         eye_only.eye_in_water,
+        false,
     );
     // Compare the *rate*, not the tick count: `ticks_to_break` replays
     // vanilla's f32 accumulate-and-compare loop, so a 5x slower rate lands
@@ -476,6 +477,7 @@ fn off_ground_mining_is_five_times_slower() {
     let airborne = dig_break_inputs(
         census::STONE,
         bare_handed_tool_mining(census::STONE),
+        false,
         false,
         false,
         false,
@@ -833,6 +835,7 @@ async fn live_bare_hand_stone_timing_survives_the_real_hardness_seam() {
             false,
             true,
             false,
+            false,
         );
         assert!(inputs.progress_per_tick() >= 1.0, "hardness 0 is instant");
         for action in m.start(gate, BlockFace::Up, &inputs, None) {
@@ -886,6 +889,7 @@ async fn live_bare_hand_stone_timing_survives_the_real_hardness_seam() {
         bare_handed_tool_mining(census::STONE),
         false,
         true,
+        false,
         false,
     );
     assert_eq!(stone.ticks_to_break(), Some(151));
@@ -2744,6 +2748,7 @@ fn a_hex_colour_survives_the_title_and_action_bar_accessors() {
 
     let hex = |text: &str, rgb: u32| Text {
         style: TextStyle {
+            font: None,
             color: Some(TextColor::Rgb(rgb)),
             ..TextStyle::default()
         },
@@ -2918,6 +2923,7 @@ fn held_item_overlay_spans_carry_hex_colour_from_a_real_item_to_a_vertex() {
     let hex = Text {
         content: TextContent::Literal("Hex".to_string()),
         style: TextStyle {
+            font: None,
             color: Some(TextColor::Rgb(0x1a_2b3c)),
             ..TextStyle::default()
         },
@@ -2930,6 +2936,7 @@ fn held_item_overlay_spans_carry_hex_colour_from_a_real_item_to_a_vertex() {
     let named = Text {
         content: TextContent::Literal("Gray".to_string()),
         style: TextStyle {
+            font: None,
             color: Some(TextColor::Gray),
             ..TextStyle::default()
         },
@@ -6833,6 +6840,7 @@ fn hex_chat_colour_reaches_a_vertex_through_the_real_session_and_redraw_wiring()
     let hex = Text {
         content: TextContent::Literal("Hex".to_string()),
         style: TextStyle {
+            font: None,
             color: Some(TextColor::Rgb(0x1a_2b3c)),
             ..TextStyle::default()
         },
@@ -6842,6 +6850,7 @@ fn hex_chat_colour_reaches_a_vertex_through_the_real_session_and_redraw_wiring()
     let named = Text {
         content: TextContent::Literal("Gray".to_string()),
         style: TextStyle {
+            font: None,
             color: Some(TextColor::Gray),
             ..TextStyle::default()
         },
