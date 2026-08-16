@@ -70,9 +70,12 @@
 //!   `WitherSkeleton.finalizeSpawn`. `Skeleton`, `Stray`, `Bogged` and `Parched`
 //!   override neither. So [`melee_attack_1_2`] survives with exactly one reachable caller,
 //!   and "skeletons shoot" is *not* the whole rule.
-//!   A drowned still never throws its trident: [`super::ranged`] has a
-//!   `trident_attack` builder, but [`DROWNED`]'s row is still
-//!   [`Coverage::Missing`].
+//!   A drowned now throws its trident when it spawned holding one
+//!   ([`crate::spawn_equipment`]'s ~6.25% roll): [`DROWNED`]'s trident row
+//!   registers [`super::ranged::trident_attack`] unconditionally, exactly as
+//!   vanilla's `addBehaviourGoals` does, and the goal's own `can_use` gates on
+//!   [`crate::ai::MobController::main_hand_item`] rather than on
+//!   registration.
 //! * **Nothing in the sim is a villager, iron golem, turtle, armadillo, axolotl or
 //!   piglin**, so every target registration naming one is [`Coverage::Missing`]
 //!   rather than a goal that would search for an entity class that cannot be
@@ -273,9 +276,11 @@ pub const ZOMBIE: &[Registration] = &[
 /// `ZombieAttackGoal`, `MoveThroughVillageGoal` and a water-avoiding stroll that
 /// vanilla never registers on it, and lose all six goals that make it amphibious.
 ///
-/// Of the twelve rows only four are modelled, and that is the honest figure: five
-/// of the eight unmodelled ones are the amphibious navigation and the trident,
-/// neither of which exists in this repo.
+/// Of the fifteen rows seven are now modelled, with the trident row the
+/// newest addition: it joins the melee row as real now that
+/// [`crate::spawn_equipment`] can say which drowned are holding one. Four of
+/// the eight still-`Missing` rows are the amphibious navigation, which this
+/// repo has no water-aware pathing for at all.
 pub const DROWNED: &[Registration] = &[
     // -- inherited from `Zombie.registerGoals` --------------------------------
     Registration::missing(Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
@@ -288,11 +293,15 @@ pub const DROWNED: &[Registration] = &[
     // not.
     Registration::missing(Selector::Goal, 1, "Drowned.DrownedGoToWaterGoal"),
     // `Drowned.DrownedTridentAttackGoal(this, 1.0, 40, 10.0F)` extends
-    // `RangedAttackGoal` — ranged, so it belongs to the ranged-attack roster
-    // (`super::ranged`), not this unit's. Note it shares priority 2 with the
-    // melee goal below: vanilla gates them on the held item rather than on
-    // precedence.
-    Registration::missing(Selector::Goal, 2, "Drowned.DrownedTridentAttackGoal"),
+    // `RangedAttackGoal` — its builder lives in the ranged-attack roster
+    // (`super::ranged::trident_attack`), registered from here since the
+    // drowned's melee half keeps this file. It shares priority 2 with the
+    // melee goal below: vanilla registers both unconditionally and gates them
+    // at runtime on the held item (`RangedAttackGoal::can_use`'s
+    // `requires_main_hand` conjunct), not on precedence — a drowned that never
+    // rolled a trident (`crate::spawn_equipment`, ~93.75% of spawns) simply
+    // never has this goal's `can_use` return true.
+    Registration::goal(2, "Drowned.DrownedTridentAttackGoal", super::ranged::trident_attack),
     // `Drowned.DrownedAttackGoal(this, 1.0, false)` extends `ZombieAttackGoal`,
     // adding only the `okTarget` check — vanilla's rule that a drowned in water
     // will chase anything but on land only chases a target that is itself in

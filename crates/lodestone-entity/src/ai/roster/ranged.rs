@@ -299,6 +299,14 @@ pub struct RangedAttackGoal {
     attack_radius_sqr: f64,
     attack_time: i32,
     see_time: i32,
+    /// A main-hand item id this goal additionally requires, read through
+    /// [`MobController::main_hand_item`]. `None` for the plain vanilla
+    /// `RangedAttackGoal` shape (the snow golem, the witch); the drowned's
+    /// trident is the one caller that sets it, matching
+    /// `DrownedTridentAttackGoal.canUse`'s
+    /// `this.drowned.getMainHandItem().is(Items.TRIDENT)` conjunct on top of
+    /// `super.canUse()`.
+    requires_main_hand: Option<&'static str>,
 }
 
 impl RangedAttackGoal {
@@ -325,7 +333,18 @@ impl RangedAttackGoal {
             attack_radius_sqr: attack_radius * attack_radius,
             attack_time: -1,
             see_time: 0,
+            requires_main_hand: None,
         }
+    }
+
+    /// Adds a main-hand item requirement on top of the plain `RangedAttackGoal`
+    /// shape — `DrownedTridentAttackGoal.canUse`'s extra conjunct. Builder
+    /// style so [`new`](Self::new)'s call sites that do not need it (the snow
+    /// golem, the witch) stay unchanged.
+    #[must_use]
+    pub fn with_required_main_hand(mut self, item: &'static str) -> Self {
+        self.requires_main_hand = Some(item);
+        self
     }
 
     /// Vanilla's own `Mth.floor(Mth.lerp(dist / radius, min, max))`, in `RangedAttackGoal.tick`.
@@ -344,8 +363,13 @@ impl Goal for RangedAttackGoal {
     }
 
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
-        // `RangedAttackGoal.canUse` — a live target, nothing more.
+        // `RangedAttackGoal.canUse` — a live target, nothing more — plus, for
+        // callers that set one (only the drowned's trident today), the
+        // `DrownedTridentAttackGoal.canUse` main-hand conjunct.
         mob.attack_target().is_some()
+            && self
+                .requires_main_hand
+                .is_none_or(|item| mob.main_hand_item() == Some(item))
     }
 
     fn stop(&mut self, mob: &mut dyn MobController) {
@@ -636,14 +660,16 @@ pub fn bow_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// `pub` because the drowned's row lives in [`super::hostile_melee`].
 #[must_use]
 pub fn trident_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(RangedAttackGoal::new(
-        ProjectileKind::Trident,
-        ARROW_POWER,
-        ctx.speed * 1.0,
-        40,
-        40,
-        10.0,
-    ))
+    Box::new(
+        RangedAttackGoal::new(ProjectileKind::Trident, ARROW_POWER, ctx.speed * 1.0, 40, 40, 10.0)
+            // `DrownedTridentAttackGoal.canUse`'s extra conjunct: vanilla
+            // registers this goal on *every* drowned unconditionally
+            // (`Drowned.addBehaviourGoals`) and gates it at runtime on the
+            // held item, rather than only registering it for drowned that
+            // rolled a trident at spawn. See
+            // `crate::spawn_equipment`'s module doc for the roll itself.
+            .with_required_main_hand("trident"),
+    )
 }
 
 /// `new Ghast.GhastShootFireballGoal(this)` (`Ghast.registerGoals`).

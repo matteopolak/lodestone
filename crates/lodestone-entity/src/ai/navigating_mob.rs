@@ -156,6 +156,13 @@ pub struct NavigatingMob<'w> {
     step_per_tick: f64,
     rng: SplitMix64,
     attack_target: Option<Vec3>,
+    /// The bare item id (e.g. `"trident"`) this mob spawned holding in its
+    /// main hand, if any — vanilla's `getMainHandItem()` narrowed to the one
+    /// question a goal like `DrownedTridentAttackGoal.canUse` actually asks.
+    /// Set once by the host from
+    /// [`crate::spawn_equipment::populate_default_equipment_slots`]; nothing
+    /// here mutates it mid-life (no drop/pickup model exists yet).
+    main_hand: Option<String>,
     /// The block the current path was computed toward, so `move_to` reuses the
     /// active path instead of recomputing every tick (vanilla `moveTo` reuse).
     active_target_block: Option<BlockPos>,
@@ -494,6 +501,7 @@ impl<'w> NavigatingMob<'w> {
             step_per_tick,
             rng: SplitMix64(seed),
             attack_target: None,
+            main_hand: None,
             active_target_block: None,
             last_look: None,
             jumping: false,
@@ -882,6 +890,16 @@ impl<'w> NavigatingMob<'w> {
     /// (`Zombie::createAttributes`).
     pub fn set_follow_range(&mut self, blocks: f64) -> &mut Self {
         self.follow_range = blocks;
+        self
+    }
+
+    /// Host injection point: the bare item id this mob spawned holding in its
+    /// main hand (e.g. `"trident"`), or `None` for empty-handed. Set once at
+    /// spawn from [`crate::spawn_equipment::populate_default_equipment_slots`]'s
+    /// `main_hand` field — the same "species attribute, not per-tick
+    /// perception" shape as [`set_follow_range`](Self::set_follow_range).
+    pub fn set_main_hand_item(&mut self, item: Option<String>) -> &mut Self {
+        self.main_hand = item;
         self
     }
 
@@ -1372,6 +1390,10 @@ impl MobController for NavigatingMob<'_> {
 
     fn set_attack_target(&mut self, target: Option<Vec3>) {
         self.attack_target = target;
+    }
+
+    fn main_hand_item(&self) -> Option<&str> {
+        self.main_hand.as_deref()
     }
 
     /// Vanilla `NearestAttackableTargetGoal::findTarget` for the `Player.class`

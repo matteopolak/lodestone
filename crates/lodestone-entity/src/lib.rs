@@ -33,6 +33,9 @@
 //! * [`damage`] — the damage-reduction pipeline and invulnerability-frame gate.
 //! * [`equipment`] — what an equipped item contributes to combat attributes, the
 //!   feed [`damage`]'s pipeline never had.
+//! * [`spawn_equipment`] — what a mob *spawns holding and wearing*: vanilla's
+//!   `Mob.populateDefaultEquipmentSlots` and its per-species overrides, the
+//!   producer [`equipment`] never had.
 //! * [`explosion`] — ray-sampled blast exposure, damage and knockback power.
 
 pub mod ai;
@@ -49,6 +52,7 @@ pub mod pathfinding;
 pub mod pose;
 pub mod projectile;
 pub mod spawn;
+pub mod spawn_equipment;
 
 pub use attribute::{AttributeDef, AttributeInstance, AttributeMap, Modifier, Operation};
 pub use brain::{
@@ -71,3 +75,4 @@ pub use projectile::{DragProfile, IntegrationOrder, Projectile, ProjectileRegist
 pub use spawn::{
     DespawnCtx, DespawnDecision, MobCategory, SpawnConditions, check_despawn, mob_cap,
 };
+pub use spawn_equipment::{EquipRandom, EquipmentSlots, populate_default_equipment_slots};

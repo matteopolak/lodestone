@@ -90,6 +90,20 @@ pub trait MobController {
         let _ = target;
     }
 
+    /// The bare item id this mob is currently holding in its main hand (e.g.
+    /// `"trident"`), or `None` for empty-handed. Feeds a goal whose vanilla
+    /// `canUse` reads `getMainHandItem()` — [`RangedAttackGoal`]'s optional
+    /// weapon requirement is the one production consumer today.
+    ///
+    /// Defaults to `None` so every existing implementor (including hermetic
+    /// test doubles) keeps compiling; only [`NavigatingMob`] overrides it.
+    ///
+    /// [`RangedAttackGoal`]: crate::ai::roster::ranged::RangedAttackGoal
+    /// [`NavigatingMob`]: crate::ai::NavigatingMob
+    fn main_hand_item(&self) -> Option<&str> {
+        None
+    }
+
     /// The nearest position the mob considers an attackable target — the host
     /// applies the version/type-specific filter (hostility, follow range, line
     /// of sight). Drives `NearestAttackableTargetGoal`.
