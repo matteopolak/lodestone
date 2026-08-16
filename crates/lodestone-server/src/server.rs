@@ -13634,11 +13634,16 @@ where
 }
 
 /// The player-`vitals` slice of the native loop's `vitals_tick` `select!` arm
-/// above — air supply/drowning, world-border damage, burning, status
-/// effects, hunger, and finishing an in-progress eat/drink — ported to run
-/// off [`crate::browser_timer::BrowserInterval`] instead of `tokio::time::
+/// above — air supply/drowning, world-border damage, burning, the periodic
+/// beacon effect sweep, status effects, hunger, and finishing an
+/// in-progress eat/drink — ported to run off
+/// [`crate::browser_timer::BrowserInterval`] instead of `tokio::time::
 /// interval_at`, so the wasm32 [`serve_play`] loop below can drive it too
-/// (issue #636).
+/// (issue #636). The beacon sweep was the one piece `docs/beacon.md` had
+/// long recorded as a disclosed gap here ("the `wasm32` loop's own effects
+/// section... does not yet carry the same beacon sweep") — closed by the
+/// same block the native arm already runs, `block_entities` added as a
+/// parameter for exactly that reason.
 ///
 /// # Why this is a new function rather than a shared extraction
 ///
@@ -13714,6 +13719,9 @@ async fn wasm_vitals_tick<T, P, S>(
     item_in_use: &mut Option<ItemInUse>,
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
+    // The beacon sweep's own read of every tracked `Beacon` block entity —
+    // see this function's own doc for why it was missing until now.
+    block_entities: &BlockEntityHandle,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -13888,6 +13896,60 @@ where
                 Some(crate::vitals::HurtDirection::PURE_ROLL),
             )
             .await?;
+        }
+    }
+
+    // Beacons — same block as the native arm's identical comment (`server::
+    // serve_play`'s `vitals_tick` `select!` arm), ahead of the status-effect
+    // block below for the same reason: it feeds `effects`, and the ordering
+    // between them is unobservable either way since neither reads the
+    // other's output this tick. **Not** gated on `!effects.is_empty()` —
+    // a beacon must be able to apply a *first* effect to a player who
+    // currently has none.
+    if let Some((px, py, pz)) = player_pos
+        && world.time().game_time % 80 == 0
+    {
+        let candidates: Vec<(BlockPos, Option<String>, Option<String>)> = block_entities.with(|reg| {
+            reg.iter()
+                .filter_map(|(pos, entity)| match entity {
+                    BlockEntity::Beacon(b) if b.primary_effect.is_some() => {
+                        Some((*pos, b.primary_effect.clone(), b.secondary_effect.clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        });
+        for (pos, primary, secondary) in candidates {
+            let levels = crate::beacon::beacon_levels(source.get(), pos.x, pos.y, pos.z);
+            if levels == 0 || !crate::beacon::beam_unobstructed(source.get(), pos.x, pos.y, pos.z, 384) {
+                continue;
+            }
+            let (range, application) =
+                crate::beacon::beacon_effects(levels, primary.as_deref(), secondary.as_deref());
+            let dx = px - f64::from(pos.x);
+            let dz = pz - f64::from(pos.z);
+            let dy = py - f64::from(pos.y);
+            if dx.mul_add(dx, dz * dz) > range * range || dy < -range {
+                continue;
+            }
+            for grant in &application {
+                effects.apply(&grant.effect, grant.duration_ticks, grant.amplifier);
+                apply(
+                    conn,
+                    state,
+                    proto.encode_update_mob_effect(
+                        LOCAL_PLAYER_ENTITY_ID,
+                        &grant.effect,
+                        grant.amplifier,
+                        grant.duration_ticks,
+                        true,
+                        true,
+                        true,
+                        false,
+                    ),
+                )
+                .await?;
+            }
         }
     }
 
@@ -14283,6 +14345,7 @@ where
                     &mut item_in_use,
                     mobs,
                     block_ticks,
+                    block_entities,
                 )
                 .await?;
                 continue;
