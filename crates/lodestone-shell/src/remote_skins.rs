@@ -122,6 +122,25 @@ enum FetchState {
 /// self-contained, so two players wearing the same skin hash to one entry.
 static DECODED: Mutex<Option<HashMap<String, Option<RemoteSkin>>>> = Mutex::new(None);
 
+/// The most recent **real** (non-default) skin resolved for each player UUID.
+///
+/// This is the one cache in this module keyed by player UUID rather than
+/// texture URL, and it exists for a different reason: `entities.rs`'s
+/// `resolve_entity_facts` re-derives a player's skin from the tab list *every
+/// frame*, and the tab list is not append-only — a `player_info_remove`
+/// clears a UUID's entry outright. A player-type NPC whose plugin adds a
+/// tab-list entry (carrying `textures`) and then removes it shortly after —
+/// a common technique for keeping a fake player out of the visible player
+/// list while its entity stays spawned — makes the entry vanish exactly the
+/// way a real disconnect would, and `resolve_entity_facts` cannot tell the
+/// two apart from the tab list alone. Without this cache, that lookup miss
+/// silently falls back to the UUID-hash default skin every frame afterwards,
+/// even though the real texture is still sitting in `player_skins`' GPU
+/// cache and `DECODED`/`FETCHED` above — nothing was lost, the *association*
+/// to this UUID just had nowhere to live once the tab-list entry was gone.
+/// See `entities::resolve_entity_facts`'s use of [`remember`]/[`last_known`].
+static LAST_KNOWN: Mutex<Option<HashMap<uuid::Uuid, RemoteSkin>>> = Mutex::new(None);
+
 /// Every URL we have started, finished or given up on.
 static FETCHED: Mutex<Option<HashMap<String, FetchState>>> = Mutex::new(None);
 
@@ -184,6 +203,21 @@ pub fn skin_for_profile(profile: &lodestone_game::tablist::GameProfile) -> Optio
         map.insert(value.to_owned(), decoded.clone());
         decoded
     })
+}
+
+/// Records `skin` as the most recently resolved real skin for `id`, so a
+/// later frame that cannot find `id` in the tab list can still recover it.
+/// See [`LAST_KNOWN`]'s doc.
+pub fn remember(id: uuid::Uuid, skin: &RemoteSkin) {
+    with_map(&LAST_KNOWN, |map| {
+        map.insert(id, skin.clone());
+    });
+}
+
+/// The last real skin [`remember`] recorded for `id`, if any.
+#[must_use]
+pub fn last_known(id: &uuid::Uuid) -> Option<RemoteSkin> {
+    with_map(&LAST_KNOWN, |map| map.get(id).cloned())
 }
 
 /// Start fetching `url` unless it has already been started, finished or failed.

@@ -2899,33 +2899,63 @@ fn resolve_entity_facts(
         // rather than on the property being absent, so a server that attached a
         // `textures` property to a non-player profile cannot put a skin on a
         // mob's rig.
-        player_skin: is_player
-            .then(|| uuid.and_then(|id| tab_list.get(&id)))
-            .flatten()
-            .and_then(|entry| crate::remote_skins::skin_for_profile(&entry.profile))
-            .or_else(|| {
-                // No declared `textures` property reached us: every
-                // offline-mode server (whose profile carries no property at
-                // all), and any online-mode account that has never set a skin.
-                // Vanilla does **not** fall back to a fixed rig here either —
-                // `SkinManager.registerTextures` still calls
-                // `DefaultPlayerSkin.get(profileId)`, the uuid-hash pick over
-                // the 18 built-in identities `lodestone_assets::skin`
-                // (`default_skin_for_uuid`) now ports. Before this, every such
-                // player was hardcoded wide (`type_path`, unmodified — see
-                // `EntityDraw::model_type_path`), which is exactly the
-                // "other/NPC players show a plain Steve" report: not a fetch
-                // failure, a resolver that never ran for the common case.
-                //
-                // The empty `url` is a sentinel, not a real fetch target: the
-                // draw's own fallback ("`Some(url)` with no bind group
-                // installed yet resolves to the default sheet too" —
-                // `EntityDrawBatch::skin`'s doc) already treats any unknown url
-                // as "use the model's own sheet", and `remote_skins::request`
-                // refuses an empty url outright so this can never open a
-                // doomed HTTP GET.
-                is_player.then(|| uuid.map(default_remote_skin)).flatten()
-            }),
+        player_skin: is_player.then(|| uuid).flatten().map(|id| {
+            let Some(entry) = tab_list.get(&id) else {
+                // No tab-list entry for this uuid *this frame*. This is not
+                // the same thing as "this player has no skin": a
+                // `player_info_remove` clears the entry outright, and a
+                // player-type NPC whose plugin adds a tab-list entry (with
+                // `textures`) and then removes it shortly after — keeping a
+                // fake player out of the visible player list while the
+                // entity stays spawned — makes the lookup miss exactly the
+                // way a real disconnect would. Falling back to the
+                // uuid-hash default here (as this used to, unconditionally)
+                // is what "skin enable[d] for a second... then changed back
+                // to a default alex skin" was: the tab-list entry, and only
+                // the tab-list entry, disappeared, so re-deriving from it
+                // every frame silently discarded an already-resolved skin.
+                // `remote_skins::last_known` is that resolution's memory —
+                // the fetched texture is still sitting in `player_skins`'
+                // GPU cache regardless, so prefer it over the default.
+                return crate::remote_skins::last_known(&id)
+                    .unwrap_or_else(|| default_remote_skin(id));
+            };
+            match crate::remote_skins::skin_for_profile(&entry.profile) {
+                Some(skin) => {
+                    crate::remote_skins::remember(id, &skin);
+                    skin
+                }
+                None => {
+                    // No declared `textures` property reached us: every
+                    // offline-mode server (whose profile carries no property at
+                    // all), and any online-mode account that has never set a skin.
+                    // Vanilla does **not** fall back to a fixed rig here either —
+                    // `SkinManager.registerTextures` still calls
+                    // `DefaultPlayerSkin.get(profileId)`, the uuid-hash pick over
+                    // the 18 built-in identities `lodestone_assets::skin`
+                    // (`default_skin_for_uuid`) now ports. Before this, every such
+                    // player was hardcoded wide (`type_path`, unmodified — see
+                    // `EntityDraw::model_type_path`), which is exactly the
+                    // "other/NPC players show a plain Steve" report: not a fetch
+                    // failure, a resolver that never ran for the common case.
+                    //
+                    // The empty `url` is a sentinel, not a real fetch target: the
+                    // draw's own fallback ("`Some(url)` with no bind group
+                    // installed yet resolves to the default sheet too" —
+                    // `EntityDrawBatch::skin`'s doc) already treats any unknown url
+                    // as "use the model's own sheet", and `remote_skins::request`
+                    // refuses an empty url outright so this can never open a
+                    // doomed HTTP GET. This branch (tab-list entry present, but
+                    // declaring no texture) is left at the plain default rather
+                    // than consulting `last_known`: unlike the missing-entry case
+                    // above, `fold_entry`'s merge rule keeps existing properties
+                    // whenever an update omits them, so an entry that is present
+                    // and genuinely declares no texture is trustworthy evidence
+                    // this player really has none, not a transient gap.
+                    default_remote_skin(id)
+                }
+            }
+        }),
     })
 }
 
@@ -4277,6 +4307,115 @@ mod tests {
                  default_skin_for_uuid, not draw an unrelated default"
             );
             assert_eq!(draw_with_skin(facts.player_skin.clone()).model_type_path(), "player_slim");
+        }
+
+        /// A player-type entity's resolved skin must survive its tab-list
+        /// entry disappearing.
+        ///
+        /// The owner-reported shape: a real skin resolves for a second, then
+        /// reverts to the default Alex skin. A `player_info_remove` clears a
+        /// uuid's tab-list entry outright, and a player-type NPC whose
+        /// plugin adds a tab-list
+        /// entry (carrying `textures`) and then removes it shortly after —
+        /// keeping a fake player out of the visible player list while its
+        /// entity stays spawned — makes `tab_list.get(&id)` miss exactly the
+        /// way a real disconnect would. Before this fix, `resolve_entity_facts`
+        /// re-derived `player_skin` from the tab list on every frame with no
+        /// memory of a previous resolution, so that miss silently discarded
+        /// an already-resolved real skin in favour of the uuid-hash default —
+        /// even though the fetched texture was still sitting in
+        /// `remote_skins`' own caches.
+        ///
+        /// Two frames against the *same* entity: first with the tab-list
+        /// entry present (the real skin resolves and `remote_skins::remember`
+        /// records it), then with an empty tab list for the same uuid (the
+        /// entry is gone, mirroring `player_info_remove`) — the second
+        /// resolve must still report the real skin. The trailing control
+        /// uses a *different*, never-before-seen uuid against the same empty
+        /// tab list, and must still fall back to the default: the fix must
+        /// not have become "never show the default", only "don't forget a
+        /// skin this uuid actually had".
+        #[test]
+        fn a_players_skin_survives_a_missing_tab_list_entry_once_resolved() {
+            fn textures_property(url: &str) -> lodestone_game::tablist::ProfileProperty {
+                let json = format!(
+                    r#"{{"textures":{{"SKIN":{{"url":"{url}","metadata":{{"model":"slim"}}}}}}}}"#
+                );
+                lodestone_game::tablist::ProfileProperty {
+                    name: "textures".to_owned(),
+                    value: base64(json.as_bytes()),
+                    signature: None,
+                }
+            }
+            fn base64(bytes: &[u8]) -> String {
+                const T: &[u8; 64] =
+                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                let mut out = String::new();
+                for chunk in bytes.chunks(3) {
+                    let b = [
+                        chunk[0],
+                        chunk.get(1).copied().unwrap_or(0),
+                        chunk.get(2).copied().unwrap_or(0),
+                    ];
+                    let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+                    for i in 0..4 {
+                        if i <= chunk.len() {
+                            out.push(char::from(T[((n >> (18 - 6 * i)) & 0x3f) as usize]));
+                        } else {
+                            out.push('=');
+                        }
+                    }
+                }
+                out
+            }
+
+            let id = Uuid::from_u128(90_210);
+            let url = "https://textures.minecraft.net/texture/issue678";
+            let mut tabs = lodestone_game::tablist::TabList::new();
+            let mut profile = lodestone_game::tablist::GameProfile::new(id, "Npc");
+            profile.properties.push(textures_property(url));
+            tabs.insert(lodestone_game::tablist::PlayerListEntry::new(profile));
+
+            let mut world = World::new();
+            let entity = bare_player_entity(&mut world, id);
+
+            let listed = facts_for(&world, entity, &tabs);
+            let skin = listed
+                .player_skin
+                .clone()
+                .expect("a declared texture property must resolve while listed");
+            assert_eq!(skin.url, url);
+
+            // The tab-list entry disappears (`player_info_remove`); the
+            // entity itself is untouched.
+            let unlisted = lodestone_game::tablist::TabList::new();
+            let after_removal = facts_for(&world, entity, &unlisted);
+            let skin_after = after_removal
+                .player_skin
+                .clone()
+                .expect("a previously-resolved player must still report a skin");
+            assert_eq!(
+                skin_after.url, url,
+                "a previously-resolved real skin must survive a missing tab-list \
+                 entry rather than silently reverting to the uuid-hash default"
+            );
+
+            // Control: a uuid never seen through the tab list at all, against
+            // the same empty tab list, must still take the default -- the
+            // fallback is "remember what this uuid actually had", not "keep
+            // showing the last skin resolved for anybody".
+            let never_seen = Uuid::from_u128(90_211);
+            let mut other_world = World::new();
+            let other_entity = bare_player_entity(&mut other_world, never_seen);
+            let never_facts = facts_for(&other_world, other_entity, &unlisted);
+            let never_skin = never_facts
+                .player_skin
+                .clone()
+                .expect("an unlisted player with no history still resolves the default");
+            assert_eq!(
+                never_skin.url, "",
+                "a uuid with no prior real resolution must not spuriously inherit one"
+            );
         }
 
         /// A minimal player [`EntityDraw`] carrying `skin` and nothing else —
