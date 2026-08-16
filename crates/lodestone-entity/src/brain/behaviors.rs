@@ -387,3 +387,357 @@ impl Behavior for Panic {
         "panic"
     }
 }
+
+/// Rolls `min + next_i32(max + 1 - min)` — vanilla's `UniformInt.sample`,
+/// reused by both goat-ram cooldown rolls below rather than duplicated.
+fn uniform_roll(mob: &mut dyn BrainMob, min: i32, max: i32) -> i32 {
+    let span = max + 1 - min;
+    if span > 0 { min + mob.next_i32(span) } else { min }
+}
+
+/// `PrepareRamNearestTarget` (`world/entity/ai/behavior/PrepareRamNearestTarget.java`)
+/// — the goat ram's first phase: pick the nearest visible living entity, back
+/// away from it to a ramming distance, wait
+/// [`ram_prepare_time`](Self::new)'s worth of ticks once there, then hand off
+/// to [`RamTarget`] by writing [`MemoryModuleType::RAM_TARGET`].
+///
+/// # Three disclosed cuts from the jar original
+///
+/// * **No `TargetingConditions` species/world-border filter.** Vanilla's
+///   `RAM_TARGET_CONDITIONS` excludes other goats and (with `mobGriefing`
+///   off) armour stands; this crate's [`NearbyBrainEntity`](super::mob::NearbyBrainEntity)
+///   carries no species tag a filter could read (see
+///   [`NearestVisibleLivingEntitiesSensor`](super::sensor::NearestVisibleLivingEntitiesSensor)'s
+///   own doc), so the nearest visible living entity is always the candidate —
+///   including another goat.
+/// * **No real pathfinding-based start-position search.** Vanilla scans the
+///   four cardinal directions for the walkable cell furthest from the target
+///   (up to [`max_ram_distance`](Self::new)) and picks whichever reachable one
+///   is nearest the goat. This picks the point [`min_ram_distance`](Self::new)–[`max_ram_distance`](Self::new)
+///   blocks from the target **directly behind the goat's current bearing to
+///   it** — no walkability check — and leans on [`BrainMob::move_to`]'s own
+///   real A\* to fail closed: an unreachable point simply never lets the goat
+///   arrive, so the behaviour times out and pays the fail cooldown exactly as
+///   a vanilla goat with no reachable ramming cell would.
+/// * **"Did the target move" is a >1-block horizontal displacement, not a
+///   block-position inequality.** [`BrainMob`] has no block-grid concept; a
+///   sub-block displacement is deliberately not treated as movement so a
+///   goat is not perpetually re-aiming at a target taking small steps.
+#[derive(Debug)]
+pub struct PrepareRam {
+    min_ram_distance: f64,
+    max_ram_distance: f64,
+    walk_speed: f32,
+    ram_prepare_time: i32,
+    cooldown_on_fail_min: i32,
+    cooldown_on_fail_max: i32,
+    candidate: Option<Vec3>,
+    target_id: Option<i32>,
+    target_pos: Option<Vec3>,
+    reached_at: Option<i64>,
+    entry: [(MemoryModuleType, MemoryStatus); 3],
+}
+
+impl PrepareRam {
+    /// `min_ram_distance`/`max_ram_distance` are `RAM_MIN_DISTANCE`/`RAM_MAX_DISTANCE`
+    /// (4/7 for a goat), `walk_speed` is `SPEED_MULTIPLIER_WHEN_PREPARING_TO_RAM`
+    /// (1.25), `ram_prepare_time` is `RAM_PREPARE_TIME` (20), and the two
+    /// cooldown bounds are `GoatAi.TIME_BETWEEN_RAMS`'s own range (600–6000
+    /// for a non-screaming goat; this crate does not model the screaming
+    /// variant's shorter 100–300 range).
+    #[must_use]
+    pub fn new(
+        min_ram_distance: f64,
+        max_ram_distance: f64,
+        walk_speed: f32,
+        ram_prepare_time: i32,
+        cooldown_on_fail_min: i32,
+        cooldown_on_fail_max: i32,
+    ) -> Self {
+        Self {
+            min_ram_distance,
+            max_ram_distance,
+            walk_speed,
+            ram_prepare_time,
+            cooldown_on_fail_min,
+            cooldown_on_fail_max,
+            candidate: None,
+            target_id: None,
+            target_pos: None,
+            reached_at: None,
+            entry: [
+                (MemoryModuleType::RAM_COOLDOWN_TICKS, MemoryStatus::ValueAbsent),
+                (MemoryModuleType::RAM_TARGET, MemoryStatus::ValueAbsent),
+                (
+                    MemoryModuleType::NEAREST_VISIBLE_LIVING_ENTITIES,
+                    MemoryStatus::ValuePresent,
+                ),
+            ],
+        }
+    }
+
+    /// Picks a backing-away point `[min_ram_distance, max_ram_distance]`
+    /// blocks from `target_pos`, on the line through the mob's own current
+    /// position — see this struct's own doc for why this replaces vanilla's
+    /// walkable-cell search.
+    fn choose_start_position(&self, origin: Vec3, target_pos: Vec3) -> Vec3 {
+        let dx = origin.x - target_pos.x;
+        let dz = origin.z - target_pos.z;
+        let current = dx.hypot(dz);
+        let (dir_x, dir_z) = if current > 1.0e-4 {
+            (dx / current, dz / current)
+        } else {
+            (1.0, 0.0)
+        };
+        let distance = current.clamp(self.min_ram_distance, self.max_ram_distance);
+        Vec3::new(
+            target_pos.x + dir_x * distance,
+            target_pos.y,
+            target_pos.z + dir_z * distance,
+        )
+    }
+
+    fn fail_cooldown(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob) {
+        let cooldown = uniform_roll(mob, self.cooldown_on_fail_min, self.cooldown_on_fail_max);
+        mem.set_with_expiry(
+            MemoryModuleType::RAM_COOLDOWN_TICKS,
+            MemoryValue::Unit,
+            i64::from(cooldown),
+        );
+    }
+}
+
+impl Behavior for PrepareRam {
+    fn entry_condition(&self) -> &[(MemoryModuleType, MemoryStatus)] {
+        &self.entry
+    }
+
+    // `PrepareRamNearestTarget`'s own `super(..., 160)`: a fixed duration, not
+    // a rolled range.
+    fn min_duration(&self) -> i32 {
+        160
+    }
+
+    fn max_duration(&self) -> i32 {
+        160
+    }
+
+    fn check_extra_start_conditions(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob) -> bool {
+        let Some(MemoryValue::Entities(ids)) = mem.get(MemoryModuleType::NEAREST_VISIBLE_LIVING_ENTITIES)
+        else {
+            return false;
+        };
+        // Nearest-first (the sensor's own contract), so the first id present
+        // in the live snapshot is vanilla's `findClosest`.
+        let ids = ids.clone();
+        let nearby = mob.nearby_entities();
+        let Some(target) = ids.iter().find_map(|id| nearby.iter().find(|e| e.id == *id)) else {
+            self.fail_cooldown(mem, mob);
+            return false;
+        };
+        let origin = mob.position();
+        self.candidate = Some(self.choose_start_position(origin, target.position));
+        self.target_id = Some(target.id);
+        self.target_pos = Some(target.position);
+        self.reached_at = None;
+        true
+    }
+
+    fn can_still_use(&mut self, _mem: &mut Memories, _mob: &mut dyn BrainMob, _time: i64) -> bool {
+        self.candidate.is_some()
+    }
+
+    fn tick(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob, time: i64) {
+        let (Some(start_pos), Some(target_id)) = (self.candidate, self.target_id) else {
+            return;
+        };
+        let live = mob.nearby_entities().into_iter().find(|e| e.id == target_id);
+        let Some(live) = live else {
+            // The target is no longer in the perceived set — vanilla's
+            // `canStillUse` reads `target.isAlive()`, which this seam cannot
+            // query directly; a target that vanished from perception stands
+            // in for it.
+            self.candidate = None;
+            return;
+        };
+        mem.set(
+            MemoryModuleType::WALK_TARGET,
+            MemoryValue::WalkTarget(WalkTarget::new(start_pos, self.walk_speed, 0)),
+        );
+        mem.set(MemoryModuleType::LOOK_TARGET, MemoryValue::Pos(live.position));
+
+        let moved = self
+            .target_pos
+            .is_some_and(|prev| horizontal_distance(prev, live.position) > 1.0);
+        if moved {
+            self.candidate = Some(self.choose_start_position(mob.position(), live.position));
+            self.target_pos = Some(live.position);
+            self.reached_at = None;
+            mob.stop_navigation();
+            return;
+        }
+
+        if horizontal_distance(mob.position(), start_pos) <= 0.5 {
+            if self.reached_at.is_none() {
+                self.reached_at = Some(time);
+            }
+            if time - self.reached_at.expect("just set") >= i64::from(self.ram_prepare_time) {
+                mem.set(MemoryModuleType::RAM_TARGET, MemoryValue::Pos(live.position));
+                self.candidate = None;
+            }
+        }
+    }
+
+    fn stop(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob, _time: i64) {
+        if !mem.has_value(MemoryModuleType::RAM_TARGET) {
+            self.fail_cooldown(mem, mob);
+        }
+        mem.erase(MemoryModuleType::LOOK_TARGET);
+        self.candidate = None;
+        self.target_id = None;
+        self.target_pos = None;
+        self.reached_at = None;
+    }
+
+    fn name(&self) -> &'static str {
+        "prepare_ram"
+    }
+}
+
+/// `RamTarget` (`world/entity/ai/behavior/RamTarget.java`) — the goat ram's
+/// second phase: charge [`MemoryModuleType::RAM_TARGET`] at `speed`, and hit
+/// the first thing that comes within [`CONTACT_RANGE`](Self::CONTACT_RANGE).
+///
+/// **Three disclosed cuts from the jar original.** The impact deals no
+/// jar-derived knockback direction/force of its own — it records a plain
+/// [`BrainMob::attack`] at the victim's position and leaves
+/// damage/knockback to whatever pipeline already resolves a goal-driven
+/// melee hit, rather than porting `RamTarget`'s own charge-direction,
+/// speed-scaled knockback formula (this is the same seam
+/// [`super::mob::BrainMob::attack`]'s own doc already names). The
+/// horn-breaking-block check (`hasRammedHornBreakingBlock`) is not ported —
+/// this seam has no block-state read. And the "reached or gave up" exit
+/// check reads the **mob's own position**, not vanilla's literal
+/// (effectively self-comparing) one — see [`tick`](Behavior::tick)'s own
+/// inline comment for why a faithful transcription would not test distance
+/// at all.
+#[derive(Debug)]
+pub struct RamTarget {
+    speed: f32,
+    cooldown_min: i32,
+    cooldown_max: i32,
+    entry: [(MemoryModuleType, MemoryStatus); 2],
+}
+
+impl RamTarget {
+    /// A hit lands once the mob is within this many blocks (horizontally) of
+    /// whatever it is perceiving — a standin for vanilla's own bounding-box
+    /// overlap test (`level.getNearbyEntities(..., body.getBoundingBox())`),
+    /// which this seam has no box to evaluate.
+    pub const CONTACT_RANGE: f64 = 1.2;
+
+    /// `speed` is `SPEED_MULTIPLIER_WHEN_RAMMING` (3.0 for a goat); the
+    /// cooldown bounds are the same `GoatAi.TIME_BETWEEN_RAMS` range
+    /// [`PrepareRam::new`] takes, reused here for the post-ram cooldown vanilla's
+    /// own `finishRam` rolls from the identical supplier.
+    #[must_use]
+    pub fn new(speed: f32, cooldown_min: i32, cooldown_max: i32) -> Self {
+        Self {
+            speed,
+            cooldown_min,
+            cooldown_max,
+            entry: [
+                (MemoryModuleType::RAM_COOLDOWN_TICKS, MemoryStatus::ValueAbsent),
+                (MemoryModuleType::RAM_TARGET, MemoryStatus::ValuePresent),
+            ],
+        }
+    }
+
+    fn finish(&self, mem: &mut Memories, mob: &mut dyn BrainMob) {
+        let cooldown = uniform_roll(mob, self.cooldown_min, self.cooldown_max);
+        mem.set_with_expiry(
+            MemoryModuleType::RAM_COOLDOWN_TICKS,
+            MemoryValue::Unit,
+            i64::from(cooldown),
+        );
+        mem.erase(MemoryModuleType::RAM_TARGET);
+        mob.stop_navigation();
+    }
+}
+
+impl Behavior for RamTarget {
+    fn entry_condition(&self) -> &[(MemoryModuleType, MemoryStatus)] {
+        &self.entry
+    }
+
+    // `RamTarget`'s own `super(..., 200)`: fixed, not rolled.
+    fn min_duration(&self) -> i32 {
+        200
+    }
+
+    fn max_duration(&self) -> i32 {
+        200
+    }
+
+    fn start(&mut self, mem: &mut Memories, _mob: &mut dyn BrainMob, _time: i64) {
+        if let Some(&MemoryValue::Pos(target)) = mem.get(MemoryModuleType::RAM_TARGET) {
+            mem.set(
+                MemoryModuleType::WALK_TARGET,
+                MemoryValue::WalkTarget(WalkTarget::new(target, self.speed, 0)),
+            );
+        }
+    }
+
+    fn can_still_use(&mut self, mem: &mut Memories, _mob: &mut dyn BrainMob, _time: i64) -> bool {
+        mem.has_value(MemoryModuleType::RAM_TARGET)
+    }
+
+    fn tick(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob, _time: i64) {
+        let origin = mob.position();
+        let hit = mob
+            .nearby_entities()
+            .into_iter()
+            .find(|e| horizontal_distance(origin, e.position) <= Self::CONTACT_RANGE);
+        if let Some(hit) = hit {
+            mob.attack(hit.position);
+            self.finish(mem, mob);
+            return;
+        }
+
+        let Some(&MemoryValue::Pos(ram_target)) = mem.get(MemoryModuleType::RAM_TARGET) else {
+            self.finish(mem, mob);
+            return;
+        };
+        // Vanilla's own `lostOrReachedTarget` compares
+        // `walkTarget.get().getTarget().currentPosition()` — the *WalkTarget's
+        // own* fixed position, built from this exact `ramTargetPos` in
+        // `start()` — against `ramTarget.get()`, the same value read back from
+        // memory. Both sides trace to the identical constant, so the literal
+        // transcription is within `0.25` of itself on every tick regardless of
+        // whether the goat has moved at all — not a distance check in any
+        // useful sense. This port instead checks the **mob's own current
+        // position** against `ram_target`, which is what "reached" or "gave up
+        // without connecting" actually has to mean for the charge to be
+        // visible.
+        let reached_or_lost = match mem.get(MemoryModuleType::WALK_TARGET) {
+            Some(_) => horizontal_distance(origin, ram_target) <= 0.25,
+            None => true,
+        };
+        if reached_or_lost {
+            self.finish(mem, mob);
+        }
+    }
+
+    fn stop(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob, _time: i64) {
+        // A safety net for the 200-tick hard timeout — `tick`'s own paths
+        // already call `finish` (and erase `RAM_TARGET`) for every other
+        // exit, so this only fires if none of them did.
+        if mem.has_value(MemoryModuleType::RAM_TARGET) {
+            self.finish(mem, mob);
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "ram_target"
+    }
+}

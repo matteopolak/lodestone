@@ -68,6 +68,18 @@ impl MemoryModuleType {
     pub const CANT_REACH_WALK_TARGET_SINCE: Self = Self("cant_reach_walk_target_since");
     /// Present while the mob holds a computed path (a marker here).
     pub const PATH: Self = Self("path");
+    /// The point a goat's ram-attack charges toward — `GoatAi.RAM`'s
+    /// `RamTarget`/`PrepareRamNearestTarget` share this exact memory, the
+    /// former reading it as its walk destination and the latter writing it
+    /// once the prepare timer elapses.
+    pub const RAM_TARGET: Self = Self("ram_target");
+    /// A presence-only marker (with a TTL) blocking a new ram attempt —
+    /// vanilla's `RAM_COOLDOWN_TICKS`, an `Integer` counted down every tick by
+    /// a `CountDownCooldownTicks` core behaviour there. This crate's
+    /// [`Memories`] TTL mechanism ([`Memories::set_with_expiry`]) already
+    /// performs that countdown-and-auto-clear, so no separate ticking
+    /// behaviour is needed to reproduce it.
+    pub const RAM_COOLDOWN_TICKS: Self = Self("ram_cooldown_ticks");
 }
 
 /// The presence requirement a behaviour places on a memory.

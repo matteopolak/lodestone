@@ -44,11 +44,16 @@
 
 use super::activity::Activity;
 use super::behavior::{Behavior, BehaviorControl, Leaf};
-use super::behaviors::{LookAtTargetSink, MoveToTargetSink, Panic, RandomStroll, SetPlayerLookTarget};
+use super::behaviors::{
+    LookAtTargetSink, MoveToTargetSink, Panic, PrepareRam, RamTarget, RandomStroll,
+    SetPlayerLookTarget,
+};
 use super::driver::BrainGoal;
 use super::gate::GateBehavior;
 use super::memory::{MemoryModuleType, MemoryStatus};
-use super::sensor::{HurtBySensor, NearestHostileSensor, NearestPlayerSensor};
+use super::sensor::{
+    HurtBySensor, NearestHostileSensor, NearestPlayerSensor, NearestVisibleLivingEntitiesSensor,
+};
 use super::Brain;
 
 /// The walk-target speed **modifier** the scaffold's stroll writes.
@@ -227,6 +232,51 @@ pub fn villager_brain() -> Brain {
     brain
 }
 
+/// A goat's brain: [`scaffold_with_panic`] (`AnimalPanic(2.0F)`, `GoatAi`'s
+/// own figure — see [`PANIC_SPEED_MULTIPLIER`]'s `"goat"` row) plus the
+/// ram-attack pair (issue #230's genuine ask; the long jump is a separate,
+/// arc-shaped unit not built here — see
+/// [`super::behaviors::PrepareRam`]/[`super::behaviors::RamTarget`]'s own
+/// docs for exactly what each does and does not port).
+///
+/// # Why `RAM`'s eligibility condition adds a memory vanilla's own table does not require
+///
+/// `GoatAi.initRamActivity`'s own `ImmutableSet` requires only
+/// `RAM_COOLDOWN_TICKS` absent (plus `TEMPTING_PLAYER`/`BREED_TARGET` absent,
+/// neither of which this crate models). Requiring only that would make `RAM`
+/// "eligible" — and therefore active, since it precedes `IDLE` in
+/// [`brain_for`]'s candidate list — even with nothing nearby to ram, which
+/// would suppress `IDLE`'s stroll/look behaviours for the whole
+/// [`PrepareRam`](super::behaviors::PrepareRam) timeout (160 ticks) every
+/// time the cooldown lapses with no target around. That is a genuine vanilla
+/// quirk (`PrepareRamNearestTarget`'s own fail path sets a short cooldown and
+/// retries), not a bug this port needs to reproduce: requiring
+/// `NEAREST_VISIBLE_LIVING_ENTITIES` present too keeps a goat with nothing
+/// nearby idling normally instead of periodically freezing.
+#[must_use]
+pub fn goat_brain() -> Brain {
+    let mut brain = scaffold_with_panic(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE, 2.0);
+    brain.add_sensor(Box::new(NearestVisibleLivingEntitiesSensor));
+    brain.add_activity(
+        Activity::RAM,
+        vec![
+            // `GoatAi.initRamActivity`'s own priorities: `RamTarget` at 0,
+            // `PrepareRamNearestTarget` at 1.
+            (0, leaf(RamTarget::new(3.0, 600, 6000))),
+            (1, leaf(PrepareRam::new(4.0, 7.0, 1.25, 20, 600, 6000))),
+        ],
+        vec![
+            (MemoryModuleType::RAM_COOLDOWN_TICKS, MemoryStatus::ValueAbsent),
+            (
+                MemoryModuleType::NEAREST_VISIBLE_LIVING_ENTITIES,
+                MemoryStatus::ValuePresent,
+            ),
+        ],
+        Vec::new(),
+    );
+    brain
+}
+
 /// `AnimalPanic`'s own speed multiplier, one row per species that registers
 /// it — `new AnimalPanic(speedMultiplier)` (or, for the sniffer, the
 /// anonymous subclass's identical constructor argument) in each species' own
@@ -262,6 +312,12 @@ pub fn brain_for(species: &str) -> Option<BrainGoal> {
             villager_brain(),
             vec![Activity::PANIC, Activity::IDLE],
         ));
+    }
+    // Same shape as the villager special-case above: a goat needs both a
+    // brain with an extra activity (`RAM`) and a candidate list that offers
+    // it — `BrainGoal::idle` only ever offers `IDLE`.
+    if species == "goat" {
+        return Some(BrainGoal::new(goat_brain(), vec![Activity::RAM, Activity::IDLE]));
     }
     let brain = match PANIC_SPEED_MULTIPLIER.iter().find(|&&(s, _)| s == species) {
         Some(&(_, speed)) => scaffold_with_panic(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE, speed),
@@ -527,5 +583,126 @@ mod tests {
         // The two must genuinely differ, or the presence check above could
         // pass with every species sharing one hardcoded constant.
         assert_ne!(lookup("camel"), lookup("goat"));
+    }
+
+    /// A [`BrainMob`](super::super::mob::BrainMob) double whose `move_to`
+    /// actually relocates the mob (unlike [`PanicTestMob`], which only flags
+    /// navigation in progress) — needed so [`PrepareRam`]/[`RamTarget`]'s own
+    /// "did we arrive" checks can resolve `true` inside a hermetic test, and
+    /// so it can record what [`super::super::mob::BrainMob::attack`] was
+    /// called with.
+    struct RamTestMob {
+        pos: lodestone_model::Vec3,
+        time: i64,
+        nearby: Vec<super::super::mob::NearbyBrainEntity>,
+        attacks: Vec<lodestone_model::Vec3>,
+    }
+
+    impl super::super::mob::BrainMob for RamTestMob {
+        fn next_i32(&mut self, bound: i32) -> i32 {
+            bound.saturating_sub(1).max(0)
+        }
+        fn next_f32(&mut self) -> f32 {
+            0.5
+        }
+        fn game_time(&self) -> i64 {
+            self.time
+        }
+        fn position(&self) -> lodestone_model::Vec3 {
+            self.pos
+        }
+        fn move_to(&mut self, target: lodestone_model::Vec3, _speed: f32) -> bool {
+            self.pos = target;
+            true
+        }
+        fn navigation_done(&self) -> bool {
+            true
+        }
+        fn stop_navigation(&mut self) {}
+        fn look_at(&mut self, _target: lodestone_model::Vec3) {}
+        fn random_land_pos(&mut self, max_xz: i32, _max_y: i32) -> Option<lodestone_model::Vec3> {
+            Some(lodestone_model::Vec3::new(self.pos.x + f64::from(max_xz), self.pos.y, self.pos.z))
+        }
+        fn nearby_entities(&self) -> Vec<super::super::mob::NearbyBrainEntity> {
+            self.nearby.clone()
+        }
+        fn attack(&mut self, target: lodestone_model::Vec3) {
+            self.attacks.push(target);
+        }
+    }
+
+    /// End-to-end through [`brain_for("goat")`], the exact production path
+    /// `MobSim::spawn_species` uses (per [`goals_for`](crate::ai::roster::goals_for)'s
+    /// own doc: "no host learns a new call"): a goat with a living entity 5
+    /// blocks away must back away, prepare, charge, and land a
+    /// [`BrainMob::attack`] on it — proving the whole ram pair is wired, not
+    /// merely unit-correct in isolation. Driven with the villager test's own
+    /// `set_active_activity_to_first_valid` + `tick` sequence, since `RAM`
+    /// (like `PANIC` there) is a non-core activity `BrainGoal::tick` — not a
+    /// plain `Brain::tick` — re-evaluates every call.
+    #[test]
+    fn a_goat_with_a_nearby_target_charges_and_lands_a_hit() {
+        let candidates = [Activity::RAM, Activity::IDLE];
+        let mut goat = brain_for("goat").expect("goat is a brain species");
+        let target_id = 77;
+        let mut mob = RamTestMob {
+            pos: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+            time: 0,
+            nearby: vec![super::super::mob::NearbyBrainEntity {
+                id: target_id,
+                position: lodestone_model::Vec3::new(5.0, 0.0, 0.0),
+                hostile: false,
+            }],
+            attacks: Vec::new(),
+        };
+
+        // Generous: prepare (20-tick wait once arrived, plus a few ticks of
+        // one-tick lag between a producer and the CORE sink that consumes it)
+        // plus the charge itself, well inside RamTarget's own 200-tick cap.
+        for _ in 0..80 {
+            goat.brain_mut()
+                .set_active_activity_to_first_valid(&candidates);
+            goat.brain_mut().tick(&mut mob);
+            mob.time += 1;
+            if !mob.attacks.is_empty() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            mob.attacks,
+            vec![lodestone_model::Vec3::new(5.0, 0.0, 0.0)],
+            "the goat must land exactly one attack on the target's position; got {:?}",
+            mob.attacks
+        );
+    }
+
+    /// The negative control: no nearby entity means `RAM` never has anything
+    /// to do, so the goat must fall back to `IDLE` and never call
+    /// [`BrainMob::attack`] — a goat alone in the world must not spontaneously
+    /// ram nothing.
+    #[test]
+    fn a_goat_with_nothing_nearby_never_attacks_and_falls_back_to_idle() {
+        let candidates = [Activity::RAM, Activity::IDLE];
+        let mut goat = brain_for("goat").expect("goat is a brain species");
+        let mut mob = RamTestMob {
+            pos: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+            time: 0,
+            nearby: Vec::new(),
+            attacks: Vec::new(),
+        };
+
+        for _ in 0..40 {
+            goat.brain_mut()
+                .set_active_activity_to_first_valid(&candidates);
+            goat.brain_mut().tick(&mut mob);
+            mob.time += 1;
+        }
+
+        assert!(mob.attacks.is_empty(), "an empty world must never produce a ram attack");
+        assert!(
+            goat.brain().is_active(Activity::IDLE),
+            "with nothing to ram, the goat must fall back to IDLE, not freeze in RAM"
+        );
     }
 }
