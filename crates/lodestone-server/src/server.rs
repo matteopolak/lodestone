@@ -5040,7 +5040,7 @@ where
     let mut fan_origins: Vec<BlockPos> = vec![pos];
     fan_origins.extend(collapsed.iter().map(|(cell, _)| *cell));
     for origin in fan_origins {
-        let (mut changed, scheduled) = propagate_placement(source, origin);
+        let (mut changed, scheduled) = propagate_placement_with_entities(source, origin, Some(block_entities));
         block_ticks.request_scheduled_ticks(scheduled);
         fanned.append(&mut changed);
     }
@@ -6812,7 +6812,7 @@ where
                 let mut changed: Vec<(BlockPos, String)> = Vec::new();
                 let mut piston_records: Vec<(BlockPos, lodestone_core::Nbt)> = Vec::new();
                 for p in &fanout {
-                    let (mut more, scheduled) = propagate_placement(source, *p);
+                    let (mut more, scheduled) = propagate_placement_with_entities(source, *p, Some(block_entities));
                     piston_records.extend(moving_piston_records(&scheduled));
                     block_ticks.request_scheduled_ticks(scheduled);
                     changed.append(&mut more);
@@ -7269,7 +7269,7 @@ where
             // scheduled tick already performs. Without this the redstone model
             // is correct but unreachable from any player action — dust placed
             // beside a powered line stays at `power=0` forever.
-            let (mut fanout, scheduled) = propagate_placement(source, target);
+            let (mut fanout, scheduled) = propagate_placement_with_entities(source, target, Some(block_entities));
             changed.append(&mut fanout);
             piston_records.extend(moving_piston_records(&scheduled));
             // Issue #465: and the delayed half, which `propagate_placement`
@@ -7453,9 +7453,32 @@ fn moving_piston_records(scheduled: &[ScheduledTick<String>]) -> Vec<(BlockPos, 
 /// `encode_block_update` loop above rather than publishing on
 /// [`BlockTickFeed`]; a second connection would not see them. That gap is
 /// pre-existing for placement itself and is not widened here.
+///
+/// Test-only now: every real production call site was moved to
+/// [`propagate_placement_with_entities`] once the command-block redstone-edge
+/// arm needed a live [`BlockEntityHandle`] threaded through, which this
+/// `None`-only wrapper cannot supply. Kept for the oracle gates and unit tests
+/// that have no registry to hand it.
+#[cfg(test)]
 pub(crate) fn propagate_placement<S>(
     source: &S,
     target: BlockPos,
+) -> (Vec<(BlockPos, String)>, Vec<ScheduledTick<String>>)
+where
+    S: ChunkSource + ?Sized,
+{
+    propagate_placement_with_entities(source, target, None)
+}
+
+/// [`propagate_placement`], plus a live [`BlockEntityHandle`] threaded into
+/// [`crate::random_tick::react_at_placement_with_entities`]'s fan-out — the
+/// path a lever flip, a button press or a placed block's own neighbour
+/// notification reaches a command block's `neighborChanged` through. `None`
+/// behaves exactly like [`propagate_placement`] itself.
+pub(crate) fn propagate_placement_with_entities<S>(
+    source: &S,
+    target: BlockPos,
+    block_entities: Option<&BlockEntityHandle>,
 ) -> (Vec<(BlockPos, String)>, Vec<ScheduledTick<String>>)
 where
     S: ChunkSource + ?Sized,
@@ -7473,7 +7496,7 @@ where
     // `react_at_placement`, not `propagate_and_react`: the placed block owes
     // itself a `setPlacedBy` reaction that the neighbour pass structurally
     // cannot deliver. See that function's own doc comment.
-    let events = crate::random_tick::react_at_placement(
+    let events = crate::random_tick::react_at_placement_with_entities(
         &mut column,
         min_x,
         min_z,
@@ -7484,6 +7507,7 @@ where
         // Zero, so every `trigger_tick` below *is* the delay — see the doc
         // comment above.
         0,
+        block_entities,
     );
     // `drain_due`, not `iter`: this queue is a `BinaryHeap` and `iter` yields in
     // unspecified order, while `drain_due` yields `DRAIN_ORDER`. The loop

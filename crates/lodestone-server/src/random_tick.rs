@@ -151,6 +151,7 @@
 //! consumed 0. That is vanilla's behaviour for the same above-block, which is the
 //! standard here — self-consistency is not.
 
+use crate::block_entities::BlockEntityHandle;
 use crate::gravity_tick;
 use crate::growth_tick;
 use crate::mob_spawn::SpawnRng;
@@ -1332,6 +1333,13 @@ fn wire_update_fan_out(pos: BlockPos) -> Vec<Notification> {
 /// (`DiodeBlock:88-104`), which is a different callback with a different delay.
 /// `redstone_placement_gate` measures both and separates them, because reading
 /// `2d` here is the single most plausible wrong model of this function.
+///
+/// Test-only now: `crate::server::propagate_placement`'s only production
+/// caller was moved to [`propagate_placement_with_entities`], which calls
+/// [`react_at_placement_with_entities`] directly rather than through this
+/// `None`-only wrapper. Kept for the oracle gates and unit tests that have no
+/// [`BlockEntityHandle`] to hand it.
+#[cfg(test)]
 pub(crate) fn react_at_placement(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,
@@ -1341,6 +1349,25 @@ pub(crate) fn react_at_placement(
     z: i32,
     block_ticks: &mut ScheduledTickQueue<String>,
     current_tick: u64,
+) -> Vec<RandomTickEvent> {
+    react_at_placement_with_entities(column, min_x, min_z, x, y, z, block_ticks, current_tick, None)
+}
+
+/// [`react_at_placement`], plus a live [`BlockEntityHandle`] threaded into its
+/// [`propagate_and_react_with_entities`] fan-out — see that function's own doc
+/// for why the parameter exists and who needs it. `None` behaves exactly like
+/// [`react_at_placement`] itself.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn react_at_placement_with_entities(
+    column: &mut crate::chunk::ChunkColumn,
+    min_x: i32,
+    min_z: i32,
+    x: i32,
+    y: i32,
+    z: i32,
+    block_ticks: &mut ScheduledTickQueue<String>,
+    current_tick: u64,
+    block_entities: Option<&BlockEntityHandle>,
 ) -> Vec<RandomTickEvent> {
     let tlx = x - min_x;
     let tlz = z - min_z;
@@ -1462,7 +1489,9 @@ pub(crate) fn react_at_placement(
             }
         }
     }
-    own.extend(propagate_and_react(column, min_x, min_z, x, y, z, block_ticks, current_tick));
+    own.extend(propagate_and_react_with_entities(
+        column, min_x, min_z, x, y, z, block_ticks, current_tick, block_entities,
+    ));
     own
 }
 
@@ -1541,6 +1570,31 @@ pub(crate) fn propagate_and_react(
     block_ticks: &mut ScheduledTickQueue<String>,
     current_tick: u64,
 ) -> Vec<RandomTickEvent> {
+    propagate_and_react_with_entities(column, min_x, min_z, x, y, z, block_ticks, current_tick, None)
+}
+
+/// [`propagate_and_react`], plus a live [`BlockEntityHandle`] for the one
+/// family whose `neighborChanged` reaction lives in a block *entity* rather
+/// than in the block-state string every other reaction here mutates —
+/// command blocks (`CommandBlock.neighborChanged` →
+/// `CommandBlock.setPoweredAndUpdate`, `crate::command_block::on_power_changed`).
+/// `None` is exactly equivalent to calling [`propagate_and_react`] itself, so
+/// every caller with no block-entity registry in scope (every oracle gate and
+/// unit test in this crate) keeps working unchanged; the real world-tick
+/// call sites in `tick.rs`/`crate::server` — the ones a redstone edge or a
+/// block placement actually reaches through — pass `Some`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn propagate_and_react_with_entities(
+    column: &mut crate::chunk::ChunkColumn,
+    min_x: i32,
+    min_z: i32,
+    x: i32,
+    y: i32,
+    z: i32,
+    block_ticks: &mut ScheduledTickQueue<String>,
+    current_tick: u64,
+    block_entities: Option<&BlockEntityHandle>,
+) -> Vec<RandomTickEvent> {
     crate::redstone_counters::begin_drain();
     let mut events = Vec::new();
     let propagator = NeighborPropagator::default();
@@ -1565,7 +1619,7 @@ pub(crate) fn propagate_and_react(
 
     for centre in centres {
         propagator.propagate(centre, None, |n: Notification| -> Vec<Notification> {
-            react_to_notification(column, min_x, min_z, n, block_ticks, current_tick, &mut events)
+            react_to_notification(column, min_x, min_z, n, block_ticks, current_tick, &mut events, block_entities)
         });
     }
     crate::redstone_counters::end_drain();
@@ -1583,6 +1637,7 @@ fn react_to_notification(
     block_ticks: &mut ScheduledTickQueue<String>,
     current_tick: u64,
     events: &mut Vec<RandomTickEvent>,
+    block_entities: Option<&BlockEntityHandle>,
 ) -> Vec<Notification> {
     {
         let tlx = n.pos.x - min_x;
@@ -2188,6 +2243,107 @@ fn react_to_notification(
                     current_tick,
                     TickPriority::Normal,
                 );
+            }
+            return Vec::new();
+        }
+
+        // 3j. Command blocks — the redstone-edge half of the command-block
+        // remainder (`CommandBlock.neighborChanged` →
+        // `CommandBlock.setPoweredAndUpdate`, `.cache/mc/26.2/src`'s
+        // `CommandBlock.java`). `crate::command_block::on_power_changed` was
+        // written and unit-tested with no production caller until this arm;
+        // see that module's own doc for the other two hops (wire decode,
+        // tick-loop scheduling) that were already wired.
+        //
+        // Gated on `block_entities` being `Some`: `powered`/`auto`/
+        // `condition_met` live on the block *entity*, not in the block-state
+        // string every other arm here mutates, and most callers of
+        // [`propagate_and_react`] (every oracle gate, every unit test in this
+        // crate) have no registry to hand it. Those callers take the `None`
+        // branch and this arm is a no-op for them, exactly as before this
+        // landed.
+        if let Some(block_entities) = block_entities {
+            if crate::command_block::is_command_block_family(&state) {
+                // `hasNeighborSignal`, not `getBestOwnOrNeighbourSignal`: a
+                // command block is not itself a signal source
+                // (`SignalGetter.java`'s own default-method pair), so there is
+                // no "own signal" term to fold in — just the same six-direction
+                // scan the dispenser arm above already uses.
+                let is_powered = {
+                    let lookup = redstone::make_lookup(column, min_x, min_z);
+                    redstone::best_neighbor_signal(&lookup, n.pos, false) > 0
+                };
+                let mode = crate::command_block::mode_for_block(&state);
+                let snapshot = block_entities.with(|reg| match reg.get(n.pos) {
+                    Some(crate::block_entities::BlockEntity::CommandBlock(d)) => Some(d.clone()),
+                    _ => None,
+                });
+                if let Some(mut data) = snapshot {
+                    if let Some(reaction) =
+                        crate::command_block::on_power_changed(mode, data.powered, is_powered, data.auto)
+                    {
+                        data.powered = reaction.new_powered;
+                        if reaction.schedule_execution {
+                            // `markConditionMet()` — computed at the edge, not
+                            // deferred to the scheduled tick: `CommandBlock.tick`'s
+                            // own `REDSTONE` arm reads `wasConditionMet` as-is with
+                            // no recompute, matching `CommandBlockEntity`'s own
+                            // split between `markConditionMet` (called from
+                            // `setPoweredAndUpdate`) and `wasConditionMet` (read
+                            // later by `tick`).
+                            let conditional = crate::command_block::is_conditional(&state);
+                            // The predecessor read is column-local only — a
+                            // conditional command block whose predecessor sits in
+                            // a different loaded column at the instant of the edge
+                            // degrades to "no predecessor found" (`None`), the
+                            // same "out of this column" limit
+                            // `apply_tripwire_result` already accepts for a
+                            // cross-column write. Every *unconditional* command
+                            // block (`is_conditional` false, the common case) never
+                            // reaches this branch at all: `mark_condition_met`
+                            // ignores `predecessor_succeeded` unless `conditional`
+                            // is true.
+                            let predecessor_succeeded = conditional.then(|| {
+                                let behind = crate::command_block::facing(&state).opposite().relative(n.pos);
+                                let btlx = behind.x - min_x;
+                                let btlz = behind.z - min_z;
+                                if (0..16).contains(&btlx)
+                                    && (0..16).contains(&btlz)
+                                    && behind.y >= column.min_y
+                                    && behind.y < column.min_y + column.height
+                                {
+                                    let behind_state = column.block_state(btlx, behind.y, btlz).to_string();
+                                    crate::command_block::is_command_block_family(&behind_state)
+                                        && block_entities.with(|reg| {
+                                            matches!(
+                                                reg.get(behind),
+                                                Some(crate::block_entities::BlockEntity::CommandBlock(d))
+                                                    if d.success_count > 0
+                                            )
+                                        })
+                                } else {
+                                    false
+                                }
+                            });
+                            data.condition_met = crate::command_block::mark_condition_met(conditional, predecessor_succeeded);
+                            if !block_ticks
+                                .has_scheduled((n.pos.x, n.pos.y, n.pos.z), &crate::command_block::TICK_COMMAND_BLOCK.to_string())
+                            {
+                                block_ticks.schedule(
+                                    (n.pos.x, n.pos.y, n.pos.z),
+                                    crate::command_block::TICK_COMMAND_BLOCK.to_string(),
+                                    current_tick + 1,
+                                    TickPriority::Normal,
+                                );
+                            }
+                        }
+                        block_entities.with(|reg| {
+                            if let Some(crate::block_entities::BlockEntity::CommandBlock(d)) = reg.get_mut(n.pos) {
+                                *d = data.clone();
+                            }
+                        });
+                    }
+                }
             }
             return Vec::new();
         }

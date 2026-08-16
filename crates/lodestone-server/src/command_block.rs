@@ -17,8 +17,8 @@
 //! logic reduce to, each cited against and unit-tested against the decompiled
 //! source.
 //!
-//! **Both hops named above are now wired**, and a third, narrower gap is
-//! disclosed below in its place:
+//! **All three hops are now wired**, with one narrower gap disclosed in its
+//! place below:
 //!
 //! 1. **The wire decode.** `SET_COMMAND_BLOCK` now decodes into
 //!    `ServerBound::SetCommandBlock` (`crates/protocol/v770/src/server_protocol.rs`)
@@ -39,18 +39,29 @@
 //!    [`chain_link_present`]/[`chain_link_should_run`], and reschedules for
 //!    `Auto` mode exactly as [`tick`]'s own `reschedule` field says to.
 //!
-//! **What is still open, and is a different hop from the two above:**
-//! nothing yet calls [`on_power_changed`] from a real redstone signal.
-//! `CommandBlock.neighborChanged` would need to reach into `block_entities`
-//! from `crate::random_tick::propagate_and_react`, which today only rewrites
-//! the block-*state* string (see that function's own dispenser arm) and has
-//! no block-entity handle in scope at all — threading one through is real
-//! work in its own right, not a leftover of this pass. So today a command
-//! block runs from **"Always Active"** (wired, and the path this module's
-//! own tests exercise end to end) or from a `ServerCommands`/RCON caller
-//! setting it up directly; an ordinary redstone pulse into an impulse
-//! (`minecraft:command_block`) or repeating-but-not-automatic block does
-//! nothing yet, because nothing yet calls [`on_power_changed`] in production.
+//! 3. **The redstone edge itself.** [`on_power_changed`] now has a real
+//!    caller: `crate::random_tick::react_to_notification`'s command-block arm,
+//!    reached through `propagate_and_react_with_entities` (and, for the
+//!    placed block's own neighbours, `react_at_placement_with_entities` via
+//!    `crate::server::propagate_placement_with_entities`) — the `_with_entities`
+//!    variants that thread a live `BlockEntityHandle` through, since
+//!    `powered`/`auto`/`condition_met` live on the block entity rather than in
+//!    the block-state string every other reaction in that module mutates. A
+//!    lever flip, a button press, a piece of dust changing power, or a
+//!    scheduled-tick diode flip that reaches a command block's position all
+//!    now compute `hasNeighborSignal` and call [`on_power_changed`] exactly as
+//!    `CommandBlock.neighborChanged` does. The one disclosed narrowing: a
+//!    *conditional* command block's predecessor read is column-local only, so
+//!    a chain that crosses a chunk boundary at the exact instant of the edge
+//!    degrades to "no predecessor found" rather than reading across columns —
+//!    see that arm's own comment for why, and `apply_tripwire_result`'s
+//!    identical pre-existing limit for precedent. An *unconditional* command
+//!    block (the common case) never depends on this at all.
+//!
+//! So today a command block runs from **"Always Active"**, from a real
+//! redstone edge (rising edge on an impulse or non-automatic repeating block,
+//! matching vanilla), or from a `ServerCommands`/RCON caller setting it up
+//! directly.
 //!
 //! # Two field names collide with a Rust keyword's neighbour, on purpose
 //!
@@ -634,5 +645,72 @@ mod tests {
         assert_eq!(yaw_for_facing(Direction::South), 0.0);
         assert_eq!(yaw_for_facing(Direction::West), 90.0);
         assert_eq!(yaw_for_facing(Direction::East), -90.0);
+    }
+
+    /// End-to-end through the real production entry point, not through
+    /// [`on_power_changed`] directly: a redstone-block placed beside an
+    /// impulse command block, propagated through
+    /// `crate::random_tick::propagate_and_react_with_entities` exactly as
+    /// `crate::server::propagate_placement_with_entities` calls it for a real
+    /// lever flip or block placement. Before the wiring this pass documents,
+    /// [`on_power_changed`] had zero production callers — this is that
+    /// caller, driven through the same neighbour-notification path a real
+    /// connection reaches.
+    #[test]
+    fn a_neighbor_signal_powers_and_schedules_a_real_command_block_through_the_production_entry_point() {
+        use crate::block_entities::{BlockEntity, BlockEntityHandle};
+        use crate::chunk::ChunkColumn;
+        use crate::scheduled_tick::ScheduledTickQueue;
+
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(5, 5, 5, &state(COMMAND_BLOCK, "north", false));
+        // A constant signal source directly beside the command block —
+        // `redstone::best_neighbor_signal`'s own six-direction scan reaches it
+        // exactly as `Level.hasNeighborSignal` would.
+        column.set_block(5, 5, 6, "minecraft:redstone_block");
+
+        let block_entities = BlockEntityHandle::new();
+        block_entities.with(|reg| reg.insert(BlockPos::new(5, 5, 5), BlockEntity::CommandBlock(CommandBlockData::new())));
+
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let _events = crate::random_tick::propagate_and_react_with_entities(
+            &mut column,
+            0,
+            0,
+            5,
+            5,
+            6,
+            &mut block_ticks,
+            0,
+            Some(&block_entities),
+        );
+
+        let data = block_entities
+            .with(|reg| match reg.get(BlockPos::new(5, 5, 5)) {
+                Some(BlockEntity::CommandBlock(d)) => Some(d.clone()),
+                _ => None,
+            })
+            .expect("the command block entity is still there");
+        assert!(data.powered, "the rising edge must be recorded on the entity, not just computed and discarded");
+        assert!(data.condition_met, "an unconditional block is always met once `on_power_changed` schedules it");
+        assert!(
+            block_ticks.has_scheduled((5, 5, 5), &TICK_COMMAND_BLOCK.to_string()),
+            "a rising edge on an impulse command block must schedule its one-tick run, matching \
+             `CommandBlock.setPoweredAndUpdate`'s `level.scheduleTick(pos, this, 1)`"
+        );
+
+        // Negative control: the identical setup with `None` in place of the
+        // registry — every oracle gate and pre-existing unit test's shape —
+        // must be a complete no-op for the command block, proving the arm is
+        // actually gated on `block_entities` rather than always running.
+        let mut column2 = ChunkColumn::new(0, 16);
+        column2.set_block(5, 5, 5, &state(COMMAND_BLOCK, "north", false));
+        column2.set_block(5, 5, 6, "minecraft:redstone_block");
+        let mut block_ticks2: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let _ = crate::random_tick::propagate_and_react(&mut column2, 0, 0, 5, 5, 6, &mut block_ticks2, 0);
+        assert!(
+            !block_ticks2.has_scheduled((5, 5, 5), &TICK_COMMAND_BLOCK.to_string()),
+            "with no block-entity registry in scope, nothing should have been scheduled at all"
+        );
     }
 }
