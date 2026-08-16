@@ -82,10 +82,15 @@ edit.
   `enchant_effectiveness` are per-hit fields and there is no enchantment model to
   derive an EPF from; they stay at their neutral defaults, which is an accurate
   statement of what currently reduces damage rather than a stub.
-* **Mob equipment.** Only the player's inventory feeds this. `SavedEntity` carries no
-  equipment NBT and `MobSim` has no equipment slots, so a naturally-armoured skeleton
-  is not modelled — a mob's `Defenses` still comes from its species base attributes
-  (which is real: a zombie has 2 points of armour and it does reduce hits).
+* **Mob equipment is now modelled, and it feeds this exact module.** See
+  [`mob-spawn-equipment.md`](./mob-spawn-equipment.md):
+  `lodestone_entity::spawn_equipment::populate_default_equipment_slots` rolls what a
+  mob spawns holding and wearing, and `MobSim::spawn_species` folds the result through
+  `apply_equipment`/`defenses_from_attributes` — the same functions this module
+  exports — so a naturally-armoured zombie or a drowned with a trident really does
+  fight differently now. `SavedEntity` still carries no equipment NBT (a saved mob's
+  gear does not survive a save/load round trip yet), which is the honest remaining
+  gap.
 * **Attack-cooldown scaling and critical hits.** `Player.attack`'s
   `baseDamageScaleFactor()` needs a server-tracked attack-strength ticker, which does
   not exist.
