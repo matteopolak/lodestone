@@ -14,7 +14,13 @@ impl V770Adapter {
             let len = reader.var_i32().map_err(dec_err)?;
             let len = usize::try_from(len)
                 .map_err(|_| AdapterError::Decode(format!("invalid item count {len}")))?;
-            let mut items = Vec::with_capacity(len);
+            // Cap the reservation by the readable bytes: `len` is attacker
+            // controlled and every stack costs at least one byte, so no more
+            // than `remaining()` of them can actually be produced. Without
+            // this a 9-byte payload declaring a huge count OOMs the client
+            // before a single stack is read. The loop below still fails
+            // honestly on a short read.
+            let mut items = Vec::with_capacity(len.min(reader.remaining()));
             let mut complete = true;
             for _ in 0..len {
                 match read_item_stack(&mut reader)? {

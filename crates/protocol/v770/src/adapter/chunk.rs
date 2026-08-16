@@ -721,7 +721,11 @@ impl V770Adapter {
             let count = reader.var_i32().map_err(dec_err)?;
             let count = usize::try_from(count)
                 .map_err(|_| AdapterError::Decode(format!("invalid game rule count {count}")))?;
-            let mut values = Vec::with_capacity(count);
+            // Same cap as every other list decode here: `count` comes off the
+            // wire and each rule costs at least one byte, so `remaining()` is
+            // a sound ceiling on how many can exist. Reserving `count`
+            // outright lets a tiny payload demand an unbounded allocation.
+            let mut values = Vec::with_capacity(count.min(reader.remaining()));
             for _ in 0..count {
                 let key = reader.string(32767).map_err(dec_err)?;
                 let key = parse_key(&key, "game rule")?;
