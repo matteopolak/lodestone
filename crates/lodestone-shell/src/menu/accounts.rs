@@ -1583,8 +1583,22 @@ mod test_browser_opens {
 
 /// Best-effort: copies `text` to the system clipboard via the same
 /// no-new-dependency OS-command approach as [`open_in_browser`].
-#[cfg(not(target_arch = "wasm32"))]
-fn copy_to_clipboard(text: &str) {
+///
+/// `pub(crate)` since that fix: `crate::chat`'s `copy_to_clipboard`
+/// `click_event` reuses this rather than duplicating it — the effect
+/// (`pbcopy`/`clip`/`xclip`) has nothing account-specific about it, the same
+/// reasoning [`open_in_browser`] is already `pub(crate)` for.
+///
+/// **Forked on `#[cfg(test)]` for the same reason [`open_in_browser`] is,
+/// and found the same way that incident's own doc says to look: grep for the
+/// effect, not the feature.** This call site was reachable from a real key
+/// handler (`MenuKey::Char('c')` while `SignIn::Waiting`) with no test
+/// interception at all — a second, latent instance of the exact incident
+/// `open_in_browser`'s doc records, sitting undiscovered only because no
+/// existing test happens to press 'c' from that state. Fixed here rather
+/// than left for the day one does.
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
+pub(crate) fn copy_to_clipboard(text: &str) {
     use std::io::Write;
     #[cfg(target_os = "macos")]
     let cmd = std::process::Command::new("pbcopy").stdin(std::process::Stdio::piped()).spawn();
@@ -1599,6 +1613,37 @@ fn copy_to_clipboard(text: &str) {
         && let Some(stdin) = child.stdin.as_mut()
     {
         let _ = stdin.write_all(text.as_bytes());
+    }
+}
+
+/// The test build's [`copy_to_clipboard`]: records the text instead of
+/// shelling out to the OS clipboard. See the `cfg(not(test))` sibling above
+/// for the incident this forestalls.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn copy_to_clipboard(text: &str) {
+    test_clipboard::record(text);
+}
+
+/// Per-thread record of what [`copy_to_clipboard`] was asked to copy, in
+/// test builds only — the clipboard sibling of `test_browser_opens`, same
+/// thread-local reasoning (one `#[test]` per thread, no lock, no ordering
+/// assumption).
+#[cfg(test)]
+mod test_clipboard {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static COPIES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(text: &str) {
+        COPIES.with(|c| c.borrow_mut().push(text.to_owned()));
+    }
+
+    /// Everything recorded so far, clearing the record — taking rather than
+    /// peeking so a test's assertions are about its own interval.
+    pub(super) fn taken() -> Vec<String> {
+        COPIES.with(|c| std::mem::take(&mut *c.borrow_mut()))
     }
 }
 
@@ -1949,6 +1994,23 @@ mod tests {
             test_browser_opens::taken(),
             vec!["https://example.invalid/probe".to_string()],
             "the cfg(test) interception is not live — a unit test just handed a URL to the OS"
+        );
+    }
+
+    /// [`copy_to_clipboard`]'s own sibling of the gate above — the second
+    /// latent instance the incident's own lesson (grep for the effect, not
+    /// the feature) found. Before this fork existed, a test that pressed 'c'
+    /// while `SignIn::Waiting` would have shelled out to `pbcopy`/`clip`/
+    /// `xclip` for real; nothing currently does, which is exactly why it
+    /// went unnoticed rather than being caught the way the browser one was.
+    #[test]
+    fn the_real_clipboard_handoff_is_unreachable_from_a_unit_test() {
+        let _ = test_clipboard::taken();
+        copy_to_clipboard("probe-code");
+        assert_eq!(
+            test_clipboard::taken(),
+            vec!["probe-code".to_string()],
+            "the cfg(test) interception is not live — a unit test just shelled out to the OS clipboard"
         );
     }
 
