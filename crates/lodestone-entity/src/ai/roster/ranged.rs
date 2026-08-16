@@ -822,6 +822,7 @@ pub const fn projectile_entity_type(kind: ProjectileKind) -> &'static str {
         ProjectileKind::SplashPotion => "splash_potion",
         ProjectileKind::Trident => "trident",
         ProjectileKind::WitherSkull => "wither_skull",
+        ProjectileKind::DragonFireball => "dragon_fireball",
     }
 }
 
@@ -849,7 +850,8 @@ pub const fn integrates_as_arrow(kind: ProjectileKind) -> bool {
         ProjectileKind::SmallFireball
         | ProjectileKind::Snowball
         | ProjectileKind::SplashPotion
-        | ProjectileKind::WitherSkull => false,
+        | ProjectileKind::WitherSkull
+        | ProjectileKind::DragonFireball => false,
     }
 }
 

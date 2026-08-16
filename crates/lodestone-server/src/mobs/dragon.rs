@@ -265,9 +265,68 @@ impl<'w> MobSim<'w> {
         }
 
         let mut adapter = SpawnRngAdapter(&mut self.dragon_rng);
-        // `PhaseEffect::FireFireball` is intentionally dropped here — see
-        // this module's doc comment for why (no projectile producer yet).
-        let _effect = dragon.phase.tick(&inputs, &mut adapter);
+        let effect = dragon.phase.tick(&inputs, &mut adapter);
+
+        // `DragonDeathPhase.doServerTick`'s health-drive clause — see
+        // `phase::PhaseManager::dying_health_this_tick`'s own doc for why
+        // this is a second call rather than folded into `tick` above: it
+        // drives `health`, not the phase itself. **Previously never called
+        // in production** — a real, tested, individually-correct function
+        // with zero production callers, the island class this repo's own
+        // rules name explicitly. Without it a killing blow redirected the
+        // dragon into `Dying` (via `on_killing_blow`, below) and then never
+        // actually finished it off: health stayed clamped at `1.0` forever.
+        let mut just_died = false;
+        if let Some(new_health) = dragon.phase.dying_health_this_tick(&inputs) {
+            dragon.health = new_health;
+            just_died = new_health <= 0.0;
+        }
+        let fire_origin = dragon.position;
+        let dragon_yaw = dragon.yaw;
+
+        // A dragon whose death-flight health reached zero leaves the sim
+        // here — matching this module's own doc ("only the caller's own
+        // removal logic, watching health hit 0.0, ends the fight"). The
+        // egg/exit-portal/gateway spawn sequence (`crate::dragon::fight::
+        // set_dragon_killed`) is **not** called from here: `MobSim` owns no
+        // `FightState` (see `dragon_boss_bar`'s own doc for why that stays a
+        // caller-supplied value), so a production wiring pass still needs to
+        // watch for this removal and drive that controller — a narrower,
+        // still-disclosed gap than "the dragon can never die at all".
+        if just_died {
+            self.dragons.remove(&id);
+            return;
+        }
+
+        // `PhaseEffect::FireFireball` — previously computed and unconditionally
+        // dropped (see this module's doc history); now spawns a real
+        // `minecraft:dragon_fireball` through the same
+        // `MobSim::spawn_projectile_from` funnel every other projectile
+        // producer in this crate uses. Aimed at the strafe target's last-known
+        // position (this sim's targeting is distance-only, matching every
+        // other input above — see this module's doc for the disclosed LOS
+        // simplification); a target that despawned between acquiring the
+        // strafe lock and firing falls back to straight ahead along the
+        // dragon's current heading rather than dropping the shot silently.
+        if effect == Some(phase::PhaseEffect::FireFireball) {
+            let target_pos = nearest_player
+                .and_then(|(pid, _)| self.players.iter().find(|p| p.identity.is_some_and(|i| i.entity_id == pid)))
+                .map(|p| p.perception.position);
+            // No resolvable target position (the strafe lock's player
+            // disconnected or moved out of the perception list this same
+            // tick): fall back to straight ahead along the current heading
+            // rather than dropping the shot silently.
+            let heading = f64::from(dragon_yaw).to_radians();
+            let aim = target_pos.unwrap_or(fire_origin + Vec3::new(heading.cos(), 0.0, heading.sin()));
+            let delta = aim - fire_origin;
+            let dir = if delta.length() > 1e-6 { delta.normalize() } else { Vec3::new(0.0, 0.0, 1.0) };
+            let projectile = lodestone_entity::projectile::Projectile::throwable(fire_origin, dir.scale(1.0));
+            self.spawn_projectile_from(
+                "minecraft:dragon_fireball".parse().expect("valid key"),
+                projectile,
+                Some(id),
+            );
+        }
     }
 
     /// Applies `damage` to a live dragon through
@@ -280,6 +339,15 @@ impl<'w> MobSim<'w> {
     /// targets a dragon) — this method exists so a future hit-resolution
     /// pass has one call to make rather than reimplementing the
     /// sitting-damage/killing-blow clauses at the call site.
+    ///
+    /// A killing blow while **not** sitting redirects into `Dying` at
+    /// `1.0` health, matching `handleKillingBlow` — the dragon is not
+    /// removed here; [`tick_one_dragon`] finishes it off (and removes it)
+    /// once the death-flight health-drive clause reaches `0.0`, see that
+    /// method's own doc. A killing blow while **sitting** is `EnderDragon`'s
+    /// one undisguised surprise — it dies outright, same tick, no redirect —
+    /// so this method removes it immediately in that branch; there is no
+    /// later tick that would otherwise do it.
     pub fn damage_dragon(&mut self, id: i32, damage: f32) -> Option<f32> {
         let dragon = self.dragons.get_mut(&id)?;
         if damage >= dragon.health {
@@ -294,7 +362,11 @@ impl<'w> MobSim<'w> {
         dragon.health = (dragon.health - damage).max(0.0);
         let delta = before - dragon.health;
         dragon.phase.on_sitting_damage(delta, dragon.max_health);
-        Some(dragon.health)
+        let health = dragon.health;
+        if health <= 0.0 {
+            self.dragons.remove(&id);
+        }
+        Some(health)
     }
 
     /// Appends every live dragon's [`crate::protocol::EntitySnapshot`] to
@@ -346,12 +418,17 @@ impl<'w> MobSim<'w> {
     /// * **`dragon_killed` is hardcoded `false`.** `MobSim` tracks no
     ///   `crate::dragon::fight::FightState` of its own (see
     ///   [`dragon_boss_bar`](Self::dragon_boss_bar)'s own doc for why that is
-    ///   a caller-supplied parameter) and nothing here removes a dragon whose
-    ///   health reaches `0.0` — the same disclosed gap
-    ///   [`damage_dragon`](Self::damage_dragon)'s own doc names. The bar
-    ///   therefore empties out and stays visible rather than disappearing on
-    ///   death, which is at least consistent with the entity itself staying
-    ///   in the world.
+    ///   a caller-supplied parameter). This no longer means the bar lingers
+    ///   forever, though: [`damage_dragon`](Self::damage_dragon) and
+    ///   [`tick_one_dragon`] both remove a dragon whose health reaches `0.0`
+    ///   (see their own docs), and a removed dragon's own uuid simply stops
+    ///   appearing in this method's output — [`crate::server::EntityStreamer`]'s
+    ///   own diff (`sync_boss_bars`) reads a missing id as "no longer
+    ///   visible" and sends the `REMOVE` operation, exactly as it would for
+    ///   `visible: false`. `dragon_killed`'s only remaining effect is the
+    ///   `crate::dragon::fight::boss_bar_value`'s persisted-past-death "always
+    ///   full" branch (`EnderDragonFight`'s post-victory display for a
+    ///   re-entering player), which needs `FightState` regardless.
     #[must_use]
     pub fn boss_bars(&self) -> Vec<crate::protocol::BossBarSnapshot> {
         let mut ids: Vec<i32> = self.dragons.keys().copied().collect();
@@ -484,5 +561,94 @@ mod tests {
         }
         sim.damage_dragon(id, 51.0); // > 0.25 * 200.0
         assert_eq!(sim.dragon_phase(id), Some(phase::Phase::Takeoff));
+    }
+
+    /// **The island this fix closes**: `phase::PhaseManager::dying_health_this_tick`
+    /// existed, was individually tested in `phase`'s own test module, and had
+    /// zero production callers — a killing blow redirected a flying dragon
+    /// into `Dying` at `1.0` health and then nothing ever finished it off.
+    /// This drives `tick_dragons` with no player nearby (`dying_flying_cleanly`
+    /// resolves `false` — see `tick_one_dragon`'s own `inputs.dying_flying_cleanly`
+    /// assignment, which needs a real nearby player to read `true`) so the
+    /// health-drive clause takes its zero branch on the very next tick, and
+    /// asserts the dragon actually leaves the sim — not just that its health
+    /// field changed, which a gate reading only `dragon_health` could not
+    /// distinguish from "still tracked at exactly 0.0 forever".
+    #[test]
+    fn a_killing_blow_while_flying_now_actually_finishes_the_dragon_off() {
+        let mut sim = sim();
+        let id = sim.spawn_dragon(Vec3::new(0.0, 64.0, 0.0));
+        let after_blow = sim.damage_dragon(id, 10_000.0);
+        assert_eq!(after_blow, Some(1.0), "redirected into Dying at 1.0, matching handleKillingBlow");
+        assert_eq!(sim.dragon_phase(id), Some(phase::Phase::Dying));
+
+        sim.tick_dragons();
+
+        assert!(sim.dragon_health(id).is_none(), "the dragon must leave the sim once the death-flight clause reaches 0.0");
+        assert!(
+            sim.snapshots().into_iter().all(|s| s.entity_type != ender_dragon_entity_type()),
+            "a dead dragon must stop streaming, the same pixels-reaching-zero check `mobs::wither` uses"
+        );
+    }
+
+    /// The sitting-instant-kill path `damage_dragon`'s own doc names —
+    /// `EnderDragon.handleKillingBlow`'s one place that does **not**
+    /// distinguish sitting from standing — must also leave the sim, and on
+    /// the same call (there is no later tick that would otherwise catch it,
+    /// since `on_killing_blow` never redirects into `Dying` here).
+    #[test]
+    fn a_killing_blow_while_sitting_dies_outright_and_leaves_the_sim() {
+        let mut sim = sim();
+        let id = sim.spawn_dragon(Vec3::new(0.0, 64.0, 0.0));
+        {
+            let dragon = sim.dragons.get_mut(&id).unwrap();
+            dragon.phase = phase::PhaseManager::starting_in(phase::Phase::SittingScanning);
+        }
+        let after = sim.damage_dragon(id, 10_000.0);
+        assert_eq!(after, Some(0.0), "a sitting dragon takes the killing blow outright, not redirected to 1.0");
+        assert!(sim.dragon_health(id).is_none(), "and must leave the sim immediately — there is no Dying tick to catch it later");
+    }
+
+    /// **The second island this fix closes**: `PhaseEffect::FireFireball`
+    /// was computed and unconditionally discarded (see this file's own
+    /// module-doc history) — a strafing dragon transitioned phase correctly
+    /// but no `minecraft:dragon_fireball` ever reached the wire. Forces the
+    /// fire condition directly (five ticks of in-range-and-in-cone strafing,
+    /// the exact sequence `phase::tests::strafe_fires_only_at_five_charge_and_in_cone`
+    /// already proves fires on the fifth) and asserts a real tracked
+    /// projectile now exists, not just that the phase changed.
+    #[test]
+    fn a_strafing_dragon_now_actually_fires_a_real_fireball_projectile() {
+        let mut sim = sim();
+        let id = sim.spawn_dragon(Vec3::new(0.0, 64.0, 0.0));
+        sim.set_players(vec![crate::PerceivedPlayer {
+            identity: Some(crate::PlayerIdentity {
+                uuid: uuid::Uuid::new_v4(),
+                entity_id: 1,
+            }),
+            perception: crate::PlayerPerception {
+                // Within `NEARBY_PLAYER_RANGE_SQ` (`64.0` blocks) of the fight
+                // *origin* `(0, 64, 0)` — `tick_one_dragon` measures every
+                // targeting distance from `fight_origin`, not the dragon's own
+                // (much higher, orbiting) position.
+                position: Vec3::new(0.0, 64.0, 10.0),
+                held_item: None,
+                view_direction: Vec3::new(0.0, 0.0, 1.0),
+            },
+        }]);
+        {
+            let dragon = sim.dragons.get_mut(&id).unwrap();
+            dragon.phase.set_phase_with_target(phase::Phase::StrafePlayer, phase::TargetSighting { id: 1 });
+        }
+        let before = sim.projectile_count();
+        // Five ticks: `fireball_charge` must reach `5` with the target in
+        // range/cone (the real player above sits well inside both
+        // `NEARBY_PLAYER_RANGE_SQ` and the `100.0`-block "in range" gate
+        // `tick_one_dragon` derives `strafe_in_range_and_los` from).
+        for _ in 0..5 {
+            sim.tick_dragons();
+        }
+        assert!(sim.projectile_count() > before, "a completed strafe charge must spawn a real fireball, not just transition phase");
+        assert_eq!(sim.dragon_phase(id), Some(phase::Phase::HoldingPattern), "firing also returns to HoldingPattern, matching phase::PhaseManager::tick");
     }
 }

@@ -3090,6 +3090,13 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // and the phase transitions are reachable only from tests, which is
         // exactly the island shape `CLAUDE.md` opens with.
         mobs.with(super::mobs::MobSim::tick_dragons);
+
+        // The wither's own emergence countdown, heal ticks and skull-fire —
+        // same shape and same reason as `tick_dragons` immediately above: no
+        // block reads needed, and without this line a summoned wither (once
+        // something spawns one) is inert the same way an un-ticked dragon
+        // was before the line above landed.
+        mobs.with(super::mobs::MobSim::tick_withers);
         });
 
         // Per-phase timing (see `TickPhase::ScheduledAndPhysics`'s own doc):
