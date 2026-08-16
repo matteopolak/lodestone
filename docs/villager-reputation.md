@@ -50,8 +50,17 @@ loop). `MobSim` adds:
   player-identified attacker hurting a villager writes `VillagerHurt` gossip onto
   **that villager's own** ledger; killing one writes `VillagerKilled` gossip onto
   **every nearby witnessing villager's own** ledger instead (the victim is gone).
-  A new method rather than a changed signature on `attack` — see "What remains" below
-  for why.
+  A new method rather than a changed signature on `attack`, so `attack`'s other
+  callers (every hermetic test that does not care about gossip) stay unchanged.
+  `crate::server::apply_attack` (the only production caller of the old `attack`)
+  now calls this one, passing `PlayerIdentity { uuid: player_uuid, entity_id:
+  LOCAL_PLAYER_ENTITY_ID }` — a real player hit or kill on a villager writes gossip.
+- **Trade gossip's producer** — `crate::server`'s `ServerBound::SelectTrade` handler
+  (`attempt_villager_trade`'s call site) calls
+  `MobSim::record_reputation_event(entity_id, ReputationEventType::Trade, player_uuid)`
+  immediately after a purchase succeeds, matching `Villager.notifyTrade`'s own
+  `onReputationEventFrom(Trade, buyer, this)` call. `record_reputation_event` existed
+  and was tested before this; this is its first production caller.
 
 ## How to change it, and the gotchas
 
@@ -74,12 +83,9 @@ loop). `MobSim` adds:
 - **`update_special_prices` has no live per-villager `OfferState` list to call against
   yet.** `crate::villager_trade`'s own doc already discloses `SELECT_TRADE` is decoded
   and discarded and nothing calls `VillagerTrades::maybe_restock` — this module is
-  ready the instant that lands (`crate::server`, off limits for this change).
-- **`attack_from_player` has no production caller.** `MobSim::attack`'s only production
-  caller is `crate::server::apply_attack` (off limits); that call site needs to switch
-  to `attack_from_player` (passing the attacker's `PlayerIdentity` it almost certainly
-  already resolves for other reasons) before a real player hit writes reputation
-  gossip. Until then this method is reachable only from its own tests.
+  ready the instant that lands (`crate::server`, off limits for this change). This is
+  the one remaining reason the reputation score, though now written by every real
+  producer below, still moves no visible price for a player.
 - **Iron-golem aggression toward a low-reputation player** (named in issue #246's own
   body) has no evidenced vanilla mechanism — nothing in
   `.cache/mc/26.2/src/net/minecraft/world/entity/animal/golem/IronGolem.java` reads
