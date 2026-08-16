@@ -139,10 +139,17 @@ turns that into an `open_screen` + `merchant_offers` send
   detected by `tick_villager_professions`/`tick_villager_beds`'s own
   re-verification, not a push from wherever a block actually breaks — at
   most one tick of lag in practice.
-- **Trade purchase is not wired.** `open_merchant_screen` sends real offers;
-  nothing produces a `select_trade` response, so a player can see a trade
-  and cannot yet buy one. Restocking and reputation-based pricing are
-  likewise unbuilt. This is issue #245's third piece.
+- **Trade purchase is wired.** `ServerBound::SelectTrade`'s dispatch arm
+  calls `MobSim::try_villager_trade`, which reads and mutates a real,
+  persistent `crate::villager_trade::VillagerTrades` kept on the villager's
+  own `SimMob` (`SimMob::ensure_trades`) — repeated buying moves demand,
+  an exhausted offer refuses, and `crate::villager_trade`'s own restock
+  cadence runs once per `MobSim::tick_villager_professions` pass. A
+  completed trade's xp now reaches `SimMob::give_villager_xp`, which can
+  advance `villager_level` past `1` for the first time, unlocking the next
+  trade tier. Reputation/Hero of the Village pricing is unchanged — see
+  `MobSim::villager_offers`'s own doc for exactly how the price shown and
+  the price charged stay identical.
 - **`VillagerType` (biome flavour) is not derived** — every villager reports
   `minecraft:plains`. Cosmetic only.
 - **Adding a `MetadataField` variant is exhaustively enforced.**

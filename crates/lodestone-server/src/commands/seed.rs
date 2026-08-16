@@ -51,8 +51,15 @@ mod tests {
 
         let state = WorldStateHandle::new();
         let alice = CommandSource::console("alice", overworld_dimension(), 4);
-        let world =
-            CommandWorld { rules: &state, players: &[], state: &state, mobs: None, border: None, access: None };
+        let world = CommandWorld {
+            rules: &state,
+            players: &[],
+            state: &state,
+            mobs: None,
+            border: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            access: None,
+        };
 
         let outcome = commands.run(&world, &alice, "seed").expect("root matched");
         let expected = format!("Seed: [{}]", crate::worldgen_data::active_world_seed());

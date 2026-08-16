@@ -79,11 +79,20 @@ point passes `0`, because this crate has no cross-connection player registry to 
 the honest split rather than a fabricated count: the ban and whitelist checks are live, the limit is
 not. Wiring it needs `PlayerRegistry` to become world-scoped.
 
-**Permission levels are stored and only half-read.** `permission_level`/`has_permission_level`
-answer 0–4 off the op entry. Gating *command dispatch* on it belongs to issue #48's dispatcher,
-which owns `CommandTree::require_permission` and `parse_filtered`; `commands.rs`'s module doc still
-records that its built-ins are ungated, and the reason it gives is still right — gating the command
-but not the equivalent packet would be security theatre.
+**Permission levels are stored and fully read.** `permission_level`/`command_permission_level`
+answer 0–4 off the op entry, and every built-in command root is gated at its vanilla level through
+`crate::commands::registrar::Registrar::require_level`, resolved by `crate::commands::level_filter`
+— see `crate::commands`'s own module doc ("Permissions are real now").
+
+**Granting/revoking access has a real command surface, scoped to RCON.** `/op`, `/deop` and
+`/whitelist` (`crate::commands::access_commands`) read and write the *shared* `AccessHandle` —
+`IntegratedServer::open_to_lan` threads the same handle every accepted connection's join check
+reads into `RconConfig::access`, so an op granted over RCON is real for the very next join. In-game
+chat (`crate::server::dispatch_play_packet`) has no `AccessHandle` in scope and these commands
+refuse there by name ("No access list is configured for this world") rather than silently doing
+nothing — see `access_commands`'s own module doc for why chat was deliberately left out. **Nothing
+calls `AccessHandle::save` after a mutation yet**, so a grant/revoke is immediate for the running
+process but does not survive a restart unless the host separately persists it.
 
 ## Configuration
 

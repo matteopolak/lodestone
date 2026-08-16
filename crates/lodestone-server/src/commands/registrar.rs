@@ -208,6 +208,12 @@ pub struct CommandWorld<'a> {
     /// `Some`, matching vanilla's own admin surface (the dedicated-server
     /// console/RCON, not in-game chat) — see `crate::commands::access_commands`'s
     /// own module doc for the rest of that scoping.
+    ///
+    /// `cfg`-gated with `crate::access` itself (native only, like
+    /// `crate::rcon`, whose `AccessHandle` this field carries) — a browser
+    /// singleplayer world has no filesystem-backed access lists and no RCON
+    /// to grant them through.
+    #[cfg(not(target_arch = "wasm32"))]
     pub access: Option<&'a crate::access::AccessHandle>,
 }
 
