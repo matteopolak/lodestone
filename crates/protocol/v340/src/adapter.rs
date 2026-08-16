@@ -6,34 +6,39 @@ use std::sync::{Arc, Mutex};
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
 use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_data::block_states;
+use lodestone_data::mob_effects::mob_effect_name;
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BossAction, BossColor, BossOverlay,
     ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule,
-    ConnectionState, Directive, DisplaySlot, DisplayedSkinParts, EntityEquipment,
+    ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityEquipment,
     EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile,
-    MainHand, ObjectiveMode, ObjectiveRenderType, PlayerCommand, PlayerListEntry,
+    MainHand, ObjectiveMode, ObjectiveRenderType, ParticleOptions, PlayerCommand, PlayerListEntry,
     ProfileProperty, RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation, SectionPos,
     ServerAddress, SoundCategory, TeamAction, TeamColor, TeamParameters, TeleportFlags, Text,
-    Vec3, VersionAdapter, Visibility, WorldSink,
+    Vec3, Vec3f, VersionAdapter, Visibility, WorldSink,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk};
 
 use crate::canonical::{self, FallbackTally};
 use crate::entity_types;
 use crate::item_types;
+use crate::particle_ids;
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::chunk::{ChunkShape, MapChunk, UnloadChunk};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::entity::{
     EntityDestroy, EntityLook, EntityMoveLook, EntityTeleport, EntityVelocityPacket,
-    NamedEntitySpawn, RelEntityMove, SpawnEntityLiving, SpawnObject,
+    NamedEntitySpawn, RelEntityMove, SpawnEntityExperienceOrb, SpawnEntityLiving,
+    SpawnEntityWeather, SpawnObject,
 };
 use crate::packets::game::{
-    Animation, BlockAction, BlockDig, BlockPlace, ClientCommand, ClientboundChat,
-    ClientboundEntityEquipment, ClientboundPositionLook, EntityAction, JoinGame, KickDisconnect,
-    NamedSoundEffect, Respawn, ScoreboardDisplayObjective, ServerboundArmAnimation,
-    ServerboundChat, ServerboundPositionLook, SoundEffect, Spectate, TeleportConfirm,
-    UpdateHealth, UseEntity, UseEntityAt, UseEntityInteract,
+    Animation, AttachEntity, BlockAction, BlockDig, BlockPlace, ClientCommand, ClientboundChat,
+    ClientboundEntityEquipment, ClientboundPositionLook, Collect, DifficultyPacket, EntityAction,
+    EntityEffect, JoinGame, KickDisconnect, NamedSoundEffect, PlayerlistHeader,
+    RemoveEntityEffect, Respawn, ScoreboardDisplayObjective, ServerboundArmAnimation,
+    ServerboundChat, ServerboundPositionLook, SetPassengers, SoundEffect, Spectate,
+    SpawnPosition, TeleportConfirm, UpdateHealth, UpdateTime, UseEntity, UseEntityAt,
+    UseEntityInteract,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
@@ -87,6 +92,12 @@ const REL_PITCH: i8 = 0x10;
 #[derive(Debug, Clone)]
 pub struct V340Adapter {
     shape: Arc<Mutex<ChunkShape>>,
+    /// Raw 1.12.2 dimension id from the most recent `login`/`respawn`, so a
+    /// packet that identifies its dimension only implicitly (e.g.
+    /// `spawn_position`, which has no dimension field of its own) can still
+    /// build a [`lodestone_model::DimensionId`]. Defaults to `0` (overworld),
+    /// matching `shape`'s own default.
+    current_dimension: Arc<Mutex<i32>>,
 }
 
 impl Default for V340Adapter {
@@ -102,6 +113,7 @@ impl V340Adapter {
     pub fn new() -> Self {
         Self {
             shape: Arc::new(Mutex::new(ChunkShape::overworld())),
+            current_dimension: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -116,6 +128,14 @@ impl V340Adapter {
                 ChunkShape::no_skylight()
             };
         }
+        if let Ok(mut current) = self.current_dimension.lock() {
+            *current = dimension;
+        }
+    }
+
+    /// Returns the most recently announced raw dimension id.
+    fn current_dimension(&self) -> i32 {
+        self.current_dimension.lock().map_or(0, |value| *value)
     }
 
     /// Returns the current dimension's chunk shape.
@@ -1610,6 +1630,186 @@ impl V340Adapter {
             };
             reader.ensure_empty().map_err(dec_err)?;
             return Ok(vec![Directive::Emit(ClientEvent::BossBarUpdate { id, action })]);
+        }
+        if packet_id == play::clientbound::SPAWN_POSITION {
+            let body: SpawnPosition = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::SpawnPositionChanged {
+                dimension: dimension_id(self.current_dimension())?,
+                pos: body.location.0,
+                angle: 0.0,
+                pitch: 0.0,
+            })]);
+        }
+        if packet_id == play::clientbound::UPDATE_TIME {
+            let body: UpdateTime = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::TimeChanged {
+                world_age: body.age,
+                time_of_day: body.time,
+            })]);
+        }
+        if packet_id == play::clientbound::DIFFICULTY {
+            let body: DifficultyPacket = decode_body(payload)?;
+            let difficulty = match body.difficulty {
+                0 => Difficulty::Peaceful,
+                1 => Difficulty::Easy,
+                2 => Difficulty::Normal,
+                3 => Difficulty::Hard,
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "unknown difficulty id {other}"
+                    )));
+                }
+            };
+            // 1.12.2 has no "locked" bit — that is a later addition.
+            return Ok(vec![Directive::Emit(ClientEvent::DifficultyChanged {
+                difficulty,
+                locked: false,
+            })]);
+        }
+        if packet_id == play::clientbound::PLAYERLIST_HEADER {
+            let body: PlayerlistHeader = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::TabListChanged {
+                header: Text::from_json(&body.header),
+                footer: Text::from_json(&body.footer),
+            })]);
+        }
+        if packet_id == play::clientbound::ATTACH_ENTITY {
+            let body: AttachEntity = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::EntityLeashed {
+                entity_id: body.entity_id,
+                holder_id: (body.vehicle_id != 0).then_some(body.vehicle_id),
+            })]);
+        }
+        if packet_id == play::clientbound::SET_PASSENGERS {
+            let body: SetPassengers = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(
+                ClientEvent::EntityPassengersChanged {
+                    vehicle_id: body.entity_id,
+                    passenger_ids: body.passengers,
+                },
+            )]);
+        }
+        if packet_id == play::clientbound::COLLECT {
+            let body: Collect = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ItemPickup {
+                item_entity_id: body.collected_entity_id,
+                player_id: body.collector_entity_id,
+                amount: body.pickup_item_count,
+            })]);
+        }
+        if packet_id == play::clientbound::ENTITY_EFFECT {
+            let body: EntityEffect = decode_body(payload)?;
+            // 1.12.2's legacy effect id is 1-based; the shared
+            // `lodestone-data` registry table is the 0-based modern
+            // `minecraft:mob_effect` network id, and the two id spaces have
+            // been stable in the same relative order since Minecraft
+            // Beta 1.8 — verified entry-for-entry against
+            // `vendor/minecraft-data`'s `data/pc/1.12/effects.json` (ids
+            // `1..=27`) against `generated/mob_effects.rs`'s `MOB_EFFECT_NAMES`
+            // (indices `0..=26`).
+            let name = mob_effect_name(i32::from(body.effect_id) - 1).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown legacy effect id {}", body.effect_id))
+            })?;
+            let effect: ResourceKey = name
+                .parse()
+                .map_err(|_| AdapterError::Decode(format!("effect id {name} is not a key")))?;
+            return Ok(vec![Directive::Emit(ClientEvent::MobEffectApplied {
+                entity_id: body.entity_id,
+                effect,
+                amplifier: i32::from(body.amplifier),
+                duration_ticks: body.duration,
+                ambient: body.flags & 0x01 != 0,
+                visible: body.flags & 0x02 != 0,
+                // Neither bit exists at this protocol revision: vanilla
+                // 1.12.2 always shows the HUD icon and never blends.
+                show_icon: true,
+                blend: false,
+            })]);
+        }
+        if packet_id == play::clientbound::REMOVE_ENTITY_EFFECT {
+            let body: RemoveEntityEffect = decode_body(payload)?;
+            let name = mob_effect_name(i32::from(body.effect_id) - 1).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown legacy effect id {}", body.effect_id))
+            })?;
+            let effect: ResourceKey = name
+                .parse()
+                .map_err(|_| AdapterError::Decode(format!("effect id {name} is not a key")))?;
+            return Ok(vec![Directive::Emit(ClientEvent::MobEffectRemoved {
+                entity_id: body.entity_id,
+                effect,
+            })]);
+        }
+        if packet_id == play::clientbound::SPAWN_ENTITY_WEATHER {
+            let body: SpawnEntityWeather = decode_body(payload)?;
+            let entity_type: ResourceKey = "minecraft:lightning_bolt"
+                .parse()
+                .map_err(|_| AdapterError::Decode("lightning_bolt key invalid".to_owned()))?;
+            return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+                entity_id: body.entity_id,
+                uuid: None,
+                entity_type,
+                pos: Vec3::new(body.x, body.y, body.z),
+                rotation: Rotation::new(0.0, 0.0),
+                velocity: None,
+            })]);
+        }
+        if packet_id == play::clientbound::SPAWN_ENTITY_EXPERIENCE_ORB {
+            let body: SpawnEntityExperienceOrb = decode_body(payload)?;
+            let entity_type: ResourceKey = "minecraft:experience_orb"
+                .parse()
+                .map_err(|_| AdapterError::Decode("experience_orb key invalid".to_owned()))?;
+            return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+                entity_id: body.entity_id,
+                uuid: None,
+                entity_type,
+                pos: Vec3::new(body.x, body.y, body.z),
+                rotation: Rotation::new(0.0, 0.0),
+                velocity: None,
+            })]);
+        }
+        if packet_id == play::clientbound::WORLD_PARTICLES {
+            // Fixed-width prefix (verified against minecraft-data's 1.12.2
+            // `packet_world_particles`), then a legacy particle id whose
+            // rename crosswalk into the modern `minecraft:particle_type`
+            // registry lives in `crate::particle_ids` (see that module's
+            // docs for how it was derived — a real decompile, not a guess).
+            // Three legacy ids carry extra type-specific VarInts
+            // (`particle_ids::extra_varint_count`); this crate cannot yet
+            // model their payload as a typed `ParticleOptions` variant
+            // (`lodestone-model` is off limits here — see the brokered-hunk
+            // note this pass reports), so they are read and discarded, same
+            // as `lodestone-v770` does for any particle name it does not
+            // specifically parse a payload for.
+            let mut reader = Reader::new(payload);
+            let particle_id = reader.i32().map_err(dec_err)?;
+            let long_distance = reader.bool().map_err(dec_err)?;
+            let x = reader.f32().map_err(dec_err)?;
+            let y = reader.f32().map_err(dec_err)?;
+            let z = reader.f32().map_err(dec_err)?;
+            let offset_x = reader.f32().map_err(dec_err)?;
+            let offset_y = reader.f32().map_err(dec_err)?;
+            let offset_z = reader.f32().map_err(dec_err)?;
+            let max_speed = reader.f32().map_err(dec_err)?;
+            let count = reader.i32().map_err(dec_err)?;
+            for _ in 0..particle_ids::extra_varint_count(particle_id) {
+                reader.var_i32().map_err(dec_err)?;
+            }
+            reader.ensure_empty().map_err(dec_err)?;
+            let name = particle_ids::particle_key(particle_id).ok_or_else(|| {
+                AdapterError::Decode(format!("unmapped legacy particle id {particle_id}"))
+            })?;
+            let particle: ResourceKey = name
+                .parse()
+                .map_err(|_| AdapterError::Decode(format!("particle id {name} is not a key")))?;
+            return Ok(vec![Directive::Emit(ClientEvent::Particles {
+                particle,
+                long_distance,
+                pos: Vec3::new(f64::from(x), f64::from(y), f64::from(z)),
+                offset: Vec3f::new(offset_x, offset_y, offset_z),
+                max_speed,
+                count,
+                options: ParticleOptions::None,
+            })]);
         }
         // Everything else in play is intentionally ignored for now.
         Ok(Vec::new())

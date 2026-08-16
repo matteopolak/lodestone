@@ -584,3 +584,142 @@ pub struct ScoreboardDisplayObjective {
     #[mc(max = 16)]
     pub name: String,
 }
+
+/// Clientbound `update_time` — the world's age and the current time of day.
+///
+/// Wire layout: two raw `i64`s, verified against minecraft-data's 1.12.2
+/// `packet_update_time`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:update_time", state = Play, bound = Client)]
+pub struct UpdateTime {
+    /// Total world age, in ticks.
+    pub age: i64,
+    /// Current time of day, in ticks.
+    pub time: i64,
+}
+
+/// Clientbound `attach_entity` — sets or clears an entity's leash holder.
+///
+/// Wire layout: two raw (non-VarInt) `i32`s, verified against
+/// minecraft-data's 1.12.2 `packet_attach_entity`. A `vehicle_id` of `0`
+/// means "no holder" — the same sentinel the modern `SET_ENTITY_LINK` packet
+/// uses (entity id `0` is never a valid entity), so it lifts directly into
+/// [`lodestone_model::ClientEvent::EntityLeashed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:attach_entity", state = Play, bound = Client)]
+pub struct AttachEntity {
+    /// Leashed entity id.
+    pub entity_id: i32,
+    /// Holder entity id, or `0` for "no holder".
+    pub vehicle_id: i32,
+}
+
+/// Clientbound `set_passengers` — the full passenger list of a vehicle.
+///
+/// Wire layout: a VarInt vehicle id then a VarInt-length-prefixed VarInt
+/// array, verified against minecraft-data's 1.12.2 `packet_set_passengers`
+/// (identical shape to the modern `SET_PASSENGERS` packet
+/// `lodestone-v770`'s adapter decodes).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:set_passengers", state = Play, bound = Client)]
+pub struct SetPassengers {
+    /// Vehicle entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Passenger entity ids, in mounting order.
+    #[mc(varint)]
+    pub passengers: Vec<i32>,
+}
+
+/// Clientbound `collect` — an item entity was picked up (or an experience orb
+/// was collected).
+///
+/// Wire layout: three VarInts, verified against minecraft-data's 1.12.2
+/// `packet_collect`. The field order — collected entity, then collector, then
+/// amount — is the same order the modern `TAKE_ITEM_ENTITY` packet uses;
+/// see `docs/`'s note on transposition risk for two adjacent same-typed
+/// VarInts before assuming this generalises to a new packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:collect", state = Play, bound = Client)]
+pub struct Collect {
+    /// The entity that was picked up.
+    #[mc(varint)]
+    pub collected_entity_id: i32,
+    /// The entity that did the picking up (usually a player).
+    #[mc(varint)]
+    pub collector_entity_id: i32,
+    /// Stack size collected.
+    #[mc(varint)]
+    pub pickup_item_count: i32,
+}
+
+/// Clientbound `entity_effect` — a status effect was applied to an entity.
+///
+/// Wire layout: verified against minecraft-data's 1.12.2 `packet_entity_effect`:
+/// VarInt entity id, raw `i8` legacy effect id, raw `i8` amplifier, VarInt
+/// duration, raw `i8` flags byte. 1.12.2's flags byte packs two bits — `0x01`
+/// ambient, `0x02` show particles — where later protocols add a third
+/// (`0x04` show icon); this protocol revision has neither the "show icon" nor
+/// the "blend" bit, so those two always decode as `true`/`false` respectively
+/// in the adapter, matching vanilla 1.12.2's own always-on HUD icon and
+/// always-off blend behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:entity_effect", state = Play, bound = Client)]
+pub struct EntityEffect {
+    /// Target entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Legacy (1-based) potion-effect id.
+    pub effect_id: i8,
+    /// Effect amplifier (`0` = level I).
+    pub amplifier: i8,
+    /// Remaining duration, in ticks.
+    #[mc(varint)]
+    pub duration: i32,
+    /// Flags byte: bit `0x01` ambient, bit `0x02` show particles.
+    pub flags: i8,
+}
+
+/// Clientbound `remove_entity_effect` — a status effect was removed from an
+/// entity.
+///
+/// Wire layout: VarInt entity id, raw `i8` legacy effect id, verified against
+/// minecraft-data's 1.12.2 `packet_remove_entity_effect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:remove_entity_effect", state = Play, bound = Client)]
+pub struct RemoveEntityEffect {
+    /// Target entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Legacy (1-based) potion-effect id.
+    pub effect_id: i8,
+}
+
+/// Clientbound `difficulty` — the server's configured difficulty changed.
+///
+/// Wire layout: a single raw `u8`, verified against minecraft-data's 1.12.2
+/// `packet_difficulty`. 1.12.2 has no "locked" bit — that is a later
+/// addition — so the adapter always reports `locked: false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:difficulty", state = Play, bound = Client)]
+pub struct DifficultyPacket {
+    /// Raw difficulty id (`0` peaceful .. `3` hard).
+    pub difficulty: u8,
+}
+
+/// Clientbound `playerlist_header` — the tab list's header/footer text.
+///
+/// Wire layout: two length-prefixed strings, verified against
+/// minecraft-data's 1.12.2 `packet_playerlist_header`. Both are JSON text
+/// components, the same as `chat` and `open_window`'s title at this protocol
+/// revision — not plain legacy text.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:playerlist_header", state = Play, bound = Client)]
+pub struct PlayerlistHeader {
+    /// Header JSON text.
+    #[mc(max = 32767)]
+    pub header: String,
+    /// Footer JSON text.
+    #[mc(max = 32767)]
+    pub footer: String,
+}
