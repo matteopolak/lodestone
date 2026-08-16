@@ -339,6 +339,18 @@ fn tag_not_secure(text: Text) -> Text {
     }
 }
 
+/// Whether an `Ok(None)` from `encode_action` for `action` at `state` is the
+/// expected "adapter deliberately produced no packet this tick" case rather
+/// than a genuine "no encode arm for this action/state" drop.
+///
+/// True today for exactly one shape: a [`ClientAction::Move`] while `state`
+/// is [`ConnectionState::Play`]. See [`Driver::handle_action`]'s call site
+/// for why that combination can only mean v770's `select_move_packet`
+/// throttling and not a missing arm.
+fn is_expected_move_no_op(action: &ClientAction, state: ConnectionState) -> bool {
+    matches!(action, ClientAction::Move { .. }) && state == ConnectionState::Play
+}
+
 impl<T: Transport> Driver<T> {
     // The driver constructor genuinely needs every collaborator it is handed
     // (connection, adapter, read-model, event sink, policies, and the login
@@ -1345,16 +1357,38 @@ impl<T: Transport> Driver<T> {
                     tracing::warn!(%error, "failed to write client action");
                 }
             }
+            Ok(None) if is_expected_move_no_op(&action, self.state) => {
+                // This is NOT the state-mismatch case the sibling branch below
+                // exists to catch, and logging it identically is what made a
+                // routine per-tick no-op read as a live correctness bug: v770's
+                // `Move` arm delegates to `select_move_packet`, which mirrors
+                // vanilla's `LocalPlayer.sendPosition()` dirty tracking (see
+                // `crates/protocol/v770/src/adapter/mod.rs`) and legitimately
+                // returns `None` on the large majority of ticks — any tick
+                // where position/rotation/on-ground/collision are all
+                // unchanged since the last **sent** update, short of the
+                // 20-tick periodic forced resync. `net.rs`'s
+                // `should_forward_action` already withholds `Move` from ever
+                // reaching this driver while the connection is not `Play`, so
+                // by the time a `Move` gets here `state` is already `Play` on
+                // every legacy family too (v47/v340/v735 gate `Move` on
+                // nothing but state, unconditionally encoding `Some(..)` once
+                // state is `Play`) — meaning this arm's `Ok(None)` can only
+                // come from v770's deliberate throttling, never from a
+                // missing encode arm. `trace!`, not `debug!`: an idle player
+                // produces this on ~19 of every 20 ticks and it is not
+                // evidence of a dropped position update.
+                tracing::trace!(
+                    ?action,
+                    "move produced no packet this tick (pose unchanged; vanilla-faithful throttling)"
+                );
+            }
             Ok(None) => {
-                // The state is the whole diagnosis here: `Move` (for example)
-                // has an encode arm gated on `ConnectionState::Play`, so the
-                // interesting question when this fires is *which* state the
-                // action was queued in — was it produced somewhere that
-                // should not be producing it in this state (e.g. `Move`
-                // still ticking during a 26.2 dimension-change-via-
-                // configuration respawn), or is the adapter genuinely
-                // missing an arm it should have. Without the state, both
-                // read identically.
+                // Unlike the `Move`-in-`Play` arm above, this *is* a genuine
+                // "no packet in current state" case: either the action was
+                // produced in a state that should not have produced it, or
+                // the adapter is missing an arm it should have. The state is
+                // the whole diagnosis here, which is why it is logged.
                 tracing::debug!(
                     ?action,
                     state = ?self.state,
@@ -1649,6 +1683,43 @@ mod tests {
         assert_ne!(
             sig1, sig2,
             "identical content sent twice must sign differently (chain index advanced)"
+        );
+    }
+
+    /// `Ok(None)` from `encode_action` for a `Move` while `state`
+    /// is `Play` must be recognised as v770's `select_move_packet` throttling
+    /// (expected, not a drop), and every other combination must still be
+    /// treated as a genuine "no packet in current state" case. Four arms, not
+    /// one: `Move`-in-Play is the only `true`, and each of the other three
+    /// changes exactly one of the two inputs from that baseline, so a guard
+    /// that collapsed to "any `Move`" or "any `Play`-state action" fails a
+    /// different arm than a guard that is right.
+    #[test]
+    fn move_no_op_is_recognised_only_in_play_state() {
+        let move_action = ClientAction::Move {
+            pos: lodestone_model::Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+            rotation: lodestone_model::Rotation { yaw: 0.0, pitch: 0.0 },
+            on_ground: true,
+            horizontal_collision: false,
+        };
+        let other_action = ClientAction::SwingArm { hand: lodestone_model::Hand::Main };
+
+        assert!(
+            is_expected_move_no_op(&move_action, ConnectionState::Play),
+            "a Move with no packet while genuinely in Play is the expected throttling case"
+        );
+        assert!(
+            !is_expected_move_no_op(&move_action, ConnectionState::Configuration),
+            "a Move outside Play is a genuine drop, not throttling"
+        );
+        assert!(
+            !is_expected_move_no_op(&other_action, ConnectionState::Play),
+            "a non-Move action in Play is a genuine drop, not throttling -- only \
+             Move has a per-tick dirty-check that legitimately produces None"
+        );
+        assert!(
+            !is_expected_move_no_op(&other_action, ConnectionState::Configuration),
+            "a non-Move action outside Play is a genuine drop"
         );
     }
 
