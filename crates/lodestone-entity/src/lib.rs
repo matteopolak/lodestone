@@ -37,6 +37,11 @@
 //!   `Mob.populateDefaultEquipmentSlots` and its per-species overrides, the
 //!   producer [`equipment`] never had.
 //! * [`explosion`] — ray-sampled blast exposure, damage and knockback power.
+//! * [`vibration`] — the world-event/vibration substrate: a
+//!   [`VibrationEvent`](vibration::VibrationEvent) type and the host-side
+//!   nearest-listenable resolution a warden (or a future sculk sensor) reads,
+//!   independent of both [`brain`] and the client-side event bus of the same
+//!   name in `lodestone-ecs`.
 
 pub mod ai;
 pub mod attribute;
@@ -53,6 +58,7 @@ pub mod pose;
 pub mod projectile;
 pub mod spawn;
 pub mod spawn_equipment;
+pub mod vibration;
 
 pub use attribute::{AttributeDef, AttributeInstance, AttributeMap, Modifier, Operation};
 pub use brain::{

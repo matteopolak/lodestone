@@ -86,6 +86,9 @@ use lodestone_entity::equipment::{
     knockback_resistance_from_attributes,
 };
 use lodestone_entity::explosion::Aabb as ExplosionAabb;
+use lodestone_entity::vibration::{
+    PostedVibration, VibrationEvent, WARDEN_LISTENER_RADIUS, is_vibration_listener, nearest_listenable,
+};
 use lodestone_entity::item_entity::{ItemEntityRegistry, ItemLifecycle, ItemMotion};
 use lodestone_entity::pathfinding::{Aabb, BlockCues, MobShape, PathType, PathWorld};
 use lodestone_entity::projectile::{Projectile, ProjectileRegistry, TrackedProjectile};
@@ -1182,6 +1185,14 @@ pub struct SimMob<'w> {
     /// [`MobSim::tick_villager_beds`] — the same throttling shape as
     /// [`job_search_cooldown`](Self::job_search_cooldown).
     bed_search_cooldown: i32,
+    /// The nearest warden-listenable vibration this tick, if this mob is a
+    /// listener species ([`is_vibration_listener`]) and one was posted in
+    /// range — issue #459's vibration substrate, resolved host-side by
+    /// [`MobSim::resolve_vibrations`]. `None` for every other mob, and for a
+    /// listener with nothing audible in range this tick. Not yet read by any
+    /// behaviour: turning this into a warden's actual anger/dig/emerge
+    /// response is issue #459's own separate, still-open step 3.
+    nearest_vibration: Option<PostedVibration>,
     /// This mob's own gossip ledger (issue #244) — `Villager.gossips`, what
     /// it believes about every UUID it has an opinion of. Empty for every
     /// non-villager species; a converted zombie villager's ledger is seeded
@@ -1942,6 +1953,14 @@ impl<'w> SimMob<'w> {
         self.bed
     }
 
+    /// The nearest warden-listenable vibration this tick, if any — issue
+    /// #459's substrate. See the `nearest_vibration` field's own doc for
+    /// what this deliberately does not yet drive.
+    #[must_use]
+    pub fn nearest_vibration(&self) -> Option<PostedVibration> {
+        self.nearest_vibration
+    }
+
     /// `VillagerData.level`, `1..=5`.
     #[must_use]
     pub fn villager_level(&self) -> i32 {
@@ -2504,6 +2523,13 @@ pub struct MobSim<'w> {
     /// own reason.
     #[cfg(not(target_arch = "wasm32"))]
     bed_claims: villager::BedClaims,
+    /// Vibrations real producers posted this tick (issue #459's substrate) —
+    /// resolved into each listener's [`SimMob::nearest_vibration`] by
+    /// [`resolve_vibrations`](Self::resolve_vibrations), which also drains
+    /// this back to empty so nothing crosses into the next tick. No
+    /// `wasm32` gate: unlike the villager claim ledgers, this touches no
+    /// `std::fs`-backed type.
+    posted_vibrations: Vec<PostedVibration>,
     /// Live ender dragons, keyed by network entity id — see [`TrackedDragon`]
     /// and `mobs::dragon`'s own module doc for the phase/heal state each one
     /// drives and exactly what is a real port vs. a simplification.
@@ -2932,6 +2958,7 @@ impl<'w> MobSim<'w> {
             workstation_claims: villager::WorkstationClaims::new(),
             #[cfg(not(target_arch = "wasm32"))]
             bed_claims: villager::BedClaims::new(),
+            posted_vibrations: Vec::new(),
             dragons: HashMap::new(),
             withers: HashMap::new(),
             wither_rng: SpawnRng::new(wither::WITHER_SKULL_SEED),
@@ -3257,6 +3284,7 @@ impl<'w> MobSim<'w> {
             cat_search_cooldown: 0,
             bed: None,
             bed_search_cooldown: 0,
+            nearest_vibration: None,
             gossip: villager::gossip::GossipContainer::new(),
             last_gossip_decay_tick: None,
             golem_detected_until: None,
@@ -4558,6 +4586,10 @@ impl<'w> MobSim<'w> {
         self.tick_golem_summon();
         // Issue #229: the cat's chest/lit-furnace/bed candidate search.
         self.tick_cat_block_search();
+        // Issue #459: the vibration substrate. Last, so every producer
+        // earlier in this tick (currently just `reap_dead`'s `entity_die`)
+        // has already posted before a listener resolves its nearest answer.
+        self.resolve_vibrations();
 
         self.tick_count += 1;
     }
@@ -6921,6 +6953,41 @@ impl<'w> MobSim<'w> {
             if drops_experience {
                 self.drop_death_experience(&entity_type, position);
             }
+            // Issue #459's vibration substrate: `LivingEntity.die` posts
+            // `GameEvent.ENTITY_DIE` (`GameEvent.Context.of(this)`) at the
+            // dying mob's own position — this crate's first real producer.
+            // Every other vanilla producer (`block_destroy`, `step`,
+            // `container_open`, ...) lives outside this file's owned crate
+            // paths and is real follow-up work, not modelled here.
+            self.post_vibration(position, VibrationEvent::EntityDie);
+        }
+    }
+
+    /// Posts one vibration for a real producer to call — issue #459's
+    /// substrate. `pub` so a caller outside this crate's `mobs` module (a
+    /// future block-break/container hook in `server.rs`, say) can post one
+    /// without this module changing; [`reap_dead`](Self::reap_dead) is the
+    /// one producer this file owns today.
+    pub fn post_vibration(&mut self, position: Vec3, event: VibrationEvent) {
+        self.posted_vibrations.push(PostedVibration { position, event });
+    }
+
+    /// Resolves this tick's nearest-vibration answer for every listener
+    /// species (issue #459's substrate), then drains the posted log back to
+    /// empty. Runs at the *end* of the tick, deliberately not inside
+    /// [`feed_perception`](Self::feed_perception) (which runs before
+    /// [`reap_dead`](Self::reap_dead) posts anything): a death this same
+    /// tick must be audible this same tick, not one tick late — the same
+    /// reasoning [`tick_orbs`](Self::tick_orbs) already gives for reading
+    /// `tick_count` before its own increment.
+    fn resolve_vibrations(&mut self) {
+        let posted = std::mem::take(&mut self.posted_vibrations);
+        for mob in &mut self.mobs {
+            mob.nearest_vibration = if is_vibration_listener(mob.entity_type.path()) {
+                nearest_listenable(mob.position(), WARDEN_LISTENER_RADIUS, &posted)
+            } else {
+                None
+            };
         }
     }
 
@@ -10675,6 +10742,105 @@ mod villager_bed_claim_tests {
 
         assert_eq!(sim.get(id).expect("spawned").bed(), None);
         assert!(sim.occupied_homes_in_range(BlockPos::new(0, 0, 0), 64).is_empty());
+    }
+}
+
+/// Issue #459's vibration substrate: proves `reap_dead`'s real producer and
+/// `resolve_vibrations`'s host-side resolution are wired into the real
+/// per-tick [`MobSim`] loop, the same not-an-island bar
+/// `villager_bed_claim_tests` already sets for bed claiming.
+#[cfg(test)]
+mod vibration_substrate_tests {
+    use super::*;
+
+    fn flat_world() -> ChunkWorld {
+        ChunkWorld::new(-64, 384)
+    }
+
+    fn spawn(sim: &mut MobSim<'_>, species: &str, pos: Vec3) -> i32 {
+        sim.spawn_species(format!("minecraft:{species}").parse().expect("valid key"), pos)
+            .id()
+    }
+
+    /// The headline case: a mob dies within 16 blocks of a warden, and the
+    /// same tick's `resolve_vibrations` (run after `reap_dead` posts) hands
+    /// the warden the death's own position as an `EntityDie` vibration.
+    #[test]
+    fn a_warden_hears_a_nearby_death_the_same_tick_it_happens() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let warden = spawn(&mut sim, "warden", Vec3::new(0.0, 0.0, 0.0));
+        let victim = spawn(&mut sim, "zombie", Vec3::new(10.0, 0.0, 0.0));
+        sim.get_mut(victim).expect("spawned").health = 0.0;
+
+        sim.tick();
+
+        let heard = sim.get(warden).expect("spawned").nearest_vibration();
+        assert_eq!(
+            heard,
+            Some(PostedVibration {
+                position: Vec3::new(10.0, 0.0, 0.0),
+                event: VibrationEvent::EntityDie,
+            }),
+            "the warden must hear the death at the victim's own position, the same tick"
+        );
+    }
+
+    /// A death just outside the 16-block listener radius must not be heard —
+    /// the discriminating control against "the warden hears everything".
+    #[test]
+    fn a_death_just_outside_the_listener_radius_is_not_heard() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let warden = spawn(&mut sim, "warden", Vec3::new(0.0, 0.0, 0.0));
+        let victim = spawn(&mut sim, "zombie", Vec3::new(16.1, 0.0, 0.0));
+        sim.get_mut(victim).expect("spawned").health = 0.0;
+
+        sim.tick();
+
+        assert_eq!(
+            sim.get(warden).expect("spawned").nearest_vibration(),
+            None,
+            "16.1 blocks away must not be audible at the warden's 16.0 radius"
+        );
+    }
+
+    /// A non-listener species standing right next to the same death must
+    /// never receive a vibration — the species filter is load-bearing, the
+    /// same control every other search in this file runs for its own gate.
+    #[test]
+    fn a_non_listener_species_never_receives_a_vibration() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let bystander = spawn(&mut sim, "zombie", Vec3::new(0.0, 0.0, 0.0));
+        let victim = spawn(&mut sim, "zombie", Vec3::new(1.0, 0.0, 0.0));
+        sim.get_mut(victim).expect("spawned").health = 0.0;
+
+        sim.tick();
+
+        assert_eq!(sim.get(bystander).expect("spawned").nearest_vibration(), None);
+    }
+
+    /// The posted log must not leak into the next tick: a warden that hears
+    /// a death on tick 1 must hear nothing new (and retain no stale answer)
+    /// on tick 2, when nothing else has died.
+    #[test]
+    fn the_posted_log_does_not_leak_into_the_next_tick() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let warden = spawn(&mut sim, "warden", Vec3::new(0.0, 0.0, 0.0));
+        let victim = spawn(&mut sim, "zombie", Vec3::new(5.0, 0.0, 0.0));
+        sim.get_mut(victim).expect("spawned").health = 0.0;
+
+        sim.tick();
+        assert!(sim.get(warden).expect("spawned").nearest_vibration().is_some());
+
+        sim.tick();
+        assert_eq!(
+            sim.get(warden).expect("spawned").nearest_vibration(),
+            None,
+            "a vibration from a prior tick must not persist once nothing new was posted"
+        );
     }
 }
 
