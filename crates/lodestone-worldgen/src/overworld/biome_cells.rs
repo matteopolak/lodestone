@@ -107,15 +107,6 @@ impl BiomeCells {
         &self.palette[self.index_at_quart(qx, qy, qz) as usize]
     }
 
-    /// Biome id at a block position — local `x`/`z` in `0..16`, world `y`.
-    /// Out-of-column `y` clamps to the nearest layer, matching every other
-    /// accessor on the generated column.
-    #[must_use]
-    pub fn at_block(&self, lx: usize, y: i32, lz: usize) -> &str {
-        let qy = ((y - self.min_y) >> 2).max(0) as usize;
-        self.at_quart(lx >> 2, qy, lz >> 2)
-    }
-
     /// A single-biome column — the fallback for a generator with no climate
     /// table, and what a `ChunkColumn` with no generated data should hold.
     #[must_use]

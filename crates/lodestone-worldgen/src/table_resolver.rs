@@ -99,14 +99,6 @@ impl<'a> TableResolver<'a> {
         self
     }
 
-    /// Overrides the table id [`Resolver::biome_temperatures`] looks up.
-    /// Default: `"biome_parameters/overworld_temperature"`.
-    #[must_use]
-    pub const fn with_biome_temperatures_key(mut self, key: &'a str) -> Self {
-        self.biome_temperatures_key = key;
-        self
-    }
-
     /// Looks up `key` in the JSON table, panicking if absent. For the two
     /// fields [`Resolver`] requires rather than defaults
     /// (`density_function`, `noise`) — a missing required entry is a data

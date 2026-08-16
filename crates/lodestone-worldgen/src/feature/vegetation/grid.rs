@@ -645,20 +645,6 @@ pub mod census {
         pub writes_rejected: usize,
     }
 
-    impl VegCensus {
-        /// Total unmodelled terminal dispatches across every reason.
-        #[must_use]
-        pub fn unsupported_total(&self) -> usize {
-            self.unsupported.values().sum()
-        }
-
-        /// Terminal dispatches that reached a placer this engine implements.
-        #[must_use]
-        pub fn modelled_terminals(&self) -> usize {
-            self.simple_block + self.tree + self.block_column + self.other_feature
-        }
-    }
-
     thread_local! {
         static CENSUS: RefCell<VegCensus> = RefCell::new(VegCensus::default());
     }
