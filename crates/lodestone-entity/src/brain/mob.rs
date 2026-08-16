@@ -135,4 +135,24 @@ pub trait BrainMob {
     fn nearby_entities(&self) -> Vec<NearbyBrainEntity> {
         Vec::new()
     }
+
+    /// Records a melee hit landing on whatever occupies `target` this tick —
+    /// vanilla's `LivingEntity.hurtServer`/`knockback` calls a ram or an
+    /// attack-target behaviour makes directly on the target entity. This
+    /// crate's [`BrainMob`] has no entity handle to call a method *on*, only
+    /// a position, so — the same seam
+    /// [`MobController::attack`](crate::ai::MobController::attack) already
+    /// uses for goal-driven melee — recording is all a behaviour can do; a
+    /// host with the real world resolves the position to a victim and applies
+    /// damage/knockback.
+    ///
+    /// Defaults to a no-op so every existing implementor (including hermetic
+    /// test doubles) keeps compiling; [`NavigatingMob`](crate::ai::NavigatingMob)
+    /// overrides it to push onto the **same** attack queue
+    /// [`MobController::attack`](crate::ai::MobController::attack) writes, so
+    /// a host's existing melee-hit resolution (already draining that queue
+    /// for goal-driven mobs) picks up a brain-driven hit for free — one
+    /// queue, two producers, not two independent trackers that could
+    /// disagree.
+    fn attack(&mut self, _target: Vec3) {}
 }

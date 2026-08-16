@@ -1781,6 +1781,15 @@ impl BrainMob for NavigatingMob<'_> {
     fn nearby_entities(&self) -> Vec<crate::brain::NearbyBrainEntity> {
         self.nearby_entities.clone()
     }
+
+    /// Delegates to the same `attacks` queue [`MobController::attack`] writes
+    /// (fully qualified: both traits declare `attack`, so an unqualified call
+    /// would be `E0034`, the same disambiguation [`last_hurt_by`](Self::last_hurt_by)
+    /// needs) — see [`BrainMob::attack`]'s own doc for why a brain-driven hit
+    /// and a goal-driven hit share one queue rather than two.
+    fn attack(&mut self, target: Vec3) {
+        MobController::attack(self, target);
+    }
 }
 
 #[cfg(test)]

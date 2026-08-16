@@ -47,4 +47,6 @@ impl Activity {
     pub const AVOID: Self = Self("avoid");
     /// Swimming (aquatic mobs).
     pub const SWIM: Self = Self("swim");
+    /// Preparing, then charging, a ram attack (goat).
+    pub const RAM: Self = Self("ram");
 }

@@ -133,6 +133,66 @@ impl Sensor for NearestHostileSensor {
     }
 }
 
+/// Writes [`MemoryModuleType::NEAREST_VISIBLE_LIVING_ENTITIES`] from every
+/// entity in [`BrainMob::nearby_entities`] within [`RANGE`](Self::RANGE)
+/// blocks, nearest first — vanilla's `NearestLivingEntitiesSensor`, the feed
+/// `PrepareRamNearestTarget` reduces to a single ram candidate via its own
+/// `TargetingConditions`.
+///
+/// **No hostility, species or line-of-sight filter** — every entity
+/// [`BrainMob::nearby_entities`] reports counts, unlike
+/// [`NearestHostileSensor`], which keeps only the `hostile`-flagged ones.
+/// That is deliberate: vanilla's own sensor is unfiltered too (the exclusion
+/// — "not another goat", "respect the world border" — lives entirely in the
+/// *consumer's* `TargetingConditions`), and this crate's
+/// [`NearbyBrainEntity`](super::mob::NearbyBrainEntity) carries no species
+/// tag a consumer could filter on even if this sensor tried, so a goat ram
+/// candidate found through this feed is not excluded from being another
+/// goat — a disclosed gap, not a silent one; see
+/// [`super::behaviors::PrepareRam`]'s own doc for the rest of what its
+/// consumer does not narrow.
+#[derive(Debug, Default)]
+pub struct NearestVisibleLivingEntitiesSensor;
+
+impl NearestVisibleLivingEntitiesSensor {
+    /// Wide enough to cover a goat's `RAM_MAX_DISTANCE` (7 blocks) with
+    /// margin — this crate's sensors have no cadence knob, so (as
+    /// [`NearestHostileSensor::RANGE`]'s own doc notes for its figure) the
+    /// host is expected to have already coarsely filtered
+    /// [`BrainMob::nearby_entities`] to something reasonable.
+    pub const RANGE: f64 = 12.0;
+}
+
+impl Sensor for NearestVisibleLivingEntitiesSensor {
+    fn tick(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob) {
+        let origin = mob.position();
+        let range_sqr = Self::RANGE * Self::RANGE;
+        let mut nearby: Vec<(i32, f64)> = mob
+            .nearby_entities()
+            .into_iter()
+            .map(|e| (e.id, distance_sqr(origin, e.position)))
+            .filter(|&(_, d)| d <= range_sqr)
+            .collect();
+        nearby.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let ids: Vec<i32> = nearby.into_iter().map(|(id, _)| id).collect();
+        // `Memories::set` already clears the slot for an empty collection
+        // (`MemoryValue::is_empty_collection`), matching vanilla's own
+        // `isEmptyCollection` coercion — no separate erase branch needed.
+        mem.set(
+            MemoryModuleType::NEAREST_VISIBLE_LIVING_ENTITIES,
+            MemoryValue::Entities(ids),
+        );
+    }
+
+    fn output_memories(&self) -> Vec<MemoryModuleType> {
+        vec![MemoryModuleType::NEAREST_VISIBLE_LIVING_ENTITIES]
+    }
+
+    fn name(&self) -> &'static str {
+        "nearest_visible_living_entities"
+    }
+}
+
 /// Squared Euclidean distance — a plain helper since [`lodestone_model::Vec3`]
 /// carries no `distance_squared` of its own.
 fn distance_sqr(a: Vec3, b: Vec3) -> f64 {
@@ -265,5 +325,109 @@ mod nearest_hostile_tests {
         let mut sensor = NearestHostileSensor;
         sensor.tick(&mut mem, &mut mob);
         assert_eq!(mem.get(MemoryModuleType::NEAREST_HOSTILE), Some(&MemoryValue::Entity(7)));
+    }
+}
+
+#[cfg(test)]
+mod nearest_visible_living_entities_tests {
+    use super::*;
+    use crate::brain::mob::NearbyBrainEntity;
+
+    struct FixedPerception {
+        pos: Vec3,
+        nearby: Vec<NearbyBrainEntity>,
+    }
+
+    impl BrainMob for FixedPerception {
+        fn next_i32(&mut self, _bound: i32) -> i32 {
+            0
+        }
+        fn next_f32(&mut self) -> f32 {
+            0.0
+        }
+        fn game_time(&self) -> i64 {
+            0
+        }
+        fn position(&self) -> Vec3 {
+            self.pos
+        }
+        fn move_to(&mut self, _target: Vec3, _speed: f32) -> bool {
+            true
+        }
+        fn navigation_done(&self) -> bool {
+            true
+        }
+        fn stop_navigation(&mut self) {}
+        fn look_at(&mut self, _target: Vec3) {}
+        fn random_land_pos(&mut self, _max_xz: i32, _max_y: i32) -> Option<Vec3> {
+            None
+        }
+        fn nearby_entities(&self) -> Vec<NearbyBrainEntity> {
+            self.nearby.clone()
+        }
+    }
+
+    /// Three entities within range, one beyond — the in-range three must come
+    /// out **nearest first**, and the out-of-range one must be absent, not
+    /// merely sorted last.
+    #[test]
+    fn writes_in_range_entities_nearest_first() {
+        let mut mob = FixedPerception {
+            pos: Vec3::default(),
+            nearby: vec![
+                NearbyBrainEntity {
+                    id: 1,
+                    position: Vec3::new(9.0, 0.0, 0.0),
+                    hostile: false,
+                },
+                NearbyBrainEntity {
+                    id: 2,
+                    position: Vec3::new(3.0, 0.0, 0.0),
+                    hostile: true,
+                },
+                NearbyBrainEntity {
+                    id: 3,
+                    position: Vec3::new(1.0, 0.0, 0.0),
+                    hostile: false,
+                },
+                NearbyBrainEntity {
+                    id: 4,
+                    position: Vec3::new(50.0, 0.0, 0.0),
+                    hostile: false,
+                },
+            ],
+        };
+        let mut mem = Memories::new();
+        mem.register(MemoryModuleType::NEAREST_VISIBLE_LIVING_ENTITIES);
+        let mut sensor = NearestVisibleLivingEntitiesSensor;
+        sensor.tick(&mut mem, &mut mob);
+        assert_eq!(
+            mem.get(MemoryModuleType::NEAREST_VISIBLE_LIVING_ENTITIES),
+            Some(&MemoryValue::Entities(vec![3, 2, 1])),
+            "must be sorted nearest-first and exclude id 4 (beyond RANGE)"
+        );
+    }
+
+    /// Nothing nearby leaves the memory absent, clearing a stale value rather
+    /// than leaving it — the same control [`NearestHostileSensor`]'s own
+    /// clearing test makes.
+    #[test]
+    fn clears_the_memory_when_nothing_is_in_range() {
+        let mut mob = FixedPerception {
+            pos: Vec3::default(),
+            nearby: Vec::new(),
+        };
+        let mut mem = Memories::new();
+        mem.register(MemoryModuleType::NEAREST_VISIBLE_LIVING_ENTITIES);
+        mem.set(
+            MemoryModuleType::NEAREST_VISIBLE_LIVING_ENTITIES,
+            MemoryValue::Entities(vec![99]),
+        );
+        let mut sensor = NearestVisibleLivingEntitiesSensor;
+        sensor.tick(&mut mem, &mut mob);
+        assert!(
+            !mem.has_value(MemoryModuleType::NEAREST_VISIBLE_LIVING_ENTITIES),
+            "an empty perception must clear a stale value, not leave it"
+        );
     }
 }
