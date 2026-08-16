@@ -56,7 +56,6 @@
 //! (2048 sprites) is unaffected: in the `Atlas2D` path it indexes a UV-lookup
 //! table, not a texture-array layer, so it addresses the whole atlas everywhere.
 
-use bytemuck::cast_slice;
 use lodestone_assets::Atlas;
 
 use crate::caps::GpuCapabilities;
@@ -600,12 +599,6 @@ pub fn atlas_mip_levels(atlas: &Atlas) -> Vec<MipLevel> {
         let levels = mip_level_count(atlas.width, atlas.height);
         generate_isolated_mips(atlas.width, atlas.height, &atlas.rgba, &rects, levels)
     }
-}
-
-/// Reinterpret a slice of `u32` as bytes (helper for callers staging pixels).
-#[must_use]
-pub fn u32_pixels_as_bytes(pixels: &[u32]) -> &[u8] {
-    cast_slice(pixels)
 }
 
 #[cfg(test)]

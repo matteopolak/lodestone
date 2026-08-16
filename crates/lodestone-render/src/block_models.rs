@@ -2096,12 +2096,6 @@ impl BlockModels {
         &self.anim_frame_v
     }
 
-    /// The number of animation slots (excludes the static sentinel `0`).
-    #[must_use]
-    pub fn anim_slot_count(&self) -> usize {
-        self.animations.len()
-    }
-
     /// Build the per-slot animation uniform array for game `tick`, ready to
     /// upload to the model/fluid shaders' animation bind group.
     ///
@@ -2162,17 +2156,6 @@ impl BlockModels {
     #[must_use]
     pub fn item_forms(&self, item: &ResourceLocation) -> Option<&ItemVariants> {
         self.items.get(item)
-    }
-
-    /// The baked quads of an item's **inventory** icon — 3-D model or extruded
-    /// sprite slab (empty when it has neither).
-    /// Pose them with [`gui_item_pose`](crate::gui_item_pose) and mesh them with
-    /// [`mesh_item_quads`](crate::mesh_item_quads); their UVs index
-    /// [`atlas`](Self::atlas) and their tints [`tint_palette`](Self::tint_palette),
-    /// exactly like [`quads`](Self::quads).
-    #[must_use]
-    pub fn item_quads(&self, item: &ResourceLocation) -> &[BakedQuad] {
-        self.item(item).map_or(&[], |g| &g.quads)
     }
 
     /// The number of items with baked geometry of any kind.

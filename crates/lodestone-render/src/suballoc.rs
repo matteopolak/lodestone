@@ -151,13 +151,6 @@ impl Suballocator {
         self.align
     }
 
-    /// Round `size` up to the arena alignment. Exposed so callers can predict
-    /// the real footprint of a request.
-    #[must_use]
-    pub const fn aligned_size(&self, size: u64) -> u64 {
-        align_up(size, self.align)
-    }
-
     /// Allocate `size` bytes (rounded up to the alignment) using address-ordered
     /// first-fit.
     ///

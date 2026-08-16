@@ -384,11 +384,6 @@ impl BlockAtlas {
         self.atlas.sprites().len()
     }
 
-    /// The magenta "missing texture" sprite unresolved faces fall back to.
-    #[must_use]
-    pub fn missing_sprite(&self) -> SpriteId {
-        self.missing
-    }
 
     /// The vanilla global block-state id for a generator block-state string, or
     /// `None` if it names no known state.

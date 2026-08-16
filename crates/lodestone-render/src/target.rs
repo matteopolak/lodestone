@@ -483,12 +483,6 @@ impl<'window> SurfaceTarget<'window> {
         self.surface.configure(device, &self.config);
     }
 
-    /// The present mode currently in force.
-    #[must_use]
-    pub const fn present_mode(&self) -> wgpu::PresentMode {
-        self.config.present_mode
-    }
-
     /// The present mode the adapter itself chose at bring-up — pass this back to
     /// [`Self::set_present_mode`] to undo an override. See
     /// [`Self::default_present_mode`]'s field docs for why this is remembered

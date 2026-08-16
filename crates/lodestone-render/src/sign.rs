@@ -380,15 +380,6 @@ impl SignSpawn {
         }
     }
 
-    /// [`SignSpawn::at`]'s hanging counterpart — a ceiling hanging sign at
-    /// `pos`, `rotation_segment = 0`, no text.
-    #[must_use]
-    pub fn hanging_at(pos: [i32; 3]) -> Self {
-        SignSpawn {
-            kind: SignKind::Hanging,
-            ..SignSpawn::at(pos)
-        }
-    }
 }
 
 #[cfg(test)]

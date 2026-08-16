@@ -258,12 +258,6 @@ impl WeatherState {
         self.rain > 0.2
     }
 
-    /// `Level.isThundering` (`Level.java:942-944`), `thunder_level > 0.9`.
-    #[must_use]
-    pub fn is_thundering(&self) -> bool {
-        self.thunder_level() > 0.9
-    }
-
     /// Whether the weather pass has anything to draw at all — vanilla's own
     /// extraction gate (`WeatherEffectRenderer.java:64`).
     #[must_use]
