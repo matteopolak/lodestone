@@ -17,8 +17,8 @@
 use std::collections::BTreeMap;
 
 use lodestone_model::{
-    ArmorTrim, AuthoredEnchantment, Identifier, ItemEnchantment, Text, TextSpan, ToolPatch,
-    WrittenBookContent,
+    ArmorTrim, AuthoredEnchantment, Identifier, ItemEnchantment, ItemProfile, PotDecorations,
+    Text, TextSpan, ToolPatch, WrittenBookContent,
 };
 
 /// The default maximum stack size when an item carries no
@@ -102,6 +102,22 @@ pub const WRITABLE_BOOK_CONTENT_COMPONENT: &str = "minecraft:writable_book_conte
 /// signed book's title/author/generation/pages. Carried as
 /// [`ComponentValue::WrittenBook`].
 pub const WRITTEN_BOOK_CONTENT_COMPONENT: &str = "minecraft:written_book_content";
+/// Well-known component identifier for `minecraft:pot_decorations`.
+///
+/// Without this branch the four sherds facing out of a `minecraft:decorated_pot`
+/// stack were silently dropped at the crate boundary, the same class of loss the
+/// dye and trim comments above document — and the wire component this models was
+/// specifically decoded (see [`lodestone_model::ItemComponents::pot_decorations`])
+/// because an advancement icon carrying it used to truncate the whole
+/// `update_advancements` packet. Carried as [`ComponentValue::PotDecorations`].
+pub const POT_DECORATIONS_COMPONENT: &str = "minecraft:pot_decorations";
+/// Well-known component identifier for `minecraft:profile`.
+///
+/// Carries a player-head's owner identity (name/uuid/skin properties). Modelled
+/// for the same truncation reason as [`POT_DECORATIONS_COMPONENT`] — a player
+/// head in an advancement icon or an inventory slot used to lose the rest of its
+/// packet, not just its owner. Carried as [`ComponentValue::Profile`].
+pub const PROFILE_COMPONENT: &str = "minecraft:profile";
 /// Well-known component identifier for `minecraft:custom_model_data`.
 ///
 /// Vanilla's own "make this item look different" channel, and half of how real
@@ -190,6 +206,13 @@ pub enum ComponentValue {
     /// [`lodestone_model::WrittenBookContent`]. See
     /// [`WRITTEN_BOOK_CONTENT_COMPONENT`].
     WrittenBook(WrittenBookContent),
+    /// `minecraft:pot_decorations` — the four sherds facing out of a
+    /// `minecraft:decorated_pot` stack, carried verbatim from
+    /// [`lodestone_model::PotDecorations`]. See [`POT_DECORATIONS_COMPONENT`].
+    PotDecorations(PotDecorations),
+    /// `minecraft:profile` — a player-head's owner identity, carried verbatim
+    /// from [`lodestone_model::ItemProfile`]. See [`PROFILE_COMPONENT`].
+    Profile(ItemProfile),
 }
 
 /// The effective, resolved component set of an [`ItemStack`].
@@ -621,6 +644,39 @@ impl ItemStack {
         self.write_component(MAP_ID_COMPONENT, id.map(|v| ComponentValue::Int(i64::from(v))));
     }
 
+    /// The stack's `minecraft:pot_decorations`, or `None` for every item but a
+    /// `minecraft:decorated_pot` carrying at least one sherd.
+    #[must_use]
+    pub fn pot_decorations(&self) -> Option<PotDecorations> {
+        match self.components.get_str(POT_DECORATIONS_COMPONENT) {
+            Some(ComponentValue::PotDecorations(decorations)) => Some(decorations.clone()),
+            _ => None,
+        }
+    }
+
+    /// Sets or clears `minecraft:pot_decorations`.
+    pub fn set_pot_decorations(&mut self, decorations: Option<PotDecorations>) {
+        self.write_component(
+            POT_DECORATIONS_COMPONENT,
+            decorations.map(ComponentValue::PotDecorations),
+        );
+    }
+
+    /// The stack's `minecraft:profile`, or `None` for every item but a player
+    /// head carrying an owner identity.
+    #[must_use]
+    pub fn profile(&self) -> Option<ItemProfile> {
+        match self.components.get_str(PROFILE_COMPONENT) {
+            Some(ComponentValue::Profile(profile)) => Some(profile.clone()),
+            _ => None,
+        }
+    }
+
+    /// Sets or clears `minecraft:profile`.
+    pub fn set_profile(&mut self, profile: Option<ItemProfile>) {
+        self.write_component(PROFILE_COMPONENT, profile.map(ComponentValue::Profile));
+    }
+
     /// The stack's `minecraft:writable_book_content` draft pages, or `None`
     /// for every item but an edited `minecraft:writable_book`.
     #[must_use]
@@ -877,6 +933,23 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             components.insert(key, ComponentValue::WrittenBook(content));
         }
 
+        // Same crate-boundary loss as the dye/trim above: without this branch a
+        // decorated pot's sherds never reach this crate's shape, and a pot icon
+        // built from a game-crate stack cannot draw them.
+        if let Some(decorations) = stack.components.pot_decorations.clone()
+            && let Ok(key) = POT_DECORATIONS_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::PotDecorations(decorations));
+        }
+
+        // Same crate-boundary loss as above, for a player head's owner identity
+        // (and skin) rather than a pot's sherds.
+        if let Some(profile) = stack.components.profile.clone()
+            && let Ok(key) = PROFILE_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::Profile(profile));
+        }
+
         Self::with_components(
             stack.item.clone(),
             i32::try_from(stack.count).unwrap_or(i32::MAX),
@@ -903,8 +976,12 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
     ///
     /// # What is and is not recoverable
     ///
-    /// The five *patch* fields round-trip exactly. Of the rest:
+    /// Every *patch* field this crate's component map has a slot for round-trips
+    /// exactly. Of the rest:
     ///
+    /// * `custom_data` has no slot in this crate's `ComponentValue` (an opaque
+    ///   NBT blob) and `repair_cost` is server-side-only bookkeeping with no slot
+    ///   either — both always lower to their zero value here.
     /// * `has_unmodeled` is **always `false`** here, and that is honest rather
     ///   than lossy: the flag means "the wire carried a component this build
     ///   could not decode", which is a property of a decode that this stack is
@@ -928,16 +1005,8 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             authored_enchantment: stack.authored_enchantment(),
             trim: stack.trim(),
             map_id: stack.map_id(),
-            // This crate's own component map has no `pot_decorations` slot — its
-            // `ComponentValue` cannot represent four item keys — so there is
-            // nothing to carry across. A decorated pot round-tripped through here
-            // loses its sherds, the same way an unmodelled component loses its
-            // warning above.
-            pot_decorations: None,
-            // Same story as `pot_decorations` above: this crate's component map
-            // has no slot for a player-head owner identity, so there is nothing
-            // to carry.
-            profile: None,
+            pot_decorations: stack.pot_decorations(),
+            profile: stack.profile(),
             tool: stack.tool(),
             max_stack_size: stack
                 .components
@@ -966,13 +1035,13 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             // wire shape.
             writable_book_content: stack.writable_book_content().map(<[String]>::to_vec),
             written_book_content: stack.written_book_content().cloned(),
-            // Same story as `pot_decorations` above: this crate's component map
-            // has no slot for an opaque NBT blob, so there is nothing to carry.
+            // This crate's component map has no slot for an opaque NBT blob, so
+            // there is nothing to carry across.
             custom_data: None,
             // `repair_cost` is server-side-only bookkeeping (see its own doc on
             // `lodestone_model::ItemComponents`) with no slot in this crate's
-            // component map — same "nothing to carry" story as `pot_decorations`
-            // and `custom_data` above.
+            // component map — same "nothing to carry" story as `custom_data`
+            // above.
             repair_cost: 0,
             // See the doc above: not lossy, out of scope.
             has_unmodeled: false,
@@ -1359,13 +1428,24 @@ mod tests {
                     pattern: "silence".to_string(),
                 }),
                 map_id: Some(1701),
-                // Not round-tripped by design: this crate's component map has no
-                // slot for four item keys, so the conversion sets `None` either
-                // way and a `Some` here would fail the round-trip assertion for
-                // the wrong reason.
-                pot_decorations: None,
-                // Same story: no slot for a player-head owner identity.
-                profile: None,
+                // Both now round-trip through this crate's component map, so this
+                // test exercises real values rather than `None` either way — the
+                // same upgrade the book components got.
+                pot_decorations: Some(lodestone_model::PotDecorations {
+                    back: Some(id("minecraft:brick")),
+                    left: Some(id("minecraft:angler_pottery_sherd")),
+                    right: None,
+                    front: Some(id("minecraft:skull_pottery_sherd")),
+                }),
+                profile: Some(lodestone_model::ItemProfile {
+                    name: Some("Notch".to_string()),
+                    id: Some(uuid::Uuid::from_u128(1)),
+                    properties: vec![lodestone_model::ProfileProperty {
+                        name: "textures".to_string(),
+                        value: "eyJ0ZXh0dXJlcyI6e319".to_string(),
+                        signature: Some("sig".to_string()),
+                    }],
+                }),
                 // Issue #613's `EditBook` remainder: both book components now
                 // round-trip through this crate's component map, so this
                 // test exercises real values rather than `None` either way.
