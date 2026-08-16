@@ -182,49 +182,34 @@ result slot's server authority:
 
 Remaining gaps:
 
-- The v770 adapter encodes the serverbound `place_recipe`,
-  `recipe_book_change_settings` and `recipe_book_seen_recipe` packets. It
-  decodes **one** of the five clientbound recipe packets: `recipe_book_settings`
-  (76), which landed in `fd53995` as `ClientEvent::RecipeBookSettingsChanged`.
-  The other four — `update_recipes`, `recipe_book_add`, `recipe_book_remove`,
-  `place_ghost_recipe` — still have no decode and no `ClientEvent`.
-
-  **The blanket "zero hits" claim that stood here was true when written and
-  went stale the moment `fd53995` landed.** Re-run the grep
-  rather than trusting this paragraph:
+- **All five clientbound recipe packets now decode.** `recipe_book_settings`
+  (76) landed first as `ClientEvent::RecipeBookSettingsChanged`; `update_recipes`,
+  `recipe_book_add`, `recipe_book_remove` and `place_ghost_recipe` followed once
+  the recursive `SlotDisplay`/`RecipeDisplay` walker existed
+  (`read_slot_display`/`read_recipe_display` in
+  `crates/protocol/v770/src/adapter/inventory.rs`). Re-run the grep rather than
+  trusting this paragraph the way an earlier version of it went stale:
 
   ```
   grep -rn "PLACE_GHOST_RECIPE\|RECIPE_BOOK_ADD\|RECIPE_BOOK_REMOVE\|RECIPE_BOOK_SETTINGS\|UPDATE_RECIPES" \
       crates/protocol/v770/src/adapter/
   ```
 
-  The packet-id constants in `generated/packet_ids.rs` prove only that the *id*
-  is known, never that anything decodes it — see `docs/README.md`'s own
-  connectedness caveats.
-
-- **The four undecoded packets are not blocked on the packets.** Their shared
-  prerequisite is a recursive `SlotDisplay` decoder (11 registry-dispatched
-  variants, one carrying a `DataComponentPatch` whose field order differs from
-  `ItemStack.OPTIONAL_STREAM_CODEC`, one carrying a `Holder<TrimPattern>` whose
-  `0` discriminator is an inline definition containing a full chat `Component`)
-  plus a `RecipeDisplay` dispatcher (5 variants). Recursion is unbounded on the
-  wire and vanilla does not bound it, so a depth cap is required. Measured
-  directly: `grep -rn "SlotDisplay\|RecipeDisplay" --include="*.rs" crates/`
-  returns **5 hits, every one of them prose in a doc comment** — not a line of
-  the codec exists. Estimate 400–600 lines.
-
-  Ahead of the codec there is a **design blocker**, and it is the reason
-  "the consumer is already built" is only half true: `RecipeUnlockState::unlock`
-  and `remove` (`recipe.rs`) key on `Identifier`, the wire carries
-  a `RecipeDisplayId` — a session-assigned integer (the `recipe` field on
-  `RecipeBookSeenRecipe` and `PlaceRecipe` in `v770/src/packets/game.rs`) —
-  and a `RecipeDisplay` contains no recipe id at all. So decoding
-  `recipe_book_add` does not by itself let anything call `unlock`. Either the
-  event carries the index plus a resolved result and something owns the
-  index→`Identifier` map, or `RecipeUnlockState` gains an index-keyed path.
-  `recipe_book_remove` is trivial to decode and **useless alone**, because that
-  mapping arrives only in `recipe_book_add`. The toast renderer and its
-  `app.rs`/`hud.rs` wiring *are* done; it is the key type that does not match.
+- **The key-type mismatch this section used to call a design blocker is not
+  one — it was resolved by keying differently, not by resolving ids.**
+  `RecipeUnlockState::unlock`/`remove` (`recipe.rs`) key on `Identifier`, and
+  the wire's `RecipeDisplayId` is a session-assigned integer with no
+  `Identifier` anywhere on it — so `RecipeUnlockState` stays exactly as dead as
+  this section used to describe, and nothing feeds it. The real consumer is a
+  *different* store that keys on the wire's own id:
+  `lodestone_game::recipe_sync::RecipeBookSync` (`SessionRecipeBook` in
+  `lodestone-ecs`), which holds each `RecipeDisplayId`'s **result and station
+  item ids** directly rather than trying to name the recipe. A caller that
+  wants an `Identifier` (the toast, see below) resolves those raw item ids
+  itself, id-to-`Identifier` being a shell-side concern
+  (`lodestone_data::items::item_name`) that a version-free crate like
+  `lodestone-game` should not reach for — see `recipe_sync.rs`'s own "How to
+  change it".
 
 ### Recipe-book settings round trip
 
@@ -457,22 +442,20 @@ passes — chrome, art, models, then sprites plus the icon-overlay colour range.
 This was **recipe-panel only**; the main container and inventory path was
 already correct.
 
-### Recipe-unlock tracking — `RecipeUnlockState` (`recipe.rs`)
+### Recipe-unlock tracking — `RecipeUnlockState` (`recipe.rs`) — still genuinely dead
 
-**Nothing populates this today.** The server signal is
-`recipe_book_add`/`recipe_book_remove`, and per the "Remaining gaps" section
-above, `v770`'s adapter decodes neither — confirmed by grep, not assumed —
-nor does `lodestone-model` have a `ClientEvent` for them. Both are outside
-this change's owned files (`crates/protocol/**`); see "Brokered work" below.
-
-Until that lands, `RecipeUnlockState::is_unlocked` reports **every** recipe
-as unlocked, so the browsable panel shows the full local corpus rather than
-an empty one — a visible, honest stand-in for missing data, not a silently
-fake "everything is unlocked" that would survive real data arriving. The
-moment a single `unlock`/`remove` call is made (`has_data()` flips true) it
-switches to the real per-id answer. `unlock`/`remove`/`take_new` (for the
-toast, next) are implemented and unit-tested against direct calls; nothing
-in the running client calls them yet.
+**Nothing populates this, and nothing ever will while it keys on `Identifier`.**
+This is not the same gap the "Remaining gaps" section above describes: the wire
+now decodes fine, but its `RecipeDisplayId` has no `Identifier` on it, so this
+particular store has no signal it could consume. `RecipeUnlockState::is_unlocked`
+still reports **every** recipe as unlocked (the documented, honest stand-in —
+see its own doc comment), and `unlock`/`remove`/`take_new` are still exercised
+only by their own unit tests. The real per-session unlock tracking lives in
+`lodestone_game::recipe_sync::RecipeBookSync` instead — see "Remaining gaps"
+above for why that is a different store rather than a fix to this one. Do not
+read this type's continued dormancy as evidence the recipe-unlock feature is
+unfinished; check `RecipeBookSync`/`SessionRecipeBook` and the toast section
+below before concluding that.
 
 ### Unlock toast — `RecipeToastQueue` (`recipe.rs`)
 
@@ -481,9 +464,31 @@ Pure timing data mirroring `RecipeToast.java`: `RECIPE_TOAST_DISPLAY_MS =
 (`Toast.DEFAULT_WIDTH`/`Toast.SLOT_HEIGHT`). Multiple recipes unlocked within the window merge into
 one toast that **cycles** through them (`displayed_entry`, mirroring
 `RecipeToast.update`'s formula) rather than stacking separate toasts.
-Nothing calls `push` from live data yet — same blocker as unlock tracking —
-but `hud.rs` **does** render it now (`HudFrame::recipe_toast`, see "Shell
-wiring" below), so the toast appears the moment a producer exists.
+
+`push` now has a real production caller: `WindowApp::sync_recipe_toasts`
+(`app/session.rs`, called every frame from `drive_ui_from_session`, right
+after `restore_recipe_book_settings`) diffs `Sim::known_recipes()`'s
+`RecipeBookSync::known()` against a `recipe_toast_seen: HashSet<i32>` of
+already-toasted `RecipeDisplayId`s. Two things about the diff are load-bearing:
+
+- The **first** sync this session (`known_recipes().has_data()` true for the
+  first time) seeds `recipe_toast_seen` from the whole known set and toasts
+  none of it — vanilla does not replay a fresh join's entire unlock history as
+  toasts, only genuinely new unlocks after that. `recipe_toast_synced: bool` is
+  the latch, kept separate from `recipe_toast_seen.is_empty()` because a
+  brand-new player with zero unlocked recipes must still latch it.
+- Only entries with `notification: true` (`flags` bit 0 on the wire) raise a
+  toast; a highlight-only unlock is marked seen and skipped silently.
+
+The station and unlocked icons resolve `KnownRecipe::station_items`/
+`result_items` (raw item registry ids) through
+`lodestone_data::items::item_name`, the same table
+`container::merchant::cost_item_stack` resolves for the same reason — an id
+outside the generated census degrades to "toast nothing" rather than a wrong
+icon. `station_items` itself is new: `read_recipe_display`'s walk used to keep
+only the result `SlotDisplay`'s items and drop the station's, even though every
+`RecipeDisplay` variant's station is always its *final* walked display; it now
+returns both.
 
 ### Auto-fill — `Recipe::placement` + `plan_auto_fill` (`recipe.rs`), `Menu::plan_recipe_auto_fill` (`menu.rs`)
 
@@ -625,19 +630,28 @@ own doc comment records.
 
 ### Still brokered
 
-1. **Protocol decode** (`crates/protocol/v770/src/adapter/inventory.rs`): clientbound
-   arms for `place_ghost_recipe`/`recipe_book_add`/`recipe_book_remove`/
-   `recipe_book_settings`/`update_recipes`, plus a `ClientEvent` variant in
-   `lodestone-model` to decode into and a `net.rs`/ingest consumer that calls
-   `RecipeUnlockState::unlock`/`remove` and `RecipeToastQueue::push`.
+Nothing protocol-side remains brokered for the toast chain: decode, the ECS
+fold, the shell-side read and the toast dispatch are all live production code
+now (see the two sections above). What is still a documented, honest
+degradation:
 
-Until that lands, two things degrade **honestly and visibly**: the panel shows
-the full local corpus (`RecipeUnlockState::is_unlocked` reports everything
-unlocked until `has_data()` flips), and the toast never fires, because nothing
-can call `push`. No fake producer was added to make either light up early —
-that would be the island defect one layer down. `app.rs`'s
-`recipe_toast_now_ms` is the clock a future producer should push on, so the two
-sides cannot pick incompatible origins.
+- **The browsable panel still shows the full local corpus regardless of server
+  unlock state.** `RecipeUnlockState::is_unlocked`'s "everything unlocked until
+  real data arrives" stand-in never receives real data, because nothing feeds
+  it `Identifier`s (see "Recipe-unlock tracking" above) — this is a
+  *different* gap from the toast, which reads `RecipeBookSync` directly and
+  needs no `Identifier`-keyed unlock state. Closing the panel gap would mean
+  either teaching `RecipeUnlockState` to key on `RecipeDisplayId` too, or
+  driving the panel's per-recipe "locked" styling from `RecipeBookSync`'s
+  `unlocked_producing` the same way the toast now does.
+- **The recipe-book category id the wire sends per entry
+  (`recipe_book_category`, decoded and discarded as `_category` in
+  `decode_recipe_book_add`) is still unused.** It could plausibly seed a
+  category-to-default-station-icon table as a fallback for a display whose
+  station slot decodes to nothing, but that would need checking against
+  vanilla's own `RecipeBookComponent`-side logic rather than guessing, and the
+  station `SlotDisplay` itself (now surfaced as `station_items`) already
+  covers the case that matters.
 
 ### Gates
 

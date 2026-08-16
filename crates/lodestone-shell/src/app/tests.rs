@@ -3067,6 +3067,145 @@ fn a_crafting_panel_does_not_restore_the_furnace_books_settings() {
     );
 }
 
+/// The recipe-unlock toast's missing hop: `SessionRecipeBook` was folded and
+/// read by nothing, so `RecipeToastQueue::push` had zero production callers
+/// and the toast could never appear. Drives the real chain: a real
+/// `WindowApp`, a real `ClientEvent::RecipeBookAdded` folded through the same
+/// `NetIngest` schedule the net thread runs, and `drive_ui_from_session`
+/// itself — the method `redraw()` calls every frame, which is where
+/// `WindowApp::sync_recipe_toasts` now lives.
+///
+/// Two properties, both load-bearing:
+///
+/// * the first sync (`replace: true`, vanilla's join-time seed) must seed the
+///   "already toasted" set and toast **nothing** — vanilla does not toast a
+///   fresh join's entire unlock history;
+/// * a genuinely new unlock **after** that must reach
+///   [`crate::hud::HudFrame::recipe_toast`]'s own producer,
+///   [`recipe_toast_view`], with the *station* and *unlocked* item ids the
+///   decode carried — not transposed, and not the discarded `_category` this
+///   feature used to drop instead.
+#[test]
+fn drive_ui_from_session_toasts_a_newly_unlocked_recipe_but_not_the_join_time_seed() {
+    use crate::net::NetUpdate;
+    use lodestone_client::ClientEvent;
+    use lodestone_model::event::RecipeBookEntry;
+
+    let torch = lodestone_data::items::item_id("minecraft:torch").expect("torch is in the census");
+    let crafting_table = lodestone_data::items::item_id("minecraft:crafting_table")
+        .expect("crafting_table is in the census");
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    app.sim.step(1.0 / 20.0);
+
+    app.sim
+        .net()
+        .expect("net attached above")
+        .ingest_session_event(ClientEvent::RecipeBookAdded {
+            entries: vec![RecipeBookEntry {
+                display_id: 1,
+                result_items: vec![torch],
+                station_items: vec![crafting_table],
+                notification: true,
+                highlight: false,
+            }],
+            replace: true,
+        });
+    app.drive_ui_from_session();
+    assert!(
+        recipe_toast_view(&app.recipe_toasts, recipe_toast_now_ms()).is_none(),
+        "the first join-time sync must seed the seen set, not replay the \
+         whole unlock history as toasts"
+    );
+
+    app.sim
+        .net()
+        .expect("net attached above")
+        .ingest_session_event(ClientEvent::RecipeBookAdded {
+            entries: vec![RecipeBookEntry {
+                display_id: 2,
+                result_items: vec![torch],
+                station_items: vec![crafting_table],
+                notification: true,
+                highlight: false,
+            }],
+            replace: false,
+        });
+    app.drive_ui_from_session();
+
+    let view = recipe_toast_view(&app.recipe_toasts, recipe_toast_now_ms())
+        .expect("a newly-unlocked, notifying recipe must reach the toast queue");
+    assert_eq!(
+        view.station.item.to_string(),
+        "minecraft:crafting_table",
+        "the station icon must be the crafting station, not the unlocked item"
+    );
+    assert_eq!(
+        view.unlocked.item.to_string(),
+        "minecraft:torch",
+        "the unlocked icon must be the result item, not the station"
+    );
+}
+
+/// The control for the gate above: a recipe with `notification: false` must
+/// never toast, even on a later (non-seeding) sync — vanilla's tab-highlight-
+/// only unlocks are silent.
+#[test]
+fn a_non_notifying_unlock_never_toasts() {
+    use crate::net::NetUpdate;
+    use lodestone_client::ClientEvent;
+    use lodestone_model::event::RecipeBookEntry;
+
+    let torch = lodestone_data::items::item_id("minecraft:torch").expect("torch is in the census");
+    let crafting_table = lodestone_data::items::item_id("minecraft:crafting_table")
+        .expect("crafting_table is in the census");
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    app.sim.step(1.0 / 20.0);
+
+    // Seed with an empty first sync.
+    app.sim
+        .net()
+        .expect("net attached above")
+        .ingest_session_event(ClientEvent::RecipeBookAdded {
+            entries: Vec::new(),
+            replace: true,
+        });
+    app.drive_ui_from_session();
+
+    app.sim
+        .net()
+        .expect("net attached above")
+        .ingest_session_event(ClientEvent::RecipeBookAdded {
+            entries: vec![RecipeBookEntry {
+                display_id: 5,
+                result_items: vec![torch],
+                station_items: vec![crafting_table],
+                notification: false,
+                highlight: true,
+            }],
+            replace: false,
+        });
+    app.drive_ui_from_session();
+
+    assert!(
+        recipe_toast_view(&app.recipe_toasts, recipe_toast_now_ms()).is_none(),
+        "notification: false must never raise a toast"
+    );
+}
+
 /// The owner's report: right-clicking a server-side "server selector" opens a
 /// container, selecting a row makes the **server** close it, and our client
 /// showed the player's own inventory instead of returning to gameplay —
