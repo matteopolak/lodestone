@@ -434,8 +434,19 @@ const fn main_hand_value(hand: MainHand) -> i32 {
     }
 }
 
+/// The vanilla ability flag bit set when the client is invulnerable — only
+/// meaningful on the **clientbound** `abilities` packet; the serverbound
+/// direction the client sends carries only the flying bit.
+const ABILITY_INVULNERABLE: i8 = 0x01;
 /// The vanilla flying-ability flag bit set when the client is flying.
 const ABILITY_FLYING: i8 = 0x02;
+/// The vanilla ability flag bit set when the client is allowed to fly —
+/// clientbound-only, same caveat as [`ABILITY_INVULNERABLE`].
+const ABILITY_CAN_FLY: i8 = 0x04;
+/// The vanilla ability flag bit set when the client may instantly break
+/// blocks (creative mode) — clientbound-only, same caveat as
+/// [`ABILITY_INVULNERABLE`].
+const ABILITY_INSTABUILD: i8 = 0x08;
 /// Vanilla default flying speed, sent in the server-ignored serverbound field.
 const DEFAULT_FLYING_SPEED: f32 = 0.05;
 /// Vanilla default walking speed, sent in the server-ignored serverbound field.
@@ -1074,6 +1085,32 @@ impl V340Adapter {
             let body: HeldItemSlot = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::HeldSlotChanged {
                 slot: i32::from(body.slot),
+            })]);
+        }
+        if packet_id == play::clientbound::ABILITIES {
+            // Signed-byte flags (bit 0x01 invulnerable, 0x02 flying, 0x04 can
+            // fly, 0x08 instabuild), then f32 flying speed, f32 walking speed
+            // — verified against minecraft-data's 1.12.2 `packet_abilities`,
+            // byte-identical to 1.8's shape. 1.12.2 reuses one packet *name*
+            // for both directions with different flag semantics (the
+            // serverbound `abilities` this crate already encodes for
+            // `SetFlying` carries only the flying bit); the clientbound
+            // shape decoded here is byte-identical, so it is hand-decoded
+            // rather than routed through the serverbound-tagged
+            // [`PlayerAbilities`] struct to avoid conflating the two
+            // directions' meaning.
+            let mut reader = Reader::new(payload);
+            let flags = reader.i8().map_err(dec_err)?;
+            let flying_speed = reader.f32().map_err(dec_err)?;
+            let walking_speed = reader.f32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::AbilitiesChanged {
+                invulnerable: flags & ABILITY_INVULNERABLE != 0,
+                flying: flags & ABILITY_FLYING != 0,
+                can_fly: flags & ABILITY_CAN_FLY != 0,
+                instabuild: flags & ABILITY_INSTABUILD != 0,
+                flying_speed,
+                walking_speed,
             })]);
         }
         // Everything else in play is intentionally ignored for now.
