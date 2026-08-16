@@ -1285,7 +1285,20 @@ impl<T: Transport> Driver<T> {
                 }
             }
             Ok(None) => {
-                tracing::debug!(?action, "action has no packet in current state; dropping");
+                // The state is the whole diagnosis here: `Move` (for example)
+                // has an encode arm gated on `ConnectionState::Play`, so the
+                // interesting question when this fires is *which* state the
+                // action was queued in — was it produced somewhere that
+                // should not be producing it in this state (e.g. `Move`
+                // still ticking during a 26.2 dimension-change-via-
+                // configuration respawn), or is the adapter genuinely
+                // missing an arm it should have. Without the state, both
+                // read identically.
+                tracing::debug!(
+                    ?action,
+                    state = ?self.state,
+                    "action has no packet in current state; dropping"
+                );
             }
             Err(error) => {
                 tracing::warn!(%error, ?action, "adapter rejected action; dropping");
