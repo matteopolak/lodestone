@@ -24,16 +24,17 @@ delay vanilla uses) once every wave is spawned and cleared. A real boss bar
 raider of each wave is marked *captain* (`MobSim::raid_captain`), the data-only half of
 the ominous-banner marker.
 
-**Not reachable without an edit outside this crate's owned files, or without a
-primitive that did not exist until recently** (see §5): **the trigger.**
-`MobSim::start_raid` is real, tested, and **has zero production callers** — the same
-"code exists, nothing calls it" shape `docs/pillager-patrols.md` itself warns readers
-to check for. Nothing in this tree currently:
-
-* grants `minecraft:bad_omen` from an ominous bottle,
-* detects a player crossing into a village, or
-* converts Bad Omen into `minecraft:raid_omen` on that crossing and starts a raid when
-  it expires.
+**The trigger — landed.** `server.rs`'s native `serve_play` now carries the whole
+Bad-Omen → Raid-Omen → `start_raid` chain: a `minecraft:bad_omen` carrier within 64
+blocks of an occupied `#village` POI (via the live `MobSim::occupied_homes_in_range`
+bed-claim ledger — see below for why that is narrower than vanilla's full tag) has it
+converted to `minecraft:raid_omen` at the same amplifier, with the conversion position
+remembered (`raid_omen_position`, vanilla's `ServerPlayer.raidOmenPosition`); on Raid
+Omen's own last tick, `MobSim::create_or_extend_raid(origin, difficulty, amplifier)`
+re-queries that position, averages the occupied POIs into a centre, and either extends
+an already-ongoing raid within 96 blocks (`MobSim::raid_near`, vanilla's own
+`ServerLevel::getRaidAt` constant) or calls the already-built `start_raid`. Still
+missing: **granting Bad Omen from an ominous bottle in the first place** — see below.
 
 **The real vanilla trigger is narrower than `isVillageCenter` suggests, and this
 doc previously named the wrong primitive.** Traced through the decompile:
@@ -140,20 +141,24 @@ nothing this unit could set even if it owned the wire path.
   `poi/` set, so `MobSim::occupied_homes_in_range(center, radius)` is the
   live query the trigger below should use instead of (or alongside)
   `PoiStorage::occupied_in_range`.
-* **The Bad-Omen → Raid-Omen → raid-start trigger**, real but narrow, and now
-  fully specified: `raid::absorb_raid_omen(existing_level, amplifier)` is the pure
-  arithmetic (`Raid.absorbRaidOmen`, clamped to `1..=5`) already written and
-  tested. The remaining wiring, now that bed-claiming exists, is mechanical: (1)
-  `server.rs`'s per-connection `ActiveEffects` notices `minecraft:bad_omen`
-  expiring, removes it, and applies `minecraft:raid_omen` at the new level,
-  recording the player's position (`player.getRaidOmenPosition()`'s equivalent);
-  (2) on `minecraft:raid_omen`'s own expiry, call a new `MobSim`-side entry point
-  that runs `occupied_homes_in_range(recorded_position, 64)` (plus, for parity
-  with the wider `#village` tag, `occupied_in_range` over claimed job sites and
-  the meeting bell — this module only closes the `home` gap), averages the
-  results into a centre, and calls the already-built
-  `MobSim::start_raid(center, difficulty, omen_level)` when the query returns
-  anything. All of that state lives in `server.rs`.
+* **The Bad-Omen → Raid-Omen → raid-start trigger — landed.**
+  `raid::absorb_raid_omen(existing_level, amplifier)` is the pure arithmetic
+  (`Raid.absorbRaidOmen`, clamped to `1..=5`); `MobSim::create_or_extend_raid`
+  (native-only, `mobs/raid.rs`) is the whole "average the occupied POIs, extend
+  or start" step; `server.rs`'s native `serve_play` owns the per-connection
+  `ActiveEffects`/`raid_omen_position` state that drives it, right before the
+  generic `effects.tick()` block (reading `duration() == 1` *before* that block
+  decrements it, matching vanilla's own pre-decrement `tickCount`). **Still
+  narrower than vanilla's `#village` tag**: `create_or_extend_raid` reads only
+  `MobSim::occupied_homes_in_range` (claimed beds) — claimed job sites and the
+  meeting bell have no matching live range query yet, and the disk-backed
+  `PoiStorage::occupied_in_range` can never see a claim either way, since
+  neither claim ledger persists. A village with claimed workstations but no
+  claimed bed does not yet trigger a raid — a real, disclosed gap, not a silent
+  one. **Also not built:** an "extend, don't duplicate" call still creates a
+  *second* raid if the first one has drifted more than 96 blocks from the new
+  omen's centre (matching vanilla's own `getRaidAt` radius exactly, so this is
+  vanilla's own boundary, not a narrowing).
 * **Granting Bad Omen from an ominous bottle.** `item_use.rs` already lists
   `ominous_bottle` among the drinkable-not-food items, but its `Consumable.onConsume`
   effect list (the actual Bad Omen grant) is explicitly unmodelled — the same disclosed
@@ -170,12 +175,19 @@ nothing this unit could set even if it owned the wire path.
 
 ## 6. How to change it
 
-* **Exercising a raid today** without the missing trigger: call `MobSim::start_raid`
-  directly (a debug command, a test) — everything downstream (waves, boss bar,
-  captain, victory) already runs.
-* **Wiring the real trigger** is exactly §5's bullets, in dependency order:
-  villager bed-claiming first (so `occupied_in_range` ever finds an occupied
-  `#village` POI), then the mechanical `ActiveEffects`/`MobSim` wiring last.
+* **Exercising a raid today** without granting Bad Omen first: call
+  `MobSim::start_raid`/`create_or_extend_raid` directly (a debug command, a
+  test), or `/effect give` a player `minecraft:bad_omen` and walk them within
+  64 blocks of a villager's claimed bed — the real trigger picks it up from
+  there.
+* **Widening the occupied-POI signal past beds** (job sites, the meeting bell)
+  needs a live range query for `WorkstationClaims` the way
+  `MobSim::occupied_homes_in_range` already exists for `BedClaims` — see
+  `crate::mobs::villager`'s own module doc for why neither ledger persists to
+  disk.
+* **Granting Bad Omen from an ominous bottle** is the one remaining hop before
+  a real playthrough can reach a raid with no debug command at all — see
+  `item_use.rs`'s own disclosed gap for `ominous_bottle`.
 * **Adding ravager/evoker/witch waves** slots in once those species exist in the
   roster: add their own `spawnsPerWaveBeforeBonus` arrays (real data, already known —
   see `Raid.java`'s `RaiderType` enum) next to `PILLAGER_BASE_SPAWNS`/

@@ -12448,6 +12448,11 @@ where
     // `apply_use_item_on`'s bed arm. Never read here — the placement half of
     // P2 is the next consumer (see `crate::world_spawn`'s module doc).
     let mut respawn: Option<RespawnPoint> = None;
+    // Issue #241's raid trigger: vanilla's `ServerPlayer.raidOmenPosition`.
+    // Set the tick Bad Omen converts to Raid Omen (the block the carrier
+    // stood on then), read and cleared on Raid Omen's own last tick — see
+    // the `vitals_tick` arm below for both halves.
+    let mut raid_omen_position: Option<BlockPos> = None;
     // Issue #325: this connection's server-side entity id — the key the
     // night-skip vote stores this player under. A `PlayerRegistry` ticket
     // carries it where a registry exists (LAN, and every `serve_play` gate);
@@ -13536,6 +13541,72 @@ where
                             )
                             .await?;
                         }
+                    }
+                }
+
+                // Issue #241's raid trigger, traced through the decompile:
+                // `BadOmenMobEffect.applyEffectTick` converts Bad Omen into Raid
+                // Omen the moment its carrier (not a spectator, not on Peaceful)
+                // stands near an occupied village POI, remembering *where* that
+                // happened (`raid_omen_position`); `RaidOmenMobEffect
+                // .applyEffectTick`, on Raid Omen's own last tick, spends that
+                // remembered position on `Raids.createOrExtendRaid`
+                // (`MobSim::create_or_extend_raid`) — a flat 64-block radius query
+                // over occupied `#village` POIs, **not** `isVillage`'s own
+                // section-distance tracker, a different subsystem this port does
+                // not build (see `crate::mobs::villager`'s own module doc). Ahead
+                // of the generic `effects.tick()` block below, and reading
+                // `duration()` *before* it decrements — vanilla's own `tickCount`
+                // is the pre-decrement remaining duration.
+                if let Some((x, y, z)) = player_pos
+                    && game_mode != GameMode::Spectator
+                {
+                    let pos = BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32);
+                    let (difficulty, _) = world.difficulty();
+                    if difficulty != lodestone_model::Difficulty::Peaceful
+                        && let Some(amplifier) = effects.amplifier_of("minecraft:bad_omen")
+                        && !mobs.with(|sim| sim.occupied_homes_in_range(pos, 64)).is_empty()
+                    {
+                        effects.remove("minecraft:bad_omen");
+                        apply(
+                            conn,
+                            &mut state,
+                            proto.encode_remove_mob_effect(LOCAL_PLAYER_ENTITY_ID, "minecraft:bad_omen"),
+                        )
+                        .await?;
+                        effects.apply("minecraft:raid_omen", 600, amplifier);
+                        apply(
+                            conn,
+                            &mut state,
+                            proto.encode_update_mob_effect(
+                                LOCAL_PLAYER_ENTITY_ID,
+                                "minecraft:raid_omen",
+                                amplifier,
+                                600,
+                                false,
+                                true,
+                                true,
+                                true,
+                            ),
+                        )
+                        .await?;
+                        raid_omen_position = Some(pos);
+                    }
+
+                    let expiring_raid_omen = effects
+                        .get("minecraft:raid_omen")
+                        .map(|instance| (instance.duration(), instance.amplifier()));
+                    if let Some((1, amplifier)) = expiring_raid_omen
+                        && let Some(origin) = raid_omen_position.take()
+                    {
+                        effects.remove("minecraft:raid_omen");
+                        apply(
+                            conn,
+                            &mut state,
+                            proto.encode_remove_mob_effect(LOCAL_PLAYER_ENTITY_ID, "minecraft:raid_omen"),
+                        )
+                        .await?;
+                        mobs.with(|sim| sim.create_or_extend_raid(origin, difficulty, amplifier));
                     }
                 }
 
