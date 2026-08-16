@@ -584,6 +584,13 @@ Know its scope, because outside it the instrument is *silent* rather than wrong 
 - It answers **"is this clientbound packet reaching anything"** and nothing else — not Rust call graphs,
   where it returns byte-identical output before and after a fix. For a crate-internal island, grep for
   constructors tree-wide plus a test that drives the *registry* rather than the type.
+- **Its granularity is the packet id, so a packet that multiplexes an enum hides an unconnected arm behind
+  its connected siblings.** Measured: `PLAYER_ACTION`'s `SWAP_ITEM_WITH_OFFHAND` ordinal — the F key — fell
+  through to `ServerBound::Ignored`, while the packet id counted as **connected** on the strength of its
+  other ordinals, so the instrument reported health for a feature that did nothing. Any packet carrying a
+  discriminant (`PLAYER_ACTION`, `PLAYER_COMMAND`, `INTERACT`, `CUSTOM_CLICK_ACTION`) needs its arms
+  enumerated by hand; "the packet is connected" is a claim about the id, not about the behaviour you care
+  about. The same reasoning applies to a `MetadataField` index shared across classes.
 - **It cannot see a fully-connected wire carrying the wrong value.** #323: `SET_TIME` decodes and really
   does darken the sky, every link green, while the value is wall-clock elapsed-since-join and `tick.rs`'s
   real counter never reaches the encoder. Only a gate whose expected value originates **outside** our own
