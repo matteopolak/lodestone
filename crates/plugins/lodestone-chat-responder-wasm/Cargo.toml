@@ -49,6 +49,15 @@ misbehave = []
 # `misbehave` — a fuel-exhaustion test pointed at a well-behaved plugin measures
 # nothing, because the plugin returns long before the budget runs out.
 spin = []
+# The memory-ceiling fixture: a guest that tries to grow its linear memory without
+# bound. See `crates/lodestone-wasm-host/tests/memory_denial.rs` — the pair of
+# tests there needs one artifact whose growth is bounded only by whatever ceiling
+# the *host* configures, so the same module run under two different
+# `PluginHost::with_memory_limit` values is the control.
+alloc-loop = []
+# The network-denial fixture: a guest that attempts a real TCP connect. See
+# `crates/lodestone-wasm-host/tests/network_denial.rs`.
+network = []
 
 [dependencies]
 # The only dependency, and it must stay that way: everything a guest links is
