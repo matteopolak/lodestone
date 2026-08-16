@@ -222,6 +222,19 @@ structural consequence of the name-based design documented above:
   field this scanner cannot see mutated (through a method that itself does
   something equivalent to `field = 0` without literal `Expr::Assign` syntax,
   e.g. `std::mem::take`) may be mis-scored either way.
+- **A `Vec`/collection field grown only through a mutating method
+  (`.push`, `.insert`, `.extend`) reads as default-only, permanently.**
+  Found dogfooding this tool on itself: `Collected::allow_dead_code` and
+  four sibling `Vec` fields in `xtask/src/islands.rs`'s own `Collected`
+  struct are constructed once via `Collected::default()` (correctly
+  default-like) and then grown exclusively via `.push(...)` throughout the
+  scan — a real, meaningful mutation this heuristic cannot see, because
+  `visit_expr_binary`'s compound-assignment fix only covers operators
+  (`+=`), not method calls. Unlike `position_reminder`'s `+=` case above,
+  there is no bounded operator list to special-case here: `.push` today,
+  some other crate's `.insert`/`.append`/a custom mutator tomorrow. Treat a
+  default-only finding on a collection-typed field as this class by default
+  and check its consumer for a growth method before trusting it.
 - **Findings in a crate this scanner cannot edit (anything outside
   `crates/xtask`/`xtask`, `crates/protocol/*`, `docs/`) still need a human or
   a differently-scoped agent to close them.** The tool reports; it does not
