@@ -362,11 +362,25 @@ impl Sim {
     {
         let net = self.net.as_ref()?;
         let handle = net.shared_handle();
-        // `.0` is `game_time`, vanilla's `level.getGameTime()`; `.1` is
-        // `time_of_day`, which wraps every day and would make the sway jump at
-        // dawn.
-        let game_time = handle.get().map_or(0, |c| c.world_time().0);
-        let partial_tick = self.clock().interp_alpha;
+        // `banner_phase` only needs a value that advances by exactly one every
+        // tick, every tick — it is purely decorative, not synced to anything
+        // server-side. `handle.get().map(|c| c.world_time().0)` (vanilla's
+        // `level.getGameTime()`) looked like the obvious source, and it is the
+        // wrong clock here: `WorldTime` is a flat snapshot the net thread only
+        // overwrites on a decoded `SET_TIME`, which the server sends roughly
+        // once per second (`docs/served-session-liveness.md`'s
+        // `TIME_SYNC_INTERVAL`) — the exact staleness
+        // `ContinuousTimeOfDay::advance` exists to paper over for the sky's
+        // cloud scroll (`app/session.rs`'s `install_session_render_sources`).
+        // Reading it raw here made every banner's integer phase jump once a
+        // second while `partial_tick` sawed 0→1 underneath it on every local
+        // tick in between — a stepped, "choppy" sway rather than a smooth one.
+        // `FrameClock.ticks` is the local driver's own fixed-tick counter, and
+        // it is paired with `interp_alpha` in the very same struct, so the two
+        // can never desync the way a network snapshot and a local clock can.
+        let clock = self.clock();
+        let game_time = clock.ticks as i64;
+        let partial_tick = clock.interp_alpha;
         Some(move |eye: glam::Vec3| {
             crate::block_entities::banner_spawns(&handle, eye, game_time, partial_tick)
         })
