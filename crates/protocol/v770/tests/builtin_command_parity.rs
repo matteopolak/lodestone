@@ -238,15 +238,10 @@ fn the_comparison_fails_when_the_subtrees_differ() {
     );
 }
 
-/// `/gamerule`'s two known divergences, asserted rather than left to be
-/// discovered. Both were found by running this gate, not by reading the code.
+/// `/gamerule`'s one remaining known divergence, asserted rather than left to
+/// be discovered. Found by running this gate, not by reading the code.
 ///
-/// **1. Vanilla registers two literals per rule.** `keep_inventory` *and*
-/// `minecraft:keep_inventory`, leading to identical subtrees. We register only the
-/// unprefixed form, so `/gamerule` does not have full subtree parity. Closing that
-/// is one extra `literal` call in `commands::gamerule`.
-///
-/// **2. We expose one rule vanilla's tree does not: `max_minecart_speed`.** Not a
+/// **We expose one rule vanilla's tree does not: `max_minecart_speed`.** Not a
 /// version skew — it is `registerInteger("max_minecart_speed", …,
 /// FeatureFlagSet.of(FeatureFlags.MINECART_IMPROVEMENTS))`
 /// (`GameRules.java`), i.e. gated behind an **experimental feature flag**
@@ -255,11 +250,21 @@ fn the_comparison_fails_when_the_subtrees_differ() {
 /// offers it unconditionally. That is the honest description of the gap and it is
 /// pinned here rather than papered over with an inequality.
 ///
-/// The per-rule subtrees themselves *do* match, which is the part that decides
-/// whether a client autocompletes a value the server rejects; that is asserted
-/// below for one boolean rule and one bounded-integer rule.
+/// **Vanilla's own two-literals-per-rule shape is now matched.**
+/// `commands::gamerule::register_rule_literal` builds both `keep_inventory`
+/// *and* `minecraft:keep_inventory` (`GameRuleCommand.register`'s own
+/// `unqualified`/`qualified` pair, `.cache/mc/26.2/src`), so the child count
+/// is a plain `theirs == (ours - FEATURE_FLAGGED_RULES) * 2` no longer — it is
+/// `theirs == (ours - FEATURE_FLAGGED_RULES * 2)`, both sides counting **all**
+/// literals (bare and namespaced) now that we register both too.
+///
+/// The per-rule subtrees themselves *do* match, both spellings, which is the
+/// part that decides whether a client autocompletes a value the server
+/// rejects; that is asserted below for one boolean rule and one
+/// bounded-integer rule, each checked under both its bare and namespaced
+/// literal.
 #[test]
-fn gamerule_has_every_rule_subtree_right_but_half_the_literals() {
+fn gamerule_has_every_rule_subtree_right_and_every_literal_too() {
     let ours = ServerCommands::new().wire_tree();
     let theirs = vanilla_tree();
     let our_root = root_literal(&ours, "gamerule");
@@ -267,16 +272,20 @@ fn gamerule_has_every_rule_subtree_right_but_half_the_literals() {
 
     let ours_children = ours.node(our_root).expect("node").children.len();
     let theirs_children = theirs.node(their_root).expect("node").children.len();
-    /// `max_minecart_speed`, behind `FeatureFlags.MINECART_IMPROVEMENTS`.
-    const FEATURE_FLAGGED_RULES: usize = 1;
+    /// `max_minecart_speed`, behind `FeatureFlags.MINECART_IMPROVEMENTS` —
+    /// counted once per spelling (bare + namespaced), since both sides now
+    /// register both literals for every rule they carry at all.
+    const FEATURE_FLAGGED_LITERALS: usize = 2;
     assert_eq!(
         theirs_children,
-        (ours_children - FEATURE_FLAGGED_RULES) * 2,
-        "vanilla registers a namespaced alias per rule and omits feature-flagged rules. \
-         ours={ours_children} vanilla={theirs_children}"
+        ours_children - FEATURE_FLAGGED_LITERALS,
+        "both trees now register a namespaced alias per rule; the only remaining gap is the \
+         feature-flagged rule. ours={ours_children} vanilla={theirs_children}"
     );
     // Which rule is the extra one, named — so a *second* divergence appearing
-    // later cannot hide inside the arithmetic above.
+    // later cannot hide inside the arithmetic above. Compared by *bare* name
+    // only (namespaced aliases filtered out) so the feature-flagged rule is
+    // named once, not twice.
     let literal_names = |tree: &CommandTree, root: usize| -> Vec<String> {
         tree.node(root)
             .expect("node")
@@ -300,26 +309,31 @@ fn gamerule_has_every_rule_subtree_right_but_half_the_literals() {
     );
 
     // Two rules with different value types, so this separates "the literal is
-    // there" from "its value node is right".
+    // there" from "its value node is right" — checked under both spellings,
+    // since a redirect-free duplicate subtree is exactly the shape a
+    // half-built alias (present but pointing at the wrong executor, or built
+    // with a stale spec) would still pass a bare-name-only check on.
     for rule in ["keep_inventory", "max_snow_accumulation_height"] {
-        let find = |tree: &CommandTree, root: usize| {
-            *tree
-                .node(root)
-                .expect("node")
-                .children
-                .iter()
-                .find(|&&child| {
-                    matches!(&tree.node(child).expect("child").kind,
-                        NodeKind::Literal { name } if name == rule)
-                })
-                .unwrap_or_else(|| panic!("`/gamerule {rule}` is missing"))
-        };
-        compare(
-            &format!("/gamerule/{rule}"),
-            &ours,
-            find(&ours, our_root),
-            &theirs,
-            find(&theirs, their_root),
-        );
+        for spelling in [rule.to_string(), format!("minecraft:{rule}")] {
+            let find = |tree: &CommandTree, root: usize| {
+                *tree
+                    .node(root)
+                    .expect("node")
+                    .children
+                    .iter()
+                    .find(|&&child| {
+                        matches!(&tree.node(child).expect("child").kind,
+                            NodeKind::Literal { name } if *name == spelling)
+                    })
+                    .unwrap_or_else(|| panic!("`/gamerule {spelling}` is missing"))
+            };
+            compare(
+                &format!("/gamerule/{spelling}"),
+                &ours,
+                find(&ours, our_root),
+                &theirs,
+                find(&theirs, their_root),
+            );
+        }
     }
 }
