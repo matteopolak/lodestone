@@ -921,12 +921,6 @@ impl ApplicationHandler for WindowApp {
                         self.ui.close_container();
                         self.set_grab(self.ui.wants_cursor_grab());
                     }
-                    Some(KeyOutcome::ToggleDebugOverlay) => {
-                        // Toggle the debug instrument (§S4). Unlike older
-                        // vanilla, 26.2 makes this a real `KeyMapping`, so it
-                        // belongs in the table — see `keybinds`' module docs.
-                        self.show_debug = !self.show_debug;
-                    }
                     Some(KeyOutcome::DebugModifier(down)) => {
                         // Issue #197. Vanilla's
                         // `keyDebugModifier.setDown(!didDebugAction)`

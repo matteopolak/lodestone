@@ -133,7 +133,6 @@ pub(crate) enum KeyOutcome {
     Chat,
     Pause,
     CloseContainer,
-    ToggleDebugOverlay,
     /// The debug modifier (F3) went down (`true`) or up (`false`) — That fix.
     ///
     /// The overlay toggle happens on the **release**, and only when no chord
