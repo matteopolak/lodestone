@@ -462,7 +462,11 @@ fn handle_remove_entities(
     let count = reader.var_i32().map_err(dec_err)?;
     let count = usize::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("negative remove_entities count {count}")))?;
-    let mut entity_ids = Vec::with_capacity(count);
+    // Cap the reservation at the readable bytes, the same way `decode_vec`
+    // does: `count` is attacker-controlled and each id costs at least one
+    // byte, so no more than `remaining()` can be produced. Reserving `count`
+    // outright lets a tiny payload demand an unbounded allocation.
+    let mut entity_ids = Vec::with_capacity(count.min(reader.remaining()));
     for _ in 0..count {
         entity_ids.push(reader.var_i32().map_err(dec_err)?);
     }
