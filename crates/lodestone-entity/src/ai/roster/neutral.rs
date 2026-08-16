@@ -165,7 +165,8 @@ use crate::ai::goals::{
 
 use super::{
     Registration, Selector, SpeciesContext, breed_1_0, float_goal, hurt_by_target,
-    look_at_player_8, melee_attack, random_look_around, sit_when_ordered, stroll,
+    look_at_player_8, melee_attack, owner_hurt_by_target, owner_hurt_target, random_look_around,
+    sit_when_ordered, stroll,
 };
 
 /// Every species this family claims. Iterated by `roster`'s invariant gates.
@@ -285,10 +286,9 @@ pub const ENDERMAN: &[Registration] = &[
 /// `ATTACK_DAMAGE 5.0`. `FOLLOW_RANGE 35.0` is inherited from `Zombie.createAttributes` and
 /// is what sizes the alert box below.
 ///
-/// Group aggro is modelled now, in one of its **two independent** vanilla
-/// halves, neither of which is a row in this table. Re-verified against the
-/// 26.2 jar rather than assumed — an earlier version of this comment
-/// mislabelled which half this crate implements:
+/// Group aggro is modelled now, in **both** of its independent vanilla
+/// halves, neither of which is a row in this table (both live in
+/// `lodestone_server::mobs::MobSim`, a host-side census rather than a goal):
 ///
 /// 1. **`HurtByTargetGoal(this).setAlertOthers()`** (registered above, target
 ///    priority 1) fires its inherited `alertOthers()` once, from `start()`,
@@ -298,23 +298,25 @@ pub const ENDERMAN: &[Registration] = &[
 ///    models, gated on the victim's grudge being *new* (never re-alerting
 ///    mid-grudge), which matches vanilla's own "once per acquisition" shape
 ///    exactly rather than approximating it.
-/// 2. **`ZombifiedPiglin.customServerAiStep`'s private `maybeAlertOthers`**
-///    is a second, wholly separate mechanism this crate does not model at
-///    all: every tick the piglin has a target, throttled by its own
-///    `ALERT_INTERVAL = TimeUtil.rangeOfSeconds(4, 6)` = **[80, 120]-tick**
-///    timer (distinct from the shared grudge-duration window), gated on
-///    `getSensing().hasLineOfSight(getTarget())` against the piglin's
-///    *current* live target position. This is what makes a real piglin pack
-///    keep growing every few seconds while chasing you, not just once at the
-///    first hit — see `lodestone_server::mobs::alert_species`'s own doc
-///    comment for what building it needs.
+/// 2. **`ZombifiedPiglin.customServerAiStep`'s private `maybeAlertOthers`** —
+///    a second, wholly separate mechanism: every tick the piglin has a
+///    target, throttled by its own `ALERT_INTERVAL = TimeUtil.rangeOfSeconds(4,
+///    6)` = **[80, 120]-tick** timer (distinct from the shared
+///    grudge-duration window), gated on live line of sight to the piglin's
+///    current target. This is what makes a real piglin pack keep growing
+///    every few seconds while chasing you, not just once at the first hit.
+///    Modelled in `MobSim::tick`'s per-mob loop (`SimMob::piglin_alert_ticks`
+///    carries the throttle) — see `lodestone_server::mobs::alert_species`'s
+///    own doc comment for the one disclosed approximation (a live target
+///    reference this seam does not carry, so the check reads
+///    `MobController::attack_target` instead).
 ///
-/// The propagation itself (half 1): every other zombified piglin in a box of
-/// `(FOLLOW_RANGE, 10.0, FOLLOW_RANGE)` = **±35 XZ, ±10 Y** that has no live
-/// grudge yet has one set on it, matching this mob's own. The *acquisition* half
-/// — a piglin turning its fresh grudge into an actual `attack_target` — is
-/// `NearestAttackableTargetGoal(Player,isAngryAt)` below, `Coverage::Modelled`
-/// via `anger_gated_target`.
+/// The propagation itself (both halves): every other zombified piglin in a
+/// box of `(FOLLOW_RANGE, 10.0, FOLLOW_RANGE)` = **±35 XZ, ±10 Y** that has no
+/// live grudge yet has one set on it, matching the alerting mob's own. The
+/// *acquisition* half — a piglin turning its fresh grudge into an actual
+/// `attack_target` — is `NearestAttackableTargetGoal(Player,isAngryAt)`
+/// below, `Coverage::Modelled` via `anger_gated_target`.
 pub const ZOMBIFIED_PIGLIN: &[Registration] = &[
     // Inherited from `Zombie.registerGoals`.
     Registration::missing(Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
@@ -442,24 +444,32 @@ pub const BEE: &[Registration] = &[
 /// **Eight of the twenty rows needed an owner**, and until `lodestone_server`
 /// grew one (`PlayerIdentity` at the perception seam, plus `MobController::
 /// owner_position`/`is_tame`/`is_ordered_to_sit`) all eight were `Missing` for
-/// that single reason. `SitWhenOrderedToGoal` and `FollowOwnerGoal` are now
-/// built on it and appear below as real rows — the ownership half of the gap
-/// is closed for those two.
+/// that single reason. `SitWhenOrderedToGoal`, `FollowOwnerGoal` and now
+/// `OwnerHurtByTargetGoal`/`OwnerHurtTargetGoal` are built on it and appear
+/// below as real rows — the ownership half of the gap is closed for all four.
 ///
-/// The other six are still `Missing`, but **not for the reason above anymore**,
-/// and re-reading this comment instead of the table is exactly the kind of
-/// staleness this repo's evidence standards warn about:
+/// `OwnerHurtByTargetGoal`/`OwnerHurtTargetGoal` (`ai/goal/target/
+/// OwnerHurtByTargetGoal.java`, `OwnerHurtTargetGoal.java`) read
+/// `owner.getLastHurtByMob()`/`owner.getLastHurtMob()` — **who last hurt the
+/// owner** and **who the owner last hurt**. Both facts now have real
+/// producers: `crate::server::apply_attack`'s caller already threads the
+/// attacking player's `PlayerIdentity` into `MobSim::attack_from_player`
+/// (built for villager reputation), which resolves every tamed pet owned by
+/// that identity and calls `NavigatingMob::set_owner_hurt_target` on each —
+/// the "owner attacked X" half. The "a mob hurt the owner" half resolves
+/// inside `MobSim::tick`'s own hostile-melee-against-player pass, which
+/// already turns a hit into a `PlayerHit` by matching the attack's target
+/// position against a connected player; that same pass now also walks
+/// `self.mobs` for pets owned by that player's uuid and calls
+/// `set_owner_hurt_by`. Both rows read `MobController::owner_hurt_by`/
+/// `owner_hurt_target`, which decay on the same 100-tick window vanilla's
+/// own `lastHurtByMob`/`lastHurtMob` do (they *are* those fields, just read
+/// off the owner's entity rather than this mob's).
 ///
-/// * `OwnerHurtByTargetGoal`/`OwnerHurtTargetGoal` read `owner.getLastHurtByMob()`
-///   and `owner.getLastHurtMob()` (`ai/goal/target/OwnerHurtByTargetGoal.java`,
-///   `OwnerHurtTargetGoal.java`) — **who last hurt the owner** and **who the
-///   owner last hurt**. Ownership can name the owner now; nothing produces
-///   either fact. The player half needs the attacker's `PlayerIdentity` threaded
-///   through `MobSim::attack`'s caller (`crate::server::apply_attack`, which
-///   today passes only a `Vec3` for knockback), and the "a mob hurt the owner"
-///   half has no producer at all — player damage is not resolved through
-///   `MobSim`. Both rows stay `Missing` at their own table entries below, with
-///   this reasoning repeated there rather than assumed from this paragraph.
+/// The remaining four are still `Missing`, but **not for an ownership
+/// reason**, and re-reading this comment instead of the table is exactly the
+/// kind of staleness this repo's evidence standards warn about:
+///
 /// * `BegGoal` and `Wolf.WolfAvoidEntityGoal(Llama)` both gate on `isTame()`
 ///   (`ai/goal/BegGoal.java`, `Wolf.WolfAvoidEntityGoal.canUse`), which is answerable
 ///   today — but neither has a goal *type* in this crate yet (begging for food,
@@ -481,7 +491,7 @@ pub const BEE: &[Registration] = &[
 /// an `attack_target` — is `NearestAttackableTargetGoal(Player,isAngryAt)`
 /// below, `Coverage::Modelled`. What remains genuinely `Missing`: line of
 /// sight on the alert itself (not modelled anywhere in this census), and the
-/// two owner-gated goals the bullet above already names.
+/// four goal-type gaps the bullets above already name.
 pub const WOLF: &[Registration] = &[
     Registration::goal(1, "FloatGoal", float_goal),
     // `TamableAnimal.TamableAnimalPanicGoal(1.5, DamageTypeTags.PANIC_ENVIRONMENTAL_CAUSES)`
@@ -512,21 +522,17 @@ pub const WOLF: &[Registration] = &[
     Registration::goal(10, "LookAtPlayerGoal(Player)", look_at_player_8),
     Registration::goal(10, "RandomLookAroundGoal", random_look_around),
     // `OwnerHurtByTargetGoal` (`ai/goal/target/OwnerHurtByTargetGoal.java`):
-    // targets whoever `owner.getLastHurtByMob()` names. Ownership can resolve
-    // the owner now; nothing produces "who last hurt the owner" — a player's
-    // incoming damage is not resolved through `MobSim` at all, so there is no
-    // call site here to read it from. See this table's own doc for the fuller
-    // account.
-    Registration::missing(Selector::Target, 1, "OwnerHurtByTargetGoal"),
+    // targets whoever `owner.getLastHurtByMob()` names. `MobSim::tick`'s
+    // hostile-melee-against-player resolution now also walks the owner's
+    // tamed pets and calls `NavigatingMob::set_owner_hurt_by` on each — see
+    // this table's own doc for the fuller account.
+    Registration::target(1, "OwnerHurtByTargetGoal", owner_hurt_by_target),
     // `OwnerHurtTargetGoal` (`ai/goal/target/OwnerHurtTargetGoal.java`): targets
     // whoever `owner.getLastHurtMob()` names, i.e. joins a fight the owner
-    // started. `MobSim::attack` — this crate's own melee-resolution entry point
-    // — already takes the attacker's `Vec3` for knockback, but not their
-    // `PlayerIdentity`, so a wolf here cannot tell "the owner just hit this"
-    // from "some other player did". Threading identity through needs a change
-    // at `crate::server::apply_attack`'s call site, which this unit does not
-    // own; see this table's own doc for the fuller account.
-    Registration::missing(Selector::Target, 2, "OwnerHurtTargetGoal"),
+    // started. `MobSim::attack_from_player` now resolves the attacking
+    // player's tamed pets and calls `set_owner_hurt_target` on each — see
+    // this table's own doc for the fuller account.
+    Registration::target(2, "OwnerHurtTargetGoal", owner_hurt_target),
     // `.setAlertOthers()` — the pack half is `Missing`; see this table's doc.
     Registration::target(3, "HurtByTargetGoal", hurt_by_target),
     // `Coverage::Modelled` now — see the piglin row's identical comment and
@@ -826,34 +832,74 @@ mod tests {
         assert_eq!(at(zombie, "ZombieAttackGoal"), Some(3));
     }
 
-    /// The mechanisms genuinely still absent from this crate — not this
-    /// family's four headline ones (all landed for issue #233; see the module
-    /// doc) but the *wolf-owner-combat* rows #229 needs — must be present as
-    /// `Coverage::Missing` rows at their real vanilla priorities, not absent,
-    /// and not silently `Modelled` by a goal that does something else.
-    ///
-    /// This is the gate that fails if someone "implements" a mechanism by
-    /// pointing the row at a plain goal that does not actually reproduce it,
-    /// or drops a row because nothing builds it. `bee`'s `Bee.BeeAttackGoal`
-    /// used to be in this list; it is `Coverage::Modelled` now (see `BEE`'s own
-    /// row comment for why a bare `MeleeAttackGoal` is a faithful stand-in),
-    /// and [`the_enderman_freeze_row_is_modelled_and_built_from_the_seam`] is
-    /// the positive-side gate for the enderman half this list already dropped.
+    /// The wolf's two owner-combat target rows are real, working goals built
+    /// from the seam — not merely rows whose `coverage` field says `Modelled`
+    /// while their build function does something else. Same shape as
+    /// [`the_enderman_freeze_row_is_modelled_and_built_from_the_seam`]: drives
+    /// each row's `build()` against a real [`NavigatingMob`], the production
+    /// `MobController`, with a discriminating pair per row — the fed position
+    /// present vs. absent, since `can_use` reading `None` and reading `Some`
+    /// is the only thing that could plausibly be wrong here.
     #[test]
-    fn the_owner_combat_mechanisms_are_recorded_as_missing_not_omitted() {
-        let blocked: &[(&str, i32, Selector, &str)] = &[("wolf", 1, Selector::Target, "OwnerHurtByTargetGoal")];
-        for &(species, priority, selector, vanilla) in blocked {
-            let row = registrations_for(species)
+    fn the_owner_combat_rows_are_modelled_and_built_from_the_seam() {
+        use crate::ai::mob::MobController;
+
+        let cases: &[(&str, i32)] =
+            &[("OwnerHurtByTargetGoal", 1), ("OwnerHurtTargetGoal", 2)];
+        for &(vanilla, priority) in cases {
+            let row = registrations_for("wolf")
                 .iter()
                 .find(|r| r.vanilla == vanilla)
-                .unwrap_or_else(|| panic!("{species} has no row for {vanilla}"));
+                .unwrap_or_else(|| panic!("wolf has no row for {vanilla}"));
+            assert_eq!(row.selector, Selector::Target);
             assert_eq!(row.priority, priority, "{vanilla} is at the wrong priority");
-            assert_eq!(row.selector, selector, "{vanilla} is on the wrong selector");
             assert!(
-                matches!(row.coverage, Coverage::Missing),
-                "{vanilla} claims coverage other than Missing; the primitive it \
-                 needs does not exist on MobController, so anything built here is \
-                 doing something else"
+                matches!(row.coverage, Coverage::Modelled(_)),
+                "{vanilla} is a real goal now; this row must say so"
+            );
+            let build = row.build().expect("a Modelled row must build something");
+            let ctx = SpeciesContext::new(WOLF_SPEED);
+            let world = Flat::dry();
+            let fed = Vec3::new(4.0, 0.0, 0.0);
+
+            let mut with_record = NavigatingMob::new(
+                &world,
+                MobShape::land(0.6, 0.85),
+                Vec3::new(0.0, 0.0, 0.0),
+                WOLF_SPEED,
+                560,
+                1,
+            );
+            if vanilla == "OwnerHurtByTargetGoal" {
+                with_record.set_owner_hurt_by(Some(fed));
+            } else {
+                with_record.set_owner_hurt_target(Some(fed));
+            }
+            let mut goal = build(&ctx);
+            assert!(
+                goal.can_use(&mut with_record),
+                "{vanilla} must accept a fed owner-combat record"
+            );
+            goal.start(&mut with_record);
+            assert_eq!(
+                with_record.attack_target(),
+                Some(fed),
+                "{vanilla} must set the fed position as the attack target"
+            );
+
+            let mut without_record = NavigatingMob::new(
+                &world,
+                MobShape::land(0.6, 0.85),
+                Vec3::new(0.0, 0.0, 0.0),
+                WOLF_SPEED,
+                560,
+                1,
+            );
+            assert!(
+                !build(&ctx).can_use(&mut without_record),
+                "{vanilla} must NOT fire with no owner-combat record fed — if \
+                 this fires, the row's build function has degenerated into \
+                 something that ignores the seam"
             );
         }
     }

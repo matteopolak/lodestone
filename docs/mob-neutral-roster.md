@@ -60,9 +60,22 @@ Three species chain `.setAlertOthers()` onto their `HurtByTargetGoal`. That prim
 The zombified piglin has a **second, independent** propagation path that is easy to conflate with the
 first: its own `alertOthers` (`ZombifiedPiglin.java`), same box shape, but driven from
 `customServerAiStep` rather than from a goal's `start()`, throttled by
-`ALERT_INTERVAL = TimeUtil.rangeOfSeconds(4, 6)` = **[80, 120] ticks**, and
-gated on line of sight to the current target. So "piglin group aggro" is a per-tick census,
-not a `Registration` — modelling it means an arm in `MobSim::tick`, next to `feed_perception`.
+`ALERT_INTERVAL = TimeUtil.rangeOfSeconds(4, 6)` = **[80, 120] ticks**
+(`PIGLIN_ALERT_INTERVAL_TICKS` in `mobs/mod.rs`), and gated on line of sight to the current target.
+So "piglin group aggro" is a per-tick census, not a `Registration` — it lives in `MobSim::tick`'s
+own per-mob loop, next to `feed_perception`, rather than as a roster row.
+
+**Landed.** `SimMob::piglin_alert_ticks` carries the countdown (`-1` sentinel = no active timer,
+rolled fresh via `piglin_alert_interval` the first tick a piglin holds a target, no immediate fire —
+a disclosed simplification, since the seam has no "did I have a target last tick" signal to detect
+vanilla's true acquisition edge from). While the countdown holds a target it decrements every tick;
+at zero it checks `RayView::is_clear` between the piglin's own position and
+`MobController::attack_target()` (the disclosed stand-in for a live `getTarget()` reference this seam
+does not carry) and, if clear, queues an alert applied to the rest of `self.mobs` after the per-mob
+loop ends — reusing this section's own box. `mobs::anger_tests::a_piglin_holding_a_target_alerts_a_neighbour_that_did_not_exist_for_the_one_shot_alert`
+isolates this from the one-shot `alertOthers` path above by spawning the neighbour *after* the first
+piglin's grudge already started, so the one-shot census (which walks `self.mobs` at the instant of
+the hit) could not have reached it — only the ongoing per-tick mechanism can.
 
 ### The enderman stare has a real geometry
 
@@ -155,7 +168,7 @@ This is the actionable part. Each row is a gap in the AI seam, not in this file:
 | 2 | ~~a gaze test~~ — **landed and fed**, see below | `MobController::is_being_stared_at` + free `is_in_view_cone`; `PlayerPerception::view_direction` now carries a real view vector, fed from `server.rs`'s `PlayerMoved` arm | enderman freeze + stare |
 | 3 | ~~instant relocation of a mob~~ — **landed**, see below | `MobController::teleport_to` + `SimMob::teleport_to` | enderman teleport |
 | 4 | ~~a mob damaging **itself**~~ — **landed**, see below | `MobController::damage_self`, drained by a `MobSim::tick` arm | bee sting-then-die |
-| 5 | ~~an ownership relation~~ — **half landed**, see below | `MobController::owner_position` + `SimMob::owner_id`; the **player** half stays blocked on `PlayerPerception` carrying an identity | wolf tame half, and the owner filter inside pack alert |
+| 5 | ~~an ownership relation~~ — **landed**, see below | `MobController::owner_position` + `SimMob::owner_id`/`owner_uuid`, fed from `PlayerIdentity` at the perception seam | wolf tame half, the owner filter inside pack alert, and the wolf's `OwnerHurtByTargetGoal`/`OwnerHurtTargetGoal` |
 
 Plus a sixth that is not a trait method: **same-species propagation**, which belongs in
 `MobSim::feed_perception`'s census rather than in a goal, because the seam deliberately hands a goal
@@ -188,16 +201,22 @@ seconds-as-ticks misreading these tests exist to exclude — left **every assert
 the expectation moved with the subject. The bounds are now jar literals stated independently in the
 test module, and the control fails as it must. If you touch these tests, keep that separation.
 
-**The rows are still `Coverage::Missing`, deliberately.** Anger resolving is necessary but not
-sufficient: flipping a row means retiring `no_anger_gated_target_row_is_modelled`, which is a
-maintainer's call and not a side effect of landing a primitive.
+**The anger-gated rows flipped to `Coverage::Modelled` once `NavigatingMob::find_nearest_target`
+stopped looping back through `self.attack_target` and started actually searching** — the old
+`no_anger_gated_target_row_is_modelled` guard that held them `Missing` for exactly that reason is
+gone from this file's tests, replaced by
+`tests::anger_gated_target_rows_use_the_anger_gated_search_not_the_open_one`, which proves both the
+positive claim and the behavioural property the old guard cared about (a live nearby player with no
+grudge is never acquired). The zombified-piglin, wolf and bee anger-gated target rows are real now;
+see `roster::neutral`'s own module doc for the citation.
 
 #### Primitives 2-5, as landed
 
 The remaining four landed as `MobController` methods plus `NavigatingMob` overrides and a `MobSim`
-host half. Each primitive is necessary but not sufficient: the roster rows stay `Coverage::Missing`
-because the enderman's goals, the bee's sting hook, the wolf's tame half and `alertOthers` all need
-more, named below.
+host half. Each primitive was necessary but not sufficient at the time it landed — the enderman's
+goals, the bee's sting hook, the wolf's tame half and `alertOthers` all needed more, named below (most
+of which have since landed too; read each bullet for its current state rather than assuming
+`Missing` from this paragraph).
 
 - **Gaze.** `MobController::is_being_stared_at` (a fed boolean) plus the free function
   `is_in_view_cone`, which is vanilla's exact `dot > 1.0 - coneSize / (adjustForDistance ? dist : 1.0)`
@@ -225,12 +244,15 @@ more, named below.
   applied through `SimMob::apply_damage` (i-frames and reductions included, matching vanilla's
   `hurtServer`). The bee's `hasStung` flag, `timeSinceSting` counter and `customServerAiStep` roll are
   **not** implemented — the primitive is the pipeline, not the bee.
-- **Ownership.** `MobController::owner_position` (a fed position) plus `SimMob::owner_id` and
-  `set_owner_id`; `feed_perception` resolves the id to a position each tick. The **player** half is
-  blocked exactly as the row predicted: vanilla's owner is a player `UUID`
-  (`TamableAnimal.DATA_OWNERUUID_ID`), and `PlayerPerception` carries no identity, so only mob-to-mob
-  ownership can be fed today. The wolf-pack same-owner filter inside `HurtByTargetGoal.alertOthers`
-  still needs that player identity before it can compare owners.
+- **Ownership.** `MobController::owner_position` (a fed position) plus `SimMob::owner_id`/`owner_uuid`
+  and `set_owner_id`/`set_owner`; `feed_perception` resolves the id to a position each tick. The
+  **player** half landed too: `PlayerIdentity` at the perception seam gives `MobOwner::Player(Uuid)`
+  a real identity to carry, which is what the wolf-pack same-owner filter inside
+  `HurtByTargetGoal.alertOthers` compares (`MobSim::attack`'s pack-alert census) and what the wolf's
+  `OwnerHurtByTargetGoal`/`OwnerHurtTargetGoal` target-selector rows read — see
+  `roster::neutral::WOLF`'s own table doc for how those two resolve to real producers
+  (`MobSim::attack_from_player` for "the owner just hit this", and the hostile-melee-against-player
+  resolution inside `MobSim::tick` for "this just hit the owner").
 
 ### Gotchas
 
@@ -240,13 +262,13 @@ more, named below.
   **plus** its six, and because the override does not call `super`, Zombie's
   `MoveThroughVillageGoal` is *dropped* and `SpearUseGoal`/`ZombieAttackGoal` renumber from 2/3 to
   1/2. `the_piglin_inherits_three_rows_and_drops_one_from_its_parent` pins all of that.
-- **Do not model a target row whose jar signature ends in `isAngryAt`.** That predicate is the entire
-  difference between a neutral mob and a hostile one. Our `NearestAttackableTargetGoal` takes no
-  predicate, so a `Modelled` row there makes zombified piglins, wolves and bees attack on sight.
-  It is currently *latent* rather than active only because `NavigatingMob::find_nearest_target`
-  returns `self.attack_target` instead of searching — the day that
-  self-loop is fixed, a `Modelled` row here turns three neutral species hostile.
-  `no_anger_gated_target_row_is_modelled` is the guard.
+- **Never register the plain `NearestAttackableTargetGoal` constructor for one of these three
+  species — only the `anger_gated` form.** A jar signature ending in `isAngryAt` is the entire
+  difference between a neutral mob and a hostile one, and the plain constructor takes no predicate,
+  so a `Modelled` row built from it makes zombified piglins, wolves and bees attack on sight.
+  `NavigatingMob::find_nearest_target` now really does search (it no longer loops back through
+  `self.attack_target`), so this is a live hazard, not a latent one.
+  `tests::anger_gated_target_rows_use_the_anger_gated_search_not_the_open_one` is the guard.
 - **`attribute.rs`'s `type_spec` now has arms for all four**, so they spawn at the
   jar's 0.3/0.23/0.3/0.3 rather than the registry's 0.7. Every rostered species now resolves, pinned
   structurally by `every_rostered_species_has_a_type_spec_arm`. The paragraph below describes the

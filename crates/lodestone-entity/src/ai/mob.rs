@@ -139,6 +139,31 @@ pub trait MobController {
         None
     }
 
+    /// The position of whoever most recently damaged this mob's **owner**,
+    /// within the same retaliation window. Drives `OwnerHurtByTargetGoal`
+    /// (`ai/goal/target/OwnerHurtByTargetGoal.java`), which reads
+    /// `owner.getLastHurtByMob()` directly — a player is a `LivingEntity`
+    /// like any other, so that is the *same* field and the *same* decay rule
+    /// `last_hurt_by` already models, just recorded on the owner rather than
+    /// on this mob.
+    ///
+    /// Defaults to `None` — an untamed mob, or one whose owner has not
+    /// recently been hurt.
+    fn owner_hurt_by(&self) -> Option<Vec3> {
+        None
+    }
+
+    /// The position of whoever this mob's **owner** most recently attacked,
+    /// same decay rule as [`owner_hurt_by`](MobController::owner_hurt_by).
+    /// Drives `OwnerHurtTargetGoal` (`ai/goal/target/OwnerHurtTargetGoal.java`),
+    /// which reads `owner.getLastHurtMob()` — a pet joins whatever fight its
+    /// owner just started.
+    ///
+    /// Defaults to `None`.
+    fn owner_hurt_target(&self) -> Option<Vec3> {
+        None
+    }
+
     /// The position of the entity this mob currently holds a **persistent
     /// grudge** against, or `None` when its anger has expired or never started.
     ///

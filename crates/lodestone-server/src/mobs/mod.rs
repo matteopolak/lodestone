@@ -859,6 +859,13 @@ struct Anger {
 /// those two hypotheses explicitly rather than asserting a grudge merely ends.
 const ANGER_TICKS: (u64, u64) = (400, 780);
 
+/// `ZombifiedPiglin.ALERT_INTERVAL` — `TimeUtil.rangeOfSeconds(4, 6)` =
+/// `[80, 120]` ticks, the throttle on the piglin's own private
+/// `maybeAlertOthers`. Deliberately **not** [`ANGER_TICKS`]: a different
+/// window this mechanism never touches, matching the piglin's real jar
+/// constant rather than reusing the shared grudge-duration one.
+const PIGLIN_ALERT_INTERVAL_TICKS: (i32, i32) = (80, 120);
+
 /// `LivingEntity.PLAYER_HURT_EXPERIENCE_TIME` — how long after a player's hit a mob's
 /// death still counts as a player kill, in ticks.
 const PLAYER_HURT_EXPERIENCE_TIME: u64 = 100;
@@ -903,6 +910,13 @@ fn grudge_ticks(mob: &mut impl MobController) -> u64 {
     lo + u64::try_from(mob.next_i32(span)).unwrap_or(0)
 }
 
+/// One draw from [`PIGLIN_ALERT_INTERVAL_TICKS`], same `lo + nextInt(hi - lo
+/// + 1)` shape as [`grudge_ticks`] and the same off-by-one reasoning applies.
+fn piglin_alert_interval(mob: &mut impl MobController) -> i32 {
+    let (lo, hi) = PIGLIN_ALERT_INTERVAL_TICKS;
+    lo + mob.next_i32(hi - lo + 1)
+}
+
 /// Whether `species` propagates a grudge to nearby same-species mobs when it
 /// is newly hurt, and if so the alert box's half-extents and whether the
 /// alerted mob's owner must match the victim's.
@@ -922,26 +936,27 @@ fn grudge_ticks(mob: &mut impl MobController) -> u64 {
 /// `crate::explosion`'s exposure sampling and `crate::mobs::projectiles`)
 /// would be the primitive if one were ever needed here.
 ///
-/// **What actually is missing, and is a materially bigger gap than "no line
-/// of sight": `ZombifiedPiglin` runs a wholly separate, ongoing mechanism**
-/// this crate has no analogue of at all. `ZombifiedPiglin.customServerAiStep`
-/// calls a private `maybeAlertOthers` every tick the piglin has a target —
-/// throttled by its own `ALERT_INTERVAL = [80, 120]` ticks (not the shared
-/// grudge window `ANGER_TICKS` reuses) and gated on
-/// `getSensing().hasLineOfSight(getTarget())` against the piglin's *current*,
-/// live target position — so a piglin pack keeps growing every couple of
+/// **A second, wholly separate mechanism also propagates piglin aggro, and it
+/// is now modelled too:** `ZombifiedPiglin.customServerAiStep`'s private
+/// `maybeAlertOthers`, called every tick the piglin has a target, throttled
+/// by its own `ALERT_INTERVAL = [80, 120]` ticks
+/// ([`PIGLIN_ALERT_INTERVAL_TICKS`], deliberately not the shared grudge
+/// window `ANGER_TICKS` reuses) and gated on live line of sight to the
+/// piglin's *current* target — so a piglin pack keeps growing every couple of
 /// seconds as long as the alerting piglin can still see whoever it is
 /// chasing, not just once at acquisition. [`MobSim::attack`]'s "only on a
 /// *new* grudge" gate covers `HurtByTargetGoal`'s one-shot alert (accurately,
-/// per the paragraph above) and nothing else; this second mechanism has no
-/// producer anywhere in this crate. Building it needs: a per-mob
-/// `ticks_until_next_alert` counter (rolled via `ALERT_INTERVAL` on first
-/// acquisition, matching `ZombifiedPiglin.setTarget`'s override), a per-tick
-/// pass in `MobSim::tick` for angry piglins, and a line-of-sight check — the
-/// closest available stand-in for "current target position" is the stored
-/// `Anger::target: Vec3` (the attacker's position at hit time, not a live
-/// entity reference this crate tracks), which would need disclosing as an
-/// approximation rather than a byte-exact port.
+/// per the paragraph above); this ongoing one is a second, independent
+/// producer, resolved in [`MobSim::tick`]'s own per-mob loop
+/// ([`SimMob::piglin_alert_ticks`] carries the throttle) and applied to the
+/// rest of `self.mobs` afterwards, reusing this function's own box for the
+/// propagation. The one disclosed approximation: `getSensing().
+/// hasLineOfSight(getTarget())` wants a live entity reference this seam does
+/// not carry (see [`MobController::angry_target`]'s own doc for why), so the
+/// line-of-sight check and the alerted position both read
+/// `MobController::attack_target` instead — the position the piglin's own
+/// anger-gated target row last fed it, not a continuously-refreshed live
+/// target.
 fn alert_species(species_path: &str) -> Option<(f64, f64, bool)> {
     match species_path {
         "zombified_piglin" => Some((35.0, 10.0, false)),
@@ -1101,6 +1116,27 @@ pub struct SimMob<'w> {
     /// — a stung bee is always on a path to death, matching vanilla's
     /// `hasStung` having no reset.
     stung_at: Option<u64>,
+    /// `ZombifiedPiglin.ticksUntilNextAlert` — the throttle on the piglin's
+    /// own private `maybeAlertOthers`, a second, wholly separate group-aggro
+    /// mechanism from [`Anger`]'s one-shot [`alert_species`] propagation on a
+    /// *new* grudge: this one re-fires every `[80, 120]`-tick interval for as
+    /// long as the piglin keeps a target, which is what makes a real piglin
+    /// pack keep growing every few seconds while chasing a player rather than
+    /// only once at the first hit.
+    ///
+    /// A countdown rather than a deadline (unlike [`Anger::end_time`]) because
+    /// vanilla's own field is one: `ticksUntilNextAlert` decrements every tick
+    /// and is redrawn each time it bottoms out, with no absolute-time
+    /// semantics to preserve. `-1` is this crate's "no active timer" sentinel
+    /// (vanilla has no equivalent — a fresh piglin's field starts at `0`,
+    /// which fires on its very first tick with a target; this sentinel
+    /// instead rolls a fresh interval with no immediate fire, a disclosed
+    /// simplification since the seam has no "did I have a target last tick"
+    /// signal to detect the true acquisition edge from). Reset to `-1` the
+    /// moment [`MobController::attack_target`] goes empty, so a piglin that
+    /// loses and later reacquires a target rerolls rather than resuming a
+    /// stale countdown.
+    piglin_alert_ticks: i32,
     /// The [`MobSim::tick_count`] at which this mob stops counting as
     /// player-killed — vanilla's `LivingEntity.lastHurtByPlayerMemoryTime`,
     /// expressed as an absolute deadline for [`Anger`]'s reason.
@@ -3436,6 +3472,7 @@ impl<'w> MobSim<'w> {
             defenses,
             anger: None,
             stung_at: None,
+            piglin_alert_ticks: -1,
             hurt_by_player_until: None,
             attack_damage,
             hurt_cooldown: HurtCooldown::default(),
@@ -4446,6 +4483,14 @@ impl<'w> MobSim<'w> {
         // without an extra borrow of `self` the loop already avoids for the
         // others.
         let mut mining_fatigue: Vec<MiningFatigueAura> = Vec::new();
+        // `ZombifiedPiglin.maybeAlertOthers`, resolved the same way
+        // `hits`/`bred` are: accumulated into a local while `self.mobs` is
+        // mutably borrowed for the per-mob loop below, then applied to the
+        // rest of `self.mobs` in a second pass afterwards. Each entry is
+        // (alerting piglin's own position, its live target's position) — see
+        // `piglin_alert_ticks`'s own doc comment for the mechanism and the
+        // disclosed target-position approximation.
+        let mut piglin_alerts: Vec<(Vec3, Vec3)> = Vec::new();
         let tick_count = self.tick_count;
         // The disconnect self-heal for a mounted mob — the mob twin of
         // `tick_vehicles`' identical guard for a boat (see that comment for
@@ -4486,6 +4531,31 @@ impl<'w> MobSim<'w> {
             if m.health > 0.0 {
                 if let Some(effect) = roll_ambient_sound(m, tick_count) {
                     ambient_sounds.push(effect);
+                }
+            }
+            // `ZombifiedPiglin.customServerAiStep`'s private `maybeAlertOthers`
+            // — see `piglin_alert_ticks`'s own doc comment for the mechanism.
+            // `attack_target()` doubles as "current live target position" per
+            // that same disclosed approximation (this seam has no entity
+            // reference to resolve a byte-exact `getTarget()` from).
+            if m.health > 0.0 && m.entity_type.path() == "zombified_piglin" {
+                match m.mob.attack_target() {
+                    Some(_) if m.piglin_alert_ticks < 0 => {
+                        m.piglin_alert_ticks = piglin_alert_interval(&mut m.mob);
+                    }
+                    Some(target_pos) if m.piglin_alert_ticks == 0 => {
+                        let world = self.world;
+                        if world.is_clear(m.position(), target_pos) {
+                            piglin_alerts.push((m.position(), target_pos));
+                        }
+                        m.piglin_alert_ticks = piglin_alert_interval(&mut m.mob);
+                    }
+                    Some(_) => {
+                        m.piglin_alert_ticks -= 1;
+                    }
+                    None => {
+                        m.piglin_alert_ticks = -1;
+                    }
                 }
             }
             let new_attacks = m.mob.take_new_attacks();
@@ -4651,6 +4721,32 @@ impl<'w> MobSim<'w> {
         self.pending_grazes.extend(grazes);
         self.pending_ambient_sounds.extend(ambient_sounds);
         self.pending_mining_fatigue.extend(mining_fatigue);
+        // `ZombifiedPiglin.maybeAlertOthers`'s propagation half, resolved now
+        // that the per-mob loop's mutable borrow on an individual `SimMob`
+        // has ended — same box `alert_species("zombified_piglin")` already
+        // sizes for the one-shot `HurtByTargetGoal.alertOthers` path, and the
+        // same "already holding a live grudge is not redirected" gate
+        // `MobSim::attack`'s own pack-alert census uses.
+        if let Some((box_xz, box_y, _)) = alert_species("zombified_piglin") {
+            for (source_pos, target_pos) in piglin_alerts {
+                for other in &mut self.mobs {
+                    if other.entity_type.path() != "zombified_piglin" || other.anger.is_some() {
+                        continue;
+                    }
+                    let p = other.position();
+                    if (p.x - source_pos.x).abs() > box_xz
+                        || (p.z - source_pos.z).abs() > box_xz
+                        || (p.y - source_pos.y).abs() > box_y
+                    {
+                        continue;
+                    }
+                    other.anger = Some(Anger {
+                        end_time: tick_count + grudge_ticks(&mut other.mob),
+                        target: target_pos,
+                    });
+                }
+            }
+        }
         for (shooter, launch) in launches {
             use lodestone_entity::ai::roster::ranged::{integrates_as_arrow, projectile_entity_type};
             let projectile = if integrates_as_arrow(launch.kind) {
@@ -4692,6 +4788,23 @@ impl<'w> MobSim<'w> {
                     raw_damage,
                     attacker_pos,
                 });
+                // `Wolf.OwnerHurtByTargetGoal`: a tamed pet retaliates against
+                // whatever just hurt its owner, reading `owner.
+                // getLastHurtByMob()` on the *owner's* own `LivingEntity` —
+                // same field vanilla's `HurtByTargetGoal` reads off a mob
+                // itself, recorded on the player instead. The seam carries no
+                // entity identity (see `MobController::owner_position`'s own
+                // doc for why), so every owned pet gets the attacker's
+                // *position* the same way `note_hurt` above does for a mob
+                // victim.
+                for pet in &mut self.mobs {
+                    if pet.owner_uuid() == Some(identity.uuid)
+                        && pet.is_tame()
+                        && pet.health() > 0.0
+                    {
+                        pet.mob.set_owner_hurt_by(Some(attacker_pos));
+                    }
+                }
             }
         }
         // Issue #458, primitive 4: self-inflicted damage — the bee's sting
@@ -6506,6 +6619,25 @@ impl<'w> MobSim<'w> {
             .is_some_and(|m| m.entity_type.path() == "villager");
         let target_pos_before = self.get(target_id).map(SimMob::position);
         let outcome = self.attack(target_id, attacker_pos, raw_damage, flags, knockback_power)?;
+        // `Wolf.OwnerHurtTargetGoal`: a wolf (or any tamed pet) joins whatever
+        // fight its owner just started, reading `owner.getLastHurtMob()` on
+        // the *owner's* own `LivingEntity`. This is the same field vanilla's
+        // `HurtByTargetGoal` reads off a mob itself, just recorded on the
+        // player instead — see `NavigatingMob::set_owner_hurt_target`'s own
+        // doc comment for the decay rule. Every tame pet owned by the
+        // attacking player gets the target's pre-attack position (matching
+        // the villager-witness resolution just below, which uses the same
+        // `target_pos_before` for the identical reason: `target_id` may no
+        // longer resolve to a live `SimMob` once `self.attack` has killed it).
+        if let Some(actor) = attacker
+            && let Some(pos) = target_pos_before
+        {
+            for pet in &mut self.mobs {
+                if pet.owner_uuid() == Some(actor.uuid) && pet.is_tame() && pet.health() > 0.0 {
+                    pet.mob.set_owner_hurt_target(Some(pos));
+                }
+            }
+        }
         if let Some(actor) = attacker
             && target_was_villager
         {
@@ -9153,6 +9285,86 @@ mod anger_tests {
             "the second hit must extend the deadline from the tick it landed on; \
              a grudge that has already expired here means the deadline was not \
              recomputed against the current clock"
+        );
+    }
+
+    /// `ZombifiedPiglin.ALERT_INTERVAL`'s own `[80, 120]` window, stated
+    /// independently of [`PIGLIN_ALERT_INTERVAL_TICKS`] for the same reason
+    /// [`JAR_LO`]/[`JAR_HI`] are stated independently of [`ANGER_TICKS`]
+    /// above: a magnitude check that read the expectation off the constant
+    /// under test would pass even if the constant itself were wrong. Drawn
+    /// from a real spawned mob's own RNG stream (never a hand-rolled double),
+    /// the same [`MobController`] seam production reads.
+    #[test]
+    fn piglin_alert_interval_rolls_inside_the_jars_80_to_120_window() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:zombified_piglin").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+
+        for _ in 0..1000 {
+            let draw = piglin_alert_interval(&mut sim.get_mut(id).expect("alive").mob);
+            assert!(
+                (80..=120).contains(&draw),
+                "piglin_alert_interval drew {draw}, outside the jar's [80, 120] \
+                 ALERT_INTERVAL window"
+            );
+        }
+    }
+
+    /// The ongoing `maybeAlertOthers` mechanism, isolated from the one-shot
+    /// `HurtByTargetGoal.alertOthers` propagation it sits alongside.
+    ///
+    /// The one-shot half fires immediately on a *new* grudge
+    /// (`MobSim::attack`'s `pack_alert`), so a naive test that spawns both
+    /// piglins before the first hit cannot tell the two mechanisms apart —
+    /// the neighbour would be alerted by the one-shot on tick zero regardless
+    /// of whether the ongoing timer exists at all. This test starves that
+    /// confound structurally: the second piglin is spawned **after** the
+    /// first is already hit and holding a grudge, so it was not present for
+    /// any one-shot census and cannot have been alerted by it. If it ends up
+    /// angry anyway, the ongoing per-tick mechanism is what did it.
+    #[test]
+    fn a_piglin_holding_a_target_alerts_a_neighbour_that_did_not_exist_for_the_one_shot_alert() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:zombified_piglin").expect("valid key");
+
+        let alerting = sim.spawn_species(key.clone(), Vec3::new(0.0, 0.0, 0.0)).id();
+        let attacker = Vec3::new(3.0, 0.0, 4.0);
+        sim.attack(alerting, attacker, 1.0, DamageFlags::default(), 0.0)
+            .expect("alive");
+
+        // The neighbour did not exist for the hit above, so the one-shot
+        // `alertOthers` census (which walks `self.mobs` at the instant of the
+        // hit) structurally could not have reached it.
+        let neighbour = sim.spawn_species(key, Vec3::new(5.0, 0.0, 0.0)).id();
+        assert_eq!(
+            sim.get(neighbour).expect("alive").mob.angry_target(),
+            None,
+            "precondition: a freshly spawned neighbour must start with no grudge"
+        );
+
+        // 120 ticks covers the interval's own worst case
+        // (`PIGLIN_ALERT_INTERVAL_TICKS`'s upper bound), plus headroom for the
+        // alerting piglin's anger-gated target row to turn its grudge into a
+        // real `attack_target` (what `piglin_alert_ticks` reads to decide it
+        // has something to alert about).
+        for _ in 0..200 {
+            sim.tick();
+            if sim
+                .get(neighbour)
+                .expect("alive")
+                .mob
+                .angry_target()
+                .is_some()
+            {
+                return;
+            }
+        }
+        panic!(
+            "the neighbour was never alerted within 200 ticks — the ongoing \
+             maybeAlertOthers mechanism has no live producer"
         );
     }
 }
