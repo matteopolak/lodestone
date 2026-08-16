@@ -46,6 +46,98 @@
 //! (`ColumnSource::Complete`) — and mip/gutter sampling is excluded on the
 //! same already-fixed basis `distant_flat_terrain_holes.rs` records.
 //!
+//! # The proof above is wrong for an off-centre column, and the residual gate failures are exactly that case
+//!
+//! Three passes of renderer suspicion (geometry inflation, 4x MSAA) both made
+//! the aggregate hole count *worse*, and a raw pixel dump at the crux column
+//! showed byte-identical pure sky for dozens of consecutive rows — no
+//! sub-pixel blend, which a coverage artefact would produce. That sent the
+//! search back to this file's own proof, and the proof has a hole in it.
+//!
+//! The proof says: "fix the camera position **and yaw** (one screen
+//! column)," then varies only pitch and argues the ray's ground track is the
+//! same line for every row. That is true when varying the *whole camera's*
+//! pitch. It is **not** true when sweeping *screen rows within one rendered
+//! frame at one fixed camera pose* — which is what a screen column actually
+//! is. `Camera::basis`'s own closed form makes the gap visible: `right`'s
+//! components never depend on pitch, but `up`'s do (`up.z = cos(yaw)*sin(pitch)`),
+//! so a fixed-column, varying-row sweep changes not only the ray's vertical
+//! angle but also its horizontal bearing — by an amount that is exactly zero
+//! at the image's centre column (`ndc_x = 0`, so the `up`-borne term never
+//! multiplies against a nonzero horizontal offset from `right`) and grows
+//! with distance from centre. So the monotonic-first-hit argument holds
+//! exactly on the centre column and is not proven anywhere else — and every
+//! measured hole here sits off-centre (`x=106`/`540` out of a `320`-centre
+//! frame, `x=54`, `x=592`), never on it.
+//!
+//! What that bearing drift does at a convex, chunk-seam-free corner: a row
+//! near the top of a riser's silhouette can graze past the corner's own tip
+//! into a real, unobstructed line of sight to farther, lower ground, then a
+//! row further down the same column reacquires that farther ground (or a
+//! *different* nearby riser) as solid again. That is a genuine
+//! terrain→sky→terrain sequence in one column with **no missing geometry
+//! anywhere** — legal grazing-corner sky, not a crack — and the original
+//! proof's "no legitimate cliff/ridge/ledge" claim silently assumed the
+//! centre-column case generalised. It does not.
+//!
+//! # The fix: an independent ray-cast oracle replaces "any hole is a bug"
+//!
+//! Verified two ways before touching this file: an offline Python transcription
+//! of `Camera::basis`'s formula against this world's exact block layout (sharing
+//! no code with the renderer or with this file) reproduced the renderer's own
+//! reported hole rows almost exactly — the `x=54` config's `(54,80)-(54,111)`
+//! sandwiched band predicted as rows 80–111, an *exact* match, and the `x=106`
+//! band predicted as rows 187–219 against the renderer's reported 187–225,
+//! matching at the near edge and within a few rows at the far one (march-step
+//! resolution, not a disagreement in kind). Both predicted the exact same
+//! world-space corner the renderer's own geometry reading named as the
+//! culprit.
+//!
+//! So `oracle_ray_dir`/`oracle_ray_hits_solid` below port that check into the
+//! gate itself, walking `World::block_state_at` directly — no mesher, no
+//! rasteriser, no shader — using a ray direction transcribed (not called) from
+//! `Camera::basis`'s documented closed form. **The invariant this file now
+//! enforces is not "no sandwiched sky pixel exists" — it is "every sandwiched
+//! sky pixel's own ray, cast independently against the real block data, agrees
+//! that it should be sky."** A pixel where the renderer shows sky and the
+//! oracle says the ray should have hit a block is still a hard failure; a pixel
+//! where both agree is legal grazing-corner geometry inherent to a stepped
+//! heightfield's silhouette, inherited from the very unevenness this file
+//! exists to test, and is not one.
+//!
+//! `classify_holes` also has to know the renderer's own view-distance cull
+//! (`lodestone_render::cull::within_view_distance`) — a hit the oracle finds
+//! beyond that radius is exactly as legitimate as one behind a corner, because
+//! the renderer is correctly not drawing it. `render_frame` used to leave
+//! `RenderState` at its constructor default (`render_distance_chunks = 8`)
+//! while the rest of this fixture (`RD_CHUNKS`, the camera's far clip) assumed
+//! `10` — an unstated mismatch the oracle surfaced immediately as a wave of
+//! false "genuine bug" reports at the loaded world's own far edge. Fixed by
+//! calling `RenderState::set_fog` with `RD_CHUNKS` explicitly rather than
+//! silently trusting the constructor default to agree with it.
+//!
+//! # What is left after both fixes: a real, much smaller, different defect
+//!
+//! With the corner-legality oracle and the view-distance fix both applied,
+//! 213 of the original 215 flagged pixels across all six configs are
+//! oracle-confirmed legal grazing-corner sky. **Two are not**, both in the
+//! `pitch = 20°` ("steep down") config, at ordinary flat ground roughly 170
+//! blocks out — nowhere near a riser or a corner. Each sits exactly one
+//! screen row before the row where the renderer starts drawing that same
+//! ground, and each flagged pixel is byte-identical to the no-terrain
+//! reference (a hard miss, not a blend) — the same "not an antialiasing
+//! artefact" signature the original corner investigation used to rule out a
+//! coverage-blend explanation there. This reads as a one-row-late silhouette
+//! edge at a shallow, long-range viewing angle over *ordinary* terrain — a
+//! different mechanism from the corner crack (which involves no corner at
+//! all), small enough (2 pixels out of 6 × 307,200) that it was invisible
+//! inside the original 215-pixel aggregate. **Not chased further in this
+//! pass** — same reasoning the earlier MSAA/geometry-inflation passes gave
+//! for not landing a renderer change on top of a diagnostic one. The gate
+//! below is left reporting it, by name, rather than being loosened to hide
+//! it: an oracle-based gate that cannot report an unexplained residual is not
+//! more trustworthy than the aggregate one it replaced.
+//!
 //! # The world: a ziggurat, not a bump
 //!
 //! Three tiers, each a full section (16 blocks) taller than the last —
@@ -71,10 +163,13 @@
 //! cargo test -p lodestone-shell --test uneven_terrain_holes -- --ignored --nocapture
 //! ```
 
-use lodestone::gpu::{RenderState, ThirdPersonBodyState};
+use lodestone::gpu::{RenderState, SKY_COLOR, ThirdPersonBodyState};
 use lodestone::mesher::{SectionGeometry, SectionKey, mesh_snapshot_models, snapshot_section, snapshot_visibility};
 use lodestone::resources::BlockResources;
-use lodestone_render::{Camera, GpuContext, HeadlessTarget, ModelMesh, RenderTarget, entity_anim::AnimInput};
+use lodestone_render::{
+    Camera, GpuContext, HeadlessTarget, ModelMesh, RenderTarget, cull::within_view_distance,
+    entity_anim::AnimInput, fog::FogSettings,
+};
 use lodestone_world::{ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World};
 
 /// See `distant_flat_terrain_holes.rs`'s identical helper for why this exists
@@ -157,16 +252,19 @@ fn grow(rect: Option<Rect>, x: u32, y: u32) -> Rect {
 /// Identical to `distant_flat_terrain_holes.rs`'s function of the same name —
 /// see its doc for the full argument. The module doc above is what changed:
 /// the geometric justification now covers any heightfield, not just a flat
-/// one, and this world actually exercises that generalisation.
+/// one, and this world actually exercises that generalisation. Also returns
+/// every flagged pixel's own coordinates (not just the aggregate count/rect),
+/// which the oracle check below needs to interrogate each one individually.
 fn find_sandwiched_background(
     subject: &[u8],
     reference: &[u8],
     w: u32,
     h: u32,
-) -> (usize, Option<Rect>, usize) {
+) -> (usize, Option<Rect>, usize, Vec<(u32, u32)>) {
     let mut total = 0usize;
     let mut rect: Option<Rect> = None;
     let mut hole_columns = 0usize;
+    let mut pixels = Vec::new();
     for x in 0..w {
         let mut seen_terrain = false;
         let mut column_has_hole = false;
@@ -180,13 +278,104 @@ fn find_sandwiched_background(
                 total += 1;
                 column_has_hole = true;
                 rect = Some(grow(rect, x, y));
+                pixels.push((x, y));
             }
         }
         if column_has_hole {
             hole_columns += 1;
         }
     }
-    (total, rect, hole_columns)
+    (total, rect, hole_columns, pixels)
+}
+
+/// Independent ray-cast oracle for the flagged pixels above — see the module
+/// doc's "The fix" section for why this exists and what it measured before
+/// landing. Shares no code with the renderer, mesher or rasteriser: the ray
+/// direction is transcribed (not called) from `Camera::basis`'s documented
+/// closed form, and solidity comes straight from `World::block_state_at`.
+fn oracle_ray_dir(camera: &Camera, px: u32, py: u32, w: u32, h: u32) -> glam::Vec3 {
+    let (sy, cy) = camera.yaw.to_radians().sin_cos();
+    let (sp, cp) = camera.pitch.to_radians().sin_cos();
+    let right = glam::Vec3::new(-cy, 0.0, -sy);
+    let up = glam::Vec3::new(-sy * sp, cp, cy * sp);
+    let forward = glam::Vec3::new(-sy * cp, -sp, cy * cp);
+    let half_y = (camera.fov_y_degrees.to_radians() * 0.5).tan();
+    let half_x = half_y * camera.aspect;
+    let ndc_x = 2.0 * (px as f32 + 0.5) / w as f32 - 1.0;
+    let ndc_y = 1.0 - 2.0 * (py as f32 + 0.5) / h as f32;
+    (forward + right * (ndc_x * half_x) + up * (ndc_y * half_y)).normalize()
+}
+
+/// Marches a ray through `world`'s real block data in small steps. A `None`
+/// read (chunk not loaded, or `y` outside the column) is treated as air —
+/// exactly what the renderer itself would show there. Returns the first
+/// solid-hit world point, or `None` if the ray reaches `max_dist` clean.
+fn oracle_ray_hits_solid(
+    world: &World,
+    air: u32,
+    origin: glam::Vec3,
+    dir: glam::Vec3,
+    max_dist: f32,
+) -> Option<glam::Vec3> {
+    const STEP: f32 = 0.02;
+    let mut t = 0.0f32;
+    while t < max_dist {
+        let p = origin + dir * t;
+        let (bx, by, bz) = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+        if let Some(state) = world.block_state_at(bx, by, bz) {
+            if state != air {
+                return Some(p);
+            }
+        }
+        t += STEP;
+    }
+    None
+}
+
+/// Classifies every flagged pixel in `hole_pixels` by independently
+/// ray-casting it: pixels the oracle also calls sky are legal grazing-corner
+/// geometry (see the module doc); pixels the oracle says should have hit a
+/// block are genuine renderer bugs — **unless that hit itself sits beyond the
+/// renderer's own configured view distance**, in which case the renderer is
+/// correctly applying the same circular cull
+/// (`lodestone_render::cull::within_view_distance`, vanilla's own view
+/// membership rule) that a real client applies, and finding nothing to draw
+/// there is expected, not a defect. `render_distance_chunks` must match what
+/// the frame under test was actually configured with (`render_frame` now
+/// sets it explicitly — see that function's doc for why the default was
+/// wrong here). Returns `(legitimate, genuine_bugs)`, the second as
+/// `(x, y, world point the oracle hit)` for a failure message that names
+/// exactly where to look.
+fn classify_holes(
+    world: &World,
+    air: u32,
+    camera: &Camera,
+    render_distance_chunks: u32,
+    hole_pixels: &[(u32, u32)],
+    w: u32,
+    h: u32,
+) -> (usize, Vec<(u32, u32, glam::Vec3)>) {
+    let camera_chunk = (
+        (camera.position.x / 16.0).floor() as i32,
+        (camera.position.z / 16.0).floor() as i32,
+    );
+    let mut legitimate = 0usize;
+    let mut genuine_bugs = Vec::new();
+    for &(x, y) in hole_pixels {
+        let dir = oracle_ray_dir(camera, x, y, w, h);
+        match oracle_ray_hits_solid(world, air, camera.position, dir, camera.far) {
+            Some(hit) => {
+                let hit_chunk = ((hit.x / 16.0).floor() as i32, (hit.z / 16.0).floor() as i32);
+                if within_view_distance(camera_chunk, hit_chunk, render_distance_chunks) {
+                    genuine_bugs.push((x, y, hit));
+                } else {
+                    legitimate += 1;
+                }
+            }
+            None => legitimate += 1,
+        }
+    }
+    (legitimate, genuine_bugs)
 }
 
 /// Build the ziggurat world described in the module doc: a flat `LEVEL0_Y`
@@ -304,6 +493,19 @@ fn render_frame(
 ) -> (Vec<u8>, lodestone::gpu::RenderStats) {
     let mut state = RenderState::new(device, queue, format, W, H, Some(atlas));
     suppress_first_person_arm(&mut state);
+    // `RenderState::new` defaults `render_distance_chunks` to
+    // `DEFAULT_RENDER_DISTANCE_CHUNKS` (8), not this fixture's own `RD_CHUNKS`
+    // (10) — the world, and `camera_at`'s far clip, are both built assuming
+    // 10. Left at the default, the renderer's own view-distance cull
+    // (`TerrainCull`, vanilla's circular `within_view_distance`) silently
+    // disagreed with what the rest of the fixture assumed was drawable, which
+    // the oracle below caught: pixels near the render-distance edge looked
+    // like "genuine bugs" only because the renderer was, correctly, applying
+    // a *tighter* cull than the fixture's other constants implied.
+    state.set_fog(
+        FogSettings::for_render_distance(SKY_COLOR, RD_CHUNKS as u32),
+        RD_CHUNKS as u32,
+    );
     let uploaded = upload_all(world, models, &mut state, device, queue, skip, upload_terrain);
     assert!(
         !upload_terrain || uploaded > 0,
@@ -359,9 +561,11 @@ fn load_vanilla() -> (BlockResources, std::sync::Arc<lodestone_render::BlockAtla
 /// several yaws (edge-on to a riser, corner-on where two risers meet, and
 /// tangential/flat-only as a sanity repeat of the already-clean flat result)
 /// and pitches (the report's own "same level as me" shallow look-down, plus
-/// steep-down and slight-up controls). No sandwiched sky pixel should exist
-/// anywhere in any frame — see the module doc for why that is a hard
-/// geometric requirement here, not just on flat ground.
+/// steep-down and slight-up controls). A sandwiched sky pixel is only a
+/// failure if its own independent ray-cast (`classify_holes`, below) agrees
+/// it should have hit a block — see the module doc's "The proof above is
+/// wrong for an off-centre column" section for why the naive "any hole is a
+/// bug" version of this gate was itself wrong on this world.
 #[test]
 #[ignore = "requires a GPU adapter and the vanilla client.jar"]
 fn uneven_terrain_at_moderate_distance_has_no_sky_holes() {
@@ -397,7 +601,7 @@ fn uneven_terrain_at_moderate_distance_has_no_sky_holes() {
         ("centred on risers, slight up", -10.0, 0.0),
     ];
 
-    let mut any_hole = false;
+    let mut all_genuine_bugs: Vec<(&str, u32, u32, glam::Vec3)> = Vec::new();
     for &(label, pitch, yaw) in configs {
         let camera = camera_at(pitch, yaw);
         let (reference, _) = render_frame(
@@ -419,7 +623,10 @@ fn uneven_terrain_at_moderate_distance_has_no_sky_holes() {
             }
         }
 
-        let (hole_px, bbox, hole_cols) = find_sandwiched_background(&subject, &reference, W, H);
+        let (hole_px, bbox, hole_cols, hole_pixels) =
+            find_sandwiched_background(&subject, &reference, W, H);
+        let (legitimate, genuine_bugs) =
+            classify_holes(&world, air, &camera, RD_CHUNKS as u32, &hole_pixels, W, H);
         eprintln!(
             "=== {label} (pitch={pitch}, yaw={yaw}) ===\n\
              sections drawn        = {}\n\
@@ -429,13 +636,16 @@ fn uneven_terrain_at_moderate_distance_has_no_sky_holes() {
              terrain pixels        = {terrain_px} / {}\n\
              sandwiched-sky pixels = {hole_px}\n\
              sandwiched-sky columns= {hole_cols} / {W}\n\
-             bounding box          = {bbox:?}",
+             bounding box          = {bbox:?}\n\
+             oracle-legitimate     = {legitimate} (ray genuinely reaches sky — grazing corner)\n\
+             oracle-genuine bugs   = {} (ray should have hit a block)",
             stats.sections_drawn,
             stats.sections_culled_distance,
             stats.sections_culled_frustum,
             stats.sections_culled_occlusion,
             stats.occlusion_active,
             W * H,
+            genuine_bugs.len(),
         );
         assert!(
             terrain_px > 0,
@@ -443,19 +653,27 @@ fn uneven_terrain_at_moderate_distance_has_no_sky_holes() {
              vacuous (see distant_flat_terrain_holes.rs's own zero-pixel-readback history) \
              and a clean sandwiched-sky result here would prove nothing"
         );
-        if hole_px > 0 {
-            any_hole = true;
+        for (x, y, hit) in genuine_bugs {
+            all_genuine_bugs.push((label, x, y, hit));
         }
     }
 
     assert!(
-        !any_hole,
+        all_genuine_bugs.is_empty(),
         "the ziggurat world produced sky pixels sandwiched inside its own terrain silhouette \
-         in at least one config above — see the per-config bounding boxes printed to stderr. \
+         whose own independent ray-cast says the ray should have hit a block instead — this is \
+         not the legal grazing-corner case the module doc's oracle exists to exonerate. \
+         Mismatches (config, x, y, world point the oracle hit): {all_genuine_bugs:?}. \
          Every column was loaded before any section was meshed, so this cannot be the \
-         streaming-neighbour-arrival cause; the module doc's monotonicity proof means this is \
-         not a legitimate cliff/ledge either — it points at the occlusion graph, depth \
-         compositing/bias on a near-vertical riser face, or a chunk-seam mesh gap instead."
+         streaming-neighbour-arrival cause. As measured at this file's last update: the residual \
+         mismatches (two pixels, only in the steep-down config, at ordinary flat ground roughly \
+         170 blocks out — not near any riser/corner) sit exactly one screen row before the row \
+         where the renderer starts drawing that same distant ground, and the flagged pixel itself \
+         is byte-identical to the no-terrain reference (a hard miss, not an antialiased blend). \
+         That is a one-row-late silhouette edge at a shallow, long-range viewing angle over \
+         ordinary flat terrain — a different, much smaller defect from the originally-diagnosed \
+         corner crack (which this same oracle now clears as legal geometry). Not chased further \
+         in this pass; see the module doc."
     );
 }
 
@@ -515,14 +733,28 @@ fn a_deliberately_missing_riser_section_is_detected() {
         device, queue, format, &mut target, &atlas, &world, models, &camera, Some(victim), true,
     );
 
-    let (hole_px, bbox, hole_cols) = find_sandwiched_background(&subject, &reference, W, H);
+    let (hole_px, bbox, hole_cols, hole_pixels) =
+        find_sandwiched_background(&subject, &reference, W, H);
+    // The victim section was only skipped in `upload_all` — `world` itself
+    // still holds the real stone there — so the oracle (which reads `world`
+    // directly) must call every one of these pixels a genuine bug, never
+    // legitimate grazing-corner sky. This is the control-of-the-control the
+    // module doc promises: proof the new oracle-based invariant still catches
+    // a real missing-upload defect and does not launder it into "legal
+    // geometry" the way the old aggregate assertion could not have told
+    // apart from the residual grazing-corner failures either.
+    let (legitimate, genuine_bugs) =
+        classify_holes(&world, air, &camera, RD_CHUNKS as u32, &hole_pixels, W, H);
     eprintln!(
         "=== control: riser section {victim:?} never uploaded ===\n\
          sections drawn         = {}\n\
          sandwiched-sky pixels  = {hole_px}\n\
          sandwiched-sky columns = {hole_cols} / {W}\n\
-         bounding box           = {bbox:?}",
+         bounding box           = {bbox:?}\n\
+         oracle-legitimate      = {legitimate} (expect 0 — nothing here is a legal grazing corner)\n\
+         oracle-genuine bugs    = {} (expect {hole_px} — the oracle must catch all of them)",
         stats.sections_drawn,
+        genuine_bugs.len(),
     );
     assert!(
         hole_px > 0,
@@ -530,5 +762,14 @@ fn a_deliberately_missing_riser_section_is_detected() {
          and the sandwiched-sky detector found nothing in this uneven scene. Either the \
          victim section projects off-screen, or the detector cannot see a real hole here — \
          fix this before trusting a clean result from the main gate."
+    );
+    assert_eq!(
+        genuine_bugs.len(),
+        hole_px,
+        "control's own oracle check failed: {legitimate} of {hole_px} deliberately-missing-section \
+         pixels were classified as legitimate grazing-corner sky instead of a genuine bug. The \
+         world still holds real stone at the victim section (only the GPU upload was skipped), so \
+         the oracle should have flagged every one of them — an oracle that can be fooled by this \
+         would also launder a real production missing-upload bug into a false pass on the main gate."
     );
 }
