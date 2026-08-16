@@ -509,6 +509,155 @@ pub struct Spectate {
     pub target: Uuid,
 }
 
+/// Clientbound `update_time` packet.
+///
+/// Wire layout: i64 world age, i64 time of day, verified against
+/// minecraft-data's 1.16.2 `packet_update_time` (byte-identical to 1.12.2's
+/// shape).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:update_time", state = Play, bound = Client)]
+pub struct UpdateTime {
+    /// Total world age, in ticks.
+    pub age: i64,
+    /// Current time of day, in ticks.
+    pub time: i64,
+}
+
+/// Clientbound `difficulty` packet.
+///
+/// Wire layout: u8 difficulty, bool difficulty-locked — verified against
+/// minecraft-data's 1.16.2 `packet_difficulty`. Unlike 1.12.2 (which has no
+/// lock bit at all), 1.14+ appends `difficultyLocked`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:difficulty", state = Play, bound = Client)]
+pub struct DifficultyPacket {
+    /// Raw difficulty id (`0` peaceful .. `3` hard).
+    pub difficulty: u8,
+    /// Whether the difficulty is locked from further changes in the UI.
+    pub difficulty_locked: bool,
+}
+
+/// Clientbound `playerlist_header` packet — the tab list's header/footer.
+///
+/// Wire layout: two length-prefixed JSON strings, verified against
+/// minecraft-data's 1.16.2 `packet_playerlist_header`.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:playerlist_header", state = Play, bound = Client)]
+pub struct PlayerlistHeader {
+    /// Header JSON text.
+    #[mc(max = 32767)]
+    pub header: String,
+    /// Footer JSON text.
+    #[mc(max = 32767)]
+    pub footer: String,
+}
+
+/// Clientbound `open_sign_entity` packet — the server opened a sign-editing
+/// UI for the local player.
+///
+/// Wire layout: a single packed [`Position`], verified against
+/// minecraft-data's 1.16.2 `packet_open_sign_entity`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:open_sign_entity", state = Play, bound = Client)]
+pub struct OpenSignEntity {
+    /// Block position of the sign.
+    pub location: Position,
+}
+
+/// Clientbound `attach_entity` packet — sets or clears an entity's leash
+/// holder.
+///
+/// Wire layout: two raw (non-VarInt) `i32`s, verified against
+/// minecraft-data's 1.16.2 `packet_attach_entity` (byte-identical to
+/// 1.12.2's shape). A `vehicle_id` of `0` means "no holder" (leash removed);
+/// cross-checked against `lodestone-v770`'s own `SET_ENTITY_LINK` decode,
+/// which uses the same `!= 0` convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:attach_entity", state = Play, bound = Client)]
+pub struct AttachEntity {
+    /// Leashed entity id.
+    pub entity_id: i32,
+    /// Holder entity id, or `0` for "no holder".
+    pub vehicle_id: i32,
+}
+
+/// Clientbound `set_passengers` packet — the full passenger list of a
+/// vehicle.
+///
+/// Wire layout: a VarInt vehicle id then a VarInt-counted VarInt array,
+/// verified against minecraft-data's 1.16.2 `packet_set_passengers`.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:set_passengers", state = Play, bound = Client)]
+pub struct SetPassengers {
+    /// Vehicle entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Passenger entity ids, in mounting order.
+    #[mc(varint)]
+    pub passengers: Vec<i32>,
+}
+
+/// Clientbound `collect` packet — an item entity (or experience orb) was
+/// picked up.
+///
+/// Wire layout: three VarInts, verified against minecraft-data's 1.16.2
+/// `packet_collect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:collect", state = Play, bound = Client)]
+pub struct Collect {
+    /// The entity that was picked up.
+    #[mc(varint)]
+    pub collected_entity_id: i32,
+    /// The entity that did the picking up (usually a player).
+    #[mc(varint)]
+    pub collector_entity_id: i32,
+    /// Stack size collected.
+    #[mc(varint)]
+    pub pickup_item_count: i32,
+}
+
+/// Clientbound `entity_effect` packet — a status effect was applied to an
+/// entity.
+///
+/// Wire layout: verified against minecraft-data's 1.16.2
+/// `packet_entity_effect`: VarInt entity id, raw `i8` legacy effect id, raw
+/// `i8` amplifier, VarInt duration, raw `i8` flags byte. 1.16.5 postdates
+/// 1.13, so unlike 1.12.2 the flags byte carries a third bit (`0x04` show
+/// icon) alongside `0x01` ambient / `0x02` show particles — cross-checked
+/// against `lodestone-v770`'s `UPDATE_MOB_EFFECT` decode, which uses the same
+/// three low bits (plus a 1.19+ `0x08` blend bit this protocol predates).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:entity_effect", state = Play, bound = Client)]
+pub struct EntityEffect {
+    /// Target entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Legacy (1-based) potion-effect id.
+    pub effect_id: i8,
+    /// Effect amplifier (`0` = level I).
+    pub amplifier: i8,
+    /// Remaining duration, in ticks.
+    #[mc(varint)]
+    pub duration: i32,
+    /// Flags byte: bit `0x01` ambient, bit `0x02` show particles, bit `0x04`
+    /// show icon.
+    pub flags: i8,
+}
+
+/// Clientbound `remove_entity_effect` packet.
+///
+/// Wire layout: VarInt entity id, raw `i8` legacy effect id, verified against
+/// minecraft-data's 1.16.2 `packet_remove_entity_effect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:remove_entity_effect", state = Play, bound = Client)]
+pub struct RemoveEntityEffect {
+    /// Target entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Legacy (1-based) potion-effect id.
+    pub effect_id: i8,
+}
+
 /// Serverbound `recipe_book` packet — toggle a recipe book's open/filtering
 /// state.
 ///

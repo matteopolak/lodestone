@@ -7,6 +7,7 @@ pub mod game;
 pub mod handshake;
 pub mod login;
 pub mod metadata;
+pub mod player_info;
 pub mod position;
 pub mod settings;
 pub mod slot;
