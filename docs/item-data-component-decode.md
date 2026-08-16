@@ -58,7 +58,10 @@ Two mechanical backstops sit behind the type:
 
 ## The census
 
-42 of 111 component types are consumed. The 69 that are not are each still a truncation
+46 of 111 component types are consumed (drifted upward from an earlier count of 42 —
+`profile`, `potion_contents`, `writable_book_content`, `written_book_content` and
+`bundle_contents` were the ones this doc had lost track of; re-verified against the match
+arms directly rather than carried forward). The 65 that are not are each still a truncation
 point. Regenerate the list with a scan of the added-component match arms against
 `lodestone_data::data_component_types::DATA_COMPONENT_TYPE_NAMES`.
 
@@ -72,13 +75,16 @@ Consumed, grouped by the wire shape they share — each group is one rule, not o
 | fixed-width | `INT` / `FLOAT` / `BOOL` | `dyed_color`, `map_color`, `minimum_attack_charge`, `potion_duration_scale`, `enchantment_glint_override` |
 | identifier | one UTF-8 string | `item_model`, `tooltip_style`, `note_block_sound` |
 | chat component | network NBT | `custom_name`, `item_name` |
-| composite | see the reader | `enchantments`, `stored_enchantments`, `tool`, `trim`, `pot_decorations`, `lore`, `custom_model_data`, `tooltip_display`, `attribute_modifiers` |
+| composite | see the reader | `enchantments`, `stored_enchantments`, `tool`, `trim`, `pot_decorations`, `lore`, `custom_model_data`, `tooltip_display`, `attribute_modifiers`, `potion_contents`, `profile`, `writable_book_content`, `written_book_content`, `bundle_contents` |
 
-Only `custom_name`, `damage`, `enchantments`, `dyed_color`, `trim`, `map_id`,
-`pot_decorations`, `tool`, `max_stack_size` and `max_damage` are **surfaced** into
-`ItemComponents`; `custom_data` is carried as an opaque byte blob. The rest are consumed for
-alignment and thrown away, which is the entire point — the value is worthless and consuming
-the right number of bytes is worth a whole packet.
+`custom_name`, `damage`, `enchantments`, `dyed_color`, `trim`, `map_id`, `pot_decorations`,
+`profile`, `writable_book_content`, `written_book_content` and `bundle_contents` are
+**surfaced** into `ItemComponents` as-decoded; `potion_contents` is surfaced already mixed
+into an opaque colour (`potion_color`), and `tool`/`max_stack_size`/`max_damage`/`equippable`
+as prototype-folded **effective** values (see that type's own doc for the patch-vs-effective
+split). `custom_data` is carried as an opaque byte blob. The rest are consumed for alignment
+and thrown away, which is the entire point — the value is worthless and consuming the right
+number of bytes is worth a whole packet.
 
 ### The derived-NBT family is easy to miss
 
@@ -95,9 +101,8 @@ list tag and the `Unit`-valued members to an empty compound.
 
 | component | cost |
 |---|---|
-| `profile` | `either(GAME_PROFILE, Partial)` plus `PlayerSkin.Patch` — player heads, so common on GUI servers, but four nested codecs |
 | `can_place_on` / `can_break` | `AdventureModePredicate`: a list of `BlockPredicate`s, each with state/NBT matchers. Adventure-mode servers send them |
-| `container` / `bundle_contents` / `charged_projectiles` | lists of whole `ItemStack`s — recursive through this same decoder |
+| `container` / `charged_projectiles` | lists of whole `ItemStack`s — recursive through this same decoder, the same shape `bundle_contents` (now modeled, see the composite row above and `read_bundle_contents`) used to occupy here |
 | `food` / `consumable` / `use_cooldown` / `use_remainder` / `weapon` / `blocks_attacks` | multi-field records with nested effect lists |
 | `entity_data` / `block_entity_data` / `bucket_entity_data` | `TypedEntityData`: a registry id then NBT. Cheap, but each uses a *different* registry codec |
 | the 29 `*/variant`, `*/collar`, `*/color`, `salmon/size` ids | individually trivial (holder VarInt or enum VarInt) but each needs its registry checked for static vs dynamic, since a dynamic-registry `Holder` uses the inline-`0` sentinel and a static one does not. Only mob buckets and spawn eggs carry them |
