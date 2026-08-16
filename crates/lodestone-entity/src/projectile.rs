@@ -87,12 +87,6 @@ impl Projectile {
         Self::throwable(position, velocity)
     }
 
-    /// An ender pearl. Same ballistics as any throwable.
-    #[must_use]
-    pub fn ender_pearl(position: Vec3, velocity: Vec3) -> Self {
-        Self::throwable(position, velocity)
-    }
-
     /// An arrow / spectral arrow / trident: gravity `0.05`, air drag `0.99`,
     /// water drag `0.6`, move-first order.
     #[must_use]

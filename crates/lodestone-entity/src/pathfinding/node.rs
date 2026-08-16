@@ -183,15 +183,6 @@ impl Node {
         (xd * xd + yd * yd + zd * zd).sqrt()
     }
 
-    /// Euclidean distance to a block position.
-    #[must_use]
-    pub fn distance_to_pos(&self, pos: BlockPos) -> f32 {
-        let xd = (pos.x - self.x) as f32;
-        let yd = (pos.y - self.y) as f32;
-        let zd = (pos.z - self.z) as f32;
-        (xd * xd + yd * yd + zd * zd).sqrt()
-    }
-
     /// Manhattan distance to a block position.
     #[must_use]
     pub fn distance_manhattan(&self, pos: BlockPos) -> f32 {
@@ -207,11 +198,6 @@ impl Node {
         self.heap_idx >= 0
     }
 
-    /// This node's block position.
-    #[must_use]
-    pub fn as_block_pos(&self) -> BlockPos {
-        BlockPos::new(self.x, self.y, self.z)
-    }
 }
 
 #[cfg(test)]

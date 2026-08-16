@@ -808,12 +808,6 @@ impl<'w> NavigatingMob<'w> {
         )
     }
 
-    /// How many times a goal asked this mob to move.
-    #[must_use]
-    pub fn move_calls(&self) -> u32 {
-        self.move_calls
-    }
-
     /// How many actual A\* searches ran — the count the seam's fakes can never
     /// produce, since their `move_to` never touches a pathfinder.
     #[must_use]
@@ -914,12 +908,6 @@ impl<'w> NavigatingMob<'w> {
     pub fn set_age(&mut self, age: i32) -> &mut Self {
         self.age = age;
         self
-    }
-
-    /// Whether ageing is currently frozen (vanilla `AgeableMob.isAgeLocked`).
-    #[must_use]
-    pub fn is_age_locked(&self) -> bool {
-        self.age_locked
     }
 
     /// Freezes (`true`) or resumes (`false`) age advancement.

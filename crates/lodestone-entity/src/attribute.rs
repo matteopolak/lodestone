@@ -194,12 +194,6 @@ impl AttributeInstance {
         }
     }
 
-    /// Whether a modifier with `id` is present.
-    #[must_use]
-    pub fn has_modifier(&self, id: &Identifier) -> bool {
-        self.modifiers.contains_key(id)
-    }
-
     /// The number of modifiers currently applied.
     #[must_use]
     pub fn modifier_count(&self) -> usize {

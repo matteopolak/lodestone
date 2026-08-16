@@ -1898,14 +1898,6 @@ impl EatBlockGoal {
         Self::default()
     }
 
-    /// Ticks left in the eat animation (vanilla's `EatBlockGoal.getEatAnimationTick`).
-    /// Vanilla drives the head-down pose from this, broadcast as entity event
-    /// `10` in `EatBlockGoal.start` — a wire concern this crate cannot reach,
-    /// so a host that wants the animation reads it here.
-    #[must_use]
-    pub fn eat_animation_tick(&self) -> i32 {
-        self.eat_animation_tick
-    }
 }
 
 impl Goal for EatBlockGoal {

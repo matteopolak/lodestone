@@ -76,9 +76,8 @@ struct BehaviorEntry {
 /// into activities.
 ///
 /// Construct one with [`Brain::new`], wire it with the builder-style methods
-/// ([`add_sensor`](Brain::add_sensor), [`add_activity`](Brain::add_activity),
-/// [`set_core_activities`](Brain::set_core_activities)), then drive it once per
-/// server tick with [`tick`](Brain::tick).
+/// ([`add_sensor`](Brain::add_sensor), [`add_activity`](Brain::add_activity)),
+/// then drive it once per server tick with [`tick`](Brain::tick).
 pub struct Brain {
     memories: Memories,
     sensors: Vec<Box<dyn Sensor>>,
@@ -150,19 +149,6 @@ impl Brain {
     /// Registers a memory slot so it can later hold a value.
     pub fn register_memory(&mut self, ty: MemoryModuleType) {
         self.memories.register(ty);
-    }
-
-    /// Sets which activities are always active. Also makes them the initial
-    /// active set via [`use_default_activity`](Brain::use_default_activity).
-    pub fn set_core_activities(&mut self, activities: &[Activity]) {
-        self.core_activities = activities.to_vec();
-        self.use_default_activity();
-    }
-
-    /// Sets the fallback activity used when no requested activity's requirements
-    /// are met.
-    pub fn set_default_activity(&mut self, activity: Activity) {
-        self.default_activity = activity;
     }
 
     /// Adds a sensor, registering the memories it writes.
@@ -269,25 +255,10 @@ impl Brain {
         self.schedule.is_some()
     }
 
-    /// The activities currently active (core plus at most one non-core).
-    #[must_use]
-    pub fn active_activities(&self) -> &[Activity] {
-        &self.active_activities
-    }
-
     /// Whether `activity` is currently active.
     #[must_use]
     pub fn is_active(&self, activity: Activity) -> bool {
         self.active_activities.contains(&activity)
-    }
-
-    /// The active non-core activity, if any.
-    #[must_use]
-    pub fn active_non_core_activity(&self) -> Option<Activity> {
-        self.active_activities
-            .iter()
-            .find(|a| !self.core_activities.contains(a))
-            .copied()
     }
 
     /// Resets the active set to the core activities plus the default activity.

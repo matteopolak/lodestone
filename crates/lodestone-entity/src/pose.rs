@@ -382,13 +382,6 @@ impl EntityPose {
         }
     }
 
-    /// The head yaw relative to the body (what a head part is posed by), in
-    /// `[-75, 75]` degrees.
-    #[must_use]
-    pub fn relative_head_yaw(&self) -> f32 {
-        wrap_degrees(self.head_yaw - self.body_yaw)
-    }
-
     /// The interpolated attack-swing progress for a partial tick — vanilla's
     /// `LivingEntity.getAttackAnim`.
     ///
