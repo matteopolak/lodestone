@@ -272,13 +272,18 @@ pub struct SessionMenus(pub lodestone_game::menus::Menus);
 /// the breaking entity's id, not by *this* session, but there is exactly one
 /// copy of it client-side, same as a boss-bar set).
 ///
-/// **Drawing it is a separate piece of work.** The renderer's
-/// single-target `CrackTarget`/`CrackPipeline` (`lodestone_shell::gpu`) only
-/// ever draws the local player's own dig; painting *other* players' cracks
-/// needs that pipeline to accept more than one target, which is a rendering
-/// change, not a routing one.
+/// **Drawing it is done too, and this note used to say otherwise.** The
+/// renderer's `CrackPipeline` (`lodestone_shell::gpu`) now accepts any number
+/// of targets in one pass: `Sim::crack_targets` walks this component via
+/// `crate::gpu::gather_crack_targets` and hands the local dig plus every
+/// other player's overlay to `render_with_crack_and_effects` in one `Vec`
+/// (`lodestone_shell::app::redraw`). The gather and the pipeline were both
+/// proven in isolation before that call site existed, and nothing in
+/// production called the gather until it landed. A stale "separate piece of
+/// work" claim is exactly the trap this repo's own working rules call out: it
+/// was true when written and wrong by the time this was read.
 /// [`stage_at`](lodestone_game::mining::BlockDestructionOverlays::stage_at) is
-/// the read side ready for whoever picks that up.
+/// the read side that call chain uses.
 #[derive(Component, Debug, Clone, Default)]
 pub struct SessionBlockDestruction(pub lodestone_game::mining::BlockDestructionOverlays);
 
