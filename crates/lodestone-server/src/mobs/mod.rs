@@ -1178,6 +1178,14 @@ pub struct SimMob<'w> {
     /// the very first check just records the timestamp rather than decaying
     /// immediately).
     last_gossip_decay_tick: Option<u64>,
+    /// This mob's `GOLEM_DETECTED_RECENTLY` memory (`GolemSensor`'s own name)
+    /// — the absolute tick at which it stops suppressing a golem-summon
+    /// attempt, or `None` while the memory is absent. Set both right after a
+    /// successful spawn (vanilla's `nearbyVillagers.forEach(GolemSensor::golemDetected)`)
+    /// and — not modelled here, see [`MobSim::tick_golem_summon`]'s own doc
+    /// for the disclosed cut — by proximity to an already-present iron golem.
+    /// Only meaningful for `minecraft:villager`.
+    golem_detected_until: Option<u64>,
     /// Live zombie-villager conversion state (issue #247) — `Some` only
     /// while [`entity_type`](Self::entity_type) is `minecraft:zombie_villager`
     /// and a golden apple has been used on it while weakened. `None` for
@@ -3215,6 +3223,7 @@ impl<'w> MobSim<'w> {
             job_search_cooldown: 0,
             gossip: villager::gossip::GossipContainer::new(),
             last_gossip_decay_tick: None,
+            golem_detected_until: None,
             conversion: None,
             effects: crate::mob_effects::ActiveEffects::new(),
             rider: None,
@@ -3599,6 +3608,132 @@ impl<'w> MobSim<'w> {
             }
         }
         self.gossip_spread_rng = rng;
+    }
+
+    /// Ticks between golem-summon checks — `VillagerPanicTrigger.tick`'s own
+    /// `timestamp % 100L == 0L` gate.
+    const GOLEM_SUMMON_INTERVAL_TICKS: u64 = 100;
+    /// `hasHostile`'s host-side radius, matching
+    /// `lodestone_entity::brain::NearestHostileSensor::RANGE` (8.0) — see
+    /// [`tick_golem_summon`](Self::tick_golem_summon)'s own doc for why this
+    /// recomputes the test rather than reading a villager's Brain memory.
+    const GOLEM_SUMMON_HOSTILE_RANGE_SQR: f64 = 64.0;
+    /// `spawnGolemIfNeeded`'s own `getBoundingBox().inflate(10.0, 10.0, 10.0)`.
+    const GOLEM_AGREEMENT_RADIUS: f64 = 10.0;
+    /// `VillagerPanicTrigger.tick`'s own `spawnGolemIfNeeded(level, timestamp, 3)`
+    /// argument — the hurt/hostile path's agreement threshold (vanilla's other
+    /// call site, `Villager.gossip`'s post-transfer check, uses `5` instead;
+    /// only the hurt/hostile path is built here).
+    const GOLEM_VILLAGERS_NEEDED: usize = 3;
+    /// `GolemSensor.MEMORY_TIME_TO_LIVE` — how long a village suppresses a
+    /// further summon attempt after a successful one.
+    const GOLEM_DETECTED_TTL: u64 = 599;
+
+    /// Issue #231's golem-summon-on-hurt: `VillagerPanicTrigger.tick`'s
+    /// `spawnGolemIfNeeded(level, timestamp, 3)`, called on the same 100-tick
+    /// cadence for every villager that is hurt or has a hostile nearby.
+    ///
+    /// # Why this lives on `MobSim` rather than as a `Brain` behaviour
+    ///
+    /// It needs two things no single mob's [`lodestone_entity::brain::BrainMob`]
+    /// seam can give it: **other villagers' own state** (the agreement count)
+    /// and **the power to create a new entity**. Villager panic itself is
+    /// Brain-driven (`villager_brain`, `lodestone-entity`), but the brain
+    /// lives inside an opaque `Box<dyn Goal>` once installed
+    /// (`BrainGoal`) — this sim has no way to read *into* it, so "is this
+    /// villager hurt or does it see a hostile" is recomputed here directly
+    /// against [`SimMob::last_hurt_by`] and [`species::is_hostile_species`]
+    /// over `self.mobs`, mirroring what `HurtBySensor`/`NearestHostileSensor`
+    /// would answer rather than reading their output.
+    ///
+    /// # Three disclosed cuts from the jar original
+    ///
+    /// * **`golemSpawnConditionsMet`'s `LAST_SLEPT` gate is not enforced.**
+    ///   Vanilla additionally requires the villager to have slept within the
+    ///   last 24000 ticks — a proxy for "this is a real village with resting
+    ///   villagers", not merely a stray hurt animal. This crate has no
+    ///   sleep/bed tracking for villagers yet (the rest/schedule half of
+    ///   issue #231), so every villager is eligible regardless of sleep
+    ///   history.
+    /// * **No `SpawnUtil.trySpawnMob` placement search.** Vanilla searches a
+    ///   10-block horizontal, 8-block vertical box for a legal iron-golem
+    ///   cell; this sim's terrain read is a pathfinding snapshot, not a live
+    ///   column scan suited to that search, so the golem spawns one block
+    ///   beside the triggering villager instead — the same class of cut
+    ///   [`lodestone_entity::brain::behaviors::PrepareRam`]'s own doc
+    ///   discloses for a different pathfinding-heavy vanilla search.
+    /// * **At most one spawn per pass.** Vanilla's per-entity iteration could
+    ///   produce more than one spawn in the same 100-tick moment if several
+    ///   independent villager groups each clear the threshold; this port
+    ///   evaluates only the first id-ordered candidate, to keep one call
+    ///   deterministic rather than re-deriving vanilla's exact entity
+    ///   iteration order.
+    fn tick_golem_summon(&mut self) {
+        if self.tick_count % Self::GOLEM_SUMMON_INTERVAL_TICKS != 0 {
+            return;
+        }
+        let tick_count = self.tick_count;
+        for m in &mut self.mobs {
+            if m.entity_type.path() == "villager"
+                && m.golem_detected_until.is_some_and(|until| tick_count >= until)
+            {
+                m.golem_detected_until = None;
+            }
+        }
+
+        let hostile_positions: Vec<Vec3> = self
+            .mobs
+            .iter()
+            .filter(|m| species::is_hostile_species(&m.entity_type))
+            .map(|m| m.position())
+            .collect();
+
+        // `wantsToSpawnGolem`: not on cooldown, and hurt or a hostile nearby.
+        let candidates: Vec<(i32, Vec3)> = self
+            .mobs
+            .iter()
+            .filter(|m| m.entity_type.path() == "villager" && m.golem_detected_until.is_none())
+            .filter(|m| {
+                let pos = m.position();
+                m.last_hurt_by().is_some()
+                    || hostile_positions.iter().any(|hp| {
+                        let d = *hp - pos;
+                        d.dot(d) <= Self::GOLEM_SUMMON_HOSTILE_RANGE_SQR
+                    })
+            })
+            .map(|m| (m.id, m.position()))
+            .collect();
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        let (_, origin_pos) = candidates[0];
+        let within_box = |pos: Vec3| {
+            (pos.x - origin_pos.x).abs() <= Self::GOLEM_AGREEMENT_RADIUS
+                && (pos.y - origin_pos.y).abs() <= Self::GOLEM_AGREEMENT_RADIUS
+                && (pos.z - origin_pos.z).abs() <= Self::GOLEM_AGREEMENT_RADIUS
+        };
+        let agreeing = candidates.iter().filter(|&&(_, pos)| within_box(pos)).take(5).count();
+        if agreeing < Self::GOLEM_VILLAGERS_NEEDED {
+            return;
+        }
+
+        let golem_pos = Vec3::new(origin_pos.x + 1.0, origin_pos.y, origin_pos.z);
+        self.spawn_species(
+            "minecraft:iron_golem".parse().expect("static key"),
+            golem_pos,
+        );
+
+        // `nearbyVillagers.forEach(GolemSensor::golemDetected)`: every
+        // villager in the search box, not only the ones that individually
+        // wanted a golem — vanilla marks the whole nearby set.
+        let until = tick_count + Self::GOLEM_DETECTED_TTL;
+        for m in &mut self.mobs {
+            if m.entity_type.path() == "villager" && within_box(m.position()) {
+                m.golem_detected_until = Some(until);
+            }
+        }
     }
 
     /// This villager's summed reputation toward `player` (issue #246) —
@@ -4165,6 +4300,9 @@ impl<'w> MobSim<'w> {
         // Issue #244: nearby-villager gossip spread. No `wasm32` gate — unlike
         // `tick_villager_professions`, this touches no `std::fs`-backed type.
         self.spread_villager_gossip();
+        // Issue #231: golem-summon-on-hurt. No `wasm32` gate, for
+        // `spread_villager_gossip`'s own reason.
+        self.tick_golem_summon();
 
         self.tick_count += 1;
     }
@@ -9892,6 +10030,130 @@ mod villager_gossip_reputation_and_curing_tests {
                 .is_none(),
             "villagers 500 blocks apart must never spread gossip to each other"
         );
+    }
+}
+
+/// Issue #231: `VillagerPanicTrigger.tick`'s golem-summon-on-hurt.
+#[cfg(test)]
+mod golem_summon_tests {
+    use super::*;
+
+    fn flat_world() -> ChunkWorld {
+        ChunkWorld::new(-64, 384)
+    }
+
+    fn hurt_villager(sim: &mut MobSim<'_>, pos: Vec3) -> i32 {
+        let id = sim
+            .spawn_species("minecraft:villager".parse().expect("valid key"), pos)
+            .id();
+        sim.get_mut(id)
+            .expect("just spawned")
+            .mob
+            .note_hurt(Some(Vec3::new(pos.x + 1.0, pos.y, pos.z)));
+        id
+    }
+
+    fn iron_golem_count(sim: &MobSim<'_>) -> usize {
+        sim.mobs
+            .iter()
+            .filter(|m| m.entity_type.path() == "iron_golem")
+            .count()
+    }
+
+    /// The headline case: three hurt villagers within the 10-block agreement
+    /// box must produce exactly one iron golem, and every villager in the box
+    /// (not only the triggering one) must be marked `golem_detected_until` so
+    /// a second pass this same 100-tick window does not summon a second one.
+    #[test]
+    fn three_hurt_villagers_close_together_summon_exactly_one_golem() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        hurt_villager(&mut sim, Vec3::new(0.0, 0.0, 0.0));
+        hurt_villager(&mut sim, Vec3::new(2.0, 0.0, 0.0));
+        hurt_villager(&mut sim, Vec3::new(-2.0, 0.0, 0.0));
+
+        sim.tick();
+
+        assert_eq!(
+            iron_golem_count(&sim),
+            1,
+            "three hurt villagers within the agreement box must summon exactly one golem"
+        );
+        assert!(
+            sim.mobs
+                .iter()
+                .filter(|m| m.entity_type.path() == "villager")
+                .all(|m| m.golem_detected_until.is_some()),
+            "every villager in the agreement box must be marked golem-detected after a spawn"
+        );
+    }
+
+    /// Below `GOLEM_VILLAGERS_NEEDED` (3): two hurt villagers must summon
+    /// nothing — the discriminating floor, not merely "some villagers hurt
+    /// summons a golem eventually".
+    #[test]
+    fn two_hurt_villagers_do_not_summon_a_golem() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        hurt_villager(&mut sim, Vec3::new(0.0, 0.0, 0.0));
+        hurt_villager(&mut sim, Vec3::new(2.0, 0.0, 0.0));
+
+        for _ in 0..150 {
+            sim.tick();
+        }
+
+        assert_eq!(iron_golem_count(&sim), 0, "two hurt villagers must never reach the agreement floor");
+    }
+
+    /// Three villagers far enough apart that they never share an agreement
+    /// box (each pairwise distance exceeds `GOLEM_AGREEMENT_RADIUS`) must not
+    /// summon a golem even though each is individually hurt.
+    #[test]
+    fn three_hurt_villagers_too_far_apart_do_not_summon_a_golem() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        hurt_villager(&mut sim, Vec3::new(0.0, 0.0, 0.0));
+        hurt_villager(&mut sim, Vec3::new(50.0, 0.0, 0.0));
+        hurt_villager(&mut sim, Vec3::new(-50.0, 0.0, 0.0));
+
+        sim.tick();
+
+        assert_eq!(iron_golem_count(&sim), 0, "villagers outside one shared agreement box must not summon a golem");
+    }
+
+    /// A villager that is neither hurt nor near a hostile is not a candidate
+    /// at all — three *unhurt* villagers standing together must never summon
+    /// a golem.
+    #[test]
+    fn unhurt_villagers_with_no_hostile_nearby_never_summon() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        sim.spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0));
+        sim.spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(2.0, 0.0, 0.0));
+        sim.spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(-2.0, 0.0, 0.0));
+
+        for _ in 0..150 {
+            sim.tick();
+        }
+
+        assert_eq!(iron_golem_count(&sim), 0, "villagers with nothing wrong must never summon a golem");
+    }
+
+    /// A hostile mob nearby is exactly as good as being hurt — three
+    /// *unhurt* villagers next to a zombie must still summon, proving the
+    /// `hurt || hostile_near` disjunction rather than only the hurt half.
+    #[test]
+    fn a_nearby_hostile_alone_is_enough_to_summon() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        sim.spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0));
+        sim.spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(2.0, 0.0, 0.0));
+        sim.spawn_species("minecraft:villager".parse().expect("valid key"), Vec3::new(-2.0, 0.0, 0.0));
+        sim.spawn_species("minecraft:zombie".parse().expect("valid key"), Vec3::new(1.0, 0.0, 1.0));
+
+        sim.tick();
+
+        assert_eq!(iron_golem_count(&sim), 1, "a nearby hostile alone must be enough to summon, with no villager hurt");
     }
 }
 
