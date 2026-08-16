@@ -72,6 +72,9 @@ use super::ChunkWorld;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::poi_storage::PoiRecord;
 
+pub mod conversion;
+pub mod gossip;
+pub mod reputation;
 pub mod trades;
 
 /// `minecraft:villager_profession`, in `VillagerProfession.bootstrap`'s own
