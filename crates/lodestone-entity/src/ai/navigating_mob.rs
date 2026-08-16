@@ -198,6 +198,10 @@ pub struct NavigatingMob<'w> {
     /// Host-injected claimed bell position — [`job_site`](Self::job_site)'s
     /// sibling for [`BrainMob::meeting_point`]/`MemoryModuleType::MEETING_POINT`.
     meeting_point: Option<Vec3>,
+    /// Host-injected nearest visible zombified piglin position —
+    /// [`job_site`](Self::job_site)'s sibling for
+    /// [`BrainMob::nearest_visible_zombified`]/`MemoryModuleType::NEAREST_VISIBLE_ZOMBIFIED`.
+    nearest_visible_zombified: Option<Vec3>,
     /// The block the current path was computed toward, so `move_to` reuses the
     /// active path instead of recomputing every tick (vanilla `moveTo` reuse).
     active_target_block: Option<BlockPos>,
@@ -488,6 +492,20 @@ pub struct NavigatingMob<'w> {
     /// [`MobController::set_lying`], and read back by the host to publish
     /// that flag.
     lying: bool,
+    /// Host injection point, refreshed once per tick: how long the owner has
+    /// been asleep, or `None` if awake. Drives
+    /// [`MobController::owner_sleep_ticks`].
+    owner_sleep_ticks: Option<u32>,
+    /// Set by [`MobController::request_gift`]; drained by the host once per
+    /// tick, the same shape as [`eaten`](Self::eaten).
+    gift_requested: bool,
+    /// Host injection point: vanilla `ShoulderRidingEntity.rideCooldownCounter`.
+    /// Drives [`MobController::ticks_since_shoulder_dismount`]. Defaults to
+    /// `i32::MAX` — see that method's own doc for why the permissive default.
+    ticks_since_shoulder_dismount: i32,
+    /// Set by [`MobController::request_shoulder_ride`]; drained by the host
+    /// once per tick, the same shape as [`gift_requested`](Self::gift_requested).
+    shoulder_ride_requested: bool,
     /// Host injection point: vanilla `PatrollingMonster.patrolling`. Drives
     /// [`MobController::is_patrolling`].
     patrolling: bool,
@@ -579,6 +597,7 @@ impl<'w> NavigatingMob<'w> {
             job_site: None,
             home: None,
             meeting_point: None,
+            nearest_visible_zombified: None,
             active_target_block: None,
             last_look: None,
             jumping: false,
@@ -623,6 +642,10 @@ impl<'w> NavigatingMob<'w> {
             cat_sit_target: None,
             cat_bed_target: None,
             lying: false,
+            owner_sleep_ticks: None,
+            gift_requested: false,
+            ticks_since_shoulder_dismount: i32::MAX,
+            shoulder_ride_requested: false,
             patrolling: false,
             patrol_leader: false,
             patrol_target: None,
@@ -755,6 +778,22 @@ impl<'w> NavigatingMob<'w> {
     /// which is a wire concern this crate cannot reach).
     pub fn take_new_eaten(&mut self) -> Vec<EatenBlock> {
         std::mem::take(&mut self.eaten)
+    }
+
+    /// Drains the gift request since the last call — the same one-shot-flag
+    /// shape [`take_new_eaten`](Self::take_new_eaten) uses for a `Vec`. **A
+    /// host that never calls this makes the morning gift an island**: the
+    /// cat walks to its sleeping owner, lies down, and no item ever appears.
+    pub fn take_gift_requested(&mut self) -> bool {
+        std::mem::take(&mut self.gift_requested)
+    }
+
+    /// Drains the shoulder-ride request since the last call, same shape as
+    /// [`take_gift_requested`](Self::take_gift_requested). **A host that
+    /// never calls this makes shoulder-riding an island**: the parrot walks
+    /// up to its owner and simply stands there forever.
+    pub fn take_shoulder_ride_requested(&mut self) -> bool {
+        std::mem::take(&mut self.shoulder_ride_requested)
     }
 
     /// The block position this mob occupies — vanilla `mob.blockPosition()`,
@@ -1024,6 +1063,14 @@ impl<'w> NavigatingMob<'w> {
         self
     }
 
+    /// Host injection point: the nearest visible zombified piglin's position,
+    /// or `None` — [`set_job_site`](Self::set_job_site)'s sibling for
+    /// [`BrainMob::nearest_visible_zombified`].
+    pub fn set_nearest_visible_zombified(&mut self, target: Option<Vec3>) -> &mut Self {
+        self.nearest_visible_zombified = target;
+        self
+    }
+
     /// Host injection point: the entity this mob holds a live persistent grudge
     /// against, or `None` once the grudge expires. The host resolves vanilla's
     /// absolute anger deadline and feeds only the answer — see
@@ -1089,6 +1136,24 @@ impl<'w> NavigatingMob<'w> {
     /// candidate target from the host's bounded block search.
     pub fn set_cat_bed_target(&mut self, target: Option<Vec3>) -> &mut Self {
         self.cat_bed_target = target;
+        self
+    }
+
+    /// Host injection point: refreshes
+    /// [`CatRelaxOnOwnerGoal`](super::goals::CatRelaxOnOwnerGoal)'s read of
+    /// how long the owner has been asleep. See
+    /// [`MobController::owner_sleep_ticks`]'s own doc for the two moments it
+    /// is read.
+    pub fn set_owner_sleep_ticks(&mut self, ticks: Option<u32>) -> &mut Self {
+        self.owner_sleep_ticks = ticks;
+        self
+    }
+
+    /// Host injection point: refreshes
+    /// [`LandOnOwnersShoulderGoal`](super::goals::LandOnOwnersShoulderGoal)'s
+    /// read of `ShoulderRidingEntity.rideCooldownCounter`.
+    pub fn set_ticks_since_shoulder_dismount(&mut self, ticks: i32) -> &mut Self {
+        self.ticks_since_shoulder_dismount = ticks;
         self
     }
 
@@ -1688,6 +1753,22 @@ impl MobController for NavigatingMob<'_> {
         self.lying = lying;
     }
 
+    fn owner_sleep_ticks(&self) -> Option<u32> {
+        self.owner_sleep_ticks
+    }
+
+    fn request_gift(&mut self) {
+        self.gift_requested = true;
+    }
+
+    fn ticks_since_shoulder_dismount(&self) -> i32 {
+        self.ticks_since_shoulder_dismount
+    }
+
+    fn request_shoulder_ride(&mut self) {
+        self.shoulder_ride_requested = true;
+    }
+
     fn is_patrolling(&self) -> bool {
         self.patrolling
     }
@@ -1990,6 +2071,13 @@ impl BrainMob for NavigatingMob<'_> {
     /// [`meeting_point`](Self::meeting_point)'s own field doc.
     fn meeting_point(&self) -> Option<Vec3> {
         self.meeting_point
+    }
+
+    /// The host-injected nearest visible zombified piglin position — see
+    /// [`nearest_visible_zombified`](Self::nearest_visible_zombified)'s own
+    /// field doc.
+    fn nearest_visible_zombified(&self) -> Option<Vec3> {
+        self.nearest_visible_zombified
     }
 
     /// Delegates to the same `attacks` queue [`MobController::attack`] writes

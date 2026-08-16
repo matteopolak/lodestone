@@ -288,6 +288,17 @@ impl SleepState {
         self.sleepers.len() >= needed && self.deep_sleepers(game_tick) >= needed
     }
 
+    /// Every current sleeper as `(entity id, lay-down tick)` — issue #229's
+    /// feed for `MobSim::set_sleeping_players`, the join
+    /// `CatRelaxOnOwnerGoal`/shoulder-ride dismount need against a mob's
+    /// owner. A plain copy rather than exposing [`Sleeper`] itself, so this
+    /// module's internal shape can still change without widening what the
+    /// mob simulation depends on.
+    #[must_use]
+    pub(crate) fn sleepers_snapshot(&self) -> Vec<(i32, u64)> {
+        self.sleepers.iter().map(|s| (s.entity_id, s.since_game_tick)).collect()
+    }
+
     /// The wake-all — vanilla's `wakeUpAllPlayers` (`ServerLevel.java:367-379`)
     /// per-sleeper `stopSleepInBed(false, false)`. This crate has no
     /// per-player sleep state to clear, so dropping the roster *is* the wake;

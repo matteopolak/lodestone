@@ -1580,6 +1580,12 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             let day_time = (world_state.time().day_time.rem_euclid(24_000)) as i32;
             mobs.with(|sim| {
                 sim.set_day_time(day_time);
+                // Issue #229: last tick's sleep roster (this tick's own
+                // `sleep_state.reconcile` runs later in this loop, in
+                // vanilla's own `tickSleepingPlayers` position — see that
+                // call's own comment) — a one-tick lag, the same shape
+                // every other perception feed in this loop already carries.
+                sim.set_sleeping_players(sleep_state.sleepers_snapshot());
                 // The **block-state name**, not a solid/air bit. One bit per cell
                 // cannot express the shape an item comes to rest on: a bottom slab,
                 // soul sand and a patch of short grass all answered "solid" and all
