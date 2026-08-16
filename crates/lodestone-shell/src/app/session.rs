@@ -697,17 +697,26 @@ impl WindowApp {
             SingleplayerLaunch::Open(_) => resolve_launch_seed(None),
             SingleplayerLaunch::Created { config, .. } => resolve_launch_seed(Some(config)),
         };
-        // Issue #592's item 1, same rule as `seed` immediately above: only
-        // `Created` carries a `WorldCreationConfig` to read a chosen preset
-        // from, and only a **new** world's generator is ever built from this
-        // — an existing `Open`ed world has no stored world-type field to
-        // override either, so it takes the same `Overworld` default the
+        // Issue #592's items 1 and 2, same rule as `seed` immediately above:
+        // only `Created` carries a `WorldCreationConfig` to read a chosen
+        // preset from, and only a **new** world's generator is ever built
+        // from this — an existing `Open`ed world has no stored world-type
+        // field to override either, so it takes the same `Normal` default the
         // unconditional `overworld_chunk_source(seed)` call used before this
         // was threaded. Not cfg-gated to native, unlike `online_mode` below:
         // `launch_singleplayer` needs this on wasm32 too.
+        //
+        // The full `WorldTypePreset` is threaded now, not just its
+        // `lodestone_server::WorldType` projection (issue #592's item 1) —
+        // `net.rs`'s `preset_chunk_source` is what resolves the other four
+        // presets (`SingleBiomeSurface`/`Flat`/`FlatAllDimensions`/
+        // `DebugAllBlockStates`) once `lodestone-server`'s `lib.rs` re-exports
+        // their entry points (issue #592's item 2, already landed), and it
+        // needs the preset itself to pick among four different generator
+        // constructors, not a three-way `WorldType`.
         let world_type = match &launch {
-            SingleplayerLaunch::Open(_) => lodestone_server::WorldType::Overworld,
-            SingleplayerLaunch::Created { config, .. } => config.world_type.backend_world_type(),
+            SingleplayerLaunch::Open(_) => crate::menu::create_world::WorldTypePreset::Normal,
+            SingleplayerLaunch::Created { config, .. } => config.world_type,
         };
         // Issue #273's shell-side control: only `SingleplayerLaunch::Created`
         // carries a `WorldCreationConfig` to hold this on — `Open` (Play

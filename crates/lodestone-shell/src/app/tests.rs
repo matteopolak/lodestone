@@ -2392,7 +2392,7 @@ fn pressing_play_reaches_a_running_integrated_server() {
         0,
         None,
         seed,
-        lodestone_server::WorldType::Overworld,
+        crate::menu::create_world::WorldTypePreset::Normal,
         None,
     ) {
         Ok(net) => net,

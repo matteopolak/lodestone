@@ -85,7 +85,7 @@ pub(crate) fn launch_singleplayer(
     view_radius: i32,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
     seed: i64,
-    world_type: lodestone_server::WorldType,
+    world_type: crate::menu::create_world::WorldTypePreset,
     #[cfg(not(target_arch = "wasm32"))] world_dir: Option<std::path::PathBuf>,
 ) -> Result<NetClient, LaunchError> {
     let server_protocol = lodestone_registry::server_protocol_for_protocol(protocol)
@@ -122,7 +122,7 @@ pub(crate) fn launch_open_to_lan_online(
     view_radius: i32,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
     seed: i64,
-    world_type: lodestone_server::WorldType,
+    world_type: crate::menu::create_world::WorldTypePreset,
     world_dir: Option<std::path::PathBuf>,
 ) -> Result<NetClient, LaunchError> {
     let server_protocol = lodestone_registry::server_protocol_for_protocol(protocol)
