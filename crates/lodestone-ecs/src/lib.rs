@@ -187,12 +187,12 @@ pub use permissions::{
     PermissionStore, PermissionSubject, Permissions, SubjectPermissions, normalize_node,
 };
 pub use player::{
-    ActionQueue, AttackStrengthTicker, CollisionSource, Dead, DebugLine, DebugLines, Egress,
-    Flying, JumpTriggerTime, LastFlyingSent, LastPlayerInput, LastSprintingSent, LocalPlayer,
-    LocalPlayerPlugin, LookIntent, MovementIntent, PhysicsState, PlayerCollision, PrevPosition,
-    Profile, SelectedSlot, SprintKeyHeld, Submersion, WasJumping, apply_creative_flight_input,
-    apply_look_intent, cancel_flight_on_landing, clear_debug_lines, pin_passenger_to_vehicle,
-    reset_local_player, spawn_local_player, tick_attack_strength,
+    ActionQueue, AttackStrengthTicker, CameraOverride, CollisionSource, Dead, DebugLine,
+    DebugLines, Egress, Flying, JumpTriggerTime, LastFlyingSent, LastPlayerInput,
+    LastSprintingSent, LocalPlayer, LocalPlayerPlugin, LookIntent, MovementIntent, PhysicsState,
+    PlayerCollision, PrevPosition, Profile, SelectedSlot, SprintKeyHeld, Submersion, WasJumping,
+    apply_creative_flight_input, apply_look_intent, cancel_flight_on_landing, clear_debug_lines,
+    pin_passenger_to_vehicle, reset_local_player, spawn_local_player, tick_attack_strength,
 };
 pub use brand::{
     ReportedServerBrand, ServerBrandChannelPlugin, ServerBrandPayload, record_server_brand,
