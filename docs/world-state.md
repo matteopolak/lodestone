@@ -104,12 +104,17 @@ than forgotten:
   change nothing until mob-on-player melee or blast damage to the player exists.
   The `scaling` column is already in `lodestone_data::damage_types`, so it is a
   table lookup once there is a hit to scale.
-* **Regional difficulty** (`DifficultyInstance`). The formula is small and its
-  inputs (world `game_time`, chunk inhabited time, moon phase) are all reachable
-  from here, but its only vanilla consumers are `Mob.finalizeSpawn`'s geared/enchanted
-  equipment, zombie reinforcements and mob potion effects — none of which are
-  modelled — so building it now would be a computed number with no reader. Left
-  deliberately; chunk inhabited time is not tracked either.
+* **Regional difficulty** (`DifficultyInstance`). This bullet is stale as
+  "deliberately left" — the formula landed (`crate::regional_difficulty`, see
+  [`regional-difficulty.md`](./regional-difficulty.md)) and its one real consumer,
+  `crate::lightning`'s skeleton-horse-trap roll, now runs in a live server (the
+  per-chunk lightning gate `crate::tick::run_tick_loop_with_weather` calls every
+  tick — see [`lightning.md`](./lightning.md)). What is still genuinely unbuilt:
+  vanilla's other consumers — `Mob.finalizeSpawn`'s geared/enchanted equipment,
+  zombie reinforcements and mob potion effects — since there is no zombie AI or
+  spawn-equipment path here yet, and chunk inhabited time is still not tracked
+  (every caller passes `local_game_time = 0`, which only ever understates the
+  result).
 
 `keep_inventory` has an accessor and **no** reader, and that is recorded rather
 than hidden: there is no death-drop path to keep an inventory through. Adding an

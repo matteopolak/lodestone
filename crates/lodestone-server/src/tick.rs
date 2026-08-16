@@ -350,6 +350,14 @@ pub(crate) const INITIAL_RANDOM_TICK_DEFERRAL_TICKS: u64 = 40;
 const RANDOM_TICK_POSITION_SEED: i32 = 0x5EED_1234u32 as i32;
 const RANDOM_TICK_BEHAVIOR_SEED: u64 = 0x5EED_5678;
 
+/// Seed for the driver's own [`crate::lightning::block_random_pos`] LCG state
+/// (`Level.randValue`'s counterpart, for lightning target selection rather
+/// than random ticks) — [`RANDOM_TICK_POSITION_SEED`]'s own reasoning
+/// restated for a second, independent LCG: any fixed literal is fine, since
+/// nothing here asserts on the exact sequence, only that strikes land inside
+/// their per-chunk column.
+const LIGHTNING_RAND_VALUE_SEED: i32 = 0x5EED_4C49u32 as i32;
+
 /// A shared feed of block changes the world tick loop wants every connection
 /// to learn about (issue #307/#308's one real producer reaching a client
 /// today: grass ↔ dirt, via `crate::random_tick`). Mirrors [`LiveMobSource`]'s
@@ -1402,6 +1410,16 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     let mut fire_env: Option<(i32, i32)> = None;
     let mut fire_changes: Vec<(BlockPos, String)> = Vec::new();
     let mut fire_primed_tnt: Vec<BlockPos> = Vec::new();
+    // `crate::lightning`'s two independent streams (issue #223/#233's
+    // shared blocker, #269's own module doc): strike target-selection and a
+    // bolt's own life/flashes/ignition state machine, kept on separate
+    // streams for `LIGHTNING_BOLT_SEED`'s documented reason — a strike
+    // decision must never shift which roll an already-live bolt's state
+    // machine sees. `lightning_rand_value` is the third, non-`SpawnRng`
+    // stream `block_random_pos` needs (`Level.randValue`'s own tiny LCG).
+    let mut lightning_strike_rng = crate::mob_spawn::SpawnRng::new(crate::lightning::LIGHTNING_STRIKE_SEED);
+    let mut lightning_bolt_rng = crate::mob_spawn::SpawnRng::new(crate::lightning::LIGHTNING_BOLT_SEED);
+    let mut lightning_rand_value: i32 = LIGHTNING_RAND_VALUE_SEED;
     // `crate::explosion_blocks`' behaviour stream, drawn once per ray of a blast
     // (1,352 rays) plus one per `createFire` candidate. Separate from `fire_rng`
     // so a blast cannot shift the fire stream, and from `random_ticks`' own
@@ -3017,6 +3035,90 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             }
         }
 
+        // Issue #223/#233's shared blocker, closed: `ServerLevel.tickThunder`,
+        // one per-chunk decision per tick, over the same follow area and
+        // startup-deferral window as the random-tick pass just above. Gated
+        // on `thundering` alone — vanilla's own gate is `raining &&
+        // isThundering()`, independent of `randomTickSpeed`, which only
+        // throttles the *random*-tick pass above — so a storm keeps striking
+        // even with `/gamerule random_tick_speed 0`.
+        //
+        // `crate::lightning::tick_thunder_for_chunk` only decides *whether*
+        // and *where* a strike happens (and, via `should_be_skeleton_trap`,
+        // is `crate::regional_difficulty::DifficultyInstance`'s one real
+        // consumer — see that module's own doc for why its other named
+        // consumers have nothing here to attach to yet); turning a decision
+        // into a live, ticking, network-visible entity and its `thunderHit`
+        // effects is `crate::mobs::lightning`'s job. Before this, neither
+        // `tick_thunder_for_chunk` nor `MobSim::tick_lightning` had a single
+        // production caller, so a thunderstorm never struck anything.
+        if game_tick > INITIAL_RANDOM_TICK_DEFERRAL_TICKS && weather.thundering {
+            // `min_y`/`height` are uniform for the whole dimension, so the
+            // fire-tick arm's own cache is reused rather than paying a second
+            // `world.column` fetch for the same two integers.
+            let (lightning_min_y, lightning_height) = *fire_env.get_or_insert_with(|| {
+                let probe = world.column(0, 0);
+                (probe.min_y, probe.height)
+            });
+            let env = crate::lightning::LightningEnv { min_y: lightning_min_y, height: lightning_height };
+            let spawn_mobs_rule = world_state.spawn_mobs();
+            let lightning_difficulty = world_state.difficulty().0;
+            let total_game_time = world_state.time().game_time;
+            let living_entities = mobs.with(|sim| sim.living_entity_positions());
+            let mut strikes = Vec::new();
+            for &(cx, cz) in area.chunks() {
+                if let Some(strike) = crate::lightning::tick_thunder_for_chunk(
+                    &*world,
+                    env,
+                    cx * 16,
+                    cz * 16,
+                    weather.raining,
+                    weather.thundering,
+                    lightning_difficulty,
+                    total_game_time,
+                    day_time,
+                    spawn_mobs_rule,
+                    // No POI/lightning-rod search here — `crate::lightning`'s
+                    // own module doc names this as a documented reduction,
+                    // `None` until this crate has a POI manager.
+                    None,
+                    &living_entities,
+                    &mut lightning_rand_value,
+                    &mut lightning_strike_rng,
+                ) {
+                    strikes.push(strike);
+                }
+            }
+            if !strikes.is_empty() {
+                mobs.with(|sim| sim.spawn_lightning_bolts(strikes, &mut lightning_bolt_rng));
+            }
+        }
+        // Every live bolt's state machine and `thunderHit` effects, one tick
+        // — run unconditionally (not gated on `thundering`) so a bolt struck
+        // moments before the storm ends still finishes its life/flashes
+        // countdown, matching `LightningBolt.tick` running from vanilla's own
+        // `entityTickList` independently of `tickThunder`'s gate.
+        mobs.with(|sim| sim.tick_lightning(world_state.difficulty().0, &mut lightning_bolt_rng));
+        // `MobSim::tick_lightning`'s fire-ignition candidates: `MobSim` holds
+        // only a frozen pathfinding snapshot (`take_lightning_fires`'s own
+        // doc), so the live write happens here, gated exactly like
+        // `LightningBolt.spawnFire` — air, and `FireBlock::canSurvive`.
+        for pos in mobs.with(MobSim::take_lightning_fires) {
+            let (min_y, height) = *fire_env.get_or_insert_with(|| {
+                let probe = world.column(pos.x.div_euclid(16), pos.z.div_euclid(16));
+                (probe.min_y, probe.height)
+            });
+            let fire_placement_env =
+                crate::fire::FireEnv::overworld_in(min_y, height, world_state.difficulty().0, weather.raining);
+            if crate::random_tick::is_air_variant(&world.block_state(pos.x, pos.y, pos.z))
+                && crate::fire::can_survive(&*world, fire_placement_env, pos)
+            {
+                let new_state = crate::fire::state_for_placement(&*world, fire_placement_env, pos);
+                world.set_block(pos.x, pos.y, pos.z, &new_state);
+                block_tick_out.publish(pos.x, pos.y, pos.z, new_state);
+            }
+        }
+
         // Every live `FallingBlockEntity`, one tick — the driver half of the
         // falling-block animation. Without it a spawned entity would sit still at
         // its spawn cell forever, which is a *worse* symptom than the teleport it
@@ -4359,6 +4461,110 @@ mod tests {
             assert_eq!(event.wire(), (7, *level), "rain ramp must be GAME_EVENT id 7");
         }
         assert_eq!(previous, 1.0, "the ramp must land exactly on 1.0");
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #223/#233: lightning reaches the production loop. Before this,
+    // neither `crate::lightning::tick_thunder_for_chunk` nor
+    // `MobSim::tick_lightning` had a single production caller — every
+    // gate for the mechanism (`crate::lightning`'s own module, and
+    // `crate::mobs::lightning`'s sidecar) drove the pieces directly, which
+    // is exactly the "hermetic green, island red" pair CLAUDE.md's rule 1
+    // warns about for the sibling weather gates just above.
+    // ---------------------------------------------------------------------
+
+    /// A thundering, single-chunk world (`world_tick_args`'s
+    /// `(0..=0, 0..=0)`) must eventually strike, driven entirely through
+    /// [`run_tick_loop_with_weather`] rather than by calling
+    /// `spawn_lightning_bolts`/`tick_lightning` directly.
+    ///
+    /// The production stream is a **fixed** seed
+    /// (`crate::lightning::LIGHTNING_STRIKE_SEED`), so this predicts —
+    /// rather than guesses — exactly which tick strikes: with one chunk
+    /// ticked per eligible tick, `should_attempt_strike` draws exactly once
+    /// per tick from that same fixed stream, so replaying it here (the
+    /// identical draw the production loop will make) finds the exact draw
+    /// count to the first zero, and the loop is advanced exactly that many
+    /// ticks past the startup deferral — no more, no fewer.
+    #[tokio::test(start_paused = true)]
+    async fn a_thundering_world_produces_a_real_bolt_through_the_loop() {
+        // Predict the exact tick, from the same fixed stream the loop itself
+        // draws from — see this test's own doc comment.
+        let mut probe = crate::mob_spawn::SpawnRng::new(crate::lightning::LIGHTNING_STRIKE_SEED);
+        let mut draws_to_first_strike: u64 = 0;
+        loop {
+            draws_to_first_strike += 1;
+            if probe.next_int(crate::lightning::STRIKE_ROLL_BOUND) == 0 {
+                break;
+            }
+            assert!(
+                draws_to_first_strike < 2_000_000,
+                "no zero roll found in a generous range; the fixed seed may have changed"
+            );
+        }
+        let total_ticks = INITIAL_RANDOM_TICK_DEFERRAL_TICKS + draws_to_first_strike;
+
+        let (mobs, out, block_entities) = handles();
+        let mobs_for_assert = mobs.clone();
+        let clock = Arc::new(TickClock::new());
+        let (world, block_tick_out, tick_area) = world_tick_args();
+        let weather_out = WeatherFeed::default();
+        // Raining and thundering for the whole test, never flipping.
+        let mut weather = WeatherState::default();
+        weather.raining = true;
+        weather.thundering = true;
+        weather.rain_time = i32::MAX;
+        weather.thunder_time = i32::MAX;
+        weather.rain_level = 1.0;
+        weather.thunder_level = 1.0;
+
+        let vote = SleepVote::new();
+        let feed = SleepFeed::default();
+        tokio::spawn(async move {
+            run_tick_loop_with_weather(
+                mobs,
+                out,
+                block_entities,
+                Arc::clone(&clock),
+                world,
+                block_tick_out,
+                tick_area,
+                ExplosionFeed::default(),
+                weather_out,
+                weather,
+                &vote,
+                &feed,
+                crate::region_source::ScheduledTickHandle::default(),
+                crate::world_state::WorldStateHandle::default(),
+                crate::tick_area::TickFollow::default(),
+                BorderFeed::default(),
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            mobs_for_assert.with(|sim| sim.lightning_bolt_count()),
+            0,
+            "no strike must have happened before the predicted tick"
+        );
+
+        for _ in 0..total_ticks {
+            tokio::time::advance(TICK_PERIOD).await;
+        }
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            mobs_for_assert.with(|sim| sim.lightning_bolt_count()),
+            1,
+            "the predicted tick must have produced exactly one live bolt, through the real loop"
+        );
+        let bolts: Vec<_> = mobs_for_assert
+            .with(|sim| sim.snapshots())
+            .into_iter()
+            .filter(|s| s.entity_type.to_string() == crate::lightning::LIGHTNING_BOLT)
+            .collect();
+        assert_eq!(bolts.len(), 1, "the bolt must reach the same snapshot stream every other entity does");
     }
 
     /// Gate for issue #325's wiring through the **production** loop, not at
