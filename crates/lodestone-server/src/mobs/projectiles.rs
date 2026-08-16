@@ -384,6 +384,27 @@ impl<'w> MobSim<'w> {
                     nearest = Some((t, m.id));
                 }
             }
+            // A live wither is a valid target too — `self.withers`, not
+            // `self.mobs` (see `TrackedWither`'s own doc), so without this
+            // second loop no arrow could ever strike one: the search above
+            // simply never considers it. Same id space as `self.mobs` (both
+            // draw from `self.next_id`), so a hit resolving to a wither's id
+            // cannot collide with a real mob's.
+            for (&id, w) in &self.withers {
+                if Some(id) == owner {
+                    continue;
+                }
+                let (width, height) = super::wither::HITBOX;
+                let hw = f64::from(width) / 2.0 + margin;
+                let pos = w.position;
+                let min = Vec3::new(pos.x - hw, pos.y - margin, pos.z - hw);
+                let max = Vec3::new(pos.x + hw, pos.y + f64::from(height) + margin, pos.z + hw);
+                if let Some(t) = lodestone_entity::projectile::clip_aabb(from, delta, min, max)
+                    && nearest.is_none_or(|(best, _)| t < best)
+                {
+                    nearest = Some((t, id));
+                }
+            }
 
             let block_t = first_solid_along(self.world, from, delta);
             match (nearest, block_t) {
@@ -522,6 +543,18 @@ impl<'w> MobSim<'w> {
         if effect.damage <= 0.0 {
             return;
         }
+        // A wither lives in `self.withers`, not `self.mobs` (see
+        // `TrackedWither`'s own doc), so `self.get_mut` below would find
+        // nothing and every arrow, trident and thrown potion would pass
+        // straight through one — the identical island `attack_from_player`
+        // had for melee before its own wither branch landed. Routed to a
+        // dedicated helper rather than folded into the code below: none of
+        // the armour/retaliation/wither-effect/owner-heal machinery past
+        // this point applies to a `TrackedWither`.
+        if self.withers.contains_key(&hit.target) {
+            self.resolve_projectile_hit_on_wither(hit, effect.damage);
+            return;
+        }
         // `minecraft:arrow` is the damage type for an arrow, `minecraft:thrown`
         // for a throwable, `minecraft:fireball` for a small fireball — all three
         // are ordinary reducible types (none carries `bypasses_armor`), so armour
@@ -566,6 +599,37 @@ impl<'w> MobSim<'w> {
             }
         }
         self.note_vocalisation(hit.target, applied);
+    }
+
+    /// [`resolve_projectile_hit`](Self::resolve_projectile_hit)'s wither
+    /// branch — a `TrackedWither` is not a [`super::SimMob`], so
+    /// `self.get_mut` cannot reach it and none of the armour reduction,
+    /// retaliation record or `minecraft:wither`-effect-on-hit logic above
+    /// applies (a wither has no armour attribute of its own, and is immune
+    /// to its own status effect). Routes through
+    /// [`MobSim::damage_wither`](super::MobSim::damage_wither) instead,
+    /// which already applies the emergence-invulnerability and
+    /// powered-armour-while-below-half-health gates.
+    ///
+    /// `is_arrow_or_wind_charge` mirrors vanilla's own hurt-source
+    /// classification for that gate: an arrow (a spectral arrow and a
+    /// trident are both part of the same projectile family) or a wind
+    /// charge is blocked outright while the wither is powered; every other
+    /// projectile — a thrown potion, a snowball, a ghast fireball, another
+    /// wither's own skull — lands normally regardless of powered state.
+    ///
+    /// **Disclosed gap:** a skull that strikes a *different* live wither
+    /// (two withers, one arena) does not apply the `minecraft:wither`
+    /// status effect or the owner-heal-on-kill bonus the way a hit on an
+    /// ordinary mob does — narrow enough (it needs two live withers) that
+    /// duplicating that machinery for it was not worth the risk of drifting
+    /// from the ordinary-mob path above.
+    fn resolve_projectile_hit_on_wither(&mut self, hit: &ProjectileHit, damage: f32) {
+        let is_arrow_or_wind_charge = matches!(
+            hit.entity_type.as_str(),
+            "arrow" | "spectral_arrow" | "trident" | "wind_charge"
+        );
+        self.damage_wither(hit.target, damage, is_arrow_or_wind_charge, false);
     }
 
     /// Applies one splash-family potion's blast at its impact point —

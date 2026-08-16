@@ -51,6 +51,34 @@ class rather than factored out.
 
 ## What consumes this today
 
+- **The summon ritual reaches the wire.** `crate::server`'s block-placement
+  handler calls `MobSim::try_construct_wither` on placing
+  `minecraft:wither_skeleton_skull`/`_wall_skull`, mirroring
+  `try_construct_golem`'s own real call site exactly — a completed pattern
+  spawns a real, ticking `TrackedWither` and clears the consumed cells to
+  air, the same as the golem trigger. (An earlier version of this doc said
+  nothing called this in production; that was true when written and is not
+  true now — re-verify a "does not consume this yet" claim against the tree
+  before repeating it, per this repo's own note on doc staleness.)
+- **A player can actually kill one.** Until this was fixed, a wither lived
+  only in `self.withers` (a plain `HashMap`, not `self.mobs`), while
+  `MobSim::attack_from_player` (the player-melee path) and
+  `MobSim::resolve_projectile_impacts`' nearest-target search (the
+  player-arrow path) both read and wrote `self.mobs` exclusively —
+  `self.get_mut(wither_id)` returned `None` either way, so **every melee
+  hit and every arrow silently found no target and dealt zero damage**.
+  `MobSim::damage_wither` (the armoured-phase/invulnerability gate) was
+  real, tested and had zero production callers. Both paths now carry a
+  wither branch routed through `damage_wither` instead: `attack_from_player`
+  checks `self.withers` first, and `resolve_projectile_impacts` searches a
+  second candidate loop over `self.withers` (a fixed `(0.9, 3.5)` hitbox,
+  since a `TrackedWither` carries no `MobShape`) alongside its existing
+  `self.mobs` loop, then `resolve_projectile_hit` routes a wither target to
+  `damage_wither` rather than the ordinary-mob armour/retaliation path. Both
+  respect the emergence-invulnerability and powered-armour-while-below-half-
+  health gates exactly as `damage_wither`'s own tests already proved; see
+  `mobs::wither::tests::a_players_melee_hit_damages_an_active_wither` and
+  `mobs::wither::tests::a_players_arrow_damages_an_active_wither`.
 - **The skull's full impact chain reaches the wire.** `mobs::wither::
   tick_withers` fires a skull through `MobSim::spawn_projectile_from` (the
   same funnel every other projectile in this crate uses), and
@@ -72,27 +100,28 @@ class rather than factored out.
   one-line addition beside the pre-existing `tick_dragons` call, in the
   shared-but-editable `tick.rs`. Without it a spawned wither would be inert
   the same way an un-ticked dragon was before that line landed.
+- **The "still emerging" invulnerability flag reaches the wire.** A
+  `MetadataField` for `WitherBoss.DATA_ID_INV` (index 19 of the committed
+  `entity_data_index_jvm.txt` dump) exists and `mobs::wither::
+  push_wither_snapshots` streams it on every snapshot — a wither's client-
+  side shield/particle "still emerging" visual has its data.
 
 ## What does not consume this yet
 
-- **Nothing calls `MobSim::try_construct_wither` in production.** The
-  hook belongs beside `MobSim::try_construct_golem`'s own real call site —
-  `crate::server`'s block-placement handler, on placing
-  `minecraft:wither_skeleton_skull`/`_wall_skull` — which is an off-limits
-  file for this change. See this crate's own report (or the sibling
-  `try_construct_golem` call site, cited above, as the exact shape to
-  mirror) for the hunk a block-placement owner still needs to add.
-- **No `MetadataField` for `WitherBoss.DATA_ID_INV`/`DATA_TARGET_A/B/C`**
-  (indices 19/16-18 of the committed
-  `crates/protocol/v770/tests/support/entity_data_index_jvm.txt` dump, all
-  `INT`, all shared with other species at the same crowded indices — see
-  `crate::wither`'s own module doc for the full collision census). A wither
-  is selector-visible, damageable and boss-bar-tracked without it; only the
-  client-side "still emerging" shield/particle visual and the two side
-  heads' own aim state are missing.
+- **No `MetadataField` for `WitherBoss.DATA_TARGET_A/B/C`** (indices 16-18
+  of the same dump, all `INT`, shared with other species at the same
+  crowded indices — see `crate::wither`'s own module doc for the full
+  collision census). Only the two side heads' own aim state is missing;
+  the invulnerability flag itself is wired (see above).
 - **No darken-screen bit on `BossBarSnapshot`.** `WitherBoss`'s own
   `ServerBossEvent` sets `setDarkenScreen(true)`; this crate's
   `BossBarSnapshot` has no carrier for it.
+- **A skull that strikes a *different* live wither does not apply the
+  `minecraft:wither` effect or heal its own shooter on a kill** — narrow
+  enough (it needs two live withers sharing an arena) that duplicating the
+  ordinary-mob machinery for it was not worth the risk of drifting from
+  that path. See `resolve_projectile_hit_on_wither`'s own doc comment in
+  `mobs/projectiles.rs`.
 
 ## How to change it
 
