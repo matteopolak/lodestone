@@ -26,6 +26,14 @@
 //! differs for anyone typing the ordinary spelling, and closing it is one line in
 //! the loop below whenever `/gamerule`'s own parity gate is written. Recorded here
 //! rather than discovered later.
+//!
+//! **Do not close it without also updating
+//! `crates/protocol/v770/tests/builtin_command_parity.rs`'s
+//! `gamerule_has_every_rule_subtree_right_but_half_the_literals`.** That gate
+//! pins the *current* half-parity count arithmetically
+//! (`theirs_children == (ours_children - FEATURE_FLAGGED_RULES) * 2`); adding
+//! the second literal here without updating it there turns a passing gate red
+//! for a reason its own name already predicts.
 
 use lodestone_command::{BoolArgument, IntegerArgument};
 

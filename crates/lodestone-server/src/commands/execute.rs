@@ -68,7 +68,21 @@
 //! below for why `rotated as` is not registered), `facing` (`<pos>` and
 //! `entity <targets> <anchor>`), `align`, `anchored`, `in` (single-dimension
 //! census — see [`lodestone_command_mc::DimensionArg`]'s own doc), `run`, and
-//! `if`/`unless entity`/`if`/`unless dimension`.
+//! `if`/`unless entity`/`dimension`/`score`.
+//!
+//! `if`/`unless score` (`register_score_conditions`) needed
+//! `crate::commands::scoreboard_store` to exist first — a real scoreboard,
+//! reached through `ctx.world.state.scoreboard()` exactly like `/scoreboard`
+//! itself reaches it, so a score set by one and read by the other agree by
+//! construction. Both of vanilla's two shapes are built: `matches <range>`
+//! (`lodestone_command_mc::IntRangeArg`) and `<op> <source>
+//! <sourceObjective>` as five literal comparison tokens (`<`, `<=`, `=`,
+//! `>=`, `>` — vanilla's tree registers these as literals here, **not**
+//! `minecraft:operation`'s nine-token argument, which is a different, larger
+//! set reserved for `/scoreboard players operation`). Both resolve `<target>`/
+//! `<source>` through `crate::commands::scoreboard::resolve_single`, the same
+//! function `/scoreboard players get` uses, so a selector, `*`, or a bare
+//! "fake player" name all mean the same thing in both places.
 //!
 //! # What is not built, and why — each names its own missing subsystem
 //!
@@ -83,19 +97,23 @@
 //!   rather than a silent one.
 //! * **`at`'s rotation.** Same root cause: position and dimension transfer for
 //!   real, rotation does not — the pre-`at` source's own rotation is kept.
-//! * **`store`, `if`/`unless score`, `predicate`, `data`, `items`, `function`,
-//!   `stopwatch`, `if`/`unless block`/`biome`/`blocks`/`loaded`, and `on
-//!   <relation>`.** Each needs a subsystem this server has nowhere: a
-//!   scoreboard (`store score`, `if score`), NBT storage/paths (`store …
-//!   <path>`, `if data`), a loot-predicate engine (`if predicate`), functions
-//!   (explicitly out of scope for this unit — issue #48's remainder tracks
-//!   functions/datapacks separately), a stopwatch registry, a read-only block/
-//!   biome/chunk-residency query on [`CommandWorld`] (which today only ever
-//!   *writes* blocks, through [`super::Effect::SetBlock`]/[`super::Effect::Fill`]
-//!   — see that enum's own doc for why even those two are self-targeted-only),
-//!   and entity relationship queries (owner/leasher/target/attacker/vehicle/
-//!   controller/origin/passengers) this crate's mob simulation does not expose
-//!   to a command executor.
+//! * **`store`, `predicate`, `data`, `items`, `function`, `stopwatch`,
+//!   `if`/`unless block`/`biome`/`blocks`/`loaded`, and `on <relation>`.**
+//!   (`if`/`unless score` is now built — see "What is built" above.) Each of
+//!   these still needs a subsystem this server has nowhere: `store`'s own
+//!   result/success-capture mechanism (a real scoreboard now exists for it to
+//!   write *into*, but nothing here yet wraps a following command's return
+//!   value the way `store` needs — the dispatcher only threads a
+//!   [`CommandSource`], never a result, through a chain), NBT storage/paths
+//!   (`store … <path>`, `if data`), a loot-predicate engine (`if predicate`),
+//!   functions (explicitly out of scope for this unit — issue #48's remainder
+//!   tracks functions/datapacks separately), a stopwatch registry, a read-only
+//!   block/biome/chunk-residency query on [`CommandWorld`] (which today only
+//!   ever *writes* blocks, through [`super::Effect::SetBlock`]/
+//!   [`super::Effect::Fill`] — see that enum's own doc for why even those two
+//!   are self-targeted-only), and entity relationship queries (owner/leasher/
+//!   target/attacker/vehicle/controller/origin/passengers) this crate's mob
+//!   simulation does not expose to a command executor.
 //! * **`execute summon <entity>`** (the modifier form that also changes the
 //!   acting entity). Not needed as its own subtree: `/summon` is already a
 //!   root command, so `execute at @s run summon minecraft:cow` reaches it
@@ -116,8 +134,8 @@
 
 use lodestone_command::NodeId;
 use lodestone_command_mc::{
-    AnchorInput, Axes, DimensionArg, EntityAnchorArg, EntityArg, EntitySelector, RotationArg,
-    SwizzleArg, Vec3Arg,
+    AnchorInput, Axes, DimensionArg, EntityAnchorArg, EntityArg, EntitySelector, IntRangeArg,
+    ObjectiveArg, RotationArg, ScoreHolderArg, SwizzleArg, Vec3Arg,
 };
 use lodestone_model::Rotation;
 
@@ -407,6 +425,75 @@ fn register_conditions(registrar: &mut Registrar, execute: NodeId, literal: &str
         let dimension = ctx.get(dim_key).clone();
         Ok(dimension == ctx.source.dimension)
     });
+
+    register_score_conditions(registrar, parent, execute, expected);
+}
+
+/// `score <target> <targetObjective> matches <range>` and `score <target>
+/// <targetObjective> <op> <source> <sourceObjective>` — the two shapes
+/// `ExecuteCommand.addConditional`'s own `score` branch registers. Both are
+/// boolean tests (a comparison result, not a count), so both use
+/// [`add_boolean_conditional`], matching the reference: vanilla's own
+/// `score` conditional is not fork-counted the way `if entity`'s match count
+/// is.
+fn register_score_conditions(registrar: &mut Registrar, parent: NodeId, execute: NodeId, expected: bool) {
+    let score_lit = registrar.literal(parent, "score");
+    let (target_node, target_key) = registrar.arg(score_lit, "target", ScoreHolderArg::single());
+    let (target_obj_node, target_obj_key) = registrar.arg(target_node, "targetObjective", ObjectiveArg);
+
+    // `matches <range>`.
+    let matches_lit = registrar.literal(target_obj_node, "matches");
+    let (range_node, range_key) = registrar.arg(matches_lit, "range", IntRangeArg);
+    add_boolean_conditional(registrar, range_node, execute, expected, move |ctx| {
+        let holder = super::scoreboard::resolve_single(ctx, target_key)?;
+        let objective = ctx.get(target_obj_key).clone();
+        let range = *ctx.get(range_key);
+        let value = ctx
+            .world
+            .state
+            .scoreboard()
+            .get_score(&holder, &objective)
+            .map_err(|e| e.to_string())?;
+        Ok(range.matches(value))
+    });
+
+    // `<op> <source> <sourceObjective>`, one literal child per comparison
+    // token — vanilla's tree registers these as five *literals*
+    // (`Commands.literal("<")`, …), not `minecraft:operation`'s nine-token
+    // argument (that parser is `/scoreboard players operation`'s own, a
+    // different, larger token set).
+    for token in ["<", "<=", "=", ">=", ">"] {
+        let op_lit = registrar.literal(target_obj_node, token);
+        let (source_node, source_key) = registrar.arg(op_lit, "source", ScoreHolderArg::single());
+        let (source_obj_node, source_obj_key) = registrar.arg(source_node, "sourceObjective", ObjectiveArg);
+        let token = token.to_string();
+        add_boolean_conditional(registrar, source_obj_node, execute, expected, move |ctx| {
+            let target_holder = super::scoreboard::resolve_single(ctx, target_key)?;
+            let target_objective = ctx.get(target_obj_key).clone();
+            let source_holder = super::scoreboard::resolve_single(ctx, source_key)?;
+            let source_objective = ctx.get(source_obj_key).clone();
+            let target = ctx
+                .world
+                .state
+                .scoreboard()
+                .get_score(&target_holder, &target_objective)
+                .map_err(|e| e.to_string())?;
+            let source = ctx
+                .world
+                .state
+                .scoreboard()
+                .get_score(&source_holder, &source_objective)
+                .map_err(|e| e.to_string())?;
+            Ok(match token.as_str() {
+                "<" => target < source,
+                "<=" => target <= source,
+                "=" => target == source,
+                ">=" => target >= source,
+                ">" => target > source,
+                _ => unreachable!("token is one of the five spelled out above"),
+            })
+        });
+    }
 }
 
 /// `ExecuteCommand.addConditional` — a boolean test attached as both a fork

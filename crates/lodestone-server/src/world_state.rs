@@ -201,6 +201,16 @@ pub struct WorldStateHandle {
     /// `state`: it exists as the sharing gate's negative control for the *rules*
     /// store, and widening it would change what that control measures.
     anchors: crate::tick_area::TickAnchors,
+    /// This world's scoreboard (objectives and scores) — a sibling of
+    /// `state` for the identical reason `anchors` is one: every
+    /// `/scoreboard`/`/execute … score` command entry point (a live
+    /// connection's `ChatCommand` arm, RCON, and a command block's tick)
+    /// already receives this handle to reach `state`/`rules`, so riding here
+    /// reaches all three with no new parameter anywhere. See
+    /// `crate::commands::scoreboard_store`'s module doc for why a second,
+    /// independently-constructed handle would be the island this crate has
+    /// already paid to learn about once.
+    scoreboard: crate::commands::scoreboard_store::ScoreboardHandle,
 }
 
 impl WorldStateHandle {
@@ -229,6 +239,14 @@ impl WorldStateHandle {
     #[must_use]
     pub fn tick_anchors(&self) -> &crate::tick_area::TickAnchors {
         &self.anchors
+    }
+
+    /// This world's scoreboard — see [`Self`]'s own field doc for why a
+    /// command reaches it through here rather than through a handle of its
+    /// own.
+    #[must_use]
+    pub fn scoreboard(&self) -> &crate::commands::scoreboard_store::ScoreboardHandle {
+        &self.scoreboard
     }
 
     /// Whether this handle and `other` name the same store — for the sharing

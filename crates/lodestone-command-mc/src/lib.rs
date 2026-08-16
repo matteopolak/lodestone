@@ -73,6 +73,8 @@ pub mod game_mode;
 pub mod item;
 pub mod position;
 pub mod rotation;
+pub mod scoreboard;
+pub mod snbt;
 pub mod swizzle;
 pub mod time;
 
@@ -87,6 +89,11 @@ pub use game_mode::GameModeArg;
 pub use item::{ItemArg, ItemInput};
 pub use position::{BlockPosArg, Coordinate, Coordinates, Vec3Arg};
 pub use rotation::{Rotation2, RotationArg};
+pub use scoreboard::{
+    IntRange, IntRangeArg, ObjectiveArg, ObjectiveCriteriaArg, OperationArg, ScoreHolderArg,
+    ScoreHolderInput, ScoreOperation,
+};
+pub use snbt::{NbtCompoundArg, NbtTagArg, SnbtValue};
 pub use swizzle::{Axes, SwizzleArg};
 pub use time::TimeArg;
 

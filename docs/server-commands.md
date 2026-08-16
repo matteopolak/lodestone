@@ -289,7 +289,39 @@ stated bar (its own doc names the three residual runtime panics that fire on a
 command's *first* execution, which is exactly what that bar catches). New
 argument types back them: `lodestone_command_mc::{TimeArg, BlockArg,
 EntityTypeArg}`, plus the pre-existing `Vec3Arg`/`BlockPosArg` for `~`/`^`
-coordinates, reused by `/tp` and `/summon`.
+coordinates, reused by `/tp` and `/summon`. `/worldborder` (issue #580)
+followed, and `/scoreboard` most recently.
+
+#### `/scoreboard`
+
+`crate::commands::scoreboard` plus the store it reads and writes,
+`crate::commands::scoreboard_store::ScoreboardHandle`. `objectives
+add`/`remove`/`list`, and `players set`/`add`/`remove`/`get`/`reset`/`list`/
+`operation` — see that store's own module doc for what "criteria" means here
+(nothing: every score changes only because a command asked it to, since no
+criteria are simulated).
+
+The store rides *inside* `crate::world_state::WorldStateHandle`, as a sibling
+field next to the tick-anchor set already there, rather than as a fourth field
+on `CommandWorld` threaded independently through every entry point. That is
+what makes it reachable from `/execute if score` (see above), from RCON (the
+same `WorldStateHandle` `RconConfig::with_world` already substitutes), and
+from a command block's own tick (the same handle `run_command_block_command`
+already receives) with **no new parameter anywhere** — the identical island
+`/gamerule`'s own history in this document warns a *second*, disconnected
+store would be.
+
+New argument types back it, all in `lodestone_command_mc::scoreboard`:
+`ObjectiveArg`, `ObjectiveCriteriaArg`, `OperationArg` (vanilla's nine
+`+=`/`-=`/…/`><` tokens), `IntRangeArg` (`minecraft:int_range`, also used by
+`execute if score … matches`), and `ScoreHolderArg` (`minecraft:score_holder`
+— `*`, a selector, or a bare "fake player" word, the dominant real use of a
+scoreboard in redstone/adventure-map contexts and the reason this is not
+simply `EntityArg` reused).
+
+**Not built:** `objectives setdisplay` and any display-slot concept (nothing
+in this crate renders a sidebar, so a stored slot would be write-only), and
+`players enable` (meaningless with no criteria semantics modelled at all).
 
 #### The four mechanisms
 
@@ -398,11 +430,19 @@ engages here.
 
 Built: `as`, `at`, `positioned` (+ `as`), `rotated` (redirect only), `facing`
 (`<pos>` and `entity <targets> <anchor>`), `align`, `anchored`, `in`
-(single-hosted-dimension census), `run`, and `if`/`unless entity`/`if`/`unless
-dimension`. Each subcommand is one [`Registrar::modifier`] rewriting the one
+(single-hosted-dimension census), `run`, and `if`/`unless entity`/`dimension`/
+`score`. Each subcommand is one [`Registrar::modifier`] rewriting the one
 [`CommandSource`] flowing through it, redirected back to `execute`'s own
 children — the modifier/fork substrate this document already named as "built
 before `/execute` needs it" now has its first production caller.
+
+`if`/`unless score` — both of vanilla's two shapes, `matches <range>`
+(`lodestone_command_mc::IntRangeArg`) and `<op> <source> <sourceObjective>` as
+five literal comparison tokens (`<`, `<=`, `=`, `>=`, `>`) — needed a real
+scoreboard to exist first; see "`/scoreboard`" below. Both read through
+`ctx.world.state.scoreboard()`, the same store `/scoreboard` itself writes, so
+a score set by one command and read by a chained `execute if score` agree by
+construction with no new plumbing between them.
 
 `run <command>` carries **no modifier at all**: `registrar.redirect(run_node,
 registrar.root())`, matching vanilla's own `literal("run")
@@ -424,16 +464,21 @@ gets to run).
 
 Not built, each naming its own missing subsystem: `rotated as`/`at`'s rotation
 transfer (`PlayerCandidate` carries no rotation — the identical gap `/tp`'s own
-module doc names), `store`/`if score` (no scoreboard), `if data`/`items`
-(no NBT storage or container-slot query reachable from a command), `if
-predicate` (no loot-predicate engine), `stopwatch` (no stopwatch registry),
-`if block`/`biome`/`blocks`/`loaded` (no read-only block/biome/chunk-residency
-query on `CommandWorld`, which today only ever *writes* blocks), `on
-<relation>` (no entity-relationship query on the mob simulation), the
-`execute summon` modifier form (unnecessary as its own subtree — `/summon` is
-already a root command reachable through `run`), and `positioned over
-<heightmap>` (no heightmap query). `crate::commands::execute`'s own module doc
-is the up-to-date source for this list.
+module doc names), `store` (a scoreboard now exists to write *into* — see
+"`/scoreboard`" below — but nothing in the dispatcher yet wraps a chained
+command's own return value the way `store` needs to capture it), `if
+data`/`items` (no NBT storage or container-slot query reachable from a
+command — a textual SNBT *parser* now exists, `lodestone_command_mc::snbt`,
+but `if data` additionally needs somewhere to read NBT *from*, which this
+crate still has nowhere), `if predicate` (no loot-predicate engine),
+`stopwatch` (no stopwatch registry), `if block`/`biome`/`blocks`/`loaded` (no
+read-only block/biome/chunk-residency query on `CommandWorld`, which today
+only ever *writes* blocks), `on <relation>` (no entity-relationship query on
+the mob simulation), the `execute summon` modifier form (unnecessary as its
+own subtree — `/summon` is already a root command reachable through `run`),
+and `positioned over <heightmap>` (no heightmap query).
+`crate::commands::execute`'s own module doc is the up-to-date source for this
+list.
 
 Tested in `crates/lodestone-server/tests/builtin_commands.rs`, each assertion
 predicting a rewritten answer a caller-position/caller-entity reading of the
@@ -685,21 +730,30 @@ built-in listed above, not only the original four.
 
 Still open, and each is now additive rather than blocked:
 
-* **`/execute`'s larger conditions/`store`, functions and datapacks.**
-  `/execute`'s core chain (`as`/`at`/`positioned`/`rotated`/`facing`/`align`/
-  `anchored`/`in`/`run`, plus `if`/`unless entity`/`dimension`) is built — see
-  this document's own `#### /execute` section. `store`, `if score`/`data`/
-  `predicate`/`items`/`block`/`biome`/`blocks`/`loaded`, `on <relation>` and
-  `stopwatch` each need a subsystem this server does not have yet (scoreboard,
-  NBT storage, a loot-predicate engine, a read-only block/chunk query on
-  `CommandWorld`, entity-relationship queries); functions/datapacks remain
-  entirely unattempted, as scoped. **Command blocks now run end to end from
-  "Always Active"**: `SET_COMMAND_BLOCK` decodes and writes the block entity,
-  and `tick.rs`'s `TICK_COMMAND_BLOCK` drain runs them. What remains is
-  narrower — an ordinary redstone pulse into an impulse or repeating-but-not-
-  automatic command block does nothing yet, because nothing calls
-  `crate::command_block::on_power_changed` — see this document's own
-  `#### Command blocks` section for exactly what is left.
+* **A real scoreboard now exists** (`crate::commands::scoreboard`,
+  `crate::commands::scoreboard_store::ScoreboardHandle` — see the
+  `#### /scoreboard` section above), and `/execute if`/`unless score` is built
+  on it. What is still open: **`store`** (a scoreboard exists to write *into*,
+  but the dispatcher does not yet wrap a chained command's return value the
+  way `store` needs to capture it), **`if data`/`items`** (a textual SNBT
+  *parser* now exists — `lodestone_command_mc::snbt::{NbtTagArg,
+  NbtCompoundArg, SnbtValue}` — but there is still no NBT-*storage* engine to
+  read from, and no container-slot query reachable from a command),
+  **`if predicate`** (no loot-predicate engine), **`stopwatch`** (no
+  stopwatch registry), **`if block`/`biome`/`blocks`/`loaded`** (no read-only
+  block/biome/chunk-residency query on `CommandWorld`, which today only ever
+  *writes* blocks), and **`on <relation>`** (no entity-relationship query on
+  the mob simulation). Functions/datapacks remain entirely unattempted, as
+  scoped. **Command blocks now run end to end from "Always Active"**:
+  `SET_COMMAND_BLOCK` decodes and writes the block entity, and `tick.rs`'s
+  `TICK_COMMAND_BLOCK` drain runs them. What remains is narrower — an ordinary
+  redstone pulse into an impulse or repeating-but-not-automatic command block
+  does nothing yet, because nothing calls
+  `crate::command_block::on_power_changed` (still a real `never used`
+  function, confirmed by `cargo check`'s own dead-code warning) — see this
+  document's own `#### Command blocks` section for exactly what is left, and
+  why closing it needs `crate::random_tick::propagate_and_react` to gain a
+  block-entity handle it does not have in scope today.
 * **`/publish`** (the Open-to-LAN port command) is a separate, LAN-specific
   issue and was not attempted here.
 * **`/xp query`** parses and resolves its target, then refuses rather than
@@ -708,31 +762,56 @@ Still open, and each is now additive rather than blocked:
   (the roster snapshot selectors resolve against) carries a position and a game
   mode, the same two scalars `/gamemode`'s `gamemode=` filter needs, but no
   experience field. Answering the query for real needs that snapshot widened,
-  the same way game mode already was.
-* **`/setblock`/`/fill`/`/say`/`/me` are unreachable from RCON**, unlike every
-  other new command. `Effect::SetBlock`/`Fill` need the chunk source only a
-  live connection's own `ChatCommand` arm has in scope; RCON's `run_command`
-  has no such source at all. `Effect::Broadcast` (`/say`/`/me`) is the one
-  exception — RCON already holds the player registry, so `rcon.rs` calls
-  `PlayerRegistry::say` directly for that one effect kind. See `rcon.rs`'s own
-  module doc for the up-to-date roster of what RCON can and cannot run.
+  the same way game mode already was — which needs `crate::players`'
+  `TrackedPlayer`/`PlayerCandidate::experience` plus a republish call at every
+  site that changes a player's XP, mirroring `PlayerRegistry::set_game_mode`'s
+  own producer/mirror split. Not done here: those sites are scattered across
+  `crate::server`, off limits to this pass.
+* **`/setblock`/`/fill` are unreachable from RCON**, unlike every other new
+  command — **`/say`/`/me` already are reachable** (`rcon.rs`'s own
+  `run_command_as` already special-cases `Effect::Broadcast` through
+  `PlayerRegistry::say`; an earlier draft of this document said otherwise and
+  was stale). `Effect::SetBlock`/`Fill` need the chunk source only a live
+  connection's own `ChatCommand` arm has in scope; RCON's `run_command` has no
+  such source at all, and giving it one would mean a shared, always-resident
+  chunk-write path RCON could hold outside any connection — a real feature,
+  not a routing fix, and out of scope here. `/summon` and `/worldborder` are
+  RCON-unreachable for the identical shape of reason (`CommandWorld::mobs`/
+  `::border` are `None` there): each needs a handle
+  (`crate::mobs::MobHandle`/`crate::border::BorderFeed`) that today is a local
+  variable inside `IntegratedServer::open_in_memory_with_mobs` rather than a
+  field the server keeps around for `start_rcon` to read back — see `rcon.rs`'s
+  own module doc for the up-to-date roster of what RCON can and cannot run.
+  `/scoreboard` (and `/execute if score`) **are** reachable from RCON, with no
+  new wiring: both ride `crate::world_state::WorldStateHandle`, which
+  `RconConfig::with_world` already substitutes for the shared production
+  store.
 * **`/spawnpoint` has no `<targets>` form**, only the caller-implicit one.
   `RespawnPoint` is a connection-local variable
   (`dispatch_play_packet`'s own `respawn: &mut Option<RespawnPoint>`); reaching
   a *different* connection's copy would need a directed effect this crate does
   not have yet (`Effect::SetRespawnPoint` is deliberately self-targeted-only —
   see its own doc comment).
-* **A textual SNBT parser.** `ItemArg` v1 refuses a `[…]` component patch by name
-  rather than dropping it, because no textual SNBT parser exists anywhere in this
-  tree (`read_component_patch` is *wire* decode, a different problem). Since
-  `minecraft:item_stack` carries no wire payload, the node, the autocompletion and
-  `/give minecraft:diamond_sword 3` are all complete now, and the later unit
-  replaces exactly one match arm.
-* **Deferred selector options.** `scores`, `nbt`, `advancements`, `predicate`,
+* **A textual SNBT parser now exists**
+  (`lodestone_command_mc::snbt::{parse_value, parse_compound, NbtTagArg,
+  NbtCompoundArg, SnbtValue}`), ported clause by clause from `TagParser`. It
+  is a grammar-only building block with **no production caller yet**:
+  `ItemArg` v1 still refuses a `[…]` component patch by name rather than
+  parsing it, because `lodestone_model::ItemStack` has nowhere to put a parsed
+  component patch even once one is parsed, and widening it is outside
+  `lodestone-command`/`lodestone-command-mc`/`lodestone-server`'s combined
+  remit. Since `minecraft:item_stack` carries no wire payload, the node, the
+  autocompletion and `/give minecraft:diamond_sword 3` are all complete now
+  regardless; the later unit that wires the parser in replaces exactly one
+  match arm in `ItemArg::parse`.
+* **Deferred selector options.** `nbt`, `advancements`, `predicate`,
   `tag`, `team`, `level` and the two `*_rotation` options are refused **by name**
   rather than ignored — a silently widened selector is the worst available
-  failure. Each needs a subsystem that does not exist (a scoreboard, entity NBT,
-  the advancement predicate engine, entity tags, experience levels, per-entity
+  failure. (`scores` is no longer in this list in spirit — a scoreboard now
+  exists — but the selector *option* itself is still unbuilt; only
+  `/execute if score` and `/scoreboard` read the store directly today.) Each
+  needs a subsystem that does not fully exist yet (entity NBT, the advancement
+  predicate engine, entity tags, experience levels, per-entity
   rotation tracking). **None of it is visible on the wire**: `minecraft:entity`
   carries one flags byte and no option list, so deferring options cannot break
   tree parity.
