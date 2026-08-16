@@ -94,7 +94,7 @@ use lodestone_render::{
     GpuEntityModel, GuiSpriteQuad, ModelPipeline, ModelVertex, RenderLayer, block_entity_texture_stems,
     entity_camera_buffer, fog::FogUniform, gui_item_pose, gui_ortho, mesh_item_quads,
     model_shared_camera_buffer, section_origin_buffer, update_model_shared_camera_buffer,
-    upload_instances,
+    upload_instances_tinted,
 };
 
 use super::font;
@@ -246,6 +246,11 @@ pub(crate) struct SpecialIconDraw {
     pub texture: &'static str,
     /// GUI-pixel-space placement, from [`gui_item_pose`].
     pub placement: Mat4,
+    /// Gamma-space `[r, g, b]` multiplied into every texel, `[255, 255, 255]`
+    /// for every kind but the banner's flag — see
+    /// [`lodestone_render::banner_item_rig`]'s doc for why that one is tinted
+    /// rather than drawn through a real translucent mask layer.
+    pub tint: [u8; 3],
 }
 
 /// The block-entity mesh and sheet for one special-renderer `kind`, keyed on the
@@ -690,14 +695,39 @@ fn push_special_icon(
     y: f32,
     size: f32,
 ) {
+    let outer = gui_item_pose([x, y, size, size], transform);
+    let placement = lodestone_render::compose_special_node_transform(outer, node_transform);
+
+    // The banner rig is two meshes sharing one placement — see
+    // `lodestone_render::banner_item_rig`'s doc — so it is pushed as two draws
+    // rather than through the single-`(model, texture)` path every other kind
+    // uses below.
+    if kind == "minecraft:banner"
+        && let Some(rig) = lodestone_render::banner_item_rig(item.path())
+    {
+        out.push(SpecialIconDraw {
+            model: rig.body.0,
+            texture: rig.body.1,
+            placement,
+            tint: [255, 255, 255],
+        });
+        out.push(SpecialIconDraw {
+            model: rig.flag.0,
+            texture: rig.flag.1,
+            placement,
+            tint: rig.flag_tint,
+        });
+        return;
+    }
+
     let Some((model, texture)) = special_icon_geometry(kind, item) else {
         return;
     };
-    let outer = gui_item_pose([x, y, size, size], transform);
     out.push(SpecialIconDraw {
         model,
         texture,
-        placement: lodestone_render::compose_special_node_transform(outer, node_transform),
+        placement,
+        tint: [255, 255, 255],
     });
 }
 
@@ -2214,6 +2244,13 @@ fn build_special_batches(
         // with whichever sheet happened to be bound.
         let mut keys: Vec<(&'static str, &'static str)> = Vec::new();
         let mut per_key: Vec<Vec<Mat4>> = Vec::new();
+        // Parallel to `per_key`, but indexed **per icon** rather than per part —
+        // every icon sharing a `(model, texture)` key needs its own tint, since
+        // two different-coloured banners both resolve to `(BANNER_FLAG,
+        // banner_base)`. Kept separate from `per_key` rather than zipped into it
+        // because `per_key` is part-major after the transpose below and this
+        // stays icon-major throughout.
+        let mut per_key_tint: Vec<Vec<[u8; 3]>> = Vec::new();
         for draw in special {
             let Some(mesh) = s.models.get(draw.model) else {
                 continue;
@@ -2223,15 +2260,21 @@ fn build_special_batches(
             }
             let transforms = mesh.part_transforms(draw.placement, &[]);
             match keys.iter().position(|k| *k == (draw.model, draw.texture)) {
-                Some(i) => per_key[i].extend(transforms),
+                Some(i) => {
+                    per_key[i].extend(transforms);
+                    per_key_tint[i].push(draw.tint);
+                }
                 None => {
                     keys.push((draw.model, draw.texture));
                     per_key.push(transforms);
+                    per_key_tint.push(vec![draw.tint]);
                 }
             }
         }
 
-        for ((model, texture), flat) in keys.into_iter().zip(per_key) {
+        for (((model, texture), flat), icon_tints) in
+            keys.into_iter().zip(per_key).zip(per_key_tint)
+        {
             let Some(mesh) = s.models.get(model) else {
                 continue;
             };
@@ -2245,15 +2288,22 @@ fn build_special_batches(
             // this transpose wrong draws every part of the mesh at some other
             // part's position, which for a chest is a scattered pile of boxes.
             let count = flat.len() / part_count;
+            let tints: Vec<lodestone_render::InstanceTint> = icon_tints
+                .iter()
+                .map(|&rgb| lodestone_render::InstanceTint::rgb(rgb))
+                .collect();
             let parts = (0..part_count)
                 .map(|p| {
                     let per_icon: Vec<Mat4> = (0..count)
                         .map(|icon| flat[icon * part_count + p])
                         .collect();
                     // No `lights`: an inventory slot has no world light to
-                    // sample, so `upload_instances` falls back to
-                    // `ENTITY_FULLBRIGHT` for every instance.
-                    upload_instances(device, &per_icon, &[])
+                    // sample, so `upload_instances_tinted` falls back to
+                    // `ENTITY_FULLBRIGHT` for every instance. `tints` is
+                    // `InstanceTint::NONE` (a no-op multiply) for every kind but
+                    // the banner flag, so this is byte-identical to the old
+                    // `upload_instances` call for every existing consumer.
+                    upload_instances_tinted(device, &per_icon, &[], &tints)
                 })
                 .collect();
             out.push(SpecialBatch {

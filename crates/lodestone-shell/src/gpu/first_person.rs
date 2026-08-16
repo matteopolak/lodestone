@@ -12,7 +12,7 @@ use lodestone_render::{
         first_person_item_mesh_with_use, hand_projection, hand_transform, model_for_type,
     },
     fog::FogUniform,
-    update_model_shared_camera_buffer, upload_instances,
+    update_model_shared_camera_buffer, upload_instances, upload_instances_tinted,
 };
 
 use crate::camera_rig::BobFrame;
@@ -439,7 +439,13 @@ pub(super) enum FirstPersonHand<'a> {
     /// model shader's vertex layout, and this is instanced entity geometry. An
     /// enchanted held chest therefore draws unglinted — the same shortfall the
     /// inventory slot has for the same reason.
-    Special(SpecialHandDraw<'a>),
+    ///
+    /// A `Vec` rather than a single draw because the banner rig is two meshes
+    /// (pole/bar and flag, only the flag tinted) sharing one placement — see
+    /// [`RenderState::prepare_special_hand`] and
+    /// [`lodestone_render::banner_item_rig`]'s doc. Every other kind still
+    /// pushes exactly one.
+    Special(Vec<SpecialHandDraw<'a>>),
     /// The bare arm, drawn through the *entity* pipeline.
     Arm(FirstPersonArm<'a>),
 }
@@ -456,6 +462,9 @@ pub(super) enum FirstPersonHand<'a> {
 pub(super) struct SpecialHandDraw<'a> {
     model: &'a GpuEntityModel,
     texture: &'a wgpu::BindGroup,
+    /// Already baked with a per-instance tint (`[255, 255, 255]`, a no-op, for
+    /// every kind but the banner's flag) via `upload_instances_tinted` — see
+    /// [`RenderState::build_special_hand_draw`].
     parts: Vec<(lodestone_render::entity::PartRange, wgpu::Buffer)>,
 }
 
@@ -676,9 +685,9 @@ impl RenderState {
         if let Some((item, _foil)) = self.equip.visible()
             && let Some(model) = self.model.as_ref()
             && let Some(form) = model.items.get(item).and_then(|v| v.resolve_special(&hand_ctx))
-            && let Some(draw) = self.prepare_special_hand(device, item, form, inverse_arm_height, camera)
+            && let Some(draws) = self.prepare_special_hand(device, item, form, inverse_arm_height, camera)
         {
-            return Some(FirstPersonHand::Special(draw));
+            return Some(FirstPersonHand::Special(draws));
         }
 
         // The bare arm is always the wide/default player rig — this call site
@@ -755,15 +764,7 @@ impl RenderState {
         form: &lodestone_render::SpecialItemForm,
         inverse_arm_height: f32,
         camera: &Camera,
-    ) -> Option<SpecialHandDraw<'a>> {
-        let (model_name, texture_stem) = lodestone_render::special_item_rig(&form.kind, item.path())?;
-        let mesh = self.block_entities.models.get(model_name)?;
-        let gpu = self.block_entities.gpu_models.get(model_name)?;
-        // A missing sheet draws **nothing** rather than an untextured box — the same
-        // fail-open the world block-entity pass uses, and for the same reason: a
-        // flat-magenta chest-shaped box in the hand reads as a renderer bug.
-        let texture = self.block_entities.textures.get(texture_stem)?;
-
+    ) -> Option<Vec<SpecialHandDraw<'a>>> {
         // The same `Arm::Right` `prepare_first_person_hand` uses. A local rather
         // than a shared constant so this function is readable on its own; the two
         // cannot drift into disagreement, because the *caller* has already resolved
@@ -782,13 +783,54 @@ impl RenderState {
         // `compose_special_node_transform`'s doc for the derivation.
         let placement =
             lodestone_render::compose_special_node_transform(placement, form.transformation);
-        // `upload_instances` takes the packed byte widened to `u32`, the same shape
-        // the arm branch passes `hand_light` through.
         let light = self.hand_light(camera);
+
+        // The banner rig is two meshes sharing this same placement — see
+        // `lodestone_render::banner_item_rig`'s doc for why the flag alone is
+        // tinted.
+        if form.kind == "minecraft:banner"
+            && let Some(rig) = lodestone_render::banner_item_rig(item.path())
+        {
+            let body = self.build_special_hand_draw(device, rig.body, [255, 255, 255], placement, light)?;
+            let flag = self.build_special_hand_draw(device, rig.flag, rig.flag_tint, placement, light)?;
+            return Some(vec![body, flag]);
+        }
+
+        let (model_name, texture_stem) = lodestone_render::special_item_rig(&form.kind, item.path())?;
+        let draw = self.build_special_hand_draw(
+            device,
+            (model_name, texture_stem),
+            [255, 255, 255],
+            placement,
+            light,
+        )?;
+        Some(vec![draw])
+    }
+
+    /// Build one [`SpecialHandDraw`] for `(model_name, texture_stem)`, tinted by
+    /// `tint`. Shared by every `minecraft:special` kind
+    /// [`Self::prepare_special_hand`] resolves, so a chest, a shulker, a skull
+    /// and now a banner's two meshes all go through the same upload shape.
+    fn build_special_hand_draw<'a>(
+        &'a self,
+        device: &wgpu::Device,
+        (model_name, texture_stem): (&'static str, &'static str),
+        tint: [u8; 3],
+        placement: glam::Mat4,
+        light: u32,
+    ) -> Option<SpecialHandDraw<'a>> {
+        let mesh = self.block_entities.models.get(model_name)?;
+        let gpu = self.block_entities.gpu_models.get(model_name)?;
+        // A missing sheet draws **nothing** rather than an untextured box — the same
+        // fail-open the world block-entity pass uses, and for the same reason: a
+        // flat-magenta chest-shaped box in the hand reads as a renderer bug.
+        let texture = self.block_entities.textures.get(texture_stem)?;
+
         // `&[]` — no pose overrides. A held chest's lid is shut:
         // `ChestSpecialRenderer` carries no `openness` at all, so the rest pose *is*
         // the pose. Passing a lid angle here would open every chest in every hand.
         let transforms = mesh.part_transforms(placement, &[]);
+        let instance_tint = lodestone_render::InstanceTint::rgb(tint);
 
         let parts: Vec<(lodestone_render::entity::PartRange, wgpu::Buffer)> = transforms
             .iter()
@@ -798,7 +840,12 @@ impl RenderState {
                 if range.index_count == 0 {
                     return None;
                 }
-                let buffer = upload_instances(device, &[*matrix], &[light])?;
+                let buffer = upload_instances_tinted(
+                    device,
+                    &[*matrix],
+                    &[light],
+                    &[instance_tint],
+                )?;
                 Some((range, buffer))
             })
             .collect();
@@ -1095,17 +1142,21 @@ impl RenderState {
             // own hand camera, so the sheet is `entity/chest/normal` and not the
             // stitched block atlas. Two bind groups, not four — see
             // `FirstPersonHand::Special`.
-            FirstPersonHand::Special(draw) => {
+            FirstPersonHand::Special(draws) => {
                 pass.set_pipeline(&self.block_entities.pipeline.pipeline);
                 pass.set_bind_group(0, &self.block_entities.hand_cam_bind_group, &[]);
-                pass.set_bind_group(1, draw.texture, &[]);
-                pass.set_vertex_buffer(0, draw.model.vertices.slice(..));
-                pass.set_index_buffer(draw.model.indices.slice(..), wgpu::IndexFormat::Uint32);
-                for (range, buffer) in &draw.parts {
-                    pass.set_vertex_buffer(1, buffer.slice(..));
-                    let end = range.index_start + range.index_count;
-                    pass.draw_indexed(range.index_start..end, 0, 0..1);
-                    stats.draw_calls += 1;
+                // Usually one draw; the banner rig is two (pole/bar, flag) sharing
+                // this pipeline and camera bind group — see `FirstPersonHand::Special`.
+                for draw in draws {
+                    pass.set_bind_group(1, draw.texture, &[]);
+                    pass.set_vertex_buffer(0, draw.model.vertices.slice(..));
+                    pass.set_index_buffer(draw.model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    for (range, buffer) in &draw.parts {
+                        pass.set_vertex_buffer(1, buffer.slice(..));
+                        let end = range.index_start + range.index_count;
+                        pass.draw_indexed(range.index_start..end, 0, 0..1);
+                        stats.draw_calls += 1;
+                    }
                 }
             }
             FirstPersonHand::Arm(arm) => {

@@ -225,6 +225,26 @@ fn band_mean(pixels: &[u8], rect: [u32; 4], rows: std::ops::Range<u32>) -> Optio
     (n > 0).then(|| sum as f32 / n as f32)
 }
 
+/// Mean `[r, g, b]` (0..255) of the lit (non-backdrop) pixels inside `rect`, or
+/// `None` when nothing is lit — the per-channel sibling of [`lit_in`], for a
+/// gate that has to tell *which colour* drew, not only *whether* something did.
+fn mean_rgb_in(pixels: &[u8], rect: [u32; 4]) -> Option<[f32; 3]> {
+    let [rx, ry, rw, rh] = rect;
+    let (mut sum, mut n) = ([0u32; 3], 0u32);
+    for y in ry..ry + rh {
+        for x in rx..rx + rw {
+            if brightness(pixels, x, y) > 20 {
+                let i = ((y * W + x) * 4) as usize;
+                sum[0] += u32::from(pixels[i]);
+                sum[1] += u32::from(pixels[i + 1]);
+                sum[2] += u32::from(pixels[i + 2]);
+                n += 1;
+            }
+        }
+    }
+    (n > 0).then(|| [sum[0] as f32 / n as f32, sum[1] as f32 / n as f32, sum[2] as f32 / n as f32])
+}
+
 /// The 2-D screen-space cross product, i.e. the signed parallelogram area of two
 /// projected edge vectors.
 fn cross2(u: Vec3, v: Vec3) -> f32 {
@@ -1010,5 +1030,247 @@ fn a_player_head_item_in_the_hotbar_reaches_pixels() {
     assert_eq!(
         control_filled, 0,
         "without attach_item_models the same frame must draw nothing in the cell"
+    );
+}
+
+/// Pixel gate: a `minecraft:banner` item in the hotbar draws its dye colour.
+///
+/// `special_item_rig`'s own doc table names `banner` as one of six `kind`s
+/// that resolve to `None` ("needs the ordered translucent pattern-mask pass,
+/// not one rig"), which is why a banner drew zero pixels in a hotbar slot,
+/// an inventory slot and the first-person hand — the owner's own report,
+/// verified here rather than re-derived from it. `lodestone_render::
+/// banner_item_rig` closes the narrower half of that gap: the two-mesh
+/// (pole/bar, flag) rig draws, with the flag tinted by the item's own base
+/// colour derived straight from its path (`<dye>_banner`) — see that
+/// function's doc for why a tint-multiply and not the real translucent mask
+/// layer, which is a separate, larger piece of work this gate does not claim.
+///
+/// # Two colours, not one, and chosen to disagree hard on every channel
+///
+/// A single banner proves geometry reaches pixels; it cannot prove the tint
+/// is the *item's own* colour rather than a hardcoded one, or worse, the
+/// mesh's plain `banner_base` texture leaking through untinted. Vanilla's
+/// `textureDiffuseColor` puts `RED` at `(176, 46, 38)` and `LIGHT_BLUE` at
+/// `(58, 179, 218)` — R and B swap which one dominates — so "the red banner's
+/// lit pixels average redder than the light-blue banner's, and the light-blue
+/// banner's average bluer than the red banner's" is a claim a hardcoded tint,
+/// a swapped channel, or an untinted grey mesh could not all satisfy at once.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn two_differently_dyed_banners_in_the_hotbar_draw_different_colours() {
+    const RED: &str = "minecraft:red_banner";
+    const LIGHT_BLUE: &str = "minecraft:light_blue_banner";
+
+    assert_eq!(
+        calculate_gui_scale(AUTO_GUI_SCALE, W, H),
+        1,
+        "cell_rect assumes W x H divides to itself under the GUI scale"
+    );
+
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    // --- premises ---------------------------------------------------------
+
+    let item_atlas = load_item_atlas().expect("the item atlas must build from client.jar");
+    for id in [RED, LIGHT_BLUE] {
+        let item: ResourceLocation = id.parse().expect("valid item id");
+        let icon = item_atlas
+            .icon(&item)
+            .unwrap_or_else(|| panic!("{id} must resolve to an icon in the item atlas"));
+        let kind = icon.parts.iter().find_map(|p| match p {
+            IconPart::Special { kind, .. } => Some(kind.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            kind.as_deref(),
+            Some("minecraft:banner"),
+            "{id} must resolve to an IconPart::Special carrying `minecraft:banner`; \
+             got {kind:?}. Without that this gate renders an item the special pass \
+             never sees and proves nothing."
+        );
+    }
+    let sheets_on_disk = load_block_entity_textures().len();
+    assert!(
+        sheets_on_disk > 0,
+        "no block-entity sheets decoded from the jar; a banner could not draw for \
+         reasons that have nothing to do with the wiring under test"
+    );
+
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!(
+            "GPU gate opted in but the vanilla pack did not load; set LODESTONE_ASSETS \
+             to a pack root with client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        )
+    });
+    let models: &BlockModels = atlas
+        .models()
+        .expect("the vanilla load must attach baked block models");
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+
+    let slot = |id: &str| {
+        Some(HotbarSlot {
+            item: id.parse().expect("valid item id"),
+            count: 1,
+            damage: None,
+            max_damage: None,
+            enchanted: false,
+            dyed_color: None,
+            potion_color: None,
+        })
+    };
+    let slots: Vec<Option<HotbarSlot>> = vec![
+        slot(RED),
+        slot(LIGHT_BLUE),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ];
+
+    let stats = DebugStats::default();
+    let hud_frame = HudFrame {
+        show_debug: false,
+        crosshair: false,
+        hotbar: None,
+        hotbar_items: Some(&slots),
+        ..HudFrame::new(&stats)
+    };
+
+    let mut shoot = |hud: &mut HudRenderer| -> Vec<u8> {
+        let frame = target.acquire().expect("headless acquire");
+        let raw_view = frame.create_view(target.raw_view_format());
+        clear_view(device, queue, frame.view(), [0, 0, 0]);
+        hud.render_with_item_models(
+            device,
+            queue,
+            frame.view(),
+            &raw_view,
+            Some(render.depth_view()),
+            &hud_frame,
+            Some(models),
+            calculate_gui_scale(AUTO_GUI_SCALE, W, H),
+            W,
+            H,
+        );
+        target.read_texels(device, queue)
+    };
+
+    let mut lit_hud = HudRenderer::new(device, format);
+    lit_hud.attach_items(device, queue, format, item_atlas.clone());
+    lit_hud.attach_item_models(
+        device,
+        format,
+        render
+            .model_atlas_view()
+            .expect("the vanilla path must expose a model atlas"),
+        render
+            .model_atlas_sampler()
+            .expect("the vanilla path must expose a model atlas sampler"),
+        render
+            .model_palette_buffer()
+            .expect("the vanilla path must expose a tint palette"),
+        render
+            .model_anim_buffer()
+            .expect("the vanilla path must expose animation slots"),
+    );
+    let subject = shoot(&mut lit_hud);
+    let sheets_in_pass = lit_hud.special_icon_sheets();
+
+    let mut dark_hud = HudRenderer::new(device, format);
+    dark_hud.attach_items(device, queue, format, item_atlas.clone());
+    let control = shoot(&mut dark_hud);
+
+    let red_cell = cell_rect(0);
+    let blue_cell = cell_rect(1);
+    let empty_cell = cell_rect(8);
+    let red_lit = lit_in(&subject, red_cell);
+    let blue_lit = lit_in(&subject, blue_cell);
+    let empty_lit = lit_in(&subject, empty_cell);
+    let control_red_lit = lit_in(&control, red_cell);
+    let red_rgb = mean_rgb_in(&subject, red_cell);
+    let blue_rgb = mean_rgb_in(&subject, blue_cell);
+
+    eprintln!("=== hotbar special-item (banner) pixel gate ===");
+    eprintln!("sheets on disk        = {sheets_on_disk}");
+    eprintln!("sheets loaded by pass = {sheets_in_pass}");
+    eprintln!("lit, slot 0 ({RED})  = {red_lit}, mean rgb = {red_rgb:?}");
+    eprintln!("lit, slot 1 ({LIGHT_BLUE}) = {blue_lit}, mean rgb = {blue_rgb:?}");
+    eprintln!("lit, slot 8 (empty)   = {empty_lit}");
+    eprintln!("lit, slot 0 (no item-model pass attached) = {control_red_lit}");
+
+    assert!(
+        sheets_in_pass > 0,
+        "the special-icon pass reported {sheets_in_pass} sheets after a frame \
+         containing a banner — it never built, so whatever painted in the cell is \
+         not it. ({sheets_on_disk} sheets are decodable from the jar, so this is a \
+         wiring failure and not a missing pack.)"
+    );
+
+    // --- that: pixels reach both cells, and only while the pass is attached ---
+
+    assert!(
+        red_lit > 0,
+        "nothing drew in hotbar cell 0 for {RED}. This is the owner's own report — \
+         a banner in an item slot drew zero pixels — and `banner_item_rig` \
+         resolving `None` (a datapack-shaped item path, or `special_item_rig`'s \
+         old `_ => None` still winning) is exactly how it would still fail."
+    );
+    assert!(blue_lit > 0, "nothing drew in hotbar cell 1 for {LIGHT_BLUE}");
+    assert_eq!(
+        empty_lit, 0,
+        "an empty hotbar cell must stay black; {empty_lit} lit pixels there means \
+         the draw is not localised to its own slot"
+    );
+    assert_eq!(
+        control_red_lit, 0,
+        "without attach_item_models the same frame must draw nothing in the cell"
+    );
+
+    // --- which colour: the two banners must disagree on the *right* channels --
+
+    let [rr, rg, rb] = red_rgb.expect("slot 0 has lit pixels, checked above");
+    let [br, bg, bb] = blue_rgb.expect("slot 1 has lit pixels, checked above");
+    eprintln!("red banner   r-b = {:.1}", rr - rb);
+    eprintln!("light-blue   b-r = {:.1}", bb - br);
+    let _ = (rg, bg);
+
+    // `RED`'s textureDiffuseColor is (176, 46, 38): red channel must dominate
+    // blue by a wide, unmissable margin. A hardcoded white tint (untinted mesh
+    // leaking through) would read r≈b; a channel-order bug (tinting with `bgr`
+    // instead of `rgb`) would flip this sign entirely.
+    assert!(
+        rr - rb > 40.0,
+        "the {RED} banner's lit pixels average r={rr:.1}, b={rb:.1} — red must \
+         dominate blue by a wide margin for this to be the item's own dye colour \
+         and not an untinted grey mesh (r≈b) or a channel-swapped tint (b>r)"
+    );
+    // `LIGHT_BLUE`'s textureDiffuseColor is (58, 179, 218): blue channel must
+    // dominate red by the same margin, in the opposite direction.
+    assert!(
+        bb - br > 40.0,
+        "the {LIGHT_BLUE} banner's lit pixels average b={bb:.1}, r={br:.1} — blue \
+         must dominate red by a wide margin for the same reason"
+    );
+    // The pairwise-distinct check CLAUDE.md's evidence section asks for: the two
+    // banners' own red channels must differ, or a single shared tint could
+    // satisfy both assertions above by coincidence.
+    assert!(
+        (rr - br).abs() > 40.0,
+        "the two banners' red channels ({rr:.1} vs {br:.1}) are too close — they \
+         may be drawing with the same tint rather than each item's own colour"
     );
 }
