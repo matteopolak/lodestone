@@ -949,6 +949,22 @@ fn read_component_patch(
             Some("minecraft:tooltip_display") => read_tooltip_display(reader)?,
             Some("minecraft:attribute_modifiers") => read_attribute_modifiers(reader)?,
 
+            // Decoded for the same reason as the trim, map id, pot decorations,
+            // profile and the two book contents above: `ItemStackTemplate
+            // .STREAM_CODEC` (`BundleContents`' per-entry codec) has no length
+            // prefix, so a filled bundle sitting in any inventory truncated the
+            // rest of the packet from that slot onward. See
+            // [`read_bundle_contents`].
+            Some("minecraft:bundle_contents") => {
+                let (items, complete) = read_bundle_contents(reader)?;
+                components.bundle_contents = items;
+                if !complete {
+                    components.has_unmodeled = true;
+                    let _ = reader.bytes(reader.remaining());
+                    return Ok((components, false));
+                }
+            }
+
             other => {
                 // An unmodeled component: its payload is not length-prefixed, so
                 // it and everything after it in this packet are unreadable. Keep
@@ -2023,6 +2039,52 @@ fn read_item_stack_template(reader: &mut Reader<'_>) -> Result<ItemStack, Adapte
         count,
         components,
     })
+}
+
+/// Decodes `minecraft:bundle_contents`' payload — `BundleContents.STREAM_CODEC`
+/// (`ItemStackTemplate.STREAM_CODEC.apply(ByteBufCodecs.list())`, mapped
+/// straight onto `BundleContents`' `items` list — `BundleContents.java`).
+///
+/// Each entry is `ItemStackTemplate.STREAM_CODEC`: item id, then count, then a
+/// **nested** `DataComponentPatch` — [`read_component_patch`] called
+/// recursively, deliberately, since a bundle can legally contain another bundle
+/// (`BUNDLE_IN_BUNDLE_WEIGHT`). An unmodeled component inside a *contained*
+/// stack is exactly as unrecoverable as one at the top level (its payload has
+/// no length prefix either), so it stops the whole bundle list the same way the
+/// caller's `other` arm stops the outer patch, rather than hard-failing the
+/// packet the way [`read_item_stack_template`]'s advancement-icon caller does —
+/// a bundle in a hotbar is not a case this decoder can afford to treat as fatal.
+///
+/// Bounded at 64 entries defensively: no legal bundle holds anywhere near that
+/// many stacks (every contained item costs at least `1/(64*16)` weight against a
+/// budget of `1`, and `getNumberOfItemsToShow` itself caps the tooltip at 12), so
+/// a declared count above it is a malformed packet, not a large bundle.
+fn read_bundle_contents(reader: &mut Reader<'_>) -> Result<(Vec<ItemStack>, bool), AdapterError> {
+    let count = read_count(reader, "bundle_contents item")?;
+    if count > 64 {
+        return Err(AdapterError::Decode(format!(
+            "bundle_contents declares {count} items, implausibly many"
+        )));
+    }
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        let item_id = reader.var_i32().map_err(dec_err)?;
+        let name = item_name(item_id)
+            .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
+        let item_count = reader.var_i32().map_err(dec_err)?;
+        let item_count = u32::try_from(item_count)
+            .map_err(|_| AdapterError::Decode(format!("invalid item count {item_count}")))?;
+        let (components, complete) = read_component_patch(reader, name)?;
+        items.push(ItemStack {
+            item: parse_key(name, "item")?,
+            count: item_count,
+            components,
+        });
+        if !complete {
+            return Ok((items, false));
+        }
+    }
+    Ok((items, true))
 }
 
 /// Decodes `ClientboundUpdateAdvancementsPacket` (id 130).

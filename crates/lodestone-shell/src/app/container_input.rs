@@ -270,6 +270,68 @@ impl WindowApp {
         true
     }
 
+    /// One `MouseWheel` notch over a slot holding a bundle: scroll-selects
+    /// which of its contents is highlighted and reports the new selection to
+    /// the server (issue #616's `BUNDLE_ITEM_SELECTED` / #613's
+    /// `SelectBundleItem` remainder — see `crate::container::bundle`'s module
+    /// doc for the algorithm and why the tracked selection lives on
+    /// `WindowApp` rather than mutated into the stack itself). Returns
+    /// whether the notch was consumed, the same "did this surface claim it"
+    /// shape [`Self::handle_beacon_click`]/[`Self::handle_enchant_click`]
+    /// already use, so a caller can skip falling through to any other scroll
+    /// handling for the same event.
+    ///
+    /// **Not wired to vanilla's `onStopHovering`/`onSlotClicked` reset**:
+    /// this only ever resets the tracked selection when a later notch lands
+    /// on a different (or no longer scrollable) slot, not the instant the
+    /// cursor merely leaves the bundle slot with no further scroll, and not
+    /// on a quick-move/swap click. The send is purely advisory (only a later
+    /// right-click removal reads it server-side, and nothing broadcasts it
+    /// back — see [`crate::sim::Sim::send_select_bundle_item`]'s doc), so a
+    /// stale local highlight costs nothing beyond an occasional redundant or
+    /// slightly-late send; a full per-frame hover tracker was judged not
+    /// worth the plumbing for that.
+    pub(super) fn handle_bundle_scroll(&mut self, wheel: f64, w: u32, h: u32) -> bool {
+        let Some(menu) = self.active_container_menu() else {
+            self.bundle_selection = None;
+            return false;
+        };
+        let hit = crate::container::hit_test_with_book(
+            &menu,
+            self.nav.gui_scale(),
+            w,
+            h,
+            self.cursor.0,
+            self.cursor.1,
+            self.recipe_panel.open,
+        );
+        let MenuHit::Slot(index) = hit else {
+            self.bundle_selection = None;
+            return false;
+        };
+        let Some(stack) = menu.slot_item(index) else {
+            self.bundle_selection = None;
+            return false;
+        };
+        let window_id = self.sim.open_menu().map_or(0, |open| open.window_id);
+        #[allow(clippy::cast_possible_wrap)]
+        let slot = index as i32;
+        let Some(selection) = crate::container::bundle::bundle_slot_scrolled(
+            window_id,
+            slot,
+            stack,
+            wheel,
+            self.bundle_selection,
+        ) else {
+            self.bundle_selection = None;
+            return false;
+        };
+        self.bundle_selection = Some(selection);
+        self.sim
+            .send_select_bundle_item(selection.slot, selection.selected);
+        true
+    }
+
     /// The enchanting table's three enchant-offer rows (issue #613's
     /// `ContainerButtonClick` remainder). Unlike the beacon's power buttons,
     /// there is no local pending state to update here — a hit *is* the send,

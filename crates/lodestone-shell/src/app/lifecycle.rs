@@ -667,6 +667,21 @@ impl ApplicationHandler for WindowApp {
                 // which exists for the hotbar's discrete-slot quantization.
                 self.scroll_creative_screen(wheel_notches(delta) as f32);
             }
+            // A bundle's scroll-to-select highlight (issue #616's
+            // `BUNDLE_ITEM_SELECTED` / #613's `SelectBundleItem` remainder).
+            // Gated the same way the container click arm above is
+            // (`is_container_open`, not `active_container_menu().is_some()`
+            // directly) so a bundle slot and a real click can never disagree
+            // about whether a container screen is showing. Falls through to
+            // nothing else when the hovered slot is not a scrollable bundle —
+            // `handle_bundle_scroll` returns `false` and this arm does not
+            // forward the notch anywhere, matching vanilla: an ordinary
+            // container has no other use for the wheel.
+            WindowEvent::MouseWheel { delta, .. } if self.ui.is_container_open() => {
+                if let Some((w, h)) = self.target.as_ref().map(RenderTarget::size) {
+                    self.handle_bundle_scroll(wheel_notches(delta), w, h);
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } if self.ui.accepts_gameplay_input() => {
                 let dy = wheel_notches(delta);
                 let scaled = scale_scroll(dy, self.nav.discrete_mouse_scroll(), self.nav.mouse_wheel_sensitivity());

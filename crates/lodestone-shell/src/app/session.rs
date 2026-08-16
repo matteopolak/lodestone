@@ -62,6 +62,7 @@ impl WindowApp {
             recipe_book_revision: 0,
             recipe_panel: RecipePanelState::default(),
             recipe_toasts: lodestone_game::recipe::RecipeToastQueue::new(),
+            bundle_selection: None,
             // No session yet, so no weather cell to read; see
             // `install_session_render_sources`.
             weather: None,

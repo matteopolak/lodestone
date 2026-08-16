@@ -1531,6 +1531,32 @@ impl Sim {
         }
     }
 
+    /// Report which item inside a hovered bundle the scroll wheel just
+    /// highlighted — vanilla's `ServerboundSelectBundleItemPacket`
+    /// (`BundleMouseActions.toggleSelectedBundleItem`, issue #616's
+    /// `BUNDLE_ITEM_SELECTED` / #613's `SelectBundleItem` remainder). Purely
+    /// informational: the only server-side effect is which item a later
+    /// right-click removal takes, and the component's own `selectedItem`
+    /// never round-trips back to the client (see
+    /// [`lodestone_model::ItemComponents::bundle_contents`]'s doc) — there is
+    /// no reply to predict against.
+    ///
+    /// [`ClientAction::SelectBundleItem`] was already encoded by every
+    /// protocol family with no shell caller anywhere — the same
+    /// outbound-island shape `ClientAction::SetFlying` was caught in.
+    /// Best-effort like [`Self::send_select_trade`] — a closed session drops
+    /// it. `selected_item_index` of `-1` is vanilla's own "unselect"
+    /// sentinel, sent on unhover; see
+    /// `crate::container::bundle::bundle_slot_scrolled`, this send's caller.
+    pub fn send_select_bundle_item(&self, slot_id: i32, selected_item_index: i32) {
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::SelectBundleItem {
+                slot_id,
+                selected_item_index,
+            });
+        }
+    }
+
     /// Apply the world-creation Game Rules editor's overrides — vanilla's
     /// `ServerboundSetGameRulePacket` (issue #592's More tab). Sent once, by
     /// `app/session.rs`'s `drive_ui_from_session`, the moment a freshly

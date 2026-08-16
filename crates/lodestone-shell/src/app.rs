@@ -698,6 +698,12 @@ struct WindowApp {
     /// render path is wired and gated so the toast appears the moment decode
     /// lands. Deliberately **no** fake producer was added to light it up early.
     recipe_toasts: lodestone_game::recipe::RecipeToastQueue,
+    /// The bundle slot currently tracking a scroll-driven selection highlight
+    /// (issue #616's `BUNDLE_ITEM_SELECTED` / #613's `SelectBundleItem`), or
+    /// `None` when no bundle is being scrolled — see
+    /// `crate::container::bundle`'s module doc for why this lives beside the
+    /// menu rather than mutated inside it the way vanilla's own client does.
+    bundle_selection: Option<crate::container::bundle::BundleSelection>,
     /// The world's weather, resolved from the net thread's cell once per frame.
     /// `None` before a session exists; installed alongside the other render
     /// sources by [`WindowApp::install_session_render_sources`] and cleared with
