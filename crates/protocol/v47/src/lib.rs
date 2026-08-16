@@ -34,9 +34,17 @@ pub mod packet_ids;
 #[path = "generated/entity_types.rs"]
 pub(crate) mod generated_entity_types;
 
+/// Generated item-id→name table for protocol 47.
+///
+/// Like `generated_entity_types`, generated from `minecraft-data` rather
+/// than a Mojang report. See `tests/item_types.rs` for the generator.
+#[path = "generated/item_types.rs"]
+pub(crate) mod generated_item_types;
+
 pub mod adapter;
 pub mod entity_metadata;
 pub mod entity_types;
+pub mod item_types;
 pub mod packets;
 
 pub use adapter::{PROTOCOL, PROTOCOLS, V47Adapter, adapter, adapter_for};

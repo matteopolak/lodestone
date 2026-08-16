@@ -9,13 +9,15 @@ use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_model::{
     AdapterError, BlockActionKind, BlockFace, ChatKind, ChatMode, ChunkPos, ClientAction,
     ClientEvent, ClientSettings, ConnectionState, Directive, DisplayedSkinParts, EntityInteraction,
-    EntityMovement, GameMode, Hand, LoginProfile, PlayerCommand, Rotation, SectionPos,
-    ServerAddress, TeleportFlags, Text, Vec3, VersionAdapter,
+    EntityMovement, GameMode, Hand, ItemStack, LoginProfile, PlayerCommand, PlayerListEntry,
+    ProfileProperty, ResourceKey, Rotation, SectionPos, ServerAddress, TeleportFlags, Text, Vec3,
+    VersionAdapter,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk, WorldSink};
 
 use crate::entity_metadata;
 use crate::entity_types;
+use crate::item_types;
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::chunk::{ChunkShape, MapChunk, MapChunkBulk};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
@@ -30,11 +32,13 @@ use crate::packets::game::{
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
+use crate::packets::player_info::{PlayerInfo, PlayerInfoAction};
 use crate::packets::position::Position;
 use crate::packets::settings::{BrandPayload, PlayerAbilities, Settings};
 use crate::packets::slot::Slot;
 use crate::packets::window::{
-    EnchantItem, HeldItemSlot, ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot,
+    CloseWindow, EnchantItem, HeldItemSlot, OpenWindow, ServerboundCloseWindow,
+    ServerboundHeldItemSlot, SetCreativeSlot, SetSlot, WindowItems,
 };
 
 /// Protocol version implemented by this adapter.
@@ -299,6 +303,72 @@ fn game_mode(value: u8) -> Result<GameMode, AdapterError> {
         3 => Ok(GameMode::Spectator),
         other => Err(AdapterError::Decode(format!("unknown game mode {other}"))),
     }
+}
+
+/// Converts a decoded 1.8 [`Slot`] into the canonical
+/// [`Option<ItemStack>`](ItemStack).
+///
+/// Resolves the item **family** from [`item_types`] but not `damage` (see
+/// that module's doc for why turning damage into a variant would be a
+/// guess); every stack carries no components. An id absent from the 1.8
+/// item table decodes to `None` (an empty slot) rather than failing the
+/// whole packet — a single unresolvable item must not make an entire chest
+/// or player inventory unopenable.
+fn slot_to_item_stack(slot: &Slot) -> Option<ItemStack> {
+    match slot {
+        Slot::Empty => None,
+        Slot::Item { id, count, .. } => {
+            let name = item_types::item_name(*id)?;
+            let key: ResourceKey = name.parse().ok()?;
+            Some(ItemStack::new(key, u32::try_from(*count).unwrap_or(0)))
+        }
+    }
+}
+
+/// Resolves a 1.8 `open_window` `inventory_type` string to a canonical
+/// `minecraft:menu` key from 26.2's own registry
+/// (`lodestone_data::generated::menus::MENU_NAMES` lists the 25 real
+/// entries this is checked against).
+///
+/// Two cases are **judgement calls, not lookups**, both driven by real wire
+/// data rather than guessed:
+///
+/// * `"minecraft:chest"`/`"minecraft:container"` and `"EntityHorse"` have no
+///   fixed modern menu — vanilla's own `ChestMenu`/`ChestType` picks
+///   `generic_9x{rows}` from the container's slot count, and 26.2 has no
+///   dedicated horse menu type at all (`MENU_NAMES` has no horse entry; the
+///   horse GUI became a normal generic-shaped container upstream). Both are
+///   resolved from `slot_count` the same way vanilla's own chest menu
+///   derives its row count, clamped to the `1..=6` rows 26.2's registry
+///   actually has.
+/// * every other 1.8 `inventory_type` string here is a real, unchanged
+///   `minecraft:*` key already (confirmed against
+///   `vendor/minecraft-data/data/pc/1.8/windows.json`), so it is mapped
+///   directly rather than through a table that could drift.
+fn resolve_menu_type(inventory_type: &str, slot_count: u8) -> ResourceKey {
+    let generic_rows = || {
+        // Ceiling division: a floor division would under-count rows for any
+        // `slot_count` not a multiple of 9 (a 17-slot horse inventory would
+        // floor to 1 row of 9 and silently hide 8 slots).
+        let rows = (u32::from(slot_count).div_ceil(9)).clamp(1, 6);
+        format!("minecraft:generic_9x{rows}")
+    };
+    let key = match inventory_type {
+        "minecraft:chest" | "minecraft:container" | "EntityHorse" => generic_rows(),
+        "minecraft:dispenser" | "minecraft:dropper" => "minecraft:generic_3x3".to_string(),
+        "minecraft:crafting_table" => "minecraft:crafting".to_string(),
+        "minecraft:enchanting_table" => "minecraft:enchantment".to_string(),
+        "minecraft:villager" => "minecraft:merchant".to_string(),
+        // furnace, anvil, beacon, brewing_stand, hopper already match 26.2's
+        // own key verbatim.
+        other => other.to_string(),
+    };
+    key.parse().unwrap_or_else(|_| {
+        // Unreachable for every branch above (all produce well-formed
+        // `minecraft:*` keys); fall back to the generic shape rather than
+        // panicking on a future `inventory_type` this table has not seen.
+        generic_rows().parse().expect("generic_9xN is always valid")
+    })
 }
 
 /// Maps a 1.8 numeric dimension to a canonical namespaced dimension identifier.
@@ -1011,6 +1081,162 @@ impl V47Adapter {
                     })
                 })
                 .collect());
+        }
+        if packet_id == play::clientbound::OPEN_WINDOW {
+            // `OpenWindow`'s codec already existed and was already tested
+            // (`tests/inventory.rs`); nothing here ever called it, so no 1.8
+            // container screen — a chest, a furnace, a crafting table —
+            // could ever open.
+            let body: OpenWindow = decode_body(payload)?;
+            let menu_type = resolve_menu_type(&body.inventory_type, body.slot_count);
+            return Ok(vec![Directive::Emit(ClientEvent::ScreenOpened {
+                window_id: i32::from(body.window_id),
+                menu_type,
+                title: Text::from_json(&body.window_title),
+            })]);
+        }
+        if packet_id == play::clientbound::CLOSE_WINDOW {
+            let body: CloseWindow = decode_body_exact(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ScreenClosed {
+                window_id: i32::from(body.window_id),
+            })]);
+        }
+        if packet_id == play::clientbound::WINDOW_ITEMS {
+            // 1.8 has no container-synchronization state id (added in a much
+            // later version) and does not bundle the cursor item into this
+            // packet the way it might elsewhere, so `state_id` is a fixed 0
+            // and `carried_item` stays `None` — this packet genuinely does
+            // not say.
+            let body: WindowItems = decode_body(payload)?;
+            let items = body.items.iter().map(slot_to_item_stack).collect();
+            return Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
+                window_id: i32::from(body.window_id),
+                state_id: 0,
+                items,
+                carried_item: None,
+            })]);
+        }
+        if packet_id == play::clientbound::SET_SLOT {
+            // 1.8 unifies what 26.2 splits into three packets
+            // (`SET_CURSOR_ITEM`/`SET_PLAYER_INVENTORY`/`CONTAINER_SET_SLOT`)
+            // behind one `window_id` sentinel: `-1` is the cursor (dragged
+            // item), `0` is the player's own inventory with no container
+            // screen open, anything else is a slot inside that open
+            // container — matching exactly the three-way split the canonical
+            // model already draws for the modern versions.
+            let body: SetSlot = decode_body(payload)?;
+            let item = slot_to_item_stack(&body.item);
+            if body.window_id == -1 {
+                return Ok(vec![Directive::Emit(ClientEvent::CursorItemChanged { item })]);
+            }
+            if body.window_id == 0 {
+                return Ok(vec![Directive::Emit(ClientEvent::InventorySlotChanged {
+                    slot: i32::from(body.slot),
+                    item,
+                })]);
+            }
+            return Ok(vec![Directive::Emit(ClientEvent::ContainerSlot {
+                window_id: i32::from(body.window_id),
+                state_id: 0,
+                slot: i32::from(body.slot),
+                item,
+            })]);
+        }
+        if packet_id == play::clientbound::PLAYER_INFO {
+            // A single `action` applies to every entry in the packet
+            // (verified against minecraft-data's 1.8 `packet_player_info`
+            // `switch`), unlike 26.2's per-entry action bitmask — see
+            // `packets::player_info`'s module doc.
+            let body: PlayerInfo = decode_body_exact(payload)?;
+            let mut updated = Vec::new();
+            let mut removed = Vec::new();
+            for entry in body.entries {
+                let blank = || PlayerListEntry {
+                    uuid: entry.uuid,
+                    name: None,
+                    game_mode: None,
+                    latency: None,
+                    display_name: None,
+                    // 1.8 has no separate "listed" bit — every entry the
+                    // server sends is, by construction, in the tab list.
+                    listed: None,
+                    properties: None,
+                    // 1.8 predates secure chat sessions entirely.
+                    chat_session: None,
+                };
+                match entry.action {
+                    PlayerInfoAction::AddPlayer {
+                        name,
+                        properties,
+                        game_mode: raw_mode,
+                        ping,
+                        display_name,
+                    } => {
+                        updated.push(PlayerListEntry {
+                            name: Some(name),
+                            game_mode: Some(game_mode(
+                                u8::try_from(raw_mode).map_err(|_| {
+                                    AdapterError::Decode(format!(
+                                        "player_info game mode {raw_mode} out of range"
+                                    ))
+                                })?,
+                            )?),
+                            latency: Some(ping),
+                            display_name: display_name.map(|json| Text::from_json(&json)),
+                            properties: Some(
+                                properties
+                                    .into_iter()
+                                    .map(|property| ProfileProperty {
+                                        name: property.name,
+                                        value: property.value,
+                                        signature: property.signature,
+                                    })
+                                    .collect(),
+                            ),
+                            ..blank()
+                        });
+                    }
+                    PlayerInfoAction::UpdateGameMode { game_mode: raw_mode } => {
+                        updated.push(PlayerListEntry {
+                            game_mode: Some(game_mode(
+                                u8::try_from(raw_mode).map_err(|_| {
+                                    AdapterError::Decode(format!(
+                                        "player_info game mode {raw_mode} out of range"
+                                    ))
+                                })?,
+                            )?),
+                            ..blank()
+                        });
+                    }
+                    PlayerInfoAction::UpdateLatency { ping } => {
+                        updated.push(PlayerListEntry {
+                            latency: Some(ping),
+                            ..blank()
+                        });
+                    }
+                    PlayerInfoAction::UpdateDisplayName { display_name } => {
+                        updated.push(PlayerListEntry {
+                            display_name: display_name.map(|json| Text::from_json(&json)),
+                            ..blank()
+                        });
+                    }
+                    PlayerInfoAction::RemovePlayer => {
+                        removed.push(entry.uuid);
+                    }
+                }
+            }
+            let mut directives = Vec::with_capacity(2);
+            if !updated.is_empty() {
+                directives.push(Directive::Emit(ClientEvent::PlayerListUpdate {
+                    entries: updated,
+                }));
+            }
+            if !removed.is_empty() {
+                directives.push(Directive::Emit(ClientEvent::PlayerListRemove {
+                    profile_ids: removed,
+                }));
+            }
+            return Ok(directives);
         }
         if packet_id == play::clientbound::HELD_ITEM_SLOT {
             // A single signed byte, the newly-selected hotbar index — verified
