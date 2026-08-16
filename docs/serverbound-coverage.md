@@ -231,6 +231,29 @@ Since fixed:
 Remaining: `SetContainerSlotState`, `SpectatorAction`, `Stab`,
 `TeleportToEntity`.
 
+**`Stab`'s trigger is not actually unknown — a prior claim that it has "no
+reference anywhere in the decompiled source beyond an unrelated enum value"
+was wrong, and cost two agents a declined guess.** It has real, named call
+sites: `Minecraft.startAttack()` reads `heldItem.get(DataComponents.PIERCING_WEAPON)`
+*before* its normal `hitResult`-type switch and, when present, calls
+`MultiPlayerGameMode.piercingAttack(weapon)` instead of the ordinary attack —
+unconditionally, even with no entity in range (an "air stab"), then swings the
+arm. `piercingAttack` sends exactly `ClientAction::Stab`'s wire shape
+(`ServerboundPlayerActionPacket(Action.STAB, BlockPos.ZERO, Direction.DOWN)`,
+`play::serverbound::PLAYER_ACTION` ordinal 7 — matching
+`crates/protocol/v770/src/adapter/serverbound.rs`'s own encoder exactly). So
+the real blocker is: **the trigger is a left-click attack while the main-hand
+item carries an unmodelled `minecraft:piercing_weapon` data component**
+(`PiercingWeapon.java`: `dealsKnockback: bool`, `dismounts: bool`,
+`sound`/`hitSound: Optional<Holder<SoundEvent>>`), not "an unknown input" —
+26.2 ships seven real items with it (`{wooden,stone,copper,iron,golden,diamond,
+netherite}_spear`, per `generated/reports/minecraft/components/item/*_spear.json`).
+Landing this needs the component modelled in `lodestone_model::ItemComponents`
+plus decode/encode support alongside the other component-patch fields, and the
+shell's attack-input path (`Minecraft.startAttack`'s equivalent) branching on
+it — a real subsystem in its own right, not a quick follow-on, so it stays
+listed here rather than attempted in the same pass as this finding.
+
 Filed as one narrow follow-up rather than eleven separate issues, per the pattern
 this doc's own "How to change it" section already sets: each needs its own
 screen or input binding designed, none is a one-line fix, and grouping them keeps
