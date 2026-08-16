@@ -82,6 +82,31 @@ impl Sensor for HurtBySensor {
     }
 }
 
+/// Writes [`MemoryModuleType::ANGER_TARGET`] from [`BrainMob::angry_target`],
+/// clearing it once the host stops reporting one (anger decayed to zero, or
+/// the tracked target was replaced by a fresher grudge). The warden's own
+/// pursuit behaviour (`super::roster::warden_brain`) is this sensor's one
+/// consumer today.
+#[derive(Debug, Default)]
+pub struct AngerTargetSensor;
+
+impl Sensor for AngerTargetSensor {
+    fn tick(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob) {
+        match mob.angry_target() {
+            Some(pos) => mem.set(MemoryModuleType::ANGER_TARGET, MemoryValue::Pos(pos)),
+            None => mem.erase(MemoryModuleType::ANGER_TARGET),
+        }
+    }
+
+    fn output_memories(&self) -> Vec<MemoryModuleType> {
+        vec![MemoryModuleType::ANGER_TARGET]
+    }
+
+    fn name(&self) -> &'static str {
+        "anger_target"
+    }
+}
+
 /// Writes [`MemoryModuleType::NEAREST_HOSTILE`] from the nearest hostile
 /// entity in [`BrainMob::nearby_entities`], within [`RANGE`](Self::RANGE)
 /// blocks — vanilla's `NearestHostileSensor`, restricted to the one question

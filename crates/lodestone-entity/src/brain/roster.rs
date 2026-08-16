@@ -27,20 +27,21 @@
 //! goat, camel, armadillo, frog, sniffer, allay, the `AnimalPanic`-family
 //! half of the passive-roster brain species — now also flee a recent
 //! attacker via [`scaffold_with_panic`], each at its own jar-cited speed
-//! multiplier. Everything else about the scaffold claim
-//! still holds: this is still the composition, not the full per-species
-//! behaviour package (a villager's profession schedule and trading
-//! availability, a warden's vibration sensor and anger, a piglin's barter and
+//! multiplier, and the warden now has [`warden_brain`]'s `FIGHT` activity
+//! (a chase toward whatever it is angry at, layered on top of the separate
+//! `lodestone_server::mobs::warden` anger/vibration machinery — issue #459's
+//! step 3, closing that module's own disclosed "no pursuit" gap). Everything
+//! else about the scaffold claim still holds: this is still the
+//! composition, not the full per-species behaviour package (a villager's
+//! profession schedule and trading availability, a piglin's barter and
 //! hoglin hunt, are separate units layered on this one and need machinery
-//! this crate does not have yet — the warden's needs vanilla's
-//! world-event/vibration registry, which is **absent** here
-//! (`lodestone_ecs::GameEvent` is the client plugin bus and `GAME_EVENT` is
-//! vanilla's weather packet; neither is the vibration listener)).
+//! this crate does not have yet).
 //!
 //! So a camel and a warden no longer behave *identically* — the camel now
-//! flees a hit at 4× speed, the warden still just wanders and watches
-//! players — but both are still a floor rather than a finish, and both
-//! reached zero pixels before the brain was wired to production at all.
+//! flees a hit at 4× speed, and the warden now chases whatever it is angry
+//! at instead of wandering past it — but both are still a floor rather than
+//! a finish, and both reached zero pixels before the brain was wired to
+//! production at all.
 
 use super::activity::Activity;
 use super::behavior::{Behavior, BehaviorControl, Leaf};
@@ -52,8 +53,8 @@ use super::driver::BrainGoal;
 use super::gate::GateBehavior;
 use super::memory::{MemoryModuleType, MemoryStatus};
 use super::sensor::{
-    HurtBySensor, NearestHostileSensor, NearestPlayerSensor, NearestVisibleLivingEntitiesSensor,
-    NearestVisibleZombifiedSensor, VillagerPoiSensor,
+    AngerTargetSensor, HurtBySensor, NearestHostileSensor, NearestPlayerSensor,
+    NearestVisibleLivingEntitiesSensor, NearestVisibleZombifiedSensor, VillagerPoiSensor,
 };
 use super::Brain;
 
@@ -379,6 +380,69 @@ pub fn goat_brain() -> Brain {
     brain
 }
 
+/// The `WalkToPoi` close-enough distance a warden's melee pursuit stops at —
+/// **not** a vanilla constant (see this function's own doc for why one
+/// cannot be cited). Chosen strictly smaller than
+/// [`warden's melee reach`](crate)'s own consumer,
+/// `lodestone_server::mobs::warden::MELEE_RANGE_SQR`'s `3.0`-block radius,
+/// so a warden that reaches this stop distance is already inside the range
+/// the host's own hit resolution checks — 2 blocks short of 3, not merely
+/// "close", so a target moving away one step does not immediately fall
+/// back outside melee reach the instant the walk halts.
+const WARDEN_PURSUIT_CLOSE_ENOUGH: i32 = 2;
+
+/// A warden's brain: the [`scaffold`] plus a real chase toward whatever it
+/// is angry at (issue #459's disclosed "no pursuit" gap, closed).
+///
+/// # Why this exists, and what it deliberately is not
+///
+/// `lodestone_server::mobs::warden` already computes real anger and lands a
+/// real melee hit — but only when a target is *already* standing inside
+/// [`MELEE_RANGE_SQR`](lodestone_server), because nothing moved the warden
+/// toward it. That module's own doc names the fix as "a Brain
+/// melee-pursuit behaviour, which needs building from scratch"; this is it.
+///
+/// **Not vanilla's own architecture.** `Warden.java` has no `GoalSelector`
+/// and its real pursuit lives in `WardenAi`'s `FIGHT` package
+/// (`StartAttacking`, `MeleeAttack`, and the sonic-boom escalation this
+/// crate does not build) — a `RunOne`/`Swim`/`SetWalkTargetFromAttackTarget`
+/// stack this crate has no equivalent of. `FIGHT` here is a single
+/// [`WalkToPoi`] reading a host-fed position, the same "narrow but honest"
+/// shape [`piglin_brain`]'s single `avoidZombified` slice already is against
+/// the rest of `PiglinAi`. The actual melee *hit* still happens entirely
+/// outside this brain, in `MobSim::resolve_warden_anger` — this behaviour
+/// only ever walks; it never calls [`BrainMob::attack`](super::mob::BrainMob::attack),
+/// so there is exactly one hit-resolution path, not two racing ones.
+///
+/// # Dependencies
+///
+/// [`AngerTargetSensor`] feeds [`MemoryModuleType::ANGER_TARGET`] from
+/// [`BrainMob::angry_target`](super::mob::BrainMob::angry_target), itself
+/// fed host-side by `MobSim::feed_perception` resolving
+/// `SimMob::warden_anger_target`'s entity id to a live position, gated on
+/// [`AngerLevel::Angry`](lodestone_server) — a calm or merely-agitated
+/// warden gets no target and `FIGHT` is ineligible, so it falls through to
+/// `IDLE`'s ordinary wander/look.
+#[must_use]
+pub fn warden_brain() -> Brain {
+    let mut brain = scaffold(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE);
+    brain.add_sensor(Box::new(AngerTargetSensor));
+    brain.add_activity(
+        Activity::FIGHT,
+        vec![(
+            0,
+            leaf(WalkToPoi::new(
+                MemoryModuleType::ANGER_TARGET,
+                SCAFFOLD_STROLL_SPEED,
+                WARDEN_PURSUIT_CLOSE_ENOUGH,
+            )),
+        )],
+        vec![(MemoryModuleType::ANGER_TARGET, MemoryStatus::ValuePresent)],
+        Vec::new(),
+    );
+    brain
+}
+
 /// `PiglinAi.avoidZombified`'s own duration range —
 /// `TimeUtil.rangeOfSeconds(5, 7)` = 100–140 ticks.
 const AVOID_ZOMBIFIED_DURATION: (i64, i64) = (100, 140);
@@ -517,6 +581,12 @@ pub fn brain_for(species: &str) -> Option<BrainGoal> {
     // every other brain species this crate has no dedicated package for.
     if species == "piglin" {
         return Some(BrainGoal::new(piglin_brain(), vec![Activity::AVOID, Activity::IDLE]));
+    }
+    // Same shape again: `warden_brain` needs both an extra activity (`FIGHT`)
+    // and a candidate list that offers it, ahead of `IDLE` — a warden with a
+    // live grudge must chase rather than idly wander and look at players.
+    if species == "warden" {
+        return Some(BrainGoal::new(warden_brain(), vec![Activity::FIGHT, Activity::IDLE]));
     }
     let brain = match PANIC_SPEED_MULTIPLIER.iter().find(|&&(s, _)| s == species) {
         Some(&(_, speed)) => scaffold_with_panic(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE, speed),
@@ -980,6 +1050,150 @@ mod tests {
         assert!(
             !brute.brain().is_active(Activity::AVOID),
             "a piglin_brute must never swap into AVOID, even near a zombified piglin"
+        );
+    }
+
+    /// A [`BrainMob`](super::super::mob::BrainMob) double whose `move_to`
+    /// actually relocates the mob, the same shape [`RamTestMob`] already
+    /// uses and for the same reason: [`MoveToTargetSink::reached`] compares
+    /// live `mob.position()` against the walk target, so a double that never
+    /// moves can never let a stale `WALK_TARGET` (from `IDLE`'s own
+    /// `RandomStroll`, still active during the one-tick lag before `FIGHT`
+    /// becomes eligible) time out and clear — [`WalkToPoi`]'s own entry
+    /// condition requires `WALK_TARGET` **absent** before it will even try
+    /// to start, so a stuck stroll target would permanently lock it out in
+    /// a hermetic test in a way production's real, actually-moving
+    /// `NavigatingMob` does not.
+    struct WardenPursuitTestMob {
+        pos: lodestone_model::Vec3,
+        time: i64,
+        angry: Option<lodestone_model::Vec3>,
+        move_calls: Vec<(lodestone_model::Vec3, f32)>,
+        attacks: Vec<lodestone_model::Vec3>,
+    }
+
+    impl super::super::mob::BrainMob for WardenPursuitTestMob {
+        fn next_i32(&mut self, bound: i32) -> i32 {
+            bound.saturating_sub(1).max(0)
+        }
+        fn next_f32(&mut self) -> f32 {
+            0.5
+        }
+        fn game_time(&self) -> i64 {
+            self.time
+        }
+        fn position(&self) -> lodestone_model::Vec3 {
+            self.pos
+        }
+        fn move_to(&mut self, target: lodestone_model::Vec3, speed: f32) -> bool {
+            self.move_calls.push((target, speed));
+            self.pos = target;
+            true
+        }
+        fn navigation_done(&self) -> bool {
+            true
+        }
+        fn stop_navigation(&mut self) {}
+        fn look_at(&mut self, _target: lodestone_model::Vec3) {}
+        fn random_land_pos(&mut self, max_xz: i32, _max_y: i32) -> Option<lodestone_model::Vec3> {
+            Some(lodestone_model::Vec3::new(self.pos.x + f64::from(max_xz), self.pos.y, self.pos.z))
+        }
+        fn angry_target(&self) -> Option<lodestone_model::Vec3> {
+            self.angry
+        }
+        fn attack(&mut self, target: lodestone_model::Vec3) {
+            self.attacks.push(target);
+        }
+    }
+
+    /// Issue #459 step 3's pursuit half, driven through `brain_for("warden")`
+    /// — the exact production path — rather than constructing
+    /// [`warden_brain`]/[`WalkToPoi`] by hand. A warden with a live
+    /// [`BrainMob::angry_target`](super::super::mob::BrainMob::angry_target)
+    /// must swap into `FIGHT` and issue a real `move_to` toward it, and must
+    /// never call [`BrainMob::attack`](super::super::mob::BrainMob::attack)
+    /// itself — this module's own doc discloses that the actual hit stays
+    /// entirely in `lodestone_server::mobs::warden::resolve_warden_anger`, so
+    /// a brain that attacked directly would be a second, racing hit path.
+    #[test]
+    fn a_warden_with_a_live_grudge_walks_toward_it_and_never_attacks_directly() {
+        let candidates = [Activity::FIGHT, Activity::IDLE];
+        let mut warden = brain_for("warden").expect("warden is a brain species");
+        let mut mob = WardenPursuitTestMob {
+            pos: lodestone_model::Vec3::default(),
+            time: 1,
+            angry: Some(lodestone_model::Vec3::new(5.0, 0.0, 0.0)),
+            move_calls: Vec::new(),
+            attacks: Vec::new(),
+        };
+
+        // A handful of ticks, the same one-tick lag every other
+        // activity-swap test in this module documents: the first pass's
+        // `set_active_activity_to_first_valid` runs before the sensor has
+        // written `ANGER_TARGET` for the first time, so `FIGHT` only
+        // becomes eligible on the second. A few extra beyond that give
+        // `WalkToPoi` room to actually reach `close_enough` of the target,
+        // since this mob's own `move_to` relocates it exactly there each
+        // call (see [`WardenPursuitTestMob`]'s own doc).
+        for _ in 0..6 {
+            warden.brain_mut().set_active_activity_to_first_valid(&candidates);
+            warden.brain_mut().tick(&mut mob);
+            mob.time += 1;
+        }
+
+        assert!(
+            warden.brain().is_active(Activity::FIGHT),
+            "a warden with a live grudge must swap into FIGHT"
+        );
+        assert!(
+            !mob.move_calls.is_empty(),
+            "FIGHT's WalkToPoi must have issued at least one move_to call toward the grudge"
+        );
+        assert!(
+            mob.move_calls
+                .iter()
+                .any(|&(t, _)| t == lodestone_model::Vec3::new(5.0, 0.0, 0.0)),
+            "at least one move_to call must target the live angry_target position exactly; all calls: {:?}",
+            mob.move_calls
+        );
+        assert!(
+            mob.attacks.is_empty(),
+            "the brain must never call BrainMob::attack directly — resolve_warden_anger owns the hit: {:?}",
+            mob.attacks
+        );
+    }
+
+    /// The negative control: no grudge means `FIGHT` is never eligible, so a
+    /// warden must fall back to `IDLE` and never issue a chase toward the
+    /// stale `(5, 0, 0)` this test's positive twin uses.
+    #[test]
+    fn a_calm_warden_never_enters_fight_and_stays_idle() {
+        let candidates = [Activity::FIGHT, Activity::IDLE];
+        let mut warden = brain_for("warden").expect("warden is a brain species");
+        let mut mob = WardenPursuitTestMob {
+            pos: lodestone_model::Vec3::default(),
+            time: 1,
+            angry: None,
+            move_calls: Vec::new(),
+            attacks: Vec::new(),
+        };
+
+        for _ in 0..6 {
+            warden.brain_mut().set_active_activity_to_first_valid(&candidates);
+            warden.brain_mut().tick(&mut mob);
+            mob.time += 1;
+        }
+
+        assert!(
+            warden.brain().is_active(Activity::IDLE),
+            "a calm warden (no angry_target) must stay IDLE, never FIGHT"
+        );
+        assert!(
+            !mob.move_calls
+                .iter()
+                .any(|&(t, _)| t == lodestone_model::Vec3::new(5.0, 0.0, 0.0)),
+            "a calm warden must never chase a position it was never given: {:?}",
+            mob.move_calls
         );
     }
 }
