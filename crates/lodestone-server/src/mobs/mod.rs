@@ -2294,6 +2294,16 @@ pub struct MobSim<'w> {
     /// [`take_player_hits`](Self::take_player_hits). See [`PlayerHit`]'s own
     /// doc comment for how a target position resolves to a player identity.
     pending_player_hits: Vec<PlayerHit>,
+    /// Players caught in an elder guardian's mining-fatigue pulse this tick
+    /// (issue #232) — the same handoff shape as
+    /// [`pending_player_hits`](Self::pending_player_hits) above and for the
+    /// same reason: this sim owns no connection and cannot reach a player's
+    /// `ActiveEffects` itself, nor send the `GUARDIAN_ELDER_EFFECT` game
+    /// event. Drained by
+    /// [`take_mining_fatigue_auras`](Self::take_mining_fatigue_auras). See
+    /// [`MiningFatigueAura`]'s own doc comment for exactly what the caller
+    /// owes vanilla.
+    pending_mining_fatigue: Vec<MiningFatigueAura>,
     /// Hurt and death sounds awaiting the driver (issue #530), the same handoff
     /// shape as the two above and for the same reason: this sim owns no
     /// connection. Drained by [`take_vocalisations`](Self::take_vocalisations).
@@ -2720,6 +2730,71 @@ pub struct PlayerHit {
     pub attacker_pos: Vec3,
 }
 
+/// `ElderGuardian.EFFECT_INTERVAL` — the aura's cadence in ticks
+/// (`ElderGuardian.customServerAiStep`'s `(tickCount + getId()) % 1200 == 0`).
+///
+/// This sim tracks no per-mob `Entity.tickCount` (only [`SimMob::age`], which
+/// is the *growth* timer, and [`MobSim::tick_count`], the world's own tick
+/// counter) — the same substitution [`bee_sting_death_roll`]'s own doc
+/// already uses `tick_count` for. Mixing the world tick with the mob's id
+/// keeps the same per-mob stagger vanilla's `getId()` offset gives (two elder
+/// guardians spawned on the same tick still pulse on different ticks), and
+/// the periodicity is unaffected by the offset between "ticks this world has
+/// run" and "ticks since this particular mob was created" — both are exact
+/// multiples of `ELDER_GUARDIAN_EFFECT_INTERVAL` apart.
+const ELDER_GUARDIAN_EFFECT_INTERVAL: u64 = 1200;
+
+/// `ElderGuardian.EFFECT_RADIUS` blocks — spherical, `Vec3.closerThan` in
+/// `MobEffectUtil.addEffectToPlayersAround`, not a box.
+pub const ELDER_GUARDIAN_EFFECT_RADIUS: f64 = 50.0;
+
+/// `ElderGuardian.EFFECT_DURATION` ticks — how long each pulse's
+/// `minecraft:mining_fatigue` application lasts.
+pub const ELDER_GUARDIAN_EFFECT_DURATION: i32 = 6000;
+
+/// `ElderGuardian.EFFECT_AMPLIFIER` — Mining Fatigue III (0-indexed amplifier
+/// `2`).
+pub const ELDER_GUARDIAN_EFFECT_AMPLIFIER: u32 = 2;
+
+/// One player caught in an elder guardian's mining-fatigue pulse this tick —
+/// `ElderGuardian.customServerAiStep` calling
+/// `MobEffectUtil.addEffectToPlayersAround`, for
+/// [`take_mining_fatigue_auras`](MobSim::take_mining_fatigue_auras) to hand a
+/// driver. The same handoff shape as [`PlayerHit`] above and for the
+/// identical reason: this sim owns no connection, so it can neither reach a
+/// player's `ActiveEffects` (that lives on the driver's own `Player` state)
+/// nor send a game-event packet.
+///
+/// # What the consumer owes vanilla
+///
+/// For each returned identity, whose gamemode the driver — not this sim,
+/// which tracks no gamemode — must confirm is survival (or adventure;
+/// `GameType.isSurvival()`'s own definition) before doing either of the
+/// following, per `MobEffectUtil.addEffectToPlayersAround`:
+///
+/// * Call `ActiveEffects::apply("minecraft:mining_fatigue",
+///   `[`ELDER_GUARDIAN_EFFECT_DURATION`]`, `[`ELDER_GUARDIAN_EFFECT_AMPLIFIER`]`)`.
+///   `apply`'s own "only take over if stronger or ending sooner" semantics
+///   already implement vanilla's redundant-application guard, so this list is
+///   **not** pre-filtered by the target's current effect — every player
+///   within radius is reported every pulse, exactly as
+///   `addEffectToPlayersAround`'s own player query is unconditional on the
+///   *distance* clause and only the effect clause is conditional.
+/// * Send that player's connection a `GUARDIAN_ELDER_EFFECT` game event
+///   (`ClientboundGameEventPacket`), the screen-darkening warning — vanilla's
+///   own `isSilent() ? 0.0F : 1.0F` parameter has no sim-side equivalent
+///   (silence is a per-mob NBT flag this sim does not model for elder
+///   guardians), so the driver should send `1.0`.
+///
+/// This sim deliberately does **not** replicate `!source.isAlliedTo(input)`:
+/// nothing in this codebase gives a mob a scoreboard team, so every survival
+/// player in range is always a valid target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MiningFatigueAura {
+    /// Who was caught in the pulse.
+    pub target: PlayerIdentity,
+}
+
 /// One projectile-vs-block impact [`MobSim::resolve_projectile_impacts`] found
 /// (issue #322), for [`take_projectile_block_hits`](MobSim::take_projectile_block_hits)
 /// to hand a driver — the same handoff shape as
@@ -2784,6 +2859,7 @@ impl<'w> MobSim<'w> {
             pending_detonations: Vec::new(),
             pending_grazes: Vec::new(),
             pending_player_hits: Vec::new(),
+            pending_mining_fatigue: Vec::new(),
             pending_vocalisations: Vec::new(),
             pending_ambient_sounds: Vec::new(),
             pending_animations: Vec::new(),
@@ -3707,6 +3783,14 @@ impl<'w> MobSim<'w> {
         // local for the same reason `grazes`/`bred` are: `self.mobs` is
         // mutably borrowed for the whole loop.
         let mut ambient_sounds: Vec<crate::effects::WorldEffect> = Vec::new();
+        // Issue #232: elder guardian mining-fatigue pulses rolled this tick —
+        // accumulated into a local for the same reason `grazes`/`bred` are:
+        // `self.mobs` is mutably borrowed for the whole loop, and reading
+        // `self.players` from inside it (a *different* field) is fine, but
+        // this sim still cannot push straight onto `self.pending_mining_fatigue`
+        // without an extra borrow of `self` the loop already avoids for the
+        // others.
+        let mut mining_fatigue: Vec<MiningFatigueAura> = Vec::new();
         let tick_count = self.tick_count;
         // The disconnect self-heal for a mounted mob — the mob twin of
         // `tick_vehicles`' identical guard for a boat (see that comment for
@@ -3887,10 +3971,31 @@ impl<'w> MobSim<'w> {
                     m.conversion = Some(state);
                 }
             }
+            // Issue #232: `ElderGuardian.customServerAiStep`'s periodic
+            // mining-fatigue pulse. See `ELDER_GUARDIAN_EFFECT_INTERVAL`'s own
+            // doc for why `tick_count` stands in for vanilla's per-entity
+            // `Entity.tickCount`.
+            if m.entity_type.path() == "elder_guardian"
+                && tick_count.wrapping_add(m.id as u64) % ELDER_GUARDIAN_EFFECT_INTERVAL == 0
+            {
+                let source_pos = m.position();
+                for player in &self.players {
+                    let Some(identity) = player.identity else {
+                        continue;
+                    };
+                    let delta = source_pos - player.perception.position;
+                    if delta.dot(delta)
+                        < ELDER_GUARDIAN_EFFECT_RADIUS * ELDER_GUARDIAN_EFFECT_RADIUS
+                    {
+                        mining_fatigue.push(MiningFatigueAura { target: identity });
+                    }
+                }
+            }
         }
         self.push_entities();
         self.pending_grazes.extend(grazes);
         self.pending_ambient_sounds.extend(ambient_sounds);
+        self.pending_mining_fatigue.extend(mining_fatigue);
         for (shooter, launch) in launches {
             use lodestone_entity::ai::roster::ranged::{integrates_as_arrow, projectile_entity_type};
             let projectile = if integrates_as_arrow(launch.kind) {
@@ -5278,6 +5383,17 @@ impl<'w> MobSim<'w> {
     /// grudge target.
     pub fn take_player_hits(&mut self) -> Vec<PlayerHit> {
         std::mem::take(&mut self.pending_player_hits)
+    }
+
+    /// Drains every player caught in an elder guardian's mining-fatigue pulse
+    /// since the last call (issue #232) — the same handoff shape as
+    /// [`take_player_hits`](Self::take_player_hits) above and for the
+    /// identical reason: this sim owns no connection, so the driver is what
+    /// turns each entry into a real `ActiveEffects::apply` call and a
+    /// `GUARDIAN_ELDER_EFFECT` game event. See [`MiningFatigueAura`]'s own
+    /// doc comment for exactly what the driver owes vanilla.
+    pub fn take_mining_fatigue_auras(&mut self) -> Vec<MiningFatigueAura> {
+        std::mem::take(&mut self.pending_mining_fatigue)
     }
 
     /// Drains every fire-ignition attempt a live lightning bolt made this
@@ -9776,5 +9892,147 @@ mod villager_gossip_reputation_and_curing_tests {
                 .is_none(),
             "villagers 500 blocks apart must never spread gossip to each other"
         );
+    }
+}
+
+/// Issue #232: the elder guardian's mining-fatigue aura,
+/// `ElderGuardian.customServerAiStep` calling
+/// `MobEffectUtil.addEffectToPlayersAround`.
+#[cfg(test)]
+mod elder_guardian_mining_fatigue_tests {
+    use super::*;
+
+    fn flat_world() -> ChunkWorld {
+        ChunkWorld::new(-64, 384)
+    }
+
+    fn player_at(uuid: Uuid, pos: Vec3) -> PerceivedPlayer {
+        PerceivedPlayer {
+            identity: Some(PlayerIdentity { uuid, entity_id: 99 }),
+            perception: PlayerPerception {
+                position: pos,
+                held_item: None,
+                view_direction: Vec3::new(0.0, 0.0, 1.0),
+            },
+        }
+    }
+
+    /// `(tickCount + getId()) % 1200 == 0`, with `tick_count` standing in for
+    /// `Entity.tickCount` (see [`ELDER_GUARDIAN_EFFECT_INTERVAL`]'s own doc).
+    /// A freshly spawned elder guardian gets id `1`, so the trigger tick is
+    /// `1200 - 1 = 1199`; [`MobSim::tick`] reads `self.tick_count` *before*
+    /// incrementing it, so seeding `set_tick_count(1199)` and ticking once is
+    /// the tick this pulse fires on.
+    #[test]
+    fn a_player_within_fifty_blocks_is_pulsed_on_the_interval_tick() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let guardian_id = sim
+            .spawn_species(
+                "minecraft:elder_guardian".parse().expect("valid key"),
+                Vec3::new(0.0, 0.0, 0.0),
+            )
+            .id();
+        assert_eq!(guardian_id, 1, "precondition: the trigger-tick arithmetic below assumes id 1");
+
+        let alice = Uuid::from_u128(0xA11CE);
+        sim.set_players(vec![player_at(alice, Vec3::new(40.0, 0.0, 0.0))]);
+        sim.set_tick_count(1199);
+        sim.tick();
+
+        let pulses = sim.take_mining_fatigue_auras();
+        assert_eq!(
+            pulses,
+            vec![MiningFatigueAura {
+                target: PlayerIdentity {
+                    uuid: alice,
+                    entity_id: 99
+                }
+            }],
+            "a player 40 blocks away (within the 50-block radius) must be pulsed on tick 1199, got {pulses:?}"
+        );
+    }
+
+    /// The same setup, moved just past `EFFECT_RADIUS` — the spherical
+    /// `Vec3.closerThan` cut, not a box.
+    #[test]
+    fn a_player_beyond_fifty_blocks_is_not_pulsed() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let guardian_id = sim
+            .spawn_species(
+                "minecraft:elder_guardian".parse().expect("valid key"),
+                Vec3::new(0.0, 0.0, 0.0),
+            )
+            .id();
+        assert_eq!(guardian_id, 1, "precondition: the trigger-tick arithmetic below assumes id 1");
+
+        let alice = Uuid::from_u128(0xA11CE);
+        sim.set_players(vec![player_at(alice, Vec3::new(60.0, 0.0, 0.0))]);
+        sim.set_tick_count(1199);
+        sim.tick();
+
+        assert!(
+            sim.take_mining_fatigue_auras().is_empty(),
+            "a player 60 blocks away is outside EFFECT_RADIUS and must not be pulsed"
+        );
+    }
+
+    /// A tick that is not a multiple of the 1200-tick interval must pulse
+    /// nobody, even with a player standing on top of the guardian.
+    #[test]
+    fn no_pulse_off_the_interval_tick() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        sim.spawn_species(
+            "minecraft:elder_guardian".parse().expect("valid key"),
+            Vec3::new(0.0, 0.0, 0.0),
+        );
+
+        let alice = Uuid::from_u128(0xA11CE);
+        sim.set_players(vec![player_at(alice, Vec3::new(0.0, 0.0, 0.0))]);
+        sim.set_tick_count(1198);
+        sim.tick();
+
+        assert!(
+            sim.take_mining_fatigue_auras().is_empty(),
+            "one tick before the interval must not fire"
+        );
+    }
+
+    /// An ordinary guardian (not elder) must never pulse — the aura is
+    /// `ElderGuardian`-only in vanilla; `Guardian.customServerAiStep` has no
+    /// such call.
+    #[test]
+    fn an_ordinary_guardian_never_pulses() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let guardian_id = sim
+            .spawn_species(
+                "minecraft:guardian".parse().expect("valid key"),
+                Vec3::new(0.0, 0.0, 0.0),
+            )
+            .id();
+        assert_eq!(guardian_id, 1, "precondition: the trigger-tick arithmetic below assumes id 1");
+
+        let alice = Uuid::from_u128(0xA11CE);
+        sim.set_players(vec![player_at(alice, Vec3::new(0.0, 0.0, 0.0))]);
+        sim.set_tick_count(1199);
+        sim.tick();
+
+        assert!(
+            sim.take_mining_fatigue_auras().is_empty(),
+            "an ordinary guardian must never emit a mining-fatigue pulse"
+        );
+    }
+
+    /// The magnitude gate: the constants a driver applies must match
+    /// `ElderGuardian`'s own `EFFECT_DURATION`/`EFFECT_AMPLIFIER` fields, not
+    /// a plausible-looking round number.
+    #[test]
+    fn effect_constants_match_the_jar() {
+        assert_eq!(ELDER_GUARDIAN_EFFECT_DURATION, 6000);
+        assert_eq!(ELDER_GUARDIAN_EFFECT_AMPLIFIER, 2, "Mining Fatigue III is amplifier 2, zero-indexed");
+        assert_eq!(ELDER_GUARDIAN_EFFECT_RADIUS, 50.0);
     }
 }
