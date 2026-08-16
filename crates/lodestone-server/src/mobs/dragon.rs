@@ -39,7 +39,7 @@
 //!   when written and is not true now — re-verify a "not consumed"
 //!   disclosure against the tree before repeating it.)
 
-use lodestone_model::{ResourceKey, Rotation, Vec3};
+use lodestone_model::{BlockPos, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
 use crate::dragon::{crystal, fight, phase};
@@ -124,6 +124,35 @@ pub struct EndDragonFightInit {
     /// Not applied to any world by this call; see
     /// [`MobSim::init_end_dragon_fight`]'s own doc for why.
     pub block_writes: Vec<lodestone_worldgen::end::PodiumBlock>,
+}
+
+/// One dragon's death, drained by [`MobSim::take_dragon_deaths`] — the
+/// block-write/egg/portal/gateway-signal half of
+/// `crate::dragon::fight::set_dragon_killed` this sim cannot perform itself.
+/// `MobSim` holds `world: &'w ChunkWorld` **immutably** and owns no
+/// connection, so — the same "no block-write authority" contract
+/// [`EndDragonFightInit::block_writes`]'s own doc names — this is handed
+/// back as data for a caller with real write access to apply, the same
+/// `pending_*`/`take_*` handoff shape every other world-mutating effect in
+/// this sim already uses (`pending_detonations`, `pending_grazes`, ...).
+#[derive(Debug, Clone)]
+pub struct DragonDeathOutcome {
+    /// The arena/podium origin — the same `origin` [`MobSim::init_end_dragon_fight`]
+    /// was called with, floored to a [`BlockPos`]. `exit_portal_blocks` was
+    /// computed against this, and it is also `EndPodiumFeature.getLocation`,
+    /// the column [`fight::set_dragon_killed`]'s egg placement resolves a
+    /// heightmap against.
+    pub origin: BlockPos,
+    /// `crate::dragon::fight::EnderDragonFight.setDragonKilled`'s own three
+    /// effects — see [`fight::DeathOutcome`]'s own doc for each field.
+    pub outcome: fight::DeathOutcome,
+    /// `crate::dragon::fight::exit_portal_blocks(origin, true)` — every block
+    /// write the now-active exit portal needs, precomputed here since this
+    /// struct already knows `origin` is fixed for this one death. Order
+    /// matters (see that function's own doc): a caller must apply these in
+    /// sequence so the central bedrock pole overwrites the portal disc at
+    /// its own column, exactly as it does here.
+    pub exit_portal_blocks: Vec<(BlockPos, &'static str)>,
 }
 
 impl<'w> MobSim<'w> {
@@ -226,10 +255,12 @@ impl<'w> MobSim<'w> {
     }
 
     /// The boss-bar value for a live dragon — see [`fight::boss_bar_value`].
-    /// `dragon_killed` is the caller's [`fight::FightState::dragon_killed`]
-    /// (this sim tracks no `FightState` of its own — see `docs/dragon-fight.md`
-    /// for why the fight controller stays a separate, world-owned value
-    /// rather than sim-owned state).
+    /// `dragon_killed` is a caller-supplied [`fight::FightState::dragon_killed`]
+    /// rather than read internally, so a caller with its own view of the
+    /// fight (or a test) can still override it; [`boss_bars`](Self::boss_bars)'s
+    /// own production call now passes [`dragon_fight_killed`](Self::dragon_fight_killed)
+    /// — this sim's real, `record_dragon_death`-maintained state — instead of
+    /// a hardcoded value.
     #[must_use]
     pub fn dragon_boss_bar(&self, id: i32, dragon_killed: bool) -> Option<fight::BossBarValue> {
         self.dragons
@@ -359,17 +390,20 @@ impl<'w> MobSim<'w> {
         }
         let fire_origin = dragon.position;
         let dragon_yaw = dragon.yaw;
+        // Captured before the removal below, for `record_dragon_death` —
+        // `dragon` (the `&mut TrackedDragon` borrow) cannot survive a
+        // `self.dragons.remove` call, and `record_dragon_death` itself needs
+        // `&mut self`.
+        let fight_origin = dragon.fight_origin;
 
         // A dragon whose death-flight health reached zero leaves the sim
-        // here — matching this module's own doc ("only the caller's own
-        // removal logic, watching health hit 0.0, ends the fight"). The
-        // egg/exit-portal/gateway spawn sequence (`crate::dragon::fight::
-        // set_dragon_killed`) is **not** called from here: `MobSim` owns no
-        // `FightState` (see `dragon_boss_bar`'s own doc for why that stays a
-        // caller-supplied value), so a production wiring pass still needs to
-        // watch for this removal and drive that controller — a narrower,
-        // still-disclosed gap than "the dragon can never die at all".
+        // here. The egg/exit-portal/gateway-signal spawn sequence
+        // (`crate::dragon::fight::set_dragon_killed`) now runs from here too
+        // — see `record_dragon_death`'s own doc for why this closes the
+        // "the post-kill controller is wired nowhere" gap `crate::dragon`'s
+        // module doc used to name.
         if just_died {
+            self.record_dragon_death(fight_origin);
             self.dragons.remove(&id);
             return;
         }
@@ -440,9 +474,94 @@ impl<'w> MobSim<'w> {
         dragon.phase.on_sitting_damage(delta, dragon.max_health);
         let health = dragon.health;
         if health <= 0.0 {
+            // See `tick_one_dragon`'s identical capture-before-remove
+            // comment: `dragon` cannot survive `record_dragon_death`'s
+            // `&mut self`, so the origin is read out first.
+            let fight_origin = dragon.fight_origin;
+            self.record_dragon_death(fight_origin);
             self.dragons.remove(&id);
         }
         Some(health)
+    }
+
+    /// [`super::MobSim::attack_from_player`]'s dragon branch — the same
+    /// "route around the general `attack`, which reads and writes
+    /// `self.mobs` exclusively" shape [`super::MobSim::attack_wither`]
+    /// already establishes for the wither, and for the identical reason: a
+    /// dragon lives in `self.dragons`, not `self.mobs`, so the generic path
+    /// silently finds nothing. Before this, **no production call site could
+    /// ever reduce a dragon's health at all** — `damage_dragon`'s own doc
+    /// disclosed "not yet wired to a real hit" — so the whole post-kill
+    /// controller this file now drives was unreachable from real combat
+    /// regardless of `FightState` existing.
+    ///
+    /// This sim tracks no per-dragon knockback response (the same
+    /// simplified-flight narrowing `mobs::dragon`'s own module doc
+    /// discloses), so the outcome's `velocity` is always zero, matching
+    /// `attack_wither`'s identical choice for its own non-moving-on-hit
+    /// target. `damage_dealt` is the real health delta this one hit caused
+    /// (`before - after`), which folds in `damage_dragon`'s own
+    /// killing-blow-redirect clamp (a lethal hit against a flying,
+    /// not-yet-sitting dragon only ever costs it down to `1.0`, never the
+    /// full `damage` argument) rather than echoing `raw_damage` unconditionally.
+    pub(super) fn attack_dragon(&mut self, target_id: i32, raw_damage: f32) -> Option<super::AttackOutcome> {
+        let before = self.dragon_health(target_id)?;
+        let health = self.damage_dragon(target_id, raw_damage)?;
+        Some(super::AttackOutcome {
+            health,
+            killed: health <= 0.0,
+            damage_dealt: (before - health).max(0.0),
+            velocity: Vec3::new(0.0, 0.0, 0.0),
+        })
+    }
+
+    /// `EnderDragonFight.setDragonKilled`, driven from a real kill for the
+    /// first time — the exact gap `crate::dragon`'s module doc names
+    /// ("`dragon::fight::FightState` is ready to receive one whenever that
+    /// lands"). Ensures a [`fight::FightState`] exists (lazily, matching
+    /// `EnderDragonFight.createDefault()` — nothing calls
+    /// [`crate::dragon::fight::scan_state`] yet, so a fresh state is the
+    /// correct assumption for the *first* death this session ever sees),
+    /// applies [`fight::set_dragon_killed`], and queues the result —
+    /// `origin`'s exit-portal geometry included — onto
+    /// [`take_dragon_deaths`](Self::take_dragon_deaths) for a caller with
+    /// real world-write access to apply.
+    ///
+    /// **Persistence**: `self.dragon_fight` lives only as long as this
+    /// `MobSim`/`MobHandle` does — a process-lifetime gate, the same
+    /// disclosed shape `ChunkSource::claim_dragon_fight_start`'s own doc
+    /// already uses for "has an arena been spawned into this End sibling
+    /// yet". A server restart forgets both; round-tripping either through a
+    /// save is real, tracked, follow-up work, not a silent gap this method
+    /// introduces.
+    fn record_dragon_death(&mut self, origin: Vec3) {
+        let state = self.dragon_fight.get_or_insert_with(fight::FightState::new);
+        let outcome = fight::set_dragon_killed(state);
+        let block_pos = BlockPos::new(origin.x.floor() as i32, origin.y.floor() as i32, origin.z.floor() as i32);
+        let exit_portal_blocks = fight::exit_portal_blocks(block_pos, true);
+        self.pending_dragon_deaths.push(DragonDeathOutcome {
+            origin: block_pos,
+            outcome,
+            exit_portal_blocks,
+        });
+    }
+
+    /// Drains every dragon death since the last call — the block-write/egg/
+    /// portal/gateway-signal half of a kill this sim cannot perform itself.
+    /// See [`DragonDeathOutcome`]'s own doc for the handoff shape.
+    pub fn take_dragon_deaths(&mut self) -> Vec<DragonDeathOutcome> {
+        std::mem::take(&mut self.pending_dragon_deaths)
+    }
+
+    /// The live `FightState.dragon_killed` flag — `false` until this
+    /// session's first real kill (`EnderDragonFight.createDefault()`'s own
+    /// starting value), and re-asserted `true` by every subsequent one.
+    /// Feeds [`boss_bars`](Self::boss_bars)/[`dragon_boss_bar`](Self::dragon_boss_bar),
+    /// closing the "hardcoded `false`" gap [`boss_bars`](Self::boss_bars)'s
+    /// own doc used to name.
+    #[must_use]
+    pub fn dragon_fight_killed(&self) -> bool {
+        self.dragon_fight.is_some_and(|s| s.dragon_killed)
     }
 
     /// Appends every live dragon's [`crate::protocol::EntitySnapshot`] to
@@ -491,20 +610,17 @@ impl<'w> MobSim<'w> {
     ///   This sim tracks one bar per dragon 1:1 and nothing needs the two
     ///   identities to differ — see [`crate::protocol::BossBarSnapshot::id`]'s
     ///   own doc.
-    /// * **`dragon_killed` is hardcoded `false`.** `MobSim` tracks no
-    ///   `crate::dragon::fight::FightState` of its own (see
-    ///   [`dragon_boss_bar`](Self::dragon_boss_bar)'s own doc for why that is
-    ///   a caller-supplied parameter). This no longer means the bar lingers
-    ///   forever, though: [`damage_dragon`](Self::damage_dragon) and
-    ///   [`tick_one_dragon`] both remove a dragon whose health reaches `0.0`
-    ///   (see their own docs), and a removed dragon's own uuid simply stops
-    ///   appearing in this method's output — [`crate::server::EntityStreamer`]'s
-    ///   own diff (`sync_boss_bars`) reads a missing id as "no longer
-    ///   visible" and sends the `REMOVE` operation, exactly as it would for
-    ///   `visible: false`. `dragon_killed`'s only remaining effect is the
-    ///   `crate::dragon::fight::boss_bar_value`'s persisted-past-death "always
-    ///   full" branch (`EnderDragonFight`'s post-victory display for a
-    ///   re-entering player), which needs `FightState` regardless.
+    /// * **`dragon_killed` no longer hardcodes `false`** — it now reads
+    ///   [`dragon_fight_killed`](Self::dragon_fight_killed), the real
+    ///   [`fight::FightState`] [`record_dragon_death`](Self::record_dragon_death)
+    ///   maintains. A removed dragon's own uuid still stops appearing in
+    ///   this method's output the moment it dies (see
+    ///   [`damage_dragon`](Self::damage_dragon)/[`tick_one_dragon`]'s own
+    ///   docs), so `visible` was already reaching `false` correctly before
+    ///   this; what changes is `crate::dragon::fight::boss_bar_value`'s other
+    ///   branch — `EnderDragonFight`'s post-victory "always full, always
+    ///   hidden" display for a player re-entering after the fight is already
+    ///   over — which needed a real flag to answer at all.
     #[must_use]
     pub fn boss_bars(&self) -> Vec<crate::protocol::BossBarSnapshot> {
         let mut ids: Vec<i32> = self.dragons.keys().copied().collect();
@@ -517,7 +633,7 @@ impl<'w> MobSim<'w> {
                 // single-dragon sibling, previously computed inline here a
                 // second time with a duplicated `false` literal) rather than
                 // calling `fight::boss_bar_value` directly a second time.
-                let bar = self.dragon_boss_bar(id, false)?;
+                let bar = self.dragon_boss_bar(id, self.dragon_fight_killed())?;
                 Some(crate::protocol::BossBarSnapshot {
                     id: d.uuid,
                     name: lodestone_model::Text::translate("entity.minecraft.ender_dragon", Vec::new()),
@@ -814,5 +930,105 @@ mod tests {
             init_a.block_writes.iter().any(|w| w.state.starts_with("minecraft:iron_bars")),
             "expected at least one iron-bars cage write — got none"
         );
+    }
+
+    /// **The island this whole pass closes**: before this, nothing in
+    /// `lodestone-server` ever called `crate::dragon::fight::set_dragon_killed`
+    /// — a dragon simply vanished when its health reached zero, and
+    /// `damage_dragon` itself had zero real production callers on top of
+    /// that. Kills a sitting dragon through the real production entry point
+    /// (`attack_from_player`, the same one `crate::server::apply_attack`
+    /// calls) rather than `damage_dragon` directly, so this also proves the
+    /// new `attack_dragon` branch in `attack_from_player` is actually
+    /// reached. Asserts a real [`DragonDeathOutcome`] reaches
+    /// [`MobSim::take_dragon_deaths`], carrying the first-kill egg
+    /// placement and a genuinely *activated* portal (real
+    /// `minecraft:end_portal` blocks, not merely a non-empty list), and that
+    /// [`MobSim::dragon_fight_killed`] flips — not just that the dragon's
+    /// own health field changed, which none of this file's older gates
+    /// could distinguish from "still silently dropped".
+    #[test]
+    fn a_real_kill_through_attack_from_player_reaches_the_post_kill_controller() {
+        let mut sim = sim();
+        let id = sim.spawn_dragon(Vec3::new(0.0, 64.0, 0.0));
+        {
+            let dragon = sim.dragons.get_mut(&id).unwrap();
+            dragon.phase = phase::PhaseManager::starting_in(phase::Phase::SittingScanning);
+        }
+        assert!(sim.take_dragon_deaths().is_empty(), "no death has happened yet");
+        assert!(!sim.dragon_fight_killed());
+
+        let outcome = sim.attack_from_player(
+            id,
+            None,
+            Vec3::new(0.0, 64.0, 0.0),
+            10_000.0,
+            crate::mobs::DamageFlags::default(),
+            0.0,
+        );
+        assert_eq!(outcome.map(|o| o.killed), Some(true), "a sitting dragon dies outright to a killing blow");
+        assert!(sim.dragon_health(id).is_none(), "the dragon must have left the sim");
+        assert!(sim.dragon_fight_killed(), "the post-kill controller must have run");
+
+        let deaths = sim.take_dragon_deaths();
+        assert_eq!(deaths.len(), 1, "exactly one death must be queued");
+        assert!(deaths[0].outcome.place_dragon_egg, "the first kill ever must place the egg");
+        assert!(deaths[0].outcome.activate_exit_portal);
+        assert!(deaths[0].outcome.spawn_gateway);
+        assert!(
+            deaths[0].exit_portal_blocks.iter().any(|(_, s)| *s == "minecraft:end_portal"),
+            "the portal must be activated (real end_portal blocks), not left inactive"
+        );
+
+        assert!(sim.take_dragon_deaths().is_empty(), "drained, not merely read");
+    }
+
+    /// The *other* death path — `tick_one_dragon`'s death-flight health-drive
+    /// clause, not a direct `attack_from_player` call — must reach the same
+    /// controller. Reuses
+    /// `a_killing_blow_while_flying_now_actually_finishes_the_dragon_off`'s
+    /// own setup (a killing blow while not sitting redirects into `Dying`,
+    /// and the next `tick_dragons` call finishes it off with no player
+    /// nearby) and adds the assertion that test could not make: that the
+    /// finish is not just a silent removal.
+    #[test]
+    fn the_death_flight_path_also_reaches_the_post_kill_controller() {
+        let mut sim = sim();
+        let id = sim.spawn_dragon(Vec3::new(0.0, 64.0, 0.0));
+        let after_blow = sim.damage_dragon(id, 10_000.0);
+        assert_eq!(after_blow, Some(1.0), "redirected into Dying at 1.0, matching handleKillingBlow");
+
+        sim.tick_dragons();
+
+        assert!(sim.dragon_health(id).is_none(), "the dragon must have left the sim");
+        assert!(sim.dragon_fight_killed());
+        let deaths = sim.take_dragon_deaths();
+        assert_eq!(deaths.len(), 1, "the death-flight finish must queue exactly one outcome, not zero");
+        assert!(deaths[0].outcome.place_dragon_egg);
+    }
+
+    /// `EnderDragonFight.setDragonKilled`'s one-time egg: a *second* death in
+    /// the same session (a respawned dragon killed again — modelled here as
+    /// a second `spawn_dragon`/kill, since this file has no respawn
+    /// integration yet) must not re-place it, even though the exit portal is
+    /// re-activated and a gateway signalled every time.
+    #[test]
+    fn only_the_first_ever_kill_places_the_egg() {
+        let mut sim = sim();
+        let first = sim.spawn_dragon(Vec3::new(0.0, 64.0, 0.0));
+        sim.damage_dragon(first, 10_000.0); // -> Dying, 1.0 health
+        sim.tick_dragons(); // -> 0.0, removed, first death queued
+        let first_death = sim.take_dragon_deaths();
+        assert_eq!(first_death.len(), 1);
+        assert!(first_death[0].outcome.place_dragon_egg);
+
+        let second = sim.spawn_dragon(Vec3::new(0.0, 64.0, 0.0));
+        sim.damage_dragon(second, 10_000.0);
+        sim.tick_dragons();
+        let second_death = sim.take_dragon_deaths();
+        assert_eq!(second_death.len(), 1);
+        assert!(!second_death[0].outcome.place_dragon_egg, "the egg is a one-time placement across the whole session");
+        assert!(second_death[0].outcome.activate_exit_portal, "the portal still re-activates on a repeat kill");
+        assert!(second_death[0].outcome.spawn_gateway, "a repeat kill still signals a new gateway");
     }
 }

@@ -156,6 +156,51 @@ against a connection's last-sent set.
 now calls `MobSim::init_end_dragon_fight` itself, the first time any
 connection reaches a fresh End sibling.
 
+**No production caller for `dragon::fight::set_dragon_killed`, and no real
+hit could even reach `damage_dragon` — no longer true.** Two gaps closed
+together:
+
+* **`MobSim::attack_dragon`** (`mobs/dragon.rs`) is `attack_from_player`'s
+  dragon branch, the same shape `attack_wither` already established for the
+  wither: a dragon lives in `self.dragons`, not `self.mobs`, so the generic
+  `attack` path silently found nothing. Before this, `damage_dragon`'s own
+  doc disclosed "not yet wired to a real hit" and it was true — a player's
+  melee could never reduce a dragon's health at all, independent of anything
+  below.
+* **`MobSim::record_dragon_death`** is called from both places a dragon
+  actually leaves `self.dragons` — `damage_dragon`'s sitting-instant-kill
+  branch, and `tick_one_dragon`'s death-flight health-drive clause (the one
+  `dying_health_this_tick` drives). It lazily creates a
+  `dragon::fight::FightState` (matching `EnderDragonFight.createDefault()`;
+  nothing calls `dragon::fight::scan_state` yet, so a fresh state is the
+  correct assumption for this session's first death), applies
+  `fight::set_dragon_killed`, and queues a `DragonDeathOutcome` — the
+  outcome plus `fight::exit_portal_blocks(origin, true)` — onto
+  `MobSim::take_dragon_deaths` for a caller with real world-write access.
+* **`MobSim::boss_bars`/`dragon_boss_bar`'s hardcoded `dragon_killed: false`
+  is gone** — `boss_bars` now passes `dragon_fight_killed()`, the real flag
+  `record_dragon_death` maintains.
+* **`crate::server::serve_play`** drains `MobSim::take_dragon_deaths` once
+  per connection per tick (next to the existing Hero of the Village drain,
+  same handoff shape) and, for each death, writes the real activated exit
+  portal to the End sibling (`home.get().sibling(Dimension::End)`, chosen
+  because `home` — not `source` — is "the only thing that knows the world's
+  siblings" regardless of which dimension this connection currently
+  occupies) and places the one-time dragon egg by scanning down from the
+  portal's own domed air clearing for the podium column's real highest solid
+  block (`EnderDragonFight.setDragonKilled`'s own
+  `getHeightmapPos(MOTION_BLOCKING, ...)`, ported as a real scan rather than
+  assumed).
+
+**Still a real, disclosed gap**: `outcome.spawn_gateway` is a signal with
+nothing to apply it to. `fight::FightState`'s own doc comment already
+disclosed that no gateway position formula or the shuffled 20-position pool
+is ported anywhere in this repo; that has not changed. Persisting
+`FightState` itself is also still process-lifetime only — it lives as long
+as the `MobSim`/`MobHandle` does, the same disclosed shape
+`ChunkSource::claim_dragon_fight_start` already uses, and does not yet
+round-trip through a save.
+
 ## The End's own furniture, and how it gets placed on first arrival
 
 `MobSim::init_end_dragon_fight(seed, origin, min_y) -> EndDragonFightInit`
