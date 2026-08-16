@@ -1,13 +1,24 @@
-//! Bug found by `fuzz/fuzz_targets/v770_clientbound_decode.rs` (this
-//! session's first libFuzzer target added to this repo): a **9-byte**
-//! `CONTAINER_SET_CONTENT` (play clientbound packet id 18) payload from a
-//! hostile or merely broken server crashes any connecting lodestone client
-//! with an out-of-memory abort, before a single item is decoded.
+//! **Fixed**, at `b3597cef` ("bound two attacker-controlled list
+//! reservations") — this file's own doc used to describe the bug as live and
+//! assert the *buggy* behaviour; a later run of `cargo test -p lodestone-fuzz
+//! --no-fail-fast` found this file failing exactly as its own prior module
+//! doc predicted it would once fixed ("If this assertion is failing,
+//! `adapter/inventory.rs`'s CONTAINER_SET_CONTENT decode has been fixed —
+//! flip this test"), which is the signal this rewrite responds to. The two
+//! tests below now assert the fixed, bounded behaviour instead, matching
+//! `length_prefix_allocation.rs`'s own post-fix shape (its module doc
+//! documents the identical before/after pattern for a different packet).
 //!
-//! ## Where the bug lives
+//! ## Original bug, for context
+//!
+//! Bug found by `fuzz/fuzz_targets/v770_clientbound_decode.rs` (this
+//! repo's first libFuzzer target): a **9-byte** `CONTAINER_SET_CONTENT`
+//! (play clientbound packet id 18) payload from a hostile or merely broken
+//! server crashed any connecting lodestone client with an out-of-memory
+//! abort, before a single item was decoded.
 //!
 //! `crates/protocol/v770/src/adapter/inventory.rs`'s hand-rolled
-//! `CONTAINER_SET_CONTENT` decode arm:
+//! `CONTAINER_SET_CONTENT` decode arm used to read:
 //!
 //! ```text
 //! let len = reader.var_i32().map_err(dec_err)?;
@@ -15,40 +26,25 @@
 //! let mut items = Vec::with_capacity(len);   // <-- unchecked against remaining bytes
 //! ```
 //!
-//! This is the **same defect class** `docs/fuzz-harness.md` already documents
-//! as fixed once, in `lodestone-macros`' `decode_vec` — an attacker-controlled
-//! VarInt length feeding `Vec::with_capacity` before any check against
-//! `reader.remaining()` — but this specific decode arm is hand-written, not
-//! generated through `decode_vec`, so that fix never touched it. It is a
-//! second, independent instance of the same hole, in a different file, found
-//! by treating "no panic on arbitrary bytes" as a *reachability* problem
-//! (coverage-guided fuzzing) rather than by re-reading every hand-rolled
-//! decoder for the same shape by hand.
+//! This was the **same defect class** `docs/fuzz-harness.md` already
+//! documents as fixed once, in `lodestone-macros`' `decode_vec` — an
+//! attacker-controlled VarInt length feeding `Vec::with_capacity` before any
+//! check against `reader.remaining()` — but this specific decode arm is
+//! hand-written, not generated through `decode_vec`, so that fix never
+//! touched it. A second, independent instance of the same hole, in a
+//! different file, found by treating "no panic on arbitrary bytes" as a
+//! *reachability* problem (coverage-guided fuzzing) rather than by
+//! re-reading every hand-rolled decoder for the same shape by hand.
 //!
-//! `crates/protocol/v770/**` is out of scope for this session (owned by a
-//! live agent) — this file only reports and measures the bug through the
-//! real production entry point (`V770Adapter::handle_packet`, via
-//! `lodestone_fuzz::decode_clientbound`), it does not patch
-//! `adapter/inventory.rs`. The fix, when applied, is the same shape
-//! `decode_vec`'s fix used: cap the reservation at
-//! `len.min(reader.remaining())` — every `ItemStack` this loop can decode
-//! consumes at least one byte (a present/absent flag at minimum), so no more
-//! than `remaining()` elements can ever be produced regardless of what `len`
-//! claims.
+//! ## The fix
 //!
-//! ## This test's own status: expected to FAIL once the bug above is fixed
-//!
-//! Unlike `length_prefix_allocation.rs` (which asserts the *fixed* behaviour
-//! for `decode_vec`, because that fix already landed), this file asserts the
-//! *current, buggy* behaviour — it is a live, executable bug report, exactly
-//! the shape `length_prefix_allocation.rs`'s own module doc says it used to
-//! be before its fix landed ("This file originally both stated the property
-//! and demonstrated that it was **violated**"). When `adapter/inventory.rs`
-//! is fixed,
-//! `container_set_content_allocation_is_disproportionate_to_the_tiny_payload`
-//! below will start failing — that is the signal to flip its assertion to
-//! the bounded form (see that file's `huge_length_prefix_no_longer_forces_disproportionate_allocation`
-//! for the shape to copy) rather than a spurious CI failure to chase down.
+//! `adapter/inventory.rs` now reads
+//! `Vec::with_capacity(len.min(reader.remaining()))` — capping the
+//! reservation at the readable bytes, since every `ItemStack` this loop can
+//! decode consumes at least one byte, so no more than `remaining()` of them
+//! can ever be produced regardless of what `len` claims. This file only
+//! measures the fix through the real production entry point
+//! (`V770Adapter::handle_packet`, via `lodestone_fuzz::decode_clientbound`).
 //!
 //! ## Why the claimed length is 2,000,000, not the fuzzer's own ~136,000,000
 //!
@@ -120,27 +116,30 @@ fn peak_alloc_during<R>(f: impl FnOnce() -> R) -> (R, usize) {
 const SMALL_CEILING: usize = 4096;
 
 /// `window_id: VarInt = 0`, `state_id: VarInt = 0`, then an `items` length
-/// prefix of `claimed_len` and nothing else — isolating the up-front
-/// `Vec::with_capacity` cost the same way
-/// `game_login_with_huge_levels_prefix` does in `length_prefix_allocation.rs`.
-fn container_set_content_with_huge_items_prefix(claimed_len: i32) -> Vec<u8> {
+/// prefix of `claimed_len`, followed by `trailing_bytes` more zero bytes —
+/// isolating the up-front `Vec::with_capacity` cost the same way
+/// `game_login_with_huge_levels_prefix` does in `length_prefix_allocation.rs`,
+/// while letting a caller control `reader.remaining()` after the length
+/// prefix (0 for the "tiny payload" case below, non-zero for the "scales
+/// with input" case).
+fn container_set_content_with_huge_items_prefix(claimed_len: i32, trailing_bytes: usize) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(0); // window_id
     w.var_i32(0); // state_id
     w.var_i32(claimed_len); // items length prefix
-    w.into_vec()
+    let mut out = w.into_vec();
+    out.extend(std::iter::repeat_n(0u8, trailing_bytes));
+    out
 }
 
-/// **Currently passing** — documents the live bug. `Vec::with_capacity(len)`
-/// in `adapter/inventory.rs`'s `CONTAINER_SET_CONTENT` arm reserves for the
-/// full, unchecked `claimed_len` regardless of `payload.len()`, so a 5-byte
-/// payload (three single-byte VarInts) forces a multi-megabyte allocation.
-/// See this file's module doc for the exact production fix once
-/// `crates/protocol/v770` is back in scope.
+/// **Fixed.** A malicious server claiming 2,000,000 items in a payload that
+/// leaves zero readable bytes after the length prefix must not reserve for
+/// anything close to that — `adapter/inventory.rs` now caps the reservation
+/// at `len.min(reader.remaining())`, and `remaining() == 0` here.
 #[test]
-fn container_set_content_allocation_is_disproportionate_to_the_tiny_payload() {
+fn container_set_content_allocation_is_bounded_by_available_bytes() {
     const CLAIMED_LEN: i32 = 2_000_000;
-    let payload = container_set_content_with_huge_items_prefix(CLAIMED_LEN);
+    let payload = container_set_content_with_huge_items_prefix(CLAIMED_LEN, 0);
     assert!(
         payload.len() < 16,
         "sanity: the malicious payload itself must be tiny ({} bytes)",
@@ -156,28 +155,61 @@ fn container_set_content_allocation_is_disproportionate_to_the_tiny_payload() {
         )
     });
 
-    // It still errors cleanly (or would, once item decode runs out of bytes)
-    // — the bug is entirely in the up-front reservation, not in error
-    // handling. Not asserted strictly here since the point of this file is
-    // the allocation, not the `Result` shape.
-    let _ = result;
+    // Still errors cleanly (there is nothing left to decode a carried item
+    // from either) — the fix only changes the up-front reservation, not
+    // error handling.
+    assert!(
+        result.is_err(),
+        "expected a clean decode error for a payload with no item bytes, got {result:?}"
+    );
 
     assert!(
-        peak > SMALL_CEILING,
-        "expected the CURRENTLY-BUGGY behaviour (a disproportionate up-front \
-         allocation well above {SMALL_CEILING} bytes from a {}-byte payload); \
-         measured only {peak} bytes. If this assertion is failing, \
-         `adapter/inventory.rs`'s CONTAINER_SET_CONTENT decode has been fixed \
-         — flip this test to assert the bounded behaviour instead, matching \
-         `length_prefix_allocation.rs`'s post-fix shape.",
+        peak <= SMALL_CEILING,
+        "expected the FIXED, bounded behaviour (peak allocation at or below \
+         {SMALL_CEILING} bytes from a {}-byte payload claiming {CLAIMED_LEN} items); \
+         measured {peak} bytes instead. If this assertion is failing because `peak` \
+         is back in the multi-megabyte range, `adapter/inventory.rs`'s \
+         `len.min(reader.remaining())` cap has regressed.",
         payload.len()
     );
+}
+
+/// The cap must track `remaining()`, not collapse to "always ~0 regardless
+/// of input" — otherwise the test above would trivially pass for the wrong
+/// reason (a decoder that always reserved 0 bytes would also pass it). This
+/// payload leaves 200 real bytes after the claimed length of 2,000,000, so
+/// the reservation is capped at `2_000_000.min(200) == 200` elements — still
+/// bounded, but non-zero and tracking the actual input rather than a
+/// constant. Not predicting an exact byte count here (the loop that reads
+/// `ItemStack`s does not stop at exactly 200 reservations' worth of memory,
+/// since the `Vec` only grows if the loop keeps pushing), just that it stays
+/// far below the old, truly unbounded magnitude a 2,000,000-element
+/// reservation would cost.
+#[test]
+fn container_set_content_allocation_scales_with_remaining_bytes_not_a_constant() {
+    const CLAIMED_LEN: i32 = 2_000_000;
+    const TRAILING: usize = 200;
+    let payload = container_set_content_with_huge_items_prefix(CLAIMED_LEN, TRAILING);
+
+    let (_, peak) = peak_alloc_during(|| {
+        decode_clientbound(
+            Family::V770,
+            ConnectionState::Play,
+            play::clientbound::CONTAINER_SET_CONTENT,
+            &payload,
+        )
+    });
+
+    // Four to five orders of magnitude below what an unchecked
+    // Vec::with_capacity(2_000_000) of ItemStack would cost (tens of
+    // megabytes), while still allowing real per-item decode work over 200
+    // bytes of trailing input.
+    const UNBOUNDED_MAGNITUDE_FLOOR: usize = 1_000_000;
     assert!(
-        peak >= 2_000_000,
-        "expected the reservation to scale with the claimed length ({CLAIMED_LEN} \
-         items), not just be 'some large constant' — measured {peak} bytes, which \
-         is not even proportional to a 2,000,000-element Vec::with_capacity. This \
-         would indicate a different, unexplained source of allocation rather than \
-         the one this file documents."
+        peak < UNBOUNDED_MAGNITUDE_FLOOR,
+        "expected an allocation bounded by ~{TRAILING} readable bytes, not the \
+         unbounded {CLAIMED_LEN}-item claim; measured {peak} bytes, which is at or \
+         above the {UNBOUNDED_MAGNITUDE_FLOOR}-byte floor this test uses to detect \
+         a regression back to the unbounded reservation."
     );
 }
