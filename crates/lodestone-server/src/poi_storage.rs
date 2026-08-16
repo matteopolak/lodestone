@@ -689,6 +689,64 @@ impl PoiStorage {
         Ok(out)
     }
 
+    /// `PoiManager.getInRange(typePredicate, pos, radius, occupancy)` — every
+    /// POI matching `type_predicate`/`occupancy` whose block position lies
+    /// within `radius` blocks of `center` (real Euclidean distance, not a
+    /// chunk-taxicab approximation), read fresh from disk over exactly the
+    /// chunk-column range the radius can reach.
+    ///
+    /// This is issue #241 (raids)'s own missing primitive: the real trigger,
+    /// traced through the decompile, is `RaidOmenMobEffect.applyEffectTick`
+    /// on the omen's last tick calling `Raids.createOrExtendRaid`, whose own
+    /// village check is exactly this — a flat 64-block radius query over
+    /// occupied `#village`-tagged POIs — **not**
+    /// `isVillageCenter`/`sectionsToVillage`'s section-distance propagation,
+    /// a different subsystem this query does not touch. A caller wiring a
+    /// raid trigger passes `radius: 64`, `occupancy: Occupancy::IsOccupied`,
+    /// and a predicate matching the `#village` POI tag, then averages the
+    /// returned positions into a raid centre itself — this method has no
+    /// opinion about that, matching [`records_matching`](PoiSection::records_matching)'s
+    /// own "return records, let the caller reduce" shape.
+    ///
+    /// # Errors
+    /// As [`Self::load_area`].
+    pub fn occupied_in_range(
+        &self,
+        mut type_predicate: impl FnMut(&ResourceKey) -> bool,
+        center: BlockPos,
+        radius: i32,
+        occupancy: Occupancy,
+    ) -> Result<Vec<BlockPos>, Error> {
+        let radius_sq = i64::from(radius) * i64::from(radius);
+        // +1: a POI whose *chunk* is just outside the radius's chunk-aligned
+        // bounding box can still have a block within `radius` of `center`
+        // (the radius is measured in blocks, not chunks), so the loaded area
+        // must be at least one chunk wider on every side than a naive
+        // `radius / 16` — the exact real-distance filter below is what
+        // trims the extra chunks' out-of-range records back out.
+        let chunk_radius = radius.div_euclid(16) + 1;
+        let center_cx = center.x.div_euclid(16);
+        let center_cz = center.z.div_euclid(16);
+        let area = self.load_area(
+            (center_cx - chunk_radius)..=(center_cx + chunk_radius),
+            (center_cz - chunk_radius)..=(center_cz + chunk_radius),
+        )?;
+        let mut out = Vec::new();
+        for chunk in area.values() {
+            for section in chunk.sections.values() {
+                for record in section.records_matching(&mut type_predicate, occupancy) {
+                    let dx = i64::from(record.pos.x - center.x);
+                    let dy = i64::from(record.pos.y - center.y);
+                    let dz = i64::from(record.pos.z - center.z);
+                    if dx * dx + dy * dy + dz * dz <= radius_sq {
+                        out.push(record.pos);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Writes the given chunks' **complete** POI state to disk. A chunk not
     /// present in `chunks` is left byte-for-byte untouched — see the module
     /// doc on why POI needs no identity-clearing pass the way
@@ -1091,6 +1149,81 @@ mod tests {
             v
         };
         assert_eq!(types, vec!["home", "nether_portal"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `occupied_in_range`'s whole reason to exist over a chunk-box scan:
+    /// real Euclidean distance, not the padded chunk bounding box the load
+    /// itself uses. Four pairwise-distinct positions, each excluded by a
+    /// *different* one of the three filters, so no single assertion could
+    /// pass by accident:
+    ///
+    /// - `inside`: occupied `home`, 30 blocks out — must be returned.
+    /// - `far`: occupied `home`, inside the padded chunk box
+    ///   (`chunk_radius = 64/16 + 1 = 5` chunks covers it) but its real
+    ///   distance is `sqrt(60² + 60²) ≈ 84.9 > 64` — proves the query filters
+    ///   by real distance, not merely by which chunks got loaded.
+    /// - `unoccupied`: a `home` well inside 64 blocks that was never
+    ///   claimed — excluded by the `Occupancy::IsOccupied` filter.
+    /// - `wrong_type`: an occupied `nether_portal` a few blocks from centre —
+    ///   excluded by the type predicate.
+    #[test]
+    fn occupied_in_range_filters_by_real_distance_type_and_occupancy() {
+        let dir = tempdir("occupied-in-range");
+        let storage = PoiStorage::new(&dir, Dimension::Overworld).expect("create");
+
+        let center = BlockPos::new(0, 70, 0);
+        let inside_pos = BlockPos::new(30, 70, 0);
+        let far_pos = BlockPos::new(60, 70, 60);
+        let unoccupied_pos = BlockPos::new(10, 70, -20);
+        let wrong_type_pos = BlockPos::new(5, 70, 5);
+
+        let mut to_save: HashMap<(i32, i32), PoiChunk> = HashMap::new();
+        let mut place = |pos: BlockPos, ty: ResourceKey, claim: bool| {
+            let cx = pos.x.div_euclid(16);
+            let cz = pos.z.div_euclid(16);
+            let mut record = PoiRecord::new(pos, ty);
+            if claim {
+                assert!(record.acquire_ticket(), "test fixture: type must have a ticket to claim");
+            }
+            let chunk = to_save.entry((cx, cz)).or_insert_with(PoiChunk::default);
+            let section = chunk
+                .sections
+                .entry(pos.y.div_euclid(16))
+                .or_insert_with(PoiSection::new);
+            assert!(section.insert_record(record));
+        };
+        place(inside_pos, home_type(), true);
+        place(far_pos, home_type(), true);
+        place(unoccupied_pos, home_type(), false);
+        place(wrong_type_pos, portal_type(), false);
+
+        let written = storage.save(&to_save).expect("save");
+        assert_eq!(written, 4);
+
+        let found = storage
+            .occupied_in_range(|t| t.path() == "home", center, 64, Occupancy::IsOccupied)
+            .expect("query");
+        assert_eq!(
+            found,
+            vec![inside_pos],
+            "only the occupied home strictly inside the real 64-block radius must come back"
+        );
+
+        // Control: `Occupancy::Any` still respects distance and type, so the
+        // three exclusions above are the filters at work, not an artifact of
+        // the query returning nothing regardless of input.
+        let mut any = storage
+            .occupied_in_range(|t| t.path() == "home", center, 64, Occupancy::Any)
+            .expect("query");
+        any.sort_by_key(|p| (p.x, p.y, p.z));
+        let mut expected_any = vec![inside_pos, unoccupied_pos];
+        expected_any.sort_by_key(|p| (p.x, p.y, p.z));
+        assert_eq!(
+            any, expected_any,
+            "control: both in-range homes exist regardless of occupancy"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

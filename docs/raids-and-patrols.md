@@ -24,8 +24,8 @@ delay vanilla uses) once every wave is spawned and cleared. A real boss bar
 raider of each wave is marked *captain* (`MobSim::raid_captain`), the data-only half of
 the ominous-banner marker.
 
-**Not reachable without an edit outside this crate's owned files, or without a wholly
-new primitive this crate does not have anywhere** (see §5): **the trigger.**
+**Not reachable without an edit outside this crate's owned files, or without a
+primitive that did not exist until recently** (see §5): **the trigger.**
 `MobSim::start_raid` is real, tested, and **has zero production callers** — the same
 "code exists, nothing calls it" shape `docs/pillager-patrols.md` itself warns readers
 to check for. Nothing in this tree currently:
@@ -35,13 +35,23 @@ to check for. Nothing in this tree currently:
 * converts Bad Omen into `minecraft:raid_omen` on that crossing and starts a raid when
   it expires.
 
-The third item is a small, real hunk (§5). The **second** is not: `poi_storage.rs`'s
-own module doc already states *"`PoiManager.isVillageCenter`, not ported here — no
-village distance tracker exists in this codebase"* — this is a missing primitive, not
-a missing call site, and building it is bigger than this unit's scope. Everything in
-§2–4 below is real and works the moment something supplies a raid centre and starts
-one; a debug/admin path (a `/raid start` command, say) could exercise it today with no
-further work.
+**The real vanilla trigger is narrower than `isVillageCenter` suggests, and this
+doc previously named the wrong primitive.** Traced through the decompile:
+`RaidOmenMobEffect.applyEffectTick` fires once, on the omen's last tick, and calls
+`Raids.createOrExtendRaid(player, raidPosition)` — whose own village check is a
+**flat 64-block radius query** (`PoiManager.getInRange`, every occupied
+`#village`-tagged POI within 64 blocks, averaged into a raid centre), not
+`isVillageCenter`/`sectionsToVillage`'s section-distance-propagation tracker (a
+different subsystem this trigger path never touches). `poi_storage.rs`'s
+`occupied_in_range` (see `docs/point-of-interest-storage.md`) is now that primitive —
+built and tested. What still blocks the trigger is **not** a missing spatial query
+any more; it is that `#village` POIs (beds) are never *occupied*, because villager
+bed-claiming does not exist anywhere in this codebase (confirmed while building
+golem-summon-on-hurt: `golemSpawnConditionsMet`'s `LAST_SLEPT` gate has nothing to
+read either, for the identical reason) — see §5 for the exact remaining shape.
+Everything in §2–4 below is real and works the moment something supplies a raid
+centre and starts one; a debug/admin path (a `/raid start` command, say) could
+exercise it today with no further work.
 
 ---
 
@@ -62,10 +72,12 @@ raid could not show.
 in this crate's roster (`docs/plans/villager-economy.md`'s own scope note excludes
 them from V10 for the same reason) — not transcribed here rather than silently wrong.
 
-**Not ported:** `Raid.RaidStatus.LOSS` (losing the village) — needs the same missing
-village-distance primitive §1 names, so this port's raids can only reach `Ongoing` or
-`Victory`, never a defeat. The 48000-tick (40-minute) overall timeout is ported, so an
-abandoned raid does eventually stop being tracked either way.
+**Not ported:** `Raid.RaidStatus.LOSS` (losing the village) — vanilla's own check is
+`isVillageCenter`/`sectionsToVillage`'s section-distance tracker, a genuinely
+different subsystem from the trigger's flat radius query (§1) and still unbuilt
+here, so this port's raids can only reach `Ongoing` or `Victory`, never a defeat.
+The 48000-tick (40-minute) overall timeout is ported, so an abandoned raid does
+eventually stop being tracked either way.
 
 ---
 
@@ -97,17 +109,35 @@ nothing this unit could set even if it owned the wire path.
 
 ## 5. Known gaps needing work outside this file's ownership
 
-* **The Bad-Omen → Raid-Omen → raid-start trigger**, real but narrow:
-  `raid::absorb_raid_omen(existing_level, amplifier)` is the pure arithmetic
-  (`Raid.absorbRaidOmen`, clamped to `1..=5`) already written and tested; wiring it
-  needs `server.rs`'s per-connection `ActiveEffects` to notice `minecraft:bad_omen`,
-  remove it, apply `minecraft:raid_omen` at the new level, and call
-  `MobSim::start_raid` when that effect's duration reaches zero. All of that state
-  lives in `server.rs`, off limits to this change.
-* **Village detection**, real and *not* narrow: nothing in this codebase answers "is
-  this position inside a village" (`poi_storage.rs`'s own doc says so). The trigger
-  above cannot be completed without it — a village-distance/bell-cluster primitive is
-  a prerequisite, not a brokered hunk.
+* **`PoiStorage::occupied_in_range` — landed.** The spatial half of the trigger
+  (§1's corrected finding) now exists: `poi_storage.rs`'s
+  `occupied_in_range(type_predicate, center, radius, occupancy)` is
+  `PoiManager.getInRange`, tested against a fixture that separately exercises its
+  distance, type and occupancy filters. See `docs/point-of-interest-storage.md`.
+* **Villager bed-claiming — still missing, and it is the real remaining blocker.**
+  `#village`-tagged POIs (beds) are never `Occupancy::IsOccupied` because no
+  villager in this codebase ever claims a bed at all — confirmed while building
+  golem-summon-on-hurt (`golemSpawnConditionsMet`'s `LAST_SLEPT` gate has nothing
+  to read from either, the identical gap). Querying `occupied_in_range` today
+  against real POI data would find zero occupied beds regardless of how close a
+  player stands to a real village, which is why this was not attempted as a
+  stand-in/approximate detector (e.g. counting nearby claimed workstations only)
+  — it would under-detect every real village and risk shipping an island that
+  looks plausible and never fires. This is villager work/rest-schedule territory
+  (issue #231's remainder), in `mobs/villager/`, off limits to whoever does not
+  own that subtree.
+* **The Bad-Omen → Raid-Omen → raid-start trigger**, real but narrow, and now
+  fully specified: `raid::absorb_raid_omen(existing_level, amplifier)` is the pure
+  arithmetic (`Raid.absorbRaidOmen`, clamped to `1..=5`) already written and
+  tested. The remaining wiring, once bed-claiming exists, is mechanical: (1)
+  `server.rs`'s per-connection `ActiveEffects` notices `minecraft:bad_omen`
+  expiring, removes it, and applies `minecraft:raid_omen` at the new level,
+  recording the player's position (`player.getRaidOmenPosition()`'s equivalent);
+  (2) on `minecraft:raid_omen`'s own expiry, call a new `MobSim`-side entry point
+  that runs `occupied_in_range(#village predicate, recorded_position, 64,
+  Occupancy::IsOccupied)`, averages the results into a centre, and calls the
+  already-built `MobSim::start_raid(center, difficulty, omen_level)` when the
+  query returns anything. All of that state lives in `server.rs`.
 * **Granting Bad Omen from an ominous bottle.** `item_use.rs` already lists
   `ominous_bottle` among the drinkable-not-food items, but its `Consumable.onConsume`
   effect list (the actual Bad Omen grant) is explicitly unmodelled — the same disclosed
@@ -127,8 +157,9 @@ nothing this unit could set even if it owned the wire path.
 * **Exercising a raid today** without the missing trigger: call `MobSim::start_raid`
   directly (a debug command, a test) — everything downstream (waves, boss bar,
   captain, victory) already runs.
-* **Wiring the real trigger** is exactly §5's first two bullets, in that dependency
-  order (village detection before the omen-expiry call site can mean anything).
+* **Wiring the real trigger** is exactly §5's bullets, in dependency order:
+  villager bed-claiming first (so `occupied_in_range` ever finds an occupied
+  `#village` POI), then the mechanical `ActiveEffects`/`MobSim` wiring last.
 * **Adding ravager/evoker/witch waves** slots in once those species exist in the
   roster: add their own `spawnsPerWaveBeforeBonus` arrays (real data, already known —
   see `Raid.java`'s `RaiderType` enum) next to `PILLAGER_BASE_SPAWNS`/
@@ -156,5 +187,7 @@ fixed seed.
   boss-bar publish path, already built for the dragon/wither fights.
 * `.cache/mc/26.2/src/net/minecraft/world/entity/raid/{Raid,Raids}.java`,
   `.../world/effect/RaidOmenMobEffect.java`.
+* `crate::poi_storage::PoiStorage::occupied_in_range` — the spatial half of the
+  real trigger (§1, §5); see `docs/point-of-interest-storage.md`.
 * `docs/pillager-patrols.md` — the patrol half of #241, and the equipment-slot gap
   this unit's captain marker inherits rather than duplicates.
