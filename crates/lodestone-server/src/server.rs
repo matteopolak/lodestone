@@ -11083,6 +11083,19 @@ where
                     )
                     .await?;
                 }
+                // `AbstractHorse.doPlayerRide`: `interact_horse`'s empty-handed arm
+                // on a tamed adult already recorded the mount in `MobSim` (its own
+                // doc names this exact send as the caller's cue) — this is the
+                // client's only way to learn it is aboard, the same
+                // whole-passenger-list handoff the boat/minecart arms above use.
+                if outcome == Some(crate::mobs::InteractOutcome::Mounted) {
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_set_passengers(entity_id, &[LOCAL_PLAYER_ENTITY_ID]),
+                    )
+                    .await?;
+                }
                 // Vanilla consumes through `usePlayerItem`, a no-op in creative
                 // (`Player.hasInfiniteMaterials`). A sit toggle is
                 // `InteractionResult.SUCCESS.withoutItem()` and consumes nothing,
@@ -11297,11 +11310,24 @@ where
             pitch,
         } => {
             // Pitch is decoded and dropped: `AbstractBoat` never writes `xRot`, and
-            // a land mount (which takes half its rider's) is not modelled as a
-            // vehicle here. Named rather than `_` so the field's existence is
+            // a mounted mob only ever reports half its rider's (unmodelled — see
+            // `apply_mob_move`). Named rather than `_` so the field's existence is
             // visible at the one place that could use it.
             let _ = pitch;
-            mobs.with(|sim| sim.apply_vehicle_move(player_entity_id, position, yaw));
+            // A player can only be aboard one of the two maps at a time
+            // (`mount_mob` and `mount_vehicle` are separate "one map's worry"
+            // occupancy rules — see `mount_mob`'s own doc), so trying the mob map
+            // only when the vehicle map refused is exact rather than a guess:
+            // vanilla's `Player.isClientAuthoritative()` does not distinguish a
+            // boat from a horse, and this is the one wire packet both share.
+            mobs.with(|sim| {
+                if sim
+                    .apply_vehicle_move(player_entity_id, position, yaw)
+                    .is_none()
+                {
+                    sim.apply_mob_move(player_entity_id, position, yaw);
+                }
+            });
         }
         ServerBound::PlayerInput { sprint } => {
             *sprinting = sprint;
