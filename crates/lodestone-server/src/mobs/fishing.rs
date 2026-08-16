@@ -257,12 +257,21 @@ impl<'w> MobSim<'w> {
         luck: i32,
         lure_speed: i32,
     ) -> i32 {
+        // `Mth.cos`/`Mth.sin` are a 65,536-entry lookup table, not
+        // `f32::cos`/`f32::sin` — see `lodestone_physics::mth`'s own doc. The
+        // difference is not cosmetic here: at `pitch == 90.0` (straight down)
+        // `x_cos` sits exactly on the table's quantized zero, and vanilla's
+        // table gives it a *consistent* sign (`-0.0`, driving `base.y`
+        // negative i.e. downward) where the standard library's transcendental
+        // `cos` lands on the wrong side of zero by float noise, flipping
+        // `base.y`'s clamp to `+5.0` and launching every straight-down cast
+        // skyward instead of into the water.
         let y_rot = yaw.to_radians();
         let x_rot = pitch.to_radians();
-        let y_cos = (-y_rot - std::f32::consts::PI).cos();
-        let y_sin = (-y_rot - std::f32::consts::PI).sin();
-        let x_cos = -(-x_rot).cos();
-        let x_sin = (-x_rot).sin();
+        let y_cos = lodestone_physics::mth::cos(f64::from(-y_rot - std::f32::consts::PI));
+        let y_sin = lodestone_physics::mth::sin(f64::from(-y_rot - std::f32::consts::PI));
+        let x_cos = -lodestone_physics::mth::cos(f64::from(-x_rot));
+        let x_sin = lodestone_physics::mth::sin(f64::from(-x_rot));
         let spawn = Vec3::new(
             player_pos.x - f64::from(y_sin) * 0.3,
             eye_y,
@@ -490,18 +499,47 @@ impl<'w> MobSim<'w> {
             if !is_water && !b.on_ground {
                 b.velocity = Vec3::new(b.velocity.x, b.velocity.y - 0.03, b.velocity.z);
             }
+            let start_y = b.position.y;
             b.position = Vec3::new(b.position.x + b.velocity.x, b.position.y + b.velocity.y, b.position.z + b.velocity.z);
             // Settling: a coarse "am I resting on solid ground" read off the
-            // cell directly below the new position, standing in for
-            // vanilla's full collision sweep — this sim's item-settling code
-            // (`items.rs`) does the real swept version for dropped items;
-            // duplicating it here for a bobber that spends its whole
+            // cell(s) crossed between the old and new position, standing in
+            // for vanilla's full collision sweep — this sim's item-settling
+            // code (`items.rs`) does the real swept version for dropped
+            // items; duplicating it here for a bobber that spends its whole
             // interesting life in water was not worth the borrow-splitting
             // cost.
+            //
+            // The one piece this coarse version cannot skip: a bobber whose
+            // per-tick fall exceeds a shallow pond's (or a single-block
+            // platform's) depth — a straight-down cast is the case that hits
+            // it — used to tunnel straight through the floor into the void
+            // below, because a version of this code that only ever *read*
+            // the single cell below the already-moved position can miss a
+            // thin floor entirely when the fall crosses it in one tick.
+            // Scan every integer Y cell the fall passed through and stop at
+            // the topmost solid one, exactly as vanilla's real `move()`
+            // would have — a one-block floor can no longer be skipped over.
             let below_x = b.position.x.floor() as i32;
-            let below_y = (b.position.y - 0.01).floor() as i32;
             let below_z = b.position.z.floor() as i32;
-            b.on_ground = world.is_solid(below_x, below_y, below_z) && b.velocity.y <= 0.0;
+            let mut landed = false;
+            if b.velocity.y <= 0.0 {
+                let top = (start_y - 0.01).floor() as i32;
+                let bottom = (b.position.y - 0.01).floor() as i32;
+                let mut y = top;
+                while y >= bottom {
+                    if world.is_solid(below_x, y, below_z) {
+                        let surface = f64::from(y + 1);
+                        if b.position.y < surface {
+                            b.position = Vec3::new(b.position.x, surface, b.position.z);
+                        }
+                        b.velocity = Vec3::new(b.velocity.x, 0.0, b.velocity.z);
+                        landed = true;
+                        break;
+                    }
+                    y -= 1;
+                }
+            }
+            b.on_ground = landed;
             if b.state == FishHookState::Flying && b.on_ground {
                 b.velocity = Vec3::new(0.0, 0.0, 0.0);
             }
