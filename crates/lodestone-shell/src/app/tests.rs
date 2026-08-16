@@ -2511,21 +2511,50 @@ fn pressing_play_reaches_a_running_integrated_server() {
         }
     };
 
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // The loop below is bounded by *state reached* — `logged_in && chunks >
+    // 0`, or a definitive `fatal` answer from the session itself — never by
+    // racing the clock in the ordinary case. `deadline` only exists as a
+    // backstop against a genuine hang (no update of any kind, ever), so it
+    // must be generous rather than tight: this test spins up a real
+    // integrated server and waits for real worldgen on a background thread,
+    // and that thread measurably starves for CPU when several agents are
+    // running concurrent `cargo` builds in this repo. The previous 30 s
+    // budget was measured taking 19.11 s to pass *alone* on an otherwise
+    // quiet machine (64% of the budget with zero contention), which is
+    // exactly `CLAUDE.md`'s "a timing gathered under load is attributed to
+    // the wrong cause" shape — it was failing from contention, not from a
+    // regression. 240 s (matching `tests/singleplayer_persistence.rs`'s
+    // `SESSION_DEADLINE` and `tests/singleplayer_terrain_arrives.rs`'s own
+    // `DEADLINE` — the same class of test, already using this budget) costs
+    // a healthy run nothing, because the loop still exits the instant
+    // success is observed; it only changes the outcome for a run that was
+    // previously timing out on a busy machine despite the session being
+    // perfectly healthy.
+    let deadline = Instant::now() + Duration::from_secs(240);
     let mut logged_in = false;
     let mut chunks = 0usize;
     let mut errors: Vec<String> = Vec::new();
-    while Instant::now() < deadline && !(logged_in && chunks > 0) {
+    let mut fatal = false;
+    while Instant::now() < deadline && !(logged_in && chunks > 0) && !fatal {
         for update in net.poll() {
             match update {
                 crate::net::NetUpdate::LoggedIn { .. } => logged_in = true,
                 crate::net::NetUpdate::Chunk { .. } => chunks += 1,
                 // Collected rather than ignored: an `Error`/`Disconnected`
                 // here is the actual diagnosis, and without it the failure
-                // message would only say "timed out".
-                crate::net::NetUpdate::Error(e) => errors.push(e),
+                // message would only say "timed out". Also a *definitive*
+                // answer, unlike silence — once the session itself has
+                // reported failure, waiting out the rest of a now-generous
+                // backstop cannot produce more evidence, so `fatal` ends the
+                // loop after this batch finishes draining rather than at
+                // `deadline`.
+                crate::net::NetUpdate::Error(e) => {
+                    errors.push(e);
+                    fatal = true;
+                }
                 crate::net::NetUpdate::Disconnected(reason) => {
                     errors.push(format!("disconnected: {reason:?}"));
+                    fatal = true;
                 }
                 _ => {}
             }
@@ -2545,6 +2574,59 @@ fn pressing_play_reaches_a_running_integrated_server() {
     assert!(
         errors.is_empty(),
         "the session reported errors while starting: {errors:?}"
+    );
+}
+
+/// **The islands sweep's finding, made permanent**: `sim::build` used to
+/// insert `Profile(PhysicsProfile::mc_1_21())` unconditionally, so a 1.8.9
+/// (`v47`) session ran modern movement physics with no protocol-family
+/// selection at all — a correct function (`PhysicsProfile::mc_1_8`) fed a
+/// constant by its producer, `CLAUDE.md`'s most common defect shape. The fix
+/// threads `config.protocol` through `lodestone_registry::
+/// physics_profile_for_protocol`, the one crate allowed to know which
+/// protocol numbers belong to which version family.
+///
+/// This is the discriminating half of that regression test, gated on `v47`
+/// specifically because it is not the default-compiled family: with only
+/// `live` (`v770`) enabled, every protocol resolves to `mc_1_21()`, which is
+/// *also* what the old hardcoded constant produced — an input on which the
+/// old and new code agree is not a test (`CLAUDE.md`'s "world" vacuous-test
+/// species). `v47`'s correct answer differs from that constant, so this
+/// assertion actually fails on the pre-fix code.
+#[cfg(feature = "v47")]
+#[test]
+fn physics_profile_threads_the_configured_protocol_through_the_session() {
+    // `render_distance: 2`, matching `pacing_sim`'s own reasoning: the
+    // smallest span that still builds a real demo world, so this stays a
+    // cheap unit test rather than paying for a full render distance's worth
+    // of worldgen just to read back one resource.
+    let sim = Sim::with_demo_world(Config {
+        mode: Mode::Headless,
+        render_distance: 2,
+        protocol: 47,
+        ..Config::default()
+    });
+    assert_eq!(
+        sim.profile(),
+        lodestone_physics::PhysicsProfile::mc_1_8(),
+        "a v47 (1.8.9) session must run the 1.8 physics profile, not the \
+         modern default every construction site used to hardcode"
+    );
+}
+
+/// The companion baseline: the default-compiled family (`v770`, 26.2) must
+/// still resolve to the modern profile — unchanged behaviour for the only
+/// family that was ever actually joined before this seam existed. Weak on
+/// its own (the pre-fix hardcoded constant satisfies it too, exactly the
+/// coincidence [`physics_profile_threads_the_configured_protocol_through_the_session`]'s
+/// own doc names), but it is cheap, always runs, and catches the mapping
+/// table returning the wrong default or panicking on the ordinary path.
+#[test]
+fn physics_profile_defaults_to_the_modern_profile_for_the_default_protocol() {
+    let sim = pacing_sim();
+    assert_eq!(
+        sim.profile(),
+        lodestone_physics::PhysicsProfile::mc_1_21()
     );
 }
 
