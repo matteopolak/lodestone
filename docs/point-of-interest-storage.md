@@ -77,6 +77,30 @@ record anyway** — `poi_storage.rs`'s own unit test
 `an_occupied_poi_is_excluded_from_a_has_space_query` exists because a
 found-only assertion would pass under either implementation.
 
+### `occupied_in_range` — a real spatial query, not just per-chunk lookup
+
+`PoiStorage::occupied_in_range(type_predicate, center, radius, occupancy)` is
+`PoiManager.getInRange`: every POI matching `type_predicate`/`occupancy`
+whose block position is within `radius` blocks of `center`, by real Euclidean
+distance. Everything above it (`load_chunk`/`load_all`/`load_area`) answers
+"what is in this chunk/area"; this is the first method that answers "what is
+near this point", loading a chunk-column box padded one extra chunk past
+`radius / 16` (a block-radius query can reach past a naively-sized chunk box)
+and then filtering the padding back out by real distance — see the module's
+own test, `occupied_in_range_filters_by_real_distance_type_and_occupancy`,
+for a fixture with a POI *inside* the padded chunk box but outside the real
+radius, proving the distance filter (not merely the chunk load) is what
+excludes it.
+
+This exists for issue #241 (raids): the real vanilla raid trigger
+(`RaidOmenMobEffect.applyEffectTick` → `Raids.createOrExtendRaid`) is exactly
+this query — a flat 64-block radius over occupied `#village`-tagged POIs —
+**not** the `isVillageCenter`/`sectionsToVillage` section-distance tracker a
+first look at this problem expects. See `docs/raids-and-patrols.md` for what
+still has to exist before a raid trigger can call it (villager bed-claiming,
+so `#village` POIs are ever occupied at all) and where the eventual call
+site belongs.
+
 ### No identity-clearing pass, unlike entities
 
 `entity_storage.rs`'s hardest problem is a mob *moving* between chunks, solved
