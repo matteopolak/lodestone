@@ -35,13 +35,25 @@ is explicitly not:
 | offline play still sends unsigned | done — `chat_session` stays `None` without an `auth_session` (or if the key fetch fails), and `maybe_sign_chat` passes `SendChat` through unchanged in that case; every pre-existing `SendChat` test in `lodestone-client`'s `tests/driver.rs` exercises exactly that path and stayed green |
 | a real server accepting a signed message | **still unverified** — reaching it needs an *online-mode* server and a real Mojang-issued key, and the local oracle runs offline. See "The chat-validation kick" below for what a real server *did* tell us. |
 
-## The chat-validation kick, and why signing is off by default
+## The chat-validation kick, and why signing is on by default again
 
-**Signing is gated behind `LODESTONE_SECURE_CHAT` and defaults to off**
-([`SECURE_CHAT_ENV`] in `lodestone-client/src/driver.rs`). It was turned on by
-default when this first landed, and a real server disconnected the repo owner
-with *"Chat message validation failure"*. That mitigation is separate from the
-fix below and is still in force.
+**Signing defaults to on; `LODESTONE_SECURE_CHAT=0` opts out**
+([`SECURE_CHAT_ENV`] in `lodestone-client/src/driver.rs`). Note the gate is
+written so that an unset *or unparseable* value means **enabled** — a typo in
+the variable degrades to the default rather than silently disabling signing,
+which is the direction that fails safely for a feature whose whole purpose is
+to be exercised.
+
+It was on by default when this first landed, a real server disconnected the
+repo owner with *"Chat message validation failure"*, and it was turned off as a
+mitigation while the cause was unknown. **The cause is now known and fixed —
+see below — so the mitigation has been lifted.**
+
+The escape hatch stays, and the reason is worth keeping: this failure mode is a
+**disconnect**, not a degraded message. An unsigned message a server merely
+marks unverified is strictly better than a signed one it rejects outright, so a
+server whose enforcement we mismatch is unplayable until signing can be turned
+off from outside the binary.
 
 **The fault was not in the signature.** `build_signature_payload` was
 re-derived independently from `PlayerChatMessage.updateSignature` →
