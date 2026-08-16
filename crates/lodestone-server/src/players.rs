@@ -212,6 +212,13 @@ struct Inner {
     /// numbers, so trimming the front of the window cannot silently rewind
     /// a reader — it makes the gap detectable instead.
     chat_base: u64,
+    /// The arm-swing broadcast log. Same cursor-over-append-only-log shape
+    /// as `chat` and for the identical reason (every connection must see
+    /// every swing, not just whichever connection's timer drains first) —
+    /// see [`PlayerRegistry::swing`].
+    swings: VecDeque<SwingEvent>,
+    /// Sequence number of `swings.front()`, mirroring `chat_base`.
+    swings_base: u64,
     /// Per-player queues of command effects awaiting delivery.
     ///
     /// **Directed, and drained rather than cursored** — the two properties that
@@ -263,6 +270,23 @@ impl ChatLine {
 /// loses the overflow rather than the whole window, because cursors are
 /// absolute sequence numbers rather than indices.
 const CHAT_LOG_CAPACITY: usize = 256;
+
+/// One arm-swing, as broadcast to every other connection (`ServerBound::Swing`'s
+/// own doc comment explains why the sender itself is excluded at the read
+/// site rather than at the write site — the log has no way to know who will
+/// read it next).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwingEvent {
+    /// The swinging entity's network id.
+    pub entity_id: i32,
+    /// `0` main hand, `1` off hand.
+    pub hand: u8,
+}
+
+/// How many swing events the shared log retains. A swing is far more
+/// frequent than a chat line, so this is a larger window than
+/// [`CHAT_LOG_CAPACITY`] for the same 50 ms-drain-interval reasoning.
+const SWING_LOG_CAPACITY: usize = 1024;
 
 impl PlayerRegistry {
     /// A fresh, empty registry.
@@ -347,6 +371,50 @@ impl PlayerRegistry {
     pub fn chat_cursor(&self) -> u64 {
         let inner = self.lock();
         inner.chat_base + inner.chat.len() as u64
+    }
+
+    /// Appends one arm-swing to the shared broadcast log (`ServerBound::Swing`).
+    ///
+    /// Unlike [`say`](Self::say), the *reader* excludes the sender
+    /// (`swings_since`'s callers filter `entity_id != player_entity_id`) —
+    /// vanilla's own `sendToTrackingPlayers` never sends to the swinger,
+    /// which already animates locally the instant it sent the packet. The
+    /// log itself carries the sender so each reader can make that
+    /// per-connection decision; it does not decide for them.
+    pub fn swing(&self, entity_id: i32, hand: u8) {
+        let mut inner = self.lock();
+        inner.swings.push_back(SwingEvent { entity_id, hand });
+        while inner.swings.len() > SWING_LOG_CAPACITY {
+            inner.swings.pop_front();
+            inner.swings_base += 1;
+        }
+    }
+
+    /// Every swing appended since `cursor`, advancing `cursor` past them.
+    /// Same absolute-sequence-number shape as [`chat_since`](Self::chat_since).
+    pub fn swings_since(&self, cursor: &mut u64) -> Vec<SwingEvent> {
+        let inner = self.lock();
+        if *cursor < inner.swings_base {
+            *cursor = inner.swings_base;
+        }
+        let end = inner.swings_base + inner.swings.len() as u64;
+        if *cursor >= end {
+            *cursor = end;
+            return Vec::new();
+        }
+        let start = (*cursor - inner.swings_base) as usize;
+        let events: Vec<SwingEvent> = inner.swings.iter().skip(start).copied().collect();
+        *cursor = end;
+        events
+    }
+
+    /// The sequence number one past the newest swing — where a freshly
+    /// joined connection's cursor should start, mirroring
+    /// [`chat_cursor`](Self::chat_cursor).
+    #[must_use]
+    pub fn swing_cursor(&self) -> u64 {
+        let inner = self.lock();
+        inner.swings_base + inner.swings.len() as u64
     }
 
     /// Registers a connection's player and returns the ticket that owns the
@@ -867,5 +935,99 @@ mod tests {
     #[test]
     fn a_plain_source_has_no_registry() {
         assert!(NoEntities.players().is_none());
+    }
+
+    /// A fresh connection's cursor starts at the log's current end, exactly
+    /// like `chat_cursor` — it must not replay a swing that happened before
+    /// it joined.
+    #[test]
+    fn swing_cursor_starts_at_the_current_end() {
+        let registry = PlayerRegistry::new();
+        registry.swing(1, 0);
+        registry.swing(1, 0);
+        let mut cursor = registry.swing_cursor();
+        assert_eq!(
+            registry.swings_since(&mut cursor),
+            Vec::new(),
+            "a cursor started at the current end must see none of the prior swings"
+        );
+    }
+
+    /// Every connection's cursor sees every swing appended after it started —
+    /// including entries from more than one swinger, pairwise-distinct so a
+    /// transposition between `entity_id` and `hand` cannot survive.
+    #[test]
+    fn swings_since_returns_every_entry_in_order() {
+        let registry = PlayerRegistry::new();
+        let mut cursor = registry.swing_cursor();
+        registry.swing(11, 0);
+        registry.swing(22, 1);
+        let events = registry.swings_since(&mut cursor);
+        assert_eq!(
+            events,
+            vec![
+                SwingEvent {
+                    entity_id: 11,
+                    hand: 0
+                },
+                SwingEvent {
+                    entity_id: 22,
+                    hand: 1
+                },
+            ]
+        );
+        // The cursor has advanced past both: a second read with the same
+        // cursor sees nothing new.
+        assert_eq!(registry.swings_since(&mut cursor), Vec::new());
+    }
+
+    /// Two independent cursors over the same log each see the full backlog
+    /// from their own starting point — proving this is a shared broadcast log
+    /// (every reader sees every entry) and not a single-consumer drain (only
+    /// the first reader sees anything).
+    #[test]
+    fn two_independent_cursors_each_see_the_same_swing() {
+        let registry = PlayerRegistry::new();
+        let mut alice_cursor = registry.swing_cursor();
+        let mut bob_cursor = registry.swing_cursor();
+        registry.swing(7, 1);
+        assert_eq!(
+            registry.swings_since(&mut alice_cursor),
+            vec![SwingEvent {
+                entity_id: 7,
+                hand: 1
+            }]
+        );
+        assert_eq!(
+            registry.swings_since(&mut bob_cursor),
+            vec![SwingEvent {
+                entity_id: 7,
+                hand: 1
+            }],
+            "a second, independent cursor must still see the same entry"
+        );
+    }
+
+    /// The retention window drops the oldest entries and snaps a fallen-behind
+    /// cursor forward rather than rewinding — the same deliberate-loss shape
+    /// `chat_since`'s own doc comment describes, proven here by actually
+    /// overflowing the window rather than asserting the constant.
+    #[test]
+    fn a_cursor_that_fell_behind_the_window_is_snapped_forward_not_rewound() {
+        let registry = PlayerRegistry::new();
+        let mut cursor = registry.swing_cursor();
+        for i in 0..(SWING_LOG_CAPACITY as i32 + 5) {
+            registry.swing(i, 0);
+        }
+        let events = registry.swings_since(&mut cursor);
+        assert_eq!(
+            events.len(),
+            SWING_LOG_CAPACITY,
+            "the overflowed entries must be dropped, not rewound into view"
+        );
+        assert_eq!(
+            events[0].entity_id, 5,
+            "the oldest *retained* entry, after the first 5 were evicted"
+        );
     }
 }
