@@ -423,9 +423,4 @@ impl DamageType {
         DAMAGE_TYPE_TAG_MASKS[self.index()] & tag.bit() != 0
     }
 
-    /// The raw resolved tag mask (bit `i` = `ALL_DAMAGE_TYPE_TAGS[i]`).
-    #[must_use]
-    pub fn tag_mask(self) -> u64 {
-        DAMAGE_TYPE_TAG_MASKS[self.index()]
-    }
 }
