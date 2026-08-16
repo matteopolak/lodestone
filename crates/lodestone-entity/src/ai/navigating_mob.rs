@@ -31,7 +31,8 @@ use super::goal::GoalSelector;
 use super::mob::{EatenBlock, MobController, ProjectileLaunch, distance_sqr};
 use crate::brain::BrainMob;
 use crate::pathfinding::{
-    BlockCues, MobShape, PathFinder, PathNavigator, PathParams, PathStart, PathType, PathWorld,
+    Aabb, BlockCues, MobShape, PathFinder, PathNavigator, PathParams, PathStart, PathType,
+    PathWorld,
 };
 
 /// Vanilla `Animal::setInLove`'s love-mode duration, in ticks
@@ -1391,6 +1392,33 @@ impl<'w> NavigatingMob<'w> {
         landed
     }
 
+    /// The y coordinate a mob standing at `pos` should rest at: the top of
+    /// the first solid or fluid column beneath its feet, searched downward
+    /// from the block it currently occupies. This is [`step_vertical`]'s
+    /// "no active waypoint" substitute for a pathfinder-supplied target —
+    /// see [`advance`](Self::advance)'s no-waypoint branch for why one is
+    /// needed at all. Bounded by [`PathWorld::min_y`], so a mob over the
+    /// void falls until it passes the world floor rather than looping
+    /// forever.
+    fn ground_below(&self, pos: Vec3) -> f64 {
+        let x = pos.x.floor() as i32;
+        let z = pos.z.floor() as i32;
+        let min_y = self.world.min_y();
+        let mut y = pos.y.floor() as i32;
+        while y > min_y {
+            let below = y - 1;
+            let top = self.world.collision_top(x, below, z);
+            if top > 0.0 {
+                return f64::from(below) + top;
+            }
+            if self.world.is_water(x, below, z) {
+                return f64::from(below) + 1.0;
+            }
+            y = below;
+        }
+        f64::from(min_y)
+    }
+
     /// Advances the follower one step toward the current waypoint. Public so a
     /// caller running its own goal loop can drive movement explicitly.
     pub fn advance(&mut self) {
@@ -1457,7 +1485,32 @@ impl<'w> NavigatingMob<'w> {
         }
         let old = self.pos;
         let Some(waypoint) = self.navigator.tick(self.pos) else {
-            self.velocity = Vec3::new(0.0, 0.0, 0.0);
+            // Issue: a mob with no active path used to skip vertical motion
+            // entirely — `self.velocity = 0; return;` with nothing below ever
+            // touching `pos.y`. Every waypoint-following tick already applies
+            // gravity via `step_vertical` above, but the *overwhelming*
+            // majority of a mob's life is spent between paths (idle, waiting
+            // out a goal's cooldown, or with no goal that wants to move at
+            // all — the common case for a target-less hostile), so this early
+            // return meant almost no mob ever fell: one spawned above the
+            // terrain, or standing on a block a player mined out from under
+            // it, simply hung in the air forever. Vanilla's
+            // `LivingEntity.travel` integrates gravity unconditionally every
+            // tick regardless of whether `Mob.getNavigation()` is currently
+            // moving anything; this mirrors that by falling toward the
+            // ground directly beneath the mob using the same
+            // [`step_vertical`] integrator a waypoint-driven fall already
+            // uses, rather than teleporting straight to it.
+            let ground_y = self.ground_below(self.pos);
+            let new_y = Self::step_vertical(
+                self.pos.y,
+                ground_y,
+                f64::from(self.shape.max_up_step),
+                &mut self.fall_speed,
+            );
+            let moved_y = new_y - self.pos.y;
+            self.pos.y = new_y;
+            self.velocity = Vec3::new(0.0, moved_y, 0.0);
             return;
         };
         let dx = waypoint.x - self.pos.x;
@@ -1826,6 +1879,53 @@ impl MobController for NavigatingMob<'_> {
         self.velocity = Vec3::new(0.0, 0.0, 0.0);
         // Fully-qualified: `BrainMob` also declares `stop_navigation`.
         MobController::stop_navigation(self);
+    }
+
+    /// Vanilla `EnderMan::teleport(x, y, z)` + `LivingEntity::randomTeleport`'s
+    /// landing search — see [`MobController::validate_teleport_landing`]'s own
+    /// doc comment for why this lives here rather than inside
+    /// [`teleport_to`](Self::teleport_to). Walks the `(target.x, target.z)`
+    /// column down from `target.y`, same direction and same per-cell test
+    /// [`ground_below`](Self::ground_below) already uses for unpathed gravity
+    /// (a solid or fluid top), except a fluid landing is rejected outright
+    /// here — vanilla's `!isWet` — rather than accepted as a resting surface.
+    fn validate_teleport_landing(&self, target: Vec3) -> Option<Vec3> {
+        let bx = target.x.floor() as i32;
+        let bz = target.z.floor() as i32;
+        let min_y = self.world.min_y();
+        let mut by = target.y.floor() as i32;
+        loop {
+            if by <= min_y {
+                return None;
+            }
+            let top = self.world.collision_top(bx, by, bz);
+            if top > 0.0 {
+                if self.world.is_water(bx, by, bz) {
+                    return None;
+                }
+                let landing_y = f64::from(by) + top;
+                // Vanilla's second-stage `level.noCollision(this) &&
+                // !containsAnyLiquid(...)`: the mob's own footprint at the
+                // landing spot must not overlap a block — e.g. the random
+                // offset landed the feet on solid ground but the body inside
+                // a wall or ceiling above it.
+                let half_width = f64::from(self.shape.width) / 2.0;
+                let height = f64::from(self.shape.height);
+                let footprint = Aabb::new(
+                    target.x - half_width,
+                    landing_y,
+                    target.z - half_width,
+                    target.x + half_width,
+                    landing_y + height,
+                    target.z + half_width,
+                );
+                if self.world.collides(footprint) {
+                    return None;
+                }
+                return Some(Vec3::new(target.x, landing_y, target.z));
+            }
+            by -= 1;
+        }
     }
 
     fn damage_self(&mut self, amount: f32) {
@@ -3748,6 +3848,136 @@ mod tests {
             "same seed => identical random offsets: target delta \
              ({target_delta:?}) must equal position delta ({pos_delta:?}); \
              this is the lockstep the per-mob seed eliminates"
+        );
+    }
+
+    /// A world purpose-built for [`MobController::validate_teleport_landing`]'s
+    /// own gate: a small solid platform at `(x, -1, z)` for `-2..=2` on both
+    /// axes (so most random ±32-block teleport offsets land in open air with
+    /// nothing below them all the way to `min_y`), a waterlogged solid cell
+    /// at `(10, -1, 10)` (solid, but its fluid state is water), and a
+    /// one-block-tall gap at `(3, 3)` — floor at `y=-1`, ceiling at `y=1`,
+    /// too low for a 1.95-tall mob to stand in.
+    struct TeleportWorld;
+
+    impl PathWorld for TeleportWorld {
+        fn min_y(&self) -> i32 {
+            -64
+        }
+        fn base_path_type(&self, x: i32, y: i32, z: i32) -> PathType {
+            if self.collision_top(x, y, z) > 0.0 {
+                PathType::Blocked
+            } else {
+                PathType::Open
+            }
+        }
+        fn collision_top(&self, x: i32, y: i32, z: i32) -> f64 {
+            if (-2..=2).contains(&x) && (-2..=2).contains(&z) && y == -1 {
+                1.0
+            } else if (x, y, z) == (10, -1, 10) {
+                1.0
+            } else if (x, y, z) == (3, -1, 3) || (x, y, z) == (3, 1, 3) {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        fn collides(&self, aabb: Aabb) -> bool {
+            let x0 = aabb.min_x.floor() as i32;
+            let x1 = (aabb.max_x - 1e-7).floor() as i32;
+            let y0 = aabb.min_y.floor() as i32;
+            let y1 = (aabb.max_y - 1e-7).floor() as i32;
+            let z0 = aabb.min_z.floor() as i32;
+            let z1 = (aabb.max_z - 1e-7).floor() as i32;
+            for x in x0..=x1 {
+                for y in y0..=y1 {
+                    for z in z0..=z1 {
+                        if self.collision_top(x, y, z) > 0.0 {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        fn is_water(&self, x: i32, y: i32, z: i32) -> bool {
+            (x, y, z) == (10, -1, 10)
+        }
+    }
+
+    fn teleport_mob(pos: Vec3) -> NavigatingMob<'static> {
+        let world: &'static TeleportWorld = &TeleportWorld;
+        NavigatingMob::new(world, MobShape::land(0.6, 1.95), pos, 0.2, 32, 1)
+    }
+
+    /// The positive case: a candidate whose column has solid, dry ground
+    /// beneath it lands exactly on top of that ground (`y = -1`'s collision
+    /// top `1.0` → feet at `y = 0.0`), not at the raw random `y` vanilla's
+    /// `EnderMan::teleport` only ever proposes as a *candidate*.
+    #[test]
+    fn validate_teleport_landing_snaps_to_the_top_of_solid_ground() {
+        let mob = teleport_mob(Vec3::new(0.0, 0.0, 0.0));
+        let landing = mob
+            .validate_teleport_landing(Vec3::new(1.5, 20.0, -1.5))
+            .expect("the 5x5 platform covers (1, -1) and (-1, ...)... (1.5, -1.5) is inside it");
+        assert!(
+            (landing.y - 0.0).abs() < 1e-9,
+            "must rest on top of the y=-1 platform (collision top 1.0), got y={}",
+            landing.y
+        );
+        assert!(
+            (landing.x - 1.5).abs() < 1e-9 && (landing.z - (-1.5)).abs() < 1e-9,
+            "x/z must be preserved from the candidate: got {landing:?}"
+        );
+    }
+
+    /// **This is the enderman-in-the-sky bug, reproduced and fixed.** A
+    /// candidate over open air with nothing solid anywhere below it down to
+    /// `min_y` must be rejected outright — the pre-fix code (`teleport_to`
+    /// called unconditionally with the raw random offset) would have
+    /// happily placed the mob at `y = 20.0`, floating over nothing.
+    #[test]
+    fn validate_teleport_landing_rejects_a_column_with_no_floor_before_min_y() {
+        let mob = teleport_mob(Vec3::new(0.0, 0.0, 0.0));
+        let landing = mob.validate_teleport_landing(Vec3::new(50.0, 20.0, 50.0));
+        assert_eq!(
+            landing, None,
+            "column (50, 50) has no ground anywhere in this world; a teleport there \
+             must be refused entirely, not resolved to some fallback height"
+        );
+    }
+
+    /// Vanilla's `!isWet` half of `EnderMan::teleport`'s guard: a solid but
+    /// waterlogged landing block must be rejected too, not just an empty
+    /// column.
+    #[test]
+    fn validate_teleport_landing_rejects_a_waterlogged_landing() {
+        let mob = teleport_mob(Vec3::new(0.0, 0.0, 0.0));
+        let landing = mob.validate_teleport_landing(Vec3::new(10.5, 20.0, 10.5));
+        assert_eq!(
+            landing, None,
+            "(10, -1, 10) is solid but waterlogged; vanilla's !isWet check must reject it"
+        );
+    }
+
+    /// Vanilla's `level.noCollision(this)` half: solid ground exists directly
+    /// below the candidate, but the mob's own 1.95-tall footprint does not
+    /// fit under the one-block gap's ceiling at `y = 1`, so the landing must
+    /// be rejected even though the ground check alone would have passed. The
+    /// candidate `y` (`0.5`) is deliberately *inside* the gap — matching
+    /// vanilla's own `getY() + (nextInt(64) - 32)` offset, which can land
+    /// anywhere relative to the mob's current height, not only far above
+    /// everything — so the downward scan reaches the true floor at `y=-1`
+    /// instead of resting on the ceiling itself.
+    #[test]
+    fn validate_teleport_landing_rejects_a_footprint_that_cannot_fit() {
+        let mob = teleport_mob(Vec3::new(0.0, 0.0, 0.0));
+        let landing = mob.validate_teleport_landing(Vec3::new(3.5, 0.5, 3.5));
+        assert_eq!(
+            landing, None,
+            "(3, 3) has ground at y=-1 and a ceiling at y=1, a one-block gap; a \
+             1.95-tall mob cannot stand there, and vanilla's noCollision check must \
+             catch it even though the ground beneath the candidate is solid and dry"
         );
     }
 }

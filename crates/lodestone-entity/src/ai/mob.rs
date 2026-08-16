@@ -609,6 +609,34 @@ pub trait MobController {
         let _ = target;
     }
 
+    /// Vanilla `EnderMan::teleport(x, y, z)` folded with
+    /// `LivingEntity::randomTeleport`'s own landing search: given a raw
+    /// candidate position, walks the column downward looking for solid,
+    /// non-fluid ground and a footprint that does not collide with
+    /// anything, returning the validated landing position (feet resting on
+    /// that ground, same x/z) or `None` if no valid landing exists between
+    /// `target` and the world floor — vanilla's `couldStandOn && !isWet`
+    /// followed by `level.noCollision(this) && !containsAnyLiquid(...)`,
+    /// either of which aborts the teleport entirely rather than moving to a
+    /// bad spot.
+    ///
+    /// [`teleport_to`](MobController::teleport_to) itself does **not** run
+    /// this — it is the raw `Entity::teleportTo` primitive every other
+    /// caller (knockback-adjacent relocations, `FollowOwnerGoal`) still
+    /// wants unchecked. Only [`EndermanLookForPlayerGoal`](super::goals::EndermanLookForPlayerGoal)'s
+    /// two random-offset teleports are vanilla's *validated* variant, so
+    /// this is a separate query the goal calls before deciding whether to
+    /// teleport at all.
+    ///
+    /// Defaults to accepting `target` unchanged — a controller with no
+    /// world to validate against (every hermetic goal-selector test fake)
+    /// silently declines to model the landing search, matching this
+    /// codebase's existing "not modelled" convention for optional
+    /// world-derived queries like [`in_water`](MobController::in_water).
+    fn validate_teleport_landing(&self, target: Vec3) -> Option<Vec3> {
+        Some(target)
+    }
+
     /// Records that this mob wants to damage itself by `amount` — the bee's
     /// sting self-destruct, where `Bee::customServerAiStep` eventually calls
     /// `this.hurtServer(level, this.damageSources().generic(), this.getHealth())`.

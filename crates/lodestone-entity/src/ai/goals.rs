@@ -584,12 +584,17 @@ impl Goal for EndermanFreezeWhenLookedAt {
 ///   discloses for its position-valued seam.
 /// * **Line of sight is not modelled**, the same disclosed gap
 ///   [`MobController::find_nearest_target`] already carries.
-/// * **The "teleport away" blink has no landing check.** Vanilla's
-///   `EnderMan::teleport` walks blocks downward looking for solid ground before
-///   committing; [`MobController::teleport_to`] writes position directly (see
-///   its own doc comment), so this goal picks vanilla's exact random offset
-///   (±32 blocks XZ, `nextInt(64) - 32` on Y) and hands it over unchecked,
-///   exactly like every other user of that primitive.
+/// * **The teleport landing is validated**, matching vanilla's
+///   `EnderMan::teleport` + `LivingEntity::randomTeleport`: both blink
+///   variants pick vanilla's exact random offset (±32 blocks XZ,
+///   `nextInt(64) - 32` on Y for the "away" blink; the facing-anchored ±8/±16
+///   offset for "towards") and pass it through
+///   [`MobController::validate_teleport_landing`] before ever calling
+///   [`MobController::teleport_to`] — which itself still writes position
+///   directly and unchecked (see its own doc comment) for every *other*
+///   caller. A candidate with no solid, non-fluid ground and a clear
+///   footprint beneath it is simply not committed, so an enderman over a
+///   ravine or the void does not blink into open air.
 #[derive(Debug, Default)]
 pub struct EndermanLookForPlayerGoal {
     /// The candidate found by `can_use`, still counting down `aggro_time`
@@ -696,7 +701,17 @@ impl Goal for EndermanLookForPlayerGoal {
                 let dy = f64::from(mob.next_i32(64) - 32);
                 let dz = (mob.next_f64() - 0.5) * 64.0;
                 let pos = mob.position();
-                mob.teleport_to(Vec3::new(pos.x + dx, pos.y + dy, pos.z + dz));
+                let candidate = Vec3::new(pos.x + dx, pos.y + dy, pos.z + dz);
+                // Vanilla's `teleport(x, y, z)`: a raw random offset is only
+                // ever a *candidate* — it walks the column down for solid,
+                // non-fluid ground and a clear footprint before committing,
+                // and does nothing at all this tick if none exists (an
+                // enderman standing over a ravine or the void does not blink
+                // into open air). See `MobController::validate_teleport_landing`'s
+                // own doc for why this is a separate call from `teleport_to`.
+                if let Some(landing) = mob.validate_teleport_landing(candidate) {
+                    mob.teleport_to(landing);
+                }
             }
             self.teleport_time = 0;
         } else if distance_sqr(mob.position(), target) > 256.0 {
@@ -748,11 +763,17 @@ impl Goal for EndermanLookForPlayerGoal {
                     let jx = (mob.next_f64() - 0.5) * 8.0;
                     let jy = f64::from(mob.next_i32(16) - 8);
                     let jz = (mob.next_f64() - 0.5) * 8.0;
-                    mob.teleport_to(Vec3::new(
+                    let candidate = Vec3::new(
                         pos.x + jx - nx * 16.0,
                         pos.y + jy - ny * 16.0,
                         pos.z + jz - nz * 16.0,
-                    ));
+                    );
+                    // Same validated-landing gate as the "teleport away"
+                    // blink above — vanilla's `teleportTowards` also funnels
+                    // through `teleport(x, y, z)`.
+                    if let Some(landing) = mob.validate_teleport_landing(candidate) {
+                        mob.teleport_to(landing);
+                    }
                 }
                 self.teleport_time = 0;
             }
