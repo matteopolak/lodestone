@@ -471,6 +471,108 @@ fn read_potion_contents_color(reader: &mut Reader<'_>) -> Result<u32, AdapterErr
     Ok(lodestone_data::potion::potion_color(potion, custom_color, &custom_effects))
 }
 
+/// `ResolvableProfile.STREAM_CODEC` (`world/item/component/ResolvableProfile.java`):
+/// `StreamCodec.composite(either(GAME_PROFILE, Partial.STREAM_CODEC), unpack,
+/// PlayerSkin.Patch.STREAM_CODEC, skinPatch, create)` — a bool-tagged identity
+/// (full `GameProfile` or a `Partial`), followed by an always-present skin-patch
+/// tail. **Both halves are read on every code path**; the bool only selects
+/// *which* identity shape follows, not whether the skin patch is present.
+///
+/// The skin patch's four fields (`body`/`cape`/`elytra` resource-id textures and
+/// an optional model) are consumed for alignment and discarded: nothing in this
+/// client resolves a resource-id skin override yet, and
+/// [`lodestone_model::ItemProfile`] carries no field for them. Getting a width
+/// wrong here would misalign every byte after this component, exactly as for the
+/// "consumed-for-alignment" group below — this component just happens to be
+/// *identity-bearing* for its first half and pure-alignment for its second.
+fn read_resolvable_profile(reader: &mut Reader<'_>) -> Result<ItemProfile, AdapterError> {
+    let profile = if reader.bool().map_err(dec_err)? {
+        // `ByteBufCodecs.GAME_PROFILE`: uuid, then `PLAYER_NAME` (cap 16), then
+        // `GAME_PROFILE_PROPERTIES` — both always present, unlike the partial
+        // form below.
+        let id = reader.uuid().map_err(dec_err)?;
+        let name = reader.string(16).map_err(dec_err)?;
+        let properties = read_profile_properties(reader)?;
+        ItemProfile {
+            name: Some(name),
+            id: Some(id),
+            properties,
+        }
+    } else {
+        // `ResolvableProfile.Partial.STREAM_CODEC`: an optional name
+        // (`PLAYER_NAME.apply(optional)`, cap 16), an optional uuid
+        // (`UUIDUtil.STREAM_CODEC.apply(optional)`), then the same
+        // `GAME_PROFILE_PROPERTIES` as the full form — **not** optional itself,
+        // just possibly empty.
+        let name = if reader.bool().map_err(dec_err)? {
+            Some(reader.string(16).map_err(dec_err)?)
+        } else {
+            None
+        };
+        let id = if reader.bool().map_err(dec_err)? {
+            Some(reader.uuid().map_err(dec_err)?)
+        } else {
+            None
+        };
+        let properties = read_profile_properties(reader)?;
+        ItemProfile { name, id, properties }
+    };
+
+    // `PlayerSkin.Patch.STREAM_CODEC`: three optional `Identifier` textures
+    // (`ClientAsset.ResourceTexture.STREAM_CODEC.apply(optional)`, each a bare
+    // `ByteBufCodecs.STRING_UTF8`, cap 32767) then an optional `PlayerModelType`
+    // (`PlayerModelType.STREAM_CODEC.apply(optional)`). **The model field is a
+    // bool wrapping a bool** — one presence flag, and if true, one more
+    // slim/wide flag — not a single flag the way every other optional in this
+    // function is; collapsing the two would misread the byte after this
+    // component as the start of the next one.
+    for _ in 0..3 {
+        if reader.bool().map_err(dec_err)? {
+            reader.string(32767).map_err(dec_err)?;
+        }
+    }
+    if reader.bool().map_err(dec_err)? {
+        reader.bool().map_err(dec_err)?; // slim/wide, discarded with the rest
+    }
+
+    Ok(profile)
+}
+
+/// `ByteBufCodecs.GAME_PROFILE_PROPERTIES`: a VarInt element count capped at 16
+/// (`ByteBufCodecs.readCount(input, 16)`), then that many `(name, value,
+/// signature)` triples — name capped at 64 bytes, value at 32767, and an
+/// optional signature capped at 1024. This is the exact shape
+/// `player_info.rs`'s `read_add_player` already reads for `ADD_PLAYER`'s
+/// property list (same codec, different packet), reimplemented here rather than
+/// shared because that function lives in a sibling module this crate does not
+/// expose a helper from.
+fn read_profile_properties(
+    reader: &mut Reader<'_>,
+) -> Result<Vec<ModelProfileProperty>, AdapterError> {
+    let count = reader.var_i32().map_err(dec_err)?;
+    if !(0..=16).contains(&count) {
+        return Err(AdapterError::Decode(format!(
+            "profile properties count {count} exceeds ByteBufCodecs.readCount's max of 16"
+        )));
+    }
+    let mut properties = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let name = reader.string(64).map_err(dec_err)?;
+        let value = reader.string(32767).map_err(dec_err)?;
+        let signature = if reader.bool().map_err(dec_err)? {
+            Some(reader.string(1024).map_err(dec_err)?)
+        } else {
+            None
+        };
+        properties.push(ModelProfileProperty {
+            name,
+            value,
+            signature,
+        });
+    }
+    Ok(properties)
+}
+
 /// `MobEffectInstance.STREAM_CODEC.apply(ByteBufCodecs.list())`: a VarInt count then
 /// that many `(MobEffect id, MobEffectInstance.Details)` pairs. Only the effect id
 /// and amplifier are kept — the colour mix needs nothing else — but every field is
@@ -598,6 +700,14 @@ fn read_component_patch(
             // [`read_potion_contents_color`].
             Some("minecraft:potion_contents") => {
                 components.potion_color = Some(read_potion_contents_color(reader)?);
+            }
+            // Decoded for the same reason as the trim, map id, pot decorations and
+            // potion contents above: `minecraft:profile`'s payload is not
+            // length-prefixed, so a player head sitting in *any* container —
+            // inventory, chest, shulker box — truncated the rest of the packet
+            // from that slot onward. See [`read_resolvable_profile`].
+            Some("minecraft:profile") => {
+                components.profile = Some(read_resolvable_profile(reader)?);
             }
             // Both of these are `ByteBufCodecs.VAR_INT` (`DataComponents.java`)
             // and both *override* the prototype value seeded above. They are

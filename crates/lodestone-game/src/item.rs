@@ -862,6 +862,10 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             // loses its sherds, the same way an unmodelled component loses its
             // warning above.
             pot_decorations: None,
+            // Same story as `pot_decorations` above: this crate's component map
+            // has no slot for a player-head owner identity, so there is nothing
+            // to carry.
+            profile: None,
             tool: stack.tool(),
             max_stack_size: stack
                 .components

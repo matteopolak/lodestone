@@ -49,13 +49,18 @@ fn component_id(name: &str) -> i32 {
 /// [`the_unmodeled_stand_in_is_still_unmodeled`] is the control that fails
 /// loudly, naming this constant, if this one is ever modeled too.
 ///
-/// `minecraft:profile` is a good choice on purpose: `ResolvableProfile.STREAM_CODEC`
-/// is `either(GAME_PROFILE, Partial)` composed with `PlayerSkin.Patch.STREAM_CODEC`
-/// — an either-dispatch over a full game profile or an optional-name /
-/// optional-uuid / property-map triple, plus a skin patch. That is genuinely
-/// expensive, so it is unlikely to be modeled on a whim and quietly void these
-/// gates again.
-const UNMODELED_COMPONENT: &str = "minecraft:profile";
+/// `minecraft:profile` was this stand-in until it was modeled (the player-head
+/// owner identity a container full of skulls needs — see
+/// `lodestone_model::ItemProfile`), which is exactly the failure mode this
+/// comment warned about: it went quietly green under the *old* wrong assertion
+/// until [`the_unmodeled_stand_in_is_still_unmodeled`] caught it by name.
+///
+/// `minecraft:instrument` is the replacement, chosen for the same property
+/// `profile` had: `Instrument.STREAM_CODEC` is `ByteBufCodecs.holder` over a
+/// `DIRECT_STREAM_CODEC` that is itself a nested holder (`SoundEvent`) plus two
+/// floats plus a full chat component — genuinely expensive, so it is unlikely
+/// to be modeled on a whim and quietly void these gates again.
+const UNMODELED_COMPONENT: &str = "minecraft:instrument";
 
 /// One added component, unmodeled, with an arbitrary payload behind it.
 ///
@@ -448,6 +453,198 @@ fn decodes_pot_decorations_into_the_right_four_faces() {
     assert!(
         mismatches.is_empty(),
         "pot_decorations faces decoded wrong: {mismatches:?}"
+    );
+}
+
+/// Appends `minecraft:profile`'s wire payload (`ResolvableProfile.STREAM_CODEC`)
+/// to `patch`: the identity half — either a full `GameProfile` (`name`/`id`
+/// both `Some`) or a `Partial` (either independently `None`) — followed by an
+/// always-present, four-field `PlayerSkin.Patch` tail.
+///
+/// `model_slim` is `None` for "no model override" and `Some(slim)` for one —
+/// exercising the double-optional trap (`PlayerModelType.STREAM_CODEC.apply
+/// (optional)`, a presence bool wrapping another bool) at least once, since
+/// getting that one wrong misaligns nothing *inside* this component (there is
+/// nothing after it to misread within the same field) but would misread the
+/// very next component's type id as this field's second bool.
+fn write_profile(
+    patch: &mut Writer,
+    name: Option<&str>,
+    id: Option<uuid::Uuid>,
+    properties: &[(&str, &str, Option<&str>)],
+    body_texture: Option<&str>,
+    model_slim: Option<bool>,
+) {
+    match (name, id) {
+        (Some(name), Some(id)) => {
+            patch.bool(true); // full GameProfile
+            patch.uuid(id);
+            patch.string(name);
+        }
+        _ => {
+            patch.bool(false); // Partial
+            match name {
+                Some(n) => {
+                    patch.bool(true);
+                    patch.string(n);
+                }
+                None => patch.bool(false),
+            }
+            match id {
+                Some(i) => {
+                    patch.bool(true);
+                    patch.uuid(i);
+                }
+                None => patch.bool(false),
+            }
+        }
+    }
+    patch.var_i32(i32::try_from(properties.len()).expect("property count"));
+    for (prop_name, value, signature) in properties {
+        patch.string(prop_name);
+        patch.string(value);
+        match signature {
+            Some(sig) => {
+                patch.bool(true);
+                patch.string(sig);
+            }
+            None => patch.bool(false),
+        }
+    }
+    // PlayerSkin.Patch: body/cape/elytra optional Identifiers, then an
+    // optional PlayerModelType.
+    match body_texture {
+        Some(t) => {
+            patch.bool(true);
+            patch.string(t);
+        }
+        None => patch.bool(false),
+    }
+    patch.bool(false); // cape: absent
+    patch.bool(false); // elytra: absent
+    match model_slim {
+        Some(slim) => {
+            patch.bool(true);
+            patch.bool(slim);
+        }
+        None => patch.bool(false),
+    }
+}
+
+/// A full `GameProfile` form of `minecraft:profile` (uuid, name and properties
+/// all present) decodes into [`lodestone_model::ItemProfile`], including a
+/// signed `minecraft:textures` property — the field the skin resolver actually
+/// needs, and the one this component existed to carry.
+#[test]
+fn decodes_a_full_profile_with_signed_textures() {
+    let id = uuid::Uuid::from_u128(0x0011_2233_4455_6677_8899_aabb_ccdd_eeff);
+    let mut patch = Writer::default();
+    patch.var_i32(1); // one added component
+    patch.var_i32(0); // none removed
+    patch.var_i32(component_id("minecraft:profile"));
+    write_profile(
+        &mut patch,
+        Some("Notch"),
+        Some(id),
+        &[("textures", "eyJ0ZXh0dXJlcyI6e319", Some("sig-bytes"))],
+        None,
+        None,
+    );
+
+    let payload = set_slot_with_patch("minecraft:player_head", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(
+        !item.components.has_unmodeled,
+        "minecraft:profile is modeled now, so nothing may be flagged partial"
+    );
+    let profile = item.components.profile.as_ref().expect("a player head's profile");
+    assert_eq!(profile.name.as_deref(), Some("Notch"));
+    assert_eq!(profile.id, Some(id));
+    assert_eq!(profile.properties.len(), 1);
+    assert_eq!(profile.properties[0].name, "textures");
+    assert_eq!(profile.properties[0].value, "eyJ0ZXh0dXJlcyI6e319");
+    assert_eq!(profile.properties[0].signature.as_deref(), Some("sig-bytes"));
+}
+
+/// The `Partial` form: a head placed with only a name (no uuid resolved yet, no
+/// properties) still decodes, and `id`/`properties` read as genuinely absent
+/// rather than defaulted to something that looks plausible. The skin-patch tail
+/// also carries a real body-texture override and a model flag here, exercising
+/// the double-optional trap [`write_profile`]'s doc describes.
+#[test]
+fn a_partial_profile_by_name_only_still_decodes_and_keeps_the_slot_after_it_aligned() {
+    let mut patch = Writer::default();
+    patch.var_i32(1);
+    patch.var_i32(0);
+    patch.var_i32(component_id("minecraft:profile"));
+    write_profile(
+        &mut patch,
+        Some("Dinnerbone"),
+        None,
+        &[],
+        Some("minecraft:custom/skin"),
+        Some(true),
+    );
+
+    let payload = set_slot_with_patch("minecraft:player_head", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(!item.components.has_unmodeled);
+    let profile = item.components.profile.as_ref().expect("a player head's profile");
+    assert_eq!(profile.name.as_deref(), Some("Dinnerbone"));
+    assert_eq!(profile.id, None, "a partial profile with no uuid must decode to None, not a guess");
+    assert!(profile.properties.is_empty());
+}
+
+/// The whole point of modeling this component: a player head is no longer a
+/// decode cliff for whatever comes after it in the same container. Three
+/// pairwise-distinct slots (a compass, the head, a diamond sword with distinct
+/// counts) — before this fix, the sword slot was silently lost the moment a
+/// server sent a player head with an owner.
+#[test]
+fn a_player_head_with_a_profile_no_longer_truncates_the_container() {
+    let mut head_patch = Writer::default();
+    head_patch.var_i32(1);
+    head_patch.var_i32(0);
+    head_patch.var_i32(component_id("minecraft:profile"));
+    write_profile(
+        &mut head_patch,
+        Some("Notch"),
+        Some(uuid::Uuid::from_u128(0x0699_a79f_444e_9472_6a5b_efca_90e3_8aaf)),
+        &[("textures", "eyJ0ZXh0dXJlcyI6e319", None)],
+        None,
+        None,
+    );
+
+    let payload = set_content(&[
+        ("minecraft:compass", 1, empty_patch()),
+        ("minecraft:player_head", 7, head_patch.into_vec()),
+        ("minecraft:diamond_sword", 3, empty_patch()),
+    ]);
+
+    let directives = handle(play::clientbound::CONTAINER_SET_CONTENT, &payload);
+    let ClientEvent::ContainerContent { items, .. } = expect_single_emit(&directives) else {
+        panic!("wrong event");
+    };
+    let names: Vec<_> = items
+        .iter()
+        .map(|slot| slot.as_ref().map(|s| (s.item.to_string(), s.count)))
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            Some(("minecraft:compass".to_owned(), 1)),
+            Some(("minecraft:player_head".to_owned(), 7)),
+            Some(("minecraft:diamond_sword".to_owned(), 3)),
+        ],
+        "all three slots must survive a player head carrying a profile"
+    );
+    let head = items[1].as_ref().expect("the head slot");
+    assert!(!head.components.has_unmodeled);
+    assert_eq!(
+        head.components.profile.as_ref().and_then(|p| p.name.as_deref()),
+        Some("Notch")
     );
 }
 
