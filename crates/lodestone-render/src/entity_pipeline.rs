@@ -1074,6 +1074,17 @@ pub fn upload_flame_instances(
 /// fixed set of `@location` inputs. Every existing caller keeps passing
 /// `"vs_main"` and [`EntityInstanceRaw::instance_layout()`], so this is zero
 /// behaviour change for mobs, armour and banners.
+///
+/// `write_mask` was added for [`EntityPipeline::water_mask_pipeline`] (owner
+/// report: "placing down a boat still shows water through the bottom").
+/// Every existing caller passes `wgpu::ColorWrites::ALL`, the literal value
+/// this function hardcoded before, so this is zero behaviour change for
+/// every other pipeline. `water_mask_pipeline` passes
+/// `wgpu::ColorWrites::empty()` — the whole trick behind vanilla's
+/// `RenderPipelines.WATER_MASK` (`ColorTargetState(…, writeMask = 0)`, read
+/// directly from `.cache/mc/26.2/client-src`): the same depth-tested,
+/// depth-writing geometry as every other entity, with the fragment shader's
+/// colour output silently discarded rather than composited.
 fn build_entity_pipeline(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
@@ -1086,6 +1097,7 @@ fn build_entity_pipeline(
     vertex_entry: &str,
     fragment_entry: &str,
     instance_layout: wgpu::VertexBufferLayout<'_>,
+    write_mask: wgpu::ColorWrites,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(&format!("{label}-shader")),
@@ -1111,7 +1123,7 @@ fn build_entity_pipeline(
             targets: &[Some(wgpu::ColorTargetState {
                 format: color_format,
                 blend,
-                write_mask: wgpu::ColorWrites::ALL,
+                write_mask,
             })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         }),
@@ -1216,6 +1228,7 @@ impl EntityPipeline {
             "vs_main",
             "fs_main",
             EntityInstanceRaw::instance_layout(),
+            wgpu::ColorWrites::ALL,
         );
 
         EntityPipeline {
@@ -1279,6 +1292,7 @@ impl EntityPipeline {
             "vs_main",
             "fs_main",
             EntityInstanceRaw::instance_layout(),
+            wgpu::ColorWrites::ALL,
         )
     }
 
@@ -1339,6 +1353,7 @@ impl EntityPipeline {
             "vs_main",
             "fs_main_no_cutout",
             EntityInstanceRaw::instance_layout(),
+            wgpu::ColorWrites::ALL,
         )
     }
 
@@ -1391,6 +1406,7 @@ impl EntityPipeline {
             "vs_main_flame",
             "fs_main_flame",
             FlameInstanceRaw::instance_layout(),
+            wgpu::ColorWrites::ALL,
         )
     }
 
@@ -1452,6 +1468,55 @@ impl EntityPipeline {
             "vs_main",
             "fs_main_orb",
             EntityInstanceRaw::instance_layout(),
+            wgpu::ColorWrites::ALL,
+        )
+    }
+
+    /// A render pipeline over this pipeline's own bind-group layouts, for the
+    /// boat water-clip mask (owner report: "placing down a boat still shows
+    /// water through the bottom").
+    ///
+    /// Vanilla's `RenderPipelines.WATER_MASK`
+    /// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/
+    /// RenderPipelines.java`): `DepthStencilState.DEFAULT` (this engine's
+    /// `LessEqual`, same translation every sibling here applies) with
+    /// `ColorTargetState(…, writeMask = 0)` — a normal depth-tested,
+    /// depth-writing draw whose fragment output never reaches the
+    /// framebuffer. `blend` is therefore irrelevant (there is nothing to
+    /// blend) and left `None` to match the base mob pipeline's state, the
+    /// nearest sibling with the same `depth_write: true`.
+    ///
+    /// Reuses `vs_main`/`fs_main` and [`EntityInstanceRaw`] — the ordinary mob
+    /// shader and instance format, unlike [`Self::flame_pipeline`]'s
+    /// dedicated entry point — because the water mask needs nothing the base
+    /// shader does not already compute; only the pipeline's own
+    /// `write_mask` differs. The texture bind group this pipeline's layout
+    /// still requires is real (see [`lodestone_assets::entity_models`]'s
+    /// `boat_water_patch` corpus entry) but its sampled texels never leave
+    /// the fragment stage.
+    ///
+    /// Reuses [`Self::camera_layout`]/[`Self::texture_layout`] like every
+    /// sibling here — the entity shader still spends exactly two bind groups,
+    /// nowhere near `CLAUDE.md`'s 4-bind-group floor.
+    #[must_use]
+    pub fn water_mask_pipeline(
+        &self,
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        build_entity_pipeline(
+            device,
+            color_format,
+            &self.camera_layout,
+            &self.texture_layout,
+            "lodestone-entity-water-mask",
+            wgpu::CompareFunction::LessEqual,
+            None,
+            true,
+            "vs_main",
+            "fs_main",
+            EntityInstanceRaw::instance_layout(),
+            wgpu::ColorWrites::empty(),
         )
     }
 
@@ -1526,6 +1591,7 @@ impl EntityPipeline {
             "vs_main",
             "fs_main",
             EntityInstanceRaw::instance_layout(),
+            wgpu::ColorWrites::ALL,
         )
     }
 

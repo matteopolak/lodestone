@@ -705,10 +705,30 @@ impl RenderState {
             if !entity_batches.is_empty() {
                 pass.set_pipeline(&self.entities.pipeline.pipeline);
                 pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
+                // `"boat_water_patch"` is the one model in this loop that
+                // must **not** draw through the base pipeline: it is a boat's
+                // own extra, colour-write-disabled instance
+                // (`gpu/entity_passes.rs`'s `prepare_entities`), and drawing
+                // it through the textured pipeline would paint a second,
+                // visible mirrored hull plank inside every boat rather than
+                // leaving the gap it exists to occlude invisible. See
+                // `EntityPipeline::water_mask_pipeline`'s doc. Switched back
+                // for the next batch in the same loop rather than split into
+                // a second pass, so cam group 0 stays bound throughout.
+                let mut water_mask_bound = false;
                 for batch in &entity_batches {
                     let Some(model) = self.entities.gpu_models.get(batch.model) else {
                         continue;
                     };
+                    let is_water_mask = batch.model == "boat_water_patch";
+                    if is_water_mask != water_mask_bound {
+                        pass.set_pipeline(if is_water_mask {
+                            &self.entities.water_mask_pipeline
+                        } else {
+                            &self.entities.pipeline.pipeline
+                        });
+                        water_mask_bound = is_water_mask;
+                    }
                     // A fetched player skin wins over the model's own sheet, and a
                     // miss falls through to it. That fallback covers three cases
                     // at once and none of them is an error: no skin declared

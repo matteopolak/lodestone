@@ -131,6 +131,20 @@ pub(super) struct EntityRenderer {
     pub(super) orb_pipeline: wgpu::RenderPipeline,
     pub(super) orb_gpu_model: Option<GpuEntityModel>,
     pub(super) orb_texture: Option<wgpu::BindGroup>,
+    /// The boat water-clip mask (owner report: "placing down a boat still
+    /// shows water through the bottom"): a sixth pipeline
+    /// ([`EntityPipeline::water_mask_pipeline`], colour writes disabled)
+    /// drawn through the **base** pipeline's own camera bind group. Unlike
+    /// the flame/orb pipelines above, this needs **no** dedicated geometry or
+    /// texture storage here: `"boat_water_patch"` is an ordinary
+    /// [`lodestone_assets::entity_models`] corpus entry, so [`Self::models`]/
+    /// [`Self::gpu_models`]/[`Self::textures`] already carry it through the
+    /// same loop every other rig goes through — the pipeline object is the
+    /// only thing this pass needs that a normal batch does not already have.
+    /// See `gpu/entity_passes.rs`'s `prepare_entities` for where the second,
+    /// per-boat instance is built, and `gpu/frame.rs` for the draw-loop arm
+    /// that selects this pipeline by `batch.model == "boat_water_patch"`.
+    pub(super) water_mask_pipeline: wgpu::RenderPipeline,
     /// Remote players' fetched skins: one texture bind group per **texture
     /// URL**, filled in at runtime by
     /// [`RenderState::install_pending_player_skins`](super::RenderState::install_pending_player_skins).
@@ -330,6 +344,11 @@ impl EntityRenderer {
             pipeline.texture_bind_group(device, &view, &sampler)
         });
 
+        // The boat water-clip mask. No geometry/texture of its own to build:
+        // `"boat_water_patch"` went through the corpus loop above like every
+        // other rig, so `gpu_models`/`textures` already carry it.
+        let water_mask_pipeline = pipeline.water_mask_pipeline(device, color_format);
+
         // A persistent group-0 uniform, rewritten every frame before the pass.
         // Sized for camera **plus fog**: the entity shader reads both out of one
         // binding, so a buffer sized for the camera alone would leave the fog
@@ -392,6 +411,7 @@ impl EntityRenderer {
             orb_pipeline,
             orb_gpu_model,
             orb_texture,
+            water_mask_pipeline,
             // Nothing until a skin is fetched; see `player_skins`' doc for why a
             // miss falls back rather than failing.
             player_skins: HashMap::new(),
