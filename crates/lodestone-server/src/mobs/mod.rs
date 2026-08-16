@@ -826,6 +826,65 @@ fn grudge_ticks(mob: &mut impl MobController) -> u64 {
     lo + u64::try_from(mob.next_i32(span)).unwrap_or(0)
 }
 
+/// Whether `species` propagates a grudge to nearby same-species mobs when it
+/// is newly hurt, and if so the alert box's half-extents and whether the
+/// alerted mob's owner must match the victim's.
+///
+/// `ZombifiedPiglin.alertOthers` (box `(FOLLOW_RANGE, 10.0, FOLLOW_RANGE)` =
+/// **±35 XZ, ±10 Y**, no owner filter — piglins are not `TamableAnimal`) and
+/// `HurtByTargetGoal.alertOthers` on the wolf's own `.setAlertOthers()`
+/// registration (box `(FOLLOW_RANGE, 10.0, FOLLOW_RANGE)` = **±16 XZ, ±10
+/// Y**, plus `tamable.getOwner() == other.getOwner()` since `Wolf` is a
+/// `TamableAnimal` — see `docs/plans/mob-ai-roster.md` §4's `FOLLOW_RANGE`
+/// citations and `roster::neutral`'s module doc for both derivations).
+///
+/// Line of sight is not modelled (disclosed the same way the enderman stare's
+/// carved-pumpkin disguise is: the perception seam has no ray query), and
+/// the piglin's own `ALERT_INTERVAL` throttle is not reproduced as a separate
+/// timer — [`MobSim::attack`]'s "only on a *new* grudge" gate already
+/// prevents an already-angry piglin from re-alerting every subsequent hit,
+/// which is a stricter (never more frequent than vanilla) approximation of
+/// the same effect.
+fn alert_species(species_path: &str) -> Option<(f64, f64, bool)> {
+    match species_path {
+        "zombified_piglin" => Some((35.0, 10.0, false)),
+        "wolf" => Some((16.0, 10.0, true)),
+        _ => None,
+    }
+}
+
+/// One draw of `Bee.customServerAiStep`'s self-destruct roll, evaluated once
+/// every 5th tick since the sting connected (`elapsed % 5 == 0`, checked by
+/// the caller): `nextInt(clamp(1200 - timeSinceSting, 1, 1200)) == 0`.
+///
+/// The clamp is what bounds it at both ends — at `elapsed == 1200` the
+/// divisor is `1` and the roll is unconditional, and `1200` is itself a
+/// multiple of `5` so that tick is never skipped; **a stung bee is certainly
+/// alive one tick after the sting** (elapsed `1`, not a multiple of 5, so the
+/// caller never calls this at all) **and certainly dead by 1200 ticks after
+/// it**. See `roster::neutral::BEE`'s own doc comment for the citation this
+/// was derived from.
+///
+/// Deterministic and independent of the mob's own [`MobController`] RNG
+/// stream, for the same reason [`roll_ambient_sound`] avoids it: this can
+/// fire on a cadence unrelated to that stream's own consumers, and drawing
+/// from the shared stream here would shift every subsequent AI draw. Not a
+/// faithful `java.util.Random` reproduction — a multiplicative hash of
+/// `(tick_count, id, elapsed)`, the same style already used for the ambient
+/// sound pitch/timing rolls in this module.
+fn bee_sting_death_roll(tick_count: u64, id: i32, elapsed: u64) -> bool {
+    if elapsed >= 1200 {
+        return true;
+    }
+    let denom = (1200 - elapsed).max(1);
+    let mix = tick_count
+        .wrapping_mul(2_654_435_761)
+        .wrapping_add(id as u64)
+        .wrapping_mul(40_503)
+        .wrapping_add(elapsed.wrapping_mul(2_246_822_519));
+    mix % denom == 0
+}
+
 /// One tick of vanilla `Mob.baseTick`'s idle-vocalisation roll:
 /// `if (isAlive() && random.nextInt(1000) < ambientSoundTime++) {
 /// resetAmbientSoundTime(); playAmbientSound(); }`. `ambientSoundTime` starts
@@ -934,6 +993,17 @@ pub struct SimMob<'w> {
     /// query: the seam has no shared clock, so the host resolves expiry and
     /// only `Option<Vec3>` crosses. See that method's own doc comment.
     anger: Option<Anger>,
+    /// Issue #233: `Bee.hasStung`, expressed as the [`MobSim::tick_count`] the
+    /// sting connected rather than a bare flag, since the self-destruct roll
+    /// (`Bee.customServerAiStep`) needs `timeSinceSting` and a decrementing
+    /// counter would drift against a stepped tick loop for the same reason
+    /// [`Anger::end_time`] is an absolute deadline rather than a countdown.
+    ///
+    /// `None` for a bee that has never stung. Set the instant a bee's own
+    /// attack connects ([`MobSim::tick`]'s first mob loop) and never cleared
+    /// — a stung bee is always on a path to death, matching vanilla's
+    /// `hasStung` having no reset.
+    stung_at: Option<u64>,
     /// The [`MobSim::tick_count`] at which this mob stops counting as
     /// player-killed — vanilla's `LivingEntity.lastHurtByPlayerMemoryTime`,
     /// expressed as an absolute deadline for [`Anger`]'s reason.
@@ -2903,6 +2973,7 @@ impl<'w> MobSim<'w> {
             max_health,
             defenses,
             anger: None,
+            stung_at: None,
             hurt_by_player_until: None,
             attack_damage,
             hurt_cooldown: HurtCooldown::default(),
@@ -3380,7 +3451,21 @@ impl<'w> MobSim<'w> {
                     ambient_sounds.push(effect);
                 }
             }
-            for target_pos in m.mob.take_new_attacks() {
+            let new_attacks = m.mob.take_new_attacks();
+            // Issue #233: `Bee.doHurtTarget` — the sting connects the instant
+            // this mob's own attack fires (this codebase has no separate
+            // "swing missed" outcome, matching the fidelity every other
+            // consumer of `take_new_attacks` already assumes). `stung_at` is
+            // sticky (only the *first* sting matters) and clearing `anger`
+            // here is vanilla's `stopBeingAngry()`, called from the same
+            // method — see `SimMob::stung_at`'s own doc comment for why this
+            // is what stops the bee re-acquiring a target without a second
+            // `!hasStung()` guard on the goal itself.
+            if !new_attacks.is_empty() && m.stung_at.is_none() && m.entity_type.path() == "bee" {
+                m.stung_at = Some(tick_count);
+                m.anger = None;
+            }
+            for target_pos in new_attacks {
                 // Carry the attacker's own position too, so the victim can
                 // retaliate: vanilla's `hurt` sets `lastHurtByMob` from the
                 // damage source's attacker (`LivingEntity.java:1358`), which is
@@ -3389,6 +3474,21 @@ impl<'w> MobSim<'w> {
                 // no way to learn who hit it and `HurtByTargetGoal` could never
                 // fire even once the perception seam existed.
                 hits.push((m.attack_target_id, target_pos, m.attack_damage, m.position()));
+            }
+            // Issue #233: `Bee.customServerAiStep`'s self-destruct roll — see
+            // `bee_sting_death_roll`'s own doc comment for the exact formula
+            // and its two derived bounds (certainly alive at sting+1,
+            // certainly dead by sting+1200).
+            if let Some(stung_at) = m.stung_at {
+                let elapsed = tick_count.saturating_sub(stung_at);
+                if elapsed > 0 && elapsed % 5 == 0 && bee_sting_death_roll(tick_count, m.id, elapsed)
+                {
+                    // A fixed, large amount rather than `m.health`: this is a
+                    // lethal roll, not a graded hit, and `apply_damage`'s
+                    // reductions (armour, absorption) must not be able to
+                    // leave a "certainly dead" tick non-lethal.
+                    m.mob.damage_self(10_000.0);
+                }
             }
             if m.mob.take_detonated() {
                 detonations.push((m.id, m.position()));
@@ -4917,7 +5017,7 @@ impl<'w> MobSim<'w> {
         // Read before the mutable borrow below: the grudge deadline is
         // absolute, so it needs the clock as of this tick.
         let now = self.tick_count;
-        let (health, velocity, damage_dealt) = {
+        let (health, velocity, damage_dealt, pack_alert) = {
             let mob = self.get_mut(target_id)?;
             let damage_dealt = mob.apply_damage(raw_damage, flags);
             // Issue #441: the retaliation half of the damage record. This is
@@ -4937,11 +5037,34 @@ impl<'w> MobSim<'w> {
             // *read* `angry_target`, so an always-hostile zombie carrying an
             // unread grudge is inert, whereas a name list here would be one
             // more `is_hostile_species` waiting to go stale.
+            let was_already_angry = mob.anger.is_some();
             let end_time = now + grudge_ticks(&mut mob.mob);
             mob.anger = Some(Anger {
                 end_time,
                 target: attacker_pos,
             });
+            // Issue #233: zombified-piglin group aggro and wolf pack aggro
+            // (`ZombifiedPiglin.alertOthers` /
+            // `HurtByTargetGoal(this).setAlertOthers()` — see
+            // `alert_species`'s own doc for the box/owner-filter citations).
+            // Gated on the grudge being *new*: vanilla fires `alertOthers`
+            // from `HurtByTargetGoal.start()`/`customServerAiStep`, i.e. once
+            // per acquisition, not once per hit — an already-angry victim
+            // re-hit mid-grudge must not re-wake its whole pack every tick.
+            let pack_alert = if was_already_angry {
+                None
+            } else {
+                alert_species(mob.entity_type.path()).map(|(box_xz, box_y, need_owner_match)| {
+                    (
+                        mob.entity_type.clone(),
+                        mob.position(),
+                        mob.owner_uuid(),
+                        need_owner_match,
+                        box_xz,
+                        box_y,
+                    )
+                })
+            };
             // `LivingEntity.setLastHurtByPlayer`: this is the *player* attack path, so
             // the kill counts as a player kill for the next 100 ticks. Vanilla's
             // `dropExperience` reads exactly this, which is why a mob killed by
@@ -5000,8 +5123,44 @@ impl<'w> MobSim<'w> {
                 };
                 mob.apply_knockback(Vec3::new(new_velocity.x, new_velocity.y, new_velocity.z));
             }
-            (mob.health(), mob.velocity(), damage_dealt)
+            (mob.health(), mob.velocity(), damage_dealt, pack_alert)
         };
+        // Issue #233: resolve the group-alert census now that the borrow on
+        // `target_id`'s own `SimMob` above has ended. Every same-species mob
+        // in the box, not already holding a live grudge (vanilla's
+        // `getTarget() == null` guard — a pack member already fighting
+        // something is not redirected), gets the *same* deadline and target
+        // as the victim; matching the victim's own `end_time` rather than
+        // drawing a fresh one is a disclosed simplification (vanilla redraws
+        // `PERSISTENT_ANGER_TIME` per alerted mob), not a rule this repo has
+        // any evidence against — the alerted mobs still expire independently
+        // of the victim once ticked past `end_time`.
+        if let Some((species_key, victim_pos, victim_owner, need_owner_match, box_xz, box_y)) =
+            pack_alert
+        {
+            for other in &mut self.mobs {
+                if other.id == target_id || other.entity_type != species_key {
+                    continue;
+                }
+                if need_owner_match && other.owner_uuid() != victim_owner {
+                    continue;
+                }
+                if other.anger.is_some() {
+                    continue;
+                }
+                let p = other.position();
+                if (p.x - victim_pos.x).abs() > box_xz
+                    || (p.z - victim_pos.z).abs() > box_xz
+                    || (p.y - victim_pos.y).abs() > box_y
+                {
+                    continue;
+                }
+                other.anger = Some(Anger {
+                    end_time: now + grudge_ticks(&mut other.mob),
+                    target: attacker_pos,
+                });
+            }
+        }
         // Issue #530: before the removal below, so a killing blow is read for
         // its death sound rather than finding no mob.
         self.note_vocalisation(target_id, damage_dealt);
@@ -7312,13 +7471,25 @@ mod anger_tests {
     /// Drives `MobSim` + `NavigatingMob`, never `ScriptMob` and never
     /// `roster::probe`'s double: both override the perception methods wholesale,
     /// which is exactly how #441's and #455's islands stayed hidden.
+    ///
+    /// The attacker position is placed well outside `flat_world`'s solid `±8`
+    /// platform (issue #233): once the bee's anger-gated target row and
+    /// `Bee.BeeAttackGoal` both landed, a *nearby* attacker position let the
+    /// bee's own `MeleeAttackGoal` close the one-block gap and "sting" the
+    /// bare position within the very first tick, clearing `anger`
+    /// (`stopBeingAngry()`, by design — see `roster::neutral::BEE`'s doc
+    /// comment) before this helper ever got to measure the grudge's real
+    /// duration. This function measures **grudge duration**, not "does the
+    /// mob's own combat ever run" — an attacker outside the walkable platform
+    /// (so no path exists to it, for any of the four species' plausible
+    /// speeds) decouples the two.
     fn ticks_until_anger_clears(species: &str, limit: u64) -> Option<u64> {
         let world = flat_world();
         let mut sim = MobSim::new(&world);
         let key = ResourceKey::from_str(&format!("minecraft:{species}")).expect("valid key");
         let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
 
-        let attacker = Vec3::new(1.0, 0.0, 0.0);
+        let attacker = Vec3::new(128.0, 0.0, 0.0);
         sim.attack(id, attacker, 1.0, DamageFlags::default(), 0.0)
             .expect("the mob must still be alive to hold a grudge");
 

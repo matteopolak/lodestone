@@ -6,66 +6,63 @@
 //! One [`Registration`] table per species, transcribed from that species'
 //! `registerGoals()` in `.cache/mc/26.2/src/net/minecraft/world/entity/`.
 //!
-//! **Read the next section before adding behaviour here.** The four headline
-//! mechanisms this family exists to cover — enderman teleport-on-stare,
-//! zombified-piglin group aggro, bee sting-then-die, wolf pack aggro — are
-//! **not** in these tables as
-//! [`Coverage::Modelled`] rows, and that is a finding rather than an omission.
-//! Each of the four waits on a primitive that did not exist on
-//! [`MobController`](super::MobController) when the tables were written; all
-//! five have since landed, but a primitive is necessary, not
-//! sufficient — each mechanism still needs its goal and its host census — so
-//! each is a [`Coverage::Missing`] row naming what it still waits on.
+//! **Read the next section before adding behaviour here.** As written, the four
+//! headline mechanisms this family exists to cover — enderman teleport-on-stare,
+//! zombified-piglin group aggro, bee sting-then-die, wolf pack aggro — were
+//! **not** [`Coverage::Modelled`] rows, each blocked on a primitive absent from
+//! [`MobController`](super::MobController). **All four are now landed** (issue
+//! #233): the sections below are kept as the record of *why* they were blocked
+//! and exactly what closed each gap, because the next reader arriving via a
+//! stale copy of this doc is the failure mode CLAUDE.md's evidence standards
+//! warn about — re-verify against the tables, not this paragraph.
 //!
-//! # Why the four headline mechanisms are `Missing`
+//! # Why the four headline mechanisms were `Missing`, and what closed each
 //!
 //! A roster entry can only be as good as the goals it can build, and a goal can
 //! only ask [`MobController`](super::MobController) questions it has methods
 //! for. Measured against the trait, **five primitives were absent** and between
-//! them accounted for every one of the four. All five have landed;
-//! the table is kept as the record of what each needed, with the landed state
-//! marked:
+//! them accounted for every one of the four. All five landed (issue #458); the
+//! table is kept as the record of what each needed:
 //!
-//! | absent primitive | blocks | landed as |
+//! | absent primitive | blocked | landed as |
 //! |---|---|---|
-//! | the anger timer + anger target (a *grudge*) | all four | host-side `SimMob::anger` + `MobController::angry_target` (the deadline stays on the host) |
-//! | "is that player looking at me" (a gaze test) | enderman freeze + stare | `MobController::is_being_stared_at` + free `is_in_view_cone` geometry, consumed by both `EndermanFreezeWhenLookedAt` and `EndermanLookForPlayerGoal` below (both `Coverage::Modelled`). **The host feed has landed**: `lodestone_server::mobs::MobSim::tick_with_terrain` computes it every tick from each connected player's real position and view direction (`PerceivedPlayer::perception.view_direction`), so `is_being_stared_at` is a live boolean in the running game, not a permanent `false` — see this table's own doc on the enderman row |
+//! | the anger timer + anger target (a *grudge*) | all four | host-side `SimMob::anger` + `MobController::angry_target` (the deadline stays on the host) — **fed by every hit** in `MobSim::attack`, not species-gated (see that method's own doc comment for why a name list there would be redundant) |
+//! | "is that player looking at me" (a gaze test) | enderman freeze + stare | `MobController::is_being_stared_at` + free `is_in_view_cone` geometry, fed every tick by `lodestone_server::mobs::MobSim::tick_with_terrain` from each connected player's real view direction |
 //! | relocating a mob instantly (a teleport) | enderman teleport | `MobController::teleport_to`, host-commanded via `SimMob::teleport_to` |
-//! | a mob damaging **itself** | bee sting-then-die | `MobController::damage_self`, drained by `MobSim::tick` through the damage pipeline |
-//! | an owner relationship | wolf tame half | `MobController::owner_position`/`is_tame`/`is_ordered_to_sit` + host-side `SimMob::owner`. **No longer blocked**: `lodestone_server::mobs::PerceivedPlayer` puts a `PlayerIdentity` (account uuid + runtime entity id) at the perception seam, so a mob can be owned *by a player*, and the wolf's `SitWhenOrderedToGoal` and `FollowOwnerGoal` rows below are `Modelled` |
+//! | a mob damaging **itself** | bee sting-then-die | `MobController::damage_self`, drained by `MobSim::tick` through the ordinary damage pipeline — **now has a real caller**: `MobSim::tick`'s own sting-death roll, see `BEE`'s doc comment |
+//! | an owner relationship | wolf tame half | `MobController::owner_position`/`is_tame`/`is_ordered_to_sit` + host-side `SimMob::owner`, fed from `PerceivedPlayer`'s `PlayerIdentity` |
 //!
-//! Group propagation needs a sixth thing that is not a trait method at all: a
-//! same-species census, which the seam deliberately does not expose (a goal sees
-//! `Option<Vec3>` answers, never a population). `MobSim::feed_perception` is
-//! where that resolution happens for every other question, and it is where
-//! `alertOthers` belongs.
+//! A primitive being landed is necessary but not sufficient — each mechanism
+//! also needed its own goal and, for the two group mechanisms, a same-species
+//! *census*, which is not a trait method at all: the seam deliberately hands a
+//! goal `Option<Vec3>` answers, never a population
+//! (`MobSim::attack`'s pack-alert census is where that resolution happens, not
+//! a `Registration` here). Four things closed the remaining gap:
 //!
-//! So the honest state of this family is: **the tables are complete and cited; the
-//! mechanisms are blocked on the seam, in five specific, named places — all of
-//! which now have a landed primitive.** A primitive is not a
-//! mechanism: each of the four still needs its goal (a bee sting hook, a tame
-//! interaction) and its census (`alertOthers`) before it can be a
-//! [`Coverage::Modelled`] row. Writing one of those *here* before its goal
-//! exists would produce a type with no possible consumer — the island this
-//! repo's dominant defect class is named after — so this module does not
-//! contain most of them.
+//! 1. **The anger-gated target rows.** `NearestAttackableTargetGoal::anger_gated`
+//!    (built in `goals.rs`, unused for a time on purpose — see the next section)
+//!    reads `angry_target` instead of running an open hostile search. Piglin,
+//!    wolf and bee all register it now.
+//! 2. **`MobSim::attack`'s pack-alert census** (`alert_species`, in
+//!    `lodestone_server::mobs`) propagates a fresh grudge to nearby same-species
+//!    mobs — the piglin and wolf group-aggro half — the instant the victim's own
+//!    grudge is newly set, mirroring vanilla's `alertOthers` being called from
+//!    `HurtByTargetGoal.start()`/`customServerAiStep` rather than every tick.
+//! 3. **The bee's sting hook and self-destruct roll**, in `MobSim::tick`'s own
+//!    mob loop (`stung_at`, `bee_sting_death_roll`) — see `BEE`'s doc comment.
+//! 4. **`Bee.BeeAttackGoal`**, registered as a bare `MeleeAttackGoal` — safe
+//!    *because* this table registers no other target-acquisition row, so
+//!    `attack_target` is only ever set while angry; see that row's own comment
+//!    for why this also covers `!hasStung()` without a second guard.
 //!
-//! **The enderman's stare is now the exception that closed, not the one still
-//! open.** Both halves are real [`Coverage::Modelled`] rows below, driven off
-//! the real [`MobController::is_being_stared_at`](super::MobController::is_being_stared_at)
-//! seam and reachable through the real roster: `EndermanFreezeWhenLookedAt`
-//! (goal priority 1) pins the head and stops the navigation while stared at,
-//! and `EndermanLookForPlayerGoal` (target priority 1) is what actually turns
-//! a stare into an attack target — see its own doc comment for the port and
-//! for the identity/line-of-sight/landing-check narrowings the position-only
-//! seam forces. This used to be the honest intermediate state
-//! `nearest_player`/`temptation` sat in before their own feed lines landed —
-//! a goal with no possible input, `can_use` reading a permanent `false` — but
-//! that state ended once `MobSim::tick_with_terrain` started computing
-//! `is_being_stared_at` from a real per-player view vector each tick; see this
-//! table's own doc on the enderman row for the citation.
+//! **The enderman's stare and teleport are `Coverage::Modelled`** below:
+//! `EndermanFreezeWhenLookedAt` (goal priority 1) pins the head while stared at,
+//! and `EndermanLookForPlayerGoal` (target priority 1) turns a stare into an
+//! attack target and, at range, a teleport — see its own doc comment for the
+//! disclosed identity/line-of-sight/landing-check narrowings the position-only
+//! seam forces.
 //!
-//! # The trap that decided the target rows
+//! # The trap that decided the target rows, and why it is now safe to cross
 //!
 //! Three of these species register a player-targeting goal whose last argument is
 //! an **anger predicate**: `NearestAttackableTargetGoal<>(this, Player.class, 10,
@@ -75,19 +72,26 @@
 //! `isAngry() && !hasStung()`).
 //!
 //! **That predicate is the entire difference between a neutral mob and a hostile
-//! one.** Our [`NearestAttackableTargetGoal`](super::nearest_attackable_target)
-//! takes no predicate, so registering it for these species would make a
-//! zombified piglin, a wolf and a bee attack players **on sight** — strictly
-//! worse than the mob doing nothing, and worse than vanilla in a way a priority
-//! gate cannot see. Every such row is therefore [`Coverage::Missing`].
+//! one.** The plain [`NearestAttackableTargetGoal`](super::nearest_attackable_target)
+//! constructor takes no predicate, so registering *that* form for these species
+//! would make a zombified piglin, a wolf and a bee attack players **on sight** —
+//! strictly worse than the mob doing nothing, and worse than vanilla in a way a
+//! priority gate cannot see. This was written down while
+//! `NavigatingMob::find_nearest_target` still returned `self.attack_target`
+//! instead of searching (issue #455), so no `NearestAttackableTargetGoal` of
+//! either form could fire in production and the predicate-free constructor was
+//! inert rather than actively wrong.
 //!
-//! This was written down while `NavigatingMob::find_nearest_target` still
-//! returned `self.attack_target` instead of searching, so no
-//! `NearestAttackableTargetGoal` could fire in production. That self-loop is
-//! fixed now, which makes the anger predicate load-bearing rather than
-//! theoretical: a `Modelled` row here would silently turn three neutral
-//! species hostile. Do not "upgrade" these rows without an anger predicate to
-//! gate them.
+//! **That self-loop is fixed now**, which is exactly why the predicate stopped
+//! being optional: `NearestAttackableTargetGoal::anger_gated` (not the plain
+//! constructor) is what these three rows below build. The old
+//! `no_anger_gated_target_row_is_modelled` guard that held these rows `Missing`
+//! is gone from this file's tests, replaced by
+//! [`tests::anger_gated_target_rows_use_the_anger_gated_search_not_the_open_one`],
+//! which asserts the positive half its name describes *and* the behavioural
+//! half the old guard actually cared about (a live nearby player with no grudge
+//! must not be acquired) — see that test's own doc comment for why replacing a
+//! guard is not the same act as relaxing one to dodge a failure.
 //!
 //! # What does still reach behaviour
 //!
@@ -156,7 +160,7 @@
 use crate::ai::goal::Goal;
 use crate::ai::goals::{
     EndermanFreezeWhenLookedAt, EndermanLookForPlayerGoal, FollowOwnerGoal, FollowParentGoal,
-    PanicGoal, TemptGoal,
+    MeleeAttackGoal, NearestAttackableTargetGoal, PanicGoal, TemptGoal,
 };
 
 use super::{
@@ -272,15 +276,21 @@ pub const ENDERMAN: &[Registration] = &[
 /// `ATTACK_DAMAGE 5.0`. `FOLLOW_RANGE 35.0` is inherited from `Zombie.createAttributes` and
 /// is what sizes the alert box below.
 ///
-/// Group aggro is `Missing` in two halves. The propagation itself is
-/// `ZombifiedPiglin.alertOthers`: every other zombified piglin in a box of
-/// `(FOLLOW_RANGE, 10.0, FOLLOW_RANGE)` = **±35 XZ, ±10 Y** that has no target
-/// yet and is not allied to the victim's attacker has `setTarget` called on it.
-/// It is throttled by `ZombifiedPiglin.maybeAlertOthers` on `ALERT_INTERVAL =
-/// TimeUtil.rangeOfSeconds(4, 6)` = **[80, 120] ticks** and requires line of
-/// sight to the target. Note it is driven from `ZombifiedPiglin.customServerAiStep`,
-/// **not** from a goal — so it is not a roster row at all, and modelling it means
-/// a census in `MobSim::tick`, not a `Registration` here.
+/// Group aggro is modelled now, in two halves, neither of which is a row in
+/// this table — `ZombifiedPiglin.alertOthers` is driven from
+/// `ZombifiedPiglin.customServerAiStep`, not from a goal, so it was never
+/// going to be a `Registration` here. The propagation itself: every other
+/// zombified piglin in a box of `(FOLLOW_RANGE, 10.0, FOLLOW_RANGE)` = **±35
+/// XZ, ±10 Y** that has no live grudge yet has one set on it, matching this
+/// mob's own — `lodestone_server::mobs::MobSim::attack`'s `alert_species`
+/// census. Not modelled: line of sight, and vanilla's separate
+/// `ALERT_INTERVAL = TimeUtil.rangeOfSeconds(4, 6)` = **[80, 120]-tick**
+/// throttle on `ZombifiedPiglin.maybeAlertOthers` — the census instead fires
+/// only when the victim's own grudge is *new* (never re-alerting mid-grudge),
+/// which is a stricter, never-more-frequent stand-in. The *acquisition* half
+/// — a piglin turning its fresh grudge into an actual `attack_target` — is
+/// `NearestAttackableTargetGoal(Player,isAngryAt)` below, `Coverage::Modelled`
+/// via `anger_gated_target`.
 pub const ZOMBIFIED_PIGLIN: &[Registration] = &[
     // Inherited from `Zombie.registerGoals`.
     Registration::missing(Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
@@ -298,17 +308,21 @@ pub const ZOMBIFIED_PIGLIN: &[Registration] = &[
     // same-type alert is not — see this table's doc comment.
     Registration::target(1, "HurtByTargetGoal", hurt_by_target),
     // The anger predicate is what makes a piglin neutral; see the module doc.
-    Registration::missing(
-        Selector::Target,
+    // `Coverage::Modelled` now: `NearestAttackableTargetGoal::anger_gated()`
+    // reads `MobController::angry_target` rather than searching, so this row
+    // never targets a player the piglin has no live grudge against — see
+    // `anger_gated_target`'s own doc comment.
+    Registration::target(
         2,
         "NearestAttackableTargetGoal(Player,isAngryAt)",
+        anger_gated_target,
     ),
     Registration::missing(Selector::Target, 3, "ResetUniversalAngerTargetGoal"),
 ];
 
 /// `Bee.registerGoals`.
 ///
-/// Seventeen registrations, of which this repo builds five. Note that the
+/// Seventeen registrations, of which this repo builds seven. Note that the
 /// `beePollinateGoal`, `goToHiveGoal` and `goToKnownFlowerGoal` field
 /// assignments inside `Bee.registerGoals` are field assignments rather than
 /// `addGoal` calls — a line-count transcription of that block gets twenty
@@ -319,10 +333,10 @@ pub const ZOMBIFIED_PIGLIN: &[Registration] = &[
 /// `ATTACK_DAMAGE 2.0`.
 ///
 /// **Sting-then-die is not "die on stinging", and the difference is the whole
-/// mechanism.** `Bee.doHurtTarget` deals `(int)ATTACK_DAMAGE` = 2,
-/// applies poison for 0/10/18 seconds by difficulty, then sets
-/// `hasStung` and calls `stopBeingAngry()` — the bee survives
-/// the sting. Death comes later and stochastically, in `Bee.customServerAiStep`:
+/// mechanism — modelled now, both halves.** `Bee.doHurtTarget` deals
+/// `(int)ATTACK_DAMAGE` = 2, applies poison for 0/10/18 seconds by difficulty,
+/// then sets `hasStung` and calls `stopBeingAngry()` — the bee survives the
+/// sting. Death comes later and stochastically, in `Bee.customServerAiStep`:
 /// once `hasStung`, `timeSinceSting++` each tick and every fifth
 /// tick the bee kills itself with probability
 /// `1 / clamp(1200 - timeSinceSting, 1, 1200)`. The clamp is what bounds it — at
@@ -330,18 +344,31 @@ pub const ZOMBIFIED_PIGLIN: &[Registration] = &[
 /// 1200 is a multiple of 5, so **a stung bee is certainly dead by 1200 ticks
 /// after the sting and certainly alive one tick after it.**
 ///
-/// That shape is a drain-flag, not a goal: the closest precedent in this repo is
+/// That shape is a drain-flag, the same precedent this repo already used for
 /// the creeper fuse (`SwellGoal` sets a direction, `NavigatingMob::advance`
-/// integrates it, `take_detonated` drains it, `MobSim::tick` resolves it). A bee
-/// needs the same three pieces plus access to its own health, which lives on
-/// `SimMob`.
+/// integrates it, `take_detonated` drains it, `MobSim::tick` resolves it):
+/// `SimMob::stung_at` is set the instant this mob's own `take_new_attacks()`
+/// fires while it has no prior sting (`MobSim::tick`'s first mob loop, right
+/// where `hits` is built) and `MobSim::tick`'s own `bee_sting_death_roll`
+/// evaluates the formula above every fifth tick after, calling
+/// `MobController::damage_self` through the same primitive the module doc
+/// names. **Not modelled**: the poison application (no status-effect producer
+/// reads a bee's sting here) — a disclosed simplification, not a silent one.
+/// Setting `stung_at` also clears `anger` (`stopBeingAngry()`), which is what
+/// makes the anger-gated target row below stop re-acquiring without a second
+/// `!hasStung()` check — see that row's own comment.
 pub const BEE: &[Registration] = &[
     // `Bee.BeeAttackGoal(this, 1.4F, true)` extends
     // `MeleeAttackGoal`, but its `Bee.BeeAttackGoal.canUse` adds `isAngry() && !hasStung()`.
-    // Registering a bare melee goal at priority 0 would make every bee
-    // attack on sight and keep attacking after it had stung — two wrongs, both
-    // invisible to a priority gate.
-    Registration::missing(Selector::Goal, 0, "Bee.BeeAttackGoal"),
+    // `Coverage::Modelled` now, as a bare `MeleeAttackGoal` — safe rather than
+    // "two wrongs" because *this table registers no other target-acquisition
+    // row*: `attack_target` is only ever set by `anger_gated_target` below,
+    // which is itself `isAngry()`. And `!hasStung()` needs no separate guard
+    // here either, for the reason `anger_gated_target`'s row comment gives —
+    // a sting clears the grudge, so `attack_target` clears with it inside a
+    // tick and `MeleeAttackGoal.can_continue_to_use` (which requires a live
+    // target) stops the same way.
+    Registration::goal(0, "Bee.BeeAttackGoal", bee_attack),
     Registration::missing(Selector::Goal, 1, "Bee.BeeEnterHiveGoal"),
     Registration::goal(2, "BreedGoal", breed_1_0),
     // `TemptGoal(this, 1.25, i -> i.is(ItemTags.BEE_FOOD), false)`. The goal is
@@ -367,9 +394,16 @@ pub const BEE: &[Registration] = &[
     // `isAngry()`. `canUse` — the retaliation trigger — is inherited unchanged,
     // so ours is a faithful stand-in for the part that fires.
     Registration::target(1, "Bee.BeeHurtByOtherGoal", hurt_by_target),
-    // `Bee.BeeBecomeAngryTargetGoal` — gated on
-    // `isAngry() && !hasStung()`; see the module doc's neutrality trap.
-    Registration::missing(Selector::Target, 2, "Bee.BeeBecomeAngryTargetGoal"),
+    // `Bee.BeeBecomeAngryTargetGoal` — gated on `isAngry() && !hasStung()`.
+    // `Coverage::Modelled` now via `anger_gated_target`, same as the piglin
+    // and wolf rows. The `!hasStung()` half of the guard is not a second
+    // condition to add here: `Bee.doHurtTarget` calls `stopBeingAngry()` the
+    // instant the sting connects (see `BEE`'s own doc comment and
+    // `MobSim`'s sting resolution), which clears the grudge
+    // `angry_target` reads — so a stung bee's `can_use` already returns
+    // `false` on the very next tick without this row needing its own copy of
+    // the flag.
+    Registration::target(2, "Bee.BeeBecomeAngryTargetGoal", anger_gated_target),
     Registration::missing(Selector::Target, 3, "ResetUniversalAngerTargetGoal"),
 ];
 
@@ -410,15 +444,20 @@ pub const BEE: &[Registration] = &[
 /// * Both `NonTameRandomTargetGoal`s gate on `!isTame()` and otherwise pick a
 ///   random same-class target — also answerable, also no goal type here yet.
 ///
-/// Pack aggro is `HurtByTargetGoal(this).setAlertOthers()` at target priority 3,
-/// and the ownership gap reaches into it too:
-/// `HurtByTargetGoal.alertOthers` filters same-class neighbours in a
-/// `(16.0, 10.0, 16.0)` box, and for a `TamableAnimal` it additionally requires
-/// **`tamable.getOwner() == other.getOwner()`**
-/// (in `HurtByTargetGoal.alertOthers`) — a wolf pack only rallies for
-/// wolves sharing its owner. So a correct wolf pack alert needs the owner model
-/// even though the alert itself is not about taming. Retaliation, the half that
-/// does not, is modelled.
+/// Pack aggro — `HurtByTargetGoal(this).setAlertOthers()` at target priority
+/// 3 — is modelled now, via the same census `alert_species` describes for the
+/// piglin: `HurtByTargetGoal.alertOthers` filters same-class neighbours in a
+/// `(16.0, 10.0, 16.0)` box, and for a `TamableAnimal` additionally requires
+/// **`tamable.getOwner() == other.getOwner()`** — a wolf pack only rallies for
+/// wolves sharing its owner, which
+/// `lodestone_server::mobs::MobSim::attack`'s census enforces by comparing
+/// `SimMob::owner_uuid()` on both sides (`None == None` included, so a pack of
+/// *wild* wolves still rallies together, matching vanilla's own null-owner
+/// case). The acquisition half — a rallied wolf turning its fresh grudge into
+/// an `attack_target` — is `NearestAttackableTargetGoal(Player,isAngryAt)`
+/// below, `Coverage::Modelled`. What remains genuinely `Missing`: line of
+/// sight on the alert itself (not modelled anywhere in this census), and the
+/// two owner-gated goals the bullet above already names.
 pub const WOLF: &[Registration] = &[
     Registration::goal(1, "FloatGoal", float_goal),
     // `TamableAnimal.TamableAnimalPanicGoal(1.5, DamageTypeTags.PANIC_ENVIRONMENTAL_CAUSES)`
@@ -466,10 +505,15 @@ pub const WOLF: &[Registration] = &[
     Registration::missing(Selector::Target, 2, "OwnerHurtTargetGoal"),
     // `.setAlertOthers()` — the pack half is `Missing`; see this table's doc.
     Registration::target(3, "HurtByTargetGoal", hurt_by_target),
-    Registration::missing(
-        Selector::Target,
+    // `Coverage::Modelled` now — see the piglin row's identical comment and
+    // `anger_gated_target`'s own doc. The wolf's pack-alert half
+    // (`HurtByTargetGoal.alertOthers`' owner-matched propagation) is modelled
+    // in `MobSim::attack`, not here — a same-species census is a host
+    // question, per this module's own doc.
+    Registration::target(
         4,
         "NearestAttackableTargetGoal(Player,isAngryAt)",
+        anger_gated_target,
     ),
     Registration::missing(Selector::Target, 5, "NonTameRandomTargetGoal(Animal)"),
     Registration::missing(Selector::Target, 6, "NonTameRandomTargetGoal(Turtle)"),
@@ -507,6 +551,31 @@ fn panic_1_5(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// `TemptGoal(this, 1.25, BEE_FOOD, false)`, from `Bee.registerGoals`.
 fn tempt_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(TemptGoal::new(ctx.speed * 1.25))
+}
+
+/// `NearestAttackableTargetGoal<>(this, Player.class, 10, true, false,
+/// this::isAngryAt)` — the piglin, wolf and bee's own anger-gated
+/// registration, shared here because all three cite the identical
+/// constructor shape and read the identical seam method.
+///
+/// [`NearestAttackableTargetGoal::anger_gated`] is what makes this safe to
+/// register at all: it targets [`MobController::angry_target`] rather than
+/// running an open hostile search, so a species with no live grudge
+/// acquires nothing. See that constructor's own doc comment for why a
+/// predicate-free registration here would have made three neutral species
+/// hostile on sight, and this module's own doc for why that self-loop
+/// (#455) is now fixed, making this the correct row to build rather than a
+/// row to keep deferring.
+fn anger_gated_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(NearestAttackableTargetGoal::anger_gated())
+}
+
+/// `Bee.BeeAttackGoal(this, 1.4F, true)` — the bee's melee speed multiplier.
+/// See `BEE`'s own row comment for why a bare `MeleeAttackGoal` is a safe
+/// stand-in despite carrying neither half of vanilla's `isAngry() &&
+/// !hasStung()` guard directly.
+fn bee_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(MeleeAttackGoal::new(ctx.speed * 1.4, ctx.attack_reach))
 }
 
 /// `FollowOwnerGoal(this, 1.0, 10.0F, 2.0F)` — the wolf's follow distances.
@@ -733,23 +802,22 @@ mod tests {
         assert_eq!(at(zombie, "ZombieAttackGoal"), Some(3));
     }
 
-    /// The still-blocked headline mechanisms named in this module's own doc
-    /// comment must be present as `Coverage::Missing` rows at their real
-    /// vanilla priorities — not absent, and
-    /// not silently `Modelled` by a goal that does something else.
+    /// The mechanisms genuinely still absent from this crate — not this
+    /// family's four headline ones (all landed for issue #233; see the module
+    /// doc) but the *wolf-owner-combat* rows #229 needs — must be present as
+    /// `Coverage::Missing` rows at their real vanilla priorities, not absent,
+    /// and not silently `Modelled` by a goal that does something else.
     ///
-    /// This is the gate that fails if someone "implements" the enderman
-    /// teleport by pointing the row at a plain goal, or drops a row because
-    /// nothing builds it. The enderman *freeze* half is no longer in this
-    /// list — primitive 2 landed it as a real `Coverage::Modelled` row, and
-    /// [`the_enderman_freeze_row_is_modelled_and_built_from_the_seam`] is its
-    /// own positive gate.
+    /// This is the gate that fails if someone "implements" a mechanism by
+    /// pointing the row at a plain goal that does not actually reproduce it,
+    /// or drops a row because nothing builds it. `bee`'s `Bee.BeeAttackGoal`
+    /// used to be in this list; it is `Coverage::Modelled` now (see `BEE`'s own
+    /// row comment for why a bare `MeleeAttackGoal` is a faithful stand-in),
+    /// and [`the_enderman_freeze_row_is_modelled_and_built_from_the_seam`] is
+    /// the positive-side gate for the enderman half this list already dropped.
     #[test]
-    fn the_four_blocked_mechanisms_are_recorded_as_missing_not_omitted() {
-        let blocked: &[(&str, i32, Selector, &str)] = &[
-            ("bee", 0, Selector::Goal, "Bee.BeeAttackGoal"),
-            ("wolf", 1, Selector::Target, "OwnerHurtByTargetGoal"),
-        ];
+    fn the_owner_combat_mechanisms_are_recorded_as_missing_not_omitted() {
+        let blocked: &[(&str, i32, Selector, &str)] = &[("wolf", 1, Selector::Target, "OwnerHurtByTargetGoal")];
         for &(species, priority, selector, vanilla) in blocked {
             let row = registrations_for(species)
                 .iter()
@@ -1184,28 +1252,101 @@ mod tests {
         );
     }
 
-    /// Every player-targeting row on these species carries vanilla's anger
-    /// predicate, and ours has none — so none of them may be `Modelled`.
+    /// Every player-targeting row on these species that carries vanilla's
+    /// anger predicate must be built from `NearestAttackableTargetGoal::
+    /// anger_gated`, the constructor that reads `angry_target` — never the
+    /// plain, predicate-free constructor, which would make a neutral mob
+    /// hostile on sight (see the module doc's "trap that decided the target
+    /// rows").
     ///
-    /// The module doc explains why this matters more than it looks: the rows are
-    /// inert today only because `find_nearest_target` is a self-loop, so a
-    /// `Modelled` row here is a latent "neutral mobs become hostile" bug rather
-    /// than an active one.
+    /// This test **replaces** `no_anger_gated_target_row_is_modelled`, which
+    /// used to require these three rows stay `Coverage::Missing` while
+    /// `NavigatingMob::find_nearest_target`'s self-loop (#455) meant a
+    /// predicate-free row would have made every neutral mob hostile. That
+    /// self-loop is fixed (confirmed against the tree — `#455`'s own issue
+    /// record and this module's own doc), so landing these three rows now is
+    /// a deliberate, cited change, not a relaxation of the old guard to dodge
+    /// a failure it was catching. The old guard's actual concern — an open
+    /// hostile search reaching a neutral mob's target row — is exactly what
+    /// the behavioural half below still proves impossible, using a real
+    /// [`NavigatingMob`] rather than a stub that could not exhibit the bug in
+    /// the first place.
     #[test]
-    fn no_anger_gated_target_row_is_modelled() {
+    fn anger_gated_target_rows_use_the_anger_gated_search_not_the_open_one() {
         let mut checked = 0usize;
         for species in SPECIES {
             for r in registrations_for(species) {
-                if r.vanilla.contains("isAngryAt") || r.vanilla.contains("BecomeAngry") {
-                    assert!(
-                        matches!(r.coverage, Coverage::Missing),
-                        "{species}'s {} is gated on isAngryAt in the jar; \
-                         modelling it with our predicate-free \
-                         NearestAttackableTargetGoal makes a neutral mob hostile",
-                        r.vanilla
-                    );
-                    checked += 1;
+                if !(r.vanilla.contains("isAngryAt") || r.vanilla.contains("BecomeAngry")) {
+                    continue;
                 }
+                assert!(
+                    matches!(r.coverage, Coverage::Modelled(_)),
+                    "{species}'s {} is gated on isAngryAt in the jar and should be \
+                     Modelled via anger_gated_target now that #455 is fixed",
+                    r.vanilla
+                );
+                let build = r.build().expect("a Modelled row must build something");
+                let ctx = SpeciesContext::new(0.3);
+                let world = Flat::dry();
+
+                // No live grudge: even with a player standing right next to
+                // it, the row must not acquire a target. This is the exact
+                // property an open hostile search (the old guard's actual
+                // fear) would fail.
+                let mut calm = NavigatingMob::new(
+                    &world,
+                    MobShape::land(0.6, 1.4),
+                    Vec3::new(0.0, 0.0, 0.0),
+                    0.3,
+                    900,
+                    (checked as u64) * 2 + 1,
+                );
+                calm.set_nearest_player(Some(Vec3::new(3.0, 0.0, 0.0)));
+                calm.set_angry_target(None);
+                assert!(
+                    !build(&ctx).can_use(&mut calm),
+                    "{species}'s {} acquired a target with no live grudge — this is \
+                     the open-search hypothesis, not the anger-gated one",
+                    r.vanilla
+                );
+
+                // A live grudge, with the nearest player somewhere else
+                // entirely: the row must acquire the grudge target, not the
+                // nearest player, proving it reads `angry_target` and not
+                // `find_nearest_target`.
+                let mut angry = NavigatingMob::new(
+                    &world,
+                    MobShape::land(0.6, 1.4),
+                    Vec3::new(0.0, 0.0, 0.0),
+                    0.3,
+                    900,
+                    (checked as u64) * 2 + 2,
+                );
+                angry.set_nearest_player(Some(Vec3::new(80.0, 0.0, 0.0)));
+                angry.set_angry_target(Some(Vec3::new(3.0, 0.0, 0.0)));
+                // `NearestAttackableTargetGoal`'s own `random_interval`
+                // throttle (vanilla's own constructor argument, `10` for all
+                // three rows here) only actually scans on roughly one call in
+                // ten — a single `can_use` call is a coin flip on whether
+                // this tick was the one that rolled `0`, not a test of
+                // whether the row can ever acquire. Retry well past the
+                // interval before concluding it cannot.
+                let mut goal = build(&ctx);
+                let mut acquired = false;
+                for _ in 0..50 {
+                    if goal.can_use(&mut angry) {
+                        acquired = true;
+                        break;
+                    }
+                }
+                assert!(
+                    acquired,
+                    "{species}'s {} never acquired its live grudge target in 50 \
+                     attempts, well past the random_interval throttle",
+                    r.vanilla
+                );
+
+                checked += 1;
             }
         }
         assert_eq!(
