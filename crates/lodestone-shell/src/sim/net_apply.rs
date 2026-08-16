@@ -308,6 +308,7 @@ impl Sim {
                     offset,
                     max_speed,
                     count,
+                    options,
                 } => {
                     // `ClientLevel.doAddParticle`'s render cutoff: a particle
                     // farther than 32 blocks (`1024.0` == `32.0` squared) from
@@ -332,6 +333,7 @@ impl Sim {
                                 [offset.x, offset.y, offset.z],
                                 max_speed,
                                 count,
+                                options,
                             );
                         });
                     }

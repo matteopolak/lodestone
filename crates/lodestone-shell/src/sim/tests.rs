@@ -1798,6 +1798,7 @@ fn net_particles_reaches_the_emitter_and_resolves() {
         offset: Vec3f::new(0.1, 0.1, 0.1),
         max_speed: 0.02,
         count: 9,
+        options: lodestone_model::event::ParticleOptions::None,
     })
     .unwrap();
     sim.poll_net();
@@ -1861,6 +1862,7 @@ fn sim_with_particles(count: i32) -> (Sim, Camera) {
             [0.5, 0.5, 0.5],
             0.02,
             count,
+            lodestone_model::event::ParticleOptions::None,
         );
     });
     let camera = sim.camera(1.0);
@@ -2124,6 +2126,7 @@ fn long_distance_flag_gates_the_far_away_cutoff() {
         offset: Vec3f::new(0.0, 0.0, 0.0),
         max_speed: 0.0,
         count: 3,
+        options: lodestone_model::event::ParticleOptions::None,
     })
     .unwrap();
     sim.poll_net();
@@ -2140,6 +2143,7 @@ fn long_distance_flag_gates_the_far_away_cutoff() {
         offset: Vec3f::new(0.0, 0.0, 0.0),
         max_speed: 0.0,
         count: 3,
+        options: lodestone_model::event::ParticleOptions::None,
     })
     .unwrap();
     sim.poll_net();

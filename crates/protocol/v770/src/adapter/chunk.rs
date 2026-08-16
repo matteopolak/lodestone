@@ -594,13 +594,18 @@ impl V770Adapter {
         }
         if packet_id == play::clientbound::LEVEL_PARTICLES {
             // The particle type is the final field: a registry id followed by
-            // per-type option bytes the model does not carry. The prefix decodes
-            // to fixed widths (so a misparse is caught before the id) and the
-            // options are swallowed by `remaining`.
+            // per-type option bytes. The prefix decodes to fixed widths (so a
+            // misparse is caught before the id) and `Decode`'s `#[mc(remaining)]`
+            // captures the option bytes verbatim into `particles.options` --
+            // `decode_particle_options` below is what actually parses them,
+            // for the names it recognises; everything else stays
+            // `ParticleOptions::None`, same as when this crate dropped them
+            // outright.
             let particles: LevelParticles = decode_full(payload)?;
             let name = particle_type_name(particles.particle_id).ok_or_else(|| {
                 AdapterError::Decode(format!("unknown particle id {}", particles.particle_id))
             })?;
+            let options = decode_particle_options(name, &particles.options)?;
             return Ok(vec![Directive::Emit(ClientEvent::Particles {
                 particle: parse_key(name, "particle")?,
                 long_distance: particles.override_limiter,
@@ -616,6 +621,7 @@ impl V770Adapter {
                 },
                 max_speed: particles.max_speed,
                 count: particles.count,
+                options,
             })]);
         }
         if packet_id == play::clientbound::EXPLODE {
@@ -1092,6 +1098,8 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
             pos: Vec3::new(x, y, z),
             offset: Vec3f::new(0.0, 0.0, 0.0),
             max_speed: 0.0,
+            // `ParticleTypes.EXPLOSION_EMITTER` is a bare `SimpleParticleType`.
+            options: ParticleOptions::None,
             count: 1,
         }),
         Directive::Emit(ClientEvent::Sound {
@@ -1104,6 +1112,59 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
             seed: rand::random(),
         }),
     ])
+}
+
+/// Decodes a particle type's own trailing payload out of `LEVEL_PARTICLES`'s
+/// captured `#[mc(remaining)]` bytes, for the type-specific
+/// [`ParticleOptions`] this crate models today.
+///
+/// Every name this match does not recognise resolves to
+/// [`ParticleOptions::None`] — the correct decode for a true
+/// `SimpleParticleType` (the overwhelming majority of registry entries carry
+/// no payload at all) and, for now, the honest answer for every payload-
+/// carrying type this crate has not modelled yet. Getting this dispatch wrong
+/// in the other direction — decoding a plain `SimpleParticleType` as if it
+/// carried bytes — cannot happen here because there is nothing left in
+/// `bytes` for those names to misread past `LevelParticles`'s own
+/// fixed-width prefix, and this function is never called with any of the
+/// packet's own fields still unread.
+///
+/// `minecraft:dust`/`minecraft:dust_color_transition`
+/// (`DustParticleOptions`/`DustColorTransitionOptions`,
+/// `.cache/mc/26.2/client-src/net/minecraft/core/particles/`): one or two
+/// packed RGB24 big-endian `i32`s (`ARGB.vector3fFromRGB24` unpacks each byte
+/// to `[0, 1]` via `red(color) = color >> 16 & 0xFF`, ditto green/blue) then a
+/// big-endian `f32` scale — `StreamCodec.composite(ByteBufCodecs.INT, …,
+/// ByteBufCodecs.FLOAT, …)`, ordinary fixed-width fields, not VarInts.
+fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, AdapterError> {
+    fn rgb24(reader: &mut Reader<'_>) -> Result<[f32; 3], AdapterError> {
+        let packed = reader.i32().map_err(dec_err)?;
+        Ok([
+            f32::from(((packed >> 16) & 0xff) as u8) / 255.0,
+            f32::from(((packed >> 8) & 0xff) as u8) / 255.0,
+            f32::from((packed & 0xff) as u8) / 255.0,
+        ])
+    }
+    // `name` is the fully-namespaced registry id (`PARTICLE_TYPE_NAMES`'
+    // own entries, e.g. `"minecraft:dust"`), not the namespace-stripped path
+    // `net.rs`'s `NetUpdate::Particles::kind` uses -- matching the bare path
+    // here would silently fall through to `None` for every particle.
+    match name {
+        "minecraft:dust" => {
+            let mut reader = Reader::new(bytes);
+            let color = rgb24(&mut reader)?;
+            let scale = reader.f32().map_err(dec_err)?;
+            Ok(ParticleOptions::Dust { color, scale })
+        }
+        "minecraft:dust_color_transition" => {
+            let mut reader = Reader::new(bytes);
+            let from_color = rgb24(&mut reader)?;
+            let to_color = rgb24(&mut reader)?;
+            let scale = reader.f32().map_err(dec_err)?;
+            Ok(ParticleOptions::DustColorTransition { from_color, to_color, scale })
+        }
+        _ => Ok(ParticleOptions::None),
+    }
 }
 
 /// Reads a wire `BitSet` — a varint `long`-count followed by that many

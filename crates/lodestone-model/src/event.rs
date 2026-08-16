@@ -1262,6 +1262,44 @@ pub enum BossAction {
     },
 }
 
+/// A `minecraft:particle_type` registry entry's type-specific payload —
+/// [`ClientEvent::Particles`]'s `options`.
+///
+/// Most vanilla particle types are a bare `SimpleParticleType` with no
+/// payload at all ([`Self::None`], the common case); a handful carry extra
+/// fields read immediately after the registry id (`DustParticleOptions`,
+/// `BlockParticleOption`, `ItemParticleOption`, …). Adding a variant here
+/// does not by itself decode anything — the adapter's `LEVEL_PARTICLES` arm
+/// (`crates/protocol/v770/src/adapter/chunk.rs`) is what parses a payload out
+/// of the wire bytes based on the resolved particle name, and only for the
+/// names it recognises; every other name still resolves to [`Self::None`],
+/// same as before this type existed.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ParticleOptions {
+    /// No type-specific payload.
+    #[default]
+    None,
+    /// `minecraft:dust` (`DustParticleOptions`).
+    Dust {
+        /// Colour, unpacked from the wire's packed RGB24 `i32` to `[0, 1]`
+        /// components (`ARGB.vector3fFromRGB24`).
+        color: [f32; 3],
+        /// Size multiplier (`ScalableParticleOptionsBase::getScale`).
+        scale: f32,
+    },
+    /// `minecraft:dust_color_transition` (`DustColorTransitionOptions`) — the
+    /// sculk-to-redstone sibling of [`Self::Dust`] that lerps colour over its
+    /// life instead of holding one fixed.
+    DustColorTransition {
+        /// Starting colour, same unpacking as [`Self::Dust`]'s `color`.
+        from_color: [f32; 3],
+        /// Ending colour.
+        to_color: [f32; 3],
+        /// Size multiplier.
+        scale: f32,
+    },
+}
+
 /// Things that happen to the client after a version adapter lifts a packet into
 /// the canonical model.
 ///
@@ -1575,6 +1613,9 @@ pub enum ClientEvent {
         max_speed: f32,
         /// Number of particles to spawn.
         count: i32,
+        /// The particle type's own extra payload, if it carries one. See
+        /// [`ParticleOptions`].
+        options: ParticleOptions,
     },
     /// A container's full content changed.
     ContainerContent {

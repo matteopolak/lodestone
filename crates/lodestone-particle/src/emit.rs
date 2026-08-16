@@ -2005,3 +2005,132 @@ pub fn drip(
     p.behaviour = Behaviour::WaterDrop;
     engine.add(p);
 }
+
+/// `DustParticleBase.randomizeColor` — a fresh `nextFloat` draw per call, so
+/// three calls (r, g, b) each consume their own random number even though
+/// `baseFactor` is shared across all three.
+fn randomize_dust_channel(engine: &mut ParticleEngine, channel: f32, base_factor: f32) -> f32 {
+    rng_next(engine).mul_add(0.2, 0.8) * channel * base_factor
+}
+
+/// Shared `DustParticleBase` constructor body — the physics and sizing every
+/// `minecraft:dust`-family particle has in common
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/particle/DustParticleBase.java`).
+/// `color` starts at `SingleQuadParticle`'s draw-quad-size point (already run
+/// by [`Particle::with_velocity`]), matching the constructor order: `super(...)`
+/// runs the velocity jitter and quad-size draw, *then* `xd/yd/zd *= 0.1`,
+/// *then* the lifetime redraw below.
+fn dust_particle(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    scale: f32,
+) -> Particle {
+    let rng = engine.rng();
+    let mut p = Particle::with_velocity(
+        x,
+        y,
+        z,
+        xa,
+        ya,
+        za,
+        SpriteSource::Sheet { sheet: Sheet::Generic, frame: 0 },
+        rng,
+    );
+    p.friction = 0.96;
+    p.speed_up_when_y_blocked = true;
+    p.xd *= 0.1;
+    p.yd *= 0.1;
+    p.zd *= 0.1;
+    p.quad_size *= 0.75 * scale;
+    // `(int)(8.0 / (random.nextDouble() * 0.8 + 0.2))`, then
+    // `(int) Math.max(baseLifetime * scale, 1.0F)`.
+    #[expect(clippy::cast_possible_truncation, reason = "Java's `(int)` cast; small")]
+    let base_lifetime = (8.0 / engine.rng().next_double().mul_add(0.8, 0.2)) as i32;
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        reason = "mirrors Java's int/float arithmetic and (int) cast"
+    )]
+    {
+        p.lifetime = (base_lifetime as f32 * scale).max(1.0) as i32;
+    }
+    p.sprite = SpriteSource::Sheet {
+        sheet: Sheet::Generic,
+        frame: Sheet::Generic.frame_for_age(0, p.lifetime),
+    };
+    p
+}
+
+/// `DustParticle.Provider` (`ParticleTypes.DUST`, the wire particle
+/// `minecraft:dust` decodes into).
+///
+/// `color` is `DustParticleOptions::getColor()` — the packed RGB24 already
+/// unpacked to `[0, 1]` components — and `scale` its `ScalableParticleOptionsBase`
+/// scale. The colour is randomised once here (`DustParticle`'s constructor
+/// body, which runs *after* `DustParticleBase`'s) and held for the particle's
+/// whole life; see [`dust_color_transition`] for the sibling that doesn't.
+pub fn dust(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    color: [f32; 3],
+    scale: f32,
+) {
+    let mut p = dust_particle(engine, x, y, z, xa, ya, za, scale);
+    let base_factor = rng_next(engine).mul_add(0.4, 0.6);
+    p.colour = [
+        randomize_dust_channel(engine, color[0], base_factor),
+        randomize_dust_channel(engine, color[1], base_factor),
+        randomize_dust_channel(engine, color[2], base_factor),
+    ];
+    p.behaviour = Behaviour::Dust;
+    engine.add(p);
+}
+
+/// `DustColorTransitionParticle.Provider` (`ParticleTypes.DUST_COLOR_TRANSITION`,
+/// `minecraft:dust_color_transition` — the sculk-sensor/sculk-shrieker particle).
+///
+/// Same physics as [`dust`]; the colour lerps from `from_color` to `to_color`
+/// over the particle's life instead of staying fixed — see
+/// [`Behaviour::DustColorTransition`] for how the lerp itself is ticked.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors DustColorTransitionOptions plus position/velocity/engine"
+)]
+pub fn dust_color_transition(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    from_color: [f32; 3],
+    to_color: [f32; 3],
+    scale: f32,
+) {
+    let mut p = dust_particle(engine, x, y, z, xa, ya, za, scale);
+    let base_factor = rng_next(engine).mul_add(0.4, 0.6);
+    let from = [
+        randomize_dust_channel(engine, from_color[0], base_factor),
+        randomize_dust_channel(engine, from_color[1], base_factor),
+        randomize_dust_channel(engine, from_color[2], base_factor),
+    ];
+    let to = [
+        randomize_dust_channel(engine, to_color[0], base_factor),
+        randomize_dust_channel(engine, to_color[1], base_factor),
+        randomize_dust_channel(engine, to_color[2], base_factor),
+    ];
+    p.colour = from;
+    p.behaviour = Behaviour::DustColorTransition { from, to };
+    engine.add(p);
+}

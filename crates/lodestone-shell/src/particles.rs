@@ -51,6 +51,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lodestone_assets::{ParticleAtlas, ResourceLocation};
+use lodestone_model::event::ParticleOptions;
 use lodestone_particle::{Layer, ParticleEngine, ParticleQuad, Sheet, SpriteSource, emit};
 use lodestone_physics::{CollisionView, Vec3d};
 use lodestone_render::{BlockModels, Camera};
@@ -481,6 +482,7 @@ impl Particles {
         offset: [f32; 3],
         max_speed: f32,
         count: i32,
+        options: ParticleOptions,
     ) {
         if count == 0 {
             let vel = [
@@ -488,7 +490,7 @@ impl Particles {
                 f64::from(max_speed) * f64::from(offset[1]),
                 f64::from(max_speed) * f64::from(offset[2]),
             ];
-            self.spawn_one(kind, pos, vel);
+            self.spawn_one(kind, pos, vel, options);
             return;
         }
         for _ in 0..count {
@@ -502,14 +504,14 @@ impl Particles {
                 self.gaussian() * f64::from(max_speed),
                 self.gaussian() * f64::from(max_speed),
             ];
-            self.spawn_one(kind, jittered, vel);
+            self.spawn_one(kind, jittered, vel, options);
         }
     }
 
     /// Dispatches one particle to the emitter matching `kind`. Mirrors
     /// `Level.addParticle`'s per-type dispatch, narrowed to the sheet
     /// particles [`lodestone_particle::emit`] implements today.
-    fn spawn_one(&mut self, kind: &str, pos: [f64; 3], vel: [f64; 3]) {
+    fn spawn_one(&mut self, kind: &str, pos: [f64; 3], vel: [f64; 3], options: ParticleOptions) {
         let [x, y, z] = pos;
         let [xa, ya, za] = vel;
         match kind {
@@ -631,6 +633,46 @@ impl Particles {
             "spore_blossom_air" => {
                 emit::drip(&mut self.engine, x, y, z, Sheet::DripFall, [0.32, 0.5, 0.22], 0.0);
             }
+            // The two `ParticleOptions`-carrying types this shell decodes a
+            // payload for today (`decode_particle_options` in the v770
+            // adapter). `kind` and `options` both come from the same
+            // `LEVEL_PARTICLES` packet by construction -- `net.rs`'s
+            // `ClientEvent::Particles` arm carries both straight through to
+            // `NetUpdate::Particles`, and `net_apply.rs`'s arm hands both to
+            // this call unmodified -- so the two agreeing is the production
+            // case; the `_` arm below is only reachable from a caller
+            // (a test, or a future non-network producer) that passes a
+            // mismatched or default `options` on purpose.
+            "dust" => match options {
+                ParticleOptions::Dust { color, scale } => {
+                    emit::dust(&mut self.engine, x, y, z, xa, ya, za, color, scale);
+                }
+                _ => tracing::debug!(
+                    target: "particles",
+                    "dust particle with no DustParticleOptions payload; dropped"
+                ),
+            },
+            "dust_color_transition" => match options {
+                ParticleOptions::DustColorTransition { from_color, to_color, scale } => {
+                    emit::dust_color_transition(
+                        &mut self.engine,
+                        x,
+                        y,
+                        z,
+                        xa,
+                        ya,
+                        za,
+                        from_color,
+                        to_color,
+                        scale,
+                    );
+                }
+                _ => tracing::debug!(
+                    target: "particles",
+                    "dust_color_transition particle with no DustColorTransitionOptions \
+                     payload; dropped"
+                ),
+            },
             other => tracing::debug!(
                 target: "particles",
                 "no emitter wired for particle type {other:?}; dropped"
@@ -1303,7 +1345,14 @@ mod tests {
     #[test]
     fn spawn_particles_emits_exactly_count_flame_particles_all_resolved() {
         let mut p = resolvable();
-        p.spawn_particles("flame", [0.5, 65.0, 0.5], [0.1, 0.1, 0.1], 0.02, 7);
+        p.spawn_particles(
+            "flame",
+            [0.5, 65.0, 0.5],
+            [0.1, 0.1, 0.1],
+            0.02,
+            7,
+            ParticleOptions::None,
+        );
         assert_eq!(
             p.engine.particles().len(),
             7,
@@ -1364,7 +1413,7 @@ mod tests {
         ];
         for &(kind, offset) in cases {
             let mut p = resolvable();
-            p.spawn_particles(kind, [0.5, 65.0, 0.5], offset, 0.0, 1);
+            p.spawn_particles(kind, [0.5, 65.0, 0.5], offset, 0.0, 1, ParticleOptions::None);
             assert_eq!(
                 p.engine.particles().len(),
                 1,
@@ -1398,11 +1447,106 @@ mod tests {
             "fireworks",
             "firework_rocket",
         ] {
-            p.spawn_particles(kind, [0.0, 64.0, 0.0], [0.0; 3], 0.0, 3);
+            p.spawn_particles(kind, [0.0, 64.0, 0.0], [0.0; 3], 0.0, 3, ParticleOptions::None);
         }
         assert!(
             p.engine.particles().is_empty(),
             "a near-miss kind must not match any of the new dispatch arms"
+        );
+    }
+
+    /// The `dust` gap this pass closed: before it, `LEVEL_PARTICLES`'s option
+    /// bytes were captured and then thrown away entirely, so even a wired
+    /// `"dust"` dispatch arm would have had no colour to draw with. This pins
+    /// the whole chain from a decoded `ParticleOptions::Dust` payload through
+    /// to a resolved, drawn instance addressing `Sheet::Generic` (confirmed
+    /// against the real `dust.json`, which lists the same eight
+    /// `generic_0..generic_7` textures as `Sheet::Generic` itself) --
+    /// pairwise-distinct RGB values so a channel transposition could not
+    /// survive this test unnoticed.
+    #[test]
+    fn dust_with_a_decoded_payload_reaches_the_emitter_and_resolves() {
+        let mut p = resolvable();
+        p.spawn_particles(
+            "dust",
+            [0.5, 65.0, 0.5],
+            [0.0; 3],
+            0.0,
+            1,
+            ParticleOptions::Dust { color: [0.75, 0.25, 0.5], scale: 2.0 },
+        );
+        assert_eq!(p.engine.particles().len(), 1, "a decoded dust payload must dispatch");
+        let particle = &p.engine.particles()[0];
+        assert_ne!(
+            particle.colour, [1.0, 1.0, 1.0],
+            "the decoded colour must actually reach the particle, not the \
+             SingleQuadParticle white default"
+        );
+
+        let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+            Some(lodestone_particle::FULL_BRIGHT)
+        });
+        assert_eq!(frame.drawn, 1);
+        assert_eq!(frame.unresolved, 0, "dust shares Sheet::Generic, already in the fixture");
+        assert_eq!(
+            frame.sheet_drawn, 1,
+            "dust must address the particle sheet, not the block atlas"
+        );
+    }
+
+    /// The sibling type, and the reason [`Behaviour::DustColorTransition`]
+    /// exists separately from [`Behaviour::Dust`]: its colour must move
+    /// between the two ends of the transition as it ages rather than staying
+    /// fixed, which a shared-behaviour implementation could get away without
+    /// ever doing.
+    #[test]
+    fn dust_color_transition_lerps_from_its_starting_colour_as_it_ages() {
+        struct NoCollision;
+        impl CollisionView for NoCollision {
+            fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<lodestone_physics::Aabb>) {}
+        }
+
+        let mut p = resolvable();
+        p.spawn_particles(
+            "dust_color_transition",
+            [0.5, 65.0, 0.5],
+            [0.0; 3],
+            0.0,
+            1,
+            ParticleOptions::DustColorTransition {
+                from_color: [1.0, 0.0, 0.0],
+                to_color: [0.0, 0.0, 1.0],
+                scale: 1.0,
+            },
+        );
+        assert_eq!(p.engine.particles().len(), 1);
+        let start_colour = p.engine.particles()[0].colour;
+        assert!(
+            start_colour[0] > start_colour[2],
+            "at age 0 the lerp fraction is 0, so colour must still favour \
+             from_color's red over to_color's blue, got {start_colour:?}"
+        );
+
+        // The randomised colour factors (`randomize_dust_channel`) differ per
+        // channel, so a mid-transition sample cannot be compared safely --
+        // tick to the particle's own `lifetime` (still alive: `tick_base`
+        // only removes once `age > lifetime`) instead of a fixed guess, so
+        // the lerp fraction lands close to 1 regardless of which lifetime the
+        // engine's entropy-seeded RNG happened to draw. At that fraction
+        // red's contribution is bounded above by `from_r * 1/(lifetime+1)`
+        // and blue's below by `to_b * lifetime/(lifetime+1)`, which cannot
+        // invert for any pair of per-channel random factors.
+        let lifetime = p.engine.particles()[0].lifetime;
+        for _ in 0..lifetime {
+            p.tick(&NoCollision);
+        }
+        assert_eq!(p.engine.particles().len(), 1, "the particle must still be alive at age == lifetime");
+        let later_colour = p.engine.particles()[0].colour;
+        assert!(
+            later_colour[2] > later_colour[0],
+            "near the end of its life the lerp must have moved decisively \
+             towards to_color's blue, got {later_colour:?} (started at \
+             {start_colour:?}, lifetime {lifetime})"
         );
     }
 
@@ -1426,7 +1570,14 @@ mod tests {
         }
 
         let mut p = resolvable();
-        p.spawn_particles("explosion_emitter", [0.5, 65.0, 0.5], [0.0; 3], 0.0, 1);
+        p.spawn_particles(
+            "explosion_emitter",
+            [0.5, 65.0, 0.5],
+            [0.0; 3],
+            0.0,
+            1,
+            ParticleOptions::None,
+        );
         assert_eq!(
             p.engine.particles().len(),
             1,
@@ -1519,7 +1670,14 @@ mod tests {
     #[test]
     fn spawn_particles_for_an_unknown_type_spawns_nothing() {
         let mut p = resolvable();
-        p.spawn_particles("totally_not_a_real_particle", [0.0, 64.0, 0.0], [0.0; 3], 0.0, 5);
+        p.spawn_particles(
+            "totally_not_a_real_particle",
+            [0.0, 64.0, 0.0],
+            [0.0; 3],
+            0.0,
+            5,
+            ParticleOptions::None,
+        );
         assert!(
             p.engine.particles().is_empty(),
             "an unmapped kind must spawn nothing rather than guess at a sheet"
@@ -1535,7 +1693,14 @@ mod tests {
     #[test]
     fn count_zero_spawns_one_particle_at_the_exact_position_with_offset_as_velocity() {
         let mut p = resolvable();
-        p.spawn_particles("flame", [1.0, 64.0, -2.0], [0.25, 0.5, -0.25], 4.0, 0);
+        p.spawn_particles(
+            "flame",
+            [1.0, 64.0, -2.0],
+            [0.25, 0.5, -0.25],
+            4.0,
+            0,
+            ParticleOptions::None,
+        );
         let particles = p.engine.particles();
         assert_eq!(particles.len(), 1, "count == 0 means exactly one particle");
         let particle = &particles[0];
@@ -1576,7 +1741,14 @@ mod tests {
     #[test]
     fn count_greater_than_zero_scatters_positions_around_pos() {
         let mut p = resolvable();
-        p.spawn_particles("flame", [0.0, 64.0, 0.0], [1.0, 1.0, 1.0], 0.0, 64);
+        p.spawn_particles(
+            "flame",
+            [0.0, 64.0, 0.0],
+            [1.0, 1.0, 1.0],
+            0.0,
+            64,
+            ParticleOptions::None,
+        );
         let particles = p.engine.particles();
         assert_eq!(particles.len(), 64);
         let distinct_x = particles

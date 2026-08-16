@@ -122,7 +122,7 @@ use lodestone_game::scoreboard::Scoreboard;
 use lodestone_game::tablist::TabList;
 use lodestone_model::Vec3f;
 use lodestone_model::action::ResourcePackResponseKind;
-use lodestone_model::event::SoundCategory;
+use lodestone_model::event::{ParticleOptions, SoundCategory};
 // `SectionLight` is imported anonymously: it is the trait carrying
 // `sky_light`/`block_light` on `WorldSectionLight`, and naming it would collide
 // with `lodestone_world::SectionLight`, the *storage* type of the same name that
@@ -803,6 +803,9 @@ pub enum NetUpdate {
         /// Number of particles to spawn. `0` is vanilla's special case for
         /// exactly one particle with a non-randomized velocity.
         count: i32,
+        /// The particle type's own extra payload, if it carries one. See
+        /// [`lodestone_model::event::ParticleOptions`].
+        options: ParticleOptions,
     },
     // `Health` and `Experience` used to live here, forwarded from
     // `ClientEvent::{HealthChanged, ExperienceChanged}` and folded by
@@ -3975,6 +3978,7 @@ fn forward(
             offset,
             max_speed,
             count,
+            options,
         } => NetUpdate::Particles {
             kind: particle.path().to_string(),
             long_distance,
@@ -3982,6 +3986,7 @@ fn forward(
             offset,
             max_speed,
             count,
+            options,
         },
         ClientEvent::Disconnect { reason } => {
             // Unlike `Death`'s `message` (flattened to plain text below, a
@@ -4848,6 +4853,10 @@ mod tests {
             offset: Vec3f::new(0.1, 0.2, 0.3),
             max_speed: 0.5,
             count: 12,
+            options: ParticleOptions::Dust {
+                color: [0.9, 0.05, 0.05],
+                scale: 1.5,
+            },
         };
         forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), &BiomeNameCell::default(), &CommandTreeCell::default(), event).expect("forward does not stop the loop");
         match rx.try_recv().expect("an update was forwarded") {
@@ -4858,6 +4867,7 @@ mod tests {
                 offset,
                 max_speed,
                 count,
+                options,
             } => {
                 assert_eq!(kind, "flame", "namespace must be stripped, matching Sound");
                 assert!(long_distance);
@@ -4865,6 +4875,11 @@ mod tests {
                 assert_eq!(offset, Vec3f::new(0.1, 0.2, 0.3));
                 assert_eq!(max_speed, 0.5);
                 assert_eq!(count, 12);
+                assert_eq!(
+                    options,
+                    ParticleOptions::Dust { color: [0.9, 0.05, 0.05], scale: 1.5 },
+                    "options must survive the hop into NetUpdate unchanged"
+                );
             }
             other => panic!("expected Particles, got {other:?}"),
         }
