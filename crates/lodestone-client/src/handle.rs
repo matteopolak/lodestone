@@ -146,6 +146,19 @@ impl ClientHandle {
         self.state.player().alive
     }
 
+    /// Returns whether the connection's live wire state is currently `Play`.
+    ///
+    /// A per-tick movement producer should check this before submitting a
+    /// `Move`: the connection can drop back into `Configuration` mid-session
+    /// (a dimension-change reconfigure, a pushed resource pack) while the
+    /// caller has no other signal that happened, and a `Move` submitted then
+    /// has no encode arm in any adapter and is silently dropped by the
+    /// driver after already paying for the channel send.
+    #[must_use]
+    pub fn is_in_play_state(&self) -> bool {
+        self.state.in_play()
+    }
+
     /// Returns the player's progress toward the next level (`0.0..1.0`), or
     /// `None` if the server has not reported it yet.
     #[must_use]

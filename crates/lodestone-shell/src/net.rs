@@ -2456,6 +2456,26 @@ pub fn entity_light_at(
 /// `finish_bring_up` were: this is ~500 lines of login, world-sync and teardown, and
 /// two copies would diverge into a browser session that is subtly wrong rather than
 /// one that fails to build.
+/// Whether a queued outbound action should reach the driver this drain.
+///
+/// The controller's 20 Hz movement producer gates [`ClientAction::Move`] on
+/// the shell's own session phase, which is state-unaware of the *wire*: the
+/// connection can drop back into `Configuration` mid-session (a
+/// dimension-change reconfigure, a pushed resource pack) while that phase
+/// stays "connected". No adapter has a `Move` encode arm outside `Play`, so a
+/// queued `Move` reaching the driver in that window is dropped after already
+/// paying for the channel send, and it recurs every tick until the state
+/// comes back — the log noise this filters out before it ever reaches
+/// `ClientHandle::send_action`.
+///
+/// Scoped to `Move` alone: every other queued action (chat, container
+/// clicks, resource-pack policy, …) still reaches the driver exactly as
+/// before, and the driver's own "no packet in current state" drop-and-log
+/// remains the backstop for anything this does not name.
+fn should_forward_action(action: &ClientAction, in_play: bool) -> bool {
+    !matches!(action, ClientAction::Move { .. }) || in_play
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the driver's shared cells, one per subsystem the render thread reads; \
@@ -3079,6 +3099,10 @@ async fn run_async(
             // by the driver. This counter is a queue-liveness signal, never proof
             // of wire delivery — that lives in `impl-physics`'s live gate.
             while let Ok(action) = action_rx.try_recv() {
+                // See `should_forward_action`'s own doc.
+                if !should_forward_action(&action, handle.is_in_play_state()) {
+                    continue;
+                }
                 let _ = handle.send_action(action);
                 handed_actions += 1;
                 if handed_actions == 1 {
@@ -5427,6 +5451,41 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "an entity spawn must not cross this channel — the ECS ingest fold owns it"
+        );
+    }
+
+    /// A `Move` queued while the wire is not in `Play` is the exact shape the
+    /// owner's live log captured (`action=Move { .. }` dropped repeatedly,
+    /// ~44 ms apart -- one per tick). Discriminating pair: `Move` vs.
+    /// `SwingArm`, so a filter that dropped *every* action while
+    /// disconnected (too broad) is distinguished from one that names `Move`
+    /// specifically.
+    #[test]
+    fn should_forward_action_withholds_move_outside_play_but_not_other_actions() {
+        use lodestone_client::{ClientAction, Hand, Rotation, Vec3};
+
+        let move_action = ClientAction::Move {
+            pos: Vec3::new(625.5, 37.0, 779.5),
+            rotation: Rotation::new(129.705_84, 3.126_854),
+            on_ground: true,
+            horizontal_collision: false,
+        };
+        let swing = ClientAction::SwingArm { hand: Hand::Main };
+
+        assert!(
+            !should_forward_action(&move_action, false),
+            "a Move queued while the connection is not in Play must be withheld, \
+             not handed to the driver only to be dropped there"
+        );
+        assert!(
+            should_forward_action(&move_action, true),
+            "a Move queued while the connection genuinely is in Play must still reach \
+             the driver -- this is not a blanket 'never send Move' switch"
+        );
+        assert!(
+            should_forward_action(&swing, false),
+            "a non-Move action must reach the driver regardless of play state -- \
+             only Move has no encode arm outside Play"
         );
     }
 
