@@ -492,6 +492,198 @@ pub fn sign_edit_frame(state: &sign_edit::SignEditState) -> MenuFrame<'static> {
     }
 }
 
+/// Builds the book-editing screen's overlay frame:
+/// [`book_edit::BookEditState`]'s page or title layout, chosen by
+/// [`book_edit::BookEditState::signing`]. See [`book_edit`]'s module doc for
+/// what this deliberately does not attempt (per-pixel caret placement inside
+/// the page, a pseudo-3D book mesh).
+///
+/// The page's text draws as one [`MenuLabel`] per wrapped visual line —
+/// informational only, not part of `rows`' click system, the same split
+/// [`command_block_frame`]'s title/labels make. Row indices match
+/// [`book_edit::page_row`] while not signing, [`book_edit::sign_row`] while
+/// signing — two disjoint tables sharing one `rows` vec, the same shape
+/// `Screen::Settings`'s per-page row tables already use.
+pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
+    const PAGE_DX: f32 = -100.0;
+    const PAGE_Y: f32 = 40.0;
+    const PAGE_LINE_H: f32 = 9.0;
+
+    let dim = widget::argb_to_rgba(widget::INACTIVE_MESSAGE_ARGB);
+
+    if state.signing {
+        let labels = vec![
+            MenuLabel {
+                text: "Enter a Book Title:".to_string(),
+                origin: Origin::ScreenTop,
+                dx: 0.0,
+                dy: PAGE_Y - 20.0,
+                align: Align::Centre,
+                colour: LABEL,
+                scale: 1.0,
+            },
+            MenuLabel {
+                text: state.author_line(),
+                origin: Origin::ScreenTop,
+                dx: 0.0,
+                dy: PAGE_Y + 10.0,
+                align: Align::Centre,
+                colour: dim,
+                scale: 1.0,
+            },
+        ];
+        let rows = vec![
+            MenuRow {
+                field: true,
+                edit: Some(state.title.clone()),
+                slot: Some(Slot {
+                    origin: Origin::ScreenTop,
+                    dx: -57.0,
+                    dy: PAGE_Y,
+                    w: 114.0,
+                    h: 20.0,
+                }),
+                ..Default::default()
+            },
+            MenuRow {
+                label: "Finalize".to_string(),
+                enabled: state.can_finalize(),
+                slot: Some(Slot {
+                    origin: Origin::ScreenTop,
+                    dx: -100.0,
+                    dy: 196.0,
+                    w: 98.0,
+                    h: 20.0,
+                }),
+                ..Default::default()
+            },
+            MenuRow {
+                label: "Cancel".to_string(),
+                enabled: true,
+                slot: Some(Slot {
+                    origin: Origin::ScreenTop,
+                    dx: 2.0,
+                    dy: 196.0,
+                    w: 98.0,
+                    h: 20.0,
+                }),
+                ..Default::default()
+            },
+        ];
+        debug_assert_eq!(rows.len(), book_edit::sign_row::CANCEL + 1);
+        return MenuFrame {
+            rows,
+            selected: usize::MAX,
+            hovered: state.hovered,
+            backdrop: MenuBackdrop::Dim,
+            vanilla: true,
+            labels,
+            ..Default::default()
+        };
+    }
+
+    let (current, total) = state.page_indicator();
+    let mut labels = vec![MenuLabel {
+        text: "Book and Quill".to_string(),
+        origin: Origin::ScreenTop,
+        dx: 0.0,
+        dy: 20.0,
+        align: Align::Centre,
+        colour: LABEL,
+        scale: 1.0,
+    }];
+    for (i, line) in state.page.lines().iter().enumerate() {
+        let text: String = state
+            .page
+            .value()
+            .chars()
+            .skip(line.begin)
+            .take(line.len())
+            .collect();
+        labels.push(MenuLabel {
+            text,
+            origin: Origin::ScreenTop,
+            dx: PAGE_DX,
+            dy: PAGE_Y + i as f32 * PAGE_LINE_H,
+            align: Align::Left,
+            colour: LABEL,
+            scale: 1.0,
+        });
+    }
+    labels.push(MenuLabel {
+        text: format!("Page {current} of {total}"),
+        origin: Origin::ScreenTop,
+        dx: 100.0,
+        dy: PAGE_Y + book_edit::PAGE_LINE_LIMIT as f32 * PAGE_LINE_H + 8.0,
+        align: Align::Right,
+        colour: dim,
+        scale: 1.0,
+    });
+
+    let footer_y = PAGE_Y + book_edit::PAGE_LINE_LIMIT as f32 * PAGE_LINE_H + 20.0;
+    let rows = vec![
+        MenuRow {
+            label: "<".to_string(),
+            enabled: current > 1,
+            slot: Some(Slot {
+                origin: Origin::ScreenTop,
+                dx: -43.0,
+                dy: footer_y,
+                w: 20.0,
+                h: 20.0,
+            }),
+            ..Default::default()
+        },
+        MenuRow {
+            label: ">".to_string(),
+            enabled: true,
+            slot: Some(Slot {
+                origin: Origin::ScreenTop,
+                dx: 23.0,
+                dy: footer_y,
+                w: 20.0,
+                h: 20.0,
+            }),
+            ..Default::default()
+        },
+        MenuRow {
+            label: "Sign".to_string(),
+            enabled: true,
+            slot: Some(Slot {
+                origin: Origin::ScreenTop,
+                dx: -100.0,
+                dy: footer_y + 28.0,
+                w: 98.0,
+                h: 20.0,
+            }),
+            ..Default::default()
+        },
+        MenuRow {
+            label: "Done".to_string(),
+            enabled: true,
+            slot: Some(Slot {
+                origin: Origin::ScreenTop,
+                dx: 2.0,
+                dy: footer_y + 28.0,
+                w: 98.0,
+                h: 20.0,
+            }),
+            ..Default::default()
+        },
+    ];
+    debug_assert_eq!(rows.len(), book_edit::page_row::DONE + 1);
+
+    MenuFrame {
+        rows,
+        selected: usize::MAX,
+        hovered: state.hovered,
+        backdrop: MenuBackdrop::Dim,
+        vanilla: true,
+        labels,
+        ..Default::default()
+    }
+}
+
 /// Builds the loading screen's frame (issue #449): the panorama under
 /// `menu_background.png`'s wash, with one centred line of text — the current
 /// `ConnectPhase`'s own vanilla string

@@ -16,7 +16,10 @@
 
 use std::collections::BTreeMap;
 
-use lodestone_model::{ArmorTrim, AuthoredEnchantment, Identifier, ItemEnchantment, Text, TextSpan, ToolPatch};
+use lodestone_model::{
+    ArmorTrim, AuthoredEnchantment, Identifier, ItemEnchantment, Text, TextSpan, ToolPatch,
+    WrittenBookContent,
+};
 
 /// The default maximum stack size when an item carries no
 /// `minecraft:max_stack_size` component. Matches vanilla's `Item.Properties`
@@ -90,6 +93,15 @@ pub const POTION_EFFECT_COMPONENT: &str = "lodestone:potion_effect";
 /// [`AuthoredEnchantment`]'s own doc for why it must never be confused with
 /// [`ENCHANTMENTS_COMPONENT`].
 pub const AUTHORED_ENCHANTMENT_COMPONENT: &str = "lodestone:authored_enchantment";
+/// Well-known component identifier for `minecraft:writable_book_content` —
+/// an unsigned book-and-quill's draft pages (issue #613's `EditBook`
+/// remainder; see `docs/book-editing.md`). Carried as
+/// [`ComponentValue::WritableBook`].
+pub const WRITABLE_BOOK_CONTENT_COMPONENT: &str = "minecraft:writable_book_content";
+/// Well-known component identifier for `minecraft:written_book_content` — a
+/// signed book's title/author/generation/pages. Carried as
+/// [`ComponentValue::WrittenBook`].
+pub const WRITTEN_BOOK_CONTENT_COMPONENT: &str = "minecraft:written_book_content";
 /// Well-known component identifier for `minecraft:custom_model_data`.
 ///
 /// Vanilla's own "make this item look different" channel, and half of how real
@@ -170,6 +182,14 @@ pub enum ComponentValue {
     /// compares them, so two stacks with identical opaque blobs stack and two
     /// with differing blobs do not.
     Opaque(Vec<u8>),
+    /// `minecraft:writable_book_content` — an unsigned book-and-quill's draft
+    /// pages, in order. See [`WRITABLE_BOOK_CONTENT_COMPONENT`].
+    WritableBook(Vec<String>),
+    /// `minecraft:written_book_content` — a signed book's title, author,
+    /// generation and pages, carried verbatim from
+    /// [`lodestone_model::WrittenBookContent`]. See
+    /// [`WRITTEN_BOOK_CONTENT_COMPONENT`].
+    WrittenBook(WrittenBookContent),
 }
 
 /// The effective, resolved component set of an [`ItemStack`].
@@ -601,6 +621,42 @@ impl ItemStack {
         self.write_component(MAP_ID_COMPONENT, id.map(|v| ComponentValue::Int(i64::from(v))));
     }
 
+    /// The stack's `minecraft:writable_book_content` draft pages, or `None`
+    /// for every item but an edited `minecraft:writable_book`.
+    #[must_use]
+    pub fn writable_book_content(&self) -> Option<&[String]> {
+        match self.components.get_str(WRITABLE_BOOK_CONTENT_COMPONENT) {
+            Some(ComponentValue::WritableBook(pages)) => Some(pages),
+            _ => None,
+        }
+    }
+
+    /// Sets or clears `minecraft:writable_book_content`.
+    pub fn set_writable_book_content(&mut self, pages: Option<Vec<String>>) {
+        self.write_component(
+            WRITABLE_BOOK_CONTENT_COMPONENT,
+            pages.map(ComponentValue::WritableBook),
+        );
+    }
+
+    /// The stack's `minecraft:written_book_content`, or `None` for every item
+    /// but a signed `minecraft:written_book`.
+    #[must_use]
+    pub fn written_book_content(&self) -> Option<&WrittenBookContent> {
+        match self.components.get_str(WRITTEN_BOOK_CONTENT_COMPONENT) {
+            Some(ComponentValue::WrittenBook(content)) => Some(content),
+            _ => None,
+        }
+    }
+
+    /// Sets or clears `minecraft:written_book_content`.
+    pub fn set_written_book_content(&mut self, content: Option<WrittenBookContent>) {
+        self.write_component(
+            WRITTEN_BOOK_CONTENT_COMPONENT,
+            content.map(ComponentValue::WrittenBook),
+        );
+    }
+
     /// The stack's `minecraft:custom_model_data` selector, if any (issue #147).
     #[must_use]
     pub fn custom_model_data(&self) -> Option<i32> {
@@ -805,6 +861,22 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             components.insert(key, ComponentValue::Int(i64::from(max)));
         }
 
+        // Issue #613's `EditBook` remainder: without these two branches a
+        // writable/written book's content is dropped at the crate boundary
+        // the same way the dye and trim above used to be, and the book
+        // editor has nothing to seed its pages from.
+        if let Some(pages) = stack.components.writable_book_content.clone()
+            && let Ok(key) = WRITABLE_BOOK_CONTENT_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::WritableBook(pages));
+        }
+
+        if let Some(content) = stack.components.written_book_content.clone()
+            && let Ok(key) = WRITTEN_BOOK_CONTENT_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::WrittenBook(content));
+        }
+
         Self::with_components(
             stack.item.clone(),
             i32::try_from(stack.count).unwrap_or(i32::MAX),
@@ -887,11 +959,13 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
                 }
                 _ => None,
             },
-            // Same story as `pot_decorations`/`profile` above: this crate's
-            // component map has no slot for either book component, so there is
-            // nothing to carry across.
-            writable_book_content: None,
-            written_book_content: None,
+            // Issue #613's `EditBook` remainder: this crate's component map
+            // now carries both book components (`writable_book_content`),
+            // `written_book_content`), so both round-trip rather than being
+            // silently dropped converting a game-crate stack back to the
+            // wire shape.
+            writable_book_content: stack.writable_book_content().map(<[String]>::to_vec),
+            written_book_content: stack.written_book_content().cloned(),
             // Same story as `pot_decorations` above: this crate's component map
             // has no slot for an opaque NBT blob, so there is nothing to carry.
             custom_data: None,
@@ -1292,9 +1366,17 @@ mod tests {
                 pot_decorations: None,
                 // Same story: no slot for a player-head owner identity.
                 profile: None,
-                // Same story: no slot for either book component.
-                writable_book_content: None,
-                written_book_content: None,
+                // Issue #613's `EditBook` remainder: both book components now
+                // round-trip through this crate's component map, so this
+                // test exercises real values rather than `None` either way.
+                writable_book_content: Some(vec!["Once upon a time".to_string()]),
+                written_book_content: Some(lodestone_model::WrittenBookContent {
+                    title: "A Tale".to_string(),
+                    author: "Steve".to_string(),
+                    generation: 0,
+                    pages: vec![Text::literal("The end.")],
+                    resolved: true,
+                }),
                 tool: ToolPatch::Set(tool),
                 max_stack_size: Some(1),
                 max_damage: Some(1561),

@@ -243,6 +243,10 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
                 ui.enter_dev_world();
                 ui.open_sign_edit();
             }
+            Screen::BookEdit => {
+                ui.enter_dev_world();
+                ui.open_book_edit();
+            }
             Screen::Paused => {
                 ui.enter_dev_world();
                 ui.pause();

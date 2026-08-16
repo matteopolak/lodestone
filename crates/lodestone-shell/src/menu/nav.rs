@@ -30,6 +30,7 @@
 //! skips `Drop`), and a server list that survives only a graceful quit is one
 //! that silently loses the entry the player just added.
 
+use super::book_edit;
 use super::command_block;
 use super::edit_box::EditBox;
 use super::sign_edit;
@@ -219,6 +220,14 @@ pub enum MenuAction {
     /// [`MenuAction::SetCommandBlock`]'s own doc gives. `app.rs`'s arm calls
     /// [`sign_edit::SignEditSubmit::into_action`] to cross back.
     SignUpdate(sign_edit::SignEditSubmit),
+    /// The book-editing screen closed with something to send — Done (draft
+    /// save, `title: None`) or Finalize (sign, `title: Some(..)`); Cancel and
+    /// Escape never reach this variant (see [`Screen::BookEdit`]'s own doc).
+    /// `app.rs` must submit the `ClientAction::EditBook` this payload
+    /// rebuilds. Carries a [`book_edit::BookEditSubmit`] rather than a
+    /// [`lodestone_model::ClientAction`] directly for the identical
+    /// `Eq`-derive reason [`MenuAction::SetCommandBlock`]'s own doc gives.
+    EditBook(book_edit::BookEditSubmit),
     /// The pause menu's **Open to LAN** was activated (issue #535): the app must
     /// republish the world it is in on a TCP port so other machines can join.
     ///
@@ -1386,6 +1395,13 @@ pub struct MenuNav {
     /// (see its own doc), so there is no non-empty default to construct
     /// eagerly, exactly as for [`Self::command_block`].
     sign_edit: Option<sign_edit::SignEditState>,
+    /// The book-editing screen's page/title widgets, held for the same
+    /// reason [`Self::command_block`] is. `None` whenever
+    /// [`Screen::BookEdit`](super::Screen::BookEdit) is not showing — this
+    /// screen is client-local, the same as [`Self::command_block`] and
+    /// unlike [`Self::sign_edit`], so there is equally no non-empty default
+    /// to construct eagerly.
+    book_edit: Option<book_edit::BookEditState>,
     /// The command tree the connected server sent (issue #471 step 2), pushed
     /// down by `app`'s right-click handler off `net::CommandTreeCell` — this
     /// module is pure and holds no client handle, so it cannot pull it.
@@ -1508,6 +1524,7 @@ impl MenuNav {
             click_clock: crate::platform::Instant::now(),
             command_block: None,
             sign_edit: None,
+            book_edit: None,
             resource_pack_prompt: None,
             resource_pack_answered_id: None,
             command_tree: None,
@@ -2290,6 +2307,22 @@ impl MenuNav {
         self.command_block.as_ref()
     }
 
+    /// The book-editing screen's state, or `None` when [`Screen::BookEdit`]
+    /// is not showing — see [`Self::book_edit`]'s own field doc.
+    #[must_use]
+    pub fn book_edit(&self) -> Option<&book_edit::BookEditState> {
+        self.book_edit.as_ref()
+    }
+
+    /// Mutable access for the input layer — `app::menus`'s click/key handlers
+    /// go through the `activate_book_edit_row`/`key_book_edit` methods below
+    /// rather than this directly, but the render dispatch's own frame builder
+    /// (`book_edit_overlay_frame`) reads through the shared-immutable
+    /// accessor above.
+    pub(super) fn book_edit_mut(&mut self) -> Option<&mut book_edit::BookEditState> {
+        self.book_edit.as_mut()
+    }
+
     /// The sign-editing screen's state, or `None` when [`Screen::SignEdit`] is
     /// not showing — see [`Self::sign_edit`]'s own field doc.
     #[must_use]
@@ -2404,6 +2437,29 @@ impl MenuNav {
     pub fn close_sign_edit(&mut self, ui: &mut UiState) {
         self.sign_edit = None;
         ui.close_sign_edit();
+    }
+
+    /// Opens the book-editing screen with `open`'s data — the draft's current
+    /// pages, read off the item stack in hand. Only from [`Screen::Playing`],
+    /// matching [`Self::open_command_block`]'s own guard: this screen is
+    /// client-local, not server-driven, the same shape as the command block.
+    pub fn open_book_edit(&mut self, ui: &mut UiState, open: book_edit::BookEditOpen) {
+        if ui.screen() == Screen::Playing {
+            self.book_edit = Some(book_edit::BookEditState::new(open));
+            ui.open_book_edit();
+        }
+    }
+
+    /// Closes the book-editing screen, whether Done, Finalize, or Escape
+    /// triggered it — matching [`Self::close_command_block`]'s own "either
+    /// way" phrasing, since which one happened decided *whether a packet was
+    /// sent*, not which screen comes next. Callers that mean to send take
+    /// [`book_edit::BookEditState::to_save_action`]/[`to_sign_action`
+    /// ](book_edit::BookEditState::to_sign_action) **before** calling this —
+    /// it drops the state.
+    pub fn close_book_edit(&mut self, ui: &mut UiState) {
+        self.book_edit = None;
+        ui.close_book_edit();
     }
 
     /// The last persistence failure, if any.
@@ -2579,6 +2635,13 @@ impl MenuNav {
             Screen::SignEdit => {
                 if let Some(state) = self.sign_edit.as_mut() {
                     state.done_hovered = row == sign_edit_row::DONE;
+                }
+            }
+            // The book-editing screen — same shape as `CommandBlockEdit`
+            // above: plain mouse-highlight tracking, no keyboard row cursor.
+            Screen::BookEdit => {
+                if let Some(state) = self.book_edit.as_mut() {
+                    state.hovered = Some(row);
                 }
             }
             _ => {}
@@ -2779,6 +2842,12 @@ impl MenuNav {
         // through `Enter` (which this screen repurposes for line navigation).
         if ui.screen() == Screen::SignEdit {
             return self.activate_sign_edit_row(ui, row);
+        }
+        // The book-editing screen — same #391 shape as `SignEdit` above: a
+        // click on the title field (while signing) is caret placement, a
+        // click on any other row is a button press.
+        if ui.screen() == Screen::BookEdit {
+            return self.activate_book_edit_row(ui, row);
         }
         // Statistics (issue #188) — the newest instance of #391's shape, and it
         // became *necessary* rather than merely tidy when Enter there stopped
@@ -3049,6 +3118,11 @@ impl MenuNav {
             // of its four line fields, which the catch-all below (Escape only)
             // cannot do.
             Screen::SignEdit => self.key_sign_edit(ui, key),
+            // The book-editing screen — its own arm for the same reason
+            // `Screen::SignEdit`'s is: every keystroke must reach the page or
+            // the title field, which the catch-all below (Escape only)
+            // cannot do.
+            Screen::BookEdit => self.key_book_edit(ui, key),
             // Escape is the only menu key that means anything on the world and
             // loading screens, and `UiState` already owns it.
             _ => {
@@ -3481,6 +3555,116 @@ impl MenuNav {
         let submit = state.to_submit();
         self.close_sign_edit(ui);
         MenuAction::SignUpdate(submit)
+    }
+
+    /// The book-editing screen. Up/Down move the page's caret between visual
+    /// lines (`TextArea::seek_cursor_line`) — this screen's only keyboard
+    /// navigation, the same reduced shape `key_sign_edit`'s own doc names:
+    /// no Tab traversal is needed because neither layout has more than one
+    /// focusable field (see [`book_edit::BookEditState::handle_key`]'s own
+    /// doc). Enter inserts a newline in the page rather than acting as
+    /// "Done" — vanilla's `MultilineTextField.keyPressed`'s `case 257` — and
+    /// does nothing while signing (there is no multi-line field there to
+    /// insert into; Finalize is a click-only affordance, like `SignEdit`'s
+    /// own Done).
+    fn key_book_edit(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        let Some(state) = self.book_edit.as_mut() else {
+            return MenuAction::None;
+        };
+        match key {
+            // Escape discards unconditionally, from either layout — see
+            // `Screen::BookEdit`'s own doc on why this differs from
+            // `key_sign_edit`'s Escape arm.
+            MenuKey::Escape => {
+                self.close_book_edit(ui);
+                MenuAction::None
+            }
+            MenuKey::Up if !state.signing => {
+                state.page.seek_cursor_line(-1, false);
+                MenuAction::None
+            }
+            MenuKey::Down if !state.signing => {
+                state.page.seek_cursor_line(1, false);
+                MenuAction::None
+            }
+            MenuKey::Enter if !state.signing => {
+                state.page.handle_key(KeyEvent::new(focus::KEY_ENTER));
+                MenuAction::None
+            }
+            MenuKey::Char(ch) => {
+                state.handle_char(ch);
+                MenuAction::None
+            }
+            MenuKey::Backspace => {
+                state.handle_key(KeyEvent::new(focus::KEY_BACKSPACE));
+                MenuAction::None
+            }
+            MenuKey::Delete => {
+                state.handle_key(KeyEvent::new(focus::KEY_DELETE));
+                MenuAction::None
+            }
+            MenuKey::SelectAll | MenuKey::Copy | MenuKey::Cut | MenuKey::Paste => {
+                if let Some(event) = KeyEvent::from_menu_key(key) {
+                    state.handle_key(event);
+                }
+                MenuAction::None
+            }
+            MenuKey::Up | MenuKey::Down | MenuKey::Enter | MenuKey::Tab | MenuKey::Refresh => {
+                MenuAction::None
+            }
+        }
+    }
+
+    /// What clicking a row on the book-editing screen does — dispatched by
+    /// [`book_edit::BookEditState::signing`], since the two layouts use
+    /// disjoint row tables (`page_row`/`sign_row`). Shared by [`Self::click`]'s
+    /// `BookEdit` arm.
+    fn activate_book_edit_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+        let Some(state) = self.book_edit.as_mut() else {
+            return MenuAction::None;
+        };
+        if state.signing {
+            match row {
+                // The title field: caret placement, not something this method
+                // expresses — see the module doc's "What is deliberately
+                // simplified".
+                book_edit::sign_row::TITLE => MenuAction::None,
+                book_edit::sign_row::FINALIZE => {
+                    if !state.can_finalize() {
+                        return MenuAction::None;
+                    }
+                    let action = state.to_sign_action();
+                    self.close_book_edit(ui);
+                    MenuAction::EditBook(action)
+                }
+                book_edit::sign_row::CANCEL => {
+                    state.cancel_sign();
+                    MenuAction::None
+                }
+                _ => MenuAction::None,
+            }
+        } else {
+            match row {
+                book_edit::page_row::BACK => {
+                    state.page_back();
+                    MenuAction::None
+                }
+                book_edit::page_row::FORWARD => {
+                    state.page_forward();
+                    MenuAction::None
+                }
+                book_edit::page_row::SIGN => {
+                    state.begin_sign();
+                    MenuAction::None
+                }
+                book_edit::page_row::DONE => {
+                    let action = state.to_save_action();
+                    self.close_book_edit(ui);
+                    MenuAction::EditBook(action)
+                }
+                _ => MenuAction::None,
+            }
+        }
     }
 
     /// The world-select screen (issue #397). **Every key goes through
@@ -5152,6 +5336,10 @@ pub fn on_screen_frame<'a>(
     if let Some(frame) = resource_pack_prompt_overlay_frame(ui, nav) {
         return Some(frame);
     }
+    // The seventh overlay screen (issue #613's `EditBook`), same shape again.
+    if let Some(frame) = book_edit_overlay_frame(ui, nav) {
+        return Some(frame);
+    }
     super::render::frame_for(ui, nav, statuses, favicons)
 }
 
@@ -5167,6 +5355,20 @@ pub fn sign_edit_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super:
     }
     let state = nav.sign_edit()?;
     Some(super::render::sign_edit_frame(state))
+}
+
+/// The book-editing screen's overlay frame, or `None` when that screen is not
+/// up — [`sign_edit_overlay_frame`]'s exact shape and for the same reason:
+/// [`on_screen_frame`] hit-tests a click against this, and `app/redraw.rs`'s
+/// overlay block draws it, so a second construction anywhere would be free
+/// to disagree with it.
+#[must_use]
+pub fn book_edit_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super::render::MenuFrame<'a>> {
+    if !ui.is_book_edit_open() {
+        return None;
+    }
+    let state = nav.book_edit()?;
+    Some(super::render::book_edit_frame(state))
 }
 
 /// The resource-pack prompt's overlay frame, or `None` when it is not up —
@@ -5443,6 +5645,12 @@ pub fn routes_menu_input(ui: &UiState) -> bool {
         || ui.is_death()
         || ui.is_command_block_open()
         || ui.is_sign_edit_open()
+        // Same reasoning as `is_command_block_open`/`is_sign_edit_open`
+        // immediately above: `Screen::BookEdit` is `owns_frame == false`
+        // (see [`book_edit_overlay_frame`]'s own doc) with its own rows to
+        // hover, click and type into. Without this arm the screen would open
+        // and never receive a single keystroke or click.
+        || ui.is_book_edit_open()
         // Issue #167. Advancements is not `owns_frame` (it is an overlay drawn
         // through `ContainerRenderer`), but Escape has to close it, and the
         // `_` arm of `MenuNav::key` routes exactly that through
@@ -10004,6 +10212,20 @@ mod tests {
             ("SignEdit", |ui, nav| {
                 ui.enter_dev_world();
                 nav.open_sign_edit(ui, sign_edit::SignEditOpen::default());
+            }),
+            // Same shape again — issue #613's `EditBook` remainder. The frame
+            // is built from `MenuNav::book_edit`, so a bare `UiState` on this
+            // screen is equally not the production state.
+            ("BookEdit", |ui, nav| {
+                ui.enter_dev_world();
+                nav.open_book_edit(
+                    ui,
+                    book_edit::BookEditOpen {
+                        slot: 0,
+                        pages: vec![String::new()],
+                        author: "Steve".to_string(),
+                    },
+                );
             }),
             // The sixth overlay screen — the frame is built from
             // `MenuNav::resource_pack_prompt`, so this drives
