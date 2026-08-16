@@ -678,6 +678,21 @@ and puts the wrong number on the XP bar. **Port from `write`/`read`, never from 
 declaration** — for a record whose fields are all the same type, those are three different orders that all
 look authoritative.
 
+**A nested `catch_unwind` did not catch under Cranelift, and the failure looked like a broken production
+invariant.** Measured: `random_tick_section_counters`'s tripwire control wraps a deliberately-corrupting
+`tick_chunk` call in `std::panic::catch_unwind`, *inside* libtest's own harness catch. Under Cranelift the
+panic escaped that inner catch and libtest reported a bare `FAILED` before the message-content checks ran;
+the identical test passes under `CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm`. It cost real time because the
+panic message named a counter desync and a plausible culprit (three new `_with_entities` mutation paths)
+had landed the same day — **production was innocent**. The fix was `#[should_panic(expected = …)]`, using
+libtest's outer catch, which is reliable.
+
+So: **prefer `#[should_panic]` to a hand-rolled `catch_unwind` in a test**, and treat a panic-catching
+boundary as backend-sensitive rather than a given. The workspace has 14 `catch_unwind` sites and two of them
+are **production panic isolation** — `lodestone-ecs`'s `async_task`/`handle` job boundary and
+`lodestone-fuzz`'s panic-to-finding conversion. Neither is verified under Cranelift; if either silently
+stops catching, an isolated job kills the process and the fuzzer aborts instead of reporting a finding.
+
 **A `const` has no stable address, and switching codegen backend is what makes that bite.** Measured the
 day Cranelift became the debug backend: `ai::roster::FALLBACK` was a `const`, and `is_fallback` compared
 pointers against it. A `const` is *inlined at every use site*, so it may occupy as many addresses as it has
