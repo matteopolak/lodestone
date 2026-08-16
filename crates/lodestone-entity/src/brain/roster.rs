@@ -47,7 +47,8 @@ use super::behavior::{Behavior, BehaviorControl, Leaf};
 use super::behaviors::{LookAtTargetSink, MoveToTargetSink, Panic, RandomStroll, SetPlayerLookTarget};
 use super::driver::BrainGoal;
 use super::gate::GateBehavior;
-use super::sensor::{HurtBySensor, NearestPlayerSensor};
+use super::memory::{MemoryModuleType, MemoryStatus};
+use super::sensor::{HurtBySensor, NearestHostileSensor, NearestPlayerSensor};
 use super::Brain;
 
 /// The walk-target speed **modifier** the scaffold's stroll writes.
@@ -182,6 +183,50 @@ pub fn scaffold_with_panic(stroll_speed: f32, look_distance: f32, panic_speed_mu
     brain
 }
 
+/// `Villager`'s own panic: an **Activity-swap** shaped differently from the
+/// six [`PANIC_SPEED_MULTIPLIER`] species' in-place [`Panic`] behaviour.
+///
+/// Vanilla's `VillagerPanicTrigger` is an imperative `Behavior` that reaches
+/// into its own entity's `Brain` and calls `setActiveActivityIfPossible
+/// (Activity.PANIC)` directly — a seam this crate's [`Behavior`] trait
+/// deliberately does not expose (see [`Brain::add_activity_any_of`]'s own doc).
+/// The declarative equivalent, wired through the same
+/// `set_active_activity_to_first_valid` candidate list every other brain
+/// species' `updateActivity` already uses: offer `PANIC` **before** `IDLE`,
+/// gated on "hurt OR a hostile is nearby"
+/// (`VillagerPanicTrigger.isHurt`/`hasHostile`) via [`Brain::add_activity_any_of`].
+///
+/// **What is ported and what is not**, against
+/// `VillagerGoalPackages.getPanicPackage`: the flee-and-look shape is real
+/// (reusing [`Panic`], the same `AnimalPanic`-style fleeing this repo already
+/// has, rather than porting `SetWalkTargetAwayFrom`'s *directed* flee — a
+/// villager here flees to a random nearby spot instead of one chosen to
+/// increase distance from the threat specifically) and
+/// `VillagerCalmDown`/village-bound stroll are not ported (this repo has no
+/// village-bounds concept). `VillagerPanicTrigger.tick`'s
+/// `spawnGolemIfNeeded` (golem-summon-on-hurt) is a separate, unbuilt unit —
+/// nothing here calls it.
+#[must_use]
+pub fn villager_brain() -> Brain {
+    let mut brain = scaffold(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE);
+    brain.add_sensor(Box::new(HurtBySensor));
+    brain.add_sensor(Box::new(NearestHostileSensor));
+    // `AnimalPanic(0.5F)` is `VillagerGoalPackages.getPanicPackage`'s own
+    // `speedModifier` argument passed from `Villager.java:164`
+    // (`getPanicPackage(0.5F)`), distinct from every `PANIC_SPEED_MULTIPLIER`
+    // row below (none of which is a villager).
+    brain.add_activity_any_of(
+        Activity::PANIC,
+        vec![(-1, leaf(Panic::new(0.5)))],
+        vec![
+            (MemoryModuleType::HURT_BY, MemoryStatus::ValuePresent),
+            (MemoryModuleType::NEAREST_HOSTILE, MemoryStatus::ValuePresent),
+        ],
+        Vec::new(),
+    );
+    brain
+}
+
 /// `AnimalPanic`'s own speed multiplier, one row per species that registers
 /// it — `new AnimalPanic(speedMultiplier)` (or, for the sniffer, the
 /// anonymous subclass's identical constructor argument) in each species' own
@@ -206,6 +251,17 @@ const PANIC_SPEED_MULTIPLIER: &[(&str, f32)] = &[
 pub fn brain_for(species: &str) -> Option<BrainGoal> {
     if !is_brain_species(species) {
         return None;
+    }
+    // The villager is the one species whose panic is an Activity-swap rather
+    // than an in-place `Panic` behaviour, so it needs both a different brain
+    // ([`villager_brain`]) and a candidate list that actually offers `PANIC`
+    // — `BrainGoal::idle` only ever offers `IDLE`, which would build the
+    // activity and then never let it become active.
+    if species == "villager" {
+        return Some(BrainGoal::new(
+            villager_brain(),
+            vec![Activity::PANIC, Activity::IDLE],
+        ));
     }
     let brain = match PANIC_SPEED_MULTIPLIER.iter().find(|&&(s, _)| s == species) {
         Some(&(_, speed)) => scaffold_with_panic(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE, speed),
@@ -296,6 +352,7 @@ mod tests {
         time: i64,
         hurt_by: Option<lodestone_model::Vec3>,
         nav_done: bool,
+        nearby: Vec<super::super::mob::NearbyBrainEntity>,
     }
 
     impl PanicTestMob {
@@ -305,6 +362,7 @@ mod tests {
                 time: 0,
                 hurt_by: None,
                 nav_done: true,
+                nearby: Vec::new(),
             }
         }
     }
@@ -339,6 +397,9 @@ mod tests {
         fn last_hurt_by(&self) -> Option<lodestone_model::Vec3> {
             self.hurt_by
         }
+        fn nearby_entities(&self) -> Vec<super::super::mob::NearbyBrainEntity> {
+            self.nearby.clone()
+        }
     }
 
     /// **The discriminating gate for this whole slice.** A hurt species from
@@ -371,6 +432,75 @@ mod tests {
             !warden.brain().running_behavior_names().contains(&"panic"),
             "the warden ran a panic behaviour it was never given: {:?}",
             warden.brain().running_behavior_names()
+        );
+    }
+
+    /// The villager's Activity-swap panic, driven through the exact sequence
+    /// [`super::driver::BrainGoal::tick`] runs each tick
+    /// (`set_active_activity_to_first_valid` then `brain.tick`), since a plain
+    /// `Brain::tick` alone — what the goat test above uses — never
+    /// re-evaluates which non-core activity is active and so cannot show this
+    /// species' mechanism working at all: its `Panic` lives inside
+    /// `Activity::PANIC`, not `Activity::CORE`.
+    ///
+    /// Three arms: hurt alone is enough, a nearby hostile alone is enough
+    /// (proving the OR, not just one disjunct), and neither leaves the
+    /// villager idly stroll-and-looking with no panic running at all.
+    ///
+    /// Each arm drives the sequence **twice**: the first
+    /// `set_active_activity_to_first_valid` + `tick` runs against whatever
+    /// memory existed *before* this tick's sensors wrote anything (there is
+    /// none yet, on tick one), and only the second call sees `HURT_BY`/
+    /// `NEAREST_HOSTILE` as written by the first tick's sensor pass — the same
+    /// one-tick lag `BrainGoal::tick`'s real production sequence has, and
+    /// exactly why a plain single call is not enough for a species whose
+    /// panic lives behind an activity switch rather than in `CORE`.
+    #[test]
+    fn a_villager_panics_via_activity_swap_when_hurt_or_a_hostile_is_near() {
+        let candidates = [Activity::PANIC, Activity::IDLE];
+        let drive = |brain: &mut Brain, mob: &mut PanicTestMob| {
+            brain.set_active_activity_to_first_valid(&candidates);
+            brain.tick(mob);
+            mob.time += 1;
+            brain.set_active_activity_to_first_valid(&candidates);
+            brain.tick(mob);
+        };
+
+        let mut hurt_brain = villager_brain();
+        let mut hurt_mob = PanicTestMob::new();
+        hurt_mob.hurt_by = Some(lodestone_model::Vec3::new(5.0, 0.0, 0.0));
+        hurt_mob.time = 1;
+        drive(&mut hurt_brain, &mut hurt_mob);
+        assert!(hurt_brain.is_active(Activity::PANIC), "HURT_BY alone must swap to PANIC");
+        assert!(
+            hurt_brain.running_behavior_names().contains(&"panic"),
+            "and the panic behaviour itself must be running: {:?}",
+            hurt_brain.running_behavior_names()
+        );
+
+        let mut hostile_brain = villager_brain();
+        let mut hostile_mob = PanicTestMob::new();
+        hostile_mob.time = 1;
+        hostile_mob.nearby = vec![super::super::mob::NearbyBrainEntity {
+            id: 42,
+            position: lodestone_model::Vec3::new(3.0, 0.0, 0.0),
+            hostile: true,
+        }];
+        drive(&mut hostile_brain, &mut hostile_mob);
+        assert!(
+            hostile_brain.is_active(Activity::PANIC),
+            "a nearby hostile alone must swap to PANIC too, proving the OR"
+        );
+
+        let mut calm_brain = villager_brain();
+        let mut calm_mob = PanicTestMob::new();
+        calm_mob.time = 1;
+        drive(&mut calm_brain, &mut calm_mob);
+        assert!(calm_brain.is_active(Activity::IDLE), "neither condition must leave IDLE active");
+        assert!(
+            !calm_brain.running_behavior_names().contains(&"panic"),
+            "and panic must not be running: {:?}",
+            calm_brain.running_behavior_names()
         );
     }
 

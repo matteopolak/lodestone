@@ -163,6 +163,13 @@ pub struct NavigatingMob<'w> {
     /// [`crate::spawn_equipment::populate_default_equipment_slots`]; nothing
     /// here mutates it mid-life (no drop/pickup model exists yet).
     main_hand: Option<String>,
+    /// What [`crate::brain::NearestHostileSensor`] reads through
+    /// [`BrainMob::nearby_entities`] — a host-fed snapshot, refreshed once per
+    /// tick, the same shape [`MobController::nearest_player`]'s own host-fed
+    /// field is for the goal system. Empty for a goal-driven mob, since only a
+    /// host that ticks a [`crate::brain::Brain`] has any reason to populate
+    /// it.
+    nearby_entities: Vec<crate::brain::NearbyBrainEntity>,
     /// The block the current path was computed toward, so `move_to` reuses the
     /// active path instead of recomputing every tick (vanilla `moveTo` reuse).
     active_target_block: Option<BlockPos>,
@@ -502,6 +509,7 @@ impl<'w> NavigatingMob<'w> {
             rng: SplitMix64(seed),
             attack_target: None,
             main_hand: None,
+            nearby_entities: Vec::new(),
             active_target_block: None,
             last_look: None,
             jumping: false,
@@ -900,6 +908,14 @@ impl<'w> NavigatingMob<'w> {
     /// perception" shape as [`set_follow_range`](Self::set_follow_range).
     pub fn set_main_hand_item(&mut self, item: Option<String>) -> &mut Self {
         self.main_hand = item;
+        self
+    }
+
+    /// Host injection point: every entity a brain's perception can currently
+    /// see, refreshed once per tick — see [`nearby_entities`](Self::nearby_entities)'s
+    /// own doc for what reads it.
+    pub fn set_nearby_entities(&mut self, entities: Vec<crate::brain::NearbyBrainEntity>) -> &mut Self {
+        self.nearby_entities = entities;
         self
     }
 
@@ -1742,6 +1758,10 @@ impl BrainMob for NavigatingMob<'_> {
     /// unqualified call would be `E0034`.
     fn last_hurt_by(&self) -> Option<Vec3> {
         MobController::last_hurt_by(self)
+    }
+
+    fn nearby_entities(&self) -> Vec<crate::brain::NearbyBrainEntity> {
+        self.nearby_entities.clone()
     }
 }
 

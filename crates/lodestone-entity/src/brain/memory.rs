@@ -57,6 +57,12 @@ impl MemoryModuleType {
     pub const IS_PANICKING: Self = Self("is_panicking");
     /// The position of whatever last hurt the mob.
     pub const HURT_BY: Self = Self("hurt_by");
+    /// The nearest hostile entity's id, from
+    /// [`super::sensor::NearestHostileSensor`] — vanilla's `NEAREST_HOSTILE`,
+    /// what `VillagerPanicTrigger.hasHostile` (and, more generally, any
+    /// target-acquisition behaviour that needs "what is the closest thing I
+    /// should be worried about") reads.
+    pub const NEAREST_HOSTILE: Self = Self("nearest_hostile");
     /// Registered-but-usually-empty marker used by `MoveToTargetSink` to record
     /// how long a walk target has been unreachable.
     pub const CANT_REACH_WALK_TARGET_SINCE: Self = Self("cant_reach_walk_target_since");
