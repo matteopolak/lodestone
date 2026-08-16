@@ -12,6 +12,14 @@ anyhow.workspace = true
 serde_json.workspace = true
 sha1 = { version = "0.11", default-features = false }
 zip.workspace = true
+# `islands` (the syn-based dead-code/unwired-feature scanner) needs the
+# `visit` feature on top of what the workspace default already turns on for
+# `lodestone-macros`'s proc-macro use (`full`, `extra-traits`); this crate
+# is the only one that walks an AST with `syn::visit::Visit` rather than
+# just deriving from one, so the extra feature is requested here rather
+# than widened workspace-wide.
+syn = { workspace = true, features = ["visit"] }
+proc-macro2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
