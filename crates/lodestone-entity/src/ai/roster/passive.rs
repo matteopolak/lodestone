@@ -104,8 +104,8 @@
 
 use crate::ai::goal::Goal;
 use crate::ai::goals::{
-    AvoidEntityGoal, BreedGoal, EatBlockGoal, FollowOwnerGoal, FollowParentGoal, LookAtPlayerGoal,
-    PanicGoal, RandomStrollGoal, TemptGoal,
+    AvoidEntityGoal, BreedGoal, CatLieOnBedGoal, CatSitOnBlockGoal, EatBlockGoal, FollowOwnerGoal,
+    FollowParentGoal, LookAtPlayerGoal, PanicGoal, RandomStrollGoal, TemptGoal,
 };
 
 use super::{
@@ -332,14 +332,16 @@ pub const CAT: &[Registration] = &[
     // `TemptGoal` row in this roster.
     Registration::goal(4, "Cat.CatTemptGoal(CAT_FOOD)", cat_tempt_0_6),
     // `CatLieOnBedGoal(this, 1.1, 8)` — a `MoveToBlockGoal` that hunts
-    // beds in an 8-block radius. Needs the block-spiral search plus `#beds`
-    // identity; nothing here computes a candidate block position, the same gap
-    // `Rabbit.RaidGardenGoal` and `CatSitOnBlockGoal` below share.
-    Registration::missing(Selector::Goal, 5, "CatLieOnBedGoal"),
+    // beds in an 8-block radius. The candidate bed position is host-computed
+    // (`MobController::cat_bed_target`, `docs/mob-block-perception.md`'s own
+    // guidance for a goal that needs to search a neighbourhood) rather than
+    // searched in-goal.
+    Registration::goal(5, "CatLieOnBedGoal", cat_lie_on_bed_1_1),
     Registration::goal(6, "FollowOwnerGoal", cat_follow_owner),
-    // `CatSitOnBlockGoal(this, 0.8)` — hunts chests and furnaces to
-    // perch on, same `MoveToBlockGoal`-spiral gap as `CatLieOnBedGoal` above.
-    Registration::missing(Selector::Goal, 7, "CatSitOnBlockGoal"),
+    // `CatSitOnBlockGoal(this, 0.8)` — hunts chests and lit furnaces to
+    // perch on, same host-computed-candidate shape as `CatLieOnBedGoal` above
+    // (`MobController::cat_sit_target`).
+    Registration::goal(7, "CatSitOnBlockGoal", cat_sit_on_block_0_8),
     // `LeapAtTargetGoal(this, 0.3F)` — pounces at its own attack
     // target. No goal type here models a leap.
     Registration::missing(Selector::Goal, 8, "LeapAtTargetGoal"),
@@ -534,6 +536,16 @@ fn cat_tempt_0_6(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// A cat stops five blocks out, against the wolf's two.
 fn cat_follow_owner(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(FollowOwnerGoal::new(ctx.speed, 10.0, 5.0))
+}
+
+/// `CatSitOnBlockGoal(this, 0.8)` — cat (`Cat.registerGoals`).
+fn cat_sit_on_block_0_8(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(CatSitOnBlockGoal::new(ctx.speed * 0.8))
+}
+
+/// `CatLieOnBedGoal(this, 1.1, 8)` — cat (`Cat.registerGoals`).
+fn cat_lie_on_bed_1_1(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(CatLieOnBedGoal::new(ctx.speed * 1.1))
 }
 
 /// `WaterAvoidingRandomStrollGoal(this, 0.8, 1.0000001E-5F)` — cat
