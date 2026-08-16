@@ -1285,6 +1285,8 @@ mod tests {
                 // way and a `Some` here would fail the round-trip assertion for
                 // the wrong reason.
                 pot_decorations: None,
+                // Same story: no slot for a player-head owner identity.
+                profile: None,
                 tool: ToolPatch::Set(tool),
                 max_stack_size: Some(1),
                 max_damage: Some(1561),
