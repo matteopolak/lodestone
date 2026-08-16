@@ -73,12 +73,6 @@ pub enum Verdict {
 }
 
 impl Verdict {
-    /// `true` if this is [`Verdict::Allow`].
-    #[must_use]
-    pub const fn is_allowed(self) -> bool {
-        matches!(self, Self::Allow)
-    }
-
     /// `Deny` if `deny` is true. Convenience for the common
     /// `if protected { Deny } else { Allow }` predicate body.
     #[must_use]

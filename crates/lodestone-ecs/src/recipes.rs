@@ -198,14 +198,6 @@ impl RecipeRegistry {
         &self.book
     }
 
-    /// The corpus, for a caller that needs to mutate it directly. Bumps
-    /// [`Self::revision`] unconditionally, since it cannot know whether the
-    /// caller wrote anything.
-    pub fn book_mut(&mut self) -> &mut RecipeBook {
-        self.revision += 1;
-        &mut self.book
-    }
-
     /// A clone of the corpus, for a consumer that caches one outside the
     /// `World` (the shell's per-frame draw does, to avoid holding an `EcsHandle`
     /// guard across a render pass).
@@ -224,11 +216,6 @@ impl RecipeRegistry {
     #[must_use]
     pub fn pending_len(&self) -> usize {
         self.pending.len()
-    }
-
-    /// Every live plugin registration, in registration order.
-    pub fn registrations(&self) -> impl Iterator<Item = &RecipeRegistration> {
-        self.pending.iter()
     }
 
     /// Bumped on every mutation. A cached reader compares this against the

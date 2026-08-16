@@ -903,9 +903,6 @@ impl Permissions {
         self.resolver = Some(resolver);
     }
 
-    pub fn clear_resolver(&mut self) {
-        self.resolver = None;
-    }
 
     pub fn has_resolver(&self) -> bool {
         self.resolver.is_some()
