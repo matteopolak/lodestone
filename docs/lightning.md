@@ -22,10 +22,11 @@ in-place LCG (distinct from every `java.util.Random`-exact stream in this crate)
 `find_lightning_target_around` is `findLightningTargetAround`: a nearby lightning rod
 wins outright, otherwise a random living/sky-visible entity in a generous column,
 otherwise the terrain heightmap. `tick_thunder_for_chunk` is the whole per-chunk
-decision, called once per ticking chunk per tick from `run_tick_loop_with_weather`
-(unconditionally, matching vanilla's own `ServerLevel.tickChunk` — only
-`should_attempt_strike`'s short-circuit keeps a clear world from drawing
-anything), gated on `weather.thundering`. A decided `Strike` is handed straight to
+decision, called once per ticking chunk (`area.chunks()`, the same follow area the
+random-tick pass uses) per tick from `run_tick_loop_with_weather` — gated on
+`weather.thundering` at the call site (a cheap skip of the whole per-chunk loop on a
+clear world) rather than left to `should_attempt_strike`'s own internal short-circuit,
+which still holds and would reject every draw anyway. A decided `Strike` is handed straight to
 `MobSim::spawn_lightning_bolts` rather than round-tripping through `LightningFeed`'s
 `Arc<Mutex<..>>`, since the whole path is synchronous within one tick loop
 iteration; `LightningFeed` stays as the tested publish/drain type for a future

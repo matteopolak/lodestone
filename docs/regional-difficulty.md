@@ -42,7 +42,10 @@ tested port. What is missing:
   chance, reinforcement, spawn-cap composition — do not exist anywhere in this tree.**
   There is no zombie AI, no spawn-equipment path and no reinforcement mechanic to wire
   this scalar into; building those is separate, unimplemented work. The one real
-  consumer today is `crate::lightning`'s skeleton-horse-trap roll.
+  consumer today is `crate::lightning`'s skeleton-horse-trap roll — and, as of
+  `crate::tick::run_tick_loop_with_weather` calling `crate::lightning::tick_thunder_for_chunk`
+  every tick, that roll runs in a live server rather than only in `lightning.rs`'s own
+  unit tests (see `docs/lightning.md`).
 
 ## Configuration
 
