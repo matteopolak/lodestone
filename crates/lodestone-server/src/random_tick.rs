@@ -1801,6 +1801,55 @@ fn react_to_notification(
                     }
                 }
 
+                // Second interrupt — sticky retraction only, and a *different*
+                // cell from the arm above. `PistonBaseBlock.triggerEvent`'s
+                // `isSticky` branch also inspects `pos.offset(direction * 2)`
+                // (`piston::relative_n(.., 2)`, the cell this piston's own pull
+                // would grab from) and, if it holds a still-**extending**
+                // `moving_piston` entity travelling the *same* direction this
+                // piston is retracting along, finalTicks that too — one
+                // piston's retraction interrupting a different piston's
+                // extension two cells away. Vanilla's own `if (!pistonPiece)`
+                // guard then skips the sticky-pull decision entirely for this
+                // event rather than grabbing whatever the interrupt left
+                // behind, reproduced below by forcing the resolution's
+                // `to_push` empty — the same reduction the plain (non-sticky)
+                // retract path already uses.
+                let mut sticky_pull_intercepted = false;
+                if !want_extended && sticky {
+                    let two_pos = crate::piston::relative_n(n.pos, facing, 2);
+                    if let Some(pending) = block_ticks.take_matching(
+                        (two_pos.x, two_pos.y, two_pos.z),
+                        |kind: &String| {
+                            crate::piston::parse_finish_kind(kind)
+                                .is_some_and(|e| e.direction == facing && e.extending)
+                        },
+                    ) {
+                        let entity = crate::piston::parse_finish_kind(&pending.kind)
+                            .expect("take_matching's predicate already parsed this kind");
+                        let write = crate::piston::interrupt(two_pos, &entity);
+                        let wlx = write.pos.x - min_x;
+                        let wlz = write.pos.z - min_z;
+                        if (0..16).contains(&wlx)
+                            && (0..16).contains(&wlz)
+                            && write.pos.y >= column.min_y
+                            && write.pos.y < column.min_y + column.height
+                        {
+                            let from = column.block_state(wlx, write.pos.y, wlz).to_string();
+                            if from != write.to {
+                                column.set_block(wlx, write.pos.y, wlz, &write.to);
+                                events.push(RandomTickEvent {
+                                    pos: (write.pos.x, write.pos.y, write.pos.z),
+                                    from,
+                                    to: write.to.clone(),
+                                });
+                                interrupt_fan_out.push(Notification { pos: write.pos, from: Direction::Down });
+                            }
+                        }
+                        sticky_pull_intercepted = true;
+                    }
+                }
+
                 let resolution = crate::piston::resolve(
                     &redstone::make_lookup(column, min_x, min_z),
                     n.pos,
@@ -1820,8 +1869,11 @@ fn react_to_notification(
                         push_direction: facing.opposite(),
                     },
                 };
-                // A sticky piston pulls; a normal one only drops its head.
-                let resolution = if want_extended || sticky {
+                // A sticky piston pulls; a normal one only drops its head. A
+                // sticky piston whose pull target was just interrupted above
+                // pulls nothing this event either — vanilla's own
+                // `!pistonPiece` guard (see the interrupt's own comment).
+                let resolution = if want_extended || (sticky && !sticky_pull_intercepted) {
                     resolution
                 } else {
                     crate::piston::Resolution { to_push: Vec::new(), ..resolution }
@@ -3509,5 +3561,127 @@ mod tests {
             "no step of this script ever produced a ticking section — the comparison above \
              was `false == false` throughout and proved nothing"
         );
+    }
+
+    /// The second interrupt (sticky retraction only, issue #316's own
+    /// "update-order quirk"): `piston::relative_n(pos, facing, 2)` — a
+    /// *different* cell from the arm the first interrupt already covers — is
+    /// checked too, and a still-**extending** `moving_piston` entity found
+    /// there is finalTicked exactly as the arm's own pending commit is, per
+    /// `PistonBaseBlock.triggerEvent`'s `isSticky` branch.
+    ///
+    /// **The discriminating pair.** Scenario A leaves a plain pushable block at
+    /// the two-cell-out position with no pending commit — an ordinary sticky
+    /// pull, which must schedule a fresh `moving_piston` commit to grab it.
+    /// Scenario B reaches the *identical final cell content* (the interrupt's
+    /// own write lands on the same block scenario A started from) but through
+    /// a pending commit instead, and must schedule **no** pull at all — per
+    /// vanilla's `if (!pistonPiece)` guard, which skips the whole
+    /// moveBlocks-or-removeBlock decision once the interrupt fires. If the
+    /// interrupt only mutated the cell without suppressing the pull decision,
+    /// scenario B would schedule a pull exactly like scenario A and this test
+    /// could not tell the two apart.
+    #[test]
+    fn sticky_retract_interrupts_a_second_pistons_extension_two_cells_out_and_skips_the_pull() {
+        let piston_pos = BlockPos::new(5, 5, 5);
+        // West of the piston, i.e. *not* the push direction (East) — a valid
+        // direct neighbour signal source, mirroring
+        // `redstone_piston_order_oracle_gate.rs`'s own `piston_rig()`. The
+        // piston never reacts to a notification landing on its **own**
+        // position (`NeighborPropagator::propagate` notifies a centre's
+        // neighbours, never the centre itself) — it must be notified via one
+        // of its own neighbours, exactly as production always reaches it.
+        let torch_pos = BlockPos::new(4, 5, 5);
+        let two_pos = crate::piston::relative_n(piston_pos, Direction::East, 2);
+
+        // Scenario A (control): an ordinary sticky pull, nothing pending at
+        // `two_pos` — proves the pull mechanism itself fires absent interference.
+        {
+            let mut column = ChunkColumn::new(0, 16);
+            column.set_block(5, 5, 5, "minecraft:sticky_piston[extended=true,facing=east]");
+            column.set_block(4, 5, 5, &redstone_torch::set_standing_lit(true));
+            column.set_block(7, 5, 5, "minecraft:dirt");
+            let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+            // Un-light the torch and notify from *it* — the piston loses its
+            // extend signal and retracts.
+            column.set_block(4, 5, 5, &redstone_torch::set_standing_lit(false));
+            let _events = propagate_and_react(
+                &mut column, 0, 0, torch_pos.x, torch_pos.y, torch_pos.z, &mut block_ticks, 0,
+            );
+            let arm_pos = crate::piston::relative_n(piston_pos, Direction::East, 1);
+            let pull_at_arm = block_ticks.iter().any(|t| {
+                t.pos == (arm_pos.x, arm_pos.y, arm_pos.z)
+                    && crate::piston::parse_finish_kind(&t.kind).is_some_and(|e| !e.source)
+            });
+            assert!(
+                pull_at_arm,
+                "control failed: an ordinary sticky pull with nothing intervening must \
+                 schedule a carried-block (non-source) commit at the arm"
+            );
+        }
+
+        // Scenario B: the same cell reached through a pending commit instead.
+        {
+            let mut column = ChunkColumn::new(0, 16);
+            column.set_block(5, 5, 5, "minecraft:sticky_piston[extended=true,facing=east]");
+            column.set_block(4, 5, 5, &redstone_torch::set_standing_lit(true));
+            column.set_block(7, 5, 5, "minecraft:moving_piston[facing=east,type=normal]");
+            let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+            let pending_entity = crate::piston::MovingBlockEntity {
+                moved_state: "minecraft:dirt".to_string(),
+                direction: Direction::East,
+                extending: true,
+                source: false,
+            };
+            block_ticks.schedule(
+                (two_pos.x, two_pos.y, two_pos.z),
+                crate::piston::finish_kind(&pending_entity),
+                100,
+                TickPriority::Normal,
+            );
+
+            column.set_block(4, 5, 5, &redstone_torch::set_standing_lit(false));
+            let events = propagate_and_react(
+                &mut column, 0, 0, torch_pos.x, torch_pos.y, torch_pos.z, &mut block_ticks, 0,
+            );
+
+            // The pending commit is gone — interrupted, not left to also fire
+            // later against a cell the interrupt already rewrote.
+            assert!(
+                block_ticks.iter().all(|t| t.pos != (two_pos.x, two_pos.y, two_pos.z)),
+                "the interrupted commit must be removed, not merely superseded"
+            );
+            // The interrupt's own write landed: a non-source entity writes its
+            // `moved_state` — exactly the block scenario A started from.
+            assert_eq!(
+                column.block_state(two_pos.x, two_pos.y, two_pos.z),
+                "minecraft:dirt",
+                "a non-source interrupted entity must write its moved_state"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.pos == (two_pos.x, two_pos.y, two_pos.z) && e.to == "minecraft:dirt"),
+                "the interrupt's write must be reported as an event"
+            );
+
+            // The discriminator: no *carried-block* commit was scheduled at
+            // the arm — where `apply_move` lands a successful pull — because
+            // vanilla's `!pistonPiece` guard skips the pull decision entirely
+            // once the interrupt fired. (The base's own retraction commit at
+            // `piston_pos`, `source: true`, is unconditional and expected
+            // regardless — see `begin_move`'s own retract arm — so this checks
+            // the arm specifically, not "no commit anywhere".)
+            let arm_pos = crate::piston::relative_n(piston_pos, Direction::East, 1);
+            let pull_at_arm = block_ticks.iter().any(|t| {
+                t.pos == (arm_pos.x, arm_pos.y, arm_pos.z)
+                    && crate::piston::parse_finish_kind(&t.kind).is_some_and(|e| !e.source)
+            });
+            assert!(
+                !pull_at_arm,
+                "an intercepted sticky retraction must not also schedule a pull at the arm \
+                 (found one) — scenario A's control above proves this would otherwise happen"
+            );
+        }
     }
 }
