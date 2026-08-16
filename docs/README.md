@@ -613,6 +613,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   player's hand in first person — vanilla's `ItemInHandRenderer.submitArmWithItem`
   non-empty branch. It replaces the bare arm rather than joining it, and it is one
   half of a fork: **the arm or the item, never both.**
+- [Fishing](./fishing.md) — A server-side port of vanilla's fishing rod: casting a
+  bobber, its cast/bob/bite state machine, the fish/junk/treasure loot roll (Luck of
+  the Sea shifting weight toward treasure), and reeling in a real item entity plus
+  experience. It lives in `lodestone_server::mobs`
+  (`MobSim::cast_fishing_bobber`/`retrieve_fishing_bobber`/ `tick_fishing_bobbers`, in
+  `mobs/fishing.rs`).
 - [Fluid classification](./fluid-classification.md) — The single answer to **"does
   this block state carry water (or lava)?"** — shared by the mesher (which draws the
   water surface) and by physics (which decides whether you swim, and whether your eye
@@ -1277,6 +1283,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   translation layer — the ViaVersion shape, not sixteen parallel simulations). This
   doc settles two questions before fifteen more `crates/protocol/vNNN` crates get
   created:
+- [Raids and patrols](./raids-and-patrols.md) — Issue #241 in two halves. **Patrols
+  already exist and are wired into production** — see `docs/pillager-patrols.md` for
+  the full account (`MobSim::run_patrol_spawn_cycle`, `LongDistancePatrolGoal`, wired
+  into `crate::tick`'s production loop). This document covers the **raid** half:
+  wave-escalating illager assaults with a boss bar and a captain marker, in
+  `lodestone_server::mobs` (`MobSim::start_raid`/`tick_raids`, in `mobs/raid.rs`).
 - [Runtime recipe registration](./recipe-registration.md) — The plugin-facing door
   onto the crafting corpus (issue
   [#148](https://github.com/matteopolak/lodestone/issues/148)) — the

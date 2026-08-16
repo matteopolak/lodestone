@@ -1,0 +1,823 @@
+//! `MobSim`'s fishing-bobber slice — cast, the bob/bite/hook state machine,
+//! the fish/junk/treasure loot roll, and reeling in a real item entity.
+//! Issue #257. Ported from `FishingHook.java`/`FishingRodItem.java`
+//! (`.cache/mc/26.2/src/net/minecraft/world/entity/projectile/FishingHook.java`,
+//! `.../world/item/FishingRodItem.java`) and the three
+//! `data/minecraft/loot_table/gameplay/fishing{,/fish,/junk,/treasure}.json`
+//! tables, which this file transcribes exactly (weights, quality, item ids).
+//!
+//! See `docs/fishing.md` for what reaches the screen, the disclosed gaps and
+//! how to change it.
+
+use lodestone_entity::item_entity::ItemLifecycle;
+use lodestone_model::{ResourceKey, Rotation, Vec3};
+use uuid::Uuid;
+
+use crate::mob_spawn::SpawnRng;
+
+use super::{ChunkWorld, MobSim};
+
+/// Seed for [`MobSim::fishing_rng`] — its own stream, on the same
+/// "a fishing roll must not shift which roll a mob spawn/patrol/orb-merge
+/// sees" reasoning [`super::orbs::ORB_BEHAVIOR_SEED`]'s own doc gives.
+pub(super) const FISHING_ROLL_SEED: u64 = 0x4649_5348_5F52_4F44;
+
+/// `FishingHook.MAX_OUT_OF_WATER_TIME`.
+const MAX_OUT_OF_WATER_TIME: i32 = 10;
+
+/// `FishingHook.life >= 1200` — twenty seconds resting on solid ground
+/// (never in water) discards the bobber; the fallback despawn since this sim
+/// has no per-connection "is the owner still holding a rod and within 1024
+/// blocks" state to check every tick (see this module's own `docs/fishing.md`
+/// §5 for why that half of `shouldStopFishing` is not ported here).
+const HOOK_MAX_GROUND_LIFE: i32 = 1200;
+
+/// `FishingHook.FishHookState` — vanilla's own three-state machine, ported
+/// verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FishHookState {
+    Flying,
+    Bobbing,
+    HookedInEntity,
+}
+
+/// One live fishing bobber — the fields `FishingHook` itself carries, minus
+/// `hookedIn`'s general "any entity" case (see this file's own module doc
+/// §5 in `docs/fishing.md`: this sim's bobber cannot snag a floating item or
+/// a mob mid-flight, only fish once it is bobbing in open water).
+#[derive(Debug, Clone)]
+pub(super) struct FishingBobber {
+    pub uuid: Uuid,
+    /// The casting player's own entity id, supplied by the caller
+    /// ([`MobSim::cast_fishing_bobber`]) because this sim tracks player
+    /// *positions*, never their entity ids — the same limit
+    /// [`super::projectiles`]'s own module doc discloses for melee.
+    pub owner: i32,
+    pub position: Vec3,
+    pub velocity: Vec3,
+    pub state: FishHookState,
+    /// `FishingHook.life` — ticks spent `onGround()`; the ground-timeout
+    /// clock.
+    pub life: i32,
+    pub out_of_water_time: i32,
+    pub nibble: i32,
+    pub time_until_lured: i32,
+    pub time_until_hooked: i32,
+    pub fish_angle: f32,
+    pub open_water: bool,
+    pub biting: bool,
+    pub on_ground: bool,
+    /// `FishingHook.luck` — `Math.max(0, luck)` of the rod's own
+    /// Luck of the Sea level, clamped at cast time exactly as vanilla's
+    /// constructor clamps it.
+    pub luck: i32,
+    /// `FishingHook.lureSpeed` — `Math.max(0, lureSpeed)`, `20 *`
+    /// `getFishingTimeReduction` in whole ticks.
+    pub lure_speed: i32,
+}
+
+/// One catch's proceeds: what [`MobSim::retrieve_fishing_bobber`] has
+/// already turned into real entities, plus the rod-damage tier the
+/// off-limits caller (durability lives on the connection's inventory) still
+/// needs to apply — `FishingHook.retrieve`'s own return value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FishingRetrieve {
+    /// `0` (bobber still on ground, no bite), `1` (a loot item was reeled
+    /// in), `2` (the bobber was resting on ground when retrieved) or `3`
+    /// (a snagged entity was pulled — not reachable by this port, see this
+    /// file's own doc).
+    pub rod_damage: i32,
+}
+
+/// `LootPoolEntryContainer.getWeight(luck)` — `max(0, floor(weight + quality
+/// * luck))`. Real per the record: the fixed integer arithmetic (not a
+/// float lerp) is what makes a `luck` of exactly `-5` zero out a `quality:
+/// -2, weight: 10` entry rather than merely shrinking it.
+fn effective_weight(weight: i32, quality: i32, luck: i32) -> i32 {
+    (weight + quality * luck).max(0)
+}
+
+/// One `minecraft:fishing` pool selection: `junk` (weight 10, quality -2),
+/// `treasure` (weight 5, quality 2, **only when `open_water`** — the
+/// `entity_properties`/`type_specific/fishing_hook` condition in
+/// `gameplay/fishing.json`), `fish` (weight 85, quality -1). `rolls: 1.0`,
+/// so exactly one of the three is chosen — no independent per-entry roll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LootCategory {
+    Junk,
+    Treasure,
+    Fish,
+}
+
+fn pick_category(open_water: bool, luck: i32, rng: &mut SpawnRng) -> LootCategory {
+    let mut candidates = vec![(LootCategory::Junk, effective_weight(10, -2, luck))];
+    if open_water {
+        candidates.push((LootCategory::Treasure, effective_weight(5, 2, luck)));
+    }
+    candidates.push((LootCategory::Fish, effective_weight(85, -1, luck)));
+    weighted_pick(&candidates, rng)
+}
+
+/// `gameplay/fishing/fish.json`, weights as written (no quality at this
+/// level — the parent pool already applied it).
+const FISH_POOL: &[(&str, i32)] = &[
+    ("minecraft:cod", 60),
+    ("minecraft:salmon", 25),
+    ("minecraft:tropical_fish", 2),
+    ("minecraft:pufferfish", 13),
+];
+
+/// `gameplay/fishing/junk.json`. Every entry with no explicit `"weight"` key
+/// defaults to `1` (vanilla's own `LootPoolSingletonContainer` default) —
+/// only `ink_sac` lacks one in the source table, so it is `1` here and not
+/// the `10` its `set_count` function actually sets the *stack size* to
+/// (those are two different numbers on the same entry; see
+/// [`junk_stack_count`]).  `bamboo` carries a real
+/// `minecraft:location_check` biome condition, applied in
+/// [`pick_junk_item`] rather than folded into this table, because the
+/// condition needs `ChunkWorld::biome_at` and this table does not have a
+/// world to ask.
+const JUNK_POOL: &[(&str, i32)] = &[
+    ("minecraft:lily_pad", 17),
+    ("minecraft:leather_boots", 10),
+    ("minecraft:leather", 10),
+    ("minecraft:bone", 10),
+    ("minecraft:potion", 10),
+    ("minecraft:string", 5),
+    ("minecraft:fishing_rod", 2),
+    ("minecraft:bowl", 10),
+    ("minecraft:stick", 5),
+    ("minecraft:ink_sac", 1),
+    ("minecraft:tripwire_hook", 10),
+    ("minecraft:rotten_flesh", 10),
+    ("minecraft:bamboo", 10),
+];
+
+/// The one junk entry whose `minecraft:set_count` function overrides the
+/// default stack size of `1` — `ink_sac`'s `10.0`. Every other junk/fish/
+/// treasure entry drops a single item; `minecraft:set_damage` and
+/// `minecraft:enchant_with_levels` (leather boots, fishing rod, bow, book)
+/// are not applied — no item-durability-roll or enchantment model exists in
+/// this crate (the same disclosed gap `mobs::projectiles`'s own module doc
+/// names for Punch/Piercing), so those items are reeled in undamaged and
+/// unenchanted rather than not at all.
+fn junk_stack_count(item: &str) -> u8 {
+    if item == "minecraft:ink_sac" { 10 } else { 1 }
+}
+
+/// `gameplay/fishing/treasure.json` — no entry carries a `"weight"` key, so
+/// every one defaults to `1`; `enchant_with_levels`/`set_damage` are the
+/// same disclosed no-op as [`junk_stack_count`]'s doc says.
+const TREASURE_POOL: &[(&str, i32)] = &[
+    ("minecraft:name_tag", 1),
+    ("minecraft:saddle", 1),
+    ("minecraft:bow", 1),
+    ("minecraft:fishing_rod", 1),
+    ("minecraft:book", 1),
+    ("minecraft:nautilus_shell", 1),
+];
+
+/// The jungle family `bamboo`'s own `minecraft:location_check` names
+/// (`data/minecraft/tags/item/enchantable/fishing.json` is a different
+/// file; this is the loot condition's own three biomes, read directly off
+/// `gameplay/fishing/junk.json`).
+const BAMBOO_BIOMES: &[&str] = &[
+    "minecraft:jungle",
+    "minecraft:sparse_jungle",
+    "minecraft:bamboo_jungle",
+];
+
+fn weighted_pick<T: Copy>(candidates: &[(T, i32)], rng: &mut SpawnRng) -> T {
+    let total: i32 = candidates.iter().map(|&(_, w)| w).sum();
+    if total <= 0 {
+        // Every effective weight floored to zero (an extreme negative luck
+        // against the treasure/fish entries is not reachable without an
+        // enchantment model, but junk alone could in principle zero out) —
+        // fall back to the first candidate rather than dividing by zero.
+        return candidates[0].0;
+    }
+    let mut roll = rng.next_int(total);
+    for &(value, w) in candidates {
+        if roll < w {
+            return value;
+        }
+        roll -= w;
+    }
+    candidates[candidates.len() - 1].0
+}
+
+/// One resolved loot item: its registry id and stack count.
+fn roll_loot(open_water: bool, luck: i32, world: &ChunkWorld, pos: Vec3, rng: &mut SpawnRng) -> (ResourceKey, u8) {
+    let category = pick_category(open_water, luck, rng);
+    let item = match category {
+        LootCategory::Fish => weighted_pick(FISH_POOL, rng),
+        LootCategory::Treasure => weighted_pick(TREASURE_POOL, rng),
+        LootCategory::Junk => {
+            // The bamboo entry is excluded from the draw entirely outside a
+            // jungle biome — `minecraft:location_check` is a *condition*,
+            // not a weight of zero, so vanilla re-rolls among the remaining
+            // entries rather than ever landing on "nothing". Filtering the
+            // candidate list before the weighted pick reproduces that.
+            let biome = world.biome_at(pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32);
+            let in_jungle = biome.is_some_and(|b| BAMBOO_BIOMES.contains(&b.as_str()));
+            let pool: Vec<(&str, i32)> = JUNK_POOL
+                .iter()
+                .copied()
+                .filter(|&(name, _)| name != "minecraft:bamboo" || in_jungle)
+                .collect();
+            weighted_pick(&pool, rng)
+        }
+    };
+    let count = if category == LootCategory::Junk { junk_stack_count(item) } else { 1 };
+    (item.parse().expect("every table entry above is a valid resource key"), count)
+}
+
+impl<'w> MobSim<'w> {
+    /// Casts a fishing bobber — `FishingHook`'s own player constructor,
+    /// `FishingRodItem.use`'s "no active bobber" arm.
+    ///
+    /// `eye_pos` is the player's `getEyeY()` position (feet + eye height,
+    /// resolved by the caller — this sim has no player eye-height constant
+    /// of its own, and `PLAYER_EYE_HEIGHT` already lives in `orbs.rs` for a
+    /// different reason); `yaw`/`pitch` are degrees, vanilla's own
+    /// convention. `luck`/`lure_speed` are the rod's *Luck of the Sea*/
+    /// *Lure* enchantment levels, clamped to `>= 0` here exactly as the
+    /// vanilla constructor clamps them — `0`/`0` for an unenchanted rod,
+    /// which is the only value any call site can supply today (no
+    /// enchantment model; see `docs/fishing.md`).
+    ///
+    /// Returns the assigned entity id.
+    pub fn cast_fishing_bobber(
+        &mut self,
+        owner: i32,
+        player_pos: Vec3,
+        eye_y: f64,
+        yaw: f32,
+        pitch: f32,
+        luck: i32,
+        lure_speed: i32,
+    ) -> i32 {
+        let y_rot = yaw.to_radians();
+        let x_rot = pitch.to_radians();
+        let y_cos = (-y_rot - std::f32::consts::PI).cos();
+        let y_sin = (-y_rot - std::f32::consts::PI).sin();
+        let x_cos = -(-x_rot).cos();
+        let x_sin = (-x_rot).sin();
+        let spawn = Vec3::new(
+            player_pos.x - f64::from(y_sin) * 0.3,
+            eye_y,
+            player_pos.z - f64::from(y_cos) * 0.3,
+        );
+        let base = Vec3::new(f64::from(-y_sin), f64::from((-(x_sin / x_cos)).clamp(-5.0, 5.0)), f64::from(-y_cos));
+        let dist = (base.x * base.x + base.y * base.y + base.z * base.z).sqrt().max(1e-9);
+        // `random.triangle(0.5, 0.0103365)`: mean 0.5, half-width 0.0103365,
+        // `mean + width * (nextDouble() - nextDouble())`. Not vanilla's exact
+        // stream (this sim's `SpawnRng` never claims to be — see
+        // `crate::mob_spawn::SpawnRng`'s own doc), but the same real
+        // distribution shape and constants.
+        let triangle = |rng: &mut SpawnRng| 0.5 + 0.010_3365 * (rng.next_f64() - rng.next_f64());
+        let scale = Vec3::new(
+            0.6 / dist + triangle(&mut self.fishing_rng),
+            0.6 / dist + triangle(&mut self.fishing_rng),
+            0.6 / dist + triangle(&mut self.fishing_rng),
+        );
+        let velocity = Vec3::new(base.x * scale.x, base.y * scale.y, base.z * scale.z);
+
+        let id = self.next_id;
+        self.next_id += 1;
+        self.fishing_bobbers.insert(
+            id,
+            FishingBobber {
+                uuid: Uuid::new_v4(),
+                owner,
+                position: spawn,
+                velocity,
+                state: FishHookState::Flying,
+                life: 0,
+                out_of_water_time: 0,
+                nibble: 0,
+                time_until_lured: 0,
+                time_until_hooked: 0,
+                fish_angle: 0.0,
+                open_water: true,
+                biting: false,
+                on_ground: false,
+                luck: luck.max(0),
+                lure_speed: lure_speed.max(0),
+            },
+        );
+        id
+    }
+
+    /// Reels in the bobber `id` — `FishingHook.retrieve`. Rolls the loot
+    /// table if the fish was hooked (`nibble > 0`), spawns the caught
+    /// item(s) as real, flying-toward-the-owner item entities via
+    /// [`MobSim::spawn_item`] and an experience orb via
+    /// [`MobSim::award_experience`] (both this sim's own producers — the
+    /// "feeds the Phase A item-entity lifecycle issue" half of #257), and
+    /// discards the bobber either way.
+    ///
+    /// `owner_pos`/`owner_luck` are the reeling player's current position
+    /// (the item's pull target — vanilla's `owner.getX()` etc, read at
+    /// retrieve time, not cast time) and their own `Attributes.LUCK` value
+    /// (`owner.getLuck()`), added to the rod's own luck exactly as vanilla's
+    /// `this.luck + owner.getLuck()` does; `0` for a caller with no luck
+    /// effect modelled yet.
+    ///
+    /// Returns `None` if `id` is not a tracked bobber.
+    pub fn retrieve_fishing_bobber(
+        &mut self,
+        id: i32,
+        owner_pos: Vec3,
+        owner_luck: i32,
+    ) -> Option<FishingRetrieve> {
+        let bobber = self.fishing_bobbers.remove(&id)?;
+        // Not reachable by this port (see the struct's own doc): a bobber
+        // never enters `HookedInEntity` here, so vanilla's `dmg = 5` (a
+        // player) / `3` (an item) branch never fires. Only the loot-roll and
+        // on-ground branches are live.
+        let rod_damage = if bobber.nibble > 0 {
+            let total_luck = bobber.luck + owner_luck;
+            let (item, count) = roll_loot(bobber.open_water, total_luck, self.world, bobber.position, &mut self.fishing_rng);
+            let delta = Vec3::new(owner_pos.x - bobber.position.x, owner_pos.y - bobber.position.y, owner_pos.z - bobber.position.z);
+            let horiz_sq = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
+            let velocity = Vec3::new(
+                delta.x * 0.1,
+                delta.y * 0.1 + horiz_sq.sqrt().sqrt() * 0.08,
+                delta.z * 0.1,
+            );
+            self.spawn_item(
+                item,
+                bobber.position,
+                velocity,
+                ItemLifecycle::newly_dropped(count, lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE),
+            );
+            let xp = self.fishing_rng.next_int(6) + 1;
+            self.award_experience(owner_pos, Vec3::new(0.0, 0.0, 0.0), xp);
+            1
+        } else {
+            0
+        };
+        Some(FishingRetrieve {
+            rod_damage: if bobber.on_ground { 2 } else { rod_damage },
+        })
+    }
+
+    /// The bobber id owned by `owner`, if any — what a caller uses to decide
+    /// "cast" vs "reel in" on a rod right-click (`player.fishing != null`).
+    /// `O(n)` over live bobbers, which is fine: a server has at most one per
+    /// connected player.
+    #[must_use]
+    pub fn player_active_bobber(&self, owner: i32) -> Option<i32> {
+        self.fishing_bobbers.iter().find(|(_, b)| b.owner == owner).map(|(&id, _)| id)
+    }
+
+    /// A live bobber's current position, for a caller that needs to draw the
+    /// line or check distance without holding the sim's internals.
+    #[must_use]
+    pub fn fishing_bobber_position(&self, id: i32) -> Option<Vec3> {
+        self.fishing_bobbers.get(&id).map(|b| b.position)
+    }
+
+    /// Every live bobber's [`crate::protocol::EntitySnapshot`], appended by
+    /// [`MobSim::snapshots`]. No metadata: `DATA_HOOKED_ENTITY`/`DATA_BITING`
+    /// need new `MetadataField` variants and an encoder arm in
+    /// `crates/protocol/v770`, neither of which this file can add — see
+    /// `docs/fishing.md` §5. The bite/nibble motion still reaches the wire
+    /// through `position`/`velocity` alone, because the dip in
+    /// [`tick_fishing_bobbers`](Self::tick_fishing_bobbers) is real physics,
+    /// not an animation driven by the missing flag.
+    pub(super) fn fishing_bobber_snapshots(&self, out: &mut Vec<crate::protocol::EntitySnapshot>) {
+        let mut ids: Vec<i32> = self.fishing_bobbers.keys().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            let Some(b) = self.fishing_bobbers.get(&id) else { continue };
+            out.push(crate::protocol::EntitySnapshot {
+                id,
+                uuid: b.uuid,
+                entity_type: "minecraft:fishing_bobber".parse().expect("valid key"),
+                position: b.position,
+                rotation: Rotation::new(0.0, 0.0),
+                head_yaw: 0.0,
+                velocity: b.velocity,
+                metadata: Vec::new(),
+                // `FishingHook.getAddEntityPacket` sends the owner's own
+                // entity id as object data (`owner == null ? this.getId() :
+                // owner.getId()`) — the field a real client's
+                // `FishingHookRenderer` reads to draw the line back to the
+                // rod tip.
+                object_data: b.owner,
+                leash_link: None,
+            });
+        }
+    }
+
+    /// One tick of every live fishing bobber — `FishingHook.tick`, in its
+    /// own order, minus the two branches this file's own doc discloses
+    /// (`shouldStopFishing`'s distance/held-item check, and hooking a
+    /// world entity rather than only bobbing for fish).
+    pub(super) fn tick_fishing_bobbers(&mut self) {
+        let world = self.world;
+        let ids: Vec<i32> = self.fishing_bobbers.keys().copied().collect();
+        let mut expired: Vec<i32> = Vec::new();
+        for id in ids {
+            let Some(b) = self.fishing_bobbers.get_mut(&id) else { continue };
+            if b.on_ground {
+                b.life += 1;
+                if b.life >= HOOK_MAX_GROUND_LIFE {
+                    expired.push(id);
+                    continue;
+                }
+            } else {
+                b.life = 0;
+            }
+
+            let bx = b.position.x.floor() as i32;
+            let by = b.position.y.floor() as i32;
+            let bz = b.position.z.floor() as i32;
+            let fluid = crate::fluid::fluid_state_of(world.block_state(bx, by, bz));
+            let is_water = fluid.is_some_and(|f| f.kind == crate::fluid::FluidKind::Water);
+            let liquid_height = if is_water { f64::from(fluid.expect("checked above").own_height()) } else { 0.0 };
+            let in_water = liquid_height > 0.0;
+
+            match b.state {
+                FishHookState::Flying => {
+                    if in_water {
+                        b.velocity = Vec3::new(b.velocity.x * 0.3, b.velocity.y * 0.2, b.velocity.z * 0.3);
+                        b.state = FishHookState::Bobbing;
+                    } else {
+                        // No entity-hit search here (see this file's doc) —
+                        // only the block/on-ground transition below applies.
+                    }
+                }
+                FishHookState::HookedInEntity => {
+                    // Unreachable in this port (never set), kept only so the
+                    // match is exhaustive against vanilla's own state machine.
+                }
+                FishHookState::Bobbing => {
+                    let movement = b.velocity;
+                    let mut force = b.position.y + movement.y - f64::from(by) - liquid_height;
+                    if force.abs() < 0.01 {
+                        force += force.signum() * 0.1;
+                    }
+                    let damp_roll = self.fishing_rng.next_f32();
+                    b.velocity = Vec3::new(
+                        movement.x * 0.9,
+                        movement.y - force * f64::from(damp_roll) * 0.2,
+                        movement.z * 0.9,
+                    );
+                    if b.nibble <= 0 && b.time_until_hooked <= 0 {
+                        b.open_water = true;
+                    } else {
+                        b.open_water = b.open_water
+                            && b.out_of_water_time < MAX_OUT_OF_WATER_TIME
+                            && calculate_open_water(world, bx, by, bz);
+                    }
+                    if in_water {
+                        b.out_of_water_time = (b.out_of_water_time - 1).max(0);
+                        if b.biting {
+                            let r1 = f64::from(self.fishing_rng.next_f32());
+                            let r2 = f64::from(self.fishing_rng.next_f32());
+                            b.velocity = Vec3::new(b.velocity.x, b.velocity.y - 0.1 * r1 * r2, b.velocity.z);
+                        }
+                        catching_fish(b, &mut self.fishing_rng);
+                    } else {
+                        b.out_of_water_time = (b.out_of_water_time + 1).min(MAX_OUT_OF_WATER_TIME);
+                    }
+                }
+            }
+
+            if !is_water && !b.on_ground {
+                b.velocity = Vec3::new(b.velocity.x, b.velocity.y - 0.03, b.velocity.z);
+            }
+            b.position = Vec3::new(b.position.x + b.velocity.x, b.position.y + b.velocity.y, b.position.z + b.velocity.z);
+            // Settling: a coarse "am I resting on solid ground" read off the
+            // cell directly below the new position, standing in for
+            // vanilla's full collision sweep — this sim's item-settling code
+            // (`items.rs`) does the real swept version for dropped items;
+            // duplicating it here for a bobber that spends its whole
+            // interesting life in water was not worth the borrow-splitting
+            // cost.
+            let below_x = b.position.x.floor() as i32;
+            let below_y = (b.position.y - 0.01).floor() as i32;
+            let below_z = b.position.z.floor() as i32;
+            b.on_ground = world.is_solid(below_x, below_y, below_z) && b.velocity.y <= 0.0;
+            if b.state == FishHookState::Flying && b.on_ground {
+                b.velocity = Vec3::new(0.0, 0.0, 0.0);
+            }
+            b.velocity = Vec3::new(b.velocity.x * 0.92, b.velocity.y * 0.92, b.velocity.z * 0.92);
+        }
+        for id in expired {
+            self.fishing_bobbers.remove(&id);
+        }
+    }
+}
+
+/// `FishingHook.calculateOpenWater` — a 5×5 area at four Y layers
+/// (`blockPos.offset(-2, y, -2) .. offset(2, y, 2)`, `y` in `-1..=2`), each
+/// layer classified `ABOVE_WATER` (air or a lily pad throughout),
+/// `INSIDE_WATER` (a water *source* with an empty collision shape
+/// throughout) or `INVALID` (anything else, or a mixed layer), and the whole
+/// area is "open" only if the layers read as a clean above-water-then-
+/// underwater stack with no `INVALID` layer anywhere.
+fn calculate_open_water(world: &ChunkWorld, x: i32, y: i32, z: i32) -> bool {
+    #[derive(PartialEq, Eq, Clone, Copy)]
+    enum Layer {
+        Above,
+        Inside,
+        Invalid,
+    }
+    let mut previous = Layer::Invalid;
+    for dy in -1..=2 {
+        let mut layer: Option<Layer> = None;
+        'cell: for dx in -2..=2 {
+            for dz in -2..=2 {
+                let state = world.block_state(x + dx, y + dy, z + dz);
+                let cell = if state == "minecraft:air" || state == "minecraft:lily_pad" {
+                    Layer::Above
+                } else {
+                    match crate::fluid::fluid_state_of(state) {
+                        Some(f) if f.kind == crate::fluid::FluidKind::Water && f.is_source() => Layer::Inside,
+                        _ => Layer::Invalid,
+                    }
+                };
+                match layer {
+                    None => layer = Some(cell),
+                    Some(prev) if prev == cell => {}
+                    Some(_) => {
+                        layer = Some(Layer::Invalid);
+                        break 'cell;
+                    }
+                }
+            }
+        }
+        let layer = layer.unwrap_or(Layer::Invalid);
+        match layer {
+            // `previous == Invalid` is only ever true on the very first
+            // (`dy == -1`) iteration — the sentinel start value, never
+            // reassigned to `Invalid` by a prior loop turn (an `Invalid`
+            // layer returns `false` immediately, below). So this is exactly
+            // vanilla's `previousLayer == INVALID` check on the bottom layer.
+            Layer::Above if previous == Layer::Invalid => return false,
+            Layer::Inside if previous == Layer::Above => return false,
+            Layer::Invalid => return false,
+            _ => {}
+        }
+        previous = layer;
+    }
+    true
+}
+
+/// `FishingHook.catchingFish`, minus the rain/sky-visibility `fishingSpeed`
+/// modifier (this sim has no weather state or heightmap crossing its own
+/// seam — see `docs/fishing.md` §5) and minus the particle bursts (no
+/// world-effect channel from inside the per-bobber loop; see
+/// [`MobSim::tick_fishing_bobbers`]'s own doc). `fishingSpeed` is therefore
+/// always vanilla's own unmodified `1`. Every RNG draw and every
+/// duration/threshold below is transcribed as written.
+fn catching_fish(b: &mut FishingBobber, rng: &mut SpawnRng) {
+    let fishing_speed = 1;
+    if b.nibble > 0 {
+        b.nibble -= 1;
+        if b.nibble <= 0 {
+            b.time_until_lured = 0;
+            b.time_until_hooked = 0;
+            b.biting = false;
+        }
+    } else if b.time_until_hooked > 0 {
+        b.time_until_hooked -= fishing_speed;
+        if b.time_until_hooked <= 0 {
+            // The bite: `nibble = nextInt(20, 40)` and `biting = true`,
+            // which is also where vanilla's synced-data listener applies the
+            // downward yank (`-0.4F * nextFloat(0.6, 1.0)`) — folded in here
+            // rather than through a metadata round-trip, since this sim has
+            // no client to notify and applies its own state directly.
+            b.nibble = 20 + rng.next_int(21);
+            b.biting = true;
+            let dip = 0.4 * f64::from(0.6 + rng.next_f32() * 0.4);
+            b.velocity = Vec3::new(b.velocity.x, -dip, b.velocity.z);
+        }
+    } else if b.time_until_lured > 0 {
+        b.time_until_lured -= fishing_speed;
+        if b.time_until_lured <= 0 {
+            b.fish_angle = rng.next_f32() * 360.0;
+            b.time_until_hooked = 20 + rng.next_int(61);
+        }
+    } else {
+        b.time_until_lured = 100 + rng.next_int(501);
+        b.time_until_lured -= b.lure_speed;
+    }
+}
+
+#[cfg(test)]
+mod fishing_tests {
+    use super::*;
+    use crate::mobs::PlayerPerception;
+
+    /// A 5×5 pond, three deep, walled by stone — real open water by
+    /// vanilla's own rule (a clean water layer under a clean air layer).
+    fn pond_world() -> ChunkWorld {
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -4..=4 {
+            for z in -4..=4 {
+                world.set_block(x, 0, z, "minecraft:stone");
+                for y in 1..=3 {
+                    world.set_block(x, y, z, "minecraft:water");
+                }
+            }
+        }
+        world
+    }
+
+    /// **The three declared weights sum to 100 and split exactly as
+    /// `gameplay/fishing.json` writes them, at zero luck.**
+    ///
+    /// Predicts the value rather than asserting a direction: junk 10%,
+    /// treasure 5%, fish 85%, over a large sample, each within a wide but
+    /// real tolerance. A category swap or a mistyped weight moves one share
+    /// by double digits, which this catches; a ±3-point sampling wobble does
+    /// not.
+    #[test]
+    fn category_split_matches_the_declared_weights_at_zero_luck() {
+        let mut rng = SpawnRng::new(1);
+        let mut junk = 0;
+        let mut treasure = 0;
+        let mut fish = 0;
+        const N: i32 = 20_000;
+        for _ in 0..N {
+            match pick_category(true, 0, &mut rng) {
+                LootCategory::Junk => junk += 1,
+                LootCategory::Treasure => treasure += 1,
+                LootCategory::Fish => fish += 1,
+            }
+        }
+        let pct = |n: i32| f64::from(n) / f64::from(N) * 100.0;
+        assert!((pct(junk) - 10.0).abs() < 2.0, "junk share {}%, want ~10%", pct(junk));
+        assert!((pct(treasure) - 5.0).abs() < 2.0, "treasure share {}%, want ~5%", pct(treasure));
+        assert!((pct(fish) - 85.0).abs() < 2.0, "fish share {}%, want ~85%", pct(fish));
+    }
+
+    /// **The discriminating input: Luck of the Sea shifts weight toward
+    /// treasure, by the real quality-weighted formula, not merely "more
+    /// treasure than at luck 0".**
+    ///
+    /// At `luck = 15`: junk `10 + (-2)*15 = -20` floors to `0` (excluded from
+    /// the draw entirely — the formula's own zero-floor, not a special
+    /// case), treasure `5 + 2*15 = 35`, fish `85 + (-1)*15 = 70`; total 105,
+    /// so treasure's predicted share is `35/105 ≈ 33.3%` — up from 5%, and
+    /// junk's predicted share is exactly `0%`. Both are asserted, because a
+    /// direction-only check ("more treasure at higher luck") is satisfied by
+    /// any monotonic function, not only the real one.
+    #[test]
+    fn an_enchanted_rods_luck_shifts_weight_toward_treasure_by_the_derived_amount() {
+        let mut rng = SpawnRng::new(7);
+        let mut treasure = 0;
+        let mut junk = 0;
+        const N: i32 = 20_000;
+        for _ in 0..N {
+            match pick_category(true, 15, &mut rng) {
+                LootCategory::Treasure => treasure += 1,
+                LootCategory::Junk => junk += 1,
+                LootCategory::Fish => {}
+            }
+        }
+        let treasure_pct = f64::from(treasure) / f64::from(N) * 100.0;
+        assert!(
+            (treasure_pct - 33.3).abs() < 2.5,
+            "treasure share at luck 15 was {treasure_pct}%, the derived value is ~33.3% (35/105)"
+        );
+        assert_eq!(junk, 0, "junk's effective weight floors to 0 at luck 15 — it must never be drawn");
+    }
+
+    /// **The control: without open water, treasure is not a candidate at
+    /// all**, whatever the luck — the `in_open_water` condition gates the
+    /// whole entry, not just its weight.
+    #[test]
+    fn control_treasure_is_unreachable_without_open_water() {
+        let mut rng = SpawnRng::new(3);
+        for _ in 0..2_000 {
+            assert_ne!(pick_category(false, 30, &mut rng), LootCategory::Treasure);
+        }
+    }
+
+    /// A cast bobber lands in the water and the tick loop carries it through
+    /// lure → hook → bite, ending with `nibble > 0` and `biting` true, and
+    /// crucially a **visible downward dip** the moment the bite lands — the
+    /// signal that reaches the wire with no metadata field at all (see this
+    /// file's own `fishing_bobber_snapshots` doc).
+    #[test]
+    fn a_cast_bobber_eventually_bites_and_dips() {
+        let world = pond_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim.cast_fishing_bobber(1, Vec3::new(0.0, 4.0, 0.0), 4.6, 0.0, 90.0, 0, 0);
+        // Straight down at pitch 90; give it a few ticks to settle into the
+        // pond, then run long enough to cross lure (100..600) + hook
+        // (20..80) worst case.
+        let mut biting_seen = false;
+        let mut dipped = false;
+        for _ in 0..900 {
+            sim.tick_fishing_bobbers();
+            if let Some(b) = sim.fishing_bobbers.get(&id) {
+                if b.biting {
+                    biting_seen = true;
+                    if b.velocity.y < -0.05 {
+                        dipped = true;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        assert!(biting_seen, "a bobber left ticking for 900 ticks in open water must eventually bite");
+        assert!(dipped, "the bite must apply a real downward velocity dip, not just flip a flag");
+    }
+
+    /// **Reeling in a bite spawns a real item entity flying toward the
+    /// owner** — the "feeds the Phase A item-entity lifecycle issue" half of
+    /// #257, asserted against the actual producer rather than assumed from
+    /// the loot roll alone.
+    #[test]
+    fn retrieving_a_bite_spawns_a_real_item_entity_and_xp() {
+        let world = pond_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim.cast_fishing_bobber(1, Vec3::new(0.0, 4.0, 0.0), 4.6, 0.0, 90.0, 0, 0);
+        for _ in 0..900 {
+            sim.tick_fishing_bobbers();
+            if sim.fishing_bobbers.get(&id).is_some_and(|b| b.nibble > 0) {
+                break;
+            }
+        }
+        assert!(sim.fishing_bobbers.get(&id).is_some_and(|b| b.nibble > 0), "must have bitten within 900 ticks");
+        let before_items = sim.item_count();
+        let owner_pos = Vec3::new(5.0, 4.0, 0.0);
+        let retrieve = sim.retrieve_fishing_bobber(id, owner_pos, 0).expect("bobber was tracked");
+        assert_eq!(retrieve.rod_damage, 1, "a landed bite reels in exactly one loot item, dmg 1");
+        assert_eq!(sim.item_count(), before_items + 1, "one real item entity must be spawned");
+        assert!(sim.orb_points_outstanding() > 0, "a catch must award experience");
+        assert!(sim.player_active_bobber(1).is_none(), "the bobber is discarded on retrieve");
+    }
+
+    /// The control for the item-entity claim: retrieving with **no** bite
+    /// (a fresh cast, immediately reeled in) spawns nothing.
+    #[test]
+    fn control_an_immediate_retrieve_with_no_bite_spawns_nothing() {
+        let world = pond_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim.cast_fishing_bobber(1, Vec3::new(0.0, 4.0, 0.0), 4.6, 0.0, 90.0, 0, 0);
+        let before_items = sim.item_count();
+        let before_xp = sim.orb_points_outstanding();
+        let retrieve = sim.retrieve_fishing_bobber(id, Vec3::new(5.0, 4.0, 0.0), 0).expect("tracked");
+        assert_eq!(retrieve.rod_damage, 0, "no bite means dmg 0, not a phantom catch");
+        assert_eq!(sim.item_count(), before_items, "no item may spawn without a bite");
+        assert_eq!(sim.orb_points_outstanding(), before_xp, "no xp may spawn without a bite");
+    }
+
+    /// A bobber that lands on dry ground rather than water despawns after
+    /// [`HOOK_MAX_GROUND_LIFE`] ticks — `FishingHook.life >= 1200`.
+    #[test]
+    fn a_grounded_bobber_despawns_after_1200_ticks() {
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -2..=2 {
+            for z in -2..=2 {
+                world.set_block(x, 0, z, "minecraft:stone");
+            }
+        }
+        let mut sim = MobSim::new(&world);
+        let id = sim.cast_fishing_bobber(1, Vec3::new(0.0, 1.0, 0.0), 1.6, 0.0, 90.0, 0, 0);
+        for _ in 0..HOOK_MAX_GROUND_LIFE + 5 {
+            sim.tick_fishing_bobbers();
+        }
+        assert!(sim.fishing_bobbers.get(&id).is_none(), "a bobber resting on ground for 1200+ ticks must discard itself");
+    }
+
+    /// `player_active_bobber` finds the caster's own bobber and nobody
+    /// else's — the query a rod right-click needs to decide cast vs. reel.
+    #[test]
+    fn player_active_bobber_is_keyed_by_owner() {
+        let world = pond_world();
+        let mut sim = MobSim::new(&world);
+        let mine = sim.cast_fishing_bobber(1, Vec3::new(0.0, 4.0, 0.0), 4.6, 0.0, 90.0, 0, 0);
+        let _theirs = sim.cast_fishing_bobber(2, Vec3::new(0.0, 4.0, 0.0), 4.6, 0.0, 90.0, 0, 0);
+        assert_eq!(sim.player_active_bobber(1), Some(mine));
+        assert_eq!(sim.player_active_bobber(3), None, "a player with no cast bobber finds nothing");
+    }
+
+    /// A cast bobber appears in `snapshots()` as `minecraft:fishing_bobber`
+    /// carrying the owner's entity id as object data — the field a real
+    /// client's line-to-rod-tip renderer reads.
+    #[test]
+    fn a_cast_bobber_streams_with_the_owners_id_as_object_data() {
+        let world = pond_world();
+        let mut sim = MobSim::new(&world);
+        sim.set_players(vec![PlayerPerception {
+            position: Vec3::new(0.0, 4.0, 0.0),
+            held_item: None,
+            view_direction: Vec3::new(0.0, 0.0, 1.0),
+        }]);
+        let owner_entity_id = 42;
+        let id = sim.cast_fishing_bobber(owner_entity_id, Vec3::new(0.0, 4.0, 0.0), 4.6, 0.0, 90.0, 0, 0);
+        let snap = sim.snapshots().into_iter().find(|s| s.id == id).expect("a live bobber must be streamed");
+        assert_eq!(snap.entity_type.to_string(), "minecraft:fishing_bobber");
+        assert_eq!(snap.object_data, owner_entity_id);
+    }
+}

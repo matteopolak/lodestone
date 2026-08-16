@@ -204,6 +204,19 @@ pub(crate) mod minecart;
 // module's own driver plumbing call it.
 mod lightning;
 
+// Issue #257. No re-export: every `impl MobSim` method is `pub` already
+// (`cast_fishing_bobber`, `retrieve_fishing_bobber`, …), `FishHookState`/
+// `FishingBobber` stay `pub(super)`, and `FISHING_ROLL_SEED` is read directly
+// as `fishing::FISHING_ROLL_SEED` by `MobSim::new`, the same shape
+// `orbs::ORB_BEHAVIOR_SEED` uses.
+mod fishing;
+
+// Issue #241 (the raid half — patrols already exist, see `mobs::mod`'s own
+// module doc and `docs/pillager-patrols.md`). No re-export: every `impl
+// MobSim` method is `pub` already; `RAID_ROLL_SEED` is read the same way
+// `fishing::FISHING_ROLL_SEED` is.
+mod raid;
+
 /// Reads a computed attribute value from `attrs` by bare path (e.g.
 /// `"max_health"`), applying the registry default when the attribute is not
 /// explicitly present — mirrors [`AttributeMap::value`]'s own fallback so a
@@ -2275,6 +2288,24 @@ pub struct MobSim<'w> {
     /// for [`tnt_rng`](Self::tnt_rng)'s reason: a dragon tick must not shift
     /// which roll a mob spawn, a block drop, or anything else sees.
     dragon_rng: SpawnRng,
+    /// Live fishing bobbers (issue #257), keyed by network entity id — see
+    /// [`fishing::FishingBobber`] and `mobs::fishing`'s own module doc.
+    fishing_bobbers: HashMap<i32, fishing::FishingBobber>,
+    /// The bobber cast/bob/bite/loot-roll RNG stream, on its own stream for
+    /// [`dragon_rng`](Self::dragon_rng)'s reason.
+    fishing_rng: SpawnRng,
+    /// Live raids (issue #241), keyed by this sim's own raid id (not a
+    /// network entity id — a raid has no entity of its own; see
+    /// [`raid::Raid`] and `mobs::raid`'s own module doc).
+    raids: HashMap<i32, raid::Raid>,
+    /// The next id [`raid::MobSim::start_raid`] assigns — a separate counter
+    /// from [`next_id`](Self::next_id) because a raid id is never a network
+    /// entity id and must never collide with one being reused after a raid
+    /// despawns its raiders.
+    next_raid_id: i32,
+    /// The wave-spawn-position/spawn-count RNG stream, on its own stream for
+    /// [`dragon_rng`](Self::dragon_rng)'s reason.
+    raid_rng: SpawnRng,
     /// Live withers, keyed by network entity id — see [`TrackedWither`] and
     /// `mobs::wither`'s own module doc for the emergence/heal/skull-fire
     /// state each one drives.
@@ -2605,6 +2636,11 @@ impl<'w> MobSim<'w> {
             wither_rng: SpawnRng::new(wither::WITHER_SKULL_SEED),
             crystals: HashMap::new(),
             dragon_rng: SpawnRng::new(dragon::DRAGON_PHASE_SEED),
+            fishing_bobbers: HashMap::new(),
+            fishing_rng: SpawnRng::new(fishing::FISHING_ROLL_SEED),
+            raids: HashMap::new(),
+            next_raid_id: 1,
+            raid_rng: SpawnRng::new(raid::RAID_ROLL_SEED),
         }
     }
 
@@ -3543,6 +3579,15 @@ impl<'w> MobSim<'w> {
         self.tick_leashes();
         #[cfg(not(target_arch = "wasm32"))]
         self.tick_villager_professions();
+        // Issue #257: fishing bobbers. Reads `self.world` (the static
+        // per-tick terrain snapshot, not the live `view` oracle the item/orb
+        // passes just above use) — see `fishing::MobSim::tick_fishing_bobbers`'s
+        // own doc for why a bobber's whole interesting life is spent sitting
+        // in open water, where the two oracles agree.
+        self.tick_fishing_bobbers();
+        // Issue #241: raids. Wave spawning and victory/defeat need no live
+        // terrain oracle either — see `raid::MobSim::tick_raids`'s own doc.
+        self.tick_raids();
 
         self.tick_count += 1;
     }
@@ -5952,6 +5997,12 @@ impl<'w> MobSim<'w> {
         self.push_dragon_snapshots(&mut out);
         self.push_end_crystal_snapshots(&mut out);
         self.push_wither_snapshots(&mut out);
+        // Issue #257: live fishing bobbers.
+        self.fishing_bobber_snapshots(&mut out);
+        // Issue #241: live raiders spawned by an active raid stream through
+        // the ordinary mob loop at the top of this function — `raid.rs`
+        // spawns them with `spawn_species`, exactly as a patrol does — so
+        // there is nothing to append here.
         out
     }
 }
