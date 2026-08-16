@@ -38,10 +38,18 @@ pub(crate) mod generated_entity_types;
 #[path = "generated/item_types.rs"]
 pub(crate) mod generated_item_types;
 
+/// Generated legacy `SoundEvent` id→name table for protocol 340.
+///
+/// Like `generated_item_types`, generated from `minecraft-data` rather than
+/// a Mojang report. See `tests/sound_ids.rs` for the generator.
+#[path = "generated/sound_ids.rs"]
+pub(crate) mod generated_sound_ids;
+
 pub mod adapter;
 pub mod entity_types;
 pub mod item_types;
 pub mod packets;
+pub mod sound_ids;
 
 /// The `id:meta` (pre-Flattening) → modern block-state table and the bridge
 /// from it to canonical 26.2 state ids.

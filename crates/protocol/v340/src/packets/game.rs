@@ -4,6 +4,7 @@ use lodestone_macros::{Decode, Encode, Packet};
 use uuid::Uuid;
 
 use crate::packets::position::Position;
+use crate::packets::slot::Slot;
 
 /// Clientbound `login` (game-join) packet.
 ///
@@ -466,4 +467,120 @@ pub struct BlockAction {
     /// Legacy numeric block *type* id (no metadata), e.g. `25` = note block.
     #[mc(varint)]
     pub block_id: i32,
+}
+
+/// Clientbound `entity_equipment` — one entity equipment slot changed.
+///
+/// Verified against minecraft-data's 1.12.2 `packet_entity_equipment`: a
+/// varint entity id, a varint `EquipmentSlot` ordinal, then a `slot` item
+/// stack. Unlike the modern packet this carries exactly **one** slot per
+/// message (the array-of-slots batching is a later addition), so the
+/// adapter always emits a single-element `equipment` vec.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:entity_equipment", state = Play, bound = Client)]
+pub struct ClientboundEntityEquipment {
+    /// Entity whose equipment changed.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Vanilla `EquipmentSlot` ordinal (0 main hand, 1 off hand, 2 boots, 3
+    /// leggings, 4 chestplate, 5 helmet in this era).
+    #[mc(varint)]
+    pub slot: i32,
+    /// New item in the slot, or `Slot::Empty` when cleared.
+    pub item: Slot,
+}
+
+/// Clientbound `animation` — a hand-swing or hit-effect animation.
+///
+/// Verified against minecraft-data's 1.12.2 `packet_animation`: a varint
+/// entity id, then a raw `u8` animation code. Wiki.vg's historical
+/// documentation for this era lists `0` swing main arm, `2` leave bed, `3`
+/// swing offhand, `4` critical effect, `5` magic critical effect; `1` is not
+/// assigned a name at this protocol revision either, matching
+/// `AnimationAction`'s own note that Mojang left it reserved. Any code this
+/// crate doesn't recognise still travels intact via `AnimationAction::Other`
+/// rather than being dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:animation", state = Play, bound = Client)]
+pub struct Animation {
+    /// Entity performing the animation.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Raw animation code.
+    pub animation: u8,
+}
+
+/// Clientbound `named_sound_effect` — plays a sound by its namespaced name
+/// (used for record discs, resource-pack-only sounds, etc.).
+///
+/// Verified against minecraft-data's 1.12.2 `packet_named_sound_effect`: a
+/// string sound name, a varint sound category, then `x`/`y`/`z` as
+/// fixed-point `i32`s (real coordinate × 8, vanilla's
+/// `ClientboundSoundPacket` fixed-point convention), then `f32` volume and
+/// pitch.
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:named_sound_effect", state = Play, bound = Client)]
+pub struct NamedSoundEffect {
+    /// Sound event name; may or may not carry a `namespace:` prefix.
+    #[mc(max = 256)]
+    pub sound_name: String,
+    /// Vanilla `SoundCategory` ordinal.
+    #[mc(varint)]
+    pub sound_category: i32,
+    /// Fixed-point X (real coordinate × 8).
+    pub x: i32,
+    /// Fixed-point Y (real coordinate × 8).
+    pub y: i32,
+    /// Fixed-point Z (real coordinate × 8).
+    pub z: i32,
+    /// Volume multiplier.
+    pub volume: f32,
+    /// Pitch multiplier.
+    pub pitch: f32,
+}
+
+/// Clientbound `sound_effect` — plays a sound by its registry id.
+///
+/// Verified against minecraft-data's 1.12.2 `packet_sound_effect`: identical
+/// shape to [`NamedSoundEffect`] except the leading field is a varint
+/// `SoundEvent` registry id rather than a string name.
+#[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:sound_effect", state = Play, bound = Client)]
+pub struct SoundEffect {
+    /// Legacy `SoundEvent` registry id.
+    #[mc(varint)]
+    pub sound_id: i32,
+    /// Vanilla `SoundCategory` ordinal.
+    #[mc(varint)]
+    pub sound_category: i32,
+    /// Fixed-point X (real coordinate × 8).
+    pub x: i32,
+    /// Fixed-point Y (real coordinate × 8).
+    pub y: i32,
+    /// Fixed-point Z (real coordinate × 8).
+    pub z: i32,
+    /// Volume multiplier.
+    pub volume: f32,
+    /// Pitch multiplier.
+    pub pitch: f32,
+}
+
+/// Clientbound `scoreboard_display_objective` — assigns an objective to a
+/// display slot.
+///
+/// Verified against minecraft-data's 1.12.2
+/// `packet_scoreboard_display_objective`: a raw `i8` slot position, then a
+/// string objective name (empty string clears the slot — vanilla's
+/// `ClientboundSetDisplayObjectivePacket` never sends a dedicated "clear"
+/// marker at this protocol revision).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:scoreboard_display_objective", state = Play, bound = Client)]
+pub struct ScoreboardDisplayObjective {
+    /// Raw display-slot position (`0` list, `1` sidebar, `2` below-name at
+    /// this protocol revision — the per-team-colour sidebar slots are a
+    /// later addition).
+    pub position: i8,
+    /// Objective name, or an empty string to clear the slot.
+    #[mc(max = 16)]
+    pub name: String,
 }
