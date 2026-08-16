@@ -7,11 +7,14 @@ use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
 use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_data::block_states;
 use lodestone_model::{
-    AdapterError, BlockActionKind, BlockFace, ChatKind, ChatMode, ChunkPos, ClientAction,
-    ClientEvent, ClientSettings, ConnectionState, Directive, DisplayedSkinParts, EntityInteraction,
-    EntityMovement, GameMode, Hand, ItemStack, LoginProfile, MainHand, PlayerCommand,
-    PlayerListEntry, ProfileProperty, RecipeBookType, ResourceKey, ResourcePackResponseKind,
-    Rotation, SectionPos, ServerAddress, TeleportFlags, Text, Vec3, VersionAdapter, WorldSink,
+    AdapterError, AnimationAction, BlockActionKind, BlockFace, BossAction, BossColor, BossOverlay,
+    ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule,
+    ConnectionState, Directive, DisplaySlot, DisplayedSkinParts, EntityEquipment,
+    EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile,
+    MainHand, ObjectiveMode, ObjectiveRenderType, PlayerCommand, PlayerListEntry,
+    ProfileProperty, RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation, SectionPos,
+    ServerAddress, SoundCategory, TeamAction, TeamColor, TeamParameters, TeleportFlags, Text,
+    Vec3, VersionAdapter, Visibility, WorldSink,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk};
 
@@ -26,10 +29,11 @@ use crate::packets::entity::{
     NamedEntitySpawn, RelEntityMove, SpawnEntityLiving, SpawnObject,
 };
 use crate::packets::game::{
-    BlockAction, BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook,
-    EntityAction, JoinGame, KickDisconnect, Respawn, ServerboundArmAnimation, ServerboundChat,
-    ServerboundPositionLook, Spectate, TeleportConfirm, UpdateHealth, UseEntity, UseEntityAt,
-    UseEntityInteract,
+    Animation, BlockAction, BlockDig, BlockPlace, ClientCommand, ClientboundChat,
+    ClientboundEntityEquipment, ClientboundPositionLook, EntityAction, JoinGame, KickDisconnect,
+    NamedSoundEffect, Respawn, ScoreboardDisplayObjective, ServerboundArmAnimation,
+    ServerboundChat, ServerboundPositionLook, SoundEffect, Spectate, TeleportConfirm,
+    UpdateHealth, UseEntity, UseEntityAt, UseEntityInteract,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
@@ -241,6 +245,70 @@ fn game_mode(value: u8) -> Result<GameMode, AdapterError> {
         2 => Ok(GameMode::Adventure),
         3 => Ok(GameMode::Spectator),
         other => Err(AdapterError::Decode(format!("unknown game mode {other}"))),
+    }
+}
+
+/// Maps a `boss_bar` varint colour ordinal to the canonical [`BossColor`].
+///
+/// Vanilla's `BossEvent.BossBarColor` enum declaration order (`PINK`,
+/// `BLUE`, `RED`, `GREEN`, `YELLOW`, `PURPLE`, `WHITE`) matches
+/// [`BossColor`]'s own declaration order exactly, so this is a direct index
+/// rather than a remapping.
+fn boss_color_from_ordinal(ordinal: i32) -> Result<BossColor, AdapterError> {
+    match ordinal {
+        0 => Ok(BossColor::Pink),
+        1 => Ok(BossColor::Blue),
+        2 => Ok(BossColor::Red),
+        3 => Ok(BossColor::Green),
+        4 => Ok(BossColor::Yellow),
+        5 => Ok(BossColor::Purple),
+        6 => Ok(BossColor::White),
+        other => Err(AdapterError::Decode(format!("unknown boss bar color {other}"))),
+    }
+}
+
+/// Maps a `boss_bar` varint overlay/division ordinal to the canonical
+/// [`BossOverlay`]. Vanilla's `BossEvent.BossBarOverlay` declaration order
+/// (`PROGRESS`, `NOTCHED_6`, `NOTCHED_10`, `NOTCHED_12`, `NOTCHED_20`)
+/// matches [`BossOverlay`]'s own order exactly.
+fn boss_overlay_from_ordinal(ordinal: i32) -> Result<BossOverlay, AdapterError> {
+    match ordinal {
+        0 => Ok(BossOverlay::Progress),
+        1 => Ok(BossOverlay::Notched6),
+        2 => Ok(BossOverlay::Notched10),
+        3 => Ok(BossOverlay::Notched12),
+        4 => Ok(BossOverlay::Notched20),
+        other => Err(AdapterError::Decode(format!("unknown boss bar overlay {other}"))),
+    }
+}
+
+/// Maps a `teams` signed colour byte to the canonical [`TeamColor`].
+///
+/// Vanilla packs this as an `EnumChatFormatting` ordinal (the same 16-colour
+/// `§`-code order [`lodestone_model::TextColor`]'s own `NAMED` table walks),
+/// so `-1` ("no colour"/reset) and any other value outside `0..=15` both
+/// resolve to `None` rather than being rejected — a team legitimately has no
+/// colour, and this is not a wire-shape error the way an unrecognised
+/// `teams` mode or an unrecognised objective render type is.
+fn team_color_from_byte(byte: i8) -> Option<TeamColor> {
+    match byte {
+        0 => Some(TeamColor::Black),
+        1 => Some(TeamColor::DarkBlue),
+        2 => Some(TeamColor::DarkGreen),
+        3 => Some(TeamColor::DarkAqua),
+        4 => Some(TeamColor::DarkRed),
+        5 => Some(TeamColor::DarkPurple),
+        6 => Some(TeamColor::Gold),
+        7 => Some(TeamColor::Gray),
+        8 => Some(TeamColor::DarkGray),
+        9 => Some(TeamColor::Blue),
+        10 => Some(TeamColor::Green),
+        11 => Some(TeamColor::Aqua),
+        12 => Some(TeamColor::Red),
+        13 => Some(TeamColor::LightPurple),
+        14 => Some(TeamColor::Yellow),
+        15 => Some(TeamColor::White),
+        _ => None,
     }
 }
 
@@ -1166,6 +1234,382 @@ impl V340Adapter {
                 b1: body.byte2,
                 block: key,
             })]);
+        }
+        if packet_id == play::clientbound::ENTITY_EQUIPMENT {
+            // Verified against minecraft-data's 1.12.2
+            // `packet_entity_equipment`: a varint entity id, a varint
+            // `EquipmentSlot` ordinal, then a `slot` item stack. Unlike the
+            // modern packet this carries exactly one slot per message, so
+            // the emitted `equipment` vec always has a single entry.
+            let body: ClientboundEntityEquipment = decode_body_exact(payload)?;
+            let ordinal = u8::try_from(body.slot).map_err(|_| {
+                AdapterError::Decode(format!(
+                    "entity_equipment slot ordinal {} is outside u8 range",
+                    body.slot
+                ))
+            })?;
+            let slot = EquipmentSlot::from_ordinal(ordinal).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown entity_equipment slot ordinal {ordinal}"))
+            })?;
+            let item = slot_to_item_stack(&body.item);
+            return Ok(vec![Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+                entity_id: body.entity_id,
+                equipment: vec![EntityEquipment { slot, item }],
+            })]);
+        }
+        if packet_id == play::clientbound::ANIMATION {
+            // Verified against minecraft-data's 1.12.2 `packet_animation`: a
+            // varint entity id, then a raw animation code byte. See
+            // `Animation`'s own doc for the code table and why `1` maps to
+            // `Other` rather than a named variant.
+            let body: Animation = decode_body_exact(payload)?;
+            let action = match body.animation {
+                0 => AnimationAction::SwingMainHand,
+                2 => AnimationAction::WakeUp,
+                3 => AnimationAction::SwingOffHand,
+                4 => AnimationAction::CriticalHit,
+                5 => AnimationAction::MagicCriticalHit,
+                other => AnimationAction::Other(other),
+            };
+            return Ok(vec![Directive::Emit(ClientEvent::EntityAnimation {
+                entity_id: body.entity_id,
+                action,
+            })]);
+        }
+        if packet_id == play::clientbound::NAMED_SOUND_EFFECT {
+            // Verified against minecraft-data's 1.12.2
+            // `packet_named_sound_effect`. `x`/`y`/`z` are vanilla's
+            // fixed-point sound-position convention (real coordinate × 8);
+            // this era carries no fixed audible range and no variant seed,
+            // so both canonical fields are the "not present" default.
+            let body: NamedSoundEffect = decode_body_exact(payload)?;
+            let category_ordinal = u8::try_from(body.sound_category).map_err(|_| {
+                AdapterError::Decode(format!(
+                    "named_sound_effect category {} is outside u8 range",
+                    body.sound_category
+                ))
+            })?;
+            let category = SoundCategory::from_ordinal(category_ordinal).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown sound category {category_ordinal}"))
+            })?;
+            let sound: ResourceKey = body.sound_name.parse().map_err(|_| {
+                AdapterError::Decode(format!(
+                    "named_sound_effect sound name {:?} is not a valid resource key",
+                    body.sound_name
+                ))
+            })?;
+            return Ok(vec![Directive::Emit(ClientEvent::Sound {
+                sound,
+                category,
+                pos: Vec3 {
+                    x: f64::from(body.x) / 8.0,
+                    y: f64::from(body.y) / 8.0,
+                    z: f64::from(body.z) / 8.0,
+                },
+                volume: body.volume,
+                pitch: body.pitch,
+                fixed_range: None,
+                seed: 0,
+            })]);
+        }
+        if packet_id == play::clientbound::SOUND_EFFECT {
+            // Identical shape to `NAMED_SOUND_EFFECT` except the leading
+            // field is a varint `SoundEvent` registry id rather than a
+            // string name — resolved through the generated legacy
+            // `sound_ids` table (`vendor/minecraft-data`'s
+            // `pc/1.12.2/sounds.json`, wire-order network ids).
+            let body: SoundEffect = decode_body_exact(payload)?;
+            let category_ordinal = u8::try_from(body.sound_category).map_err(|_| {
+                AdapterError::Decode(format!(
+                    "sound_effect category {} is outside u8 range",
+                    body.sound_category
+                ))
+            })?;
+            let category = SoundCategory::from_ordinal(category_ordinal).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown sound category {category_ordinal}"))
+            })?;
+            let name = crate::sound_ids::sound_name(body.sound_id).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown legacy sound id {}", body.sound_id))
+            })?;
+            let sound: ResourceKey = name.parse().map_err(|_| {
+                AdapterError::Decode(format!(
+                    "resolved sound name {name:?} is not a valid resource key"
+                ))
+            })?;
+            return Ok(vec![Directive::Emit(ClientEvent::Sound {
+                sound,
+                category,
+                pos: Vec3 {
+                    x: f64::from(body.x) / 8.0,
+                    y: f64::from(body.y) / 8.0,
+                    z: f64::from(body.z) / 8.0,
+                },
+                volume: body.volume,
+                pitch: body.pitch,
+                fixed_range: None,
+                seed: 0,
+            })]);
+        }
+        if packet_id == play::clientbound::SCOREBOARD_DISPLAY_OBJECTIVE {
+            // Verified against minecraft-data's 1.12.2
+            // `packet_scoreboard_display_objective`: a raw `i8` slot
+            // position, then a string objective name. This protocol
+            // revision only ever sends 0/1/2 — the per-team-colour sidebar
+            // slots are a later addition — and clears the slot with an
+            // empty string rather than a dedicated marker.
+            let body: ScoreboardDisplayObjective = decode_body_exact(payload)?;
+            let slot = match body.position {
+                0 => DisplaySlot::List,
+                1 => DisplaySlot::Sidebar,
+                2 => DisplaySlot::BelowName,
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "unknown scoreboard display slot {other}"
+                    )));
+                }
+            };
+            let objective = if body.name.is_empty() {
+                None
+            } else {
+                Some(body.name)
+            };
+            return Ok(vec![Directive::Emit(ClientEvent::DisplayObjective {
+                slot,
+                objective,
+            })]);
+        }
+        if packet_id == play::clientbound::SCOREBOARD_OBJECTIVE {
+            // Mode-multiplexed (minecraft-data's 1.12.2
+            // `packet_scoreboard_objective`), so this is a hand-decoded
+            // `Reader` walk rather than a derived struct, mirroring
+            // `block_change`/`entity_status`'s treatment of the same shape.
+            // `displayText` is a **plain** legacy-formatted string at this
+            // protocol revision (JSON scoreboard text is a 1.13+ addition),
+            // so it goes through `Text::from_legacy`, not `from_json`.
+            let mut reader = Reader::new(payload);
+            let name = reader.string(16).map_err(dec_err)?;
+            let action = reader.i8().map_err(dec_err)?;
+            let event = match action {
+                0 | 2 => {
+                    let display_text = reader.string(64).map_err(dec_err)?;
+                    let render_type_str = reader.string(16).map_err(dec_err)?;
+                    let render_type = match render_type_str.as_str() {
+                        "integer" => ObjectiveRenderType::Integer,
+                        "hearts" => ObjectiveRenderType::Hearts,
+                        other => {
+                            return Err(AdapterError::Decode(format!(
+                                "unknown objective render type {other:?}"
+                            )));
+                        }
+                    };
+                    ClientEvent::ObjectiveUpdate {
+                        name,
+                        mode: if action == 0 {
+                            ObjectiveMode::Add
+                        } else {
+                            ObjectiveMode::Change
+                        },
+                        display_name: Some(Text::from_legacy(&display_text)),
+                        render_type: Some(render_type),
+                        number_format: None,
+                    }
+                }
+                1 => ClientEvent::ObjectiveUpdate {
+                    name,
+                    mode: ObjectiveMode::Remove,
+                    display_name: None,
+                    render_type: None,
+                    number_format: None,
+                },
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "unknown scoreboard_objective action {other}"
+                    )));
+                }
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(event)]);
+        }
+        if packet_id == play::clientbound::SCOREBOARD_SCORE {
+            // Verified against minecraft-data's 1.12.2
+            // `packet_scoreboard_score`: `itemName` is the score *holder*
+            // and `scoreName` is the *objective* — the mcdata field names
+            // are misleading, not the wire order. `scoreName` is read
+            // unconditionally (unlike `value`), so a `remove` action still
+            // names exactly one objective, never "reset all".
+            let mut reader = Reader::new(payload);
+            let holder = reader.string(64).map_err(dec_err)?;
+            let action = reader.var_i32().map_err(dec_err)?;
+            let objective = reader.string(16).map_err(dec_err)?;
+            let event = match action {
+                0 => {
+                    let value = reader.var_i32().map_err(dec_err)?;
+                    ClientEvent::ScoreUpdate {
+                        holder,
+                        objective,
+                        value,
+                        display: None,
+                        number_format: None,
+                    }
+                }
+                1 => ClientEvent::ScoreReset {
+                    holder,
+                    objective: Some(objective),
+                },
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "unknown scoreboard_score action {other}"
+                    )));
+                }
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(event)]);
+        }
+        if packet_id == play::clientbound::TEAMS {
+            // Mode-multiplexed (minecraft-data's 1.12.2 `packet_teams`), so
+            // this is a hand-decoded `Reader` walk. Modes `0`
+            // (create) and `2` (update) share the full parameter block;
+            // `0` additionally carries the initial member list, and `3`/`4`
+            // (add/remove members) carry only a member list. `friendlyFire`
+            // packs two flags in one byte (`0x01` friendly fire, `0x02` see
+            // friendly invisibles) — vanilla's `PacketPlayOutScoreboardTeam`
+            // convention. The member-list count is capped against the
+            // payload's own remaining length before `Vec::with_capacity`,
+            // since `players` is exactly the attacker-influenced unbounded
+            // wire count this crate's own trap list warns about.
+            let mut reader = Reader::new(payload);
+            let team = reader.string(16).map_err(dec_err)?;
+            let mode = reader.i8().map_err(dec_err)?;
+            let read_members = |reader: &mut Reader<'_>| -> Result<Vec<String>, AdapterError> {
+                let count = reader.var_i32().map_err(dec_err)?;
+                let count = usize::try_from(count)
+                    .unwrap_or(0)
+                    .min(reader.remaining());
+                let mut members = Vec::with_capacity(count);
+                for _ in 0..count {
+                    members.push(reader.string(16).map_err(dec_err)?);
+                }
+                Ok(members)
+            };
+            let action = match mode {
+                0 | 2 => {
+                    let display_name = reader.string(16).map_err(dec_err)?;
+                    let prefix = reader.string(16).map_err(dec_err)?;
+                    let suffix = reader.string(16).map_err(dec_err)?;
+                    let friendly_flags = reader.i8().map_err(dec_err)?;
+                    let visibility_str = reader.string(32).map_err(dec_err)?;
+                    let collision_str = reader.string(32).map_err(dec_err)?;
+                    let color_byte = reader.i8().map_err(dec_err)?;
+                    let name_tag_visibility = match visibility_str.as_str() {
+                        "always" => Visibility::Always,
+                        "never" => Visibility::Never,
+                        "hideForOtherTeams" => Visibility::HideForOtherTeams,
+                        "hideForOwnTeam" => Visibility::HideForOwnTeam,
+                        other => {
+                            return Err(AdapterError::Decode(format!(
+                                "unknown team name-tag visibility {other:?}"
+                            )));
+                        }
+                    };
+                    let collision_rule = match collision_str.as_str() {
+                        "always" => CollisionRule::Always,
+                        "never" => CollisionRule::Never,
+                        "pushOtherTeams" => CollisionRule::PushOtherTeams,
+                        "pushOwnTeam" => CollisionRule::PushOwnTeam,
+                        other => {
+                            return Err(AdapterError::Decode(format!(
+                                "unknown team collision rule {other:?}"
+                            )));
+                        }
+                    };
+                    let params = Box::new(TeamParameters {
+                        display_name: Text::from_legacy(&display_name),
+                        prefix: Text::from_legacy(&prefix),
+                        suffix: Text::from_legacy(&suffix),
+                        name_tag_visibility,
+                        collision_rule,
+                        color: team_color_from_byte(color_byte),
+                        friendly_fire: friendly_flags & 0x01 != 0,
+                        see_friendly_invisibles: friendly_flags & 0x02 != 0,
+                    });
+                    if mode == 0 {
+                        TeamAction::Create {
+                            params,
+                            members: read_members(&mut reader)?,
+                        }
+                    } else {
+                        TeamAction::Update { params }
+                    }
+                }
+                1 => TeamAction::Remove,
+                3 => TeamAction::AddMembers(read_members(&mut reader)?),
+                4 => TeamAction::RemoveMembers(read_members(&mut reader)?),
+                other => {
+                    return Err(AdapterError::Decode(format!("unknown teams mode {other}")));
+                }
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::TeamUpdate {
+                name: team,
+                action,
+            })]);
+        }
+        if packet_id == play::clientbound::BOSS_BAR {
+            // Action-multiplexed (minecraft-data's 1.12.2 `packet_boss_bar`),
+            // so this is a hand-decoded `Reader` walk. Title is a JSON chat
+            // component at this protocol revision (unlike the plain-string
+            // scoreboard/team fields above — the boss bar packet has carried
+            // `IChatComponent` since its 1.9 introduction, predating the
+            // 1.13 scoreboard/team JSON migration), so it goes through
+            // `Text::from_json`. `flags` packs three bits: `0x01` darken
+            // sky, `0x02` boss music, `0x04` create fog.
+            let mut reader = Reader::new(payload);
+            let id = reader.uuid().map_err(dec_err)?;
+            let action_ordinal = reader.var_i32().map_err(dec_err)?;
+            let action = match action_ordinal {
+                0 => {
+                    let title = reader.string(32767).map_err(dec_err)?;
+                    let progress = reader.f32().map_err(dec_err)?;
+                    let color = boss_color_from_ordinal(reader.var_i32().map_err(dec_err)?)?;
+                    let overlay = boss_overlay_from_ordinal(reader.var_i32().map_err(dec_err)?)?;
+                    let flags = reader.u8().map_err(dec_err)?;
+                    BossAction::Add {
+                        title: Box::new(Text::from_json(&title)),
+                        progress,
+                        color,
+                        overlay,
+                        darken: flags & 0x01 != 0,
+                        music: flags & 0x02 != 0,
+                        fog: flags & 0x04 != 0,
+                    }
+                }
+                1 => BossAction::Remove,
+                2 => BossAction::UpdateProgress(reader.f32().map_err(dec_err)?),
+                3 => {
+                    let title = reader.string(32767).map_err(dec_err)?;
+                    BossAction::UpdateName(Box::new(Text::from_json(&title)))
+                }
+                4 => {
+                    let color = boss_color_from_ordinal(reader.var_i32().map_err(dec_err)?)?;
+                    let overlay = boss_overlay_from_ordinal(reader.var_i32().map_err(dec_err)?)?;
+                    BossAction::UpdateStyle { color, overlay }
+                }
+                5 => {
+                    let flags = reader.u8().map_err(dec_err)?;
+                    BossAction::UpdateFlags {
+                        darken: flags & 0x01 != 0,
+                        music: flags & 0x02 != 0,
+                        fog: flags & 0x04 != 0,
+                    }
+                }
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "unknown boss_bar action {other}"
+                    )));
+                }
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::BossBarUpdate { id, action })]);
         }
         // Everything else in play is intentionally ignored for now.
         Ok(Vec::new())
