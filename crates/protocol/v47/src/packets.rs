@@ -13,3 +13,4 @@ pub mod settings;
 pub mod slot;
 pub mod status;
 pub mod window;
+pub mod world;

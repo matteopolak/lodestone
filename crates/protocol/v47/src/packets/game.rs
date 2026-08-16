@@ -402,3 +402,60 @@ pub struct Spectate {
     /// Uuid of the entity to spectate/teleport to.
     pub target: Uuid,
 }
+
+/// Clientbound `difficulty` packet.
+///
+/// Wire layout: a single unsigned byte (`0` peaceful .. `3` hard). Verified
+/// against minecraft-data's 1.8 `packet_difficulty`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:difficulty", state = Play, bound = Client)]
+pub struct DifficultyPacket {
+    /// World difficulty (`0` peaceful .. `3` hard).
+    pub difficulty: u8,
+}
+
+/// Clientbound `camera` packet — attaches the client's camera to an entity.
+///
+/// Wire layout: a single varint entity id. Verified against minecraft-data's
+/// 1.8 `packet_camera`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:camera", state = Play, bound = Client)]
+pub struct CameraPacket {
+    /// Entity id the camera should follow.
+    #[mc(varint)]
+    pub camera_id: i32,
+}
+
+/// Clientbound `playerlist_header` packet — tab-list header/footer text.
+///
+/// Wire layout: two strings, header then footer. Both are **JSON** chat
+/// components: this packet was introduced alongside 1.8's own JSON text
+/// component format, unlike the scoreboard/team packets' plain legacy text
+/// (which predate 1.8's JSON migration and were never revisited).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:playerlist_header", state = Play, bound = Client)]
+pub struct PlayerlistHeader {
+    /// JSON-encoded header component.
+    #[mc(max = 32767)]
+    pub header: String,
+    /// JSON-encoded footer component.
+    #[mc(max = 32767)]
+    pub footer: String,
+}
+
+/// Clientbound `experience` packet — the local player's XP bar/level.
+///
+/// Wire layout: f32 progress bar, varint level, varint total experience.
+/// Verified against minecraft-data's 1.8 `packet_experience`.
+#[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:experience", state = Play, bound = Client)]
+pub struct Experience {
+    /// Progress toward the next level, in `0.0..1.0`.
+    pub bar: f32,
+    /// Current experience level.
+    #[mc(varint)]
+    pub level: i32,
+    /// Total accumulated experience points.
+    #[mc(varint)]
+    pub total: i32,
+}

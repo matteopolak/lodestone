@@ -3,15 +3,19 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use lodestone_canonical::canonical::{self, FallbackTally};
+use lodestone_canonical::canonical::{self, CanonicalBlockState, FallbackTally};
 use lodestone_core::{Ctx, Decode, Encode, Reader};
 use lodestone_data::block_entity_types::block_entity_type;
+use lodestone_data::block_states;
+use lodestone_data::mob_effects::mob_effect_name;
 use lodestone_model::{
-    AdapterError, BlockActionKind, BlockFace, ChatKind, ChatMode, ChunkPos, ClientAction,
-    ClientEvent, ClientSettings, ConnectionState, Directive, DisplayedSkinParts, EntityInteraction,
-    EntityMovement, GameMode, Hand, ItemStack, LoginProfile, PlayerCommand, PlayerListEntry,
-    ProfileProperty, ResourceKey, Rotation, SectionPos, ServerAddress, TeleportFlags, Text, Vec3,
-    VersionAdapter,
+    AdapterError, AnimationAction, BlockActionKind, BlockFace, ChatKind, ChatMode, ChunkPos,
+    ClientAction, ClientEvent, ClientSettings, CollisionRule, ConnectionState, Difficulty,
+    Directive, DisplayedSkinParts, DisplaySlot, EntityEquipment, EntityInteraction,
+    EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile, ObjectiveMode,
+    ObjectiveRenderType, PlayerCommand, PlayerListEntry, ProfileProperty, ResourceKey, Rotation,
+    SectionPos, ServerAddress, SoundCategory, TeamAction, TeamColor, TeamParameters,
+    TeleportFlags, Text, Vec3, VersionAdapter, Visibility,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk, WorldSink};
 
@@ -22,13 +26,16 @@ use crate::packet_ids::{handshaking, login, play};
 use crate::packets::chunk::{ChunkShape, MapChunk, MapChunkBulk};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::entity::{
-    EntityDestroy, EntityLook, EntityMetadataPacket, EntityMoveLook, EntityTeleport,
-    EntityVelocityPacket, RelEntityMove, SpawnEntityLiving, SpawnObject,
+    Animation, AttachEntity, ClientboundEntityEquipment, Collect, EntityDestroy, EntityEffect,
+    EntityLook, EntityMetadataPacket, EntityMoveLook, EntityTeleport, EntityVelocityPacket,
+    RelEntityMove, RemoveEntityEffect, SpawnEntityExperienceOrb, SpawnEntityLiving,
+    SpawnEntityPainting, SpawnEntityWeather, SpawnObject,
 };
 use crate::packets::game::{
-    BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook, EntityAction,
-    JoinGame, KickDisconnect, PlaySetCompression, Respawn, ServerboundChat, ServerboundPositionLook,
-    Spectate, UpdateHealth, UseEntity, UseEntityAt,
+    BlockDig, BlockPlace, CameraPacket, ClientCommand, ClientboundChat, ClientboundPositionLook,
+    DifficultyPacket, EntityAction, Experience, JoinGame, KickDisconnect, PlayerlistHeader,
+    PlaySetCompression, Respawn, ServerboundChat, ServerboundPositionLook, Spectate,
+    SpawnPosition, UpdateHealth, UseEntity, UseEntityAt,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
@@ -39,6 +46,9 @@ use crate::packets::slot::Slot;
 use crate::packets::window::{
     CloseWindow, EnchantItem, HeldItemSlot, OpenWindow, ServerboundCloseWindow,
     ServerboundHeldItemSlot, SetCreativeSlot, SetSlot, WindowItems,
+};
+use crate::packets::world::{
+    BlockAction, BlockBreakAnimation, NamedSoundEffect, OpenSignEntity, WorldEvent,
 };
 
 /// Protocol version implemented by this adapter.
@@ -93,6 +103,22 @@ pub struct V47Adapter {
     /// to currently-tracked mobs rather than growing for the life of the
     /// connection.
     entity_kinds: Arc<Mutex<HashMap<i32, &'static str>>>,
+    /// The raw 1.8 dimension byte from the most recent `login`/`respawn`,
+    /// kept alongside `shape` (which only distinguishes "has skylight" from
+    /// "does not") because `spawn_position` needs the real
+    /// [`lodestone_model::DimensionId`], and nether (`-1`) vs end (`1`)
+    /// collapse to the same `ChunkShape`.
+    dimension: Arc<Mutex<i8>>,
+    /// Vehicle entity id -> its current passenger ids, in mount order.
+    /// `attach_entity` (mount/ride branch) sends one relation at a time; this
+    /// is the adapter-side fold that turns that stream into the full list
+    /// [`ClientEvent::EntityPassengersChanged`] expects, mirroring
+    /// `entity_kinds`' role for `entity_metadata`.
+    vehicle_passengers: Arc<Mutex<HashMap<i32, Vec<i32>>>>,
+    /// Passenger entity id -> the vehicle it currently rides, so a dismount
+    /// (`vehicle_id == -1`) knows which `vehicle_passengers` entry to prune
+    /// without scanning every vehicle.
+    passenger_vehicle: Arc<Mutex<HashMap<i32, i32>>>,
 }
 
 impl Default for V47Adapter {
@@ -109,6 +135,9 @@ impl V47Adapter {
         Self {
             shape: Arc::new(Mutex::new(ChunkShape::overworld())),
             entity_kinds: Arc::new(Mutex::new(HashMap::new())),
+            dimension: Arc::new(Mutex::new(0)),
+            vehicle_passengers: Arc::new(Mutex::new(HashMap::new())),
+            passenger_vehicle: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -152,6 +181,9 @@ impl V47Adapter {
                 ChunkShape::no_skylight()
             };
         }
+        if let Ok(mut dim) = self.dimension.lock() {
+            *dim = dimension;
+        }
     }
 
     /// Returns the current dimension's chunk shape.
@@ -159,6 +191,70 @@ impl V47Adapter {
         self.shape
             .lock()
             .map_or_else(|_| ChunkShape::overworld(), |shape| *shape)
+    }
+
+    /// Returns the raw 1.8 dimension byte from the most recent
+    /// `login`/`respawn`.
+    fn current_dimension(&self) -> i8 {
+        self.dimension.lock().map_or(0, |dim| *dim)
+    }
+
+    /// Records that `passenger` now rides `vehicle`, returning `vehicle`'s
+    /// full updated passenger list. If `passenger` already rode a different
+    /// vehicle, it is removed from that vehicle's list first (a mount always
+    /// implies leaving any prior one, matching vanilla's single-vehicle
+    /// invariant).
+    fn mount(&self, vehicle: i32, passenger: i32) -> Vec<i32> {
+        let (Ok(mut passengers), Ok(mut owner)) =
+            (self.vehicle_passengers.lock(), self.passenger_vehicle.lock())
+        else {
+            return vec![passenger];
+        };
+        if let Some(&previous) = owner.get(&passenger) {
+            if previous != vehicle {
+                if let Some(list) = passengers.get_mut(&previous) {
+                    list.retain(|&id| id != passenger);
+                }
+            }
+        }
+        let list = passengers.entry(vehicle).or_default();
+        if !list.contains(&passenger) {
+            list.push(passenger);
+        }
+        owner.insert(passenger, vehicle);
+        list.clone()
+    }
+
+    /// Records that `passenger` dismounted, returning the former vehicle id
+    /// and its remaining passenger list, if `passenger` was tracked as
+    /// riding one.
+    fn dismount(&self, passenger: i32) -> Option<(i32, Vec<i32>)> {
+        let (Ok(mut passengers), Ok(mut owner)) =
+            (self.vehicle_passengers.lock(), self.passenger_vehicle.lock())
+        else {
+            return None;
+        };
+        let vehicle = owner.remove(&passenger)?;
+        let list = passengers.get_mut(&vehicle)?;
+        list.retain(|&id| id != passenger);
+        Some((vehicle, list.clone()))
+    }
+
+    /// Forgets any vehicle/passenger bookkeeping for destroyed entities —
+    /// called alongside `forget_kinds` on `entity_destroy` so neither map
+    /// grows for the life of the connection.
+    fn forget_vehicles(&self, entity_ids: &[i32]) {
+        if let (Ok(mut passengers), Ok(mut owner)) =
+            (self.vehicle_passengers.lock(), self.passenger_vehicle.lock())
+        {
+            for id in entity_ids {
+                passengers.remove(id);
+                owner.remove(id);
+            }
+            for list in passengers.values_mut() {
+                list.retain(|passenger| !entity_ids.contains(passenger));
+            }
+        }
     }
 }
 
@@ -400,6 +496,99 @@ const fn chat_kind(position: i8) -> ChatKind {
         1 => ChatKind::System,
         2 => ChatKind::GameInfo,
         _ => ChatKind::Chat,
+    }
+}
+
+/// Maps a 1.8 `entity_equipment`/`item_equipment` slot ordinal to the
+/// canonical [`EquipmentSlot`].
+///
+/// **Not** [`EquipmentSlot::from_ordinal`]: that table is the *modern*
+/// `EquipmentSlot` enum's declaration order, which inserts `OffHand` at
+/// ordinal `1` (a 1.9 addition) and shifts every armor slot down by one.
+/// 1.8 has no off-hand at all — its five ordinals are `0` held item, `1`
+/// boots, `2` leggings, `3` chestplate, `4` helmet — verified against
+/// minecraft-data's 1.8 `packet_entity_equipment` (which only ever carries
+/// `0..=4`) and against `EntityLiving.getEquipmentInSlot`'s five-slot array
+/// in the same era. Using the modern table here would silently render every
+/// 1.8 boots-equip as an off-hand item and shift the rest of the armor one
+/// slot off.
+fn legacy_equipment_slot(ordinal: i16) -> Result<EquipmentSlot, AdapterError> {
+    match ordinal {
+        0 => Ok(EquipmentSlot::MainHand),
+        1 => Ok(EquipmentSlot::Feet),
+        2 => Ok(EquipmentSlot::Legs),
+        3 => Ok(EquipmentSlot::Chest),
+        4 => Ok(EquipmentSlot::Head),
+        other => Err(AdapterError::Decode(format!(
+            "entity_equipment slot ordinal {other} is outside 1.8's 0..=4 range"
+        ))),
+    }
+}
+
+/// Resolves a 1-based legacy `minecraft:mob_effect` id to its canonical
+/// resource key.
+///
+/// The shared [`lodestone_data::mob_effects`] table is 0-based (the modern
+/// registry network id); 1.8's `entity_effect`/`remove_entity_effect` ids
+/// have been stable and 1-based in the same relative order since Beta 1.8,
+/// matching `lodestone-v340`'s identical `- 1` adjustment for 1.12.2.
+fn legacy_effect_key(effect_id: i8) -> Result<ResourceKey, AdapterError> {
+    let name = mob_effect_name(i32::from(effect_id) - 1)
+        .ok_or_else(|| AdapterError::Decode(format!("unknown legacy effect id {effect_id}")))?;
+    name.parse()
+        .map_err(|_| AdapterError::Decode(format!("effect id {name} is not a key")))
+}
+
+/// Resolves a legacy numeric block-**type** id (no metadata component, as
+/// `block_action`/`block_break_animation`-adjacent packets carry) to a
+/// canonical block-family resource key.
+///
+/// `block_action`'s wire shape carries no metadata at all, unlike
+/// `block_change`'s `id:meta` composite, and every block that can trigger a
+/// block-event resolves to the same canonical family regardless of
+/// metadata — only within-family blockstate properties (piston facing,
+/// chest orientation) vary with it, and [`ClientEvent::BlockEvent`] only
+/// needs the family. But `meta = 0` is not always a populated slot in the
+/// legacy flattening table: a chest/ender_chest/trapped_chest id has no
+/// entry at meta `0` or `1` — only `2..=5` (facing) were ever real chest
+/// orientations — so a fixed `meta = 0` would silently resolve every
+/// chest-lid `block_action` to air. Scanning every meta and taking the
+/// first `Resolved` slot is family-only-safe (any meta the table does
+/// populate names the same block).
+fn legacy_block_type_key(block_id: u8) -> ResourceKey {
+    let state = (0u8..16)
+        .find_map(|meta| match canonical::resolve(block_id, meta) {
+            CanonicalBlockState::Resolved(state) => Some(state),
+            _ => None,
+        })
+        .unwrap_or_else(canonical::air_state_id);
+    block_states::block_name(state)
+        .unwrap_or("minecraft:air")
+        .parse()
+        .unwrap_or_else(|_| "minecraft:air".parse().expect("minecraft:air is valid"))
+}
+
+/// Maps a 1.8 team-color byte (a legacy chat formatting colour code,
+/// `0..=15`) to the canonical [`TeamColor`], or `None` for `-1` (no colour).
+const fn team_color_from_byte(byte: i8) -> Option<TeamColor> {
+    match byte {
+        0 => Some(TeamColor::Black),
+        1 => Some(TeamColor::DarkBlue),
+        2 => Some(TeamColor::DarkGreen),
+        3 => Some(TeamColor::DarkAqua),
+        4 => Some(TeamColor::DarkRed),
+        5 => Some(TeamColor::DarkPurple),
+        6 => Some(TeamColor::Gold),
+        7 => Some(TeamColor::Gray),
+        8 => Some(TeamColor::DarkGray),
+        9 => Some(TeamColor::Blue),
+        10 => Some(TeamColor::Green),
+        11 => Some(TeamColor::Aqua),
+        12 => Some(TeamColor::Red),
+        13 => Some(TeamColor::LightPurple),
+        14 => Some(TeamColor::Yellow),
+        15 => Some(TeamColor::White),
+        _ => None,
     }
 }
 
@@ -844,6 +1033,7 @@ impl V47Adapter {
             // varint, replacing the former hand-decoded loop.
             let body: EntityDestroy = decode_body_exact(payload)?;
             self.forget_kinds(&body.entity_ids);
+            self.forget_vehicles(&body.entity_ids);
             return Ok(vec![Directive::Emit(ClientEvent::EntityRemoved {
                 entity_ids: body.entity_ids,
             })]);
@@ -1272,6 +1462,569 @@ impl V47Adapter {
                 instabuild: flags & ABILITY_INSTABUILD != 0,
                 flying_speed,
                 walking_speed,
+            })]);
+        }
+        if packet_id == play::clientbound::SPAWN_POSITION {
+            // The already-defined `SpawnPosition` codec (`packets::game`) was
+            // never dispatched from here — this is that decoder's first
+            // caller, so the compass never pointed anywhere but world spawn
+            // for a 1.8 connection.
+            let body: SpawnPosition = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::SpawnPositionChanged {
+                dimension: dimension_id(self.current_dimension())?,
+                pos: body.location.0,
+                // 1.8's spawn_position carries no compass angle/pitch — that
+                // is a later (recompass) addition.
+                angle: 0.0,
+                pitch: 0.0,
+            })]);
+        }
+        if packet_id == play::clientbound::DIFFICULTY {
+            let body: DifficultyPacket = decode_body(payload)?;
+            let difficulty = match body.difficulty {
+                0 => Difficulty::Peaceful,
+                1 => Difficulty::Easy,
+                2 => Difficulty::Normal,
+                3 => Difficulty::Hard,
+                other => {
+                    return Err(AdapterError::Decode(format!("unknown difficulty id {other}")));
+                }
+            };
+            // 1.8 has no "locked" bit — that is a later addition.
+            return Ok(vec![Directive::Emit(ClientEvent::DifficultyChanged {
+                difficulty,
+                locked: false,
+            })]);
+        }
+        if packet_id == play::clientbound::CAMERA {
+            let body: CameraPacket = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::CameraSet {
+                entity_id: body.camera_id,
+            })]);
+        }
+        if packet_id == play::clientbound::PLAYERLIST_HEADER {
+            // Both fields are JSON chat components: this packet was
+            // introduced alongside 1.8's own JSON text component format
+            // (unlike the scoreboard/team packets below, which predate it).
+            let body: PlayerlistHeader = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::TabListChanged {
+                header: Text::from_json(&body.header),
+                footer: Text::from_json(&body.footer),
+            })]);
+        }
+        if packet_id == play::clientbound::EXPERIENCE {
+            let body: Experience = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ExperienceChanged {
+                progress: body.bar,
+                level: body.level,
+                total: body.total,
+            })]);
+        }
+        if packet_id == play::clientbound::ANIMATION {
+            // Verified against minecraft-data's 1.8 `packet_animation`
+            // (identical shape at 1.12.2): varint entity id, raw animation
+            // code. `1` has no assigned meaning in either era's client
+            // handler and maps to `Other` rather than a named variant.
+            let body: Animation = decode_body_exact(payload)?;
+            let action = match body.animation {
+                0 => AnimationAction::SwingMainHand,
+                2 => AnimationAction::WakeUp,
+                3 => AnimationAction::SwingOffHand,
+                4 => AnimationAction::CriticalHit,
+                5 => AnimationAction::MagicCriticalHit,
+                other => AnimationAction::Other(other),
+            };
+            return Ok(vec![Directive::Emit(ClientEvent::EntityAnimation {
+                entity_id: body.entity_id,
+                action,
+            })]);
+        }
+        if packet_id == play::clientbound::ENTITY_EQUIPMENT {
+            // 1.8 carries exactly one slot per message (unlike some later
+            // revisions' batched form), so the emitted `equipment` vec
+            // always has a single entry.
+            let body: ClientboundEntityEquipment = decode_body_exact(payload)?;
+            let slot = legacy_equipment_slot(body.slot)?;
+            let item = slot_to_item_stack(&body.item);
+            return Ok(vec![Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+                entity_id: body.entity_id,
+                equipment: vec![EntityEquipment { slot, item }],
+            })]);
+        }
+        if packet_id == play::clientbound::WORLD_BORDER {
+            // Action-multiplexed, verified field-by-field against
+            // minecraft-data's 1.8 `packet_world_border` (identical shape
+            // at 1.12.2, action `3` "initialize" carrying every field in
+            // the order matching `ClientEvent::WorldBorderInitialized`
+            // one-for-one).
+            let mut reader = Reader::new(payload);
+            let action = reader.var_i32().map_err(dec_err)?;
+            let directive = match action {
+                0 => {
+                    let radius = reader.f64().map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::WorldBorderSizeChanged { size: radius })
+                }
+                1 => {
+                    let old_radius = reader.f64().map_err(dec_err)?;
+                    let new_radius = reader.f64().map_err(dec_err)?;
+                    let speed = reader.var_i64().map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::WorldBorderSizeLerping {
+                        old_size: old_radius,
+                        new_size: new_radius,
+                        lerp_time_ms: speed,
+                    })
+                }
+                2 => {
+                    let x = reader.f64().map_err(dec_err)?;
+                    let z = reader.f64().map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::WorldBorderCenterChanged { x, z })
+                }
+                3 => {
+                    let x = reader.f64().map_err(dec_err)?;
+                    let z = reader.f64().map_err(dec_err)?;
+                    let old_radius = reader.f64().map_err(dec_err)?;
+                    let new_radius = reader.f64().map_err(dec_err)?;
+                    let speed = reader.var_i64().map_err(dec_err)?;
+                    let portal_boundary = reader.var_i32().map_err(dec_err)?;
+                    let warning_time = reader.var_i32().map_err(dec_err)?;
+                    let warning_blocks = reader.var_i32().map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::WorldBorderInitialized {
+                        x,
+                        z,
+                        old_size: old_radius,
+                        new_size: new_radius,
+                        lerp_time_ms: speed,
+                        absolute_max_size: portal_boundary,
+                        warning_blocks,
+                        warning_time,
+                    })
+                }
+                4 => {
+                    let warning_time = reader.var_i32().map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::WorldBorderWarningDelayChanged { warning_time })
+                }
+                5 => {
+                    let warning_blocks = reader.var_i32().map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::WorldBorderWarningDistanceChanged {
+                        warning_blocks,
+                    })
+                }
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "unknown world_border action {other}"
+                    )));
+                }
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![directive]);
+        }
+        if packet_id == play::clientbound::COMBAT_EVENT {
+            // Action-multiplexed, verified field-by-field against
+            // minecraft-data's 1.8 `packet_combat_event` (identical shape
+            // at 1.12.2). Event `2` (entity died) is only ever sent to the
+            // dying player about their own death (vanilla's
+            // `EntityPlayerMP`-scoped `CombatTracker`), so `playerId` is
+            // always this connection's own entity id and is read-and-discarded
+            // exactly as `lodestone-v340` documents for the same packet.
+            let mut reader = Reader::new(payload);
+            let event = reader.var_i32().map_err(dec_err)?;
+            let directive = match event {
+                0 => Directive::Emit(ClientEvent::PlayerCombatEntered),
+                1 => {
+                    let duration_ticks = reader.var_i32().map_err(dec_err)?;
+                    reader.i32().map_err(dec_err)?; // entity id, unused downstream
+                    Directive::Emit(ClientEvent::PlayerCombatEnded { duration_ticks })
+                }
+                2 => {
+                    reader.var_i32().map_err(dec_err)?; // player id, unused downstream
+                    reader.i32().map_err(dec_err)?; // killer entity id, unused downstream
+                    let message = reader.string(32767).map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::Death {
+                        message: Text::from_json(&message),
+                    })
+                }
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "unknown combat_event action {other}"
+                    )));
+                }
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![directive]);
+        }
+        if packet_id == play::clientbound::OPEN_SIGN_ENTITY {
+            let body: OpenSignEntity = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::SignEditorOpened {
+                pos: body.location.0,
+                // 1.8 has no front/back text distinction — a later (1.20)
+                // addition — so this always edits the one text a legacy
+                // sign has.
+                is_front_text: true,
+            })]);
+        }
+        if packet_id == play::clientbound::ATTACH_ENTITY {
+            // 1.8 overloads one packet for both leashing and mounting (see
+            // `AttachEntity`'s own doc); this is not `lodestone-v340`'s
+            // leash-only shape and must not be ported from it verbatim.
+            let body: AttachEntity = decode_body_exact(payload)?;
+            if body.leash {
+                return Ok(vec![Directive::Emit(ClientEvent::EntityLeashed {
+                    entity_id: body.entity_id,
+                    holder_id: (body.vehicle_id != -1).then_some(body.vehicle_id),
+                })]);
+            }
+            if body.vehicle_id == -1 {
+                let Some((vehicle_id, passenger_ids)) = self.dismount(body.entity_id) else {
+                    return Ok(Vec::new());
+                };
+                return Ok(vec![Directive::Emit(ClientEvent::EntityPassengersChanged {
+                    vehicle_id,
+                    passenger_ids,
+                })]);
+            }
+            let passenger_ids = self.mount(body.vehicle_id, body.entity_id);
+            return Ok(vec![Directive::Emit(ClientEvent::EntityPassengersChanged {
+                vehicle_id: body.vehicle_id,
+                passenger_ids,
+            })]);
+        }
+        if packet_id == play::clientbound::COLLECT {
+            // 1.8's `collect` carries no pickup count (see `Collect`'s own
+            // doc); `amount` is presently unread by every consumer of
+            // `ClientEvent::ItemPickup` (the fly-to-collector overlay counts
+            // from the separately-tracked item-stack resource instead), so
+            // `1` is a safe, documented placeholder rather than a guess this
+            // packet cannot make honest.
+            let body: Collect = decode_body_exact(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ItemPickup {
+                item_entity_id: body.collected_entity_id,
+                player_id: body.collector_entity_id,
+                amount: 1,
+            })]);
+        }
+        if packet_id == play::clientbound::BLOCK_ACTION {
+            let body: BlockAction = decode_body_exact(payload)?;
+            let block_id = u8::try_from(body.block_id).map_err(|_| {
+                AdapterError::Decode(format!(
+                    "block_action block id {} is outside the legacy 0..=255 block-type space",
+                    body.block_id
+                ))
+            })?;
+            return Ok(vec![Directive::Emit(ClientEvent::BlockEvent {
+                pos: body.location.0,
+                b0: body.byte1,
+                b1: body.byte2,
+                block: legacy_block_type_key(block_id),
+            })]);
+        }
+        if packet_id == play::clientbound::BLOCK_BREAK_ANIMATION {
+            let body: BlockBreakAnimation = decode_body(payload)?;
+            let progress = u8::try_from(body.destroy_stage).unwrap_or(0);
+            return Ok(vec![Directive::Emit(ClientEvent::BlockDestruction {
+                entity_id: body.entity_id,
+                pos: body.location.0,
+                progress,
+            })]);
+        }
+        if packet_id == play::clientbound::WORLD_EVENT {
+            let body: WorldEvent = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::LevelEvent {
+                event: body.effect_id,
+                pos: body.location.0,
+                data: body.data,
+                global: body.global,
+            })]);
+        }
+        if packet_id == play::clientbound::NAMED_SOUND_EFFECT {
+            // 1.8 carries no sound category (defaults to `Master`, matching
+            // vanilla's pre-category behaviour) and packs pitch as a single
+            // byte — see `NamedSoundEffect`'s own doc for the `/63.0`
+            // conversion source.
+            let body: NamedSoundEffect = decode_body(payload)?;
+            let sound: ResourceKey = body.sound_name.parse().map_err(|_| {
+                AdapterError::Decode(format!(
+                    "named_sound_effect sound name {:?} is not a valid resource key",
+                    body.sound_name
+                ))
+            })?;
+            return Ok(vec![Directive::Emit(ClientEvent::Sound {
+                sound,
+                category: SoundCategory::Master,
+                pos: Vec3::new(
+                    f64::from(body.x) / 8.0,
+                    f64::from(body.y) / 8.0,
+                    f64::from(body.z) / 8.0,
+                ),
+                volume: body.volume,
+                pitch: f32::from(body.pitch) / 63.0,
+                fixed_range: None,
+                seed: 0,
+            })]);
+        }
+        if packet_id == play::clientbound::ENTITY_EFFECT {
+            let body: EntityEffect = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::MobEffectApplied {
+                entity_id: body.entity_id,
+                effect: legacy_effect_key(body.effect_id)?,
+                amplifier: i32::from(body.amplifier),
+                duration_ticks: body.duration,
+                // 1.8's `hideParticles` is a single bit (see `EntityEffect`'s
+                // own doc) — there is no separate ambient bit to read, and
+                // vanilla 1.8 always shows the HUD icon.
+                ambient: false,
+                visible: !body.hide_particles,
+                show_icon: true,
+                blend: false,
+            })]);
+        }
+        if packet_id == play::clientbound::REMOVE_ENTITY_EFFECT {
+            let body: RemoveEntityEffect = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::MobEffectRemoved {
+                entity_id: body.entity_id,
+                effect: legacy_effect_key(body.effect_id)?,
+            })]);
+        }
+        if packet_id == play::clientbound::SPAWN_ENTITY_WEATHER {
+            let body: SpawnEntityWeather = decode_body(payload)?;
+            let entity_type: ResourceKey = "minecraft:lightning_bolt"
+                .parse()
+                .map_err(|_| AdapterError::Decode("lightning_bolt key invalid".to_owned()))?;
+            return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+                entity_id: body.entity_id,
+                uuid: None,
+                entity_type,
+                pos: Vec3::new(
+                    f64::from(body.x) / FIXED_POINT_SCALE,
+                    f64::from(body.y) / FIXED_POINT_SCALE,
+                    f64::from(body.z) / FIXED_POINT_SCALE,
+                ),
+                rotation: Rotation::new(0.0, 0.0),
+                velocity: None,
+            })]);
+        }
+        if packet_id == play::clientbound::SPAWN_ENTITY_EXPERIENCE_ORB {
+            let body: SpawnEntityExperienceOrb = decode_body(payload)?;
+            let entity_type: ResourceKey = "minecraft:experience_orb"
+                .parse()
+                .map_err(|_| AdapterError::Decode("experience_orb key invalid".to_owned()))?;
+            return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+                entity_id: body.entity_id,
+                uuid: None,
+                entity_type,
+                pos: Vec3::new(
+                    f64::from(body.x) / FIXED_POINT_SCALE,
+                    f64::from(body.y) / FIXED_POINT_SCALE,
+                    f64::from(body.z) / FIXED_POINT_SCALE,
+                ),
+                rotation: Rotation::new(0.0, 0.0),
+                velocity: None,
+            })]);
+        }
+        if packet_id == play::clientbound::SPAWN_ENTITY_PAINTING {
+            let body: SpawnEntityPainting = decode_body(payload)?;
+            let entity_type: ResourceKey = "minecraft:painting"
+                .parse()
+                .map_err(|_| AdapterError::Decode("painting key invalid".to_owned()))?;
+            let pos = body.location.0;
+            return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+                entity_id: body.entity_id,
+                // 1.8's spawn_entity_painting carries no entity UUID (see
+                // `SpawnEntityPainting`'s own doc).
+                uuid: None,
+                entity_type,
+                pos: Vec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z)),
+                // The legacy motive name and facing direction have no home
+                // in the canonical model yet (no legacy motive -> modern
+                // `minecraft:painting_variant` crosswalk, and no yaw
+                // conversion for the facing byte) — dropped, matching
+                // `lodestone-v340`'s treatment of the same gap.
+                rotation: Rotation::new(0.0, 0.0),
+                velocity: None,
+            })]);
+        }
+        if packet_id == play::clientbound::SCOREBOARD_OBJECTIVE {
+            // Mode-multiplexed (minecraft-data's 1.8 `packet_scoreboard_objective`,
+            // identical shape at 1.12.2), so this is a hand-decoded `Reader`
+            // walk. `displayText` is a **plain** legacy-formatted string at
+            // this protocol revision (JSON scoreboard text is a 1.13+
+            // addition), so it goes through `Text::from_legacy`.
+            let mut reader = Reader::new(payload);
+            let name = reader.string(16).map_err(dec_err)?;
+            let action = reader.i8().map_err(dec_err)?;
+            let event = match action {
+                0 | 2 => {
+                    let display_text = reader.string(64).map_err(dec_err)?;
+                    let render_type_str = reader.string(16).map_err(dec_err)?;
+                    let render_type = match render_type_str.as_str() {
+                        "integer" => ObjectiveRenderType::Integer,
+                        "hearts" => ObjectiveRenderType::Hearts,
+                        other => {
+                            return Err(AdapterError::Decode(format!(
+                                "unknown objective render type {other:?}"
+                            )));
+                        }
+                    };
+                    ClientEvent::ObjectiveUpdate {
+                        name,
+                        mode: if action == 0 {
+                            ObjectiveMode::Add
+                        } else {
+                            ObjectiveMode::Change
+                        },
+                        display_name: Some(Text::from_legacy(&display_text)),
+                        render_type: Some(render_type),
+                        number_format: None,
+                    }
+                }
+                1 => ClientEvent::ObjectiveUpdate {
+                    name,
+                    mode: ObjectiveMode::Remove,
+                    display_name: None,
+                    render_type: None,
+                    number_format: None,
+                },
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "unknown scoreboard_objective action {other}"
+                    )));
+                }
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(event)]);
+        }
+        if packet_id == play::clientbound::SCOREBOARD_SCORE {
+            // Verified against minecraft-data's 1.8 `packet_scoreboard_score`
+            // (identical shape at 1.12.2): `itemName` is the score *holder*
+            // and `scoreName` is the *objective* — the mcdata field names are
+            // misleading, not the wire order. `scoreName` is read
+            // unconditionally (unlike `value`), so a `remove` action still
+            // names exactly one objective, never "reset all".
+            let mut reader = Reader::new(payload);
+            let holder = reader.string(64).map_err(dec_err)?;
+            let action = reader.var_i32().map_err(dec_err)?;
+            let objective = reader.string(16).map_err(dec_err)?;
+            let event = match action {
+                0 => {
+                    let value = reader.var_i32().map_err(dec_err)?;
+                    ClientEvent::ScoreUpdate {
+                        holder,
+                        objective,
+                        value,
+                        display: None,
+                        number_format: None,
+                    }
+                }
+                1 => ClientEvent::ScoreReset {
+                    holder,
+                    objective: Some(objective),
+                },
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "unknown scoreboard_score action {other}"
+                    )));
+                }
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(event)]);
+        }
+        if packet_id == play::clientbound::SCOREBOARD_DISPLAY_OBJECTIVE {
+            // Verified against minecraft-data's 1.8
+            // `packet_scoreboard_display_objective` (identical shape at
+            // 1.12.2): raw `i8` slot position, then a string objective name.
+            // This protocol revision only ever sends 0/1/2 — the
+            // per-team-colour sidebar slots are a later addition — and
+            // clears the slot with an empty string rather than a dedicated
+            // marker.
+            let mut reader = Reader::new(payload);
+            let position = reader.i8().map_err(dec_err)?;
+            let name = reader.string(16).map_err(dec_err)?;
+            let slot = match position {
+                0 => DisplaySlot::List,
+                1 => DisplaySlot::Sidebar,
+                2 => DisplaySlot::BelowName,
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "unknown scoreboard display slot {other}"
+                    )));
+                }
+            };
+            let objective = if name.is_empty() { None } else { Some(name) };
+            return Ok(vec![Directive::Emit(ClientEvent::DisplayObjective {
+                slot,
+                objective,
+            })]);
+        }
+        if packet_id == play::clientbound::SCOREBOARD_TEAM {
+            // Mode-multiplexed (minecraft-data's 1.8 `packet_scoreboard_team`),
+            // so this is a hand-decoded `Reader` walk. **1.8 carries no
+            // collision-rule field** (a 1.9 addition `lodestone-v340`'s
+            // sibling packet does have) — `CollisionRule::Always` documents
+            // the pre-collision-rule vanilla behaviour (everyone always
+            // pushes) rather than guessing a value this wire cannot supply.
+            // `friendlyFire` packs two flags in one byte (`0x01` friendly
+            // fire, `0x02` see friendly invisibles) — vanilla's
+            // `PacketPlayOutScoreboardTeam` convention, unchanged since 1.8.
+            let mut reader = Reader::new(payload);
+            let team = reader.string(16).map_err(dec_err)?;
+            let mode = reader.i8().map_err(dec_err)?;
+            let read_members = |reader: &mut Reader<'_>| -> Result<Vec<String>, AdapterError> {
+                let count = reader.var_i32().map_err(dec_err)?;
+                let count = usize::try_from(count).unwrap_or(0).min(reader.remaining());
+                let mut members = Vec::with_capacity(count);
+                for _ in 0..count {
+                    members.push(reader.string(16).map_err(dec_err)?);
+                }
+                Ok(members)
+            };
+            let action = match mode {
+                0 | 2 => {
+                    let display_name = reader.string(16).map_err(dec_err)?;
+                    let prefix = reader.string(16).map_err(dec_err)?;
+                    let suffix = reader.string(16).map_err(dec_err)?;
+                    let friendly_flags = reader.i8().map_err(dec_err)?;
+                    let visibility_str = reader.string(32).map_err(dec_err)?;
+                    let color_byte = reader.i8().map_err(dec_err)?;
+                    let name_tag_visibility = match visibility_str.as_str() {
+                        "always" => Visibility::Always,
+                        "never" => Visibility::Never,
+                        "hideForOtherTeams" => Visibility::HideForOtherTeams,
+                        "hideForOwnTeam" => Visibility::HideForOwnTeam,
+                        other => {
+                            return Err(AdapterError::Decode(format!(
+                                "unknown team name-tag visibility {other:?}"
+                            )));
+                        }
+                    };
+                    let params = Box::new(TeamParameters {
+                        display_name: Text::from_legacy(&display_name),
+                        prefix: Text::from_legacy(&prefix),
+                        suffix: Text::from_legacy(&suffix),
+                        name_tag_visibility,
+                        collision_rule: CollisionRule::Always,
+                        color: team_color_from_byte(color_byte),
+                        friendly_fire: friendly_flags & 0x01 != 0,
+                        see_friendly_invisibles: friendly_flags & 0x02 != 0,
+                    });
+                    if mode == 0 {
+                        TeamAction::Create {
+                            params,
+                            members: read_members(&mut reader)?,
+                        }
+                    } else {
+                        TeamAction::Update { params }
+                    }
+                }
+                1 => TeamAction::Remove,
+                3 => TeamAction::AddMembers(read_members(&mut reader)?),
+                4 => TeamAction::RemoveMembers(read_members(&mut reader)?),
+                other => {
+                    return Err(AdapterError::Decode(format!("unknown scoreboard_team mode {other}")));
+                }
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::TeamUpdate {
+                name: team,
+                action,
             })]);
         }
         // Everything else in play is intentionally ignored for now.

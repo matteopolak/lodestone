@@ -218,6 +218,197 @@ pub struct EntityVelocityPacket {
 /// was reported to `lodestone-macros` and closed: `#[mc(varint)]` on a
 /// `Vec<i32>` now encodes the length **and** each element as a varint, so this
 /// is an ordinary derived struct.
+/// Clientbound `entity_equipment` — one equipment slot changed on an entity.
+///
+/// Wire layout: varint entity id, signed `i16` equipment-slot ordinal
+/// (`0` held item, `1` boots, `2` leggings, `3` chestplate, `4` helmet — 1.8
+/// predates the off-hand slot modern versions insert at ordinal `1`, so this
+/// ordinal table is *not* the same as [`lodestone_model::EquipmentSlot`]'s own
+/// `from_ordinal`; the adapter maps it by hand), then a [`Slot`](super::slot::Slot).
+/// Verified against minecraft-data's 1.8 `packet_entity_equipment`.
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:entity_equipment", state = Play, bound = Client)]
+pub struct ClientboundEntityEquipment {
+    /// Entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// 1.8 equipment-slot ordinal (see struct doc for the table).
+    pub slot: i16,
+    /// New item in the slot, or an empty [`Slot`](super::slot::Slot).
+    pub item: super::slot::Slot,
+}
+
+/// Clientbound `animation` — a per-entity animation trigger (arm swing, hurt
+/// flash, wake up, critical-hit particles).
+///
+/// Wire layout: varint entity id, raw animation-code byte. Verified against
+/// minecraft-data's 1.8 `packet_animation` (identical shape at 1.12.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:animation", state = Play, bound = Client)]
+pub struct Animation {
+    /// Entity id performing the animation.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Raw animation code.
+    pub animation: u8,
+}
+
+/// Clientbound `attach_entity` — 1.8 overloads one packet for both leashing
+/// **and** mounting, distinguished by `leash`.
+///
+/// Wire layout: raw (non-varint) `i32` entity id, raw `i32` vehicle id, bool
+/// leash — verified against minecraft-data's 1.8 `packet_attach_entity`.
+/// **This is not the same shape as later versions**: 1.9 split mounting into
+/// its own `set_passengers` packet and dropped `leash` from this one (two
+/// `i32` fields only), so this struct must not be reused verbatim from a
+/// sibling family. When `leash` is `true`, `entity_id` is the leashed entity
+/// and `vehicle_id` is its holder (`-1` clears the leash). When `leash` is
+/// `false`, `entity_id` is a passenger and `vehicle_id` is the vehicle it now
+/// rides (`-1` dismounts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:attach_entity", state = Play, bound = Client)]
+pub struct AttachEntity {
+    /// Leashed/passenger entity id.
+    pub entity_id: i32,
+    /// Holder/vehicle entity id, or `-1`.
+    pub vehicle_id: i32,
+    /// `true` for a leash relation, `false` for a mount/ride relation.
+    pub leash: bool,
+}
+
+/// Clientbound `collect` — an item (or arrow, or XP orb) entity was picked up
+/// and should fly toward its collector before despawning.
+///
+/// Wire layout: varint collected-entity id, varint collector-entity id.
+/// **1.8 carries no pickup count** — verified against minecraft-data's 1.8
+/// `packet_collect`, which is exactly these two fields; 1.12.2 inserts a
+/// third `pickupItemCount` varint that does not exist here. The adapter
+/// supplies a documented placeholder for the canonical event's `amount`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:collect", state = Play, bound = Client)]
+pub struct Collect {
+    /// Collected (despawning) entity id.
+    #[mc(varint)]
+    pub collected_entity_id: i32,
+    /// Collector entity id.
+    #[mc(varint)]
+    pub collector_entity_id: i32,
+}
+
+/// Clientbound `spawn_entity_weather` — spawns a lightning bolt.
+///
+/// Wire layout: varint entity id, signed byte type (always `1`, thunderbolt),
+/// three fixed-point `i32` coordinates. Verified against minecraft-data's 1.8
+/// `packet_spawn_entity_weather`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:spawn_entity_weather", state = Play, bound = Client)]
+pub struct SpawnEntityWeather {
+    /// Entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Weather-entity type (always `1` for a thunderbolt).
+    pub kind: i8,
+    /// Fixed-point X (block units × 32).
+    pub x: i32,
+    /// Fixed-point Y (block units × 32).
+    pub y: i32,
+    /// Fixed-point Z (block units × 32).
+    pub z: i32,
+}
+
+/// Clientbound `spawn_entity_experience_orb`.
+///
+/// Wire layout: varint entity id, three fixed-point `i32` coordinates, `i16`
+/// orb value. Verified against minecraft-data's 1.8
+/// `packet_spawn_entity_experience_orb`; 1.12.2 widens the coordinates to raw
+/// `f64` (no fixed-point scale), another divergence this struct must not
+/// inherit from a sibling family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:spawn_entity_experience_orb", state = Play, bound = Client)]
+pub struct SpawnEntityExperienceOrb {
+    /// Entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Fixed-point X (block units × 32).
+    pub x: i32,
+    /// Fixed-point Y (block units × 32).
+    pub y: i32,
+    /// Fixed-point Z (block units × 32).
+    pub z: i32,
+    /// XP value carried by the orb.
+    pub count: i16,
+}
+
+/// Clientbound `spawn_entity_painting`.
+///
+/// Wire layout: varint entity id, string title (motive), packed [`Position`]
+/// (unlike most spawns' fixed-point coordinates — a painting sits on a block
+/// grid), unsigned byte direction. Verified against minecraft-data's 1.8
+/// `packet_spawn_entity_painting`. **1.8 carries no entity UUID** — 1.12.2
+/// inserts one between `entityId` and `title` that this struct must not
+/// carry.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:spawn_entity_painting", state = Play, bound = Client)]
+pub struct SpawnEntityPainting {
+    /// Entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Motive/title name (unmapped to a canonical painting variant here).
+    #[mc(max = 13)]
+    pub title: String,
+    /// Packed block position.
+    pub location: super::position::Position,
+    /// Facing direction (`0` south, `1` west, `2` north, `3` east).
+    pub direction: u8,
+}
+
+/// Clientbound `entity_effect` — a potion/mob effect was applied or
+/// refreshed.
+///
+/// Wire layout: varint entity id, signed byte legacy effect id, signed byte
+/// amplifier, varint duration (ticks), bool `hideParticles`. Verified against
+/// minecraft-data's 1.8 `packet_entity_effect`. **The trailing flag is a
+/// single `bool`** — 1.12.2's same-named field is a bitmask byte carrying a
+/// second (ambient) bit that does not exist on this wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:entity_effect", state = Play, bound = Client)]
+pub struct EntityEffect {
+    /// Entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// 1-based legacy `minecraft:mob_effect` id.
+    pub effect_id: i8,
+    /// Effect amplifier (0 = level I).
+    pub amplifier: i8,
+    /// Remaining duration, in ticks.
+    #[mc(varint)]
+    pub duration: i32,
+    /// Whether particles are hidden.
+    pub hide_particles: bool,
+}
+
+/// Clientbound `remove_entity_effect`.
+///
+/// Wire layout: varint entity id, signed byte legacy effect id. Verified
+/// against minecraft-data's 1.8 `packet_remove_entity_effect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:remove_entity_effect", state = Play, bound = Client)]
+pub struct RemoveEntityEffect {
+    /// Entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// 1-based legacy `minecraft:mob_effect` id.
+    pub effect_id: i8,
+}
+
+/// Clientbound `entity_destroy` — a varint-counted list of varint entity ids to
+/// remove.
+///
+/// Previously hand-decoded because the derive macro could not express a `Vec`
+/// whose *elements* are varints (only the length prefix was varint). That gap
+/// was reported to `lodestone-macros` and closed: `#[mc(varint)]` on a
+/// `Vec<i32>` now encodes the length **and** each element as a varint, so this
+/// is an ordinary derived struct.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:entity_destroy", state = Play, bound = Client)]
 pub struct EntityDestroy {
