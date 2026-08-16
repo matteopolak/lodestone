@@ -35,6 +35,7 @@ pub mod packet_ids;
 pub(crate) mod generated_entity_types;
 
 pub mod adapter;
+pub mod entity_metadata;
 pub mod entity_types;
 pub mod packets;
 
