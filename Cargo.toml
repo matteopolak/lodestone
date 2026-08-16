@@ -265,3 +265,39 @@ opt-level = 2
 # as a slow suite — so the two entries must be kept in step.
 [profile.dev.package.lodestone-worldgen-core]
 opt-level = 2
+
+# LLVM carve-out, not a speed choice. Measured: `std::panic::catch_unwind` wrapping a
+# panic that occurs on a *freshly spawned* `std::thread` aborts the whole process under
+# Cranelift on this platform/pin -- "fatal runtime error: failed to initiate panic, error
+# 5, aborting" -- where the identical code under LLVM catches cleanly and the thread's
+# caller observes `Err`. Reproduced in a minimal standalone binary with no workspace code
+# at all (just `thread::spawn` + `catch_unwind` + `panic!()`), so this is a Cranelift/
+# platform limitation, not anything in our source. `AsyncTaskPool`'s `worker_loop`
+# (crates/lodestone-ecs/src/async_task.rs) is exactly this shape: it isolates a
+# panicking plugin job on a worker thread so one bad job cannot take the process down --
+# under the default Cranelift backend it currently does the opposite, and the crate's
+# own `a_panicking_job_does_not_kill_the_worker` test (and every other test in the
+# binary queued after it) aborts instead of failing. See docs/compile-times.md.
+[profile.dev.package.lodestone-ecs]
+codegen-backend = "llvm"
+
+# Same class, different symptom: lodestone-fuzz's `catch()` is the wrapper every
+# property test in the crate uses to turn a decoder panic into a reported `Err` instead
+# of aborting `cargo test` outright (its own doc comment says so). Its dedicated control,
+# `tests/harness_control.rs`, is red under Cranelift -- the *nested* catch_unwind (this
+# one is invoked from inside libtest's own catch, the same shape already documented for
+# `random_tick_section_counters`) does not catch, so the panic escapes `catch()` entirely
+# and is only reported because libtest's outer catch happens to still work. A real
+# `cargo-fuzz`/libFuzzer target has no such outer catch, so the failure mode there would
+# be the fatal-abort variant above, not a soft one. See docs/compile-times.md.
+[profile.dev.package.lodestone-fuzz]
+codegen-backend = "llvm"
+
+# `CheckCounter`'s own self-test that it panics on zero checks
+# (crates/lodestone-testsupport/tests/safety.rs::check_counter_panics_when_nothing_was_checked)
+# is the same nested-catch_unwind class as lodestone-fuzz above: red under Cranelift,
+# green under LLVM. `CheckCounter::assert_at_least` is the "count with a verdict" pattern
+# CLAUDE.md itself relies on across the workspace, so its own detector staying provably
+# able to fire is worth the crate's small compile-time cost. See docs/compile-times.md.
+[profile.dev.package.lodestone-testsupport]
+codegen-backend = "llvm"

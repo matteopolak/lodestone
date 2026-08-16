@@ -188,12 +188,106 @@ RUSTFLAGS="-Z codegen-backend=cranelift" cargo build -Z codegen-backend \
 
 **Done, 2026-08-16** (see the "Follow-up" table above): `lodestone-shell`,
 `lodestone-render`, `lodestone-server`, and all four protocol families are now
-verified clean under Cranelift. What is left is purely a scheduling question,
-not a technical one — land `[unstable]\ncodegen-backend = true` in
-`.cargo/config.toml` plus the profile override in `Cargo.toml` the next time
-`df -h` shows enough headroom to absorb a full-workspace cold-rebuild wave
-across every other live agent at once (this pass saw as low as 10 GiB free).
-No LLVM carve-out is needed for any crate tested so far.
+verified clean under Cranelift — clean meaning "compiles, same warnings as
+LLVM." **It does not mean "behaves the same at runtime"** — see the next
+section, which is the reason three crates now carry an explicit LLVM
+carve-out despite compiling fine under Cranelift.
+
+**Landed for real, 2026-08-16**: `[unstable] codegen-backend = true` plus
+`[profile.dev] codegen-backend = "cranelift"` are both in `.cargo/config.toml`
+— Cranelift is now the default debug backend workspace-wide, with the three
+carve-outs the next section documents. The scheduling caveat above (wait for
+`df -h` headroom before a flag that invalidates sccache's fingerprint
+workspace-wide) still applies to *this* change; it was landed once the
+checkout had room to absorb the rebuild wave.
+
+## Behavioural differences under Cranelift — compiling clean is not enough
+
+**A codegen backend is not purely a compile-speed lever: it is a second,
+independently-conforming implementation of things the language spec leaves
+unspecified, and Cranelift and LLVM disagree on at least two of them.** Both
+were found the same day this backend went live, both first presented as
+unrelated product bugs, and both cost real debugging time before either was
+traced back to the compiler rather than the code:
+
+1. **A `const` has no stable address.** `ai::roster::FALLBACK` was a `const`,
+   compared by pointer in `is_fallback`. A `const` is inlined at every use
+   site and may occupy as many addresses as it has call sites — LLVM folded
+   the inlined copies to one address, Cranelift did not, so two
+   `lodestone-entity` tests began failing deterministically: a real,
+   unclaimed species read as claimed. Fixed by making it `static` (one
+   address, guaranteed). General form: pointer identity is only meaningful on
+   a `static`; a codegen-backend change is a behaviour change for anything
+   resting on this kind of unspecified detail, so a failure it surfaces is a
+   latent bug revealed, not one it caused.
+2. **A *nested* `catch_unwind` does not reliably catch.**
+   `random_tick_section_counters`'s tripwire control wrapped a
+   deliberately-corrupting call in `std::panic::catch_unwind`, itself called
+   from *inside* libtest's own per-test catch. Under Cranelift the panic
+   escaped the inner catch (libtest's outer one still caught it, so the test
+   reported a bare `FAILED` rather than running the message assertions); under
+   `CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm` the identical test passes. Fixed by
+   switching that test to `#[should_panic(expected = …)]`, which needs no
+   catch at all.
+
+**Both were reasoned to be limited to those two sites and were not — a
+targeted audit of the workspace's other 12 `catch_unwind` call sites (issue
+`#686`) found the same nested-catch defect in three more places, plus a third,
+more severe failure mode nobody had gone looking for:**
+
+| site | shape | Cranelift | LLVM |
+|---|---|---|---|
+| `lodestone-fuzz::catch` (`tests/harness_control.rs`) | nested (inside libtest's catch) | does not catch — panic escapes to libtest's outer catch, test FAILs instead of `catch` returning `Err` | catches, test passes |
+| `lodestone-ecs::handle::tests::panicked` (3 consuming tests) | nested (inside libtest's catch) | does not catch — 3/9 `handle` tests FAIL | catches, 9/9 pass |
+| `lodestone-testsupport::CheckCounter`'s own self-test (`tests/safety.rs`) | nested (inside libtest's catch) | does not catch — the "does this even detect a vacuous check" control itself FAILs | catches, passes |
+| `lodestone-render::fog::ramp_gate::the_old_fraction_model_fails_this_gate` | nested (inside libtest's catch) | does not catch — FAILs (off-limits crate for this audit; reported, not fixed here) | catches, passes |
+| `lodestone-ecs::async_task::worker_loop` — the async-job panic-isolation boundary named in `#686` | **outer**, on a freshly-spawned `std::thread`, no surrounding catch at all | **the whole process aborts**: `fatal runtime error: failed to initiate panic, error 5, aborting` (SIGABRT) — `cargo test -p lodestone-ecs --lib` dies partway through all 309 tests, not just the one | catches; the pool drains the next job and `try_take` returns it |
+
+**The fifth row is a different and worse bug than the nested-catch one.**
+Reproduced in a *minimal standalone binary* with zero workspace code — just
+`std::thread::spawn` wrapping a closure that does `catch_unwind(|| panic!())`
+— to rule out any interaction with `bevy_ecs`/`parking_lot`/anything else in
+the dependency graph: under Cranelift the process aborts with the identical
+"failed to initiate panic, error 5" message; under LLVM (the same binary, no
+other change) it prints `caught: true` and returns normally. So on this
+platform and toolchain pin, **`catch_unwind` around a panic that occurs on a
+freshly-spawned OS thread does not merely fail to catch under Cranelift — the
+panic runtime itself cannot unwind and takes the whole process down.** This is
+exactly the scenario `#686` was worried about ("an isolated job kills the
+process and the fuzzer aborts instead of reporting"), except it is worse than
+"silently stops catching": it is loud, immediate, and unconditional, and it
+would have hit any real `cargo-fuzz`/libFuzzer target the moment `fuzz/`
+landed, because those run with no libtest-style outer catch to fall back on —
+the fourth row's "soft" failure mode is an artifact of running under `cargo
+test`, not a property of `catch_unwind` itself.
+
+**Fix landed, not just documented**: `Cargo.toml` now carries
+`codegen-backend = "llvm"` package overrides for `lodestone-ecs`,
+`lodestone-fuzz`, and `lodestone-testsupport` — the three in-ownership crates
+whose panic-isolation or panic-detection machinery is demonstrably broken
+under Cranelift. All three verified green again after the override:
+`lodestone-ecs --lib` 309/309, `lodestone-testsupport` 4/4 (incl. one doctest),
+`lodestone-fuzz`'s `harness_control` control passing (full-suite re-run
+blocked mid-session by an unrelated in-flight edit to `lodestone-anvil`, a
+transitive dependency — the single control test was re-verified directly).
+`lodestone-render`'s `fog::ramp_gate` instance is reported to that crate's
+owner rather than fixed here (off-limits). This is the exact contingency
+`#666`'s own filing anticipated — "with an explicit LLVM override for any
+crate that turns out incompatible" — except the incompatibility is a runtime
+correctness defect, not a compile failure, so nothing before this audit would
+have surfaced it.
+
+**The generalisable question, not just the two known answers**: what else in
+this workspace rests on behaviour the language leaves unspecified, that a
+backend swap can move? Two candidates checked and cleared this session: no
+`fn`-pointer identity comparisons were found (`grep -rn "as usize" | grep -i
+fn`, and a scan for `std::ptr::eq`/`==` on function-pointer-typed values,
+turned up none outside the already-fixed `const` case); `#[inline]` presence
+or absence changes *whether* something optimises, never program behaviour, so
+it is not this class. The standing risk this leaves open: any other
+`catch_unwind` (nested or on a spawned thread) not covered by a control that
+was actually run under both backends is unverified, not merely unlikely to be
+broken — "no findings" and "did not look" must not share a value.
 
 ## Landed: parallel front-end (`-Z threads=N`)
 
@@ -280,20 +374,45 @@ that pattern; that is open work, not a "checked, clean" result.
   count of the reference machine changes.
 - Cranelift's opt-in recipe above needs the rustup component installed once
   per toolchain; re-install after any `rust-toolchain.toml` pin change.
+- **Before adding a new `catch_unwind` call site anywhere in the workspace,
+  or moving an existing one, run its control under both backends** — `cargo
+  test -p <crate> ...` for the default (Cranelift) and
+  `CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm cargo test -p <crate> ...` for the
+  comparison — before trusting it. See "Behavioural differences" above for
+  why a green `cargo check`/`cargo test` at compile time proves nothing about
+  whether the catch actually catches at runtime.
+- If a *new* crate's own panic-isolation or panic-detection control turns out
+  to need the same LLVM carve-out, add
+  `[profile.dev.package.<crate>] codegen-backend = "llvm"` next to the three
+  existing ones in the root `Cargo.toml`, with a comment naming the specific
+  control that is red under Cranelift and citing this doc.
 
 ## Configuration
 
 - `.cargo/config.toml` — `[build] rustflags = ["-Z", "threads=8"]`, nightly-only,
   requires the pin in `rust-toolchain.toml`.
-- Cranelift: nothing committed. The opt-in recipe above is the only way to use
-  it until the follow-up verification lands it for real.
+- `.cargo/config.toml` — `[unstable] codegen-backend = true` and
+  `[profile.dev] codegen-backend = "cranelift"`: Cranelift is the default debug
+  backend workspace-wide, landed 2026-08-16.
+- `Cargo.toml` — `[profile.dev.package.<name>] codegen-backend = "llvm"` for
+  `lodestone-ecs`, `lodestone-fuzz`, and `lodestone-testsupport`: the LLVM
+  carve-out the "Behavioural differences" section above measures the need for.
+  A per-package override wins over the workspace-wide `[profile.dev]` setting,
+  so these three build (and only these three) under LLVM while everything else
+  stays on Cranelift; verified this mixes cleanly within one linked test
+  binary (a crate's dependencies still build under whatever *their* profile
+  says, so e.g. `lodestone-ecs`'s own code is LLVM while `bevy_ecs` beneath it
+  stays Cranelift — no ABI or unwind-table mismatch observed across that
+  boundary).
 
 ## Dependencies
 
-- `rustc-codegen-cranelift-preview` rustup component — not committed, install
-  locally to use the opt-in recipe; must match the pinned nightly's date.
+- `rustc-codegen-cranelift-preview` rustup component — declared in
+  `rust-toolchain.toml`'s `components` list, so a fresh checkout is
+  self-sufficient; must match the pinned nightly's date.
 - Interacts with [`docs/build-caching.md`](./build-caching.md) (sccache
   cache-key/flip-cost precedent this doc reuses), `rust-toolchain.toml` (the
   pin both this and Cranelift depend on), and `Cargo.toml`'s `[profile.dev]`
   package overrides (`lodestone-worldgen`'s `opt-level = 2`, confirmed
-  compatible with Cranelift above).
+  compatible with Cranelift above; the three `codegen-backend = "llvm"`
+  overrides above are not compatible with it, which is the point).
