@@ -9712,7 +9712,14 @@ mod villager_gossip_reputation_and_curing_tests {
         sim.get_mut(a)
             .expect("spawned")
             .gossip
-            .add(stranger, villager::gossip::GossipType::MajorPositive, 20);
+            // `Trading`, not `MajorPositive`: `MajorPositive`'s own
+            // `decay_per_transfer` (20) equals its own `max` (20), so it
+            // can *never* survive a transfer (always decays to exactly 0,
+            // below `DISCARD_THRESHOLD`) — a real vanilla quirk `gossip.rs`'s
+            // own `a_transferred_entry_that_decays_below_threshold_is_dropped`
+            // test already predicts. `Trading` at its own max (25) decays to
+            // 5, which does survive.
+            .add(stranger, villager::gossip::GossipType::Trading, 25);
 
         for _ in 0..(MobSim::GOSSIP_SPREAD_INTERVAL_TICKS + 1) {
             sim.tick();
@@ -9748,7 +9755,14 @@ mod villager_gossip_reputation_and_curing_tests {
         sim.get_mut(a)
             .expect("spawned")
             .gossip
-            .add(stranger, villager::gossip::GossipType::MajorPositive, 20);
+            // `Trading`, not `MajorPositive`: `MajorPositive`'s own
+            // `decay_per_transfer` (20) equals its own `max` (20), so it
+            // can *never* survive a transfer (always decays to exactly 0,
+            // below `DISCARD_THRESHOLD`) — a real vanilla quirk `gossip.rs`'s
+            // own `a_transferred_entry_that_decays_below_threshold_is_dropped`
+            // test already predicts. `Trading` at its own max (25) decays to
+            // 5, which does survive.
+            .add(stranger, villager::gossip::GossipType::Trading, 25);
 
         for _ in 0..(MobSim::GOSSIP_SPREAD_INTERVAL_TICKS * 3) {
             sim.tick();
