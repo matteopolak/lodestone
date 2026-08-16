@@ -2243,7 +2243,14 @@ fn pressing_play_reaches_a_running_integrated_server() {
     // not about persistence (issue #468 gates that in
     // `tests/singleplayer_persistence.rs`), and an in-memory world leaves
     // nothing in the developer's real data directory.
-    let net = match launch_singleplayer(protocol, 0, None, seed, None) {
+    let net = match launch_singleplayer(
+        protocol,
+        0,
+        None,
+        seed,
+        lodestone_server::WorldType::Overworld,
+        None,
+    ) {
         Ok(net) => net,
         Err(e) => {
             // A build with no hostable family must *report*, which is the
@@ -2440,6 +2447,117 @@ fn drive_ui_from_session_opens_credits_on_the_real_win_game_event() {
         crate::menu::Screen::Credits,
         "the real WIN_GAME event (GAME_EVENT code 4, ClientPacketListener.java) \
          must open the credits screen"
+    );
+}
+
+/// **The owner's live report, reproduced deterministically and fixed.**
+/// "accepting the custom resource pack didn't do anything, and it kept the
+/// choice menu open. when i pressed accept again, it closed it and no
+/// texture pack was applied at all."
+///
+/// Traced: `NetClient::respond_to_resource_pack` only *queues* the answer
+/// for the net thread's own loop to drain (up to 15 ms later on native) —
+/// [`crate::net::PackPromptCell`]'s doc used to claim the shared cell was
+/// cleared "the instant" an answer was queued, which is false; only the
+/// drain clears it. `app/session.rs`'s `drive_ui_from_session` reconciles
+/// `Screen::ResourcePackPrompt` from that same cell every frame, and used to
+/// reopen on any frame where the UI was closed but the (still-stale) cell
+/// still reported the answered prompt pending — which a real session hits
+/// on the very frame of the click, since the click handler and `redraw`
+/// share one winit dispatch. That is symptom 1 and 2 exactly: the first
+/// Accept appears to do nothing because the reopen is instant, and the
+/// dialog "stays open". A real second click then answers the *same* id
+/// again; net's `apply_pack_response` finds it already cleared and does
+/// nothing further, so **only the first click's answer ever drives the
+/// download** — but the player never got to see that, because the dialog
+/// reopening ate their confirmation that anything had happened.
+///
+/// This drives the real chain end to end — a real `WindowApp`, the real
+/// `MenuNav::click`/`apply_menu_action`/`respond_to_resource_pack` path, and
+/// the real `drive_ui_from_session` — with a **loopback** `NetClient`
+/// standing in for the net thread. That is not a weaker double here: a
+/// loopback's `pack_response_tx` has no receiver at all (see
+/// [`NetClient::loopback`]'s own doc), so the shared cell *never* clears —
+/// the permanent, worst-case version of the up-to-15ms lag a real session
+/// only suffers briefly. If the reconcile can stay closed against a ground
+/// truth that never catches up, it certainly survives one that catches up
+/// within a frame or two.
+///
+/// **Negative control, executed:** reverting `app/session.rs`'s reconcile to
+/// its old unconditional `if !self.ui.is_resource_pack_prompt() {
+/// show_resource_pack_prompt(...) }` (dropping the
+/// `resource_pack_already_answered` check) makes this fail at the final
+/// assertion — the screen is `ResourcePackPrompt` again, reproducing the
+/// report.
+#[test]
+fn accepting_a_resource_pack_prompt_does_not_reopen_it_before_the_net_thread_catches_up() {
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    let (net, _actions) = NetClient::loopback();
+    app.sim.attach_net(net);
+    app.ui.enter_dev_world();
+    assert_eq!(
+        app.ui.screen(),
+        crate::menu::Screen::Playing,
+        "precondition: a live-gameplay screen, one of the five the prompt can open over"
+    );
+
+    let id = uuid::Uuid::from_u128(0xF00D);
+    app.sim
+        .net()
+        .expect("attached above")
+        .set_pending_resource_pack_prompt_for_test(crate::net::PendingResourcePackPrompt::for_test(
+            id, false,
+        ));
+
+    // The opening edge: a fresh reconcile with nothing shown yet must arm it.
+    app.drive_ui_from_session();
+    assert_eq!(
+        app.ui.screen(),
+        crate::menu::Screen::ResourcePackPrompt,
+        "precondition: the pushed prompt must open the confirm screen"
+    );
+
+    // The player's one and only click on Accept.
+    let action = app.nav.click(&mut app.ui, crate::menu::confirm::ACCEPT_ROW);
+    app.apply_menu_action(action);
+    assert!(
+        !app.ui.is_resource_pack_prompt(),
+        "the click's own `apply_resource_pack_prompt` must close the screen immediately"
+    );
+
+    // The reconcile that used to reopen it: the loopback's shared cell still
+    // reports `id` pending (nothing ever drains `respond_to_resource_pack`'s
+    // queued answer on a loopback), which is exactly the stale read a real
+    // net thread produces for its first ~15 ms.
+    app.drive_ui_from_session();
+    assert!(
+        !app.ui.is_resource_pack_prompt(),
+        "a single Accept must not reopen the very prompt it just answered, \
+         even while the net thread has not yet cleared the shared cell — \
+         this is the owner's \"accepting did nothing, it kept the choice \
+         menu open\" report"
+    );
+
+    // And the suppression is scoped to *that* id, not sticky forever: a
+    // genuinely different prompt (a second push superseding the first, the
+    // same case `PackPromptCell::clear_if`'s own doc names) must still open
+    // even though `resource_pack_answered_id` is still set from the first.
+    app.sim
+        .net()
+        .expect("attached above")
+        .set_pending_resource_pack_prompt_for_test(crate::net::PendingResourcePackPrompt::for_test(
+            uuid::Uuid::from_u128(0xBEEF),
+            false,
+        ));
+    app.drive_ui_from_session();
+    assert_eq!(
+        app.ui.screen(),
+        crate::menu::Screen::ResourcePackPrompt,
+        "a later, genuinely different prompt must still open — the \
+         suppression must be scoped to the answered id, not sticky forever"
     );
 }
 

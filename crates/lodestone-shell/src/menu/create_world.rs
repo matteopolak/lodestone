@@ -28,10 +28,10 @@
 //!   `WorldTab` also has a "Customize Type" button this client has no
 //!   preset-editor screen for, left absent the same way. [`WORLD_TYPE_ROW`]
 //!   itself (issue #519's UI half) is real — cycles all seven bundled
-//!   presets and collects the choice — but **decorative for all seven**: see
-//!   [`WorldTypePreset`]'s own doc for exactly which entry points exist and
-//!   which single hop (outside `lodestone-server`, in `net.rs`) is still
-//!   missing to make three of them do something.
+//!   presets and collects the choice — and since issue #592's item 1,
+//!   selecting `Normal`/`LargeBiomes`/`Amplified` reaches the served world;
+//!   the other four remain decorative. See [`WorldTypePreset`]'s own doc for
+//!   exactly which is which and why.
 //! - **More** (`createWorld.tab.more.title`): nothing. Vanilla's `MoreTab` is
 //!   three buttons (Game Rules, Experiments, Data Packs), and none of the three
 //!   models exist here — no game-rule table, no experiments screen, no
@@ -108,12 +108,24 @@
 //!   real, but nothing downstream reads any of them: they need deeper
 //!   session-setup wiring (server-side initial state) than the seed's
 //!   one-parameter threading, and are left as documented follow-up.
-//! - **Decorative — world type.** Cycles all seven bundled presets for real
-//!   (issue #519's generator half landed all seven; this is their UI). Three
-//!   (`Normal`/`LargeBiomes`/`Amplified`) have a reachable generator and are
-//!   only missing the `net.rs` threading hop; four more are additionally
-//!   blocked on a `lodestone-server` re-export. See [`WorldTypePreset`]'s own
-//!   doc.
+//! - **Wired since issue #592's item 1 — three of seven world types.** Cycles
+//!   all seven bundled presets for real (issue #519's generator half landed
+//!   all seven; this is their UI), and choosing `Normal`/`LargeBiomes`/
+//!   `Amplified` now reaches the served world:
+//!   `WorldTypePreset::backend_world_type` converts the UI choice,
+//!   `begin_singleplayer` (`app/session.rs`) reads it from
+//!   `WorldCreationConfig` for a **`Created`** launch only (same rule as
+//!   `seed`), threads it through `launch_singleplayer`/
+//!   `launch_open_to_lan_online` (`app/launch.rs`) into
+//!   `NetClient::open_singleplayer`/`open_to_lan`, and `net.rs`'s
+//!   `Origin::Integrated` carries it to the one construction site that used
+//!   to hardcode `overworld_chunk_source(seed)`. **Still decorative — the
+//!   other four** (`SingleBiomeSurface`/`Flat`/`FlatAllDimensions`/
+//!   `DebugAllBlockStates`): their entry points are blocked on a
+//!   `lodestone-server` re-export this crate cannot make (see
+//!   [`WorldTypePreset::backend_world_type`]'s own doc). Selecting one of the
+//!   four falls back to `Overworld` rather than erroring, the same policy
+//!   `is_backend_wired` names.
 //! - **Decorative — the world name and the "will be saved in" folder.**
 //!   There is still no `LevelStorageSource` (`world_select`'s own module
 //!   docs, unchanged by this issue), so a name is collected and shown but
@@ -230,30 +242,36 @@ fn content_rows_for_tab(tab: usize) -> &'static [usize] {
 /// ## Backend wiring — three of seven, and which three
 ///
 /// [`Self::caption`] is real for all seven (`generator.minecraft.*`,
-/// verbatim). **Selecting one is decorative for all seven today** — see
-/// `docs/worldgen-world-type-selection.md`'s own "How to change it" table for
-/// exactly which entry point each preset needs:
+/// verbatim). **Selecting one is only decorative for four of the seven now**
+/// — see `docs/worldgen-world-type-selection.md`'s own "How to change it"
+/// table for exactly which entry point each preset needs:
 ///
-/// - [`Self::Normal`]/[`Self::LargeBiomes`]/[`Self::Amplified`] are
-///   **backend-ready and not yet threaded**: their generators
-///   (`lodestone_server::overworld_chunk_source_of_type`) are already `pub`
-///   at the server crate's root, verified end to end
-///   (`crates/lodestone-server/tests/world_type_selection.rs`), and reachable
-///   from this crate with no `lodestone-server` change at all — the
-///   remaining hop is `net.rs`'s single `overworld_chunk_source(seed)` call
-///   site (`Origin::Integrated`'s own construction), which this issue
-///   deliberately left untouched: that file had a live, unrelated concurrent
-///   edit in flight this session (`net::NetUpdate::LanPublishError`), and a
-///   new `Origin::Integrated` field is exactly the shared-struct collision
-///   shape `CLAUDE.md` warns about. Tracked as the first item of the
-///   follow-up issue this module's own doc links.
+/// - [`Self::Normal`]/[`Self::LargeBiomes`]/[`Self::Amplified`] are **wired,
+///   end to end.** [`Self::backend_world_type`] converts the choice,
+///   `begin_singleplayer` (`app/session.rs`) reads it from
+///   `WorldCreationConfig` for a **`Created`** launch and threads it through
+///   `launch_singleplayer`/`launch_open_to_lan_online` (`app/launch.rs`) into
+///   `NetClient::open_singleplayer`/`open_to_lan`, and `net.rs`'s
+///   `Origin::Integrated` carries it to the `overworld_chunk_source_of_type`
+///   call that used to hardcode `overworld_chunk_source(seed)` (i.e.
+///   `WorldType::Overworld`) unconditionally. Verified end to end by
+///   `tests/singleplayer_terrain_arrives.rs`'s
+///   `a_singleplayer_world_honours_the_selected_world_type_end_to_end`, which
+///   reuses `lodestone-server/tests/world_type_selection.rs`'s own measured
+///   64/130 top-of-world heights at seed 4242 rather than re-deriving them —
+///   a real `NetClient::open_singleplayer` session selecting `Amplified` must
+///   serve the 130 figure over the wire, not the 64 the Overworld default
+///   would give the identical column.
 /// - [`Self::SingleBiomeSurface`]/[`Self::Flat`]/[`Self::FlatAllDimensions`]/
-///   [`Self::DebugAllBlockStates`] are **blocked on a `lodestone-server`
-///   change**: their entry points
+///   [`Self::DebugAllBlockStates`] are **still blocked on a
+///   `lodestone-server` change**: their entry points
 ///   (`single_biome_chunk_source`/`flat_chunk_source`/`debug_chunk_source`)
 ///   are real and individually verified, but not yet re-exported from that
 ///   crate's root — `crates/lodestone-server/src/lib.rs` is off limits to
 ///   this agent (another is live in it), so this cannot be closed from here.
+///   Selecting one of these four does not error; [`Self::backend_world_type`]
+///   falls back to [`lodestone_server::WorldType::Overworld`], same as
+///   selecting [`Self::Normal`] — see that method's own doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorldTypePreset {
     #[default]
@@ -296,15 +314,38 @@ impl WorldTypePreset {
 
     /// Whether the launch path builds this preset's own generator rather than
     /// silently falling back to [`Self::Normal`] — see this type's own doc.
-    /// Not consulted by anything yet (the launch path is not threaded at
-    /// all), but named now so the wiring patch does not have to invent the
-    /// question.
     #[must_use]
     pub fn is_backend_wired(self) -> bool {
         matches!(
             self,
             WorldTypePreset::Normal | WorldTypePreset::LargeBiomes | WorldTypePreset::Amplified
         )
+    }
+
+    /// The `lodestone_server::WorldType` this preset resolves to, now that the
+    /// `net.rs` threading hop (issue #592's item 1) exists.
+    ///
+    /// [`Self::is_backend_wired`] is the caller-facing "does this do anything"
+    /// question; this is the *value* to pass once the answer is yes. The four
+    /// presets [`Self::is_backend_wired`] reports `false` for have no
+    /// `lodestone_server::WorldType` variant at all yet — they need
+    /// `single_biome_chunk_source`/`flat_chunk_source`/`debug_chunk_source`,
+    /// not this enum, once those are re-exported (issue #592's item 2) — so
+    /// they fall back to [`lodestone_server::WorldType::Overworld`] here,
+    /// same as selecting [`Self::Normal`]. That fallback is exactly what
+    /// [`Self::is_backend_wired`] exists to let a caller warn about instead of
+    /// silently accepting.
+    #[must_use]
+    pub fn backend_world_type(self) -> lodestone_server::WorldType {
+        match self {
+            WorldTypePreset::LargeBiomes => lodestone_server::WorldType::LargeBiomes,
+            WorldTypePreset::Amplified => lodestone_server::WorldType::Amplified,
+            WorldTypePreset::Normal
+            | WorldTypePreset::SingleBiomeSurface
+            | WorldTypePreset::Flat
+            | WorldTypePreset::FlatAllDimensions
+            | WorldTypePreset::DebugAllBlockStates => lodestone_server::WorldType::Overworld,
+        }
     }
 }
 
@@ -1709,6 +1750,33 @@ mod tests {
                 WorldTypePreset::Amplified,
             ]
         );
+    }
+
+    /// [`WorldTypePreset::backend_world_type`]'s exact mapping — the value a
+    /// caller passes once [`WorldTypePreset::is_backend_wired`] says yes.
+    /// Predicted per-variant rather than merely checking the two wired,
+    /// non-`Overworld` arms differ from the fallback: the four unwired
+    /// presets falling back to `Overworld` is as load-bearing as the three
+    /// wired arms landing on their own variant — a caller that skipped the
+    /// `is_backend_wired` check must still get a real, playable world
+    /// (`Overworld`) rather than a panic or a nonsense generator.
+    #[test]
+    fn backend_world_type_maps_each_preset_to_its_measured_generator() {
+        use lodestone_server::WorldType;
+        let cases = [
+            (WorldTypePreset::Normal, WorldType::Overworld),
+            (WorldTypePreset::LargeBiomes, WorldType::LargeBiomes),
+            (WorldTypePreset::Amplified, WorldType::Amplified),
+            (WorldTypePreset::SingleBiomeSurface, WorldType::Overworld),
+            (WorldTypePreset::Flat, WorldType::Overworld),
+            (WorldTypePreset::FlatAllDimensions, WorldType::Overworld),
+            (WorldTypePreset::DebugAllBlockStates, WorldType::Overworld),
+        ];
+        let wrong: Vec<(WorldTypePreset, WorldType)> = cases
+            .into_iter()
+            .filter(|&(preset, expected)| preset.backend_world_type() != expected)
+            .collect();
+        assert!(wrong.is_empty(), "wrong mapping(s): {wrong:?}");
     }
 
     #[test]
