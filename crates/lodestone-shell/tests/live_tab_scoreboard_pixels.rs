@@ -93,7 +93,7 @@ fn live_tab_list_and_scoreboard_reach_pixels() {
         // the client's own `NetIngest` fold below.
         let _ = net.poll();
         scores = net.scoreboard();
-        view = tablist::tab_list_view(&net.tab_list(), &|_: &str| None);
+        view = tablist::tab_list_view(&net.tab_list(), Some(&scores), &|_: &str| None);
         sidebar = scoreboard::sidebar_from(&scores, &|_: &str| None);
         if !view.is_empty()
             && sidebar
