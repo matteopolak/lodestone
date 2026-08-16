@@ -185,6 +185,14 @@ pub struct RconConfig {
     /// real, tick-loop-shared state) and the scope it does not (no accepted
     /// LAN connection reads this feed yet).
     pub(crate) border: Option<crate::border::BorderFeed>,
+    /// `/op`/`/deop`/`/whitelist`'s read/write surface — the *shared*
+    /// [`crate::access::AccessHandle`], not a fresh one, for the same reason
+    /// [`Self::world`] is: a private copy would let RCON report success
+    /// while granting operator status nobody's join check ever reads. `None`
+    /// for a config with no access list configured (every plain constructor
+    /// below), matching this crate's default-permissive singleplayer shape —
+    /// see `crate::access`'s own module doc.
+    pub(crate) access: Option<crate::access::AccessHandle>,
 }
 
 impl RconConfig {
@@ -205,6 +213,7 @@ impl RconConfig {
             block_ticks: None,
             mobs: None,
             border: None,
+            access: None,
         }
     }
 
@@ -231,7 +240,18 @@ impl RconConfig {
             block_ticks: None,
             mobs: None,
             border: None,
+            access: None,
         }
+    }
+
+    /// Points this config at a *shared* [`crate::access::AccessHandle`] — the
+    /// only shape in which `/op`/`/deop`/`/whitelist` over RCON affect the
+    /// running world's real join checks and command permission gating,
+    /// rather than a private copy nothing else reads.
+    #[must_use]
+    pub fn with_access(mut self, access: crate::access::AccessHandle) -> Self {
+        self.access = Some(access);
+        self
     }
 
     /// The same config pointed at a *shared* world and player registry — what
@@ -517,6 +537,10 @@ pub(crate) fn run_command_as(
         // `/worldborder`'s read/write surface — see `RconConfig::border`'s
         // own doc for what reading/mutating it here does and does not reach.
         border: config.border.as_ref(),
+        // `/op`/`/deop`/`/whitelist`'s read/write surface — RCON is the one
+        // production caller that gets `Some` here; see `RconConfig::access`'s
+        // own doc for why.
+        access: config.access.as_ref(),
     };
     let source = CommandSource::console(
         caller_name,

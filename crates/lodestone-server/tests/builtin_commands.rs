@@ -78,6 +78,7 @@ fn run(
         state: &state,
         mobs: None,
         border: None,
+    access: None,
     };
     commands.run(&world, source, text)
 }
@@ -574,6 +575,7 @@ fn gamerule_writes_the_store_it_is_handed_including_the_production_world_state()
         state: &world_state,
         mobs: None,
         border: None,
+    access: None,
     };
     let outcome = commands
         .run(&command_world, &alice, "gamerule random_tick_speed 6")
@@ -710,7 +712,7 @@ fn run_stateful(
     source: &CommandSource,
     text: &str,
 ) -> Option<lodestone_server::CommandOutcome> {
-    let world = CommandWorld { rules: state, players, state, mobs: None, border: None };
+    let world = CommandWorld { rules: state, players, state, mobs: None, border: None, access: None };
     commands.run(&world, source, text)
 }
 
@@ -1224,7 +1226,7 @@ fn summon_spawns_into_the_shared_mob_handle_at_the_resolved_position() {
 
     assert!(mobs.snapshots().is_empty(), "nothing spawned yet");
 
-    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None };
+    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None };
     let outcome =
         commands.run(&world, &alice, "summon minecraft:cow ~11 ~1 ~4").expect("root matched");
     assert!(outcome.response.is_ran(), "{outcome:?}");
@@ -1249,7 +1251,7 @@ fn summon_refuses_an_unknown_entity_type_at_parse_time() {
     let players = roster();
     let mobs = lodestone_server::MobHandle::default();
 
-    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None };
+    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None };
     let outcome =
         commands.run(&world, &alice, "summon minecraft:not_a_real_mob").expect("root matched");
     assert!(!outcome.response.is_ran(), "{outcome:?}");
@@ -1597,7 +1599,7 @@ fn worldborder_world<'a>(
     state: &'a lodestone_server::world_state::WorldStateHandle,
     feed: &'a lodestone_server::BorderFeed,
 ) -> CommandWorld<'a> {
-    CommandWorld { rules: state, players: &[], state, mobs: None, border: Some(feed) }
+    CommandWorld { rules: state, players: &[], state, mobs: None, border: Some(feed), access: None }
 }
 
 /// **The composition that matters**: the command mutates the *same* feed the
@@ -1780,7 +1782,7 @@ fn worldborder_setting_to_the_current_value_is_refused_and_does_not_mutate() {
 fn worldborder_with_no_border_refuses_cleanly_instead_of_panicking() {
     let commands = ServerCommands::new();
     let state = lodestone_server::world_state::WorldStateHandle::new();
-    let world = CommandWorld { rules: &state, players: &[], state: &state, mobs: None, border: None };
+    let world = CommandWorld { rules: &state, players: &[], state: &state, mobs: None, border: None, access: None };
     let alice = source(1, "alice");
 
     let outcome = commands.run(&world, &alice, "worldborder get").expect("root matched");
@@ -1840,7 +1842,7 @@ fn scoreboard_world<'a>(
     state: &'a lodestone_server::world_state::WorldStateHandle,
     players: &'a [PlayerCandidate],
 ) -> CommandWorld<'a> {
-    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None }
+    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None, access: None }
 }
 
 #[test]

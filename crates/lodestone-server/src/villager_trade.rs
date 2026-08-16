@@ -26,32 +26,18 @@
 //!
 //! # What this module does not do
 //!
-//! It has no connection to the network or to `SimMob`/`MobSim` — nothing
-//! here reaches a wire or a player's inventory. `crate::mobs::villager`'s
-//! `OpenTrade` interact outcome and `crate::server::open_merchant_screen`
-//! already produce the *static* offer list a client sees when a screen
-//! opens. Wiring `SELECT_TRADE` (currently decoded and discarded in
-//! `crates/protocol/v770/src/server_protocol.rs`) to actually call
-//! [`VillagerTrades::try_trade`] needs three more things, none built here:
-//!
-//! 1. A `ServerBound::SelectTrade { index }` variant (currently the packet is
-//!    decoded and the value thrown away) plus a real dispatch arm.
-//! 2. A window-id → villager-entity mapping threaded through
-//!    `crate::server::dispatch_play_packet`, which already carries roughly
-//!    thirty per-connection parameters (`next_window_id`/`open_container`
-//!    are the existing precedent for the shape it would take) — plus the
-//!    same tracking on the per-villager side (`crate::mobs::villager`,
-//!    off limits for this change).
-//! 3. A player-inventory item exchange: [`TradeTake`] already names exactly
-//!    what to remove and what to give, but performing that removal/grant
-//!    against `PlayerInventory` and syncing the changed slots back to the
-//!    client is `crate::server`'s job, not this module's.
-//!
-//! Named rather than silent, the same shape as this repo's own precedent for
-//! the Brain-driven half of #243: build what the file-ownership boundary
-//! allows, and report the remainder rather than rushing a hunk into this
-//! repo's single largest choke-point function while other agents are live in
-//! adjacent files.
+//! It has no connection to the network by itself — no packet decode, no
+//! `PlayerInventory` mutation. Those live in `crate::server`:
+//! [`VillagerTrades::try_trade`] is called from
+//! [`ServerBound::SelectTrade`](crate::protocol::ServerBound::SelectTrade)'s
+//! dispatch arm (via `crate::mobs::MobSim::try_villager_trade`, which is the
+//! per-villager-entity home for a live [`VillagerTrades`] this module itself
+//! has no id to key one by), and the inventory exchange
+//! [`TradeTake`] names is performed by `crate::server::attempt_villager_trade`
+//! and synced back with a `container_set_content`. See
+//! `crate::mobs::MobSim::villager_offers`/`try_villager_trade`'s own doc
+//! comments for the up-to-date wiring, and `crate::server::open_merchant_screen`
+//! for the display half.
 //!
 //! # The hook for gossip (#244) and reputation (#246)
 //!

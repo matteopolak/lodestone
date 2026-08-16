@@ -1262,6 +1262,19 @@ pub struct SimMob<'w> {
     /// Accumulated trading xp toward [`villager::max_xp_for_level`]'s next
     /// threshold. `Villager.villagerXp`.
     villager_xp: i32,
+    /// This villager's persistent trade economics (issue #245's third
+    /// piece, previously entirely absent) — per-offer demand, restock
+    /// cadence and use counts, keyed alongside the `(profession, level)` it
+    /// was built for so [`SimMob::ensure_trades`] can tell when it has gone
+    /// stale. `None` for a non-villager or one with no profession yet.
+    ///
+    /// Rebuilding on a profession/level change (rather than merging in the
+    /// newly unlocked tier) loses whatever demand/restock state the old
+    /// tiers had accumulated — a real simplification, not vanilla's
+    /// `updateTrades`, but strictly better than the previous state, which
+    /// discarded that state on *every* menu open rather than only a tier
+    /// change.
+    trades: Option<(villager::Profession, i32, crate::villager_trade::VillagerTrades)>,
     /// Ticks until this mob's next job search, decremented in
     /// [`MobSim::tick_villager_professions`]. Throttles the bounded terrain
     /// scan [`villager::find_and_claim_workstation`] runs — see that
@@ -2179,6 +2192,45 @@ impl<'w> SimMob<'w> {
     ) {
         self.profession = profession;
         self.workstation = workstation;
+    }
+
+    /// Ensures [`Self::trades`] matches the current `(profession,
+    /// villager_level)`, rebuilding it from
+    /// [`crate::villager_trade::VillagerTrades::for_profession`] when either
+    /// has moved on since the last build — see that field's own doc for
+    /// what a rebuild costs. `None` for a non-villager or an unemployed one
+    /// (`Profession::None`), which get no economics at all, matching every
+    /// other villager-only accessor in this file.
+    fn ensure_trades(&mut self) -> Option<&mut crate::villager_trade::VillagerTrades> {
+        if self.profession == villager::Profession::None {
+            self.trades = None;
+            return None;
+        }
+        let fresh = !matches!(
+            &self.trades,
+            Some((p, l, _)) if *p == self.profession && *l == self.villager_level
+        );
+        if fresh {
+            self.trades = Some((
+                self.profession,
+                self.villager_level,
+                crate::villager_trade::VillagerTrades::for_profession(self.profession, self.villager_level),
+            ));
+        }
+        self.trades.as_mut().map(|(_, _, trades)| trades)
+    }
+
+    /// Applies a completed trade's xp reward (`TradeRecord::xp`) and
+    /// advances this villager's level via [`villager::level_up`] — vanilla's
+    /// `Villager.rewardTradeXp` feeding `Villager.setVillagerXp`. Previously
+    /// nothing in this crate ever called this: `villager_level` was
+    /// initialised to `1` and never mutated again, so no villager could ever
+    /// reach a level-2..5 trade no matter how much it was traded with. A
+    /// level change is picked up the next [`Self::ensure_trades`] call,
+    /// which rebuilds the offer list to include the newly unlocked tier.
+    fn give_villager_xp(&mut self, xp: i32) {
+        self.villager_xp += xp;
+        self.villager_level = villager::level_up(self.villager_level, self.villager_xp);
     }
 
     /// Lowers the mob into a version-free [`EntitySnapshot`] for the encode seam.
@@ -3352,6 +3404,76 @@ impl<'w> MobSim<'w> {
             .map_or(0, |m| m.villager_xp)
     }
 
+    /// This villager's priced offer list for one moment in time, backed by
+    /// its *persistent* [`crate::villager_trade::VillagerTrades`] (issue
+    /// #245's third piece — previously every call rebuilt a fresh,
+    /// stateless offer list, so demand never moved and nothing ever went
+    /// out of stock no matter how much was bought). Reputation and Hero of
+    /// the Village are folded into a clone of each offer's price
+    /// (`reset_special_price_diff` first, matching
+    /// [`crate::mobs::villager::reputation::update_special_prices`]'s own
+    /// contract): the *persisted* `special_price_diff` never accumulates
+    /// across menu opens, only the persisted `uses`/`demand` do.
+    ///
+    /// Empty for a non-villager, an unknown id, or an unemployed villager —
+    /// see [`SimMob::ensure_trades`].
+    #[must_use]
+    pub fn villager_offers(
+        &mut self,
+        mob_id: i32,
+        reputation: i32,
+        hero_of_the_village_amplifier: Option<u32>,
+    ) -> Vec<crate::villager_trade::OfferState> {
+        let Some(m) = self.get_mut(mob_id) else {
+            return Vec::new();
+        };
+        let Some(trades) = m.ensure_trades() else {
+            return Vec::new();
+        };
+        let mut offers = trades.offers.clone();
+        for offer in &mut offers {
+            offer.reset_special_price_diff();
+        }
+        villager::reputation::update_special_prices(&mut offers, reputation, hero_of_the_village_amplifier);
+        offers
+    }
+
+    /// Executes a purchase against this villager's *persistent* offer at
+    /// `index` — [`crate::villager_trade::VillagerTrades::try_trade`]'s
+    /// first production caller. Pricing is computed the same way
+    /// [`Self::villager_offers`] displays it (reset then
+    /// re-discounted from `reputation`/`hero_of_the_village_amplifier`), so
+    /// what a player sees is what they pay; [`OfferState::take`] then
+    /// enforces the live, persisted cost *and* out-of-stock state for real,
+    /// where every previous caller always saw a fresh `uses: 0` offer no
+    /// matter how many times it had been bought.
+    ///
+    /// On success, feeds the trade's xp reward into
+    /// [`SimMob::give_villager_xp`] — vanilla's `Villager.notifyTrade` path,
+    /// also previously unreached, which is why no villager could level up.
+    /// Returns `None` — nothing mutated — for an unknown mob/villager, an
+    /// out-of-range index, or a refused (out-of-stock/unsatisfied) offer.
+    pub fn try_villager_trade(
+        &mut self,
+        mob_id: i32,
+        index: usize,
+        reputation: i32,
+        hero_of_the_village_amplifier: Option<u32>,
+    ) -> Option<crate::villager_trade::TradeTake> {
+        let m = self.get_mut(mob_id)?;
+        let trades = m.ensure_trades()?;
+        let offer = trades.offers.get_mut(index)?;
+        offer.reset_special_price_diff();
+        let mut priced = [*offer];
+        villager::reputation::update_special_prices(&mut priced, reputation, hero_of_the_village_amplifier);
+        *offer = priced[0];
+        let cost_a = offer.modified_cost_a_count();
+        let cost_b = offer.record.wants_b.map_or(0, |(_, count)| count);
+        let take = trades.try_trade(index, cost_a, cost_b)?;
+        m.give_villager_xp(take.xp);
+        Some(take)
+    }
+
     /// Replaces the set of players mob perception can see, for
     /// [`tick`](Self::tick) to consume.
     ///
@@ -3560,6 +3682,7 @@ impl<'w> MobSim<'w> {
             workstation: None,
             villager_level: 1,
             villager_xp: 0,
+            trades: None,
             job_search_cooldown: 0,
             cat_search_cooldown: 0,
             shoulder_dismount_ticks: 0,
@@ -3867,6 +3990,14 @@ impl<'w> MobSim<'w> {
     fn tick_villager_professions(&mut self) {
         let world = self.world;
         let claims = &mut self.workstation_claims;
+        // `Villager.restock`'s own cadence check (`WorkAtPoi`'s per-AI-tick
+        // call, not built here — see `villager_trade`'s module doc), run
+        // once per profession pass for every employed villager instead.
+        // `tick_count` is this sim's only clock (see its own field doc);
+        // `restock_day` divides it into vanilla's 24000-tick day the same
+        // way `day_time` is derived elsewhere in this file.
+        let restock_time = self.tick_count as i64;
+        let restock_day = restock_time / 24_000;
         for mob in &mut self.mobs {
             if mob.entity_type.path() != "villager" {
                 continue;
@@ -3879,6 +4010,8 @@ impl<'w> MobSim<'w> {
                 if !still_valid {
                     claims.remove(pos);
                     mob.set_profession(villager::Profession::None, None);
+                } else if let Some(trades) = mob.ensure_trades() {
+                    trades.maybe_restock(restock_time, restock_day);
                 }
                 continue;
             }

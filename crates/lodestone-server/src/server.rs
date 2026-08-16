@@ -4227,29 +4227,25 @@ fn container_title(menu: &str) -> &'static str {
 /// vanilla's `ServerPlayer::openMenu` sends in its own right immediately
 /// after `open_screen` for a `MerchantMenu`.
 ///
-/// **Trade purchase is not wired.** Nothing here or in
-/// [`dispatch_play_packet`] produces a `select_trade`/merchant
-/// `container_click` response, so a player can open this screen and see
-/// real offers and cannot yet buy one — issue #245's third piece
-/// (restock/leveling/purchase), named rather than silently absent. See
-/// `crate::mobs::villager::trades`'s own module doc for the same disclosure
-/// on the generation side.
+/// **Trade purchase is wired**, through [`ServerBound::SelectTrade`]'s
+/// dispatch arm in `dispatch_play_packet` — issue #245's third piece
+/// (restock/leveling/purchase), previously named here as absent, is now a
+/// real per-villager economy: see [`crate::mobs::MobSim::villager_offers`]/
+/// [`crate::mobs::MobSim::try_villager_trade`].
+///
+/// `offers` is the caller's already-priced, already-*persistent* list —
+/// [`crate::mobs::MobSim::villager_offers`], not a fresh stateless one — so
+/// what this sends is read from exactly the same `uses`/`demand` state
+/// [`ServerBound::SelectTrade`]'s dispatch arm charges against.
 #[allow(clippy::too_many_arguments)]
 async fn open_merchant_screen<T, P>(
     conn: &mut Connection<T>,
     proto: &P,
     state: &mut State,
-    profession: crate::mobs::villager::Profession,
+    offers: &[crate::villager_trade::OfferState],
     level: i32,
     xp: i32,
     next_window_id: &mut i32,
-    // Issue #246's own remaining scope: this villager's summed reputation
-    // toward the opening player (`MobSim::villager_reputation`) and, when
-    // carried, the Hero of the Village amplifier (`ActiveEffects::amplifier_of`)
-    // — both fed straight into `priced_villager_offers` so the displayed
-    // price already reflects them, matching what `SelectTrade` will charge.
-    reputation: i32,
-    hero_of_the_village_amplifier: Option<u32>,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -4265,34 +4261,29 @@ where
     )
     .await?;
 
-    let offers: Vec<MerchantOfferOut> = priced_villager_offers(
-        profession,
-        level,
-        reputation,
-        hero_of_the_village_amplifier,
-    )
-    .into_iter()
-    .filter_map(|offer| {
-        Some(MerchantOfferOut {
-            wants_a: (
-                offer.record.wants_item.parse::<ResourceKey>().ok()?,
-                offer.modified_cost_a_count(),
-            ),
-            wants_b: None,
-            gives: (
-                offer.record.gives_item.parse::<ResourceKey>().ok()?,
-                offer.record.gives_count,
-            ),
-            max_uses: offer.record.max_uses,
-            xp: offer.record.xp,
+    let wire_offers: Vec<MerchantOfferOut> = offers
+        .iter()
+        .filter_map(|offer| {
+            Some(MerchantOfferOut {
+                wants_a: (
+                    offer.record.wants_item.parse::<ResourceKey>().ok()?,
+                    offer.modified_cost_a_count(),
+                ),
+                wants_b: None,
+                gives: (
+                    offer.record.gives_item.parse::<ResourceKey>().ok()?,
+                    offer.record.gives_count,
+                ),
+                max_uses: offer.record.max_uses,
+                xp: offer.record.xp,
+            })
         })
-    })
-    .collect();
+        .collect();
 
     apply(
         conn,
         state,
-        proto.encode_merchant_offers(window_id, &offers, level, xp, true, true),
+        proto.encode_merchant_offers(window_id, &wire_offers, level, xp, true, true),
     )
     .await
 }
@@ -4322,11 +4313,16 @@ where
 /// standard 36-slot hotbar+main inventory ([`PlayerInventory::consume`]),
 /// not from two manually-filled slots — so a player can trade without first
 /// dragging items into place, a real deviation from vanilla's UX rather than
-/// a silent one. Demand pricing ([`crate::villager_trade::OfferState`]) is
-/// not consulted: nothing yet ties a live [`crate::villager_trade::VillagerTrades`]
-/// to a specific [`crate::mobs::SimMob`], so every purchase is priced at the
-/// record's own base cost (issue #245's own disclosed "no persistence of
-/// offer state" gap, extended here to "no live state at all yet").
+/// a silent one.
+///
+/// `offer` is the caller's read-only priced peek at the villager's *live*,
+/// persistent [`crate::villager_trade::VillagerTrades`] entry
+/// ([`crate::mobs::MobSim::villager_offers`]) — this function only decides
+/// whether the buyer's inventory can afford it; committing the trade against
+/// that persistent state (uses, demand, xp) is
+/// [`crate::mobs::MobSim::try_villager_trade`]'s job, called only after this
+/// one succeeds, so a buyer who cannot pay never moves the villager's
+/// economics.
 ///
 /// Returns `None` — inventory untouched — when the player lacks the cost
 /// items or has no room for the result, mirroring vanilla's own refusal
@@ -4356,39 +4352,6 @@ fn attempt_villager_trade(
         return None;
     }
     Some(trial)
-}
-
-/// This villager's priced offer list for one moment in time: the static
-/// per-level trade table ([`crate::mobs::villager::trades::offers_up_to`])
-/// with vanilla's reputation and Hero of the Village discounts folded in
-/// ([`crate::mobs::villager::reputation::update_special_prices`] — see that
-/// function's own doc for why the two are independent and additive, and both
-/// negative deltas).
-///
-/// **Demand and use-count are not persisted across calls** — every
-/// [`OfferState`](crate::villager_trade::OfferState) starts fresh at `uses: 0,
-/// demand: 0` — issue #245's own disclosed "no live per-villager `OfferState`"
-/// gap, unchanged by this. What this closes is issue #246's own remaining
-/// scope: reputation and Hero of the Village now reach a real price, computed
-/// identically at [`open_merchant_screen`] (display) and the `SelectTrade`
-/// dispatch arm (purchase) so what a player sees is what they pay.
-fn priced_villager_offers(
-    profession: crate::mobs::villager::Profession,
-    level: i32,
-    reputation: i32,
-    hero_of_the_village_amplifier: Option<u32>,
-) -> Vec<crate::villager_trade::OfferState> {
-    let mut offers: Vec<crate::villager_trade::OfferState> =
-        crate::mobs::villager::trades::offers_up_to(profession, level)
-            .into_iter()
-            .map(crate::villager_trade::OfferState::new)
-            .collect();
-    crate::mobs::villager::reputation::update_special_prices(
-        &mut offers,
-        reputation,
-        hero_of_the_village_amplifier,
-    );
-    offers
 }
 
 /// Opens a block-entity's container screen for this connection, mirroring
@@ -10946,75 +10909,76 @@ where
         // doc for why this executes the trade in one step rather than through
         // a payment-slot placement flow.
         ServerBound::SelectTrade { index } => {
-            if let Some(OpenMerchant { entity_id }) = *open_merchant {
-                let resolved = mobs.with(|sim| {
-                    sim.get(entity_id)
-                        .map(|mob| (mob.profession(), mob.villager_level()))
+            if let Some(OpenMerchant { entity_id }) = *open_merchant
+                && let Some(index) = usize::try_from(index).ok()
+            {
+                // Read back from the villager's *persistent*
+                // [`crate::villager_trade::VillagerTrades`] (issue #245's
+                // third piece — no longer recomputed fresh every click), so
+                // the charged price already reflects any earlier purchase's
+                // demand and this offer's real out-of-stock state, and is
+                // derived identically to what `open_merchant_screen` sent.
+                let reputation = mobs.with(|sim| sim.villager_reputation(entity_id, player_uuid));
+                let hero_of_the_village_amplifier =
+                    effects.amplifier_of("minecraft:hero_of_the_village");
+                // A read-only priced peek, so a buyer who cannot afford it
+                // never moves the villager's uses/demand — only the
+                // `try_villager_trade` commit below does that, and only
+                // after `attempt_villager_trade` confirms the inventory can
+                // actually pay.
+                let offer = mobs.with(|sim| {
+                    sim.villager_offers(entity_id, reputation, hero_of_the_village_amplifier)
+                        .get(index)
+                        .copied()
                 });
-                if let Some((profession, level)) = resolved
-                    && let Some(index) = usize::try_from(index).ok()
+                if let Some(offer) = offer
+                    && let Some(next) = attempt_villager_trade(inventory, &offer)
+                    && mobs
+                        .with(|sim| {
+                            sim.try_villager_trade(entity_id, index, reputation, hero_of_the_village_amplifier)
+                        })
+                        .is_some()
                 {
-                    // Recomputed fresh, not read back from what
-                    // `open_merchant_screen` sent: this crate has no live
-                    // per-villager `OfferState` to hold onto between packets
-                    // (see `priced_villager_offers`'s own doc), so the
-                    // charged price is derived identically to the displayed
-                    // one rather than cached — reputation moving between the
-                    // menu opening and this click is the one, minor
-                    // divergence from vanilla's cached-offer behaviour.
-                    let reputation = mobs.with(|sim| sim.villager_reputation(entity_id, player_uuid));
-                    let hero_of_the_village_amplifier =
-                        effects.amplifier_of("minecraft:hero_of_the_village");
-                    let offers = priced_villager_offers(
-                        profession,
-                        level,
-                        reputation,
-                        hero_of_the_village_amplifier,
-                    );
-                    if let Some(offer) = offers.get(index)
-                        && let Some(next) = attempt_villager_trade(inventory, offer)
-                    {
-                        *inventory = next;
-                        // `Villager.notifyTrade`'s `onReputationEventFrom`: a
-                        // completed trade is the one real production producer
-                        // of `Trading` gossip, matching
-                        // `MobSim::attack_from_player`'s villager-hit case.
-                        // `record_reputation_event` (issue #246) already exists
-                        // and was, until this call, only reachable from its own
-                        // tests.
-                        mobs.with(|sim| {
-                            sim.record_reputation_event(
-                                entity_id,
-                                crate::mobs::villager::reputation::ReputationEventType::Trade,
-                                player_uuid,
-                            );
-                        });
-                        // A full window-0 resync rather than a per-slot diff:
-                        // the cost items can land anywhere across 36 slots and
-                        // the given item anywhere `add` found room, so there
-                        // is no fixed pair of menu slots to name — the same
-                        // reasoning `join_inventory_snapshot` already
-                        // documents for why this packet (not a per-slot one)
-                        // is the right shape for an arbitrary multi-slot
-                        // change.
-                        let items = read_menu(
-                            &MenuLayout::player(),
-                            inventory,
-                            Some(inventory.crafting()),
-                            &[],
+                    *inventory = next;
+                    // `Villager.notifyTrade`'s `onReputationEventFrom`: a
+                    // completed trade is the one real production producer
+                    // of `Trading` gossip, matching
+                    // `MobSim::attack_from_player`'s villager-hit case.
+                    // `record_reputation_event` (issue #246) already exists
+                    // and was, until this call, only reachable from its own
+                    // tests.
+                    mobs.with(|sim| {
+                        sim.record_reputation_event(
+                            entity_id,
+                            crate::mobs::villager::reputation::ReputationEventType::Trade,
+                            player_uuid,
                         );
-                        apply(
-                            conn,
-                            state,
-                            proto.encode_container_content(
-                                0,
-                                0,
-                                &items,
-                                inventory.click_state().carried.as_ref(),
-                            ),
-                        )
-                        .await?;
-                    }
+                    });
+                    // A full window-0 resync rather than a per-slot diff:
+                    // the cost items can land anywhere across 36 slots and
+                    // the given item anywhere `add` found room, so there
+                    // is no fixed pair of menu slots to name — the same
+                    // reasoning `join_inventory_snapshot` already
+                    // documents for why this packet (not a per-slot one)
+                    // is the right shape for an arbitrary multi-slot
+                    // change.
+                    let items = read_menu(
+                        &MenuLayout::player(),
+                        inventory,
+                        Some(inventory.crafting()),
+                        &[],
+                    );
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_container_content(
+                            0,
+                            0,
+                            &items,
+                            inventory.click_state().carried.as_ref(),
+                        ),
+                    )
+                    .await?;
                 }
             }
         }
@@ -11357,25 +11321,19 @@ where
                 // ahead of the generic item-consumption handling below
                 // because opening the screen is itself the whole visible
                 // effect of this outcome (there is no slot sync to send).
-                if let Some(crate::mobs::InteractOutcome::OpenTrade { profession, level }) =
-                    outcome
-                {
+                if let Some(crate::mobs::InteractOutcome::OpenTrade { level, .. }) = outcome {
                     let xp = mobs.with(|sim| sim.villager_xp(entity_id));
                     let reputation = mobs.with(|sim| sim.villager_reputation(entity_id, player_uuid));
                     let hero_of_the_village_amplifier =
                         effects.amplifier_of("minecraft:hero_of_the_village");
-                    open_merchant_screen(
-                        conn,
-                        proto,
-                        state,
-                        profession,
-                        level,
-                        xp,
-                        next_window_id,
-                        reputation,
-                        hero_of_the_village_amplifier,
-                    )
-                    .await?;
+                    // The villager's *persistent* offer list (issue #245's
+                    // third piece), not a fresh stateless one —
+                    // `MobSim::villager_offers` reads the mob's own live
+                    // profession/level itself, so `OpenTrade`'s `profession`
+                    // is no longer needed here.
+                    let offers =
+                        mobs.with(|sim| sim.villager_offers(entity_id, reputation, hero_of_the_village_amplifier));
+                    open_merchant_screen(conn, proto, state, &offers, level, xp, next_window_id).await?;
                     // `SelectTrade`'s only lookup: which villager this
                     // connection is currently trading with. Set unconditionally
                     // on every open (not merged/kept) — a second interact while
@@ -11819,6 +11777,15 @@ where
                 // `/worldborder`'s read/write surface (issue #580) — the same
                 // shared `BorderFeed` this connection already holds.
                 border: Some(border),
+                // `dispatch_play_packet` does not carry an `AccessHandle` in
+                // its own signature (adding one would widen this crate's
+                // single largest parameter list for one command family) —
+                // `/op`/`/deop`/`/whitelist` typed in chat report the same
+                // "no access list configured" refusal an offline-world RCON
+                // caller would see. RCON (`crate::rcon::run_command_as`) is
+                // the one production `Some`; see `access_commands`'s module
+                // doc for why that scoping is deliberate, not a gap.
+                access: None,
             };
             match commands.builtins.run(&command_world, &source, &command) {
                 Some(outcome) => {

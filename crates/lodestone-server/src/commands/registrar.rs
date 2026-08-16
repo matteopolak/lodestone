@@ -198,6 +198,17 @@ pub struct CommandWorld<'a> {
     /// be an island rather than a degradation. A live connection's
     /// `ChatCommand` arm always has the real handle and passes `Some`.
     pub border: Option<&'a crate::border::BorderFeed>,
+    /// `/op`/`/deop`/`/whitelist`'s read/write surface (`crate::access`) —
+    /// previously nothing in this crate's command tree could reach
+    /// [`crate::access::AccessLists`] at all, so an admin's only way to
+    /// grant/revoke operator status or manage the whitelist was to stop the
+    /// server and hand-edit `ops.json`/`whitelist.json`. `Option` for the
+    /// same reason [`Self::mobs`]/[`Self::border`] are: RCON
+    /// ([`crate::rcon::RconConfig::access`]) is today's one production
+    /// `Some`, matching vanilla's own admin surface (the dedicated-server
+    /// console/RCON, not in-game chat) — see `crate::commands::access_commands`'s
+    /// own module doc for the rest of that scoping.
+    pub access: Option<&'a crate::access::AccessHandle>,
 }
 
 /// Read/write access to the world's game rules, abstracted over *which* store.
