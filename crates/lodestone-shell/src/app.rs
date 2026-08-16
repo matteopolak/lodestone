@@ -711,6 +711,12 @@ struct WindowApp {
     /// re-seed and any later real unlock would be silently treated as "already
     /// seen".
     recipe_toast_synced: bool,
+    /// `RecipeDisplayId`s [`WindowApp::sync_recipe_book_seen`] has already
+    /// reported to the server this session (vanilla's
+    /// `ServerboundRecipeBookSeenRecipePacket`), so a recipe whose button
+    /// stays on screen for many frames is reported exactly once rather than
+    /// every frame the panel stays open on that page.
+    recipe_book_seen: HashSet<i32>,
     /// The bundle slot currently tracking a scroll-driven selection highlight
     /// (issue #616's `BUNDLE_ITEM_SELECTED` / #613's `SelectBundleItem`), or
     /// `None` when no bundle is being scrolled — see

@@ -3206,6 +3206,161 @@ fn a_non_notifying_unlock_never_toasts() {
     );
 }
 
+/// `RecipeBookSeenRecipe` (issue #613): the encoder existed in every protocol
+/// family and nothing anywhere called it. Drives the real chain: a real
+/// `WindowApp`, a real `ClientEvent::RecipeBookAdded` folded through the same
+/// `NetIngest` schedule the net thread runs, a recipe corpus loaded so the
+/// panel's page actually contains the unlocked result, and
+/// `drive_ui_from_session` itself, which is where `WindowApp::sync_recipe_book_seen`
+/// now lives.
+///
+/// Two properties: the recipe must actually be **on the open page** (vanilla
+/// only fires this for a `RecipeButton` that was populated, not for the whole
+/// corpus), and reporting it once must not report it again next frame — the
+/// dedup [`WindowApp::recipe_book_seen`] exists for.
+#[test]
+fn drive_ui_from_session_reports_a_visible_highlighted_recipe_as_seen_exactly_once() {
+    use crate::net::NetUpdate;
+    use lodestone_client::{ClientAction, ClientEvent};
+    use lodestone_game::item::ItemStack;
+    use lodestone_game::recipe::{Ingredient, Recipe, RecipeBook, ShapedRecipe};
+    use lodestone_model::event::RecipeBookEntry;
+
+    let torch_id: lodestone_model::Identifier = "minecraft:torch".parse().unwrap();
+    let mut book = RecipeBook::new();
+    book.insert(
+        torch_id.clone(),
+        Recipe::Shaped(ShapedRecipe::new(
+            1,
+            2,
+            vec![
+                Some(Ingredient::Item("minecraft:coal".parse().unwrap())),
+                Some(Ingredient::Item("minecraft:stick".parse().unwrap())),
+            ],
+            ItemStack::new(torch_id, 4),
+        )),
+    );
+
+    let torch = lodestone_data::items::item_id("minecraft:torch").expect("torch is in the census");
+    let crafting_table = lodestone_data::items::item_id("minecraft:crafting_table")
+        .expect("crafting_table is in the census");
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    app.recipe_book = Some(book);
+    let (net, actions, feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    app.sim.step(1.0 / 20.0);
+    app.ui.enter_dev_world();
+    app.ui.open_container();
+    app.recipe_panel.open = true;
+    // Drain the login-time traffic this harness generates so the assertion
+    // below is exactly the seen-recipe send, not an artifact of setup.
+    while actions.try_recv().is_ok() {}
+
+    app.sim
+        .net()
+        .expect("net attached above")
+        .ingest_session_event(ClientEvent::RecipeBookAdded {
+            entries: vec![RecipeBookEntry {
+                display_id: 3,
+                result_items: vec![torch],
+                station_items: vec![crafting_table],
+                notification: false,
+                highlight: true,
+            }],
+            replace: true,
+        });
+    app.drive_ui_from_session();
+
+    assert_eq!(
+        actions.try_recv(),
+        Ok(ClientAction::RecipeBookSeenRecipe { recipe: 3 }),
+        "a highlighted recipe visible on the open page must be reported seen"
+    );
+    assert!(
+        actions.try_recv().is_err(),
+        "exactly one report for one newly-shown recipe"
+    );
+
+    // The dedup control: the same recipe stays on the same page next frame,
+    // and must not be re-reported.
+    app.drive_ui_from_session();
+    assert!(
+        actions.try_recv().is_err(),
+        "a recipe already reported seen must not be reported again"
+    );
+}
+
+/// The control for the gate above: a highlighted recipe that is **not** on
+/// the currently open page (the panel is closed) must never be reported —
+/// vanilla only fires this for a populated `RecipeButton`.
+#[test]
+fn a_highlighted_recipe_is_not_reported_while_the_panel_is_closed() {
+    use crate::net::NetUpdate;
+    use lodestone_client::ClientEvent;
+    use lodestone_game::item::ItemStack;
+    use lodestone_game::recipe::{Ingredient, Recipe, RecipeBook, ShapedRecipe};
+    use lodestone_model::event::RecipeBookEntry;
+
+    let torch_id: lodestone_model::Identifier = "minecraft:torch".parse().unwrap();
+    let mut book = RecipeBook::new();
+    book.insert(
+        torch_id.clone(),
+        Recipe::Shaped(ShapedRecipe::new(
+            1,
+            2,
+            vec![
+                Some(Ingredient::Item("minecraft:coal".parse().unwrap())),
+                Some(Ingredient::Item("minecraft:stick".parse().unwrap())),
+            ],
+            ItemStack::new(torch_id, 4),
+        )),
+    );
+
+    let torch = lodestone_data::items::item_id("minecraft:torch").expect("torch is in the census");
+    let crafting_table = lodestone_data::items::item_id("minecraft:crafting_table")
+        .expect("crafting_table is in the census");
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    app.recipe_book = Some(book);
+    let (net, actions, feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    app.sim.step(1.0 / 20.0);
+    app.ui.enter_dev_world();
+    app.ui.open_container();
+    // Deliberately left closed, unlike the positive gate above.
+    assert!(!app.recipe_panel.open, "precondition: the panel starts closed");
+    while actions.try_recv().is_ok() {}
+
+    app.sim
+        .net()
+        .expect("net attached above")
+        .ingest_session_event(ClientEvent::RecipeBookAdded {
+            entries: vec![RecipeBookEntry {
+                display_id: 3,
+                result_items: vec![torch],
+                station_items: vec![crafting_table],
+                notification: false,
+                highlight: true,
+            }],
+            replace: true,
+        });
+    app.drive_ui_from_session();
+
+    assert!(
+        actions.try_recv().is_err(),
+        "a closed panel must never report a recipe seen, however unlocked it is"
+    );
+}
+
 /// The owner's report: right-clicking a server-side "server selector" opens a
 /// container, selecting a row makes the **server** close it, and our client
 /// showed the player's own inventory instead of returning to gameplay —

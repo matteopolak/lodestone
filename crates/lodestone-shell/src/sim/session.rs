@@ -1496,6 +1496,23 @@ impl Sim {
         }
     }
 
+    /// Report a recipe as seen — vanilla's `ServerboundRecipeBookSeenRecipePacket`,
+    /// sent from `LocalPlayer::removeRecipeHighlight`
+    /// (`RecipeBookComponent::recipeShown`, itself called from
+    /// `RecipeButton::init` for every highlighted recipe a page just placed a
+    /// button for). Clears the recipe's "new" tab-highlight and squeeze
+    /// animation server-side.
+    ///
+    /// `ClientAction::RecipeBookSeenRecipe` was already encoded by every
+    /// protocol family with no shell caller anywhere — the same
+    /// outbound-island shape [`Self::send_select_trade`]'s doc names.
+    /// Best-effort like the sends above it: a closed session drops it.
+    pub fn send_recipe_book_seen_recipe(&self, display_id: i32) {
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::RecipeBookSeenRecipe { recipe: display_id });
+        }
+    }
+
     /// Select a merchant trade row — vanilla's `ServerboundSelectTradePacket`
     /// (`MerchantScreen.postButtonClick`, `MerchantScreen.java`), sent
     /// when the player clicks a trade-list row (issue #245's UI half).

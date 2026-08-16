@@ -64,6 +64,7 @@ impl WindowApp {
             recipe_toasts: lodestone_game::recipe::RecipeToastQueue::new(),
             recipe_toast_seen: std::collections::HashSet::new(),
             recipe_toast_synced: false,
+            recipe_book_seen: std::collections::HashSet::new(),
             bundle_selection: None,
             // No session yet, so no weather cell to read; see
             // `install_session_render_sources`.
@@ -175,6 +176,7 @@ impl WindowApp {
         }
         self.restore_recipe_book_settings();
         self.sync_recipe_toasts();
+        self.sync_recipe_book_seen();
         // The credits screen (issue #192): `Sim::has_won()` is the ground
         // truth `NetUpdate::WinGame` sets in `poll_net`, reconciled here the
         // same way `is_dead()` is reconciled above. The `!= Screen::Credits`
@@ -426,6 +428,56 @@ impl WindowApp {
                 continue;
             };
             self.recipe_toasts.push(station, unlocked, now);
+        }
+    }
+
+    /// Report vanilla's "seen recipe" signal for every highlighted, unseen
+    /// recipe currently placed on the recipe-book panel's visible page —
+    /// vanilla's `RecipeButton::init` → `RecipeBookPage::recipeShown` →
+    /// `RecipeBookComponent::recipeShown` → `LocalPlayer::removeRecipeHighlight`
+    /// chain, which fires the instant a highlighted recipe's button is
+    /// populated onto a page the player can see, not on a click.
+    ///
+    /// Walked every frame the panel is open, the same shape as
+    /// [`Self::sync_recipe_toasts`] and [`Self::restore_recipe_book_settings`]:
+    /// only while `recipe_panel.open`, because vanilla only ever populates
+    /// `RecipeButton`s — and therefore only ever fires this — for a page
+    /// actually on screen, never for the whole corpus at once.
+    ///
+    /// [`Self::recipe_book_seen`] is this method's own "already reported" set,
+    /// separate from [`Self::recipe_toast_seen`]: a recipe can be seen (its
+    /// tab highlight cleared) without ever having raised a toast (highlight
+    /// and notification are independent `flags` bits), and the toast queue's
+    /// own dedup must not be reused to gate a differently-timed signal.
+    pub(super) fn sync_recipe_book_seen(&mut self) {
+        if !self.recipe_panel.open {
+            return;
+        }
+        let Some(menu) = self.active_container_menu() else {
+            return;
+        };
+        let Some(book_type) = super::recipe_panel::recipe_book_type_for(&menu) else {
+            return;
+        };
+        let (_, _, page_ids) = super::recipe_panel::recipe_panel_contents(
+            self.recipe_book.as_ref(),
+            &self.recipe_panel,
+            &menu,
+            book_type,
+        );
+        let sync = self.sim.known_recipes();
+        for id in &page_ids {
+            let Some(item_reg_id) = lodestone_data::items::item_id(&id.to_string()) else {
+                continue;
+            };
+            for (display_id, recipe) in sync.unlocked_producing(item_reg_id) {
+                if !recipe.highlight {
+                    continue;
+                }
+                if self.recipe_book_seen.insert(display_id) {
+                    self.sim.send_recipe_book_seen_recipe(display_id);
+                }
+            }
         }
     }
 
