@@ -35,6 +35,11 @@ pub(crate) struct AdvancementsFeed {
     progress: AdvancementProgress,
     toasts: AdvancementToastQueue,
     polled_at: Option<crate::platform::Instant>,
+    /// The tab index last reported to the server via
+    /// [`ClientAction::SeenAdvancements`](lodestone_model::ClientAction::SeenAdvancements),
+    /// or `None` when the screen is considered closed as far as that report is
+    /// concerned (either genuinely closed, or not yet opened this session).
+    reported_tab: Option<usize>,
 }
 
 impl WindowApp {
@@ -60,6 +65,25 @@ impl WindowApp {
                 .toasts
                 .observe(&self.advancement_feed.progress);
         }
+
+        // Report the open tab to the server — including the default tab on
+        // first open, and every subsequent switch — and report the close
+        // once. `ClientAction::SeenAdvancements` was already encoded by every
+        // protocol family with no shell caller anywhere before this.
+        if let Some((report, new_reported)) = seen_advancements_transition(
+            self.ui.is_advancements(),
+            self.nav.advancements().tab,
+            self.advancement_feed.reported_tab,
+        ) {
+            let id = report.and_then(|tab| {
+                advancement_tabs()
+                    .get(tab)
+                    .and_then(|advancement| advancement.id.parse().ok())
+            });
+            self.sim.send_seen_advancements(id);
+            self.advancement_feed.reported_tab = new_reported;
+        }
+
         self.advancement_feed.progress.clone()
     }
 
@@ -262,4 +286,91 @@ pub(super) fn advancements_title(
         return String::new();
     };
     translate(root.title).unwrap_or_else(|| root.title_en.to_string())
+}
+
+/// What to report to the server this frame given whether the Advancements
+/// screen is open, which tab index is currently selected, and which tab
+/// index was last reported.
+///
+/// A free, pure function — not a `WindowApp` method — so it is unit-testable
+/// without a live `Sim`/net loop, the same shape
+/// `net::auto_resource_pack_response` uses for the same reason.
+///
+/// Returns `None` when there is nothing new to report this frame. Otherwise
+/// `Some((report, new_reported))`: `report` is `Some(tab)` to send `OPENED_TAB`
+/// for that tab or `None` to send `CLOSED_SCREEN`; `new_reported` is what
+/// [`AdvancementsFeed::reported_tab`] should become. Reporting is **on change
+/// only**, a deliberate simplification of vanilla's real trigger (which fires
+/// once per tab per screen lifetime, the first time its widgets are actually
+/// rendered) — this crate tracks no broader "already seen" set, only the
+/// single last-reported tab: opening always reports (`reported` starts
+/// `None`, which never equals `Some(tab)`), switching tabs while open reports
+/// the new tab, and the open-to-closed transition reports the close exactly
+/// once.
+fn seen_advancements_transition(
+    is_open: bool,
+    tab: usize,
+    reported: Option<usize>,
+) -> Option<(Option<usize>, Option<usize>)> {
+    if is_open {
+        if reported == Some(tab) {
+            None
+        } else {
+            Some((Some(tab), Some(tab)))
+        }
+    } else if reported.is_some() {
+        Some((None, None))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod seen_advancements_tests {
+    use super::seen_advancements_transition;
+
+    #[test]
+    fn opening_reports_the_default_tab() {
+        assert_eq!(
+            seen_advancements_transition(true, 0, None),
+            Some((Some(0), Some(0)))
+        );
+    }
+
+    #[test]
+    fn staying_on_the_same_tab_reports_nothing() {
+        assert_eq!(seen_advancements_transition(true, 2, Some(2)), None);
+    }
+
+    #[test]
+    fn switching_tabs_reports_the_new_one() {
+        assert_eq!(
+            seen_advancements_transition(true, 3, Some(2)),
+            Some((Some(3), Some(3)))
+        );
+    }
+
+    #[test]
+    fn closing_reports_once_and_clears_the_reported_state() {
+        assert_eq!(
+            seen_advancements_transition(false, 0, Some(3)),
+            Some((None, None))
+        );
+    }
+
+    #[test]
+    fn staying_closed_reports_nothing() {
+        assert_eq!(seen_advancements_transition(false, 0, None), None);
+    }
+
+    #[test]
+    fn a_closed_report_is_not_repeated_next_frame() {
+        // Simulates two frames in a row with the screen closed: the first
+        // reports the close and clears `reported`, the second (using that
+        // cleared state) reports nothing.
+        let first = seen_advancements_transition(false, 0, Some(1));
+        assert_eq!(first, Some((None, None)));
+        let (_, new_reported) = first.unwrap();
+        assert_eq!(seen_advancements_transition(false, 0, new_reported), None);
+    }
 }
