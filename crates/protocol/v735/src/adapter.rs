@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use lodestone_core::{Ctx, Decode, Encode, Reader};
+use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
 use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_data::mob_effects::mob_effect_name;
 use lodestone_model::{
@@ -1068,6 +1068,111 @@ impl V735Adapter {
                 window_id: i32::from(body.window_id),
             })]);
         }
+        if packet_id == play::clientbound::CRAFT_PROGRESS_BAR {
+            // `packet_craft_progress_bar` (minecraft-data 1.16.2, identical
+            // to 1.8's/1.12.2's shape): `windowId: u8, property: i16, value:
+            // i16` — no synchronization state id, so it maps directly onto
+            // the same `ContainerData` 26.2's `minecraft:container_set_data`
+            // produces.
+            let mut reader = Reader::new(payload);
+            let window_id = i32::from(reader.u8().map_err(dec_err)?);
+            let property = i32::from(reader.i16().map_err(dec_err)?);
+            let value = i32::from(reader.i16().map_err(dec_err)?);
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ContainerData {
+                window_id,
+                property,
+                value,
+            })]);
+        }
+        if packet_id == play::clientbound::TITLE {
+            // Action-multiplexed, verified field-by-field against
+            // minecraft-data's 1.16.2 `packet_title` (identical to 1.12.2's
+            // shape): the `text` switch has three cases (`0`/`1`/`2` —
+            // title/subtitle/action-bar), the fade-in/stay/fade-out case
+            // (times) is `3`, and the two argument-less actions are `4`/`5`.
+            // Action-bar text always renders as an overlay, so it maps to
+            // the same `Chat` `GameInfo` event the dedicated
+            // `SET_ACTION_BAR_TEXT` packet uses on 26.2 — 1.16.5 predates
+            // that split packet, it rides this one instead. `4`/`5` are
+            // clear-then-reset, the same pair 26.2's `CLEAR_TITLES` folds
+            // into one `resetTimes` bool.
+            let mut reader = Reader::new(payload);
+            let action = reader.var_i32().map_err(dec_err)?;
+            let directive = match action {
+                0 => {
+                    let text = reader.string(32_767).map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::TitleText {
+                        text: Text::from_json(&text),
+                    })
+                }
+                1 => {
+                    let text = reader.string(32_767).map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::SubtitleText {
+                        text: Text::from_json(&text),
+                    })
+                }
+                2 => {
+                    let text = reader.string(32_767).map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::Chat {
+                        text: Text::from_json(&text),
+                        kind: ChatKind::GameInfo,
+                        sender: None,
+                        ack: None,
+                    })
+                }
+                3 => {
+                    let fade_in = reader.i32().map_err(dec_err)?;
+                    let stay = reader.i32().map_err(dec_err)?;
+                    let fade_out = reader.i32().map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::TitlesAnimation {
+                        fade_in,
+                        stay,
+                        fade_out,
+                    })
+                }
+                4 => Directive::Emit(ClientEvent::TitlesCleared { reset_times: false }),
+                5 => Directive::Emit(ClientEvent::TitlesCleared { reset_times: true }),
+                other => {
+                    return Err(AdapterError::Decode(format!("unknown title action {other}")));
+                }
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![directive]);
+        }
+        if packet_id == play::clientbound::TAB_COMPLETE {
+            // `packet_tab_complete` (minecraft-data 1.16.2, its data source
+            // for 1.16.5 per `dataPaths.json`): `transactionId: varint,
+            // start: varint, length: varint, matches: [{match: string,
+            // tooltip: option<string>}]` — full parity with 26.2's
+            // `CommandSuggestionsResponse` shape (1.13 introduced this
+            // range-based form), so no client-side bookkeeping is needed the
+            // way v47/v340 need for their pre-1.13 bare-string-list shape.
+            let mut reader = Reader::new(payload);
+            let id = reader.var_i32().map_err(dec_err)?;
+            let start = reader.var_i32().map_err(dec_err)?;
+            let length = reader.var_i32().map_err(dec_err)?;
+            let count = reader.var_i32().map_err(dec_err)?;
+            let count = usize::try_from(count)
+                .map_err(|_| AdapterError::Decode(format!("invalid tab_complete count {count}")))?;
+            let mut suggestions = Vec::with_capacity(count.min(reader.remaining()));
+            for _ in 0..count {
+                let text = reader.string(32_767).map_err(dec_err)?;
+                let tooltip = if reader.bool().map_err(dec_err)? {
+                    Some(Text::from_json(&reader.string(32_767).map_err(dec_err)?).to_legacy_string())
+                } else {
+                    None
+                };
+                suggestions.push(lodestone_model::CommandSuggestionEntry { text, tooltip });
+            }
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::CommandSuggestionsReceived {
+                id,
+                start,
+                length,
+                suggestions,
+            })]);
+        }
         if packet_id == play::clientbound::PLAYER_INFO {
             // A single `action` applies to every entry in the packet —
             // verified against minecraft-data's 1.16.2 `packet_player_info`
@@ -1852,6 +1957,12 @@ impl VersionAdapter for V735Adapter {
             // item-metadata gap — but the transaction id and registry alone are
             // enough to make an encoded click be rejected by a live server (via a
             // failed transaction) rather than silently applied. Refused loudly.
+            //
+            // This is also why clientbound `TRANSACTION` has no decode arm: it
+            // exists solely to accept or reject a `window_click` this client
+            // cannot yet send, so nothing here could ever receive one — wiring a
+            // decode for it now would be an event with no producer that could
+            // trigger it. It becomes real work once `ContainerClick` above is.
             ClientAction::ContainerClick { .. } => Err(AdapterError::Unsupported(
                 "protocol 754 ContainerClick needs a client-tracked transaction id (model carries \
                  only the 1.17+ state_id) and an item registry; refused rather than sending bytes \
@@ -1983,11 +2094,16 @@ impl VersionAdapter for V735Adapter {
             ClientAction::SeenAdvancements { .. } => Err(AdapterError::Unsupported(
                 "protocol 735 advancements encoding is not yet implemented".to_owned(),
             )),
-            ClientAction::CommandSuggestion { .. } => Err(AdapterError::Unsupported(
-                "protocol 735's tab-complete packet has a different wire shape and is not yet \
-                 implemented"
-                    .to_owned(),
-            )),
+            ClientAction::CommandSuggestion { id, command } => {
+                // `packet_tab_complete` (minecraft-data 1.16.2): `transactionId:
+                // varint, text: string` — full parity with 26.2's serverbound
+                // shape, so `id` round-trips on the wire itself and needs no
+                // client-side bookkeeping the way v47/v340 need.
+                let mut writer = Writer::default();
+                writer.var_i32(*id);
+                writer.string(command);
+                Ok(Some((play::serverbound::TAB_COMPLETE, writer.into_vec())))
+            }
             ClientAction::PaddleBoat { .. } => Err(AdapterError::Unsupported(
                 "protocol 735 paddle boat encoding is not yet implemented".to_owned(),
             )),

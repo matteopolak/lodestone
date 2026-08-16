@@ -99,6 +99,47 @@ pub struct V340Adapter {
     /// build a [`lodestone_model::DimensionId`]. Defaults to `0` (overworld),
     /// matching `shape`'s own default.
     current_dimension: Arc<Mutex<i32>>,
+    /// The most recently sent `ClientAction::CommandSuggestion`, remembered
+    /// because 1.12.2's `tab_complete` reply carries neither a transaction id
+    /// nor a replacement range (both added in 1.13) — see the `TAB_COMPLETE`
+    /// arm in `handle_play` for how this is used to reconstruct them.
+    pending_tab_complete: Arc<Mutex<Option<PendingTabComplete>>>,
+}
+
+/// The half of an outgoing `command_suggestion` request 1.12.2's reply does
+/// not echo back, kept just long enough to answer the one reply it produced.
+/// Overwritten rather than queued: only one tab-complete request is ever in
+/// flight, mirroring `lodestone_shell::chat::SuggestionRequests`'s own
+/// single-`pending` design on the other end of this same round trip.
+#[derive(Debug, Clone)]
+struct PendingTabComplete {
+    id: i32,
+    command: String,
+}
+
+/// Byte offset of the last whitespace-delimited word in `text` — the start of
+/// the range 1.12.2's `tab_complete` matches replace, since this version
+/// sends full replacement strings for that word rather than a
+/// server-declared range. Mirrors `CommandSuggestions.getLastWordIndex`'s
+/// shape: the offset just past the final run of whitespace, or `0` when
+/// there is none.
+fn last_word_index(text: &str) -> usize {
+    let mut result = 0;
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_whitespace() {
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            result = j;
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    result
 }
 
 impl Default for V340Adapter {
@@ -115,7 +156,20 @@ impl V340Adapter {
         Self {
             shape: Arc::new(Mutex::new(ChunkShape::overworld())),
             current_dimension: Arc::new(Mutex::new(0)),
+            pending_tab_complete: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Records the request `TAB_COMPLETE`'s reply cannot echo back itself.
+    fn remember_tab_complete(&self, id: i32, command: String) {
+        if let Ok(mut pending) = self.pending_tab_complete.lock() {
+            *pending = Some(PendingTabComplete { id, command });
+        }
+    }
+
+    /// Takes (and clears) the pending tab-complete request, if any.
+    fn take_tab_complete(&self) -> Option<PendingTabComplete> {
+        self.pending_tab_complete.lock().ok().and_then(|mut p| p.take())
     }
 
     /// Records whether the joined `dimension` carries sky light so subsequent
@@ -1066,6 +1120,110 @@ impl V340Adapter {
                 state_id: 0,
                 slot: i32::from(body.slot),
                 item,
+            })]);
+        }
+        if packet_id == play::clientbound::CRAFT_PROGRESS_BAR {
+            // `packet_craft_progress_bar` (minecraft-data 1.12.2, identical
+            // to 1.8's shape): `windowId: u8, property: i16, value: i16` — no
+            // synchronization state id, so it maps directly onto the same
+            // `ContainerData` 26.2's `minecraft:container_set_data` produces.
+            let mut reader = Reader::new(payload);
+            let window_id = i32::from(reader.u8().map_err(dec_err)?);
+            let property = i32::from(reader.i16().map_err(dec_err)?);
+            let value = i32::from(reader.i16().map_err(dec_err)?);
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ContainerData {
+                window_id,
+                property,
+                value,
+            })]);
+        }
+        if packet_id == play::clientbound::TITLE {
+            // Action-multiplexed, verified field-by-field against
+            // minecraft-data's 1.12.2 `packet_title`: unlike 1.8, the `text`
+            // switch has three cases (`0`/`1`/`2` — title/subtitle/action-bar,
+            // the action-bar case 1.12.2 adds), which pushes the
+            // fade-in/stay/fade-out case (times) to `3` and the two
+            // argument-less actions to `4`/`5`. Action-bar text always
+            // renders as an overlay, so it maps to the same `Chat`
+            // `GameInfo` event the dedicated `SET_ACTION_BAR_TEXT` packet
+            // uses on 26.2 — there is no such dedicated packet before 1.17,
+            // it rides this one instead. `4`/`5` are clear-then-reset, the
+            // same pair 26.2's `CLEAR_TITLES` folds into one `resetTimes`
+            // bool.
+            let mut reader = Reader::new(payload);
+            let action = reader.var_i32().map_err(dec_err)?;
+            let directive = match action {
+                0 => {
+                    let text = reader.string(32_767).map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::TitleText {
+                        text: Text::from_json(&text),
+                    })
+                }
+                1 => {
+                    let text = reader.string(32_767).map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::SubtitleText {
+                        text: Text::from_json(&text),
+                    })
+                }
+                2 => {
+                    let text = reader.string(32_767).map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::Chat {
+                        text: Text::from_json(&text),
+                        kind: ChatKind::GameInfo,
+                        sender: None,
+                        ack: None,
+                    })
+                }
+                3 => {
+                    let fade_in = reader.i32().map_err(dec_err)?;
+                    let stay = reader.i32().map_err(dec_err)?;
+                    let fade_out = reader.i32().map_err(dec_err)?;
+                    Directive::Emit(ClientEvent::TitlesAnimation {
+                        fade_in,
+                        stay,
+                        fade_out,
+                    })
+                }
+                4 => Directive::Emit(ClientEvent::TitlesCleared { reset_times: false }),
+                5 => Directive::Emit(ClientEvent::TitlesCleared { reset_times: true }),
+                other => {
+                    return Err(AdapterError::Decode(format!("unknown title action {other}")));
+                }
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![directive]);
+        }
+        if packet_id == play::clientbound::TAB_COMPLETE {
+            // `packet_tab_complete` (minecraft-data 1.12.2, identical to
+            // 1.8's shape): a bare `matches: string[]`, no transaction id and
+            // no replacement range (both added in 1.13). See v47's identical
+            // arm and `pending_tab_complete`'s doc for why the id/range come
+            // from the outgoing request instead of the wire.
+            let mut reader = Reader::new(payload);
+            let count = reader.var_i32().map_err(dec_err)?;
+            let count = usize::try_from(count)
+                .map_err(|_| AdapterError::Decode(format!("invalid tab_complete count {count}")))?;
+            let mut matches = Vec::with_capacity(count.min(reader.remaining()));
+            for _ in 0..count {
+                matches.push(reader.string(32_767).map_err(dec_err)?);
+            }
+            reader.ensure_empty().map_err(dec_err)?;
+            let pending = self.take_tab_complete();
+            let (id, command) = pending
+                .map(|p| (p.id, p.command))
+                .unwrap_or_else(|| (0, String::new()));
+            let start = last_word_index(&command) as i32;
+            let length = command.len() as i32 - start;
+            let suggestions = matches
+                .into_iter()
+                .map(|text| lodestone_model::CommandSuggestionEntry { text, tooltip: None })
+                .collect();
+            return Ok(vec![Directive::Emit(ClientEvent::CommandSuggestionsReceived {
+                id,
+                start,
+                length,
+                suggestions,
             })]);
         }
         if packet_id == play::clientbound::PLAYER_INFO {
@@ -2331,12 +2489,19 @@ impl VersionAdapter for V340Adapter {
             // Container clicks predate the modern `state_id` reconciliation.
             // Faithfully encoding 1.12's `window_click` needs a client-tracked
             // transaction id (the `action` counter, absent from the model which
-            // carries only the 1.17+ `state_id`; this adapter is stateless), an
+            // carries only the 1.17+ `state_id`; this adapter tracks other
+            // per-connection state, `pending_tab_complete`, but not this), an
             // item registry (`ResourceKey` -> numeric id) for the clicked stack,
             // and item metadata/damage that pre-1.13 slots carry but the model's
             // `ItemStack { item, count }` cannot express. Refused loudly rather
             // than encoded with wrong bytes that a live server rejects via a
             // failed transaction (silently dropping the click).
+            //
+            // This is also why clientbound `TRANSACTION` has no decode arm: it
+            // exists solely to accept or reject a `window_click` this client
+            // cannot yet send, so nothing here could ever receive one — wiring a
+            // decode for it now would be an event with no producer that could
+            // trigger it. It becomes real work once `ContainerClick` above is.
             ClientAction::ContainerClick { .. } => Err(AdapterError::Unsupported(
                 "protocol 340 ContainerClick needs a client-tracked transaction id (model carries \
                  only the 1.17+ state_id), an item registry, and item metadata the model's \
@@ -2470,11 +2635,22 @@ impl VersionAdapter for V340Adapter {
             ClientAction::SeenAdvancements { .. } => Err(AdapterError::Unsupported(
                 "protocol 340 advancements encoding is not yet implemented".to_owned(),
             )),
-            ClientAction::CommandSuggestion { .. } => Err(AdapterError::Unsupported(
-                "protocol 340's tab-complete packet has a different wire shape and is not yet \
-                 implemented"
-                    .to_owned(),
-            )),
+            ClientAction::CommandSuggestion { id, command } => {
+                // `packet_tab_complete` (minecraft-data 1.12.2): `text:
+                // string, assumeCommand: bool, lookedAtBlock:
+                // option<position>`. `command` already carries the leading
+                // slash the way every chat-box request does, so
+                // `assumeCommand` (for callers that omit it, e.g. a command
+                // block) stays `false`; this client never tracks a
+                // looked-at block either. `id` has nowhere to go on the
+                // wire and is remembered instead (see `pending_tab_complete`).
+                self.remember_tab_complete(*id, command.clone());
+                let mut writer = Writer::default();
+                writer.string(command);
+                writer.bool(false);
+                writer.bool(false);
+                Ok(Some((play::serverbound::TAB_COMPLETE, writer.into_vec())))
+            }
             ClientAction::PaddleBoat { .. } => Err(AdapterError::Unsupported(
                 "protocol 340 paddle boat encoding is not yet implemented".to_owned(),
             )),
