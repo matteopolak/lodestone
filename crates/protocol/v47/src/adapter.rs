@@ -14,13 +14,14 @@ use lodestone_model::{
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk, WorldSink};
 
+use crate::entity_metadata;
 use crate::entity_types;
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::chunk::{ChunkShape, MapChunk, MapChunkBulk};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::entity::{
-    EntityDestroy, EntityLook, EntityMoveLook, EntityTeleport, EntityVelocityPacket, RelEntityMove,
-    SpawnEntityLiving, SpawnObject,
+    EntityDestroy, EntityLook, EntityMetadataPacket, EntityMoveLook, EntityTeleport,
+    EntityVelocityPacket, RelEntityMove, SpawnEntityLiving, SpawnObject,
 };
 use crate::packets::game::{
     BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook, EntityAction,
@@ -78,6 +79,16 @@ const REL_PITCH: i8 = 0x10;
 #[derive(Debug, Clone)]
 pub struct V47Adapter {
     shape: Arc<Mutex<ChunkShape>>,
+    /// Entity id -> canonical mob-type identifier (e.g. `"minecraft:sheep"`),
+    /// recorded at `spawn_entity_living` and consulted by the standalone
+    /// `entity_metadata` packet, which carries no type of its own. Without
+    /// this, the incremental packet cannot know which
+    /// [`crate::entity_metadata::MobProfile`] applies and would have to guess
+    /// — exactly the index-collision trap the metadata module's docs warn
+    /// about. Entries are removed on `entity_destroy` so this stays bounded
+    /// to currently-tracked mobs rather than growing for the life of the
+    /// connection.
+    entity_kinds: Arc<Mutex<HashMap<i32, &'static str>>>,
 }
 
 impl Default for V47Adapter {
@@ -93,6 +104,36 @@ impl V47Adapter {
     pub fn new() -> Self {
         Self {
             shape: Arc::new(Mutex::new(ChunkShape::overworld())),
+            entity_kinds: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Records the canonical mob-type name a `spawn_entity_living` announced
+    /// for `entity_id`, so a later standalone `entity_metadata` packet for
+    /// the same id can be folded with the right [`entity_metadata::fold`]
+    /// gating.
+    fn remember_kind(&self, entity_id: i32, kind: &'static str) {
+        if let Ok(mut kinds) = self.entity_kinds.lock() {
+            kinds.insert(entity_id, kind);
+        }
+    }
+
+    /// Returns the canonical mob-type name recorded for `entity_id`, if this
+    /// adapter saw it spawn as a mob.
+    fn kind_for(&self, entity_id: i32) -> Option<&'static str> {
+        self.entity_kinds
+            .lock()
+            .ok()
+            .and_then(|kinds| kinds.get(&entity_id).copied())
+    }
+
+    /// Forgets every id in `entity_ids` — called on `entity_destroy` so the
+    /// map does not grow for the life of the connection.
+    fn forget_kinds(&self, entity_ids: &[i32]) {
+        if let Ok(mut kinds) = self.entity_kinds.lock() {
+            for id in entity_ids {
+                kinds.remove(id);
+            }
         }
     }
 
@@ -552,13 +593,14 @@ impl V47Adapter {
             // mobs carry no UUID.
             let body: SpawnEntityLiving = decode_body(payload)?;
             let type_id = i32::from(body.kind);
-            let entity_type = entity_types::mob_type_name(type_id)
-                .ok_or_else(|| {
-                    AdapterError::Decode(format!("unknown mob type id {type_id} in spawn"))
-                })?
+            let kind_name = entity_types::mob_type_name(type_id).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown mob type id {type_id} in spawn"))
+            })?;
+            let entity_type = kind_name
                 .parse()
                 .map_err(|_| AdapterError::Decode(format!("mob type id {type_id} is not a key")))?;
-            return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+            self.remember_kind(body.entity_id, kind_name);
+            let mut directives = vec![Directive::Emit(ClientEvent::EntitySpawned {
                 entity_id: body.entity_id,
                 uuid: None,
                 entity_type,
@@ -573,7 +615,21 @@ impl V47Adapter {
                     f64::from(body.velocity_y) / VELOCITY_SCALE,
                     f64::from(body.velocity_z) / VELOCITY_SCALE,
                 )),
-            })]);
+            })];
+            // 1.8 embeds the mob's *entire* registered DataWatcher in the
+            // spawn packet itself (confirmed against `DataWatcher.a`, which
+            // iterates every entry unconditionally — unlike the incremental
+            // `entity_metadata` packet's dirty-only `DataWatcher.b`), so this
+            // is real initial state, not a synthesized default the way
+            // 26.2's adapter has to for sheep/creeper.
+            let metadata = entity_metadata::fold(Some(kind_name), &body.metadata);
+            if !metadata.is_empty() {
+                directives.push(Directive::Emit(ClientEvent::EntityMetadataUpdated {
+                    entity_id: body.entity_id,
+                    metadata,
+                }));
+            }
+            return Ok(directives);
         }
         if packet_id == play::clientbound::SPAWN_ENTITY {
             // Object spawn. The trailing velocity is present only when
@@ -717,8 +773,29 @@ impl V47Adapter {
             // and since landed) encodes both the length and each element as a
             // varint, replacing the former hand-decoded loop.
             let body: EntityDestroy = decode_body_exact(payload)?;
+            self.forget_kinds(&body.entity_ids);
             return Ok(vec![Directive::Emit(ClientEvent::EntityRemoved {
                 entity_ids: body.entity_ids,
+            })]);
+        }
+        if packet_id == play::clientbound::ENTITY_METADATA {
+            // The incremental metadata packet carries no type of its own —
+            // only `spawn_entity_living` names the mob, so a later delta for
+            // the same id is gated by whatever `remember_kind` recorded at
+            // spawn. An id this adapter never saw spawn (a player, an object,
+            // or an entity that spawned before this connection existed) folds
+            // with `None`, which only reads the universal Entity/EntityLiving
+            // base fields — never a class-specific index it cannot safely
+            // gate.
+            let body: EntityMetadataPacket = decode_body_exact(payload)?;
+            let kind = self.kind_for(body.entity_id);
+            let metadata = entity_metadata::fold(kind, &body.metadata);
+            if metadata.is_empty() {
+                return Ok(vec![]);
+            }
+            return Ok(vec![Directive::Emit(ClientEvent::EntityMetadataUpdated {
+                entity_id: body.entity_id,
+                metadata,
             })]);
         }
         if packet_id == play::clientbound::KICK_DISCONNECT {

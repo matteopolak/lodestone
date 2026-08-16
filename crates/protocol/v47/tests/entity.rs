@@ -10,14 +10,16 @@
 //! outside any float tolerance, so it cannot slip through.
 
 use lodestone_core::{Ctx, Encode, Reader, Writer};
-use lodestone_model::{ClientEvent, ConnectionState, Directive, EntityMovement, VersionAdapter};
+use lodestone_model::{
+    ClientEvent, ConnectionState, Directive, EntityMovement, EntityVariant, VersionAdapter,
+};
 use lodestone_v47::V47Adapter;
 use lodestone_v47::packet_ids::play;
 use lodestone_v47::packets::entity::{
-    EntityLook, EntityMoveLook, EntityTeleport, EntityVelocityPacket, RelEntityMove,
-    SpawnEntityLiving,
+    EntityLook, EntityMetadataPacket, EntityMoveLook, EntityTeleport, EntityVelocityPacket,
+    RelEntityMove, SpawnEntityLiving,
 };
-use lodestone_v47::packets::metadata::EntityMetadata;
+use lodestone_v47::packets::metadata::{EntityMetadata, MetadataEntry, MetadataValue};
 use lodestone_world::World;
 
 const CTX: Ctx = Ctx { version: 47 };
@@ -47,6 +49,16 @@ fn empty_metadata() -> EntityMetadata {
     // The 1.8 metadata list is terminated by a single 0x7F byte.
     let mut reader = Reader::new(&[0x7Fu8]);
     <EntityMetadata as lodestone_core::Decode>::decode(&mut reader, CTX).expect("empty metadata")
+}
+
+/// Dispatches through an adapter the caller supplies, rather than a fresh
+/// one — needed to exercise `spawn_entity_living` -> `entity_metadata`
+/// sequencing, where the second packet's interpretation depends on state the
+/// first one recorded.
+fn dispatch_with(adapter: &V47Adapter, packet_id: i32, payload: &[u8]) -> Vec<Directive> {
+    adapter
+        .handle_packet(&mut World::new(), ConnectionState::Play, packet_id, payload)
+        .expect("handle_packet")
 }
 
 const EPS: f64 = 1e-9;
@@ -368,6 +380,183 @@ fn named_entity_spawn_resolves_player_and_uuid() {
             assert!((pos.y - 64.0).abs() < EPS);
         }
         other => panic!("expected EntitySpawned player, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entity metadata — the DataWatcher table, wired end to end.
+// ---------------------------------------------------------------------------
+
+fn sheep_metadata(color: u8, sheared: bool) -> EntityMetadata {
+    let mut byte = color & 0x0F;
+    if sheared {
+        byte |= 0x10;
+    }
+    EntityMetadata(vec![MetadataEntry {
+        key: 16,
+        value: MetadataValue::Byte(byte as i8),
+    }])
+}
+
+#[test]
+fn spawn_entity_living_dispatches_metadata_alongside_the_spawn_event() {
+    // Pairwise-distinct sheep colour/sheared so a transposition of the two
+    // bit ranges cannot survive: colour 11 (not 0/1), sheared true.
+    let payload = encode(&SpawnEntityLiving {
+        entity_id: 7,
+        kind: 91, // sheep
+        x: 0,
+        y: 0,
+        z: 0,
+        yaw: 0,
+        pitch: 0,
+        head_pitch: 0,
+        velocity_x: 0,
+        velocity_y: 0,
+        velocity_z: 0,
+        metadata: sheep_metadata(11, true),
+    });
+    match dispatch(play::clientbound::SPAWN_ENTITY_LIVING, &payload).as_slice() {
+        [
+            Directive::Emit(ClientEvent::EntitySpawned { entity_id, .. }),
+            Directive::Emit(ClientEvent::EntityMetadataUpdated {
+                entity_id: meta_id,
+                metadata,
+            }),
+        ] => {
+            assert_eq!(*entity_id, 7);
+            assert_eq!(*meta_id, 7);
+            assert_eq!(
+                metadata.variant,
+                Some(EntityVariant::Dyed {
+                    color: 11,
+                    sheared: true
+                })
+            );
+        }
+        other => panic!("expected EntitySpawned then EntityMetadataUpdated, got {other:?}"),
+    }
+}
+
+#[test]
+fn standalone_entity_metadata_uses_the_type_recorded_at_spawn() {
+    let adapter = V47Adapter::new();
+
+    let spawn_payload = encode(&SpawnEntityLiving {
+        entity_id: 55,
+        kind: 91, // sheep
+        x: 0,
+        y: 0,
+        z: 0,
+        yaw: 0,
+        pitch: 0,
+        head_pitch: 0,
+        velocity_x: 0,
+        velocity_y: 0,
+        velocity_z: 0,
+        metadata: sheep_metadata(3, false),
+    });
+    dispatch_with(&adapter, play::clientbound::SPAWN_ENTITY_LIVING, &spawn_payload);
+
+    // A later incremental update re-dyes and shears the same sheep. If the
+    // adapter forgot (or never recorded) that entity 55 is a sheep, this
+    // would fall back to the universal-base-only fold and `variant` would
+    // stay `None` — the exact index-collision trap the metadata module's
+    // docs describe.
+    let update_payload = encode(&EntityMetadataPacket {
+        entity_id: 55,
+        metadata: sheep_metadata(9, true),
+    });
+    match dispatch_with(&adapter, play::clientbound::ENTITY_METADATA, &update_payload).as_slice() {
+        [
+            Directive::Emit(ClientEvent::EntityMetadataUpdated { entity_id, metadata }),
+        ] => {
+            assert_eq!(*entity_id, 55);
+            assert_eq!(
+                metadata.variant,
+                Some(EntityVariant::Dyed {
+                    color: 9,
+                    sheared: true
+                })
+            );
+        }
+        other => panic!("expected EntityMetadataUpdated with sheep variant, got {other:?}"),
+    }
+}
+
+#[test]
+fn standalone_entity_metadata_for_an_untracked_id_still_folds_the_universal_base() {
+    // No prior spawn recorded entity 999's type. The sheep-shaped wool byte
+    // at index 16 must NOT be read as a variant (that would require knowing
+    // this is a sheep) — but the universal on-fire flag at index 0 is always
+    // safe to interpret regardless of class.
+    let adapter = V47Adapter::new();
+    let mut md = sheep_metadata(11, true);
+    md.0.push(MetadataEntry {
+        key: 0,
+        value: MetadataValue::Byte(0x01), // on fire
+    });
+    let payload = encode(&EntityMetadataPacket {
+        entity_id: 999,
+        metadata: md,
+    });
+    match dispatch_with(&adapter, play::clientbound::ENTITY_METADATA, &payload).as_slice() {
+        [
+            Directive::Emit(ClientEvent::EntityMetadataUpdated { entity_id, metadata }),
+        ] => {
+            assert_eq!(*entity_id, 999);
+            assert_eq!(metadata.flags, Some(0x01));
+            assert_eq!(
+                metadata.variant, None,
+                "an untracked id must not have its wool byte read as a variant"
+            );
+        }
+        other => panic!("expected EntityMetadataUpdated with only base fields, got {other:?}"),
+    }
+}
+
+#[test]
+fn entity_destroy_forgets_the_recorded_type_so_a_stale_id_cannot_leak_state() {
+    let adapter = V47Adapter::new();
+
+    let spawn_payload = encode(&SpawnEntityLiving {
+        entity_id: 3,
+        kind: 91, // sheep
+        x: 0,
+        y: 0,
+        z: 0,
+        yaw: 0,
+        pitch: 0,
+        head_pitch: 0,
+        velocity_x: 0,
+        velocity_y: 0,
+        velocity_z: 0,
+        metadata: sheep_metadata(0, false),
+    });
+    dispatch_with(&adapter, play::clientbound::SPAWN_ENTITY_LIVING, &spawn_payload);
+
+    let mut w = Writer::default();
+    w.var_i32(1); // count
+    w.var_i32(3); // the sheep's id
+    dispatch_with(&adapter, play::clientbound::ENTITY_DESTROY, &w.into_vec());
+
+    // A later `entity_metadata` for the same numeric id (e.g. reused by the
+    // server for an unrelated entity) must not still be folded as a sheep.
+    let update_payload = encode(&EntityMetadataPacket {
+        entity_id: 3,
+        metadata: sheep_metadata(5, true),
+    });
+    match dispatch_with(&adapter, play::clientbound::ENTITY_METADATA, &update_payload).as_slice() {
+        [] => {}
+        [
+            Directive::Emit(ClientEvent::EntityMetadataUpdated { metadata, .. }),
+        ] => {
+            assert_eq!(
+                metadata.variant, None,
+                "id 3 was destroyed; its old sheep type must not be reused"
+            );
+        }
+        other => panic!("unexpected directives after destroy: {other:?}"),
     }
 }
 
