@@ -51,6 +51,7 @@ pub mod spawn_stage;
 pub mod spawners;
 pub mod structure;
 pub mod surface;
+pub mod table_resolver;
 
 /// The numeric core, re-exported so every pre-split path keeps resolving.
 ///
