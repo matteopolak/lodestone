@@ -806,13 +806,6 @@ impl Menu {
         self.carried = normalize_opt(stack);
     }
 
-    /// Returns the player-inventory container index used for native swap
-    /// addressing.
-    #[must_use]
-    pub fn player_container(&self) -> usize {
-        self.player_container
-    }
-
     /// Snapshots every menu slot's contents in menu-slot order.
     #[must_use]
     pub fn snapshot(&self) -> Vec<Option<ItemStack>> {

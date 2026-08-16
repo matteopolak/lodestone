@@ -194,15 +194,6 @@ pub struct PlayerChatMessage {
 }
 
 impl PlayerChatMessage {
-    /// The content to decorate: the server's `unsigned_content` if present, else
-    /// the signed plaintext as a literal (mirrors vanilla `decoratedContent`).
-    #[must_use]
-    pub fn decorated_content(&self) -> Text {
-        self.unsigned_content
-            .clone()
-            .unwrap_or_else(|| Text::literal(self.signed_content.clone()))
-    }
-
     /// Whether the message carries a signature.
     #[must_use]
     pub fn is_signed(&self) -> bool {
