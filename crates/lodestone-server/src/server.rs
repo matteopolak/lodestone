@@ -3993,6 +3993,7 @@ where
             | ServerBound::RenameItem { .. }
             | ServerBound::ContainerButtonClick { .. }
             | ServerBound::SetCommandBlock { .. }
+            | ServerBound::SignUpdate { .. }
             | ServerBound::PickItemFromBlock { .. }
             | ServerBound::PickItemFromEntity { .. }
             | ServerBound::TeleportToEntity { .. }
@@ -7113,7 +7114,7 @@ where
             // gap.
             let obstructed = player_pos.is_some_and(|feet| placement_obstructs_placer(target, &state, feet));
             if !obstructed {
-            if let Some((entity_block, entity)) = block_entity_for_item(item) {
+            if let Some((entity_block, mut entity)) = block_entity_for_item(item) {
                 // The two sources must agree on the block name, or we would
                 // register a furnace at a position holding some other block.
                 // `lodestone-data`'s `the_block_entity_blocks_still_resolve_
@@ -7124,6 +7125,15 @@ where
                     entity_block, block_name,
                     "block-entity table and item census disagree on {item}"
                 );
+                // `SignItem.useOn` → `SignBlock.openTextEdit` →
+                // `setAllowedPlayerEditor(player.getUUID())`: the placer is
+                // granted edit permission on the sign they just placed, the
+                // one grant site this crate models (see `SignData::editor`'s
+                // own doc for the other vanilla grant site this does not
+                // reach yet).
+                if let crate::block_entities::BlockEntity::Sign(sign) = &mut entity {
+                    sign.editor = Some(placer);
+                }
                 block_entities.with(|registry| registry.insert(target, entity));
             }
             source.set_block(target.x, target.y, target.z, &state);
@@ -10453,6 +10463,21 @@ where
                     block_ticks.request_scheduled_ticks(crate::command_block::ticks_after_schedule(pos));
                 }
             }
+        }
+        // Issue #616's remainder. `ServerGamePacketListenerImpl.handleSignUpdate`:
+        // strip legacy formatting codes from every line, then
+        // `updateSignText`'s own gate (not waxed, `editor` matches) decides
+        // whether the write actually lands. This crate grants `editor` only
+        // at placement (see `crate::block_entities::SignData`'s own doc), so
+        // in practice this succeeds exactly once per sign, right after it is
+        // placed.
+        ServerBound::SignUpdate { pos, is_front_text, lines } => {
+            let stripped = lines.map(|line| crate::block_entities::strip_sign_formatting(&line));
+            block_entities.with(|registry| {
+                if let Some(entity) = registry.get_mut(pos) {
+                    crate::block_entities::apply_sign_update(entity, player_uuid, is_front_text, stripped);
+                }
+            });
         }
         // The enchanting table's "choose an offer" button
         // (`EnchantmentMenu.clickMenuButton`) — issue #253's other last-mile

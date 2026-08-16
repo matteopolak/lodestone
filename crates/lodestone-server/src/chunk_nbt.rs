@@ -1283,6 +1283,55 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             }
             ("minecraft:spawner", fields)
         }
+        // `SignText.DIRECT_CODEC`: `messages`/`color`/`has_glowing_text` per
+        // side, under `front_text`/`back_text`, plus a sibling `is_waxed` —
+        // read off `crate::block_entities::SignData`'s own doc comment, which
+        // cites the real wire probe this shape was confirmed against
+        // (`lodestone_world::sign_text`'s module doc). `messages` elements
+        // are **JSON-serialized text**, not the NBT-structural component
+        // shape every other resolved text in this crate uses — a bare
+        // `"hello"` line is stored as the 7-character string `"hello"`,
+        // quotes included, matching what a bare string component serializes
+        // to. `serde_json::to_string` on a `&String` produces exactly that
+        // (proper JSON escaping included, unlike a hand-rolled
+        // quote-and-concatenate). Colour/glow are not modelled (see
+        // `SignData`'s own doc for why), so every side is written black and
+        // unglowing — the codec's own defaults, and what `SignText::parse`
+        // falls back to for an absent field anyway.
+        BlockEntity::Sign(sign) => {
+            let side = |lines: &[String; 4]| {
+                Nbt::Compound(vec![
+                    ("has_glowing_text".to_owned(), Nbt::Byte(0)),
+                    ("color".to_owned(), Nbt::String("black".to_owned())),
+                    (
+                        "messages".to_owned(),
+                        Nbt::List {
+                            element_type: NbtTag::String,
+                            elements: lines
+                                .iter()
+                                .map(|line| {
+                                    Nbt::String(
+                                        serde_json::to_string(line).unwrap_or_else(|_| "\"\"".to_owned()),
+                                    )
+                                })
+                                .collect(),
+                        },
+                    ),
+                ])
+            };
+            (
+                if sign.hanging {
+                    "minecraft:hanging_sign"
+                } else {
+                    "minecraft:sign"
+                },
+                vec![
+                    ("front_text".to_owned(), side(&sign.front)),
+                    ("back_text".to_owned(), side(&sign.back)),
+                    ("is_waxed".to_owned(), Nbt::Byte(i8::from(sign.waxed))),
+                ],
+            )
+        }
     };
 
     let mut fields = vec![
@@ -1554,6 +1603,77 @@ pub fn extras_from_nbt(nbt: &Nbt) -> ChunkExtras {
 /// self-consistent misunderstanding of it. `#[ignore]`d for the same reason
 /// that oracle is: it requires `.cache/mc/survival/world`, which is not repo
 /// state.
+/// [`block_entity_to_nbt`]'s new `Sign` arm, checked against the **real
+/// client-side decoder** (`lodestone_world::sign_text::SignText::parse`) —
+/// not a self-authored assertion of the NBT shape. This is the two-file join
+/// this crate's own evidence standards ask for: the producer here and the
+/// consumer in `lodestone-world` were written by different agents from the
+/// same wire probe (`docs/block-entity-renderers.md`), so agreement between
+/// them is real evidence rather than one implementation checking itself.
+#[cfg(test)]
+mod sign_nbt_tests {
+    use lodestone_world::{SignDyeColor, SignText};
+
+    use super::block_entity_to_nbt;
+    use crate::block_entities::{BlockEntity, SignData};
+    use lodestone_model::BlockPos;
+
+    /// A round trip through the real client parser: two distinct lines on
+    /// the front (pairwise-distinct from the back's own placeholder, so a
+    /// front/back transposition cannot survive), the back left blank, waxed
+    /// set — every field this arm writes, read back by the type that will
+    /// actually render it.
+    #[test]
+    fn a_signs_nbt_round_trips_through_the_real_client_decoder() {
+        let sign = SignData {
+            front: ["LODESTONE".to_owned(), "PROBE".to_owned(), String::new(), String::new()],
+            back: Default::default(),
+            waxed: true,
+            editor: None,
+            hanging: false,
+        };
+        let nbt = block_entity_to_nbt(BlockPos::new(1, 65, 1), &BlockEntity::Sign(sign));
+
+        let text = SignText::parse(&nbt);
+        assert_eq!(text.front.lines[0], "LODESTONE");
+        assert_eq!(text.front.lines[1], "PROBE");
+        assert_eq!(text.front.lines[2], "");
+        assert_eq!(text.front.color, SignDyeColor::Black);
+        assert!(!text.front.glowing);
+        assert_eq!(text.back.lines, ["", "", "", ""], "the back side must stay blank");
+        assert!(text.waxed, "the waxed flag must survive the round trip");
+
+        // Control: an unwaxed sign must decode as unwaxed — proves the
+        // `true` above is really carrying the field, not a decoder that
+        // always reads waxed.
+        let unwaxed = block_entity_to_nbt(
+            BlockPos::new(1, 65, 1),
+            &BlockEntity::Sign(SignData::default()),
+        );
+        assert!(!SignText::parse(&unwaxed).waxed);
+    }
+
+    /// A hanging sign gets the distinct `minecraft:hanging_sign` id — read
+    /// straight off the encoded `id` field, since [`SignText::parse`] itself
+    /// does not distinguish the two (it parses the same `front_text`/
+    /// `back_text`/`is_waxed` shape either way).
+    #[test]
+    fn a_hanging_sign_encodes_its_own_block_entity_type() {
+        let nbt = block_entity_to_nbt(
+            BlockPos::new(0, 70, 0),
+            &BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
+        );
+        let lodestone_core::Nbt::Compound(fields) = &nbt else {
+            panic!("must be a compound")
+        };
+        let id = fields
+            .iter()
+            .find(|(name, _)| name == "id")
+            .map(|(_, value)| value.clone());
+        assert_eq!(id, Some(lodestone_core::Nbt::String("minecraft:hanging_sign".to_owned())));
+    }
+}
+
 #[cfg(test)]
 mod intern_bound_tests {
     use std::path::{Path, PathBuf};

@@ -1346,6 +1346,24 @@ pub enum ServerBound {
         /// `COMMAND_BLOCK_FLAG_AUTOMATIC` — the "Always Active" toggle.
         automatic: bool,
     },
+    /// A sign's text-edit submission (`ServerboundSignUpdatePacket`, issue
+    /// #616's remainder). `crate::block_entities::apply_sign_update` is the
+    /// consumer: it re-checks vanilla's `SignBlockEntity.updateSignText` gate
+    /// (not waxed, and `editor` is the uuid `openTextEdit` granted) before
+    /// writing either side's four lines.
+    SignUpdate {
+        /// The target sign's block position.
+        pos: BlockPos,
+        /// Whether the front (vs. back) text is being edited.
+        is_front_text: bool,
+        /// The sign's four text lines, wire-shape only (raw, unstripped) —
+        /// matching every other packet-shaped variant's convention of doing
+        /// no interpretation in the protocol crate. `crate::server`'s
+        /// consumer runs `crate::block_entities::strip_sign_formatting` on
+        /// each line before anything else, matching `handleSignUpdate`'s own
+        /// `ChatFormatting::stripFormatting` map.
+        lines: [String; 4],
+    },
     /// A packet the loop does not need to act on (teleport confirmations,
     /// look-only or status-only movement, and several other decoded-but-
     /// unmodelled families — see `crates/protocol/v770/src/server_protocol.rs`'s
