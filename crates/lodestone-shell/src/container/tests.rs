@@ -1133,6 +1133,40 @@ fn hopper_slots_land_at_vanillas_real_positions_on_a_shorter_panel() {
     assert_eq!(at(5), Some((8.0, 51.0)));
 }
 
+/// The beacon's one payment slot lands at vanilla's real position
+/// (`BeaconMenu.java:50`), on a panel that is both wider (`230`, not `176`)
+/// and taller (`219`, not `166`) than the usual special layout — the two
+/// wrong hypotheses this rules out are reusing either the default panel
+/// width or the default `main_y = 84`.
+#[test]
+fn beacon_slot_lands_at_vanillas_real_position_on_a_wider_taller_panel() {
+    let beacon = Menu::beacon();
+    let layout = slot_layout(&beacon);
+    assert_eq!(layout.width, 230.0);
+    assert_eq!(
+        layout.height, 219.0,
+        "expected vanilla's real 219 — the wrong hypothesis (reusing \
+         main_y = 84 like most special layouts) would give 166"
+    );
+    let payment = layout.slots.iter().find(|s| s.menu_index == 0).unwrap();
+    assert_eq!((payment.x, payment.y), (136.0, 110.0));
+    // Main storage starts at x=36, y=137 — menu index 1 is the first main
+    // slot right after the single payment slot.
+    let main0 = layout.slots.iter().find(|s| s.menu_index == 1).unwrap();
+    assert_eq!((main0.x, main0.y), (36.0, 137.0));
+}
+
+/// [`background_kind`] keys the beacon off `special_layout`, not size: a
+/// same-sized (`1`) generic container must not draw the beacon sheet.
+#[test]
+fn background_kind_recognises_the_beacon() {
+    assert_eq!(background_kind(&Menu::beacon()), BackgroundKind::Beacon);
+    assert_eq!(
+        background_kind(&Menu::generic(1)),
+        BackgroundKind::Generic { rows: 1 }
+    );
+}
+
 /// The anvil's three slots land at vanilla's real positions
 /// (`AnvilMenu.java`), not [`generic_layout`]'s plain left-to-right
 /// row — and the panel is the real `176x166`, not whatever height a
@@ -1537,6 +1571,11 @@ fn synthetic_background_with_window_size(window_w: u32, window_h: u32) -> Contai
         "cartography_table",
         "dispenser",
         "hopper",
+        // The beacon screen (issue #613's `SetBeaconEffects` remainder) —
+        // loaded by `ContainerBackground::build` alongside the sixteen
+        // above, so a missing stand-in fails every test in this module
+        // rather than just the beacon ones.
+        "beacon",
         // The merchant screen (issue #245's UI half) — real `villager.png` is
         // `512x256`, but the stand-in only needs to exist; `whole_panel_sized`
         // grabs a `276x166` sub-rect regardless of the sheet's own dimensions,

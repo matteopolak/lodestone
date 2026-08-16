@@ -1332,6 +1332,25 @@ impl WindowApp {
                 );
                 Some(self.anvil_rename.value.clone())
             });
+            // The beacon screen's pending primary/secondary power selection
+            // (issue #613's `SetBeaconEffects` remainder).
+            // `BeaconSelection::sync` is vanilla's own
+            // `ContainerListener::dataChanged` — it re-derives the local
+            // selection from `container_data` properties `1`/`2` exactly
+            // when that pair changes (menu open, and every successful
+            // confirm), and otherwise leaves a pending local click alone.
+            // `None` off any non-beacon screen, matching `anvil_name` above;
+            // the state itself is not cleared on leaving the screen, only
+            // its value stops being read (see `WindowApp::beacon_selection`'s
+            // own doc).
+            if container_menu.is_some_and(|menu| {
+                menu.special_layout() == Some(lodestone_game::menu::SpecialLayout::Beacon)
+            }) && let Some(open) = open_menu.as_ref()
+            {
+                let primary_id = open.data.iter().find(|(p, _)| *p == 1).map_or(0, |(_, v)| *v);
+                let secondary_id = open.data.iter().find(|(p, _)| *p == 2).map_or(0, |(_, v)| *v);
+                self.beacon_selection.sync(primary_id, secondary_id);
+            }
             // Does the recipe-book panel own the pointer this frame? The *click*
             // path has consulted this predicate before the container's own hit
             // test since the panel landed (`handle_recipe_panel_click`); the draw
@@ -1432,7 +1451,11 @@ impl WindowApp {
                     self.sim.has_infinite_materials(),
                     self.sim.xp().map_or(0, |(level, _)| level),
                 )
-                .with_anvil_name(anvil_name.as_deref());
+                .with_anvil_name(anvil_name.as_deref())
+                .with_beacon_selection(
+                    self.beacon_selection.primary.as_ref(),
+                    self.beacon_selection.secondary.as_ref(),
+                );
             // `render_with_icons_scaled`, **not** `render_scaled`: the latter
             // hardcodes `depth: None, models: None`, so `want_models` was always
             // false and `push_item_model` returned early. Flat sprite icons still

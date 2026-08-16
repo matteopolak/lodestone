@@ -77,6 +77,11 @@ pub struct ContainerBackground {
     /// placement is unaffected (see [`Self::quads`]'s `whole_panel_sized`),
     /// only the sub-rect grabbed from it (`276×166`) differs.
     merchant: ResourceLocation,
+    /// `textures/gui/container/beacon.png` (issue #613's `SetBeaconEffects`
+    /// remainder) — a `256×256` sheet like every non-merchant one above, but
+    /// a taller-than-usual `230×219` whole-panel blit
+    /// (`BeaconScreen.java`'s `super(menu, inventory, title, 230, 219)`).
+    beacon: ResourceLocation,
     /// The creative screen's three sheets (issue #158) — `tab_items`,
     /// `tab_item_search`, `tab_inventory`. Same family as every sheet above:
     /// loose `textures/gui/container/**` art with no `.mcmeta` and no
@@ -124,6 +129,9 @@ pub(super) enum BackgroundKind {
     /// `276×166`, not `176×166` — see [`SpecialLayout::Merchant`]'s doc
     /// comment.
     Merchant,
+    /// `230×219`, not `176×166` — see [`SpecialLayout::Beacon`]'s doc
+    /// comment.
+    Beacon,
 }
 
 /// Mirrors [`slot_layout`]'s own dispatch, **including** its
@@ -146,11 +154,13 @@ pub(super) enum BackgroundKind {
 /// `blit(texture, x, y, 0, 0, imageWidth, imageHeight)` uses the vanilla
 /// `176×166` default, none override `imageWidth`/`imageHeight` — re-verified
 /// against `AbstractContainerScreen.java`'s own default constructor for
-/// the six added by #28, not merely assumed to match the first four). The one
-/// exception is [`BackgroundKind::Hopper`]: `HopperScreen`'s constructor
-/// explicitly passes `176, 133` (`HopperScreen.java`), so its blit is
-/// `176×133`, not `166` — [`ContainerBackground::quads`] special-cases it
-/// rather than reusing the `whole_panel` closure's hardcoded size.
+/// the six added by #28, not merely assumed to match the first four). Three
+/// exceptions pass a non-default size to their own `super(...)` constructor
+/// and [`ContainerBackground::quads`] special-cases each rather than reusing
+/// the `whole_panel` closure's hardcoded size: [`BackgroundKind::Hopper`]
+/// (`176, 133`, `HopperScreen.java`), [`BackgroundKind::Merchant`] (`276,
+/// 166`, `MerchantScreen.java`) and [`BackgroundKind::Beacon`] (`230, 219`,
+/// `BeaconScreen.java`).
 pub(super) fn background_kind(menu: &Menu) -> BackgroundKind {
     match menu.special_layout() {
         Some(SpecialLayout::Anvil) => return BackgroundKind::Anvil,
@@ -167,6 +177,7 @@ pub(super) fn background_kind(menu: &Menu) -> BackgroundKind {
         Some(SpecialLayout::Dispenser) => return BackgroundKind::Dispenser,
         Some(SpecialLayout::Hopper) => return BackgroundKind::Hopper,
         Some(SpecialLayout::Merchant) => return BackgroundKind::Merchant,
+        Some(SpecialLayout::Beacon) => return BackgroundKind::Beacon,
         None => {}
     }
     match menu.kind() {
@@ -230,6 +241,8 @@ impl ContainerBackground {
         // comment for why that needs no special handling here.
         let merchant = ResourceLocation::new("minecraft", "gui/container/villager")
             .expect("hardcoded location is always valid");
+        let beacon = ResourceLocation::new("minecraft", "gui/container/beacon")
+            .expect("hardcoded location is always valid");
         // The creative screen's three sheets (issue #158). Unlike the tab-button
         // and scroller art — which is `gui/sprites/**` and rides `GUI_SPRITES`
         // below — these are loose `gui/container/**` textures, so they need their
@@ -276,6 +289,7 @@ impl ContainerBackground {
         builder.load(manager, &dispenser)?;
         builder.load(manager, &hopper)?;
         builder.load(manager, &merchant)?;
+        builder.load(manager, &beacon)?;
         builder.load(manager, &creative_items)?;
         builder.load(manager, &creative_search)?;
         builder.load(manager, &creative_inventory)?;
@@ -321,6 +335,7 @@ impl ContainerBackground {
             dispenser,
             hopper,
             merchant,
+            beacon,
             creative_items,
             creative_search,
             creative_inventory,
@@ -652,6 +667,9 @@ impl ContainerBackground {
             BackgroundKind::Merchant => {
                 whole_panel_sized(&self.merchant, Self::MERCHANT_DECLARED, 276.0, 166.0)
             }
+            BackgroundKind::Beacon => {
+                whole_panel_sized(&self.beacon, Self::SHEET_DECLARED, 230.0, 219.0)
+            }
             BackgroundKind::Generic { rows } => {
                 let top_h = (rows * 18 + 17) as f32;
                 let (top_min, top_max) =
@@ -765,6 +783,7 @@ mod tests {
             "cartography_table",
             "dispenser",
             "hopper",
+            "beacon",
             // Real `villager.png` is `512x256` (`Self::MERCHANT_DECLARED`),
             // not `256x256`×scale like every sheet above — see that
             // constant's own doc.

@@ -493,16 +493,19 @@ impl ApplicationHandler for WindowApp {
                     )
                 {
                     // The merchant trade-list buttons get first refusal, then
-                    // the recipe-book panel (issue #163). The panel overlaps
-                    // the main panel's left edge at narrow canvases by
+                    // the beacon's power/confirm/cancel buttons (issue #613),
+                    // then the recipe-book panel (issue #163). The panel
+                    // overlaps the main panel's left edge at narrow canvases by
                     // `container.rs`'s documented design, so testing it
                     // *after* the slot layout would make its own widgets
-                    // unclickable there; the trade buttons never overlap a
-                    // real slot but follow the same first-refusal shape for
-                    // the reason `handle_merchant_click`'s own doc gives. Only
-                    // a press is offered to either: a release landing there
-                    // must still reach `MenuInput::release` so an in-flight
-                    // drag that started on a real slot can terminate.
+                    // unclickable there; the merchant and beacon buttons never
+                    // overlap a real slot (nor, by construction, each other —
+                    // each only ever fires on its own `special_layout`) but
+                    // follow the same first-refusal shape for the reason
+                    // `handle_merchant_click`'s own doc gives. Only a press is
+                    // offered to any of these: a release landing there must
+                    // still reach `MenuInput::release` so an in-flight drag
+                    // that started on a real slot can terminate.
                     // Deliberately not an early `return`: the tail of
                     // `window_event` latches `quit_requested`, and returning
                     // from here would skip it.
@@ -510,10 +513,14 @@ impl ApplicationHandler for WindowApp {
                         matches!(state, ElementState::Pressed) && menu_button == MenuButton::Left;
                     let consumed_by_merchant =
                         is_left_press && self.handle_merchant_click(&menu, w, h);
+                    let consumed_by_beacon = !consumed_by_merchant
+                        && is_left_press
+                        && self.handle_beacon_click(&menu, w, h);
                     let consumed_by_recipe_panel = !consumed_by_merchant
+                        && !consumed_by_beacon
                         && is_left_press
                         && self.handle_recipe_panel_click(&menu, w, h);
-                    if !consumed_by_merchant && !consumed_by_recipe_panel {
+                    if !consumed_by_merchant && !consumed_by_beacon && !consumed_by_recipe_panel {
                         // **`hit_test_with_book`, not `hit_test_with_scale`.** This is
                         // the one click path that was still testing against an
                         // unshifted panel while `redraw` drew a shifted one
