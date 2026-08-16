@@ -648,6 +648,44 @@ impl RenderState {
             // is not the model, so without it every wolf breed shares one bind group
             // and all nine draw pale. See `EntityDrawBatch::variant_sheet`.
             let sheet = e.variant_sheet;
+
+            // The water-clip mask: a **second**, separately-pipelined instance
+            // for this same boat, at the same feet/yaw/pitch/scale but resolved
+            // to an entirely different rig (`"boat_water_patch"`) — see
+            // `EntityPipeline::water_mask_pipeline`'s doc for why this closes
+            // the owner report "placing down a boat still shows water through
+            // the bottom". `ends_with("_boat")` also matches `_chest_boat`
+            // (`"oak_chest_boat".ends_with("_boat")` is `true`), which is
+            // exactly right: vanilla's `BoatRenderer` submits this mask for
+            // both. `_raft`/`_chest_raft` never match, matching
+            // `RaftRenderer`'s own empty `submitTypeAdditions` — see
+            // `lodestone_assets::entity_models::boat_water_patch_model`'s doc
+            // for why rafts get none of this. Pushed into the *same* `groups`
+            // key as the boat's own instance above: the patch shares no
+            // colour with anything (`write_mask` is empty), so `white`
+            // riding along is inert, and keeping one key means one fewer
+            // linear scan of `groups` per boat rather than two.
+            if e.type_path.as_ref().ends_with("_boat")
+                && let Some(patch) = self.entities.models.resolve_animated(
+                    "boat_water_patch",
+                    e.feet,
+                    e.yaw,
+                    e.pitch,
+                    e.scale,
+                    &e.anim,
+                    0.0,
+                    0.0,
+                )
+            {
+                let patch = patch.with_light(entity_light(&self.entity_light, e));
+                match groups.iter_mut().position(|(hurt, flash, url, s, _)| {
+                    *hurt == e.hurt && *flash == white && *url == skin && *s == sheet
+                }) {
+                    Some(i) => groups[i].4.push(patch),
+                    None => groups.push((e.hurt, white, skin.clone(), sheet, vec![patch])),
+                }
+            }
+
             match groups.iter_mut().position(|(hurt, flash, url, s, _)| {
                 *hurt == e.hurt && *flash == white && *url == skin && *s == sheet
             }) {

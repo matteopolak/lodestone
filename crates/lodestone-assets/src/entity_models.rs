@@ -2293,13 +2293,54 @@ fn boat_hull() -> PartDef {
 }
 
 /// `BoatModel.createBoatModel`: hull + both paddles, no chest. Sheet 128×64.
-/// (`createWaterPatch`'s 0×0-sheet overlay quad is vanilla's water-clip patch,
-/// not a textured model part, and is intentionally not ported.)
+/// (`createWaterPatch`'s own invisible clip quad is [`boat_water_patch_model`],
+/// a separate corpus entry rather than a child of this part tree — see its
+/// own doc for why.)
 pub fn boat_model() -> EntityModelDef {
     EntityModelDef {
         texture_width: 128,
         texture_height: 64,
         root: boat_hull(),
+    }
+}
+
+/// `BoatModel.createWaterPatch`: an invisible depth-only mask shaped like a
+/// **mirror** of the hull's own `bottom` plank — same box, offset the other
+/// way (`y = -3.0` here against `bottom`'s `y = 3.0`) — that fills the boat's
+/// hollow interior. Owner report: "placing down a boat still shows water
+/// through the bottom". The hull is five thin planks around an open top, so
+/// looking down (or across, at a grazing angle) into an occupied or empty
+/// boat has a real gap between them; without this patch, the translucent
+/// water surface underneath draws straight through it. Vanilla closes the
+/// gap not with a visible floor but with **depth only**: this model is
+/// submitted through `EntityPipeline::water_mask_pipeline` (colour writes
+/// disabled, depth writes on, texture bound but never sampled into the
+/// framebuffer) rather than the normal textured entity pipeline, so it
+/// occludes the water pass's depth test while remaining itself invisible —
+/// whatever would have been visible with no boat there at all (sky, terrain,
+/// nothing) still shows through the hollow, exactly as vanilla's is.
+///
+/// A **separate corpus entry**, not a child part of [`boat_model`]/
+/// [`chest_boat_model`]'s own tree: every part of one `PartDef` draws through
+/// the *same* pipeline in one batch (`prepare_entities`), and this needs a
+/// different one. `BoatRenderer`'s own constructor bakes one shared
+/// `ModelLayers.BOAT_WATER_PATCH` regardless of chest-or-not
+/// (`.cache/mc/26.2/client-src`'s `BoatRenderer.java`), so one entry serves
+/// both here too.
+///
+/// **Rafts get none of this.** `RaftRenderer` does not override
+/// `AbstractBoatRenderer.submitTypeAdditions`, whose default body is empty —
+/// so `"raft"`/`"chest_raft"` never resolve to this model, matching vanilla's
+/// real (if inconsistent) behaviour: a raft's water is not masked either.
+pub fn boat_water_patch_model() -> EntityModelDef {
+    EntityModelDef {
+        texture_width: 128,
+        texture_height: 64,
+        root: PartDef::new(PartPose::ZERO).with_child(
+            "water_patch",
+            PartDef::new(PartPose::offset_and_rotation(0.0, -3.0, 1.0, PI / 2.0, 0.0, 0.0))
+                .with_cube(cube([-14.0, -9.0, -3.0], [28.0, 16.0, 3.0], [0.0, 0.0])),
+        ),
     }
 }
 
@@ -5304,6 +5345,17 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
             texture: EntityTexture::Fixed("entity/chest_boat/oak"),
             build: chest_boat_model,
         },
+        // The invisible water-clip mask both `boat` and `chest_boat` draw a
+        // second, separately-pipelined instance of — see
+        // `boat_water_patch_model`'s own doc. The texture is real (so this
+        // loads exactly like every other corpus entry) but never sampled into
+        // the framebuffer: `EntityPipeline::water_mask_pipeline` disables
+        // colour writes.
+        EntityModelEntry {
+            name: "boat_water_patch",
+            texture: EntityTexture::Fixed("entity/boat/oak"),
+            build: boat_water_patch_model,
+        },
         EntityModelEntry {
             name: "raft",
             texture: EntityTexture::Fixed("entity/boat/bamboo"),
@@ -5576,4 +5628,102 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
             build: trident_model,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The corpus really carries the water-clip mask, not just the standalone
+    /// builder function — the island shape this repo's own defects keep
+    /// taking: a function can be correct and unit-testable while nothing
+    /// wires it into the table `EntityModelSet::load()` actually walks.
+    #[test]
+    fn the_water_patch_is_a_real_corpus_entry() {
+        let entry = entity_models()
+            .into_iter()
+            .find(|e| e.name == "boat_water_patch")
+            .expect("boat_water_patch must be registered in entity_models()");
+        assert_eq!((entry.build)(), boat_water_patch_model());
+    }
+
+    /// **Both hypotheses, from the real vanilla source.** `BoatModel.createWaterPatch`
+    /// (`.cache/mc/26.2/client-src`) builds the *same* box `boat_hull`'s own
+    /// `"bottom"` child does — `addBox(-14, -9, -3, 28, 16, 3)` at `texOffs(0, 0)`
+    /// — but at pose `offsetAndRotation(0, -3, 1, PI/2, 0, 0)`, where `"bottom"`
+    /// sits at `offsetAndRotation(0, 3, 1, PI/2, 0, 0)`. Only the pivot's `y`
+    /// differs, and only in sign: everything else — the box, the rotation, `x`,
+    /// `z` — must be bit-identical, or the patch sits somewhere vanilla's own
+    /// hollow-interior fix does not, and the gap it exists to close reopens on
+    /// one side.
+    #[test]
+    fn the_water_patch_mirrors_the_hulls_own_bottom_plank() {
+        let hull = boat_hull();
+        let bottom = hull
+            .children
+            .iter()
+            .find(|(name, _)| name == "bottom")
+            .map(|(_, part)| part)
+            .expect("boat_hull must carry a \"bottom\" child");
+
+        let patch_model = boat_water_patch_model();
+        assert_eq!(patch_model.texture_width, 128, "same sheet width as the boat itself");
+        assert_eq!(patch_model.texture_height, 64, "same sheet height as the boat itself");
+        let (name, patch) = &patch_model.root.children[0];
+        assert_eq!(name, "water_patch");
+
+        // The one axis that must differ, and only in sign: this is the whole
+        // mechanism by which the patch sits *inside* the hollow rather than on
+        // the visible outer hull.
+        assert!(
+            (patch.pose.y - (-bottom.pose.y)).abs() < 1e-6,
+            "the patch's y pivot ({}) must be the *negation* of bottom's ({}), not a copy",
+            patch.pose.y,
+            bottom.pose.y
+        );
+        // The wrong-but-plausible neighbour: a straight copy of "bottom",
+        // which would draw the mask exactly where the visible hull already is
+        // and leave the actual gap (further up, inside the hollow) unmasked.
+        assert!(
+            (patch.pose.y - bottom.pose.y).abs() > 1.0,
+            "the patch must not merely copy bottom's pose, or it masks the wrong plane"
+        );
+
+        // Every other pose axis: identical.
+        assert!((patch.pose.x - bottom.pose.x).abs() < 1e-6, "x pivot must match");
+        assert!((patch.pose.z - bottom.pose.z).abs() < 1e-6, "z pivot must match");
+        assert!((patch.pose.x_rot - bottom.pose.x_rot).abs() < 1e-6, "x rotation must match");
+        assert!((patch.pose.y_rot - bottom.pose.y_rot).abs() < 1e-6, "y rotation must match");
+        assert!((patch.pose.z_rot - bottom.pose.z_rot).abs() < 1e-6, "z rotation must match");
+
+        // The box itself: bit-identical origin/size/tex_offset to `"bottom"`'s,
+        // per `BoatModel.createWaterPatch`'s own `texOffs(0, 0).addBox(-14, -9,
+        // -3, 28, 16, 3)` — the same literal `addBox` call `addCommonParts`
+        // makes for `"bottom"`.
+        assert_eq!(patch.cubes.len(), 1, "the patch is one box, not the whole hull");
+        assert_eq!(bottom.cubes.len(), 1);
+        assert_eq!(patch.cubes[0].origin, bottom.cubes[0].origin, "box origin must match");
+        assert_eq!(patch.cubes[0].size, bottom.cubes[0].size, "box size must match");
+        assert_eq!(
+            patch.cubes[0].tex_offset,
+            bottom.cubes[0].tex_offset,
+            "tex offset must match (irrelevant for colour, but a real transcription \
+             checks the whole literal, not just the parts that render differently)"
+        );
+    }
+
+    /// The negative control this pair needs: `chest_boat_model` must **not**
+    /// carry its own water-patch child — vanilla's `BoatRenderer` submits the
+    /// mask as a second model entirely, not folded into either boat variant's
+    /// own part tree (see `boat_water_patch_model`'s doc for why it is a
+    /// separate corpus entry).
+    #[test]
+    fn neither_boat_variant_carries_the_patch_as_its_own_child() {
+        for (label, model) in [("boat", boat_model()), ("chest_boat", chest_boat_model())] {
+            assert!(
+                !model.root.children.iter().any(|(name, _)| name == "water_patch"),
+                "{label} must not carry \"water_patch\" as a child part"
+            );
+        }
+    }
 }

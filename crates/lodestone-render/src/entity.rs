@@ -1124,7 +1124,18 @@ pub fn dying_entity_model_matrix(
 #[must_use]
 pub fn non_living_vehicle_placement(model_name: &str) -> Option<(f32, f32)> {
     match model_name {
-        "boat" | "chest_boat" | "raft" | "chest_raft" => Some((0.375, 90.0)),
+        // `"boat_water_patch"` joins this arm rather than getting its own:
+        // `AbstractBoatRenderer.submit` calls `submitTypeAdditions` (the
+        // water-patch submit) **inside the same `pushPose`/`popPose` block**
+        // as the main model, after the identical bob/rotate/flip/spin
+        // sequence — so the patch's placement transform is not merely
+        // *similar* to the boat's, it is the same pose-stack state the boat
+        // model itself just submitted through. Omitting it here would leave
+        // the mask floating at the wrong height and facing broadside, right
+        // back to the "water shows through the bottom" symptom this exists
+        // to fix, just from a mask sitting nowhere near the hull instead of
+        // no mask at all.
+        "boat" | "chest_boat" | "raft" | "chest_raft" | "boat_water_patch" => Some((0.375, 90.0)),
         "minecart" => Some((0.375, 0.0)),
         _ => None,
     }
@@ -4115,6 +4126,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **The water-clip mask reaches `resolve_animated` through the real
+    /// corpus loader, not just through its own standalone builder.** Owner
+    /// report: "placing down a boat still shows water through the bottom".
+    /// This is the render-layer half of the island check
+    /// `lodestone_assets::entity_models`'s own `the_water_patch_is_a_real_corpus_entry`
+    /// makes at the data layer: a name present in `entity_models()` still has
+    /// to survive `EntityModelSet::load()`'s baking and `canonical_model_name`'s
+    /// resolution before anything can draw it.
+    #[test]
+    fn boat_water_patch_resolves_through_the_real_corpus_loader() {
+        let models = EntityModelSet::load();
+        let anim = AnimInput::REST;
+        let instance = models
+            .resolve_animated("boat_water_patch", Vec3::new(1.0, 64.0, 2.0), 30.0, 0.0, 1.0, &anim, 0.0, 0.0)
+            .expect(
+                "\"boat_water_patch\" must resolve through the same corpus loader every real \
+                 boat instance goes through, or the fix is present in source and reaches no pixel",
+            );
+        assert_eq!(instance.model, "boat_water_patch");
+    }
+
+    /// **The mask must sit exactly where the boat itself is drawn, not merely
+    /// somewhere plausible.** `AbstractBoatRenderer.submit` calls
+    /// `submitTypeAdditions` (the water-patch submit) *inside* the same
+    /// `pushPose`/`popPose` block as the main model, after the identical
+    /// bob/rotate/flip/spin sequence — so the two must share one placement
+    /// transform, not two similar ones. Both hypotheses are checked: the
+    /// right one (`"boat_water_patch"` joins `non_living_vehicle_placement`'s
+    /// `"boat"` arm) and the wrong one this fix could easily have shipped
+    /// (falling through to the *living-entity* placement — a bare
+    /// `resolve`/`resolve_posed` matrix with no `0.375` bob and no `90°`
+    /// spin), which would leave the mask floating at the wrong height and
+    /// facing broadside to the hull it exists to seal.
+    #[test]
+    fn the_water_patch_shares_the_boats_own_placement_transform() {
+        let models = EntityModelSet::load();
+        let anim = AnimInput::REST;
+        let feet = Vec3::new(-4.0, 70.0, 11.0);
+        let boat = models
+            .resolve_animated("boat", feet, 217.0, 0.0, 1.0, &anim, 0.0, 0.0)
+            .expect("\"boat\" must resolve");
+        let patch = models
+            .resolve_animated("boat_water_patch", feet, 217.0, 0.0, 1.0, &anim, 0.0, 0.0)
+            .expect("\"boat_water_patch\" must resolve");
+        assert_eq!(
+            boat.transform, patch.transform,
+            "the mask's placement transform must be bit-identical to the boat's own, not a \
+             separately-derived approximation"
+        );
+
+        // The wrong hypothesis, computed from the *other* placement rule this
+        // fix could have fallen through to (a living-entity matrix, no bob,
+        // no spin) — must disagree, or this test cannot tell the two apart.
+        let living_matrix = crate::entity::EntityInstance::new(
+            "boat_water_patch",
+            models.get("boat_water_patch").expect("resolved above"),
+            feet,
+            217.0,
+            1.0,
+            &anim,
+        )
+        .transform;
+        assert_ne!(
+            boat.transform, living_matrix,
+            "the living-entity placement must differ from the vehicle one at this yaw, or \
+             the positive assertion above proves nothing"
+        );
     }
 
     /// A non-humanoid rig carries no armour, and that is the correct answer
