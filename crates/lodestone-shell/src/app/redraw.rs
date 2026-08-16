@@ -26,6 +26,16 @@ impl WindowApp {
         // clamped to vanilla's ten-tick catch-up budget, so a long stall is
         // dropped rather than replayed in a burst.
         let frame_start = Instant::now();
+        // Issue #613's `PingRequest` remainder — see `WindowApp::last_ping_request`'s
+        // own doc for why this is gated on F3 rather than sent every tick the
+        // way vanilla's ungated `PingDebugMonitor.tick` is. `send_ping_request`
+        // itself is best-effort (a closed session drops it silently), so this
+        // needs no separate "are we connected" check.
+        if should_send_ping_request(self.show_debug, self.last_ping_request, frame_start) {
+            let time_ms = i64::try_from(crate::platform::epoch_duration().as_millis()).unwrap_or(i64::MAX);
+            self.sim.send_ping_request(time_ms);
+            self.last_ping_request = Some(frame_start);
+        }
         let target_fps = self.current_target_fps(frame_start);
         let step = self.pacer.begin_frame(frame_start, target_fps);
         let dt = step.dt;
@@ -1893,5 +1903,59 @@ impl WindowApp {
             wgpu::PresentMode::AutoNoVsync
         };
         target.set_present_mode(gpu.device(), mode);
+    }
+}
+
+/// Whether `redraw`'s per-frame housekeeping should send one
+/// `ClientAction::PingRequest` right now (issue #613's `PingRequest`
+/// remainder) — pulled out as a pure function of its three inputs so the
+/// throttle can be checked with no window, no GPU and no session at all; see
+/// [`WindowApp::last_ping_request`]'s own doc for why F3 is the gate and one
+/// second is the interval.
+#[must_use]
+fn should_send_ping_request(show_debug: bool, last: Option<Instant>, now: Instant) -> bool {
+    show_debug && last.is_none_or(|last| now.duration_since(last) >= std::time::Duration::from_secs(1))
+}
+
+#[cfg(test)]
+mod ping_request_tests {
+    use super::*;
+
+    #[test]
+    fn never_sent_with_f3_closed_regardless_of_elapsed_time() {
+        let now = Instant::now();
+        assert!(!should_send_ping_request(false, None, now));
+        assert!(!should_send_ping_request(
+            false,
+            Some(now - std::time::Duration::from_secs(60)),
+            now
+        ));
+    }
+
+    #[test]
+    fn sends_immediately_the_first_time_f3_is_open() {
+        let now = Instant::now();
+        assert!(
+            should_send_ping_request(true, None, now),
+            "no prior send must not block the first one"
+        );
+    }
+
+    #[test]
+    fn throttles_to_once_per_second_while_f3_stays_open() {
+        let last = Instant::now();
+        assert!(
+            !should_send_ping_request(true, Some(last), last + std::time::Duration::from_millis(999)),
+            "999ms after the last send must not fire yet"
+        );
+        assert!(
+            should_send_ping_request(true, Some(last), last + std::time::Duration::from_secs(1)),
+            "a full second must fire"
+        );
+        assert!(should_send_ping_request(
+            true,
+            Some(last),
+            last + std::time::Duration::from_secs(5)
+        ));
     }
 }

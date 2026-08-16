@@ -72,6 +72,8 @@ impl WindowApp {
             merchant_selected: 0,
             anvil_rename: crate::container::AnvilRenameState::new(),
             beacon_selection: crate::container::beacon::BeaconSelection::new(),
+            pending_game_rules: None,
+            last_ping_request: None,
         }
     }
 
@@ -111,7 +113,19 @@ impl WindowApp {
         match self.sim.session_phase() {
             // LocalOnly never drives the menu — the dev world is already Playing.
             SessionPhase::LocalOnly | SessionPhase::Connecting => {}
-            SessionPhase::Connected => self.ui.session_ready(),
+            SessionPhase::Connected => {
+                self.ui.session_ready();
+                // Issue #592's Game Rules half: the integrated server only
+                // starts inside `begin_singleplayer`, so there was nothing to
+                // send the overrides to any earlier than the session's own
+                // first `Connected` frame. `take()` means a later frame
+                // (this arm runs every frame the session stays `Connected`,
+                // not just the transition into it) sends nothing a second
+                // time.
+                if let Some(entries) = self.pending_game_rules.take() {
+                    self.sim.send_set_game_rules(entries);
+                }
+            }
             SessionPhase::Ended(end) => {
                 // Only transition in once; re-setting every frame would keep
                 // re-latching the same reason (harmless but wasteful).
@@ -717,6 +731,17 @@ impl WindowApp {
         let world_type = match &launch {
             SingleplayerLaunch::Open(_) => crate::menu::create_world::WorldTypePreset::Normal,
             SingleplayerLaunch::Created { config, .. } => config.world_type,
+        };
+        // Issue #592's Game Rules half, same rule as `world_type` immediately
+        // above: only a **new** world carries a `WorldCreationConfig` to read
+        // overrides from, and an empty `Vec` (nothing touched) is left as
+        // `None` so `drive_ui_from_session` has nothing to send.
+        self.pending_game_rules = match &launch {
+            SingleplayerLaunch::Open(_) => None,
+            SingleplayerLaunch::Created { config, .. } if !config.game_rules.is_empty() => {
+                Some(config.game_rules.clone())
+            }
+            SingleplayerLaunch::Created { .. } => None,
         };
         // Issue #273's shell-side control: only `SingleplayerLaunch::Created`
         // carries a `WorldCreationConfig` to hold this on — `Open` (Play

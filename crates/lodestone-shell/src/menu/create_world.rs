@@ -155,8 +155,10 @@ use super::edit_box::EditBox;
 use super::focus::{FocusChildren, FocusSet, FocusTarget, KeyEvent, KeyOutcome};
 use super::layout;
 use super::nav::MenuKey;
+use super::options;
 use super::render::{Align, MenuFrame, MenuLabel, MenuRow, Origin, Slot, TabEntryView};
 use super::widget::Widget;
+use lodestone_server::game_rules::{GAME_RULES, GameRuleValue};
 
 // -- vanilla captions, verbatim from en_us.json --------------------------
 
@@ -193,6 +195,9 @@ pub const CANCEL_LABEL: &str = "Cancel";
 /// `selectWorld.mapType` — vanilla's own label for the World Type cycle
 /// button (`WorldTab.java`'s `typeButton`, `CreateWorldScreen.java`).
 pub const WORLD_TYPE_LABEL: &str = "World Type";
+/// `createWorld.customize.gameRules.title`-adjacent — vanilla's More tab
+/// button that opens `WorldCreationGameRulesScreen`.
+pub const GAME_RULES_BUTTON_LABEL: &str = "Game Rules...";
 
 /// `createWorld.tab.game.title`/`.world.title`/`.more.title`, verbatim from
 /// `en_us.json` — this screen's own tab bar (issue #567), built from the same
@@ -229,6 +234,7 @@ fn content_rows_for_tab(tab: usize) -> &'static [usize] {
             BONUS_CHEST_ROW,
             ONLINE_MODE_ROW,
         ],
+        MORE_TAB => &[GAME_RULES_ROW],
         _ => &[],
     }
 }
@@ -456,6 +462,14 @@ pub struct WorldCreationConfig {
     /// online mode — that path calls `IntegratedServer::publish`, which has
     /// no online-mode parameter.
     pub online_mode: bool,
+    /// Game rules that differ from their vanilla default (issue #592's More
+    /// tab), collected from [`CreateWorldNav`]'s own [`GameRulesEditor`] when
+    /// Create is pressed. Sent to the freshly-created singleplayer server as
+    /// [`lodestone_model::action::ClientAction::SetGameRules`] once the
+    /// session reaches Play — see `app/session.rs`'s `begin_singleplayer`.
+    /// Empty for a world whose rules were never touched, which sends nothing
+    /// rather than a no-op packet.
+    pub game_rules: Vec<(lodestone_model::ResourceKey, String)>,
 }
 
 impl Default for WorldCreationConfig {
@@ -475,6 +489,7 @@ impl Default for WorldCreationConfig {
             bonus_chest: false,
             allow_cheats: false,
             online_mode: false,
+            game_rules: Vec::new(),
         }
     }
 }
@@ -492,7 +507,10 @@ pub const ONLINE_MODE_ROW: usize = 7;
 pub const WORLD_TYPE_ROW: usize = 8;
 pub const CREATE_ROW: usize = 9;
 pub const CANCEL_ROW: usize = 10;
-const ROW_COUNT: usize = 11;
+/// More tab's one real row (issue #592's Game Rules half): opens the
+/// scrollable rule editor — see [`CreateWorldMode::GameRules`].
+pub const GAME_RULES_ROW: usize = 11;
+const ROW_COUNT: usize = 12;
 
 const SEED_CANVAS: (f32, f32) = (854.0, 480.0);
 
@@ -526,8 +544,8 @@ pub fn row_slot(row: usize) -> Slot {
     // share a `dy` (never shown at once, so sharing costs nothing) stay
     // visibly paired rather than restated at the same number twice.
     match row {
-        // Local row 0: Name / Seed.
-        NAME_FIELD | SEED_FIELD => {
+        // Local row 0: Name / Seed / More's one row (Game Rules).
+        NAME_FIELD | SEED_FIELD | GAME_RULES_ROW => {
             Slot { origin: Origin::ScreenTop, dx: X, dy: TOP, w: FIELD_W, h: super::render::EDIT_BOX_H }
         }
         // Local row 1: Game Mode / World Type.
@@ -598,6 +616,9 @@ pub struct CreateWorldWidgets {
     pub world_type: Widget,
     pub create: Widget,
     pub cancel: Widget,
+    /// More tab's Game Rules button (issue #592) — opens
+    /// [`CreateWorldMode::GameRules`].
+    pub game_rules: Widget,
 }
 
 impl FocusChildren for CreateWorldWidgets {
@@ -614,6 +635,7 @@ impl FocusChildren for CreateWorldWidgets {
             WORLD_TYPE_ROW => &self.world_type as &dyn FocusTarget,
             CREATE_ROW => &self.create as &dyn FocusTarget,
             CANCEL_ROW => &self.cancel as &dyn FocusTarget,
+            GAME_RULES_ROW => &self.game_rules as &dyn FocusTarget,
             _ => return None,
         })
     }
@@ -631,6 +653,7 @@ impl FocusChildren for CreateWorldWidgets {
             WORLD_TYPE_ROW => &mut self.world_type as &mut dyn FocusTarget,
             CREATE_ROW => &mut self.create as &mut dyn FocusTarget,
             CANCEL_ROW => &mut self.cancel as &mut dyn FocusTarget,
+            GAME_RULES_ROW => &mut self.game_rules as &mut dyn FocusTarget,
             _ => return None,
         })
     }
@@ -681,6 +704,24 @@ pub struct CreateWorldNav {
     /// was `false` for every row, every frame — no outline, ever, regardless
     /// of where the mouse was.
     hovered: Option<usize>,
+    /// Which sub-screen is showing (issue #592's Game Rules half) — `Tabs` is
+    /// the ordinary Game/World/More view this whole module used to be;
+    /// `GameRules` replaces it with [`GAME_RULES_ROW`]'s own scrollable rule
+    /// list. Not part of [`Self::active_tab`]: switching tabs while the rule
+    /// editor is open is not possible (there is no tab bar drawn in that
+    /// mode), so the two are orthogonal rather than one being a special case
+    /// of the other.
+    mode: CreateWorldMode,
+    /// The rule editor's own live state — see [`GameRulesEditor`]'s doc.
+    game_rules: GameRulesEditor,
+}
+
+/// See [`CreateWorldNav::mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum CreateWorldMode {
+    #[default]
+    Tabs,
+    GameRules,
 }
 
 fn button(row: usize, label: impl Into<String>) -> Widget {
@@ -717,6 +758,7 @@ impl CreateWorldNav {
             world_type: button(WORLD_TYPE_ROW, cycle_label(WORLD_TYPE_LABEL, config.world_type.caption())),
             create: button(CREATE_ROW, CREATE_LABEL),
             cancel: button(CANCEL_ROW, CANCEL_LABEL),
+            game_rules: button(GAME_RULES_ROW, GAME_RULES_BUTTON_LABEL),
         };
         let mut focus = FocusSet::new();
         for row in 0..ROW_COUNT {
@@ -729,6 +771,8 @@ impl CreateWorldNav {
             config,
             active_tab: GAME_TAB,
             hovered: None,
+            mode: CreateWorldMode::Tabs,
+            game_rules: GameRulesEditor::new(),
         };
         // Game is active from the start, so this deactivates World's four
         // fields (Seed/Structures/Bonus Chest/Online Mode) — matching what a
@@ -755,6 +799,27 @@ impl CreateWorldNav {
         self.active_tab
     }
 
+    /// Whether the Game Rules sub-screen is open — the gate
+    /// [`super::nav::MenuNav::active_list`]/[`super::nav::MenuNav::scroll_active_list`]
+    /// use to know this screen has a scrollbar right now.
+    #[must_use]
+    pub fn game_rules_open(&self) -> bool {
+        self.mode == CreateWorldMode::GameRules
+    }
+
+    /// The rule editor's own scroll offset, in pixels — only meaningful while
+    /// [`Self::game_rules_open`].
+    #[must_use]
+    pub fn game_rules_scroll(&self) -> f32 {
+        self.game_rules.scroll()
+    }
+
+    /// Scrolls the rule editor by `notches` of mouse wheel, at a
+    /// `canvas_height`-tall canvas.
+    pub fn scroll_game_rules_by(&mut self, notches: f32, canvas_height: f32) {
+        self.game_rules.scroll_by(notches, canvas_height);
+    }
+
     /// Sets every widget's `active` flag from [`Self::active_tab`] alone —
     /// the difficulty row is the one exception, folded into
     /// [`Self::apply_hardcore_lock`] instead, since it has a *second* gate
@@ -774,6 +839,7 @@ impl CreateWorldNav {
         self.widgets.bonus_chest.active = world;
         self.widgets.online_mode.active = world;
         self.widgets.world_type.active = world;
+        self.widgets.game_rules.active = self.active_tab == MORE_TAB;
     }
 
     /// Difficulty is locked to Hard and its own row inactive while Hardcore
@@ -888,6 +954,10 @@ impl CreateWorldNav {
     /// records only [`Self::hovered`], which is what lets the mouse travel to
     /// Create without touching whichever field currently has the keyboard.
     pub fn hover_row(&mut self, row: usize) {
+        if self.mode == CreateWorldMode::GameRules {
+            self.game_rules.hover_row(row);
+            return;
+        }
         if row < TAB_LABELS.len() {
             return;
         }
@@ -946,9 +1016,14 @@ impl CreateWorldNav {
                 self.refresh_labels();
                 CreateWorldOutcome::Handled
             }
+            GAME_RULES_ROW => {
+                self.mode = CreateWorldMode::GameRules;
+                CreateWorldOutcome::Handled
+            }
             CREATE_ROW => {
                 self.config.name = self.widgets.name.value().to_string();
                 self.config.seed = self.widgets.seed.value().to_string();
+                self.config.game_rules = self.game_rules.changed_entries();
                 CreateWorldOutcome::Create(self.config.clone())
             }
             CANCEL_ROW => CreateWorldOutcome::Cancel,
@@ -963,6 +1038,12 @@ impl CreateWorldNav {
     /// for issue #567 — switches the active tab, and none of those is "hover
     /// then Enter".
     pub fn click_row(&mut self, row: usize) -> CreateWorldOutcome {
+        if self.mode == CreateWorldMode::GameRules {
+            if self.game_rules.click_row(row) {
+                self.mode = CreateWorldMode::Tabs;
+            }
+            return CreateWorldOutcome::Handled;
+        }
         if row < TAB_LABELS.len() {
             self.switch_tab(row);
             return CreateWorldOutcome::Handled;
@@ -992,6 +1073,20 @@ impl CreateWorldNav {
     /// see [`Self::sync_tab_visibility`]'s own doc on why that needs no
     /// special case here: [`FocusSet`] already skips an inactive widget.
     pub fn handle_key(&mut self, key: MenuKey) -> CreateWorldOutcome {
+        // Escape from the rule editor returns to the More tab rather than
+        // discarding the whole screen — the same "Escape unwinds one level"
+        // shape [`super::options::SettingsNav`]'s page graph already uses,
+        // narrowed to this screen's one extra level. Edits already live on
+        // `self.game_rules` the moment a button is clicked (there is no
+        // separate discard-on-cancel path here, unlike vanilla's own
+        // `AbstractGameRulesScreen.closeAndDiscardChanges` — a disclosed
+        // simplification, not a missed case).
+        if self.mode == CreateWorldMode::GameRules {
+            if key == MenuKey::Escape {
+                self.mode = CreateWorldMode::Tabs;
+            }
+            return CreateWorldOutcome::Handled;
+        }
         if key == MenuKey::Escape {
             return CreateWorldOutcome::Cancel;
         }
@@ -1043,6 +1138,9 @@ fn toggle_label(caption: &str, on: bool) -> String {
 /// (`selectWorld.create`), not a real vanilla heading on the screen itself.
 #[must_use]
 pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
+    if nav.mode == CreateWorldMode::GameRules {
+        return game_rules_frame(nav);
+    }
     let focused = nav.focused();
     let widget_row = |w: &Widget, row: usize| MenuRow {
         label: w.message.clone(),
@@ -1090,6 +1188,7 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
             ALLOW_CHEATS_ROW => widget_row(&nav.widgets.allow_cheats, ALLOW_CHEATS_ROW),
             ONLINE_MODE_ROW => widget_row(&nav.widgets.online_mode, ONLINE_MODE_ROW),
             WORLD_TYPE_ROW => widget_row(&nav.widgets.world_type, WORLD_TYPE_ROW),
+            GAME_RULES_ROW => widget_row(&nav.widgets.game_rules, GAME_RULES_ROW),
             // `content_rows_for_tab` is the only producer of these ids; a new
             // entry there needs a matching arm here, and an out-of-sync pair
             // is a compile-time `unreachable!()` away from being caught the
@@ -1157,6 +1256,412 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
         // `CreateWorldNav::new` already sets `seed.hint`, so a permanent
         // notice here would draw the same string vanilla only ever shows
         // conditionally — a duplicate, not a second real label.
+        ..Default::default()
+    }
+}
+
+// -- Game Rules sub-screen (issue #592's More tab) ---------------------------
+//
+// Vanilla's `WorldCreationGameRulesScreen` is a per-type widget (a checkbox
+// for a boolean rule, a free-text `EditBox` for an integer one) over a
+// two-column `AbstractSelectionList`. This is a narrower shape: **every** row,
+// boolean or integer, is a `-`/`+` step pair plus a `"name: value"` label —
+// one geometry for both types rather than two, and a real, working control
+// for each (an integer rule needs to go *down* from its default as often as
+// up, which a single "cycle" button cannot do without an impractically long
+// wraparound for an unbounded rule like `max_command_forks`). A disclosed
+// simplification, not a missing feature: every one of vanilla's 60 rules is
+// listed, live, and reaches the wire.
+//
+// Edits apply to [`GameRulesEditor::values`] immediately on click — there is
+// no separate "Done commits, Cancel discards" distinction the way vanilla's
+// screen has, because nothing downstream reads the values until Create is
+// pressed (`CreateWorldNav::activate`'s `CREATE_ROW` arm reads
+// [`GameRulesEditor::changed_entries`] at that point, not before) — so
+// leaving the rule editor via Done, Escape or the tab bar are all the same
+// "keep what's here" operation.
+
+/// One rule's identity plus its live value — [`GameRulesEditor`]'s per-row
+/// state, parallel to [`GAME_RULES`] by index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GameRulesEditor {
+    values: Vec<GameRuleValue>,
+    scroll: f32,
+    cursor: usize,
+}
+
+impl GameRulesEditor {
+    fn new() -> Self {
+        Self {
+            values: GAME_RULES.iter().map(|rule| rule.default).collect(),
+            scroll: 0.0,
+            cursor: 0,
+        }
+    }
+
+    /// The scroll offset, in pixels.
+    #[must_use]
+    pub fn scroll(&self) -> f32 {
+        self.scroll
+    }
+
+    /// Rule `index`'s live value, or its default if `index` is out of range
+    /// (never true in practice — `values` is seeded 1:1 from [`GAME_RULES`]
+    /// and never resized).
+    #[must_use]
+    fn value(&self, index: usize) -> GameRuleValue {
+        self.values
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| GAME_RULES[index.min(GAME_RULES.len().saturating_sub(1))].default)
+    }
+
+    /// Every rule whose live value differs from its vanilla default, as the
+    /// `(namespaced key, wire-form string)` pairs
+    /// [`lodestone_model::action::ClientAction::SetGameRules`] carries.
+    /// Sending only the changed subset (rather than vanilla's own "always
+    /// re-apply everything" shape) is a byte-count optimisation, not a
+    /// correctness difference: an unset rule already reads the server's own
+    /// identical default.
+    #[must_use]
+    pub fn changed_entries(&self) -> Vec<(lodestone_model::ResourceKey, String)> {
+        GAME_RULES
+            .iter()
+            .zip(&self.values)
+            .filter(|(spec, value)| **value != spec.default)
+            .map(|(spec, value)| {
+                (
+                    // `GAME_RULES` names are bare identifiers ("no
+                    // `minecraft:` namespace" — `lodestone_server::game_rules`'s
+                    // own doc); the wire needs the full resource key.
+                    lodestone_model::Identifier::new("minecraft", spec.name)
+                        .expect("every GAME_RULES name is a valid identifier path"),
+                    value.serialize(),
+                )
+            })
+            .collect()
+    }
+
+    fn step(&mut self, index: usize, increase: bool) {
+        let (Some(spec), Some(value)) = (GAME_RULES.get(index), self.values.get_mut(index)) else {
+            return;
+        };
+        *value = match (spec.default, *value) {
+            // A boolean rule has no meaningful "step" — `-`/`+` are simply
+            // Off/On, matching vanilla's own two-state checkbox.
+            (GameRuleValue::Bool(_), GameRuleValue::Bool(_)) => GameRuleValue::Bool(increase),
+            (GameRuleValue::Int(_), GameRuleValue::Int(current)) => {
+                let min = spec.min.unwrap_or(i32::MIN);
+                let max = spec.max.unwrap_or(i32::MAX);
+                let delta = if increase { 1 } else { -1 };
+                GameRuleValue::Int(current.saturating_add(delta).clamp(min, max))
+            }
+            // `GAME_RULES` never mixes the two default shapes for one entry.
+            (_, other) => other,
+        };
+    }
+
+    /// The live [`super::widget::ScrollList`] at this canvas height, or
+    /// `None` when there is nothing to scroll — mirrors
+    /// [`super::key_binds::KeyBindsNav::model`].
+    fn model(&self, canvas_height: f32) -> Option<super::widget::ScrollList> {
+        game_rules_list_spec(self.scroll).model(canvas_height)
+    }
+
+    /// One mouse-wheel notch, through the shared primitive.
+    pub fn scroll_by(&mut self, notches: f32, canvas_height: f32) {
+        let Some(mut list) = self.model(canvas_height) else {
+            return;
+        };
+        list.mouse_scrolled(notches);
+        self.scroll = list.scroll();
+    }
+
+    #[must_use]
+    fn visible(&self) -> Vec<GameRuleControlView> {
+        game_rule_controls(self.scroll)
+    }
+
+    /// The cursor's position within [`Self::visible`], for the highlight —
+    /// mirrors [`super::key_binds::KeyBindsNav::selected_row`].
+    #[must_use]
+    fn selected_row(&self) -> Option<usize> {
+        let all = all_game_rule_controls();
+        let control = *all.get(self.cursor)?;
+        self.visible().iter().position(|c| c.control == control)
+    }
+
+    /// The mouse moved over visible row `row` — moves the cursor there, the
+    /// same "hover moves the cursor" shape
+    /// [`super::key_binds::KeyBindsNav::hover_row`] uses.
+    fn hover_row(&mut self, row: usize) {
+        let visible = self.visible();
+        let Some(view) = visible.get(row).copied() else {
+            return;
+        };
+        let all = all_game_rule_controls();
+        if let Some(i) = all.iter().position(|&c| c == view.control) {
+            self.cursor = i;
+        }
+    }
+
+    /// A click on visible row `row`. Returns `true` when Done was pressed —
+    /// [`CreateWorldNav::click_row`]'s cue to leave the editor.
+    fn click_row(&mut self, row: usize) -> bool {
+        self.hover_row(row);
+        let visible = self.visible();
+        let Some(view) = visible.get(row).copied() else {
+            return false;
+        };
+        match view.control {
+            GameRuleControl::Minus(index) => {
+                self.step(index, false);
+                false
+            }
+            GameRuleControl::Plus(index) => {
+                self.step(index, true);
+                false
+            }
+            GameRuleControl::Done => true,
+        }
+    }
+}
+
+/// One clickable control of the Game Rules screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GameRuleControl {
+    /// Step rule `usize` (an index into [`GAME_RULES`]) down.
+    Minus(usize),
+    /// Step rule `usize` up.
+    Plus(usize),
+    /// Leave the editor, keeping every edit made so far.
+    Done,
+}
+
+/// One flattened, focusable control plus its already-resolved [`Slot`] —
+/// mirrors [`super::key_binds::KeyControlView`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GameRuleControlView {
+    control: GameRuleControl,
+    slot: Slot,
+}
+
+/// Every control, ignoring scroll — mirrors
+/// [`super::key_binds::all_controls`].
+#[must_use]
+fn all_game_rule_controls() -> Vec<GameRuleControl> {
+    let mut out = Vec::with_capacity(GAME_RULES.len() * 2 + 1);
+    for index in 0..GAME_RULES.len() {
+        out.push(GameRuleControl::Minus(index));
+        out.push(GameRuleControl::Plus(index));
+    }
+    out.push(GameRuleControl::Done);
+    out
+}
+
+/// `-`/`+` step button width, and the gap between them and the row's right
+/// edge / each other.
+const STEP_BUTTON_W: f32 = 20.0;
+const STEP_GAP: f32 = 4.0;
+/// The rule list's row band, centred like [`super::key_binds::ROW_WIDTH`] but
+/// narrower — this screen has one label and two small buttons per row, not
+/// `KeyBindsList`'s name-plus-two-75/50-px-buttons.
+pub const GAME_RULE_ROW_WIDTH: f32 = 280.0;
+pub const GAME_RULE_ROW_H: f32 = 20.0;
+
+#[must_use]
+pub fn game_rule_row_left(width: f32) -> f32 {
+    width * 0.5 - GAME_RULE_ROW_WIDTH * 0.5
+}
+
+#[must_use]
+pub fn game_rule_row_right(width: f32) -> f32 {
+    game_rule_row_left(width) + GAME_RULE_ROW_WIDTH
+}
+
+#[must_use]
+pub fn game_rule_plus_x(width: f32) -> f32 {
+    game_rule_row_right(width) - STEP_BUTTON_W
+}
+
+#[must_use]
+pub fn game_rule_minus_x(width: f32) -> f32 {
+    game_rule_plus_x(width) - STEP_GAP - STEP_BUTTON_W
+}
+
+#[must_use]
+pub fn game_rule_name_x(width: f32) -> f32 {
+    game_rule_row_left(width) + 4.0
+}
+
+/// Budget of list pixels, mirroring [`super::key_binds::LIST_WINDOW_PX`] —
+/// same fixed-budget reasoning (no GPU scissor here, see that constant's own
+/// doc), reusing the identical header/footer constants so this screen's band
+/// agrees with every other settings-shaped list in this tree.
+pub const GAME_RULES_LIST_WINDOW_PX: f32 = crate::config::MIN_SCALED_HEIGHT as f32
+    - options::SUB_HEADER_HEIGHT
+    - options::FOOTER_HEIGHT
+    - options::LIST_TOP_INSET;
+
+/// This screen's list, as the generic [`super::widget::ListSpec`] the
+/// scrollbar draw and the mouse wheel both go through — mirrors
+/// [`super::key_binds::list_spec`].
+#[must_use]
+pub fn game_rules_list_spec(scroll: f32) -> super::widget::ListSpec {
+    super::widget::ListSpec::uniform(
+        GAME_RULE_ROW_H,
+        options::SUB_HEADER_HEIGHT,
+        options::FOOTER_HEIGHT,
+        GAME_RULES.len(),
+        GAME_RULE_ROW_WIDTH,
+    )
+    .at(scroll)
+}
+
+/// Where one [`GameRuleControl`] (other than [`GameRuleControl::Done`], which
+/// reuses [`Origin::Settings`]'s footer) sits — [`Origin::CreateWorldGameRules`]'s
+/// whole body. Mirrors [`super::key_binds::KeyPlacement`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GameRulePlacement {
+    Minus { row: u16, scroll: f32 },
+    Plus { row: u16, scroll: f32 },
+    /// The `"name: value"` label — a [`MenuLabel`], not a [`GameRuleControl`].
+    Name { row: u16, scroll: f32 },
+}
+
+impl GameRulePlacement {
+    fn row_scroll(self) -> (u16, f32) {
+        match self {
+            GameRulePlacement::Minus { row, scroll }
+            | GameRulePlacement::Plus { row, scroll }
+            | GameRulePlacement::Name { row, scroll } => (row, scroll),
+        }
+    }
+}
+
+/// The top-left of the widget a [`GameRulePlacement`] names — mirrors
+/// [`super::key_binds::placement_anchor`].
+#[must_use]
+pub fn game_rule_placement_anchor(placement: GameRulePlacement, width: f32, _height: f32) -> (f32, f32) {
+    let (row, scroll) = placement.row_scroll();
+    let row_y = options::SUB_HEADER_HEIGHT + options::LIST_TOP_INSET + f32::from(row) * GAME_RULE_ROW_H
+        - scroll.floor();
+    match placement {
+        GameRulePlacement::Minus { .. } => (game_rule_minus_x(width), row_y),
+        GameRulePlacement::Plus { .. } => (game_rule_plus_x(width), row_y),
+        GameRulePlacement::Name { .. } => (game_rule_name_x(width), row_y + 6.0),
+    }
+}
+
+/// **Every** control at scroll offset `scroll`, then Done — mirrors
+/// [`super::key_binds::controls`]: absolute indices into [`all_game_rule_controls`],
+/// not a windowed slice, since [`super::render::draw`] clips a row to the band
+/// itself.
+#[must_use]
+fn game_rule_controls(scroll: f32) -> Vec<GameRuleControlView> {
+    let mut out = Vec::with_capacity(GAME_RULES.len() * 2 + 1);
+    for row in 0..GAME_RULES.len() {
+        out.push(GameRuleControlView {
+            control: GameRuleControl::Minus(row),
+            slot: Slot {
+                origin: Origin::CreateWorldGameRules(GameRulePlacement::Minus {
+                    row: row as u16,
+                    scroll,
+                }),
+                dx: 0.0,
+                dy: 0.0,
+                w: STEP_BUTTON_W,
+                h: GAME_RULE_ROW_H,
+            },
+        });
+        out.push(GameRuleControlView {
+            control: GameRuleControl::Plus(row),
+            slot: Slot {
+                origin: Origin::CreateWorldGameRules(GameRulePlacement::Plus {
+                    row: row as u16,
+                    scroll,
+                }),
+                dx: 0.0,
+                dy: 0.0,
+                w: STEP_BUTTON_W,
+                h: GAME_RULE_ROW_H,
+            },
+        });
+    }
+    out.push(GameRuleControlView {
+        control: GameRuleControl::Done,
+        slot: Slot {
+            origin: Origin::Settings(options::Placement::Footer { index: 0, count: 1 }),
+            dx: 0.0,
+            dy: 0.0,
+            w: options::SMALL_BUTTON_WIDTH,
+            h: options::WIDGET_H,
+        },
+    });
+    out
+}
+
+/// Builds the Game Rules sub-screen's whole frame — [`frame`]'s
+/// [`CreateWorldMode::GameRules`] branch.
+#[must_use]
+fn game_rules_frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
+    let editor = &nav.game_rules;
+    let visible = editor.visible();
+    let selected = editor.selected_row();
+
+    let rows: Vec<MenuRow> = visible
+        .iter()
+        .map(|view| MenuRow {
+            label: match view.control {
+                GameRuleControl::Minus(_) => "-".to_string(),
+                GameRuleControl::Plus(_) => "+".to_string(),
+                GameRuleControl::Done => "Done".to_string(),
+            },
+            enabled: true,
+            slot: Some(view.slot),
+            ..Default::default()
+        })
+        .collect();
+
+    // `list_labels`, not `labels` — these scroll with the band and must be
+    // clipped to it, the same split `key_binds::frame` documents for its own
+    // Name/Category labels.
+    let mut list_labels = Vec::with_capacity(GAME_RULES.len());
+    for (row, spec) in GAME_RULES.iter().enumerate() {
+        let value = editor.value(row);
+        list_labels.push(MenuLabel {
+            text: format!("{}: {}", spec.name, value.serialize()),
+            origin: Origin::CreateWorldGameRules(GameRulePlacement::Name {
+                row: row as u16,
+                scroll: editor.scroll(),
+            }),
+            dx: 0.0,
+            dy: 0.0,
+            align: Align::Left,
+            colour: super::widget::ACTIVE_LABEL,
+            scale: 1.0,
+        });
+    }
+
+    MenuFrame {
+        title: "Game Rules",
+        rows,
+        selected: selected.unwrap_or(usize::MAX),
+        vanilla: true,
+        labels: vec![MenuLabel {
+            text: "Game Rules".to_string(),
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: 12.0,
+            align: Align::Centre,
+            colour: super::widget::ACTIVE_LABEL,
+            scale: 1.0,
+        }],
+        list_labels,
+        // **Deliberately not set here** — `render::dispatch` stamps
+        // `f.list = nav.active_list(ui)` on every frame, matching
+        // `key_binds::frame`'s own comment on why setting it twice invites
+        // the two declarations to disagree.
         ..Default::default()
     }
 }
@@ -1539,8 +2044,9 @@ mod tests {
         let f = frame(&nav);
         assert_eq!(
             f.rows.len(),
-            TAB_LABELS.len() + 2,
-            "More has no content rows, only the tab bar and the footer"
+            TAB_LABELS.len() + 3,
+            "More has one content row (Game Rules, issue #592) plus the tab \
+             bar and the footer"
         );
 
         // Clicking the tab already showing is a no-op, not a crash and not a
@@ -1561,7 +2067,12 @@ mod tests {
         assert_eq!(nav.focused(), Some(SEED_FIELD), "World's first field takes focus");
 
         nav.click_row(MORE_TAB);
-        assert_eq!(nav.focused(), None, "More has nothing to focus");
+        assert_eq!(
+            nav.focused(),
+            Some(GAME_RULES_ROW),
+            "More's first (and only) field, the Game Rules button, takes focus \
+             (issue #592 — this tab used to have nothing at all)"
+        );
 
         nav.click_row(GAME_TAB);
         assert_eq!(nav.focused(), Some(NAME_FIELD), "back to Game's first field");
@@ -1793,6 +2304,144 @@ mod tests {
             nav.active_tab(),
             WORLD_TAB,
             "clicking World Type must switch to the tab that holds it"
+        );
+    }
+
+    // -- Game Rules sub-screen (issue #592's More tab) -----------------------
+
+    fn rule_index(name: &str) -> usize {
+        GAME_RULES
+            .iter()
+            .position(|r| r.name == name)
+            .unwrap_or_else(|| panic!("{name} is not in GAME_RULES"))
+    }
+
+    #[test]
+    fn game_rules_button_opens_the_editor_and_lists_every_rule() {
+        let mut nav = CreateWorldNav::new();
+        assert!(!nav.game_rules_open(), "premise: starts closed");
+        assert_eq!(nav.click_focus(GAME_RULES_ROW), CreateWorldOutcome::Handled);
+        assert!(nav.game_rules_open(), "clicking Game Rules must open the editor");
+        let f = frame(&nav);
+        assert_eq!(
+            f.rows.len(),
+            GAME_RULES.len() * 2 + 1,
+            "a -/+ pair per rule plus one Done button — a shorter list would \
+             mean a rule GAME_RULES carries never reached a control"
+        );
+        assert_eq!(
+            f.list_labels.len(),
+            GAME_RULES.len(),
+            "one name label per rule"
+        );
+    }
+
+    #[test]
+    fn clicking_plus_then_minus_on_a_boolean_rule_round_trips_through_changed_entries() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(GAME_RULES_ROW);
+        let index = rule_index("keep_inventory"); // default false
+        assert!(
+            nav.game_rules.changed_entries().is_empty(),
+            "premise: nothing touched yet"
+        );
+        let plus_row = nav
+            .game_rules
+            .visible()
+            .iter()
+            .position(|v| v.control == GameRuleControl::Plus(index))
+            .expect("keep_inventory's Plus button is visible at scroll 0");
+        assert_eq!(nav.click_row(plus_row), CreateWorldOutcome::Handled);
+        assert_eq!(
+            nav.game_rules.changed_entries(),
+            vec![(
+                lodestone_model::Identifier::new("minecraft", "keep_inventory").unwrap(),
+                "true".to_string()
+            )],
+            "flipping the rule to non-default must appear in the diff, keyed \
+             on its namespaced identifier"
+        );
+        let minus_row = nav
+            .game_rules
+            .visible()
+            .iter()
+            .position(|v| v.control == GameRuleControl::Minus(index))
+            .expect("keep_inventory's Minus button is visible at scroll 0");
+        nav.click_row(minus_row);
+        assert!(
+            nav.game_rules.changed_entries().is_empty(),
+            "back at the default, the diff must go empty again rather than \
+             recording a no-op override"
+        );
+    }
+
+    #[test]
+    fn an_integer_rule_clamps_at_its_declared_minimum_rather_than_wrapping_negative() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(GAME_RULES_ROW);
+        let index = rule_index("random_tick_speed"); // default 3, min 0
+        for _ in 0..10 {
+            let row = nav
+                .game_rules
+                .visible()
+                .iter()
+                .position(|v| v.control == GameRuleControl::Minus(index))
+                .unwrap();
+            nav.click_row(row);
+        }
+        assert_eq!(
+            nav.game_rules.value(index),
+            GameRuleValue::Int(0),
+            "ten decrements past the default of 3 must clamp at the declared \
+             minimum (0), never go negative or wrap"
+        );
+    }
+
+    #[test]
+    fn escape_from_the_game_rules_editor_returns_to_more_tab_not_a_full_cancel() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(GAME_RULES_ROW);
+        assert!(nav.game_rules_open(), "premise");
+        assert_eq!(
+            nav.handle_key(MenuKey::Escape),
+            CreateWorldOutcome::Handled,
+            "must not unwind the whole Create New World screen"
+        );
+        assert!(
+            !nav.game_rules_open(),
+            "escape must close only the editor, back to the tabs"
+        );
+        assert_eq!(nav.active_tab(), MORE_TAB, "left on the tab it was opened from");
+    }
+
+    #[test]
+    fn create_after_editing_game_rules_carries_exactly_the_changed_entries() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(GAME_RULES_ROW);
+        let index = rule_index("keep_inventory");
+        let plus_row = nav
+            .game_rules
+            .visible()
+            .iter()
+            .position(|v| v.control == GameRuleControl::Plus(index))
+            .unwrap();
+        nav.click_row(plus_row);
+        // Done is always the last control.
+        let done_row = nav.game_rules.visible().len() - 1;
+        assert_eq!(nav.click_row(done_row), CreateWorldOutcome::Handled);
+        assert!(!nav.game_rules_open(), "Done must leave the editor");
+        let outcome = nav.click_focus(CREATE_ROW);
+        let CreateWorldOutcome::Create(config) = outcome else {
+            panic!("expected Create, got {outcome:?}");
+        };
+        assert_eq!(
+            config.game_rules,
+            vec![(
+                lodestone_model::Identifier::new("minecraft", "keep_inventory").unwrap(),
+                "true".to_string()
+            )],
+            "Create must capture the editor's diff at press time, not an \
+             empty default"
         );
     }
 }

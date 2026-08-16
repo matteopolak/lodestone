@@ -784,6 +784,28 @@ struct WindowApp {
     /// re-seeds it from the menu's own `container_data` the next time a
     /// beacon is open, so a stale value between sessions is never visible.
     beacon_selection: crate::container::beacon::BeaconSelection,
+    /// Game-rule overrides collected on Create New World's More tab (issue
+    /// #592), queued for exactly one send once the fresh singleplayer session
+    /// reaches `SessionPhase::Connected` — see
+    /// [`Self::drive_ui_from_session`]'s own arm and
+    /// [`crate::sim::Sim::send_set_game_rules`]. `Option` rather than a bare
+    /// (possibly empty) `Vec` so "already sent" and "nothing to send" are two
+    /// different states: `take()` clears it the moment it is used, so a
+    /// `Connected` phase read on every later frame (see that method's own
+    /// doc on why it is not a one-shot transition) cannot resend it.
+    pending_game_rules: Option<Vec<(lodestone_model::ResourceKey, String)>>,
+    /// When the F3 debug overlay's own network-chart figures were last
+    /// refreshed via a `ClientAction::PingRequest` send (issue #613's
+    /// `PingRequest` remainder) — `None` means "never, this session". Real
+    /// vanilla re-sends this every client tick while its own network-chart
+    /// sub-panel shows (`PingDebugMonitor.tick`, gated on
+    /// `DebugScreenOverlay.showNetworkCharts()`); this client has no such
+    /// sub-panel, so the closest honest equivalent is "while F3 is open, at
+    /// most once per second" — real, F3-gated traffic rather than either an
+    /// unconditional per-tick spam or a send with no UI behind it at all.
+    /// See [`Self::redraw`]'s own call site and
+    /// [`crate::sim::Sim::send_ping_request`].
+    last_ping_request: Option<Instant>,
 }
 
 #[cfg(test)]
