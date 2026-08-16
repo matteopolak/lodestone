@@ -233,6 +233,27 @@ impl DyeColor {
     }
 }
 
+/// Quantises a gamma-space `[r, g, b]` in `0.0..=1.0` (a [`PatternLayer::color`],
+/// or [`DyeColor::gamma_rgb`] directly) to the `[u8; 3]` bytes
+/// [`lodestone_render::InstanceTint::rgb`](crate::InstanceTint::rgb) and
+/// `upload_instances_tinted` want. Shared by every consumer that turns a
+/// resolved layer into an instance tint — the world block-entity pass, the
+/// first-person hand and the GUI/inventory icon — so the clamp-then-round
+/// only has one implementation to get right.
+#[must_use]
+pub fn gamma_rgb_to_bytes(rgb: [f32; 3]) -> [u8; 3] {
+    rgb.map(|c| {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped into 0..=255 first"
+        )]
+        {
+            (c.clamp(0.0, 1.0) * 255.0).round() as u8
+        }
+    })
+}
+
 /// The maximum number of pattern layers vanilla ever draws
 /// (`BannerRenderer.MAX_PATTERNS`, `BannerRenderer.java:41` — `= 16`) —
 /// `submitPatterns`' loop bound (`BannerRenderer.java:189`:

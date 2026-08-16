@@ -541,6 +541,10 @@ pub struct MainHandItem {
     /// off `lodestone_game::item::ItemStack::potion_color`. `None` for a
     /// non-potion item or one with no potion contents.
     pub potion_color: Option<u32>,
+    /// The stack's `minecraft:banner_patterns`, straight off
+    /// `lodestone_game::item::ItemStack::banner_patterns`. Empty for every
+    /// non-banner item and for a plain banner carrying no loom patterns.
+    pub banner_patterns: Vec<lodestone_model::BannerPatternLayer>,
 }
 
 /// Where the **local player's main-hand item** comes from, polled once per frame

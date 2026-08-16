@@ -17,8 +17,8 @@
 use std::collections::BTreeMap;
 
 use lodestone_model::{
-    ArmorTrim, AuthoredEnchantment, Identifier, ItemEnchantment, ItemProfile, PotDecorations,
-    Text, TextSpan, ToolPatch, WrittenBookContent,
+    ArmorTrim, AuthoredEnchantment, BannerPatternLayer, Identifier, ItemEnchantment, ItemProfile,
+    PotDecorations, Text, TextSpan, ToolPatch, WrittenBookContent,
 };
 
 /// The default maximum stack size when an item carries no
@@ -128,6 +128,17 @@ pub const PROFILE_COMPONENT: &str = "minecraft:profile";
 /// #616's six, per that issue's own note, and the reason it was deferred five
 /// times before this. Carried as [`ComponentValue::Bundle`].
 pub const BUNDLE_CONTENTS_COMPONENT: &str = "minecraft:bundle_contents";
+/// Well-known component identifier for `minecraft:banner_patterns`.
+///
+/// A banner or shield stack's loom-applied pattern layers. Without this
+/// branch a banner's colour-and-pattern data was dropped at the crate
+/// boundary the same way the dye and trim above used to be — worse, the
+/// *decode* itself used to stop at this component before it was modelled in
+/// [`lodestone_model::ItemComponents`] (an unmodeled component cannot be
+/// skipped on the wire), so a banner or shield anywhere in an inventory
+/// truncated the rest of that packet. Carried as
+/// [`ComponentValue::BannerPatterns`].
+pub const BANNER_PATTERNS_COMPONENT: &str = "minecraft:banner_patterns";
 /// Well-known component identifier for `minecraft:custom_model_data`.
 ///
 /// Vanilla's own "make this item look different" channel, and half of how real
@@ -245,6 +256,11 @@ pub enum ComponentValue {
     /// (`custom_name`/`enchantments`/…) on a contained item that it already
     /// does on the top-level one. See [`BUNDLE_CONTENTS_COMPONENT`].
     Bundle(Vec<ItemStack>),
+    /// `minecraft:banner_patterns` — a banner or shield stack's loom-applied
+    /// pattern layers, in the stack's own stored order, carried verbatim from
+    /// [`lodestone_model::BannerPatternLayer`]. See
+    /// [`BANNER_PATTERNS_COMPONENT`].
+    BannerPatterns(Vec<BannerPatternLayer>),
 }
 
 /// The effective, resolved component set of an [`ItemStack`].
@@ -755,6 +771,26 @@ impl ItemStack {
         size.min(available - empty_on_last_row)
     }
 
+    /// The stack's `minecraft:banner_patterns`, in the stack's own stored
+    /// order, or an empty slice for every non-banner, non-shield item and for
+    /// a plain banner carrying no patterns.
+    #[must_use]
+    pub fn banner_patterns(&self) -> &[BannerPatternLayer] {
+        match self.components.get_str(BANNER_PATTERNS_COMPONENT) {
+            Some(ComponentValue::BannerPatterns(layers)) => layers,
+            _ => &[],
+        }
+    }
+
+    /// Replaces the stack's banner patterns. An empty list **removes** the
+    /// component rather than storing an empty one, matching
+    /// [`set_bundle_contents`](Self::set_bundle_contents) — an unpatterned
+    /// banner and one that never carried the component are the same state.
+    pub fn set_banner_patterns(&mut self, layers: Vec<BannerPatternLayer>) {
+        let value = (!layers.is_empty()).then_some(ComponentValue::BannerPatterns(layers));
+        self.write_component(BANNER_PATTERNS_COMPONENT, value);
+    }
+
     /// The stack's `minecraft:writable_book_content` draft pages, or `None`
     /// for every item but an edited `minecraft:writable_book`.
     #[must_use]
@@ -1050,6 +1086,18 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             );
         }
 
+        // Same crate-boundary loss as the dye/trim/pot/profile/bundle above,
+        // for a banner or shield's pattern layers rather than an item's own
+        // colour or contents.
+        if !stack.components.banner_patterns.is_empty()
+            && let Ok(key) = BANNER_PATTERNS_COMPONENT.parse()
+        {
+            components.insert(
+                key,
+                ComponentValue::BannerPatterns(stack.components.banner_patterns.clone()),
+            );
+        }
+
         Self::with_components(
             stack.item.clone(),
             i32::try_from(stack.count).unwrap_or(i32::MAX),
@@ -1115,6 +1163,11 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
                 .iter()
                 .map(lodestone_model::ItemStack::from)
                 .collect(),
+            // Mirrors the bundle contents above, one component over: the
+            // forward conversion stores this, so it round-trips rather than
+            // being silently dropped converting a game-crate stack back to
+            // the wire shape.
+            banner_patterns: stack.banner_patterns().to_vec(),
             tool: stack.tool(),
             max_stack_size: stack
                 .components
@@ -1577,6 +1630,22 @@ mod tests {
                         ..ModelItemComponents::default()
                     },
                 }],
+                // A banner or shield's loom patterns, real and non-empty either
+                // way — the same "exercise the recursive/real-value path, not
+                // the empty short-circuit" reasoning as `bundle_contents` above.
+                // Two layers with genuinely different colours, per this repo's
+                // own fixture convention: a single-layer or same-coloured
+                // fixture cannot catch a transposition.
+                banner_patterns: vec![
+                    lodestone_model::BannerPatternLayer {
+                        pattern_asset_id: "creeper".to_string(),
+                        color: "lime".to_string(),
+                    },
+                    lodestone_model::BannerPatternLayer {
+                        pattern_asset_id: "border".to_string(),
+                        color: "black".to_string(),
+                    },
+                ],
                 tool: ToolPatch::Set(tool),
                 max_stack_size: Some(1),
                 max_damage: Some(1561),

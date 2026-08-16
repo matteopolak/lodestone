@@ -562,6 +562,7 @@ fn a_chest_item_in_the_hotbar_reaches_pixels() {
         enchanted: false,
         dyed_color: None,
         potion_color: None,
+        banner_patterns: Vec::new(),
     }))
     .chain(std::iter::repeat_with(|| None).take(8))
     .collect();
@@ -867,6 +868,7 @@ fn a_player_head_item_in_the_hotbar_reaches_pixels() {
         enchanted: false,
         dyed_color: None,
         potion_color: None,
+        banner_patterns: Vec::new(),
     }))
     .chain(std::iter::repeat_with(|| None).take(8))
     .collect();
@@ -1040,11 +1042,14 @@ fn a_player_head_item_in_the_hotbar_reaches_pixels() {
 /// not one rig"), which is why a banner drew zero pixels in a hotbar slot,
 /// an inventory slot and the first-person hand — the owner's own report,
 /// verified here rather than re-derived from it. `lodestone_render::
-/// banner_item_rig` closes the narrower half of that gap: the two-mesh
-/// (pole/bar, flag) rig draws, with the flag tinted by the item's own base
-/// colour derived straight from its path (`<dye>_banner`) — see that
-/// function's doc for why a tint-multiply and not the real translucent mask
-/// layer, which is a separate, larger piece of work this gate does not claim.
+/// banner_item_rig` landed the two-mesh (pole/bar, flag) rig; this gate
+/// predates the later landing of the *real* translucent pattern-layer pass
+/// (`minecraft:banner_patterns` decoded per stack, drawn through
+/// `push_special_icon`'s `SpecialIconDraw::BannerLayer` entries — see
+/// `hud/item_icon.rs`), so both banners here carry no pattern layers and draw
+/// only the base translucent mask, which is what this test's colour
+/// assertions check. See `two_dyed_banners_with_loom_patterns_show_both_colours`
+/// below for the pattern half specifically.
 ///
 /// # Two colours, not one, and chosen to disagree hard on every channel
 ///
@@ -1127,6 +1132,7 @@ fn two_differently_dyed_banners_in_the_hotbar_draw_different_colours() {
             enchanted: false,
             dyed_color: None,
             potion_color: None,
+            banner_patterns: Vec::new(),
         })
     };
     let slots: Vec<Option<HotbarSlot>> = vec![
@@ -1272,5 +1278,195 @@ fn two_differently_dyed_banners_in_the_hotbar_draw_different_colours() {
         (rr - br).abs() > 40.0,
         "the two banners' red channels ({rr:.1} vs {br:.1}) are too close — they \
          may be drawing with the same tint rather than each item's own colour"
+    );
+}
+
+/// Pixels inside `rect` within `tol` (summed per-channel abs diff) of
+/// `target` — the per-bucket sibling of [`mean_rgb_in`], needed below because
+/// averaging a base colour and a pattern colour together reads as a third,
+/// blended colour that neither test predicts; only counting each bucket
+/// separately can tell "two colours coexist" from "one blended grey".
+fn count_near_in(pixels: &[u8], rect: [u32; 4], target: [u8; 3], tol: i32) -> usize {
+    let [rx, ry, rw, rh] = rect;
+    let mut n = 0usize;
+    for y in ry..ry + rh {
+        for x in rx..rx + rw {
+            let i = ((y * W + x) * 4) as usize;
+            let d = (i32::from(pixels[i]) - i32::from(target[0])).abs()
+                + (i32::from(pixels[i + 1]) - i32::from(target[1])).abs()
+                + (i32::from(pixels[i + 2]) - i32::from(target[2])).abs();
+            if d <= tol {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// Pixel gate: a `minecraft:banner` item in the hotbar draws its **loom
+/// patterns**, not just its base colour — the half named as still missing by
+/// the doc comment on both `lodestone_render::banner_item_rig` and this
+/// file's own sibling test above, closed by decoding
+/// `minecraft:banner_patterns` for an item stack (`crates/protocol/v770`) and
+/// a real translucent pattern-layer pass in `hud/item_icon.rs`'s
+/// `SpecialIconDraw::BannerLayer` (mirroring the world block-entity pass's
+/// `banner_layer_pipeline`).
+///
+/// # Two colours in one cell is the discriminating claim
+///
+/// A flat tint — the mechanism this file's sibling test measures, and any
+/// regression back toward it — can only ever produce *one* colour across the
+/// whole flag. A `minecraft:creeper` pattern drawn in black over a
+/// `minecraft:white_banner`'s base is a **local** mask: the creeper-shaped
+/// region should read black (`DyeColor::Black`, `(29, 29, 33)`) while the
+/// uncovered rest of the flag stays the base white (`DyeColor::White`,
+/// `(249, 255, 254)`). The negative control is the same white banner with
+/// **no** pattern layers — `banner_pattern_layers` still draws the base mask,
+/// so the cell is not blank, but nothing should read as black, because there
+/// is no black layer to draw.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
+    assert_eq!(
+        calculate_gui_scale(AUTO_GUI_SCALE, W, H),
+        1,
+        "cell_rect assumes W x H divides to itself under the GUI scale"
+    );
+
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    let item_atlas = load_item_atlas().expect("the item atlas must build from client.jar");
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!(
+            "GPU gate opted in but the vanilla pack did not load; set LODESTONE_ASSETS \
+             to a pack root with client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        )
+    });
+    let models: &BlockModels = atlas
+        .models()
+        .expect("the vanilla load must attach baked block models");
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+
+    let slot = |patterns: Vec<lodestone_model::BannerPatternLayer>| {
+        Some(HotbarSlot {
+            item: "minecraft:white_banner".parse().expect("valid item id"),
+            count: 1,
+            damage: None,
+            max_damage: None,
+            enchanted: false,
+            dyed_color: None,
+            potion_color: None,
+            banner_patterns: patterns,
+        })
+    };
+    let plain_slots: Vec<Option<HotbarSlot>> = std::iter::once(slot(Vec::new()))
+        .chain(std::iter::repeat_with(|| None).take(8))
+        .collect();
+    let patterned_slots: Vec<Option<HotbarSlot>> = std::iter::once(slot(vec![
+        lodestone_model::BannerPatternLayer {
+            pattern_asset_id: "creeper".to_string(),
+            color: "black".to_string(),
+        },
+    ]))
+    .chain(std::iter::repeat_with(|| None).take(8))
+    .collect();
+
+    let mut shoot = |slots: &[Option<HotbarSlot>]| -> Vec<u8> {
+        let stats = DebugStats::default();
+        let hud_frame = HudFrame {
+            show_debug: false,
+            crosshair: false,
+            hotbar: None,
+            hotbar_items: Some(slots),
+            ..HudFrame::new(&stats)
+        };
+        let mut hud = HudRenderer::new(device, format);
+        hud.attach_items(device, queue, format, item_atlas.clone());
+        hud.attach_item_models(
+            device,
+            format,
+            render
+                .model_atlas_view()
+                .expect("the vanilla path must expose a model atlas"),
+            render
+                .model_atlas_sampler()
+                .expect("the vanilla path must expose a model atlas sampler"),
+            render
+                .model_palette_buffer()
+                .expect("the vanilla path must expose a tint palette"),
+            render
+                .model_anim_buffer()
+                .expect("the vanilla path must expose animation slots"),
+        );
+        let frame = target.acquire().expect("headless acquire");
+        let raw_view = frame.create_view(target.raw_view_format());
+        clear_view(device, queue, frame.view(), [0, 0, 0]);
+        hud.render_with_item_models(
+            device,
+            queue,
+            frame.view(),
+            &raw_view,
+            Some(render.depth_view()),
+            &hud_frame,
+            Some(models),
+            calculate_gui_scale(AUTO_GUI_SCALE, W, H),
+            W,
+            H,
+        );
+        target.read_texels(device, queue)
+    };
+
+    let plain_pixels = shoot(&plain_slots);
+    let patterned_pixels = shoot(&patterned_slots);
+    let cell = cell_rect(0);
+
+    // Vanilla's `DyeColor.textureDiffuseColor`: WHITE = 16383998 = 0xF9FFFE,
+    // BLACK = 1908001 = 0x1D1D21 — re-typed from the same jar constants
+    // `lodestone_render::banner_pattern`'s own test module cross-checks.
+    const WHITE_RGB: [u8; 3] = [0xF9, 0xFF, 0xFE];
+    const BLACK_RGB: [u8; 3] = [0x1D, 0x1D, 0x21];
+
+    let plain_white = count_near_in(&plain_pixels, cell, WHITE_RGB, 24);
+    let plain_black = count_near_in(&plain_pixels, cell, BLACK_RGB, 24);
+    let patterned_white = count_near_in(&patterned_pixels, cell, WHITE_RGB, 24);
+    let patterned_black = count_near_in(&patterned_pixels, cell, BLACK_RGB, 24);
+
+    eprintln!("=== hotbar banner pattern-layer pixel gate ===");
+    eprintln!("plain white_banner:  white-ish px={plain_white}, black-ish px={plain_black}");
+    eprintln!("+creeper (black):    white-ish px={patterned_white}, black-ish px={patterned_black}");
+
+    assert!(
+        plain_white > 10,
+        "a plain white_banner must still show its own (white) base colour in its \
+         cell — got only {plain_white} white-ish px, which means the base \
+         translucent layer itself is not reaching pixels"
+    );
+    assert_eq!(
+        plain_black, 0,
+        "a plain white_banner with zero pattern layers read {plain_black} black-ish \
+         pixels in its cell — there is no black layer to draw, so any black pixels \
+         here mean the count is picking up something other than the pattern mask"
+    );
+    assert!(
+        patterned_black > 5,
+        "adding a black `creeper` pattern layer produced only {patterned_black} \
+         black-ish pixels in the cell (0 in the unpatterned control above) — the \
+         pattern mask is not reaching pixels"
+    );
+    assert!(
+        patterned_white > 5,
+        "the patterned banner's white-ish pixel count ({patterned_white}) collapsed \
+         from the plain banner's ({plain_white}) — the pattern mask is covering the \
+         *whole* cell rather than just the creeper-shaped region"
     );
 }
