@@ -31,12 +31,12 @@ Two new pieces, in two different crates:
   profession/level combinations (`armorer` 4 and 5, `toolsmith` 5,
   `weaponsmith` 5) resolve to nothing portable at all.
 
-  This supersedes `crate::mobs::villager::trades`'s farmer-only table in
-  scope, but does not replace it in code — that module (under `mobs/**`, a
-  different agent's file cluster at the time this landed) still builds its
-  own offers from its own farmer-only constants. Switching it to call
-  `lodestone_data::villager_trades::pool_for` instead is the brokered hunk
-  this doc names rather than performs; see "What remains" below.
+  **This now supersedes `crate::mobs::villager::trades` in code too, not just
+  in scope.** That module (under `mobs/**`) is a thin delegation onto this
+  one: `Profession::path()` gives the bare registry path
+  `lodestone_data::villager_trades::pool_for` is keyed on, and
+  `crate::mobs::villager::trades::{offers_for, offers_up_to}` forward to it
+  directly. It carries no trade data of its own any more.
 
 - **`lodestone_server::villager_trade`** (`crates/lodestone-server/src/villager_trade.rs`)
   — the dynamic half: [`OfferState`] ports `MerchantOffer`'s mutable fields
@@ -54,8 +54,9 @@ Both are pure logic: neither reaches the network, `SimMob`, or a player's
 inventory. `crate::mobs::villager`'s `OpenTrade` interact outcome and
 `crate::server::open_merchant_screen` (unchanged by this work) already
 produce the *static* offer list a client sees when the screen opens, sourced
-from `crate::mobs::villager::trades::offers_up_to` — the farmer-only table,
-still.
+from `crate::mobs::villager::trades::offers_up_to` — which, now that it
+delegates, reflects the real per-profession table for all thirteen
+professions, not just farmer.
 
 ## How to change it, and the gotchas
 
@@ -89,14 +90,6 @@ still.
 
 Not built here, named rather than silent:
 
-- **`crate::mobs::villager::trades` still only has farmer.** Switching its
-  `pool_for` to call `lodestone_data::villager_trades::pool_for` instead of
-  its own hand-written constants is a small, mechanical change — but that
-  file is under `mobs/**`, owned by a different agent cluster at the time
-  this landed. Until that switch happens, `open_merchant_screen` keeps
-  showing only farmer trades for real; every other profession's real numbers
-  exist in `lodestone_data::villager_trades` but are not yet reachable from a
-  live server.
 - **`SELECT_TRADE` is still decoded and discarded**
   (`crates/protocol/v770/src/server_protocol.rs`'s `let _ =
   decode_full::<SelectTrade>(payload);`). Wiring it to
@@ -135,8 +128,10 @@ values.
 `lodestone_server::villager_trade` depends on `lodestone_data::villager_trades`
 (the static table) and `lodestone_data::item_prototypes` (cost-item max stack
 size, for the price clamp), and reads `crate::mobs::villager::Profession`
-read-only (no edits to that module). `lodestone_data::villager_trades` depends
-on nothing beyond `lodestone-data`'s own conventions.
+read-only (no edits to that module). `crate::mobs::villager::trades` now
+depends on `lodestone_data::villager_trades` the same way, for the same
+reason. `lodestone_data::villager_trades` depends on nothing beyond
+`lodestone-data`'s own conventions.
 
 ## Evidence
 
@@ -152,4 +147,6 @@ on nothing beyond `lodestone-data`'s own conventions.
 | demand is predicted exactly from the outside formula, both the under-use (price cannot drop below base) and heavy-use (price rises by the predicted amount) directions, at two different `price_multiplier` values so one test cannot pass by copying the other's arithmetic | `lodestone-server/src/villager_trade.rs`, `demand_after_underuse_does_not_lower_the_price_below_base`, `heavy_use_raises_the_price_by_the_predicted_amount` |
 | the gossip/reputation hook discounts and surcharges correctly, with a floor at 1 | `lodestone-server/src/villager_trade.rs`, `a_special_price_diff_reduces_the_next_purchases_cost` |
 | restock cadence matches vanilla's exact tick thresholds (2400-tick cooldown, 2-per-day cap, day rollover), not a round-number guess | `lodestone-server/src/villager_trade.rs`, `restock_cadence_matches_the_exact_tick_thresholds` |
+| `crate::mobs::villager::trades` (what `open_merchant_screen` actually reads) now has a non-zero production-reader count on `lodestone_data::villager_trades` — a librarian, which the old farmer-only table always answered empty for, comes back non-empty | `lodestone-server/src/mobs/villager/trades.rs`, `a_librarian_now_offers_real_trades_through_this_seam` |
+| every one of the thirteen ported professions is reachable through this same seam, not just the one discriminating case | `lodestone-server/src/mobs/villager/trades.rs`, `every_ported_profession_is_reachable_through_this_seam` |
 | a neuter (wheat cost 20 → 21) turned the jar-match test red; restored via `cp` from an md5-checked backup | this session's own record, not a committed test |
