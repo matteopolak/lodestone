@@ -2,9 +2,13 @@
 //!
 //! # What this proves, and why it exists
 //!
-//! Every module in this crate — the [`EntityTracker`], metadata application,
-//! the attribute pipeline validated in §12.20, [`EntityPose`] interpolation — is
-//! well unit-tested. But unit tests here mock the thing they integrate with, and
+//! Every module in this crate — metadata application, the attribute pipeline
+//! validated in §12.20, [`EntityPose`] interpolation — is well unit-tested.
+//! Production entity tracking now lives in `lodestone_ecs::entity::EntityKind`,
+//! a distinct type from anything in this crate; the pre-ECS `EntityTracker`/
+//! `EntityState`/`EntityKind` that used to live here had zero production
+//! callers anywhere in the workspace and was deleted. But unit tests here mock
+//! the thing they integrate with, and
 //! the project has been burned four times by a green suite that never once let
 //! real data cross the public seam. `impl-shell` found exactly this for chunks:
 //! the decoder was correct and proven against 225 live chunks, yet `handle_play`
