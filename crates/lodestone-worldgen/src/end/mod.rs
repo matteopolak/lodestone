@@ -29,12 +29,19 @@
 //!
 //! # What is *not* here, and it is not terrain
 //!
-//! * **The central island's furniture.** Obsidian pillars, the exit portal, the
-//!   gateway and the dragon are structure/entity work, and three of the four are
-//!   *not worldgen at all* despite looking like it: `EndPodiumFeature` is never
-//!   registered in `Feature.java`, the pillars and the end platform each have a
-//!   gameplay placer as well as a worldgen one, and only `end_gateway_return`
-//!   (rarity 700 in `end_highlands`) is reached from a biome document.
+//! * **The central island's furniture — partially closed.** Obsidian pillars,
+//!   the exit portal, the gateway and the dragon are structure/entity work,
+//!   and three of the four are *not worldgen at all* despite looking like it:
+//!   `EndPodiumFeature` is never registered in `Feature.java`, the pillars and
+//!   the end platform each have a gameplay placer as well as a worldgen one,
+//!   and only `end_gateway_return` (rarity 700 in `end_highlands`) is reached
+//!   from a biome document. [`spikes::end_spikes_for_seed`] (the ten obsidian
+//!   pillars' layout) and [`podium::end_podium`] (the exit-portal/dragon-egg
+//!   podium's own block writes) are now ported here — both pure functions,
+//!   neither touching a world — because `mobs/end_crystal.rs`'s and
+//!   `mobs/dragon.rs`'s own module docs (in `lodestone-server`) disclosed
+//!   them as the reason the dragon fight has no production entry point. The
+//!   gateway and the dragon entity itself are still not here.
 //! * **Decoration.** All the End's placed features are bundled and the five biome
 //!   documents carry the step wiring, so that is `crate::feature` step work with
 //!   zero data missing.
@@ -101,6 +108,12 @@ use crate::engine::Program;
 use crate::interner::StateInterner;
 use crate::noise::EndIslandNoise;
 use crate::surface::{PreState, SurfaceDiff, SurfaceSystem, identity_canon};
+
+mod podium;
+mod spikes;
+
+pub use podium::{PodiumBlock, end_podium};
+pub use spikes::{EndSpike, SPIKE_COUNT, end_spike_blocks, end_spikes_for_seed};
 
 /// `Biomes.THE_END`.
 pub const THE_END: &str = "minecraft:the_end";
