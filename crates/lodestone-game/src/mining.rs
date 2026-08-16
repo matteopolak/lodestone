@@ -82,6 +82,18 @@ pub struct BreakInputs {
     pub submerged_mining_speed: f32,
     /// Whether the player is on the ground. Off-ground mining is 5× slower.
     pub on_ground: bool,
+    /// `Abilities.instabuild` — true for a creative-mode player.
+    ///
+    /// This is **not** an input to the break-time formula at all; vanilla's
+    /// `getDestroyProgress`/`progress_per_tick` never consult it. It bypasses
+    /// the formula entirely, at the [`Mining`] state-machine level: both
+    /// `startDestroyBlock` and `continueDestroyBlock` check
+    /// `player.getAbilities().instabuild` *before* ever reading hardness or
+    /// dig speed, and when it is set they call `destroyBlock(pos)`
+    /// immediately — no accumulation, no hardness check, not even an
+    /// unbreakable-block check (a creative player breaks bedrock in one
+    /// click). See [`Mining::start`]'s own doc for where this is consulted.
+    pub creative: bool,
 }
 
 impl Default for BreakInputs {
@@ -98,6 +110,7 @@ impl Default for BreakInputs {
             submerged: false,
             submerged_mining_speed: 0.2,
             on_ground: true,
+            creative: false,
         }
     }
 }
@@ -323,12 +336,14 @@ impl Mining {
         }
     }
 
-    /// Begin (or retarget) a dig, mirroring `startDestroyBlock`'s survival path.
+    /// Begin (or retarget) a dig, mirroring `startDestroyBlock`'s survival path
+    /// **and** its `instabuild` (creative) branch.
     ///
     /// Sends `START_DESTROY_BLOCK` and swings the arm. If the target changed
     /// while another dig was live, an `ABORT` for the old target is sent first.
-    /// A block that satisfies the instant-break condition
-    /// (`progress_per_tick >= 1.0`) breaks on this tick and leaves no live dig.
+    /// A block instant-breaks — on this tick, leaving no live dig — when either
+    /// [`BreakInputs::creative`] is set or the ordinary survival condition
+    /// (`progress_per_tick >= 1.0`) holds.
     ///
     /// `tool` is the currently selected stack (used for the same-target check);
     /// pass `None` for an empty hand.
@@ -346,23 +361,37 @@ impl Mining {
                 out.push(block_action(BlockActionKind::AbortDestroy, old.target, face, 0));
             }
             let seq = self.take_sequence();
-            if !inputs.is_air && inputs.progress_per_tick() >= 1.0 {
+            // Vanilla's `instabuild` (creative) branch never reaches
+            // `getDestroyProgress`/hardness at all — it is a separate check
+            // ahead of the formula, not a value the formula happens to
+            // produce (`Player.getAbilities().instabuild` in
+            // `startDestroyBlock`, checked before any block-state read). A
+            // creative player breaks even an unbreakable block in one click,
+            // so this bypasses the `!inputs.is_air` guard's sibling
+            // (hardness) too, though the air guard itself stays — there is
+            // never a real target to destroy over air.
+            if !inputs.is_air && (inputs.creative || inputs.progress_per_tick() >= 1.0) {
                 // Instant break: the server breaks the block on START, so no
                 // live dig is retained and no STOP is ever sent.
                 //
                 // Vanilla's equivalent branch (`startDestroyBlock`'s
-                // `getDestroyProgress(..) >= 1.0F` arm) calls
-                // `this.destroyBlock(pos)` here, which is the *same* funnel the
-                // progressive finish in `continue_` reaches. Latching it is what
-                // makes the effect keyed on destruction rather than on the
-                // `StopDestroy` packet a one-shot never sends (issue #387).
+                // `getDestroyProgress(..) >= 1.0F` arm, or its `instabuild`
+                // arm) calls `this.destroyBlock(pos)` here, which is the
+                // *same* funnel the progressive finish in `continue_`
+                // reaches. Latching it is what makes the effect keyed on
+                // destruction rather than on the `StopDestroy` packet a
+                // one-shot never sends (issue #387).
                 //
                 // **Also arms the same 5-tick cooldown `continue_`'s progressive
-                // finish sets.** Without it, holding the button in creative (whose
-                // `progress_per_tick()` is always `>= 1.0`) breaks a block, clears
-                // `state`, and reaches `start` again on the very next tick with
-                // nothing to stop it doing the same thing again — a block broken
-                // every tick instead of once per click.
+                // finish sets.** Without it, holding the button in creative
+                // breaks a block, clears `state`, and reaches `start` again on
+                // the very next tick with nothing to stop it doing the same
+                // thing again — a block broken every tick instead of once per
+                // click. Because `state` stays `None` for a creative dig, the
+                // *next* `continue_` call (once the cooldown expires) falls
+                // straight back into this branch via its `same_target`-on-`None`
+                // check — the same reason `continue_` itself needs no separate
+                // creative arm.
                 self.state = None;
                 self.destroyed = Some(pos);
                 self.delay = 5;
@@ -901,6 +930,43 @@ mod tests {
             "a one-shot break must still report the block as destroyed: vanilla's \
              instant-break branch calls the same `destroyBlock` funnel the \
              progressive finish does"
+        );
+    }
+
+    /// A creative-mode dig instant-breaks on the very first tick regardless of
+    /// hardness — this is the fix for "particles/sound only for grass, never
+    /// for a solid block": a creative session (`BreakInputs::creative`) is
+    /// naturally a single click, and before this the client applied the
+    /// **survival** hardness/tool formula even in creative, so anything but a
+    /// zero-hardness block (grass, flowers) needed several held ticks the
+    /// player never provided, and the local burst/sound never latched.
+    ///
+    /// `hardness: -1.0` (vanilla's unbreakable marker, e.g. bedrock) is the
+    /// discriminating value: the survival formula would give `progress_per_tick()
+    /// == 0.0` for it (never instant, in fact never breaking at all), so a
+    /// pass here can only be `creative` actually bypassing the formula, not a
+    /// coincidence of the hardness math.
+    #[test]
+    fn a_creative_dig_instant_breaks_regardless_of_hardness() {
+        let mut m = Mining::new();
+        let p = pos(0, 70, 0);
+        let inputs = BreakInputs {
+            hardness: -1.0,
+            creative: true,
+            ..BreakInputs::default()
+        };
+        assert_eq!(
+            inputs.progress_per_tick(),
+            0.0,
+            "the survival formula alone must not explain this test's result"
+        );
+        let acts = m.start(p, BlockFace::Up, &inputs, None);
+        assert!(is_start(&acts[0], p));
+        assert_eq!(
+            m.take_destroyed(),
+            Some(p),
+            "creative must instant-break on the very first tick even though the \
+             survival formula gives this block a zero progress rate"
         );
     }
 

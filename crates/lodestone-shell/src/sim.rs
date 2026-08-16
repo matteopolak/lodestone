@@ -143,15 +143,30 @@ pub(crate) const HOTBAR_SLOTS: usize = 9;
 /// # Mining efficiency, haste and fatigue are still unmodeled
 ///
 /// Everything but `hardness`/`correct_tool`/`tool_speed`/`is_air`/`on_ground`/
-/// `submerged` is left at [`BreakInputs::default`] — no enchantment, potion or
-/// attribute inputs are modeled yet, only the tool census resolved by
+/// `submerged`/`creative` is left at [`BreakInputs::default`] — no enchantment,
+/// potion or attribute inputs are modeled yet, only the tool census resolved by
 /// [`lodestone_model::VersionAdapter::tool_mining`].
+///
+/// # `creative` bypasses this formula, it is not an input to it
+///
+/// [`BreakInputs::creative`] is read by [`lodestone_game::mining::Mining`]
+/// itself, ahead of `progress_per_tick()` — see that field's own doc. This
+/// function's caller must still pass the real value; leaving it `false` for a
+/// creative session (the default) makes the client apply the survival
+/// hardness/tool formula, which requires the button held for several ticks
+/// on anything but a zero-hardness block. A creative player naturally clicks
+/// once, so a wrongly-`false` flag here silently drops the destroy burst and
+/// break sound for every block except the zero-hardness ones (grass, saplings,
+/// flowers) that happen to instant-break under the survival formula too — the
+/// exact split ("particles for grass, nothing for anything else") this was
+/// caught reproducing.
 pub(crate) fn dig_break_inputs(
     entry: lodestone_model::BlockHardness,
     tool: lodestone_model::ToolMining,
     is_air: bool,
     on_ground: bool,
     submerged: bool,
+    creative: bool,
 ) -> BreakInputs {
     BreakInputs {
         hardness: entry.hardness,
@@ -162,6 +177,7 @@ pub(crate) fn dig_break_inputs(
         tool_speed: tool.speed,
         on_ground,
         submerged,
+        creative,
         ..BreakInputs::default()
     }
 }
