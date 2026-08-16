@@ -92,15 +92,21 @@
 //!
 //! [`BellClaims`]/[`find_and_claim_bell`] complete the `#village` POI trio
 //! (workstation, bed, bell) with the identical ticket-accounting shape, this
-//! time against `PoiTypes.MEETING`'s 32-ticket cap. Nothing about the raid
-//! trigger needs a bell specifically (`occupied_homes_in_range` already
-//! covers that with beds alone, matching vanilla's own `#village` tag
-//! query), but issue #231's WORK/MEET/REST schedule
-//! (`crates/lodestone-entity`'s `brain::roster::villager_brain`) does: `MEET`
-//! is only eligible once `MemoryModuleType::MEETING_POINT` holds a value,
-//! and nothing wrote that memory until this. `crate::mobs::MobSim::tick_villager_bells`/
+//! time against `PoiTypes.MEETING`'s 32-ticket cap. Issue #231's WORK/MEET/REST
+//! schedule (`crates/lodestone-entity`'s `brain::roster::villager_brain`)
+//! needs it directly: `MEET` is only eligible once
+//! `MemoryModuleType::MEETING_POINT` holds a value, and nothing wrote that
+//! memory until this. `crate::mobs::MobSim::tick_villager_bells`/
 //! `meeting_point` are this ledger's production wiring, the same shape
 //! [`tick_villager_beds`](crate::mobs::MobSim::tick_villager_beds) already is.
+//!
+//! **The raid trigger does need a bell** — `point_of_interest_type/village.json`
+//! tags `home`, `meeting` *and* `#acquirable_job_site` into `#village`, not
+//! beds alone, so [`MobSim::occupied_village_pois_in_range`](crate::mobs::MobSim::occupied_village_pois_in_range)
+//! unions all three claim ledgers (this crate's earlier belief that
+//! `occupied_homes_in_range` alone "matches vanilla's own `#village` tag
+//! query" was wrong — beds are one third of that tag, not all of it — and is
+//! corrected here rather than left standing).
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -319,6 +325,32 @@ impl WorkstationClaims {
         if let Some(record) = self.records.get_mut(&(pos.x, pos.y, pos.z)) {
             record.release_ticket();
         }
+    }
+
+    /// [`BedClaims::occupied_in_range`]'s own shape, restricted to this
+    /// ledger's claimed workstations — the `#minecraft:acquirable_job_site`
+    /// third of vanilla's `#village` POI tag (`home` + `meeting` +
+    /// `#acquirable_job_site`; see `point_of_interest_type/village.json`).
+    /// Issue #241's raid trigger unions this with
+    /// [`BedClaims::occupied_in_range`] and [`BellClaims::occupied_in_range`]
+    /// (`MobSim::occupied_village_pois_in_range`) so a village with claimed
+    /// jobs but no claimed bed yet still counts, matching
+    /// `Raids.createOrExtendRaid`'s real `PoiManager.getInRange(#village, …)`
+    /// query instead of narrowing it to beds alone.
+    #[must_use]
+    pub fn occupied_in_range(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
+        let radius_sq = i64::from(radius) * i64::from(radius);
+        self.records
+            .values()
+            .filter(|record| record.is_occupied())
+            .map(|record| record.pos)
+            .filter(|pos| {
+                let dx = i64::from(pos.x - center.x);
+                let dy = i64::from(pos.y - center.y);
+                let dz = i64::from(pos.z - center.z);
+                dx * dx + dy * dy + dz * dz <= radius_sq
+            })
+            .collect()
     }
 }
 
@@ -635,6 +667,26 @@ impl BellClaims {
             record.release_ticket();
         }
     }
+
+    /// [`BedClaims::occupied_in_range`]'s own shape, restricted to this
+    /// ledger's claimed bells — the `meeting` third of vanilla's `#village`
+    /// POI tag. See [`WorkstationClaims::occupied_in_range`]'s own doc for
+    /// why this exists and who unions it.
+    #[must_use]
+    pub fn occupied_in_range(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
+        let radius_sq = i64::from(radius) * i64::from(radius);
+        self.records
+            .values()
+            .filter(|record| record.is_occupied())
+            .map(|record| record.pos)
+            .filter(|pos| {
+                let dx = i64::from(pos.x - center.x);
+                let dy = i64::from(pos.y - center.y);
+                let dz = i64::from(pos.z - center.z);
+                dx * dx + dy * dy + dz * dz <= radius_sq
+            })
+            .collect()
+    }
 }
 
 /// Runs one bell search from `origin`: a nearest-first scan of `world` for a
@@ -915,6 +967,56 @@ mod tests {
             found,
             vec![inside],
             "only the claimed bed strictly inside the 64-block radius must come back"
+        );
+    }
+
+    /// [`WorkstationClaims::occupied_in_range`]'s own version of the bed
+    /// test above — added alongside [`BellClaims::occupied_in_range`] so
+    /// `MobSim::occupied_village_pois_in_range` has a real per-ledger
+    /// primitive to union rather than a beds-only stand-in.
+    #[test]
+    fn workstation_occupied_in_range_finds_only_claimed_workstations_inside_the_radius() {
+        let mut claims = WorkstationClaims::new();
+        let center = BlockPos::new(0, 70, 0);
+        // "librarian" — the POI *type* a lectern registers as
+        // ([`poi_type_for_block`]), not the block id itself.
+        let job_type = || -> ResourceKey { "minecraft:librarian".parse().expect("valid key") };
+
+        let inside = BlockPos::new(30, 70, 0);
+        let outside = BlockPos::new(70, 70, 0);
+        let unclaimed = BlockPos::new(10, 70, 0);
+
+        assert!(claims.try_claim(inside, job_type()));
+        assert!(claims.try_claim(outside, job_type()));
+        claims.discover(unclaimed, job_type()); // registers the record but claims no ticket
+
+        let found = claims.occupied_in_range(center, 64);
+        assert_eq!(
+            found,
+            vec![inside],
+            "only the claimed workstation strictly inside the 64-block radius must come back"
+        );
+    }
+
+    /// [`BellClaims::occupied_in_range`]'s own version of the same test.
+    #[test]
+    fn bell_occupied_in_range_finds_only_claimed_bells_inside_the_radius() {
+        let mut claims = BellClaims::new();
+        let center = BlockPos::new(0, 70, 0);
+
+        let inside = BlockPos::new(30, 70, 0);
+        let outside = BlockPos::new(70, 70, 0);
+        let unclaimed = BlockPos::new(10, 70, 0);
+
+        assert!(claims.try_claim(inside));
+        assert!(claims.try_claim(outside));
+        claims.discover(unclaimed); // registers the record but claims no ticket
+
+        let found = claims.occupied_in_range(center, 64);
+        assert_eq!(
+            found,
+            vec![inside],
+            "only the claimed bell strictly inside the 64-block radius must come back"
         );
     }
 
