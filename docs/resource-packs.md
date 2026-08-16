@@ -72,6 +72,25 @@ to notice a client that will never load the pack
 itself (`apply_pack_response` returning `true` breaks its own loop and sends
 `NetUpdate::Disconnected`), not the UI layer.
 
+**The answer is queued, not applied, by `respond_to_resource_pack`.** It
+only sends `(id, accept)` on a channel the net thread's own loop drains —
+up to 15 ms later on native, since that loop also has an outbound-action
+flush and an `events.recv()` wait to get through first — and only that
+drain, `apply_pack_response`, actually clears `PackPromptCell`. A player
+report ("accepting did nothing, it kept the choice menu open") traced to
+exactly this gap: `MenuNav::apply_resource_pack_prompt` closes
+`Screen::ResourcePackPrompt` the instant the click is handled, but
+`drive_ui_from_session`'s reconcile can run again before the drain catches
+up (the click handler and a frame's reconcile share one winit dispatch), so
+it read the still-`Some` cell, saw the screen closed, and reopened the exact
+prompt just answered. `MenuNav::resource_pack_answered_id` is the fix: it
+remembers the id this side already answered and the reconcile skips
+reopening for it, forgetting it again once `pending_resource_pack_prompt()`
+itself reports `None`. See `accepting_a_resource_pack_prompt_does_not_reopen_it_before_the_net_thread_catches_up`
+(`app/tests.rs`) for the reproduction, driven against a **loopback**
+`NetClient` — whose `pack_response_tx` has no receiver at all, so the cell
+never clears, the permanent worst case of the real lag.
+
 ### The download (`net.rs`, native only)
 
 `spawn_pack_download` runs on its own OS thread with its own
