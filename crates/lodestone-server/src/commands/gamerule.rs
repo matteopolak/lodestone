@@ -16,24 +16,26 @@
 //!   `CommandTree::suggest` offers exactly the valid names, for free, and a value
 //!   slot offers `true`/`false` where that is what it takes.
 //!
-//! # One known, deliberate divergence from the captured vanilla tree
+//! # Two literals per rule, matching vanilla
 //!
-//! Vanilla registers **two** literals per rule — `keep_inventory` *and*
-//! `minecraft:keep_inventory` — which the captured 26.2 tree confirms
-//! (`command_tree_creative.hex` has both, 2 × 58 rule literals). This registers
-//! only the unprefixed form. That is a gap in *tree parity* for `/gamerule` and
-//! nothing else: both literals lead to identical subtrees, so no behaviour
-//! differs for anyone typing the ordinary spelling, and closing it is one line in
-//! the loop below whenever `/gamerule`'s own parity gate is written. Recorded here
-//! rather than discovered later.
+//! `GameRuleCommand.register` (`.cache/mc/26.2/src`) visits each rule and calls
+//! `buildRuleArguments` **twice** — once against `Commands.literal(gameRule.id())`
+//! (the bare name, e.g. `keep_inventory`) and once against
+//! `Commands.literal(gameRule.getIdentifier().toString())` (the namespaced form,
+//! `minecraft:keep_inventory`) — each an independently-built, structurally
+//! identical subtree hung off the same `/gamerule` root. Neither call site reads
+//! the literal's own text back: `queryRule`/`setRule` both report through
+//! `gameRule.id()`, which is always the bare name regardless of which literal a
+//! player typed. [`register`] below mirrors that shape exactly:
+//! [`register_rule_literal`] is called once per name, and the *set/query*
+//! closures it builds always capture `spec.name` (never the literal string),
+//! matching vanilla's own indifference to which spelling triggered them.
 //!
-//! **Do not close it without also updating
 //! `crates/protocol/v770/tests/builtin_command_parity.rs`'s
-//! `gamerule_has_every_rule_subtree_right_but_half_the_literals`.** That gate
-//! pins the *current* half-parity count arithmetically
-//! (`theirs_children == (ours_children - FEATURE_FLAGGED_RULES) * 2`); adding
-//! the second literal here without updating it there turns a passing gate red
-//! for a reason its own name already predicts.
+//! `gamerule_has_every_rule_subtree_right_and_every_literal_too` is the parity
+//! gate this satisfies — see that test for the one remaining, deliberate
+//! divergence (`max_minecart_speed`, gated behind a feature flag this crate has
+//! no concept of).
 
 use lodestone_command::{BoolArgument, IntegerArgument};
 
@@ -53,42 +55,61 @@ pub(super) fn register(registrar: &mut Registrar) {
     registrar.require_level(gamerule, GAMERULE_LEVEL);
 
     for spec in GAME_RULES {
-        let rule = registrar.literal(gamerule, spec.name);
-        let name = spec.name;
+        // Bare (`keep_inventory`) and namespaced (`minecraft:keep_inventory`) —
+        // see this module's own doc for why both are independently built rather
+        // than one redirecting to the other.
+        register_rule_literal(registrar, gamerule, spec, spec.name);
+        register_rule_literal(registrar, gamerule, spec, &format!("minecraft:{}", spec.name));
+    }
+}
 
-        // `/gamerule <rule>` — query. Vanilla's `commands.gamerule.query`.
-        registrar.exec(rule, move |ctx| {
-            let value = ctx
-                .world
-                .rules
-                .get_rule(name)
-                .expect("a rule built from GAME_RULES is always in GAME_RULES");
-            ctx.send_success(format!(
-                "Gamerule {name} is currently set to: {}",
-                value.serialize()
-            ));
-            Ok(1)
-        });
+/// One rule's full subtree (query + `value` argument), hung off `literal_name`
+/// — either `spec.name` or its `minecraft:`-prefixed alias. Every executor
+/// closure built here captures `spec.name`, **not** `literal_name`: vanilla's
+/// `queryRule`/`setRule` report through `gameRule.id()` regardless of which of
+/// the two literals a player actually typed, and `GameRules::get_rule`/
+/// `set_rule` are keyed on the bare name.
+fn register_rule_literal(
+    registrar: &mut Registrar,
+    gamerule: lodestone_command::NodeId,
+    spec: &'static crate::game_rules::GameRuleSpec,
+    literal_name: &str,
+) {
+    let rule = registrar.literal(gamerule, literal_name);
+    let name = spec.name;
 
-        // `/gamerule <rule> <value>` — set. The argument's type and range come
-        // from the rule's own spec, so the tree rejects a bad value before any
-        // executor runs.
-        match spec.default {
-            GameRuleValue::Bool(_) => {
-                let (node, key) = registrar.arg(rule, "value", BoolArgument);
-                registrar.exec(node, move |ctx| set(ctx, name, ctx.get(key).to_string()));
-            }
-            GameRuleValue::Int(_) => {
-                let (node, key) = registrar.arg(
-                    rule,
-                    "value",
-                    IntegerArgument::bounded(
-                        spec.min.unwrap_or(i32::MIN),
-                        spec.max.unwrap_or(i32::MAX),
-                    ),
-                );
-                registrar.exec(node, move |ctx| set(ctx, name, ctx.get(key).to_string()));
-            }
+    // `/gamerule <rule>` — query. Vanilla's `commands.gamerule.query`.
+    registrar.exec(rule, move |ctx| {
+        let value = ctx
+            .world
+            .rules
+            .get_rule(name)
+            .expect("a rule built from GAME_RULES is always in GAME_RULES");
+        ctx.send_success(format!(
+            "Gamerule {name} is currently set to: {}",
+            value.serialize()
+        ));
+        Ok(1)
+    });
+
+    // `/gamerule <rule> <value>` — set. The argument's type and range come
+    // from the rule's own spec, so the tree rejects a bad value before any
+    // executor runs.
+    match spec.default {
+        GameRuleValue::Bool(_) => {
+            let (node, key) = registrar.arg(rule, "value", BoolArgument);
+            registrar.exec(node, move |ctx| set(ctx, name, ctx.get(key).to_string()));
+        }
+        GameRuleValue::Int(_) => {
+            let (node, key) = registrar.arg(
+                rule,
+                "value",
+                IntegerArgument::bounded(
+                    spec.min.unwrap_or(i32::MIN),
+                    spec.max.unwrap_or(i32::MAX),
+                ),
+            );
+            registrar.exec(node, move |ctx| set(ctx, name, ctx.get(key).to_string()));
         }
     }
 }
