@@ -2,8 +2,11 @@
 //!
 //! # What it is
 //!
-//! `open_merchant_screen`'s only source of a villager's static offer list.
-//! Thin delegation onto [`lodestone_data::villager_trades`], which carries
+//! The static per-level trade table `MobSim::interact`'s `OpenTrade` gate
+//! reads to decide whether a villager has any offers at all (`has_offers`),
+//! and what `crate::villager_trade::VillagerTrades::for_profession` builds
+//! the *persistent*, per-villager offer list from. Thin delegation onto
+//! [`lodestone_data::villager_trades`], which carries
 //! the actual per-profession, per-level table (all thirteen workstation
 //! professions, transcribed from the real 26.2 registry data — see that
 //! module's own doc for what is and is not ported, and

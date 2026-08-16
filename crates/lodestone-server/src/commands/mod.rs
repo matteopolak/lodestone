@@ -115,6 +115,7 @@
 //! `lodestone-command-mc` (the Minecraft argument types), `lodestone-model` (the
 //! version-free `ArgumentParser`), and [`crate::game_rules`].
 
+mod access_commands;
 mod block_commands;
 mod chat_commands;
 mod clear;
@@ -223,6 +224,7 @@ impl ServerCommands {
     #[must_use]
     pub fn new() -> Self {
         let mut registrar = Registrar::new();
+        access_commands::register(&mut registrar);
         gamerule::register(&mut registrar);
         gamemode::register(&mut registrar);
         give::register(&mut registrar);

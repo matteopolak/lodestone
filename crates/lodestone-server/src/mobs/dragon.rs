@@ -513,7 +513,11 @@ impl<'w> MobSim<'w> {
             .into_iter()
             .filter_map(|id| {
                 let d = self.dragons.get(&id)?;
-                let bar = fight::boss_bar_value(false, d.health, d.max_health);
+                // Delegates to `dragon_boss_bar` (this method's own
+                // single-dragon sibling, previously computed inline here a
+                // second time with a duplicated `false` literal) rather than
+                // calling `fight::boss_bar_value` directly a second time.
+                let bar = self.dragon_boss_bar(id, false)?;
                 Some(crate::protocol::BossBarSnapshot {
                     id: d.uuid,
                     name: lodestone_model::Text::translate("entity.minecraft.ender_dragon", Vec::new()),

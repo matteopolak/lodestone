@@ -2898,7 +2898,11 @@ impl IntegratedServer {
         let conn_resource_packs = resource_packs;
         let conn_plugin_channels = plugin_channels;
         // Issue #336: moved into the accept loop like the three above it, and
-        // cloned per socket below.
+        // cloned per socket below. `rcon_access` is a second clone taken
+        // *before* the move into `async move` below, for `start_rcon` past
+        // this point (RCON's `/op`/`/deop`/`/whitelist` sharing the same
+        // list every accepted connection's join check reads).
+        let rcon_access = access.clone();
         let conn_access = access;
         // Issue #273: same reasoning as the four above — moved out here so the
         // `async move` accept arm below doesn't capture `config`'s original,
@@ -3210,7 +3214,14 @@ impl IntegratedServer {
         // caller that asked for RCON and did not get it has a security-relevant
         // surprise, unlike the two UDP listeners above.
         if let Some(rcon) = rcon {
-            server.start_rcon(rcon)?;
+            // Issue #336's remaining wiring: the *same* `AccessLists` every
+            // accepted LAN connection's join check reads (`conn_access`,
+            // cloned per socket above) is what RCON's `/op`/`/deop`/
+            // `/whitelist` now mutate too — a private copy here would let
+            // RCON report success while granting operator status the next
+            // join check never sees. Previously `RconConfig::access` had no
+            // production caller at all, so those commands could not exist.
+            server.start_rcon(rcon.with_access(rcon_access))?;
         }
         Ok(server)
     }

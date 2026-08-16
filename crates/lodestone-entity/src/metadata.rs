@@ -399,12 +399,11 @@ impl MobFlags {
     /// Whether the mob is left-handed (`Mob.isLeftHanded`).
     ///
     /// Vanilla's `Mob.getMainArm()` returns `LEFT` when this is set, which flips
-    /// which arm every arm pose applies to. Decoded but **not yet consumed**: the
-    /// pose selection assumes a right-handed mob, so a left-handed skeleton draws
-    /// its bow with the wrong arm. That is a visible cosmetic divergence on a rare
-    /// case (vanilla sets it for 5% of mobs at spawn), recorded rather than
-    /// guessed at, because plumbing a main-arm through the pose chain is a wider
-    /// change than the bit that would feed it.
+    /// which arm every arm pose applies to. Consumed end to end: it folds into
+    /// `MobState::left_handed` and threads through `EntityDraw::main_arm_left`,
+    /// then gets XORed against the held-hand bit in `arm_pose_for`'s two pose
+    /// paths and in the `EquipmentSlot`-to-`Arm` mappings the entity and
+    /// world-item draw passes use.
     #[must_use]
     pub const fn left_handed(self) -> bool {
         self.bits & Self::LEFT_HANDED != 0

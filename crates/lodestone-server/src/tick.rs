@@ -1065,6 +1065,10 @@ fn run_command_block_command<W: ChunkSource + ?Sized>(
         // honest answer, not a silent drop: the command still runs and every
         // other built-in still works, `/worldborder` just refuses here.
         border: None,
+        // Same reasoning as `border` above: a command block running
+        // `/op`/`/deop`/`/whitelist` is a niche case not worth threading a
+        // fifth handle through this helper for.
+        access: None,
     };
     let Some(outcome) = commands.run(&command_world, &source, command) else {
         return false;
