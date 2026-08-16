@@ -972,6 +972,133 @@ fn retains_modeled_components_before_an_unmodeled_one() {
 }
 
 // ---------------------------------------------------------------------------
+// `minecraft:bundle_contents`
+// ---------------------------------------------------------------------------
+
+/// Writes one `ItemStackTemplate` (`item_id`, `count`, then an *empty* nested
+/// `DataComponentPatch`) — the shape `BundleContents.STREAM_CODEC`'s per-entry
+/// codec expects for a contained stack with no components of its own.
+fn write_item_stack_template(w: &mut Writer, item: &str, count: i32) {
+    w.var_i32(item_id(item).expect("known item"));
+    w.var_i32(count);
+    w.var_i32(0); // no added components
+    w.var_i32(0); // no removed components
+}
+
+/// A filled bundle decodes its nested items — including a bundle nested inside
+/// it (`BUNDLE_IN_BUNDLE_WEIGHT` is real, so this is not a hypothetical case) —
+/// and a component placed *after* `bundle_contents` in the same patch proves
+/// the reader is still correctly aligned once the nested list ends, the same
+/// alignment risk every unprefixed-payload component in this file carries.
+///
+/// The two top-level entries and their `item_id`/`count` pairs are pairwise
+/// distinct (`torch`/11, `white_bundle`/1) so a transposition of either
+/// adjacent VarInt pair cannot survive unnoticed.
+#[test]
+fn decodes_bundle_contents_including_a_nested_bundle() {
+    let mut nested_bundle_patch = Writer::default();
+    nested_bundle_patch.var_i32(1); // one added component
+    nested_bundle_patch.var_i32(0);
+    nested_bundle_patch.var_i32(component_id("minecraft:bundle_contents"));
+    nested_bundle_patch.var_i32(1); // one item in the nested bundle
+    write_item_stack_template(&mut nested_bundle_patch, "minecraft:iron_ingot", 4);
+
+    let mut patch = Writer::default();
+    patch.var_i32(2); // bundle_contents, then damage -- proves alignment survives
+    patch.var_i32(0);
+    patch.var_i32(component_id("minecraft:bundle_contents"));
+    patch.var_i32(2); // two items
+    write_item_stack_template(&mut patch, "minecraft:torch", 11);
+    // Second entry: a bundle-in-a-bundle -- item id, count, then its own
+    // (non-empty) nested patch built above, not `write_item_stack_template`'s
+    // empty one.
+    patch.var_i32(item_id("minecraft:white_bundle").expect("known item"));
+    patch.var_i32(1);
+    patch.bytes(nested_bundle_patch.as_slice());
+    patch.var_i32(component_id("minecraft:damage"));
+    patch.var_i32(9);
+
+    let payload = set_slot_with_patch("minecraft:bundle", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(
+        !item.components.has_unmodeled,
+        "every component in this patch is modeled"
+    );
+    assert_eq!(
+        item.components.damage,
+        Some(9),
+        "the reader must still be aligned after the nested list, including the \
+         nested bundle inside it"
+    );
+    assert_eq!(item.components.bundle_contents.len(), 2);
+    assert_eq!(item.components.bundle_contents[0].item.to_string(), "minecraft:torch");
+    assert_eq!(item.components.bundle_contents[0].count, 11);
+    assert_eq!(
+        item.components.bundle_contents[1].item.to_string(),
+        "minecraft:white_bundle"
+    );
+    assert_eq!(item.components.bundle_contents[1].count, 1);
+    let nested = &item.components.bundle_contents[1].components.bundle_contents;
+    assert_eq!(nested.len(), 1, "the bundle-in-a-bundle must decode its own contents");
+    assert_eq!(nested[0].item.to_string(), "minecraft:iron_ingot");
+    assert_eq!(nested[0].count, 4);
+}
+
+/// An unmodeled component inside a *contained* stack is exactly as
+/// unrecoverable as one at the top level — `ItemStackTemplate.STREAM_CODEC`'s
+/// nested `DataComponentPatch` carries no length prefix either — so it stops
+/// the bundle list, flags the outer stack `has_unmodeled`, and (like every
+/// other unmodeled-component case in this file) drops the rest of the packet
+/// rather than hard-failing the whole connection.
+#[test]
+fn an_unmodeled_component_inside_a_bundled_item_degrades_gracefully() {
+    let mut nested_patch = Writer::default();
+    nested_patch.var_i32(item_id("minecraft:torch").expect("known item"));
+    nested_patch.var_i32(1);
+    nested_patch.var_i32(1); // one added component
+    nested_patch.var_i32(0);
+    nested_patch.var_i32(component_id(UNMODELED_COMPONENT));
+    write_network_nbt(&mut nested_patch, &Nbt::Compound(Vec::new())).unwrap();
+
+    let mut patch = Writer::default();
+    patch.var_i32(1);
+    patch.var_i32(0);
+    patch.var_i32(component_id("minecraft:bundle_contents"));
+    patch.var_i32(1); // one item
+    patch.bytes(nested_patch.as_slice());
+
+    let payload = set_content(&[
+        ("minecraft:bundle", 1, patch.into_vec()),
+        ("minecraft:diamond_sword", 1, empty_patch()),
+    ]);
+
+    let directives = handle(play::clientbound::CONTAINER_SET_CONTENT, &payload);
+    let ClientEvent::ContainerContent { items, .. } = expect_single_emit(&directives) else {
+        panic!("wrong event");
+    };
+    // The unmodeled component inside the bundle ends the whole packet at that
+    // slot -- the same "drop the rest, keep what decoded" contract every other
+    // unprefixed component in this file gets.
+    assert_eq!(
+        items.len(),
+        1,
+        "the slot after the partial bundle must never be read"
+    );
+    let bundle = items[0].as_ref().expect("the bundle slot");
+    assert!(bundle.components.has_unmodeled);
+    assert_eq!(
+        bundle.components.bundle_contents.len(),
+        1,
+        "the item decoded before the unmodeled component is retained"
+    );
+    assert_eq!(
+        bundle.components.bundle_contents[0].item.to_string(),
+        "minecraft:torch"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // `minecraft:custom_data`, and the multi-item lists that made it fatal
 // ---------------------------------------------------------------------------
 

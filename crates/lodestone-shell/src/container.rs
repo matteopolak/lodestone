@@ -37,6 +37,9 @@ mod background;
 /// surface (issue #613's `SetBeaconEffects` remainder) — see its own module
 /// doc.
 pub mod beacon;
+/// Bundle scroll-to-select tracking (issue #616's `BUNDLE_ITEM_SELECTED` /
+/// #613's `SelectBundleItem` remainder) — see its own module doc.
+pub mod bundle;
 /// The enchanting table's three enchant-offer buttons (issue #613's
 /// `ContainerButtonClick` remainder) — see its own module doc.
 pub mod enchant;

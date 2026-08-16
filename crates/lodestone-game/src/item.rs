@@ -118,6 +118,16 @@ pub const POT_DECORATIONS_COMPONENT: &str = "minecraft:pot_decorations";
 /// head in an advancement icon or an inventory slot used to lose the rest of its
 /// packet, not just its owner. Carried as [`ComponentValue::Profile`].
 pub const PROFILE_COMPONENT: &str = "minecraft:profile";
+/// Well-known component identifier for `minecraft:bundle_contents`.
+///
+/// A bundle's nested items — closes issue #616's `BUNDLE_ITEM_SELECTED` and
+/// #613's `SelectBundleItem` remainder together, since both exist only to
+/// mutate this one component's selected-item highlight. Modelled as the full
+/// mutable nested-item container vanilla's `BundleContents`/`BundleItem` are
+/// (`tryTransfer`/`removeOne`), not a display-only summary — the biggest of
+/// #616's six, per that issue's own note, and the reason it was deferred five
+/// times before this. Carried as [`ComponentValue::Bundle`].
+pub const BUNDLE_CONTENTS_COMPONENT: &str = "minecraft:bundle_contents";
 /// Well-known component identifier for `minecraft:custom_model_data`.
 ///
 /// Vanilla's own "make this item look different" channel, and half of how real
@@ -139,6 +149,22 @@ pub const CUSTOM_MODEL_DATA_COMPONENT: &str = "minecraft:custom_model_data";
 /// genuinely novel item id is not representable, exactly as a novel entity type
 /// is not (#140). A custom item is a vanilla item plus this tag, and nothing else.
 pub const PLUGIN_ITEM_ID_COMPONENT: &str = "lodestone:item_id";
+
+/// Whether `item` is one of vanilla's 17 bundle variants (`minecraft:bundle`
+/// plus one per dye colour) — real vanilla gates a bundle-only interaction on
+/// `#minecraft:bundles` (`BundleMouseActions.matches`,
+/// `slot.getItem().is(ItemTags.BUNDLES)`), and this crate carries no tag
+/// registry to consult that tag by name.
+///
+/// **Disclosed simplification, not a guess**: every bundle-family item is a
+/// `minecraft:` item whose path ends in `bundle`, and nothing else in the
+/// current registry does, so the shape stands in for the tag membership.
+/// Re-derive from the real tag if a modded or future item breaks that
+/// assumption.
+#[must_use]
+pub fn is_bundle(item: &Identifier) -> bool {
+    item.namespace() == VANILLA_ITEM_NAMESPACE && item.path().ends_with("bundle")
+}
 
 /// A canonical, version-free component value.
 ///
@@ -213,6 +239,12 @@ pub enum ComponentValue {
     /// `minecraft:profile` — a player-head's owner identity, carried verbatim
     /// from [`lodestone_model::ItemProfile`]. See [`PROFILE_COMPONENT`].
     Profile(ItemProfile),
+    /// `minecraft:bundle_contents` — a bundle's nested items, each lifted to a
+    /// full canonical [`ItemStack`] (not the raw model stack) so a tooltip or
+    /// slot renderer can call the same typed accessors
+    /// (`custom_name`/`enchantments`/…) on a contained item that it already
+    /// does on the top-level one. See [`BUNDLE_CONTENTS_COMPONENT`].
+    Bundle(Vec<ItemStack>),
 }
 
 /// The effective, resolved component set of an [`ItemStack`].
@@ -677,6 +709,52 @@ impl ItemStack {
         self.write_component(PROFILE_COMPONENT, profile.map(ComponentValue::Profile));
     }
 
+    /// The stack's `minecraft:bundle_contents`, in slot order (index 0 is the
+    /// most-recently-inserted item — vanilla's `Mutable::tryInsert` always
+    /// `add(0, …)`), or an empty slice for every non-bundle item and for an
+    /// empty bundle.
+    #[must_use]
+    pub fn bundle_contents(&self) -> &[ItemStack] {
+        match self.components.get_str(BUNDLE_CONTENTS_COMPONENT) {
+            Some(ComponentValue::Bundle(items)) => items,
+            _ => &[],
+        }
+    }
+
+    /// Replaces the stack's bundle contents. An empty list **removes** the
+    /// component rather than storing an empty one, matching
+    /// [`set_enchantments`](Self::set_enchantments) — an empty bundle and one
+    /// that never carried the component are the same state.
+    pub fn set_bundle_contents(&mut self, items: Vec<ItemStack>) {
+        let value = (!items.is_empty()).then_some(ComponentValue::Bundle(items));
+        self.write_component(BUNDLE_CONTENTS_COMPONENT, value);
+    }
+
+    /// How many of this stack's bundle contents are shown (and therefore
+    /// scroll-selectable) at once — `BundleContents.getNumberOfItemsToShow`,
+    /// transcribed:
+    ///
+    /// ```text
+    /// let available = if size > 12 { 11 } else { 12 };
+    /// let on_last_row = size % 4;
+    /// let empty_on_last_row = if on_last_row == 0 { 0 } else { 4 - on_last_row };
+    /// min(size, available - empty_on_last_row)
+    /// ```
+    ///
+    /// `0` for every non-bundle item and for an empty bundle — the same guard
+    /// `BundleMouseActions.onMouseScrolled` uses to make scrolling a no-op.
+    #[must_use]
+    pub fn bundle_items_to_show(&self) -> usize {
+        let size = self.bundle_contents().len();
+        if size == 0 {
+            return 0;
+        }
+        let available = if size > 12 { 11 } else { 12 };
+        let on_last_row = size % 4;
+        let empty_on_last_row = if on_last_row == 0 { 0 } else { 4 - on_last_row };
+        size.min(available - empty_on_last_row)
+    }
+
     /// The stack's `minecraft:writable_book_content` draft pages, or `None`
     /// for every item but an edited `minecraft:writable_book`.
     #[must_use]
@@ -950,6 +1028,28 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             components.insert(key, ComponentValue::Profile(profile));
         }
 
+        // Issue #616's `BUNDLE_ITEM_SELECTED` / #613's `SelectBundleItem`:
+        // without this branch a bundle's contents never reach this crate's
+        // shape, the same crate-boundary loss the dye/trim/pot comments above
+        // already document. Each nested model stack is lifted through this
+        // same `From` impl recursively, so a bundle-in-a-bundle round-trips as
+        // faithfully as the top level does.
+        if !stack.components.bundle_contents.is_empty()
+            && let Ok(key) = BUNDLE_CONTENTS_COMPONENT.parse()
+        {
+            components.insert(
+                key,
+                ComponentValue::Bundle(
+                    stack
+                        .components
+                        .bundle_contents
+                        .iter()
+                        .map(ItemStack::from)
+                        .collect(),
+                ),
+            );
+        }
+
         Self::with_components(
             stack.item.clone(),
             i32::try_from(stack.count).unwrap_or(i32::MAX),
@@ -1007,6 +1107,14 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             map_id: stack.map_id(),
             pot_decorations: stack.pot_decorations(),
             profile: stack.profile(),
+            // Issue #616 / #613's `SelectBundleItem`: each contained stack
+            // lowers back through this same `From` impl recursively, the
+            // mirror of the forward conversion above.
+            bundle_contents: stack
+                .bundle_contents()
+                .iter()
+                .map(lodestone_model::ItemStack::from)
+                .collect(),
             tool: stack.tool(),
             max_stack_size: stack
                 .components
@@ -1457,6 +1565,18 @@ mod tests {
                     pages: vec![Text::literal("The end.")],
                     resolved: true,
                 }),
+                // Issue #616 / #613's `SelectBundleItem`: a real nested stack,
+                // not `vec![]` either way, so this exercises the recursive
+                // conversion rather than the empty-list short-circuit both
+                // directions take.
+                bundle_contents: vec![lodestone_model::ItemStack {
+                    item: id("minecraft:torch"),
+                    count: 7,
+                    components: ModelItemComponents {
+                        custom_name: Some(Text::literal("A nested torch")),
+                        ..ModelItemComponents::default()
+                    },
+                }],
                 tool: ToolPatch::Set(tool),
                 max_stack_size: Some(1),
                 max_damage: Some(1561),
@@ -1477,6 +1597,52 @@ mod tests {
         let back = lodestone_model::ItemStack::from(&game);
 
         assert_eq!(back, original, "the round trip must be exact");
+    }
+
+    /// `is_bundle` matches every real bundle item and rejects a look-alike
+    /// whose path merely contains, rather than ends in, "bundle".
+    #[test]
+    fn is_bundle_matches_the_bundle_family_and_nothing_else() {
+        assert!(is_bundle(&id("minecraft:bundle")));
+        assert!(is_bundle(&id("minecraft:black_bundle")));
+        assert!(!is_bundle(&id("minecraft:torch")));
+        assert!(!is_bundle(&id("minecraft:bundle_of_joy")));
+        assert!(!is_bundle(&id("lodestone:custom_bundle")));
+    }
+
+    /// `getNumberOfItemsToShow`'s own worked cases: a full row shows
+    /// everything up to the cap, and a partial last row reserves the empty
+    /// cells rather than letting a later item slide into them.
+    #[test]
+    fn bundle_items_to_show_matches_vanillas_worked_cases() {
+        let bundle_of = |count: usize| {
+            let mut stack = ItemStack::new(id("minecraft:bundle"), 1);
+            stack.set_bundle_contents(
+                (0..count)
+                    .map(|_| ItemStack::new(id("minecraft:torch"), 1))
+                    .collect(),
+            );
+            stack
+        };
+
+        assert_eq!(bundle_of(0).bundle_items_to_show(), 0, "an empty bundle shows nothing");
+        assert_eq!(bundle_of(4).bundle_items_to_show(), 4, "one full row");
+        assert_eq!(
+            bundle_of(6).bundle_items_to_show(),
+            6,
+            "one full row plus a partial one still shows every item at 6"
+        );
+        assert_eq!(
+            bundle_of(16).bundle_items_to_show(),
+            11,
+            "over 12, on an exact row boundary, caps at the reduced 11"
+        );
+        assert_eq!(
+            bundle_of(13).bundle_items_to_show(),
+            8,
+            "over 12 with a one-item partial last row reserves that row's \
+             three empty cells out of the reduced 11, leaving 8"
+        );
     }
 
     /// A plugin's typed writes land in the same component map the decoder writes,

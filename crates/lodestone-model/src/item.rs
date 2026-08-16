@@ -284,6 +284,34 @@ pub struct ItemComponents {
     /// codec is equally unprefixed, so a written book anywhere in an
     /// inventory used to truncate the rest of that packet.
     pub written_book_content: Option<WrittenBookContent>,
+    /// `minecraft:bundle_contents`: a bundle's nested items, in slot order (index
+    /// 0 is the most-recently-inserted stack — vanilla's `Mutable::tryInsert`
+    /// always `add(0, …)`). Empty for every non-bundle item and for an empty
+    /// bundle; the two are indistinguishable here, the same "absent patch field
+    /// and an explicitly-empty one collapse to the same value" convention
+    /// [`enchantments`](Self::enchantments) already uses.
+    ///
+    /// Each entry is a **full nested `ItemStack`**, not a display-only summary —
+    /// `BundleContents.STREAM_CODEC` wire-carries a whole `ItemStackTemplate`
+    /// (item, count, and its own recursive `DataComponentPatch`) per contained
+    /// item, and a bundle can legally contain another bundle
+    /// (`BUNDLE_IN_BUNDLE_WEIGHT`), which is why the nesting is real rather than
+    /// flattened to one level.
+    ///
+    /// Decoded rather than treated as unmodeled for the same reason as
+    /// [`trim`](Self::trim) and the rest of that group: `ItemStackTemplate
+    /// .STREAM_CODEC` carries no length prefix, so a filled bundle sitting in
+    /// any inventory used to truncate the rest of the packet from that slot
+    /// onward.
+    ///
+    /// **`BundleContents`'s own `selectedItem` never reaches the wire** — its
+    /// `STREAM_CODEC` maps straight onto the constructor that always defaults it
+    /// to `-1` (`BundleContents.java`); the tooltip highlight vanilla's client
+    /// shows is derived from local mouse/scroll state (`BundleMouseActions`),
+    /// never from this component. So there is no `selected_index` field here to
+    /// carry, and there should not be one — a field for it would always read as
+    /// unset from a real server.
+    pub bundle_contents: Vec<ItemStack>,
     /// True when the stack's patch carried at least one component this build
     /// does not model, so decoding stopped early and the modeled fields above
     /// may be incomplete. The modeled fields that were decoded remain valid.
