@@ -20,25 +20,42 @@ variant) already had.
 ### The two different rules
 
 A player's tag and every other entity's tag are resolved by genuinely
-different vanilla predicates, both applied once, at `net::entity_snapshot`
-(`crates/lodestone-shell/src/net.rs`):
+different vanilla predicates, both applied once, in
+`entities.rs::resolve_entity_facts` (`crates/lodestone-shell/src/entities.rs`)
+— **not** at `net::entity_snapshot`, which issue #36 deleted along with
+`EntitySnapshot` itself; `resolve_entity_facts` is the bevy-ECS successor this
+doc's earlier draft predates (`docs/bevy-migration.md` §4.4 is the wider
+record of that move):
 
 - **A player's tag is always its tab-list display name.**
-  `Player.shouldShowName()` returns `true` unconditionally
-  (`Player.java:1637`), overriding the base `Entity.shouldShowName() =
-  isCustomNameVisible()` every other entity uses. The name comes from
-  `NetClient::tab_list()` (already-existing, already-folded state — see
-  `crates/lodestone-shell/src/tablist.rs`), matched by `EntityView::uuid`.
-  Scoreboard team colouring/prefixes are genuinely part of vanilla's
-  `getDisplayName()` for a player and are **out of scope here** — this is
-  the plain tab-list name.
+  `Player.shouldShowName()` returns `true` unconditionally, overriding the
+  base `Entity.shouldShowName() = isCustomNameVisible()` every other entity
+  uses. The name comes from the `tab_list: &TabList` parameter
+  `resolve_entity_facts` already threads through for the player-skin lookup
+  right below it (`crate::tablist`), matched by the entity's `EntityUuid`
+  component. Scoreboard team colouring/prefixes are genuinely part of
+  vanilla's `getDisplayName()` for a player and are **out of scope here** —
+  this is the plain tab-list name.
+  - **The lookup survives a missing tab-list entry once resolved.** A
+    player-type NPC spawned by a server plugin is almost always a fake
+    player entity whose profile carries no `CustomName` at all, and whose
+    plugin commonly adds a tab-list entry (to declare a skin/name) and then
+    removes it shortly after, to keep the fake player out of the visible
+    player list while the entity stays spawned — the exact shape a real
+    disconnect's `player_info_remove` also takes. Without a fallback, that
+    miss silently drops the tag every frame afterwards even though nothing
+    about the entity changed — the reported symptom was "NPCs don't have a
+    name rendered ... their skins do show up perfectly though," and the skin
+    half already survived this (`crate::remote_skins`'s `LAST_KNOWN` cache).
+    `remote_skins::remember_name`/`last_known_name` are the name half of the
+    identical fix, keyed by uuid the same way.
 - **Every other entity's tag is its `CUSTOM_NAME`**, gated on
   `CUSTOM_NAME_VISIBLE` (`LivingEntity.shouldShowName() =
-  isCustomNameVisible()`, `LivingEntity.java:2364`/`:2365`). An entity with
-  `CUSTOM_NAME_VISIBLE=true` but no custom name shows nothing here — vanilla
-  would fall back to drawing the entity's translated type name (`Entity.
-  getDisplayName()`'s default), which is **deliberately not reproduced**
-  (out of scope: the issue's own checklist says "a non-empty custom name").
+  isCustomNameVisible()`). An entity with `CUSTOM_NAME_VISIBLE=true` but no
+  custom name shows nothing here — vanilla would fall back to drawing the
+  entity's translated type name (`Entity.getDisplayName()`'s default), which
+  is **deliberately not reproduced** (out of scope: the issue's own
+  checklist says "a non-empty custom name").
 
 Both resolve to one `crate::entities::NameTag { text, see_through }`, carried
 as `EntitySnapshot::name_tag` → `RenderNameTag` (a `bevy_ecs` component,
@@ -129,11 +146,20 @@ already wrote this frame — see `RenderState::render_inner`.
 
 ## How to change it, and the gotchas
 
-- **The two rules live at `net::entity_snapshot`, not in `gpu/nametag.rs`.**
-  If a scoreboard-team-prefixed player name, or vanilla's translated-type-name
-  fallback, is ever wanted, that is a change to the *resolution* logic in
-  `net.rs`, not to the draw pass — the draw pass only ever sees an already-
-  resolved `Option<NameTag>` and does not know which rule produced it.
+- **The two rules live at `entities.rs::resolve_entity_facts`, not in
+  `gpu/nametag.rs`.** If a scoreboard-team-prefixed player name, or vanilla's
+  translated-type-name fallback, is ever wanted, that is a change to the
+  *resolution* logic in `entities.rs`, not to the draw pass — the draw pass
+  only ever sees an already-resolved `Option<NameTag>` and does not know
+  which rule produced it.
+- **The player-name fallback cache is per-uuid, not per-frame.**
+  `remote_skins::remember_name`/`last_known_name` persist across frames the
+  same way `remember`/`last_known` (the skin cache) already do; a fresh uuid
+  that was never resolved through the tab list still correctly shows no tag,
+  and only a uuid that *was* resolved once inherits its own remembered name
+  on a later miss — see `remote_skins.rs`'s own doc on `NAME_LAST_KNOWN` for
+  why this needs to be a second, separate map rather than folded into the
+  skin one.
 - **`wgpu`'s depth-stencil constraint is per render *pass*, not per
   pipeline in isolation.** Any future pass that wants "no depth interaction"
   while sharing this crate's single monolithic block pass needs the same
@@ -182,6 +208,10 @@ module's doc).
   — the camera math and the shared depth format.
 - `lodestone-game::tablist::TabList` — already-folded tab-list state, for
   player names.
+- `crate::remote_skins` — `remember_name`/`last_known_name`, the per-uuid
+  fallback cache for a player-type entity's name surviving a missing
+  tab-list entry (see the bullet above), alongside the pre-existing skin
+  cache it shares the module with.
 - `wgpu` — the pass's own pipeline/shader, ~200 lines, no shared bind groups
   with the model/entity pipelines.
 
@@ -210,9 +240,12 @@ module's doc).
 - `crates/lodestone-shell/src/gpu/nametag.rs`'s own unit tests (`cargo test
   -p lodestone-shell --lib gpu::nametag`) — the distance cutoff and empty-name
   cases, driven directly against `push_entity_quads` with no GPU.
-- `crates/lodestone-shell/src/net.rs`'s `net::tests::name_tag` module — the
+- `crates/lodestone-shell/src/entities.rs`'s `tests::name_tag` module — the
   two resolution rules (player-vs-mob, visibility gating, sneaking) pinned
-  against `entity_snapshot` in isolation.
+  against `resolve_entity_facts` in isolation, plus the per-uuid fallback
+  (`a_players_name_tag_survives_a_missing_tab_list_entry_once_resolved`),
+  the name-cache sibling of the pre-existing skin-fallback test right next
+  to it.
 - `crates/lodestone-shell/tests/nametag_pixels.rs` — the real pixel gates,
   through `RenderState::render`:
   - `a_named_entity_draws_text_pixels_above_it`: a tagged entity against an
@@ -231,6 +264,6 @@ module's doc).
 
 ```text
 cargo test -p lodestone-shell --lib gpu::nametag
-cargo test -p lodestone-shell --lib net::tests::name_tag
+cargo test -p lodestone-shell --lib entities::tests::name_tag
 cargo test -p lodestone-shell --test nametag_pixels -- --ignored --nocapture
 ```
