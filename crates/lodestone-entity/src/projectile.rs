@@ -341,6 +341,15 @@ pub const SMALL_FIREBALL_DAMAGE: f32 = 5.0;
 /// `SmallFireball.onHitEntity`'s `igniteForSeconds(5.0F)`.
 pub const SMALL_FIREBALL_IGNITE_SECONDS: f32 = 5.0;
 
+/// `WitherSkull.onHitEntity`'s damage when the shooter is a living owner —
+/// the only case this crate's production skull spawns ever hit (see
+/// `lodestone_server::wither`'s own doc for the no-owner `5.0F` case, which
+/// this table does not carry because nothing here resolves "does this
+/// tracked projectile have an owner" — that is `MobSim`'s own
+/// `ProjectileMeta::owner`, resolved by the caller, not this version-free
+/// table).
+pub const WITHER_SKULL_DAMAGE: f32 = 8.0;
+
 /// An arrow-family impact's damage, `AbstractArrow.onHitEntity`:
 /// `Mth.ceil(Mth.clamp(speed * baseDamage, 0, Integer.MAX_VALUE))`.
 ///
@@ -395,6 +404,13 @@ pub fn impact_effect(path: &str, speed: f64) -> ImpactEffect {
         // is the general case, not a stand-in for the whole rule.
         "snowball" | "egg" | "ender_pearl" | "experience_bottle" | "splash_potion"
         | "lingering_potion" => none,
+        // `WitherSkull.onHitEntity`'s damage; the impact-blast/wither-effect
+        // halves need the target's own liveness/owner, so `MobSim`'s impact
+        // pass applies those, matching the snowball-vs-blaze precedent above.
+        "wither_skull" => ImpactEffect {
+            damage: WITHER_SKULL_DAMAGE,
+            ..none
+        },
         _ => none,
     }
 }

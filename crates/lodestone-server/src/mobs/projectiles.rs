@@ -33,6 +33,12 @@ struct ProjectileHit {
     /// Where the projectile was when it struck, standing in for the shooter as
     /// the retaliation direction.
     origin: Vec3,
+    /// The projectile's own [`ProjectileMeta::owner`] — needed by the wither
+    /// skull's `livingOwner.heal(5.0F)`-on-kill clause
+    /// (`WitherSkull.onHitEntity`); every other impact ignores it (the
+    /// retaliation direction above already covers the general "who did this"
+    /// case).
+    owner: Option<i32>,
 }
 
 /// One splash/lingering potion impact [`MobSim::resolve_projectile_impacts`]
@@ -73,6 +79,10 @@ fn projectile_damage_type(path: &str) -> &'static str {
         "arrow" | "spectral_arrow" => "arrow",
         "trident" => "trident",
         "small_fireball" | "fireball" => "fireball",
+        // `WitherSkull.onHitEntity`'s own `damageSources().witherSkull(...)`
+        // — a real, distinct `minecraft:wither_skull` damage type (confirmed
+        // in the generated `lodestone_data::damage_types` table, not assumed).
+        "wither_skull" => "wither_skull",
         // `thrown` covers snowball, egg and the potions.
         _ => "thrown",
     }
@@ -318,6 +328,11 @@ impl<'w> MobSim<'w> {
         // (health, status effects), so it cannot run while this loop still
         // holds an immutable borrow of it.
         let mut potion_impacts: Vec<PotionImpact> = Vec::new();
+        // `WitherSkull.onHit`'s unconditional impact explosion — staged for
+        // the same reason `potion_impacts` is: `MobSim::explode` needs
+        // `&mut self.mobs` while this loop still holds an immutable borrow of
+        // both the projectile set and the mob list.
+        let mut wither_skull_blasts: Vec<Vec3> = Vec::new();
         for tracked in self.projectiles.iter() {
             let from = tracked.projectile.position;
             let delta = tracked.projectile.velocity;
@@ -361,6 +376,7 @@ impl<'w> MobSim<'w> {
             match (nearest, block_t) {
                 (Some((entity_t, target)), block) if block.is_none_or(|b| entity_t <= b) => {
                     let entity_type = meta.map(|m| m.entity_type.path().to_owned());
+                    let is_wither_skull = entity_type.as_deref() == Some("wither_skull");
                     if is_potion_family {
                         // Vanilla's own search is over the blast AABB, not
                         // just whichever entity the collision sweep names as
@@ -373,12 +389,16 @@ impl<'w> MobSim<'w> {
                             margin,
                         });
                     }
+                    if is_wither_skull {
+                        wither_skull_blasts.push(from + delta.scale(entity_t));
+                    }
                     hits.push(ProjectileHit {
                         projectile: tracked.id,
                         target,
                         entity_type: entity_type.unwrap_or_default(),
                         speed: delta.length(),
                         origin: from,
+                        owner,
                     });
                 }
                 (_, Some(block_t)) => {
@@ -396,6 +416,11 @@ impl<'w> MobSim<'w> {
                             potion: potion_id,
                             margin,
                         });
+                    }
+                    if meta.map(|m| m.entity_type.path()) == Some("wither_skull") {
+                        // `WitherSkull.onHit` explodes on **any** surface,
+                        // block included — not just an entity hit.
+                        wither_skull_blasts.push(coarse_hit);
                     }
                     let cell = super::lightning::floor_block_pos(coarse_hit);
                     if let Some((_, axis, frac)) = block_entry(from, delta, cell) {
@@ -434,6 +459,16 @@ impl<'w> MobSim<'w> {
         for impact in &potion_impacts {
             self.resolve_potion_splash(impact);
         }
+        // `WitherSkull.onHit`'s unconditional impact blast — after the
+        // direct hit's own damage/wither-effect/owner-heal above (matching
+        // vanilla's own ordering: `onHitEntity` runs inside `onHit`, before
+        // `onHit`'s own `explode` call), and before the reaper so a blast
+        // that finishes off an already-hit mob still drops loot through the
+        // shared reap below. No source exemption — see `mobs::wither`'s own
+        // module doc for why.
+        for &centre in &wither_skull_blasts {
+            self.explode(centre, crate::wither::SKULL_EXPLOSION_POWER, DamageFlags::default());
+        }
         // Through the shared reaper, so an arrow kill drops the same loot a melee
         // kill does — the same argument `attack`'s own killing blow makes.
         self.reap_dead();
@@ -466,7 +501,7 @@ impl<'w> MobSim<'w> {
         // reduces a projectile hit exactly as it reduces a melee one.
         let flags = DamageFlags::for_damage_type_name(projectile_damage_type(&hit.entity_type))
             .unwrap_or_default();
-        let applied = {
+        let (applied, target_died) = {
             let Some(target) = self.get_mut(hit.target) else {
                 return;
             };
@@ -477,8 +512,32 @@ impl<'w> MobSim<'w> {
             // best identity available here and points the right way along the
             // flight path.
             target.mob.note_hurt(Some(hit.origin));
-            applied
+            (applied, target.health() <= 0.0)
         };
+        // `WitherSkull.onHitEntity`: a landed hit applies `MobEffects.WITHER`
+        // (Normal-difficulty duration — see `mobs::wither`'s own module doc
+        // for why this does not thread a real `Difficulty` through yet), and
+        // a killing hit heals the shooter. Both gated on `applied > 0.0`,
+        // matching vanilla's own `wasHurt` guard.
+        if hit.entity_type == "wither_skull" && applied > 0.0 {
+            let ticks = crate::wither::wither_effect_ticks(lodestone_model::Difficulty::Normal);
+            if ticks > 0 && !target_died {
+                if let Some(target) = self.get_mut(hit.target) {
+                    target.apply_effect("minecraft:wither", ticks, crate::wither::WITHER_EFFECT_AMPLIFIER);
+                }
+            }
+            if target_died {
+                if let Some(owner_id) = hit.owner {
+                    // The shooter is a wither, tracked in `self.withers`, not
+                    // `self.mobs` — see `mobs::wither`'s own module doc for
+                    // why the wither is a plain tracked entity rather than a
+                    // `SimMob`. `self.get_mut` cannot reach it.
+                    if let Some(owner) = self.withers.get_mut(&owner_id) {
+                        owner.health = (owner.health + crate::wither::OWNER_HEAL_ON_KILL).min(owner.max_health);
+                    }
+                }
+            }
+        }
         self.note_vocalisation(hit.target, applied);
     }
 

@@ -565,6 +565,15 @@ pub enum ProjectileKind {
     /// `minecraft:trident` — drowned
     /// (`Drowned::performRangedAttack`).
     Trident,
+    /// `minecraft:wither_skull` — the wither's own ranged attack
+    /// (`WitherBoss::performRangedAttack`, ported at
+    /// `lodestone_server::wither`/`lodestone_server::mobs::wither`). Not
+    /// currently launched through this goal-driven seam — the wither is a
+    /// plain tracked entity, not a `SimMob`, the same shape
+    /// `mobs::dragon`'s own module doc explains for the ender dragon — but
+    /// the variant lives here so `projectile_entity_type`/`integrates_as_arrow`
+    /// have one shared table to read from either way.
+    WitherSkull,
 }
 
 /// One projectile a goal asked the mob to launch, in world terms.
