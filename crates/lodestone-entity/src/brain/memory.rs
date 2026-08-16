@@ -92,6 +92,16 @@ impl MemoryModuleType {
     /// Villager `MEET` requires this present, the same shape as `JOB_SITE`
     /// above.
     pub const MEETING_POINT: Self = Self("meeting_point");
+    /// The nearest visible zombified piglin's position — vanilla
+    /// `MemoryModuleType.NEAREST_VISIBLE_ZOMBIFIED`, part of
+    /// `PiglinSpecificSensor`'s output in the jar. Feeds a piglin's `AVOID`
+    /// activity through [`super::behaviors::CopyMemoryWithExpiry`].
+    pub const NEAREST_VISIBLE_ZOMBIFIED: Self = Self("nearest_visible_zombified");
+    /// The entity a piglin is currently fleeing — vanilla
+    /// `MemoryModuleType.AVOID_TARGET`, a `LivingEntity` there; narrowed here
+    /// to a position, the same simplification `HURT_BY`/`NEAREST_VISIBLE_PLAYER`
+    /// already make (see [`MemoryValue::Pos`]'s own doc).
+    pub const AVOID_TARGET: Self = Self("avoid_target");
 }
 
 /// The presence requirement a behaviour places on a memory.

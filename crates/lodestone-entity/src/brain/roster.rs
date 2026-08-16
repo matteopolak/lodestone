@@ -45,15 +45,15 @@
 use super::activity::Activity;
 use super::behavior::{Behavior, BehaviorControl, Leaf};
 use super::behaviors::{
-    LookAtTargetSink, MoveToTargetSink, Panic, PrepareRam, RamTarget, RandomStroll,
-    SetPlayerLookTarget, WalkToPoi,
+    AvoidTarget, CopyMemoryWithExpiry, LookAtTargetSink, MoveToTargetSink, Panic, PrepareRam,
+    RamTarget, RandomStroll, SetPlayerLookTarget, WalkToPoi,
 };
 use super::driver::BrainGoal;
 use super::gate::GateBehavior;
 use super::memory::{MemoryModuleType, MemoryStatus};
 use super::sensor::{
     HurtBySensor, NearestHostileSensor, NearestPlayerSensor, NearestVisibleLivingEntitiesSensor,
-    VillagerPoiSensor,
+    NearestVisibleZombifiedSensor, VillagerPoiSensor,
 };
 use super::Brain;
 
@@ -209,9 +209,17 @@ pub fn scaffold_with_panic(stroll_speed: f32, look_distance: f32, panic_speed_mu
 /// villager here flees to a random nearby spot instead of one chosen to
 /// increase distance from the threat specifically) and
 /// `VillagerCalmDown`/village-bound stroll are not ported (this repo has no
-/// village-bounds concept). `VillagerPanicTrigger.tick`'s
-/// `spawnGolemIfNeeded` (golem-summon-on-hurt) is a separate, unbuilt unit —
-/// nothing here calls it.
+/// village-bounds concept). **`VillagerPanicTrigger.tick`'s
+/// `spawnGolemIfNeeded` (golem-summon-on-hurt) is landed, but not here** —
+/// this doc used to say it was a separate, unbuilt unit, and that went stale
+/// the moment it shipped: `MobSim::tick_golem_summon`
+/// (`lodestone_server::mobs`) recomputes "is this villager hurt or does it
+/// see a hostile" directly against `self.mobs` on the same 100-tick cadence,
+/// because it needs two things no single mob's `BrainMob` seam can give it —
+/// other villagers' own state (the agreement count) and the power to create
+/// a new entity — see that function's own doc for why it lives on the host
+/// rather than as a `Brain` behaviour, and its three disclosed cuts from the
+/// jar original.
 /// `Villager.SPEED_MODIFIER` — the one figure every non-panic villager
 /// package (`WORK`, `REST`, `MEET`, `IDLE`) is built with
 /// (`ActivityData.create(Activity.WORK, VillagerGoalPackages.getWorkPackage(profession, 0.5F), …)`
@@ -371,6 +379,82 @@ pub fn goat_brain() -> Brain {
     brain
 }
 
+/// `PiglinAi.avoidZombified`'s own duration range —
+/// `TimeUtil.rangeOfSeconds(5, 7)` = 100–140 ticks.
+const AVOID_ZOMBIFIED_DURATION: (i64, i64) = (100, 140);
+
+/// A piglin's brain: the [`scaffold`] plus the one slice of `PiglinAi` this
+/// crate has machinery for — an adult piglin flees a nearby visible
+/// zombified piglin (`PiglinAi.avoidZombified`/`initRetreatActivity`).
+///
+/// # What this is, and what it deliberately is not
+///
+/// Real vanilla `PiglinAi` also barters (`ADMIRE_ITEM`), hunts hoglins and
+/// fights players not wearing gold armour (`FIGHT`, beyond a generic attack
+/// target), celebrates a kill (`CELEBRATE`) and lets a baby ride a hoglin
+/// (`RIDE`) — all fed by `PiglinSpecificSensor`, a single sensor producing
+/// nine memory values (a repellent-block search, wanted-item detection,
+/// gold-armour detection, a live hoglin/piglin population census) this crate
+/// has no seam for. `super`'s own module doc already discloses "a piglin's
+/// barter and hoglin hunt… need machinery this crate does not have yet";
+/// this lands exactly one slice of it. `AVOID` is the whole slice landed
+/// here: it is the one piglin-specific behaviour namable with a single new
+/// host primitive ([`BrainMob::nearest_visible_zombified`](super::mob::BrainMob::nearest_visible_zombified))
+/// rather than the nine-memory sensor the rest of the package would share.
+///
+/// **A piglin has no work/rest/bed schedule and no golem-summon mechanism —
+/// neither applies, and building either would be fiction, not a gap.**
+/// `PiglinAi.java` registers no `Schedule` at all (`Piglin`/`AbstractPiglin`
+/// are hostile mobs, not villagers, and share none of `Villager`'s
+/// `WORK`/`MEET`/`REST` machinery), and `spawnGolemIfNeeded` lives only on
+/// `VillagerPanicTrigger` — nothing in `PiglinAi.java` calls anything
+/// resembling it. `babyAvoidNemesis` (a baby piglin fleeing a nearby hoglin)
+/// is the other half of `initCoreActivity`'s avoid pair and is **not**
+/// ported here either: it needs a `NEAREST_VISIBLE_NEMESIS` sensor this
+/// crate also has no host primitive for yet, a separate gap from
+/// `avoidZombified`'s.
+///
+/// `piglin_brute` deliberately does **not** get this brain — see
+/// [`brain_for`]'s own piglin arm for why.
+///
+/// # Disclosed simplification
+///
+/// [`AvoidTarget`]'s own doc discloses the flee-direction simplification
+/// shared with [`Panic`].
+#[must_use]
+pub fn piglin_brain() -> Brain {
+    let mut brain = scaffold(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE);
+    brain.add_sensor(Box::new(NearestVisibleZombifiedSensor));
+    // `PiglinAi.initCoreActivity`'s own `avoidZombified()` row — always
+    // ticking, refreshing `AVOID_TARGET` from `NEAREST_VISIBLE_ZOMBIFIED`
+    // every tick a zombified piglin is visible.
+    brain.add_activity(
+        Activity::CORE,
+        vec![(
+            0,
+            leaf(CopyMemoryWithExpiry::new(
+                MemoryModuleType::NEAREST_VISIBLE_ZOMBIFIED,
+                MemoryModuleType::AVOID_TARGET,
+                AVOID_ZOMBIFIED_DURATION.0,
+                AVOID_ZOMBIFIED_DURATION.1,
+            )),
+        )],
+        Vec::new(),
+        Vec::new(),
+    );
+    brain.add_activity(
+        Activity::AVOID,
+        // `PiglinAi.initRetreatActivity`'s own priority 1 for the walk-away
+        // behaviour (priority 0's `SetEntityLookTargetSometimes` and
+        // priority 3's `EraseMemoryIf` early-exit are both disclosed as not
+        // ported, on `AvoidTarget`'s own doc).
+        vec![(1, leaf(AvoidTarget::new(1.0)))],
+        vec![(MemoryModuleType::AVOID_TARGET, MemoryStatus::ValuePresent)],
+        Vec::new(),
+    );
+    brain
+}
+
 /// `AnimalPanic`'s own speed multiplier, one row per species that registers
 /// it — `new AnimalPanic(speedMultiplier)` (or, for the sniffer, the
 /// anonymous subclass's identical constructor argument) in each species' own
@@ -424,6 +508,15 @@ pub fn brain_for(species: &str) -> Option<BrainGoal> {
     // it — `BrainGoal::idle` only ever offers `IDLE`.
     if species == "goat" {
         return Some(BrainGoal::new(goat_brain(), vec![Activity::RAM, Activity::IDLE]));
+    }
+    // Same shape again: `piglin_brain` needs both an extra activity (`AVOID`)
+    // and a candidate list that offers it. `piglin_brute` is deliberately
+    // excluded — `PiglinBruteAi.updateActivity` offers only
+    // `[Activity.FIGHT, Activity.IDLE]` in the jar, so a brute never flees a
+    // zombified piglin and falls through to the plain [`scaffold`] below like
+    // every other brain species this crate has no dedicated package for.
+    if species == "piglin" {
+        return Some(BrainGoal::new(piglin_brain(), vec![Activity::AVOID, Activity::IDLE]));
     }
     let brain = match PANIC_SPEED_MULTIPLIER.iter().find(|&&(s, _)| s == species) {
         Some(&(_, speed)) => scaffold_with_panic(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE, speed),
@@ -515,6 +608,7 @@ mod tests {
         hurt_by: Option<lodestone_model::Vec3>,
         nav_done: bool,
         nearby: Vec<super::super::mob::NearbyBrainEntity>,
+        zombified: Option<lodestone_model::Vec3>,
     }
 
     impl PanicTestMob {
@@ -525,6 +619,7 @@ mod tests {
                 hurt_by: None,
                 nav_done: true,
                 nearby: Vec::new(),
+                zombified: None,
             }
         }
     }
@@ -561,6 +656,9 @@ mod tests {
         }
         fn nearby_entities(&self) -> Vec<super::super::mob::NearbyBrainEntity> {
             self.nearby.clone()
+        }
+        fn nearest_visible_zombified(&self) -> Option<lodestone_model::Vec3> {
+            self.zombified
         }
     }
 
@@ -809,6 +907,79 @@ mod tests {
         assert!(
             goat.brain().is_active(Activity::IDLE),
             "with nothing to ram, the goat must fall back to IDLE, not freeze in RAM"
+        );
+    }
+
+    /// A piglin with a nearby visible zombified piglin swaps to `AVOID` and
+    /// actually starts walking away from it — driven through
+    /// `brain_for("piglin")`, the exact production path, the same shape the
+    /// villager panic test above uses for an activity-swap species. A piglin
+    /// with no zombified piglin nearby stays `IDLE`.
+    #[test]
+    fn a_piglin_near_a_zombified_piglin_avoids_it_and_otherwise_stays_idle() {
+        let candidates = [Activity::AVOID, Activity::IDLE];
+
+        let mut fleeing_piglin = brain_for("piglin").expect("piglin is a brain species");
+        let mut fleeing_mob = PanicTestMob::new();
+        fleeing_mob.zombified = Some(lodestone_model::Vec3::new(3.0, 0.0, 0.0));
+        fleeing_mob.time = 1;
+        // Two ticks: the first CORE-only pass writes `AVOID_TARGET` from the
+        // sensor's first read, the second is what lets `AVOID` actually
+        // become eligible — the same one-tick lag the villager test above
+        // documents for an activity-swap species.
+        fleeing_piglin.brain_mut().set_active_activity_to_first_valid(&candidates);
+        fleeing_piglin.brain_mut().tick(&mut fleeing_mob);
+        fleeing_mob.time += 1;
+        fleeing_piglin.brain_mut().set_active_activity_to_first_valid(&candidates);
+        fleeing_piglin.brain_mut().tick(&mut fleeing_mob);
+        assert!(
+            fleeing_piglin.brain().is_active(Activity::AVOID),
+            "a piglin near a zombified piglin must swap to AVOID"
+        );
+        assert!(
+            fleeing_piglin.brain().running_behavior_names().contains(&"avoid_target"),
+            "and the flee behaviour itself must be running: {:?}",
+            fleeing_piglin.brain().running_behavior_names()
+        );
+
+        let mut calm_piglin = brain_for("piglin").expect("piglin is a brain species");
+        let mut calm_mob = PanicTestMob::new();
+        calm_mob.time = 1;
+        calm_piglin.brain_mut().set_active_activity_to_first_valid(&candidates);
+        calm_piglin.brain_mut().tick(&mut calm_mob);
+        calm_mob.time += 1;
+        calm_piglin.brain_mut().set_active_activity_to_first_valid(&candidates);
+        calm_piglin.brain_mut().tick(&mut calm_mob);
+        assert!(
+            calm_piglin.brain().is_active(Activity::IDLE),
+            "with no zombified piglin visible, a piglin must stay IDLE"
+        );
+        assert!(
+            !calm_piglin.brain().running_behavior_names().contains(&"avoid_target"),
+            "and must not be fleeing anything: {:?}",
+            calm_piglin.brain().running_behavior_names()
+        );
+    }
+
+    /// `piglin_brute` must never pick up the piglin's `AVOID` package —
+    /// `PiglinBruteAi.updateActivity` offers only `[FIGHT, IDLE]` in the jar,
+    /// so a brute is too brave to flee a zombified piglin the way an
+    /// ordinary piglin does.
+    #[test]
+    fn piglin_brute_does_not_get_the_piglin_avoid_package() {
+        let candidates = [Activity::AVOID, Activity::IDLE];
+        let mut brute = brain_for("piglin_brute").expect("piglin_brute is a brain species");
+        let mut mob = PanicTestMob::new();
+        mob.zombified = Some(lodestone_model::Vec3::new(3.0, 0.0, 0.0));
+        mob.time = 1;
+        brute.brain_mut().set_active_activity_to_first_valid(&candidates);
+        brute.brain_mut().tick(&mut mob);
+        mob.time += 1;
+        brute.brain_mut().set_active_activity_to_first_valid(&candidates);
+        brute.brain_mut().tick(&mut mob);
+        assert!(
+            !brute.brain().is_active(Activity::AVOID),
+            "a piglin_brute must never swap into AVOID, even near a zombified piglin"
         );
     }
 }

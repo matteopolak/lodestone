@@ -172,6 +172,17 @@ pub trait BrainMob {
         None
     }
 
+    /// The nearest visible zombified piglin's position, if any — feeds
+    /// [`MemoryModuleType::NEAREST_VISIBLE_ZOMBIFIED`](super::MemoryModuleType::NEAREST_VISIBLE_ZOMBIFIED)
+    /// through [`super::sensor::NearestVisibleZombifiedSensor`], the same
+    /// host-computed-candidate shape [`job_site`](Self::job_site) already
+    /// uses: this crate's `BrainMob` seam has no same-species census a
+    /// sensor could search itself (see [`ai::roster::neutral`](crate::ai::roster::neutral)'s
+    /// module doc on why that is a host question). Defaults to `None`.
+    fn nearest_visible_zombified(&self) -> Option<Vec3> {
+        None
+    }
+
     /// Records a melee hit landing on whatever occupies `target` this tick —
     /// vanilla's `LivingEntity.hurtServer`/`knockback` calls a ram or an
     /// attack-target behaviour makes directly on the target entity. This
