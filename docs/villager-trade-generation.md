@@ -109,11 +109,16 @@ professions, not just farmer.
   why: a villager is a `SimMob`, not a `BlockEntity`, so it has none of the
   `BlockPos`-keyed storage `OpenContainer`'s slot-sync machinery needs, and a
   second parallel storage-and-sync mechanism for one menu's two payment
-  slots plus a result slot was judged out of scope for this pass. Every
-  purchase is priced at the record's own base cost, and the cost items are
-  found and consumed from wherever they sit in the inventory rather than
-  from two manually-filled payment slots — a real, disclosed UX deviation
-  from vanilla's `MerchantMenu`, not a silent one.
+  slots plus a result slot was judged out of scope for this pass. The cost
+  items are found and consumed from wherever they sit in the inventory
+  rather than from two manually-filled payment slots — a real, disclosed UX
+  deviation from vanilla's `MerchantMenu`, not a silent one.
+  **Pricing itself is no longer the record's flat base cost** — both
+  `open_merchant_screen` and this dispatch arm build their offer list through
+  `crate::server::priced_villager_offers`, which folds reputation and Hero of
+  the Village into `OfferState::special_price_diff` before either side reads
+  a price (see `docs/villager-reputation.md`'s "What remains" for exactly
+  what still resets every call: demand and uses, not special-price-diff).
 - **Still not built: tying a live `VillagerTrades` (with real demand/uses
   state) to a specific `SimMob`.** `VillagerTrades::try_trade` and
   `maybe_restock` remain unused in production; the SELECT_TRADE wiring above
