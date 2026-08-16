@@ -401,7 +401,8 @@ with its machine-load caveat):
 The table above's own caveat ("re-run in a quiet window... before using a
 specific figure for a decision") turned out to matter for more than machine
 jitter. `crates/lodestone-worldgen/tests/embedded_vs_fixture_stage_cost.rs`
-(added to close out issue #78's tracking) holds the table's own methodology
+(added as part of this repo's benchmark/regression-detection tracking) holds
+the table's own methodology
 constant — same cache-cold 3×3 patch, no neighbourhood warm-up — and swaps
 only the resolver, fixture tree vs. the real embedded 26.2 data
 (`lodestone_server::overworld_generator`). Both arms agree: **vegetation
