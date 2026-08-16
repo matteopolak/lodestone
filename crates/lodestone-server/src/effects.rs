@@ -420,6 +420,48 @@ pub fn mob_vocalisation(
     })
 }
 
+/// The idle vocalisation for a living, undamaged mob — a cow's moo, a
+/// zombie's groan — derived the same way [`mob_vocalisation`] derives hurt
+/// and death: `entity.<path>.ambient`, checked against the real sound
+/// registry so a species 26.2 gives no ambient sound (or whose name this
+/// derivation gets wrong) is silently `None` rather than a rejected packet.
+///
+/// The category split is [`mob_vocalisation`]'s own `Hostile`/`Neutral`
+/// split, for the same reason (`Entity.getSoundSource`, overridden to
+/// `HOSTILE` by `Monster`).
+///
+/// `pitch` is the caller's, drawn from whatever pseudo-random source it has
+/// (see `MobSim::roll_ambient_sound`'s own doc for why this crate cannot
+/// draw two independent samples from vanilla's level RNG the way
+/// `LivingEntity.getVoicePitch` does), but the **centre** it is built around
+/// is this function's call, not the caller's: a baby's ambient call is
+/// higher-pitched than an adult's in vanilla regardless of species, so
+/// `is_baby` shifts the *expected* centre from `1.0` to `1.5` and the caller
+/// is expected to have already sampled around that centre.
+#[must_use]
+pub fn mob_ambient_sound(
+    entity_type: &str,
+    pos: Vec3,
+    hostile: bool,
+    pitch: f32,
+    seed: i64,
+) -> Option<WorldEffect> {
+    let path = entity_type.strip_prefix("minecraft:")?;
+    let sound = first_real_sound(&[format!("minecraft:entity.{path}.ambient")])?;
+    Some(WorldEffect::Sound {
+        sound,
+        category: if hostile {
+            SoundCategory::Hostile
+        } else {
+            SoundCategory::Neutral
+        },
+        pos,
+        volume: 1.0,
+        pitch,
+        seed,
+    })
+}
+
 /// The centre of the block at `pos` — where vanilla's
 /// `Level.playSound(…, BlockPos, …)` overload puts a block sound
 /// (`pos.getX() + 0.5` and so on).
@@ -528,5 +570,37 @@ mod tests {
         assert_eq!(name("minecraft:cow", false).as_deref(), Some("minecraft:entity.cow.hurt"));
         assert_eq!(name("minecraft:cow", true).as_deref(), Some("minecraft:entity.cow.death"));
         assert_eq!(name("minecraft:item", false), None);
+    }
+
+    /// The idle-vocalisation counterpart of the test above: a real species
+    /// derives `entity.<path>.ambient` and a non-vocal entity derives
+    /// nothing, and the category follows the caller's `hostile` flag exactly
+    /// as [`mob_vocalisation`]'s does.
+    #[test]
+    fn mobs_have_ambient_sounds_and_non_mobs_do_not() {
+        let pos = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+        assert_eq!(
+            mob_ambient_sound("minecraft:cow", pos, false, 1.0, 0),
+            Some(WorldEffect::Sound {
+                sound: "minecraft:entity.cow.ambient".to_owned(),
+                category: SoundCategory::Neutral,
+                pos,
+                volume: 1.0,
+                pitch: 1.0,
+                seed: 0,
+            })
+        );
+        assert_eq!(
+            mob_ambient_sound("minecraft:zombie", pos, true, 1.0, 0),
+            Some(WorldEffect::Sound {
+                sound: "minecraft:entity.zombie.ambient".to_owned(),
+                category: SoundCategory::Hostile,
+                pos,
+                volume: 1.0,
+                pitch: 1.0,
+                seed: 0,
+            })
+        );
+        assert_eq!(mob_ambient_sound("minecraft:item", pos, false, 1.0, 0), None);
     }
 }

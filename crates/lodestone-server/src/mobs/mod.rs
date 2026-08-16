@@ -765,6 +765,12 @@ const ANGER_TICKS: (u64, u64) = (400, 780);
 /// death still counts as a player kill, in ticks.
 const PLAYER_HURT_EXPERIENCE_TIME: u64 = 100;
 
+/// `Mob.getAmbientSoundInterval`'s default (`80`) — the forced gap
+/// [`roll_ambient_sound`] enforces after an idle vocalisation fires (and
+/// after a hurt sound, via [`MobSim::note_vocalisation`]) before the
+/// per-tick chance of firing again starts climbing from zero.
+const AMBIENT_SOUND_INTERVAL: i32 = 80;
+
 /// The flat knockback power `LivingEntity.dealDefaultKnockback` applies to
 /// **every** damaging hit, regardless of the attacker's own
 /// `minecraft:attack_knockback` attribute — `LivingEntity.knockback(0.4F, xd,
@@ -797,6 +803,59 @@ fn grudge_ticks(mob: &mut impl MobController) -> u64 {
     let (lo, hi) = ANGER_TICKS;
     let span = i32::try_from(hi - lo + 1).expect("the anger window fits in i32");
     lo + u64::try_from(mob.next_i32(span)).unwrap_or(0)
+}
+
+/// One tick of vanilla `Mob.baseTick`'s idle-vocalisation roll:
+/// `if (isAlive() && random.nextInt(1000) < ambientSoundTime++) {
+/// resetAmbientSoundTime(); playAmbientSound(); }`. `ambientSoundTime` starts
+/// at `0` and climbs by one every tick that does not fire, so the per-tick
+/// chance of firing ramps from `0` toward certainty rather than being a flat
+/// roll; firing resets it to `-`[`AMBIENT_SOUND_INTERVAL`], enforcing a hard
+/// cooldown before the ramp restarts (mirrored on a hurt sound too, in
+/// [`MobSim::note_vocalisation`]).
+///
+/// **Must not draw from the mob's own [`MobController`] RNG stream.** That
+/// stream is also what every AI goal draws from (wander targets, look
+/// timers, …), and this roll runs unconditionally every tick for every live
+/// mob — consuming from it here would shift every subsequent AI draw by
+/// however many calls this makes, exactly the failure mode
+/// [`MobSim::note_vocalisation`]'s own doc already flags for the same
+/// reason: "consuming from a shared generator here would shift every other
+/// draw." Mixed from `tick_count` and the mob's id instead, the same
+/// approach that function already uses.
+fn roll_ambient_sound(m: &mut SimMob<'_>, tick_count: u64) -> Option<crate::effects::WorldEffect> {
+    let id = m.id as u64;
+    // A small multiplicative hash of (tick_count, id) — not vanilla's RNG,
+    // deterministic and cheap, and critically independent of the mob's own
+    // `next_i32`/`next_f32` stream. `% 1000` matches `random.nextInt(1000)`'s
+    // range.
+    let mix = tick_count
+        .wrapping_mul(2_654_435_761)
+        .wrapping_add(id)
+        .wrapping_mul(40_503);
+    let roll = (mix % 1000) as i32;
+    let fired = roll < m.ambient_sound_time;
+    m.ambient_sound_time += 1;
+    if !fired {
+        return None;
+    }
+    m.ambient_sound_time = -AMBIENT_SOUND_INTERVAL;
+    // Vanilla `LivingEntity.getVoicePitch`: `(rand - rand) * 0.2 + centre`,
+    // centre `1.5` for a baby and `1.0` for an adult — unlike the hurt/death
+    // pitch, which vanilla draws from a *different*, baby-blind formula (see
+    // `MobSim::note_vocalisation`'s own doc for why that one differs). Same
+    // tick_count/id phase approach `note_vocalisation` already uses for its
+    // own pitch, so both land in `[centre - 0.1, centre + 0.1]`.
+    let phase = (tick_count.wrapping_mul(31).wrapping_add(id)) % 21;
+    let centre = if m.is_baby() { 1.5 } else { 1.0 };
+    let pitch = centre - 0.1 + phase as f32 * 0.01;
+    crate::effects::mob_ambient_sound(
+        m.entity_type.to_string().as_str(),
+        m.position(),
+        m.category == MobCategory::Monster,
+        pitch,
+        tick_count as i64,
+    )
 }
 
 #[derive(Debug)]
@@ -875,6 +934,12 @@ pub struct SimMob<'w> {
     /// (`damage::HurtCooldown`), ticked once per sim tick regardless of
     /// whether anything hit this tick.
     hurt_cooldown: HurtCooldown,
+    /// Vanilla `Mob.ambientSoundTime`: an increasing-probability countdown for
+    /// this mob's idle vocalisation (cow moo, zombie groan, …), ticked once
+    /// per sim tick regardless of whether a goal moved this mob. Starts at
+    /// `0`, matching Java's field default — see
+    /// [`MobSim::roll_ambient_sound`] for the roll this drives.
+    ambient_sound_time: i32,
     /// The id of another live [`SimMob`] this mob's melee attacks should
     /// damage, set alongside [`set_attack_target`](SimMob::set_attack_target)'s
     /// `Vec3` (which only drives movement — the goal/navigation seam has no
@@ -2049,6 +2114,16 @@ pub struct MobSim<'w> {
     /// result at all** — the `ServerProtocol` trait had no sound encoder, so a
     /// player could beat a cow to death in silence.
     pending_vocalisations: Vec<crate::effects::WorldEffect>,
+    /// Idle ambient vocalisations awaiting the driver — the same handoff shape
+    /// as [`pending_vocalisations`](Self::pending_vocalisations) and for the
+    /// same reason, but rolled every tick per mob
+    /// ([`roll_ambient_sound`]) rather than recorded at a damage funnel.
+    /// Drained by [`take_ambient_sounds`](Self::take_ambient_sounds).
+    ///
+    /// Before this, `MobSim` had no periodic ambient-sound producer at all —
+    /// hurt and death were the only mob sounds a client could ever hear, so
+    /// ordinary exploration (no combat) was silent but for footsteps.
+    pending_ambient_sounds: Vec<crate::effects::WorldEffect>,
     /// Per-entity animation cues awaiting the driver — the *visible* half of the
     /// same hits [`pending_vocalisations`](Self::pending_vocalisations) makes
     /// audible, and recorded at the same funnels for the same reason (this sim
@@ -2458,6 +2533,7 @@ impl<'w> MobSim<'w> {
             pending_grazes: Vec::new(),
             pending_player_hits: Vec::new(),
             pending_vocalisations: Vec::new(),
+            pending_ambient_sounds: Vec::new(),
             pending_animations: Vec::new(),
             players: Vec::new(),
             tame_rng: SpawnRng::new(TAME_ROLL_SEED),
@@ -2753,6 +2829,7 @@ impl<'w> MobSim<'w> {
             hurt_by_player_until: None,
             attack_damage,
             hurt_cooldown: HurtCooldown::default(),
+            ambient_sound_time: 0,
             attack_target_id: None,
             owner: None,
             tame: false,
@@ -3208,11 +3285,24 @@ impl<'w> MobSim<'w> {
         // Issue #458, primitive 4: self-inflicted damage requests, drained per
         // mob and resolved below — see the resolution pass after `hits`.
         let mut self_damage: Vec<(i32, f32)> = Vec::new();
+        // Idle ambient vocalisations rolled this tick — accumulated into a
+        // local for the same reason `grazes`/`bred` are: `self.mobs` is
+        // mutably borrowed for the whole loop.
+        let mut ambient_sounds: Vec<crate::effects::WorldEffect> = Vec::new();
+        let tick_count = self.tick_count;
         for m in &mut self.mobs {
             // Vanilla ages `invulnerableTime`/`hurtTime` every tick regardless
             // of whether the mob was hit this tick.
             m.hurt_cooldown.tick();
             m.mob.tick(&mut m.goals);
+            // Vanilla `Mob.baseTick`'s ambient-sound roll runs every tick a
+            // mob is alive, independent of any goal — see
+            // `roll_ambient_sound`'s own doc.
+            if m.health > 0.0 {
+                if let Some(effect) = roll_ambient_sound(m, tick_count) {
+                    ambient_sounds.push(effect);
+                }
+            }
             for target_pos in m.mob.take_new_attacks() {
                 // Carry the attacker's own position too, so the victim can
                 // retaliate: vanilla's `hurt` sets `lastHurtByMob` from the
@@ -3254,6 +3344,7 @@ impl<'w> MobSim<'w> {
         }
         self.push_entities();
         self.pending_grazes.extend(grazes);
+        self.pending_ambient_sounds.extend(ambient_sounds);
         for (shooter, launch) in launches {
             use lodestone_entity::ai::roster::ranged::{integrates_as_arrow, projectile_entity_type};
             let projectile = if integrates_as_arrow(launch.kind) {
@@ -4433,6 +4524,14 @@ impl<'w> MobSim<'w> {
         std::mem::take(&mut self.pending_vocalisations)
     }
 
+    /// Drains every idle ambient vocalisation [`tick`](Self::tick) has rolled
+    /// since the last call — [`take_vocalisations`](Self::take_vocalisations)'
+    /// periodic sibling. Drained for the same reason: a slow consumer must not
+    /// replay the same moo twice.
+    pub fn take_ambient_sounds(&mut self) -> Vec<crate::effects::WorldEffect> {
+        std::mem::take(&mut self.pending_ambient_sounds)
+    }
+
     /// Drains every per-entity animation cue recorded since the last call — the
     /// visible sibling of [`take_vocalisations`](Self::take_vocalisations), and
     /// drained rather than read for the same reason: a slow consumer must not
@@ -4467,9 +4566,13 @@ impl<'w> MobSim<'w> {
         if applied <= 0.0 {
             return;
         }
-        let Some(mob) = self.mobs.iter().find(|m| m.id == id) else {
+        let Some(mob) = self.mobs.iter_mut().find(|m| m.id == id) else {
             return;
         };
+        // Vanilla `Mob.playHurtSound` calls `resetAmbientSoundTime()` before
+        // playing the hurt sound itself, so a mob that just yelped in pain
+        // does not also roll an idle vocalisation on the very next tick.
+        mob.ambient_sound_time = -AMBIENT_SOUND_INTERVAL;
         // Hurt *and* death on a killing blow, in that order, because vanilla sends
         // both: `hurtServer` broadcasts the damage event and only then calls `die`,
         // which broadcasts byte 3. The client needs the flash to have started for
@@ -8324,5 +8427,121 @@ mod wandering_trader_tests {
             llama_before, llama_after,
             "the llama must move toward its holder once the trader is far enough away"
         );
+    }
+}
+
+/// `MobSim`'s periodic idle-vocalisation producer (`roll_ambient_sound`,
+/// wired into [`MobSim::tick`]) — closing the gap the audit behind issue #664
+/// found: hurt and death were the only mob sounds a running server could ever
+/// produce, so ordinary exploration with no combat was silent but for
+/// footsteps.
+#[cfg(test)]
+mod ambient_sound_tests {
+    use super::*;
+    use crate::effects::WorldEffect;
+    use lodestone_model::SoundCategory;
+
+    fn flat_world() -> ChunkWorld {
+        ChunkWorld::new(-64, 384)
+    }
+
+    /// **The wire is real, not merely the derivation.** A hermetic call to
+    /// `effects::mob_ambient_sound` proves the string derivation; it proves
+    /// nothing about whether anything in `MobSim::tick` ever calls it — the
+    /// exact island shape this repo's own evidence standards warn about
+    /// repeatedly. Ticking a real, freshly spawned cow through the real
+    /// production `tick()` loop and draining `take_ambient_sounds()` is what
+    /// proves the roll actually fires and actually reaches the queue
+    /// `crate::tick::run_tick_loop` drains.
+    ///
+    /// `ambient_sound_time` starts at `0` and this cow's RNG stream is
+    /// seeded deterministically from its id, so how many ticks the first
+    /// firing takes is a fixed, measured number for this exact scenario, not
+    /// a guess: measured at **tick 36** for this world/spawn order. The
+    /// 400-tick loop bound is over 10x that measured value, not a round
+    /// number reached for on its own — it exists only so a regression that
+    /// pushed the firing tick out shows up as a clean failure rather than an
+    /// infinite loop.
+    #[test]
+    fn a_real_mob_ticked_through_the_production_loop_eventually_vocalises() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        sim.spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0));
+
+        let mut fired = Vec::new();
+        for _ in 0..400 {
+            sim.tick();
+            fired.extend(sim.take_ambient_sounds());
+            if !fired.is_empty() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            fired.len(),
+            1,
+            "exactly one ambient sound must have fired within the margin, got {fired:?}"
+        );
+        match &fired[0] {
+            WorldEffect::Sound { sound, category, .. } => {
+                assert_eq!(sound, "minecraft:entity.cow.ambient");
+                assert_eq!(*category, SoundCategory::Neutral);
+            }
+            other => panic!("expected a Sound effect, got {other:?}"),
+        }
+    }
+
+    /// **Control: the roll is load-bearing, not vacuous.** A dead mob
+    /// (`health <= 0.0`) must never roll — vanilla's own guard is
+    /// `isAlive() && …` — so ticking a mob whose health is forced to zero
+    /// for the same window above must produce nothing at all. Without this,
+    /// the subject test's "it fired" is not distinguishable from "everything
+    /// always fires".
+    #[test]
+    fn a_dead_mob_never_rolls_an_ambient_sound() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+        sim.get_mut(id).expect("spawned").health = 0.0;
+
+        let mut fired = Vec::new();
+        for _ in 0..400 {
+            sim.tick();
+            fired.extend(sim.take_ambient_sounds());
+        }
+        assert!(
+            fired.is_empty(),
+            "a mob at zero health must never roll an ambient sound, got {fired:?}"
+        );
+    }
+
+    /// A hostile species reports the `Hostile` sound category, matching
+    /// `mob_vocalisation`'s own hurt/death split — checked with the same
+    /// production-loop wiring as the subject test above, not just the
+    /// hermetic derivation.
+    #[test]
+    fn a_hostile_mob_vocalises_on_the_hostile_category() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        sim.spawn_species("minecraft:zombie".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0));
+
+        let mut fired = Vec::new();
+        for _ in 0..400 {
+            sim.tick();
+            fired.extend(sim.take_ambient_sounds());
+            if !fired.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(fired.len(), 1, "expected exactly one ambient sound, got {fired:?}");
+        match &fired[0] {
+            WorldEffect::Sound { sound, category, .. } => {
+                assert_eq!(sound, "minecraft:entity.zombie.ambient");
+                assert_eq!(*category, SoundCategory::Hostile);
+            }
+            other => panic!("expected a Sound effect, got {other:?}"),
+        }
     }
 }
