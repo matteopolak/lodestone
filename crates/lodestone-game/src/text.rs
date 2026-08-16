@@ -254,81 +254,32 @@ pub struct InteractiveSpan {
 /// Flattens `text` into [`InteractiveSpan`]s: `translate` nodes resolved
 /// through `translate` first (so a hit-tested run's text matches what the HUD
 /// actually drew, exactly as [`resolve`] already does for
-/// [`crate::tablist::tab_list_view`]), then walked for `click`/`hover`
-/// inheritance alongside style.
+/// [`crate::tablist::tab_list_view`]), then lowered onto
+/// [`lodestone_model::Text::to_interactive_spans`] — the model crate's own
+/// `click`/`hover`-carrying sibling of `to_spans`, added independently for
+/// the same gap this module first closed with a duplicate tree-walk of its
+/// own. Delegating here rather than keeping that walk means there is exactly
+/// one implementation of "how `click`/`hover` inherit down a `Text` tree",
+/// owned by the crate that owns `Text` itself.
 ///
-/// Legacy `§` runs are re-expanded through the model's own
-/// [`lodestone_model::Text::from_legacy`] → [`lodestone_model::Text::to_spans`]
-/// for the *style* half, since a `§` code cannot itself carry a `click`/
-/// `hover` (those are component-tree fields, not legacy codes) — the
-/// enclosing component's already-resolved click/hover is attached to every
-/// run the legacy expansion produces.
+/// The `insertion` field `InteractiveTextSpan` carries is dropped at this
+/// boundary — nothing under `crate::tablist`/`crate::chat` reads it yet; see
+/// [`InteractiveSpan`]'s own doc if that changes.
 #[must_use]
 pub fn interactive_spans(
     text: &Text,
     translate: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<InteractiveSpan> {
-    let resolved = resolve(text, translate);
-    let mut out = Vec::new();
-    collect_interactive(
-        &resolved,
-        &lodestone_model::text::TextStyle::default(),
-        None,
-        None,
-        &mut out,
-        0,
-    );
-    out
-}
-
-fn collect_interactive(
-    node: &Text,
-    parent_style: &lodestone_model::text::TextStyle,
-    parent_click: Option<&lodestone_model::text::ClickEvent>,
-    parent_hover: Option<&lodestone_model::text::HoverEvent>,
-    out: &mut Vec<InteractiveSpan>,
-    depth: usize,
-) {
-    if depth > MAX_DEPTH {
-        return;
-    }
-    let style = node.style.inherit(parent_style);
-    let click = node.click.as_ref().or(parent_click);
-    let hover = node.hover.as_ref().or(parent_hover);
-
-    // `resolve` above has already turned every `Translate` node into a
-    // `Literal` root plus literal/argument children, so this is the only
-    // content shape that can appear here — matching `resolve_node`'s own
-    // guarantee.
-    if let TextContent::Literal(literal) = &node.content
-        && !literal.is_empty()
-    {
-        if literal.contains(lodestone_model::text::LEGACY_PREFIX) {
-            // `from_legacy(literal)` carries no `click`/`hover` of its own
-            // (legacy codes cannot express either), so every run it produces
-            // takes this node's already-resolved `click`/`hover` verbatim;
-            // only the *style* half needs inheriting further.
-            for run in Text::from_legacy(literal).to_spans() {
-                out.push(InteractiveSpan {
-                    text: run.text,
-                    style: run.style.inherit(&style),
-                    click: click.cloned(),
-                    hover: hover.cloned(),
-                });
-            }
-        } else {
-            out.push(InteractiveSpan {
-                text: literal.clone(),
-                style,
-                click: click.cloned(),
-                hover: hover.cloned(),
-            });
-        }
-    }
-
-    for child in &node.extra {
-        collect_interactive(child, &style, click, hover, out, depth + 1);
-    }
+    resolve(text, translate)
+        .to_interactive_spans()
+        .into_iter()
+        .map(|span| InteractiveSpan {
+            text: span.text,
+            style: span.style,
+            click: span.click,
+            hover: span.hover,
+        })
+        .collect()
 }
 
 #[cfg(test)]
