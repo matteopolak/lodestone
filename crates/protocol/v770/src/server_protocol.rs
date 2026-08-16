@@ -3599,13 +3599,22 @@ impl ServerProtocol for V770ServerProtocol {
                 ServerBound::Ignored
             }
             // Block-entity text, not item state — arguably miscategorized
-            // alongside the inventory-model packets above.
-            // Decoded here anyway since sign storage lives in
-            // `lodestone-world`, not `PlayerInventory`, so this cannot
-            // collide with that territory; still `Ignored` regardless.
+            // alongside the inventory-model packets above. Wire shape only,
+            // matching every other packet-shaped `ServerBound` arm's own
+            // convention — `crate::block_entities::apply_sign_update` (via
+            // `crate::server`'s consumer) is where the ownership/waxed gate
+            // and the actual text write happen.
             State::Play if packet_id == play::serverbound::SIGN_UPDATE => {
-                let _ = decode_full::<SignUpdate>(payload);
-                ServerBound::Ignored
+                match decode_full::<SignUpdate>(payload) {
+                    Some(SignUpdate { pos, is_front_text, line0, line1, line2, line3 }) => {
+                        ServerBound::SignUpdate {
+                            pos: unpack_block_pos(pos),
+                            is_front_text,
+                            lines: [line0, line1, line2, line3],
+                        }
+                    }
+                    None => ServerBound::Ignored,
+                }
             }
             // A follow-up fix: this used to decode-and-discard. The
             // anvil's rename field is the only consumer

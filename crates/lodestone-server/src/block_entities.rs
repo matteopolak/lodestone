@@ -106,6 +106,120 @@ pub enum BlockEntity {
     /// natural-spawn cycle: a spawner needs the player list and the live entity
     /// set, neither of which this registry has a handle to.
     Spawner(crate::mob_spawner::SpawnerState),
+    /// `minecraft:sign`/`minecraft:hanging_sign` (issue #616's `SIGN_UPDATE`
+    /// remainder). See [`SignData`] for the fields and [`apply_sign_update`]
+    /// for the editor gate `SIGN_UPDATE` is checked against.
+    Sign(SignData),
+}
+
+/// A placed sign's text and edit-permission state — vanilla's
+/// `SignBlockEntity`, reduced to what `SIGN_UPDATE` actually touches.
+/// `SignBlockEntity.updateSignText` only ever rewrites `messages` (plain
+/// strings, formatting codes already stripped by
+/// `ServerGamePacketListenerImpl.handleSignUpdate`'s
+/// `ChatFormatting::stripFormatting`), never `color`/`hasGlowingText` — those
+/// need a dye-interaction path this crate does not model, so they are not
+/// carried here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignData {
+    /// The four lines a player reading the sign from its front sees.
+    pub front: [String; 4],
+    /// The four lines a player reading the sign from behind sees.
+    pub back: [String; 4],
+    /// `is_waxed` — set by a honeycomb interaction (not modelled here yet);
+    /// while `true`, [`apply_sign_update`] refuses every edit, matching
+    /// `updateSignText`'s own `!this.isWaxed()` guard.
+    pub waxed: bool,
+    /// `playerWhoMayEdit` — the uuid `SignBlock.openTextEdit` last granted
+    /// edit permission to, or `None` once spent. This crate grants it only at
+    /// placement time (see [`block_entity_for_item`]'s sign arms), matching
+    /// `SignItem.useOn`'s own `sign.openTextEdit(player, signEntity, true)`;
+    /// vanilla's *other* grant site — right-clicking an already-placed blank
+    /// sign — needs the interact-on-block path this crate's `USE_ITEM_ON`
+    /// consumer does not thread block-entity access through yet, so a sign
+    /// can be edited exactly once, immediately after placement, until that
+    /// gap closes.
+    pub editor: Option<uuid::Uuid>,
+    /// Whether this is a hanging sign (`minecraft:hanging_sign`) rather than
+    /// a standing/wall sign (`minecraft:sign`) — vanilla gives the two
+    /// distinct `BlockEntityType`s, which [`BlockEntity::type_id`] reads this
+    /// to reproduce.
+    pub hanging: bool,
+}
+
+impl Default for SignData {
+    /// Four blank lines on both sides, unwaxed, no editor granted — the state
+    /// of a sign this crate places without going through [`block_entity_for_item`]
+    /// (there is no such production caller today, but a default is cheaper
+    /// than an `Option` at every call site that might one day want one).
+    fn default() -> Self {
+        SignData {
+            front: Default::default(),
+            back: Default::default(),
+            waxed: false,
+            editor: None,
+            hanging: false,
+        }
+    }
+}
+
+/// `ChatFormatting::stripFormatting`'s regex, transcribed —
+/// `(?i)§[0-9A-FK-OR]`: every `§` immediately followed by a legacy colour or
+/// style code (case-insensitive) is dropped as a pair, and nothing else is
+/// touched. `handleSignUpdate` runs this on every line *before* the ownership
+/// gate even runs, so it happens here rather than in [`apply_sign_update`] —
+/// the two are separate steps in vanilla and a rejected edit still had its
+/// text stripped for the (discarded) attempt, which this mirrors by stripping
+/// unconditionally at decode.
+#[must_use]
+pub fn strip_sign_formatting(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{00A7}'
+            && let Some(&next) = chars.peek()
+        {
+            let lower = next.to_ascii_lowercase();
+            if lower.is_ascii_digit() || matches!(lower, 'a'..='f' | 'k'..='o' | 'r') {
+                chars.next();
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Applies a `SIGN_UPDATE` packet — `SignBlockEntity.updateSignText`'s full
+/// gate, transcribed: `entity` must be a [`BlockEntity::Sign`], not waxed, and
+/// `editor` must be the uuid currently granted edit permission
+/// ([`SignData::editor`]). A successful edit clears the grant
+/// (`setAllowedPlayerEditor(null)`), so a second `SIGN_UPDATE` for the same
+/// position without a fresh grant is refused exactly like vanilla's — the
+/// same "was warned and ignored" outcome `updateSignText`'s `else` branch
+/// logs.
+///
+/// Returns whether the edit was applied, so a caller has an honest signal for
+/// "nothing changed" rather than silently no-op-ing either way.
+pub fn apply_sign_update(
+    entity: &mut BlockEntity,
+    editor: uuid::Uuid,
+    is_front_text: bool,
+    lines: [String; 4],
+) -> bool {
+    let BlockEntity::Sign(sign) = entity else {
+        return false;
+    };
+    if sign.waxed || sign.editor != Some(editor) {
+        return false;
+    }
+    if is_front_text {
+        sign.front = lines;
+    } else {
+        sign.back = lines;
+    }
+    sign.editor = None;
+    true
 }
 
 /// Slot count of vanilla's `generic_9x3` menu — a chest, trapped chest or
@@ -188,6 +302,13 @@ impl BlockEntity {
             // `Furnace`, there is no per-instance kind to switch on here.
             BlockEntity::CommandBlock(_) => "minecraft:command_block",
             BlockEntity::Spawner(_) => "minecraft:spawner",
+            BlockEntity::Sign(sign) => {
+                if sign.hanging {
+                    "minecraft:hanging_sign"
+                } else {
+                    "minecraft:sign"
+                }
+            }
         }
     }
 
@@ -204,7 +325,7 @@ impl BlockEntity {
             BlockEntity::Container { slots, .. } => Some(slots),
             BlockEntity::Composter(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
-            | BlockEntity::Spawner(_) => {
+            | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {
                 None
             }
         }
@@ -261,7 +382,11 @@ impl BlockEntity {
             | BlockEntity::CommandBlock(_)
             // A spawner has no `AbstractContainerMenu` either — right-clicking
             // one in survival does nothing at all in vanilla.
-            | BlockEntity::Spawner(_) => None,
+            | BlockEntity::Spawner(_)
+            // A sign has no `AbstractContainerMenu` either — `SignBlock`'s own
+            // interaction opens the dedicated text-edit screen `SIGN_UPDATE`
+            // answers, not a menu.
+            | BlockEntity::Sign(_) => None,
         }
     }
 
@@ -279,7 +404,7 @@ impl BlockEntity {
             BlockEntity::Hopper(h) => h.slots().to_vec(),
             BlockEntity::Container { slots, .. } => slots.clone(),
             BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
-            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) => Vec::new(),
+            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => Vec::new(),
         }
     }
 
@@ -310,7 +435,7 @@ impl BlockEntity {
                 }
             }
             BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
-            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) => {}
+            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {}
         }
     }
 
@@ -328,7 +453,7 @@ impl BlockEntity {
             BlockEntity::Furnace(f) => (0..4).map(|i| f.container_data(i)).collect(),
             BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Container { .. } | BlockEntity::Opaque { .. }
-            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) => {
+            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {
                 Vec::new()
             }
         }
@@ -364,8 +489,12 @@ impl BlockEntity {
             // registry — has a handle to. `crate::tick::run_tick_loop` drives
             // it directly instead, the same reason the natural-spawn cycle
             // does not live in this registry either.
+            // A sign has no active tick of its own — `SignBlockEntity` in
+            // 26.2 carries no `tick()` at all (unlike a hanging sign's older
+            // wind-sway variant, which this port does not model), so an
+            // idle-until-edited sign matches vanilla exactly.
             BlockEntity::Container { .. } | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
-            | BlockEntity::Spawner(_) => {}
+            | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {}
         }
     }
 }
@@ -429,6 +558,81 @@ pub fn block_entity_for_item(item: &str) -> Option<(&'static str, BlockEntity)> 
         "minecraft:repeating_command_block" => Some((
             "minecraft:repeating_command_block",
             BlockEntity::CommandBlock(crate::command_block::CommandBlockData::new()),
+        )),
+        // The twelve standing-sign woods plus their twelve hanging-sign
+        // counterparts (`lodestone-data`'s `BLOCK_FOR_ITEM` census, items
+        // 1016-1039) — one block-entity type each
+        // (`minecraft:sign`/`minecraft:hanging_sign`, see
+        // [`BlockEntity::type_id`]), all twenty-four sharing this arm's
+        // shape. `entity_block` is the item's own name: `block_items
+        // ::block_for_item` reports the *standing* block for every one of
+        // these (wall/hanging-attached orientation is `placed_block_state`'s
+        // job, resolved after this call, exactly as the debug_assert at this
+        // function's call site expects).
+        //
+        // `editor` starts `None` here — the placing player is granted it by
+        // `crate::server`'s placement arm, which is the one call site that
+        // actually knows who is placing (see [`SignData::editor`]'s own doc
+        // comment for why placement is the only grant site this crate has).
+        "minecraft:oak_sign" => Some(("minecraft:oak_sign", BlockEntity::Sign(SignData::default()))),
+        "minecraft:spruce_sign" => Some(("minecraft:spruce_sign", BlockEntity::Sign(SignData::default()))),
+        "minecraft:birch_sign" => Some(("minecraft:birch_sign", BlockEntity::Sign(SignData::default()))),
+        "minecraft:jungle_sign" => Some(("minecraft:jungle_sign", BlockEntity::Sign(SignData::default()))),
+        "minecraft:acacia_sign" => Some(("minecraft:acacia_sign", BlockEntity::Sign(SignData::default()))),
+        "minecraft:cherry_sign" => Some(("minecraft:cherry_sign", BlockEntity::Sign(SignData::default()))),
+        "minecraft:dark_oak_sign" => Some(("minecraft:dark_oak_sign", BlockEntity::Sign(SignData::default()))),
+        "minecraft:pale_oak_sign" => Some(("minecraft:pale_oak_sign", BlockEntity::Sign(SignData::default()))),
+        "minecraft:mangrove_sign" => Some(("minecraft:mangrove_sign", BlockEntity::Sign(SignData::default()))),
+        "minecraft:bamboo_sign" => Some(("minecraft:bamboo_sign", BlockEntity::Sign(SignData::default()))),
+        "minecraft:crimson_sign" => Some(("minecraft:crimson_sign", BlockEntity::Sign(SignData::default()))),
+        "minecraft:warped_sign" => Some(("minecraft:warped_sign", BlockEntity::Sign(SignData::default()))),
+        "minecraft:oak_hanging_sign" => Some((
+            "minecraft:oak_hanging_sign",
+            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
+        )),
+        "minecraft:spruce_hanging_sign" => Some((
+            "minecraft:spruce_hanging_sign",
+            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
+        )),
+        "minecraft:birch_hanging_sign" => Some((
+            "minecraft:birch_hanging_sign",
+            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
+        )),
+        "minecraft:jungle_hanging_sign" => Some((
+            "minecraft:jungle_hanging_sign",
+            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
+        )),
+        "minecraft:acacia_hanging_sign" => Some((
+            "minecraft:acacia_hanging_sign",
+            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
+        )),
+        "minecraft:cherry_hanging_sign" => Some((
+            "minecraft:cherry_hanging_sign",
+            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
+        )),
+        "minecraft:dark_oak_hanging_sign" => Some((
+            "minecraft:dark_oak_hanging_sign",
+            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
+        )),
+        "minecraft:pale_oak_hanging_sign" => Some((
+            "minecraft:pale_oak_hanging_sign",
+            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
+        )),
+        "minecraft:mangrove_hanging_sign" => Some((
+            "minecraft:mangrove_hanging_sign",
+            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
+        )),
+        "minecraft:bamboo_hanging_sign" => Some((
+            "minecraft:bamboo_hanging_sign",
+            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
+        )),
+        "minecraft:crimson_hanging_sign" => Some((
+            "minecraft:crimson_hanging_sign",
+            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
+        )),
+        "minecraft:warped_hanging_sign" => Some((
+            "minecraft:warped_hanging_sign",
+            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
         )),
         _ => None,
     }
@@ -779,6 +983,122 @@ mod tests {
             block_entity_for_item("minecraft:stone").is_none(),
             "a plain block must not resolve to a block entity"
         );
+    }
+
+    /// A standing sign and a hanging sign resolve to two different
+    /// [`BlockEntity::type_id`]s — the collision this crate must not fold
+    /// into one, since vanilla gives them distinct `BlockEntityType`s.
+    #[test]
+    fn sign_items_resolve_to_the_right_block_entity_type() {
+        let (block, entity) = block_entity_for_item("minecraft:oak_sign").expect("oak sign");
+        assert_eq!(block, "minecraft:oak_sign");
+        assert_eq!(entity.type_id(), "minecraft:sign");
+        assert!(matches!(entity, BlockEntity::Sign(ref s) if !s.hanging));
+
+        let (block, entity) =
+            block_entity_for_item("minecraft:warped_hanging_sign").expect("warped hanging sign");
+        assert_eq!(block, "minecraft:warped_hanging_sign");
+        assert_eq!(entity.type_id(), "minecraft:hanging_sign");
+        assert!(matches!(entity, BlockEntity::Sign(ref s) if s.hanging));
+
+        // Control: a sign has no menu at all — the same shape as composter/
+        // brewing-stand, distinct from every other placeable this module
+        // models.
+        assert_eq!(entity.menu_name(), None);
+        assert!(entity.container_slots().is_empty());
+    }
+
+    /// [`strip_sign_formatting`]: `(?i)§[0-9A-FK-OR]` pairs are dropped, and
+    /// nothing else is — a bare `§` with no following code character, or one
+    /// followed by an unrecognised letter, must survive untouched.
+    #[test]
+    fn strip_sign_formatting_matches_the_vanilla_regex() {
+        assert_eq!(strip_sign_formatting("\u{00A7}chello"), "hello", "lowercase colour code");
+        assert_eq!(strip_sign_formatting("\u{00A7}Chello"), "hello", "uppercase, case-insensitive");
+        assert_eq!(strip_sign_formatting("\u{00A7}khello\u{00A7}r"), "hello", "obfuscate + reset");
+        assert_eq!(
+            strip_sign_formatting("a\u{00A7}0b\u{00A7}fc"),
+            "abc",
+            "multiple codes through one line"
+        );
+        assert_eq!(
+            strip_sign_formatting("trailing\u{00A7}"),
+            "trailing\u{00A7}",
+            "a bare section sign with nothing after it is not a code pair"
+        );
+        assert_eq!(
+            strip_sign_formatting("\u{00A7}ztext"),
+            "\u{00A7}ztext",
+            "'z' is outside 0-9a-fk-or and must not be stripped"
+        );
+        assert_eq!(strip_sign_formatting("plain text"), "plain text");
+    }
+
+    /// [`apply_sign_update`]'s full gate: the placer (who placement grants
+    /// [`SignData::editor`] to) can make exactly one successful edit before
+    /// the grant is spent, a different uuid is refused outright, and a waxed
+    /// sign refuses everyone — three distinct refusal reasons, each checked
+    /// against the same starting state so none is a vacuous pass against the
+    /// others.
+    #[test]
+    fn apply_sign_update_gates_on_editor_and_waxed() {
+        let placer = uuid::Uuid::from_u128(1);
+        let stranger = uuid::Uuid::from_u128(2);
+        let lines = ["hello".to_string(), "world".to_string(), String::new(), String::new()];
+
+        // The editor's own edit succeeds and spends the grant.
+        let mut entity = BlockEntity::Sign(SignData { editor: Some(placer), ..SignData::default() });
+        assert!(apply_sign_update(&mut entity, placer, true, lines.clone()));
+        let BlockEntity::Sign(sign) = &entity else { panic!("must still be a sign") };
+        assert_eq!(sign.front, lines);
+        assert_eq!(sign.back, ["", "", "", ""], "only the front side was targeted");
+        assert_eq!(sign.editor, None, "a successful edit clears the grant");
+
+        // The same placer, immediately again: the grant is already spent, so
+        // this must be refused and the text must not change — this is the
+        // control that proves the first edit really cleared it rather than
+        // succeeding by coincidence.
+        let second = ["overwritten".to_string(), String::new(), String::new(), String::new()];
+        assert!(!apply_sign_update(&mut entity, placer, true, second));
+        let BlockEntity::Sign(sign) = &entity else { panic!("must still be a sign") };
+        assert_eq!(sign.front, lines, "a spent grant must not be reusable");
+
+        // A stranger, fresh grant: refused regardless, and the back side
+        // (never touched above) proves untouched too.
+        let mut entity = BlockEntity::Sign(SignData { editor: Some(placer), ..SignData::default() });
+        assert!(!apply_sign_update(&mut entity, stranger, false, lines.clone()));
+        let BlockEntity::Sign(sign) = &entity else { panic!("must still be a sign") };
+        assert_eq!(sign.back, ["", "", "", ""], "a non-owner's edit must not land");
+        assert_eq!(sign.editor, Some(placer), "a refused edit must not spend the grant either");
+
+        // Waxed refuses even the rightful editor.
+        let mut waxed = BlockEntity::Sign(SignData {
+            editor: Some(placer),
+            waxed: true,
+            ..SignData::default()
+        });
+        assert!(!apply_sign_update(&mut waxed, placer, true, lines.clone()));
+
+        // Control: a non-sign block entity must never be mistaken for one.
+        let mut not_a_sign = BlockEntity::Composter(Composter::new());
+        assert!(!apply_sign_update(&mut not_a_sign, placer, true, lines));
+    }
+
+    /// Placement wiring, end to end through the registry: a placed sign is
+    /// registered with `editor` already set to the placer, so the very next
+    /// `SIGN_UPDATE` from that uuid succeeds with no separate grant step —
+    /// this is what `crate::server`'s placement arm relies on.
+    #[test]
+    fn a_freshly_placed_sign_grants_its_placer_immediate_edit_permission() {
+        let (_, mut entity) = block_entity_for_item("minecraft:spruce_sign").expect("spruce sign");
+        let placer = uuid::Uuid::from_u128(42);
+        if let BlockEntity::Sign(sign) = &mut entity {
+            sign.editor = Some(placer);
+        }
+        let lines = ["FREE", "SPRUCE", "SIGN", ""].map(str::to_owned);
+        assert!(apply_sign_update(&mut entity, placer, true, lines.clone()));
+        let BlockEntity::Sign(sign) = &entity else { panic!("must still be a sign") };
+        assert_eq!(sign.front, lines);
     }
 
     /// A furnace's menu identity/slots/data round trip through the generic
