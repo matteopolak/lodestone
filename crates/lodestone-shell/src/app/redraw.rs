@@ -694,10 +694,19 @@ impl WindowApp {
         // player still draws the pack's default sheet, which is also exactly what
         // an offline-mode server legitimately looks like. See
         // `crate::remote_skins`.
+        // Cape URLs ride the exact same request/install pair, one call below —
+        // `remote_skins::request`/`drain_ready` are generic over "a texture
+        // URL", so a cape is just a second URL per player rather than a
+        // second pipeline. See `remote_skins::RemoteSkin::cape`'s doc.
         crate::remote_skins::request_all(
             entity_draws
                 .iter()
-                .filter_map(|draw| draw.player_skin.as_ref().map(|skin| skin.url.as_str())),
+                .filter_map(|draw| draw.player_skin.as_ref().map(|skin| skin.url.as_str()))
+                .chain(
+                    entity_draws
+                        .iter()
+                        .filter_map(|draw| draw.player_skin.as_ref()?.cape.as_deref()),
+                ),
         );
         render.install_pending_player_skins(device, queue);
         // Extraction lives in `Sim` because resolving each particle's light
@@ -1619,6 +1628,56 @@ impl WindowApp {
                     }
                 },
             );
+
+            // The player-inventory status-effect column (real 26.2 name:
+            // `EffectsInInventory`, not the older `EffectRenderingInventoryScreen`
+            // some descriptions of this still use — that older screen
+            // repositioned the panel to make room; this version does not, it
+            // only draws in whatever space already sits beside it). Only the
+            // local player's own inventory shows this — a chest or furnace
+            // menu resolves a different `MenuKind` and gets none.
+            //
+            // Drawn **after** the whole container/recipe-book call above, in
+            // its own composited pass, the same "self-contained, one render
+            // call, nothing here collides with the container's own tiered
+            // geometry" discipline `crate::effects`' top-right HUD overlay
+            // already uses — see that module's doc.
+            if container_menu.is_some_and(|menu| menu.kind() == lodestone_game::menu::MenuKind::Player)
+                && let Some(effects) = self.effects.as_mut()
+            {
+                let layout = crate::container::slot_layout(
+                    container_menu.expect("checked is_some_and above"),
+                );
+                let (logical_w, logical_h) =
+                    crate::menu::render::logical_canvas(self.nav.gui_scale(), w, h);
+                let (panel_x, panel_y) =
+                    crate::container::panel_origin_with_scale(&layout, self.nav.gui_scale(), w, h);
+                let panel_x = panel_x
+                    + crate::container::recipe_book_panel_shift(
+                        logical_w,
+                        layout.width,
+                        self.recipe_panel.open,
+                    );
+                // `slot_layout`/`panel_origin_with_scale` are entirely in the
+                // *logical* GUI canvas (see their own docs), and NDC is
+                // resolution-independent — `inventory_geometry`'s px→NDC
+                // conversion only needs the coordinate system its inputs are
+                // already expressed in, not the framebuffer's true physical
+                // size, so handing it the *logical* canvas here is what makes
+                // the column scale with the container panel at any GUI scale
+                // or DPI, the same as every slot/label in the panel itself.
+                effects.render_in_inventory(
+                    device,
+                    queue,
+                    frame.view(),
+                    &self.sim.active_effects(),
+                    panel_x,
+                    panel_y,
+                    layout.width,
+                    logical_w as u32,
+                    logical_h as u32,
+                );
+            }
         }
 
         // The pause overlay draws *over* the world/HUD/container passes above
