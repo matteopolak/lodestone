@@ -573,6 +573,23 @@ you expected it to have**: three of the four above were found by looking for wha
 than what the porting family calls it. When you *write* one, say what you searched for, so the next reader
 can tell a genuine absence from a missed synonym.
 
+**And the freshest-looking claim of all is a *sibling's* just-measured report — which is exactly how a stale
+comment gets laundered into a fresh measurement.** Measured twice in one day. An agent closing the
+world-admin decode family reported, in its own final summary, that **"no permission/op model exists anywhere
+in `lodestone-server`"**; that went into a brief as the first thing to build. `crate::access` had landed
+**nine days earlier**. The agent had not invented it: it asked "why is each of these packets stranded?" and
+answered from **the decode sites' own doc comments**, every one of which still said "no permission model" —
+so a stale comment became a report, and the report became a task. The real defect was the exact inverse of
+the brief: the model existed and six handlers were never gated on it, each still carrying the comment that
+concealed it.
+
+Two things follow. **A subagent's report is a claim like any other, and it decays *faster* than a doc
+precisely because nothing marks it as second-hand** — a doc at least looks like it has an age. Before
+building on one, spend the same grep you would spend on an issue body. And **when a comment states an
+absence, it is evidence about the moment it was written, not about the tree** — so when you wire something up,
+grep for comments asserting it does not exist and delete them in the same commit, because the next reader's
+"blocked on X" will be quoting yours.
+
 **The highest-decay content in this repo is a doc's own status annotation** — "Landed", "still open", "not
 implemented", "blocked by". A drifted *citation* eventually fails visibly, because the path stops resolving
 or the symbol stops existing; a wrong **"Landed: no"** stays perfectly plausible forever, and nothing about
