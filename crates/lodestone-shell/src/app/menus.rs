@@ -278,6 +278,18 @@ impl WindowApp {
                     net.respond_to_resource_pack(id, accept);
                 }
             }
+            // The Spectator Menu's a player row was activated (issue #613's
+            // `TeleportToEntity` remainder — see
+            // `crate::menu::spectator_menu`'s module doc): the screen has
+            // already closed (`MenuNav::activate_spectator_menu_row`), and
+            // this is the one send `ClientAction::SpectatorAction`'s own
+            // producer (`Sim::begin_attack_live`) already proved a live
+            // spectator session can reach.
+            MenuAction::TeleportToEntity { target } => {
+                if let Some(net) = self.sim.net() {
+                    net.send_action(lodestone_model::ClientAction::TeleportToEntity { target });
+                }
+            }
         }
     }
 

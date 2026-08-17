@@ -689,6 +689,101 @@ pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
     }
 }
 
+/// Builds the Spectator Menu's overlay frame (issue #613's
+/// `TeleportToEntity` remainder — see [`spectator_menu`]'s module doc for
+/// what the vertical-list layout deliberately simplifies against vanilla's
+/// paginated icon-slot bar).
+///
+/// Row indices match [`spectator_menu::SpectatorMenuState::visible`]'s own
+/// index space exactly — row 0 is either the first root entry, or (while a
+/// team category is expanded) the "< Back" row — so a click resolved
+/// against this frame's [`MenuRow`]s and a call to
+/// [`spectator_menu::SpectatorMenuState::activate`] can never disagree about
+/// what row `N` means.
+#[must_use]
+pub fn spectator_menu_frame(state: &spectator_menu::SpectatorMenuState) -> MenuFrame<'static> {
+    const TITLE_Y: f32 = 20.0;
+    const ROW_Y0: f32 = 44.0;
+    const ROW_H: f32 = 20.0;
+    const ROW_GAP: f32 = 2.0;
+    const ROW_W: f32 = 200.0;
+
+    let title = if state.expanded_team().is_some() {
+        "Team Teleport".to_string()
+    } else {
+        "Spectator Menu".to_string()
+    };
+    let mut labels = vec![MenuLabel {
+        text: title,
+        origin: Origin::ScreenTop,
+        dx: 0.0,
+        dy: TITLE_Y,
+        align: Align::Centre,
+        colour: LABEL,
+        scale: 1.0,
+    }];
+
+    let visible = state.visible();
+    let mut rows: Vec<MenuRow> = Vec::with_capacity(visible.len());
+    for (i, row) in visible.iter().enumerate() {
+        let slot = Some(Slot {
+            origin: Origin::ScreenTop,
+            dx: -ROW_W / 2.0,
+            dy: ROW_Y0 + i as f32 * (ROW_H + ROW_GAP),
+            w: ROW_W,
+            h: ROW_H,
+        });
+        rows.push(match row {
+            spectator_menu::SpectatorMenuRow::Back => MenuRow {
+                label: "< Back".to_string(),
+                enabled: true,
+                slot,
+                ..Default::default()
+            },
+            spectator_menu::SpectatorMenuRow::Team { label, count } => MenuRow {
+                label: format!("{label} ({count})"),
+                enabled: true,
+                head: Some(default_head_icon()),
+                slot,
+                ..Default::default()
+            },
+            spectator_menu::SpectatorMenuRow::Player(player) => MenuRow {
+                label: player.name.clone(),
+                enabled: true,
+                head: Some(default_head_icon()),
+                slot,
+                ..Default::default()
+            },
+        });
+    }
+
+    let hidden = state.hidden_row_count();
+    let message = (hidden > 0 && rows.len() == crate::menu::spectator_menu::MAX_VISIBLE_ROWS)
+        .then(|| format!("...and {hidden} more not shown"));
+    if rows.is_empty() {
+        labels.push(MenuLabel {
+            text: "No one else is here to teleport to.".to_string(),
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: ROW_Y0,
+            align: Align::Centre,
+            colour: widget::argb_to_rgba(widget::INACTIVE_MESSAGE_ARGB),
+            scale: 1.0,
+        });
+    }
+
+    MenuFrame {
+        rows,
+        selected: usize::MAX,
+        hovered: state.hovered,
+        backdrop: MenuBackdrop::Dim,
+        vanilla: true,
+        labels,
+        message,
+        ..Default::default()
+    }
+}
+
 /// Builds the loading screen's frame (issue #449): the panorama under
 /// `menu_background.png`'s wash, with one centred line of text — the current
 /// `ConnectPhase`'s own vanilla string

@@ -2042,6 +2042,7 @@ fn a_menu_screen_outranks_the_chat_prompt_and_everything_below_it() {
         recipe_search: true,
         creative_search: true,
         anvil_rename_active: true,
+        spectator: false,
     };
     assert_eq!(resolve(both, KeyCode::KeyW, true), Some(KeyOutcome::Menu));
     assert_eq!(resolve(both, KeyCode::Escape, true), Some(KeyOutcome::Menu));

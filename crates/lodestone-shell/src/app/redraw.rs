@@ -2003,6 +2003,20 @@ impl WindowApp {
             menu.render_overlay(device, queue, frame.view(), &book_edit_frame, w, h);
         }
 
+        // The Spectator Menu (issue #613's `TeleportToEntity` remainder) —
+        // the eighth overlay, same shape as the book-editing block
+        // immediately above and for the same reason: `menu::render::frame_for`
+        // has no arm for it (it is an overlay, not a full screen), so without
+        // a draw call here the screen would open, hit-test correctly
+        // (`nav::on_screen_frame` already calls
+        // `spectator_menu_overlay_frame`), and render nothing.
+        if let Some(spectator_menu_frame) =
+            crate::menu::nav::spectator_menu_overlay_frame(&self.ui, &self.nav)
+            && let Some(menu) = self.menu.as_mut()
+        {
+            menu.render_overlay(device, queue, frame.view(), &spectator_menu_frame, w, h);
+        }
+
         // `key.screenshot` (issue #16), and **this position is the whole
         // correctness argument**: every pass above — world, HUD, container, and
         // the three overlay blocks — has now written into `frame.view()`, and

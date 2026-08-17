@@ -68,6 +68,7 @@ pub mod server_links;
 pub mod servers;
 pub mod sign_edit;
 pub mod social;
+pub mod spectator_menu;
 pub mod stats;
 pub mod status;
 pub mod telemetry;
@@ -227,6 +228,19 @@ pub enum Screen {
     /// [`crate::menu::book_edit::BookEditState::to_save_action`]/
     /// [`to_sign_action`](crate::menu::book_edit::BookEditState::to_sign_action).
     BookEdit,
+    /// The Spectator Menu — vanilla's `SpectatorMenu`/`SpectatorGui`, opened
+    /// by a hotbar-number key while in spectator mode. Issue #613's
+    /// `TeleportToEntity` remainder — see
+    /// [`crate::menu::spectator_menu`]'s module doc for the real vanilla
+    /// trigger (there is no click handling anywhere on the tab list itself)
+    /// and what this implementation deliberately simplifies. Same overlay
+    /// shape as [`Screen::BookEdit`]: client-local, no server round trip to
+    /// open, pointer released, world kept rendering (and ticking) behind it.
+    ///
+    /// Opened by [`open_spectator_menu`](Self::open_spectator_menu); closed
+    /// by [`close_spectator_menu`](Self::close_spectator_menu) — Escape, or
+    /// activating a player row (which also sends the teleport).
+    SpectatorMenu,
     /// Paused overlay: pointer released, player input frozen. The world behind
     /// keeps rendering and — on a live server — keeps ticking; pausing is a
     /// *local* UI state, not a world stop. Reachable from [`Screen::Playing`]
@@ -437,7 +451,7 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 24] = [
+    pub const ALL: [Screen; 25] = [
         Screen::MainMenu,
         Screen::ServerList,
         Screen::ServerEdit,
@@ -451,6 +465,7 @@ impl Screen {
         Screen::CommandBlockEdit,
         Screen::SignEdit,
         Screen::BookEdit,
+        Screen::SpectatorMenu,
         Screen::Paused,
         Screen::Death,
         Screen::Error,
@@ -618,6 +633,12 @@ impl UiState {
     #[must_use]
     pub fn is_book_edit_open(&self) -> bool {
         self.screen == Screen::BookEdit
+    }
+
+    /// Whether the Spectator Menu is open over the world.
+    #[must_use]
+    pub fn is_spectator_menu_open(&self) -> bool {
+        self.screen == Screen::SpectatorMenu
     }
 
     /// Whether a session is currently being established.
@@ -814,6 +835,10 @@ impl UiState {
                     // answer) must not strand the player staring at a
                     // question whose answer now goes nowhere.
                     | Screen::ResourcePackPrompt
+                    // Same reasoning again: a disconnect while the Spectator
+                    // Menu is open must not strand the player on a player
+                    // list that belonged to a session that no longer exists.
+                    | Screen::SpectatorMenu
             )
         {
             self.death_message = None;
@@ -1274,6 +1299,24 @@ impl UiState {
         }
     }
 
+    /// Open the Spectator Menu over the world. Only from [`Screen::Playing`],
+    /// matching [`open_book_edit`](Self::open_book_edit)'s own guard — this
+    /// screen is reached the same client-local way (see
+    /// [`Screen::SpectatorMenu`]'s own doc).
+    pub fn open_spectator_menu(&mut self) {
+        if self.screen == Screen::Playing {
+            self.screen = Screen::SpectatorMenu;
+        }
+    }
+
+    /// Close the Spectator Menu back to the world — Escape, or a real
+    /// teleport selection.
+    pub fn close_spectator_menu(&mut self) {
+        if self.screen == Screen::SpectatorMenu {
+            self.screen = Screen::Playing;
+        }
+    }
+
     /// Escape, interpreted by screen:
     /// - Playing → Paused, Paused → Playing
     /// - Chat → Playing (cancel the line)
@@ -1315,6 +1358,10 @@ impl UiState {
             // vanilla's un-overridden `Screen.onClose` for both screens it
             // folds), so this bare `close_book_edit()` never sends either.
             Screen::BookEdit => self.close_book_edit(),
+            // Belt-and-braces, matching `Screen::BookEdit`'s own reasoning
+            // immediately above: `MenuNav::key_spectator_menu` intercepts
+            // Escape first in production and sends nothing.
+            Screen::SpectatorMenu => self.close_spectator_menu(),
             Screen::Error => self.dismiss_error(),
             Screen::ServerEdit => self.screen = Screen::ServerList,
             Screen::ServerList => self.screen = Screen::MainMenu,

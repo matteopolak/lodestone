@@ -34,6 +34,7 @@ use super::book_edit;
 use super::command_block;
 use super::edit_box::EditBox;
 use super::sign_edit;
+use super::spectator_menu;
 use super::focus::{self, FocusChildren, FocusSet, FocusTarget, KeyEvent, KeyOutcome};
 use super::servers::{MAX_NAME_CHARS, ServerEntry, ServerList, servers_path};
 use super::widget;
@@ -249,6 +250,17 @@ pub enum MenuAction {
         id: uuid::Uuid,
         /// `true` for Accept, `false` for Decline.
         accept: bool,
+    },
+    /// The Spectator Menu's a player row was activated (issue #613's
+    /// `TeleportToEntity` remainder — see [`spectator_menu`]'s module doc):
+    /// the app must send `ClientAction::TeleportToEntity { target }`.
+    /// `MenuNav` holds no `Sim`/`NetClient` to send it through, the same
+    /// division of labour [`MenuAction::ResourcePackResponse`] has. The
+    /// screen has already closed by the time this is returned (see
+    /// [`MenuNav::activate_spectator_menu_row`]).
+    TeleportToEntity {
+        /// Uuid of the player to teleport to.
+        target: uuid::Uuid,
     },
 }
 
@@ -1394,6 +1406,14 @@ pub struct MenuNav {
     /// unlike [`Self::sign_edit`], so there is equally no non-empty default
     /// to construct eagerly.
     book_edit: Option<book_edit::BookEditState>,
+    /// The Spectator Menu's roster and expand/hover state (issue #613's
+    /// `TeleportToEntity` remainder). **Not** an `Option` like
+    /// [`Self::book_edit`] above — this screen's roster is live-refreshed
+    /// every frame while connected, the same shape [`Self::social`] uses for
+    /// its own roster, so there is a real non-empty default (an empty
+    /// roster) rather than "not constructed yet". See
+    /// [`spectator_menu`]'s module doc.
+    spectator_menu: spectator_menu::SpectatorMenuState,
     /// The command tree the connected server sent (issue #471 step 2), pushed
     /// down by `app`'s right-click handler off `net::CommandTreeCell` — this
     /// module is pure and holds no client handle, so it cannot pull it.
@@ -1539,6 +1559,7 @@ impl MenuNav {
             command_block: None,
             sign_edit: None,
             book_edit: None,
+            spectator_menu: spectator_menu::SpectatorMenuState::default(),
             resource_pack_prompt: None,
             resource_pack_answered_id: None,
             command_tree: None,
@@ -1806,6 +1827,17 @@ impl MenuNav {
     /// everything else is either persisted or pure.
     pub fn refresh_social(&mut self, entries: Vec<crate::menu::social::SocialEntry>) {
         self.social.refresh(entries);
+    }
+
+    /// Replaces the Spectator Menu's roster — the same shape
+    /// [`Self::refresh_social`] immediately above has, for the identical
+    /// reason: `app/session.rs`'s per-frame reconciliation is what can reach
+    /// the live [`crate::sim::Sim`]; this module cannot. Called every frame
+    /// while connected regardless of which screen is open, matching
+    /// `refresh_social`'s own reasoning — the list the player sees the
+    /// instant they open the menu must not be a frame stale.
+    pub fn refresh_spectator_menu(&mut self, root: Vec<spectator_menu::SpectatorMenuEntry>) {
+        self.spectator_menu.refresh(root);
     }
 
     /// Replaces the counters the Statistics screen shows — the same shape, and
@@ -2363,6 +2395,14 @@ impl MenuNav {
         self.book_edit.as_ref()
     }
 
+    /// The Spectator Menu's live state — never `None` (see
+    /// [`Self::spectator_menu`]'s own field doc), drawn only while
+    /// [`Screen::SpectatorMenu`] is up.
+    #[must_use]
+    pub fn spectator_menu(&self) -> &spectator_menu::SpectatorMenuState {
+        &self.spectator_menu
+    }
+
     /// The sign-editing screen's state, or `None` when [`Screen::SignEdit`] is
     /// not showing — see [`Self::sign_edit`]'s own field doc.
     #[must_use]
@@ -2525,6 +2565,29 @@ impl MenuNav {
     pub fn close_book_edit(&mut self, ui: &mut UiState) {
         self.book_edit = None;
         ui.close_book_edit();
+    }
+
+    /// Opens the Spectator Menu at its root view. Only from
+    /// [`Screen::Playing`], matching [`Self::open_book_edit`]'s own guard.
+    /// Unlike `open_book_edit` this needs no payload from the caller — the
+    /// roster is already live via [`Self::refresh_spectator_menu`] — but it
+    /// does reset the view (see [`spectator_menu::SpectatorMenuState::reset_view`])
+    /// so a menu closed mid-category-browse does not reopen already-expanded.
+    pub fn open_spectator_menu(&mut self, ui: &mut UiState) {
+        if ui.screen() == Screen::Playing {
+            self.spectator_menu.reset_view();
+            ui.open_spectator_menu();
+        }
+    }
+
+    /// Closes the Spectator Menu, whether Escape or a real teleport
+    /// selection triggered it — matching [`Self::close_book_edit`]'s own
+    /// "either way" phrasing. The roster itself is **not** cleared (unlike
+    /// [`Self::close_book_edit`]'s state drop): it stays live-refreshed so
+    /// the next open is never stale, see [`Self::spectator_menu`]'s own
+    /// field doc.
+    pub fn close_spectator_menu(&mut self, ui: &mut UiState) {
+        ui.close_spectator_menu();
     }
 
     /// The last persistence failure, if any.
@@ -2708,6 +2771,11 @@ impl MenuNav {
                 if let Some(state) = self.book_edit.as_mut() {
                     state.hovered = Some(row);
                 }
+            }
+            // The Spectator Menu — same shape as `BookEdit`/`CommandBlockEdit`
+            // above: plain mouse-highlight tracking, no keyboard row cursor.
+            Screen::SpectatorMenu => {
+                self.spectator_menu.hovered = Some(row);
             }
             _ => {}
         }
@@ -2913,6 +2981,12 @@ impl MenuNav {
         // click on any other row is a button press.
         if ui.screen() == Screen::BookEdit {
             return self.activate_book_edit_row(ui, row);
+        }
+        // The Spectator Menu (issue #613's `TeleportToEntity` remainder) —
+        // same #391 shape: every row is a button (a team category, a
+        // player, or Back), never a field.
+        if ui.screen() == Screen::SpectatorMenu {
+            return self.activate_spectator_menu_row(ui, row);
         }
         // Statistics (issue #188) — the newest instance of #391's shape, and it
         // became *necessary* rather than merely tidy when Enter there stopped
@@ -3188,6 +3262,13 @@ impl MenuNav {
             // the title field, which the catch-all below (Escape only)
             // cannot do.
             Screen::BookEdit => self.key_book_edit(ui, key),
+            // The Spectator Menu (issue #613's `TeleportToEntity`
+            // remainder) — its own arm for the same reason as its siblings
+            // above: the catch-all's `UiState::on_escape` would work too
+            // (its `Screen::SpectatorMenu` arm calls
+            // `close_spectator_menu`), but routing Escape through here keeps
+            // it in one place with the row-click path.
+            Screen::SpectatorMenu => self.key_spectator_menu(ui, key),
             // Escape is the only menu key that means anything on the world and
             // loading screens, and `UiState` already owns it.
             _ => {
@@ -3622,6 +3703,21 @@ impl MenuNav {
         MenuAction::SignUpdate(submit)
     }
 
+    /// The Spectator Menu (issue #613's `TeleportToEntity` remainder). No
+    /// keyboard row cursor — see [`spectator_menu::SpectatorMenuState::hovered`]'s
+    /// own doc for why this is mouse-only, the same shape
+    /// [`Self::key_book_edit`]'s doc names for its own screen's simplest
+    /// layout. Escape closes without sending anything, matching
+    /// `Screen.keyPressed`'s un-overridden default for every vanilla screen
+    /// that has no explicit `onClose` — same reasoning
+    /// [`Screen::BookEdit`]'s own doc gives.
+    fn key_spectator_menu(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        if key == MenuKey::Escape {
+            self.close_spectator_menu(ui);
+        }
+        MenuAction::None
+    }
+
     /// The book-editing screen. Up/Down move the page's caret between visual
     /// lines (`TextArea::seek_cursor_line`) — this screen's only keyboard
     /// navigation, the same reduced shape `key_sign_edit`'s own doc names:
@@ -3728,6 +3824,21 @@ impl MenuNav {
                     MenuAction::EditBook(action)
                 }
                 _ => MenuAction::None,
+            }
+        }
+    }
+
+    /// What clicking a row on the Spectator Menu does (issue #613's
+    /// `TeleportToEntity` remainder) — dispatched entirely by
+    /// [`spectator_menu::SpectatorMenuState::activate`], which already knows
+    /// whether `row` means "expand a category", "go back", or "teleport".
+    /// Shared by [`Self::click`]'s `SpectatorMenu` arm.
+    fn activate_spectator_menu_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+        match self.spectator_menu.activate(row) {
+            spectator_menu::SpectatorMenuOutcome::None => MenuAction::None,
+            spectator_menu::SpectatorMenuOutcome::Teleport(target) => {
+                self.close_spectator_menu(ui);
+                MenuAction::TeleportToEntity { target }
             }
         }
     }
@@ -5405,6 +5516,11 @@ pub fn on_screen_frame<'a>(
     if let Some(frame) = book_edit_overlay_frame(ui, nav) {
         return Some(frame);
     }
+    // The eighth overlay screen (issue #613's `TeleportToEntity`
+    // remainder), same shape again.
+    if let Some(frame) = spectator_menu_overlay_frame(ui, nav) {
+        return Some(frame);
+    }
     super::render::frame_for(ui, nav, statuses, favicons)
 }
 
@@ -5434,6 +5550,22 @@ pub fn book_edit_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super:
     }
     let state = nav.book_edit()?;
     Some(super::render::book_edit_frame(state))
+}
+
+/// The Spectator Menu's overlay frame, or `None` when that screen is not up
+/// (issue #613's `TeleportToEntity` remainder) — [`book_edit_overlay_frame`]'s
+/// exact shape and for the same reason: [`on_screen_frame`] hit-tests a
+/// click against this, and `app/redraw.rs`'s overlay block draws it, so a
+/// second construction anywhere would be free to disagree with it. Unlike
+/// `book_edit_overlay_frame` this never returns `None` merely because the
+/// nav state is absent — [`MenuNav::spectator_menu`] always has one (see its
+/// own field doc) — only because the screen itself is not showing.
+#[must_use]
+pub fn spectator_menu_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super::render::MenuFrame<'a>> {
+    if !ui.is_spectator_menu_open() {
+        return None;
+    }
+    Some(super::render::spectator_menu_frame(nav.spectator_menu()))
 }
 
 /// The resource-pack prompt's overlay frame, or `None` when it is not up —

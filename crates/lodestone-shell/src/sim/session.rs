@@ -876,6 +876,32 @@ impl Sim {
         crate::scoreboard::sidebar_from(&board, self.translator().as_ref())
     }
 
+    /// The client's own folded team/objective state — the same
+    /// `SessionScoreboard` read [`Self::sidebar`] does, exposed raw for a
+    /// caller (the Spectator Menu's "Team Teleport" grouping, issue #613's
+    /// `TeleportToEntity` remainder) that needs [`Scoreboard::team_of`]
+    /// rather than a rendered sidebar.
+    #[must_use]
+    pub fn scoreboard(&self) -> lodestone_game::scoreboard::Scoreboard {
+        self.read(|w| {
+            w.get::<lodestone_ecs::SessionScoreboard>(self.local)
+                .map(|board| board.0.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    /// Whether the local player's server-authoritative game mode is
+    /// `Spectator` — `MultiPlayerGameMode.isSpectator()`. A public mirror of
+    /// `sim::actions::Sim::is_spectator` (private to that module): the
+    /// Spectator Menu's hotbar-key intercept (issue #613's
+    /// `TeleportToEntity` remainder) is gated from `app/input.rs`, which has
+    /// no access to that module-private helper.
+    #[must_use]
+    pub fn is_spectator(&self) -> bool {
+        self.read(|w| w.get::<ServerGameMode>(self.local).and_then(|m| m.0))
+            == Some(lodestone_client::GameMode::Spectator)
+    }
+
     /// The active boss bars to draw, in render order. Empty off a live server.
     #[must_use]
     pub fn boss_bars(&self) -> Vec<BossBarView> {

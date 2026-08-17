@@ -865,6 +865,9 @@ impl ApplicationHandler for WindowApp {
                     // invisible field.
                     creative_search: self.creative_search_active(),
                     anvil_rename_active: self.anvil_rename_active(),
+                    // Issue #613's `TeleportToEntity` remainder — see
+                    // `KeyGate::spectator`'s own doc.
+                    spectator: self.sim.is_spectator(),
                 };
                 let code = match event.physical_key {
                     PhysicalKey::Code(code) => Some(code),
@@ -1167,6 +1170,15 @@ impl ApplicationHandler for WindowApp {
                     // Vanilla's own third-/first-person toggle.
                     Some(KeyOutcome::TogglePerspective) => self.sim.cycle_camera_type(),
                     Some(KeyOutcome::SelectSlot(slot)) => self.sim.select_slot(slot),
+                    // Issue #613's `TeleportToEntity` remainder — the
+                    // Spectator Menu (`crate::menu::spectator_menu`), same
+                    // release-and-open dance as `OpenContainer` above.
+                    Some(KeyOutcome::OpenSpectatorMenu) => {
+                        self.sim.input_mut(InputState::release_all);
+                        self.nav.open_spectator_menu(&mut self.ui);
+                        self.tab_held = false;
+                        self.set_grab(false);
+                    }
                     Some(KeyOutcome::ContainerSwap { button }) => {
                         self.send_container_swap(button);
                     }
