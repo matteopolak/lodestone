@@ -563,6 +563,7 @@ fn a_chest_item_in_the_hotbar_reaches_pixels() {
         dyed_color: None,
         potion_color: None,
         banner_patterns: Vec::new(),
+        base_color: None,
     }))
     .chain(std::iter::repeat_with(|| None).take(8))
     .collect();
@@ -869,6 +870,7 @@ fn a_player_head_item_in_the_hotbar_reaches_pixels() {
         dyed_color: None,
         potion_color: None,
         banner_patterns: Vec::new(),
+        base_color: None,
     }))
     .chain(std::iter::repeat_with(|| None).take(8))
     .collect();
@@ -1133,6 +1135,7 @@ fn two_differently_dyed_banners_in_the_hotbar_draw_different_colours() {
             dyed_color: None,
             potion_color: None,
             banner_patterns: Vec::new(),
+            base_color: None,
         })
     };
     let slots: Vec<Option<HotbarSlot>> = vec![
@@ -1384,6 +1387,7 @@ fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
             dyed_color: None,
             potion_color: None,
             banner_patterns: patterns,
+            base_color: None,
         })
     };
     let plain_slots: Vec<Option<HotbarSlot>> = std::iter::once(slot(Vec::new()))
@@ -1507,5 +1511,445 @@ fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
         "the pixels the creeper pattern moved average rgb={moved_mean:?} — green \
          must exceed red for a lime pattern over a red base, or this is not the \
          pattern's own colour reaching the mask"
+    );
+}
+
+/// Pixel gate: shields — the identical island `banner_item_rig`'s doc used to
+/// name (`banner_item_rig` reuses `BANNER_BODY`/`BANNER_FLAG`, which had no
+/// shield equivalent, and `lodestone_render::banner_pattern::
+/// shield_pattern_layers` had no consumer at all) — now draw in the hotbar
+/// through a real `"shield"` mesh (`lodestone_assets::block_entity_models::
+/// shield_model`, `ShieldModel.createLayer` ported) and
+/// `lodestone_render::shield_item_rig`/`shield_has_patterns`.
+///
+/// # Two `minecraft:base_color`s, not one
+///
+/// A shield's item id never encodes colour the way `red_banner`/
+/// `light_blue_banner` do — every shield is `minecraft:shield`, and the tint
+/// is entirely `minecraft:base_color`. So this is the shield analogue of
+/// [`two_differently_dyed_banners_in_the_hotbar_draw_different_colours`]:
+/// the same two colours (`RED`/`LIGHT_BLUE`), chosen for the same reason —
+/// they disagree hard on every channel, so a hardcoded tint, a swapped
+/// channel, or an untinted grey mesh could not satisfy the assertions below
+/// by accident.
+///
+/// # The negative control: no `base_color`, no patterns
+///
+/// `ShieldSpecialRenderer.submit`'s own `hasPatterns` gate means a shield
+/// with neither carries **no** translucent layer at all — only the flat
+/// `shield_base_nopattern` sheet, untinted. That is the common case (straight
+/// off a crafting table) and this gate checks it is not silently treated as
+/// "coloured": the plain shield's lit pixels must average much closer to
+/// neutral (small `max - min` channel spread) than either dyed shield's,
+/// which is the mid-magnitude anchor between "a real translucent tint layer
+/// is present" and "only the grey primer sheet is" — a gate that only
+/// checked the two dyed shields against each other could pass even if
+/// `shield_has_patterns` always returned `true` and every shield paid for a
+/// layer draw it does not need.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn shields_with_different_base_colours_draw_different_colours_and_a_plain_one_draws_neither() {
+    const SHIELD: &str = "minecraft:shield";
+
+    assert_eq!(
+        calculate_gui_scale(AUTO_GUI_SCALE, W, H),
+        1,
+        "cell_rect assumes W x H divides to itself under the GUI scale"
+    );
+
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    let item_atlas = load_item_atlas().expect("the item atlas must build from client.jar");
+    let item: ResourceLocation = SHIELD.parse().expect("valid item id");
+    let icon = item_atlas
+        .icon(&item)
+        .unwrap_or_else(|| panic!("{SHIELD} must resolve to an icon in the item atlas"));
+    let kind = icon.parts.iter().find_map(|p| match p {
+        IconPart::Special { kind, .. } => Some(kind.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        kind.as_deref(),
+        Some("minecraft:shield"),
+        "{SHIELD} must resolve to an IconPart::Special carrying `minecraft:shield`; \
+         got {kind:?}. Without that this gate renders an item the special pass \
+         never sees and proves nothing."
+    );
+
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!(
+            "GPU gate opted in but the vanilla pack did not load; set LODESTONE_ASSETS \
+             to a pack root with client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        )
+    });
+    let models: &BlockModels = atlas
+        .models()
+        .expect("the vanilla load must attach baked block models");
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+
+    let slot = |base_color: Option<&str>| {
+        Some(HotbarSlot {
+            item: SHIELD.parse().expect("valid item id"),
+            count: 1,
+            damage: None,
+            max_damage: None,
+            enchanted: false,
+            dyed_color: None,
+            potion_color: None,
+            banner_patterns: Vec::new(),
+            base_color: base_color.map(str::to_string),
+        })
+    };
+    let slots: Vec<Option<HotbarSlot>> = vec![
+        slot(Some("red")),
+        slot(Some("light_blue")),
+        slot(None),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ];
+
+    let stats = DebugStats::default();
+    let hud_frame = HudFrame {
+        show_debug: false,
+        crosshair: false,
+        hotbar: None,
+        hotbar_items: Some(&slots),
+        ..HudFrame::new(&stats)
+    };
+
+    let mut shoot = |hud: &mut HudRenderer| -> Vec<u8> {
+        let frame = target.acquire().expect("headless acquire");
+        let raw_view = frame.create_view(target.raw_view_format());
+        clear_view(device, queue, frame.view(), [0, 0, 0]);
+        hud.render_with_item_models(
+            device,
+            queue,
+            frame.view(),
+            &raw_view,
+            Some(render.depth_view()),
+            &hud_frame,
+            Some(models),
+            calculate_gui_scale(AUTO_GUI_SCALE, W, H),
+            W,
+            H,
+        );
+        target.read_texels(device, queue)
+    };
+
+    let mut lit_hud = HudRenderer::new(device, format);
+    lit_hud.attach_items(device, queue, format, item_atlas.clone());
+    lit_hud.attach_item_models(
+        device,
+        format,
+        render
+            .model_atlas_view()
+            .expect("the vanilla path must expose a model atlas"),
+        render
+            .model_atlas_sampler()
+            .expect("the vanilla path must expose a model atlas sampler"),
+        render
+            .model_palette_buffer()
+            .expect("the vanilla path must expose a tint palette"),
+        render
+            .model_anim_buffer()
+            .expect("the vanilla path must expose animation slots"),
+    );
+    let subject = shoot(&mut lit_hud);
+    let sheets_in_pass = lit_hud.special_icon_sheets();
+
+    let red_cell = cell_rect(0);
+    let blue_cell = cell_rect(1);
+    let plain_cell = cell_rect(2);
+    let empty_cell = cell_rect(8);
+    let red_lit = lit_in(&subject, red_cell);
+    let blue_lit = lit_in(&subject, blue_cell);
+    let plain_lit = lit_in(&subject, plain_cell);
+    let empty_lit = lit_in(&subject, empty_cell);
+    let red_rgb = mean_rgb_in(&subject, red_cell);
+    let blue_rgb = mean_rgb_in(&subject, blue_cell);
+    let plain_rgb = mean_rgb_in(&subject, plain_cell);
+
+    eprintln!("=== hotbar special-item (shield) pixel gate ===");
+    eprintln!("sheets loaded by pass = {sheets_in_pass}");
+    eprintln!("lit, slot 0 (red shield)        = {red_lit}, mean rgb = {red_rgb:?}");
+    eprintln!("lit, slot 1 (light_blue shield) = {blue_lit}, mean rgb = {blue_rgb:?}");
+    eprintln!("lit, slot 2 (plain shield)      = {plain_lit}, mean rgb = {plain_rgb:?}");
+    eprintln!("lit, slot 8 (empty)             = {empty_lit}");
+
+    assert!(
+        sheets_in_pass > 0,
+        "the special-icon pass reported {sheets_in_pass} sheets after a frame \
+         containing a shield — it never built, so whatever painted in the cell is \
+         not it"
+    );
+    assert!(red_lit > 0, "nothing drew in hotbar cell 0 for a red-based shield");
+    assert!(blue_lit > 0, "nothing drew in hotbar cell 1 for a light_blue-based shield");
+    assert!(plain_lit > 0, "nothing drew in hotbar cell 2 for a plain shield — the opaque \
+         no-pattern sheet alone should still reach pixels even with no translucent layer");
+    assert_eq!(
+        empty_lit, 0,
+        "an empty hotbar cell must stay black; {empty_lit} lit pixels there means \
+         the draw is not localised to its own slot"
+    );
+
+    let [rr, rg, rb] = red_rgb.expect("slot 0 has lit pixels, checked above");
+    let [br, bg, bb] = blue_rgb.expect("slot 1 has lit pixels, checked above");
+    let [pr, pg, pb] = plain_rgb.expect("slot 2 has lit pixels, checked above");
+    let _ = (rg, bg, pg);
+    eprintln!("red shield         r-b = {:.1}", rr - rb);
+    eprintln!("light-blue shield  b-r = {:.1}", bb - br);
+    eprintln!("plain shield       max-min channel spread = {:.1}", pr.max(pg).max(pb) - pr.min(pg).min(pb));
+
+    // `RED`'s textureDiffuseColor is (176, 46, 38): red channel must dominate
+    // blue by a wide margin, exactly as the banner test's identical assertion
+    // reasons — see that test's own doc for why the margin is this large
+    // (the base mask is fully opaque, so the measured contrast comes back to
+    // the full-tint shape once the mask's placement is correct).
+    assert!(
+        rr - rb > 20.0,
+        "the red-based shield's lit pixels average r={rr:.1}, b={rb:.1} — red must \
+         dominate blue by a real margin for this to be the stack's own \
+         `minecraft:base_color` and not an untinted grey mesh (r≈b) or a \
+         channel-swapped tint (b>r)"
+    );
+    assert!(
+        bb - br > 20.0,
+        "the light_blue-based shield's lit pixels average b={bb:.1}, r={br:.1} — \
+         blue must dominate red by a real margin for the same reason"
+    );
+    assert!(
+        (rr - br).abs() > 20.0,
+        "the two shields' red channels ({rr:.1} vs {br:.1}) are too close — they \
+         may be drawing with the same tint rather than each stack's own \
+         `minecraft:base_color`"
+    );
+
+    // The mid-magnitude anchor: a plain shield (no base_color, no patterns)
+    // must sit far closer to neutral than either dyed one — the discriminator
+    // between "the translucent base-mask layer is genuinely gated on
+    // `shield_has_patterns`" and "it always draws, tinted white, and happens
+    // to look plausible". A shield with no colour information at all has
+    // nothing to be neutral *about* except by construction.
+    let red_spread = rr.max(rg).max(rb) - rr.min(rg).min(rb);
+    let blue_spread = br.max(bg).max(bb) - br.min(bg).min(bb);
+    let plain_spread = pr.max(pg).max(pb) - pr.min(pg).min(pb);
+    eprintln!(
+        "channel spread: red={red_spread:.1} blue={blue_spread:.1} plain={plain_spread:.1}"
+    );
+    assert!(
+        plain_spread < red_spread.min(blue_spread) * 0.5,
+        "a plain shield's own channel spread ({plain_spread:.1}) should be well \
+         below either dyed shield's ({red_spread:.1}, {blue_spread:.1}) — a plain \
+         shield draws no translucent tint layer at all, so it should read far \
+         closer to a neutral grey than a shield carrying a real \
+         `minecraft:base_color`"
+    );
+}
+
+/// Pixel gate: a `minecraft:shield` item in the hotbar draws its **loom
+/// patterns**, not just its base colour — the shield analogue of
+/// [`a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell`].
+/// Unlike a banner, a shield's pattern layers re-tint the *whole* mesh
+/// (`plate` and `handle` together — see `lodestone_render::block_entity::
+/// SHIELD`'s doc for why there is no separate flag-shaped sub-part), so this
+/// is also the check that `push_special_icon`'s shield branch resolves the
+/// right mesh/part range rather than the banner's `"flag"` one.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_based_shield_with_a_loom_pattern_shows_both_colours_in_one_cell() {
+    assert_eq!(
+        calculate_gui_scale(AUTO_GUI_SCALE, W, H),
+        1,
+        "cell_rect assumes W x H divides to itself under the GUI scale"
+    );
+
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    let item_atlas = load_item_atlas().expect("the item atlas must build from client.jar");
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!(
+            "GPU gate opted in but the vanilla pack did not load; set LODESTONE_ASSETS \
+             to a pack root with client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        )
+    });
+    let models: &BlockModels = atlas
+        .models()
+        .expect("the vanilla load must attach baked block models");
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+
+    let slot = |patterns: Vec<lodestone_model::BannerPatternLayer>| {
+        Some(HotbarSlot {
+            item: "minecraft:shield".parse().expect("valid item id"),
+            count: 1,
+            damage: None,
+            max_damage: None,
+            enchanted: false,
+            dyed_color: None,
+            potion_color: None,
+            banner_patterns: patterns,
+            base_color: Some("red".to_string()),
+        })
+    };
+    let plain_slots: Vec<Option<HotbarSlot>> = std::iter::once(slot(Vec::new()))
+        .chain(std::iter::repeat_with(|| None).take(8))
+        .collect();
+    let patterned_slots: Vec<Option<HotbarSlot>> = std::iter::once(slot(vec![
+        lodestone_model::BannerPatternLayer {
+            pattern_asset_id: "creeper".to_string(),
+            color: "lime".to_string(),
+        },
+    ]))
+    .chain(std::iter::repeat_with(|| None).take(8))
+    .collect();
+
+    let mut shoot = |slots: &[Option<HotbarSlot>]| -> Vec<u8> {
+        let stats = DebugStats::default();
+        let hud_frame = HudFrame {
+            show_debug: false,
+            crosshair: false,
+            hotbar: None,
+            hotbar_items: Some(slots),
+            ..HudFrame::new(&stats)
+        };
+        let mut hud = HudRenderer::new(device, format);
+        hud.attach_items(device, queue, format, item_atlas.clone());
+        hud.attach_item_models(
+            device,
+            format,
+            render
+                .model_atlas_view()
+                .expect("the vanilla path must expose a model atlas"),
+            render
+                .model_atlas_sampler()
+                .expect("the vanilla path must expose a model atlas sampler"),
+            render
+                .model_palette_buffer()
+                .expect("the vanilla path must expose a tint palette"),
+            render
+                .model_anim_buffer()
+                .expect("the vanilla path must expose animation slots"),
+        );
+        let frame = target.acquire().expect("headless acquire");
+        let raw_view = frame.create_view(target.raw_view_format());
+        clear_view(device, queue, frame.view(), [0, 0, 0]);
+        hud.render_with_item_models(
+            device,
+            queue,
+            frame.view(),
+            &raw_view,
+            Some(render.depth_view()),
+            &hud_frame,
+            Some(models),
+            calculate_gui_scale(AUTO_GUI_SCALE, W, H),
+            W,
+            H,
+        );
+        target.read_texels(device, queue)
+    };
+
+    let plain_pixels = shoot(&plain_slots);
+    let patterned_pixels = shoot(&patterned_slots);
+    let cell = cell_rect(0);
+
+    let plain = cell_rgb(&plain_pixels, cell);
+    let patterned = cell_rgb(&patterned_pixels, cell);
+
+    let mut moved_sum = [0i64; 3];
+    let mut moved_n = 0usize;
+    let mut unmoved_sum = [0i64; 3];
+    let mut unmoved_n = 0usize;
+    for (pos, prgb) in &patterned {
+        match plain.get(pos) {
+            Some(qrgb) => {
+                let d = (i32::from(prgb[0]) - i32::from(qrgb[0])).abs()
+                    + (i32::from(prgb[1]) - i32::from(qrgb[1])).abs()
+                    + (i32::from(prgb[2]) - i32::from(qrgb[2])).abs();
+                if d > 24 {
+                    for c in 0..3 {
+                        moved_sum[c] += i64::from(prgb[c]);
+                    }
+                    moved_n += 1;
+                } else {
+                    for c in 0..3 {
+                        unmoved_sum[c] += i64::from(prgb[c]);
+                    }
+                    unmoved_n += 1;
+                }
+            }
+            None => {
+                for c in 0..3 {
+                    moved_sum[c] += i64::from(prgb[c]);
+                }
+                moved_n += 1;
+            }
+        }
+    }
+
+    eprintln!("=== hotbar shield pattern-layer pixel gate ===");
+    eprintln!("plain red-based shield: lit px={}", plain.len());
+    eprintln!("+creeper (lime):        lit px={}, moved px={moved_n}, unmoved px={unmoved_n}", patterned.len());
+
+    assert!(
+        moved_n > 3,
+        "adding a lime `creeper` pattern layer moved only {moved_n} pixels by more \
+         than a rounding wobble relative to the unpatterned render, in a cell with \
+         {} lit pixels total — the pattern mask is not reaching pixels",
+        patterned.len()
+    );
+    assert!(
+        unmoved_n > 3,
+        "adding the pattern moved every lit pixel ({moved_n} of {}) — a masked \
+         layer draw should leave the uncovered rest of the shield unchanged, so \
+         this looks like a full-cell tint rather than a local mask",
+        patterned.len()
+    );
+    let moved_mean = moved_sum.map(|s| s as f64 / moved_n as f64);
+    let unmoved_mean = unmoved_sum.map(|s| s as f64 / unmoved_n as f64);
+    eprintln!("moved-pixel mean rgb   = {moved_mean:?}");
+    eprintln!("unmoved-pixel mean rgb = {unmoved_mean:?}");
+    assert!(
+        moved_mean[1] > moved_mean[0],
+        "the pixels the creeper pattern moved average rgb={moved_mean:?} — green \
+         must exceed red for a lime pattern over a red base, or this is not the \
+         pattern's own colour reaching the mask"
+    );
+    // The mid-alpha anchor this file's own creeper/red-banner sibling gate does
+    // not need (a banner's base mask and its pattern masks paint over disjoint
+    // mesh regions relative to the untinted pole/bar) but a shield's does: every
+    // layer here re-tints the *same* `plate`+`handle` mesh, base then pattern,
+    // both through the identical translucent pipeline — so the *unmoved*
+    // pixels (base mask only) must themselves still read red-dominated, or the
+    // "moved" split above could be hiding a case where the base layer itself
+    // never drew and only the pattern layer's own translucent draw is visible.
+    assert!(
+        unmoved_mean[0] > unmoved_mean[2],
+        "the shield's own unmoved (base-only) pixels average rgb={unmoved_mean:?} \
+         — red must exceed blue there too, or the base-colour layer this test's \
+         sibling gate already proved is not actually surviving underneath the \
+         pattern mask"
     );
 }

@@ -327,6 +327,15 @@ pub struct ItemComponents {
     /// shulker box, a loom's own input slot — used to truncate the rest of
     /// the packet from that slot onward.
     pub banner_patterns: Vec<BannerPatternLayer>,
+    /// `minecraft:base_color`: a shield's own dye tint, independent of any
+    /// [`Self::banner_patterns`] layer — vanilla's `DataComponents.BASE_COLOR`
+    /// (`ShieldSpecialRenderer.submit`'s `baseColor`). `None` for a
+    /// never-dyed shield and for every non-shield item; stored by vanilla's
+    /// own snake_case dye name, matching [`BannerPatternLayer::color`]'s
+    /// convention (and, like it, the field a plain banner's own base-colour
+    /// mask is derived from the *item id* rather than this component —
+    /// `crate::banner_pattern` in `lodestone-render`, not here).
+    pub base_color: Option<String>,
     /// True when the stack's patch carried at least one component this build
     /// does not model, so decoding stopped early and the modeled fields above
     /// may be incomplete. The modeled fields that were decoded remain valid.

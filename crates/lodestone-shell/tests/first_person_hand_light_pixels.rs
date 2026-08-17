@@ -251,6 +251,7 @@ fn the_first_person_held_item_dims_with_the_world_at_night() {
             dyed_color: None,
             potion_color: None,
             banner_patterns: Vec::new(),
+            base_color: None,
         })
     });
     let cam = camera();

@@ -139,6 +139,13 @@ pub const BUNDLE_CONTENTS_COMPONENT: &str = "minecraft:bundle_contents";
 /// truncated the rest of that packet. Carried as
 /// [`ComponentValue::BannerPatterns`].
 pub const BANNER_PATTERNS_COMPONENT: &str = "minecraft:banner_patterns";
+/// Well-known component identifier for `minecraft:base_color`.
+///
+/// A shield stack's own dye tint, independent of any
+/// [`BANNER_PATTERNS_COMPONENT`] layer — vanilla's `DataComponents.BASE_COLOR`
+/// (`ShieldSpecialRenderer.submit`'s `baseColor`). Carried as
+/// [`ComponentValue::BaseColor`].
+pub const BASE_COLOR_COMPONENT: &str = "minecraft:base_color";
 /// Well-known component identifier for `minecraft:custom_model_data`.
 ///
 /// Vanilla's own "make this item look different" channel, and half of how real
@@ -261,6 +268,11 @@ pub enum ComponentValue {
     /// [`lodestone_model::BannerPatternLayer`]. See
     /// [`BANNER_PATTERNS_COMPONENT`].
     BannerPatterns(Vec<BannerPatternLayer>),
+    /// `minecraft:base_color` — a shield stack's own dye tint, carried by
+    /// vanilla's own snake_case dye name (matching
+    /// [`BannerPatternLayer::color`]'s convention). See
+    /// [`BASE_COLOR_COMPONENT`].
+    BaseColor(String),
 }
 
 /// The effective, resolved component set of an [`ItemStack`].
@@ -791,6 +803,22 @@ impl ItemStack {
         self.write_component(BANNER_PATTERNS_COMPONENT, value);
     }
 
+    /// The stack's `minecraft:base_color` (vanilla's own snake_case dye
+    /// name), or `None` for a never-dyed shield and for every non-shield
+    /// item.
+    #[must_use]
+    pub fn base_color(&self) -> Option<&str> {
+        match self.components.get_str(BASE_COLOR_COMPONENT) {
+            Some(ComponentValue::BaseColor(color)) => Some(color.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Sets or clears `minecraft:base_color`.
+    pub fn set_base_color(&mut self, color: Option<String>) {
+        self.write_component(BASE_COLOR_COMPONENT, color.map(ComponentValue::BaseColor));
+    }
+
     /// The stack's `minecraft:writable_book_content` draft pages, or `None`
     /// for every item but an edited `minecraft:writable_book`.
     #[must_use]
@@ -1098,6 +1126,16 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             );
         }
 
+        // Same crate-boundary loss as the banner-patterns branch above, for a
+        // shield's own dye tint — without this a shield combined with a
+        // banner (base colour, no loom pattern) reached this crate looking
+        // like an undecorated shield.
+        if let Some(color) = stack.components.base_color.clone()
+            && let Ok(key) = BASE_COLOR_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::BaseColor(color));
+        }
+
         Self::with_components(
             stack.item.clone(),
             i32::try_from(stack.count).unwrap_or(i32::MAX),
@@ -1204,6 +1242,11 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             // component map — same "nothing to carry" story as `custom_data`
             // above.
             repair_cost: 0,
+            // Mirrors `banner_patterns` above, one component over: the
+            // forward conversion stores this, so it round-trips rather than
+            // being silently dropped converting a game-crate stack back to
+            // the wire shape.
+            base_color: stack.base_color().map(str::to_owned),
             // See the doc above: not lossy, out of scope.
             has_unmodeled: false,
         };

@@ -306,21 +306,25 @@ None — pure, deterministic function of its inputs.
 - Nothing else. In particular, no dependency on `lodestone-game` (see "How
   to change it" above) and no GPU handle of any kind.
 
-## Consumers, once the two prerequisites land
+## Consumers
 
-- **#23's banner block-entity renderer** calls `banner_pattern_layers` with
-  the block entity's decoded base colour + pattern list, gets back the
-  ordered draw list, and issues one draw per entry over its own flag mesh.
-- **The banner/shield item icon** (chest's `SpecialIconDraw` in
-  `crates/lodestone-shell/src/hud/item_icon.rs` is the shape to follow —
-  currently off-limits to this task, owned by the cost-screens agent) would
-  do the same over a GUI-posed instance of the same mesh.
-- **Shield in the first-person hand / third-person held item**
-  (`crates/lodestone-shell/src/gpu/first_person.rs`, this task's ownership)
-  is the same call again, once the mesh exists.
+All landed:
 
-None of the three exist today; this module is what all three will share
-instead of each re-deriving `submitPatterns`' layer math independently.
+- **The banner block-entity renderer** (`BlockEntityModelSet::resolve_banner`)
+  calls `banner_pattern_layers` with the block entity's decoded base colour +
+  pattern list, gets back the ordered draw list, and issues one draw per
+  entry over its own flag mesh.
+- **The banner/shield item icon** (`crates/lodestone-shell/src/hud/item_icon.rs`'s
+  `push_special_icon` — chest's `SpecialIconDraw::Mesh` shape, plus
+  `SpecialIconDraw::BannerLayer` for the translucent masks) draws both
+  families over a GUI-posed instance of the item's own mesh.
+- **The first-person hand / third-person held item**
+  (`crates/lodestone-shell/src/gpu/first_person.rs`'s `prepare_special_hand`)
+  is the same call again, for both a held banner and a held shield.
+
+No third-person held item beyond the local player's own first-person hand is
+built — that surface (another player's hand) is unrelated infrastructure this
+module does not gate.
 
 ## Steps D–F: landed
 
@@ -453,9 +457,89 @@ entirely plausible-looking banner. `gpu::tests::banner_masks_resolve_under_
 the_key_the_draw_site_derives` checks that bridge on a real two-layer pattern
 stack, and also that layer 0 carries the block's dye rather than white.
 
-**Still not built:** wall banners (a second body mesh), and the shield form
-(`shield_pattern_layers` exists and still has no consumer — a shield is an item
-model in the hand, not a block entity, so it is a different pass entirely).
+**Still not built:** wall banners (a second body mesh). The shield form is now
+built — see "Shield: landed" below.
+
+## Shield: landed
+
+`shield_pattern_layers` had a real consumer for a whole session after it
+landed — this closed that gap. Unlike a banner, a shield has **one** mesh
+(`plate`+`handle`, `ShieldModel.createLayer`), not a body+flag pair, and it
+is an **item** everywhere it draws (hand, GUI icon) — there is no shield
+block entity at all, so there is no world-placement transform to derive the
+way `banner_ground_placement_matrix` was needed for a placed banner.
+
+- **Mesh.** `lodestone_assets::block_entity_models::shield_model` — `plate`
+  (`texOffs(0,0)`, `addBox(-6,-11,-2, 12,22,1)`) and `handle`
+  (`texOffs(26,0)`, `addBox(-1,-3,-1, 2,6,6)`), both `PartPose::ZERO`, on the
+  same 64×64 sheet convention as chest/banner/shulker. Registered in
+  `BLOCK_ENTITY_MODELS` as `"shield"`, defaulting to the
+  `entity/shield/shield_base_nopattern` sheet (the undecorated common case).
+- **Which sheet, and when the pattern pass runs at all.**
+  `ShieldSpecialRenderer.submit`'s `hasPatterns = !patterns.isEmpty() ||
+  baseColor != null` decides both: `lodestone_render::block_entity::
+  shield_has_patterns` is that predicate, and `shield_item_rig(has_patterns)`
+  picks `entity/shield/shield_base` (patterned) or `..._nopattern` (plain)
+  for the mesh's own opaque draw. A plain, straight-off-the-crafting-table
+  shield therefore draws **no** translucent layer at all — the pattern pass
+  is skipped outright, not called with an empty list, matching vanilla's own
+  early-out rather than calling `shield_pattern_layers` and discarding an
+  always-present base mask the way a banner's own (never-empty) `layers`
+  list does.
+- **The pattern pass re-tints the whole mesh, not a sub-part.** `BannerRenderer
+  .submitPatterns(..., this.model, Unit.INSTANCE, banner = false, ...)`
+  passes the *entire* `ShieldModel` — both `plate` and `handle` — as the
+  thing each layer re-submits, unlike a banner's `flagModel`-only pattern
+  pass. So the shell's two draw sites (`gpu/first_person.rs`'s
+  `HandPatternFamily`, `hud/item_icon.rs`'s `PatternFamily`) branch on which
+  family a layer belongs to: a banner's layers draw the `banner_flag`
+  mesh's `"flag"` part alone (`index_of("flag")`, never `.parts.first()` —
+  see the existing banner gotcha above), a shield's draw **every** part of
+  the `"shield"` mesh with real geometry (`gpu.parts.iter().filter(|r|
+  r.index_count > 0)`), because there is no single named part standing in
+  for the whole shield the way `"flag"` does for a banner.
+- **A separate mask atlas, not a re-key of the banner one.**
+  `lodestone_assets::banner_pattern_atlas::ShieldPatternAtlas` loads
+  `entity/shield/*.png` through `atlases/shield_patterns.json` — the
+  identical directory-source shape as `BannerPatternAtlas`, factored through
+  a shared private loader (`load_pattern_directory`) parameterised by atlas
+  path, sprite prefix, and which non-pattern stems in that same directory to
+  exclude (`shield_base`/`shield_base_nopattern` for shields, `banner_base`
+  for banners). **Two separate texture sets**, not the same PNGs under a
+  different key: vanilla ships a distinctly-drawn pattern image per family,
+  cropped and laid out for that family's own mesh shape, so `ShieldPatternAtlas
+  ::get`/`get_sprite` cannot be satisfied by looking a pattern id up in the
+  banner atlas even though the ids (`"creeper"`, `"base"`, …) are identical
+  strings in both. `gpu/block_entities.rs`'s `BlockEntityRenderer::
+  shield_patterns` and `hud/item_icon.rs`'s `SpecialIcons::shield_patterns`
+  are the shell's own two loaded-mask maps, one per consumer surface,
+  mirroring `banner_patterns` exactly.
+- **`minecraft:base_color` reaches the client at all now.** It used to be
+  decoded and discarded (`crates/protocol/v770/src/adapter/inventory.rs`
+  read the VarInt and threw it away, grouped with `rarity`/`repair_cost`).
+  It is now its own decode arm (`DYE_COLOR_NAMES`-resolved, the identical
+  ordinal-to-name table a `banner_patterns` layer's own colour already used),
+  stored on `lodestone_model::ItemComponents::base_color`, round-tripped
+  through `lodestone_game::item::ItemStack::base_color`/`set_base_color`
+  (`ComponentValue::BaseColor`) exactly like `banner_patterns` already was,
+  and threaded onto both `crate::hud::HotbarSlot`/`ItemIcon` and
+  `crate::gpu::MainHandItem` so the hand and the GUI icon read the same
+  value a real shield stack carries.
+- **Pixel gates.** `crates/lodestone-shell/tests/hotbar_special_item_pixels.rs`:
+  `shields_with_different_base_colours_draw_different_colours_and_a_plain_one_
+  draws_neither` (two `base_color`s discriminate on the same channels the
+  banner base-colour gate uses, plus a plain shield's channel spread must sit
+  well below either dyed one's — the check that `shield_has_patterns` is
+  genuinely gating the layer pass rather than always drawing a white-tinted
+  one) and `a_based_shield_with_a_loom_pattern_shows_both_colours_in_one_cell`
+  (moved/unmoved split, mirroring the banner pattern-layer gate, plus an
+  extra check that the *unmoved* — base-only — pixels stay red-dominated,
+  since a shield's base and pattern layers share the same mesh region a
+  banner's do not).
+
+None of this touches `banner_pattern.rs`'s own colour/ordering math — the
+whole point of that module being pure and consumer-agnostic is that a second
+consumer needed no changes there at all, only a real mesh and shell wiring.
 
 ### The two model classes, decompiled directly
 

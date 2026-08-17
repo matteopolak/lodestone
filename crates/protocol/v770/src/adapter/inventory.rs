@@ -1022,8 +1022,8 @@ fn read_component_patch(
                 "minecraft:unbreakable" | "minecraft:creative_slot_lock" | "minecraft:glider",
             ) => {}
 
-            // A bare VarInt. `rarity`, `dye`, `base_color` and `map_post_processing`
-            // are `ByteBufCodecs.idMapper`, which is `VarInt.read` with no `+1` and
+            // A bare VarInt. `rarity`, `dye` and `map_post_processing` are
+            // `ByteBufCodecs.idMapper`, which is `VarInt.read` with no `+1` and
             // no `0` sentinel; the rest are `ByteBufCodecs.VAR_INT` directly, or a
             // one-field `StreamCodec.composite` over it (`enchantable`,
             // `ominous_bottle_amplifier`).
@@ -1034,10 +1034,27 @@ fn read_component_patch(
                 | "minecraft:ominous_bottle_amplifier"
                 | "minecraft:enchantable"
                 | "minecraft:dye"
-                | "minecraft:base_color"
                 | "minecraft:map_post_processing",
             ) => {
                 reader.var_i32().map_err(dec_err)?;
+            }
+
+            // `minecraft:base_color` — the same `ByteBufCodecs.idMapper` VarInt
+            // shape as `dye`/`rarity` above, resolved against [`DYE_COLOR_NAMES`]
+            // exactly like a `banner_patterns` layer's own colour. A shield's dye
+            // tint, independent of any loom pattern layers
+            // (`ShieldSpecialRenderer.submit`'s `baseColor`) — was previously
+            // discarded with the bare-VarInt group above, which is why a shield
+            // combined with a banner drew no base tint at all even once its
+            // pattern layers decoded. An id outside `DYE_COLOR_NAMES` stores
+            // `None`, mirroring `read_banner_pattern_layers`' own "drop, don't
+            // default" rule for an unresolved colour.
+            Some("minecraft:base_color") => {
+                let id = reader.var_i32().map_err(dec_err)?;
+                components.base_color = usize::try_from(id)
+                    .ok()
+                    .and_then(|i| DYE_COLOR_NAMES.get(i))
+                    .map(|s| (*s).to_owned());
             }
 
             // Fixed-width scalars, **not** VarInts. `MapItemColor.STREAM_CODEC` is

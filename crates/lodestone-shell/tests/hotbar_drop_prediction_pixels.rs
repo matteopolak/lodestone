@@ -126,6 +126,7 @@ fn hotbar_records(menus: &Menus) -> Vec<Option<HotbarSlot>> {
                     dyed_color: None,
                     potion_color: None,
                     banner_patterns: Vec::new(),
+                    base_color: None,
                 })
             })
         })
