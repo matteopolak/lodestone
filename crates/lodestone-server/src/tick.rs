@@ -741,6 +741,46 @@ fn publish_moving_piston(
     });
 }
 
+/// Issue #694's entity-aware reaction surface: shoves every mob standing in
+/// a moving piston cell's own swept path, the instant that cell first
+/// appears. Called at the same four `propagate_and_react_with_entities`
+/// consumers [`publish_moving_piston`] already is, and reads the identical
+/// pending-commit record that function does — see
+/// `crate::mobs::piston_shove`'s own module doc for why the wiring lives
+/// entirely in this file's consumers rather than in `crate::piston`/
+/// `crate::random_tick`, and for why `source = dest - push_direction` is
+/// the whole of the query region regardless of which cell (a pushed block,
+/// an extending head, a retracting base) this is.
+///
+/// A no-op for any other state, so a caller can hand it every block change
+/// it publishes without testing first — the same convention
+/// [`publish_moving_piston`] already establishes.
+fn shove_entities_from_piston(
+    mobs: &MobHandle,
+    block_ticks: &crate::scheduled_tick::ScheduledTickQueue<String>,
+    x: i32,
+    y: i32,
+    z: i32,
+    state: &str,
+) {
+    if !crate::piston::is_moving_piston(state) {
+        return;
+    }
+    let Some(entity) = block_ticks
+        .iter()
+        .find(|pending| pending.pos == (x, y, z) && crate::piston::is_finish_kind(&pending.kind))
+        .and_then(|pending| crate::piston::parse_finish_kind(&pending.kind))
+    else {
+        return;
+    };
+    let push_direction = if entity.extending { entity.direction } else { entity.direction.opposite() };
+    let dest = BlockPos::new(x, y, z);
+    let source = push_direction.opposite().relative(dest);
+    mobs.with(|sim| {
+        sim.shove_from_piston(source, dest, push_direction);
+    });
+}
+
 /// How far behind wall-clock schedule the loop must fall before it gives up
 /// trying to catch up and forgives the backlog, matching vanilla's
 /// `runServer` overload check
@@ -2362,6 +2402,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             ) {
                 let (ex, ey, ez) = event.pos;
                 world.set_block(ex, ey, ez, &event.to);
+                shove_entities_from_piston(&mobs, &block_ticks, ex, ey, ez, &event.to);
                 post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                 block_tick_out.publish(ex, ey, ez, event.to);
             }
@@ -2520,6 +2561,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                         let (ex, ey, ez) = event.pos;
                         world.set_block(ex, ey, ez, &event.to);
                         publish_moving_piston(&block_tick_out, &block_ticks, ex, ey, ez, &event.to);
+                        shove_entities_from_piston(&mobs, &block_ticks, ex, ey, ez, &event.to);
                         post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                         block_tick_out.publish(ex, ey, ez, event.to);
                     }
@@ -3095,6 +3137,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     publish_openable_sound(&block_tick_out, BlockPos::new(ex, ey, ez), &event.from, &event.to, game_tick);
                     world.set_block(ex, ey, ez, &event.to);
                     publish_moving_piston(&block_tick_out, &block_ticks, ex, ey, ez, &event.to);
+                    shove_entities_from_piston(&mobs, &block_ticks, ex, ey, ez, &event.to);
                     post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                     block_tick_out.publish(ex, ey, ez, event.to);
                 }
@@ -3167,6 +3210,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                         let (x, y, z) = event.pos;
                         world.set_block(x, y, z, &event.to);
                         publish_moving_piston(&block_tick_out, &block_ticks, x, y, z, &event.to);
+                        shove_entities_from_piston(&mobs, &block_ticks, x, y, z, &event.to);
                         block_tick_out.publish(x, y, z, event.to);
                     }
                 }
@@ -3303,6 +3347,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     let (ex, ey, ez) = event.pos;
                     world.set_block(ex, ey, ez, &event.to);
                     publish_moving_piston(&block_tick_out, &block_ticks, ex, ey, ez, &event.to);
+                    shove_entities_from_piston(&mobs, &block_ticks, ex, ey, ez, &event.to);
                     post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                     block_tick_out.publish(ex, ey, ez, event.to);
                 }
@@ -5463,5 +5508,121 @@ mod tests {
             None,
             "a falling edge must never be heard as a note-block play"
         );
+    }
+
+    /// Issue #694, driven through the real production shape: a lit torch
+    /// triggers a real `crate::random_tick::propagate_and_react` piston
+    /// extension (the same call `crate::piston`'s own oracle gate uses to
+    /// build a real rig, not a hand-fabricated one), and this file's own
+    /// [`shove_entities_from_piston`] — called exactly as it is at every one
+    /// of this file's real `propagate_and_react_with_entities` consumers —
+    /// must shove a mob standing in the pushed block's destination cell.
+    #[test]
+    fn a_real_piston_extension_shoves_a_mob_standing_in_its_path() {
+        let mut column = crate::chunk::ChunkColumn::new(0, 16);
+        // `piston[facing=south,extended=false]` at (4, 1, 8), a pushable
+        // dirt block one cell south (the push direction), and an unlit
+        // torch two cells west of the piston — the same rig shape
+        // `redstone_piston_order_oracle_gate.rs`'s own `piston_rig` uses.
+        column.set_block(4, 1, 8, "minecraft:piston[facing=south,extended=false]");
+        column.set_block(4, 1, 9, "minecraft:dirt");
+        column.set_block(3, 1, 8, &crate::redstone_torch::set_standing_lit(false));
+
+        let mobs = MobHandle::new(ChunkWorld::new(-64, 384));
+        // Standing exactly where the pushed dirt is about to land — the
+        // direct "a block is about to occupy my cell" case.
+        let pig_id = mobs.with(|sim| {
+            sim.spawn_species(
+                lodestone_model::ResourceKey::from_str("minecraft:pig").expect("valid key"),
+                lodestone_model::Vec3::new(4.5, 1.0, 10.5),
+            )
+            .id()
+        });
+        let before = mobs.with(|sim| sim.get(pig_id).expect("alive").position());
+
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        column.set_block(3, 1, 8, &crate::redstone_torch::set_standing_lit(true));
+        let events = crate::random_tick::propagate_and_react(
+            &mut column,
+            0,
+            0,
+            3,
+            1,
+            8,
+            &mut block_ticks,
+            40,
+        );
+
+        // Premise check: the extension actually produced a `moving_piston`
+        // write at the dirt's own destination — otherwise the shove below
+        // would pass vacuously (nothing to shove from).
+        assert!(
+            events.iter().any(|e| {
+                e.pos == (4, 1, 10) && crate::piston::is_moving_piston(&e.to)
+            }),
+            "PREMISE FAILED: extending must write a moving_piston at the pushed dirt's own \
+             destination (4, 1, 10) -- events: {events:?}"
+        );
+
+        for event in &events {
+            let (ex, ey, ez) = event.pos;
+            shove_entities_from_piston(&mobs, &block_ticks, ex, ey, ez, &event.to);
+        }
+
+        let after = mobs.with(|sim| sim.get(pig_id).expect("alive").position());
+        assert_ne!(before, after, "a mob standing where the pushed block lands must be shoved");
+        assert!(
+            (after.z - before.z - 1.0).abs() < 1e-9 && after.x == before.x && after.y == before.y,
+            "must move exactly one block further south (the push direction), no other axis: \
+             before={before:?} after={after:?}"
+        );
+    }
+
+    /// **Control**: the identical rig, but the piston never fires (the
+    /// torch stays unlit) — no `moving_piston` write exists anywhere, and
+    /// the pig must not move at all. Without this, the positive test above
+    /// could pass merely because `shove_entities_from_piston` moves every
+    /// mob regardless of whether a real piston event occurred.
+    #[test]
+    fn an_unlit_torch_never_extends_the_piston_and_never_shoves_anyone() {
+        let mut column = crate::chunk::ChunkColumn::new(0, 16);
+        column.set_block(4, 1, 8, "minecraft:piston[facing=south,extended=false]");
+        column.set_block(4, 1, 9, "minecraft:dirt");
+        column.set_block(3, 1, 8, &crate::redstone_torch::set_standing_lit(false));
+
+        let mobs = MobHandle::new(ChunkWorld::new(-64, 384));
+        let pig_id = mobs.with(|sim| {
+            sim.spawn_species(
+                lodestone_model::ResourceKey::from_str("minecraft:pig").expect("valid key"),
+                lodestone_model::Vec3::new(4.5, 1.0, 10.5),
+            )
+            .id()
+        });
+        let before = mobs.with(|sim| sim.get(pig_id).expect("alive").position());
+
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        // Torch left unlit -- no re-light this time.
+        let events = crate::random_tick::propagate_and_react(
+            &mut column,
+            0,
+            0,
+            3,
+            1,
+            8,
+            &mut block_ticks,
+            40,
+        );
+        assert!(
+            !events.iter().any(|e| crate::piston::is_moving_piston(&e.to)),
+            "PREMISE: an already-unlit torch must produce no piston write at all -- events: {events:?}"
+        );
+
+        for event in &events {
+            let (ex, ey, ez) = event.pos;
+            shove_entities_from_piston(&mobs, &block_ticks, ex, ey, ez, &event.to);
+        }
+
+        let after = mobs.with(|sim| sim.get(pig_id).expect("alive").position());
+        assert_eq!(before, after, "with no piston event at all, nothing must move");
     }
 }

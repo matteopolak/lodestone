@@ -60,10 +60,17 @@
 //!   piston block *event* at all, so the "head is mid-extension, drop it" case is
 //!   unreachable rather than merely unimplemented — though nothing needs it, since
 //!   the interrupt logic above already covers what `TRIGGER_DROP` names.
-//! * Entities in the push path are not shoved: that is `PistonMovingBlockEntity`'s
-//!   `moveCollidedEntities`/`moveStuckEntities`, which needs an entity AABB sweep
-//!   this crate has no piston-aware collision pass for. The intermediate state it
-//!   wanted is no longer the blocker; the collision pass is.
+//! * **Mobs in the push path are now shoved (issue #694)** —
+//!   `crate::mobs::piston_shove::MobSim::shove_from_piston`, called from
+//!   `crate::tick`'s own `propagate_and_react_with_entities` consumers
+//!   rather than from this module: the shared reaction surface below stays
+//!   entity-agnostic on purpose (see that module's own doc for why, and for
+//!   the disclosed "one discrete shove, not vanilla's continuous sweep"
+//!   narrowing). **Players are not** — a connected player's position is
+//!   client-reported, not server-owned state this sim can translate; that
+//!   needs a server-authoritative correction sent to the client, a
+//!   mechanism this crate has nowhere else either, and is scoped as a
+//!   separate follow-up by #694 itself.
 //! * A `moving_piston` cell has **no collision shape** here. Vanilla's
 //!   `MovingPistonBlock.getCollisionShape` delegates to the block entity's
 //!   interpolated shape, so a player rides a moving block; here the cell is empty
