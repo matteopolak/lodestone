@@ -3250,11 +3250,12 @@ where
     // `ServerBound::CustomPayload` arm in `dispatch_play_packet`. It is the
     // per-connection filter the broadcast drain in `serve_play` applies.
     let mut client_channels = ClientChannels::default();
-    // The mode this connection joins in. Survival — this crate persists no
-    // per-player game type and reads none from `level.dat` — and a runtime
-    // switch (the `change_game_mode` packet, or `/gamemode`) moves it from
-    // there. `serve_play` takes ownership of it at the Play handoff.
-    let game_mode = GameMode::Survival;
+    // The mode this connection joins in, absent a saved per-player value
+    // below: `WorldStateHandle::default_game_mode`, `/defaultgamemode`'s own
+    // read side — Survival until a host changes it. A runtime switch (the
+    // `change_game_mode` packet, or `/gamemode`) moves it from there.
+    // `serve_play` takes ownership of it at the Play handoff.
+    let game_mode = world.default_game_mode();
 
     while let Some((packet_id, payload)) = conn.read_packet().await? {
         match proto.decode(state, packet_id, &payload) {
