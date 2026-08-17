@@ -392,6 +392,176 @@ pub fn potion_splash_effects(potion_registry_id: i32, scale: f64, duration_scale
         .collect()
 }
 
+/// One effect grant from a food's `Consumable.onConsumeEffects` list —
+/// `ApplyStatusEffectsConsumeEffect`'s own `(MobEffectInstance, probability)`,
+/// `probability` defaulting to `1.0` when the Java constructor omits it.
+///
+/// Distinct from [`SplashEffect`]: a food grant is never distance-scaled and
+/// never instantaneous (no `Consumables.java` entry names `instant_health`/
+/// `instant_damage`), so this is the plain `(effect, duration, amplifier)`
+/// triple `ActiveEffects::apply` already takes, plus the probability
+/// [`food_consume_effects`]'s caller must roll.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FoodEffectGrant {
+    /// Canonical `minecraft:*` mob-effect id.
+    pub effect_id: &'static str,
+    /// Duration in ticks.
+    pub duration: i32,
+    /// 0-based amplifier.
+    pub amplifier: u32,
+    /// `random.nextFloat() < probability` — `1.0` always applies.
+    pub probability: f32,
+}
+
+/// `Consumables.java`'s per-food `onConsume(new ApplyStatusEffectsConsumeEffect(...))`
+/// lists, transcribed exactly (issue #690) — every `ApplyStatusEffectsConsumeEffect`
+/// registration in that file except `CHICKEN`'s duplicate-looking-but-distinct
+/// entry, which *is* included below. Sorted by item for [`food_consume_effects`]'s
+/// linear scan (the table is seven rows; a binary search would be a second thing to
+/// keep sorted for no measured benefit).
+///
+/// **Disclosed gap**: `resistance`'s damage reduction and `absorption`'s extra
+/// hit points are not wired into the player damage pipeline — `Defenses` is built
+/// from `PlayerInventory::combat_stats` alone, with `resistance_amplifier` always
+/// `None` and `absorption` always `0.0`, at every real call site (see
+/// `lodestone_entity::damage`'s own fields). Granting either effect here is still a
+/// real fix: it stores correctly, ticks its duration down, and shows in the HUD
+/// exactly like every other effect — the *mechanism* gap is pre-existing and wider
+/// than this table (a beacon's Resistance level and a Resistance splash potion hit
+/// the same wall), not introduced by feeding it. `fire_resistance` and
+/// `regeneration` are **not** in this category: both already have a real
+/// consumer (`crate::burning`'s `fire_resistance` flag, `ActiveEffects::tick`'s
+/// heal), so granting those two is a complete fix end to end.
+static FOOD_EFFECTS: &[(&str, &[FoodEffectGrant])] = &[
+    (
+        "minecraft:chicken",
+        &[FoodEffectGrant {
+            effect_id: "minecraft:hunger",
+            duration: 600,
+            amplifier: 0,
+            probability: 0.3,
+        }],
+    ),
+    (
+        "minecraft:enchanted_golden_apple",
+        &[
+            FoodEffectGrant {
+                effect_id: "minecraft:regeneration",
+                duration: 400,
+                amplifier: 1,
+                probability: 1.0,
+            },
+            FoodEffectGrant {
+                effect_id: "minecraft:resistance",
+                duration: 6000,
+                amplifier: 0,
+                probability: 1.0,
+            },
+            FoodEffectGrant {
+                effect_id: "minecraft:fire_resistance",
+                duration: 6000,
+                amplifier: 0,
+                probability: 1.0,
+            },
+            FoodEffectGrant {
+                effect_id: "minecraft:absorption",
+                duration: 2400,
+                amplifier: 3,
+                probability: 1.0,
+            },
+        ],
+    ),
+    (
+        "minecraft:golden_apple",
+        &[
+            FoodEffectGrant {
+                effect_id: "minecraft:regeneration",
+                duration: 100,
+                amplifier: 1,
+                probability: 1.0,
+            },
+            FoodEffectGrant {
+                effect_id: "minecraft:absorption",
+                duration: 2400,
+                amplifier: 0,
+                probability: 1.0,
+            },
+        ],
+    ),
+    (
+        "minecraft:poisonous_potato",
+        &[FoodEffectGrant {
+            effect_id: "minecraft:poison",
+            duration: 100,
+            amplifier: 0,
+            probability: 0.6,
+        }],
+    ),
+    (
+        "minecraft:pufferfish",
+        &[
+            FoodEffectGrant {
+                effect_id: "minecraft:poison",
+                duration: 1200,
+                amplifier: 1,
+                probability: 1.0,
+            },
+            FoodEffectGrant {
+                effect_id: "minecraft:hunger",
+                duration: 300,
+                amplifier: 2,
+                probability: 1.0,
+            },
+            FoodEffectGrant {
+                effect_id: "minecraft:nausea",
+                duration: 300,
+                amplifier: 0,
+                probability: 1.0,
+            },
+        ],
+    ),
+    (
+        "minecraft:rotten_flesh",
+        &[FoodEffectGrant {
+            effect_id: "minecraft:hunger",
+            duration: 600,
+            amplifier: 0,
+            probability: 0.8,
+        }],
+    ),
+    (
+        "minecraft:spider_eye",
+        &[FoodEffectGrant {
+            effect_id: "minecraft:poison",
+            duration: 100,
+            amplifier: 0,
+            probability: 1.0,
+        }],
+    ),
+];
+
+/// The effect grants `item` applies on a successful eat, or `&[]` for every
+/// item `Consumables.java` gives no `onConsumeEffects` list — including every
+/// plain food (`FOODS` in `crate::item_use` has forty rows; this table has
+/// seven, and the other thirty-three are correctly silent here).
+#[must_use]
+pub fn food_consume_effects(item: &str) -> &'static [FoodEffectGrant] {
+    FOOD_EFFECTS
+        .iter()
+        .find(|&&(name, _)| name == item)
+        .map_or(&[] as &[FoodEffectGrant], |&(_, grants)| grants)
+}
+
+/// `Consumables.HONEY_BOTTLE`'s `onConsume(new
+/// RemoveStatusEffectsConsumeEffect(MobEffects.POISON))` — the one food whose
+/// consume effect *removes* rather than grants. Deterministic (no probability
+/// field on `RemoveStatusEffectsConsumeEffect`), so the caller need only check
+/// this and, if `true`, call `ActiveEffects::remove("minecraft:poison")`.
+#[must_use]
+pub fn removes_poison_on_consume(item: &str) -> bool {
+    item == "minecraft:honey_bottle"
+}
+
 /// One live effect — vanilla's `MobEffectInstance`, reduced to the fields that decide
 /// behaviour (see the module doc for the presentational ones that are omitted).
 ///
@@ -1261,5 +1431,122 @@ mod tests {
             potion_splash_effects(lodestone_data::potion::POTION_COUNT as i32, 1.0, 1.0),
             Vec::new()
         );
+    }
+
+    // ---- food consume effects (issue #690) ----
+
+    /// A golden apple grants exactly regeneration II (100 ticks) and
+    /// absorption I (2400 ticks) — the two-row list `Consumables.GOLDEN_APPLE`
+    /// declares, both guaranteed (`probability == 1.0`).
+    #[test]
+    fn golden_apple_grants_regeneration_and_absorption() {
+        let grants = food_consume_effects("minecraft:golden_apple");
+        assert_eq!(
+            grants,
+            &[
+                FoodEffectGrant {
+                    effect_id: "minecraft:regeneration",
+                    duration: 100,
+                    amplifier: 1,
+                    probability: 1.0,
+                },
+                FoodEffectGrant {
+                    effect_id: "minecraft:absorption",
+                    duration: 2400,
+                    amplifier: 0,
+                    probability: 1.0,
+                },
+            ]
+        );
+    }
+
+    /// The enchanted golden apple's list is **not** the plain apple's scaled up —
+    /// it is four rows, a stronger and longer regeneration, plus resistance and
+    /// fire resistance the plain apple does not grant at all, plus an absorption
+    /// **amplifier** four times the plain apple's (`3` vs `0`, i.e. eight extra
+    /// hearts against two). A table that shared one row between the two items
+    /// would fail this exact assertion.
+    #[test]
+    fn enchanted_golden_apple_grants_a_distinct_four_row_list() {
+        let plain = food_consume_effects("minecraft:golden_apple");
+        let enchanted = food_consume_effects("minecraft:enchanted_golden_apple");
+        assert_eq!(enchanted.len(), 4);
+        assert_ne!(plain, enchanted);
+        assert_eq!(enchanted[0].effect_id, "minecraft:regeneration");
+        assert_eq!(enchanted[0].duration, 400);
+        assert_eq!(enchanted[0].amplifier, 1);
+        assert_eq!(enchanted[1].effect_id, "minecraft:resistance");
+        assert_eq!(enchanted[2].effect_id, "minecraft:fire_resistance");
+        assert_eq!(enchanted[3].effect_id, "minecraft:absorption");
+        assert_eq!(enchanted[3].amplifier, 3);
+        assert_ne!(
+            enchanted[3].amplifier,
+            plain
+                .iter()
+                .find(|g| g.effect_id == "minecraft:absorption")
+                .unwrap()
+                .amplifier
+        );
+    }
+
+    /// The three probabilistic grants carry three **different** probabilities
+    /// (`0.3`, `0.6`, `0.8`) — pairwise-distinct so a transposition between rows
+    /// cannot survive this assertion, per this repo's own evidence standard for
+    /// adjacent same-typed fields.
+    #[test]
+    fn probabilistic_grants_are_pairwise_distinct() {
+        let chicken = food_consume_effects("minecraft:chicken")[0].probability;
+        let poisonous_potato = food_consume_effects("minecraft:poisonous_potato")[0].probability;
+        let rotten_flesh = food_consume_effects("minecraft:rotten_flesh")[0].probability;
+        assert_eq!(chicken, 0.3);
+        assert_eq!(poisonous_potato, 0.6);
+        assert_eq!(rotten_flesh, 0.8);
+        assert_ne!(chicken, poisonous_potato);
+        assert_ne!(poisonous_potato, rotten_flesh);
+        assert_ne!(chicken, rotten_flesh);
+    }
+
+    /// Pufferfish is the one three-row *guaranteed* list — poison II, hunger III
+    /// and nausea I, all at `probability == 1.0`, distinguishing it from
+    /// `poisonous_potato`'s single **probabilistic** poison row despite both
+    /// granting poison.
+    #[test]
+    fn pufferfish_grants_three_guaranteed_effects() {
+        let grants = food_consume_effects("minecraft:pufferfish");
+        assert_eq!(grants.len(), 3);
+        assert!(grants.iter().all(|g| g.probability == 1.0));
+        assert_eq!(grants[0], FoodEffectGrant {
+            effect_id: "minecraft:poison",
+            duration: 1200,
+            amplifier: 1,
+            probability: 1.0,
+        });
+        assert_eq!(grants[1].effect_id, "minecraft:hunger");
+        assert_eq!(grants[1].amplifier, 2);
+        assert_eq!(grants[2].effect_id, "minecraft:nausea");
+    }
+
+    /// **Control**: an ordinary food with no `onConsumeEffects` list (an apple)
+    /// yields nothing, and so does an item this table was never meant to cover
+    /// (stone) — proving an empty result is the food's own no-effects case, not
+    /// this function failing to look anything up at all.
+    #[test]
+    fn food_consume_effects_water_bottle_style_control() {
+        assert_eq!(food_consume_effects("minecraft:apple"), &[] as &[FoodEffectGrant]);
+        assert_eq!(food_consume_effects("minecraft:stone"), &[] as &[FoodEffectGrant]);
+        // Splash-side and spider-eye must not be confused: a spider eye
+        // itself grants poison, but that must not leak onto any *other* item.
+        assert_eq!(food_consume_effects("minecraft:fermented_spider_eye"), &[] as &[FoodEffectGrant]);
+    }
+
+    /// Only honey bottle removes poison on consume — the deterministic
+    /// `RemoveStatusEffectsConsumeEffect` arm, distinct from every probabilistic
+    /// `ApplyStatusEffectsConsumeEffect` row above.
+    #[test]
+    fn only_honey_bottle_removes_poison() {
+        assert!(removes_poison_on_consume("minecraft:honey_bottle"));
+        assert!(!removes_poison_on_consume("minecraft:milk_bucket"));
+        assert!(!removes_poison_on_consume("minecraft:golden_apple"));
+        assert!(!removes_poison_on_consume("minecraft:apple"));
     }
 }

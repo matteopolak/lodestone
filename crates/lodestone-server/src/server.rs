@@ -9664,6 +9664,102 @@ fn finish_drinking_ominous_bottle(
     ))
 }
 
+/// `PotionContents.onConsume` → `applyToLivingEntity(user, durationScale)`:
+/// finishing a drink of `minecraft:potion` applies its full, **unscaled**
+/// built-in effect list — issue #690's central gap, the one that made every
+/// potion in the game do nothing at all.
+///
+/// Reuses [`crate::mob_effects::potion_splash_effects`] at `scale = 1.0`,
+/// `duration_scale = 1.0` rather than re-deriving the list: that function's own
+/// `splash_instant_amount`/`splash_timed_duration` are both the identity
+/// transform at `scale = 1.0` (`floor(1.0 * x + 0.5) == x` for the non-negative
+/// integer `x` every potion table entry is), which is exactly
+/// `applyInstantaneousEffect`'s own unscaled call and `entity.addEffect`'s own
+/// unscaled duration — not an approximation reused for convenience, the same
+/// computation vanilla's *other* call site performs. `duration_scale` is `1.0`
+/// for the same disclosed `minecraft:potion_duration_scale` gap
+/// `resolve_potion_splash` already carries (this build's `ItemComponents` does
+/// not model that component).
+///
+/// Returns the `(slot, remaining stack)` pair [`finish_consuming`] does, plus
+/// the effect list to apply — `None` when the item is not a potion or the use
+/// is stale (the slot's contents changed under it), matching every sibling
+/// `finish_*` function's `still_there` gate.
+fn finish_drinking_potion(
+    inventory: &mut PlayerInventory,
+    use_in_progress: &ItemInUse,
+    game_mode: GameMode,
+) -> Option<(usize, Option<ItemStack>, Vec<crate::mob_effects::SplashEffect>)> {
+    if use_in_progress.item != "minecraft:potion" {
+        return None;
+    }
+    let stack = inventory.native(use_in_progress.native)?;
+    if stack.item.to_string() != use_in_progress.item {
+        return None;
+    }
+    let effects = stack
+        .components
+        .potion
+        .map(|id| crate::mob_effects::potion_splash_effects(id, 1.0, 1.0))
+        .unwrap_or_default();
+    if !consume_one(inventory, use_in_progress.native, game_mode) {
+        return None;
+    }
+    Some((
+        use_in_progress.native,
+        inventory.native(use_in_progress.native).cloned(),
+        effects,
+    ))
+}
+
+/// `Consumables.MILK_BUCKET`'s `onConsume(ClearAllStatusEffectsConsumeEffect
+/// .INSTANCE)` — a drunk milk bucket wipes every active status effect.
+///
+/// Returns the `(slot, remaining stack)` pair plus the ids that were actually
+/// active (and are now gone), so the caller can send one
+/// `encode_remove_mob_effect` per id rather than guessing which ones changed.
+/// An empty vec is a real answer (a player with nothing active drank milk for
+/// nothing, exactly like vanilla), not a "did not run" sentinel — matching the
+/// water-bottle-control shape this crate's other consume paths already use.
+///
+/// **Disclosed narrowing**: vanilla's `MilkBucketItem` additionally converts
+/// the stack to `minecraft:bucket` (`usingConvertsTo`) rather than consuming it
+/// outright; `item_use`'s own module doc already names `usingConvertsTo` as not
+/// modelled (a stew leaving a bowl is the same gap), so this reuses
+/// [`consume_one`] like every other drink here and empties the stack instead.
+/// The effect-clearing half — this function's actual reason to exist — is
+/// complete.
+fn finish_drinking_milk(
+    inventory: &mut PlayerInventory,
+    effects: &mut crate::mob_effects::ActiveEffects,
+    use_in_progress: &ItemInUse,
+    game_mode: GameMode,
+) -> Option<(usize, Option<ItemStack>, Vec<String>)> {
+    if use_in_progress.item != "minecraft:milk_bucket" {
+        return None;
+    }
+    let still_there = inventory
+        .native(use_in_progress.native)
+        .is_some_and(|stack| stack.item.to_string() == use_in_progress.item);
+    if !still_there {
+        return None;
+    }
+    let cleared: Vec<String> = effects
+        .active()
+        .into_iter()
+        .map(|(id, _)| id.to_owned())
+        .collect();
+    effects.clear();
+    if !consume_one(inventory, use_in_progress.native, game_mode) {
+        return None;
+    }
+    Some((
+        use_in_progress.native,
+        inventory.native(use_in_progress.native).cloned(),
+        cleared,
+    ))
+}
+
 /// Applies a `RELEASE_USE_ITEM` that ends a bow draw: computes the charge, refuses
 /// a shot too weak or unarmed, and launches the arrow.
 ///
@@ -13403,6 +13499,47 @@ where
                                 ),
                             )
                             .await?;
+
+                            // `Consumable.onConsume`'s `onConsumeEffects.forEach` —
+                            // issue #690's golden-apple/pufferfish/rotten-flesh/
+                            // spider-eye/poisonous-potato/chicken/honey-bottle gap.
+                            // Runs after the food-bar packet above rather than
+                            // folding into it: these are `update_mob_effect`/
+                            // `remove_mob_effect` packets, not health-bar fields.
+                            for grant in crate::mob_effects::food_consume_effects(&started.item) {
+                                if drops_rng.next_f32() >= grant.probability {
+                                    continue;
+                                }
+                                effects.apply(grant.effect_id, grant.duration, grant.amplifier);
+                                apply(
+                                    conn,
+                                    &mut state,
+                                    proto.encode_update_mob_effect(
+                                        LOCAL_PLAYER_ENTITY_ID,
+                                        grant.effect_id,
+                                        grant.amplifier,
+                                        grant.duration,
+                                        false,
+                                        true,
+                                        true,
+                                        false,
+                                    ),
+                                )
+                                .await?;
+                            }
+                            if crate::mob_effects::removes_poison_on_consume(&started.item)
+                                && effects.remove("minecraft:poison")
+                            {
+                                apply(
+                                    conn,
+                                    &mut state,
+                                    proto.encode_remove_mob_effect(
+                                        LOCAL_PLAYER_ENTITY_ID,
+                                        "minecraft:poison",
+                                    ),
+                                )
+                                .await?;
+                            }
                         } else if let Some((native, remainder)) = finish_drinking_ominous_bottle(
                             &mut inventory,
                             &mut effects,
@@ -13437,6 +13574,112 @@ where
                                 ),
                             )
                             .await?;
+                        } else if let Some((native, remainder, potion_effects)) =
+                            finish_drinking_potion(&mut inventory, &started, game_mode)
+                        {
+                            if let Some(menu_slot) = window_zero_menu_slot(native) {
+                                apply(
+                                    conn,
+                                    &mut state,
+                                    proto.encode_container_slot(
+                                        0,
+                                        0,
+                                        menu_slot,
+                                        remainder.as_ref(),
+                                    ),
+                                )
+                                .await?;
+                            }
+                            // `PotionContents.applyToLivingEntity`'s own split: an
+                            // instantaneous effect heals/damages immediately (no
+                            // `MobEffectInstance` is ever stored for one, so no
+                            // `update_mob_effect` follows — only the health bar
+                            // moves), a timed one is stored and announced.
+                            let mut health_changed = false;
+                            for effect in potion_effects {
+                                match effect {
+                                    crate::mob_effects::SplashEffect::Instant {
+                                        effect_id,
+                                        amount,
+                                    } => {
+                                        match effect_id
+                                            .strip_prefix("minecraft:")
+                                            .unwrap_or(effect_id.as_str())
+                                        {
+                                            "instant_health" => vitals.heal(amount),
+                                            "instant_damage" => {
+                                                vitals.apply_effect_damage(amount);
+                                            }
+                                            _ => continue,
+                                        }
+                                        health_changed = true;
+                                    }
+                                    crate::mob_effects::SplashEffect::Timed {
+                                        effect_id,
+                                        duration,
+                                        amplifier,
+                                    } => {
+                                        effects.apply(&effect_id, duration, amplifier);
+                                        apply(
+                                            conn,
+                                            &mut state,
+                                            proto.encode_update_mob_effect(
+                                                LOCAL_PLAYER_ENTITY_ID,
+                                                &effect_id,
+                                                amplifier,
+                                                duration,
+                                                false,
+                                                true,
+                                                true,
+                                                false,
+                                            ),
+                                        )
+                                        .await?;
+                                    }
+                                }
+                            }
+                            if health_changed {
+                                apply(
+                                    conn,
+                                    &mut state,
+                                    proto.encode_set_health(
+                                        vitals.health(),
+                                        vitals.food().food_level(),
+                                        vitals.food().saturation(),
+                                    ),
+                                )
+                                .await?;
+                            }
+                        } else if let Some((native, remainder, cleared)) = finish_drinking_milk(
+                            &mut inventory,
+                            &mut effects,
+                            &started,
+                            game_mode,
+                        ) {
+                            if let Some(menu_slot) = window_zero_menu_slot(native) {
+                                apply(
+                                    conn,
+                                    &mut state,
+                                    proto.encode_container_slot(
+                                        0,
+                                        0,
+                                        menu_slot,
+                                        remainder.as_ref(),
+                                    ),
+                                )
+                                .await?;
+                            }
+                            for effect_id in cleared {
+                                apply(
+                                    conn,
+                                    &mut state,
+                                    proto.encode_remove_mob_effect(
+                                        LOCAL_PLAYER_ENTITY_ID,
+                                        &effect_id,
+                                    ),
+                                )
+                                .await?;
+                            }
                         }
                     }
                 }
@@ -14596,6 +14839,40 @@ where
                     ),
                 )
                 .await?;
+
+                // Same `onConsumeEffects` producer the native arm wires — see
+                // that call site's own comment (issue #690).
+                for grant in crate::mob_effects::food_consume_effects(&started.item) {
+                    if drops_rng.next_f32() >= grant.probability {
+                        continue;
+                    }
+                    effects.apply(grant.effect_id, grant.duration, grant.amplifier);
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_update_mob_effect(
+                            LOCAL_PLAYER_ENTITY_ID,
+                            grant.effect_id,
+                            grant.amplifier,
+                            grant.duration,
+                            false,
+                            true,
+                            true,
+                            false,
+                        ),
+                    )
+                    .await?;
+                }
+                if crate::mob_effects::removes_poison_on_consume(&started.item)
+                    && effects.remove("minecraft:poison")
+                {
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_remove_mob_effect(LOCAL_PLAYER_ENTITY_ID, "minecraft:poison"),
+                    )
+                    .await?;
+                }
             } else if let Some((native, remainder)) =
                 finish_drinking_ominous_bottle(inventory, effects, &started, game_mode)
             {
@@ -14622,6 +14899,83 @@ where
                     ),
                 )
                 .await?;
+            } else if let Some((native, remainder, potion_effects)) =
+                finish_drinking_potion(inventory, &started, game_mode)
+            {
+                if let Some(menu_slot) = window_zero_menu_slot(native) {
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_container_slot(0, 0, menu_slot, remainder.as_ref()),
+                    )
+                    .await?;
+                }
+                let mut health_changed = false;
+                for effect in potion_effects {
+                    match effect {
+                        crate::mob_effects::SplashEffect::Instant { effect_id, amount } => {
+                            match effect_id.strip_prefix("minecraft:").unwrap_or(effect_id.as_str()) {
+                                "instant_health" => vitals.heal(amount),
+                                "instant_damage" => vitals.apply_effect_damage(amount),
+                                _ => continue,
+                            }
+                            health_changed = true;
+                        }
+                        crate::mob_effects::SplashEffect::Timed {
+                            effect_id,
+                            duration,
+                            amplifier,
+                        } => {
+                            effects.apply(&effect_id, duration, amplifier);
+                            apply(
+                                conn,
+                                state,
+                                proto.encode_update_mob_effect(
+                                    LOCAL_PLAYER_ENTITY_ID,
+                                    &effect_id,
+                                    amplifier,
+                                    duration,
+                                    false,
+                                    true,
+                                    true,
+                                    false,
+                                ),
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                if health_changed {
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_set_health(
+                            vitals.health(),
+                            vitals.food().food_level(),
+                            vitals.food().saturation(),
+                        ),
+                    )
+                    .await?;
+                }
+            } else if let Some((native, remainder, cleared)) =
+                finish_drinking_milk(inventory, effects, &started, game_mode)
+            {
+                if let Some(menu_slot) = window_zero_menu_slot(native) {
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_container_slot(0, 0, menu_slot, remainder.as_ref()),
+                    )
+                    .await?;
+                }
+                for effect_id in cleared {
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_remove_mob_effect(LOCAL_PLAYER_ENTITY_ID, &effect_id),
+                    )
+                    .await?;
+                }
             }
         }
     }
@@ -18545,5 +18899,151 @@ mod tests {
         assert!(result.is_none(), "a plain potion must not be handled by the ominous-bottle path");
         assert!(effects.get("minecraft:bad_omen").is_none(), "no effect must be granted");
         assert_eq!(inv.native(0), Some(&stack("minecraft:potion", 1)), "the potion must stay in hand, untouched");
+    }
+
+    fn potion_stack(potion: &str, count: u32) -> ItemStack {
+        let mut s = stack("minecraft:potion", count);
+        s.components.potion = Some(lodestone_data::potion::potion_id(potion).expect("real potion"));
+        s
+    }
+
+    /// Issue #690's central gap: a real timed-effect potion (Strength II) must
+    /// land its full, **unscaled** duration and amplifier on the drinker and
+    /// consume the bottle — the whole reason this function exists, since before
+    /// it every potion in the game did nothing at all.
+    #[test]
+    fn finish_drinking_potion_grants_the_full_unscaled_effect() {
+        let mut inv = PlayerInventory::new();
+        inv.set_native(0, Some(potion_stack("minecraft:strong_strength", 1)));
+        let started = ItemInUse {
+            native: 0,
+            item: "minecraft:potion".to_owned(),
+            finish_tick: 0,
+            last_effect_remaining: None,
+        };
+
+        let (native, remainder, effects) =
+            finish_drinking_potion(&mut inv, &started, GameMode::Survival).expect("a real potion must finish");
+        assert_eq!(native, 0);
+        assert!(remainder.is_none(), "the sole stack of 1 must be fully consumed");
+        assert_eq!(
+            effects,
+            vec![crate::mob_effects::SplashEffect::Timed {
+                effect_id: "minecraft:strength".to_owned(),
+                duration: 1800,
+                amplifier: 1,
+            }],
+            "Strong Strength: amplifier II, 1:30 — unscaled, not the splash falloff"
+        );
+    }
+
+    /// An instant potion (Harming) reaches the caller as a full-strength
+    /// [`SplashEffect::Instant`] — `6 << amplifier` unscaled, the same
+    /// `splash_instant_amount` computation at `scale = 1.0` a direct hit at
+    /// point-blank range would produce, proving drinking is not merely "a splash
+    /// with the thrower standing on the target".
+    #[test]
+    fn finish_drinking_potion_carries_an_instant_effect_at_full_strength() {
+        let mut inv = PlayerInventory::new();
+        inv.set_native(0, Some(potion_stack("minecraft:harming", 1)));
+        let started = ItemInUse {
+            native: 0,
+            item: "minecraft:potion".to_owned(),
+            finish_tick: 0,
+            last_effect_remaining: None,
+        };
+
+        let (_, _, effects) =
+            finish_drinking_potion(&mut inv, &started, GameMode::Survival).expect("harming must finish");
+        assert_eq!(
+            effects,
+            vec![crate::mob_effects::SplashEffect::Instant {
+                effect_id: "minecraft:instant_damage".to_owned(),
+                amount: 6.0,
+            }]
+        );
+    }
+
+    /// **Control**: a water bottle's `minecraft:potion` id resolves (it is a
+    /// real potion), but its built-in effect list is empty, so drinking it must
+    /// still fully consume the bottle and yield zero grants — not "not handled"
+    /// and not a panic on an empty list.
+    #[test]
+    fn finish_drinking_potion_water_bottle_control() {
+        let mut inv = PlayerInventory::new();
+        inv.set_native(0, Some(potion_stack("minecraft:water", 1)));
+        let started = ItemInUse {
+            native: 0,
+            item: "minecraft:potion".to_owned(),
+            finish_tick: 0,
+            last_effect_remaining: None,
+        };
+
+        let (_, remainder, effects) =
+            finish_drinking_potion(&mut inv, &started, GameMode::Survival).expect("water must still finish");
+        assert!(remainder.is_none());
+        assert!(effects.is_empty());
+    }
+
+    /// **Control**: any other item, including food, must not be handled by
+    /// this path.
+    #[test]
+    fn finish_drinking_potion_ignores_every_other_item() {
+        let mut inv = PlayerInventory::new();
+        inv.set_native(0, Some(stack("minecraft:golden_apple", 1)));
+        let started = ItemInUse {
+            native: 0,
+            item: "minecraft:golden_apple".to_owned(),
+            finish_tick: 0,
+            last_effect_remaining: None,
+        };
+        assert!(finish_drinking_potion(&mut inv, &started, GameMode::Survival).is_none());
+    }
+
+    /// Issue #690's milk gap: drinking milk clears every active effect and
+    /// reports exactly the ids that were cleared, and consumes the bucket.
+    #[test]
+    fn finish_drinking_milk_clears_every_active_effect() {
+        let mut inv = PlayerInventory::new();
+        inv.set_native(0, Some(stack("minecraft:milk_bucket", 1)));
+        let mut effects = crate::mob_effects::ActiveEffects::new();
+        effects.apply("minecraft:poison", 100, 0);
+        effects.apply("minecraft:speed", 200, 1);
+        let started = ItemInUse {
+            native: 0,
+            item: "minecraft:milk_bucket".to_owned(),
+            finish_tick: 0,
+            last_effect_remaining: None,
+        };
+
+        let (native, remainder, mut cleared) =
+            finish_drinking_milk(&mut inv, &mut effects, &started, GameMode::Survival).expect("milk must finish");
+        assert_eq!(native, 0);
+        assert!(remainder.is_none());
+        cleared.sort();
+        assert_eq!(cleared, vec!["minecraft:poison".to_owned(), "minecraft:speed".to_owned()]);
+        assert!(effects.is_empty(), "every effect must actually be gone");
+    }
+
+    /// **Control**: milk drunk with nothing active clears nothing (an empty
+    /// `Vec`, not a sentinel) but still consumes the bucket — matching this
+    /// crate's own water-bottle-control convention for "ran, and had nothing to
+    /// do" versus "did not run".
+    #[test]
+    fn finish_drinking_milk_with_no_active_effects_control() {
+        let mut inv = PlayerInventory::new();
+        inv.set_native(0, Some(stack("minecraft:milk_bucket", 1)));
+        let mut effects = crate::mob_effects::ActiveEffects::new();
+        let started = ItemInUse {
+            native: 0,
+            item: "minecraft:milk_bucket".to_owned(),
+            finish_tick: 0,
+            last_effect_remaining: None,
+        };
+
+        let (_, remainder, cleared) =
+            finish_drinking_milk(&mut inv, &mut effects, &started, GameMode::Survival).expect("milk must finish");
+        assert!(remainder.is_none(), "the bucket is still consumed");
+        assert!(cleared.is_empty());
     }
 }

@@ -47,13 +47,25 @@
 //! `crate::food::FoodData::eat`'s and does not belong here. Adding arm 3 or 4
 //! means finding a consumer for a held-use with no completion effect first.
 //!
-//! Not modelled, and each one is a real omission rather than an oversight:
-//! `Consumable.onConsume`'s effect lists (a golden apple's regeneration,
-//! rotten flesh's hunger, chorus fruit's teleport, milk's
-//! `ClearAllStatusEffectsConsumeEffect`), `usingConvertsTo` (a stew leaving a
-//! bowl, honey leaving a glass bottle), `useCooldown`, and potions — every one of
-//! those needs `crate::mob_effects` or an item-conversion hook wired to a
-//! *completion* callback, and the callback is what this landing creates.
+//! **`Consumable.onConsume`'s effect lists are now modelled** (issue #690) —
+//! `crate::server`'s `finish_drinking_potion`/`finish_drinking_milk` plus the
+//! `food_consume_effects`/`removes_poison_on_consume` grants
+//! `crate::mob_effects` carries, wired into the same `finish_tick` callback this
+//! module's landing created. A potion applies its full unscaled built-in effect
+//! list, milk clears every active effect, and golden apple/pufferfish/rotten
+//! flesh/spider eye/poisonous potato/chicken/honey bottle grant or remove the
+//! effects `Consumables.java` names for them. `chorus_fruit`'s
+//! `TeleportRandomlyConsumeEffect` is **not** among these — teleport-on-eat is a
+//! movement mechanic, not a status effect, and stays unmodelled here.
+//!
+//! Still not modelled, and each one is a real omission rather than an
+//! oversight: `usingConvertsTo` (a stew leaving a bowl, honey leaving a glass
+//! bottle — milk consumes the whole bucket rather than leaving an empty one,
+//! see `finish_drinking_milk`'s own doc), `useCooldown`, chorus fruit's
+//! teleport, and — a mechanism gap wider than this module —
+//! `minecraft:resistance`'s damage reduction and `minecraft:absorption`'s
+//! extra hit points are granted but never consumed by the player damage
+//! pipeline (`crate::mob_effects::FOOD_EFFECTS`'s own doc has the detail).
 
 use lodestone_model::{EquipmentSlot, ItemStack, Vec3};
 
