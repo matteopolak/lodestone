@@ -214,6 +214,36 @@ impl Sim {
         })
     }
 
+    /// This frame's beacon beams, for
+    /// [`RenderState::set_beacon_source`](crate::gpu::RenderState::set_beacon_source).
+    ///
+    /// Captures the game tick *and* the partial tick, like [`Self::banner_source`]
+    /// — the beam's scroll and spin both depend on `floorMod(gameTime, 40) +
+    /// partialTicks`. **Unlike every other animated source in this file, it
+    /// carries no cloned tracker alongside those two clock values**: a
+    /// beacon's `levels`/`beamSections` are pure functions of *current* block
+    /// state (the base pyramid, and the run of coloured glass above it), the
+    /// same way vanilla's own `BeaconBlockEntity.tick` — an ordinary
+    /// block-entity ticker `Level.tickBlockEntities` runs on both sides —
+    /// recomputes them fresh from the block data the client already has
+    /// loaded, with no server packet carrying either value. See
+    /// `crate::block_entities::beacon_spawns`' module doc for the full
+    /// argument and for the one real quirk in the beam-colour scan it ports
+    /// literally.
+    #[must_use]
+    pub fn beacon_source(
+        &self,
+    ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::BeaconSpawn> + Send + Sync + 'static>
+    {
+        let handle = self.net.as_ref()?.shared_handle();
+        let clock = self.clock();
+        let game_time = clock.ticks as i64;
+        let partial_tick = clock.interp_alpha;
+        Some(move |eye: glam::Vec3| {
+            crate::block_entities::beacon_spawns(&handle, eye, game_time, partial_tick)
+        })
+    }
+
     /// This frame's shulker boxes, for
     /// [`RenderState::set_shulker_source`](crate::gpu::RenderState::set_shulker_source).
     ///

@@ -36,6 +36,7 @@ pub mod air_bubbles;
 pub mod anim;
 pub mod arena;
 pub mod banner_pattern;
+pub mod beacon;
 pub mod biome_tint;
 pub mod block;
 pub mod block_entity;
@@ -102,6 +103,11 @@ pub use arena::{ArenaAllocation, ArenaBuffer, ArenaError};
 pub use banner_pattern::{
     DyeColor, MAX_PATTERN_LAYERS, PatternLayer, StoredPatternLayer, banner_pattern_layers,
     gamma_rgb_to_bytes, shield_pattern_layers,
+};
+pub use beacon::{
+    BEAM_GLOW_RADIUS, BEAM_SCALE_THRESHOLD, BeaconSpawn, BeamSection, BeamVertex, MAX_RENDER_Y,
+    SOLID_BEAM_RADIUS, average_beam_color, beacon_beam_color, beacon_beam_vertices,
+    beam_radius_scale,
 };
 pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
 pub use block_entity::{

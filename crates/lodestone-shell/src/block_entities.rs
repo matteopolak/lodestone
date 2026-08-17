@@ -108,11 +108,12 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 use lodestone_render::{
-    BannerAttachment, BannerSpawn, BellShakeDirection, BellSpawn, ChestHalf, ChestMaterial,
-    ChestSpawn, ConduitFrame, ConduitSpawn, DecoratedPotSpawn, LecternSpawn,
-    SHULKER_COLOURS, ShulkerFacing, ShulkerSpawn, SignKind, SignOrientation, SignSpawn,
-    SkullOrientation, SkullSpawn, SkullType, conduit_active_rotation_value, conduit_advance,
-    conduit_anim_time, conduit_animation_phase, conduit_frame_scan, horizontal_facing_clockwise_yaw,
+    BannerAttachment, BannerSpawn, BeaconSpawn, BeamSection, BellShakeDirection, BellSpawn,
+    ChestHalf, ChestMaterial, ChestSpawn, ConduitFrame, ConduitSpawn, DecoratedPotSpawn,
+    LecternSpawn, SHULKER_COLOURS, ShulkerFacing, ShulkerSpawn, SignKind, SignOrientation,
+    SignSpawn, SkullOrientation, SkullSpawn, SkullType, average_beam_color, beacon_beam_color,
+    beam_radius_scale, conduit_active_rotation_value, conduit_advance, conduit_anim_time,
+    conduit_animation_phase, conduit_frame_scan, horizontal_facing_clockwise_yaw,
     horizontal_facing_yaw,
 };
 use lodestone_render::banner_pattern::{DyeColor, StoredPatternLayer};
@@ -4228,5 +4229,280 @@ mod piston_tests {
             moving, 12,
             "expected 12 `moving_piston` states (6 facings x 2 types)"
         );
+    }
+}
+
+/// The beacon light-beam gather — `BeaconBlockEntity.tick`'s base-pyramid and
+/// beam-colour scans, run to completion against the client's own loaded world
+/// rather than paced at `BLOCKS_CHECK_PER_TICK` (10) blocks per tick the way
+/// vanilla's server-authoritative tick does.
+///
+/// **This needs no new packet.** In vanilla, `BeaconBlockEntity.tick` is an
+/// ordinary block-entity ticker, which `Level.tickBlockEntities` runs on
+/// *both* sides — the same mechanism that lets a furnace's flame flicker
+/// client-side with no server round trip. `levels` and `beamSections` are
+/// pure functions of block state the client already has loaded (the base
+/// pyramid below the beacon, and the run of `minecraft:beacon_beam_block`s
+/// above it), so this file recomputes them fresh from
+/// [`lodestone_world::World::block_state_at`] every gather rather than
+/// carrying a `Sim::step`-ticked tracker the way [`ChestLids`]/`BellShakes`
+/// do — there is no server signal to integrate, only current world state to
+/// read. That also means, unlike every *other* animated source in this file,
+/// [`beacon_spawns`] needs no per-position `HashMap` alongside it.
+///
+/// Vanilla's own pacing exists to spread a 10-blocks-per-tick cost across
+/// many *server* ticks so one beacon does not spike the tick loop; a client
+/// render source evaluated once per frame against already-resident chunk
+/// data has no equivalent budget to protect, and the scan is bounded by
+/// world height (a few hundred iterations at most, only for beacons within
+/// [`VIEW_DISTANCE`]). The **result** does not depend on how many ticks the
+/// scan took — `levels`/`beamSections` are pure functions of current block
+/// state — so running it to completion in one call changes nothing vanilla
+/// would call wrong, only how the cost is spread.
+///
+/// # Base pyramid census — `minecraft:beacon_base_blocks`, five members
+///
+/// `BeaconBlockEntity.updateBase` gates against a five-member tag
+/// (`data/minecraft/tags/block/beacon_base_blocks.json` in the real jar:
+/// iron, gold, diamond, emerald and netherite blocks). No tag table exists
+/// anywhere in this workspace's shell-reachable crates, so — per
+/// `CLAUDE.md`'s note that a small vanilla census belongs beside its one
+/// consumer rather than behind a crate boundary this task cannot reach —
+/// [`BEACON_BASE_BLOCKS`] hardcodes it here.
+///
+/// # The beam-colour scan's one real quirk
+///
+/// `BeaconBlockEntity.tick`'s `checkingBeamSections.size() <= 1` guard is
+/// not "is this the first block": it means the **first two** beam blocks a
+/// scan encounters each start their own section even when same-coloured —
+/// only from the third one onward does a same-colour run merge or a
+/// differing one average via [`average_beam_color`]. [`beacon_beam_scan`]
+/// ports this literally (`sections.len() <= 1`, not `is_empty()`), because
+/// getting it wrong either merges the beacon's own white with a directly-
+/// stacked glass block of the same colour (undercounting by one section) or
+/// never lets *any* two sections merge (a run of ten same-coloured panes
+/// staying ten sections instead of one) — both wrong in ways a screenshot of
+/// a plain white or two-colour beam cannot distinguish from correct.
+///
+/// # What is not ported
+///
+/// `BeaconBlockEntity.tick`'s scan stops at
+/// `level.getHeight(Heightmap.Types.WORLD_SURFACE, x, z)` — vanilla's own
+/// motion-blocking heightmap. This gather has no heightmap and instead scans
+/// until [`lodestone_world::World::block_state_at`] returns `None`, which
+/// happens at the loaded column's own height ceiling or past an unloaded
+/// chunk. In every case that matters (an unbroken beam reaching the sky, or
+/// one broken by an opaque block) the two termination points coincide,
+/// because the light-dampening check below already stops the scan at the
+/// first opaque block either way — a heightmap only matters for a column
+/// whose *surface* block is itself transparent to the heightmap type (rare,
+/// and unmodelled here as a documented simplification rather than a silent
+/// one).
+const BEACON_BASE_BLOCKS: [&str; 5] = [
+    "iron_block",
+    "gold_block",
+    "diamond_block",
+    "emerald_block",
+    "netherite_block",
+];
+
+fn is_beacon_base_block(state_id: u32) -> bool {
+    lodestone_data::block_states::block_name(state_id).is_some_and(|name| {
+        let path = name.strip_prefix("minecraft:").unwrap_or(name);
+        BEACON_BASE_BLOCKS.contains(&path)
+    })
+}
+
+/// `BeaconBlockEntity.updateBase` — the number of complete concentric square
+/// rings of base blocks below the beacon, `0..=4`. Stops at the first
+/// incomplete or unloaded ring, exactly as vanilla's own `break` does.
+fn beacon_levels(world: &World, pos: [i32; 3]) -> i32 {
+    let [x, y, z] = pos;
+    let mut levels = 0;
+    for step in 1..=4 {
+        let ly = y - step;
+        let mut ok = true;
+        'ring: for lx in (x - step)..=(x + step) {
+            for lz in (z - step)..=(z + step) {
+                let Some(state) = world.block_state_at(lx, ly, lz) else {
+                    ok = false;
+                    break 'ring;
+                };
+                if !is_beacon_base_block(state) {
+                    ok = false;
+                    break 'ring;
+                }
+            }
+        }
+        if !ok {
+            break;
+        }
+        levels = step;
+    }
+    levels
+}
+
+/// `BeaconBlockEntity.tick`'s beam-colour scan, starting at the beacon's own
+/// position (the beacon block is itself a beam block — `DyeColor::White`,
+/// `BeaconBlock.getColor()`) and walking straight up. See the module doc for
+/// the `size() <= 1` quirk this ports literally, and for why the loaded
+/// column's own height ceiling stands in for vanilla's heightmap.
+fn beacon_beam_scan(world: &World, pos: [i32; 3]) -> Vec<BeamSection> {
+    let [x, y, z] = pos;
+    let mut sections: Vec<BeamSection> = Vec::new();
+    let mut cy = y;
+    loop {
+        let Some(state) = world.block_state_at(x, cy, z) else {
+            break;
+        };
+        let name = lodestone_data::block_states::block_name(state);
+        let path = name.map(|n| n.strip_prefix("minecraft:").unwrap_or(n));
+        let beam_color = path.and_then(beacon_beam_color);
+        if let Some(color) = beam_color {
+            if sections.len() <= 1 {
+                sections.push(BeamSection { color, height: 1 });
+            } else if let Some(last) = sections.last_mut() {
+                if color == last.color {
+                    last.height += 1;
+                } else {
+                    let averaged = average_beam_color(last.color, color);
+                    sections.push(BeamSection {
+                        color: averaged,
+                        height: 1,
+                    });
+                }
+            }
+        } else {
+            let opaque = lodestone_data::light_props::dampening(state) >= 15;
+            let is_bedrock = path == Some("bedrock");
+            if sections.is_empty() || (opaque && !is_bedrock) {
+                sections.clear();
+                break;
+            }
+            if let Some(last) = sections.last_mut() {
+                last.height += 1;
+            }
+        }
+        cy += 1;
+    }
+    sections
+}
+
+/// One beacon candidate resolved into a [`BeaconSpawn`] — always `Some`
+/// (unlike every other `*_spawn` in this file) because a beacon has no block
+/// state this pass declines on; the caller has already checked the block
+/// name is `minecraft:beacon`. `sections` is empty when `levels == 0`,
+/// mirroring `BeaconBlockEntity.getBeamSections()`'s own
+/// `this.levels == 0 ? ImmutableList.of() : this.beamSections` gate — a
+/// coloured run can scan perfectly clean above an incomplete base and still
+/// must not render.
+fn beacon_spawn(world: &World, block: [i32; 3], eye: Vec3, animation_time: f32) -> BeaconSpawn {
+    let levels = beacon_levels(world, block);
+    let sections = if levels > 0 {
+        beacon_beam_scan(world, block)
+    } else {
+        Vec::new()
+    };
+    let dx = eye.x - (block[0] as f32 + 0.5);
+    let dz = eye.z - (block[2] as f32 + 0.5);
+    let horizontal_distance = dx.hypot(dz);
+    BeaconSpawn {
+        pos: block,
+        sections,
+        animation_time,
+        beam_radius_scale: beam_radius_scale(horizontal_distance),
+    }
+}
+
+/// Every beacon within [`VIEW_DISTANCE`], resolved into a [`BeaconSpawn`] —
+/// the beacon sibling of [`shulker_spawns`]/[`skull_spawns`], for
+/// [`crate::gpu::RenderState::set_beacon_source`].
+///
+/// Reuses [`chest_candidates`] for the position gather (already generic over
+/// block-entity type — a second scan is never needed, the same reuse
+/// `shulker_spawns` documents) and filters to `minecraft:beacon` by name,
+/// since [`chest_candidates`] hands back *every* block entity's position and
+/// state regardless of type. `world` is read once and held for both the
+/// candidate gather and every beam scan, unlike the single-state-read
+/// gathers elsewhere in this file — a beam scan needs many more reads than
+/// one, so re-acquiring the guard per candidate would serialise against
+/// every other reader for longer, not less.
+#[must_use]
+pub fn beacon_spawns(handle: &SharedHandle, eye: Vec3, game_time: i64, partial_tick: f32) -> Vec<BeaconSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+
+    // `BeaconRenderer.extract`: `floorMod(gameTime, 40) + partialTicks`.
+    let animation_time = game_time.rem_euclid(40) as f32 + partial_tick;
+
+    let mut out = Vec::new();
+    {
+        let world = store.read();
+        let candidates = chest_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        );
+        for (block, state_id) in candidates {
+            let name = lodestone_data::block_states::block_name(state_id);
+            let path = name.map(|n| n.strip_prefix("minecraft:").unwrap_or(n));
+            if path != Some("beacon") {
+                continue;
+            }
+            out.push(beacon_spawn(&world, block, eye, animation_time));
+        }
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
+#[cfg(test)]
+mod beacon_tests {
+    use super::*;
+
+    /// `BEACON_BASE_BLOCKS` names exactly the five real jar members and
+    /// nothing else — the negative arm matters as much as the positive one,
+    /// since an over-broad match would let e.g. a copper block count toward
+    /// the base pyramid.
+    #[test]
+    fn base_block_recognition_matches_the_real_five_member_tag() {
+        let mut recognised = Vec::new();
+        for id in 0..lodestone_data::block_states::STATE_COUNT {
+            let Some(name) = lodestone_data::block_states::block_name(id) else {
+                continue;
+            };
+            if is_beacon_base_block(id) {
+                recognised.push(name.to_string());
+            }
+        }
+        recognised.sort();
+        recognised.dedup();
+        assert_eq!(
+            recognised,
+            vec![
+                "minecraft:diamond_block",
+                "minecraft:emerald_block",
+                "minecraft:gold_block",
+                "minecraft:iron_block",
+                "minecraft:netherite_block",
+            ]
+        );
+    }
+
+    /// Two known non-base blocks must not be recognised — plain stone (an
+    /// arbitrary full solid) and copper block (a real "shiny metal block"
+    /// that a careless substring match on the base blocks' names could
+    /// accidentally sweep in).
+    #[test]
+    fn ordinary_blocks_are_not_base_blocks() {
+        let stone = lodestone_data::block_states::state_id("minecraft:stone")
+            .expect("stone must resolve");
+        assert!(!is_beacon_base_block(stone));
+        if let Some(copper) = lodestone_data::block_states::state_id("minecraft:copper_block") {
+            assert!(!is_beacon_base_block(copper));
+        }
     }
 }
