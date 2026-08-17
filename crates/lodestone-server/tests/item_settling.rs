@@ -1,4 +1,4 @@
-//! **Issue #533**: dropped items land, stop, and merge.
+//! Dropped items land, stop, and merge.
 //!
 //! # What was broken
 //!
@@ -10,7 +10,7 @@
 //! forever, fell straight through the terrain, and kept being streamed to the
 //! client until its 6000-tick despawn.
 //!
-//! Merging was the same defect wearing a different hat, which is why #533 has two
+//! Merging was the same defect wearing a different hat, which is why this had two
 //! symptoms and one fix. `MobSim::merge_neighbouring_items` requires
 //! `|dy| < 0.25` — vanilla's search box inflates y by exactly `0.0` — and two
 //! stacks dropped even *one tick* apart fall at permanently different speeds. The
@@ -236,7 +236,7 @@ fn an_item_over_a_void_column_never_settles_and_is_discarded() {
     );
 }
 
-/// **The merge half of #533.** Two stacks of the same item dropped at *different
+/// **The merge half of item settling.** Two stacks of the same item dropped at *different
 /// times* over the same block merge once they have both settled.
 ///
 /// "Different times" is the load-bearing part. Two items spawned on the same tick

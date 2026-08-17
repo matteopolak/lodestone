@@ -1,10 +1,9 @@
-//! Redstone torches (issue #314, the torch half): the 2-tick-delayed
+//! Redstone torches (the torch half of the redstone family): the 2-tick-delayed
 //! on/off inversion — powered means unlit, unpowered means lit.
 //!
 //! # Cited directly
 //!
-//! `RedstoneTorchBlock.hasNeighborSignal`/`neighborChanged`/`tick`
-//! (`RedstoneTorchBlock.java:63-87,90-96`):
+//! `RedstoneTorchBlock.hasNeighborSignal`/`neighborChanged`/`tick`:
 //!
 //! ```text
 //! protected boolean hasNeighborSignal(final Level level, final BlockPos pos, final BlockState state) {
@@ -26,7 +25,7 @@
 //! }
 //! ```
 //!
-//! `RedstoneWallTorchBlock.hasNeighborSignal` (`:82-85`) overrides only which
+//! `RedstoneWallTorchBlock.hasNeighborSignal` overrides only which
 //! neighbour is checked (the block it's mounted against, not "below"):
 //!
 //! ```text
@@ -38,13 +37,13 @@
 //!
 //! # Named deviation: the anti-oscillation "burnout" guard is not modeled
 //!
-//! `isToggledTooFrequently`/`RECENT_TOGGLES`/`RESTART_DELAY` (`:27-30,133-150`)
+//! `RedstoneTorchBlock.isToggledTooFrequently`/`RECENT_TOGGLES`/`RESTART_DELAY`
 //! is vanilla's defence against a torch clock (a redstone circuit that
 //! flips a torch every 2 ticks forever): after 8 toggles within 60 ticks, the
 //! torch locks unlit for 160 ticks. This crate has no per-level, per-position
 //! toggle-history table (nothing else in this crate keeps one either), and a
 //! torch clock is not a circuit this landing's own test suite builds (a
-//! straight-line dust/torch circuit, #314's own scope, never oscillates
+//! straight-line dust/torch circuit, the scope this module covers, never oscillates
 //! fast enough to trip it) — so [`run_scheduled_tick`] always flips exactly
 //! per the two `if`/`else if` branches above, with no burnout. A future
 //! landing that specifically builds a torch-clock oracle test is the right

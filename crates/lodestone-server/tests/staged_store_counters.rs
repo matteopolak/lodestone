@@ -77,8 +77,8 @@ const POST_ORE_CLOSURE: usize = 14 * 14;
 /// `structure_refs_stage`, which walks
 /// [`REFS_RADIUS`](lodestone_worldgen::overworld::structures::REFS_RADIUS) = 8 —
 /// so a single column closes over 21×21 = 441 chunks rather than 25. Asserting
-/// `PRE_ORE_CLOSURE` here was wrong from the moment structure placement landed
-/// (#514): the store legitimately holds the *structure* closure, and reading the
+/// `PRE_ORE_CLOSURE` here was wrong from the moment structure placement landed:
+/// the store legitimately holds the *structure* closure, and reading the
 /// entry count against the narrower stage made a correct store look like it had
 /// aliased a key.
 const STRUCTURE_CLOSURE: usize = 32 * 32;

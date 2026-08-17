@@ -1,10 +1,9 @@
-//! Server-authoritative fall-distance tracking and fall damage (issue #265).
+//! Server-authoritative fall-distance tracking and fall damage.
 //!
 //! # Where the truth comes from
 //!
-//! `Entity.checkFallDamage` (`.cache/mc/26.2/src/net/minecraft/world/entity/
-//! Entity.java:1564-1582`), called every physics tick from `Entity.move`
-//! (`Entity.java:784`, `this.checkFallDamage(movement.y, this.onGround(), ...)`):
+//! `Entity.checkFallDamage`, called every physics tick from `Entity.move`
+//! (`this.checkFallDamage(movement.y, this.onGround(), ...)`):
 //!
 //! ```java
 //! protected void checkFallDamage(final double ya, final boolean onGround, final BlockState onState, final BlockPos pos) {
@@ -21,8 +20,7 @@
 //! }
 //! ```
 //!
-//! `Block.fallOn`'s default (`.cache/mc/26.2/src/net/minecraft/world/level/
-//! block/Block.java:489-492`) is what turns a landing into damage:
+//! `Block.fallOn`'s default is what turns a landing into damage:
 //!
 //! ```java
 //! public void fallOn(final Level level, final BlockState state, final BlockPos pos, final Entity entity, final double fallDistance) {
@@ -30,8 +28,7 @@
 //! }
 //! ```
 //!
-//! and `LivingEntity.calculateFallDamage`/`calculateFallPower`
-//! (`.cache/mc/26.2/src/net/minecraft/world/entity/LivingEntity.java:1846-1857`):
+//! and `LivingEntity.calculateFallDamage`/`LivingEntity.calculateFallPower`:
 //!
 //! ```java
 //! protected int calculateFallDamage(final double fallDistance, final float damageModifier) {
@@ -43,8 +40,8 @@
 //!    return fallDistance + 1.0E-6 - this.getAttributeValue(Attributes.SAFE_FALL_DISTANCE);
 //! }
 //! ```
-//! (`calculateFallDamage`'s caller, `causeFallDamage` at `LivingEntity.java:
-//! 1787-1815`, only actually hurts the entity when the resulting `dmg > 0`.)
+//! (`calculateFallDamage`'s caller, `LivingEntity.causeFallDamage`,
+//! only actually hurts the entity when the resulting `dmg > 0`.)
 //!
 //! So the formula this module reproduces is:
 //! `floor((fall_distance + 1e-6 - safe_fall_distance) * block_modifier * fall_damage_multiplier)`,
@@ -52,7 +49,7 @@
 //! the classic "no damage below 3 blocks, ~1 damage per block after that"
 //! folk description with the exact vanilla constant; `FALL_DAMAGE_MULTIPLIER`
 //! (default `1.0`) is *not* a fixed 1.0 in vanilla — horses/foxes/etc.
-//! override it via a different attribute base (`AbstractHorse.java:384-385`
+//! override it via a different attribute base (`AbstractHorse.createBaseHorseAttributes`
 //! registers `0.5`), but this crate has no per-species player-equivalent, so
 //! [`FALL_DAMAGE_MULTIPLIER`] is the human-player default and the only value
 //! in force here.
@@ -74,9 +71,9 @@
 //! with a pure step function, fed by the caller with just the world-derived
 //! bit (`on_ground`) it cannot derive on its own.
 //!
-//! # The cancellation set (issue #534)
+//! # The cancellation set
 //!
-//! Until #534 this module had **no cancellation cases at all**, and the
+//! This module used to have **no cancellation cases at all**, and the
 //! consequence was the reported bug: a fall that ended in water *banked* its
 //! distance and cashed it in on the next dry landing, so a dive into a lake hurt
 //! you minutes later on a one-block step. Vanilla resets `fallDistance` in seven
@@ -84,13 +81,13 @@
 //!
 //! | vanilla site | rule | here |
 //! |---|---|---|
-//! | `Entity.checkFallDamage:1565` | `!isInWater() && ya < 0.0` — no accumulation while in water | [`FallSample::in_water`] |
-//! | `Entity.updateFluidInteraction:1658` | `if (inWater) resetFallDistance()` | [`FallSample::in_water`] |
-//! | `LivingEntity.handleOnClimbable:2695` | on a climbable → reset | [`FallSample::fall_resetting`] |
-//! | `Entity.move:747-755` | a `#minecraft:fall_damage_resetting` block in the path → reset | [`FallSample::fall_resetting`] |
-//! | `Entity.java:2897`, `:2946` | teleport / position snap → reset | [`FallTracker::reset`] |
-//! | `LivingEntity.rideTick:3294` | riding **any** vehicle → reset every tick | **not modelled** |
-//! | `LivingEntity.aiStep:3123` | `SLOW_FALLING` or `LEVITATION` → reset | **not modelled** |
+//! | `Entity.checkFallDamage` | `!isInWater() && ya < 0.0` — no accumulation while in water | [`FallSample::in_water`] |
+//! | `Entity.updateFluidInteraction` | `if (inWater) resetFallDistance()` | [`FallSample::in_water`] |
+//! | `LivingEntity.handleOnClimbable` | on a climbable → reset | [`FallSample::fall_resetting`] |
+//! | `Entity.move` | a `#minecraft:fall_damage_resetting` block in the path → reset | [`FallSample::fall_resetting`] |
+//! | `Entity.handleOnInsideBubbleColumn`, `Entity.makeStuckInBlock` | entering a bubble column, or becoming stuck in a block (honey, cobweb) → reset | [`FallTracker::reset`] |
+//! | `LivingEntity.rideTick` | riding **any** vehicle → reset every tick | **not modelled** |
+//! | `LivingEntity.aiStep` | `SLOW_FALLING` or `LEVITATION` → reset | **not modelled** |
 //!
 //! **Lava is deliberately absent, and getting that wrong is the easy mistake.**
 //! `checkFallDamage`'s guard is `isInWater()`, and `updateFluidInteraction` resets
@@ -105,11 +102,11 @@
 //!
 //! | block | `fallOn` | source |
 //! |---|---|---|
-//! | hay bale | `0.2F` | `HayBlock.java:25-26` |
-//! | honey block | `0.2F` | `HoneyBlock.java:52-58` |
-//! | slime block | `0.0F` | `SlimeBlock.java:23-25` |
-//! | powder snow | **no `causeFallDamage` call at all** | `PowderSnowBlock.java:101-107` |
-//! | anything else | `1.0F` | `Block.java:489-492` |
+//! | hay bale | `0.2F` | `HayBlock.fallOn` |
+//! | honey block | `0.2F` | `HoneyBlock.fallOn` |
+//! | slime block | `0.0F` | `SlimeBlock.fallOn` |
+//! | powder snow | **no `causeFallDamage` call at all** | `PowderSnowBlock.fallOn` |
+//! | anything else | `1.0F` | `Block.fallOn` |
 //!
 //! Powder snow is the one that is not a modifier: its `fallOn` override plays a
 //! sound and *never calls `causeFallDamage`*, so it is a complete cancellation
@@ -126,14 +123,14 @@
 //! * **`SLOW_FALLING` / `LEVITATION`.** No potion effects are tracked for the
 //!   player anywhere in this crate (the same gap `crate::vitals` carries for
 //!   respiration and Feather Falling).
-//! * **Pointed dripstone** (`PointedDripstoneBlock.java:66`, which *adds* `+2.5`
+//! * **Pointed dripstone** (`PointedDripstoneBlock.fallOn`, which *adds* `+2.5`
 //!   fall distance and uses a `2.0F` modifier). The modifier half would fit
 //!   [`FallSample::block_damage_modifier`] exactly; the additive half needs a
 //!   pre-landing hook this shape does not have, and shipping half of it would make
 //!   dripstone *safer* than plain ground, which is worse than not modelling it.
 //! * **`FALL_DAMAGE_IMMUNE` entities, elytra-glide grace
 //!   (`isIgnoringFallDamageFromCurrentImpulse`), and Jump Boost's fall-damage
-//!   reduction** (`LivingEntity.java:1787-1815`'s omitted middle). No elytra,
+//!   reduction** (`LivingEntity.causeFallDamage`'s omitted middle). No elytra,
 //!   no potion effects, no entity-type tags are modelled for the connected
 //!   player anywhere in this crate yet.
 //! * **Feather Falling and Resistance.** [`crate::vitals::PlayerVitals::
@@ -162,27 +159,25 @@
 //! future caller but nothing calls it yet".
 
 /// Vanilla's `Attributes.FALL_DAMAGE_MULTIPLIER` default
-/// (`crates/lodestone-entity/src/attribute.rs:339`, itself sourced from
-/// `Attributes.java`'s registration). No effect/attribute-modifier system
+/// (the `"fall_damage_multiplier"` arm of `lodestone_entity::attribute::default_def`,
+/// itself sourced from `Attributes.java`'s registration). No effect/attribute-modifier system
 /// changes this for the connected player today, so the registered default is
 /// the value in force — see this module's doc comment for species that
 /// vanilla itself overrides it for.
 pub const FALL_DAMAGE_MULTIPLIER: f32 = 1.0;
 
 /// Vanilla's `Attributes.SAFE_FALL_DISTANCE` default
-/// (`crates/lodestone-entity/src/attribute.rs:354`).
+/// (the `"safe_fall_distance"` arm of `lodestone_entity::attribute::default_def`).
 pub const SAFE_FALL_DISTANCE: f32 = 3.0;
 
-/// `Block.fallOn`'s default `damageModifier` parameter (`.cache/mc/26.2/src/
-/// net/minecraft/world/level/block/Block.java:489-492`, the `1.0F` passed by
+/// `Block.fallOn`'s default `damageModifier` parameter (the `1.0F` passed by
 /// `causeFallDamage`'s caller).
 ///
 /// The **default**, not the only value: [`FallSample::block_damage_modifier`]
 /// carries the per-block override, and this is what it holds for a plain block.
 pub const DEFAULT_BLOCK_DAMAGE_MODIFIER: f32 = 1.0;
 
-/// `HayBlock.fallOn`'s and `HoneyBlock.fallOn`'s `damageModifier`
-/// (`HayBlock.java:25-26`, `HoneyBlock.java:52-58`).
+/// `HayBlock.fallOn`'s and `HoneyBlock.fallOn`'s `damageModifier`.
 pub const CUSHIONED_BLOCK_DAMAGE_MODIFIER: f32 = 0.2;
 
 /// Whether `state` is in vanilla's `#minecraft:fall_damage_resetting` block tag,
@@ -225,7 +220,7 @@ pub fn is_fall_damage_resetting(state: &str) -> bool {
 /// zero modifier through one mechanism instead of two.
 ///
 /// Slime's real override is conditional — `SlimeBlock.fallOn` only zeroes the
-/// damage when the entity is **not** sneaking (`SlimeBlock.java:23-25`), which is
+/// damage when the entity is **not** sneaking, which is
 /// how a player descends a slime tower without bouncing. This crate's server
 /// tracks no sneak state at the fall-damage call site, so the unconditional `0.0`
 /// is a documented over-approximation in the player's favour rather than an
@@ -253,9 +248,9 @@ pub struct FallSample {
     /// The `on_ground` flag off the movement packet's flags byte.
     pub on_ground: bool,
     /// Vanilla `isInWater()`. Suppresses accumulation
-    /// (`Entity.checkFallDamage:1565`'s guard) **and** zeroes the running distance
-    /// (`Entity.updateFluidInteraction:1658`). Two sites, one input — and the
-    /// second is the one that fixes issue #534: without it a fall that *ends* in
+    /// (`Entity.checkFallDamage`'s guard) **and** zeroes the running distance
+    /// (`Entity.updateFluidInteraction`). Two sites, one input — and the
+    /// second is the one that matters most: without it a fall that *ends* in
     /// water merely stops growing, and the banked distance is still there for the
     /// next dry landing to charge you for.
     ///
@@ -263,7 +258,7 @@ pub struct FallSample {
     pub in_water: bool,
     /// Vanilla's `#minecraft:fall_damage_resetting` block tag at the player's
     /// position (`#minecraft:climbable` + `sweet_berry_bush` + `cobweb`), which
-    /// covers both `LivingEntity.handleOnClimbable:2695` and `Entity.move`'s
+    /// covers both `LivingEntity.handleOnClimbable` and `Entity.move`'s
     /// `FALLDAMAGE_RESETTING` clip. Zeroes the running distance.
     pub fall_resetting: bool,
     /// `Block.fallOn`'s `damageModifier` for the block being landed on —
@@ -278,8 +273,8 @@ impl FallSample {
     /// For a caller that has no world to consult — and **not** a shortcut for
     /// `crate::server`, which does. Its whole purpose is to make the
     /// world-derived fields visible at every real call site rather than
-    /// defaultable: issue #534 existed precisely because they were not there at
-    /// all.
+    /// defaultable: the reported water-landing bug existed precisely because
+    /// they were not there at all.
     #[must_use]
     pub fn plain(y: f64, on_ground: bool) -> Self {
         Self {
@@ -330,7 +325,7 @@ impl FallTracker {
             block_damage_modifier,
         } = sample;
 
-        // `Entity.checkFallDamage:1565` — `!isInWater() && ya < 0.0`.
+        // `Entity.checkFallDamage` — `!isInWater() && ya < 0.0`.
         if let Some(last_y) = self.last_y {
             let ya = y - last_y;
             if !in_water && ya < 0.0 {
@@ -345,7 +340,7 @@ impl FallTracker {
         // during `LivingEntity.travel`, ahead of the `move` that calls
         // `checkFallDamage`.
         //
-        // Ordering is the whole of issue #534. Suppressing accumulation alone
+        // Ordering is the whole of the fix for the water-landing bug. Suppressing accumulation alone
         // (the guard above) makes a fall that *ends* in water merely stop
         // growing — the distance already banked on the way down survives, and
         // the next dry landing is charged for it. `cancel` is what discards it.
@@ -388,8 +383,11 @@ impl FallTracker {
         self.fall_distance = 0.0;
     }
 
-    /// Resets accumulated fall distance outside of landing — a position snap:
-    /// vanilla's `Entity.java:2897`/`:2946` `resetFallDistance()` on teleport.
+    /// Resets accumulated fall distance outside of landing — a position snap.
+    /// Vanilla resets `fallDistance` outside of a landing in several places
+    /// (`Entity.handleOnInsideBubbleColumn`, `Entity.makeStuckInBlock`); this
+    /// crate applies the same idiom to a teleport/respawn snap, where the
+    /// pre-teleport distance is equally meaningless to carry forward.
     ///
     /// **Clears `last_y` as well as the distance, and that is the load-bearing
     /// half.** Zeroing the distance alone leaves the *reference point* at the y
@@ -529,8 +527,8 @@ mod tests {
     /// "`crate::server`'s wiring correctly withholds fall-distance accumulation
     /// for underwater ticks". **That was false when written and stayed false**:
     /// the wiring passed `(y, on_ground)` and nothing else, no water test existed
-    /// anywhere on the path, and issue #534 is the bug it described as already
-    /// handled. The water cases are now real gates below.
+    /// anywhere on the path, and the water-landing bug is what it described as
+    /// already handled. The water cases are now real gates below.
     #[test]
     fn an_intermediate_landing_caps_what_the_next_fall_measures() {
         let mut f = FallTracker::default();
@@ -544,7 +542,7 @@ mod tests {
         assert_eq!(out, None, "only the 2-block second fall should count");
     }
 
-    /// **Issue #534, the reported bug.** A long fall that ends in water must not
+    /// **The reported bug.** A long fall that ends in water must not
     /// bank its distance for the next dry landing.
     ///
     /// Both hypotheses computed from outside constants. The player falls 40 blocks
@@ -603,7 +601,7 @@ mod tests {
         assert_eq!(
             out, None,
             "a 1-block step after a water landing must not hurt; {banked_hypothesis} is \
-             what the pre-#534 tracker charged for it"
+             what the tracker charged for it before this fix"
         );
     }
 
@@ -611,7 +609,7 @@ mod tests {
     /// exactly the predicted amount.
     ///
     /// Without this, the gate above passes against a tracker that never deals fall
-    /// damage at all — the most likely way to "fix" #534 wrongly.
+    /// damage at all — the most likely way to "fix" the water-landing bug wrongly.
     #[test]
     fn the_same_fall_onto_dry_ground_still_hurts_by_the_predicted_amount() {
         const FALL: f64 = 40.0;
@@ -701,7 +699,7 @@ mod tests {
     ///
     /// | modifier | 40-block fall | source |
     /// |---|---|---|
-    /// | `1.0` | `floor(37.000001 * 1.0) = 37` | `Block.java:489-492` |
+    /// | `1.0` | `floor(37.000001 * 1.0) = 37` | `Block.fallOn` |
     /// | `0.2` | `floor(37.000001 * 0.2) = 7` | `HayBlock`/`HoneyBlock` |
     /// | `0.0` | `0`, so `None` | `SlimeBlock`, powder snow |
     ///

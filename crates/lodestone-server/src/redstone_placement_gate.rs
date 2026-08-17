@@ -1,4 +1,4 @@
-//! Issue #465's **delayed** half, gated end-to-end through the real
+//! The **delayed** half of scheduling a placement reaction, gated end-to-end through the real
 //! [`crate::tick::run_tick_loop`]: a redstone component a player mutates must
 //! flip at the tick the live 26.2 server flipped it, and the flip must reach
 //! the wire.
@@ -25,7 +25,7 @@
 //!
 //! The four delay settings come from [`ORACLE_REPEATER_DELAY`], measured on a
 //! **live vanilla 26.2 server** in `9eb8703`. The *placement* delay comes from
-//! the decompiled jar (`DiodeBlock.setPlacedBy`, `DiodeBlock.java:160-165`).
+//! the decompiled jar (`DiodeBlock.setPlacedBy`).
 //! Both originate outside this crate.
 //!
 //! # Two different delays, and separating them is the point
@@ -34,9 +34,9 @@
 //! plausible wrong model of the code under test:
 //!
 //! * A **signal change** reaching an already-placed repeater goes through
-//!   `DiodeBlock.checkTickOnNeighbor` (`:88-104`) and is delayed
+//!   `DiodeBlock.checkTickOnNeighbor` and is delayed
 //!   `getDelay(state)` — `2d` game ticks, `d` being the `delay` property.
-//! * A **placement** goes through `DiodeBlock.setPlacedBy` (`:160-165`), which
+//! * A **placement** goes through `DiodeBlock.setPlacedBy`, which
 //!   is `if (shouldTurnOn) scheduleTick(pos, this, 1)`. Delay **1**, at every
 //!   one of the four settings.
 //!
@@ -66,7 +66,7 @@
 //!
 //! Block **state** on placement. `apply_use_item_on` writes each block's bare
 //! name, so a really-placed repeater has no `facing`/`delay` and always faces
-//! north — issue #465's cause (2), still open and untouched. The rigs below
+//! north — a still-open, untouched cause of that gap. The rigs below
 //! therefore seed the component's state the way a `/setblock` does and exercise
 //! the mutation-plus-fan-out mechanism this landing adds.
 
@@ -105,7 +105,7 @@ const OUT_X: i32 = 5;
 /// [`the_oracle_table_matches_the_live_measurement_it_was_transcribed_from`].
 const ORACLE_REPEATER_DELAY: &[(u32, u64)] = &[(1, 2), (2, 4), (3, 6), (4, 8)];
 
-/// `DiodeBlock.setPlacedBy` (`DiodeBlock.java:160-165`):
+/// `DiodeBlock.setPlacedBy`:
 /// `level.scheduleTick(pos, this, 1)`. Not `getDelay(state)`, and not shared
 /// with the table above — see this module's own doc comment.
 const JAR_PLACEMENT_DELAY: u64 = 1;
@@ -165,8 +165,8 @@ impl ChunkSource for RigWorld {
 
     // Reads the cell out of the retained column rather than cloning one —
     // `RigWorld::row()` probes this eight times per snapshot, and this source
-    // is the efficient case the trait now wants an implementor to provide
-    // (issue #440). A column that has never been touched is, by
+    // is the efficient case the trait now wants an implementor to provide.
+    // A column that has never been touched is, by
     // construction, all air — the same value `column()` would materialise.
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
@@ -524,7 +524,7 @@ async fn without_the_inbound_request_the_loop_never_learns_and_the_repeater_neve
 /// | hypothesis | tick the output flips | agrees with oracle at |
 /// |---|---|---|
 /// | oracle (live 26.2), `1 + 2d` | 3, 5, 7, 9 | — |
-/// | wrong: the request never reaches the loop (pre-#465) | never | 0 of 4 |
+/// | wrong: the request never reaches the loop | never | 0 of 4 |
 /// | wrong: the fan-out flips instantly | 1, 1, 1, 1 | 0 of 4 |
 /// | wrong: delay counted in redstone ticks, `1 + d` | 2, 3, 4, 5 | 0 of 4 |
 /// | wrong: off by one, `2d` | 2, 4, 6, 8 | 0 of 4 |
@@ -669,7 +669,7 @@ fn the_falling_edge_only_model_is_the_one_a_falling_edge_measurement_cannot_see(
 // Placement timing: 1, at all four settings
 // ---------------------------------------------------------------------------
 
-/// **Issue #465's own scenario.** A repeater dropped into an already-powered
+/// **A repeater placement's own scenario.** A repeater dropped into an already-powered
 /// line lights on tick `1 + 1`, at **every** delay setting — `setPlacedBy`'s
 /// delay is a literal `1`, not `getDelay(state)`.
 ///
@@ -1190,7 +1190,7 @@ async fn the_re_run_shape_the_brokered_patch_specified_cannot_work() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #321 -- the hopper redstone lock
+// The hopper redstone lock
 // ---------------------------------------------------------------------------
 
 /// Where the two hoppers sit. They must be vertically adjacent, because this
@@ -1228,8 +1228,8 @@ fn hopper_rig(power_the_upper: bool) -> (Arc<RigWorld>, BlockEntityHandle) {
             &redstone_torch::set_standing_lit(true),
         );
     }
-    // Both hoppers start `enabled=true`, as vanilla's default state does
-    // (`HopperBlock.java:55`); the lock is what has to change one of them.
+    // Both hoppers start `enabled=true`, as vanilla's `HopperBlock` constructor's
+    // default state does; the lock is what has to change one of them.
     for y in [HOP_LOWER_Y, HOP_UPPER_Y] {
         world.set_block(HOP_X, y, ROW_Z, "minecraft:hopper[enabled=true,facing=down]");
     }
@@ -1298,7 +1298,7 @@ async fn drive_hoppers(
     published
 }
 
-/// **The load-bearing #321 gate.** A powered hopper stops transferring, and the
+/// **The load-bearing hopper-lock gate.** A powered hopper stops transferring, and the
 /// prediction is an exact item distribution rather than "fewer items moved".
 ///
 /// # Predicting the value, not the sign
@@ -1314,7 +1314,7 @@ async fn drive_hoppers(
 /// A hopper acts on ticks 1 and 9 (cooldown 8, initial `-1`), so each arm has
 /// exactly two acting ticks; the locked arm moves one item per acting tick and
 /// the unlocked arm two. `tick_all`'s hardcoded `enabled: true` produces the
-/// control column, so this gate fails on the pre-#321 tree at both cells.
+/// control column, so this gate fails on a tree with no hopper lock at both cells.
 ///
 /// The distribution is order-independent, which matters because
 /// `tick_all_with_hopper_lock` iterates `HashMap` keys: whichever hopper is
@@ -1379,7 +1379,7 @@ async fn a_powered_hopper_stops_transferring_and_an_unpowered_one_does_not() {
     );
 }
 
-/// **The island control for #321, run and observed.**
+/// **The island control for the hopper lock, run and observed.**
 ///
 /// `BlockEntityRegistry::tick_all` -- the unlocked shorthand, and what
 /// `run_tick_loop` called before this landing -- must produce the *unpowered*
@@ -1466,7 +1466,7 @@ async fn the_hopper_prediction_does_not_depend_on_registry_iteration_order() {
 ///    so `v770::resolve_state_id` hits its first tier and cannot degrade. This is
 ///    why `redstone::with_property` edits in place instead of rebuilding: dropping
 ///    `facing` would fall to the subset tier and hand the client a hopper pointing
-///    somewhere else -- #476's defect, which this deliberately avoids rather than
+///    somewhere else -- a defect this deliberately avoids rather than
 ///    repeats.
 #[tokio::test(start_paused = true)]
 async fn the_hopper_lock_is_delivered_and_resolves_exactly() {
@@ -1524,7 +1524,7 @@ fn the_hopper_rig_starts_unlocked() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #468 -- the tick loop's queues really are the persistable ones
+// The tick loop's queues really are the persistable ones
 // ---------------------------------------------------------------------------
 
 /// Like [`drive`], but over a caller-supplied [`ScheduledTickHandle`] so a gate
@@ -1559,7 +1559,7 @@ async fn drive_with_handle(
     published
 }
 
-/// **The island proof for #468's last wire.** A tick the loop schedules must be
+/// **The island proof for the persistable queues' last wire.** A tick the loop schedules must be
 /// visible in the handle the save path reads.
 ///
 /// `tests/scheduled_tick_persistence.rs` gates the handle and the schema in both
@@ -1678,7 +1678,7 @@ async fn a_tick_pre_loaded_into_the_handle_is_drained_by_the_loop_at_its_own_tri
 /// The handle's game tick must come from the loop's **own** counter.
 ///
 /// Predicts the exact count after a known number of virtual ticks. This is
-/// issue #323's shape — `SET_TIME` decoded, really did darken the sky, every link
+/// the same shape as a wrong-clock defect elsewhere in this crate — `SET_TIME` decoded, really did darken the sky, every link
 /// green, while the value was wall-clock elapsed-since-join rather than the tick
 /// counter — so a wrong clock here would rebase every loaded `trigger_tick`
 /// against the wrong origin and look entirely healthy.

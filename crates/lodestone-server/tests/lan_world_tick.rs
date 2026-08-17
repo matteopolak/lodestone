@@ -1,5 +1,5 @@
-//! Issue #439: a LAN-hosted world must actually tick — exactly **once** per
-//! tick, no matter how many players are connected.
+//! A LAN-hosted world must actually tick — exactly **once** per tick, no
+//! matter how many players are connected.
 //!
 //! # What was broken
 //!
@@ -42,7 +42,7 @@
 //! generation-count gate vacuous. That trap was already found and fixed once in
 //! `chunk.rs`'s own determinism test.
 //!
-//! # CHANGED by #289's `ChunkStore` (`crates/lodestone-server/src/chunk_store.rs`)
+//! # CHANGED by `ChunkStore` (`crates/lodestone-server/src/chunk_store.rs`)
 //!
 //! **The rate instrument used to be the counting source, and that no longer
 //! works — by design.** This section previously read: *"`tick_stats()` cannot
@@ -59,8 +59,8 @@
 //! is generated once and thereafter read from cache. Probe visits over a 1.5 s
 //! window went from ~29 to **1**, and this test's own measurement precondition
 //! caught it and failed rather than silently reporting a ratio computed from
-//! noise. Deleting the per-tick regeneration is the entire point of #289; the
-//! instrument was measuring the bug.
+//! noise. Deleting the per-tick regeneration is the entire point of the
+//! `ChunkStore` change; the instrument was measuring the bug.
 //!
 //! So the rate is now the **`TickStats::tick_count` delta**, and the probe count
 //! is demoted to the structural control described above.
@@ -116,12 +116,13 @@ const TICK_PERIOD_MILLIS: u128 = 50;
 /// inside this square.
 const LAN_TICK_RADIUS: i32 = 2;
 
-/// `tick::INITIAL_RANDOM_TICK_DEFERRAL_TICKS` (issue #481), likewise
-/// `pub(crate)` and so restated here.
+/// `tick::INITIAL_RANDOM_TICK_DEFERRAL_TICKS`, likewise `pub(crate)` and so
+/// restated here.
 ///
 /// **This is why the probe count needs a wait rather than a window.** The
 /// random-tick pass is the only thing in `run_tick_loop` that calls
-/// `world.column()`, and #481 skips it while `game_tick <=` this value — so a
+/// `world.column()`, and the deferral skips it while `game_tick <=` this value
+/// — so a
 /// gate that samples the probe after a fixed 1.5 s window read **0** and failed
 /// its own structural control, which is exactly what it is for. Restated rather
 /// than inferred from the observed count: the number a gate compares against
@@ -183,7 +184,7 @@ impl ChunkSource for CountingChunkSource {
 
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited — issue #440.
+    // retention). Explicit rather than inherited.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }
@@ -342,15 +343,16 @@ async fn ticks_delta_over(server: &IntegratedServer, window: Duration) -> (u64, 
     (after - before, elapsed)
 }
 
-/// Issue #439, both halves: the LAN path ticks, and it ticks exactly once.
+/// Both halves of the LAN tick fix: the LAN path ticks, and it ticks exactly
+/// once.
 ///
-/// # Why `multi_thread` here, when `chunk.rs`'s #293 gate insists on
-/// `current_thread`
+/// # Why `multi_thread` here, when `chunk.rs`'s generation-blocking gate
+/// insists on `current_thread`
 ///
 /// The two gates measure opposite things and want opposite runtimes, so this is
 /// worth stating rather than leaving as an inconsistency for the next reader.
 ///
-/// #293's gate asks *"does generation block the runtime?"*. Its whole
+/// That other gate asks *"does generation block the runtime?"*. Its whole
 /// mechanism is that one thread cannot do two things, so a second worker
 /// thread would let its negative control pass and make it vacuous —
 /// `current_thread` is load-bearing there, and it asserts the flavour.
@@ -359,11 +361,12 @@ async fn ticks_delta_over(server: &IntegratedServer, window: Duration) -> (u64, 
 /// the count, not of thread scheduling. On `current_thread` the loop competes
 /// with this test body for the one thread — and because `run_tick_loop` still
 /// re-generates every column in its area synchronously **every tick** (the
-/// documented #289 gap), it starves: measured 7 ticks in 904 ms, with a 500 ms
-/// `sleep` overshooting to 904 ms. That is a real limitation, but it is
-/// #289's, and letting it add noise here would only make this gate flaky about
-/// something it is not testing. A doubled loop still doubles the count on any
-/// number of worker threads, so the assertion that matters is unaffected.
+/// documented gap in this file's own "CHANGED by `ChunkStore`" section), it
+/// starves: measured 7 ticks in 904 ms, with a 500 ms `sleep` overshooting to
+/// 904 ms. That is a real limitation of the synchronous regeneration, and
+/// letting it add noise here would only make this gate flaky about something
+/// it is not testing. A doubled loop still doubles the count on any number of
+/// worker threads, so the assertion that matters is unaffected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lan_bind_runs_exactly_one_world_tick_loop() {
     let (server, probe, addr) = bind_lan(0).await;
@@ -383,7 +386,7 @@ async fn lan_bind_runs_exactly_one_world_tick_loop() {
     // under 3 TPS (see the table below), so a shorter window yields counts of
     // 2-3 and a ratio computed from those is noise.
     let window = Duration::from_millis(1500);
-    // Issue #481: the loop defers its first random-tick pass, and that pass is
+    // The loop defers its first random-tick pass, and that pass is
     // the only thing that reaches `ChunkSource::column`. Get past it before the
     // probe is read, or Control #2 below measures a deferral rather than the
     // source path. Ordered before the rate window so the window itself does not
@@ -398,12 +401,12 @@ async fn lan_bind_runs_exactly_one_world_tick_loop() {
     );
     // ---- Control #2: the loop really does iterate its tick area, through the
     // source. ----
-    // This is what the *rate* used to be measured on; since #289's `ChunkStore`
+    // This is what the *rate* used to be measured on; since `ChunkStore` landed
     // it is a one-shot structural check instead (see this file's own
-    // "CHANGED by #289" section). Exactly one visit per chunk is the property
-    // #289 exists to create, so this asserts the store is in the path as well as
-    // that the loop reaches the source at all: a `> 0` alone would also pass if
-    // the loop were regenerating every tick.
+    // "CHANGED by `ChunkStore`" section). Exactly one visit per chunk is the
+    // property the store exists to create, so this asserts the store is in the
+    // path as well as that the loop reaches the source at all: a `> 0` alone
+    // would also pass if the loop were regenerating every tick.
     assert_eq!(
         probe.probe(),
         1,
@@ -438,11 +441,11 @@ async fn lan_bind_runs_exactly_one_world_tick_loop() {
     // same unoptimised build as the first, on an idle machine, matching release
     // exactly.
     //
-    // Those numbers are now historical: since #289's `ChunkStore` the loop no
+    // Those numbers are now historical: since `ChunkStore` landed the loop no
     // longer regenerates, so the figure is a real tick rate rather than a
     // generator throughput, and it should sit near 20 regardless of load. Kept
-    // because they are the evidence that the pre-#289 rate was load-bound rather
-    // than profile-bound.
+    // because they are the evidence that the pre-`ChunkStore` rate was
+    // load-bound rather than profile-bound.
     let nominal = (solo_elapsed.as_millis() / TICK_PERIOD_MILLIS) as u64;
     eprintln!(
         "solo: {solo_delta} ticks over {solo_elapsed:?} (nominal 20 Hz would be {nominal})"
@@ -509,8 +512,8 @@ async fn lan_bind_runs_exactly_one_world_tick_loop() {
 /// tick loop must not have broken LAN serving, and a LAN client must still
 /// receive its terrain.
 ///
-/// This also exercises `serve_connection_with_mob_events_shared` (issue #293's
-/// non-blocking generation) and the per-connection feed pair the relay arm
+/// This also exercises `serve_connection_with_mob_events_shared`'s
+/// non-blocking generation and the per-connection feed pair the relay arm
 /// hands out — both of which are new on this path and neither of which the rate
 /// gate above touches.
 ///
@@ -595,7 +598,7 @@ async fn lan_join_still_works_with_the_tick_loop_running() {
     );
 
     // And the world is ticking alongside the connection — the two are not
-    // mutually exclusive, which is the entire point of #439.
+    // mutually exclusive, which is the entire point of this file.
     //
     // The sleep is not padding: a join over loopback completes in a couple of
     // milliseconds, so at 50 ms per tick the loop can legitimately not have run

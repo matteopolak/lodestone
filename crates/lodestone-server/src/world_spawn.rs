@@ -1,19 +1,19 @@
-//! The world spawn point and per-player respawn points (issue #329).
+//! The world spawn point and per-player respawn points.
 //!
 //! Before this module, the world spawn was derived inline per connection
 //! (`serve_connection`'s `ConfigurationFinished` arm): the origin column's
-//! surface at local `(8, 8)`, i.e. always `(8, y, 8)` — issue #461 replaced
+//! surface at local `(8, 8)`, i.e. always `(8, y, 8)` — a later fix replaced
 //! the Y with terrain, but the X/Z were still fixed, so a world whose origin
 //! chunk is ocean spawned the player under water and no search ever moved
 //! them. This module is vanilla's own search:
 //!
 //! * [`find_initial_spawn`] runs `MinecraftServer.setInitialSpawn`'s
-//!   121-iteration, ±5-chunk spiral (`MinecraftServer.java:480-532`) over a
-//!   [`ChunkSource`], stopping at the first chunk that contains a valid spawn
-//!   position (`PlayerSpawnFinder.getSpawnPosInChunk`).
-//! * A per-column candidate is vanilla's `getLevelRespawnPos`
-//!   (`PlayerSpawnFinder.java:148`): the surface height, with a fluid between
-//!   sky and ground (an ocean column) aborting the candidate.
+//!   121-iteration, ±5-chunk spiral over a [`ChunkSource`], stopping at the
+//!   first chunk that contains a valid spawn position
+//!   (`PlayerSpawnFinder.getSpawnPosInChunk`).
+//! * A per-column candidate is vanilla's `PlayerSpawnFinder.getLevelRespawnPos`:
+//!   the surface height, with a fluid between sky and ground (an ocean
+//!   column) aborting the candidate.
 //! * The **per-player** half — a player's bed respawn point
 //!   ([`RespawnPoint`]) with the set-time legality check vanilla applies
 //!   before accepting one ([`is_legal_bed_respawn`]), and the *read* that
@@ -47,9 +47,9 @@ use lodestone_model::{BlockPos, Vec3};
 use crate::chunk::{ChunkColumn, ChunkSource, is_air_or_fluid};
 
 /// The world's spawn point — vanilla's `LevelData.RespawnData` for the
-/// overworld (`PrimaryLevelData.java:250-267`): a position plus the yaw/pitch
-/// a player is teleported with. The initial world spawn has both rotations
-/// zero (`setInitialSpawn` passes `0.0F, 0.0F`).
+/// overworld: a position plus the yaw/pitch a player is teleported with. The
+/// initial world spawn has both rotations zero (`setInitialSpawn` passes
+/// `0.0F, 0.0F`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct WorldSpawn {
     /// World-space feet position, in blocks.
@@ -60,11 +60,11 @@ pub(crate) struct WorldSpawn {
     pub pitch: f32,
 }
 
-/// A player's per-player respawn point — the bed they last slept in (issue
-/// #329, the tracking half). Vanilla stores this per player as
+/// A player's per-player respawn point — the bed they last slept in, the
+/// tracking half. Vanilla stores this per player as
 /// `ServerPlayer.RespawnConfig` (a `RespawnData` plus a `forced` flag) and
 /// consults it on death before falling back to the level spawn
-/// (`ServerPlayer.java:1012`, `PlayerList.respawn`).
+/// (`ServerPlayer.findRespawnPositionAndUseSpawnBlock`, `PlayerList.respawn`).
 ///
 /// Position only for now: vanilla also records the facing at bed-entry time
 /// and spawns the player with it, but this crate's bed interaction is the
@@ -78,8 +78,7 @@ pub(crate) struct RespawnPoint {
     pub pos: BlockPos,
 }
 
-/// Vanilla's `ChunkGenerator.getSpawnHeight`
-/// (`.cache/mc/26.2/src/net/minecraft/world/level/chunk/ChunkGenerator.java:432`):
+/// Vanilla's `ChunkGenerator.getSpawnHeight`:
 ///
 /// ```java
 /// public int getSpawnHeight(final LevelHeightAccessor heightAccessor) {
@@ -89,10 +88,10 @@ pub(crate) struct RespawnPoint {
 ///
 /// A literal `64`, and `NoiseBasedChunkGenerator` does **not** override it — only
 /// `FlatLevelSource` does — so this is the value in force for the overworld this
-/// crate serves. `setInitialSpawn` (`MinecraftServer.java:494-498`) reads it,
-/// keeps it because `64 >= level.getMinY()`, and pre-seeds the world spawn at
-/// `offset(8, 64, 8)`; the `WORLD_SURFACE` heightmap branch beside it is dead
-/// code for any noise generator.
+/// crate serves. `MinecraftServer.setInitialSpawn` reads it, keeps it because
+/// `64 >= level.getMinY()`, and pre-seeds the world spawn at `offset(8, 64, 8)`;
+/// the `WORLD_SURFACE` heightmap branch beside it is dead code for any noise
+/// generator.
 ///
 /// # Why a literal is the right answer and a surface query is not
 ///
@@ -107,19 +106,17 @@ const GENERATOR_SPAWN_HEIGHT: i32 = 64;
 /// position `(lx, lz)` in `[0..16)`, or `None` when the column is invalid
 /// there.
 ///
-/// This is vanilla's `PlayerSpawnFinder.getLevelRespawnPos`
-/// (`.cache/mc/26.2/src/net/minecraft/server/level/PlayerSpawnFinder.java:148`),
-/// simplified to what a [`ChunkColumn`] can answer — it has no persisted
-/// heightmaps, so the top-of-column scan below is the `MOTION_BLOCKING`
-/// heightmap query's analogue:
+/// This is vanilla's `PlayerSpawnFinder.getLevelRespawnPos`, simplified to
+/// what a [`ChunkColumn`] can answer — it has no persisted heightmaps, so the
+/// top-of-column scan below is the `MOTION_BLOCKING` heightmap query's
+/// analogue:
 ///
 /// 1. Scan downward from the top of the column.
 /// 2. A fluid encountered before any solid block (an ocean column, or a lava
 ///    lake) aborts the candidate — vanilla's `break` on a non-empty fluid
-///    state at `:168-171`, which yields `null`.
+///    state, which yields `null`.
 /// 3. The first solid block from the top is the surface; return one block
-///    above it (`return pos.above().immutable()` at `:177`), the feet
-///    position.
+///    above it (`return pos.above().immutable()`), the feet position.
 /// 4. A column with no solid block at all (air/void world) is `None`.
 ///
 /// The two tests are vanilla's own, and **not** [`is_air_or_fluid`]'s negation,
@@ -127,8 +124,8 @@ const GENERATOR_SPAWN_HEIGHT: i32 = 64;
 ///
 /// | vanilla expression | here |
 /// |---|---|
-/// | `!blockState.getFluidState().isEmpty()` (`:169`) | [`spawn_has_fluid_state`] |
-/// | `Block.isFaceFull(state.getCollisionShape(…), UP)` (`:171`) | [`spawn_face_full_up`] |
+/// | `!blockState.getFluidState().isEmpty()` | [`spawn_has_fluid_state`] |
+/// | `Block.isFaceFull(state.getCollisionShape(…), UP)` | [`spawn_face_full_up`] |
 ///
 /// The old form's justification was a *stale* `worldgen_data` scope note ("no
 /// vegetation at surface"). The generator now places `short_grass`,
@@ -141,8 +138,9 @@ const GENERATOR_SPAWN_HEIGHT: i32 = 64;
 /// spawn (leaves are genuinely face-full) stays faithful rather than being
 /// "fixed" into a divergence.
 ///
-/// The vanilla pre-check at `:156-159` — the `WORLD_SURFACE` / `MOTION_BLOCKING`
-/// / `OCEAN_FLOOR` heightmap comparison — is deliberately not reproduced: it is
+/// The vanilla pre-check in `getLevelRespawnPos` — the `WORLD_SURFACE` /
+/// `MOTION_BLOCKING` / `OCEAN_FLOOR` heightmap comparison — is deliberately not
+/// reproduced: it is
 /// an early-out over three persisted heightmaps a [`ChunkColumn`] does not
 /// carry, and the loop below reaches the same verdict for the case it exists to
 /// catch (a water column aborts on the fluid test before any ground is found).
@@ -264,8 +262,8 @@ fn spawn_face_full_up(state: &str) -> bool {
 }
 
 /// Scans one already-generated column's 256 block positions in vanilla's order
-/// (`for x … for z`, `PlayerSpawnFinder.getSpawnPosInChunk`, `:182-190`) and
-/// returns the first valid spawn position's world `BlockPos`, or `None` if the
+/// (`for x … for z`, `PlayerSpawnFinder.getSpawnPosInChunk`) and returns the
+/// first valid spawn position's world `BlockPos`, or `None` if the
 /// whole chunk is invalid (all ocean, all void, …).
 ///
 /// Takes the column rather than the source so [`find_initial_spawn`] can reuse
@@ -288,8 +286,8 @@ fn get_spawn_pos_in_chunk<S: ChunkSource + ?Sized>(source: &S, cx: i32, cz: i32)
 
 /// The 121 chunk offsets the initial-spawn spiral visits, in vanilla order.
 ///
-/// Transcribed from `MinecraftServer.setInitialSpawn`'s loop
-/// (`MinecraftServer.java:504-520`): it starts at `(0, 0)`, steps with an
+/// Transcribed from `MinecraftServer.setInitialSpawn`'s loop: it starts at
+/// `(0, 0)`, steps with an
 /// initial direction `(0, -1)`, and turns right (swapping `dX`/`dZ` with the
 /// negation) whenever it reaches a square's corner — the three-arm
 /// `xChunkOffset == zChunkOffset || (xChunkOffset < 0 && xChunkOffset ==
@@ -315,14 +313,14 @@ fn spiral_chunk_offsets() -> Vec<(i32, i32)> {
 }
 
 /// Searches the world spawn point from the origin chunk, mirroring
-/// `MinecraftServer.setInitialSpawn` (`MinecraftServer.java:480-532`).
+/// `MinecraftServer.setInitialSpawn`.
 ///
 /// Vanilla's first step — `chunkSource.randomState().sampler()
 /// .findSpawnPosition()` — picks a spawn *chunk* from climate noise; that
 /// sampler is `lodestone-worldgen` deep machinery this crate does not expose,
 /// so the search centres on the origin chunk `(0, 0)`, which is exactly the
-/// result a `Climate.Sampler` with an empty spawn target returns
-/// (`Climate.java:501`). The consequence is honest and documented: with no
+/// result `Climate.Sampler.findSpawnPosition` returns for an empty spawn
+/// target. The consequence is honest and documented: with no
 /// climate picker the *choice* of centre is fixed, but the spiral that finds
 /// a valid surface *within* that ±5-chunk box is real, which is the piece
 /// that was missing (an ocean origin chunk now moves the spawn to the nearest
@@ -338,7 +336,7 @@ fn spiral_chunk_offsets() -> Vec<(i32, i32)> {
 ///
 /// This runs in `crate::server`'s `ConfigurationFinished` arm **before** the
 /// chunk-streaming ring loop, so every column it generates is time the client
-/// spends with no terrain (issue #453's time-to-first-chunk). For the normal case
+/// spends with no terrain — this is the time-to-first-chunk cost. For the normal case
 /// — a valid origin chunk — that cost is exactly **one** column: the spiral's
 /// first offset is `(0, 0)`, which is the column the `fallback_y` query already
 /// generated, so it is reused rather than re-requested. It used to be asked for
@@ -415,27 +413,27 @@ pub(crate) fn is_bed_block(name: &str) -> bool {
 }
 
 /// Whether right-clicking the bed at `bed` should set the player's respawn
-/// point — issue #329's own requirement ("beds/anchors validated for a legal
-/// respawn spot before being accepted").
+/// point — beds/anchors need to be validated for a legal respawn spot before
+/// being accepted.
 ///
-/// This is the set-time half of vanilla's `ServerPlayer.startSleepInBed`
-/// (`ServerPlayer.java:1186-1240`), reduced to what this crate's interaction
-/// scope can answer:
+/// This is the set-time half of vanilla's `ServerPlayer.startSleepInBed`,
+/// reduced to what this crate's interaction scope can answer:
 ///
 /// 1. The clicked block is a bed ([`is_bed_block`]).
 /// 2. The cell directly above the bed is clear — vanilla's obstruction
-///    rejection, the `level.noCollision(boundingBox)` of the sleeping AABB at
-///    `:1203`. A solid block above the bed makes the spot illegal.
-/// 3. The player is in reach of the bed — vanilla's `bedInRange`
-///    (`:1195-1198`), bed ±3 x/z and ±2 y. `player_pos` is `None` until the
-///    first [`crate::server`]`::PlayerMoved` packet; a click before any move
-///    skips the range test (cannot be wrong about a position it never had).
+///    rejection, `ServerPlayer.bedBlocked`'s check that the space above the
+///    bed is free. A solid block above the bed makes the spot illegal.
+/// 3. The player is in reach of the bed — vanilla's `ServerPlayer.bedInRange`,
+///    bed ±3 x/z and ±2 y. `player_pos` is `None` until the first
+///    [`crate::server`]`::PlayerMoved` packet; a click before any move skips
+///    the range test (cannot be wrong about a position it never had).
 ///
 /// The fourth check vanilla applies — a `NOT_SAFE` monster within ±8 h / ±5 v
-/// of the bed (`:1218-1227`), skipped only in creative — is the documented
-/// remainder: it needs a mob-AABB query this crate's interaction scope does
-/// not carry (shape-B world state; see this module's doc). Without it a bed
-/// in monster range is accepted, a gap the placement half of P2 will close.
+/// of the bed, checked inline in `ServerPlayer.startSleepInBed` and skipped
+/// only in creative — is the documented remainder: it needs a mob-AABB query
+/// this crate's interaction scope does not carry (shape-B world state; see
+/// this module's doc). Without it a bed in monster range is accepted, a gap
+/// the placement half of P2 will close.
 pub(crate) fn is_legal_bed_respawn<S: ChunkSource + ?Sized>(
     source: &S,
     bed: BlockPos,
@@ -843,13 +841,12 @@ mod tests {
     ///
     /// This test previously expected `(8, 8)` and named itself
     /// `plains_origin_chunk_yields_spawn_at_local_8_8`, transcribed from the
-    /// pre-#329 hardcode it replaced. It had never passed: the search and the
-    /// expectation landed in the same commit (`43e096b`), and `(8, 8)` is not what
-    /// the search returns for a valid chunk.
+    /// hardcoded-spawn-point behaviour it replaced. It had never passed: the search
+    /// and the expectation landed in the same commit (`43e096b`), and `(8, 8)` is
+    /// not what the search returns for a valid chunk.
     ///
-    /// `(0, 0)` is read off `PlayerSpawnFinder.getSpawnPosInChunk`
-    /// (`.cache/mc/26.2/src/net/minecraft/server/level/PlayerSpawnFinder.java:183-190`),
-    /// which scans from `chunkPos.getMinBlockX()`/`getMinBlockZ()` and returns the
+    /// `(0, 0)` is read off `PlayerSpawnFinder.getSpawnPosInChunk`, which scans
+    /// from `chunkPos.getMinBlockX()`/`getMinBlockZ()` and returns the
     /// first valid `(x, z)` — for chunk `(0, 0)` that is world `(0, 0)`. Its
     /// sibling [`ocean_origin_chunk_moves_the_spawn_to_the_nearest_land`] already
     /// encoded the same rule (`x = 16, z = 0` for chunk `(1, 0)`, i.e. local

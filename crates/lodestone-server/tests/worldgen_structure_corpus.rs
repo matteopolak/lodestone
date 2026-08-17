@@ -6,7 +6,7 @@
 //! `assets/worldgen/{structure,structure_set,template_pool,processor_list,
 //! world_preset,flat_level_generator_preset,tags/worldgen}` and
 //! `assets/structure/**.nbt` — 1606 files extracted verbatim from the real 26.2
-//! server jar by `scripts/extract-worldgen-structures.py` (issue #484, phase
+//! server jar by `scripts/extract-worldgen-structures.py` (phase
 //! S-data of `docs/plans/worldgen-rewrite.md`).
 //!
 //! # Why a hash manifest is the anchor

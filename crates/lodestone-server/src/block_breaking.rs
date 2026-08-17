@@ -1,6 +1,6 @@
 //! Server-side block-break validation: instant-break detection, destroy-progress
-//! timing, and an interaction-range check (issue #531, plus the one-shot-block
-//! bug that motivated it).
+//! timing, and an interaction-range check, plus the one-shot-block
+//! bug that motivated it.
 //!
 //! # What it is
 //!
@@ -12,7 +12,7 @@
 //!   block is instant sends `START_DESTROY_BLOCK` *and nothing else* — vanilla's
 //!   `MultiPlayerGameMode` concludes an instant break there, because the block
 //!   is already gone locally (`lodestone-game`'s `mining` module says so in its
-//!   own `destroyed` field doc, and it is issue #387 seen from the server side).
+//!   own `destroyed` field doc, and this module is the same defect seen from the server side).
 //!   So `pending_break` was set and never consumed, and sugar cane, grass,
 //!   flowers and every other zero-hardness block were unbreakable.
 //! * **Anything could be broken instantly.** With no timing check, a
@@ -342,7 +342,7 @@ mod tests {
         assert!(!doomed.deferred_break_ready(Some(100_000)));
     }
 
-    /// Issue #531's headline: obsidian must not break on a back-to-back
+    /// The headline gate: obsidian must not break on a back-to-back
     /// `StartDestroy`/`StopDestroy` pair, and must break once a plausible number
     /// of ticks has passed.
     #[test]
@@ -373,8 +373,8 @@ mod tests {
     /// The regression the deferred path exists for: the *ordinary* dig, where
     /// `StartDestroy` and `StopDestroy` reach the server on the same tick (a
     /// local integrated server reads both from one buffer). Refusing that made
-    /// every non-instant block unbreakable, which is worse than the cheat #531
-    /// was closing.
+    /// every non-instant block unbreakable, which is worse than the instant-break
+    /// cheat this module closes.
     ///
     /// Deepslate rather than stone because it is the block the `block_edit` gate
     /// digs, and it is slower than stone — so if this passes, stone does.

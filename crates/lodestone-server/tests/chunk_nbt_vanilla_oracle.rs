@@ -1,4 +1,4 @@
-//! The **external oracle** for `chunk_nbt`'s read path (issue #437).
+//! The **external oracle** for `chunk_nbt`'s read path.
 //!
 //! # Why this shape, and not a round trip
 //!
@@ -22,12 +22,12 @@
 //!
 //! | fact | source |
 //! |---|---|
-//! | `WORLD_SURFACE` tests `NOT_AIR = !state.isAir()` | `Types` enum, line 148 |
-//! | the stored value is `y + 1` of the highest non-air block | `setHeight(x, z, y + 1)`, line 64 |
-//! | ... biased by `-chunk.getMinY()` | `setHeight`, line 123 |
-//! | an all-air column stores `getMinY()`, i.e. a biased 0 | line 103 |
-//! | the index is `x + z * 16` | `getIndex`, line 143 |
-//! | 256 entries in a `SimpleBitStorage`, `64 / bits` per long | `Heightmap` line 40, `SimpleBitStorage` line 249 |
+//! | `WORLD_SURFACE` tests `NOT_AIR = !state.isAir()` | `Heightmap.Types.WORLD_SURFACE` |
+//! | the stored value is `y + 1` of the highest non-air block | `Heightmap.primeHeightmaps`'s `heightmap.setHeight(x, z, y + 1)` call |
+//! | ... biased by `-chunk.getMinY()` | `Heightmap.setHeight` |
+//! | an all-air column stores `getMinY()`, i.e. a biased 0 | `Heightmap.update` |
+//! | the index is `x + z * 16` | `Heightmap.getIndex` |
+//! | 256 entries in a `SimpleBitStorage`, `64 / bits` per long | `Heightmap`'s constructor and `SimpleBitStorage`'s `(bits, size, data)` constructor |
 //!
 //! # The control
 //!

@@ -1,11 +1,10 @@
-//! Redstone dust (issue #314, the wire half): power-level computation —
+//! Redstone dust (the wire half of the redstone family): power-level computation —
 //! `crate::redstone`'s query layer, composed exactly the way
 //! `RedStoneWireBlock`/`DefaultRedstoneWireEvaluator` compose it.
 //!
 //! # Cited directly
 //!
-//! `DefaultRedstoneWireEvaluator.calculateTargetStrength`
-//! (`DefaultRedstoneWireEvaluator.java:40-43`):
+//! `DefaultRedstoneWireEvaluator.calculateTargetStrength`:
 //!
 //! ```text
 //! private int calculateTargetStrength(final Level level, final BlockPos pos) {
@@ -14,12 +13,12 @@
 //! }
 //! ```
 //!
-//! `RedStoneWireBlock.getBlockSignal` (`:285-290`) is `getBestNeighborSignal`
+//! `RedStoneWireBlock.getBlockSignal` is `getBestNeighborSignal`
 //! with the wire's own `shouldSignal` flag held false for the call's
 //! duration — [`crate::redstone::best_neighbor_signal`]'s `ignore_wire`
 //! parameter, `true` here.
 //!
-//! `RedstoneWireEvaluator.getIncomingWireSignal` (`RedstoneWireEvaluator.java:29-47`):
+//! `RedstoneWireEvaluator.getIncomingWireSignal`:
 //!
 //! ```text
 //! protected int getIncomingWireSignal(final Level level, final BlockPos pos) {
@@ -51,13 +50,13 @@
 //! # What this module deliberately does not model
 //!
 //! Vanilla's dust also tracks four `RedstoneSide` connection properties
-//! (`NORTH`/`EAST`/`SOUTH`/`WEST`, for rendering the wire's visual shape —
-//! `RedStoneWireBlock.java:46-53`) and can be toggled between a "cross" and
-//! a "dot" render by right-clicking (`useWithoutItem`, `:490-510`). Neither
+//! (`RedStoneWireBlock.NORTH`/`EAST`/`SOUTH`/`WEST`, for rendering the wire's visual shape)
+//! and can be toggled between a "cross" and
+//! a "dot" render by right-clicking (`RedStoneWireBlock.useWithoutItem`). Neither
 //! is modeled: this crate's `ChunkColumn` block-state strings carry no shape
 //! information anywhere (`crate::chunk`'s own module doc — the render side
 //! derives shape from the state string in `lodestone-render`, off-limits to
-//! this task), and #314's own scope is signal propagation, not the visual
+//! this task), and this module's own scope is signal propagation, not the visual
 //! connection graph. A dust block here is always logically connected on all
 //! four horizontal sides — the one thing that changes is [`wire_power`]'s
 //! `power=N` property.

@@ -10,8 +10,8 @@
 //! # Why it drives `IntegratedServer` rather than `ServerApp::bootstrap`
 //!
 //! Because a hand-built `App` passes whether or not production wires anything,
-//! and that is precisely how issue #37 (`WindowApp.ecs`, "an inert scaffold
-//! nothing reads") happened on the client. The subject here is
+//! and that is precisely how `WindowApp.ecs` (an inert scaffold
+//! nothing reads) happened on the client. The subject here is
 //! `IntegratedServer::open_in_memory_with_mobs`, the same call a real
 //! singleplayer session makes, observed through the same public
 //! `server_tick_count()` accessor a shell would use.
@@ -47,8 +47,7 @@ impl ChunkSource for AirWorld {
     // Built into `IntegratedServer` (which wraps sources in a `ChunkStore`),
     // so a player action could reach this through the store's write-through.
     // The source has no storage — `column()` is a fresh blank column — so the
-    // edit is deliberately discarded. Explicit rather than inherited (issue
-    // #440).
+    // edit is deliberately discarded. Explicit rather than inherited.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design for this fixture.
     }
@@ -108,7 +107,7 @@ fn production_server() -> IntegratedServer {
 /// The assertion is an exact `Some(1)`, not `>= 1` and not "is some": one
 /// `ServerBoot` run, one `advance_server_tick` execution. `Some(0)` is the
 /// island — the `App` was constructed and no schedule ran against it, which is
-/// issue #37 verbatim. `None` means production stopped constructing the `World`
+/// the same `WindowApp.ecs` shape verbatim. `None` means production stopped constructing the `World`
 /// at all. A value above 1 means something ran the schedule more than once, or
 /// Phase 1 landed and this gate needs to account for `GameTick` too. Predicted
 /// from the code path, not observed and then written down.
@@ -130,7 +129,7 @@ async fn the_production_integrated_server_runs_a_registered_system() {
 }
 
 /// The same gate for the **LAN** path. `IntegratedServer::bind` gained its own
-/// world-tick loop in issue #439, and "one world, one loop" means it gets its
+/// world-tick loop, and "one world, one loop" means it gets its
 /// own server `World` rather than sharing singleplayer's — so it needs its own
 /// evidence that the `World` is live, not an inference from the constructor
 /// above.

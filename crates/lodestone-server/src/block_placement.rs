@@ -3,15 +3,16 @@
 //!
 //! # Why this is a table and not a formula
 //!
-//! There is no single convention. Read off 26.2's own sources: a stair takes
-//! `context.getHorizontalDirection()` (`StairBlock.java:102`), a furnace or a
-//! chest takes `.getOpposite()` (`AbstractFurnaceBlock.java:53`,
-//! `ChestBlock.java:213`), an anvil takes `.getClockWise()`
-//! (`AnvilBlock.java:54`), a dispenser takes
-//! `getNearestLookingDirection().getOpposite()` (`DispenserBlock.java:153`), a
-//! shulker box takes the *clicked face* (`ShulkerBoxBlock.java:101`) and a
-//! hopper takes the clicked face's opposite folded onto `down`
-//! (`HopperBlock.java:85-86`). Picking any one of those and applying it
+//! There is no single convention. Read off 26.2's own sources: a stair's
+//! `getStateForPlacement` takes
+//! `context.getHorizontalDirection()` (`StairBlock`), a furnace's or a
+//! chest's takes `.getOpposite()` (`AbstractFurnaceBlock.getStateForPlacement`,
+//! `ChestBlock.getStateForPlacement`), an anvil's takes `.getClockWise()`
+//! (`AnvilBlock.getStateForPlacement`), a dispenser's takes
+//! `getNearestLookingDirection().getOpposite()` (`DispenserBlock.getStateForPlacement`), a
+//! shulker box's takes the *clicked face* (`ShulkerBoxBlock.getStateForPlacement`) and a
+//! hopper's takes the clicked face's opposite folded onto `down`
+//! (`HopperBlock.getStateForPlacement`). Picking any one of those and applying it
 //! everywhere is wrong about half the time, which is exactly what a placed
 //! chest facing the wrong way looked like.
 //!
@@ -29,7 +30,8 @@
 //! Add an arm to [`placement`], keyed off [`Shape`] where possible. Never
 //! compute a state **id** here: return a state *string* naming only the
 //! properties you mean and let `v770`'s `resolve_state_id` write them over the
-//! jar-marked default state. Re-deriving id arithmetic is how #476 happened.
+//! jar-marked default state. Re-deriving id arithmetic is how a past
+//! regression here happened.
 //!
 //! Gotcha: `cursor` is block-local to the **clicked** block, and vanilla's
 //! `getClickLocation().y - getClickedPos().getY()` is relative to the
@@ -144,7 +146,7 @@ where
 
     if shape.attach_face {
         // `FaceAttachedHorizontalDirectionalBlock.getStateForPlacement`
-        // (`:38-55`) walks `getNearestLookingDirections()` and keeps the first
+        // walks `getNearestLookingDirections()` and keeps the first
         // that `canSurvive`. The clicked face already *is* that direction for
         // every reachable click — a button on a block's top face attaches to
         // the floor — so the clicked face stands in for the walk plus the
@@ -161,7 +163,7 @@ where
     }
 
     if shape.bell_attachment {
-        // `BellBlock.getStateForPlacement` (`:173-206`).
+        // `BellBlock.getStateForPlacement`.
         let (attachment, facing) = match ctx.face {
             BlockFace::Up => ("floor", horizontal_look(ctx)?),
             BlockFace::Down => ("ceiling", horizontal_look(ctx)?),
@@ -174,8 +176,8 @@ where
     }
 
     if shape.rotation16 {
-        // A standing sign/banner/skull. `StandingSignBlock.java:46` and
-        // `BannerBlock.java:53` offset the yaw by 180°, `SkullBlock.java:48`
+        // A standing sign/banner/skull. `StandingSignBlock.getStateForPlacement` and
+        // `BannerBlock.getStateForPlacement` offset the yaw by 180°, `SkullBlock.getStateForPlacement`
         // does not.
         let yaw = ctx.yaw?;
         let offset = if base_name(block).ends_with("_skull") || base_name(block).ends_with("_head") {
@@ -190,7 +192,7 @@ where
     }
 
     if shape.rail_shape {
-        // `BaseRailBlock.getStateForPlacement` (`:135-142`).
+        // `BaseRailBlock.getStateForPlacement`.
         let facing = horizontal_look(ctx)?;
         let axis = match facing {
             Direction::East | Direction::West => "east_west",
@@ -230,8 +232,8 @@ const FACING_IS_LOOK: &[&str] = &[
 ];
 
 /// Blocks whose horizontal `facing` is the **clicked face** — a wall
-/// attachment placed against the block it hangs on. `LadderBlock.java:93-99`
-/// and `TripWireHookBlock.java:88` both walk `getNearestLookingDirections()`
+/// attachment placed against the block it hangs on. `LadderBlock.getStateForPlacement`
+/// and `TripWireHookBlock.getStateForPlacement` both walk `getNearestLookingDirections()`
 /// filtered by `canSurvive`, which for any reachable click resolves to the
 /// clicked face.
 const FACING_IS_CLICKED_FACE: &[&str] = &["minecraft:ladder", "minecraft:tripwire_hook"];
@@ -242,7 +244,7 @@ fn horizontal_facing(block: &str, ctx: &PlaceContext) -> Option<Direction> {
         return horizontal_face(ctx.face);
     }
     if block == "minecraft:anvil" || block.ends_with("_anvil") {
-        // `AnvilBlock.java:54` — the only `.getClockWise()` in the game.
+        // `AnvilBlock.getStateForPlacement` — the only `.getClockWise()` in the game.
         return Some(horizontal_look(ctx)?.clockwise());
     }
     if FACING_IS_LOOK.contains(&block) {
@@ -255,8 +257,8 @@ fn horizontal_facing(block: &str, ctx: &PlaceContext) -> Option<Direction> {
 }
 
 /// Blocks with a six-value `facing` that take the **clicked face** verbatim:
-/// `ShulkerBoxBlock.java:101`, `AmethystClusterBlock.java:88`,
-/// `LightningRodBlock.java:48`.
+/// `ShulkerBoxBlock.getStateForPlacement`, `AmethystClusterBlock.getStateForPlacement`,
+/// `LightningRodBlock.getStateForPlacement`.
 fn facing_is_clicked_face(block: &str) -> bool {
     block.ends_with("shulker_box")
         || block == "minecraft:amethyst_cluster"
@@ -271,14 +273,14 @@ where
 {
     let clicked = face_direction(ctx.face);
     let facing = if block == "minecraft:hopper" {
-        // `HopperBlock.java:85-86`: the clicked face's opposite, with either
+        // `HopperBlock.getStateForPlacement`: the clicked face's opposite, with either
         // vertical answer folded onto `down` (a hopper has no `up`).
         match clicked.opposite() {
             Direction::Up | Direction::Down => Direction::Down,
             horizontal => horizontal,
         }
     } else if block == "minecraft:end_rod" {
-        // `EndRodBlock.java:29-33`: normally the clicked face, but flipped
+        // `EndRodBlock.getStateForPlacement`: normally the clicked face, but flipped
         // when the block behind is an end rod already pointing this way, so a
         // chain of rods alternates instead of stacking.
         let behind = block_at(clicked.opposite().relative(ctx.target));
@@ -288,7 +290,7 @@ where
     } else if facing_is_clicked_face(block) {
         clicked
     } else if block == "minecraft:observer" {
-        // `ObserverBlock.java:134` double-negates, so an observer watches the
+        // `ObserverBlock.getStateForPlacement` double-negates, so an observer watches the
         // direction the player is looking.
         nearest_look(ctx)?
     } else {
@@ -299,7 +301,7 @@ where
     Some(format!("{block}[facing={}]", direction_to_str(facing)))
 }
 
-/// `SlabBlock.getStateForPlacement` (`:68-81`). The `double` arm fires when the
+/// `SlabBlock.getStateForPlacement`. The `double` arm fires when the
 /// cell already holds a matching half-slab, which is why the caller must offer
 /// a slab cell as replaceable.
 fn slab_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> String
@@ -314,7 +316,7 @@ where
     format!("{block}[type={kind}]")
 }
 
-/// `StairBlock.getStateForPlacement` (`:97-108`) — facing from the look
+/// `StairBlock.getStateForPlacement` — facing from the look
 /// direction, `half` from the click, `shape` from the two neighbours on the
 /// facing axis.
 fn stair_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> Option<String>
@@ -330,8 +332,8 @@ where
     ))
 }
 
-/// `StairBlock.getStairsShape` (`:130-157`), including the `canTakeShape`
-/// guard (`:159-162`) that stops a run of parallel stairs from cornering.
+/// `StairBlock.getStairsShape`, including the `canTakeShape`
+/// guard that stops a run of parallel stairs from cornering.
 fn stair_shape<F>(pos: BlockPos, facing: Direction, half: &str, block_at: &F) -> &'static str
 where
     F: Fn(BlockPos) -> String,
@@ -380,7 +382,7 @@ where
     "straight"
 }
 
-/// `TrapDoorBlock.getStateForPlacement` (`:146-162`).
+/// `TrapDoorBlock.getStateForPlacement`.
 fn trapdoor_state(block: &str, ctx: &PlaceContext) -> Option<String> {
     let (facing, half) = match horizontal_face(ctx.face) {
         // Clicked a side: the trapdoor hangs on that side, hinged at whichever
@@ -399,7 +401,7 @@ fn trapdoor_state(block: &str, ctx: &PlaceContext) -> Option<String> {
     ))
 }
 
-/// `DoorBlock.getStateForPlacement` (`:139-153`) plus `setPlacedBy` (`:156-158`),
+/// `DoorBlock.getStateForPlacement` plus `DoorBlock.setPlacedBy`,
 /// which is what puts the upper half in the cell above.
 fn door_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> Option<Placement>
 where
@@ -417,7 +419,7 @@ where
     })
 }
 
-/// `DoorBlock.getHinge` (`:160-195`): a door pairs with an adjacent door, then
+/// `DoorBlock.getHinge`: a door pairs with an adjacent door, then
 /// falls back to whichever side has more solid blocks, then to the half of the
 /// block the cursor landed in.
 fn door_hinge<F>(ctx: &PlaceContext, facing: Direction, block_at: &F) -> &'static str
@@ -445,7 +447,7 @@ where
     if (door_right && !door_left) || balance < 0 {
         return "left";
     }
-    // The tie-break, verbatim from `:183-190`: which side of the doorway's
+    // The tie-break, verbatim from `DoorBlock.getHinge`: which side of the doorway's
     // own axis the cursor landed on.
     let (step_x, step_z) = match facing {
         Direction::North => (0.0, -1.0),
@@ -461,7 +463,7 @@ where
     if keeps_left { "left" } else { "right" }
 }
 
-/// `ChestBlock.getStateForPlacement` (`:211-230`) minus the sneak-placement
+/// `ChestBlock.getStateForPlacement` minus the sneak-placement
 /// branch (this crate does not carry the client's sneak state), plus the
 /// partner's own re-typing that vanilla performs through `updateShape`.
 fn chest_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> Option<Placement>
@@ -498,7 +500,7 @@ where
 }
 
 /// The upper/lower-half decision every `Half`-bearing block shares —
-/// `StairBlock.java:104` and `SlabBlock.java:78`, which are the same
+/// `StairBlock.getStateForPlacement` and `SlabBlock.getStateForPlacement`, which are the same
 /// expression.
 fn upper_half(ctx: &PlaceContext) -> bool {
     match ctx.face {
@@ -842,7 +844,7 @@ mod tests {
         // all, so there is nothing to orient and the caller keeps the bare name.
         assert!(placement("minecraft:torch", &ctx(BlockFace::Up, 0.0, 0.0), air).is_none());
         // A standing sign does have one: the 16-segment yaw. Yaw 0 faces south,
-        // and `StandingSignBlock.java:46` offsets by 180°.
+        // and `StandingSignBlock.getStateForPlacement` offsets by 180°.
         assert_eq!(
             state_of("minecraft:oak_sign", BlockFace::Up, 0.0, 0.0),
             "minecraft:oak_sign[rotation=8]"

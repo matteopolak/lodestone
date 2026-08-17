@@ -1,10 +1,10 @@
-//! Neighbour-update propagation (issue #308, second half): vanilla's fixed
-//! direction order plus its depth-first cascade semantics, the piece issue
-//! #316 calls "vanilla's update-order quirks."
+//! Neighbour-update propagation: vanilla's fixed
+//! direction order plus its depth-first cascade semantics, the piece a piston
+//! landing elsewhere in this crate calls "vanilla's update-order quirks."
 //!
 //! # The direction order, cited directly
 //!
-//! `NeighborUpdater.java:18`:
+//! `NeighborUpdater.UPDATE_ORDER`:
 //!
 //! ```text
 //! Direction[] UPDATE_ORDER = new Direction[]{Direction.WEST, Direction.EAST, Direction.DOWN, Direction.UP, Direction.NORTH, Direction.SOUTH};
@@ -15,11 +15,10 @@
 //! # The propagation shape is depth-first, not breadth-first — cited directly
 //!
 //! `ServerLevel`/`Level` use `CollectingNeighborUpdater`
-//! (`Level.java:152`, `this.neighborUpdater = new
+//! (`Level`'s own constructor, `this.neighborUpdater = new
 //! CollectingNeighborUpdater(this, maxChainedNeighborUpdates);`). Its
-//! `runUpdates` (`CollectingNeighborUpdater.java:87-112`) drives an explicit
-//! `ArrayDeque` stack, and the load-bearing part is `addAndRun`
-//! (`:68-85`):
+//! `runUpdates` drives an explicit
+//! `ArrayDeque` stack, and the load-bearing part is `addAndRun`:
 //!
 //! ```text
 //! private void addAndRun(final BlockPos pos, final NeighborUpdates update) {
@@ -52,9 +51,9 @@
 //! variants (shape/full/simple/multi), none of which this crate has a
 //! second consumer for yet.
 //!
-//! `maxChainedNeighborUpdates` (`:70`) caps total notifications per
-//! `propagate` call, logging once and discarding the rest
-//! (`CollectingNeighborUpdater.java:78-80`) — [`NeighborPropagator::propagate`]
+//! `maxChainedNeighborUpdates` caps total notifications per
+//! `propagate` call, logging once and discarding the rest, inside
+//! `CollectingNeighborUpdater.addAndRun` — [`NeighborPropagator::propagate`]
 //! mirrors this with `max_chained`.
 //!
 //! # Production status, corrected
@@ -62,7 +61,7 @@
 //! An earlier version of this doc comment said [`NeighborPropagator`] was
 //! "exercised end to end today by `crate::random_tick`'s grass/dirt
 //! conversion, which calls it ... with a currently-empty `notify` closure."
-//! That was aspirational, not actual: as of the #307/#308 landing this
+//! That was aspirational, not actual: as of the landing this
 //! module shipped in, `crate::random_tick` called nothing here at all —
 //! `docs/tick-scheduling.md`'s own "what this module does not yet have a
 //! real producer for" section had it right, this inline comment did not.
@@ -72,13 +71,13 @@
 //! doesn't exist yet'" rule — the mistake here ran the other direction, a
 //! claim that something *did* exist when it did not.
 //!
-//! **As of issue #311, it is true.** `crate::random_tick::RandomTickScheduler
+//! **Since a later landing, it is true.** `crate::random_tick::RandomTickScheduler
 //! ::tick_randomly_ticking_block` calls [`NeighborPropagator::propagate`] on
-//! every position any of its four mutation families (grass↔dirt, and #310's
+//! every position any of its four mutation families (grass↔dirt, and
 //! crop growth/sapling growth/leaf decay) just changed, mirroring vanilla's
 //! `setBlockAndUpdate` always notifying neighbours. The `notify` closure is
 //! no longer empty either: `crate::gravity_tick`'s sand/gravel settle check
-//! is the one real reaction today. Redstone (#314-#322) is the next
+//! is the one real reaction today. The redstone family is the next
 //! consumer of this same call site, inheriting the depth-first ordering
 //! contract unchanged — see `crate::gravity_tick`'s own module doc for the
 //! full citation and the two named deviations that landing accepts.
@@ -115,10 +114,10 @@ impl Direction {
         BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz)
     }
 
-    /// Vanilla's `Direction.getOpposite()` (`Direction.java:175-177`, backed
+    /// Vanilla's `Direction.getOpposite()`, backed
     /// by each variant's own `oppositeIndex` field —
-    /// `Direction.java:33-38`): down/up, north/south, west/east each pair off.
-    /// Needed by issue #314-#322's redstone family (e.g. an observer's pulse
+    /// `Direction`'s own enum declaration order: down/up, north/south, west/east each pair off.
+    /// Needed by the redstone family (e.g. an observer's pulse
     /// travels out the face opposite the one it watches).
     #[must_use]
     pub fn opposite(self) -> Direction {
@@ -132,10 +131,10 @@ impl Direction {
         }
     }
 
-    /// Vanilla's `Direction.getClockWise()` (`Direction.java:195-203`) — the
+    /// Vanilla's `Direction.getClockWise()` — the
     /// default (Y-axis) rotation used by every `HorizontalDirectionalBlock`,
     /// including repeaters/comparators reading their side inputs
-    /// (`DiodeBlock.getAlternateSignal`, `DiodeBlock.java:127`). Defined only
+    /// (`DiodeBlock.getAlternateSignal`). Defined only
     /// for the four horizontal directions, matching the jar's own
     /// `IllegalStateException` on `DOWN`/`UP` — callers here only ever pass a
     /// diode's `FACING`, which is always horizontal, so `Down`/`Up` are
@@ -153,7 +152,7 @@ impl Direction {
         }
     }
 
-    /// Vanilla's `Direction.getCounterClockWise()` (`Direction.java:245-253`)
+    /// Vanilla's `Direction.getCounterClockWise()`
     /// — see [`clockwise`](Self::clockwise)'s doc comment for the same
     /// horizontal-only scope note.
     #[must_use]
@@ -168,10 +167,10 @@ impl Direction {
     }
 }
 
-/// Vanilla's own fan-out order, verbatim from `NeighborUpdater.java:18`:
+/// Vanilla's own fan-out order, verbatim from `NeighborUpdater.UPDATE_ORDER`:
 /// **west, east, down, up, north, south**. Not alphabetical, not axis-major
-/// — this exact sequence is the "vanilla update-order quirk" issue #316
-/// names, and every consumer of [`NeighborPropagator::propagate`] observes
+/// — this exact sequence is the "vanilla update-order quirk" a piston
+/// landing elsewhere in this crate names, and every consumer of [`NeighborPropagator::propagate`] observes
 /// neighbours notified in this order (modulo `skip`).
 pub const UPDATE_ORDER: [Direction; 6] = [
     Direction::West,
@@ -199,7 +198,7 @@ pub struct Notification {
 #[derive(Debug, Clone, Copy)]
 pub struct NeighborPropagator {
     /// Caps total notifications per [`propagate`](Self::propagate) call —
-    /// mirrors `maxChainedNeighborUpdates` (`CollectingNeighborUpdater.java:20`).
+    /// mirrors `CollectingNeighborUpdater`'s own `maxChainedNeighborUpdates` field.
     /// `None` means unbounded (only test code should choose this; a live
     /// world always caps it, matching vanilla always constructing its
     /// updater with a finite value).
@@ -233,8 +232,8 @@ impl NeighborPropagator {
     /// issued, and any [`Notification`]s it returns are fully resolved
     /// (including their own further cascades) before the next direction in
     /// the original fan-out is issued. Mirrors
-    /// `updateNeighborsAtExceptFromFacing`
-    /// (`NeighborUpdater.java:26-34`) as the entry point, backed by
+    /// `NeighborUpdater.updateNeighborsAtExceptFromFacing`
+    /// as the entry point, backed by
     /// `CollectingNeighborUpdater`'s stack — see this module's doc comment
     /// for the full citation.
     ///
@@ -320,9 +319,9 @@ impl NeighborPropagator {
 }
 
 /// All six directions — vanilla's `Direction.values()`
-/// (`Direction.java:33-38`'s own declaration order: down, up, north, south,
+/// (`Direction`'s own enum declaration order: down, up, north, south,
 /// west, east). Distinct from [`UPDATE_ORDER`] on purpose: this is the order
-/// `SignalGetter.getBestNeighborSignal` (`SignalGetter.java:11,90-105`) and a
+/// `SignalGetter.getBestNeighborSignal` and a
 /// handful of other jar loops iterate in — see `crate::redstone`'s own
 /// module doc for why that particular order is irrelevant there (every use
 /// is a commutative `max`, not a notify cascade), unlike [`UPDATE_ORDER`]
@@ -344,8 +343,8 @@ mod tests {
         BlockPos::new(x, y, z)
     }
 
-    /// `getOpposite()` pins direct from `Direction.java`'s own
-    /// `oppositeIndex` field (`:33-38`): down/up, north/south, west/east.
+    /// `getOpposite()` pins direct from `Direction`'s own
+    /// `oppositeIndex` field: down/up, north/south, west/east.
     #[test]
     fn opposite_pairs_match_the_jar_field() {
         assert_eq!(Direction::Down.opposite(), Direction::Up);
@@ -356,7 +355,7 @@ mod tests {
         assert_eq!(Direction::East.opposite(), Direction::West);
     }
 
-    /// `getClockWise()`/`getCounterClockWise()` (`Direction.java:195-203,245-253`):
+    /// `Direction.getClockWise()`/`getCounterClockWise()`:
     /// a full clockwise loop returns to the start, and going one step
     /// clockwise then one step counter-clockwise is a no-op — a magnitude
     /// check (the whole cycle), not just "it changed".

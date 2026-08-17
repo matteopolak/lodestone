@@ -1,10 +1,10 @@
-//! Repeaters and comparators (issue #315) — both `DiodeBlock` subclasses in
+//! Repeaters and comparators — both `DiodeBlock` subclasses in
 //! the jar, sharing the input/side-input read `crate::redstone` already
 //! provides ([`crate::redstone::input_signal`]/[`crate::redstone::alternate_signal`]).
 //!
 //! # Repeaters, cited directly
 //!
-//! `RepeaterBlock.getDelay`/`isLocked` (`RepeaterBlock.java:52-54,82-85`):
+//! `RepeaterBlock.getDelay`/`isLocked`:
 //!
 //! ```text
 //! protected int getDelay(final BlockState state) { return state.getValue(DELAY) * 2; }
@@ -18,7 +18,7 @@
 //! or torch beside a repeater cannot lock it, only another diode's output
 //! can.
 //!
-//! `DiodeBlock.tick`/`checkTickOnNeighbor` (`DiodeBlock.java:54-67,88-103`):
+//! `DiodeBlock.tick`/`checkTickOnNeighbor`:
 //!
 //! ```text
 //! protected void tick(...) {
@@ -52,7 +52,7 @@
 //! time the tick fires — that is what makes a repeater's output pulse never
 //! shorter than its own delay. [`run_scheduled_tick`] is this, verbatim.
 //!
-//! `shouldPrioritize` (`DiodeBlock.java:200-204`):
+//! `DiodeBlock.shouldPrioritize`:
 //!
 //! ```text
 //! public boolean shouldPrioritize(...) {
@@ -64,8 +64,7 @@
 //!
 //! # Comparators, cited directly
 //!
-//! `ComparatorBlock.calculateOutputSignal`/`shouldTurnOn`/`getDelay`
-//! (`ComparatorBlock.java:46-48,71-94`):
+//! `ComparatorBlock.calculateOutputSignal`/`shouldTurnOn`/`getDelay`:
 //!
 //! ```text
 //! protected int getDelay(final BlockState state) { return 2; }
@@ -84,7 +83,7 @@
 //! }
 //! ```
 //!
-//! `checkTickOnNeighbor`/`refreshOutputState`/`tick` (`:146-183`):
+//! `ComparatorBlock.checkTickOnNeighbor`/`refreshOutputState`/`tick`:
 //!
 //! ```text
 //! protected void checkTickOnNeighbor(...) {
@@ -118,11 +117,11 @@
 //!
 //! # The named gap: container/analog-output reading
 //!
-//! `ComparatorBlock.getInputSignal` (`:97-118`) additionally reads a
+//! `ComparatorBlock.getInputSignal` additionally reads a
 //! two-away block's `getAnalogOutputSignal` (a hopper/chest's fill level)
 //! or an item frame's rotation, when the immediate target is itself a
 //! redstone conductor — the "comparator reads a hopper's contents"
-//! behaviour issue #315's own brief calls out by name as the trap most
+//! behaviour is the trap most
 //! likely to be skipped while looking done. It **is** skipped here, and
 //! explicitly, not silently: this module's `getInputSignal` equivalent is
 //! [`crate::redstone::input_signal`], the same reduced function repeaters
@@ -209,7 +208,7 @@ where
 }
 
 /// A repeater has no analog side-channel — `shouldTurnOn` reduces to
-/// `getInputSignal(...) > 0` (`DiodeBlock.shouldTurnOn`, `:109-111`,
+/// `getInputSignal(...) > 0` (`DiodeBlock.shouldTurnOn`,
 /// unmodified by `RepeaterBlock`).
 #[must_use]
 pub fn repeater_should_turn_on<F>(lookup: &F, pos: BlockPos, facing: Direction) -> bool
@@ -246,7 +245,7 @@ where
 /// The outcome of one repeater [`run_scheduled_tick`] call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepeaterTickOutcome {
-    /// Locked: `tick()`'s entire body is skipped (`DiodeBlock.java:55`).
+    /// Locked: `DiodeBlock.tick`'s entire body is skipped.
     Locked,
     /// Already in the state its own input demands — a real no-op (only
     /// reachable if the input reverted between scheduling and running).
@@ -280,8 +279,8 @@ pub fn run_scheduled_tick(state: &str, should_turn_on: bool) -> RepeaterTickOutc
     }
 }
 
-/// Recomputes `LOCKED` immediately (vanilla's `updateShape`-triggered
-/// recompute, `RepeaterBlock.java:76-79`) — `Some(new_state)` iff the value
+/// Recomputes `LOCKED` immediately (vanilla's `RepeaterBlock.updateShape`-triggered
+/// recompute) — `Some(new_state)` iff the value
 /// actually changed. Deliberately unconditional on which neighbour changed
 /// (vanilla gates this on the *axis* of the changed neighbour being
 /// perpendicular to `FACING`; this crate has no cheap way to know which

@@ -1,6 +1,6 @@
 //! The command seam: how a serverbound `chat_command` frame reaches a
 //! dispatcher that lives on the other side of this crate's dependency
-//! boundary (issue #464, the wire half of issue #48).
+//! boundary.
 //!
 //! # What it is
 //!
@@ -16,7 +16,8 @@
 //! and dispatched by `lodestone_ecs::commands::dispatch(&mut World, ..)`. That
 //! registry lives in `lodestone-ecs` because that is where the plugin API lives
 //! — a registry in *this* crate would be unreachable by every plugin that can
-//! exist, which is why issue #118's own body was unbuildable as written.
+//! exist, which is why an earlier proposal along those lines was unbuildable
+//! as written.
 //!
 //! But **this crate deliberately depends on neither `lodestone-ecs` nor the
 //! client vocabulary it carries**, and that is a measured decision, not an
@@ -25,13 +26,13 @@
 //! `lodestone-physics`/`-game`/`-world` into this graph *and into the browser
 //! bundle*, which links `lodestone-server` and links neither today.
 //!
-//! Issue #464 lists three ways out. This module is option 2, and the other two
-//! are rejected here so the next reader does not have to re-derive it:
+//! There were three ways out, considered and rejected here so the next reader
+//! does not have to re-derive it — this module is the one taken:
 //!
 //! | option | why not |
 //! |---|---|
 //! | 1. add the `lodestone-ecs` dependency | contradicts the boundary above, and the cost is already measured in `Cargo.toml` — the browser bundle is the concrete loser |
-//! | 3. move dispatch server-side, mirror the registry | reintroduces exactly the flat-vs-arena duplication issue #435 declined to create, and leaves plugins registering into a registry that is not the one dispatch reads |
+//! | 3. move dispatch server-side, mirror the registry | reintroduces exactly the flat-vs-arena duplication an earlier decision declined to create, and leaves plugins registering into a registry that is not the one dispatch reads |
 //! | **2. a callback/queue seam the host installs** | **taken.** Matches the intent doctrine the rest of this seam already uses — pre-computed answers handed across, never a query back — and inverts the dependency so the *host*, which already links both crates, owns the glue |
 //!
 //! # The vocabulary is deliberately version-free and ECS-free
@@ -73,8 +74,9 @@
 //! [`CommandDispatch::default`] holds no sink and
 //! [`CommandDispatch::run`] answers [`CommandResponse::refused`] without
 //! consulting anything. This mirrors
+//! `plugin_command_registry`'s
 //! `dispatch_refuses_rather_than_ungates_when_permissions_are_missing`
-//! (`crates/lodestone-ecs/tests/plugin_command_registry.rs:492`) one layer out:
+//! one layer out:
 //! a missing resource, and now a missing *sink*, both refuse.
 //!
 //! Note what this layer can and cannot enforce. It cannot check a permission —

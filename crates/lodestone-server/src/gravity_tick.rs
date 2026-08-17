@@ -1,7 +1,7 @@
-//! Gravity blocks (issue #311): sand/gravel falling when the block below is
+//! Gravity blocks: sand/gravel falling when the block below is
 //! removed — this landing's whole point is that it is the **first real
-//! production caller** of `crate::neighbor_update::NeighborPropagator`
-//! (issue #308), which had exactly zero until now (see that module's own
+//! production caller** of `crate::neighbor_update::NeighborPropagator`,
+//! which had exactly zero until now (see that module's own
 //! doc comment, and `docs/tick-scheduling.md`'s "what this module does not
 //! yet have a real producer for").
 //!
@@ -171,12 +171,13 @@ pub fn is_gravity_block(base: &str) -> bool {
 /// `FallingBlock.isFree`, narrowed to what this
 /// crate can check. `state.isAir() || state.liquid()` maps directly onto
 /// `crate::chunk::is_air_or_fluid`. `state.is(BlockTags.FIRE)` and
-/// `state.canBeReplaced()` are not modeled: this crate has no fire block
-/// yet (issue #312, not landed) and no generic "can be replaced" predicate
-/// beyond `is_air_or_fluid` itself (`crate::chunk`'s own doc comment: that
-/// function already *is* this crate's "can a placement replace this cell"
-/// test) — so the two disjuncts this crate has are the whole set it can
-/// evaluate, not an arbitrarily narrowed subset.
+/// `state.canBeReplaced()` are not modeled here: `crate::fire::is_fire` could
+/// answer the first now that this crate has a real fire block, but nothing
+/// wires it into this predicate yet, and there is still no generic "can be
+/// replaced" predicate beyond `is_air_or_fluid` itself (`crate::chunk`'s own
+/// doc comment: that function already *is* this crate's "can a placement
+/// replace this cell" test) — so the two disjuncts this crate has are the
+/// whole set it can evaluate, not an arbitrarily narrowed subset.
 #[must_use]
 pub fn is_free(state: &str) -> bool {
     is_air_or_fluid(state)

@@ -19,8 +19,8 @@ use crate::ecs::schedules::{GameTick, IngestSet, NetIngest, ServerBoot, TickSet}
 /// It is the cheapest piece of state that is *observably wrong when nothing
 /// runs*. A resource that is merely present proves construction; a resource
 /// that has been **incremented** proves a schedule ran a registered system
-/// against the production-built `World`, which is the exact property issue #37
-/// (`WindowApp.ecs`, "an inert scaffold nothing reads") lacks. Phase 1 keeps
+/// against the production-built `World`, which is the exact property
+/// `WindowApp.ecs` (an inert scaffold nothing reads) lacks. Phase 1 keeps
 /// incrementing it from `run_tick_loop` and gains a second, independent
 /// witness: this count must then advance in lockstep with
 /// [`crate::TickStats::tick_count`], and any divergence is the island
@@ -41,7 +41,7 @@ pub struct ServerTick {
 /// design working as intended rather than a gap. It is also exactly what makes
 /// "did a system actually run in production?" unobservable from a caller
 /// holding only an [`crate::IntegratedServer`], which is the one question Phase
-/// 0 has to be able to answer (issue #37 is the client-side example of what
+/// 0 has to be able to answer (`WindowApp.ecs` is the client-side example of what
 /// happens when nobody can).
 ///
 /// So this is a deliberately one-way valve: an `Arc<AtomicU64>` the system
@@ -173,7 +173,8 @@ mod tests {
     ///
     /// This test first asserted that installing `MainSchedulePlugin` creates
     /// `Update`. **It does not** — measured, not assumed:
-    /// `bevy_app-0.19.0/src/main_schedule.rs:311` adds `Main`, `FixedMain` and
+    /// `bevy_app`'s `main_schedule.rs` (in `MainSchedulePlugin`'s plugin build)
+    /// adds `Main`, `FixedMain` and
     /// `RunFixedMainLoop` and never touches `Update`, which `App::default()`
     /// gets only because its own `add_systems`/`configure_sets` calls create it
     /// on demand. So the control failed with "MainSchedulePlugin did not create

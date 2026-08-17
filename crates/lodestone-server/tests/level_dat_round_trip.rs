@@ -1,6 +1,5 @@
 //! A persistent world writes a real `level.dat`, and its age accumulates
-//! across sessions rather than restarting — issue
-//! [#468](https://github.com/matteopolak/lodestone/issues/468)'s gap list.
+//! across sessions rather than restarting.
 //!
 //! # What this gate evidences, and where the expected values come from
 //!
@@ -109,7 +108,7 @@ impl ChunkSource for FlatWorld {
 
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited — issue #440.
+    // retention). Explicit rather than inherited.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }

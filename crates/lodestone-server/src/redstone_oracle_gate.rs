@@ -1,4 +1,4 @@
-//! Issue #314's end-to-end gate: redstone propagation driven through the
+//! An end-to-end gate: redstone propagation driven through the
 //! **production** entry point, against expected values measured on a **real
 //! 26.2 server**.
 //!
@@ -58,8 +58,7 @@
 //!   command*, before any tick was stepped.
 //! * A torch's inversion is **not** synchronous: under the same freeze the
 //!   torch did not flip, and only flipped once the server was allowed to
-//!   tick. Its delay is `RedstoneTorchBlock.TOGGLE_DELAY = 2`
-//!   (`.cache/mc/26.2/src/net/minecraft/world/level/block/RedstoneTorchBlock.java:31`),
+//!   tick. Its delay is `RedstoneTorchBlock.TOGGLE_DELAY = 2`,
 //!   read from the jar's own source rather than counted by hand.
 //!
 //! ## Two oracle traps worth not re-paying for
@@ -114,7 +113,7 @@ const ORACLE_DUST_ATTENUATION: &[(i32, u8)] = &[
     (15, 1),
 ];
 
-/// `RedstoneTorchBlock.TOGGLE_DELAY` (`RedstoneTorchBlock.java:31`), read
+/// `RedstoneTorchBlock.TOGGLE_DELAY`, read
 /// from the 26.2 jar's own source.
 const ORACLE_TORCH_TOGGLE_DELAY: u64 = 2;
 
@@ -426,11 +425,10 @@ fn a_torch_inversion_is_scheduled_at_exactly_two_ticks_not_applied_immediately()
 
 /// **A named deviation from vanilla, pinned by a live measurement.**
 ///
-/// `crate::random_tick::propagate_and_react`'s own doc comment records that
-/// it implements only the *first* layer of
-/// `DefaultRedstoneWireEvaluator`'s update fan-out — vanilla additionally
-/// fans out from each of the six neighbours' own positions
-/// (`DefaultRedstoneWireEvaluator.java:27-37`). That doc calls the omission
+/// `crate::random_tick::propagate_and_react`'s own doc comment used to record
+/// that it implements only the *first* layer of
+/// `DefaultRedstoneWireEvaluator.updatePowerStrength`'s update fan-out — vanilla additionally
+/// fans out from each of the six neighbours' own positions. That doc called the omission
 /// a corner case affecting "a diagonal-over-conductor corner update".
 ///
 /// It is not a corner case. The geometry it misses is the **standard

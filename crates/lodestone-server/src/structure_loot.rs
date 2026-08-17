@@ -1,5 +1,4 @@
-//! Structure chests: the loot the template engine places but cannot fill
-//! (issue #337).
+//! Structure chests: the loot the template engine places but cannot fill.
 //!
 //! # What it is
 //!
@@ -535,7 +534,7 @@ mod tests {
     ///
     /// The expected values come from the file and from the decompiled source,
     /// not from this module: `with_mast.nbt` is Mojang's own, and the three
-    /// marker names are the literal keys at `ShipwreckPieces.java:69-71`.
+    /// marker names are the literal keys in `ShipwreckPieces.MARKERS_TO_LOOT`.
     #[test]
     fn a_shipwreck_template_carries_its_three_chest_markers() {
         let bytes = crate::worldgen_data::embedded_structure_template("minecraft:shipwreck/with_mast")

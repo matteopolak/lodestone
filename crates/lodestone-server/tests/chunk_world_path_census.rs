@@ -1,5 +1,5 @@
 //! Proves `ChunkWorld` reads the real 26.2 path-type/collision census
-//! (`lodestone_data::path_types` + `collision_shapes`, issue #204) instead of
+//! (`lodestone_data::path_types` + `collision_shapes`) instead of
 //! guessing solid/air, and — per this project's evidence standard — that the
 //! difference actually changes *where a mob paths*, not just what a lookup
 //! returns.
@@ -17,7 +17,7 @@
 //! (lava is a fluid, so `ChunkColumn::is_solid` reads it as "not solid").
 //!
 //! The control is a hand-built [`PathWorld`] ([`SolidAirOnly`]) that
-//! reproduces `ChunkWorld`'s **pre-#204** mapping exactly (full-cell solid ⇒
+//! reproduces `ChunkWorld`'s **old, pre-census** mapping exactly (full-cell solid ⇒
 //! `Blocked`/`1.0`, everything else ⇒ `Open`/`0.0`) over the *same* terrain.
 //! Re-running the identical search through it and asserting a *different*
 //! path is the "assertions of an absence need a control proving the detector
@@ -52,11 +52,11 @@ const OAK_FENCE: &str =
     "minecraft:oak_fence[east=false,north=false,south=false,waterlogged=false,west=false]";
 const OAK_SLAB_BOTTOM: &str = "minecraft:oak_slab[type=bottom,waterlogged=false]";
 
-/// Reproduces `ChunkWorld`'s **pre-#204** `PathWorld` impl exactly: every
+/// Reproduces `ChunkWorld`'s **old, pre-census** `PathWorld` impl exactly: every
 /// solid (non-air, non-fluid) cell is `PathType::Blocked` with a full-cell
 /// (`1.0`) collision top, everything else is `PathType::Open`/`0.0` — byte
 /// for byte what `mobs.rs` did before this fix. `collides` is untouched by
-/// #204 either way (still `ChunkWorld::is_solid`-based), so it delegates
+/// this fix either way (still `ChunkWorld::is_solid`-based), so it delegates
 /// straight through.
 struct SolidAirOnly<'w>(&'w ChunkWorld);
 
@@ -87,7 +87,7 @@ impl PathWorld for SolidAirOnly<'_> {
 }
 
 /// Floor plus a lava band from `x=-4..=4` at `z=3`, open ground beyond both
-/// ends — the exact shape issue #204 names as its own suggested case: "a mob
+/// ends — the exact shape this census fix names as its own suggested case: "a mob
 /// routing around a lava pool it could otherwise walk through." One row of
 /// lava is enough to fully block lateral crossing (unlike a *solid* wall,
 /// which needs two rows to stop a mob jumping onto its top — see
@@ -179,8 +179,7 @@ fn real_census_forces_a_lava_detour_the_old_solid_air_model_would_walk_straight_
 
 /// `ChunkWorld::collision_top` used to be a hardcoded `1.0`/`0.0` regardless
 /// of what was actually there. This pins it to the real per-state shape max
-/// (`WalkNodeEvaluator.getFloorLevel`,
-/// `.cache/mc/26.2/src/net/minecraft/world/level/pathfinder/WalkNodeEvaluator.java:219-222`:
+/// (`WalkNodeEvaluator.getFloorLevel`:
 /// `shape.isEmpty() ? 0.0 : shape.max(Direction.Axis.Y)`) for four states a
 /// full-cell assumption gets wrong in three different directions: a slab
 /// (shorter than a full cell), a fence (taller), and a fluid (no collision at
@@ -214,7 +213,7 @@ fn collision_top_reads_the_real_per_state_shape_not_a_hardcoded_full_cell() {
     assert_eq!(world.collision_top(4, 0, 0), 0.0, "air stays 0.0");
 
     // And the base_path_type census differentiates the same four cells --
-    // the two questions issue #204 asked ChunkWorld to answer for real.
+    // the two questions this fix asked ChunkWorld to answer for real.
     assert_eq!(world.base_path_type(0, 0, 0), PathType::Blocked);
     assert_eq!(
         world.base_path_type(1, 0, 0),
