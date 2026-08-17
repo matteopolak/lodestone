@@ -1382,8 +1382,20 @@ mod tests {
         }
     }
 
+    /// Where a test's throwaway workspace lives.
+    ///
+    /// The workspace `target/` rather than `xtask/target/`, because only the
+    /// former is gitignored: a test that panics leaks its `tempdir_in` (two
+    /// were found sitting untracked), and an untracked directory here is one
+    /// another agent's `git add` can sweep into a commit. Nothing in these
+    /// tests runs cargo, so the location is free to be wherever the leak is
+    /// harmless.
+    fn scratch_parent() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/islands-test-workspaces")
+    }
+
     fn workspace_with_lib(name: &str, lib_rs: &str) -> Result<Workspace> {
-        let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/islands-test-workspaces");
+        let parent = scratch_parent();
         std::fs::create_dir_all(&parent)?;
         let dir = tempfile::Builder::new()
             .prefix(&format!("{name}-"))
@@ -1777,7 +1789,7 @@ mod tests {
 
     #[test]
     fn zero_rs_files_is_a_hard_failure_not_a_skip() -> Result<()> {
-        let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/islands-test-workspaces");
+        let parent = scratch_parent();
         std::fs::create_dir_all(&parent)?;
         let dir = tempfile::Builder::new()
             .prefix("empty-crate-")

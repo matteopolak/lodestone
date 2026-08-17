@@ -2,6 +2,12 @@
 /target/
 **/*.rs.bk
 
+# xtask's fixture scratch. Named `target/` but not a cargo build dir: xtask
+# tests write throwaway workspaces and codegen `.rmeta` outputs under it. It
+# was unignored, so 104 of those outputs were once committed by accident and
+# then orphaned when the fixtures moved to per-run mkdtemp leaves.
+/xtask/target/
+
 # Fetched / generated inputs — recreate with `cargo xtask`
 /vendor/
 /.cache/
