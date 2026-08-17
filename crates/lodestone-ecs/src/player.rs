@@ -71,10 +71,10 @@ use bevy_ecs::world::World;
 use lodestone_entity::attribute::{
     attribute_value, movement_speed_key, sprinting_modifier_id, water_movement_efficiency_key,
 };
-use lodestone_model::{ClientAction, PlayerCommand, PlayerInput, Vec3};
+use lodestone_model::{ClientAction, EntityAttributeSnapshot, PlayerCommand, PlayerInput, Vec3};
 use lodestone_physics::{
     CollisionView, FluidState, MovementInput, NearbyEntity, PhysicsProfile, PlayerState, PushSelf,
-    UseEffects, Vec3d, compute_fluid_state, tick_among_entities,
+    UseEffects, Vec3d, compute_fluid_state, movement_speed_modifier, tick_among_entities,
 };
 
 use crate::entity::{Attributes, EntityIndex, Leashed, Position};
@@ -1214,6 +1214,49 @@ fn player_fluid_state(
     )
 }
 
+/// Folds Speed/Slowness into `MOVEMENT_SPEED` as a client-side bridge, the
+/// same shape as the sprint fold in [`player_physics`] and for the same
+/// reason: the value the physics engine needs is not (yet) on the wire.
+///
+/// Vanilla applies Speed/Slowness as `MOVEMENT_SPEED` `ADD_MULTIPLIED_TOTAL`
+/// modifiers **server-side** (`LivingEntity.onEffectAdded`) and syncs the
+/// folded result over `ClientboundUpdateAttributesPacket` — but
+/// `lodestone-server`'s attribute snapshot only ever publishes the four
+/// combat attributes (`armor`/`armor_toughness`/`knockback_resistance`/
+/// `attack_damage`); `minecraft:movement_speed` itself never reaches the
+/// wire, so `snapshot` here is always `None` and a Speed potion would
+/// otherwise apply its icon and its direct effects while leaving movement
+/// untouched. The amplifier is not a guess, though: `update_mob_effect`
+/// already carried it to [`crate::session::HudEffects`] (see
+/// `NetUpdate::EffectApplied`/`EffectRemoved` in `lodestone_shell::sim`), so
+/// this folds that straight through [`movement_speed_modifier`] rather than
+/// re-deriving the constant.
+///
+/// Gated on `snapshot` carrying no modifier of its own, exactly like the
+/// sprint bridge's `sprint_already_folded`: if `lodestone-server` ever grows
+/// a real attribute fold for these effects, this stops applying the moment
+/// the snapshot itself carries the modifier, rather than double-counting it.
+fn fold_effect_movement_speed(
+    attr: f64,
+    snapshot: Option<&EntityAttributeSnapshot>,
+    hud_effects: Option<&crate::session::HudEffects>,
+) -> f64 {
+    if snapshot.is_some_and(|snapshot| !snapshot.modifiers.is_empty()) {
+        return attr;
+    }
+    let Some(hud_effects) = hud_effects else {
+        return attr;
+    };
+    ["speed", "slowness"]
+        .into_iter()
+        .filter_map(|bare| {
+            let ident = lodestone_model::Identifier::new("minecraft", bare).ok()?;
+            let effect = hud_effects.0.get(&ident)?;
+            movement_speed_modifier(bare, u32::from(effect.amplifier))
+        })
+        .fold(attr, |value, amount| value * (1.0 + amount))
+}
+
 /// One fixed physics tick for every [`LocalPlayer`], in [`TickSet::Physics`].
 ///
 /// The `MOVEMENT_SPEED` attribute is injected each tick via
@@ -1252,13 +1295,23 @@ pub fn player_physics(
             &SprintKeyHeld,
             Option<&Attributes>,
             Option<&crate::session::Abilities>,
+            Option<&crate::session::HudEffects>,
         ),
         With<LocalPlayer>,
     >,
 ) {
     let profile = &profile.0;
-    for (mut state, mut fluid, mut prev, intent, flying, sprint_key, attributes, abilities) in
-        &mut players
+    for (
+        mut state,
+        mut fluid,
+        mut prev,
+        intent,
+        flying,
+        sprint_key,
+        attributes,
+        abilities,
+        hud_effects,
+    ) in &mut players
     {
         prev.0 = state.0.position;
         let player = &mut state.0;
@@ -1347,6 +1400,7 @@ pub fn player_physics(
         } else {
             base
         };
+        let attr = fold_effect_movement_speed(attr, snapshot, hud_effects);
         *player = player.with_movement_speed(attr);
 
         let efficiency = attributes.map_or(0.0, |attrs| {
@@ -3054,6 +3108,66 @@ mod tests {
             state.water_movement_efficiency, 0.0,
             "control: no attribute snapshot at all must fold to the default, not a stale \
              or hard-coded value"
+        );
+    }
+
+    /// **The Speed potion, end to end: does the player actually move faster.**
+    /// `crate::session::HudEffects` is fed by `NetUpdate::EffectApplied` in
+    /// `lodestone_shell::sim::net_apply` — outside this crate, so this test
+    /// starts from the amplifier already landed there, exactly as that arm
+    /// leaves it. The defect this guards is not "was the effect recorded" (it
+    /// was, before this fix, via `PhysicsState::effects`/`HudEffects`) but
+    /// "did movement change" — [`fold_effect_movement_speed`] had zero
+    /// callers until this fix, so a Speed potion applied its icon and its
+    /// direct effects while leaving `PlayerState::movement_speed` untouched.
+    /// Measures a real displacement over a real `GameTick` run against a
+    /// no-effect control walking the same ticks with the same input, rather
+    /// than asserting the effect merely applied.
+    #[test]
+    fn speed_effect_measurably_increases_walk_distance() {
+        use lodestone_game::effect::{ActiveEffects, StatusEffect};
+
+        let walk = |speed_effect: bool| -> f64 {
+            let (mut app, entity) = app_with_player(PlayerCollision::View(Arc::new(Floor)));
+
+            // Settle onto the floor first so the measured window is pure
+            // ground-friction walking, not still-falling noise.
+            for _ in 0..40 {
+                run_tick(&mut app);
+            }
+            let start_z = app.world().get::<PhysicsState>(entity).unwrap().0.position.z;
+
+            if speed_effect {
+                let mut effects = ActiveEffects::new();
+                effects.apply(StatusEffect::new(
+                    lodestone_model::Identifier::new("minecraft", "speed").unwrap(),
+                    0, // Speed I
+                    200,
+                ));
+                app.world_mut()
+                    .entity_mut(entity)
+                    .insert(crate::session::HudEffects(effects));
+            }
+            set_input(
+                &mut app,
+                entity,
+                MovementInput {
+                    forward: 1.0,
+                    ..MovementInput::NONE
+                },
+            );
+            for _ in 0..20 {
+                run_tick(&mut app);
+            }
+            app.world().get::<PhysicsState>(entity).unwrap().0.position.z - start_z
+        };
+
+        let plain = walk(false);
+        let boosted = walk(true);
+        assert!(
+            boosted > plain,
+            "Speed I must cover more ground than no effect over the same 20 ticks of \
+             identical input: boosted={boosted} plain={plain}"
         );
     }
 

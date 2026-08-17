@@ -1093,10 +1093,26 @@ pub(super) fn wrap_measured(b: &Quads<'_>, s: &str, max_px: f32, max_lines: usiz
         // would be appended to the previous paragraph's last line whenever it
         // happened to fit, which is the one thing splitting on `\n` exists to stop.
         let mut open_line = false;
+        // `split_whitespace` discards every run of leading/trailing/inner
+        // whitespace, including a paragraph's own **leading** run — real
+        // content when a server pads its MOTD toward centre, not mere word
+        // separation. Only the leading run is restored here (prepended to
+        // the paragraph's first word); inter-word spacing still collapses to
+        // one join space when a fitting word is appended below, matching
+        // vanilla's `Font.split` closely enough for a MOTD's actual shapes
+        // and keeping `restyle_wrapped`'s "rejoins with a single space"
+        // invariant intact everywhere except this one, still-literal, prefix
+        // — see that function's own doc for why the two must stay in step.
+        let leading_ws_len = paragraph.len() - paragraph.trim_start().len();
+        let leading = &paragraph[..leading_ws_len];
+        let mut first_word = true;
         for word in paragraph.split_whitespace() {
-            if out.len() >= max_lines {
-                return out;
-            }
+            let word = if first_word && !leading.is_empty() {
+                format!("{leading}{word}")
+            } else {
+                word.to_string()
+            };
+            first_word = false;
             let fits = open_line
                 && out.last().is_some_and(|line| {
                     b.text_width(&format!("{line} {word}"), 1.0) <= max_px
@@ -1104,12 +1120,20 @@ pub(super) fn wrap_measured(b: &Quads<'_>, s: &str, max_px: f32, max_lines: usiz
             if fits {
                 if let Some(line) = out.last_mut() {
                     line.push(' ');
-                    line.push_str(word);
+                    line.push_str(&word);
                 }
             } else {
                 // A word that does not fit starts a line rather than overflowing
-                // the one before it.
-                out.push(word.to_string());
+                // the one before it. Gated on the cap **here**, not on every
+                // word: the `fits` branch above never grows `out`, so a line
+                // already at the cap must keep accepting words that fit it —
+                // moving this check above the `fits` test (as it used to sit)
+                // silently truncated the last visible line to one word the
+                // moment `out.len()` reached `max_lines`.
+                if out.len() >= max_lines {
+                    return out;
+                }
+                out.push(word);
                 open_line = true;
             }
         }
@@ -1134,12 +1158,16 @@ pub(super) fn wrap_measured(b: &Quads<'_>, s: &str, max_px: f32, max_lines: usiz
 /// line is a line, an over-wide word starts a line rather than overflowing) that
 /// exist because each was a bug once. One wrapper, one set of rules.
 ///
-/// This works because a wrapped line's characters are a **subsequence** of the
-/// source, in order: the wrapper only splits on whitespace and rejoins with a
-/// single space. So walking both in lockstep and skipping the whitespace the
-/// wrapper collapsed re-attaches each character to the style it came with.
-/// Adjacent equal styles are merged so the draw sees runs, not one span per
-/// character.
+/// This works because a wrapped line's characters are always a **subsequence**
+/// of the source, in order — the wrapper only ever *drops* characters
+/// (whitespace it collapses to a single inter-word join space, or a
+/// paragraph-separating `\n`) or keeps them verbatim (a paragraph's own
+/// leading whitespace, kept literally rather than collapsed — see
+/// [`wrap_measured`]'s own doc). It never invents or reorders one. So walking
+/// both in lockstep, and skipping forward over whatever the wrapper dropped
+/// (whitespace or not — the scan below is agnostic to which), re-attaches
+/// each surviving character to the style it came with. Adjacent equal styles
+/// are merged so the draw sees runs, not one span per character.
 fn restyle_wrapped(spans: &[TextSpan], lines: &[String]) -> Vec<Vec<TextSpan>> {
     let flat: Vec<(char, TextStyle)> = spans
         .iter()
