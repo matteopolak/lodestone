@@ -1284,15 +1284,19 @@ pub enum ServerBound {
     /// See `crate::command`'s module doc for the whole argument, including
     /// why the two rejected alternatives were rejected.
     ///
-    /// Only the *unsigned* `chat_command` produces this. `chat_command_signed`
-    /// carries a signature block this crate has no session key to verify and
-    /// stays [`Ignored`](Self::Ignored); a client only sends the signed form for
-    /// commands whose arguments the server declared **signable**, and this server
-    /// declares none — it never handles `chat_session_update`, holds no player
-    /// public keys, and reports `enforcesSecureChat = false`. Sending a `COMMANDS`
-    /// tree (which [`encode_commands`](ServerProtocol::encode_commands) now does)
-    /// does not change that: the tree carries no signability, so every command
-    /// from a real client still arrives unsigned.
+    /// Both the unsigned `chat_command` and the signed `chat_command_signed`
+    /// produce this — the latter's per-argument `ArgumentSignatures` are
+    /// decoded and then dropped rather than verified, since a client only
+    /// sends the signed form for arguments the server's `COMMANDS` tree
+    /// declared **signable**, and this server declares none (sending a tree
+    /// via [`encode_commands`](ServerProtocol::encode_commands) does not
+    /// change that: the tree carries no signability). So there is nothing for
+    /// per-argument verification to gate here — unlike
+    /// [`Chat`](Self::Chat)'s whole-message signature, which
+    /// `crate::chat_session::decide` does verify against the sender's
+    /// announced session, `chat_command_signed`'s signatures have no
+    /// declared-signable argument to be *for*, and the command text itself is
+    /// executed identically either way.
     ChatCommand {
         /// Command text without the leading `/`.
         command: String,

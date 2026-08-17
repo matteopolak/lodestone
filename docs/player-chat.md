@@ -146,6 +146,13 @@ which does not exist today.
   reads B's socket immediately after A writes will race it; wait for quiet.
 * `ServerBound::Chat` is *not* `ServerBound::ChatCommand`. The command half (#48/#464) goes
   to the Brigadier dispatcher and replies **only to the caller**; chat goes to everyone.
+* `minecraft:chat_command_signed` also produces `ServerBound::ChatCommand` — same consumer as
+  the unsigned form. Its per-argument `ArgumentSignatures` are decoded (to find the end of the
+  frame) and dropped, not verified: a client only sends this form for arguments the server's
+  `COMMANDS` tree declared **signable**, and this server declares none, so there is nothing for
+  per-argument verification to gate. This is a different situation from `minecraft:chat`'s
+  whole-message signature, which *is* verified (see "The signing decision" above) — do not
+  conflate the two when reasoning about what this crate verifies.
 
 ## Configuration
 
