@@ -21,8 +21,11 @@
 //!
 //! - **Game** (`createWorld.tab.game.title`): [`NAME_FIELD`], [`GAME_MODE_ROW`],
 //!   [`DIFFICULTY_ROW`], [`ALLOW_CHEATS_ROW`] — vanilla's `GameTab` also has an
-//!   Experiments button this client has no experiments screen for, left absent
-//!   rather than drawn inert.
+//!   Experiments button here, but only `if (!SharedConstants.getCurrentVersion().stable())`
+//!   (`CreateWorldScreen.java`'s `GameTab` constructor) — absent on a stable
+//!   release, which is what this client models, so there is nothing missing
+//!   here even though [`EXPERIMENTS_ROW`] now exists (it lives on More,
+//!   below, matching vanilla's own always-present copy of the button).
 //! - **World** (`createWorld.tab.world.title`): [`SEED_FIELD`],
 //!   [`WORLD_TYPE_ROW`], [`STRUCTURES_ROW`], [`BONUS_CHEST_ROW`] — vanilla's
 //!   `WorldTab` also has a "Customize Type" button this client has no
@@ -33,16 +36,19 @@
 //!   the other four remain decorative. See [`WorldTypePreset`]'s own doc for
 //!   exactly which is which and why.
 //! - **More** (`createWorld.tab.more.title`): vanilla's `MoreTab` is three
-//!   buttons (Game Rules, Experiments, Data Packs). Two now have real models
+//!   buttons, in this order — Game Rules, Experiments, Data Packs
+//!   (`MoreTab`'s constructor). All three now have real models
 //!   ([`GAME_RULES_ROW`]/[`GameRulesEditor`] and
-//!   [`DATA_PACKS_ROW`]/[`DataPacksEditor`], both issue #592) — Experiments
-//!   still has none (no `DataConfiguration`/feature-flag model anywhere in
-//!   this client) and stays absent rather than drawn inert, the same rule
-//!   World's own "Customize Type" gap already follows. The tab itself
-//!   is real regardless: selectable, its own real
+//!   [`DATA_PACKS_ROW`]/[`DataPacksEditor`], both issue #592;
+//!   [`EXPERIMENTS_ROW`]/[`ExperimentsEditor`], issue #693). Unlike the other
+//!   two, [`ExperimentsEditor`]'s collected choice is **fully decorative**
+//!   past [`WorldCreationConfig::experiments`] — see that field's own doc for
+//!   why (vanilla's `enabledFeatures` lives in `level.dat`, not on the wire,
+//!   and this crate has no `lodestone-server` world-creation hook to write
+//!   it into). The tab itself is real regardless: selectable, its own real
 //!   [`TabEntryView`](super::render::TabEntryView), never disabled for having
-//!   an unbuilt feature under it — unlike Statistics's Items/Mobs, which
-//!   vanilla disables **because the underlying list is empty**
+//!   a partially-decorative feature under it — unlike Statistics's Items/Mobs,
+//!   which vanilla disables **because the underlying list is empty**
 //!   (`StatsScreen.setTabActiveStateAndTooltip`). Nothing here is
 //!   data-driven-empty; Experiments is feature-not-yet-built, and disabling
 //!   the tab for it would misrepresent that as vanilla's own behaviour.
@@ -216,6 +222,9 @@ pub const GAME_RULES_BUTTON_LABEL: &str = "Game Rules...";
 /// `dataPack.title`-adjacent — vanilla's More tab button that opens a
 /// `PackSelectionScreen` scoped to data packs.
 pub const DATA_PACKS_BUTTON_LABEL: &str = "Data Packs...";
+/// `selectWorld.experiments`, verbatim from `en_us.json` — vanilla's More tab
+/// button that opens `ExperimentsScreen` (issue #693).
+pub const EXPERIMENTS_BUTTON_LABEL: &str = "Experiments...";
 
 /// `createWorld.tab.game.title`/`.world.title`/`.more.title`, verbatim from
 /// `en_us.json` — this screen's own tab bar (issue #567), built from the same
@@ -252,7 +261,9 @@ fn content_rows_for_tab(tab: usize) -> &'static [usize] {
             BONUS_CHEST_ROW,
             ONLINE_MODE_ROW,
         ],
-        MORE_TAB => &[GAME_RULES_ROW, DATA_PACKS_ROW],
+        // Vanilla's own `MoreTab` button order (`CreateWorldScreen.java`):
+        // Game Rules, Experiments, **then** Data Packs.
+        MORE_TAB => &[GAME_RULES_ROW, EXPERIMENTS_ROW, DATA_PACKS_ROW],
         _ => &[],
     }
 }
@@ -502,6 +513,19 @@ pub struct WorldCreationConfig {
     /// world that never had any extra pack selected, same "send nothing
     /// rather than a no-op" rule [`Self::game_rules`] uses.
     pub data_packs: Vec<String>,
+    /// Feature flags the player turned on (issue #693's Experiments half), as
+    /// [`ExperimentFlag::id`] strings — collected from [`CreateWorldNav`]'s
+    /// own [`ExperimentsEditor`] when Create is pressed, the exact
+    /// `Vec<String>` shape [`Self::data_packs`] already takes and for the
+    /// same reason: **fully decorative**. Vanilla's own
+    /// `WorldDataConfiguration.enabledFeatures` is written into a freshly
+    /// created world's `level.dat` at creation time — it is never a network
+    /// packet, unlike [`Self::game_rules`] — so consuming this needs a
+    /// `lodestone-server` world-creation hook this crate cannot reach (that
+    /// crate is out of scope for the pass that added this field). Empty for
+    /// a world that never had any experiment turned on, matching
+    /// `FeatureFlags.DEFAULT_FLAGS == VANILLA_SET`.
+    pub experiments: Vec<String>,
 }
 
 impl Default for WorldCreationConfig {
@@ -523,6 +547,7 @@ impl Default for WorldCreationConfig {
             online_mode: false,
             game_rules: Vec::new(),
             data_packs: Vec::new(),
+            experiments: Vec::new(),
         }
     }
 }
@@ -546,7 +571,10 @@ pub const GAME_RULES_ROW: usize = 11;
 /// More tab's second row (issue #592's Data Packs half): opens the pack
 /// selector — see [`CreateWorldMode::DataPacks`].
 pub const DATA_PACKS_ROW: usize = 12;
-const ROW_COUNT: usize = 13;
+/// More tab's third row (issue #693's Experiments half): opens the
+/// feature-flag toggle list — see [`CreateWorldMode::Experiments`].
+pub const EXPERIMENTS_ROW: usize = 13;
+const ROW_COUNT: usize = 14;
 
 const SEED_CANVAS: (f32, f32) = (854.0, 480.0);
 
@@ -584,16 +612,16 @@ pub fn row_slot(row: usize) -> Slot {
         NAME_FIELD | SEED_FIELD | GAME_RULES_ROW => {
             Slot { origin: Origin::ScreenTop, dx: X, dy: TOP, w: FIELD_W, h: super::render::EDIT_BOX_H }
         }
-        // Local row 1: Game Mode / World Type / More's second row (Data Packs).
-        GAME_MODE_ROW | WORLD_TYPE_ROW | DATA_PACKS_ROW => Slot {
+        // Local row 1: Game Mode / World Type / More's second row (Experiments).
+        GAME_MODE_ROW | WORLD_TYPE_ROW | EXPERIMENTS_ROW => Slot {
             origin: Origin::ScreenTop,
             dx: X,
             dy: TOP + ROW_H,
             w: FIELD_W,
             h: super::render::EDIT_BOX_H,
         },
-        // Local row 2: Difficulty / Structures.
-        DIFFICULTY_ROW | STRUCTURES_ROW => Slot {
+        // Local row 2: Difficulty / Structures / More's third row (Data Packs).
+        DIFFICULTY_ROW | STRUCTURES_ROW | DATA_PACKS_ROW => Slot {
             origin: Origin::ScreenTop,
             dx: X,
             dy: TOP + ROW_H * 2.0,
@@ -658,6 +686,9 @@ pub struct CreateWorldWidgets {
     /// More tab's Data Packs button (issue #592) — opens
     /// [`CreateWorldMode::DataPacks`].
     pub data_packs: Widget,
+    /// More tab's Experiments button (issue #693) — opens
+    /// [`CreateWorldMode::Experiments`].
+    pub experiments: Widget,
 }
 
 impl FocusChildren for CreateWorldWidgets {
@@ -676,6 +707,7 @@ impl FocusChildren for CreateWorldWidgets {
             CANCEL_ROW => &self.cancel as &dyn FocusTarget,
             GAME_RULES_ROW => &self.game_rules as &dyn FocusTarget,
             DATA_PACKS_ROW => &self.data_packs as &dyn FocusTarget,
+            EXPERIMENTS_ROW => &self.experiments as &dyn FocusTarget,
             _ => return None,
         })
     }
@@ -695,6 +727,7 @@ impl FocusChildren for CreateWorldWidgets {
             CANCEL_ROW => &mut self.cancel as &mut dyn FocusTarget,
             GAME_RULES_ROW => &mut self.game_rules as &mut dyn FocusTarget,
             DATA_PACKS_ROW => &mut self.data_packs as &mut dyn FocusTarget,
+            EXPERIMENTS_ROW => &mut self.experiments as &mut dyn FocusTarget,
             _ => return None,
         })
     }
@@ -757,6 +790,9 @@ pub struct CreateWorldNav {
     game_rules: GameRulesEditor,
     /// The pack selector's own live state — see [`DataPacksEditor`]'s doc.
     data_packs: DataPacksEditor,
+    /// The feature-flag toggle list's own live state — see
+    /// [`ExperimentsEditor`]'s doc.
+    experiments: ExperimentsEditor,
 }
 
 /// See [`CreateWorldNav::mode`].
@@ -766,6 +802,7 @@ enum CreateWorldMode {
     Tabs,
     GameRules,
     DataPacks,
+    Experiments,
 }
 
 fn button(row: usize, label: impl Into<String>) -> Widget {
@@ -804,6 +841,7 @@ impl CreateWorldNav {
             cancel: button(CANCEL_ROW, CANCEL_LABEL),
             game_rules: button(GAME_RULES_ROW, GAME_RULES_BUTTON_LABEL),
             data_packs: button(DATA_PACKS_ROW, DATA_PACKS_BUTTON_LABEL),
+            experiments: button(EXPERIMENTS_ROW, EXPERIMENTS_BUTTON_LABEL),
         };
         let mut focus = FocusSet::new();
         for row in 0..ROW_COUNT {
@@ -819,6 +857,7 @@ impl CreateWorldNav {
             mode: CreateWorldMode::Tabs,
             game_rules: GameRulesEditor::new(),
             data_packs: DataPacksEditor::new(),
+            experiments: ExperimentsEditor::new(),
         };
         // Game is active from the start, so this deactivates World's four
         // fields (Seed/Structures/Bonus Chest/Online Mode) — matching what a
@@ -878,6 +917,15 @@ impl CreateWorldNav {
     #[must_use]
     pub fn data_packs_scroll(&self) -> f32 {
         self.data_packs.scroll()
+    }
+
+    /// Whether the Experiments sub-screen is open — mirrors
+    /// [`Self::game_rules_open`]/[`Self::data_packs_open`]. No scroll
+    /// accessor beside it: [`ExperimentsEditor`]'s own doc explains why a
+    /// fixed four rows never needs one.
+    #[must_use]
+    pub fn experiments_open(&self) -> bool {
+        self.mode == CreateWorldMode::Experiments
     }
 
     /// How many rows the pack selector currently has (the always-present
@@ -1039,6 +1087,10 @@ impl CreateWorldNav {
             self.data_packs.hover_row(row);
             return;
         }
+        if self.mode == CreateWorldMode::Experiments {
+            self.experiments.hover_row(row);
+            return;
+        }
         if row < TAB_LABELS.len() {
             return;
         }
@@ -1111,11 +1163,16 @@ impl CreateWorldNav {
                 self.data_packs.refresh();
                 CreateWorldOutcome::Handled
             }
+            EXPERIMENTS_ROW => {
+                self.mode = CreateWorldMode::Experiments;
+                CreateWorldOutcome::Handled
+            }
             CREATE_ROW => {
                 self.config.name = self.widgets.name.value().to_string();
                 self.config.seed = self.widgets.seed.value().to_string();
                 self.config.game_rules = self.game_rules.changed_entries();
                 self.config.data_packs = self.data_packs.selected_ids();
+                self.config.experiments = self.experiments.enabled_ids();
                 CreateWorldOutcome::Create(self.config.clone())
             }
             CANCEL_ROW => CreateWorldOutcome::Cancel,
@@ -1138,6 +1195,12 @@ impl CreateWorldNav {
         }
         if self.mode == CreateWorldMode::DataPacks {
             if self.data_packs.click_row(row) {
+                self.mode = CreateWorldMode::Tabs;
+            }
+            return CreateWorldOutcome::Handled;
+        }
+        if self.mode == CreateWorldMode::Experiments {
+            if self.experiments.click_row(row) {
                 self.mode = CreateWorldMode::Tabs;
             }
             return CreateWorldOutcome::Handled;
@@ -1186,6 +1249,12 @@ impl CreateWorldNav {
             return CreateWorldOutcome::Handled;
         }
         if self.mode == CreateWorldMode::DataPacks {
+            if key == MenuKey::Escape {
+                self.mode = CreateWorldMode::Tabs;
+            }
+            return CreateWorldOutcome::Handled;
+        }
+        if self.mode == CreateWorldMode::Experiments {
             if key == MenuKey::Escape {
                 self.mode = CreateWorldMode::Tabs;
             }
@@ -1248,6 +1317,9 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
     if nav.mode == CreateWorldMode::DataPacks {
         return data_packs_frame(nav);
     }
+    if nav.mode == CreateWorldMode::Experiments {
+        return experiments_frame(nav);
+    }
     let focused = nav.focused();
     let widget_row = |w: &Widget, row: usize| MenuRow {
         label: w.message.clone(),
@@ -1297,6 +1369,7 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
             WORLD_TYPE_ROW => widget_row(&nav.widgets.world_type, WORLD_TYPE_ROW),
             GAME_RULES_ROW => widget_row(&nav.widgets.game_rules, GAME_RULES_ROW),
             DATA_PACKS_ROW => widget_row(&nav.widgets.data_packs, DATA_PACKS_ROW),
+            EXPERIMENTS_ROW => widget_row(&nav.widgets.experiments, EXPERIMENTS_ROW),
             // `content_rows_for_tab` is the only producer of these ids; a new
             // entry there needs a matching arm here, and an out-of-sync pair
             // is a compile-time `unreachable!()` away from being caught the
@@ -2130,6 +2203,200 @@ fn data_packs_frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
     }
 }
 
+/// The three real vanilla feature flags a 26.2 world can enable
+/// (`FeatureFlags.java`'s own three `builder.createVanilla(...)` calls
+/// beyond the always-on `vanilla` flag, which carries no UI at all — issue
+/// #693's Experiments half). `WorldDataConfiguration`'s own
+/// `enabledFeatures` field is exactly this set, written into a freshly
+/// created world's `level.dat`, never sent over any network packet — see
+/// [`WorldCreationConfig::experiments`]'s own doc for why that makes this
+/// decorative here, the same way [`WorldCreationConfig::data_packs`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExperimentFlag {
+    TradeRebalance,
+    RedstoneExperiments,
+    MinecartImprovements,
+}
+
+impl ExperimentFlag {
+    pub const ALL: [ExperimentFlag; 3] =
+        [Self::TradeRebalance, Self::RedstoneExperiments, Self::MinecartImprovements];
+
+    /// The bare registration id (`FeatureFlags.java`'s own
+    /// `builder.createVanilla("...")` argument, no `minecraft:` namespace) —
+    /// `WorldDataConfiguration`'s own wire/NBT shape for `enabled_features`.
+    #[must_use]
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::TradeRebalance => "trade_rebalance",
+            Self::RedstoneExperiments => "redstone_experiments",
+            Self::MinecartImprovements => "minecart_improvements",
+        }
+    }
+
+    /// `dataPack.<id>.name`, verbatim from `en_us.json` — vanilla's real
+    /// `ExperimentsScreen` is a `PackSelectionScreen` over these three
+    /// specifically as "feature flag" packs, so it borrows the data-pack
+    /// translation keys rather than having its own.
+    #[must_use]
+    pub fn caption(self) -> &'static str {
+        match self {
+            Self::TradeRebalance => "Villager Trade Rebalance",
+            Self::RedstoneExperiments => "Redstone Experiments",
+            Self::MinecartImprovements => "Minecart Improvements",
+        }
+    }
+}
+
+/// One flag's live toggle state, on the Experiments sub-screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExperimentRow {
+    flag: ExperimentFlag,
+    enabled: bool,
+}
+
+/// The Experiments sub-screen's own live state (issue #693) — three fixed
+/// toggle rows plus Done, the shape [`DataPacksEditor`] takes for a scanned
+/// list, simplified: the flag set is fixed
+/// ([`ExperimentFlag::ALL`]), so there is no scan, and — four rows total,
+/// always fewer than fit on screen — no scroll state either, unlike
+/// [`DataPacksEditor`]/[`GameRulesEditor`]. Every flag defaults off,
+/// matching `FeatureFlags.DEFAULT_FLAGS == VANILLA_SET` (no experimental
+/// flag is on by default).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExperimentsEditor {
+    rows: [ExperimentRow; 3],
+    cursor: usize,
+}
+
+impl ExperimentsEditor {
+    fn new() -> Self {
+        Self {
+            rows: ExperimentFlag::ALL.map(|flag| ExperimentRow { flag, enabled: false }),
+            cursor: 0,
+        }
+    }
+
+    /// Every flag the player turned on, in [`ExperimentFlag::ALL`] order —
+    /// mirrors [`DataPacksEditor::selected_ids`]'s "only report what's on"
+    /// shape: an untouched screen sends nothing, matching
+    /// [`WorldCreationConfig::game_rules`]'s own "send nothing rather than a
+    /// no-op" rule.
+    #[must_use]
+    fn enabled_ids(&self) -> Vec<String> {
+        self.rows.iter().filter(|r| r.enabled).map(|r| r.flag.id().to_string()).collect()
+    }
+
+    /// The mouse moved over visible row `row` — moves the cursor there.
+    fn hover_row(&mut self, row: usize) {
+        if row < ALL_EXPERIMENT_CONTROLS.len() {
+            self.cursor = row;
+        }
+    }
+
+    /// A click on visible row `row`. Returns `true` when Done was pressed —
+    /// [`CreateWorldNav::click_row`]'s cue to leave the editor.
+    fn click_row(&mut self, row: usize) -> bool {
+        self.hover_row(row);
+        match ALL_EXPERIMENT_CONTROLS.get(row) {
+            Some(ExperimentControl::Toggle(index)) => {
+                if let Some(r) = self.rows.get_mut(*index) {
+                    r.enabled = !r.enabled;
+                }
+                false
+            }
+            Some(ExperimentControl::Done) => true,
+            None => false,
+        }
+    }
+}
+
+/// One control on the Experiments sub-screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExperimentControl {
+    /// Toggle flag `usize` (an index into [`ExperimentFlag::ALL`]).
+    Toggle(usize),
+    /// Leave the editor, keeping every toggle made so far.
+    Done,
+}
+
+/// Every control, in display order — mirrors [`all_data_pack_controls`],
+/// fixed-length since [`ExperimentsEditor`] never scans anything.
+const ALL_EXPERIMENT_CONTROLS: [ExperimentControl; 4] = [
+    ExperimentControl::Toggle(0),
+    ExperimentControl::Toggle(1),
+    ExperimentControl::Toggle(2),
+    ExperimentControl::Done,
+];
+
+/// This screen's row height — matches [`DATA_PACK_ROW_H`]/[`GAME_RULE_ROW_H`].
+const EXPERIMENT_ROW_H: f32 = 24.0;
+/// This screen's row band — matches [`DATA_PACK_ROW_WIDTH`]/[`GAME_RULE_ROW_WIDTH`].
+const EXPERIMENT_ROW_W: f32 = 280.0;
+
+/// One control's `Slot`, stacked top-to-bottom with no scroll — the same
+/// `Origin::ScreenTop` + fixed `dy` shape [`row_slot`] uses for the main
+/// tabs' own rows, simplified further since every row here shares one `dx`
+/// (centred) rather than pairing two tabs' worth of fields at each `dy`. No
+/// [`super::widget::ListSpec`]/scrollbar involved at all — see
+/// [`ExperimentsEditor`]'s own doc for why a fixed four rows never needs one.
+#[must_use]
+fn experiment_control_slot(index: usize) -> Slot {
+    const TOP: f32 = layout::TAB_BAR_HEIGHT + 32.0;
+    Slot {
+        origin: Origin::ScreenTop,
+        dx: -(EXPERIMENT_ROW_W / 2.0),
+        dy: TOP + EXPERIMENT_ROW_H * index as f32,
+        w: EXPERIMENT_ROW_W,
+        h: super::render::EDIT_BOX_H,
+    }
+}
+
+/// Builds the Experiments sub-screen's whole frame — [`frame`]'s
+/// [`CreateWorldMode::Experiments`] branch. Mirrors [`data_packs_frame`],
+/// simplified to the fixed row count [`ExperimentsEditor`]'s own doc
+/// explains: every control's `Slot` comes straight from
+/// [`experiment_control_slot`] rather than through a scrollable list model.
+#[must_use]
+fn experiments_frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
+    let editor = &nav.experiments;
+    let rows: Vec<MenuRow> = ALL_EXPERIMENT_CONTROLS
+        .iter()
+        .enumerate()
+        .map(|(i, control)| MenuRow {
+            label: match control {
+                ExperimentControl::Toggle(index) => editor
+                    .rows
+                    .get(*index)
+                    .map_or_else(String::new, |r| toggle_label(r.flag.caption(), r.enabled)),
+                ExperimentControl::Done => "Done".to_string(),
+            },
+            enabled: true,
+            slot: Some(experiment_control_slot(i)),
+            ..Default::default()
+        })
+        .collect();
+
+    MenuFrame {
+        title: "Experiments",
+        rows,
+        selected: editor.cursor,
+        vanilla: true,
+        labels: vec![MenuLabel {
+            text: "Experiments".to_string(),
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: 12.0,
+            align: Align::Centre,
+            colour: super::widget::ACTIVE_LABEL,
+            scale: 1.0,
+        }],
+        // Deliberately not set here — mirrors `data_packs_frame`'s own
+        // comment: `render::dispatch` stamps `f.list` on every frame.
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2508,9 +2775,9 @@ mod tests {
         let f = frame(&nav);
         assert_eq!(
             f.rows.len(),
-            TAB_LABELS.len() + 4,
-            "More has two content rows (Game Rules and Data Packs, issue \
-             #592) plus the tab bar and the footer"
+            TAB_LABELS.len() + 5,
+            "More has three content rows (Game Rules and Data Packs, issue \
+             #592; Experiments, issue #693) plus the tab bar and the footer"
         );
 
         // Clicking the tab already showing is a no-op, not a crash and not a
@@ -3081,6 +3348,101 @@ mod tests {
         assert!(
             f.rows.iter().any(|r| r.label.starts_with("alpha")),
             "a discovered pack's row must reach the frame"
+        );
+    }
+
+    // -- Issue #693: Experiments --------------------------------------------
+
+    #[test]
+    fn an_untouched_experiments_screen_sends_nothing_on_create() {
+        let mut nav = CreateWorldNav::new();
+        let outcome = nav.click_focus(CREATE_ROW);
+        let CreateWorldOutcome::Create(config) = outcome else {
+            panic!("expected Create, got {outcome:?}");
+        };
+        assert!(
+            config.experiments.is_empty(),
+            "no experiment was ever opened or toggled, so nothing should be sent"
+        );
+    }
+
+    #[test]
+    fn create_after_toggling_an_experiment_carries_exactly_the_enabled_flag_id() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(EXPERIMENTS_ROW);
+        assert!(nav.experiments_open(), "premise");
+        // Toggle(1) == RedstoneExperiments (see `ExperimentFlag::ALL`).
+        nav.click_row(1);
+        // Done is always the last control.
+        let done_row = ALL_EXPERIMENT_CONTROLS.len() - 1;
+        assert_eq!(nav.click_row(done_row), CreateWorldOutcome::Handled);
+        assert!(!nav.experiments_open(), "Done must leave the editor");
+
+        let outcome = nav.click_focus(CREATE_ROW);
+        let CreateWorldOutcome::Create(config) = outcome else {
+            panic!("expected Create, got {outcome:?}");
+        };
+        assert_eq!(
+            config.experiments,
+            vec!["redstone_experiments".to_string()],
+            "Create must capture exactly the one toggled flag, not all three \
+             and not none"
+        );
+    }
+
+    /// Toggling twice returns to the vanilla default (off) and sends nothing
+    /// — the discriminating control for the toggle above: a resolver that
+    /// always sent *something* once the screen was opened would fail this.
+    #[test]
+    fn toggling_an_experiment_twice_sends_nothing() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(EXPERIMENTS_ROW);
+        nav.click_row(0);
+        nav.click_row(0);
+        let done_row = ALL_EXPERIMENT_CONTROLS.len() - 1;
+        nav.click_row(done_row);
+        let outcome = nav.click_focus(CREATE_ROW);
+        let CreateWorldOutcome::Create(config) = outcome else {
+            panic!("expected Create, got {outcome:?}");
+        };
+        assert!(config.experiments.is_empty(), "back to off must send nothing, same as never opened");
+    }
+
+    #[test]
+    fn escape_from_the_experiments_editor_returns_to_more_tab_not_a_full_cancel() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(EXPERIMENTS_ROW);
+        assert!(nav.experiments_open(), "premise");
+        assert_eq!(
+            nav.handle_key(MenuKey::Escape),
+            CreateWorldOutcome::Handled,
+            "must not unwind the whole Create New World screen"
+        );
+        assert!(!nav.experiments_open(), "escape must close only the editor, back to the tabs");
+        assert_eq!(nav.active_tab(), MORE_TAB, "left on the tab it was opened from");
+    }
+
+    /// The control for `frame`'s dispatch — same reasoning
+    /// `the_data_packs_frame_carries_one_row_per_pack_plus_done` gives: a
+    /// frame that looks right in isolation but that nothing routes real rows
+    /// into is exactly `CLAUDE.md`'s recorded `draw_tab` incident shape.
+    #[test]
+    fn the_experiments_frame_carries_one_row_per_flag_plus_done() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(EXPERIMENTS_ROW);
+        nav.click_row(1);
+        let f = frame(&nav);
+        assert_eq!(f.rows.len(), 3 + 1, "three flags plus Done");
+        assert_eq!(f.title, "Experiments");
+        assert!(
+            f.rows.iter().any(|r| r.label == "Villager Trade Rebalance: OFF"),
+            "an untouched flag's row must read OFF: {:?}",
+            f.rows.iter().map(|r| &r.label).collect::<Vec<_>>()
+        );
+        assert!(
+            f.rows.iter().any(|r| r.label == "Redstone Experiments: ON"),
+            "the toggled flag's row must read ON: {:?}",
+            f.rows.iter().map(|r| &r.label).collect::<Vec<_>>()
         );
     }
 }
