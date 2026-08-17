@@ -12317,6 +12317,7 @@ where
                     entity_id: player_entity_id,
                     username: username.to_owned(),
                     position,
+                    rotation: player_rot.unwrap_or(Rotation { yaw: 0.0, pitch: 0.0 }),
                     game_mode: *game_mode,
                     // No registry to have republished into — this connection
                     // *is* the one live source, read directly rather than

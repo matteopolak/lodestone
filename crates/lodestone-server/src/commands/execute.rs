@@ -64,11 +64,17 @@
 //!
 //! # What is built
 //!
-//! `as`, `at`, `positioned` (+ `as`), `rotated` (+ redirect only — see gap
-//! below for why `rotated as` is not registered), `facing` (`<pos>` and
-//! `entity <targets> <anchor>`), `align`, `anchored`, `in` (single-dimension
-//! census — see [`lodestone_command_mc::DimensionArg`]'s own doc), `run`, and
+//! `as`, `at` (position **and** rotation), `positioned` (+ `as`), `rotated`
+//! (+ `as`), `facing` (`<pos>` and `entity <targets> <anchor>`), `align`,
+//! `anchored`, `in` (single-dimension census — see
+//! [`lodestone_command_mc::DimensionArg`]'s own doc), `run`, and
 //! `if`/`unless entity`/`dimension`/`score`.
+//!
+//! `at`'s rotation transfer and `rotated as` both needed
+//! `crate::commands::source::PlayerCandidate` to carry a rotation, which it
+//! now does (`crate::players::PlayerRegistry::candidates` already tracked one
+//! per connection — `TrackedPlayer::rotation`, kept live by
+//! `PlayerRegistry::set_rotation` — and simply never threaded it through).
 //!
 //! `if`/`unless score` (`register_score_conditions`) needed
 //! `crate::commands::scoreboard_store` to exist first — a real scoreboard,
@@ -86,18 +92,7 @@
 //!
 //! # What is not built, and why — each names its own missing subsystem
 //!
-//! * **`rotated as <targets>`.** Vanilla copies the target's own rotation
-//!   (`entity.getRotationVector()`). `crate::commands::source::PlayerCandidate`
-//!   carries a position but no rotation — the identical, already-documented gap
-//!   `crate::commands::teleport`'s module doc names for `/tp <targets>
-//!   <destination>`. Unlike `at` (which still delivers a real position change
-//!   even without a rotation copy), rotation is `rotated as`'s *entire*
-//!   purpose, so shipping it as a silent no-op would be worse than not
-//!   registering it — this subtree is simply absent, a disclosed reduction
-//!   rather than a silent one.
-//! * **`at`'s rotation.** Same root cause: position and dimension transfer for
-//!   real, rotation does not — the pre-`at` source's own rotation is kept.
-//! * **`store`, `predicate`, `data`, `items`, `function`, `stopwatch`,
+//! * **`store`, `predicate`, `items`, `function`, `stopwatch`,
 //!   `if`/`unless block`/`biome`/`blocks`/`loaded`, and `on <relation>`.**
 //!   (`if`/`unless score` is now built — see "What is built" above.) Each of
 //!   these still needs a subsystem this server has nowhere: `store`'s own
@@ -213,11 +208,13 @@ fn register_as(registrar: &mut Registrar, execute: NodeId) {
 
 /// `Commands.literal("at").then(argument("targets", entities()).fork(execute,
 /// …withLevel(level).withPosition(pos).withRotation(rot)…))` — rewrites
-/// *where*, leaving the acting entity untouched. Rotation is not transferred;
-/// see this module's doc for why (`PlayerCandidate` carries no rotation).
-/// Dimension is `base.dimension` unchanged for the same reason `/tp`'s own
-/// module doc gives elsewhere: every candidate on this server's one roster is
-/// already in the one hosted dimension.
+/// *where*, leaving the acting entity untouched. Position, rotation **and**
+/// anchor-relevant state all transfer: `CommandSourceStack.withPosition`/
+/// `withRotation` both fire in vanilla's own `at`, and
+/// `PlayerCandidate::rotation` (`crate::commands::source`) is what makes the
+/// rotation half possible here. Dimension is `base.dimension` unchanged for
+/// the same reason `/tp`'s own module doc gives elsewhere: every candidate on
+/// this server's one roster is already in the one hosted dimension.
 fn register_at(registrar: &mut Registrar, execute: NodeId) {
     let at_lit = registrar.literal(execute, "at");
     let (targets_node, targets_key) = registrar.arg(at_lit, "targets", EntityArg::entities());
@@ -230,6 +227,7 @@ fn register_at(registrar: &mut Registrar, execute: NodeId) {
             .map(|target| {
                 let mut next = base.clone();
                 next.position = target.position;
+                next.rotation = target.rotation;
                 next
             })
             .collect())
@@ -297,7 +295,26 @@ fn register_rotated(registrar: &mut Registrar, execute: NodeId) {
     });
     registrar.redirect(rot_node, execute);
 
-    // `rotated as <targets>` is not registered — see this module's doc.
+    // `rotated as <targets>` — `.fork(execute, c -> byAsRot(c))`, copying the
+    // target's own rotation wholesale (`entity.getRotationVector()`), unlike
+    // the `<rotation>` form above which resolves `~`-relative deltas against
+    // the *base* source's rotation.
+    let as_lit = registrar.literal(rotated, "as");
+    let (targets_node, targets_key) = registrar.arg(as_lit, "targets", EntityArg::entities());
+    registrar.modifier(targets_node, true, move |ctx, sources, _parsed| {
+        let base = one(sources);
+        let selector = ctx.get(targets_key).clone();
+        let targets = resolve_optional(ctx, &selector)?;
+        Ok(targets
+            .into_iter()
+            .map(|target| {
+                let mut next = base.clone();
+                next.rotation = target.rotation;
+                next
+            })
+            .collect())
+    });
+    registrar.redirect(targets_node, execute);
 }
 
 // ---- facing --------------------------------------------------------------

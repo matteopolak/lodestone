@@ -646,6 +646,7 @@ impl PlayerRegistry {
                 entity_id: p.entity_id,
                 username: p.username.clone(),
                 position: p.position,
+                rotation: p.rotation,
                 game_mode: p.game_mode,
                 xp_level: p.xp_level,
                 xp_points: p.xp_points,

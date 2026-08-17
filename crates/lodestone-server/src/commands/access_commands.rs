@@ -263,6 +263,7 @@ mod tests {
             entity_id: 1,
             username: name.to_string(),
             position: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+            rotation: lodestone_model::Rotation { yaw: 0.0, pitch: 0.0 },
             game_mode: lodestone_model::GameMode::Survival,
             xp_level: 0,
             xp_points: 0,
