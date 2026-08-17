@@ -68,7 +68,7 @@
 //! (+ `as`), `facing` (`<pos>` and `entity <targets> <anchor>`), `align`,
 //! `anchored`, `in` (single-dimension census — see
 //! [`lodestone_command_mc::DimensionArg`]'s own doc), `run`, and
-//! `if`/`unless entity`/`dimension`/`score`.
+//! `if`/`unless entity`/`dimension`/`score`/`data storage`.
 //!
 //! `at`'s rotation transfer and `rotated as` both needed
 //! `crate::commands::source::PlayerCandidate` to carry a rotation, which it
@@ -90,19 +90,29 @@
 //! function `/scoreboard players get` uses, so a selector, `*`, or a bare
 //! "fake player" name all mean the same thing in both places.
 //!
+//! `if`/`unless data storage` (`register_data_storage_condition`) needed
+//! `crate::commands::nbt_storage` to exist first — a real NBT command-storage
+//! engine, reached through `ctx.world.state.nbt_storage()` exactly like
+//! `/data storage` itself reaches it. Only the `storage` target is built —
+//! see `crate::commands::nbt_data`'s module doc for why `entity`/`block` are
+//! a separate, still-missing subsystem, not an oversight here.
+//!
 //! # What is not built, and why — each names its own missing subsystem
 //!
 //! * **`store`, `predicate`, `items`, `function`, `stopwatch`,
 //!   `if`/`unless block`/`biome`/`blocks`/`loaded`, and `on <relation>`.**
-//!   (`if`/`unless score` is now built — see "What is built" above.) Each of
-//!   these still needs a subsystem this server has nowhere: `store`'s own
-//!   result/success-capture mechanism (a real scoreboard now exists for it to
-//!   write *into*, but nothing here yet wraps a following command's return
-//!   value the way `store` needs — the dispatcher only threads a
-//!   [`CommandSource`], never a result, through a chain), NBT storage/paths
-//!   (`store … <path>`, `if data`), a loot-predicate engine (`if predicate`),
-//!   functions (explicitly out of scope for this unit — issue #48's remainder
-//!   tracks functions/datapacks separately), a stopwatch registry, a read-only
+//!   (`if`/`unless score` and `if`/`unless data storage` are now built — see
+//!   "What is built" above.) Each of these still needs a subsystem this
+//!   server has nowhere: `store`'s own result/success-capture mechanism (a
+//!   real scoreboard *and* NBT storage both now exist for it to write *into*,
+//!   but nothing here yet wraps a following command's return value the way
+//!   `store` needs — the dispatcher only threads a [`CommandSource`], never a
+//!   result, through a chain), `if data`'s `entity`/`block` targets and `if
+//!   items` (a live, command-reachable, mutable NBT view of an entity, block
+//!   entity, or container slot — `storage` needed none of that, which is why
+//!   it alone is built), a loot-predicate engine (`if predicate`), functions
+//!   (explicitly out of scope for this unit — issue #48's remainder tracks
+//!   functions/datapacks separately), a stopwatch registry, a read-only
 //!   block/biome/chunk-residency query on [`CommandWorld`] (which today only
 //!   ever *writes* blocks, through [`super::Effect::SetBlock`]/
 //!   [`super::Effect::Fill`] — see that enum's own doc for why even those two
@@ -444,6 +454,32 @@ fn register_conditions(registrar: &mut Registrar, execute: NodeId, literal: &str
     });
 
     register_score_conditions(registrar, parent, execute, expected);
+    register_data_storage_condition(registrar, parent, execute, expected);
+}
+
+/// `data storage <source> <path>` — `DataCommand`'s own numeric-conditional
+/// shape (`NbtPathArgument.NbtPath.count`), matching `if entity`'s count
+/// rather than `if score`'s boolean: real vanilla paths can carry wildcards
+/// that match more than one element, so the underlying primitive is a count
+/// even though [`lodestone_command_mc::NbtPathArg`]'s v1 grammar (no
+/// indices, no filter compounds) can only ever produce `0` or `1` here.
+/// `if data entity`/`if data block` are not registered — see
+/// `crate::commands::nbt_data`'s module doc for why only `storage` exists.
+fn register_data_storage_condition(
+    registrar: &mut Registrar,
+    parent: NodeId,
+    execute: NodeId,
+    expected: bool,
+) {
+    let data_lit = registrar.literal(parent, "data");
+    let storage_lit = registrar.literal(data_lit, "storage");
+    let (id_node, id_key) = registrar.arg(storage_lit, "source", lodestone_command_mc::StorageIdArg);
+    let (path_node, path_key) = registrar.arg(id_node, "path", lodestone_command_mc::NbtPathArg);
+    add_numeric_conditional(registrar, path_node, execute, expected, move |ctx| {
+        let id = ctx.get(id_key).clone();
+        let path = ctx.get(path_key).clone();
+        Ok(i32::from(ctx.world.state.nbt_storage().get(&id, &path).is_some()))
+    });
 }
 
 /// `score <target> <targetObjective> matches <range>` and `score <target>

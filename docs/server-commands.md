@@ -377,6 +377,39 @@ reported back but not yet *enforced* by the mob/combat simulation — "stored
 and broadcast is not enforced" is the same shape difficulty was in before its
 first real consumer landed (see `crate::world_state`'s own module doc).
 
+#### `/data storage`, and `/execute if`/`unless data storage`
+
+`crate::commands::nbt_data` plus the engine it reads and writes,
+`crate::commands::nbt_storage::NbtStorageHandle` — a free-standing per-id NBT
+compound with no owner in the world, matching vanilla's own `CommandStorage`
+(`Map<ResourceLocation, CompoundTag>`, not attached to anything). Only the
+`storage` target of vanilla's three (`storage`/`entity`/`block`) is built:
+`entity`/`block` need a live, command-reachable, mutable NBT view of a real
+entity or block entity, which this crate has nowhere — the same gap
+`crate::commands::execute`'s module doc already named for `if items`.
+`get storage <id> [<path>]`, `merge storage <id> <nbt>`, `remove storage <id>
+<path>`, and the matching `/execute if`/`unless data storage <id> <path>`
+numeric conditional, reached through `ctx.world.state.nbt_storage()` exactly
+like `/data storage` itself, so a value written by one and read by the other
+agree by construction.
+
+The store's compound representation (`Vec<(String, SnbtValue)>`) is exactly
+what `lodestone_command_mc::NbtCompoundArg` already parses `/data merge`'s
+`<nbt>` argument into, so there is no conversion at that seam. Two new
+argument types back the rest: `lodestone_command_mc::StorageIdArg`
+(`minecraft:resource_location`, no census — a storage id is created by use,
+not registered ahead of time) and `NbtPathArg` (`minecraft:nbt_path`), whose
+own module doc names it as a **v1 reduction**: a dot-separated chain of
+compound keys only, refusing (not silently truncating) an array index or a
+filter compound. That is exactly why `if data`'s `storage` form can exist
+while `if items` (array-indexed paths into an inventory) still cannot.
+`SnbtValue` also gained a `Display` impl for `/data get`'s feedback text,
+guaranteed by its own test to round-trip through `parse_value`.
+
+**Not built:** the `entity`/`block` targets everywhere they appear
+(`/data get`/`merge`/`remove`, and `if data entity`/`if data block`), array
+indices and filter-compound predicates in `<path>`.
+
 #### The four mechanisms
 
 Each of `/tp`, `/summon`, `/weather` and `/defaultgamemode` was blocked on one
@@ -485,7 +518,7 @@ engages here.
 Built: `as`, `at` (position **and** rotation), `positioned` (+ `as`), `rotated`
 (+ `as`), `facing` (`<pos>` and `entity <targets> <anchor>`), `align`,
 `anchored`, `in` (single-hosted-dimension census), `run`, and `if`/`unless
-entity`/`dimension`/`score`. `at`'s rotation transfer and `rotated as` needed
+entity`/`dimension`/`score`/`data storage`. `at`'s rotation transfer and `rotated as` needed
 `PlayerCandidate` to carry a rotation, which it now does —
 `crate::players::PlayerRegistry` was already tracking a live per-connection
 `Rotation` and simply never threading it through. Each subcommand is one
@@ -501,6 +534,13 @@ scoreboard to exist first; see "`/scoreboard`" below. Both read through
 `ctx.world.state.scoreboard()`, the same store `/scoreboard` itself writes, so
 a score set by one command and read by a chained `execute if score` agree by
 construction with no new plumbing between them.
+
+`if`/`unless data storage` needed a real NBT command-storage engine first;
+see "`/data storage`" below. It is `DataCommand`'s own numeric-conditional
+shape (a count, matching `if entity` rather than `if score`'s boolean),
+because real vanilla paths can carry wildcards — `NbtPathArg`'s v1 grammar
+can only ever produce `0` or `1` here, but the shape is kept so nothing needs
+to change if the path grammar is ever widened.
 
 `run <command>` carries **no modifier at all**: `registrar.redirect(run_node,
 registrar.root())`, matching vanilla's own `literal("run")
@@ -520,15 +560,16 @@ see that function's own doc comment for the failure mode it closes (a fork
 that empties the source set before the bare form's pass/fail message ever
 gets to run).
 
-Not built, each naming its own missing subsystem: `store` (a scoreboard now
-exists to write *into* — see "`/scoreboard`" below — but nothing in the
-dispatcher yet wraps a chained command's own return value the way `store`
-needs to capture it), `if data`/`items` (no NBT storage or container-slot
-query reachable from a command — a textual SNBT *parser* now exists,
-`lodestone_command_mc::snbt`, but `if data` additionally needs somewhere to
-read NBT *from*, which this crate still has nowhere), `if predicate` (no
-loot-predicate engine), `stopwatch` (no stopwatch registry), `if
-block`/`biome`/`blocks`/`loaded` (no read-only block/biome/chunk-residency
+Not built, each naming its own missing subsystem: `store` (a scoreboard *and*
+NBT storage now both exist to write *into* — see "`/scoreboard`"/"`/data
+storage`" below — but nothing in the dispatcher yet wraps a chained command's
+own return value the way `store` needs to capture it), `if data`'s
+`entity`/`block` targets and `if items` (no live, mutable NBT view of an
+entity, block entity, or container slot reachable from a command — `storage`
+needed none of that, which is why it alone is built; see "`/data storage`"
+below), `if predicate` (no loot-predicate engine), `stopwatch` (no
+stopwatch registry), `if block`/`biome`/`blocks`/`loaded` (no read-only
+block/biome/chunk-residency
 query on `CommandWorld`, which today only ever *writes* blocks), `on
 <relation>` (no entity-relationship query on the mob simulation), the
 `execute summon` modifier form (unnecessary as its own subtree — `/summon` is
@@ -793,12 +834,15 @@ Still open, and each is now additive rather than blocked:
   a real selector filter. **`at`'s rotation transfer and `rotated as` are also
   built now** — `PlayerCandidate` carries a live rotation (`crate::players`
   already tracked one per connection and simply never threaded it through).
-  What is still open: **`store`** (a scoreboard exists to write *into*,
-  but the dispatcher does not yet wrap a chained command's return value the
-  way `store` needs to capture it), **`if data`/`items`** (a textual SNBT
-  *parser* now exists — `lodestone_command_mc::snbt::{NbtTagArg,
-  NbtCompoundArg, SnbtValue}` — but there is still no NBT-*storage* engine to
-  read from, and no container-slot query reachable from a command),
+  **A real NBT command-storage engine now exists too**
+  (`crate::commands::nbt_storage::NbtStorageHandle` — see `#### /data
+  storage` above), so `/data storage` and `/execute if`/`unless data
+  storage` are both built; only the `entity`/`block` targets remain missing.
+  What is still open: **`store`** (a scoreboard and NBT storage both exist
+  to write *into*, but the dispatcher does not yet wrap a chained command's
+  return value the way `store` needs to capture it), **`if data`'s
+  `entity`/`block` targets and `if items`** (no live, mutable NBT view of an
+  entity, block entity, or container slot reachable from a command),
   **`if predicate`** (no loot-predicate engine), **`stopwatch`** (no
   stopwatch registry), **`if block`/`biome`/`blocks`/`loaded`** (no read-only
   block/biome/chunk-residency query on `CommandWorld`, which today only ever

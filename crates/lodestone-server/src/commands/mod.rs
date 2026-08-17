@@ -137,6 +137,8 @@ mod gamerule;
 mod give;
 mod help;
 mod kill;
+mod nbt_data;
+pub mod nbt_storage;
 pub mod registrar;
 mod scoreboard;
 pub mod scoreboard_store;
@@ -246,6 +248,7 @@ impl ServerCommands {
         clear::register(&mut registrar);
         block_commands::register(&mut registrar);
         chat_commands::register(&mut registrar);
+        nbt_data::register(&mut registrar);
         teleport::register(&mut registrar);
         summon::register(&mut registrar);
         weather::register(&mut registrar);
