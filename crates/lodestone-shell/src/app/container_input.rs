@@ -270,6 +270,64 @@ impl WindowApp {
         true
     }
 
+    /// The crafter's own click override (issue #613's `SetContainerSlotState`
+    /// remainder): a plain click on an empty, non-spectator crafter slot
+    /// toggles that slot's enabled/disabled state — `CrafterScreen.slotClicked`
+    /// (`.cache/mc/26.2/client-src`)'s `PICKUP` case: re-enable a disabled
+    /// slot unconditionally, or disable an enabled one only when nothing is
+    /// carried (so placing an item there still works normally).
+    ///
+    /// **Unlike [`Self::handle_beacon_click`]/[`Self::handle_enchant_click`],
+    /// this never *consumes* the click** — vanilla's own override still calls
+    /// `super.slotClicked(...)` unconditionally right after its toggle check,
+    /// so the ordinary (here, effectively a no-op — the slot is empty and the
+    /// cursor usually is too) container click still goes out alongside this
+    /// one. Callers should invoke this as a side effect beside the normal
+    /// click dispatch, not as part of the `consumed_by_*` first-refusal
+    /// chain.
+    ///
+    /// **Named simplifications**: only a plain click (`ContainerInput::PICKUP`)
+    /// is handled — vanilla's `SWAP` case (pressing a hotbar number over a
+    /// disabled slot holding a matching item) is not. And there is no local,
+    /// optimistic `containerData` mutation the way `CrafterMenu.setSlotState`
+    /// gives vanilla's own client — the toggle only becomes visible once the
+    /// server's `container_set_data` echoes it back into
+    /// [`lodestone_client::OpenMenuSnapshot::data`] (already threaded end to
+    /// end; see `docs/container-cost-screens.md`). No render support for the
+    /// disabled-slot sprite exists yet either — this lands the wire half
+    /// only, the same scope [`Self::handle_beacon_click`]'s own remainder
+    /// once was.
+    pub(super) fn maybe_toggle_crafter_slot(&mut self, menu: &Menu, hit: MenuHit) {
+        let MenuHit::Slot(index) = hit else { return };
+        if index >= 9 {
+            return;
+        }
+        let Some(open) = self.sim.open_menu() else {
+            return;
+        };
+        if open.menu_type.namespace() != "minecraft" || open.menu_type.path() != "crafter_3x3" {
+            return;
+        }
+        if menu.slot_item(index).is_some() {
+            return;
+        }
+        #[allow(clippy::cast_possible_wrap)]
+        let slot_id = index as i32;
+        let disabled = open
+            .data
+            .iter()
+            .find(|(id, _)| *id == slot_id)
+            .is_some_and(|(_, value)| *value == 1);
+        let Some(new_state) =
+            crate::container::crafter::toggle_decision(disabled, menu.carried().is_some())
+        else {
+            return;
+        };
+        let window_id = open.window_id;
+        self.sim
+            .send_set_container_slot_state(slot_id, window_id, new_state);
+    }
+
     /// One `MouseWheel` notch over a slot holding a bundle: scroll-selects
     /// which of its contents is highlighted and reports the new selection to
     /// the server (issue #616's `BUNDLE_ITEM_SELECTED` / #613's

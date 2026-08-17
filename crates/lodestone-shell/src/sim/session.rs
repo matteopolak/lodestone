@@ -1594,6 +1594,25 @@ impl Sim {
         }
     }
 
+    /// Toggle a crafter slot's enabled/disabled state — vanilla's
+    /// `ServerboundContainerSlotStateChangedPacket`, sent from
+    /// `CrafterScreen.updateSlotState`/`CrafterMenu.setSlotState`. Issue
+    /// #613's `SetContainerSlotState` remainder; see
+    /// `app::container_input::WindowApp::maybe_toggle_crafter_slot` for the
+    /// click gate this is called from. Same "predict, don't validate here"
+    /// shape as [`Self::send_container_button_click`] — the server's own
+    /// `container_set_data` broadcast is the authority and corrects a wrong
+    /// send.
+    pub fn send_set_container_slot_state(&self, slot_id: i32, container_id: i32, new_state: bool) {
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::SetContainerSlotState {
+                slot_id,
+                container_id,
+                new_state,
+            });
+        }
+    }
+
     /// Report which item inside a hovered bundle the scroll wheel just
     /// highlighted — vanilla's `ServerboundSelectBundleItemPacket`
     /// (`BundleMouseActions.toggleSelectedBundleItem`, issue #616's
