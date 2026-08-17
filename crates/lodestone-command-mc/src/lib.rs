@@ -65,11 +65,15 @@
 //! (the item and entity-type name censuses), `uuid`.
 
 pub mod anchor;
+pub mod biome;
 pub mod block;
 pub mod dimension;
 pub mod entity;
 pub mod entity_type;
+pub mod float_range;
 pub mod game_mode;
+pub mod heightmap;
+pub mod identifier;
 pub mod item;
 pub mod nbt_path;
 pub mod position;
@@ -81,13 +85,17 @@ pub mod team;
 pub mod time;
 
 pub use anchor::{AnchorInput, EntityAnchorArg};
+pub use biome::{BiomeArg, BiomeInput};
 pub use block::{BlockArg, BlockInput};
 pub use dimension::{DimensionArg, HOSTED_DIMENSIONS};
 pub use entity::{
     Bounds, EntityArg, EntitySelector, SelectorOrder, SelectorPosition, SelectorPredicate,
 };
 pub use entity_type::{EntityTypeArg, EntityTypeInput};
+pub use float_range::{FloatRange, FloatRangeArg};
 pub use game_mode::GameModeArg;
+pub use heightmap::{HeightmapArg, HeightmapKind};
+pub use identifier::IdentifierArg;
 pub use item::{ItemArg, ItemInput};
 pub use nbt_path::{NbtPathArg, StorageIdArg};
 pub use position::{BlockPosArg, Coordinate, Coordinates, Vec3Arg};

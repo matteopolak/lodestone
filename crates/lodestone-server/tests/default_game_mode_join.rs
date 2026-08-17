@@ -55,6 +55,10 @@ impl ChunkSource for FlatSource {
         "minecraft:air".to_string()
     }
 
+    fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+        "minecraft:plains".to_string()
+    }
+
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
 }
 

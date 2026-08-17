@@ -65,6 +65,10 @@ impl ChunkSource for AirSource {
             .unwrap_or_else(|| "minecraft:air".to_string())
     }
 
+    fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+        "minecraft:plains".to_string()
+    }
+
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
         self.edits
             .lock()

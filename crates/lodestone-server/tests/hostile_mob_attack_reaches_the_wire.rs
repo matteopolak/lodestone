@@ -166,6 +166,12 @@ impl ChunkSource for RoofedRoom {
             .to_string()
     }
 
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        self.build()
+            .biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16))
+            .to_string()
+    }
+
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
 }
 

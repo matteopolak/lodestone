@@ -395,6 +395,10 @@ impl ChunkSource for CommandBlockSource {
         }
     }
 
+    fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+        "minecraft:plains".to_string()
+    }
+
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // Edits are not retained — this test only reads back the block
         // *entity* registry, never a re-read of this source.

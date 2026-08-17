@@ -98,6 +98,10 @@ impl ChunkSource for WaterSource {
         "minecraft:water".to_string()
     }
 
+    fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+        "minecraft:plains".to_string()
+    }
+
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
     // retention). `ChunkSource::set_block` has no default, so this is

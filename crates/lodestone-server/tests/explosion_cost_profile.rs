@@ -217,6 +217,14 @@ impl ChunkSource for Rig {
         column.block_state(x - cx * 16, y, z - cz * 16).to_string()
     }
 
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let mut columns = self.columns.lock().expect("rig lock");
+        let column = columns.entry((cx, cz)).or_insert_with(|| self.fresh_column());
+        column.biome_state_at(x - cx * 16, y, z - cz * 16).to_string()
+    }
+
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);

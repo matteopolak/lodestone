@@ -96,6 +96,16 @@ impl ChunkSource for UnusedSource {
         self.column(cx, cz).block_state(lx, y, lz).to_string()
     }
 
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        // The column-regenerating form (correct, just not cheap); this status
+        // gate never reads terrain at all.
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
+    }
+
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design. `ChunkSource::set_block` has no default, so this is stated
     // explicitly rather than inherited.

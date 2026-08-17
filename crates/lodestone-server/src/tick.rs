@@ -3488,6 +3488,16 @@ mod tests {
             self.column(cx, cz).block_state(lx, y, lz).to_string()
         }
 
+        fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+            // The plain column-regenerating form; the clock/overrun gates only
+            // care that the loop runs, not what this reads.
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
+        }
+
         // `run_tick_loop` can forward grazing/random-tick mutations to this
         // (tick.rs's own `world.set_block`), so it must not panic; but the
         // source has no storage, so the edit is deliberately discarded.
@@ -4136,6 +4146,16 @@ mod tests {
             self.column(cx, cz).block_state(lx, y, lz).to_string()
         }
 
+        fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+            // The plain column-regenerating form; this fixture only records
+            // `set_block` calls, nothing reads terrain back.
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
+        }
+
         fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
             self.0
                 .lock()
@@ -4247,6 +4267,10 @@ mod tests {
             // land in the recorded set, or the block-entity scan and the fluid pass
             // would be indistinguishable from the random-tick area this measures.
             "minecraft:air".to_owned()
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_string()
         }
 
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
@@ -4905,6 +4929,10 @@ mod tests {
             self.get((x, y, z))
         }
 
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_string()
+        }
+
         fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
             self.0
                 .lock()
@@ -5055,6 +5083,10 @@ mod tests {
                 .get(&(x, y, z))
                 .cloned()
                 .unwrap_or_else(|| crate::chunk::AIR.to_owned())
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_string()
         }
 
         fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {

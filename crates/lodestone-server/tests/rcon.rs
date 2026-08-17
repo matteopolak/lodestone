@@ -75,6 +75,14 @@ impl ChunkSource for EmptyWorld {
         let lz = z.rem_euclid(16);
         self.column(cx, cz).block_state(lx, y, lz).to_string()
     }
+
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
+    }
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }
@@ -114,6 +122,10 @@ impl ChunkSource for RecordingWorld {
             .get(&(x, y, z))
             .cloned()
             .unwrap_or_else(|| "minecraft:air".to_string())
+    }
+
+    fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+        "minecraft:plains".to_string()
     }
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
         self.0
