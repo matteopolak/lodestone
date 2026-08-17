@@ -42,7 +42,12 @@ pub(super) fn version_line() -> String {
 /// split exists.
 #[must_use]
 pub fn pause_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
-    let published = nav.is_lan_published();
+    // The *layout* question — "does the Options row collapse to full width" —
+    // not the raw publish flag: see `MenuNav::open_to_lan_available`'s own
+    // doc for why a multiplayer session must take this branch too, even
+    // though `is_lan_published()` alone cannot tell it apart from an
+    // unpublished singleplayer world.
+    let published = !nav.open_to_lan_available();
     MenuFrame {
         rows: nav
             .pause_buttons()

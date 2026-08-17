@@ -220,6 +220,15 @@ impl WindowApp {
         // `is_dead` are above, so a menu already open catches up the instant
         // the server confirms the bind rather than needing to be reopened.
         self.nav.set_lan_published(self.sim.is_lan_published());
+        // Vanilla's other half of the same gate, `hasSingleplayerServer()` —
+        // without this a multiplayer session read the same `false` an
+        // unpublished singleplayer world does and showed Open to LAN with
+        // nothing local to publish. `MenuNav` holds no `Sim`/`UiState` of its
+        // own, so `SessionKind` is pushed in here too, next to the flag it
+        // combines with (`MenuNav::open_to_lan_available`).
+        self.nav.set_has_singleplayer_server(
+            self.ui.kind() == Some(crate::menu::SessionKind::Singleplayer),
+        );
         // A server-initiated container close: `Sim::open_menu` is the same
         // ground truth `redraw` reads a few lines below to *open*
         // `Screen::Container` (`Sim::open_menu().is_some() && is_playing()`),

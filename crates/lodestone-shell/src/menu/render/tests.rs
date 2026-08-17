@@ -3356,6 +3356,11 @@ fn the_odd_stat_rows_zebra_grey_reaches_real_geometry_not_just_frame_metadata() 
 /// is `MenuNav::pause_buttons`'s `PAUSE_BUTTONS` answer. See
 /// `the_published_pause_frame_drops_open_to_lan_and_reflows_options` below for
 /// the other one, added when issue #535's scope 2 made this list conditional.
+///
+/// `set_has_singleplayer_server(true)` states the other half of that same
+/// gate explicitly — `MenuNav::open_to_lan_available`'s own doc explains why
+/// a session kind of `None` (`enter_dev_world`'s own default) must not read
+/// as "offer Open to LAN" the way it used to before that field existed.
 #[test]
 fn pause_frame_builds_vanillas_ten_widgets_in_order_and_tracks_the_highlight() {
     use crate::menu::nav::{PAUSE_BUTTONS, PauseButton};
@@ -3364,6 +3369,7 @@ fn pause_frame_builds_vanillas_ten_widgets_in_order_and_tracks_the_highlight() {
     let mut ui = UiState::new();
     ui.enter_dev_world();
     ui.pause();
+    nav.set_has_singleplayer_server(true);
     // The last index, not 1: this screen reproduces vanilla's whole grid, so
     // Disconnect is the last widget rather than the third. The old version of this
     // test asserted a three-row stack.
