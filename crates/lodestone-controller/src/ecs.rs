@@ -173,14 +173,44 @@ pub fn tick_sprint_window(mut input: ResMut<RawInput>) {
     input.0.tick();
 }
 
-/// Queue the per-tick movement packet.
+/// Queue the per-tick movement **action**. This is deliberately NOT the wire
+/// cadence, and the two must not be conflated.
 ///
-/// Vanilla emits one every tick (20 Hz); mirroring that is what keeps the
-/// server from ever having to correct us. Only once we are actually in the
-/// world — before the server places us, a version adapter (correctly) has no
-/// Play-state packet for a move, so sending earlier just produces
-/// dropped-action noise. While dead the vanilla client sends no movement (it
-/// is held on the death screen), so it is withheld until the respawn lands.
+/// # This does not, and must not, mean one packet is sent every tick
+///
+/// Vanilla's own `LocalPlayer.sendPosition()` is *evaluated* every client
+/// tick but *sends* on only a fraction of them: it tracks the position/
+/// rotation last actually transmitted and emits `Pos`/`Rot`/`PosRot`/
+/// `StatusOnly` only when that state is dirty by more than `(2e-4)²`
+/// (position) or at all (rotation), or forces one `Pos` every 20 ticks
+/// regardless (`positionReminder`); an idle player with no on-ground/
+/// collision transition sends *nothing at all* on the other ~19 ticks out of
+/// 20. `crates/protocol/v770/src/adapter/mod.rs`'s `select_move_packet` is a
+/// verified, tested port of that exact algorithm
+/// (`crates/protocol/v770/tests/movement_selection.rs`), so pushing one
+/// `ClientAction::Move` here every tick does **not** put one packet on the
+/// wire every tick for v770 — it is what keeps that downstream dirty-tracker
+/// correctly clocked, since its own `positionReminder`-style counter only
+/// advances when it is invoked, exactly mirroring `sendPosition()` being
+/// called every real tick in vanilla. Removing this per-tick push (rather
+/// than throttling *inside* the adapter, where the real "last sent" state
+/// already lives) would starve that counter and silently break the 20-tick
+/// periodic resync, not fix anything.
+///
+/// **The legacy families do not have this throttle at all** —
+/// `v47`/`v340`/`v735`'s `ClientAction::Move` arms encode a real packet
+/// unconditionally on every call, with no dirty-tracking of their own
+/// (verified against `crates/protocol/v47/src/adapter.rs` and
+/// `crates/protocol/v340/src/adapter.rs`). Joining a server over one of
+/// those families genuinely does send one movement packet per tick even
+/// while standing still; closing that gap needs a `select_move_packet`-style
+/// tracker built per family, not a change here.
+///
+/// Only once we are actually in the world — before the server places us, a
+/// version adapter (correctly) has no Play-state packet for a move, so
+/// sending earlier just produces dropped-action noise. While dead the
+/// vanilla client sends no movement (it is held on the death screen), so it
+/// is withheld until the respawn lands.
 pub fn send_move_action(
     egress: Res<Egress>,
     mut queue: ResMut<ActionQueue>,

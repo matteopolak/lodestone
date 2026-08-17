@@ -7338,6 +7338,33 @@ where
                     sign.editor = Some(placer);
                 }
                 block_entities.with(|registry| registry.insert(target, entity));
+            } else if let Some(type_name) = lodestone_data::block_states::state_id(&state)
+                .and_then(lodestone_data::block_entity_types::block_entity_type)
+                .and_then(lodestone_data::block_entity_types::block_entity_type_name)
+            {
+                // Vanilla's `LevelChunk.setBlockState` creates a block entity
+                // from the *state* alone (`state.hasBlockEntity()`), for every
+                // block-entity type — not only the dozen `block_entity_for_item`
+                // simulates real behaviour for. A skull, banner, jukebox, … placed
+                // through this path still needs a registry record: its client-side
+                // render is entirely block-entity-driven (see
+                // `ChunkColumn::missing_block_entity_states`'s own doc, which
+                // repairs the identical gap for a chunk loaded off disk), so with
+                // no record here the position is on the wire as a bare state and
+                // draws nothing until an unrelated later block update lets the
+                // client synthesize an empty record for itself. `Nbt::End` matches
+                // what a save/load round trip already reconstructs for a type this
+                // crate does not otherwise model (`chunk_nbt::block_entity_from_nbt`'s
+                // own catch-all arm).
+                block_entities.with(|registry| {
+                    registry.insert(
+                        target,
+                        crate::block_entities::BlockEntity::Opaque {
+                            id: type_name.to_owned(),
+                            nbt: lodestone_core::Nbt::End,
+                        },
+                    );
+                });
             }
             source.set_block(target.x, target.y, target.z, &state);
             // `BlockItem.place`'s own `level.playSound(player, …)`

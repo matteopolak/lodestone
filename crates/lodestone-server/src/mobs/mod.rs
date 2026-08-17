@@ -820,6 +820,18 @@ pub enum InteractOutcome {
     /// [`MobSim::interact`]'s zombie-villager short-circuit for why that
     /// simplification is disclosed rather than a distinct variant.
     ZombieVillagerConversionStarted,
+    /// An empty-handed allay was given an item — vanilla `Allay.mobInteract`'s
+    /// carrying half (issue #230). Consumes the item, matching that real
+    /// `itemStack.consume(1, player)` call; see [`MobSim::interact`]'s allay
+    /// short-circuit for what is and is not modelled around it.
+    ///
+    /// **No wire encoder exists yet to make this visible** — this crate's
+    /// `ServerProtocol` has no `SET_EQUIPMENT` producer at all (only a
+    /// client-side decoder, for joining someone else's server), so the held
+    /// item is real server-side state with no client-visible consequence
+    /// today. That gap is not specific to the allay: every mob's
+    /// `NavigatingMob::main_hand_item` has the identical problem.
+    ItemGiven,
 }
 
 impl InteractOutcome {
@@ -857,7 +869,8 @@ impl InteractOutcome {
             | Self::TemperRaised { .. }
             | Self::OpenTrade { .. }
             | Self::Mounted
-            | Self::ZombieVillagerConversionStarted => None,
+            | Self::ZombieVillagerConversionStarted
+            | Self::ItemGiven => None,
         }
     }
 }
@@ -6649,6 +6662,32 @@ impl<'w> MobSim<'w> {
                 self.pending_vocalisations.push(effect);
             }
             return InteractOutcome::ZombieVillagerConversionStarted;
+        }
+
+        // `Allay.mobInteract`'s carrying half: giving an item to an
+        // empty-handed allay makes it hold that item — vanilla's own gate is
+        // exactly `hasItemInSlot(EquipmentSlot.MAINHAND)`. An allay is never
+        // tameable, so — like the villager and zombie-villager arms above —
+        // this is a short-circuit ahead of the `tame_mechanism` dispatch
+        // rather than another case inside it.
+        //
+        // **Not modelled here**: taking the item back (an empty-hand
+        // right-click on a carrying allay), autonomously picking up matching
+        // dropped items, delivering them near a note block, and the
+        // note-block-triggered duplication itself — `crate::redstone_note_block`'s
+        // own module doc already discloses that the "play pulse" it computes
+        // has nowhere in this event type to land, which is the rest of this
+        // gap. This arm only closes the "carries an item" half.
+        if species == "allay" {
+            let already_holding = mob.mob.main_hand_item().is_some();
+            if already_holding || item.is_none() {
+                return InteractOutcome::Pass;
+            }
+            let given = item.map(str::to_owned);
+            if let Some(mob) = self.mobs.iter_mut().find(|m| m.id == mob_id) {
+                mob.mob.set_main_hand_item(given);
+            }
+            return InteractOutcome::ItemGiven;
         }
 
         let outcome = match species::tame_mechanism(&species) {
@@ -12444,6 +12483,122 @@ mod villager_gossip_reputation_and_curing_tests {
                 .is_none(),
             "villagers 500 blocks apart must never spread gossip to each other"
         );
+    }
+}
+
+#[cfg(test)]
+mod allay_carrying_tests {
+    use super::*;
+
+    fn flat_world() -> ChunkWorld {
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=8 {
+            for z in -8..=8 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        world
+    }
+
+    fn alice() -> PlayerIdentity {
+        PlayerIdentity {
+            uuid: Uuid::from_u128(0xA11CE),
+            entity_id: 4242,
+        }
+    }
+
+    /// Vanilla's `hasItemInSlot(EquipmentSlot.MAINHAND)` gate, the "carrying"
+    /// half of issue #230: an empty-handed allay given an item must take it
+    /// into its main hand, consume the item, and report `ItemGiven`.
+    #[test]
+    fn giving_an_empty_handed_allay_an_item_makes_it_hold_that_item() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species(
+                "minecraft:allay".parse().expect("valid key"),
+                Vec3::new(0.0, 0.0, 0.0),
+            )
+            .id();
+        assert!(
+            sim.get(id).expect("spawned").mob.main_hand_item().is_none(),
+            "a freshly spawned allay must start empty-handed"
+        );
+
+        let outcome = sim.interact(
+            id,
+            alice(),
+            Some(&"minecraft:emerald".parse().expect("valid key")),
+        );
+
+        assert_eq!(outcome, InteractOutcome::ItemGiven);
+        assert!(
+            outcome.consumes_item(),
+            "the given item must be consumed, matching itemStack.consume(1, player)"
+        );
+        assert_eq!(
+            sim.get(id).expect("still alive").mob.main_hand_item(),
+            Some("emerald"),
+            "the allay must now be carrying exactly the item it was given"
+        );
+    }
+
+    /// The negative control: an allay **already** carrying an item must
+    /// refuse a second one — vanilla's `Allay.mobInteract` gate is
+    /// specifically "empty main hand", not "any interaction with an item".
+    /// Without this, the positive gate above could be passing because every
+    /// interaction overwrites the held item unconditionally rather than
+    /// because the empty-hand gate is real.
+    #[test]
+    fn an_already_carrying_allay_refuses_a_second_item() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species(
+                "minecraft:allay".parse().expect("valid key"),
+                Vec3::new(0.0, 0.0, 0.0),
+            )
+            .id();
+        let first = sim.interact(
+            id,
+            alice(),
+            Some(&"minecraft:emerald".parse().expect("valid key")),
+        );
+        assert_eq!(first, InteractOutcome::ItemGiven);
+
+        let second = sim.interact(
+            id,
+            alice(),
+            Some(&"minecraft:diamond".parse().expect("valid key")),
+        );
+        assert_eq!(
+            second,
+            InteractOutcome::Pass,
+            "an allay already carrying an item must refuse a second one"
+        );
+        assert_eq!(
+            sim.get(id).expect("still alive").mob.main_hand_item(),
+            Some("emerald"),
+            "the original item must still be held after the refused second gift"
+        );
+    }
+
+    /// A second negative control: an empty-handed interaction (no item held
+    /// by the actor) must never clear or otherwise touch an allay's hands.
+    #[test]
+    fn an_empty_hand_interaction_does_nothing_to_an_allay() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species(
+                "minecraft:allay".parse().expect("valid key"),
+                Vec3::new(0.0, 0.0, 0.0),
+            )
+            .id();
+
+        let outcome = sim.interact(id, alice(), None);
+        assert_eq!(outcome, InteractOutcome::Pass);
+        assert!(sim.get(id).expect("still alive").mob.main_hand_item().is_none());
     }
 }
 

@@ -955,6 +955,72 @@ impl ChunkColumn {
         &self.palette
     }
 
+    /// Absolute positions and vanilla `minecraft:block_entity_type` registry
+    /// keys for every cell in this column whose block state owns a block
+    /// entity ([`lodestone_data::block_entity_types::block_entity_type`]) but
+    /// is not among `existing`.
+    ///
+    /// Vanilla's `LevelChunk.setBlockState` creates a block entity from the
+    /// *state* alone, for every block-entity type — not only the dozen this
+    /// crate simulates real behaviour for
+    /// ([`crate::block_entities::block_entity_for_item`]'s own scope note
+    /// names them: furnace family, hopper, composter, brewing stand, the
+    /// three containers, command block, spawner, sign, beacon, crafter). A
+    /// skull, banner, jukebox, decorated pot, … placed before a registry
+    /// entry existed for it (or one this crate has never modelled a
+    /// placement-time entry for at all) can therefore reach a served column
+    /// with a correct state and zero record. That is not cosmetic: a
+    /// block-entity-rendered block draws nothing at all client-side without
+    /// one, until an unrelated later block update lets the client
+    /// synthesize an empty record for itself off the state — this is the
+    /// gap behind that "invisible until interacted with" symptom.
+    ///
+    /// The palette is classified once — the same argument
+    /// [`solid_count`](Self::solid_count) already makes for its own
+    /// predicate — so a column with no block-entity-owning state in its
+    /// palette (the overwhelming majority) costs one pass over the palette
+    /// and no cell scan at all.
+    #[must_use]
+    pub fn missing_block_entity_states(
+        &self,
+        cx: i32,
+        cz: i32,
+        existing: &[(BlockPos, BlockEntity)],
+    ) -> Vec<(BlockPos, &'static str)> {
+        let types: Vec<Option<&'static str>> = self
+            .palette_state_ids
+            .iter()
+            .map(|&id| {
+                lodestone_data::block_entity_types::block_entity_type(id)
+                    .and_then(lodestone_data::block_entity_types::block_entity_type_name)
+            })
+            .collect();
+        if types.iter().all(Option::is_none) {
+            return Vec::new();
+        }
+        const ROW_CELLS: usize = 16 * 16;
+        let base_x = cx * 16;
+        let base_z = cz * 16;
+        let mut out = Vec::new();
+        for s in 0..self.blocks.section_count() {
+            self.blocks.for_each_in_section(s, |cell, id| {
+                let Some(name) = types[id as usize] else {
+                    return;
+                };
+                let row_local = cell / ROW_CELLS;
+                let rem = cell % ROW_CELLS;
+                let local_z = (rem / 16) as i32;
+                let local_x = (rem % 16) as i32;
+                let y = self.min_y + (s * SECTION_ROWS + row_local) as i32;
+                let pos = BlockPos::new(base_x + local_x, y, base_z + local_z);
+                if !existing.iter().any(|(p, _)| *p == pos) {
+                    out.push((pos, name));
+                }
+            });
+        }
+        out
+    }
+
     /// 16-row sections in this column — `height / 16`, rounded up. The same
     /// windows [`section_ticking_counts`](Self::section_ticking_counts) indexes.
     #[must_use]
