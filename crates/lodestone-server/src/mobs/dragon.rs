@@ -153,6 +153,14 @@ pub struct DragonDeathOutcome {
     /// sequence so the central bedrock pole overwrites the portal disc at
     /// its own column, exactly as it does here.
     pub exit_portal_blocks: Vec<(BlockPos, &'static str)>,
+    /// `crate::dragon::fight::gateway_blocks`, if `outcome.spawn_gateway` was
+    /// set **and** the gateway pool still had a slice left — empty
+    /// otherwise (never both `spawn_gateway` true and this empty for a
+    /// reason other than pool exhaustion, since a kill always pops
+    /// successfully until the twenty-first). See
+    /// [`fight::gateway_blocks`]'s own doc for the real, disclosed
+    /// limit: this is the *block structure* only, not a working teleport.
+    pub gateway_blocks: Vec<(BlockPos, &'static str)>,
 }
 
 impl<'w> MobSim<'w> {
@@ -539,10 +547,26 @@ impl<'w> MobSim<'w> {
         let outcome = fight::set_dragon_killed(state);
         let block_pos = BlockPos::new(origin.x.floor() as i32, origin.y.floor() as i32, origin.z.floor() as i32);
         let exit_portal_blocks = fight::exit_portal_blocks(block_pos, true);
+        // `EnderDragonFight.init`'s lazy shuffle — the first death this
+        // session sees creates the pool, exactly matching `dragon_fight`'s
+        // own lazy-creation shape just above.
+        if self.dragon_gateways.is_none() {
+            self.dragon_gateways = Some(fight::GatewayPool::shuffled(&mut self.gateway_shuffle_rng));
+        }
+        let gateway_blocks = if outcome.spawn_gateway {
+            self.dragon_gateways
+                .as_mut()
+                .and_then(fight::GatewayPool::pop)
+                .map(|slice| fight::gateway_blocks(fight::gateway_position(slice)))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         self.pending_dragon_deaths.push(DragonDeathOutcome {
             origin: block_pos,
             outcome,
             exit_portal_blocks,
+            gateway_blocks,
         });
     }
 
@@ -978,6 +1002,16 @@ mod tests {
         assert!(
             deaths[0].exit_portal_blocks.iter().any(|(_, s)| *s == "minecraft:end_portal"),
             "the portal must be activated (real end_portal blocks), not left inactive"
+        );
+        // Issue #276/#689's remaining gap: `spawn_gateway` was already `true`
+        // above, and before `gateway_blocks` existed nothing consumed it —
+        // this is the control that would have caught that silently: a real
+        // kill through the production entry point must produce a real,
+        // placeable `minecraft:end_gateway` block, not just the boolean
+        // signal.
+        assert!(
+            deaths[0].gateway_blocks.iter().any(|(_, s)| *s == "minecraft:end_gateway"),
+            "spawn_gateway being set must produce a real gateway block, not just a signal nothing consumes"
         );
 
         assert!(sim.take_dragon_deaths().is_empty(), "drained, not merely read");

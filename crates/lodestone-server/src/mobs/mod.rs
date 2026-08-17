@@ -1488,6 +1488,22 @@ pub struct SimMob<'w> {
     /// `Goat.DATA_HAS_RIGHT_HORN`. See [`has_left_horn`](Self::has_left_horn)'s
     /// own doc — identical shape, the other horn.
     has_right_horn: bool,
+    /// `minecraft:spawn_reinforcements` attribute's **base value** —
+    /// `Zombie.randomizeReinforcementsChance`'s `random.nextDouble() * 0.1F`,
+    /// rolled once at spawn for the zombie family
+    /// ([`MobSim::spawn_species`]) and decremented by
+    /// [`ZOMBIE_REINFORCEMENT_CALLER_CHARGE`] each time this mob successfully
+    /// calls one in — the permanent per-caller modifier
+    /// `Zombie.hurtServer` keeps re-adding at a lower amount, folded here into
+    /// one running total rather than a separate modifier stack, since
+    /// nothing else ever reads this field's history. `0.0` for every
+    /// non-zombie-family species, where nothing reads it. **Does not model
+    /// the "leader zombie" bonus** (`Zombie.handleAttributes`'s own
+    /// `nextFloat() < difficultyModifier * 0.05F` roll, which adds `0.5..0.75`
+    /// to this and forces full health / door-breaking) — a real, disclosed
+    /// gap, matching `docs/mob-species-spawning.md`'s existing note that the
+    /// door-breaking roll does not model it either.
+    reinforcement_chance: f64,
     /// This mob's own gossip ledger (issue #244) — `Villager.gossips`, what
     /// it believes about every UUID it has an opinion of. Empty for every
     /// non-villager species; a converted zombie villager's ledger is seeded
@@ -2320,6 +2336,28 @@ impl<'w> SimMob<'w> {
         self.has_right_horn
     }
 
+    /// `minecraft:spawn_reinforcements`'s current base value. See
+    /// [`reinforcement_chance`](Self::reinforcement_chance)'s own field doc.
+    #[must_use]
+    pub fn reinforcement_chance(&self) -> f64 {
+        self.reinforcement_chance
+    }
+
+    /// `ZOMBIE_REINFORCEMENT_CALLEE_CHARGE` — the permanent `-0.05` a freshly
+    /// placed reinforcement is charged against its own (independently
+    /// randomized) `reinforcement_chance`, on top of whatever
+    /// [`spawn_species`](Self::spawn_species)'s own
+    /// `randomizeReinforcementsChance` roll gave it, so a chain of
+    /// reinforcements-calling-reinforcements tapers off rather than
+    /// sustaining indefinitely. The driver (`crate::tick::run_tick_loop`)
+    /// calls this on the mob [`spawn_species`](Self::spawn_species) just
+    /// returned, since only it can tell "this spawn is a reinforcement" from
+    /// "this spawn is anything else".
+    pub fn apply_reinforcement_callee_charge(&mut self) -> &mut Self {
+        self.reinforcement_chance -= ZOMBIE_REINFORCEMENT_CALLEE_CHARGE;
+        self
+    }
+
     /// `VillagerData.level`, `1..=5`.
     #[must_use]
     pub fn villager_level(&self) -> i32 {
@@ -2716,6 +2754,25 @@ pub struct MobSim<'w> {
     /// doc for why a saturated `special_multiplier` does not imply this.
     /// `false` by default.
     spawn_hard_difficulty: bool,
+    /// `level.isSpawningMonsters()` — the `spawn_mobs` game rule, fed
+    /// alongside [`spawn_hard_difficulty`](Self::spawn_hard_difficulty) since
+    /// `Zombie.hurtServer`'s reinforcement call gates on both. `false` by
+    /// default, so an unwired caller sees zero reinforcements rather than
+    /// silently-always-on ones.
+    spawn_monsters_enabled: bool,
+    /// `Zombie.hurtServer`'s own `RandomSource` draw for the reinforcement
+    /// chance roll — on its own stream for [`orb_rng`](Self::orb_rng)'s
+    /// reason: whether a hit zombie calls for backup must not shift which
+    /// denomination an orb merges into or which roll a despawn check sees.
+    reinforcement_rng: SpawnRng,
+    /// Reinforcement calls [`attack`](Self::attack) has decided should
+    /// happen — the *roll* only, queued for `crate::tick::run_tick_loop` to
+    /// place, the same decide-here/place-there split
+    /// [`pending_lightning_fires`](Self::pending_lightning_fires) already
+    /// established: finding a valid spawn position needs the live world this
+    /// version-free sim does not hold. See
+    /// [`take_reinforcement_calls`](Self::take_reinforcement_calls).
+    pending_reinforcements: Vec<ReinforcementCall>,
     /// Live `FallingBlockEntity`s, keyed by network entity id — the falling
     /// sand/gravel a `crate::gravity_tick::TICK_GRAVITY` scheduled tick created.
     ///
@@ -3044,6 +3101,21 @@ pub struct MobSim<'w> {
     /// and `dragon::MobSim::record_dragon_death`'s for the process-lifetime
     /// (not yet disk-persisted) caveat.
     dragon_fight: Option<crate::dragon::fight::FightState>,
+    /// `EnderDragonFight.gateways` — the shuffled pool
+    /// [`crate::dragon::fight::GatewayPool`] consumes one slice from per
+    /// kill. Lazily shuffled on the first real kill, alongside
+    /// [`dragon_fight`](Self::dragon_fight) and for the identical
+    /// process-lifetime-only reason (see
+    /// [`dragon::MobSim::record_dragon_death`]'s own doc).
+    dragon_gateways: Option<crate::dragon::fight::GatewayPool>,
+    /// `Util.shuffle`'s own `RandomSource` draw, ported against
+    /// [`GatewayPool::shuffled`](crate::dragon::fight::GatewayPool::shuffled) —
+    /// on its own stream for [`orb_rng`](Self::orb_rng)'s reason. Only ever
+    /// drawn from once (the pool shuffles a single time, lazily), but kept
+    /// as a stream rather than a one-shot seed so a future re-shuffle (a
+    /// fresh arena, say) has somewhere to draw from without disturbing any
+    /// other roll.
+    gateway_shuffle_rng: SpawnRng,
     /// Every dragon death since the last [`dragon::MobSim::take_dragon_deaths`]
     /// call — the same `pending_*`/`take_*` handoff shape as
     /// [`pending_detonations`](Self::pending_detonations), for the same
@@ -3278,6 +3350,29 @@ pub struct PlayerHit {
     pub attacker_pos: Vec3,
 }
 
+/// One `Zombie.hurtServer` reinforcement roll that passed — the *decision*
+/// only. `Zombie.hurtServer` then searches up to 50 candidate positions
+/// against the live world for a valid one (`SpawnPlacements.isSpawnPositionOk`,
+/// no player within 7 blocks, unobstructed, no collision, no liquid unless
+/// the species tolerates it) and only spawns if one is found; this sim holds
+/// no live world (`world: &'w ChunkWorld` is an immutable borrow, same reason
+/// [`pending_lightning_fires`](MobSim::pending_lightning_fires) exists), so
+/// the search and the actual spawn are the driver's job — see
+/// [`take_reinforcement_calls`](MobSim::take_reinforcement_calls).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReinforcementCall {
+    /// The calling zombie's position — `Mth.floor(this.getX()/Y/Z)`, the
+    /// search's own origin.
+    pub position: Vec3,
+    /// The reinforcement's own entity type — always the caller's own type
+    /// (`this.getType()`), so a husk calls in a husk and so on.
+    pub entity_type: ResourceKey,
+    /// Who the reinforcement should target on arrival — the caller's own
+    /// current attack target if it has one, else the attacker that just hit
+    /// it (`Zombie.hurtServer`'s own `target == null` fallback).
+    pub target_id: i32,
+}
+
 /// `ElderGuardian.EFFECT_INTERVAL` — the aura's cadence in ticks
 /// (`ElderGuardian.customServerAiStep`'s `(tickCount + getId()) % 1200 == 0`).
 ///
@@ -3402,6 +3497,9 @@ impl<'w> MobSim<'w> {
             door_rng: SpawnRng::new(DOOR_BREAK_ROLL_SEED),
             spawn_special_multiplier: 0.0,
             spawn_hard_difficulty: false,
+            spawn_monsters_enabled: false,
+            reinforcement_rng: SpawnRng::new(REINFORCEMENT_ROLL_SEED),
+            pending_reinforcements: Vec::new(),
             falling_blocks: HashMap::new(),
             next_id: 1,
             tick_count: 0,
@@ -3461,6 +3559,8 @@ impl<'w> MobSim<'w> {
             pending_hero_grants: Vec::new(),
             raid_rng: SpawnRng::new(raid::RAID_ROLL_SEED),
             dragon_fight: None,
+            dragon_gateways: None,
+            gateway_shuffle_rng: SpawnRng::new(GATEWAY_SHUFFLE_SEED),
             pending_dragon_deaths: Vec::new(),
         }
     }
@@ -3485,10 +3585,9 @@ impl<'w> MobSim<'w> {
     /// ::getSpecialMultiplier`, `0.0`..`1.0`) and whether the world's base
     /// difficulty is Hard.
     ///
-    /// This is the consumer `crate::regional_difficulty`'s own module doc
-    /// names as not existing anywhere in this tree — a caller that already
+    /// `crate::tick::run_tick_loop` is the real production caller — it
     /// resolves a `DifficultyInstance` (from world difficulty, game time and
-    /// moon phase) feeds
+    /// moon phase) once per tick and feeds
     /// [`DifficultyInstance::special_multiplier`](crate::regional_difficulty::DifficultyInstance::special_multiplier)
     /// and [`DifficultyInstance::is_hard`](crate::regional_difficulty::DifficultyInstance::is_hard)-shaped
     /// values here. Left at the `0.0`/`false` defaults, a spawn never rolls
@@ -3497,6 +3596,17 @@ impl<'w> MobSim<'w> {
     pub fn set_spawn_difficulty(&mut self, special_multiplier: f32, hard: bool) -> &mut Self {
         self.spawn_special_multiplier = special_multiplier;
         self.spawn_hard_difficulty = hard;
+        self
+    }
+
+    /// `level.isSpawningMonsters()` — the `spawn_mobs` game rule, gating
+    /// [`attack`](Self::attack)'s `Zombie.hurtServer` reinforcement roll
+    /// alongside [`set_spawn_difficulty`](Self::set_spawn_difficulty)'s
+    /// `hard` flag. `false` by default, matching every other spawn-difficulty
+    /// input here: an unwired caller sees zero reinforcements rather than
+    /// silently-always-on ones.
+    pub fn set_spawn_monsters_enabled(&mut self, enabled: bool) -> &mut Self {
+        self.spawn_monsters_enabled = enabled;
         self
     }
 
@@ -3869,6 +3979,7 @@ impl<'w> MobSim<'w> {
             warden_anger_target: None,
             has_left_horn: true,
             has_right_horn: true,
+            reinforcement_chance: 0.0,
             gossip: villager::gossip::GossipContainer::new(),
             last_gossip_decay_tick: None,
             golem_detected_until: None,
@@ -4005,6 +4116,22 @@ impl<'w> MobSim<'w> {
         // `species_path` was captured above.
         let (has_left_horn, has_right_horn) = goat_horn_spawn_roll(&species_path, &mut self.goat_horn_rng);
 
+        // `Zombie.randomizeReinforcementsChance` — `handleAttributes` calls
+        // it for the whole zombie family (`Husk`/`Drowned`/`ZombieVillager`/
+        // `ZombifiedPiglin` all extend `Zombie` and override neither method —
+        // the same species list `can_open_doors` above already establishes).
+        // Rolled here for the identical reason `has_left_horn`/
+        // `has_right_horn` are: before `entity_type` moves into
+        // `spawn_with_type` below.
+        let reinforcement_chance = if matches!(
+            species_path.as_str(),
+            "zombie" | "husk" | "zombie_villager" | "drowned" | "zombified_piglin"
+        ) {
+            self.reinforcement_rng.next_f64() * 0.1
+        } else {
+            0.0
+        };
+
         let mob = self.spawn_with_type(
             pos,
             shape,
@@ -4014,6 +4141,7 @@ impl<'w> MobSim<'w> {
         );
         mob.has_left_horn = has_left_horn;
         mob.has_right_horn = has_right_horn;
+        mob.reinforcement_chance = reinforcement_chance;
         mob.set_category(if hostile {
             MobCategory::Monster
         } else {
@@ -6788,6 +6916,14 @@ impl<'w> MobSim<'w> {
         std::mem::take(&mut self.pending_mining_fatigue)
     }
 
+    /// Drains every `Zombie.hurtServer` reinforcement roll that passed since
+    /// the last call — see [`ReinforcementCall`]'s own doc for what the
+    /// driver still owes vanilla (the 50-candidate terrain search) before
+    /// actually spawning one.
+    pub fn take_reinforcement_calls(&mut self) -> Vec<ReinforcementCall> {
+        std::mem::take(&mut self.pending_reinforcements)
+    }
+
     /// Drains every fire-ignition attempt a live lightning bolt made this
     /// tick — [`pending_lightning_fires`](Self::pending_lightning_fires)'s own
     /// doc explains why this sim cannot place the fire itself. The driver
@@ -7200,6 +7336,25 @@ impl<'w> MobSim<'w> {
         if self.dragons.contains_key(&target_id) {
             return self.attack_dragon(target_id, raw_damage);
         }
+        // An end crystal lives in `self.crystals`, not `self.mobs` — the same
+        // reason the wither and dragon branches above exist. `EndCrystal
+        // .hurtServer` is a one-hit kill (no health, no armour, no
+        // knockback), so this returns straight from `destroy_end_crystal`
+        // rather than routing through the generic `self.attack`. Before this
+        // branch existed a player attacking a crystal reached neither
+        // `self.attack` (which only reads `self.mobs`) nor
+        // `destroy_end_crystal`, so the crystal could not be destroyed at
+        // all — removing the entire "break the crystals to stop the heal"
+        // strategy the dragon fight is built around.
+        if self.crystals.contains_key(&target_id) {
+            self.destroy_end_crystal(target_id)?;
+            return Some(AttackOutcome {
+                health: 0.0,
+                killed: true,
+                damage_dealt: raw_damage,
+                velocity: Vec3::new(0.0, 0.0, 0.0),
+            });
+        }
         let target_was_villager = self
             .get(target_id)
             .is_some_and(|m| m.entity_type.path() == "villager");
@@ -7217,6 +7372,48 @@ impl<'w> MobSim<'w> {
             && let Some(raid_id) = target_raid_id
         {
             self.add_raid_hero(raid_id, actor.uuid);
+        }
+        // `Zombie.hurtServer`'s reinforcement call: only the *roll* happens
+        // here — see `ReinforcementCall`'s own doc for why the terrain search
+        // is the driver's job. Gated on the hit actually landing on a
+        // survivor (`super.hurtServer` returning `true`), Hard world
+        // difficulty and the `spawn_mobs` game rule
+        // (`level.isSpawningMonsters()`). Reads then re-borrows `target_id`
+        // rather than holding one borrow across the RNG draw, since
+        // `self.reinforcement_rng` is a sibling field `self.get`/`get_mut`
+        // cannot see past.
+        if !outcome.killed && outcome.damage_dealt > 0.0 && self.spawn_hard_difficulty && self.spawn_monsters_enabled {
+            let reinforcement_info = self.get(target_id).and_then(|mob| {
+                matches!(
+                    mob.entity_type.path(),
+                    "zombie" | "husk" | "zombie_villager" | "drowned" | "zombified_piglin"
+                )
+                .then(|| {
+                    (
+                        mob.entity_type.clone(),
+                        mob.position(),
+                        mob.reinforcement_chance,
+                        mob.attack_target_id,
+                    )
+                })
+            });
+            if let Some((entity_type, position, chance, own_target)) = reinforcement_info
+                && self.reinforcement_rng.next_f32() < chance as f32
+                // `target = this.getTarget(); if (target == null &&
+                // source.getEntity() is Living) target = source` — the
+                // mob's own current attack target, falling back to whoever
+                // just hit it.
+                && let Some(reinforcement_target) = own_target.or_else(|| attacker.map(|a| a.entity_id))
+            {
+                if let Some(mob) = self.get_mut(target_id) {
+                    mob.reinforcement_chance -= ZOMBIE_REINFORCEMENT_CALLER_CHARGE;
+                }
+                self.pending_reinforcements.push(ReinforcementCall {
+                    position,
+                    entity_type,
+                    target_id: reinforcement_target,
+                });
+            }
         }
         // `Wolf.OwnerHurtTargetGoal`: a wolf (or any tamed pet) joins whatever
         // fight its owner just started, reading `owner.getLastHurtMob()` on
@@ -8915,6 +9112,25 @@ const GOAT_HORN_ROLL_SEED: u64 = 0x474F_4154_484F_524E;
 /// Default seed for [`MobSim::door_rng`]. See [`TAME_ROLL_SEED`] for why it
 /// is separate. ASCII `"DOORBRKS"`.
 const DOOR_BREAK_ROLL_SEED: u64 = 0x444F_4F52_4252_4B53;
+
+/// Default seed for [`MobSim::reinforcement_rng`]. See [`TAME_ROLL_SEED`] for
+/// why it is separate. ASCII `"REINFORC"`.
+const REINFORCEMENT_ROLL_SEED: u64 = 0x5245_494E_464F_5243;
+
+/// Default seed for [`MobSim::gateway_shuffle_rng`]. See [`TAME_ROLL_SEED`]
+/// for why it is separate. ASCII `"GATEWAYS"`.
+const GATEWAY_SHUFFLE_SEED: u64 = 0x4741_5445_5741_5953;
+
+/// `Zombie.hurtServer`'s own local (`existingAmount - 0.05`) — the permanent
+/// amount subtracted from the caller's own `SPAWN_REINFORCEMENTS_CHANCE`
+/// base each time it successfully calls one in, so a single zombie cannot
+/// call in an unbounded chain every tick it stays hurt.
+const ZOMBIE_REINFORCEMENT_CALLER_CHARGE: f64 = 0.05;
+
+/// `Zombie.ZOMBIE_REINFORCEMENT_CALLEE_CHARGE`'s amount (`-0.05F`,
+/// `ADD_VALUE`) — see
+/// [`SimMob::apply_reinforcement_callee_charge`]'s own doc.
+const ZOMBIE_REINFORCEMENT_CALLEE_CHARGE: f64 = 0.05;
 
 /// The `early_game.json` timeline's `gameplay/can_pillager_patrol_spawn` gate,
 /// transcribed as a plain tick count rather than read from a general timeline
@@ -12714,6 +12930,101 @@ mod vibration_substrate_tests {
         assert!(
             sim.get(id).expect("spawned").shape().can_open_doors,
             "growing up must not reset a rolled-true door flag back to the static default"
+        );
+    }
+
+    /// `Zombie.hurtServer`'s reinforcement call (issue #223/#691): only the
+    /// *roll* is this sim's job — see `ReinforcementCall`'s own doc for the
+    /// decide-here/place-there split. Hard difficulty, `spawn_mobs` enabled,
+    /// and `reinforcement_chance` pinned to `1.0` (`next_f32() < 1.0` always
+    /// holds in `[0.0, 1.0)`, so this is exact, not statistical) must queue
+    /// exactly one call carrying the zombie's own type, position and — no AI
+    /// target set on this mob — the attacking player's own entity id as the
+    /// fallback (`Zombie.hurtServer`'s own `target == null` clause).
+    #[test]
+    fn a_hurt_zombie_calls_a_reinforcement_when_the_roll_passes() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        sim.set_spawn_difficulty(0.0, true);
+        sim.set_spawn_monsters_enabled(true);
+        let id = spawn(&mut sim, "zombie", Vec3::new(0.0, 0.0, 0.0));
+        sim.get_mut(id).expect("spawned").reinforcement_chance = 1.0;
+        let attacker = PlayerIdentity { uuid: Uuid::new_v4(), entity_id: 777 };
+
+        let outcome = sim.attack_from_player(
+            id,
+            Some(attacker),
+            Vec3::new(1.0, 0.0, 0.0),
+            1.0,
+            DamageFlags::default(),
+            0.0,
+        );
+        assert!(outcome.is_some_and(|o| !o.killed), "one point of damage must not kill a zombie");
+
+        let calls = sim.take_reinforcement_calls();
+        assert_eq!(calls.len(), 1, "the roll was pinned to 1.0 — it must always fire");
+        assert_eq!(calls[0].entity_type.path(), "zombie");
+        // Near the spawn point, not exactly on it — the hit's own mandatory
+        // knockback moves the zombie before this roll reads its position, the
+        // same `dealDefaultKnockback` every landed hit applies.
+        let dist_sqr = calls[0].position.x.powi(2) + calls[0].position.y.powi(2) + calls[0].position.z.powi(2);
+        assert!(dist_sqr < 4.0, "expected the caller's position near its spawn point, got {:?}", calls[0].position);
+        assert_eq!(calls[0].target_id, 777, "falls back to the attacker with no AI target set");
+    }
+
+    /// **Control:** the identical setup, but the mob is only skeleton-family
+    /// — `reinforcement_chance` stays `0.0` for every species outside the
+    /// zombie family, so even a Hard-difficulty hit queues nothing. The
+    /// discriminating control against "the gate is difficulty alone".
+    #[test]
+    fn only_the_zombie_family_ever_calls_for_reinforcements() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        sim.set_spawn_difficulty(1.0, true);
+        sim.set_spawn_monsters_enabled(true);
+        let id = spawn(&mut sim, "skeleton", Vec3::new(0.0, 0.0, 0.0));
+        assert_eq!(
+            sim.get(id).expect("spawned").reinforcement_chance(),
+            0.0,
+            "only the zombie family rolls a nonzero chance at spawn"
+        );
+
+        sim.attack_from_player(
+            id,
+            Some(PlayerIdentity { uuid: Uuid::new_v4(), entity_id: 777 }),
+            Vec3::new(1.0, 0.0, 0.0),
+            1.0,
+            DamageFlags::default(),
+            0.0,
+        );
+        assert!(sim.take_reinforcement_calls().is_empty());
+    }
+
+    /// **Control:** the identical zombie/roll setup below Hard difficulty
+    /// must queue nothing — `level.getDifficulty() == Difficulty.HARD` is a
+    /// hard gate in vanilla, not folded into the continuous chance roll, so
+    /// a saturated `special_multiplier` (`1.0`, Normal/Easy's ceiling) must
+    /// not substitute for it.
+    #[test]
+    fn a_hurt_zombie_calls_no_reinforcement_below_hard_difficulty() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        sim.set_spawn_difficulty(1.0, false);
+        sim.set_spawn_monsters_enabled(true);
+        let id = spawn(&mut sim, "zombie", Vec3::new(0.0, 0.0, 0.0));
+        sim.get_mut(id).expect("spawned").reinforcement_chance = 1.0;
+
+        sim.attack_from_player(
+            id,
+            Some(PlayerIdentity { uuid: Uuid::new_v4(), entity_id: 777 }),
+            Vec3::new(1.0, 0.0, 0.0),
+            1.0,
+            DamageFlags::default(),
+            0.0,
+        );
+        assert!(
+            sim.take_reinforcement_calls().is_empty(),
+            "Hard is a hard gate, not part of the continuous chance roll"
         );
     }
 

@@ -91,20 +91,31 @@
 //! never wrongly disagrees about Peaceful (still forced to `0.0`) or about
 //! which side of a threshold a *fresh* chunk sits on.
 //!
-//! **The consumers the issue names — zombie/skeleton spawned-with-enchanted-gear
-//! chance (`VanillaEnchantmentProviders.MOB_SPAWN_EQUIPMENT`, read against a
-//! `DifficultyInstance` in `SkeletonTrapGoal.enchant` and the natural-spawn
-//! equipment path), zombie reinforcement calling for backup, and spawn-cap
-//! composition — do not exist anywhere in this tree yet.** `grep`ing
-//! `crate::mob_spawn`, `crate::natural_spawn` and `crate::mobs` for
-//! "reinforce", "enchant" or "gear" turns up nothing: there is no zombie AI,
-//! no spawn-equipment path and no reinforcement mechanic to wire this scalar
-//! into. Building those is a separate, unimplemented feature, not a
-//! reachable consumer of this module. The one genuine, tested consumer in
-//! this tree is [`crate::lightning`]'s skeleton-horse-trap roll
-//! (`ServerLevel.tickThunder`'s `random.nextDouble() < difficulty.getEffectiveDifficulty() * 0.01`),
-//! which reads [`DifficultyInstance::effective_difficulty`] directly — see
-//! that module's doc for why the *spawn* half of that roll (an actual
+//! **Every consumer the issue named is now real, except spawn-cap
+//! composition (which turned out not to be a real vanilla mechanic — see
+//! below).** `crate::mobs::spawn_equipment`'s armour/weapon roll and the
+//! zombie family's door-breaking coin flip both read
+//! [`DifficultyInstance::special_multiplier`]/[`DifficultyInstance::is_hard`],
+//! fed from a fresh `DifficultyInstance` `crate::tick::run_tick_loop`
+//! resolves once per tick and passes to `MobSim::set_spawn_difficulty`/
+//! `set_spawn_monsters_enabled` — see `docs/mob-species-spawning.md`.
+//! `MobSim::attack_from_player`'s zombie-reinforcement roll (`Zombie
+//! .hurtServer`) reads the same two fields. **Enchanted spawn gear**
+//! (`populateDefaultEquipmentEnchantments`) remains unmodelled — this
+//! workspace has no enchantment model at all, the same disclosed gap
+//! `lodestone_entity::equipment`'s own module doc names.
+//!
+//! **Spawn-cap composition is not a real formula to port**: read against
+//! `.cache/mc/26.2/src/net/minecraft/world/level/NaturalSpawner.java`, every
+//! `getCurrentDifficultyAt` read in that file is inside `finalizeSpawn` (the
+//! gear/door/reinforcement roll above) — the mob-cap arithmetic itself is
+//! not difficulty-scaled in vanilla at all.
+//!
+//! [`crate::lightning`]'s skeleton-horse-trap roll
+//! (`ServerLevel.tickThunder`'s `random.nextDouble() < difficulty.getEffectiveDifficulty() * 0.01`)
+//! remains the one consumer reading [`DifficultyInstance::effective_difficulty`]
+//! directly rather than through the two derived fields above — see that
+//! module's doc for why the *spawn* half of that roll (an actual
 //! `SkeletonHorse` entity) is out of reach the same way.
 //!
 //! # Dependencies

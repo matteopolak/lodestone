@@ -1497,6 +1497,10 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     )
     .with_world_seed(crate::worldgen_data::active_world_seed());
     let mut despawn_rng = crate::mob_spawn::SpawnRng::new(NATURAL_SPAWN_SEED ^ 0x5DEE_C0DE);
+    // `Zombie.hurtServer`'s reinforcement placement search — the 50-candidate
+    // `Mth.nextInt(random, 7, 40) * Mth.nextInt(random, -1, 1)` offset draws.
+    // On its own stream, the same reason every other spawn-time RNG here is.
+    let mut reinforcement_rng = crate::mob_spawn::SpawnRng::new(NATURAL_SPAWN_SEED ^ 0x5245_494E);
     // Issue #326 / #580: the world border, ticked first each loop (per
     // `ServerLevel.tick`'s order). `border` is now the shared handle passed
     // in — see this function's own parameter comment.
@@ -1616,6 +1620,39 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             if peaceful {
                 sim.remove_monsters();
             }
+        });
+        // Issue #223: the `DifficultyInstance` inputs every spawn this tick
+        // needs. `MobSim::set_spawn_difficulty` and its two readers — the
+        // zombie/husk/zombie_villager door-breaking coin flip
+        // (`species_shape`'s caller in `spawn_species`) and
+        // `lodestone_entity::spawn_equipment`'s armour/weapon roll — have
+        // existed since `615256a1`/`7357c652`, but nothing called the setter
+        // outside a test: every real spawn saw the `0.0`/`false` defaults, so
+        // no mob has ever broken down a door or spawned wearing gear on a
+        // real world. `local_game_time` stays `0` (no per-chunk
+        // inhabited-time tracking exists yet — see
+        // `crate::regional_difficulty`'s own module doc), which only ever
+        // *understates* the scalar, never flips a Peaceful/non-Peaceful or
+        // threshold verdict; world age and moon phase alone already lift
+        // `special_multiplier` off zero on a world old enough to matter.
+        // Read fresh each tick (not the loop's one-tick-stale `day_time`
+        // mirror `crate::lightning` uses further down) since this runs
+        // before this tick's own `tick_time()` call.
+        let spawn_difficulty_time = world_state.time();
+        let spawn_difficulty_instance = crate::regional_difficulty::DifficultyInstance::new(
+            world_state.difficulty().0,
+            spawn_difficulty_time.game_time,
+            0,
+            crate::regional_difficulty::moon_brightness_for_day_time(spawn_difficulty_time.day_time),
+        );
+        mobs.with(|sim| {
+            sim.set_spawn_difficulty(
+                spawn_difficulty_instance.special_multiplier(),
+                spawn_difficulty_instance.is_hard(),
+            );
+            // `level.isSpawningMonsters()` — `Zombie.hurtServer`'s other
+            // reinforcement-roll gate alongside the `hard` flag just above.
+            sim.set_spawn_monsters_enabled(world_state.spawn_mobs());
         });
         // Issues #221/#222: **the natural spawn cycle, and the despawn pass.**
         // Both engines were complete and driverless — `MobSim::run_spawn_cycle`
@@ -2015,6 +2052,64 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             mobs.with(|sim| {
                 sim.spawn_species(attempt.entity_type, attempt.position);
             });
+        }
+
+        // Issue #223/#691: `Zombie.hurtServer`'s reinforcement call, the
+        // placement half — `MobSim::attack_from_player` already decided
+        // *whether* to call one in (`ReinforcementCall`'s own doc explains
+        // the split); this is `Zombie.hurtServer`'s own 50-candidate search
+        // against the live world, simplified the same way
+        // `mob_spawner`'s own `is_valid_position` closure above is: "solid
+        // ground below, open air at foot and head height" stands in for
+        // `SpawnPlacements.isSpawnPositionOk`/`noCollision`, and there is no
+        // liquid check (a disclosed reduction, matching this crate's other
+        // simplified spawn-placement passes). Stops at the first candidate
+        // that passes, exactly as vanilla's own loop `break`s on the first
+        // hit.
+        for call in mobs.with(MobSim::take_reinforcement_calls) {
+            let origin_x = call.position.x.floor() as i32;
+            let origin_y = call.position.y.floor() as i32;
+            let origin_z = call.position.z.floor() as i32;
+            let mut placed = None;
+            for _ in 0..50 {
+                let dx = (7 + reinforcement_rng.next_int(34)) * (reinforcement_rng.next_int(3) - 1);
+                let dy = (7 + reinforcement_rng.next_int(34)) * (reinforcement_rng.next_int(3) - 1);
+                let dz = (7 + reinforcement_rng.next_int(34)) * (reinforcement_rng.next_int(3) - 1);
+                let x = origin_x + dx;
+                let y = origin_y + dy;
+                let z = origin_z + dz;
+                let candidate = lodestone_model::Vec3::new(
+                    f64::from(x) + 0.5,
+                    f64::from(y),
+                    f64::from(z) + 0.5,
+                );
+                // `!level.hasNearbyAlivePlayer(xt, yt, zt, 7.0)`.
+                if spawner_players.iter().any(|p| {
+                    let ddx = p.x - candidate.x;
+                    let ddy = p.y - candidate.y;
+                    let ddz = p.z - candidate.z;
+                    ddx * ddx + ddy * ddy + ddz * ddz <= 49.0
+                }) {
+                    continue;
+                }
+                let below = world.block_state(x, y - 1, z);
+                let feet = world.block_state(x, y, z);
+                let head = world.block_state(x, y + 1, z);
+                if !crate::spawn_egg::collision_boxes_for(&below).is_empty()
+                    && crate::spawn_egg::collision_boxes_for(&feet).is_empty()
+                    && crate::spawn_egg::collision_boxes_for(&head).is_empty()
+                {
+                    placed = Some(candidate);
+                    break;
+                }
+            }
+            if let Some(pos) = placed {
+                mobs.with(|sim| {
+                    sim.spawn_species(call.entity_type.clone(), pos)
+                        .set_attack_target_id(Some(call.target_id))
+                        .apply_reinforcement_callee_charge();
+                });
+            }
         }
 
         // Per-phase timing (see `TickPhase::MobsAndItems`'s own doc): closes

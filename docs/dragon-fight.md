@@ -66,19 +66,22 @@ Three submodules:
   own codec round-trips) plus free functions: `scan_state` (the world-load
   scan for an existing dragon/portal), `set_dragon_killed` (what to do the
   tick the dragon actually dies — egg placement gated on first-kill-ever,
-  portal activation, and a `spawn_gateway: true` flag for the caller to act
-  on — **no gateway position formula or shuffled-pool bookkeeping is
-  implemented anywhere**, a real disclosed gap rather than a simplification;
-  see `fight::FightState`'s own doc comment), `boss_bar_value` (the `progress`/
-  `visible` pair a `BOSS_EVENT` packet needs), `exit_portal_blocks` (a
-  clause-for-clause port of `EndPodiumFeature.place`'s block geometry — the
+  portal activation, and a `spawn_gateway: true` flag), `boss_bar_value` (the
+  `progress`/`visible` pair a `BOSS_EVENT` packet needs), `exit_portal_blocks`
+  (a clause-for-clause port of `EndPodiumFeature.place`'s block geometry — the
   bedrock/end-stone foundation, the bedrock-ring-and-portal-or-air disc, the
   domed air clearing above it, the four-block bedrock pole, and its four wall
-  torches), `respawn_crystal_positions`/`try_respawn` (the four N/S/E/W cells
-  three blocks out from the portal where live end crystals must stand), and
-  `tick_respawn` (the five-stage `DragonRespawnStage` spectacle:
-  `Start → PreparingToSummonPillars → SummoningPillars → SummoningDragon →
-  End`).
+  torches), `GatewayPool`/`gateway_position`/`gateway_blocks` (the shuffled
+  20-slice pool `EnderDragonFight.gateways` draws from, the
+  `Mth.floor(96*cos/sin(...))` position formula, and `EndGatewayFeature
+  .place`'s 3×5×3 block geometry for the `END_GATEWAY_DELAYED` variant — the
+  real, visible gateway structure a kill now places; **the gateway's own
+  teleport-on-contact mechanic is not ported at all**, a real disclosed gap —
+  see `gateway_blocks`'s own doc), `respawn_crystal_positions`/`try_respawn`
+  (the four N/S/E/W cells three blocks out from the portal where live end
+  crystals must stand), and `tick_respawn` (the five-stage
+  `DragonRespawnStage` spectacle: `Start → PreparingToSummonPillars →
+  SummoningPillars → SummoningDragon → End`).
 
 ### What this does not attempt, and why
 
@@ -192,13 +195,20 @@ together:
   `getHeightmapPos(MOTION_BLOCKING, ...)`, ported as a real scan rather than
   assumed).
 
-**Still a real, disclosed gap**: `outcome.spawn_gateway` is a signal with
-nothing to apply it to. `fight::FightState`'s own doc comment already
-disclosed that no gateway position formula or the shuffled 20-position pool
-is ported anywhere in this repo; that has not changed. Persisting
-`FightState` itself is also still process-lifetime only — it lives as long
-as the `MobSim`/`MobHandle` does, the same disclosed shape
-`ChunkSource::claim_dragon_fight_start` already uses, and does not yet
+**`outcome.spawn_gateway` now has a real consumer.** `MobSim
+::record_dragon_death` lazily shuffles a `fight::GatewayPool` (`Util
+.shuffle`'s algorithm, against this crate's own `SpawnRng` — not vanilla's
+own thread-local RNG stream, a disclosed divergence matching every other roll
+in this crate), pops a slice and resolves it to real
+`fight::gateway_blocks(fight::gateway_position(slice))` block writes on
+`DragonDeathOutcome::gateway_blocks`, which `serve_play`'s drain applies to
+the End sibling the same way it applies `exit_portal_blocks`. **The
+gateway's own teleport-on-contact mechanic is still not ported at all** —
+walking into the placed `minecraft:end_gateway` block does nothing; see
+`fight::gateway_blocks`'s own doc for exactly what that means. Persisting
+`FightState`/`GatewayPool` themselves is also still process-lifetime only —
+they live as long as the `MobSim`/`MobHandle` does, the same disclosed shape
+`ChunkSource::claim_dragon_fight_start` already uses, and do not yet
 round-trip through a save.
 
 ## The End's own furniture, and how it gets placed on first arrival
