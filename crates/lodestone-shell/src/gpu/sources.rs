@@ -1156,6 +1156,39 @@ impl std::fmt::Debug for BrushableSource {
     }
 }
 
+/// Where this frame's shelved items come from.
+///
+/// **The same odd one out as [`CampfireSource`]/[`BrushableSource`], for the
+/// same reason**: `ShelfRenderer.submit` draws up to three item models, not
+/// a cuboid rig — a shelf's board/back/sides are all real block-model
+/// geometry the terrain mesher already draws — so this feeds
+/// [`RenderState::prepare_item_geometry`](crate::gpu::RenderState) and the
+/// *model* pipeline, not `prepare_block_entities`.
+///
+/// No clock captured: nothing about a shelved item animates.
+#[derive(Default)]
+pub struct ShelfSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)
+        Option<Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::ShelfItemSpawn> + Send + Sync>>,
+);
+
+impl ShelfSource {
+    /// This frame's shelved items, or none when unset.
+    #[must_use]
+    pub(super) fn shelf_items(&self, eye: glam::Vec3) -> Vec<lodestone_render::ShelfItemSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for ShelfSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ShelfSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
 /// Where this frame's vault display-item clusters come from.
 ///
 /// **The same odd one out as [`CampfireSource`], for the same reason**:

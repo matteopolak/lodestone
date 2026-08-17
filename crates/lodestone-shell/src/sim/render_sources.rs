@@ -480,6 +480,18 @@ impl Sim {
         Some(move |eye: glam::Vec3| crate::block_entities::brushable_spawns(&handle, eye))
     }
 
+    /// The shelf sibling of [`Self::campfire_source`]/[`Self::brushable_source`]
+    /// — see `crate::block_entities::shelf_spawns`. No clock, for the same
+    /// reason: a shelved item does not animate.
+    #[must_use]
+    pub fn shelf_source(
+        &self,
+    ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::ShelfItemSpawn> + Send + Sync + 'static>
+    {
+        let handle = self.net.as_ref()?.shared_handle();
+        Some(move |eye: glam::Vec3| crate::block_entities::shelf_spawns(&handle, eye))
+    }
+
     /// This frame's banners, for
     /// [`RenderState::set_banner_source`](crate::gpu::RenderState::set_banner_source).
     ///

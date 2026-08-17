@@ -164,6 +164,13 @@ pub struct RenderStats {
     /// has one: a brushable block's renderer contributes nothing to
     /// `block_entities_drawn` either.
     pub brushable_items_drawn: usize,
+    /// Shelved items drawn this frame — one per occupied slot, so a shelf
+    /// with two of its three slots filled counts 2.
+    ///
+    /// Its own counter for the reason [`campfire_items_drawn`](Self::campfire_items_drawn)
+    /// has one: a shelf's renderer contributes nothing to
+    /// `block_entities_drawn` either.
+    pub shelf_items_drawn: usize,
     /// Filled-map pictures drawn this frame — the held one counts 1, plus one per
     /// item frame carrying a map.
     ///

@@ -2921,6 +2921,51 @@ pub fn campfire_item_mesh(
     mesh_item_quads_with_light(quads, pose, gui_light, light)
 }
 
+/// Mesh one item on a shelf's slot into a world-space [`ModelMesh`], for the
+/// same model-pipeline draw [`dropped_item_mesh`] feeds.
+///
+/// The placement is
+/// [`shelf_slot_matrix`](crate::block_entity::shelf_slot_matrix) —
+/// ported from `ShelfRenderer.submitItem`'s pose stack up to its final
+/// translate — composed with **two** further transforms this function alone
+/// can supply, both requiring the item's own baked quads:
+///
+/// 1. The bounding-box correction (`offsetY` in the real jar):
+///    `-box.minY`, plus `-(box.maxY - box.minY) / 2` when the shelf is
+///    *not* aligned to the bottom. `box` is `ItemStackRenderState
+///    .getModelBoundingBox()` — the item's extents *after* its own
+///    `ItemDisplayContext.ON_SHELF` transform, which is exactly what
+///    [`posed_item_y_extent`] measures. Applied as a translate **inside**
+///    the `0.25×` scale [`shelf_slot_matrix`] already applied (vanilla calls
+///    `poseStack.translate` after `poseStack.scale`), which is why this is a
+///    right-hand factor rather than folded into that function's own
+///    world-space translate.
+/// 2. The item's own `display.on_shelf` transform, composed on the right for
+///    the same reason [`campfire_item_mesh`] composes there: vanilla applies
+///    it *inside* `ItemStackRenderState.submit`, after every pose the
+///    renderer itself pushes.
+#[must_use]
+pub fn shelf_item_mesh(
+    quads: &[BakedQuad],
+    gui_light: GuiLight,
+    on_shelf: &DisplayTransform,
+    pos: [i32; 3],
+    facing_yaw_deg: f32,
+    slot: usize,
+    align_to_bottom: bool,
+    light: u8,
+) -> ModelMesh {
+    let (min_y, max_y) = posed_item_y_extent(quads, on_shelf);
+    let mut offset_y = -min_y;
+    if !align_to_bottom {
+        offset_y += -(max_y - min_y) / 2.0;
+    }
+    let pose = crate::block_entity::shelf_slot_matrix(pos, facing_yaw_deg, slot, align_to_bottom)
+        * Mat4::from_translation(Vec3::new(0.0, offset_y, 0.0))
+        * display_matrix(on_shelf);
+    mesh_item_quads_with_light(quads, pose, gui_light, light)
+}
+
 /// Mesh a suspicious sand/gravel block's revealed item into a world-space
 /// [`ModelMesh`], for the same model-pipeline draw [`dropped_item_mesh`] feeds.
 ///

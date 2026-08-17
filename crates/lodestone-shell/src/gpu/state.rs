@@ -41,6 +41,7 @@ use super::{
     AmbientLightSource, BannerSource, BeaconBeamRenderer, BeaconSource, BellSource,
     EndGatewaySource, EndPortalRenderer, EndPortalSource,
     BlockEntityRenderer, BlockEntitySource, BrushableSource, CampfireSource, ConduitSource,
+    ShelfSource,
     DEFAULT_RENDER_DISTANCE_CHUNKS, DecoratedPotSource, EnchantingTableSource, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
     HandSwingSource, ItemUseSource, LecternSource, MainHandSource, MapSource, MovingPistonSource,
@@ -362,6 +363,8 @@ impl RenderState {
             vault_source: VaultSource::default(),
             // Likewise `set_brushable_source`.
             brushable_source: BrushableSource::default(),
+            // Likewise `set_shelf_source`.
+            shelf_source: ShelfSource::default(),
             // Likewise `set_moving_piston_source`.
             moving_piston_source: MovingPistonSource::default(),
             // Likewise `set_enchanting_table_source`.
@@ -1492,6 +1495,20 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::BrushableItemSpawn> + Send + Sync + 'static,
     ) {
         self.brushable_source = BrushableSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's shelved items.
+    ///
+    /// Clock-free like [`set_brushable_source`](Self::set_brushable_source) —
+    /// a shelved item does not animate — and feeds
+    /// [`prepare_item_geometry`](Self::prepare_item_geometry) rather than
+    /// `prepare_block_entities`, for the same odd-one-out reason
+    /// [`ShelfSource`]'s doc gives.
+    pub fn set_shelf_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::ShelfItemSpawn> + Send + Sync + 'static,
+    ) {
+        self.shelf_source = ShelfSource(Some(Box::new(f)));
     }
 
     /// Install the source for this frame's moving pistons — vanilla's

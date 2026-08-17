@@ -21,7 +21,7 @@ use lodestone_render::{
         Arm, FLAT_ITEM_DEPTH_THRESHOLD, brushable_item_mesh, camera_orientation,
         campfire_item_mesh, dropped_item_mesh, ground_transform, hand_transform, held_item_mesh,
         item_bob_offset, item_cluster_jitter, posed_item_z_extent, rendered_amount,
-        thrown_item_for, thrown_item_mesh,
+        shelf_item_mesh, thrown_item_for, thrown_item_mesh,
     },
 };
 
@@ -212,6 +212,10 @@ impl RenderState {
         // model, and `BrushableBlockRenderer` draws only the single revealed
         // item on top of it.
         self.merge_brushable_items(model, camera, &frustum, &mut combined, stats);
+        // Shelved items. Same reason as campfire/vault/brushable: a shelf's
+        // board/back/sides are all real block-model geometry, and
+        // `ShelfRenderer` draws only up to three item models on top of it.
+        self.merge_shelf_items(model, camera, &frustum, &mut combined, stats);
         let Some(mesh) = GpuModelMesh::upload(device, &combined) else {
             return (None, None);
         };
@@ -424,6 +428,64 @@ impl RenderState {
                 spawn.light,
             ));
             stats.brushable_items_drawn += 1;
+        }
+    }
+
+    /// Merge every shelf's occupied-slot items into `combined` — vanilla's
+    /// `ShelfRenderer`.
+    ///
+    /// # Why this lives in the item pass and not with the other block entities
+    ///
+    /// `ShelfRenderer` bakes no layer, binds no sheet and has no model field:
+    /// its `submit` is up to three `ItemStackRenderState.submit` calls, one
+    /// per occupied slot. A shelf's board/back/sides are all *block* model
+    /// geometry the terrain mesher already draws, so an unset
+    /// [`ShelfSource`](super::ShelfSource) leaves a complete, empty shelf,
+    /// not a hole.
+    ///
+    /// # `DisplaySlot::OnShelf`, a third display context beside `Fixed`/`Ground`
+    ///
+    /// `extractRenderState` resolves each item in `ItemDisplayContext.ON_SHELF`
+    /// — its own context, distinct from campfire's `Fixed` and a drop's
+    /// `Ground`. [`shelf_item_mesh`] is the one caller in this codebase that
+    /// needs it.
+    ///
+    /// No glint arm, for the reason [`merge_campfire_items`] has none: the
+    /// `Items` NBT parse behind [`lodestone_render::ShelfItemSpawn`] carries
+    /// no `components`.
+    fn merge_shelf_items(
+        &self,
+        model: &ModelRenderer,
+        camera: &Camera,
+        frustum: &lodestone_render::Frustum,
+        combined: &mut ModelMesh,
+        stats: &mut RenderStats,
+    ) {
+        let ctx = ItemStateContext::new(DisplaySlot::OnShelf);
+        for spawn in self.shelf_source.shelf_items(camera.position) {
+            let min = glam::Vec3::new(
+                spawn.pos[0] as f32,
+                spawn.pos[1] as f32,
+                spawn.pos[2] as f32,
+            );
+            if !frustum.intersects_aabb(min, min + glam::Vec3::ONE) {
+                continue;
+            }
+            let Some(geometry) = model.items.get(&spawn.item).and_then(|v| v.resolve(&ctx))
+            else {
+                continue;
+            };
+            combined.merge(&shelf_item_mesh(
+                &geometry.quads,
+                geometry.gui_light,
+                &geometry.display.get(DisplaySlot::OnShelf),
+                spawn.pos,
+                spawn.facing_yaw_deg,
+                spawn.slot,
+                spawn.align_to_bottom,
+                spawn.light,
+            ));
+            stats.shelf_items_drawn += 1;
         }
     }
 

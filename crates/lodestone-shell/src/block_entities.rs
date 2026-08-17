@@ -110,12 +110,12 @@ use glam::Vec3;
 use lodestone_render::{
     BannerAttachment, BannerSpawn, BeaconSpawn, BeamSection, BellShakeDirection, BellSpawn,
     BrushableItemSpawn, ChestHalf, ChestMaterial, ChestSpawn, ConduitFrame, ConduitSpawn,
-    DecoratedPotSpawn, EndGatewaySpawn, EndPortalSpawn, LecternSpawn, SHULKER_COLOURS,
-    ShulkerFacing, ShulkerSpawn, SignKind, SignOrientation, SignSpawn, SkullOrientation,
-    SkullSpawn, SkullType, VaultSpawn, average_beam_color, beacon_beam_color, beam_radius_scale,
-    conduit_active_rotation_value, conduit_advance, conduit_anim_time, conduit_animation_phase,
-    conduit_frame_scan, entity::vault_spin_degrees, horizontal_facing_clockwise_yaw,
-    horizontal_facing_yaw,
+    DecoratedPotSpawn, EndGatewaySpawn, EndPortalSpawn, LecternSpawn, SHELF_SLOTS,
+    SHULKER_COLOURS, ShelfItemSpawn, ShulkerFacing, ShulkerSpawn, SignKind, SignOrientation,
+    SignSpawn, SkullOrientation, SkullSpawn, SkullType, VaultSpawn, average_beam_color,
+    beacon_beam_color, beam_radius_scale, conduit_active_rotation_value, conduit_advance,
+    conduit_anim_time, conduit_animation_phase, conduit_frame_scan, entity::vault_spin_degrees,
+    horizontal_facing_clockwise_yaw, horizontal_facing_yaw,
 };
 use lodestone_render::banner_pattern::{DyeColor, StoredPatternLayer};
 use lodestone_world::{ChunkPos, SignText, World};
@@ -5866,5 +5866,300 @@ mod brushable_tests {
             assert_eq!(block_entity_direction_from_legacy_id(id), Some(want));
         }
         assert_eq!(block_entity_direction_from_legacy_id(6), None);
+    }
+}
+
+// --- shelf -------------------------------------------------------------
+
+/// The `facing` yaw of a shelf block, or `None` for any other block.
+///
+/// Every wood variant counts (`acacia_shelf`, `oak_shelf`, …) — the block
+/// name check is a suffix test rather than a fixed list, matched against
+/// `_shelf` (**with** the leading underscore) so it does not also catch
+/// `minecraft:bookshelf`/`minecraft:chiseled_bookshelf`, two unrelated
+/// blocks (`bookshelf` has no `ShelfBlockEntity` at all; `chiseled_bookshelf`
+/// is its own block entity with no renderer registration — see this module's
+/// top-of-file doc for the "23 with no renderer" census).
+#[must_use]
+fn shelf_facing_yaw(state_id: u32) -> Option<f32> {
+    let name = lodestone_data::block_states::block_name(state_id)?;
+    if !name.ends_with("_shelf") {
+        return None;
+    }
+    let props = lodestone_data::block_states::properties(state_id)?;
+    props
+        .iter()
+        .find(|(name, _)| *name == "facing")
+        .and_then(|(_, value)| horizontal_facing_yaw(value))
+}
+
+/// `ShelfBlockEntity.getAlignItemsToBottom()`'s own NBT flag —
+/// `align_items_to_bottom`, an ordinary boolean (`Nbt::Byte`, `!= 0`).
+/// Missing entirely (a freshly placed shelf whose block entity has never
+/// been re-saved) defaults to `false`, matching
+/// `ValueInput.getBooleanOr(.., false)`.
+#[must_use]
+fn shelf_align_to_bottom(nbt: &lodestone_core::Nbt) -> bool {
+    use lodestone_core::Nbt;
+    let Nbt::Compound(fields) = nbt else {
+        return false;
+    };
+    matches!(
+        fields
+            .iter()
+            .find(|(name, _)| name == "align_items_to_bottom")
+            .map(|(_, v)| v),
+        Some(Nbt::Byte(v)) if *v != 0
+    )
+}
+
+/// The occupied slots in a shelf's NBT, as `(slot, item id)` — the same
+/// `ItemStackWithSlot.CODEC` shape [`campfire_items`] already parses
+/// (`Items` list, `Slot` an unsigned byte, **not** the list index), narrowed
+/// to [`SHELF_SLOTS`] rather than [`lodestone_render::CAMPFIRE_SLOTS`].
+#[must_use]
+fn shelf_items(nbt: &lodestone_core::Nbt) -> Vec<(usize, lodestone_assets::ResourceLocation)> {
+    use lodestone_core::Nbt;
+
+    let Nbt::Compound(fields) = nbt else {
+        return Vec::new();
+    };
+    let Some(Nbt::List { elements, .. }) =
+        fields.iter().find(|(name, _)| name == "Items").map(|(_, v)| v)
+    else {
+        return Vec::new();
+    };
+    elements
+        .iter()
+        .filter_map(|entry| {
+            let Nbt::Compound(entry) = entry else {
+                return None;
+            };
+            let field = |key: &str| entry.iter().find(|(name, _)| name == key).map(|(_, v)| v);
+            let slot = match field("Slot") {
+                Some(Nbt::Byte(slot)) => usize::try_from(*slot).ok()?,
+                None => 0,
+                _ => return None,
+            };
+            if slot >= SHELF_SLOTS {
+                return None;
+            }
+            let Some(Nbt::String(id)) = field("id") else {
+                return None;
+            };
+            Some((slot, id.parse().ok()?))
+        })
+        .collect()
+}
+
+/// Every shelf position within [`VIEW_DISTANCE`], paired with its `facing`
+/// yaw, `align_items_to_bottom` flag and occupied-slot item list — the shelf
+/// sibling of [`campfire_candidates`].
+#[must_use]
+fn shelf_candidates(
+    world: &World,
+    chunks: impl IntoIterator<Item = ChunkPos>,
+    eye: Vec3,
+) -> Vec<(
+    [i32; 3],
+    f32,
+    bool,
+    Vec<(usize, lodestone_assets::ResourceLocation)>,
+)> {
+    let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
+    let mut candidates = Vec::new();
+    for pos in chunks {
+        let Some(chunk) = world.get(pos) else {
+            continue;
+        };
+        for be in &chunk.block_entities {
+            let x = pos.x * 16 + i32::from(be.rel_x);
+            let z = pos.z * 16 + i32::from(be.rel_z);
+            let y = i32::from(be.y);
+            let centre = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+            if centre.distance_squared(eye) > cutoff {
+                continue;
+            }
+            let state_id = chunk
+                .column
+                .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            let Some(facing_yaw_deg) = shelf_facing_yaw(state_id) else {
+                continue;
+            };
+            candidates.push((
+                [x, y, z],
+                facing_yaw_deg,
+                shelf_align_to_bottom(&be.nbt),
+                shelf_items(&be.nbt),
+            ));
+        }
+    }
+    candidates
+}
+
+/// Every shelf's occupied-slot items to draw this frame, for
+/// [`crate::gpu::RenderState::set_shelf_source`]. An empty shelf contributes
+/// nothing, matching `ShelfRenderer.submit`'s per-slot null guard.
+///
+/// No clock captured, like [`campfire_spawns`]: nothing about a shelved item
+/// animates.
+#[must_use]
+pub fn shelf_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<ShelfItemSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+
+    let candidates = {
+        let world = store.read();
+        shelf_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
+    let mut out = Vec::new();
+    for (block, facing_yaw_deg, align_to_bottom, items) in candidates {
+        if items.is_empty() {
+            continue;
+        }
+        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        for (slot, item) in items {
+            out.push(ShelfItemSpawn {
+                pos: block,
+                facing_yaw_deg,
+                slot,
+                align_to_bottom,
+                item,
+                light,
+            });
+        }
+    }
+    out.sort_by_key(|s| (s.pos, s.slot));
+    out
+}
+
+#[cfg(test)]
+mod shelf_tests {
+    use super::*;
+
+    fn compound(fields: Vec<(&str, lodestone_core::Nbt)>) -> lodestone_core::Nbt {
+        lodestone_core::Nbt::Compound(
+            fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        )
+    }
+
+    /// The shape `ShelfBlockEntity.saveAdditional` actually writes:
+    /// `{Items: [{Slot, id, count}, ...], align_items_to_bottom: <byte>}`.
+    #[test]
+    fn parses_a_real_shelf_shape() {
+        let nbt = compound(vec![
+            (
+                "Items",
+                lodestone_core::Nbt::List {
+                    element_type: lodestone_core::NbtTag::Compound,
+                    elements: vec![
+                        compound(vec![
+                            ("Slot", lodestone_core::Nbt::Byte(0)),
+                            (
+                                "id",
+                                lodestone_core::Nbt::String("minecraft:book".to_string()),
+                            ),
+                            ("count", lodestone_core::Nbt::Int(1)),
+                        ]),
+                        compound(vec![
+                            ("Slot", lodestone_core::Nbt::Byte(2)),
+                            (
+                                "id",
+                                lodestone_core::Nbt::String("minecraft:torch".to_string()),
+                            ),
+                            ("count", lodestone_core::Nbt::Int(1)),
+                        ]),
+                    ],
+                },
+            ),
+            ("align_items_to_bottom", lodestone_core::Nbt::Byte(1)),
+        ]);
+        let items = shelf_items(&nbt);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].0, 0);
+        assert_eq!(items[0].1.to_string(), "minecraft:book");
+        assert_eq!(items[1].0, 2);
+        assert_eq!(items[1].1.to_string(), "minecraft:torch");
+        assert!(shelf_align_to_bottom(&nbt));
+    }
+
+    /// An empty shelf (no `Items` list at all) parses to no items, and a
+    /// missing `align_items_to_bottom` defaults to `false`.
+    #[test]
+    fn an_empty_shelf_has_no_items_and_defaults_unaligned() {
+        assert!(shelf_items(&compound(vec![])).is_empty());
+        assert!(!shelf_align_to_bottom(&compound(vec![])));
+    }
+
+    /// `Slot` is the list-entry field, not the list index — a single item
+    /// stored at `Slot: 2` must resolve to slot 2, not slot 0 (the index it
+    /// occupies in a one-element list). The same trap
+    /// [`campfire_items`]'s doc names for the identical codec shape.
+    #[test]
+    fn slot_is_read_from_the_field_not_the_list_index() {
+        let nbt = compound(vec![(
+            "Items",
+            lodestone_core::Nbt::List {
+                element_type: lodestone_core::NbtTag::Compound,
+                elements: vec![compound(vec![
+                    ("Slot", lodestone_core::Nbt::Byte(2)),
+                    (
+                        "id",
+                        lodestone_core::Nbt::String("minecraft:emerald".to_string()),
+                    ),
+                ])],
+            },
+        )]);
+        let items = shelf_items(&nbt);
+        assert_eq!(items, vec![(2, "minecraft:emerald".parse().unwrap())]);
+    }
+
+    /// A `Slot` at or past [`SHELF_SLOTS`] is dropped, matching
+    /// `ItemStackWithSlot.isValidInContainer`.
+    #[test]
+    fn an_out_of_range_slot_is_dropped() {
+        let nbt = compound(vec![(
+            "Items",
+            lodestone_core::Nbt::List {
+                element_type: lodestone_core::NbtTag::Compound,
+                elements: vec![compound(vec![
+                    ("Slot", lodestone_core::Nbt::Byte(3)),
+                    (
+                        "id",
+                        lodestone_core::Nbt::String("minecraft:emerald".to_string()),
+                    ),
+                ])],
+            },
+        )]);
+        assert!(shelf_items(&nbt).is_empty());
+    }
+
+    /// `bookshelf`/`chiseled_bookshelf` must not resolve a facing yaw — the
+    /// suffix check this module's doc warns about getting backwards.
+    #[test]
+    fn plain_bookshelf_is_not_a_shelf_block_entity() {
+        if let Some(id) = lodestone_data::block_states::state_id("minecraft:bookshelf") {
+            assert!(shelf_facing_yaw(id).is_none());
+        }
+        if let Some(id) = lodestone_data::block_states::state_id("minecraft:chiseled_bookshelf") {
+            assert!(shelf_facing_yaw(id).is_none());
+        }
     }
 }

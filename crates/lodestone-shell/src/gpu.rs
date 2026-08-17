@@ -77,9 +77,9 @@ pub use sources::{
     CampfireSource,
     ConduitSource, DecoratedPotSource, EnchantingTableSource, EndGatewaySource, EndPortalSource,
     EntityLightSource, HandSwingSource, ItemUseSource, LecternSource, MainHandItem,
-    MainHandSource, MapSource, MovingPistonSource, OutlineShapeSource, ShulkerSource, SignSource,
-    SkullSource, SkyDarkenSource, SpawnerSource, ThirdPersonBodySource, ThirdPersonBodyState,
-    VaultSource,
+    MainHandSource, MapSource, MovingPistonSource, OutlineShapeSource, ShelfSource, ShulkerSource,
+    SignSource, SkullSource, SkyDarkenSource, SpawnerSource, ThirdPersonBodySource,
+    ThirdPersonBodyState, VaultSource,
 };
 pub use stats::RenderStats;
 
@@ -534,6 +534,12 @@ pub struct RenderState {
     /// unset source leaves a complete, correctly-dusted block with no item
     /// floating above it, never a hole.
     brushable_source: BrushableSource,
+    /// Where this frame's shelved items come from. Same odd-one-out shape as
+    /// [`Self::campfire_source`]: consumed by the item geometry pass, not
+    /// `prepare_block_entities`, because a shelf's board/back/sides are all
+    /// real block-model geometry the terrain mesher already draws. An unset
+    /// source leaves a complete, empty shelf, never a hole.
+    shelf_source: ShelfSource,
     /// Where this frame's moving pistons come from. Consumed by
     /// [`Self::prepare_moving_blocks`] and the **model** pipeline, not by
     /// `prepare_block_entities` and not by the item path — a third destination, and
