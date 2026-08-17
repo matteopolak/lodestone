@@ -1163,6 +1163,16 @@ Three corollaries, all paid for (§12.160):
   round number is a guess wearing a prediction's clothes, and it fails in the direction that looks like a
   code bug.
 
+  **And a round number chosen as an *input* is worse than one chosen as an expectation, because it can make
+  every arm of a gate coincide at once — concealing a real bug rather than merely failing.** Measured on the
+  end portal: the animation gate advanced `GameTime` by `200.0`, and that made the per-layer UV shift an
+  exact integer **for every layer simultaneously**, so the two sampled phases looked identical. That is
+  precisely the symptom of the real defect sitting underneath it — implicit-derivative mip selection had made
+  the swirl blind to `GameTime` entirely — and the round delta reproduced that symptom for an innocent
+  reason. Re-deriving the delta as `0.37` separated the two and exposed the shader bug. So when a fixture
+  supplies a *step*, a *delta*, a *seed* or an *interval*, ask what it divides evenly into; the whole point of
+  picking an input is to make the arms differ, and a round one is the input most likely to make them agree.
+
 And the reciprocal of *world*: **a new subsystem silently breaks every test that assumed its absence.** A
 drowning-cadence gate began failing when hunger landed, because a hurt well-fed player now regenerates and
 the next health packet is a *heal*. When you add a system, grep for gates whose premise was "this does not
