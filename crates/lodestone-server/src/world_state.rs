@@ -222,6 +222,10 @@ pub struct WorldStateHandle {
     /// receives this handle. See `crate::commands::nbt_storage`'s module
     /// doc.
     nbt_storage: crate::commands::nbt_storage::NbtStorageHandle,
+    /// This world's `/stopwatch` registry, a sibling of `state`/`scoreboard`/
+    /// `teams`/`nbt_storage` for the identical reason. See
+    /// `crate::commands::stopwatch_store`'s module doc.
+    stopwatches: crate::commands::stopwatch_store::StopwatchHandle,
 }
 
 impl WorldStateHandle {
@@ -273,6 +277,14 @@ impl WorldStateHandle {
     #[must_use]
     pub fn nbt_storage(&self) -> &crate::commands::nbt_storage::NbtStorageHandle {
         &self.nbt_storage
+    }
+
+    /// This world's `/stopwatch` registry — see [`Self`]'s own field doc for
+    /// why a command reaches it through here rather than through a handle of
+    /// its own.
+    #[must_use]
+    pub fn stopwatches(&self) -> &crate::commands::stopwatch_store::StopwatchHandle {
+        &self.stopwatches
     }
 
     /// Whether this handle and `other` name the same store — for the sharing
