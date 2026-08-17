@@ -199,6 +199,13 @@ pub mod anvil;
 pub mod enchantment_data;
 pub mod enchanting;
 pub mod smithing;
+/// Issue #150: the loom's banner-pattern application, and the same
+/// scratch-menu shape `smithing`/`anvil` already use for a non-block-entity
+/// station.
+pub mod loom;
+/// Issue #150: the stonecutter's recipe list, read straight off
+/// [`crafting::recipe_book`]'s already-loaded corpus.
+pub mod stonecutting;
 /// Issue #530: sounds, particles and level events the server owns. Public
 /// because `ServerProtocol`'s three new encoders name [`effects::WorldEffect`].
 pub mod effects;

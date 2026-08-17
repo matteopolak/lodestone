@@ -1902,12 +1902,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   save-format **`DataVersion`**, and its **release date**:
 - [Vibration substrate (issue #459, steps 2–3)](./vibration-substrate.md) — A
   world-event type (`VibrationEvent`) and a host-side "nearest audible event"
-  resolution (step 2), plus a first real consumer: warden anger and a real melee
-  consequence (step 3, `crates/lodestone-server/src/mobs/warden.rs`). Step 1 of that
-  issue (the Brain driver reaching production) is separate, tracked elsewhere. Step 3
-  here is **partial** — anger accumulation and a genuine in-range hit are built;
-  pursuit, dig/emerge and the sonic boom are not (see `warden.rs`'s own module doc for
-  exactly what and why).
+  resolution (step 2), plus a first real consumer: warden anger, pursuit, a real
+  melee-or-sonic-boom hit, and a real invulnerable emerging spawn window (step 3,
+  `crates/lodestone-server/src/mobs/warden.rs`). Step 1 of that issue (the Brain
+  driver reaching production) is separate, tracked elsewhere. Step 3 here is **almost
+  complete** — anger accumulation, pursuit, emerging and both attacks (melee and a
+  real ranged sonic boom) are all built and reach a real health change through
+  production ticks; only `Digging` (the warden's give-up-and-despawn retreat) remains,
+  deliberately left open rather than guessed at — see `warden.rs`'s own module doc
+  for exactly why.
 - [View bobbing, the damage tilt, and view lag](./view-bobbing.md) — Three separate
   mechanisms that a screenshot makes look like one:
 - [Villager professions and trading (issues #243, #245)](./villager-professions-and-trading.md) —
@@ -1972,16 +1975,18 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   integration and the structure matcher), ported from 26.2's decompiled
   `WitherBoss`/`WitherSkull`/`WitherSkullBlock` under
   `.cache/mc/26.2/src/net/minecraft/world/{entity/boss/wither,entity/projectile/hurtingprojectile,level/block}/`.
-- [The workstation economy: anvil, grindstone, smithing table, enchanting table](./workstation-economy.md) —
-  The server-side maths and click wiring for the four cost-driven container screens
-  issues #253–#255 ask for: the anvil (repair-with-material, repair-by-combining,
-  rename, the prior-work penalty, the too-expensive cap), the grindstone (strip
-  enchantments to curses, combine-repair, a partial XP refund), the smithing table
-  (netherite upgrade, armour/tool trim) and the enchanting table (bookshelf power, the
-  three-slot level cost, weighted-random offers). `docs/container-cost-screens.md`
-  already covers the **client** half (menu shape, layout, background art, cost-number
-  rendering) — this is the half that was still missing: nothing server-side computed
-  a result, charged XP, or consumed an input.
+- [The workstation economy: anvil, grindstone, smithing table, enchanting table, loom, stonecutter](./workstation-economy.md) —
+  The server-side maths and click wiring for the cost-driven container screens issues
+  #253–#255 (and, for the loom/stonecutter, #150) ask for: the anvil
+  (repair-with-material, repair-by-combining, rename, the prior-work penalty, the
+  too-expensive cap), the grindstone (strip enchantments to curses, combine-repair, a
+  partial XP refund), the smithing table (netherite upgrade, armour/tool trim), the
+  enchanting table (bookshelf power, the three-slot level cost, weighted-random
+  offers), the loom (banner pattern application) and the stonecutter (its own recipe
+  list). `docs/container-cost-screens.md` already covers the **client** half (menu
+  shape, layout, background art, cost-number rendering) — this is the half that was
+  still missing: nothing server-side computed a result, charged XP, or consumed an
+  input.
 - [World Creation screen](./world-creation-screen.md) — `Screen::CreateWorld` (issue
   #190): vanilla's `CreateWorldScreen`, reached from the world list's "Create New
   World" button (`crates/lodestone-shell/src/menu/world_select.rs`'s

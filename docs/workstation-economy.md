@@ -1,17 +1,23 @@
-# The workstation economy: anvil, grindstone, smithing table, enchanting table
+# The workstation economy: anvil, grindstone, smithing table, enchanting table, loom, stonecutter
 
 ## What it is
 
-The server-side maths and click wiring for the four cost-driven container
-screens issues #253–#255 ask for: the anvil (repair-with-material,
-repair-by-combining, rename, the prior-work penalty, the too-expensive cap),
-the grindstone (strip enchantments to curses, combine-repair, a partial XP
-refund), the smithing table (netherite upgrade, armour/tool trim) and the
-enchanting table (bookshelf power, the three-slot level cost, weighted-random
-offers). `docs/container-cost-screens.md` already covers the **client** half
-(menu shape, layout, background art, cost-number rendering) — this is the
-half that was still missing: nothing server-side computed a result, charged
-XP, or consumed an input.
+The server-side maths and click wiring for the cost-driven container screens
+issues #253–#255 (and, for the loom/stonecutter, #150) ask for: the anvil
+(repair-with-material, repair-by-combining, rename, the prior-work penalty,
+the too-expensive cap), the grindstone (strip enchantments to curses,
+combine-repair, a partial XP refund), the smithing table (netherite upgrade,
+armour/tool trim), the enchanting table (bookshelf power, the three-slot
+level cost, weighted-random offers), the loom (banner pattern application)
+and the stonecutter (its own recipe list). `docs/container-cost-screens.md`
+already covers the **client** half (menu shape, layout, background art,
+cost-number rendering) — this is the half that was still missing: nothing
+server-side computed a result, charged XP, or consumed an input.
+
+The loom and stonecutter are the two stations with **no** cost at all —
+unlike the other four, taking a result never charges or refunds XP, so they
+are documented here for the shared `Station`/`ItemCombiner` machinery, not
+for any economy of their own.
 
 ## How it works
 
@@ -40,6 +46,21 @@ XP, or consumed an input.
   bookshelves"), `cost_for_slot`/`table_costs` (`EnchantmentHelper.getEnchantmentCost`)
   and `select_enchantments` (`EnchantmentHelper.selectEnchantment`'s weighted
   draw-and-filter loop).
+- [`crates/lodestone-server/src/loom.rs`](../crates/lodestone-server/src/loom.rs)
+  — `result`: applies one new [`lodestone_model::BannerPatternLayer`] to a
+  banner, from either a specific pattern *item* (10 items, each mapped to its
+  one granted pattern — `tags/banner_pattern/pattern_item/*.json`, transcribed
+  as `(item, pattern)` pairs because the mapping is **not** the identity for
+  two of the ten) or the 32-pattern base grid
+  (`tags/banner_pattern/no_item_required.json`, in file order — not a verified
+  live-registry iteration order). A pattern item's single option auto-selects
+  (`LoomMenu.slotsChanged`'s own `size() == 1` branch), so the common case
+  needs no `ContainerButtonClick` at all.
+- [`crates/lodestone-server/src/stonecutting.rs`](../crates/lodestone-server/src/stonecutting.rs)
+  — `matches`/`result`: filters `crate::crafting::recipe_book()`'s own
+  `Recipe::Stonecutting` entries (see below — these were **not** bundled
+  before issue #150) by ingredient, sorted by recipe id for a stable
+  (disclosed non-vanilla-exact) button order.
 
 Every non-trivial formula's own doc comment cites the vanilla method and
 file it was read from; see each module for the derivation rather than
@@ -66,16 +87,34 @@ variants:
 - `ItemCombiner { inputs, station: Station }` — `inputs` grid cells then one
   take-only result, exactly `ItemCombinerMenu`'s own
   `getInventorySlotStart() == resultSlot + 1`. `Station` (`Anvil`,
-  `Grindstone`, `Smithing`) selects three things that differ per station:
-  `may_place` on the input cells (`item_combiner_may_place`), the quick-move
-  ranges, and — the one genuinely bespoke piece — how a take consumes the
-  input cells (`take_result`'s three-way match: crafting/smithing shrink
-  every cell by one, the grindstone always fully clears both cells, and the
-  anvil clears cell 0 unconditionally while cell 1 depends on
-  `repair_item_count_cost`/`only_renaming`, re-derived from
+  `Grindstone`, `Smithing`, `Loom`, `Stonecutter`) selects three things that
+  differ per station: `may_place` on the input cells
+  (`item_combiner_may_place`), the quick-move ranges, and — the one
+  genuinely bespoke piece — how a take consumes the input cells
+  (`take_result`'s match: crafting/smithing/stonecutter shrink every cell by
+  one — the stonecutter's single input cell falls into that same default
+  arm, needing no dedicated one — the grindstone always fully clears both
+  cells, the loom clears/shrinks only cells 0/1 (banner, dye) and
+  deliberately leaves cell 2 (the pattern item) untouched so it can stamp a
+  second banner, and the anvil clears cell 0 unconditionally while cell 1
+  depends on `repair_item_count_cost`/`only_renaming`, re-derived from
   `crate::anvil::compute` with `creative: true` purely to read those two
   fields — safe because creative can only ever *widen* which combination
   produces a result).
+  - `Loom`'s three cells are banner/dye/pattern-item, not a fourth-shape —
+    `MenuLayout::item_combiner`'s own `inputs` match groups it with
+    `Smithing` by cell *count* only; `item_combiner_may_place` still
+    dispatches per station.
+  - `Stonecutter` has exactly one input cell.
+  - Both feed a second piece of per-connection scratch state beyond the
+    grid: `PlayerInventory::selected_recipe_index` (`LoomMenu.selectedBannerPatternIndex`/
+    `StonecutterMenu.selectedRecipeIndex`'s own `DataSlot`), reset to `None`
+    by `open_workstation` exactly like `pending_rename`/`enchant_seed`. It is
+    threaded into `workstation_result`'s `selected` parameter (ignored by
+    the other three stations, the same "unused by most, real for one or two"
+    shape `rename` already had), so the two closures that recompute the
+    result mid-click (`read_workstation_menu`, `apply_workstation_clicked`'s
+    own `recipe` closure) both see it.
 - `Enchanting` — two cells (item, lapis), **no result slot at all**: the item
   is enchanted in place, so there is nothing to take.
 
@@ -107,10 +146,20 @@ rather than on a take.
 - A new enchantment, or a balance change to an existing one:
   `enchantment_data.rs`'s `ENCHANTMENTS` table, `EXCLUSIVE_SETS`, and (if it
   introduces a new `supported_items` tag) a new `SupportedItems` variant.
-- A fifth `Station`-shaped menu: a `Station` (or a wholly new `MenuKind`
+- A sixth `Station`-shaped menu: a `Station` (or a wholly new `MenuKind`
   variant, if it has no result slot like `Enchanting`) in `container_click.rs`,
-  a `PlayerInventory::open_workstation`-style opener in `server.rs`, and a
-  pure compute module alongside `anvil.rs`/`smithing.rs`/`enchanting.rs`.
+  a block-name entry in `apply_use_item_on`'s dispatch table and a
+  `workstation_menu_type`/`container_title` entry in `server.rs`, and a pure
+  compute module alongside `anvil.rs`/`smithing.rs`/`enchanting.rs`/
+  `loom.rs`/`stonecutting.rs`. Note `open_workstation_screen` itself needed
+  **no** change for the loom/stonecutter — it was already generic over
+  `Station`, `inputs`, and the menu-type string.
+- A new pattern item for the loom: one row in `loom.rs`'s `PATTERN_ITEMS`,
+  keyed by the *pattern* id its own tag file grants (not by guessing the
+  item's own name — see that table's own doc for the two rows where they
+  differ). A new stonecutting recipe needs **no** change anywhere in this
+  crate: it loads through `crate::crafting::recipe_book` automatically once
+  its JSON lands in `assets/recipe/` (see below).
 
 ### Known gaps, and why they are gaps
 
@@ -174,6 +223,35 @@ rather than on a take.
   block-state writes (`chipped_anvil`/`damaged_anvil`) this module has no
   `ChunkSource` access to. Cosmetic only; the repair/combine economy itself
   is unaffected.
+- **Closed: the loom and stonecutter had zero server-side menu support at
+  all** (issue #150) — not merely an unconnected `ContainerButtonClick`, as
+  an earlier pass on this issue had assumed. There was no `Station` variant,
+  no block-open dispatch, and (the part that took the longest to find) the
+  stonecutter's whole recipe corpus was **not bundled**: `assets/recipe/`
+  held only `crafting_shaped`/`crafting_shapeless` (1,056 files,
+  `crate::crafting::BUNDLED_CRAFTING_RECIPES`'s old value), so
+  `recipe_book()` had zero `Recipe::Stonecutting` entries in production —
+  `crate::stonecutting::matches` returned an empty list for every input
+  until the 319 real `stonecutting` recipe JSON files were copied in
+  alongside them (`BUNDLED_CRAFTING_RECIPES` is now 1,375; `build.rs`
+  needed no change, since it already bundles the whole directory generically
+  by file, keyed only by the JSON's own `"type"`). Both are now real,
+  server-computed, and gated through the production `apply_container_clicked`
+  → `apply_workstation_clicked` → `container_click::take_result` path (see
+  `server::tests::a_stonecutter_button_click_then_take_produces_the_selected_recipe_and_consumes_one_input`/
+  `server::tests::a_loom_take_with_a_pattern_item_consumes_banner_and_dye_but_not_the_pattern_item`).
+- **Not modelled: exact vanilla button ordering for either station's offer
+  list.** The loom's 32-pattern base grid is the tag file's own listed
+  order (a disclosed transcription, not a verified live-registry iteration
+  order); the stonecutter's offer list is sorted by recipe id, which is
+  stable across calls but not proven to match `RecipeManager`'s real
+  registration order. Getting either exactly right would need a JVM oracle
+  dump the same way `EntityDataIndexOracle` exists for metadata indices —
+  nobody has built one for `Registries.BANNER_PATTERN`/stonecutting
+  registration order yet. Harmless for the auto-select common case (a
+  specific pattern item, or a stonecutting input with only one recipe);
+  visible only as "button N might not be vanilla's button N" for a
+  multi-option `ContainerButtonClick`.
 
 ## Configuration
 
@@ -193,8 +271,9 @@ documented non-JVM-bit-compatible RNG `crate::loot` already uses; draw
 ## Verification
 
 ```bash
-cargo test -p lodestone-server --lib --no-fail-fast -- enchantment_data:: anvil:: smithing:: enchanting:: container_click::
+cargo test -p lodestone-server --lib --no-fail-fast -- enchantment_data:: anvil:: smithing:: enchanting:: loom:: stonecutting:: container_click:: crafting::
 cargo test -p lodestone-server --lib --no-fail-fast -- server::tests::the_anvil_repairs server::tests::the_grindstone_strips server::tests::the_smithing_table_upgrades
 cargo test -p lodestone-server --lib --no-fail-fast -- server::tests::rename_item server::tests::container_button_click server::tests::a_pure_rename_take
+cargo test -p lodestone-server --lib --no-fail-fast -- server::tests::a_stonecutter_button_click_then_take server::tests::a_loom_take_with_a_pattern_item
 cargo test -p lodestone-v770 --no-fail-fast -- serverbound_interaction_tier2::
 ```

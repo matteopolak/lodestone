@@ -194,6 +194,11 @@ pub enum Station {
     Anvil,
     Grindstone,
     Smithing,
+    /// `LoomMenu` — three input cells (banner, dye, pattern item), not two;
+    /// see [`MenuLayout::item_combiner`]'s own `inputs` match.
+    Loom,
+    /// `StonecutterMenu` — one input cell.
+    Stonecutter,
 }
 
 /// The menu-index → [`SlotKind`] table for one open menu.
@@ -259,7 +264,8 @@ impl MenuLayout {
     pub fn item_combiner(station: Station) -> Self {
         let inputs = match station {
             Station::Anvil | Station::Grindstone => 2,
-            Station::Smithing => 3,
+            Station::Smithing | Station::Loom => 3,
+            Station::Stonecutter => 1,
         };
         let mut slots: Vec<SlotKind> = (0..inputs).map(SlotKind::Grid).collect();
         slots.push(SlotKind::Result);
@@ -504,6 +510,19 @@ fn item_combiner_may_place(station: Station, cell: usize, item: &ItemStack) -> b
                 _ => crate::smithing::is_addition(&name),
             }
         }
+        // `LoomMenu`'s three anonymous slots: banner, dye, pattern item —
+        // each its own `mayPlace` override, none shared with the others.
+        Station::Loom => {
+            let name = item.item.to_string();
+            match cell {
+                0 => crate::loom::is_banner_item(&name),
+                1 => crate::loom::is_dye_item(&name),
+                _ => crate::loom::is_pattern_item(&name),
+            }
+        }
+        // `StonecutterMenu`'s plain `Slot` (no `mayPlace` override at all —
+        // vanilla's own default is unconditionally `true`).
+        Station::Stonecutter => true,
     }
 }
 
@@ -1333,6 +1352,25 @@ fn take_result(
             for (index, kind) in layout.slots.iter().copied().enumerate() {
                 if matches!(kind, SlotKind::Grid(_)) {
                     slots[index] = None;
+                }
+            }
+        }
+        // `LoomMenu.onTake`: `bannerSlot.remove(1); dyeSlot.remove(1);` —
+        // the pattern-item slot (cell 2) is deliberately **not** touched, so
+        // one pattern item can stamp several banners in a row. The generic
+        // `_` arm below would wrongly consume it (it decrements every grid
+        // cell), which is why the loom needs its own arm rather than falling
+        // through.
+        MenuKind::ItemCombiner { station: Station::Loom, .. } => {
+            for (index, kind) in layout.slots.iter().copied().enumerate() {
+                if matches!(kind, SlotKind::Grid(0) | SlotKind::Grid(1)) {
+                    if let Some(stack) = slots[index].as_mut() {
+                        if stack.count <= 1 {
+                            slots[index] = None;
+                        } else {
+                            stack.count -= 1;
+                        }
+                    }
                 }
             }
         }

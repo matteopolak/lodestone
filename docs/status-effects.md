@@ -165,16 +165,23 @@ deterministic (no probability field) and the caller only needs a bool.
   does nothing to how fast the player actually moves. `lodestone-shell` is a separate
   ownership area from this crate; the missing hunk is that one `EffectApplied`/
   `EffectRemoved` arm.
-* **`resistance`'s damage reduction and `absorption`'s extra hit points.** Both are
-  granted correctly now (a golden apple, a Potion of Regeneration's sibling potions,
-  a beacon) — they store, tick their duration down, and show in the HUD — but nothing
-  *reads* them back. `Defenses` (`lodestone_entity::damage`) already has
-  `resistance_amplifier`/`absorption` fields ready to consume; every real player
-  damage call site builds its `Defenses` from `PlayerInventory::combat_stats` alone
-  (armour only), so `resistance_amplifier` is always `None` and `absorption` is always
-  `0.0`. Regeneration and Fire Resistance are **not** in this category — both already
-  have a real consumer (`ActiveEffects::tick`'s heal, `crate::burning`'s
-  `fire_resistance` flag) — so granting those two is complete end to end.
+* **Closed (issue #690): `resistance`'s damage reduction and `absorption`'s extra hit
+  points are now read back, not just granted.** `ActiveEffects::overlay_defenses`
+  (`crate::mob_effects`) overlays the live `minecraft:resistance` amplifier and a
+  `minecraft:absorption` amplifier's nominal `4.0 * (amplifier + 1)` cushion
+  (`MobEffects.ABSORPTION`'s own `MAX_ABSORPTION` attribute modifier) onto the
+  equipment-derived `Defenses` at the one real player-damage call site
+  (`crate::server::serve_play`'s hostile-mob-hit arm), before
+  `PlayerVitals::apply_damage` runs the reduction pipeline. **Disclosed
+  simplification, not a silent one:** vanilla drains a separate `AbsorptionAmount`
+  pool across hits within one effect's duration; this crate does not track that
+  depleting pool (it would need to persist across ticks wherever the effect is
+  granted, not just at the hit site), so a hit while Absorption is active always
+  sees the effect's full nominal cushion rather than whatever an earlier hit in the
+  same duration already spent — real reduction, still measurably more generous than
+  vanilla's per-hit depletion. Regeneration and Fire Resistance were already
+  complete end to end (`ActiveEffects::tick`'s heal, `crate::burning`'s
+  `fire_resistance` flag).
 * **A lingering potion's own `AreaEffectCloud` entity.** Real vanilla behaviour is a
   cloud with a radius, a radius-per-tick shrink, a duration and a reapplication delay,
   so the burst lands repeatedly over up to 30 seconds. That entity does not exist here,

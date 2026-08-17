@@ -102,17 +102,19 @@ fn main() {
 
     // Issue #529: the crafting corpus the server re-derives a crafting result
     // from. `assets/recipe/` is vanilla 26.2's `crafting_shaped` +
-    // `crafting_shapeless` set (1,056 files, the only two types a grid can
-    // produce) and `assets/tags/item/` is the 224 item tags their ingredients
-    // reference. **Both, or neither**: a recipe whose ingredient is `#planks`
-    // matches nothing without the tag, and a corpus that silently drops
-    // recipes rejects valid crafts — which is worse than the trust it replaces.
+    // `crafting_shapeless` set plus (issue #150) the `stonecutting` set —
+    // 1,375 files total, the only three recipe types this crate's own
+    // matchers consume — and `assets/tags/item/` is the 224 item tags their
+    // ingredients reference. **Both, or neither**: a recipe whose ingredient
+    // is `#planks` matches nothing without the tag, and a corpus that
+    // silently drops recipes rejects valid crafts — which is worse than the
+    // trust it replaces.
     for (dir, table, doc) in [
         (
             "assets/recipe",
             "EMBEDDED_RECIPES",
             "every bundled crafting recipe JSON (`crafting_shaped` + \
-             `crafting_shapeless` only), sorted by id",
+             `crafting_shapeless` + `stonecutting`), sorted by id",
         ),
         (
             "assets/tags/item",

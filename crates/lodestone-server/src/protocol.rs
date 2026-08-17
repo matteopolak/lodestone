@@ -528,6 +528,25 @@ pub enum MetadataField {
     /// own doc) — a real field, pushed unconditionally, whose value simply
     /// never varies yet.
     CrystalShowBottom(bool),
+    /// `Entity.DATA_POSE` — index **6**, the one and only `POSE`-serializer
+    /// claimant in the jar dump (`entity_data_index_jvm.txt`), so no species
+    /// switch is needed to disambiguate it the way index 8 or 18 need one.
+    ///
+    /// The raw `Pose` ordinal (`net.minecraft.world.entity.Pose.id()`), not a
+    /// version-free enum — this crate has no general per-mob pose model yet
+    /// (issue #459's warden dig/emerge is the first producer), so the id is
+    /// carried through verbatim rather than inventing a vocabulary for the
+    /// other seventeen values nothing here produces. `13` (`EMERGING`) and
+    /// `14` (`DIGGING`) are the two this crate currently ever sends; `0`
+    /// (`STANDING`) is vanilla's own default.
+    ///
+    /// **Pushed unconditionally for a warden**, not only while non-standard —
+    /// the same "the reset needs to reach the client too" reasoning
+    /// [`CreeperSwellDir`](Self::CreeperSwellDir)'s own doc gives:
+    /// `SET_ENTITY_DATA` is a sparse update, so a snapshot that stops
+    /// including this field the tick emerging ends would leave a client that
+    /// received the `13` believing the warden is stuck emerging forever.
+    Pose(u32),
     /// `WitherBoss.DATA_ID_INV` — the invulnerable "emerging" countdown
     /// (`crate::wither::INVULNERABLE_TICKS` down to `0`) that drives the
     /// client-side shield visual while a freshly-summoned wither is still
