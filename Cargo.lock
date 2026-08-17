@@ -3079,6 +3079,7 @@ dependencies = [
 name = "lodestone-server"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.0",
  "bevy_app",
  "bevy_ecs",
  "flate2",
@@ -3100,6 +3101,7 @@ dependencies = [
  "lodestone-world",
  "lodestone-worldgen",
  "reqwest",
+ "rsa",
  "serde_json",
  "sha2",
  "thiserror 2.0.19",
