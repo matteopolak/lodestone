@@ -245,6 +245,10 @@ mod tests {
         fn block_state(&self, x: i32, y: i32, z: i32) -> String {
             self.0.get(&(x, y, z)).unwrap_or(&"minecraft:air").to_string()
         }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_string()
+        }
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
             unimplemented!("not needed for these tests")
         }

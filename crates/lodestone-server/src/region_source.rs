@@ -1070,6 +1070,17 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         self.column(cx, cz).block_state(lx, y, lz).to_string()
     }
 
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        // Same reasoning as `block_state` above: goes through `self.column()`
+        // so a loaded/edited column's biome data is what answers, not a bare
+        // regeneration from `self.inner`.
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
+    }
+
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
@@ -1583,6 +1594,17 @@ mod tests {
             let lx = x.rem_euclid(16);
             let lz = z.rem_euclid(16);
             self.column(cx, cz).block_state(lx, y, lz).to_string()
+        }
+
+        fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+            // The plain column-regenerating form; the tests drive edits
+            // through `RegionChunkSource` (which does not forward to this
+            // inner source), so this never needs to reflect a write here.
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
         }
 
         // `RegionChunkSource` owns the edit map and deliberately does not

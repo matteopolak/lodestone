@@ -1060,6 +1060,21 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             .unwrap_or_else(|| self.source.block_state(x, y, z))
     }
 
+    /// One biome cell out of the retained column, without cloning the whole
+    /// thing — the same reason [`block_state`](Self::block_state) is
+    /// overridden here rather than left at `self.column(..).biome_state_at(..)`.
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        if let Some(fresh) = self.ensure(cx, cz) {
+            return fresh.biome_state_at(lx, y, lz).to_string();
+        }
+        self.read(cx, cz, |column| column.biome_state_at(lx, y, lz).to_string())
+            .unwrap_or_else(|| self.source.biome_state_at(x, y, z))
+    }
+
     /// One generated block entity out of the retained column, without cloning the
     /// whole thing — the same reason [`block_state`](Self::block_state) is
     /// overridden here.
@@ -1316,6 +1331,14 @@ mod tests {
             let lx = x.rem_euclid(16);
             let lz = z.rem_euclid(16);
             self.column(cx, cz).block_state(lx, y, lz).to_string()
+        }
+
+        fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
         }
 
         // `run_tick_loop` forwards random-tick and grazing mutations through
@@ -2006,6 +2029,16 @@ mod tests {
             self.column(cx, cz).block_state(lx, y, lz).to_string()
         }
 
+        fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+            // Only `column()` is exercised here (the RSS measurement); this is
+            // the plain column-regenerating form, kept for completeness.
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
+        }
+
         // A memory-measurement fixture; nothing here writes blocks. Explicitly
         // discards rather than inheriting a silent default (issue #440).
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
@@ -2205,6 +2238,16 @@ mod tests {
                 let lx = x.rem_euclid(16);
                 let lz = z.rem_euclid(16);
                 self.column(cx, cz).block_state(lx, y, lz).to_string()
+            }
+
+            fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+                // Only `column()` is exercised here (the lock-serialisation
+                // gate); the plain column-regenerating form, for completeness.
+                let cx = x.div_euclid(16);
+                let cz = z.div_euclid(16);
+                let lx = x.rem_euclid(16);
+                let lz = z.rem_euclid(16);
+                self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
             }
 
             // A wall-clock-only fixture; nothing here writes blocks. Explicitly

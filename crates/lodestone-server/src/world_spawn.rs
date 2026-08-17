@@ -616,6 +616,14 @@ impl ChunkSource for MapSource {
         self.column(cx, cz).block_state(lx, y, lz).to_string()
     }
 
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
+    }
+
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // Fixture: the gates never edit terrain.
     }
@@ -909,6 +917,14 @@ mod tests {
                 let cz = z.div_euclid(16);
                 self.column(cx, cz)
                     .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
+                    .to_string()
+            }
+
+            fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+                let cx = x.div_euclid(16);
+                let cz = z.div_euclid(16);
+                self.column(cx, cz)
+                    .biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16))
                     .to_string()
             }
 

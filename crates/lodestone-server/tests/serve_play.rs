@@ -147,6 +147,16 @@ impl ChunkSource for AirSource {
         self.column(cx, cz).block_state(lx, y, lz).to_string()
     }
 
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        // The column-regenerating form (correct, just not cheap); this
+        // fixture is small and this path is not hot.
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
+    }
+
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
     // retention). Explicit rather than inherited — issue #440.
@@ -184,6 +194,16 @@ impl ChunkSource for WaterSource {
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
         self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        // The column-regenerating form (correct, just not cheap); this
+        // fixture is small and this path is not hot.
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
     // No storage: this fixture serves fresh columns and edits are discarded by
@@ -2067,6 +2087,16 @@ impl ChunkSource for CountingAirSource {
         self.column(cx, cz).block_state(lx, y, lz).to_string()
     }
 
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        // The column-regenerating form (correct, just not cheap); this fixture
+        // counts generations, not reads.
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
+    }
+
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
     // retention). Explicit rather than inherited — issue #440.
@@ -2922,6 +2952,10 @@ impl ChunkSource for RecordingSource {
         if y == 8 { "minecraft:stone".to_string() } else { "minecraft:air".to_string() }
     }
 
+    fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+        "minecraft:plains".to_string()
+    }
+
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design (issue #440: explicit).
     }
@@ -3060,6 +3094,14 @@ impl ChunkSource for StoneSource {
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
         self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
@@ -3314,6 +3356,10 @@ impl ChunkSource for SingleBlockSource {
         "minecraft:stone".to_string()
     }
 
+    fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+        "minecraft:plains".to_string()
+    }
+
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
         if (x, y, z) == (BREAK_POS.x, BREAK_POS.y, BREAK_POS.z) {
             *self.at_break_pos.lock().expect("lock") = name.to_string();
@@ -3425,6 +3471,14 @@ impl ChunkSource for StoneWithDirtSource {
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
         self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
@@ -3570,6 +3624,14 @@ impl ChunkSource for StoneWithFlowerSource {
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
         self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
@@ -4979,6 +5041,14 @@ impl ChunkSource for LavaSource {
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
         self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}

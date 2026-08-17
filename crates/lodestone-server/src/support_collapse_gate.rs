@@ -96,6 +96,19 @@ impl ChunkSource for RigWorld {
             .unwrap_or_else(|| crate::chunk::AIR.to_string())
     }
 
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+        self.columns
+            .lock()
+            .expect("rig world poisoned")
+            .get(&(cx, cz))
+            .map(|c| {
+                c.biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16))
+                    .to_string()
+            })
+            .unwrap_or_else(|| crate::chunk::AIR.to_string())
+    }
+
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
         self.columns

@@ -1162,6 +1162,21 @@ pub trait ChunkSource: Send + Sync {
     /// implementor rather than silently inherited.
     fn block_state(&self, x: i32, y: i32, z: i32) -> String;
 
+    /// Reads the biome id at world coordinates `(x, y, z)` — `/execute if
+    /// biome`'s own read (issue #48's remainder), through the same data
+    /// [`column`](Self::column) would return.
+    ///
+    /// Required, not defaulted, for the same reason [`block_state`](Self::block_state)
+    /// is: a defaulted trait method plus a wrapper impl is an island generator
+    /// in this crate (measured — `is_column_resident`'s `true` default was
+    /// once silently inherited by both `Arc<S>` and `DimensionalSource<S>`,
+    /// making an entire fix a no-op in production while its own tests
+    /// passed). An implementor with no cheaper path implements this as
+    /// `self.column(x.div_euclid(16), z.div_euclid(16)).biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16)).to_string()`,
+    /// which is correct if column-sized; an implementor with a retained
+    /// column (`ChunkStore`) should read out of that instead.
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String;
+
     /// Overwrites a single block's state at world coordinates `(x, y, z)`,
     /// persisting the change so a later [`column`](Self::column) call for
     /// its chunk reflects it.
@@ -1408,6 +1423,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
         (**self).block_state(x, y, z)
+    }
+
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        (**self).biome_state_at(x, y, z)
     }
 
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
@@ -2029,6 +2048,14 @@ impl ChunkSource for OverworldChunkSource {
         self.column(cx, cz).block_state(lx, y, lz).to_string()
     }
 
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
+    }
+
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
@@ -2128,6 +2155,14 @@ impl ChunkSource for NetherChunkSource {
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
         self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
@@ -2232,6 +2267,14 @@ impl ChunkSource for EndChunkSource {
         self.column(cx, cz).block_state(lx, y, lz).to_string()
     }
 
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
+    }
+
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
@@ -2319,6 +2362,20 @@ impl ChunkSource for WorldgenChunkSource {
         } else {
             AIR.to_string()
         }
+    }
+
+    /// This source stamps no biome data of its own (a solidity-only
+    /// transport-test source — see [`block_state`](Self::block_state)'s own
+    /// doc), so every cell reads [`DEFAULT_BIOME`] via
+    /// [`ChunkColumn::new`]'s own default, through the one path that column
+    /// actually exists on: `column()`, not a point-sampled shortcut like
+    /// `block_state`'s (there is no density-shaped biome field to sample).
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
     /// This source has no per-column retention — every `column()` call
@@ -2612,6 +2669,16 @@ mod tests {
             self.column(cx, cz).block_state(lx, y, lz).to_string()
         }
 
+        fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+            // The gates only ever call `column()`, so this is the plain
+            // column-regenerating form, kept for completeness.
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
+        }
+
         // A wall-clock-only fixture: it exists to make `column()` take a fixed
         // amount of blocking time, and no gate here writes blocks. Deliberately
         // discards rather than inheriting a silent default — the point of
@@ -2861,6 +2928,10 @@ mod tests {
 
             fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
                 "minecraft:air".to_string()
+            }
+
+            fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+                crate::chunk::DEFAULT_BIOME.to_string()
             }
 
             // Discarded by design (issue #440's explicit-choice rule) — this

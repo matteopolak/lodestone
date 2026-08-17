@@ -486,6 +486,10 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.block_state(x, y, z)
     }
 
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        self.primary.biome_state_at(x, y, z)
+    }
+
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
         self.primary.set_block(x, y, z, name);
     }

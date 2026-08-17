@@ -44,6 +44,16 @@ impl ChunkSource for AirWorld {
         self.column(cx, cz).block_state(lx, y, lz).to_string()
     }
 
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        // The plain column-regenerating form; this gate only drives a server
+        // tick, it never places blocks, so a cheap read is not needed.
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
+    }
+
     // Built into `IntegratedServer` (which wraps sources in a `ChunkStore`),
     // so a player action could reach this through the store's write-through.
     // The source has no storage — `column()` is a fresh blank column — so the

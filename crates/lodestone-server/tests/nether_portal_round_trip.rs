@@ -94,6 +94,10 @@ impl ChunkSource for SharedWorld {
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
         self.0.block_state(x, y, z)
     }
+
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        self.0.biome_state_at(x, y, z)
+    }
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
         self.0.set_block(x, y, z, name);
     }
@@ -125,6 +129,10 @@ impl ChunkSource for TestWorld {
             return self.filler.to_owned();
         }
         "minecraft:air".to_owned()
+    }
+
+    fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+        "minecraft:plains".to_string()
     }
 
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {

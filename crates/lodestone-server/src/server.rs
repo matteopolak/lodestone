@@ -17515,6 +17515,10 @@ mod tests {
             fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
                 "minecraft:air".to_owned()
             }
+
+            fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+                crate::chunk::DEFAULT_BIOME.to_string()
+            }
             fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
                 unimplemented!("read-only in this test")
             }
@@ -17614,6 +17618,10 @@ mod tests {
             }
             fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
                 unimplemented!("the stonecutter button click must never read the world")
+            }
+
+            fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+                crate::chunk::DEFAULT_BIOME.to_string()
             }
             fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
                 unimplemented!("read-only in this test")
@@ -19042,6 +19050,10 @@ mod tests {
         fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
             "minecraft:air".to_string()
         }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_string()
+        }
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
         fn dimension(&self) -> Option<crate::dimension::Dimension> {
             Some(self.0)
@@ -19064,6 +19076,10 @@ mod tests {
         }
         fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
             "minecraft:air".to_string()
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_string()
         }
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
         fn world_registries(&self) -> Option<crate::chunk::WorldRegistries> {

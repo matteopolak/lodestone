@@ -106,6 +106,7 @@ pub(crate) mod generated_sound_types;
 pub(crate) mod generated_tools;
 
 pub mod attribute_types;
+pub mod biomes;
 pub mod block;
 pub mod block_blast;
 pub mod block_entity_types;

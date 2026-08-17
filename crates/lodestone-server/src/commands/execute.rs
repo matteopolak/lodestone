@@ -185,7 +185,7 @@ use std::sync::Arc;
 
 use lodestone_command::{DoubleArgument, NodeId};
 use lodestone_command_mc::{
-    AnchorInput, Axes, BlockArg, BlockPosArg, DimensionArg, EntityAnchorArg, EntityArg,
+    AnchorInput, Axes, BiomeArg, BlockArg, BlockPosArg, DimensionArg, EntityAnchorArg, EntityArg,
     EntitySelector, IntRangeArg, NbtPathArg, ObjectiveArg, RotationArg, ScoreHolderArg, SnbtValue,
     StorageIdArg, SwizzleArg, Vec3Arg,
 };
@@ -617,7 +617,42 @@ fn register_conditions(registrar: &mut Registrar, execute: NodeId, literal: &str
     register_score_conditions(registrar, parent, execute, expected);
     register_data_storage_condition(registrar, parent, execute, expected);
     register_block_condition(registrar, parent, execute, expected);
+    register_biome_condition(registrar, parent, execute, expected);
     register_loaded_condition(registrar, parent, execute, expected);
+}
+
+/// `biome <pos> <biome>` — `ResourceOrTagArgument`'s own boolean shape
+/// (`ExecuteCommand`'s `biome` branch is `addConditional`'s
+/// [`add_boolean_conditional`], same as `block`/`dimension`). Reads
+/// [`crate::chunk::ChunkSource::biome_state_at`] — the primitive
+/// [`crate::chunk::ChunkColumn::biome_state_at`] already exposed, now on the
+/// trait the command layer reaches through — and refuses cleanly rather than
+/// panicking when no chunk source is in scope, exactly like
+/// [`register_block_condition`]. [`lodestone_command_mc::BiomeArg`] is a bare
+/// id, no tag support — see that type's own doc for why that is the same
+/// reduction [`lodestone_command_mc::BlockArg`] makes.
+fn register_biome_condition(
+    registrar: &mut Registrar,
+    parent: NodeId,
+    execute: NodeId,
+    expected: bool,
+) {
+    let biome_lit = registrar.literal(parent, "biome");
+    let (pos_node, pos_key) = registrar.arg(biome_lit, "pos", BlockPosArg);
+    let (biome_node, biome_key) = registrar.arg(pos_node, "biome", BiomeArg);
+    add_boolean_conditional(registrar, biome_node, execute, expected, move |ctx| {
+        let Some(blocks) = ctx.world.blocks else {
+            return Err("Blocks cannot be queried here".to_string());
+        };
+        let coords = *ctx.get(pos_key);
+        let origin = (ctx.source.position.x, ctx.source.position.y, ctx.source.position.z);
+        let rotation = (ctx.source.rotation.yaw, ctx.source.rotation.pitch);
+        let (x, y, z) = coords.resolve(origin, rotation);
+        let (x, y, z) = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
+        let actual = blocks.biome_state_at(x, y, z);
+        let expected_id = ctx.get(biome_key).biome.to_string();
+        Ok(actual == expected_id)
+    });
 }
 
 /// `loaded <pos>` — `ExecuteCommand.isChunkLoaded`'s own boolean shape

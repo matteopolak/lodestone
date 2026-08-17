@@ -113,6 +113,14 @@ impl ChunkSource for FlatWorld {
             .to_string()
     }
 
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(x.div_euclid(16), z.div_euclid(16))
+            .biome_state_at(lx, y, lz)
+            .to_string()
+    }
+
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage on the seed source itself — `RegionChunkSource` is what
         // retains an edit. See `world_persistence_round_trip.rs`'s identical
@@ -154,6 +162,10 @@ impl ChunkSource for BlockMapWorld {
             return self.filler.to_owned();
         }
         "minecraft:air".to_owned()
+    }
+
+    fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+        "minecraft:plains".to_string()
     }
 
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {

@@ -220,6 +220,12 @@ impl ChunkSource for CountingSource {
         self.column(cx, cz).block_state(lx, y, lz).to_string()
     }
 
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+        let (lx, lz) = (x.rem_euclid(16), z.rem_euclid(16));
+        self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
+    }
+
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; this is a counter, and edits are discarded by design.
         // Explicit rather than inherited.

@@ -45,6 +45,12 @@ struct FixedBlockSource {
     /// existing `if block`/`setblock` gate against this fixture is
     /// unaffected.
     unloaded: Mutex<HashSet<(i32, i32)>>,
+    /// Biome overrides [`FixedBlockSource::set_biome`] has named — for
+    /// `/execute if`/`unless biome`. Everything is `minecraft:plains` until
+    /// named here, matching [`ChunkColumn::new`]'s own default so every
+    /// existing gate against this fixture that never calls `set_biome` is
+    /// unaffected.
+    biomes: Mutex<HashMap<(i32, i32, i32), String>>,
 }
 
 impl FixedBlockSource {
@@ -55,6 +61,10 @@ impl FixedBlockSource {
     fn mark_unloaded(&self, cx: i32, cz: i32) {
         self.unloaded.lock().unwrap().insert((cx, cz));
     }
+
+    fn set_biome(&self, x: i32, y: i32, z: i32, biome: &str) {
+        self.biomes.lock().unwrap().insert((x, y, z), biome.to_string());
+    }
 }
 
 impl ChunkSource for FixedBlockSource {
@@ -64,6 +74,10 @@ impl ChunkSource for FixedBlockSource {
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
         self.blocks.lock().unwrap().get(&(x, y, z)).cloned().unwrap_or_else(|| "minecraft:air".to_string())
+    }
+
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        self.biomes.lock().unwrap().get(&(x, y, z)).cloned().unwrap_or_else(|| "minecraft:plains".to_string())
     }
 
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
@@ -2643,6 +2657,106 @@ fn execute_if_block_with_no_chunk_source_refuses_by_name() {
     let alice = source(1, "alice");
 
     let outcome = run(&commands, &rules, &players, &alice, "execute if block 0 0 0 minecraft:air").expect("root matched");
+    assert!(!outcome.response.is_ran(), "{outcome:?}");
+    assert!(
+        outcome.response.lines()[0].contains("Blocks cannot be queried"),
+        "the refusal must name the missing capability: {outcome:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// /execute if/unless biome
+// ---------------------------------------------------------------------------
+
+/// `if`/`unless biome` against a real, settable [`FixedBlockSource`] — the
+/// present biome, the fixture's own default (`minecraft:plains`) and the
+/// `blocks: None` refusal, the same three shapes [`FixedBlockSource`]'s own
+/// `if block` gate above covers.
+#[test]
+fn execute_if_unless_biome_reads_a_real_chunk_source() {
+    let commands = ServerCommands::new();
+    let rules = GameRulesHandle::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice"); // (0, 64, 0)
+    let source_blocks = FixedBlockSource::default();
+    source_blocks.set_biome(5, 64, 5, "minecraft:desert");
+
+    let world = CommandWorld {
+        rules: &rules as &(dyn RuleStore + Sync),
+        players: &players,
+        state: &state,
+        mobs: None,
+        border: None,
+        #[cfg(not(target_arch = "wasm32"))]
+        access: None,
+        blocks: Some(&source_blocks),
+    };
+
+    let matches = commands
+        .run(&world, &alice, "execute if biome 5 64 5 minecraft:desert run gamemode creative")
+        .expect("root matched");
+    assert_eq!(matches.effects.len(), 1, "the real biome matches: the chain must run: {matches:?}");
+
+    let no_match = commands
+        .run(&world, &alice, "execute if biome 5 64 5 minecraft:jungle run gamemode creative")
+        .expect("root matched");
+    assert!(no_match.effects.is_empty(), "desert is not jungle: the chain must not run: {no_match:?}");
+
+    // The un-set position is `minecraft:plains` by this fixture's own default.
+    let plains = commands
+        .run(&world, &alice, "execute if biome 0 0 0 minecraft:plains run gamemode creative")
+        .expect("root matched");
+    assert_eq!(plains.effects.len(), 1, "{plains:?}");
+
+    // `unless` is the exact complement.
+    let unless_matches = commands
+        .run(&world, &alice, "execute unless biome 5 64 5 minecraft:desert run gamemode creative")
+        .expect("root matched");
+    assert!(unless_matches.effects.is_empty(), "{unless_matches:?}");
+
+    let unless_no_match = commands
+        .run(&world, &alice, "execute unless biome 5 64 5 minecraft:jungle run gamemode creative")
+        .expect("root matched");
+    assert_eq!(unless_no_match.effects.len(), 1, "{unless_no_match:?}");
+
+    // The bare form actually refuses/succeeds rather than folding into an
+    // empty `Ran`, same convention as `if block`.
+    let bare_match = commands.run(&world, &alice, "execute if biome 5 64 5 minecraft:desert").expect("root matched");
+    assert!(bare_match.response.is_ran(), "{bare_match:?}");
+    let bare_no_match = commands.run(&world, &alice, "execute if biome 5 64 5 minecraft:jungle").expect("root matched");
+    assert!(!bare_no_match.response.is_ran(), "{bare_no_match:?}");
+}
+
+/// An unknown biome name is refused at **parse** time (`BiomeArg`'s own
+/// census check), never reaching the executor — the same posture `if block`
+/// takes for an unknown block id.
+#[test]
+fn execute_if_biome_with_an_unknown_name_is_a_parse_error() {
+    let commands = ServerCommands::new();
+    let rules = GameRulesHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+
+    let outcome =
+        run(&commands, &rules, &players, &alice, "execute if biome 0 0 0 not_a_real_biome").expect("a parse refusal still reports an outcome");
+    assert!(!outcome.response.is_ran(), "{outcome:?}");
+    assert!(
+        outcome.response.lines()[0].contains("unknown biome"),
+        "the refusal must come from BiomeArg's own parse-time census check: {outcome:?}"
+    );
+}
+
+/// With no chunk source in scope, `if biome` refuses cleanly by name, same as
+/// `if block`.
+#[test]
+fn execute_if_biome_with_no_chunk_source_refuses_by_name() {
+    let commands = ServerCommands::new();
+    let rules = GameRulesHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+
+    let outcome = run(&commands, &rules, &players, &alice, "execute if biome 0 0 0 minecraft:plains").expect("root matched");
     assert!(!outcome.response.is_ran(), "{outcome:?}");
     assert!(
         outcome.response.lines()[0].contains("Blocks cannot be queried"),
