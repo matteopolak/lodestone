@@ -733,6 +733,23 @@ Know its scope, because outside it the instrument is *silent* rather than wrong 
 
 ## Evidence standards
 
+**A derived constant can be tuned to cancel the bug you are about to fix, so the fix breaks it.** Measured:
+a container's player-inventory row sat one pixel low because `main_y` used `18 + rows*18 + 14` where
+`ChestMenu.inventoryTop` is `+ 13`. Correcting it turned a *different* gate red — `SlotLayout::height` was
+**derived** from `main_y` through a shared `+ 82`, and that `82` had been implicitly chosen against the
+*wrong* `main_y` so the panel height still came out right. Two errors cancelling, each invisible while the
+other stood.
+
+Vanilla settles it: `ContainerScreen`'s `imageHeight = 114 + rows*18` is an **independent** constant, and
+the background asset's own geometry — a `rows*18 + 17` top blit plus a fixed `96` bottom blit — confirms
+the two numbers are genuinely one pixel apart rather than derivable from each other.
+
+So: **derive each ported constant from its own outside source, never from a sibling you also ported**, and
+when a fix turns an unrelated gate red, **check whether that gate was calibrated against the bug** before
+assuming the fix is wrong. The tell is a magic offset joining two quantities vanilla defines separately.
+This is the arithmetic form of the closed loop `decode(encode(x)) == x` already warns about: two values that
+agree only because they share one mistake.
+
 **A doc that transcribes vanilla *correctly* is not evidence the code does — the transcription is the plan, and
 nothing here checks the plan against the implementation.** `docs/fluid-rendering.md` carried
 `FluidRenderer.shouldRenderFace` verbatim, **including** its `isFaceOccludedBySelf` conjunct, the entire time
