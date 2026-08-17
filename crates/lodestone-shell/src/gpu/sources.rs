@@ -381,6 +381,11 @@ impl ThirdPersonBodyState {
             // is where the URL would have to be plumbed.
             player_skin: None,
             variant_sheet: None,
+            // No cape reaches this draw for the same reason `player_skin`
+            // above is `None`: nothing plumbs our own fetched cape URL to
+            // the third-person body, so there is nothing to sway even if
+            // this were non-zero.
+            cape_sway: (0.0, 0.0, 0.0),
         }
     }
 }

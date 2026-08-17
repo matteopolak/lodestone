@@ -372,6 +372,12 @@ impl RenderState {
         // off a pose the body pass did not also draw.
         let wool_batches = self.prepare_wool(device, camera, entities, &mut stats);
 
+        // Player capes, over the same instances, for the same reason
+        // armour/wool are: no buffer creation mid-pass, and never posed off a
+        // pose the body pass did not also draw. Grouped by cape URL rather
+        // than by wearer part — see `RenderState::prepare_cape`'s doc.
+        let cape_batches = self.prepare_cape(device, camera, entities, &mut stats);
+
         // The mob-fire billboard, over the same instances, for
         // the same reason armour/wool are: no buffer creation mid-pass.
         let flame_batches = self.prepare_flame(device, camera, entities, &mut stats);
@@ -836,6 +842,34 @@ impl RenderState {
                         pass.draw_indexed(range.index_start..end, 0, 0..*count);
                         stats.draw_calls += 1;
                     }
+                }
+            }
+
+            // Player capes, right after wool and before the mob-fire
+            // billboard. Through the **base** entity pipeline, same reason
+            // wool is: a cape has no second layer at the same inflation to
+            // correct z-fighting for. Group 1 is rebound per cape URL, off
+            // the same `player_skins` cache a body's own skin bind group
+            // comes from.
+            if !cape_batches.is_empty()
+                && let Some(model) = &self.entities.cape_gpu
+            {
+                pass.set_pipeline(&self.entities.pipeline.pipeline);
+                pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
+                pass.set_vertex_buffer(0, model.vertices.slice(..));
+                pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for batch in &cape_batches {
+                    let Some(texture) = self.entities.player_skins.get(&batch.url) else {
+                        continue;
+                    };
+                    let Some(range) = model.parts.first() else {
+                        continue;
+                    };
+                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_vertex_buffer(1, batch.buffer.slice(..));
+                    let end = range.index_start + range.index_count;
+                    pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
+                    stats.draw_calls += 1;
                 }
             }
 

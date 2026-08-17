@@ -920,6 +920,47 @@ pub fn player_model(slim: bool) -> EntityModelDef {
     }
 }
 
+/// The player's cape overlay (`PlayerCapeModel.createCapeLayer`, 26.2): a
+/// single 10×16×1 box hanging off the **body** pivot, on its own 64×64 sheet
+/// (the model's declared unwrap size, not the cape PNG's real 64×32 —
+/// `LayerDefinition.create(mesh, 64, 64)` says so explicitly even though the
+/// texture itself is shorter).
+///
+/// Vanilla nests this under a `PlayerModel.createMesh` copy and clears every
+/// other cube (`root.clearRecursively()`), so the only shared coordinate frame
+/// that matters is the **body pivot** — reproduced here as a bare identity
+/// `"body"` part, matching [`player_model`]'s own `body` pose exactly, so a
+/// caller can pair this mesh's `"cape"` part against the wearer's `"body"`
+/// part transform the same way armour pairs against named body parts.
+///
+/// The cube itself is baked **without** `PlayerCapeModel`'s static
+/// `PartPose.offsetAndRotation(0, 0, 2, 0, PI, 0)` rotation folded in — only
+/// the `z = 2` translation. That rotation is not lost: `CapeLayer`/
+/// `PlayerCapeModel.setupAnim` immediately calls `cape.rotateBy(new
+/// Quaternionf().rotateY(-PI)...)`, and composing `oldRotation.rotate(newQuat)`
+/// (`ModelPart.rotateBy`) makes the static `Ry(PI)` and the quaternion's
+/// leading `Ry(-PI)` term cancel exactly — the two are inverses on the same
+/// axis. What survives is `Rx(theta_x) * Rz(theta_z) * Ry(theta_y2)`, which is
+/// exactly what `lodestone_render::entity::cape_local_rotation` computes at
+/// draw time; baking the now-cancelled static rotation into the geometry here
+/// would double it. See that function's doc for the full per-frame formula.
+pub fn player_cape_model() -> EntityModelDef {
+    let body = PartDef::new(PartPose::ZERO).with_child(
+        "cape",
+        PartDef::new(PartPose::offset(0.0, 0.0, 2.0)).with_cube(CubeDef::new(
+            [-5.0, 0.0, -1.0],
+            [10.0, 16.0, 1.0],
+            [0.0, 0.0],
+        )),
+    );
+    let root = PartDef::new(PartPose::ZERO).with_child("body", body);
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}
+
 #[cfg(test)]
 mod player_model_tests {
     use super::*;

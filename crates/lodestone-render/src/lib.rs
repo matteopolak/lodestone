@@ -53,6 +53,7 @@ pub mod crack_pipeline;
 pub mod crack_resolver;
 pub mod cull;
 pub mod device;
+pub mod display;
 pub mod driver;
 pub mod entity;
 pub mod entity_anim;
@@ -177,9 +178,10 @@ pub use device::{GpuContext, GpuError};
 pub use driver::{InstanceTable, WorldMesher};
 pub use entity::{
     ENTITY_FULLBRIGHT, EXPERIENCE_ORB_ICON_COUNT, EXPERIENCE_ORB_TEXTURE, ArmourMesh,
-    ArmourModelSet, EntityBatch, EntityCullStats, EntityFrame, EntityInstance, EntityMesh,
-    EntityModelSet, EntitySpawn, MODEL_FEET_OFFSET, PartRange, SheepWoolModelSet, WoolMesh,
-    armour_layer_tint, armour_layers, dying_entity_model_matrix, entity_model_matrix,
+    ArmourModelSet, CapeMesh, EntityBatch, EntityCullStats, EntityFrame, EntityInstance,
+    EntityMesh, EntityModelSet, EntitySpawn, MODEL_FEET_OFFSET, PartRange, SheepWoolModelSet,
+    WoolMesh, armour_layer_tint, armour_layers, cape_local_rotation, dying_entity_model_matrix,
+    entity_model_matrix,
     entity_texture_candidates, entity_variant_sheet, entity_variant_sheet_dirs,
     entity_variant_sheet_for,
     experience_orb_icon, experience_orb_light, experience_orb_matrix, experience_orb_mesh,

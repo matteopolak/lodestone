@@ -907,6 +907,7 @@ fn entity_renders_to_pixels_through_shell_path() {
         // Not an experience orb: `None` keeps this subject out of the orb
         // billboard pass entirely.
         experience_orb_value: None,
+        cape_sway: (0.0, 0.0, 0.0),
         },
         // A second pig behind the camera so frustum culling has something
         // real to remove — the anti-vacuity guard on the cull path.
@@ -950,6 +951,7 @@ fn entity_renders_to_pixels_through_shell_path() {
         // Not an experience orb: `None` keeps this subject out of the orb
         // billboard pass entirely.
         experience_orb_value: None,
+        cape_sway: (0.0, 0.0, 0.0),
         },
     ];
 
@@ -1146,6 +1148,7 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         // Not an experience orb: `None` keeps this subject out of the orb
         // billboard pass entirely.
         experience_orb_value: None,
+        cape_sway: (0.0, 0.0, 0.0),
     }];
 
     // Fraction of a mob's bright pixels whose *hue direction* is far from the
@@ -1719,6 +1722,7 @@ fn orb_draw(value: i32) -> EntityDraw {
         player_skin: None,
         variant_sheet: None,
         experience_orb_value: Some(value),
+        cape_sway: (0.0, 0.0, 0.0),
     }
 }
 

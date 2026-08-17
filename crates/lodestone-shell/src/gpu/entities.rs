@@ -91,6 +91,17 @@ pub(super) struct EntityRenderer {
     pub(super) wool_models: SheepWoolModelSet,
     pub(super) wool_gpu: Option<GpuEntityModel>,
     pub(super) wool_texture: Option<wgpu::BindGroup>,
+    /// The player cape overlay: one baked mesh (code-defined geometry, no
+    /// pack dependency — see [`lodestone_assets::entity::player_cape_model`]),
+    /// uploaded once, unconditionally. Unlike [`Self::wool_texture`] there is
+    /// no single fixed texture here: a cape's sheet is a **per-player URL**,
+    /// so the draw looks its texture up in [`Self::player_skins`] by that
+    /// player's cape URL — the exact same fetch/cache pipeline a skin uses,
+    /// reused rather than duplicated (see `remote_skins::RemoteSkin::cape`'s
+    /// doc). `cape_gpu` is `None` only if the bake produced no geometry,
+    /// which would be a code bug, not a missing pack.
+    pub(super) cape_model: lodestone_render::CapeMesh,
+    pub(super) cape_gpu: Option<GpuEntityModel>,
     /// The mob-fire billboard (player report: "mobs dont show
     /// flames yet"): a fourth pipeline
     /// ([`EntityPipeline::flame_pipeline`]) drawn through the **base**
@@ -271,6 +282,13 @@ impl EntityRenderer {
             pipeline.texture_bind_group(device, &view, &sampler)
         });
 
+        // The cape overlay. Code-defined geometry, so — unlike wool/armour —
+        // there is no pack-presence gate: the mesh always bakes, and whether
+        // any particular player's cape draws is entirely a function of
+        // whether *their* cape URL has a bind group in `player_skins` yet.
+        let cape_model = lodestone_render::CapeMesh::load();
+        let cape_gpu = GpuEntityModel::upload_cape(device, &cape_model);
+
         // The mob-fire billboard. A fourth pipeline over this
         // pipeline's own two bind-group layouts — see
         // `EntityPipeline::flame_pipeline`'s doc for why this is not a fifth
@@ -405,6 +423,8 @@ impl EntityRenderer {
             wool_models,
             wool_gpu,
             wool_texture,
+            cape_model,
+            cape_gpu,
             flame_pipeline,
             flame_gpu_models,
             flame_texture,

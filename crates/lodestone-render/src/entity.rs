@@ -2252,6 +2252,134 @@ impl SheepWoolModelSet {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The player's cape (`PlayerCapeModel`/`CapeLayer`)
+// ---------------------------------------------------------------------------
+//
+// Structurally the same "second, independently-baked mesh posed off the
+// wearer's already-animated `part_transforms`" discipline as armour and wool
+// above, with one difference from both: the cape needs an **extra** local
+// transform on top of the wearer's body matrix (the per-frame lean/flap
+// rotation), where armour and wool reuse the wearer's part matrix verbatim.
+// `attach` therefore hands back the same `(PartRange, wearer_index)` pairing
+// as the other two — the caller is what composes the extra matrix in, once
+// per instance, via [`cape_local_rotation`].
+
+/// The player cape's baked mesh: one part, `"cape"`, in the wearer's
+/// **body-pivot-local** space (see [`lodestone_assets::entity::player_cape_model`]
+/// for why no rotation is baked in).
+#[derive(Debug, Clone)]
+pub struct CapeMesh {
+    /// Four vertices per quad, part-local.
+    pub vertices: Vec<ModelVertex>,
+    /// Six indices per quad.
+    pub indices: Vec<u32>,
+    /// Always exactly one entry, `("cape", range)` — kept as a list rather
+    /// than a bare range for the same reason [`ArmourMesh::parts`] is: a bake
+    /// that produced no quads (a malformed model) yields an empty list rather
+    /// than a range into nothing.
+    pub parts: Vec<(&'static str, PartRange)>,
+}
+
+impl CapeMesh {
+    /// Bake the cape mesh.
+    #[must_use]
+    pub fn load() -> Self {
+        let def = lodestone_assets::entity::player_cape_model();
+        let baked = bake_entity_parts(&def);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut parts = Vec::new();
+        for part in &baked {
+            if part.name.as_str() != "cape" || part.quads.is_empty() {
+                continue;
+            }
+            let index_start = indices.len() as u32;
+            let vertex_start = vertices.len() as u32;
+            push_part_quads(&part.quads, &mut vertices, &mut indices);
+            parts.push((
+                "cape",
+                PartRange {
+                    index_start,
+                    index_count: indices.len() as u32 - index_start,
+                    vertex_start,
+                    vertex_count: vertices.len() as u32 - vertex_start,
+                },
+            ));
+        }
+        CapeMesh {
+            vertices,
+            indices,
+            parts,
+        }
+    }
+
+    /// Pair the cape part with the wearer's `"body"` part, dropping it
+    /// entirely for a non-humanoid rig — same gate [`wearer_carries_armour`]
+    /// uses, and for the same reason (a farm animal has no `body` pivot a
+    /// cape should hang from).
+    pub fn attach<'a>(
+        &'a self,
+        wearer: &'a Skeleton,
+    ) -> impl Iterator<Item = (PartRange, usize)> + 'a {
+        let humanoid = wearer_carries_armour(wearer);
+        self.parts
+            .iter()
+            .filter(move |_| humanoid)
+            .filter_map(|(name, range)| wearer.index_of(name).map(|i| (*range, i)))
+    }
+}
+
+/// The per-frame cape placement, relative to the wearer's **body** part
+/// transform: translate to the pivot `PlayerCapeModel.createCapeLayer` gives
+/// it (`(0, 0, 2)` model texels), then rotate.
+///
+/// `lean`/`lean2`/`flap` are vanilla's `AvatarRenderState.capeLean`/
+/// `capeLean2`/`capeFlap` in **degrees** — see
+/// `lodestone_shell::entities::cape_sway` for how those three are derived
+/// from the lagged "cloak" position each frame.
+///
+/// # The rotation, derived from `ModelPart.rotateBy`
+///
+/// `PlayerCapeModel.setupAnim` does not set a rotation, it **composes** one
+/// onto the cape's existing pose (`ModelPart.rotateBy`, `26.2`):
+///
+/// ```java
+/// Matrix3f oldRotation = new Matrix3f().rotationZYX(this.zRot, this.yRot, this.xRot);
+/// Matrix3f newRotation = oldRotation.rotate(rotation);
+/// ```
+///
+/// i.e. `new = old * rotation` (`Matrix3f.rotate`/`Quaternionf.rotateX/Y/Z`
+/// all post-multiply). The cape's `old` rotation is the static pose
+/// `createCapeLayer` gives it, `Ry(pi)` (it hangs facing backward), and the
+/// `rotation` argument is itself built by chained `rotateY/X/Z` calls —
+/// each one *also* a post-multiply — so:
+///
+/// ```text
+/// rotation = Ry(-pi) * Rx(theta_x) * Rz(theta_z) * Ry(theta_y2)
+/// new      = Ry(pi) * rotation
+///          = [Ry(pi) * Ry(-pi)] * Rx(theta_x) * Rz(theta_z) * Ry(theta_y2)
+///          = Rx(theta_x) * Rz(theta_z) * Ry(theta_y2)
+/// ```
+///
+/// The static `Ry(pi)` and the quaternion's leading `Ry(-pi)` are exact
+/// inverses on the same axis and cancel — which is exactly why
+/// [`lodestone_assets::entity::player_cape_model`] bakes no rotation at all:
+/// baking `Ry(pi)` here would double it instead of cancelling it.
+///
+/// `theta_x = 6 + lean/2 + flap`, `theta_z = lean2/2`,
+/// `theta_y2 = 180 - lean2/2`, all degrees, straight out of
+/// `PlayerCapeModel.setupAnim`.
+#[must_use]
+pub fn cape_local_rotation(lean: f32, lean2: f32, flap: f32) -> Mat4 {
+    let theta_x = (6.0 + lean / 2.0 + flap).to_radians();
+    let theta_z = (lean2 / 2.0).to_radians();
+    let theta_y2 = (180.0 - lean2 / 2.0).to_radians();
+    let translate = Mat4::from_translation(Vec3::new(0.0, 0.0, 2.0 / 16.0));
+    let rotate = Mat4::from_rotation_x(theta_x) * Mat4::from_rotation_z(theta_z) * Mat4::from_rotation_y(theta_y2);
+    translate * rotate
+}
+
 /// The texture layers to draw for an item sitting in `slot`, in draw order —
 /// empty when this item is not humanoid armour, or is armour for a *different*
 /// slot, or its material declares no layers for this slot's layer type.

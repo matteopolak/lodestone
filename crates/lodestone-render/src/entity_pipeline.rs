@@ -856,6 +856,34 @@ impl GpuEntityModel {
             parts: mesh.parts.iter().map(|(_, r)| *r).collect(),
         })
     }
+
+    /// Upload a [`CapeMesh`](crate::entity::CapeMesh), or `None` if empty.
+    ///
+    /// Mirrors [`upload_wool`](Self::upload_wool) exactly — the cape mesh is
+    /// static geometry (no per-material variant, unlike armour), uploaded
+    /// once regardless of whether any player currently in view has a cape.
+    #[must_use]
+    pub fn upload_cape(device: &wgpu::Device, mesh: &crate::entity::CapeMesh) -> Option<Self> {
+        if mesh.indices.is_empty() {
+            return None;
+        }
+        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lodestone-cape-vertices"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lodestone-cape-indices"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        Some(GpuEntityModel {
+            vertices,
+            indices,
+            index_count: mesh.indices.len() as u32,
+            parts: mesh.parts.iter().map(|(_, r)| *r).collect(),
+        })
+    }
 }
 
 /// Build an instance buffer from a slice of model matrices and the matching

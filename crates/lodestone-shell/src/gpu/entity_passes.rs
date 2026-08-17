@@ -41,8 +41,8 @@ use crate::entities::EntityDraw;
 use super::block_entities::{BannerLayerDrawBatch, BlockEntityDrawBatch};
 use super::terrain::ModelRenderer;
 use super::{
-    ArmourAccum, ArmourDrawBatch, ArmourPartAccum, ArmourTextureKey, EntityDrawBatch, FlameBatch,
-    OrbBatch, RenderState, RenderStats, WoolPartAccum, humanoid_armour_slot,
+    ArmourAccum, ArmourDrawBatch, ArmourPartAccum, ArmourTextureKey, CapeDrawBatch, EntityDrawBatch,
+    FlameBatch, OrbBatch, RenderState, RenderStats, WoolPartAccum, humanoid_armour_slot,
 };
 
 /// One entity's own hitbox width in blocks — its type's base width times its age
@@ -1286,6 +1286,111 @@ impl RenderState {
             .collect()
     }
 
+    /// Resolve this frame's **player capes** into per-URL instance buffers.
+    ///
+    /// `CapeLayer.submit` (`26.2`), transcribed: `!invisible && showCape &&
+    /// skin.cape() != null && !hasLayer(chestEquipment, WINGS)`. The last
+    /// clause — an elytra in the chest slot suppresses the cape — is
+    /// approximated as "the chest slot's item path is literally `elytra`"
+    /// rather than the real `EquipmentClientInfo`/`EquipmentAssetManager`
+    /// lookup vanilla's `hasLayer` does (which resolves a `minecraft:elytra`
+    /// asset id to a set of layer types and asks whether `WINGS` is one of
+    /// them): every 26.2 elytra item *is* that asset with a `WINGS` layer, so
+    /// the two agree for the vanilla item and would only diverge for a
+    /// resource-pack-only custom chestplate asset that also declares a wings
+    /// layer, which this build has no path to represent anyway.
+    ///
+    /// `showCape` — the *subject* player's own `modelPart.cape` toggle,
+    /// broadcast to observers on `Player`'s `DATA_PLAYER_MODE_CUSTOMISATION`
+    /// metadata byte — is not decoded on this side of the wire (no
+    /// clientbound arm for that byte exists in `crates/protocol/v770` today),
+    /// so every remote player draws as if `showCape` were `true`, matching
+    /// vanilla's own default when the byte has never been reported.
+    pub(super) fn prepare_cape(
+        &self,
+        device: &wgpu::Device,
+        camera: &Camera,
+        entities: &[EntityDraw],
+        stats: &mut RenderStats,
+    ) -> Vec<CapeDrawBatch> {
+        if self.entities.cape_gpu.is_none() {
+            return Vec::new();
+        }
+        let frustum = camera.frustum();
+        let mut groups: Vec<(String, Vec<glam::Mat4>, Vec<u32>, Vec<InstanceTint>)> = Vec::new();
+
+        for draw in entities {
+            if draw.invisible || draw.type_path.as_ref() != "player" {
+                continue;
+            }
+            let Some(skin) = draw.player_skin.as_ref() else {
+                continue;
+            };
+            let Some(cape_url) = skin.cape.as_ref().filter(|u| !u.is_empty()) else {
+                continue;
+            };
+            // Only a bind group actually installed in `player_skins` can be
+            // drawn — a fetch still in flight (or failed) draws nothing for
+            // this player this frame, exactly as an unresolved body skin
+            // falls back to the default sheet rather than blocking the mob.
+            if !self.entities.player_skins.contains_key(cape_url) {
+                continue;
+            }
+            let wearing_elytra = draw.equipment.iter().any(|(slot, id)| {
+                *slot == EquipmentSlot::Chest && id.namespace() == "minecraft" && id.path() == "elytra"
+            });
+            if wearing_elytra {
+                continue;
+            }
+            let Some(instance) = self.entities.models.resolve(
+                draw.model_type_path(),
+                draw.feet,
+                draw.yaw,
+                draw.scale,
+                &draw.anim,
+            ) else {
+                continue;
+            };
+            if !frustum.intersects_aabb(instance.aabb_min, instance.aabb_max) {
+                continue;
+            }
+            let Some(wearer) = self.entities.models.get(instance.model) else {
+                continue;
+            };
+            let Some((_, body_index)) = self.entities.cape_model.attach(&wearer.skeleton).next()
+            else {
+                continue;
+            };
+            let Some(body_transform) = instance.part_transforms.get(body_index) else {
+                continue;
+            };
+            let (lean, lean2, flap) = draw.cape_sway;
+            let transform = *body_transform * lodestone_render::cape_local_rotation(lean, lean2, flap);
+            let light = u32::from(entity_light(&self.entity_light, draw));
+            let tint = InstanceTint::rgb([255, 255, 255]).with_hurt(draw.hurt);
+            let group = match groups.iter_mut().position(|(url, ..)| url == cape_url) {
+                Some(i) => &mut groups[i],
+                None => {
+                    groups.push((cape_url.clone(), Vec::new(), Vec::new(), Vec::new()));
+                    groups.last_mut().expect("just pushed")
+                }
+            };
+            group.1.push(transform);
+            group.2.push(light);
+            group.3.push(tint);
+            stats.cape_layers_drawn += 1;
+        }
+
+        groups
+            .into_iter()
+            .filter_map(|(url, transforms, lights, tints)| {
+                let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
+                upload_instances_tinted(device, &transforms, &lights, &tints)
+                    .map(|buffer| CapeDrawBatch { url, buffer, count })
+            })
+            .collect()
+    }
+
     /// Resolve this frame's block entities (chests, that fix) into per-part
     /// instance buffers, frustum-culled and batched by `(model, sheet)`.
     ///
@@ -1875,6 +1980,7 @@ mod tests {
             variant_sheet: None,
             // A flame subject, not an orb.
             experience_orb_value: None,
+            cape_sway: (0.0, 0.0, 0.0),
         }
     }
 
