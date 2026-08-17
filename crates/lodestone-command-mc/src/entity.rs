@@ -13,14 +13,15 @@
 //!
 //! `@p @a @r @s @e @n`, a bare player name, a bare uuid, and the options
 //! `type`, `name`, `distance`, `limit`, `sort`, `gamemode`, `x`/`y`/`z`,
-//! `dx`/`dy`/`dz`, each with vanilla's `!` inversion where vanilla has it.
+//! `dx`/`dy`/`dz`, `scores`, each with vanilla's `!` inversion where vanilla
+//! has it.
 //!
-//! `scores`, `nbt`, `advancements`, `predicate`, `tag`, `team`, `level` and the
-//! two `*_rotation` options are **not** parsed, and each is refused by name
-//! rather than silently ignored — a selector that quietly matched more players
-//! than the author asked for is the worst available failure. Every one of them
-//! needs infrastructure this server does not have (a scoreboard, entity NBT, an
-//! advancement predicate engine, teams).
+//! `nbt`, `advancements`, `predicate`, `tag`, `team`, `level` and the two
+//! `*_rotation` options are **not** parsed, and each is refused by name rather
+//! than silently ignored — a selector that quietly matched more players than
+//! the author asked for is the worst available failure. Every one of them
+//! needs infrastructure this server does not have (entity NBT, an advancement
+//! predicate engine, teams).
 //!
 //! **None of that is visible on the wire.** `minecraft:entity`'s network
 //! payload is one flags byte — `single` and `players_only` — with no option
@@ -172,6 +173,12 @@ pub enum SelectorPredicate {
     /// The entity must be alive. Added implicitly by `@e` and `@n`, exactly as
     /// `parseSelector`'s `yield true` branches do.
     Alive,
+    /// `scores={obj1=1..5,obj2=10}` — every named objective must have a score
+    /// recorded for this holder, within its range. `EntitySelectorOptions.
+    /// SCORES`'s own predicate returns `false`, not "skip", for either an
+    /// unknown objective or a holder with no score on a known one — both are
+    /// modelled the same way here: the lookup returning `None`.
+    Scores(Vec<(String, crate::scoreboard::IntRange)>),
 }
 
 /// The `x`/`y`/`z` overrides: which components of the caller's position the
@@ -605,18 +612,74 @@ fn parse_option(
                 _ => volume[2] = value,
             }
         }
+        "scores" => {
+            let entries = read_scores_map(reader)?;
+            selector.predicates.push(SelectorPredicate::Scores(entries));
+        }
         // Known to vanilla, not implemented here, and named so the author knows
-        // which it is. Each needs a subsystem that does not exist: a scoreboard
-        // (`scores`, `team`), entity NBT (`nbt`), the advancement predicate
-        // engine (`advancements`, `predicate`), entity tags (`tag`), experience
-        // levels (`level`), or per-entity rotation tracking (`*_rotation`).
-        "scores" | "nbt" | "advancements" | "predicate" | "tag" | "team" | "level"
-        | "x_rotation" | "y_rotation" => {
+        // which it is. Each needs a subsystem that does not exist: entity NBT
+        // (`nbt`), the advancement predicate engine (`advancements`,
+        // `predicate`), entity tags (`tag`), teams (`team`), experience levels
+        // (`level`), or per-entity rotation tracking (`*_rotation`).
+        "nbt" | "advancements" | "predicate" | "tag" | "team" | "level" | "x_rotation"
+        | "y_rotation" => {
             Err(refuse(key_position, format!("selector option '{key}' is not supported yet")))?;
         }
         _ => Err(refuse(key_position, key.to_string()))?,
     }
     Ok(())
+}
+
+/// `EntitySelectorOptions.SCORES`'s map literal: `{obj1=1..5,obj2=10}`. Each
+/// range reuses [`crate::scoreboard::IntRangeArg`] rather than a second
+/// hand-written reader, so the two syntaxes (`/execute if score … matches`
+/// and this) cannot drift apart.
+fn read_scores_map(
+    reader: &mut StringReader,
+) -> Result<Vec<(String, crate::scoreboard::IntRange)>, ParseError> {
+    let open = reader.cursor();
+    if reader.peek() != Some('{') {
+        return Err(refuse(open, "expected '{'"));
+    }
+    reader.skip();
+    let mut entries = Vec::new();
+    skip_whitespace(reader);
+    if reader.peek() != Some('}') {
+        loop {
+            skip_whitespace(reader);
+            let name_position = reader.cursor();
+            let objective = reader.read_unquoted_string();
+            if objective.is_empty() {
+                return Err(refuse(name_position, "expected an objective name"));
+            }
+            skip_whitespace(reader);
+            if reader.peek() != Some('=') {
+                return Err(refuse(reader.cursor(), format!("objective '{objective}' has no value")));
+            }
+            reader.skip();
+            skip_whitespace(reader);
+            let range_position = reader.cursor();
+            let range_value = crate::scoreboard::IntRangeArg
+                .parse(reader)
+                .map_err(|_| refuse(range_position, "expected an integer range"))?;
+            let range = *range_value
+                .downcast_ref::<crate::scoreboard::IntRange>()
+                .expect("IntRangeArg produces an IntRange");
+            entries.push((objective, range));
+            skip_whitespace(reader);
+            if reader.peek() == Some(',') {
+                reader.skip();
+                continue;
+            }
+            break;
+        }
+    }
+    skip_whitespace(reader);
+    if reader.peek() != Some('}') {
+        return Err(refuse(reader.cursor(), "expected '}'"));
+    }
+    reader.skip();
+    Ok(entries)
 }
 
 /// `EntitySelectorParser.shouldInvertValue`.
@@ -833,12 +896,61 @@ mod tests {
         assert!(parse(EntityArg::players(), "@e[type=cow]").is_err());
     }
 
+    /// `scores={obj=range,...}` — one, two and inverted-shape ranges, and the
+    /// three malformed forms a hand-rolled `{}` reader is likely to get wrong
+    /// (missing brace, missing value, trailing comma).
+    #[test]
+    fn scores_parses_a_map_of_objective_to_int_range() {
+        use crate::scoreboard::IntRange;
+
+        let s = players("@a[scores={foo=1..5}]");
+        assert_eq!(
+            s.predicates,
+            [SelectorPredicate::Scores(vec![(
+                "foo".to_string(),
+                IntRange { min: Some(1), max: Some(5) }
+            )])]
+        );
+
+        // An exact value sets both ends, same as `distance`.
+        let s = players("@a[scores={foo=10}]");
+        assert_eq!(
+            s.predicates,
+            [SelectorPredicate::Scores(vec![("foo".to_string(), IntRange { min: Some(10), max: Some(10) })])]
+        );
+
+        // Two entries, pairwise-distinct ranges so a transposition would show.
+        let s = players("@a[scores={foo=1..5,bar=..20}]");
+        assert_eq!(
+            s.predicates,
+            [SelectorPredicate::Scores(vec![
+                ("foo".to_string(), IntRange { min: Some(1), max: Some(5) }),
+                ("bar".to_string(), IntRange { min: None, max: Some(20) }),
+            ])]
+        );
+
+        // The empty map is legal — `scores={}` matches trivially, same as
+        // vanilla's empty-map short-circuit.
+        let s = players("@a[scores={}]");
+        assert_eq!(s.predicates, [SelectorPredicate::Scores(vec![])]);
+
+        for bad in [
+            "@a[scores=]",
+            "@a[scores={foo}]",
+            "@a[scores={foo=}]",
+            "@a[scores={foo=1]",
+            "@a[scores={foo=1,}]",
+        ] {
+            assert!(parse(EntityArg::players(), bad).is_err(), "{bad:?} must not parse");
+        }
+    }
+
     /// A deferred option is refused by name, and an unknown one is refused as
     /// itself. Both must fail — the danger is an ignored option silently
     /// widening the match.
     #[test]
     fn deferred_and_unknown_options_are_both_refused_and_say_which() {
-        let deferred = parse(EntityArg::players(), "@a[scores={x=1}]").expect_err("scores is deferred");
+        let deferred = parse(EntityArg::players(), "@a[tag=foo]").expect_err("tag is deferred");
         assert!(
             deferred.to_string().contains("not supported yet"),
             "a deferred option must say so: {deferred}"

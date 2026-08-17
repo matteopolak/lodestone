@@ -194,6 +194,14 @@ pub fn resolve_players(
     // synchronous and wasm-safe and must not reach for a clock, and because a
     // test needs `@r` to be reproducible.
     shuffle: &dyn Fn(usize) -> Vec<usize>,
+    // `scores=` resolution: `(holder, objective) -> score`, `None` for either
+    // an unknown objective or a holder with no score on a known one — both
+    // read as "the predicate fails", matching `EntitySelectorOptions.SCORES`.
+    // A closure rather than a `&ScoreboardHandle` because this crate must stay
+    // ignorant of the scoreboard's storage shape (the module doc's "grammar
+    // here, resolution there" split), and so a test can supply a hand-built
+    // table with no scoreboard at all.
+    score: &dyn Fn(&str, &str) -> Option<i32>,
 ) -> Result<Vec<PlayerCandidate>, SelectorError> {
     if selector.current_entity {
         let Some(entity) = source.entity.as_ref() else {
@@ -202,7 +210,7 @@ pub fn resolve_players(
         let Some(me) = candidates.iter().find(|c| c.uuid == entity.uuid) else {
             return Err(SelectorError::NoPlayersFound);
         };
-        return if matches_predicates(me, selector) {
+        return if matches_predicates(me, selector, score) {
             Ok(vec![me.clone()])
         } else {
             Err(SelectorError::NoPlayersFound)
@@ -235,7 +243,7 @@ pub fn resolve_players(
 
     let mut matched: Vec<PlayerCandidate> = candidates
         .iter()
-        .filter(|c| matches_predicates(c, selector))
+        .filter(|c| matches_predicates(c, selector, score))
         .filter(|c| matches_region(c, selector, origin))
         .cloned()
         .collect();
@@ -285,7 +293,11 @@ fn distance_sqr(candidate: &PlayerCandidate, origin: (f64, f64, f64)) -> f64 {
     dx * dx + dy * dy + dz * dz
 }
 
-fn matches_predicates(candidate: &PlayerCandidate, selector: &EntitySelector) -> bool {
+fn matches_predicates(
+    candidate: &PlayerCandidate,
+    selector: &EntitySelector,
+    score: &dyn Fn(&str, &str) -> Option<i32>,
+) -> bool {
     // `limit_to_type` is `minecraft:player` for every player-shaped selector,
     // and a roster only holds players, so it is satisfied by construction. A
     // *different* positive type narrows to nothing — `@e[type=cow]` cannot match
@@ -307,6 +319,14 @@ fn matches_predicates(candidate: &PlayerCandidate, selector: &EntitySelector) ->
         // (which is a real possibility — a dead player stays connected on the
         // death screen) has one place to change.
         SelectorPredicate::Alive => true,
+        // `EntitySelectorOptions.SCORES`: every named objective must resolve
+        // to a score for this holder, and that score must fall in range. A
+        // holder with no score on a known objective, or an objective this
+        // scoreboard has never seen, both come back `None` from `score` and
+        // both refuse the match — vanilla does not distinguish them either.
+        SelectorPredicate::Scores(entries) => entries.iter().all(|(objective, range)| {
+            score(&candidate.username, objective).is_some_and(|value| range.matches(value))
+        }),
     })
 }
 
@@ -346,4 +366,11 @@ fn matches_region(
 #[must_use]
 pub fn no_shuffle(len: usize) -> Vec<usize> {
     (0..len).collect()
+}
+
+/// No scoreboard at all — every `scores=` lookup misses, matching an unknown
+/// objective. For a caller (or a test) with no scores to offer.
+#[must_use]
+pub fn no_scores(_holder: &str, _objective: &str) -> Option<i32> {
+    None
 }
