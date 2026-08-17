@@ -1077,6 +1077,44 @@ pub fn load_beacon_beam_texture() -> Option<lodestone_assets::Image> {
     }
 }
 
+/// The end portal/end gateway star-field shader's two textures
+/// (`textures/environment/end_sky.png`, `textures/entity/end_portal/end_portal.png`)
+/// for [`crate::gpu`]'s end-portal pass. Same fail-open shape as
+/// [`load_beacon_beam_texture`]: `None` on a jar-less run or a pack missing
+/// either file, and the pass draws nothing rather than the run failing.
+/// Bundled as one `Option<(sky, portal)>` rather than two separate loaders
+/// because the pass needs both or neither — a partial load (one texture
+/// present, one missing) has no sensible degraded rendering to fall back to.
+#[must_use]
+pub fn load_end_portal_textures() -> Option<(lodestone_assets::Image, lodestone_assets::Image)> {
+    let manager = open_vanilla_pack_stack()?;
+    let sky_path = "assets/minecraft/textures/environment/end_sky.png";
+    let portal_path = "assets/minecraft/textures/entity/end_portal/end_portal.png";
+    let sky_png = manager.read(sky_path)?;
+    let portal_png = manager.read(portal_path)?;
+    let sky = match lodestone_assets::Image::decode_png(&sky_png) {
+        Ok(img) => img,
+        Err(e) => {
+            tracing::warn!(target: "assets", "decode {sky_path}: {e}");
+            return None;
+        }
+    };
+    let portal = match lodestone_assets::Image::decode_png(&portal_png) {
+        Ok(img) => img,
+        Err(e) => {
+            tracing::warn!(target: "assets", "decode {portal_path}: {e}");
+            return None;
+        }
+    };
+    tracing::info!(
+        target: "assets",
+        end_sky = format!("{}x{}", sky.width, sky.height),
+        end_portal = format!("{}x{}", portal.width, portal.height),
+        "loaded vanilla end-portal star-field textures"
+    );
+    Some((sky, portal))
+}
+
 /// Decode vanilla's enchantment-glint sheet
 /// (`assets/minecraft/textures/misc/enchanted_glint_item.png`) for the
 /// first-person glint second pass.

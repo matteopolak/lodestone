@@ -56,6 +56,7 @@ pub mod cull;
 pub mod device;
 pub mod display;
 pub mod driver;
+pub mod end_portal;
 pub mod entity;
 pub mod entity_anim;
 pub mod entity_pipeline;
@@ -111,6 +112,9 @@ pub use beacon::{
     beam_radius_scale,
 };
 pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
+pub use end_portal::{
+    EndGatewaySpawn, EndPortalSpawn, EndPortalVertex, end_gateway_vertices, end_portal_vertices,
+};
 pub use block_entity::{
     BANNER_BASE_TEXTURE_STEM, BANNER_BODY, BANNER_FLAG, BANNER_WALL_BODY, BANNER_WALL_FLAG, BELL,
     BELL_TEXTURE_STEM, BOOK, BOOK_TEXTURE_STEM, BannerAttachment, BannerInstances,

@@ -38,6 +38,7 @@ mod debug_lines;
 // `pub(super)`, i.e. `pub(in crate::gpu)`.
 pub(crate) mod entities;
 mod beacon_beam;
+mod end_portal;
 mod entity_passes;
 mod first_person;
 mod frame;
@@ -73,7 +74,7 @@ pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{
     AmbientLightSource, BannerSource, BeaconSource, BellSource, BlockEntitySource, CampfireSource,
-    ConduitSource, DecoratedPotSource, EnchantingTableSource,
+    ConduitSource, DecoratedPotSource, EnchantingTableSource, EndGatewaySource, EndPortalSource,
     EntityLightSource, HandSwingSource, ItemUseSource, LecternSource, MainHandItem,
     MainHandSource, MapSource, MovingPistonSource, OutlineShapeSource, ShulkerSource, SignSource,
     SkullSource, SkyDarkenSource, SpawnerSource, ThirdPersonBodySource, ThirdPersonBodyState,
@@ -83,6 +84,7 @@ pub use stats::RenderStats;
 
 use beacon_beam::BeaconBeamRenderer;
 use block_entities::BlockEntityRenderer;
+use end_portal::EndPortalRenderer;
 use debug_lines::{DebugLineRenderer, DebugLinesSource};
 use entities::EntityRenderer;
 use nametag::NameTagRenderer;
@@ -562,6 +564,28 @@ pub struct RenderState {
     /// for why this needs no per-position tracker the way
     /// [`Self::bell_source`] does.
     beacon_source: BeaconSource,
+    /// The end portal / end gateway star-field pass. Always constructed,
+    /// like [`Self::beacon_beam`]: it loads its own two jar-sourced textures
+    /// and fail-opens to drawing nothing. A hole in the world the way
+    /// chest/skull are — `end_portal.json`/`end_gateway.json` have zero
+    /// model elements — so before this landed a stronghold's portal and an
+    /// End island's gateway were both fully invisible.
+    end_portal: EndPortalRenderer,
+    /// Where this frame's end portals come from. Same "unset means draw
+    /// nothing" convention as [`Self::skull_source`]; like [`BeaconSource`],
+    /// needs no per-position tracker — see [`EndPortalSource`]'s doc.
+    end_portal_source: EndPortalSource,
+    /// Where this frame's end gateways come from — same shape as
+    /// [`Self::end_portal_source`]. See [`EndGatewaySource`]'s doc for the
+    /// gateway teleport beam this deliberately does not carry.
+    end_gateway_source: EndGatewaySource,
+    /// The end-portal star-field shader's `GameTime` term — an
+    /// ever-increasing tick clock, unlike [`Self::beacon_source`]'s own
+    /// `floorMod(40)`-wrapped `animation_time`. A plain scalar rather than a
+    /// closure captured alongside a `*Source`, because the star-field swirl
+    /// needs it every frame regardless of which (if any) portals are in
+    /// view. See [`set_end_portal_game_time`](Self::set_end_portal_game_time).
+    end_portal_game_time: f32,
     /// The rain/snow pass, built once `textures/environment/{rain,snow}.png` are
     /// available. `None` — no `client.jar`, a headless test, or simply before
     /// [`RenderState::install_weather`] runs — draws no precipitation, the same

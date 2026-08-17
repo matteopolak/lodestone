@@ -110,10 +110,10 @@ use glam::Vec3;
 use lodestone_render::{
     BannerAttachment, BannerSpawn, BeaconSpawn, BeamSection, BellShakeDirection, BellSpawn,
     ChestHalf, ChestMaterial, ChestSpawn, ConduitFrame, ConduitSpawn, DecoratedPotSpawn,
-    LecternSpawn, SHULKER_COLOURS, ShulkerFacing, ShulkerSpawn, SignKind, SignOrientation,
-    SignSpawn, SkullOrientation, SkullSpawn, SkullType, VaultSpawn, average_beam_color,
-    beacon_beam_color, beam_radius_scale, conduit_active_rotation_value, conduit_advance,
-    conduit_anim_time, conduit_animation_phase, conduit_frame_scan,
+    EndGatewaySpawn, EndPortalSpawn, LecternSpawn, SHULKER_COLOURS, ShulkerFacing, ShulkerSpawn,
+    SignKind, SignOrientation, SignSpawn, SkullOrientation, SkullSpawn, SkullType, VaultSpawn,
+    average_beam_color, beacon_beam_color, beam_radius_scale, conduit_active_rotation_value,
+    conduit_advance, conduit_anim_time, conduit_animation_phase, conduit_frame_scan,
     entity::vault_spin_degrees, horizontal_facing_clockwise_yaw, horizontal_facing_yaw,
 };
 use lodestone_render::banner_pattern::{DyeColor, StoredPatternLayer};
@@ -5161,6 +5161,138 @@ pub fn beacon_spawns(handle: &SharedHandle, eye: Vec3, game_time: i64, partial_t
     }
     out.sort_by_key(|s| s.pos);
     out
+}
+
+/// Every end portal within [`VIEW_DISTANCE`], resolved into an
+/// [`EndPortalSpawn`] — the end-portal sibling of [`beacon_spawns`]. No
+/// per-position tracker and no NBT read at all: `TheEndPortalBlockEntity.
+/// shouldRenderFace` never consults world state or NBT for this type (see
+/// `lodestone_render::end_portal`'s module doc), so the only thing worth
+/// gathering is *where* one is.
+#[must_use]
+pub fn end_portal_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<EndPortalSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+
+    let mut out = Vec::new();
+    {
+        let world = store.read();
+        let candidates = chest_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        );
+        for (block, state_id) in candidates {
+            let name = lodestone_data::block_states::block_name(state_id);
+            let path = name.map(|n| n.strip_prefix("minecraft:").unwrap_or(n));
+            if path != Some("end_portal") {
+                continue;
+            }
+            out.push(EndPortalSpawn { pos: block });
+        }
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
+/// `Block.shouldRenderFace(state, neighborState, direction)`, restated over
+/// this crate's own "does this state fully block light" census
+/// (`lodestone_data::light_props::dampening(state) >= 15`) rather than the
+/// real jar's `VoxelShape` face-occlusion cache — the same stand-in
+/// [`beacon_beam_scan`] already trusts for "does this block stop the beam".
+/// A full opaque cube and a full light-blocking state coincide for every
+/// block that could plausibly neighbor a gateway (obsidian, bedrock, stone,
+/// air), so this is a deliberate simplification of the *mechanism*, not of
+/// the *result*, for the blocks this ever actually sees.
+///
+/// An unloaded neighbor (`block_state_at` returning `None` — outside any
+/// loaded chunk, or above/below the world) is treated as **non**-occluding,
+/// matching vanilla's own out-of-world-bounds air: "show the face" is the
+/// safe default, since the alternative (hiding a real gateway's swirl at
+/// the edge of loaded terrain) is the more visible failure.
+fn end_gateway_faces_to_show(world: &World, pos: [i32; 3]) -> Vec<lodestone_assets::Direction> {
+    use lodestone_assets::Direction;
+    const OFFSETS: [(Direction, [i32; 3]); 6] = [
+        (Direction::Down, [0, -1, 0]),
+        (Direction::Up, [0, 1, 0]),
+        (Direction::North, [0, 0, -1]),
+        (Direction::South, [0, 0, 1]),
+        (Direction::West, [-1, 0, 0]),
+        (Direction::East, [1, 0, 0]),
+    ];
+    OFFSETS
+        .into_iter()
+        .filter(|(_, [dx, dy, dz])| {
+            let nx = pos[0] + dx;
+            let ny = pos[1] + dy;
+            let nz = pos[2] + dz;
+            match world.block_state_at(nx, ny, nz) {
+                Some(state) => lodestone_data::light_props::dampening(state) < 15,
+                None => true,
+            }
+        })
+        .map(|(d, _)| d)
+        .collect()
+}
+
+/// Every end gateway within [`VIEW_DISTANCE`], resolved into an
+/// [`EndGatewaySpawn`] — the gateway sibling of [`end_portal_spawns`].
+/// **Not** the gateway's teleport beam (see
+/// `lodestone_render::end_portal`'s module doc for why that is a deliberate,
+/// documented gap this session) — just the always-visible star-field faces.
+/// A gateway with every face occluded (theoretically possible, never in
+/// practice — real gateway placements always have at least the top face
+/// open) is dropped rather than pushed with an empty face list, so the GPU
+/// pass never has to special-case a zero-vertex instance.
+#[must_use]
+pub fn end_gateway_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<EndGatewaySpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+
+    let mut out = Vec::new();
+    {
+        let world = store.read();
+        let candidates = chest_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        );
+        for (block, state_id) in candidates {
+            let name = lodestone_data::block_states::block_name(state_id);
+            let path = name.map(|n| n.strip_prefix("minecraft:").unwrap_or(n));
+            if path != Some("end_gateway") {
+                continue;
+            }
+            let faces = end_gateway_faces_to_show(&world, block);
+            if faces.is_empty() {
+                continue;
+            }
+            out.push(EndGatewaySpawn { pos: block, faces });
+        }
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
+#[cfg(test)]
+mod end_portal_tests {
+    use super::*;
+
+    /// [`end_gateway_faces_to_show`] with every neighbor unloaded (a bare
+    /// `World`, no chunks inserted at all) must show every face — the "show
+    /// rather than hide" default the function's own doc commits to.
+    #[test]
+    fn every_face_shows_when_every_neighbor_is_unloaded() {
+        let world = World::new();
+        let faces = end_gateway_faces_to_show(&world, [0, 64, 0]);
+        assert_eq!(faces.len(), 6, "{faces:?}");
+    }
 }
 
 #[cfg(test)]

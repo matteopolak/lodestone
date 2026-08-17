@@ -29,6 +29,17 @@ the terrain mesher already draws, so there was no hole to fill — but unlike th
 all. No new packet either: `shared_data.display_item` is ordinary generic block-entity NBT, the same
 `BlockEntity.nbt` path chest/skull/sign/decorated-pot/spawner already proved.
 
+**End portal and end gateway are now landed and wired end to end** (21 of 26 registrations) — see
+[End portal and end gateway](#end-portal-and-end-gateway). Unlike everything above, both are a genuine
+hole-in-the-world case again (`end_portal.json`/`end_gateway.json` have zero model elements) and the
+genuinely novel piece in this corpus: the star-field surface samples its own screen-space projection
+rather than an ordinary diffuse texture, so `gpu/end_portal.wgsl` is a dedicated shader with no baked
+mesh and no atlas lookup at all — a fifth seam, distinct from the cuboid-rig, procedural-quad-strip,
+nested-mob and dropped-item-reuse seams every type above uses. One real bug was caught and fixed by this
+pass's own animation pixel gate before landing: implicit-derivative mip selection made the swirl's
+*texture sampling* invisible to `GameTime` regardless of the geometry being correct, fixed with
+`textureSampleLevel(..., 0.0)` — see that section for the measurement.
+
 **Bell is now fully wired, including its `BLOCK_EVENT` trigger, and the paragraph that used to sit
 here saying otherwise was itself stale** — the live install landed before this note was next read,
 and the shake trigger landed with `BellShakes` (see [Bell](#bell)). Both halves of the gap this
@@ -117,7 +128,11 @@ pass (`gpu/beacon_beam.rs`). **Mob spawner makes 17 and trial spawner makes 18**
 `EntityPipeline`'s batch at a nested placement, a third seam distinct from both the ones above.
 **Vault makes 19** (see [Vault](#vault)) — a fourth seam again, reusing the *dropped-item* pipeline
 (`gpu/world_items.rs::prepare_item_geometry`) rather than any of the three above.
-**19 of 26 registrations are now landed and wired.** The rest are still
+**End portal makes 20 and end gateway makes 21** (see
+[End portal and end gateway](#end-portal-and-end-gateway)) — a fifth seam: a dedicated shader
+(`gpu/end_portal.wgsl`) sampling its own screen-space projection, with no baked mesh and no atlas lookup
+at all.
+**21 of 26 registrations are now landed and wired.** The rest are still
 absent. Picking the next few should read this list, not the original issue body.
 
 **The registration list had two entries this document's "what is not built" section never mentioned
@@ -2063,6 +2078,158 @@ both are particle-system work, out of this issue's block-entity-renderer scope. 
 soul-fire-vs-small-flame distinction is carried in the parsed block state (`OMINOUS`) but not yet read by
 anything, since no particle emitter consumes it.
 
+## End portal and end gateway
+
+The genuinely novel piece in this corpus — every type above is a cuboid rig, a procedural quad-strip
+(beacon) or a reuse of the dropped-item pipeline (vault); this one samples **its own screen-space
+projection**, the classic vanilla "swirling void" effect, and shares that shader between two block
+types. `assets/minecraft/models/block/end_portal.json`/`end_gateway.json` are both
+`{"textures":{"particle":...}}` — zero elements, the total-absence hole chest/skull were before their own
+landing. Before this session, a stronghold's end portal and an End island's gateway both drew **nothing**
+— every stronghold and every gateway structure in the game.
+
+### Which faces draw, and why they differ between the two types
+
+`TheEndPortalBlockEntity.shouldRenderFace` tests only the axis (`direction.getAxis() == Y`) with **no**
+neighbor check at all — an end portal always submits exactly its top and bottom faces, full stop.
+`TheEndGatewayBlockEntity.shouldRenderFace` instead delegates to `Block.shouldRenderFace`, the ordinary
+per-face neighbor-occlusion test every terrain quad already uses. This crate restates that test over
+`lodestone_data::light_props::dampening(state) >= 15` (`block_entities::end_gateway_faces_to_show`) — the
+same "does this block fully block light" stand-in `beacon_beam_scan` already trusts for "does this block
+stop the beam" — rather than the real jar's `VoxelShape` face-occlusion cache, since every block that could
+plausibly neighbor a gateway (obsidian, bedrock, air) has the two properties coincide. An unloaded
+neighbor is treated as **non**-occluding (show the face), the safe default matching vanilla's own
+out-of-world air.
+
+### The squash — the one geometric difference between the two
+
+`TheEndPortalRenderer.TRANSFORMATION` (`translate(0, 0.375, 0) · scale(1, 0.375, 1)`) flattens the
+portal's cube into a thin slab spanning `y ∈ [0.375, 0.75]`, matching the real portal-frame height.
+`TheEndGatewayRenderer.submit` applies **no** transform before `submitCube`, so a gateway's swirl fills
+the *whole* block. `lodestone_render::end_portal::push_face`'s `y_min`/`y_max` parameters are the whole
+difference; `end_portal_vertices`/`end_gateway_vertices` are otherwise identical callers.
+
+Vertex data is **position only** — no UV, no colour, no normal, matching what
+`AbstractEndPortalRenderer.FACES` actually submits. The whole illusion comes from the fragment shader.
+
+### The shader: `v * M` (GLSL row-vector) ported to WGSL's `M * v` (column-vector)
+
+`rendertype_end_portal.fsh`'s `end_portal_layer(layer)` builds a `mat4` and evaluates
+`texProj0 * end_portal_layer(...)` — a row vector on the left, GLSL's own convention for this shader.
+WGSL has no such operator. Rather than hand-transpose the matrix (an easy place to invert a sign
+unnoticed), `gpu/end_portal.wgsl::end_portal_layer_uv` is the fully expanded scalar derivation of
+`v * (R * T * S)`, applied one factor at a time (row-vector matrix products are associative, so
+`v * (R*T*S) == ((v*R)*T)*S`):
+
+1. **`R`** (`mat4(scale * rotate)`) rotates/scales `(x, y)`, passes `z, w` through.
+2. **`T`** (`translate`) adds a `w`-scaled offset — `17.0/layer` on `x`, the `GameTime`-driven term on
+   `y` — leaving `z, w` unchanged. The base sky layer (`Sampler0`, `COLORS[0]`) skips this whole chain and
+   samples the raw, undistorted `texProj0` directly, exactly as `textureProj(Sampler0, texProj0)` does in
+   the real shader.
+3. **`S`** (`SCALE_TRANSLATE`) remaps into the `[0,1]`-ish range the final divide expects.
+
+`w` itself never changes across any step, so the divide is always by the original clip-space `w`. WGSL
+has no `textureProj`; this shader divides by `w` explicitly before sampling.
+
+### `textureSampleLevel(..., 0.0)`, not `textureSample` — measured, not stylistic
+
+The first version used plain `textureSample` (implicit-derivative mip selection). It rendered real
+pixels but **the swirl never moved**: `end_portal_layer_uv`'s `trans_x_w`/`trans_y` terms are additive
+per-draw uniforms (they depend on `layer`/`GameTime`, never on screen position), so translating by them
+leaves the sampled UV's screen-space *derivative* untouched — only the `k`/rotation terms (large for a low
+layer index) set that derivative's magnitude. Implicit-LOD sampling therefore picked the same
+near-maximum mip (a texture's top mip is a single texel) regardless of `GameTime`, so two renders a
+`GameTime` apart came back byte-identical. `textureSampleLevel(..., 0.0)` sidesteps mip selection
+entirely — the swirl loses its own anti-aliasing, an accepted simplification of the same shape
+`CLAUDE.md`'s rendering-constraints section already names for projective sampling on this backend: an
+exact composited byte is not attempted, only that the two arms genuinely differ.
+
+### One pipeline, not two — a per-vertex mask instead of a shader define
+
+Vanilla splits `RenderPipelines.END_PORTAL`/`END_GATEWAY` into two pipelines sharing one shader snippet,
+differing only in `withShaderDefine("PORTAL_LAYERS", 15 | 16)` — a compile-time unroll count, not a
+behavioural difference `wgpu` needs two pipeline objects to express. `end_portal.wgsl` always runs a
+statically-bounded 16-iteration loop and masks the 16th layer's *contribution* to zero for a non-gateway
+vertex (a per-vertex `is_gateway` flag, `0.0`/`1.0`), arithmetically identical to vanilla's 15-iteration
+loop for a portal. This means an end portal's and an end gateway's geometry share one vertex buffer and
+one draw call — no dynamic loop bound is ever needed, so there is no `textureSample`-in-non-uniform-
+control-flow hazard to reason about.
+
+### `cull_mode: None`, deliberately
+
+`FaceInfo`'s six per-direction windings were transcribed rather than independently re-derived. With
+back-face culling on, a backwards winding reads as "this face silently draws nothing" — the exact island
+shape `CLAUDE.md` warns about — so culling is disabled outright, at the cost of at most 12 extra triangles
+per instance (this pass's entire geometry budget).
+
+### The gateway's teleport beam is a deliberate, documented gap
+
+`TheEndGatewayRenderer.submit` also calls `BeaconRenderer.submitBeaconBeam` while `isSpawning()`
+(first 200 ticks after creation) or `isCoolingDown()` (40 ticks after every teleport-through). Not built
+this session: it needs a per-position, client-simulated `teleportCooldown` tracker fed by the gateway's
+own `BLOCK_EVENT` (`b0 == 1` — the same collision [Bell](#bell)'s doc already names, told apart by the
+block at the position rather than the packet) plus the block entity's `Age` NBT for the rarer spawn-phase
+arm. A real gateway's beam is visible for ~10 s once after placement and ~2 s after every teleport, a
+small fraction of a gateway's total lifetime, so the always-visible swirl face was the priority within this
+session's budget.
+
+### Wiring, end to end
+
+`block_entities::end_portal_spawns`/`end_gateway_spawns` (mirroring `beacon_spawns`'s shape, reusing
+`chest_candidates` for the position gather) → `Sim::end_portal_source`/`end_gateway_source` (no per-position
+tracker or clock captured at all — a portal's face list needs no world-tick state, unlike beacon's rotating
+core) → `app/redraw.rs`'s per-frame install → `RenderState::set_end_portal_source`/`set_end_gateway_source`
+→ `gpu/end_portal.rs::EndPortalRenderer`, drawn in the opaque group of `gpu/frame.rs`'s pass (fully opaque,
+`DepthStencilState.DEFAULT`, so it belongs before translucent water, the same reasoning the beacon beam's
+solid core documents). The shader's `GameTime` term is a plain scalar
+(`RenderState::set_end_portal_game_time`, fed by `Sim::game_time_for_shaders` — an *unbounded* tick clock,
+unlike `beacon_source`'s own `floorMod(40)`-wrapped `animation_time`), not a closure-backed source, since
+the swirl needs it every frame regardless of which portals are in view.
+
+### Proof
+
+`crates/lodestone-shell/tests/end_portal_pixels.rs`, four `#[ignore]`d GPU pixel gates against a real
+headless adapter + `client.jar`:
+
+| gate | measurement |
+|---|---|
+| an end portal draws in its own projected rect | rect `x132..188 y91..122`; fill **66.1%**; every changed pixel lands inside the (padded) rect |
+| an end gateway with every face open fills the whole block | rect `x131..189 y80..140`; fill over 50% |
+| the swirl animates between two known `GameTime` values | 283 of 2,146 px in-rect differ between `GameTime` 0.0 and 0.37 |
+| the first-person arm is elsewhere | arm bbox `x247..319 y169..239`, disjoint from the portal's rect |
+
+```bash
+cargo test -p lodestone-shell --test end_portal_pixels -- --ignored --nocapture
+```
+
+**The animation gate's own `GameTime` delta was itself a measured finding, not a guess.**
+`end_portal_layer_uv`'s per-layer UV shift for a `GameTime` delta `dt` works out to
+`Δuv.y(layer) = 0.5 * dt * (3 + layer)`. The first version of this gate used `dt = 200.0` — a round
+number, and `CLAUDE.md`'s own warning against predicting one — which makes `0.5 * dt == 100.0` an
+*integer*, so `Δuv.y` came out to an exact integer for **every** `layer` in `1..=16` simultaneously: the
+swirl moved by whole texture repeats and landed back on the identical `Repeat`-addressed texel, and the
+two frames came back byte-identical inside the portal's own rect. Only a real GPU frame could see this —
+the geometry (and its projected rect) never changes, only the fragment shader's own sampling does.
+`dt = 0.37` (`0.5 * 0.37 = 0.185`, non-integer for every layer) is used instead.
+
+**Negative control watched failing**: commenting out `self.end_portal.draw(&mut pass, end_portal_count)`
+in `gpu/frame.rs` and re-running reddened three of the four gates with exactly the island diagnosis (`0.0%`
+fill for both the portal and the gateway gate; `0` px differing between the two `GameTime` values), while
+the arm-disjointness control — which does not depend on this pass at all — stayed green. Restored from an
+md5-checked backup before committing.
+
+`cargo test -p lodestone-render --lib end_portal::`: 6/6 unit tests (each `FaceInfo` direction's winding
+for Up/Down, the portal's squash range, the gateway's full-block range, a restricted face list drawing
+only that face, translation reaching every vertex). `block_entities::end_portal_tests`: 1/1 (every face
+shows when every neighbor is unloaded — the "show rather than hide" default). `cargo check -p
+lodestone-shell --all-targets`/`--no-default-features`: both clean. `cargo test -p lodestone-shell --test
+wgsl_valid`: 4/4, including `every_shader_file_parses_and_validates` — naga accepts `end_portal.wgsl`'s
+statically-bounded loop with no uniformity warning.
+
+**What is not ported**: the gateway's teleport beam (see above), fog (the same simplification
+`gpu/sign_text.rs`/`gpu/beacon_beam.rs` already make for their own jar-sourced-texture passes), and the
+swirl's own anti-aliasing (the `textureSampleLevel` fix above).
+
 ## How to change it
 
 ### Adding a block-entity type
@@ -2399,9 +2566,14 @@ Against the real 26-entry registration list (see above), not the issue's origina
   reuse of the dropped-item pipeline rather than a new pass. No new packet needed. Still open within
   its scope: the connection-particle/idle-particle effects (`VaultBlockEntity.Client`), which are
   particle-system work outside this pass's boundary.
-- Brushable block, copper golem statue, shelf. End portal/end gateway are their own shader
-  effects, not cuboid rigs (beacon was too, until it landed — see [Beacon](#beacon)), and structure
-  block/test instance block are creative/dev-only.
+- **End portal and end gateway — landed**, including the live per-frame install (see
+  [End portal and end gateway](#end-portal-and-end-gateway) above): the star-field surface for both
+  types, the axis-only vs neighbor-occlusion face selection, and the squash that distinguishes them.
+  Still open within scope: the end gateway's teleport beam (`isSpawning()`/`isCoolingDown()`, a
+  deliberate, documented gap — see that section), fog, and the swirl's own anti-aliasing
+  (`textureSampleLevel` forces mip 0).
+- Brushable block, copper golem statue, shelf are not built, and structure block/test instance block
+  are creative/dev-only, out of scope.
 
 Also unbuilt for chests specifically: the `BrightnessCombiner` that makes a double chest's two halves
 share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behind

@@ -359,6 +359,14 @@ pub struct RenderStats {
     /// Beacon-beam **outer glow** vertices uploaded this frame — the
     /// translucent sibling of [`beacon_beam_solid_vertices`](Self::beacon_beam_solid_vertices).
     pub beacon_beam_glow_vertices: u32,
+    /// End-portal/end-gateway star-field vertices uploaded this frame — the
+    /// same exact, non-pixel-based corroboration
+    /// [`beacon_beam_solid_vertices`](Self::beacon_beam_solid_vertices) gives
+    /// the beacon beam: `0` means either no portal/gateway in view, or a
+    /// jar-less run missing `end_sky.png`/`end_portal.png` (both draw
+    /// nothing), which a pixel gate must disambiguate by installing a real
+    /// source.
+    pub end_portal_vertices: u32,
     /// Mining-crack overlays actually drawn this frame — one per
     /// [`CrackTarget`](crate::gpu::CrackTarget) in the slice passed to
     /// [`RenderState::render_with_crack`](crate::gpu::RenderState::render_with_crack)

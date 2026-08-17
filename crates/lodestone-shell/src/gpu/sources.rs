@@ -794,6 +794,61 @@ impl std::fmt::Debug for BeaconSource {
     }
 }
 
+/// Where this frame's end portals come from — same "unset means draw
+/// nothing" convention as [`SkullSource`]. No per-position tracker behind
+/// it, for the same reason [`BeaconSource`] needs none: `TheEndPortalBlockEntity.
+/// shouldRenderFace` reads no world state and no NBT at all (always `{Up,
+/// Down}`), so there is nothing to advance in `Sim::step`.
+#[derive(Default)]
+pub struct EndPortalSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::EndPortalSpawn> + Send + Sync>>,
+);
+
+impl EndPortalSource {
+    /// This frame's end portals, or none when unset.
+    #[must_use]
+    pub(super) fn portals(&self, eye: glam::Vec3) -> Vec<lodestone_render::EndPortalSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for EndPortalSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("EndPortalSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
+/// Where this frame's end gateways come from — same shape as
+/// [`EndPortalSource`]. `faces` (the resolved neighbor-occlusion list) is
+/// current world state re-read fresh every call, same as `BeaconSource`'s
+/// `levels`/`beamSections`; the gateway's *teleport beam* is a deliberate,
+/// documented gap this source does not carry — see
+/// `lodestone_render::end_portal`'s module doc.
+#[derive(Default)]
+pub struct EndGatewaySource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::EndGatewaySpawn> + Send + Sync>>,
+);
+
+impl EndGatewaySource {
+    /// This frame's end gateways, or none when unset.
+    #[must_use]
+    pub(super) fn gateways(&self, eye: glam::Vec3) -> Vec<lodestone_render::EndGatewaySpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for EndGatewaySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("EndGatewaySource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
 /// Where this frame's shulker boxes come from — same shape as [`SkullSource`],
 /// and the thinnest of the family: the closure needs no partial tick and no
 /// animation map at all, because a shulker box's whole appearance is a function
