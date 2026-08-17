@@ -210,6 +210,9 @@ pub struct NavigatingMob<'w> {
     /// Host-injected allay delivery target — [`job_site`](Self::job_site)'s
     /// sibling for [`BrainMob::delivery_target`]/`MemoryModuleType::DELIVERY_TARGET`.
     delivery_target: Option<Vec3>,
+    /// Host-injected sniffer dig-search target — [`job_site`](Self::job_site)'s
+    /// sibling for [`BrainMob::sniffer_dig_target`]/`MemoryModuleType::SNIFFER_DIG_TARGET`.
+    sniffer_dig_target: Option<Vec3>,
     /// The block the current path was computed toward, so `move_to` reuses the
     /// active path instead of recomputing every tick (vanilla `moveTo` reuse).
     active_target_block: Option<BlockPos>,
@@ -608,6 +611,7 @@ impl<'w> NavigatingMob<'w> {
             nearest_visible_zombified: None,
             nearest_attackable_food: None,
             delivery_target: None,
+            sniffer_dig_target: None,
             active_target_block: None,
             last_look: None,
             jumping: false,
@@ -1082,6 +1086,14 @@ impl<'w> NavigatingMob<'w> {
     /// sibling for [`BrainMob::delivery_target`].
     pub fn set_delivery_target(&mut self, target: Option<Vec3>) -> &mut Self {
         self.delivery_target = target;
+        self
+    }
+
+    /// Host injection point: a sniffer's current candidate dig position, or
+    /// `None` — [`set_job_site`](Self::set_job_site)'s sibling for
+    /// [`BrainMob::sniffer_dig_target`].
+    pub fn set_sniffer_dig_target(&mut self, target: Option<Vec3>) -> &mut Self {
+        self.sniffer_dig_target = target;
         self
     }
 
@@ -2212,6 +2224,12 @@ impl BrainMob for NavigatingMob<'_> {
     /// [`delivery_target`](Self::delivery_target)'s own field doc.
     fn delivery_target(&self) -> Option<Vec3> {
         self.delivery_target
+    }
+
+    /// The host-injected sniffer dig-search target — see
+    /// [`sniffer_dig_target`](Self::sniffer_dig_target)'s own field doc.
+    fn sniffer_dig_target(&self) -> Option<Vec3> {
+        self.sniffer_dig_target
     }
 
     /// Delegates to the same `attacks` queue [`MobController::attack`] writes

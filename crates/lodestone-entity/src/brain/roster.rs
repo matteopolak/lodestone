@@ -30,8 +30,11 @@
 //! multiplier, and the warden now has [`warden_brain`]'s `FIGHT` activity
 //! (a chase toward whatever it is angry at, layered on top of the separate
 //! `lodestone_server::mobs::warden` anger/vibration machinery — issue #459's
-//! step 3, closing that module's own disclosed "no pursuit" gap). Everything
-//! else about the scaffold claim still holds: this is still the
+//! step 3, closing that module's own disclosed "no pursuit" gap). The sniffer
+//! now has [`sniffer_brain`]'s `SNIFF` activity too — walking toward a
+//! host-found dig position, layered on top of the separate
+//! `lodestone_server::mobs::sniffer` seek/dig/rise/egg-drop state machine.
+//! Everything else about the scaffold claim still holds: this is still the
 //! composition, not the full per-species behaviour package (a villager's
 //! profession schedule and trading availability, a piglin's barter and
 //! hoglin hunt, are separate units layered on this one and need machinery
@@ -55,7 +58,7 @@ use super::memory::{MemoryModuleType, MemoryStatus};
 use super::sensor::{
     AngerTargetSensor, DeliveryTargetSensor, HurtBySensor, NearestAttackableFoodSensor,
     NearestHostileSensor, NearestPlayerSensor, NearestVisibleLivingEntitiesSensor,
-    NearestVisibleZombifiedSensor, VillagerPoiSensor,
+    NearestVisibleZombifiedSensor, SnifferDigTargetSensor, VillagerPoiSensor,
 };
 use super::Brain;
 
@@ -490,6 +493,69 @@ pub fn allay_brain() -> Brain {
     brain
 }
 
+/// `Sniffing.stop`'s own `WalkTarget(position, 1.25F, 0)` — the walk speed
+/// and (exact-arrival) stop distance vanilla writes once a sniff finishes
+/// and a dig position has been found.
+const SNIFFER_SEARCH_SPEED: f32 = 1.25;
+
+/// A sniffer's brain: [`scaffold_with_panic`] (`AnimalPanic(2.0F)`,
+/// `SnifferAi`'s own figure — see [`PANIC_SPEED_MULTIPLIER`]'s `"sniffer"`
+/// row) plus walking toward a host-found dig position — issue #230's
+/// remaining gap for this species.
+///
+/// # What this is, and what it deliberately is not
+///
+/// Real `SnifferAi` is a seven-state machine (`IDLING`/`FEELING_HAPPY`/
+/// `SCENTING`/`SNIFFING`/`SEARCHING`/`DIGGING`/`RISING`) spread across three
+/// activities (`CORE`/`SNIFF`/`DIG`), with the sniff-then-dig timing, the
+/// diggable-block search, the loot roll and the explored-position memory all
+/// living in `Sniffer`/`SnifferAi` themselves. This crate's Brain seam has no
+/// world/block read at all (the same gap [`warden_brain`]'s own doc names),
+/// so every one of those pieces is host-side —
+/// `lodestone_server::mobs::sniffer::MobSim::tick_sniffers` runs the whole
+/// `IDLING → SNIFFING → SEARCHING → DIGGING → RISING` timer and the block-tag
+/// search, and feeds this brain only the walking half: a candidate position
+/// through [`BrainMob::sniffer_dig_target`], present only during the host's
+/// own `SEARCHING` phase. This behaviour's whole job — the same "narrow but
+/// honest" shape [`warden_brain`]'s `FIGHT`/[`piglin_brain`]'s `AVOID` already
+/// are against their own fuller jar originals — is walking there; the host
+/// detects arrival by comparing its own position against the target it
+/// handed out, not by reading anything back out of this `Brain`.
+///
+/// **Disclosed narrowing**: `FEELING_HAPPY`/`SCENTING` (both purely cosmetic
+/// animation states with no gameplay effect) are not ported at all — see
+/// `lodestone_server::mobs::sniffer`'s own module doc for the full list of
+/// cuts against `SnifferAi`.
+///
+/// # Dependencies
+///
+/// [`SnifferDigTargetSensor`] feeds
+/// [`MemoryModuleType::SNIFFER_DIG_TARGET`] from
+/// [`BrainMob::sniffer_dig_target`], the same host-computed-candidate shape
+/// [`DeliveryTargetSensor`]/[`AngerTargetSensor`] already use.
+#[must_use]
+pub fn sniffer_brain() -> Brain {
+    let mut brain = scaffold_with_panic(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE, 2.0);
+    brain.add_sensor(Box::new(SnifferDigTargetSensor));
+    brain.add_activity(
+        Activity::SNIFF,
+        vec![(
+            0,
+            leaf(WalkToPoi::new(
+                MemoryModuleType::SNIFFER_DIG_TARGET,
+                SNIFFER_SEARCH_SPEED,
+                0,
+            )),
+        )],
+        vec![(
+            MemoryModuleType::SNIFFER_DIG_TARGET,
+            MemoryStatus::ValuePresent,
+        )],
+        Vec::new(),
+    );
+    brain
+}
+
 /// The `WalkToPoi` close-enough distance a warden's melee pursuit stops at —
 /// **not** a vanilla constant (see this function's own doc for why one
 /// cannot be cited). Chosen strictly smaller than
@@ -707,6 +773,13 @@ pub fn brain_for(species: &str) -> Option<BrainGoal> {
     // live grudge must chase rather than idly wander and look at players.
     if species == "warden" {
         return Some(BrainGoal::new(warden_brain(), vec![Activity::FIGHT, Activity::IDLE]));
+    }
+    // Same shape again: `sniffer_brain` needs both an extra activity
+    // (`SNIFF`) and a candidate list that offers it, ahead of `IDLE` — a
+    // sniffer with a host-found dig target must walk there rather than
+    // idly wander and look at players.
+    if species == "sniffer" {
+        return Some(BrainGoal::new(sniffer_brain(), vec![Activity::SNIFF, Activity::IDLE]));
     }
     let brain = match PANIC_SPEED_MULTIPLIER.iter().find(|&&(s, _)| s == species) {
         Some(&(_, speed)) => scaffold_with_panic(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE, speed),
@@ -1469,6 +1542,124 @@ mod tests {
                 .iter()
                 .any(|&(t, _)| t == lodestone_model::Vec3::new(5.0, 0.0, 0.0)),
             "a calm warden must never chase a position it was never given: {:?}",
+            mob.move_calls
+        );
+    }
+
+    /// A [`BrainMob`](super::super::mob::BrainMob) double for
+    /// [`sniffer_brain`], the same "`move_to` actually relocates" shape
+    /// [`WardenPursuitTestMob`] already establishes and for the identical
+    /// reason (`MoveToTargetSink::reached` needs live movement, not a
+    /// double that stands still).
+    struct SnifferDigTestMob {
+        pos: lodestone_model::Vec3,
+        time: i64,
+        dig_target: Option<lodestone_model::Vec3>,
+        move_calls: Vec<(lodestone_model::Vec3, f32)>,
+    }
+
+    impl super::super::mob::BrainMob for SnifferDigTestMob {
+        fn next_i32(&mut self, bound: i32) -> i32 {
+            bound.saturating_sub(1).max(0)
+        }
+        fn next_f32(&mut self) -> f32 {
+            0.5
+        }
+        fn game_time(&self) -> i64 {
+            self.time
+        }
+        fn position(&self) -> lodestone_model::Vec3 {
+            self.pos
+        }
+        fn move_to(&mut self, target: lodestone_model::Vec3, speed: f32) -> bool {
+            self.move_calls.push((target, speed));
+            self.pos = target;
+            true
+        }
+        fn navigation_done(&self) -> bool {
+            true
+        }
+        fn stop_navigation(&mut self) {}
+        fn look_at(&mut self, _target: lodestone_model::Vec3) {}
+        fn random_land_pos(&mut self, max_xz: i32, _max_y: i32) -> Option<lodestone_model::Vec3> {
+            Some(lodestone_model::Vec3::new(self.pos.x + f64::from(max_xz), self.pos.y, self.pos.z))
+        }
+        fn sniffer_dig_target(&self) -> Option<lodestone_model::Vec3> {
+            self.dig_target
+        }
+    }
+
+    /// Issue #230's remaining sniffer gap, driven through
+    /// `brain_for("sniffer")` — the exact production path — rather than
+    /// constructing [`sniffer_brain`]/[`WalkToPoi`] by hand. A sniffer with a
+    /// live [`BrainMob::sniffer_dig_target`](super::super::mob::BrainMob::sniffer_dig_target)
+    /// must swap into `SNIFF` and issue a real `move_to` toward it.
+    #[test]
+    fn a_sniffer_with_a_dig_target_walks_toward_it() {
+        let candidates = [Activity::SNIFF, Activity::IDLE];
+        let mut sniffer = brain_for("sniffer").expect("sniffer is a brain species");
+        let mut mob = SnifferDigTestMob {
+            pos: lodestone_model::Vec3::default(),
+            time: 1,
+            dig_target: Some(lodestone_model::Vec3::new(5.0, 0.0, 0.0)),
+            move_calls: Vec::new(),
+        };
+
+        // The same one-tick-lag shape the warden pursuit test's own doc
+        // explains: the first pass runs before the sensor has written
+        // `SNIFFER_DIG_TARGET` for the first time.
+        for _ in 0..6 {
+            sniffer.brain_mut().set_active_activity_to_first_valid(&candidates);
+            sniffer.brain_mut().tick(&mut mob);
+            mob.time += 1;
+        }
+
+        assert!(
+            sniffer.brain().is_active(Activity::SNIFF),
+            "a sniffer with a live dig target must swap into SNIFF"
+        );
+        assert!(
+            !mob.move_calls.is_empty(),
+            "SNIFF's WalkToPoi must have issued at least one move_to call toward the dig target"
+        );
+        assert!(
+            mob.move_calls
+                .iter()
+                .any(|&(t, _)| t == lodestone_model::Vec3::new(5.0, 0.0, 0.0)),
+            "at least one move_to call must target the live dig target exactly; all calls: {:?}",
+            mob.move_calls
+        );
+    }
+
+    /// The negative control: no dig target means `SNIFF` is never eligible,
+    /// so a sniffer must fall back to `IDLE` and never walk toward the stale
+    /// `(5, 0, 0)` this test's positive twin uses.
+    #[test]
+    fn a_sniffer_with_no_dig_target_never_enters_sniff_and_stays_idle() {
+        let candidates = [Activity::SNIFF, Activity::IDLE];
+        let mut sniffer = brain_for("sniffer").expect("sniffer is a brain species");
+        let mut mob = SnifferDigTestMob {
+            pos: lodestone_model::Vec3::default(),
+            time: 1,
+            dig_target: None,
+            move_calls: Vec::new(),
+        };
+
+        for _ in 0..6 {
+            sniffer.brain_mut().set_active_activity_to_first_valid(&candidates);
+            sniffer.brain_mut().tick(&mut mob);
+            mob.time += 1;
+        }
+
+        assert!(
+            sniffer.brain().is_active(Activity::IDLE),
+            "a sniffer with no dig target must stay IDLE, never SNIFF"
+        );
+        assert!(
+            !mob.move_calls
+                .iter()
+                .any(|&(t, _)| t == lodestone_model::Vec3::new(5.0, 0.0, 0.0)),
+            "a sniffer with no dig target must never walk toward a position it was never given: {:?}",
             mob.move_calls
         );
     }

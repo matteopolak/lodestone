@@ -610,6 +610,34 @@ pub enum MetadataField {
     /// `Axolotl.hurtServer`'s own trigger collapsed to a plain countdown —
     /// see that method's own doc for the roll and the disclosed narrowings.
     PlayingDead(bool),
+    /// `Camel.DASH` — index 19, one of the `BOOLEAN` claimants
+    /// [`GoatHorns`](Self::GoatHorns)'s own doc already names at that index.
+    /// The producer ([`crate::mobs::SimMob::snapshot`]'s `"camel"` arm, the
+    /// sole caller) disambiguates it from every other claimant, the same
+    /// shape every crowded-index field in this enum already uses; never
+    /// push this variant for anything but a `minecraft:camel`.
+    ///
+    /// Pushed unconditionally for every camel, matching
+    /// [`PlayingDead`](Self::PlayingDead)'s own "the reset must reach the
+    /// client too" reasoning. Backed by
+    /// [`crate::mobs::SimMob::camel_is_dashing`] — see that method's own
+    /// doc for the disclosed narrowing (no `onGround` signal exists for a
+    /// client-authoritative mount, so the reported window is
+    /// `Camel.DASH_MINIMUM_DURATION_TICKS` rather than the real
+    /// landing-triggered one).
+    Dash(bool),
+    /// `Sniffer.DATA_STATE` — index 18, the crate's own `SNIFFER_STATE`
+    /// serializer (id 35), not a reused generic one. The producer
+    /// ([`crate::mobs::SimMob::snapshot`]'s `"sniffer"` arm, the sole
+    /// caller) is the only thing that ever pushes this; never push it for
+    /// anything but a `minecraft:sniffer`.
+    ///
+    /// Carries [`crate::mobs::sniffer::SnifferState::wire_ordinal`]'s
+    /// output directly — the real `Sniffer.State` enum ordinal, not a
+    /// crate-local renumbering. Pushed unconditionally for every sniffer,
+    /// matching [`Dash`](Self::Dash)'s own "the reset must reach the client
+    /// too" reasoning.
+    SnifferState(u8),
 }
 
 /// One generated trade offer, ready for the wire (issue #245) —
@@ -1191,28 +1219,34 @@ pub enum ServerBound {
         target_entity_id: Option<i32>,
     },
     /// The client's movement-input flags for the current tick
-    /// (`ServerboundPlayerInputPacket`). Two of the seven flags are threaded
-    /// through: `sprint` is half of vanilla's melee knockback-bonus gate
-    /// (`Player.attack`'s `isSprinting() && fullStrengthAttack` — see
+    /// (`ServerboundPlayerInputPacket`). Three of the seven flags are
+    /// threaded through: `sprint` is half of vanilla's melee knockback-bonus
+    /// gate (`Player.attack`'s `isSprinting() && fullStrengthAttack` — see
     /// `crate::server::apply_attack`'s own doc comment for the other half,
-    /// which this crate cannot track), and `shift` drives vanilla's
+    /// which this crate cannot track), `shift` drives vanilla's
     /// `Player.rideTick` dismount check (`wantsToStopRiding()` is
     /// `isShiftKeyDown()`, tested every tick a passenger is aboard — see
     /// `crate::server`'s `PlayerInput` consumer for why reacting to each
     /// received packet already reproduces that edge, given this packet's own
-    /// producer only sends on change). The other five
-    /// flags (forward/backward/left/right/jump) are decoded off the wire by
-    /// [`ServerProtocol::decode`] but not threaded through here — nothing in
-    /// this crate's server-authoritative model needs them yet, the same
-    /// "decode what the loop needs, not the whole packet" convention
-    /// [`PlayerMoved`](Self::PlayerMoved)'s own doc comment already
-    /// establishes for its two fields.
+    /// producer only sends on change), and `jump` is `Camel.onPlayerJump`'s
+    /// whole trigger — see `crate::server`'s `PlayerInput` consumer for the
+    /// same "a received packet already is the edge" reasoning `shift`
+    /// documents, applied to a mounted camel's dash instead of a dismount.
+    /// The other four flags (forward/backward/left/right) are decoded off
+    /// the wire by [`ServerProtocol::decode`] but not threaded through here
+    /// — nothing in this crate's server-authoritative model needs them yet,
+    /// the same "decode what the loop needs, not the whole packet"
+    /// convention [`PlayerMoved`](Self::PlayerMoved)'s own doc comment
+    /// already establishes for its two fields.
     PlayerInput {
         /// Whether the client reports itself as sprinting this tick.
         sprint: bool,
         /// Whether the client reports itself as sneaking this tick —
         /// vanilla's `wantsToStopRiding()` input.
         shift: bool,
+        /// Whether the client reports itself as jumping this tick —
+        /// `Camel.onPlayerJump`'s trigger for a mounted camel's dash.
+        jump: bool,
     },
     /// A creative-mode inventory slot write predicted locally by the client
     /// (`ServerboundSetCreativeModeSlotPacket`, issue #266). Uses the exact
