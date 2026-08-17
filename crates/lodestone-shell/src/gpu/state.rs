@@ -46,7 +46,7 @@ use super::{
     NameTagRenderer, OutlineRenderer, OutlineShapeSource,
     PluginBillboardInstance, PluginBillboardRenderer, PluginBillboardsSource,
     RenderState, SKY_COLOR, SignSource, SignTextRenderer, SkullSource, SkyDarkenSource,
-    SpawnerSource, ThirdPersonBodySource, ThirdPersonBodyState, TimeOfDaySource,
+    SpawnerSource, ThirdPersonBodySource, ThirdPersonBodyState, TimeOfDaySource, VaultSource,
     transparent_placeholder_atlas,
 };
 
@@ -356,6 +356,8 @@ impl RenderState {
             lectern_source: LecternSource::default(),
             // Likewise `set_campfire_source`.
             campfire_source: CampfireSource::default(),
+            // Likewise `set_vault_source`.
+            vault_source: VaultSource::default(),
             // Likewise `set_moving_piston_source`.
             moving_piston_source: MovingPistonSource::default(),
             // Likewise `set_enchanting_table_source`.
@@ -1445,6 +1447,26 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::CampfireItemSpawn> + Send + Sync + 'static,
     ) {
         self.campfire_source = CampfireSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's vault display-item clusters.
+    ///
+    /// **Must be re-installed every frame**, unlike
+    /// [`set_campfire_source`](Self::set_campfire_source): the spin advances
+    /// every tick (`lodestone_render::entity::vault_spin_degrees`), so a stale
+    /// closure freezes it at the tick it was captured — the same requirement
+    /// [`set_beacon_source`](Self::set_beacon_source) documents for the beam's
+    /// own rotating core.
+    ///
+    /// Also feeds [`prepare_item_geometry`](Self::prepare_item_geometry) and
+    /// the model pipeline, not `prepare_block_entities` — see
+    /// [`VaultSource`]'s doc for why: the vault's cage is real block-model
+    /// geometry, and only the floating reward comes from here.
+    pub fn set_vault_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::VaultSpawn> + Send + Sync + 'static,
+    ) {
+        self.vault_source = VaultSource(Some(Box::new(f)));
     }
 
     /// Install the source for this frame's moving pistons — vanilla's

@@ -1333,6 +1333,31 @@ fn beacon_source_tracks_connection_state_and_is_safe_before_login() {
     );
 }
 
+/// Issue #23 (vault): [`Sim::vault_source`]'s own island detector, matching
+/// [`beacon_source_tracks_connection_state_and_is_safe_before_login`]'s shape
+/// exactly — both closures capture only `game_time`/`partial_tick` and a
+/// `SharedHandle`, no per-position tracker.
+#[test]
+fn vault_source_tracks_connection_state_and_is_safe_before_login() {
+    let mut sim = Sim::new(test_config());
+    assert!(
+        sim.vault_source().is_none(),
+        "no net attached at all must report no source, matching beacon_source/bell_source"
+    );
+
+    let (net, _actions, _feed) = NetClient::loopback_with_feed();
+    sim.attach_net(net);
+    let source = sim
+        .vault_source()
+        .expect("a net is attached, so a source must exist even before login completes");
+    assert_eq!(
+        source(glam::Vec3::ZERO),
+        Vec::new(),
+        "no ClientHandle has been published yet, so the closure must return \
+         no spawns rather than panicking on the empty OnceLock"
+    );
+}
+
 /// Issue #23 (decorated pot): [`Sim::decorated_pot_source`]'s own island
 /// detector, matching [`bell_source_tracks_connection_state_and_is_safe_before_login`]'s
 /// shape and reasoning — see that test's doc for why a plain accessor check

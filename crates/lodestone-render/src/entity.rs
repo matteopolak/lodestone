@@ -2816,6 +2816,80 @@ pub fn dropped_item_mesh(
     mesh_item_quads_with_light(quads, pose, gui_light, light)
 }
 
+/// `VaultClientData.ROTATION_SPEED`: degrees per client tick the display item
+/// spins, unbounded (`updateDisplayItemSpin` calls `Mth.wrapDegrees` before
+/// storing it, but `Axis.YP.rotationDegrees` is periodic mod 360, so the
+/// unwrapped running total below is the same rotation and needs no wrap).
+pub const VAULT_SPIN_DEGREES_PER_TICK: f32 = 10.0;
+
+/// Vanilla's `VaultClientData.updateDisplayItemSpin`, evaluated at a
+/// continuous tick: `Mth.rotLerp(partialTick, previousSpin, currentSpin)`
+/// where `currentSpin = previousSpin + 10°` every tick, which for a constant
+/// per-tick step is exactly the unwrapped linear form below (`rotLerp`'s
+/// shortest-path wrap only matters when the two ends are more than 180° apart,
+/// and adjacent ticks here are always exactly 10° apart).
+///
+/// # A deliberate simplification: tied to absolute world time, not per-vault age
+///
+/// Real vanilla starts each vault's own counter at `0` when its block entity
+/// is constructed — effectively when its chunk first loads — so two vaults
+/// loaded at different moments spin out of phase with each other. This client
+/// has no record of *when* a given vault's block entity was constructed, only
+/// the world's current game time, so every vault here shares one clock instead
+/// (the same limitation `crate::beacon`'s rotating core and
+/// `block_entity::banner_phase` already accept, per those functions' docs).
+/// Decorative only — nothing about a vault's function reads this phase.
+#[must_use]
+pub fn vault_spin_degrees(game_time: i64, partial_tick: f32) -> f32 {
+    (game_time as f32 + partial_tick) * VAULT_SPIN_DEGREES_PER_TICK
+}
+
+/// The world placement matrix for one copy of a vault's floating display-item
+/// cluster, matching `VaultRenderer.submit`'s pose stack —
+///
+/// ```text
+/// T(block_pos) · T(0.5, 0.4, 0.5) · Ry(spin) · T(offset) · display_matrix(ground)
+/// ```
+///
+/// — composed with `ItemEntityRenderer.renderMultipleFromCount`'s per-copy
+/// translate (`offset`, zero for the first copy) and the item's own
+/// `display.ground` transform on the right, the same composition
+/// [`dropped_item_matrix`] uses for the identical reason: vanilla applies the
+/// display transform *inside* `ItemStackRenderState.submit`, after every pose
+/// this function's caller pushes.
+#[must_use]
+pub fn vault_display_item_matrix(
+    block_pos: Vec3,
+    spin_deg: f32,
+    offset: Vec3,
+    ground: &DisplayTransform,
+) -> Mat4 {
+    Mat4::from_translation(block_pos)
+        * Mat4::from_translation(Vec3::new(0.5, 0.4, 0.5))
+        * Mat4::from_rotation_y(spin_deg.to_radians())
+        * Mat4::from_translation(offset)
+        * display_matrix(ground)
+}
+
+/// Mesh one copy of a vault's display-item cluster into a world-space
+/// [`ModelMesh`], for the same model-pipeline draw [`dropped_item_mesh`] feeds
+/// — see that function's doc for why a vault's floating reward is an *item
+/// model* on the model pipeline rather than a cuboid rig on
+/// [`EntityPipeline`](crate::EntityPipeline).
+#[must_use]
+pub fn vault_display_item_mesh(
+    quads: &[BakedQuad],
+    gui_light: GuiLight,
+    ground: &DisplayTransform,
+    block_pos: Vec3,
+    spin_deg: f32,
+    offset: Vec3,
+    light: u8,
+) -> ModelMesh {
+    let pose = vault_display_item_matrix(block_pos, spin_deg, offset, ground);
+    mesh_item_quads_with_light(quads, pose, gui_light, light)
+}
+
 /// Mesh one campfire's cooking item into a world-space [`ModelMesh`], for the
 /// same model-pipeline draw [`dropped_item_mesh`] feeds.
 ///
@@ -6458,6 +6532,78 @@ mod tests {
                 screen_area(composed, cube_face(towards_camera)).signum(),
                 front_sign,
                 "the face turned towards the camera must survive back-face culling at age {age}"
+            );
+        }
+    }
+
+    #[test]
+    fn vault_spin_degrees_predicts_the_exact_running_total() {
+        // Magnitude, not sign: at game_time 37 with partial_tick 0.5 the answer
+        // is exactly 375.0 degrees (37.5 ticks * 10 deg/tick), derived from the
+        // constant outside the function under test rather than a plausible
+        // round number.
+        let deg = vault_spin_degrees(37, 0.5);
+        assert!(
+            (deg - 375.0).abs() < 1e-4,
+            "expected 375.0 degrees at (37, 0.5), got {deg}"
+        );
+        // Two continuous samples one tick apart must differ by exactly
+        // VAULT_SPIN_DEGREES_PER_TICK, matching `updateDisplayItemSpin`'s
+        // constant per-tick step.
+        let a = vault_spin_degrees(100, 0.25);
+        let b = vault_spin_degrees(101, 0.25);
+        assert!(
+            (b - a - VAULT_SPIN_DEGREES_PER_TICK).abs() < 1e-4,
+            "one tick later must advance by exactly {VAULT_SPIN_DEGREES_PER_TICK} degrees, got {}",
+            b - a
+        );
+    }
+
+    #[test]
+    fn vault_display_item_centres_on_the_blocks_upper_middle() {
+        // `T(0.5, 0.4, 0.5)`: the cluster's pivot sits above the block's floor
+        // centre, not at its corner — getting this backwards buries the item in
+        // the vault's base or floats it a whole block up.
+        let block_pos = Vec3::new(4.0, 70.0, -9.0);
+        for spin in [0.0f32, 90.0, 217.0] {
+            // `display_matrix` recentres the baked item box on its own middle
+            // (`T(-0.5,-0.5,-0.5)` innermost — see that function's doc), so
+            // `Vec3::splat(0.5)`, not the model-space origin, is the point that
+            // survives a rotation unmoved — the same probe
+            // `the_spin_is_about_the_entity_position_not_the_model_origin`
+            // uses above for exactly this reason.
+            let pose = vault_display_item_matrix(
+                block_pos,
+                spin,
+                Vec3::ZERO,
+                &DisplayTransform::default(),
+            );
+            let pivot = pose.transform_point3(Vec3::splat(0.5));
+            let expected = block_pos + Vec3::new(0.5, 0.4, 0.5);
+            assert!(
+                pivot.distance(expected) < 1e-4,
+                "pivot at spin {spin} was {pivot}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn vault_display_item_pose_preserves_winding() {
+        // Same discipline as `dropped_item_pose_preserves_winding`: a
+        // world-space pose must have a POSITIVE determinant regardless of the
+        // spin angle, so it composes correctly with a negative-determinant
+        // camera.
+        for spin in [0.0f32, 45.0, 133.0, 270.0] {
+            let pose = vault_display_item_matrix(
+                Vec3::new(1.0, 65.0, 2.0),
+                spin,
+                Vec3::ZERO,
+                &BLOCK_ITEM_GROUND,
+            );
+            assert!(
+                pose.determinant() > 0.0,
+                "a world-space vault item pose must not flip handedness; det = {} at spin {spin}",
+                pose.determinant()
             );
         }
     }

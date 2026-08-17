@@ -244,6 +244,30 @@ impl Sim {
         })
     }
 
+    /// This frame's vault display-item clusters, for
+    /// [`RenderState::set_vault_source`](crate::gpu::RenderState::set_vault_source).
+    ///
+    /// Same shape as [`Self::beacon_source`]: no per-position tracker behind
+    /// it, because a vault's spin is one shared clock
+    /// (`lodestone_render::entity::vault_spin_degrees`'s doc explains the
+    /// deliberate simplification) rather than per-instance state, and
+    /// `shared_data.display_item` is ordinary NBT the block entity gather
+    /// already reads fresh every frame — no server packet beyond the generic
+    /// `BlockEntity.nbt` path chest/skull/sign already proved.
+    #[must_use]
+    pub fn vault_source(
+        &self,
+    ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::VaultSpawn> + Send + Sync + 'static>
+    {
+        let handle = self.net.as_ref()?.shared_handle();
+        let clock = self.clock();
+        let game_time = clock.ticks as i64;
+        let partial_tick = clock.interp_alpha;
+        Some(move |eye: glam::Vec3| {
+            crate::block_entities::vault_spawns(&handle, eye, game_time, partial_tick)
+        })
+    }
+
     /// This frame's shulker boxes, for
     /// [`RenderState::set_shulker_source`](crate::gpu::RenderState::set_shulker_source).
     ///

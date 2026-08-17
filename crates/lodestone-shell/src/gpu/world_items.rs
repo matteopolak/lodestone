@@ -202,6 +202,10 @@ impl RenderState {
         // `prepare_block_entities` — a campfire's renderer owns no cuboid mesh at
         // all, only four item poses.
         self.merge_campfire_items(model, camera, &frustum, &mut combined, stats);
+        // Vault display-item clusters. Same reason as campfire items: a
+        // vault's renderer owns no cuboid mesh, only a spinning item cluster,
+        // so there is nothing to batch through `prepare_block_entities`.
+        self.merge_vault_items(model, camera, &frustum, &mut combined, stats);
         let Some(mesh) = GpuModelMesh::upload(device, &combined) else {
             return (None, None);
         };
@@ -272,6 +276,92 @@ impl RenderState {
                 spawn.light,
             ));
             stats.campfire_items_drawn += 1;
+        }
+    }
+
+    /// Merge every vault's display-item cluster into `combined` — vanilla's
+    /// `VaultRenderer`.
+    ///
+    /// # Why this lives in the item pass and not with the other block entities
+    ///
+    /// `VaultRenderer` bakes no layer and binds no sheet: its `submit` is
+    /// `ItemEntityRenderer.renderMultipleFromCount` at a fixed pose. The cage,
+    /// door and base a player sees are the *block* model, drawn by the terrain
+    /// mesher with no help from here — `blockstates/vault.json` is a plain
+    /// `variants` map, the same shape the mob-spawner cage and trial-spawner's
+    /// per-state textures already proved — so an unset
+    /// [`VaultSource`](super::VaultSource) leaves a complete vault showing no
+    /// reward, not a hole.
+    ///
+    /// # `DisplaySlot::Ground`, matching a dropped item
+    ///
+    /// `VaultRenderer.extractRenderState` resolves the display item in
+    /// `ItemDisplayContext.GROUND` — the identical context a drop resolves in
+    /// — which is why this reuses [`ground_transform`] rather than a
+    /// vault-specific display slot, and why the multi-copy loop below is the
+    /// same flat/solid fan-vs-jitter split the drop loop above uses (both
+    /// port `ItemEntityRenderer.renderMultipleFromCount`/`submitMultipleFromCount`,
+    /// the same algorithm under two names in the real jar).
+    ///
+    /// No glint arm, for the reason [`merge_campfire_items`] has none: the
+    /// NBT parse behind [`lodestone_render::VaultSpawn`] carries no
+    /// `components`, so an enchanted display item draws without its shimmer
+    /// rather than with a wrong one.
+    fn merge_vault_items(
+        &self,
+        model: &ModelRenderer,
+        camera: &Camera,
+        frustum: &lodestone_render::Frustum,
+        combined: &mut ModelMesh,
+        stats: &mut RenderStats,
+    ) {
+        let ctx = ItemStateContext::new(DisplaySlot::Ground);
+        for spawn in self.vault_source.vaults(camera.position) {
+            let block_pos = glam::Vec3::new(
+                spawn.pos[0] as f32,
+                spawn.pos[1] as f32,
+                spawn.pos[2] as f32,
+            );
+            if !frustum.intersects_aabb(block_pos, block_pos + glam::Vec3::ONE) {
+                continue;
+            }
+            let Some(geometry) = model.items.get(&spawn.item).and_then(|v| v.resolve(&ctx))
+            else {
+                continue;
+            };
+            let ground = ground_transform(&geometry.display, geometry.gui_light);
+            let (min_z, max_z) = posed_item_z_extent(&geometry.quads, &ground);
+            let depth = max_z - min_z;
+            let flat = depth <= FLAT_ITEM_DEPTH_THRESHOLD;
+            let amount = rendered_amount(spawn.count);
+            let fan_step = depth * 1.5;
+            let jitter_extent = if flat { 0.075 } else { 0.15 };
+            // Vanilla seeds `renderMultipleFromCount`'s RNG off
+            // `ItemClusterRenderState.getSeedForItemStack`
+            // (`Item.getId(item) + damageValue`); reusing the registry item id
+            // as `item_cluster_jitter`'s hash key gives the identical
+            // *property* that function's own doc names — no two vaults'
+            // clusters scatter in lockstep — rather than chasing the exact
+            // unobservable bytes (the `+ damageValue` term is not modelled).
+            let seed_key = lodestone_data::items::item_id(&spawn.item.to_string()).unwrap_or(0);
+            for copy in 0..amount {
+                let mut offset = item_cluster_jitter(seed_key, copy, jitter_extent);
+                if flat {
+                    offset.z =
+                        fan_step * (copy as f32 - (amount.saturating_sub(1) as f32) / 2.0);
+                }
+                let mesh = lodestone_render::entity::vault_display_item_mesh(
+                    &geometry.quads,
+                    geometry.gui_light,
+                    &ground,
+                    block_pos,
+                    spawn.spin_deg,
+                    offset,
+                    spawn.light,
+                );
+                combined.merge(&mesh);
+                stats.vault_items_drawn += 1;
+            }
         }
     }
 

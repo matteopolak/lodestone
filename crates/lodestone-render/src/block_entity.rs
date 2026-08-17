@@ -3019,6 +3019,44 @@ pub struct CampfireItemSpawn {
     pub light: u8,
 }
 
+/// One vault's floating display-item cluster, for this frame — vanilla's
+/// `VaultRenderer`.
+///
+/// **A third `*Spawn` here [`BlockEntityModelSet`] does not resolve**, for the
+/// same reason [`CampfireItemSpawn`] is the first: `VaultRenderer.submit` is
+/// `ItemEntityRenderer.renderMultipleFromCount` at a fixed pose, not a cuboid
+/// part rig — the vault's own cage, base and door are all real *block* model
+/// geometry the ordinary terrain mesher already draws (`blockstates/vault.json`
+/// is a plain `variants` map over `facing`/`ominous`/`vault_state`, the same
+/// shape the mob-spawner cage and trial-spawner's per-state textures already
+/// proved), so this feeds the model pipeline through
+/// [`crate::entity::vault_display_item_mesh`] the way a dropped item does.
+///
+/// Present only when `VaultBlockEntity.Client.shouldDisplayActiveEffects`
+/// (`sharedData.hasDisplayItem()`) is true — an empty `shared_data.display_item`
+/// yields **no** spawn for that vault, matching vanilla's own
+/// `!displayItem.isEmpty()` guard in `VaultRenderer.extractRenderState`. A
+/// vault the server has not yet rolled a reward for (state `INACTIVE`) is
+/// therefore silent, not a partially-drawn cluster.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VaultSpawn {
+    /// Block position of the vault.
+    pub pos: [i32; 3],
+    /// The display item's id, from `shared_data.display_item.id`.
+    pub item: ResourceLocation,
+    /// The display item's stack count, from `shared_data.display_item.count`
+    /// (vanilla's codec defaults this to `1` when absent) — feeds
+    /// [`crate::entity::rendered_amount`] the same way a dropped stack's count
+    /// does.
+    pub count: u32,
+    /// This frame's spin, in degrees — [`crate::entity::vault_spin_degrees`]
+    /// evaluated at the gather's `(game_time, partial_tick)`, already resolved
+    /// so the draw site needs no clock of its own.
+    pub spin_deg: f32,
+    /// Packed sky/block light at the vault.
+    pub light: u8,
+}
+
 /// One `moving_piston` block entity for this frame — vanilla's
 /// `PistonHeadRenderer`.
 ///
