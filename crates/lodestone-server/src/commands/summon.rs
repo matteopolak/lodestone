@@ -31,6 +31,7 @@ use lodestone_command_mc::{Coordinates, EntityTypeArg, EntityTypeInput, Vec3Arg}
 use lodestone_model::{Difficulty, Vec3};
 
 use super::registrar::{Ctx, Registrar};
+use super::source::SourceEntity;
 use super::CommandResult;
 
 /// `Commands.LEVEL_GAMEMASTERS`.
@@ -68,6 +69,29 @@ fn resolve_pos(ctx: &Ctx<'_>, coords: Coordinates) -> Vec3 {
 /// `SummonCommand.createEntity` + `spawnEntity`, minus NBT and the
 /// build-height bounds check — see the module doc for both.
 fn summon(ctx: &mut Ctx<'_>, entity: &EntityTypeInput, pos: Vec3) -> CommandResult {
+    spawn_entity(ctx, entity, pos)?;
+    ctx.send_success(format!("Summoned {}", entity.entity_type));
+    Ok(1)
+}
+
+/// The mechanism `summon` needed and `execute summon <entity>` reuses
+/// verbatim (`ExecuteCommand.spawnEntityAndRedirect` calls the identical
+/// `SummonCommand.createEntity`): spawn one mob into the live sim and hand
+/// back the [`SourceEntity`] a caller can fold into a [`CommandSource`
+/// (super::source::CommandSource)`]. Split out of [`summon`] rather than
+/// having `execute`'s modifier re-derive the difficulty/peaceful/no-`mobs`
+/// checks a second time.
+///
+/// # Errors
+///
+/// The difficulty-gated peaceful refusal, or "no live connection" when
+/// [`super::registrar::CommandWorld::mobs`] is `None` — the same two cases
+/// [`summon`]'s own executor already reports.
+pub(super) fn spawn_entity(
+    ctx: &Ctx<'_>,
+    entity: &EntityTypeInput,
+    pos: Vec3,
+) -> Result<SourceEntity, String> {
     let (difficulty, _) = ctx.world.state.difficulty();
     if difficulty == Difficulty::Peaceful
         && !crate::mob_spawn::allowed_in_peaceful(entity.entity_type.path())
@@ -80,16 +104,27 @@ fn summon(ctx: &mut Ctx<'_>, entity: &EntityTypeInput, pos: Vec3) -> CommandResu
     };
 
     let entity_type = entity.entity_type.clone();
-    mobs.with(|sim| {
+    let (uuid, entity_id) = mobs.with(|sim| {
         // `finalize_spawn` (vanilla's `Mob::finalizeSpawn`, attribute/equipment
         // randomisation on natural/command spawns) has no port here yet — see
         // `crate::mobs`' own scope notes on `spawn_species`. Marked persistent
         // so `EntitySpawnReason::COMMAND`'s exemption from natural despawn is at
         // least honoured, the one `finalizeSpawn`-adjacent property this crate
         // can cheaply keep.
-        sim.spawn_species(entity_type, pos).set_persistent(true);
+        let mob = sim.spawn_species(entity_type, pos);
+        mob.set_persistent(true);
+        (mob.uuid(), mob.id())
     });
 
-    ctx.send_success(format!("Summoned {}", entity.entity_type));
-    Ok(1)
+    Ok(SourceEntity {
+        uuid,
+        entity_id,
+        // A summoned mob has no username — vanilla's own `@s` feedback for a
+        // non-player source falls back to the entity's own display name
+        // (`Entity.getDisplayName()`, its translated type name absent an
+        // NBT `CustomName`). This crate carries no localisation table, so the
+        // canonical id is the closest stand-in; it is never compared against
+        // a real login name anywhere this crate resolves selectors.
+        username: entity.entity_type.to_string(),
+    })
 }
