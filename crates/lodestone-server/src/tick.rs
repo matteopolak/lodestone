@@ -1119,11 +1119,11 @@ const MAX_COMMAND_CHAIN_LENGTH: u32 = 65_536;
 /// a selector) is dropped rather than queued: this loop has no
 /// `PlayerRegistry` in scope to queue it on, the same honest gap
 /// `crate::rcon`'s console source already accepts for the same reason.
-fn run_command_block_command<W: ChunkSource + ?Sized>(
+fn run_command_block_command(
     commands: &crate::commands::ServerCommands,
     world_state: &crate::world_state::WorldStateHandle,
     mobs: &MobHandle,
-    world: &W,
+    world: &dyn ChunkSource,
     block_tick_out: &BlockTickFeed,
     pos: BlockPos,
     facing: crate::neighbor_update::Direction,
@@ -1156,6 +1156,12 @@ fn run_command_block_command<W: ChunkSource + ?Sized>(
         // fifth handle through this helper for.
         #[cfg(not(target_arch = "wasm32"))]
         access: None,
+        // `/execute if`/`unless block` — this helper already has a chunk
+        // source in scope (`world`), unlike `border`/`access` above, so
+        // there is nothing to disclose as missing here: a conditional
+        // command block gating on the block in front of it is a real,
+        // common vanilla pattern.
+        blocks: Some(world),
     };
     let Some(outcome) = commands.run(&command_world, &source, command) else {
         return false;
