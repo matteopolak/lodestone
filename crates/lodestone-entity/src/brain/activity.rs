@@ -58,4 +58,11 @@ impl Activity {
     /// non-faithful-but-honest shape for a species-specific slice this
     /// crate's `IDLE` scaffold cannot host inline.
     pub const DELIVER: Self = Self("deliver");
+    /// Walking toward a candidate dig position (sniffer) — vanilla
+    /// `Activity.SNIFF`, the activity `SnifferAi.initSniffingActivity`
+    /// registers its `Searching` behaviour under. Named for the vanilla
+    /// activity rather than the walk itself; the actual digging/rising
+    /// phases that follow are host-side, not a second Brain activity — see
+    /// `lodestone_server::mobs::sniffer`'s module doc.
+    pub const SNIFF: Self = Self("sniff");
 }

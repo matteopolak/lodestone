@@ -340,6 +340,31 @@ impl Sensor for DeliveryTargetSensor {
     }
 }
 
+/// Writes [`MemoryModuleType::SNIFFER_DIG_TARGET`] from
+/// [`BrainMob::sniffer_dig_target`] — the same host-computed-candidate shape
+/// [`DeliveryTargetSensor`] already uses: the host resolves the block-tag
+/// dig-position search and this sensor only copies the answer into memory
+/// each tick.
+#[derive(Debug, Default)]
+pub struct SnifferDigTargetSensor;
+
+impl Sensor for SnifferDigTargetSensor {
+    fn tick(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob) {
+        match mob.sniffer_dig_target() {
+            Some(pos) => mem.set(MemoryModuleType::SNIFFER_DIG_TARGET, MemoryValue::Pos(pos)),
+            None => mem.erase(MemoryModuleType::SNIFFER_DIG_TARGET),
+        }
+    }
+
+    fn output_memories(&self) -> Vec<MemoryModuleType> {
+        vec![MemoryModuleType::SNIFFER_DIG_TARGET]
+    }
+
+    fn name(&self) -> &'static str {
+        "sniffer_dig_target"
+    }
+}
+
 /// Squared Euclidean distance — a plain helper since [`lodestone_model::Vec3`]
 /// carries no `distance_squared` of its own.
 fn distance_sqr(a: Vec3, b: Vec3) -> f64 {

@@ -233,6 +233,11 @@ mod raid;
 // public return type.
 pub mod warden;
 
+// Issue #230's last remaining species: the sniffer's seek/dig/rise/egg-drop
+// state machine. `pub` for the same reason `warden` is — `sniffer::SnifferState`
+// is part of `SimMob::snapshot`'s metadata output.
+pub mod sniffer;
+
 /// Reads a computed attribute value from `attrs` by bare path (e.g.
 /// `"max_health"`), applying the registry default when the attribute is not
 /// explicitly present — mirrors [`AttributeMap::value`]'s own fallback so a
@@ -1133,6 +1138,22 @@ const CAMEL_POSE_SITTING: u32 = 10;
 /// `Pose.STANDING.id()` — vanilla's own default pose ordinal, `0`.
 const CAMEL_POSE_STANDING: u32 = 0;
 
+/// `Camel.DASH_COOLDOWN_TICKS` — `executeRidersJump`'s reset value for
+/// `dashCooldown`, and the gate `Camel.onPlayerJump` checks (`dashCooldown
+/// <= 0`) before a new dash can start.
+const CAMEL_DASH_COOLDOWN_TICKS: i32 = 55;
+
+/// `Camel.DASH_MINIMUM_DURATION_TICKS` — the one fixed duration vanilla's
+/// own dash actually defines. Real `isDashing()` stays `true` until
+/// `dashCooldown < 50 && (onGround() || isInLiquid() || isPassenger())`,
+/// i.e. until the camel has travelled for at least this many ticks *and*
+/// has landed — but a client-authoritative mount reports no `onGround` to
+/// this seam at all (nothing here simulates a ridden mob's physics; see
+/// `lodestone_physics::vehicle`'s module doc), so
+/// [`SimMob::camel_is_dashing`] uses this minimum alone as a disclosed
+/// stand-in for the real landing-triggered reset.
+const CAMEL_DASH_MINIMUM_DURATION_TICKS: i32 = 5;
+
 /// An independent, deterministic per-tick coin flip approximating
 /// `CamelAi.RandomSitting`'s trigger. Real vanilla re-rolls this choice (one
 /// of four equally-weighted `IDLE` behaviours) only when `WALK_TARGET` is
@@ -1507,6 +1528,41 @@ pub struct SimMob<'w> {
     /// gates [`CAMEL_RANDOM_SITTING_MIN_TICKS`], the collapsed stand-in for
     /// `Camel.getPoseTime()`. `0` for every non-camel species.
     camel_pose_tick: i64,
+    /// `Camel.dashCooldown` — set to [`CAMEL_DASH_COOLDOWN_TICKS`] by
+    /// [`MobSim::trigger_camel_dash`] (`Camel.executeRidersJump`) and
+    /// decremented once per [`MobSim::tick`] for every live camel, exactly
+    /// like [`axolotl_play_dead_ticks`]'s own countdown shape.
+    /// [`SimMob::camel_is_dashing`] derives the client-visible `Camel.DASH`
+    /// flag from this counter. `0` for every non-camel species.
+    camel_dash_cooldown: i32,
+    /// `Sniffer.DATA_STATE` — this mob's current phase in the seek/dig/rise
+    /// loop. `SnifferState::Idling` for every non-sniffer species, where
+    /// nothing reads it. See [`sniffer`] module doc for the whole state
+    /// machine.
+    sniffer_state: sniffer::SnifferState,
+    /// Ticks remaining in [`sniffer_state`](Self::sniffer_state) — a timed
+    /// state's own countdown ([`sniffer::SNIFFING_MIN_TICKS`]..=`MAX`,
+    /// [`sniffer::DIGGING_MIN_TICKS`]..=`MAX`, [`sniffer::RISING_TICKS`]) or
+    /// [`sniffer::SEARCHING_TIMEOUT_TICKS`] while `Searching`. Meaningless
+    /// while `Idling`.
+    sniffer_state_ticks: i32,
+    /// `SNIFF_COOLDOWN` — [`sniffer::SNIFF_COOLDOWN_TICKS`] set by
+    /// [`sniffer::MobSim::tick_sniffers`] once a dig finishes, gating the
+    /// next sniff. `0` for every non-sniffer species.
+    sniffer_sniff_cooldown: i32,
+    /// A host-found candidate dig position, present only during
+    /// `SnifferState::Searching` — fed to this mob's own `Brain` each tick
+    /// through `BrainMob::sniffer_dig_target`
+    /// ([`MobSim::feed_perception`]'s own sniffer line), which is *all* the
+    /// Brain sees of this state machine. See [`sniffer`] module doc for the
+    /// division of labour.
+    sniffer_dig_target: Option<Vec3>,
+    /// `Sniffer.getExploredPositions()` — up to
+    /// [`sniffer::EXPLORED_POSITIONS_CAP`] positions this sniffer has
+    /// already dug, most recent first, so [`sniffer::MobSim::tick_sniffers`]'s
+    /// own dig-position search does not repeat one. Empty for every
+    /// non-sniffer species.
+    sniffer_explored: Vec<Vec3>,
     /// `AllayAi`'s `LIKED_NOTEBLOCK_POSITION`/`LIKED_NOTEBLOCK_COOLDOWN_TICKS`
     /// memory pair, collapsed into one field: `Some((pos, ticks))` while a
     /// heard note block is still "recent" (`ticks > 0`), `None` otherwise.
@@ -1936,6 +1992,15 @@ impl<'w> SimMob<'w> {
     #[must_use]
     pub fn camel_is_sitting(&self) -> bool {
         self.camel_sitting
+    }
+
+    /// `Camel.isDashing()` — see the `camel_dash_cooldown` field's own doc
+    /// for the disclosed "fixed minimum duration, not a real
+    /// landing-triggered reset" narrowing this derives from. Always `false`
+    /// for a non-camel species, where the backing field never leaves `0`.
+    #[must_use]
+    pub fn camel_is_dashing(&self) -> bool {
+        self.camel_dash_cooldown > CAMEL_DASH_COOLDOWN_TICKS - CAMEL_DASH_MINIMUM_DURATION_TICKS
     }
 
     /// The position of the note block this allay most recently heard and
@@ -2912,6 +2977,18 @@ impl<'w> SimMob<'w> {
             } else {
                 CAMEL_POSE_STANDING
             }));
+            // `Camel.DASH` — same "unconditional, so the reset reaches the
+            // client too" shape as the pose push just above: a camel that
+            // has finished dashing must send `false`, not merely stop
+            // sending `true`.
+            metadata.push(MetadataField::Dash(self.camel_is_dashing()));
+        }
+        // `Sniffer.DATA_STATE` — same "unconditional, so the reset reaches
+        // the client too" shape as the camel arm above. Pushed for a
+        // sniffer only; see `sniffer::SnifferState::wire_ordinal` for the
+        // real jar ordinal this carries.
+        if self.entity_type.path() == "sniffer" {
+            metadata.push(MetadataField::SnifferState(self.sniffer_state.wire_ordinal()));
         }
         EntitySnapshot {
             id: self.id,
@@ -4337,6 +4414,12 @@ impl<'w> MobSim<'w> {
             axolotl_play_dead_ticks: 0,
             camel_sitting: false,
             camel_pose_tick: 0,
+            camel_dash_cooldown: 0,
+            sniffer_state: sniffer::SnifferState::Idling,
+            sniffer_state_ticks: 0,
+            sniffer_sniff_cooldown: 0,
+            sniffer_dig_target: None,
+            sniffer_explored: Vec::new(),
             allay_liked_noteblock: None,
             allay_inventory_count: 0,
             allay_duplication_cooldown: 0,
@@ -5546,6 +5629,12 @@ impl<'w> MobSim<'w> {
                 } else {
                     camel_random_sitting(m, tick_count);
                 }
+                // `Camel.tick`'s `if (dashCooldown > 0) dashCooldown--` —
+                // same "a corpse's fields are frozen, not ticked" gate as
+                // every other per-mob timer in this loop.
+                if m.camel_dash_cooldown > 0 {
+                    m.camel_dash_cooldown -= 1;
+                }
             }
             let new_attacks = m.mob.take_new_attacks();
             // Issue #233: `Bee.doHurtTarget` — the sting connects the instant
@@ -5971,6 +6060,12 @@ impl<'w> MobSim<'w> {
         // into real warden anger and, once angry and in range, a real melee
         // hit — see `warden::MobSim::resolve_warden_anger`'s own doc.
         self.resolve_warden_anger();
+        // Issue #230's last remaining species: the sniffer's own seek/dig/
+        // rise/egg-drop state machine — see `sniffer::MobSim::tick_sniffers`'s
+        // own doc. No particular ordering dependency on the calls above;
+        // placed last alongside the warden consumer as the other
+        // per-species host-side driver this tick runs.
+        self.tick_sniffers();
 
         self.tick_count += 1;
     }
@@ -6637,6 +6732,13 @@ impl<'w> MobSim<'w> {
                 .set_nearest_visible_zombified(nearest_visible_zombified[i])
                 .set_nearest_attackable_food(nearest_attackable_food[i])
                 .set_delivery_target(delivery_target[i])
+                // Issue #230: a sniffer's own host-found dig-search target,
+                // fed to its `Brain`'s `WalkToPoi` — see
+                // `sniffer::MobSim::tick_sniffers`'s own doc for the state
+                // machine that produces this. `None` for every non-sniffer
+                // species, the same harmless-default shape every other
+                // host-computed-candidate field here already is.
+                .set_sniffer_dig_target(m.sniffer_dig_target)
                 .set_ticks_since_shoulder_dismount(shoulder_dismount_ticks)
                 .set_day_time(day_time);
         }
@@ -6949,6 +7051,31 @@ impl<'w> MobSim<'w> {
                 mob.mob.set_main_hand_item(given);
             }
             return InteractOutcome::ItemGiven;
+        }
+
+        // `Camel.mobInteract` is a full override, the same "not an
+        // `Animal.mobInteract` fall-through" shape as the villager arm
+        // above — a camel is `isTamed() == true` unconditionally
+        // (`Camel.isTamed`), so unlike the horse family there is no temper
+        // roll to gate riding on at all. Only the empty-handed
+        // `doPlayerRide` half is ported: `isSecondaryUseActive()`'s
+        // inventory-GUI branch and `isFood`'s heal/age-up/love branch both
+        // need machinery this crate does not have for this species yet
+        // (a horse-style inventory screen, and a `camel` row in
+        // `species::breeding_food` — a real, disclosed, still-missing gap,
+        // not silently dropped), so any held item is left as `Pass` rather
+        // than guessed at.
+        if species == "camel" {
+            if mob.is_baby() || item.is_some() {
+                return InteractOutcome::Pass;
+            }
+            return if self.mount_mob(mob_id, actor.entity_id) {
+                InteractOutcome::Mounted
+            } else {
+                // Already ridden by someone else — `mount_mob`'s own "one
+                // map's worry" refusal.
+                InteractOutcome::Pass
+            };
         }
 
         let outcome = match species::tame_mechanism(&species) {
@@ -8121,6 +8248,45 @@ impl<'w> MobSim<'w> {
             mob.rider = None;
         }
         Some(id)
+    }
+
+    /// `Camel.onPlayerJump`/`executeRidersJump` — the rider-triggered half
+    /// of camel dash. Called from `crate::server`'s `ServerBound::PlayerInput`
+    /// consumer on every received `jump: true` (see that call site's own
+    /// comment for why a received packet already is the rising edge).
+    ///
+    /// Refuses when `player_entity_id` rides no mob, the mob it rides is
+    /// not a camel, or `SimMob::camel_dash_cooldown` has not yet reached
+    /// zero (`Camel.onPlayerJump`'s own `dashCooldown <= 0` gate). Two of
+    /// vanilla's three gates are not checked at all — see
+    /// `ServerBound::PlayerInput`'s consumer for why (no saddle-equip
+    /// model, no `onGround` for a client-authoritative mount).
+    ///
+    /// Sets `camel_dash_cooldown` to [`CAMEL_DASH_COOLDOWN_TICKS`], which
+    /// both gates the next dash and — through
+    /// [`SimMob::camel_is_dashing`] — makes the next [`snapshots`](Self::snapshots)
+    /// diff carry `Camel.DASH: true` to every other connected viewer. The
+    /// actual position impulse (`executeRidersJump`'s velocity add) is not
+    /// applied here: this crate has no server-side ridden-mob physics at
+    /// all (`lodestone_physics::vehicle`'s module doc — a mounted camel is
+    /// exactly as client-authoritative as a horse or a boat), so the visible
+    /// leap itself is the rider's own client's job, not this seam's.
+    ///
+    /// Returns whether a dash actually started, so a caller that wants to
+    /// know (a future sound/particle producer) can tell a real trigger from
+    /// a no-op jump press.
+    pub fn trigger_camel_dash(&mut self, player_entity_id: i32) -> bool {
+        let Some(id) = self.mob_ridden_by(player_entity_id) else {
+            return false;
+        };
+        let Some(mob) = self.get_mut(id) else {
+            return false;
+        };
+        if mob.entity_type.path() != "camel" || mob.camel_dash_cooldown > 0 {
+            return false;
+        }
+        mob.camel_dash_cooldown = CAMEL_DASH_COOLDOWN_TICKS;
+        true
     }
 
     /// Accepts a client-authoritative move for the mob `player_entity_id` is
@@ -10867,6 +11033,128 @@ mod follow_range_tests {
                 "a cow must never report Pose.SITTING, however long it stands around"
             );
         }
+    }
+
+    /// Issue #230's remaining camel gap: `Camel.onPlayerJump`/
+    /// `executeRidersJump` end to end through the real production path —
+    /// `MobSim::interact` (mounting) then `MobSim::trigger_camel_dash` (the
+    /// `ServerBound::PlayerInput` jump-bit consumer's own call), not a
+    /// hand-built double. Checks the whole real chain a rider drives: mount
+    /// succeeds, dash starts, the wire metadata reports it, and it resets
+    /// once `CAMEL_DASH_MINIMUM_DURATION_TICKS` have passed.
+    #[test]
+    fn camel_dash_triggers_through_a_real_mount_and_reaches_the_metadata_wire() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:camel").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+        let rider = PlayerIdentity { uuid: uuid::Uuid::new_v4(), entity_id: 42 };
+
+        let mounted = sim.interact(id, rider, None);
+        assert_eq!(mounted, InteractOutcome::Mounted, "an empty-handed click on an adult camel must mount it");
+        assert!(
+            !sim.get(id)
+                .expect("alive")
+                .snapshot()
+                .metadata
+                .contains(&MetadataField::Dash(true)),
+            "precondition: a freshly mounted camel is not yet dashing"
+        );
+
+        assert!(
+            sim.trigger_camel_dash(rider.entity_id),
+            "a jump press aboard a fresh camel (cooldown already at zero) must start a dash"
+        );
+        assert!(
+            sim.get(id)
+                .expect("alive")
+                .snapshot()
+                .metadata
+                .contains(&MetadataField::Dash(true)),
+            "a dashing camel must report Camel.DASH: true to the wire"
+        );
+
+        for _ in 0..CAMEL_DASH_MINIMUM_DURATION_TICKS {
+            sim.tick();
+        }
+        assert!(
+            sim.get(id)
+                .expect("alive")
+                .snapshot()
+                .metadata
+                .contains(&MetadataField::Dash(false)),
+            "the dash flag must reset to false once the minimum duration elapses — the client \
+             must see the reset, not merely stop seeing `true`"
+        );
+    }
+
+    /// `Camel.onPlayerJump`'s `dashCooldown <= 0` gate: a second jump press
+    /// while still cooling down must not restart the dash window, and the
+    /// full 55-tick cooldown (`CAMEL_DASH_COOLDOWN_TICKS`) must actually
+    /// elapse — not merely the 5-tick minimum duration — before a third
+    /// press succeeds. A magnitude check on the real constant, not a
+    /// direction-only assertion.
+    #[test]
+    fn camel_dash_cannot_retrigger_until_the_full_cooldown_elapses() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:camel").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+        let rider = PlayerIdentity { uuid: uuid::Uuid::new_v4(), entity_id: 42 };
+        assert_eq!(sim.interact(id, rider, None), InteractOutcome::Mounted);
+
+        assert!(sim.trigger_camel_dash(rider.entity_id), "first press must dash");
+        assert!(
+            !sim.trigger_camel_dash(rider.entity_id),
+            "an immediate second press must not restart the cooldown"
+        );
+
+        for _ in 0..(CAMEL_DASH_COOLDOWN_TICKS - 1) {
+            sim.tick();
+            assert!(
+                !sim.trigger_camel_dash(rider.entity_id),
+                "a press before the full cooldown has elapsed must keep failing"
+            );
+        }
+        sim.tick();
+        assert!(
+            sim.trigger_camel_dash(rider.entity_id),
+            "a press once the full {CAMEL_DASH_COOLDOWN_TICKS}-tick cooldown has elapsed must succeed"
+        );
+    }
+
+    /// **Controls**: a baby camel refuses to mount at all
+    /// (`Camel.mobInteract`'s `!this.isBaby()` gate), and a species that
+    /// bypasses `MobSim::interact` entirely — mounted directly through the
+    /// low-level, species-blind `mount_mob` — still never dashes, proving
+    /// `trigger_camel_dash`'s own species check is real and not merely
+    /// inherited from the mount path.
+    #[test]
+    fn a_baby_camel_refuses_to_mount_and_a_mounted_cow_never_dashes() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+
+        let baby_key = ResourceKey::from_str("minecraft:camel").expect("valid key");
+        let baby_id = sim.spawn_species(baby_key, Vec3::new(0.0, 0.0, 0.0)).id();
+        sim.get_mut(baby_id).expect("alive").set_age(BABY_START_AGE);
+        let rider = PlayerIdentity { uuid: uuid::Uuid::new_v4(), entity_id: 42 };
+        assert_eq!(
+            sim.interact(baby_id, rider, None),
+            InteractOutcome::Pass,
+            "a baby camel must refuse an empty-handed mount attempt"
+        );
+
+        let cow_key = ResourceKey::from_str("minecraft:cow").expect("valid key");
+        let cow_id = sim.spawn_species(cow_key, Vec3::new(5.0, 0.0, 0.0)).id();
+        let cow_rider = PlayerIdentity { uuid: uuid::Uuid::new_v4(), entity_id: 43 };
+        assert!(
+            sim.mount_mob(cow_id, cow_rider.entity_id),
+            "the low-level mount primitive is species-blind by its own doc"
+        );
+        assert!(
+            !sim.trigger_camel_dash(cow_rider.entity_id),
+            "a mounted cow must never dash — `trigger_camel_dash` must check the species itself"
+        );
     }
 
     /// Issue #241's ominous-bottle producer: a pillager patrol leader

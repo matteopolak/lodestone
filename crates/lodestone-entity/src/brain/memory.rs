@@ -138,6 +138,19 @@ impl MemoryModuleType {
     /// `getItemDepositPosition` is modelled — the `LIKED_PLAYER` fallback
     /// this crate's host does not resolve.
     pub const DELIVERY_TARGET: Self = Self("delivery_target");
+    /// A host-resolved candidate dig position — a narrowed stand-in for
+    /// vanilla's own `MemoryModuleType.SNIFFER_SNIFFING_TARGET` (a
+    /// `BlockPos`, written once `Sniffer.calculateDigPosition` succeeds).
+    /// This crate's Brain seam has no block-tag or navigation-reachability
+    /// read of its own — the same [`DELIVERY_TARGET`] "host resolves the
+    /// whole eligibility chain and hands back only the answer" shape — so
+    /// the host (`lodestone_server::mobs::sniffer`) does the candidate
+    /// search and [`super::behaviors::WalkToPoi`] just walks toward
+    /// whatever this holds. Real vanilla's `SNIFFER_DIGGING`/
+    /// `SNIFFER_SNIFFING_TARGET` split (one marks "walking there", the
+    /// other "now digging") collapses to this single memory plus the
+    /// host's own `SimMob::sniffer_state` — see that type's own doc.
+    pub const SNIFFER_DIG_TARGET: Self = Self("sniffer_dig_target");
 }
 
 /// The presence requirement a behaviour places on a memory.

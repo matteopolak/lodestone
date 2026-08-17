@@ -264,6 +264,7 @@ impl ServerProtocol for FakeProtocol {
                 ServerBound::PlayerInput {
                     sprint: r.u8().expect("sprint flag") != 0,
                     shift: r.u8().expect("shift flag") != 0,
+                    jump: r.u8().expect("jump flag") != 0,
                 }
             }
             State::Play if packet_id == SET_GAME_RULE_C2S => {
@@ -808,11 +809,12 @@ async fn send_creative_slot(client: &mut Connection<DuplexStream>, slot: i16, it
     send_game_mode(client, 0).await;
 }
 
-/// Sends the stand-in `player_input` sprint and shift flags.
-async fn send_player_input(client: &mut Connection<DuplexStream>, sprint: bool, shift: bool) {
+/// Sends the stand-in `player_input` sprint, shift and jump flags.
+async fn send_player_input(client: &mut Connection<DuplexStream>, sprint: bool, shift: bool, jump: bool) {
     let mut w = Writer::default();
     w.u8(u8::from(sprint));
     w.u8(u8::from(shift));
+    w.u8(u8::from(jump));
     client
         .write_packet(PLAYER_INPUT_C2S, w.as_slice())
         .await
@@ -4846,7 +4848,7 @@ async fn a_sprinting_player_loses_saturation_then_food_on_the_wire() {
     // Establish a starting position, then sprint 250 blocks in z from it. The
     // exhaustion charge needs the *previous* position, so the first move is the
     // baseline and the second is the one that costs.
-    send_player_input(&mut client, true, false).await;
+    send_player_input(&mut client, true, false, false).await;
     send_player_moved(&mut client, 8.0, 8.0, 8.0).await;
     send_player_moved(&mut client, 8.0, 8.0, 258.0).await;
 
@@ -5170,7 +5172,7 @@ async fn sneaking_dismounts_a_boat_on_the_wire() {
 
     // The fix under test: a real `PLAYER_INPUT` with `shift: true`, through
     // the real dispatch path.
-    send_player_input(&mut client, false, true).await;
+    send_player_input(&mut client, false, true, false).await;
 
     let packets = drain_available(&mut client).await;
     let payload = packets

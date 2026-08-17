@@ -11965,8 +11965,23 @@ where
                 sim.apply_boat_paddle(player_entity_id, left, right);
             });
         }
-        ServerBound::PlayerInput { sprint, shift } => {
+        ServerBound::PlayerInput { sprint, shift, jump } => {
             *sprinting = sprint;
+            // `Camel.onPlayerJump`: `isSaddled() && dashCooldown <= 0 &&
+            // onGround()`. This crate has no saddle-equip model at all (the
+            // whole horse family already boards without one — see
+            // `MobSim::mount_mob`'s own doc) and no `onGround` for a
+            // client-authoritative mount (nothing here simulates a ridden
+            // mob's physics; the client does, per
+            // `lodestone_physics::vehicle`'s module doc) — both disclosed
+            // narrowings, not silent ones. Reacting to every *received*
+            // `jump: true` is the same "a received packet already is the
+            // rising edge" reasoning the `shift` dismount two lines below
+            // relies on, since `PlayerInput`'s producer only resends on
+            // change.
+            if jump {
+                mobs.with(|sim| sim.trigger_camel_dash(player_entity_id));
+            }
             // `Player.rideTick`: `!level.isClientSide && wantsToStopRiding() &&
             // isPassenger()` → `stopRiding()`, where `wantsToStopRiding()` is
             // exactly `isShiftKeyDown()` — tested every tick a passenger is

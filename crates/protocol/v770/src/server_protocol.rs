@@ -390,6 +390,29 @@ const METADATA_IDX_GOAT_HAS_RIGHT_HORN: u8 = 20;
 /// its pair.
 const METADATA_IDX_AXOLOTL_PLAYING_DEAD: u8 = 19;
 
+/// `Camel.DASH` — index 19, serializer `BOOLEAN` (8). Off the jar dump
+/// (`tests/support/entity_data_index_jvm.txt`: `19 Camel.DASH 8 BOOLEAN`) —
+/// one of the `BOOLEAN` claimants [`METADATA_IDX_GOAT_HAS_LEFT_HORN`]'s own
+/// doc already names at this index. The producer (`SimMob::snapshot`'s
+/// `"camel"` arm, the sole caller) disambiguates, exactly as that constant's
+/// own doc describes for its pair.
+const METADATA_IDX_CAMEL_DASH: u8 = 19;
+
+/// `Sniffer.DATA_STATE` — index 18, serializer `SNIFFER_STATE` (35). Off the
+/// jar dump (`tests/support/entity_data_index_jvm.txt`: `18 Sniffer.DATA_STATE
+/// 35 SNIFFER_STATE`). Unlike every other `MetadataField` index constant in
+/// this file, `35` is not a reused generic serializer — it is a real, distinct
+/// `EntityDataSerializer` (`EntityDataSerializers.SNIFFER_STATE`, id 35 in
+/// the jar's own registration order), so the wire value is a plain VarInt
+/// enum ordinal, the same shape [`METADATA_SER_POSE`] already uses. The
+/// producer (`SimMob::snapshot`'s `"sniffer"` arm, the sole caller)
+/// disambiguates index 18 from `Armadillo.ARMADILLO_STATE`'s own claim on
+/// the same index (serializer 36, a different type — the wire's own
+/// serializer-id field is what actually separates the two, not species
+/// alone).
+const METADATA_IDX_SNIFFER_STATE: u8 = 18;
+const METADATA_SER_SNIFFER_STATE: i32 = 35;
+
 /// The overworld world-clock's registry holder id
 /// (`WorldClocks::bootstrap` registers `minecraft:overworld` first,
 /// `minecraft:the_end` second — see `packets::time::ClockUpdate::holder_id`'s
@@ -3450,17 +3473,22 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
             // `ServerboundPlayerInputPacket`: a single flags byte
-            // (`Input.STREAM_CODEC`, `Input.java`) — bit `0x40` is `sprint`
-            // and bit `0x20` is `shift`, the two flags `ServerBound::PlayerInput`
-            // carries (see its own doc comment for why the rest are decoded
-            // off the wire here and then dropped rather than threaded
-            // further).
+            // (`Input.STREAM_CODEC`, `Input.java`) — bit `0x40` is `sprint`,
+            // bit `0x20` is `shift`, and bit `0x10` is `jump`, the three
+            // flags `ServerBound::PlayerInput` carries (see its own doc
+            // comment for why the rest are decoded off the wire here and
+            // then dropped rather than threaded further). `jump` used to be
+            // one of those dropped flags — the exact "a value the decoder
+            // reads off the wire and discards at the decode site" shape —
+            // until camel dash needed it: `Camel.onPlayerJump` is this bit's
+            // whole trigger.
             State::Play if packet_id == play::serverbound::PLAYER_INPUT => {
                 let mut r = Reader::new(payload);
                 match r.u8() {
                     Ok(flags) if r.ensure_empty().is_ok() => ServerBound::PlayerInput {
                         sprint: flags & 0x40 != 0,
                         shift: flags & 0x20 != 0,
+                        jump: flags & 0x10 != 0,
                     },
                     _ => ServerBound::Ignored,
                 }
@@ -5254,6 +5282,25 @@ impl ServerProtocol for V770ServerProtocol {
                     w.u8(METADATA_IDX_AXOLOTL_PLAYING_DEAD);
                     w.var_i32(METADATA_SER_BOOLEAN);
                     w.bool(*playing_dead);
+                }
+                MetadataField::Dash(is_dashing) => {
+                    // `Camel.DASH` — index 19; only `SimMob::snapshot`'s
+                    // `"camel"` arm ever builds this variant. See
+                    // `METADATA_IDX_CAMEL_DASH`'s own doc for the claimants
+                    // this never collides with in practice.
+                    w.u8(METADATA_IDX_CAMEL_DASH);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*is_dashing);
+                }
+                MetadataField::SnifferState(state) => {
+                    // `Sniffer.DATA_STATE` — index 18; only
+                    // `SimMob::snapshot`'s `"sniffer"` arm ever builds this
+                    // variant. See `METADATA_IDX_SNIFFER_STATE`'s own doc
+                    // for the same-index `ARMADILLO_STATE` claimant this
+                    // never collides with in practice.
+                    w.u8(METADATA_IDX_SNIFFER_STATE);
+                    w.var_i32(METADATA_SER_SNIFFER_STATE);
+                    w.var_i32(i32::from(*state));
                 }
                 MetadataField::CrystalBeamTarget(target) => {
                     // `EndCrystal.DATA_BEAM_TARGET` — index 8,
@@ -7649,17 +7696,18 @@ mod combat_decode_tests {
         assert_eq!(decoded, ServerBound::Ignored);
     }
 
-    /// Round-trips through the real client encoder: `sprint` and `shift`
-    /// survive, bit-identical, out the other side; the other five `Input`
-    /// flags are decoded off the wire (so a malformed byte still fails
-    /// cleanly) but do not appear in `ServerBound::PlayerInput` — see that
-    /// variant's own doc comment for why. `sprint`/`shift` are set
-    /// pairwise-distinct in every arm (never both true or both false) so a
-    /// transposition of the two bits cannot survive this round trip.
+    /// Round-trips through the real client encoder: `sprint`, `shift` and
+    /// `jump` survive, bit-identical, out the other side; the other four
+    /// `Input` flags are decoded off the wire (so a malformed byte still
+    /// fails cleanly) but do not appear in `ServerBound::PlayerInput` — see
+    /// that variant's own doc comment for why. One-hot across the three
+    /// arms (exactly one of `jump`/`shift`/`sprint` true per arm, the other
+    /// two false) so a transposition of any adjacent pair of the three bits
+    /// (`0x10`/`0x20`/`0x20`/`0x40`) cannot survive this round trip.
     #[test]
-    fn decode_player_input_sprint_and_shift_from_the_real_client_encoder() {
+    fn decode_player_input_jump_sprint_and_shift_from_the_real_client_encoder() {
         let proto = V770ServerProtocol;
-        for (sprint, shift) in [(true, false), (false, true)] {
+        for (jump, shift, sprint) in [(true, false, false), (false, true, false), (false, false, true)] {
             let (packet_id, payload) = crate::adapter()
                 .encode_action(
                     ConnectionState::Play,
@@ -7668,7 +7716,7 @@ mod combat_decode_tests {
                         backward: false,
                         left: false,
                         right: false,
-                        jump: false,
+                        jump,
                         shift,
                         sprint,
                     }),
@@ -7679,8 +7727,8 @@ mod combat_decode_tests {
             let decoded = proto.decode(State::Play, packet_id, &payload);
             assert_eq!(
                 decoded,
-                ServerBound::PlayerInput { sprint, shift },
-                "sprint={sprint} shift={shift}"
+                ServerBound::PlayerInput { sprint, shift, jump },
+                "sprint={sprint} shift={shift} jump={jump}"
             );
         }
     }
@@ -7695,21 +7743,22 @@ mod combat_decode_tests {
     }
 
     /// Sanity check on the bit layout itself, independent of the real
-    /// encoder: bit `0x40` alone must decode to `sprint: true, shift: false`
-    /// and bit `0x20` alone to `sprint: false, shift: true`, so a future
-    /// change to `ServerBound::PlayerInput`'s fields can be checked against a
-    /// known byte, not only against the adapter's own (also-changeable)
-    /// encoder. Covers a transposition of the two adjacent bits, not just
-    /// their presence.
+    /// encoder: bit `0x40` alone must decode to `sprint: true` (the other two
+    /// false), `0x20` alone to `shift: true`, and `0x10` alone to
+    /// `jump: true`, so a future change to `ServerBound::PlayerInput`'s
+    /// fields can be checked against a known byte, not only against the
+    /// adapter's own (also-changeable) encoder. Covers a transposition of
+    /// any of the three adjacent bits, not just their presence.
     #[test]
-    fn decode_player_input_bit_layout_pins_sprint_at_0x40_and_shift_at_0x20() {
+    fn decode_player_input_bit_layout_pins_sprint_at_0x40_shift_at_0x20_jump_at_0x10() {
         let proto = V770ServerProtocol;
         let decoded = proto.decode(State::Play, play::serverbound::PLAYER_INPUT, &[0x40]);
         assert_eq!(
             decoded,
             ServerBound::PlayerInput {
                 sprint: true,
-                shift: false
+                shift: false,
+                jump: false,
             }
         );
         let decoded = proto.decode(State::Play, play::serverbound::PLAYER_INPUT, &[0x20]);
@@ -7717,15 +7766,27 @@ mod combat_decode_tests {
             decoded,
             ServerBound::PlayerInput {
                 sprint: false,
-                shift: true
+                shift: true,
+                jump: false,
             }
         );
-        let decoded = proto.decode(State::Play, play::serverbound::PLAYER_INPUT, &[0x1F]); // every other flag, not sprint or shift
+        let decoded = proto.decode(State::Play, play::serverbound::PLAYER_INPUT, &[0x10]);
         assert_eq!(
             decoded,
             ServerBound::PlayerInput {
                 sprint: false,
-                shift: false
+                shift: false,
+                jump: true,
+            }
+        );
+        // forward|backward|left|right — none of the three modelled flags.
+        let decoded = proto.decode(State::Play, play::serverbound::PLAYER_INPUT, &[0x0F]);
+        assert_eq!(
+            decoded,
+            ServerBound::PlayerInput {
+                sprint: false,
+                shift: false,
+                jump: false,
             }
         );
     }
@@ -9125,6 +9186,128 @@ mod axolotl_playing_dead_tests {
         assert_eq!(r.u8().expect("index"), METADATA_IDX_AXOLOTL_PLAYING_DEAD);
         assert_eq!(r.var_i32().expect("serializer"), METADATA_SER_BOOLEAN);
         assert!(r.bool().expect("value"), "true was pushed");
+        assert_eq!(r.u8().expect("terminator"), 0xFF);
+        assert!(r.ensure_empty().is_ok(), "no trailing bytes");
+    }
+}
+
+/// `Camel.DASH` at index 19 — the same census-premise-plus-encode-exactness
+/// shape [`goat_horns_tests`] already uses for its own claimed index.
+#[cfg(test)]
+mod camel_dash_tests {
+    use lodestone_core::Reader;
+    use lodestone_server::{MetadataField, ServerDirective, ServerProtocol};
+
+    use super::{METADATA_IDX_CAMEL_DASH, METADATA_SER_BOOLEAN, V770ServerProtocol};
+
+    const INDEX_DUMP: &str = include_str!("../tests/support/entity_data_index_jvm.txt");
+
+    fn dump_row(owner_field: &str) -> (u8, i32) {
+        for line in INDEX_DUMP.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut tok = line.split_whitespace();
+            let index: u8 = tok.next().expect("index column").parse().expect("u8");
+            let owner = tok.next().expect("owner.FIELD column");
+            let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
+            if owner == owner_field {
+                return (index, serializer);
+            }
+        }
+        panic!("{owner_field} is not in the jar dump — read the dump before changing the constant")
+    }
+
+    #[test]
+    fn camel_dash_index_matches_the_jar_dump() {
+        let (index, ser) = dump_row("Camel.DASH");
+        assert_eq!(index, METADATA_IDX_CAMEL_DASH);
+        assert_eq!(ser, METADATA_SER_BOOLEAN);
+    }
+
+    #[test]
+    fn dash_encodes_at_index_nineteen() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { payload, .. } =
+            proto.encode_set_entity_data(11, &[MetadataField::Dash(true)])
+        else {
+            panic!("encode_set_entity_data must emit a Send");
+        };
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.var_i32().expect("entity id"), 11);
+        assert_eq!(r.u8().expect("index"), METADATA_IDX_CAMEL_DASH);
+        assert_eq!(r.var_i32().expect("serializer"), METADATA_SER_BOOLEAN);
+        assert!(r.bool().expect("value"), "true was pushed");
+        assert_eq!(r.u8().expect("terminator"), 0xFF);
+        assert!(r.ensure_empty().is_ok(), "no trailing bytes");
+    }
+}
+
+/// `Sniffer.DATA_STATE` at index 18, serializer 35 — the same census-
+/// premise-plus-encode-exactness shape [`goat_horns_tests`] already uses for
+/// its own claimed index, plus a check that the wire value is the real
+/// `Sniffer.State` ordinal rather than a crate-local renumbering.
+#[cfg(test)]
+mod sniffer_state_tests {
+    use lodestone_core::Reader;
+    use lodestone_server::{MetadataField, ServerDirective, ServerProtocol};
+
+    use super::{METADATA_IDX_SNIFFER_STATE, METADATA_SER_SNIFFER_STATE, V770ServerProtocol};
+
+    const INDEX_DUMP: &str = include_str!("../tests/support/entity_data_index_jvm.txt");
+
+    fn dump_row(owner_field: &str) -> (u8, &'static str) {
+        for line in INDEX_DUMP.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut tok = line.split_whitespace();
+            let index: u8 = tok.next().expect("index column").parse().expect("u8");
+            let owner = tok.next().expect("owner.FIELD column");
+            let _serializer_id: i32 = tok.next().expect("serializer column").parse().expect("i32");
+            let serializer_name = tok.next().expect("serializer name column");
+            if owner == owner_field {
+                return (index, serializer_name);
+            }
+        }
+        panic!("{owner_field} is not in the jar dump — read the dump before changing the constant")
+    }
+
+    #[test]
+    fn sniffer_state_index_matches_the_jar_dump() {
+        let (index, serializer_name) = dump_row("Sniffer.DATA_STATE");
+        assert_eq!(index, METADATA_IDX_SNIFFER_STATE);
+        assert_eq!(serializer_name, "SNIFFER_STATE");
+    }
+
+    /// The same index also claims `Armadillo.ARMADILLO_STATE` under a
+    /// *different* serializer id — the tell that species alone cannot
+    /// disambiguate this index and the serializer id is load-bearing.
+    #[test]
+    fn index_eighteen_also_claims_a_different_armadillo_serializer() {
+        let (armadillo_index, armadillo_serializer_name) = dump_row("Armadillo.ARMADILLO_STATE");
+        assert_eq!(armadillo_index, METADATA_IDX_SNIFFER_STATE);
+        assert_eq!(armadillo_serializer_name, "ARMADILLO_STATE");
+    }
+
+    #[test]
+    fn sniffer_state_encodes_at_index_eighteen_as_a_real_ordinal() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { payload, .. } =
+            proto.encode_set_entity_data(11, &[MetadataField::SnifferState(5)])
+        else {
+            panic!("encode_set_entity_data must emit a Send");
+        };
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.var_i32().expect("entity id"), 11);
+        assert_eq!(r.u8().expect("index"), METADATA_IDX_SNIFFER_STATE);
+        assert_eq!(r.var_i32().expect("serializer"), METADATA_SER_SNIFFER_STATE);
+        // `5` is `Sniffer.State.DIGGING`'s real ordinal, not `0`/`1` — a
+        // wrong-serializer or off-by-one bug would still pass a `true`/`false`
+        // shaped assertion, so this pins the actual integer.
+        assert_eq!(r.var_i32().expect("state ordinal"), 5);
         assert_eq!(r.u8().expect("terminator"), 0xFF);
         assert!(r.ensure_empty().is_ok(), "no trailing bytes");
     }

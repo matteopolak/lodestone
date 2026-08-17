@@ -227,6 +227,18 @@ pub trait BrainMob {
         None
     }
 
+    /// A sniffer's current candidate dig position — feeds
+    /// [`MemoryModuleType::SNIFFER_DIG_TARGET`](super::MemoryModuleType::SNIFFER_DIG_TARGET)
+    /// through [`super::sensor::SnifferDigTargetSensor`], the same
+    /// [`delivery_target`](Self::delivery_target) host-computed-candidate
+    /// shape: the host (`SimMob::tick_sniffers`) runs the block-tag search
+    /// vanilla's `Sniffer.calculateDigPosition` performs and hands back
+    /// only the answer, present only while the sniffer's own state machine
+    /// is in its walking-there phase. Defaults to `None`.
+    fn sniffer_dig_target(&self) -> Option<Vec3> {
+        None
+    }
+
     /// Records a melee hit landing on whatever occupies `target` this tick —
     /// vanilla's `LivingEntity.hurtServer`/`knockback` calls a ram or an
     /// attack-target behaviour makes directly on the target entity. This
