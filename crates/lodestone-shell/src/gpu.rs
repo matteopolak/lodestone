@@ -73,7 +73,8 @@ pub use plugin_billboards::{PluginBillboardInstance, plugin_billboard_vertices};
 pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{
-    AmbientLightSource, BannerSource, BeaconSource, BellSource, BlockEntitySource, CampfireSource,
+    AmbientLightSource, BannerSource, BeaconSource, BellSource, BlockEntitySource, BrushableSource,
+    CampfireSource,
     ConduitSource, DecoratedPotSource, EnchantingTableSource, EndGatewaySource, EndPortalSource,
     EntityLightSource, HandSwingSource, ItemUseSource, LecternSource, MainHandItem,
     MainHandSource, MapSource, MovingPistonSource, OutlineShapeSource, ShulkerSource, SignSource,
@@ -525,6 +526,14 @@ pub struct RenderState {
     /// reward on top of it. An unset source leaves a complete vault showing no
     /// reward, never a hole.
     vault_source: VaultSource,
+    /// Where this frame's brushable-block revealed items come from. Same
+    /// odd-one-out shape as [`Self::campfire_source`]: consumed by the item
+    /// geometry pass, not `prepare_block_entities`, because a suspicious
+    /// sand/gravel block's appearance is entirely its own real block model —
+    /// `BrushableBlockRenderer` draws only the revealed item on top of it. An
+    /// unset source leaves a complete, correctly-dusted block with no item
+    /// floating above it, never a hole.
+    brushable_source: BrushableSource,
     /// Where this frame's moving pistons come from. Consumed by
     /// [`Self::prepare_moving_blocks`] and the **model** pipeline, not by
     /// `prepare_block_entities` and not by the item path — a third destination, and

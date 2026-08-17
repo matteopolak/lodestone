@@ -1117,6 +1117,45 @@ impl std::fmt::Debug for CampfireSource {
     }
 }
 
+/// Where this frame's brushable-block revealed items come from.
+///
+/// **The same odd one out as [`CampfireSource`], for the same reason**:
+/// `BrushableBlockRenderer.submit` draws a single item model, not a cuboid
+/// rig — the suspicious sand/gravel a player sees is the ordinary block
+/// model, real geometry the terrain mesher already draws — so this feeds
+/// [`RenderState::prepare_item_geometry`](crate::gpu::RenderState) and the
+/// *model* pipeline, not `prepare_block_entities`.
+///
+/// No clock captured, like [`CampfireSource`]: nothing about a revealed item
+/// animates, so this needs no per-frame re-install for staleness (only for
+/// [`SkullSource`]'s reason — a source outliving a disconnect).
+#[derive(Default)]
+pub struct BrushableSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<
+        Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::BrushableItemSpawn> + Send + Sync>,
+    >,
+);
+
+impl BrushableSource {
+    /// This frame's brushable-block revealed items, or none when unset.
+    #[must_use]
+    pub(super) fn brushable_items(
+        &self,
+        eye: glam::Vec3,
+    ) -> Vec<lodestone_render::BrushableItemSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for BrushableSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("BrushableSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
 /// Where this frame's vault display-item clusters come from.
 ///
 /// **The same odd one out as [`CampfireSource`], for the same reason**:

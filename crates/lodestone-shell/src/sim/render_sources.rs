@@ -467,6 +467,19 @@ impl Sim {
         Some(move |eye: glam::Vec3| crate::block_entities::campfire_spawns(&handle, eye))
     }
 
+    /// The brushable-block sibling of [`Self::campfire_source`] — see
+    /// `crate::block_entities::brushable_spawns`. No clock, for the same
+    /// reason: a revealed item does not animate.
+    #[must_use]
+    pub fn brushable_source(
+        &self,
+    ) -> Option<
+        impl Fn(glam::Vec3) -> Vec<lodestone_render::BrushableItemSpawn> + Send + Sync + 'static,
+    > {
+        let handle = self.net.as_ref()?.shared_handle();
+        Some(move |eye: glam::Vec3| crate::block_entities::brushable_spawns(&handle, eye))
+    }
+
     /// This frame's banners, for
     /// [`RenderState::set_banner_source`](crate::gpu::RenderState::set_banner_source).
     ///
