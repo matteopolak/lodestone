@@ -15,6 +15,19 @@ here saying otherwise was itself stale** — the live install landed before this
 and the shake trigger landed with `BellShakes` (see [Bell](#bell)). Both halves of the gap this
 paragraph named are closed.
 
+**Decorated pot and conduit are now fully wired too** (`fff5ed7e`), closing the last gap this file
+tracked: both render passes were already proven reachable with real pixels, but nothing fed them from
+a live world. `Sim` gained a `conduit_ticks: ConduitTicks` field (advanced once per tick in `Sim::step`
+alongside `chest_lids`/`bell_shakes`/`enchanting_table_books`/`moving_pistons`), `Sim::decorated_pot_source`/
+`Sim::conduit_source` mirror `bell_source`/`shulker_source` in `sim/render_sources.rs`, and `app/redraw.rs`
+installs both per frame beside the other block-entity sources — see [Decorated pot](#decorated-pot) and
+[Conduit](#conduit) for what was verified. Re-verified in this session: `cargo check -p lodestone-shell
+--all-targets` and `--no-default-features` both clean, the three new `sim::tests` accessor/step gates pass
+(`decorated_pot_source_tracks_connection_state_and_is_safe_before_login`,
+`conduit_source_tracks_connection_state_and_is_safe_before_login`,
+`stepping_ticks_conduits_without_panicking_before_login`), and all 9 of the bell/conduit/decorated-pot
+`#[ignore]`d GPU pixel gates still pass against a real headless adapter + `client.jar`.
+
 ## The real vanilla scope, from the registration list — not the issue's guess-list
 
 `BlockEntityRenderers.java`'s static block
@@ -60,11 +73,11 @@ model; the bell body/rim; and the shulker box — see [Shulker box](#shulker-box
 lectern, the campfire and the enchanting table, so **12 of 26** — wall banners share the `BANNER`
 registration with standing ones. **Piston head makes 13** (see [Piston head](#piston-head)), and it is
 the first entry landed through the *moving-block-model* seam rather than through `EntityPipeline` or
-the item path. **Decorated pot makes 14** (see [Decorated pot](#decorated-pot)) and **conduit makes 15**
-(see [Conduit](#conduit)), both through the fifth destination this doc has needed: a render pass proven
-reachable with real pixels and no live per-frame install yet, the same stage bell passed through before
-its own install landed. The rest are still absent. Picking the next few should read this list, not the
-original issue body.
+the item path. **Decorated pot makes 14 and conduit makes 15** (see [Decorated pot](#decorated-pot) and
+[Conduit](#conduit)) — both fully wired end to end, including the live per-frame install
+(`Sim::decorated_pot_source`/`Sim::conduit_source`, installed from `app/redraw.rs`), the same stage bell
+reached before it. **15 of 26 registrations are now landed and wired.** The rest are still absent.
+Picking the next few should read this list, not the original issue body.
 
 **The registration list had two entries this document's "what is not built" section never mentioned
 either way: `LECTERN` (`LecternRenderer`, the open book on a lectern) and `CONDUIT` (`ConduitRenderer`,
@@ -1447,7 +1460,7 @@ requires of adjacent same-typed fields — and checks the resulting texture **by
 which is why the check has to be keyed on which named side each one landed on, not merely on the set of
 textures produced.
 
-### Status: the render pass is proven reachable; the live install is not done
+### Status: fully wired, including the live install
 
 `resolve_decorated_pot`, the geometry, the texture table and `DecoratedPotSource`/
 `set_decorated_pot_source` are all wired through the ordinary `prepare_block_entities` path — the pot
@@ -1455,13 +1468,16 @@ draws through the same `RenderState::set_decorated_pot_source` + real GPU draw
 `decorated_pot_block_entity_pixels.rs` calls directly, the same shape `bell_block_entity_pixels.rs` used
 before bell's own live install landed (see [Bell](#bell)'s history).
 
-**Not done: the live per-frame install** — a `Sim::decorated_pot_source` call site in `sim.rs`, installed
-from `app.rs` the way `Sim::bell_source`/`Sim::shulker_source` are. Neither file was touched landing this,
-so a real client does not yet draw a decorated pot it walks past; only the pass itself, and its GPU pixel
-gates, prove it is correct and reachable once that source exists. This is the same gap this doc's Bell
-section once carried and later closed — see that section's own history for the shape the fix takes.
+**The live per-frame install landed in `fff5ed7e`**: `Sim::decorated_pot_source` (`sim/render_sources.rs`)
+wraps `block_entities::decorated_pot_spawns` around a captured `SharedHandle`, mirroring
+`Sim::bell_source`/`Sim::shulker_source` exactly, and `app/redraw.rs` installs it every frame
+(`if let Some(f) = self.sim.decorated_pot_source() { render.set_decorated_pot_source(f); }`) beside the
+other block-entity sources. `sim::tests::decorated_pot_source_tracks_connection_state_and_is_safe_before_login`
+proves the accessor tracks connection state and is panic-safe before login — the same accessor-level
+evidence bar bell's own gate was held to before its live install landed. A real client walking past a
+decorated pot now draws it.
 
-**Not done either: the hit-wobble animation.** `DecoratedPotBlockEntity`'s wobble is a `BLOCK_EVENT` this
+**Not done: the hit-wobble animation.** `DecoratedPotBlockEntity`'s wobble is a `BLOCK_EVENT` this
 workspace does not decode for pots (chest's own `b0 == 1`/bell's shake are the two `BLOCK_EVENT` meanings
 folded so far — see [Bell](#bell)'s note on why `b0` cannot be routed on alone). `DecoratedPotSpawn`
 carries no wobble phase for the same reason `ShulkerSpawn::progress` cannot yet vary: a pot always draws
@@ -1516,7 +1532,7 @@ first_animation_frame` crops both sheets to frame 0 at load time, so the wind pl
 real rotation and the real texture *choice* between the two sheets — static rather than flowing. A
 documented simplification, not a silent bug; a future animated pass only has to touch that one crop.
 
-### Status: the render pass is proven reachable with real pixels; the world→spawn adapter is not built
+### Status: fully wired, including the live install
 
 `resolve_conduit`, the four-sheet rig, `ConduitSource`/`RenderState::set_conduit_source` and
 `prepare_block_entities`'s resolve arm are all wired the same way [Decorated pot](#decorated-pot)'s are —
@@ -1524,16 +1540,23 @@ documented simplification, not a silent bug; a future animated pass only has to 
 render: an inactive conduit fills its own projected rect with a clean negative control, activating it
 repaints at least the whole former shell footprint (measured on this machine: 1,719 px changed against a
 1,225 px inactive footprint), and toggling `hunting` changes pixels confined to the eye's own small rect
-and nowhere else.
+and nowhere else — re-measured this session, unchanged.
 
-**Not done: the block-store gather.** `conduit_frame_scan`/`conduit_advance` are pure functions over
-closures, not over a live `SharedHandle` — the shell-side adapter (`block_entities::conduit_spawn`/
-`conduit_spawns`, plus a per-position tick tracker the same shape `BellShakes` is for the counters
-`conduit_advance` steps) was out of this task's file ownership (`block_entities.rs`, `sim.rs`,
-`sim/build.rs`, `sim/render_sources.rs`, `app/redraw.rs` were all held by a concurrent agent) and is
-reported rather than built. Until that adapter and its `Sim::conduit_source`/`app.rs` install call land,
-a real client walking past a conduit draws nothing — the same gap this section's Decorated Pot neighbour
-above carries for the identical reason.
+**The block-store gather landed in `fff5ed7e`.** `block_entities::conduit_positions`/`conduit_scan_frame`
+resolve a real `SharedHandle`'s block store into candidate positions and per-position `ConduitFrame`
+scans; `ConduitTicks` (the conduit sibling of `BellShakes`, keyed the same way) advances once per client
+tick from `Sim::step`, and `Sim::conduit_source` (`sim/render_sources.rs`) closes over a cloned
+`ConduitTicks` and the handle, mirroring `Sim::decorated_pot_source`. `app/redraw.rs` installs it every
+frame. `sim::tests::conduit_source_tracks_connection_state_and_is_safe_before_login` and
+`stepping_ticks_conduits_without_panicking_before_login` hold the accessor and the per-tick advance to the
+same evidence bar `bell_source`'s own pre-live-install gate used. A real client walking past a conduit now
+draws it.
+
+Also still not done: the wind sheets' real animation (drawn static, frame 0 only — see this section's own
+note above), and the same "real `ClientHandle` end to end" gap every type in this doc shares (see
+[Bell](#bell)'s own "what this gate does not prove" note) — no gate anywhere in this crate, for any
+block-entity type, drives a real login handshake plus a loaded chunk through the actual net/protocol
+stack; that is pre-existing test-infrastructure scope, not something specific to conduit.
 
 ```bash
 cargo test -p lodestone-render --lib block_entity::
@@ -1842,19 +1865,19 @@ Against the real 26-entry registration list (see above), not the issue's origina
 - **Piston head — landed**, including the client-side progress clock and the per-frame install (see
   [Piston head](#piston-head) above). Open within its scope is a *server* gap, not a render one: our
   own server produces no `moving_piston` block entity, so it draws against a real 26.2 server only.
-- **Decorated pot — the render pass is landed** (see [Decorated pot](#decorated-pot) above): the base
-  plus four independently-textured side instances, resolved from the block entity's own `sherds` NBT
-  through the plain `(model, texture)` batcher with no new mechanism. **Not landed: the live per-frame
-  install** (no `Sim::decorated_pot_source` call site in `sim.rs`/`app.rs` yet — off limits for the task
-  that landed the render pass) and the hit-wobble `BLOCK_EVENT` animation, the same not-yet-decoded gap
-  [Bell](#bell) once had for its own shake.
-- **Conduit — the render pass is landed** (see [Conduit](#conduit) above), proven with a real GPU pixel
-  gate: the inactive shell, the active cage/wind/eye, the client-computed `isActive`/`isHunting` scan and
-  the degrees-vs-radians rotation quirk. **Not landed: the block-store gather** — no
-  `block_entities::conduit_spawn`/`conduit_spawns`, no per-position tick tracker, and no
-  `Sim::conduit_source`/`app.rs` install call, all off limits for the task that landed the render pass,
-  same shape as decorated pot's own gap above. Also not landed: the wind sheets' real animation (drawn
-  static, frame 0 only — see the Conduit section's own note).
+- **Decorated pot — landed**, including the live per-frame install (`fff5ed7e`; see
+  [Decorated pot](#decorated-pot) above): the base plus four independently-textured side instances,
+  resolved from the block entity's own `sherds` NBT through the plain `(model, texture)` batcher with no
+  new mechanism, now fed by `Sim::decorated_pot_source` every frame. Still open within its scope: the
+  hit-wobble `BLOCK_EVENT` animation, the same not-yet-decoded gap [Bell](#bell) once had for its own
+  shake.
+- **Conduit — landed**, including the live per-frame install (`fff5ed7e`; see [Conduit](#conduit) above),
+  proven with a real GPU pixel gate: the inactive shell, the active cage/wind/eye, the client-computed
+  `isActive`/`isHunting` scan and the degrees-vs-radians rotation quirk, now fed by a real
+  `block_entities::conduit_positions`/`conduit_scan_frame` world scan advanced once per tick
+  (`ConduitTicks`, the conduit sibling of `BellShakes`) and installed from `app/redraw.rs`. Still open
+  within its scope: the wind sheets' real animation (drawn static, frame 0 only — see the Conduit
+  section's own note).
 - Mob spawner (draws a miniature spinning entity inside the cage —
   reuses full entity rendering, not a simple cuboid rig), brushable block, trial spawner,
   vault, copper golem statue, shelf. End portal/end gateway/beacon are their own shader effects, not
