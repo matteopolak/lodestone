@@ -1393,19 +1393,23 @@ impl UiState {
         }
     }
 
-    /// Force the pause overlay up (e.g. the window lost focus). Meaningful while
-    /// playing or with chat open (a focus loss must not leave input captured);
-    /// a focus loss on a menu/loading/error screen is a no-op.
+    /// Force the pause overlay up (e.g. the window lost focus). Vanilla's own
+    /// gate, `Gui.setPauseScreen` (`Gui.java`): `if (this.screen == null)` —
+    /// only when *nothing* is open, matched here by `Screen::Playing` alone.
+    /// Chat, an inventory/container, a command block, a sign or a book editor
+    /// are all a non-null `screen` in vanilla's terms, so a focus loss while
+    /// any of them is open must leave it alone rather than burying it under
+    /// the pause overlay.
+    ///
+    /// **Not for capturing input.** An earlier version of this method paused
+    /// from that wider set too, reasoning that "a focus loss must not leave
+    /// input captured" — but the pointer release that reasoning was protecting
+    /// is a separate, unconditional mechanism: `app/lifecycle.rs`'s
+    /// `WindowEvent::Focused(false)` arm calls `set_grab(false)` outside the
+    /// `pause_on_lost_focus` gate this method sits behind, so the capture is
+    /// already released whether or not this method does anything at all.
     pub fn pause(&mut self) {
-        if matches!(
-            self.screen,
-            Screen::Playing
-                | Screen::Chat
-                | Screen::Container
-                | Screen::CommandBlockEdit
-                | Screen::SignEdit
-                | Screen::BookEdit
-        ) {
+        if self.screen == Screen::Playing {
             self.screen = Screen::Paused;
         }
     }
@@ -1724,13 +1728,50 @@ mod tests {
     }
 
     #[test]
-    fn focus_loss_while_typing_pauses_rather_than_leaving_input_captured() {
+    fn focus_loss_leaves_an_open_screen_alone() {
+        // **The owner's report**: tabbing out while chat, an inventory, a
+        // chest (or any other container), a command block editor, a sign
+        // editor or a book editor is open must not bury it under the pause
+        // overlay — vanilla's own `Gui.setPauseScreen` only ever acts when
+        // `this.screen == null`, matched here by `Screen::Playing` alone.
+        // Every one of these five used to be in `UiState::pause`'s own
+        // trigger set; this is the negative half for all five at once. Each
+        // case's own name reaches the assertion message, so a failure names
+        // which screen regressed rather than only "some screen did".
+        let openers: [(&str, fn(&mut UiState)); 5] = [
+            ("chat", UiState::open_chat),
+            ("a container/inventory", UiState::open_container),
+            ("command block edit", UiState::open_command_block),
+            ("sign edit", UiState::open_sign_edit),
+            ("book edit", UiState::open_book_edit),
+        ];
+        for (name, open) in openers {
+            let mut ui = UiState::new();
+            ui.enter_dev_world();
+            open(&mut ui);
+            let opened = ui.screen();
+            assert_ne!(opened, Screen::Playing, "precondition: {name} actually opened a screen");
+            ui.pause();
+            assert_eq!(
+                ui.screen(),
+                opened,
+                "a focus loss while {name} is open must leave it alone, not bury \
+                 it under the pause overlay"
+            );
+        }
+    }
+
+    /// The positive control for the gate above: a focus loss while genuinely
+    /// just playing (nothing open) still pauses, matching vanilla's
+    /// `this.screen == null` branch — without this, a version of `pause`
+    /// that simply never does anything would pass the negative-only gate too.
+    #[test]
+    fn focus_loss_while_playing_with_nothing_open_still_pauses() {
         let mut ui = UiState::new();
         ui.enter_dev_world();
-        ui.open_chat();
+        assert_eq!(ui.screen(), Screen::Playing);
         ui.pause();
         assert_eq!(ui.screen(), Screen::Paused);
-        assert!(!ui.accepts_gameplay_input());
     }
 
     #[test]

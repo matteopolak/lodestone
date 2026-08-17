@@ -2755,6 +2755,28 @@ pub fn tick_remote_body_yaw(
 /// [`Rotation`], [`HeadYaw`] — the same defensive shape
 /// `lodestone_client::state::entity_view` uses, in case a caller ever hands
 /// this a non-networked entity.
+/// Whether `name` should draw no nametag at all — an actually-empty string,
+/// or the literal text `"<empty>"`.
+///
+/// The second case is not a hypothetical: `"<empty>"` is Mojang's own
+/// `toString()` convention for "this value is absent" — `HashedStack`,
+/// `SlotDisplay` and `CommandResultCallback` (`.cache/mc/26.2/…`) each use
+/// this *exact* string for their own no-value case, so a plugin (a common
+/// source of `type=player` NPC entities, which need a registered tab-list
+/// profile to carry a skin) that serialises an "absent name" sentinel the
+/// same way Mojang's own internals debug-print one produces this precise
+/// text over the wire — indistinguishable from a real player deliberately
+/// named `<empty>` only by convention, not by any wire signal. Nothing in
+/// this crate, `lodestone-model` or `lodestone-game` ever constructs this
+/// string — grepping the whole tree for it finds only those Java classes'
+/// own `toString()` bodies — so a name that arrives already reading exactly
+/// this is not this client's own placeholder leaking through; it is the
+/// server's "no name" state read back off the wire as if it were content.
+#[must_use]
+fn is_blank_name_tag(name: &str) -> bool {
+    name.is_empty() || name == "<empty>"
+}
+
 fn resolve_entity_facts(
     id: i32,
     entity: bevy_ecs::world::EntityRef<'_>,
@@ -2916,7 +2938,7 @@ fn resolve_entity_facts(
         uuid.and_then(|id| match tab_list.get(&id) {
             Some(entry) => {
                 let name = entry.effective_name().to_plain_string();
-                if name.is_empty() {
+                if is_blank_name_tag(&name) {
                     None
                 } else {
                     // Same fallback the skin lookup two fields down already
@@ -2938,7 +2960,7 @@ fn resolve_entity_facts(
     } else {
         match &custom_name {
             Reported::Reported(Some(name))
-                if custom_name_visible == Some(true) && !name.is_empty() =>
+                if custom_name_visible == Some(true) && !is_blank_name_tag(name) =>
             {
                 Some(name.clone())
             }
@@ -4682,6 +4704,46 @@ mod tests {
             ));
             let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
             assert_eq!(facts.name_tag, None);
+        }
+
+        /// **The owner's report**: an NPC with no name rendered the literal
+        /// text `<empty>`. Nothing in this tree ever constructs that string
+        /// (see [`is_blank_name_tag`]'s own doc) — a mob whose custom name
+        /// arrives reading exactly `<empty>` must be treated the same as one
+        /// whose name arrives as `""`, not drawn as if it were real content.
+        #[test]
+        fn a_mob_whose_custom_name_is_the_literal_empty_sentinel_shows_nothing() {
+            let mut world = World::new();
+            let entity = bare_entity(&mut world);
+            world.entity_mut(entity).insert((
+                CustomName(Some("<empty>".to_string())),
+                CustomNameVisible(true),
+            ));
+            let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+            assert_eq!(
+                facts.name_tag, None,
+                "a custom name of literally \"<empty>\" must draw no tag, not the \
+                 literal text"
+            );
+
+            // Negative control: a real name is not caught by the same guard.
+            let mut real_world = World::new();
+            let real_entity = bare_entity(&mut real_world);
+            real_world.entity_mut(real_entity).insert((
+                CustomName(Some("<empty> the Cow".to_string())),
+                CustomNameVisible(true),
+            ));
+            let real_facts = facts_for(
+                &real_world,
+                real_entity,
+                &lodestone_game::tablist::TabList::new(),
+            );
+            assert_eq!(
+                real_facts.name_tag.map(|t| t.text),
+                Some("<empty> the Cow".to_string()),
+                "the guard must match the sentinel exactly, not merely contain it — \
+                 a player who actually named their pet this must still see it"
+            );
         }
 
         /// `Entity.isDiscrete()` (`isShiftKeyDown()`, bit 1 of the shared

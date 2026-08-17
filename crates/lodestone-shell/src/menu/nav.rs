@@ -1408,10 +1408,32 @@ pub struct MenuNav {
     /// `app::session::drive_ui_from_session`, the same shape
     /// [`Self::command_tree`] is pushed in from a live session. This module
     /// is pure and holds no `Sim`, so it cannot poll the real state itself.
-    /// `false` off a hosted session too, which is what keeps a multiplayer
-    /// join's pause menu identical to a fresh singleplayer one's. See
-    /// [`Self::pause_buttons`], the one reader.
+    ///
+    /// **`false` off a hosted session too** — that is the wire ground truth
+    /// (`NetUpdate::LanOpened` can only ever arrive from *our own* integrated
+    /// server), not a claim that multiplayer's pause menu should therefore
+    /// look unpublished. This field alone cannot tell "singleplayer, not yet
+    /// published" from "multiplayer, publishing meaningless" apart — that is
+    /// [`Self::has_singleplayer_server`]'s job, and [`Self::open_to_lan_available`]
+    /// is the one place the two combine. See [`Self::pause_buttons`], one of
+    /// its two readers.
     lan_published: bool,
+    /// Vanilla's `Minecraft.hasSingleplayerServer()` — whether this session
+    /// is an **integrated** server at all, pushed in from
+    /// `UiState::kind() == Some(SessionKind::Singleplayer)` by
+    /// `app::session::drive_ui_from_session`, next to [`Self::lan_published`]'s
+    /// own push. `false` by default (and reset alongside every other session
+    /// field), which is the safe direction: Open to LAN starts hidden and is
+    /// only offered once a live singleplayer session confirms it, rather than
+    /// risking a stale `true` surviving into a multiplayer join.
+    ///
+    /// **The bug this exists to fix**: before this field, [`Self::pause_buttons`]
+    /// read only [`Self::lan_published`], which is `false` on *both* an
+    /// unpublished singleplayer world and a remote multiplayer server — so a
+    /// multiplayer session's pause menu showed Open to LAN, a button whose
+    /// only possible outcome there is nonsensical (there is no local world of
+    /// ours to open). See [`Self::open_to_lan_available`].
+    has_singleplayer_server: bool,
 }
 
 impl Default for MenuNav {
@@ -1521,6 +1543,7 @@ impl MenuNav {
             resource_pack_answered_id: None,
             command_tree: None,
             lan_published: false,
+            has_singleplayer_server: false,
         }
     }
 
@@ -2374,19 +2397,44 @@ impl MenuNav {
         self.lan_published = published;
     }
 
-    /// The last-pushed publish state — what [`Self::pause_buttons`] keys its
-    /// row list on, and what `render::pause_frame` reads to pick the matching
-    /// grid arrangement for each row's rect.
+    /// The last-pushed publish state — the raw wire ground truth, `false` on
+    /// both an unpublished singleplayer world and any multiplayer session.
+    /// Nothing outside this module currently needs this distinguished from
+    /// [`Self::open_to_lan_available`]; kept as its own accessor because it is
+    /// a real, independently meaningful fact even though today's one caller
+    /// wants the combined one.
     #[must_use]
     pub fn is_lan_published(&self) -> bool {
         self.lan_published
     }
 
-    /// The pause menu's active row list: [`PAUSE_BUTTONS_PUBLISHED`] once the
-    /// hosted world is published, [`PAUSE_BUTTONS`] otherwise. Every internal
-    /// user of a pause-screen row — [`Self::pause_button`], the hover/click
-    /// hit test, and the keyboard walk — reads through this rather than the
-    /// two constants directly, so they cannot drift onto different lists.
+    /// Pushes vanilla's `hasSingleplayerServer()` in, from
+    /// `UiState::kind() == Some(SessionKind::Singleplayer)` — see
+    /// [`Self::has_singleplayer_server`]'s own field doc.
+    pub fn set_has_singleplayer_server(&mut self, value: bool) {
+        self.has_singleplayer_server = value;
+    }
+
+    /// Whether the pause menu should offer its own Open to LAN row at all —
+    /// vanilla's `hasSingleplayerServer()` branch (`PauseScreen.java`),
+    /// **not** [`Self::is_lan_published`] alone: a multiplayer session has
+    /// nothing local to publish and must take the same collapsed,
+    /// full-width-Options shape a *published* singleplayer world does, even
+    /// though [`Self::lan_published`] reads `false` in both the multiplayer
+    /// and the not-yet-published-singleplayer case and cannot tell them
+    /// apart on its own.
+    #[must_use]
+    pub fn open_to_lan_available(&self) -> bool {
+        self.has_singleplayer_server && !self.lan_published
+    }
+
+    /// The pause menu's active row list: [`PAUSE_BUTTONS_PUBLISHED`] once
+    /// [`Self::open_to_lan_available`] is `false` (published, or not a
+    /// singleplayer session at all), [`PAUSE_BUTTONS`] otherwise. Every
+    /// internal user of a pause-screen row — [`Self::pause_button`], the
+    /// hover/click hit test, and the keyboard walk — reads through this
+    /// rather than the two constants directly, so they cannot drift onto
+    /// different lists.
     ///
     /// **A `Vec`, not `&'static [PauseButton]` any more.** [`PauseButton::
     /// ServerLinks`] is appended here rather than living in
@@ -2395,10 +2443,10 @@ impl MenuNav {
     /// those two `const` arrays cannot express — see that variant's own doc.
     #[must_use]
     pub fn pause_buttons(&self) -> Vec<PauseButton> {
-        let base: &[PauseButton] = if self.lan_published {
-            &PAUSE_BUTTONS_PUBLISHED
-        } else {
+        let base: &[PauseButton] = if self.open_to_lan_available() {
             &PAUSE_BUTTONS
+        } else {
+            &PAUSE_BUTTONS_PUBLISHED
         };
         let mut buttons = base.to_vec();
         if self.server_links.has_links() {
@@ -8766,6 +8814,11 @@ mod tests {
         let mut ui = UiState::new();
         ui.enter_dev_world();
         ui.pause();
+        // This walk visits `OpenToLan`, which only a singleplayer session
+        // offers (`MenuNav::open_to_lan_available`) — `enter_dev_world`'s
+        // `kind = None` carries no session kind of its own, so the test states
+        // its premise explicitly rather than relying on a stale default.
+        nav.set_has_singleplayer_server(true);
         assert_eq!(nav.pause_button(), PauseButton::BackToGame);
 
         nav.key(&mut ui, MenuKey::Up);
@@ -8847,6 +8900,42 @@ mod tests {
         assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
     }
 
+    /// **The owner's report**: "Open to LAN" is shown while on a multiplayer
+    /// server. `MenuNav::lan_published` alone cannot tell "singleplayer, not
+    /// yet published" from "multiplayer, has nothing to publish" apart — both
+    /// read `false`, which is exactly the state a fresh `MenuNav` starts in
+    /// and a multiplayer session never leaves. `open_to_lan_available` is the
+    /// fix: vanilla's own `hasSingleplayerServer()` conjunct, pushed in by
+    /// `app::session::drive_ui_from_session` from `UiState::kind()`.
+    #[test]
+    fn open_to_lan_is_absent_on_a_never_flagged_singleplayer_session() {
+        let mut nav = nav("pause-multiplayer-shape").0;
+        // Neither setter called — the exact state a multiplayer session's
+        // `MenuNav` is in every frame, since `set_has_singleplayer_server`
+        // only ever pushes `true` for `SessionKind::Singleplayer`.
+        assert!(
+            !nav.open_to_lan_available(),
+            "a session never confirmed singleplayer must not offer Open to LAN"
+        );
+        assert_eq!(
+            nav.pause_buttons(),
+            PAUSE_BUTTONS_PUBLISHED.as_slice(),
+            "the multiplayer pause menu must take the same collapsed, no-LAN-row \
+             shape a published singleplayer world does"
+        );
+        assert!(
+            !nav.pause_buttons().contains(&PauseButton::OpenToLan),
+            "Open to LAN must not be reachable at all on a multiplayer session"
+        );
+
+        // The positive control: flagging the session singleplayer (and still
+        // unpublished) is what actually turns the row back on — proving the
+        // assertions above are not vacuously true for every `MenuNav`.
+        nav.set_has_singleplayer_server(true);
+        assert!(nav.open_to_lan_available());
+        assert!(nav.pause_buttons().contains(&PauseButton::OpenToLan));
+    }
+
     #[test]
     fn back_to_game_resumes_play() {
         let (mut nav, _) = nav("pause-resume");
@@ -8921,6 +9010,9 @@ mod tests {
         let mut ui = UiState::new();
         ui.enter_dev_world();
         ui.pause();
+        // The full ten-row (unpublished) list is what this walk exercises —
+        // see `MenuNav::open_to_lan_available`'s own doc.
+        nav.set_has_singleplayer_server(true);
         assert_eq!(nav.pause_index(), 0);
         // Disconnect is the last of vanilla's nine pause widgets, not the third
         // of three — this index moved when the screen gained vanilla's full
@@ -8944,6 +9036,9 @@ mod tests {
         let mut ui = UiState::new();
         ui.enter_dev_world();
         ui.pause();
+        // The full ten-row (unpublished) list is what `last` below assumes —
+        // see `MenuNav::open_to_lan_available`'s own doc.
+        nav.set_has_singleplayer_server(true);
 
         // Select the real Disconnect button first, so a fall-through would be
         // observable as a session teardown.
@@ -9021,6 +9116,9 @@ mod tests {
         // LAN).
         ui.enter_dev_world();
         ui.pause();
+        // This walk visits `OpenToLan`, which only a singleplayer session
+        // offers — see `MenuNav::open_to_lan_available`'s own doc.
+        nav.set_has_singleplayer_server(true);
         let mut seen = vec![nav.pause_button()];
         for _ in 0..6 {
             nav.key(&mut ui, MenuKey::Down);
