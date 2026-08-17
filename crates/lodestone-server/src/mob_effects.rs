@@ -420,15 +420,14 @@ pub struct FoodEffectGrant {
 /// linear scan (the table is seven rows; a binary search would be a second thing to
 /// keep sorted for no measured benefit).
 ///
-/// **Disclosed gap**: `resistance`'s damage reduction and `absorption`'s extra
-/// hit points are not wired into the player damage pipeline — `Defenses` is built
-/// from `PlayerInventory::combat_stats` alone, with `resistance_amplifier` always
-/// `None` and `absorption` always `0.0`, at every real call site (see
-/// `lodestone_entity::damage`'s own fields). Granting either effect here is still a
-/// real fix: it stores correctly, ticks its duration down, and shows in the HUD
-/// exactly like every other effect — the *mechanism* gap is pre-existing and wider
-/// than this table (a beacon's Resistance level and a Resistance splash potion hit
-/// the same wall), not introduced by feeding it. `fire_resistance` and
+/// **Formerly-disclosed gap, now closed (issue #690)**: `resistance`'s damage
+/// reduction and `absorption`'s extra hit points used to be granted here and
+/// never consumed — `Defenses` was built from `PlayerInventory::combat_stats`
+/// alone, with `resistance_amplifier` always `None` and `absorption` always
+/// `0.0`, at the one real player-damage call site. [`ActiveEffects::overlay_
+/// defenses`] now overlays both onto the equipment-derived `Defenses` before
+/// every real hit, so a granted Resistance or Absorption effect measurably
+/// reduces damage rather than sitting inert in the HUD. `fire_resistance` and
 /// `regeneration` are **not** in this category: both already have a real
 /// consumer (`crate::burning`'s `fire_resistance` flag, `ActiveEffects::tick`'s
 /// heal), so granting those two is a complete fix end to end.
@@ -772,6 +771,39 @@ impl ActiveEffects {
             .iter()
             .map(|(id, instance)| (id.as_str(), instance.amplifier))
             .collect()
+    }
+
+    /// Overlays this entity's live Resistance amplifier and Absorption pool onto
+    /// equipment-derived `Defenses` (`PlayerInventory::combat_stats().defenses` at
+    /// the caller), closing the gap the food-effects table's own doc named:
+    /// `Defenses` used to come from armour alone, so a Resistance potion reduced
+    /// nothing and Absorption's extra hearts never soaked a hit (issue #690).
+    ///
+    /// `resistance_amplifier` is a direct read of the active amplifier —
+    /// `CombatRules.getDamageAfterMagicAbsorb` (`lodestone_entity::damage_after_
+    /// resistance`) takes exactly that. `absorption` is `MobEffects.ABSORPTION`'s
+    /// own `MAX_ABSORPTION` attribute modifier, `4.0 * (amplifier + 1)`
+    /// (`AttributeModifier.Operation.ADD_VALUE` at base `4.0`, scaled by level).
+    ///
+    /// **Disclosed simplification**: vanilla drains a separate `AbsorptionAmount`
+    /// pool across hits within one effect's duration — a hit that only partially
+    /// consumes the cushion leaves the remainder for the next one. This crate does
+    /// not yet track that depleting pool (it would need to persist across ticks
+    /// wherever the effect is granted, not just at the hit site), so every hit
+    /// while Absorption is active sees the effect's full nominal cushion rather
+    /// than whatever an earlier hit in the same duration already spent. Real
+    /// reduction, still measurably wrong compared to vanilla's per-hit depletion —
+    /// tracked, not silently approximated.
+    #[must_use]
+    pub fn overlay_defenses(&self, base: lodestone_entity::Defenses) -> lodestone_entity::Defenses {
+        lodestone_entity::Defenses {
+            resistance_amplifier: self.amplifier_of("minecraft:resistance").map(|a| a as i32),
+            absorption: self
+                .amplifier_of("minecraft:absorption")
+                .map(|a| 4.0 * (a + 1) as f32)
+                .unwrap_or(0.0),
+            ..base
+        }
     }
 
     /// Applies an effect — `LivingEntity.addEffect`, which forwards to

@@ -119,6 +119,15 @@ pub struct PlayerInventory {
     /// [`open_workstation`](Self::open_workstation) and set to a fresh draw by
     /// `crate::server::open_enchanting_screen`'s own caller.
     enchant_seed: i64,
+    /// An open loom or stonecutter's `selectedBannerPatternIndex`/
+    /// `selectedRecipeIndex` `DataSlot` (issue #150) — which offer in the
+    /// station's own selectable list `ContainerButtonClick` most recently
+    /// picked. `None` means "nothing chosen yet," the same shape
+    /// `pending_rename` gives a fresh anvil menu. Reset by
+    /// [`open_workstation`](Self::open_workstation), exactly like
+    /// `pending_rename`/`enchant_seed`: a new menu instance starts with
+    /// nothing selected, not whatever the previous station left behind.
+    selected_recipe_index: Option<i32>,
     /// Menu-index → highlighted bundle-content index, from
     /// `ServerboundSelectBundleItemPacket` (`crate::container_click`'s
     /// `SelectedBundleIndex`). Vanilla keeps this on the open
@@ -143,6 +152,7 @@ impl Default for PlayerInventory {
             workstation: None,
             pending_rename: None,
             enchant_seed: 0,
+            selected_recipe_index: None,
             selected_bundle: HashMap::new(),
         }
     }
@@ -395,6 +405,7 @@ impl PlayerInventory {
         self.workstation = Some(vec![None; inputs]);
         self.pending_rename = None;
         self.enchant_seed = 0;
+        self.selected_recipe_index = None;
     }
 
     /// The open anvil's typed-but-not-yet-taken rename text, if any. See this
@@ -423,6 +434,21 @@ impl PlayerInventory {
     /// (`Player.onEnchantmentPerformed`'s own reroll).
     pub fn set_enchant_seed(&mut self, seed: i64) {
         self.enchant_seed = seed;
+    }
+
+    /// The open loom/stonecutter's currently selected offer index, if any —
+    /// see this struct's own `selected_recipe_index` field doc.
+    #[must_use]
+    pub fn selected_recipe_index(&self) -> Option<i32> {
+        self.selected_recipe_index
+    }
+
+    /// Sets the open loom/stonecutter's selected offer index —
+    /// `LoomMenu.clickMenuButton`/`StonecutterMenu.clickMenuButton`'s write
+    /// half; see `crate::server`'s `ContainerButtonClick` consumer for the
+    /// validation that happens before this is called.
+    pub fn set_selected_recipe_index(&mut self, index: Option<i32>) {
+        self.selected_recipe_index = index;
     }
 
     /// Closes the open workstation and returns whatever was in it, so the

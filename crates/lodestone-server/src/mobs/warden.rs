@@ -1,19 +1,21 @@
-//! The warden's anger consumer (issue #459's step 3): turns
-//! [`SimMob::nearest_vibration`](super::SimMob::nearest_vibration) into real
-//! anger, and real anger into a real melee hit.
+//! The warden's anger consumer and its two attacks (issue #459's step 3):
+//! turns [`SimMob::nearest_vibration`](super::SimMob::nearest_vibration) into
+//! real anger, real anger into a real ranged sonic-boom or melee hit, and a
+//! fresh spawn into a real, invulnerable emerging window.
 //!
 //! # What it is
 //!
 //! [`AngerLevel`] is vanilla's `AngerLevel` (`Warden.java`'s own nested
 //! enum) — `Calm`/`Agitated`/`Angry`, bucketed from a `0..=150` anger score
 //! by [`AngerLevel::from_anger`]. [`MobSim::resolve_warden_anger`] is the
-//! per-tick consumer: it decays every warden's anger by
-//! [`ANGER_DECAY_PER_TICK`] (`AngerManagement.tick`'s own
-//! `DEFAULT_ANGER_DECREASE`), absorbs this tick's
+//! per-tick consumer: it counts down a fresh spawn's emerge window, decays
+//! every warden's anger by [`ANGER_DECAY_PER_TICK`] (`AngerManagement.tick`'s
+//! own `DEFAULT_ANGER_DECREASE`), absorbs this tick's
 //! [`nearest_vibration`](super::SimMob::nearest_vibration) answer by
 //! [`ANGER_INCREASE`] (`Warden.increaseAngerAt`'s own default amount) at its
 //! `source`, and — once a warden is [`AngerLevel::Angry`] and its target is
-//! close enough — lands a real melee hit through the same
+//! close enough — lands a real hit (sonic boom preferred, melee as the
+//! close-range fallback — see below) through the same
 //! [`SimMob::apply_damage`](super::SimMob::apply_damage) pipeline every other
 //! hit in this crate goes through (armour, i-frames, hurt sound all
 //! included).
@@ -48,19 +50,79 @@
 //! answer (that method runs after the per-mob brain tick each tick, the same
 //! ordering [`resolve_vibrations`](super::MobSim::resolve_vibrations)'s own
 //! doc explains), so a freshly-angered warden starts walking one tick after
-//! the anger that caused it, not the same tick. **No dig/emerge and no sonic
-//! boom** still: both need machinery (a pose/animation state for dig/emerge,
-//! a ranged burst-damage attack for sonic boom) this module does not build.
+//! the anger that caused it, not the same tick.
+//!
+//! **Emerging and sonic boom are now both real.** Every warden spawns with
+//! [`EMERGE_DURATION_TICKS`] of `Pose::EMERGING`
+//! ([`MetadataField::Pose`](crate::protocol::MetadataField::Pose), reaching
+//! the wire through [`SimMob::snapshot`](super::SimMob::snapshot)) —
+//! invulnerable for that window
+//! ([`SimMob::apply_damage`](super::SimMob::apply_damage)'s own warden arm)
+//! and outside `FIGHT`'s reach (this module's own early-continue). Once
+//! angry and in range, [`resolve_warden_anger`] prefers a real ranged
+//! [`SONIC_BOOM_DAMAGE`] (true damage, on
+//! [`SONIC_BOOM_COOLDOWN_TICKS`]) over melee whenever the target is within
+//! [`SONIC_BOOM_RANGE_XZ_SQR`]/[`SONIC_BOOM_RANGE_Y_SQR`] and the boom is off
+//! cooldown, matching `SonicBoom` outranking `MeleeAttack` in
+//! `WardenAi::initFightActivity`'s own behaviour order — melee only fires
+//! when the boom cannot (too close after a fresh spawn is never the reason;
+//! cooldown or the 3-block melee-only window past 15/20 blocks are).
+//!
+//! **A citation this module used to carry was wrong, and is worth recording
+//! rather than quietly dropping.** `Warden.java` declares
+//! `TIME_TO_USE_MELEE_UNTIL_SONIC_BOOM = 200`, and an earlier pass cited it
+//! here as sonic boom's trigger. Grepping the whole decompiled 26.2 tree
+//! (`.cache/mc/26.2/src/`) for that identifier finds exactly the one
+//! declaration and no read anywhere — it is dead code in this version.
+//! `SonicBoom`'s real `checkExtraStartConditions` is a plain
+//! `closerThan(target, 15.0, 20.0)`, gated only by
+//! `MemoryModuleType.SONIC_BOOM_COOLDOWN` being absent, which is what this
+//! module now implements.
+//!
+//! **Still not built: `Digging`.** `Warden.java`'s `Digging` behavior does
+//! not just play an animation — `Digging.stop` calls
+//! `body.remove(Entity.RemovalReason.DISCARDED)`, i.e. a digging warden
+//! **despawns outright**. Its entry condition
+//! (`ImmutableSet.of(ROAR_TARGET absent, DIG_COOLDOWN absent)` in
+//! `WardenAi::initDiggingActivity`) depends on `MemoryModuleType.DIG_COOLDOWN`'s
+//! *initial* state, which this pass could not pin down from the decompile
+//! alone (`setDigCooldown`'s own `hasMemoryValue` guard only *refreshes* an
+//! already-present cooldown — nothing in `Warden.java` was found setting it
+//! for the first time). Getting that wrong in either direction is worse than
+//! leaving it open: too permissive and every idle warden vanishes within
+//! seconds of spawning; too restrictive and it never triggers at all, same
+//! as today. [`POSE_DIGGING`] is reserved for whoever resolves the
+//! ambiguity — [`DIGGING_COOLDOWN_TICKS`] and the duration are already cited.
+//!
+//! **Also still open: a warden can only ever become angry at another
+//! *mob*.** [`SimMob::warden_anger_target`](super::SimMob::warden_anger_target)
+//! is only ever set from a [`PostedVibration`]'s `source`, and the only
+//! producer wired anywhere in this crate is `MobSim::reap_dead` posting
+//! `EntityDie` for a dying mob (see the vibration substrate's own module
+//! doc). No block-break, footstep or container-open producer exists yet —
+//! those live in `crate::server`/`crate::block_placement`, outside this
+//! module's — outside `mobs/**`'s — ownership. So today a warden's anger
+//! target, sonic boom target and melee target are always another `SimMob`,
+//! **never a player**, however loudly a nearby player mines. That is the
+//! real remaining gap between "the warden fights something" (true, and
+//! tested below) and "the warden fights *you*" (not yet reachable in
+//! production).
 //!
 //! # How to change it
 //!
 //! - **Pursuit speed/stop distance**: `lodestone_entity::brain::roster::warden_brain`'s
 //!   own constants (`SCAFFOLD_STROLL_SPEED`, `WARDEN_PURSUIT_CLOSE_ENOUGH`),
 //!   not this module — this module has no movement code of its own.
-//! - **Sonic boom**: `Warden.java`'s own `TIME_TO_USE_MELEE_UNTIL_SONIC_BOOM`
-//!   (200 ticks) and
-//!   `net.minecraft.world.entity.ai.behavior.warden.SonicBoom` (10.0 true
-//!   damage, a fixed knockback) are the transcription source.
+//! - **Digging**: resolve `DIG_COOLDOWN`'s initial-state ambiguity above
+//!   first, then reuse [`POSE_DIGGING`]/[`DIGGING_DURATION_TICKS`]/
+//!   [`DIGGING_COOLDOWN_TICKS`] — the same emerge-ticks/pose shape
+//!   [`resolve_warden_anger`] already builds for [`EMERGE_DURATION_TICKS`],
+//!   ending in mob removal rather than a state reset.
+//! - **Sonic boom knockback against a player target**: blocked on this
+//!   crate having no mechanism at all to deliver a velocity impulse to a
+//!   player from the server — see [`SONIC_BOOM_KNOCKBACK_HORIZONTAL`]'s own
+//!   doc. Not warden-specific; ordinary hostile melee against a player has
+//!   the identical gap.
 //! - **A second listener species**: `lodestone_entity::vibration`'s own
 //!   module doc already names this seam (`is_vibration_listener`); this
 //!   module's anger/attack consumer is warden-specific and would need a
@@ -103,6 +165,71 @@ pub const ANGRY_THRESHOLD: i32 = 80;
 /// jar-derived figure.
 pub const MELEE_RANGE_SQR: f64 = 9.0;
 
+/// `WardenAi.EMERGE_DURATION` — `Mth.ceil(133.59999F)`. How long a
+/// freshly-spawned warden holds `Pose::EMERGING` — invulnerable
+/// ([`SimMob::apply_damage`](super::SimMob::apply_damage)'s own warden arm)
+/// and outside the `FIGHT` activity's reach (see [`resolve_warden_anger`]'s
+/// own early-continue) — before returning to normal.
+pub const EMERGE_DURATION_TICKS: i32 = 134;
+
+/// `Pose.EMERGING.id()` and `Pose.DIGGING.id()` — the real jar ordinals
+/// (`net.minecraft.world.entity.Pose`), not guessed: `STANDING` through
+/// `DYING` fill `0..=7`, then `CROAKING`/`USING_TONGUE` take `8`/`9` for the
+/// frog before `SITTING` at `10` and `ROARING`/`SNIFFING` at `11`/`12`, so
+/// the warden's own two poses land at `13`/`14`.
+pub const POSE_EMERGING: u32 = 13;
+/// See [`POSE_EMERGING`]. Not yet produced by this module — no `Digging`
+/// consumer exists (see the module doc's own disclosed gap) — but named
+/// here so the id is not re-derived when one is built.
+pub const POSE_DIGGING: u32 = 14;
+/// `Pose.STANDING.id()` — vanilla's own default, and what
+/// [`SimMob::snapshot`](super::SimMob::snapshot) sends once
+/// [`EMERGE_DURATION_TICKS`] elapses so a client that already saw `13`
+/// does not stay stuck showing it forever (`SET_ENTITY_DATA` is a sparse
+/// update — see `MetadataField::Pose`'s own doc).
+pub const POSE_STANDING: u32 = 0;
+
+/// `WardenAi.DIGGING_DURATION` — `Mth.ceil(100.0F)`. Cited for whoever
+/// builds `Digging` (see the module doc's own disclosed ambiguity); nothing
+/// here starts this countdown yet.
+pub const DIGGING_DURATION_TICKS: i32 = 100;
+/// `WardenAi.DIGGING_COOLDOWN` — `1200` ticks, refreshed by
+/// `WardenAi.setDigCooldown` whenever `MemoryModuleType.DIG_COOLDOWN` is
+/// already present. See the module doc for why this module does not yet
+/// know when that memory is first set.
+pub const DIGGING_COOLDOWN_TICKS: i32 = 1200;
+
+/// `SonicBoom.COOLDOWN` — ticks after a boom lands before the next one may
+/// fire.
+pub const SONIC_BOOM_COOLDOWN_TICKS: i32 = 40;
+
+/// `SonicBoom.checkExtraStartConditions`'s `closerThan(target, 15.0, 20.0)`
+/// horizontal leg — `Entity.closerThan`'s `xz` argument, squared for the
+/// same reason [`MELEE_RANGE_SQR`] is.
+pub const SONIC_BOOM_RANGE_XZ_SQR: f64 = 225.0;
+/// The same call's vertical leg (`20.0`), squared.
+pub const SONIC_BOOM_RANGE_Y_SQR: f64 = 400.0;
+
+/// `SonicBoom.tick`'s hit: `10.0F` true damage through
+/// `level.damageSources().sonicBoom(body)` — `minecraft:sonic_boom`,
+/// `bypasses_armor bypasses_enchantments bypasses_shield` in the real
+/// datapack table (`lodestone_data::damage_types`), so armour and
+/// enchantments do nothing against it but Resistance still can, exactly as
+/// vanilla's own `getDamageAfterMagicAbsorb` leaves that stage unbypassed.
+pub const SONIC_BOOM_DAMAGE: f32 = 10.0;
+
+/// `SonicBoom.KNOCKBACK_HORIZONTAL`/`KNOCKBACK_VERTICAL` — `target.push(...)`
+/// scaled by `(1.0 - knockbackResistance)`. **Not yet applied to a player
+/// target** — this crate has no mechanism to deliver a velocity impulse to a
+/// player from the server at all yet (ordinary hostile melee against a
+/// player has the identical gap — see [`super::PlayerHit`]'s own field
+/// list, which carries no knockback vector either). Applied for real against
+/// a mob target through the same [`SimMob::apply_knockback`](super::SimMob::apply_knockback)
+/// every other mob-on-mob hit in this crate uses.
+pub const SONIC_BOOM_KNOCKBACK_HORIZONTAL: f64 = 2.5;
+/// See [`SONIC_BOOM_KNOCKBACK_HORIZONTAL`].
+pub const SONIC_BOOM_KNOCKBACK_VERTICAL: f64 = 0.5;
+
 /// `Warden.AngerLevel` — the three named buckets [`AngerLevel::from_anger`]
 /// derives from a raw anger score.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +265,19 @@ fn distance_sqr(a: Vec3, b: Vec3) -> f64 {
     dx * dx + dy * dy + dz * dz
 }
 
+/// `Entity.closerThan(Entity, xz, y)`'s horizontal leg, squared —
+/// [`SONIC_BOOM_RANGE_XZ_SQR`]'s own comparand.
+fn distance_sqr_xz(a: Vec3, b: Vec3) -> f64 {
+    let (dx, dz) = (a.x - b.x, a.z - b.z);
+    dx * dx + dz * dz
+}
+
+/// `Entity.closerThan(Entity, xz, y)`'s vertical leg, squared.
+fn distance_sqr_y(a: Vec3, b: Vec3) -> f64 {
+    let dy = a.y - b.y;
+    dy * dy
+}
+
 impl<'w> MobSim<'w> {
     /// Issue #459's step 3: decays every listener's anger, absorbs this
     /// tick's [`nearest_vibration`](super::SimMob::nearest_vibration) answer,
@@ -166,6 +306,19 @@ impl<'w> MobSim<'w> {
             if !lodestone_entity::vibration::is_vibration_listener(mob.entity_type.path()) {
                 continue;
             }
+            // Independent of anger/strike below: `onReceiveVibration` is a
+            // plain listener callback in vanilla, not a `Brain` behaviour, so
+            // it keeps running while `EMERGE` is the active activity — only
+            // *acting* on anger (walking, striking) is blocked by activity
+            // priority (`WardenAi::updateActivity` puts `EMERGE` ahead of
+            // `FIGHT`). The strike loop below is what enforces that half, by
+            // skipping any warden still counting down here.
+            if mob.warden_emerge_ticks > 0 {
+                mob.warden_emerge_ticks -= 1;
+            }
+            if mob.warden_sonic_boom_cooldown > 0 {
+                mob.warden_sonic_boom_cooldown -= 1;
+            }
             if mob.warden_anger > 0 {
                 mob.warden_anger = (mob.warden_anger - ANGER_DECAY_PER_TICK).max(0);
                 if mob.warden_anger == 0 {
@@ -182,7 +335,8 @@ impl<'w> MobSim<'w> {
                 }
                 mob.warden_anger = (mob.warden_anger + ANGER_INCREASE).min(MAX_ANGER);
             }
-            if AngerLevel::from_anger(mob.warden_anger).is_angry()
+            if mob.warden_emerge_ticks == 0
+                && AngerLevel::from_anger(mob.warden_anger).is_angry()
                 && let Some(target) = mob.warden_anger_target
             {
                 strikes.push((mob.id, target, mob.position()));
@@ -195,12 +349,54 @@ impl<'w> MobSim<'w> {
             let Some(target_pos) = self.mobs.iter().find(|m| m.id == target_id).map(super::SimMob::position) else {
                 continue;
             };
-            if distance_sqr(warden_pos, target_pos) > MELEE_RANGE_SQR {
-                continue;
-            }
             let Some(warden) = self.mobs.iter().find(|m| m.id == warden_id) else {
                 continue;
             };
+            let can_sonic_boom = warden.warden_sonic_boom_cooldown == 0
+                && distance_sqr_xz(warden_pos, target_pos) <= SONIC_BOOM_RANGE_XZ_SQR
+                && distance_sqr_y(warden_pos, target_pos) <= SONIC_BOOM_RANGE_Y_SQR;
+            if can_sonic_boom {
+                // `SonicBoom` runs *ahead* of `MeleeAttack` in
+                // `WardenAi::initFightActivity`'s own behaviour list — a
+                // warden in range and off cooldown always booms rather than
+                // melees, exactly matching that ordering rather than the
+                // (dead in 26.2 — see this module's own doc for the
+                // verification) `TIME_TO_USE_MELEE_UNTIL_SONIC_BOOM` figure
+                // this crate's earlier pass cited.
+                let flags = DamageFlags::for_damage_type_name("sonic_boom")
+                    .expect("sonic_boom is a real damage type");
+                if let Some(target) = self.mobs.iter_mut().find(|m| m.id == target_id) {
+                    let applied = target.apply_damage(SONIC_BOOM_DAMAGE, flags);
+                    if applied > 0.0 {
+                        let delta = Vec3::new(
+                            target_pos.x - warden_pos.x,
+                            target_pos.y - warden_pos.y,
+                            target_pos.z - warden_pos.z,
+                        );
+                        let horizontal = (delta.x * delta.x + delta.z * delta.z).sqrt();
+                        let (nx, nz) = if horizontal > 1e-6 {
+                            (delta.x / horizontal, delta.z / horizontal)
+                        } else {
+                            (0.0, 0.0)
+                        };
+                        let resistance = target.knockback_resistance();
+                        target.apply_knockback(Vec3::new(
+                            nx * SONIC_BOOM_KNOCKBACK_HORIZONTAL * (1.0 - resistance),
+                            SONIC_BOOM_KNOCKBACK_VERTICAL * (1.0 - resistance),
+                            nz * SONIC_BOOM_KNOCKBACK_HORIZONTAL * (1.0 - resistance),
+                        ));
+                    }
+                    target.mob.note_hurt(Some(warden_pos));
+                    self.note_vocalisation(target_id, applied);
+                }
+                if let Some(warden) = self.mobs.iter_mut().find(|m| m.id == warden_id) {
+                    warden.warden_sonic_boom_cooldown = SONIC_BOOM_COOLDOWN_TICKS;
+                }
+                continue;
+            }
+            if distance_sqr(warden_pos, target_pos) > MELEE_RANGE_SQR {
+                continue;
+            }
             let raw_damage = warden.attack_damage();
             if let Some(target) = self.mobs.iter_mut().find(|m| m.id == target_id) {
                 let applied = target.apply_damage(raw_damage, DamageFlags::default());
@@ -329,6 +525,11 @@ mod warden_anger_tests {
             let w = sim.get_mut(warden).expect("spawned");
             w.warden_anger = ANGRY_THRESHOLD + 1;
             w.warden_anger_target = Some(target);
+            // Already past its emerge window — this test's subject is a
+            // standing fight, not a fresh spawn (see
+            // `an_emerging_warden_lands_no_hit_even_when_angry_and_in_range`
+            // for that half).
+            w.warden_emerge_ticks = 0;
         }
         let health_before = sim.get(target).expect("spawned").health();
 
@@ -353,12 +554,15 @@ mod warden_anger_tests {
             let w = sim.get_mut(warden).expect("spawned");
             w.warden_anger = ANGRY_THRESHOLD + 1;
             w.warden_anger_target = Some(target);
+            // Past its emerge window — this is the range control, not the
+            // emerge one (see the dedicated emerge test below).
+            w.warden_emerge_ticks = 0;
         }
         let health_before = sim.get(target).expect("spawned").health();
 
         sim.tick();
 
-        assert_eq!(sim.get(target).expect("spawned").health(), health_before, "50 blocks away is far outside a 3-block melee reach");
+        assert_eq!(sim.get(target).expect("spawned").health(), health_before, "50 blocks away is far outside a 3-block melee reach and well past sonic boom's own 15/20 range");
     }
 
     /// The pursuit half of issue #459 step 3, driven through real ticks
@@ -398,6 +602,18 @@ mod warden_anger_tests {
             // arrives, which would test decay rather than pursuit.
             w.warden_anger = MAX_ANGER;
             w.warden_anger_target = Some(target);
+            // Past its emerge window — this test's subject is the chase, not
+            // the spawn animation, and 134 ticks of emerge decaying anger
+            // with nothing acted on would exhaust the `MAX_ANGER` budget
+            // this loop relies on before the warden ever took a step.
+            w.warden_emerge_ticks = 0;
+            // Forced past the loop's own tick budget: the target starts 10
+            // blocks away, inside sonic boom's own 15-block range, so
+            // without this a boom would land on tick 0 with no chase at all
+            // — this test's whole subject is pursuit, not the ranged
+            // attack (see `a_sonic_boom_lands_on_an_in_range_target` for
+            // that one).
+            w.warden_sonic_boom_cooldown = MAX_ANGER + 1;
         }
         let health_before = sim.get(target).expect("spawned").health();
         let target_pos = Vec3::new(10.0, 0.0, 0.0);
@@ -443,6 +659,7 @@ mod warden_anger_tests {
             let w = sim.get_mut(warden).expect("spawned");
             w.warden_anger = ANGRY_THRESHOLD + 5;
             w.warden_anger_target = Some(999_999);
+            w.warden_emerge_ticks = 0;
         }
 
         sim.tick();
@@ -450,6 +667,135 @@ mod warden_anger_tests {
         let w = sim.get(warden).expect("spawned");
         assert_eq!(w.warden_anger(), ANGRY_THRESHOLD + 4, "anger still decays normally with a stale target");
         assert_eq!(w.warden_anger_target(), Some(999_999), "a stale target is not proactively pruned");
+    }
+
+    /// A freshly-spawned warden is angry and in melee range on tick one —
+    /// and lands **no** hit, because `EMERGE` outranks `FIGHT`
+    /// (`WardenAi::updateActivity`). The discriminating control against "the
+    /// emerge gate does nothing": everything else about this setup is
+    /// identical to `an_angry_warden_in_range_lands_a_real_hit`, which does
+    /// land a hit once `warden_emerge_ticks` is zeroed.
+    #[test]
+    fn an_emerging_warden_lands_no_hit_even_when_angry_and_in_range() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let warden = spawn(&mut sim, "warden", Vec3::new(0.0, 0.0, 0.0));
+        let target = spawn(&mut sim, "pig", Vec3::new(1.0, 0.0, 0.0));
+        {
+            let w = sim.get_mut(warden).expect("spawned");
+            w.warden_anger = ANGRY_THRESHOLD + 1;
+            w.warden_anger_target = Some(target);
+        }
+        let health_before = sim.get(target).expect("spawned").health();
+
+        sim.tick();
+
+        assert_eq!(
+            sim.get(target).expect("spawned").health(),
+            health_before,
+            "a warden still emerging must not strike even an adjacent, angry-target-eligible mob"
+        );
+    }
+
+    /// The reciprocal control: an emerging warden is invulnerable to a real
+    /// incoming hit — `Warden.isInvulnerableTo`'s own `isDiggingOrEmerging`
+    /// gate, not merely "does not act".
+    #[test]
+    fn an_emerging_warden_takes_no_damage_from_a_real_hit() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let warden = spawn(&mut sim, "warden", Vec3::new(0.0, 0.0, 0.0));
+        let health_before = sim.get(warden).expect("spawned").health();
+
+        let applied = sim.get_mut(warden).expect("spawned").apply_damage(1000.0, DamageFlags::default());
+
+        assert_eq!(applied, 0.0, "a hit against an emerging warden must apply zero damage");
+        assert_eq!(sim.get(warden).expect("spawned").health(), health_before);
+    }
+
+    /// A warden past its emerge window sends `Pose::STANDING` (`0`); one
+    /// still emerging sends `Pose::EMERGING` (`13`, the real jar ordinal —
+    /// see [`POSE_EMERGING`]'s own doc). Both directions asserted, since a
+    /// snapshot test that only ever checks the non-default value cannot see
+    /// a missing "reset to standing" arm — exactly the "the reset must reach
+    /// the client too" hazard `MetadataField::Pose`'s own doc names.
+    #[test]
+    fn warden_pose_metadata_reports_emerging_then_standing() {
+        use crate::protocol::MetadataField;
+
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let warden = spawn(&mut sim, "warden", Vec3::new(0.0, 0.0, 0.0));
+
+        let mid_emerge = sim.get(warden).expect("spawned").snapshot();
+        assert!(
+            mid_emerge.metadata.contains(&MetadataField::Pose(POSE_EMERGING)),
+            "a freshly spawned warden must report the real Pose.EMERGING ordinal: {:?}",
+            mid_emerge.metadata
+        );
+
+        for _ in 0..EMERGE_DURATION_TICKS {
+            sim.tick();
+        }
+
+        let after_emerge = sim.get(warden).expect("spawned").snapshot();
+        assert!(
+            after_emerge.metadata.contains(&MetadataField::Pose(POSE_STANDING)),
+            "the pose must revert to Standing once EMERGE_DURATION_TICKS elapses, not stay stuck at Emerging: {:?}",
+            after_emerge.metadata
+        );
+    }
+
+    /// The ranged attack, end to end: an angry warden past its emerge window
+    /// with a target 10 blocks away (inside `SonicBoom`'s 15/20 range, well
+    /// outside `MELEE_RANGE_SQR`'s 3 blocks) lands a real true-damage hit —
+    /// proving the attack fires without requiring melee range — and starts
+    /// its own cooldown so an immediate second tick lands **no** further hit
+    /// even though the warden is still angry and still in range.
+    #[test]
+    fn a_sonic_boom_lands_on_a_mid_range_target_and_then_cools_down() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let warden = spawn(&mut sim, "warden", Vec3::new(0.0, 0.0, 0.0));
+        let target = spawn(&mut sim, "pig", Vec3::new(10.0, 0.0, 0.0));
+        {
+            let w = sim.get_mut(warden).expect("spawned");
+            w.warden_anger = ANGRY_THRESHOLD + 1;
+            w.warden_anger_target = Some(target);
+            w.warden_emerge_ticks = 0;
+        }
+        {
+            // A pig's real 10.0 max health would be exactly killed by one
+            // 10.0-damage boom (and then reaped before the second tick's
+            // assertion could even find it) — this test's subject is the
+            // cooldown, not lethality, so give the target enough health to
+            // survive the first hit and still be alive to assert against.
+            let t = sim.get_mut(target).expect("spawned");
+            t.health = 100.0;
+            t.max_health = 100.0;
+        }
+        let health_before = sim.get(target).expect("spawned").health();
+
+        sim.tick();
+
+        let health_after_boom = sim.get(target).expect("spawned").health();
+        assert!(
+            health_after_boom < health_before,
+            "a mid-range angry warden must land a real sonic-boom hit: {health_before} -> {health_after_boom}"
+        );
+        assert_eq!(
+            sim.get(warden).expect("spawned").warden_sonic_boom_cooldown,
+            SONIC_BOOM_COOLDOWN_TICKS,
+            "the boom must set the full cooldown on the tick it lands"
+        );
+
+        sim.tick();
+
+        assert_eq!(
+            sim.get(target).expect("spawned").health(),
+            health_after_boom,
+            "a second boom must not land while the first one's cooldown is still counting down"
+        );
     }
 
     /// Every `VibrationEvent` construction in this file must still compile

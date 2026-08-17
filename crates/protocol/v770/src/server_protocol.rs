@@ -347,6 +347,16 @@ const METADATA_SER_OPTIONAL_BLOCK_POS: i32 = 11;
 /// (`MobSim::push_end_crystal_snapshots`, the sole caller) disambiguates.
 const METADATA_IDX_CRYSTAL_SHOW_BOTTOM: u8 = 9;
 
+/// `Entity.DATA_POSE` — index 6, serializer `POSE` (20). Off the jar dump
+/// (`tests/support/entity_data_index_jvm.txt`: `6 Entity.DATA_POSE 20
+/// POSE`), the **only** claimant at this index — see
+/// `MetadataField::Pose`'s own doc for why that means no species switch is
+/// needed here, unlike every other index in this file. `METADATA_SER_POSE`
+/// matches `crates/protocol/v770/src/packets/metadata.rs`'s own `SER_POSE`
+/// decode-side constant, so a raw pose id round-trips byte-for-byte.
+const METADATA_IDX_POSE: u8 = 6;
+const METADATA_SER_POSE: i32 = 20;
+
 /// `WitherBoss.DATA_ID_INV` — index 19, serializer `INT` (1). Off the jar
 /// dump (`tests/support/entity_data_index_jvm.txt`: `19 WitherBoss.DATA_ID_INV
 /// 1 INT`), one of six `INT` claimants at index 19 — see
@@ -5185,6 +5195,11 @@ impl ServerProtocol for V770ServerProtocol {
                         }
                         None => w.bool(false),
                     }
+                }
+                MetadataField::Pose(id) => {
+                    w.u8(METADATA_IDX_POSE);
+                    w.var_i32(METADATA_SER_POSE);
+                    w.var_i32(*id as i32);
                 }
                 MetadataField::CrystalShowBottom(show) => {
                     // `EndCrystal.DATA_SHOW_BOTTOM` — index 9; only

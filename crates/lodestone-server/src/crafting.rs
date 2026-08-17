@@ -35,7 +35,9 @@
 //!
 //! ## How to change it
 //!
-//! To refresh the corpus, re-copy `crafting_shaped` + `crafting_shapeless` from
+//! To refresh the corpus, re-copy `crafting_shaped` + `crafting_shapeless` +
+//! `stonecutting` (issue #150 added the third — [`crate::stonecutting`] reads
+//! it back out of this same corpus, rather than a second bundle) from
 //! `.cache/mc/26.2/src/data/minecraft/recipe/` and all of
 //! `data/minecraft/tags/item/`, then update [`BUNDLED_CRAFTING_RECIPES`]. Both
 //! halves or neither: an ingredient spelled `#minecraft:planks` matches nothing
@@ -60,13 +62,18 @@ use lodestone_model::ItemStack;
 include!(concat!(env!("OUT_DIR"), "/embedded_embedded_recipes.rs"));
 include!(concat!(env!("OUT_DIR"), "/embedded_embedded_item_tags.rs"));
 
-/// Number of bundled grid recipes — vanilla 26.2's full `crafting_shaped` (733)
-/// plus `crafting_shapeless` (323) set.
+/// Number of bundled recipe JSON files — vanilla 26.2's full `crafting_shaped`
+/// (733) plus `crafting_shapeless` (323) set, plus (issue #150, for the
+/// stonecutter) the full `stonecutting` set (319) — 1,375 total. All three
+/// live in the same `assets/recipe/` directory and the same
+/// [`EMBEDDED_RECIPES`] table; only the JSON's own `"type"` field
+/// distinguishes them, so no second bundling mechanism was needed to add the
+/// stonecutting set.
 ///
 /// Pinned as a constant rather than left implicit because a corpus that silently
 /// lost files is the failure mode that matters here: it rejects valid crafts,
 /// and every individual recipe still works.
-pub const BUNDLED_CRAFTING_RECIPES: usize = 1056;
+pub const BUNDLED_CRAFTING_RECIPES: usize = 1375;
 
 /// The process-wide crafting corpus, parsed once.
 ///

@@ -4217,6 +4217,8 @@ fn container_title(menu: &str) -> &'static str {
         "minecraft:anvil" => "Repair & Name",
         "minecraft:grindstone" => "Grindstone",
         "minecraft:smithing" => "Smithing Table",
+        "minecraft:loom" => "Loom",
+        "minecraft:stonecutter" => "Stonecutter",
         "minecraft:enchantment" => "Enchant",
         "minecraft:merchant" => "Villager",
         "minecraft:beacon" => "Beacon",
@@ -4536,6 +4538,8 @@ fn workstation_menu_type(station: Station) -> &'static str {
         Station::Anvil => "minecraft:anvil",
         Station::Grindstone => "minecraft:grindstone",
         Station::Smithing => "minecraft:smithing",
+        Station::Loom => "minecraft:loom",
+        Station::Stonecutter => "minecraft:stonecutter",
     }
 }
 
@@ -6704,6 +6708,8 @@ where
         }
         "minecraft:grindstone" => Some(Station::Grindstone),
         "minecraft:smithing_table" => Some(Station::Smithing),
+        "minecraft:loom" => Some(Station::Loom),
+        "minecraft:stonecutter" => Some(Station::Stonecutter),
         _ => None,
     } {
         return open_workstation_screen(
@@ -8541,7 +8547,13 @@ fn read_workstation_menu(
     station: Station,
     creative: bool,
 ) -> Vec<Option<ItemStack>> {
-    let result = workstation_result(station, cells, creative, inventory.pending_rename());
+    let result = workstation_result(
+        station,
+        cells,
+        creative,
+        inventory.pending_rename(),
+        inventory.selected_recipe_index(),
+    );
     layout
         .iter()
         .map(|(_, kind)| match kind {
@@ -8554,20 +8566,27 @@ fn read_workstation_menu(
 }
 
 /// One station's result from its own input cells — [`crate::anvil::compute`],
-/// [`crate::anvil::grindstone_result`] or [`crate::smithing::compute`].
-/// `rename` is the anvil's pending typed name
-/// ([`PlayerInventory::pending_rename`]); the other two stations ignore it.
+/// [`crate::anvil::grindstone_result`], [`crate::smithing::compute`],
+/// [`crate::loom::result`] or [`crate::stonecutting::result`]. `rename` is
+/// the anvil's pending typed name ([`PlayerInventory::pending_rename`]);
+/// `selected` is the loom/stonecutter's chosen offer index
+/// ([`PlayerInventory::selected_recipe_index`]) — every other station
+/// ignores whichever of the two it does not use, the same "the other
+/// stations ignore it" shape `rename` already had before `selected` existed.
 fn workstation_result(
     station: Station,
     cells: &[Option<ItemStack>],
     creative: bool,
     rename: Option<&str>,
+    selected: Option<i32>,
 ) -> Option<ItemStack> {
     let get = |i: usize| cells.get(i).and_then(Option::as_ref);
     match station {
         Station::Anvil => crate::anvil::compute(get(0), get(1), rename, creative).result,
         Station::Grindstone => crate::anvil::grindstone_result(get(0), get(1)),
         Station::Smithing => crate::smithing::compute(get(0), get(1), get(2)),
+        Station::Loom => crate::loom::result(get(0), get(1), get(2), selected),
+        Station::Stonecutter => crate::stonecutting::result(get(0), selected),
     }
 }
 
@@ -8600,10 +8619,13 @@ fn apply_workstation_clicked<P: ServerProtocol>(
     let layout = MenuLayout::item_combiner(station);
     let cells: Vec<Option<ItemStack>> = inventory.workstation().map(<[_]>::to_vec).unwrap_or_default();
     let rename = inventory.pending_rename().map(str::to_owned);
+    let selected_recipe_index = inventory.selected_recipe_index();
     let mut slots = read_workstation_menu(&layout, inventory, &cells, station, creative);
     let before = slots.clone();
     let mut state = inventory.click_state().clone();
-    let recipe = |grid_cells: &[Option<ItemStack>]| workstation_result(station, grid_cells, creative, rename.as_deref());
+    let recipe = |grid_cells: &[Option<ItemStack>]| {
+        workstation_result(station, grid_cells, creative, rename.as_deref(), selected_recipe_index)
+    };
     // `AnvilMenu.mayPickup`: `(player.hasInfiniteMaterials() ||
     // player.experienceLevel >= this.cost.get()) && this.cost.get() > 0`.
     // `this.cost` is `crate::anvil::compute`'s own `cost` field, re-derived
@@ -8988,7 +9010,18 @@ fn apply_container_button_click<P: ServerProtocol>(
     fresh_seed: i64,
 ) -> Vec<ServerDirective> {
     let Some(tracked) = tracked else { return Vec::new() };
-    if tracked.window_id != window_id || tracked.shape != MenuKind::Enchanting {
+    if tracked.window_id != window_id {
+        return Vec::new();
+    }
+    // Issue #150: the loom and stonecutter share this same packet
+    // (`ContainerButtonClick`) but neither shape nor pricing in common with
+    // the enchanting table below — `LoomMenu`/`StonecutterMenu.clickMenuButton`
+    // both just pick an offer, with no lapis or XP cost at all. See
+    // `apply_workstation_button_click`'s own doc.
+    if let MenuKind::ItemCombiner { station: station @ (Station::Loom | Station::Stonecutter), .. } = tracked.shape {
+        return apply_workstation_button_click(proto, inventory, tracked, station, button_id, creative);
+    }
+    if tracked.shape != MenuKind::Enchanting {
         return Vec::new();
     }
     let Some(slot) = usize::try_from(button_id).ok().filter(|&s| s < 3) else {
@@ -9069,6 +9102,43 @@ fn apply_container_button_click<P: ServerProtocol>(
     let state_id = tracked.next_state_id();
     directives.push(proto.encode_container_content(tracked.window_id, state_id, &items, inventory.click_state().carried.as_ref()));
     directives
+}
+
+/// [`apply_container_button_click`]'s loom/stonecutter branch —
+/// `LoomMenu.clickMenuButton`/`StonecutterMenu.clickMenuButton`. Both just
+/// pick which offer [`workstation_result`] shows next; neither has a lapis
+/// or XP cost (contrast the enchanting table above), so this only ever needs
+/// to validate the index and resend the menu.
+///
+/// `station == Station::Stonecutter`'s own reselect guard
+/// (`StonecutterMenu.clickMenuButton`'s `if (selectedRecipeIndex.get() ==
+/// buttonId) return false;`) is reproduced; `LoomMenu.clickMenuButton` has no
+/// such guard and re-applies unconditionally when the index is valid.
+fn apply_workstation_button_click<P: ServerProtocol>(
+    proto: &P,
+    inventory: &mut PlayerInventory,
+    tracked: &mut OpenContainer,
+    station: Station,
+    button_id: i32,
+    creative: bool,
+) -> Vec<ServerDirective> {
+    if station == Station::Stonecutter && inventory.selected_recipe_index() == Some(button_id) {
+        return Vec::new();
+    }
+    let layout = MenuLayout::item_combiner(station);
+    let cells: Vec<Option<ItemStack>> = inventory.workstation().map(<[_]>::to_vec).unwrap_or_default();
+    let get = |i: usize| cells.get(i).and_then(Option::as_ref);
+    let offer_count = match station {
+        Station::Loom => crate::loom::selectable_pattern_count(get(2)),
+        Station::Stonecutter => crate::stonecutting::count(get(0)),
+        Station::Anvil | Station::Grindstone | Station::Smithing => 0,
+    };
+    if usize::try_from(button_id).is_ok_and(|index| index < offer_count) {
+        inventory.set_selected_recipe_index(Some(button_id));
+    }
+    let items = read_workstation_menu(&layout, inventory, &cells, station, creative);
+    let state_id = tracked.next_state_id();
+    vec![proto.encode_container_content(tracked.window_id, state_id, &items, inventory.click_state().carried.as_ref())]
 }
 
 /// Lays a recipe-book recipe out in the open crafting grid (issue #529 step 4).
@@ -10992,7 +11062,11 @@ where
                             }
                         }
                     }
-                    Station::Smithing => {}
+                    // Neither `LoomMenu` nor `StonecutterMenu`'s result slot
+                    // charges or refunds XP anywhere in vanilla — the whole
+                    // cost of either is the input items `take_result`
+                    // already consumes.
+                    Station::Smithing | Station::Loom | Station::Stonecutter => {}
                 }
             }
             if experience_changed {
@@ -13823,7 +13897,7 @@ where
                             if vitals
                                 .apply_damage(
                                     hit.raw_damage,
-                                    &inventory.combat_stats().defenses,
+                                    &effects.overlay_defenses(inventory.combat_stats().defenses),
                                     flags,
                                 )
                                 .is_some()
@@ -17201,6 +17275,153 @@ mod tests {
             1,
         );
         assert!(refused.is_empty(), "an out-of-range button id must be refused");
+    }
+
+    /// Issue #150, end to end through the real production dispatch: a
+    /// stonecutter menu opens with cobblestone in its input cell, a
+    /// `ContainerButtonClick` selects one of the real offers
+    /// `crate::stonecutting::matches` computes, and taking the result slot
+    /// consumes exactly one cobblestone and leaves the rest — the same
+    /// `apply_container_clicked` → `apply_workstation_clicked` →
+    /// `container_click::take_result` path every other workstation in this
+    /// crate already goes through, not a hand-rolled shortcut.
+    #[test]
+    fn a_stonecutter_button_click_then_take_produces_the_selected_recipe_and_consumes_one_input() {
+        // `apply_workstation_button_click` (the loom/stonecutter branch of
+        // `apply_container_button_click`) never reads `source` at all —
+        // unlike the enchanting branch's `bookshelf_power` call — so this
+        // must never be invoked.
+        struct UnusedSource;
+        impl ChunkSource for UnusedSource {
+            fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
+                unimplemented!("the stonecutter button click must never read the world")
+            }
+            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+                unimplemented!("the stonecutter button click must never read the world")
+            }
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+                unimplemented!("read-only in this test")
+            }
+        }
+
+        let mut inventory = PlayerInventory::new();
+        inventory.open_workstation(1);
+        if let Some(ws) = inventory.workstation_mut() {
+            ws[0] = Some(stack("minecraft:cobblestone", 5));
+        }
+        let mut open = OpenContainer {
+            window_id: 9,
+            pos: BlockPos::new(0, 0, 0),
+            shape: MenuKind::ItemCombiner { inputs: 1, station: Station::Stonecutter },
+            container_size: 2,
+            state_id: 0,
+        };
+        let offers = crate::stonecutting::matches(&stack("minecraft:cobblestone", 1));
+        assert!(offers.len() >= 2, "need at least two offers to prove a specific one was selected");
+
+        // Select offer index 1 — not the default/first, so a bug that always
+        // takes index 0 would fail this.
+        let directives = apply_container_button_click(
+            &ContainerTagProto,
+            &mut inventory,
+            Some(&mut open),
+            9,
+            1,
+            &UnusedSource,
+            &mut crate::experience::PlayerExperience::default(),
+            false,
+            0,
+        );
+        assert!(!directives.is_empty(), "a valid selection must resend the menu");
+        assert_eq!(inventory.selected_recipe_index(), Some(1));
+
+        let block_entities = BlockEntityHandle::new();
+        let (_, _dropped) = apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            Some(&mut open),
+            9,
+            // Slot `inputs` (1) is the result slot — a plain left-click picks
+            // it up, which is what triggers `take_result`.
+            Click { slot: 1, button: 0, click_type: 0 },
+            &[],
+            None,
+            false,
+            0,
+        );
+
+        let taken = inventory
+            .click_state()
+            .carried
+            .as_ref()
+            .expect("the take must put the result on the cursor");
+        assert_eq!(taken.item, offers[1].item, "the taken item must be the selected offer, not the first one");
+
+        let cells = inventory.workstation().expect("still open");
+        assert_eq!(
+            cells[0].as_ref().map(|s| s.count),
+            Some(4),
+            "exactly one cobblestone must be consumed by the take"
+        );
+    }
+
+    /// Issue #150, end to end: a loom with a banner, a dye and a specific
+    /// pattern *item* auto-selects that item's one pattern — no
+    /// `ContainerButtonClick` needed, matching `LoomMenu.slotsChanged`'s own
+    /// auto-select branch — and taking the result consumes exactly one
+    /// banner and one dye while leaving the pattern item untouched, so it
+    /// can stamp a second banner.
+    #[test]
+    fn a_loom_take_with_a_pattern_item_consumes_banner_and_dye_but_not_the_pattern_item() {
+        let mut inventory = PlayerInventory::new();
+        inventory.open_workstation(3);
+        if let Some(ws) = inventory.workstation_mut() {
+            ws[0] = Some(stack("minecraft:white_banner", 3));
+            ws[1] = Some(stack("minecraft:red_dye", 5));
+            ws[2] = Some(stack("minecraft:creeper_banner_pattern", 1));
+        }
+        let mut open = OpenContainer {
+            window_id: 11,
+            pos: BlockPos::new(0, 0, 0),
+            shape: MenuKind::ItemCombiner { inputs: 3, station: Station::Loom },
+            container_size: 4,
+            state_id: 0,
+        };
+        let block_entities = BlockEntityHandle::new();
+
+        let (_, _dropped) = apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            Some(&mut open),
+            11,
+            // Slot `inputs` (3) is the result slot.
+            Click { slot: 3, button: 0, click_type: 0 },
+            &[],
+            None,
+            false,
+            0,
+        );
+
+        let taken = inventory.click_state().carried.as_ref().expect("the take must produce a result");
+        assert_eq!(taken.item.to_string(), "minecraft:white_banner");
+        assert_eq!(
+            taken.components.banner_patterns,
+            vec![lodestone_model::BannerPatternLayer {
+                pattern_asset_id: "creeper".to_string(),
+                color: "red".to_string(),
+            }]
+        );
+
+        let cells = inventory.workstation().expect("still open");
+        assert_eq!(cells[0].as_ref().map(|s| s.count), Some(2), "one banner must be consumed");
+        assert_eq!(cells[1].as_ref().map(|s| s.count), Some(4), "one dye must be consumed");
+        assert_eq!(
+            cells[2].as_ref().map(|s| s.count),
+            Some(1),
+            "the pattern item must survive the take, so it can stamp a second banner"
+        );
     }
 
     /// A click against the connection's *open* non-zero window reaches both the

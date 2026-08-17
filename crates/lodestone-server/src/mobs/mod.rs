@@ -1511,6 +1511,21 @@ pub struct SimMob<'w> {
     /// silent behaviour change. `None` once anger decays to `0` or the
     /// target stops existing.
     warden_anger_target: Option<i32>,
+    /// `WardenAi.EMERGE_DURATION` (134 ticks) counted down from spawn —
+    /// `Emerging`'s own duration, matching `Warden.finalizeSpawn`'s
+    /// `setPose(Pose.EMERGING)`. `0` for every non-warden species and for a
+    /// warden past its emerge window. While positive: the warden is
+    /// invulnerable (`Warden.isInvulnerableTo`'s `isDiggingOrEmerging` gate,
+    /// see [`SimMob::apply_damage`]'s own species arm) and does not strike
+    /// ([`warden::MobSim::resolve_warden_anger`] skips it outright, matching
+    /// `EMERGE` outranking `FIGHT` in `WardenAi::updateActivity`'s priority
+    /// list). See [`warden`] module doc for the `DIGGING`/despawn half this
+    /// crate does not build.
+    warden_emerge_ticks: i32,
+    /// `SonicBoom.COOLDOWN` (40 ticks), ticked down once a boom lands —
+    /// [`warden::MobSim::resolve_warden_anger`]'s own gate on how often a
+    /// warden may re-use the ranged attack. `0` for every non-warden species.
+    warden_sonic_boom_cooldown: i32,
     /// `Goat.DATA_HAS_LEFT_HORN`. `true` for every non-goat species (the
     /// field is meaningless there) and for a goat that has not lost this
     /// horn. Rolled once at spawn (`Goat.finalizeSpawn`'s own `nextFloat() <
@@ -2159,6 +2174,19 @@ impl<'w> SimMob<'w> {
         if self.health <= 0.0 {
             return 0.0;
         }
+        // `Warden.isInvulnerableTo`: `isDiggingOrEmerging()` blocks every hit
+        // except one tagged `DamageTypeTags.BYPASSES_INVULNERABILITY` (void,
+        // `/kill`, and similarly out-of-world sources). That carve-out is not
+        // modelled as a `DamageFlags` bit here (see
+        // `lodestone_entity::damage::DamageFlags`'s field list — it has no
+        // `bypasses_invulnerability`), so this is a narrower, disclosed
+        // invulnerability than vanilla's: a hit that should still land during
+        // emerge is blocked too. Only the `Emerging` half is modelled — see
+        // `crate::mobs::warden`'s module doc for the `Digging` half this
+        // crate does not build.
+        if self.entity_type.path() == "warden" && self.warden_emerge_ticks > 0 {
+            return 0.0;
+        }
         // `Armadillo.hurtServer`'s override, which runs *before* the
         // invulnerability-frame check below (it wraps `super.hurtServer`, not
         // `actuallyHurt`) — a curled-up armadillo halves the raw hit before
@@ -2600,6 +2628,17 @@ impl<'w> SimMob<'w> {
                 has_left: self.has_left_horn,
                 has_right: self.has_right_horn,
             });
+        }
+        // `Entity.DATA_POSE`, index 6 — pushed unconditionally for a warden,
+        // not only while emerging, for the same "the reset must reach the
+        // client too" reason `Baby`/`CreeperSwellDir` are: see
+        // `MetadataField::Pose`'s own doc.
+        if self.entity_type.path() == "warden" {
+            metadata.push(MetadataField::Pose(if self.warden_emerge_ticks > 0 {
+                warden::POSE_EMERGING
+            } else {
+                warden::POSE_STANDING
+            }));
         }
         EntitySnapshot {
             id: self.id,
@@ -4004,6 +4043,7 @@ impl<'w> MobSim<'w> {
         self.next_id += 1;
         let (max_health, attack_damage, defenses, knockback_resistance) =
             combat_defaults(&entity_type);
+        let is_warden = entity_type.path() == "warden";
         self.mobs.push(SimMob {
             id,
             mob: NavigatingMob::new(self.world, shape, pos, step_per_tick, visited_budget, id as u64),
@@ -4048,6 +4088,8 @@ impl<'w> MobSim<'w> {
             nearest_vibration: None,
             warden_anger: 0,
             warden_anger_target: None,
+            warden_emerge_ticks: if is_warden { warden::EMERGE_DURATION_TICKS } else { 0 },
+            warden_sonic_boom_cooldown: 0,
             has_left_horn: true,
             has_right_horn: true,
             reinforcement_chance: 0.0,
@@ -5924,6 +5966,7 @@ impl<'w> MobSim<'w> {
             .iter()
             .map(|me| {
                 if me.entity_type().path() != "warden"
+                    || me.warden_emerge_ticks > 0
                     || !warden::AngerLevel::from_anger(me.warden_anger).is_angry()
                 {
                     return None;
