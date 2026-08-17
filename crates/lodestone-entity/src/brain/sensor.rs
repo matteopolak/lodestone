@@ -315,6 +315,31 @@ impl Sensor for NearestAttackableFoodSensor {
     }
 }
 
+/// Writes [`MemoryModuleType::DELIVERY_TARGET`] from
+/// [`BrainMob::delivery_target`] — the same host-computed-candidate shape
+/// [`NearestVisibleZombifiedSensor`]/[`NearestAttackableFoodSensor`] already
+/// use: the host resolves the whole eligibility chain and this sensor only
+/// copies the answer into memory each tick.
+#[derive(Debug, Default)]
+pub struct DeliveryTargetSensor;
+
+impl Sensor for DeliveryTargetSensor {
+    fn tick(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob) {
+        match mob.delivery_target() {
+            Some(pos) => mem.set(MemoryModuleType::DELIVERY_TARGET, MemoryValue::Pos(pos)),
+            None => mem.erase(MemoryModuleType::DELIVERY_TARGET),
+        }
+    }
+
+    fn output_memories(&self) -> Vec<MemoryModuleType> {
+        vec![MemoryModuleType::DELIVERY_TARGET]
+    }
+
+    fn name(&self) -> &'static str {
+        "delivery_target"
+    }
+}
+
 /// Squared Euclidean distance — a plain helper since [`lodestone_model::Vec3`]
 /// carries no `distance_squared` of its own.
 fn distance_sqr(a: Vec3, b: Vec3) -> f64 {

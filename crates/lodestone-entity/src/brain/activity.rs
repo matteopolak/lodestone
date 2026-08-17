@@ -51,4 +51,11 @@ impl Activity {
     pub const RAM: Self = Self("ram");
     /// Chasing and eating tongue-attack prey (frog) — vanilla `Activity.TONGUE`.
     pub const TONGUE: Self = Self("tongue");
+    /// Flying a carried item to its delivery target (allay). Not a named
+    /// vanilla `Activity` — real `AllayAi` runs `GoAndGiveItemsToTarget`
+    /// inside the ordinary `IDLE` package rather than swapping activities;
+    /// this crate gives it its own activity instead, a disclosed
+    /// non-faithful-but-honest shape for a species-specific slice this
+    /// crate's `IDLE` scaffold cannot host inline.
+    pub const DELIVER: Self = Self("deliver");
 }

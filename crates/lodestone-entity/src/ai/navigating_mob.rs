@@ -207,6 +207,9 @@ pub struct NavigatingMob<'w> {
     /// [`job_site`](Self::job_site)'s sibling for
     /// [`BrainMob::nearest_attackable_food`]/`MemoryModuleType::NEAREST_ATTACKABLE_FOOD`.
     nearest_attackable_food: Option<Vec3>,
+    /// Host-injected allay delivery target — [`job_site`](Self::job_site)'s
+    /// sibling for [`BrainMob::delivery_target`]/`MemoryModuleType::DELIVERY_TARGET`.
+    delivery_target: Option<Vec3>,
     /// The block the current path was computed toward, so `move_to` reuses the
     /// active path instead of recomputing every tick (vanilla `moveTo` reuse).
     active_target_block: Option<BlockPos>,
@@ -604,6 +607,7 @@ impl<'w> NavigatingMob<'w> {
             meeting_point: None,
             nearest_visible_zombified: None,
             nearest_attackable_food: None,
+            delivery_target: None,
             active_target_block: None,
             last_look: None,
             jumping: false,
@@ -1070,6 +1074,14 @@ impl<'w> NavigatingMob<'w> {
     /// for [`BrainMob::nearest_attackable_food`].
     pub fn set_nearest_attackable_food(&mut self, target: Option<Vec3>) -> &mut Self {
         self.nearest_attackable_food = target;
+        self
+    }
+
+    /// Host injection point: the position an allay carrying items should fly
+    /// to deposit them, or `None` — [`set_job_site`](Self::set_job_site)'s
+    /// sibling for [`BrainMob::delivery_target`].
+    pub fn set_delivery_target(&mut self, target: Option<Vec3>) -> &mut Self {
+        self.delivery_target = target;
         self
     }
 
@@ -2194,6 +2206,12 @@ impl BrainMob for NavigatingMob<'_> {
     /// field doc.
     fn nearest_attackable_food(&self) -> Option<Vec3> {
         self.nearest_attackable_food
+    }
+
+    /// The host-injected allay delivery target — see
+    /// [`delivery_target`](Self::delivery_target)'s own field doc.
+    fn delivery_target(&self) -> Option<Vec3> {
+        self.delivery_target
     }
 
     /// Delegates to the same `attacks` queue [`MobController::attack`] writes

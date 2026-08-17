@@ -53,9 +53,9 @@ use super::driver::BrainGoal;
 use super::gate::GateBehavior;
 use super::memory::{MemoryModuleType, MemoryStatus};
 use super::sensor::{
-    AngerTargetSensor, HurtBySensor, NearestAttackableFoodSensor, NearestHostileSensor,
-    NearestPlayerSensor, NearestVisibleLivingEntitiesSensor, NearestVisibleZombifiedSensor,
-    VillagerPoiSensor,
+    AngerTargetSensor, DeliveryTargetSensor, HurtBySensor, NearestAttackableFoodSensor,
+    NearestHostileSensor, NearestPlayerSensor, NearestVisibleLivingEntitiesSensor,
+    NearestVisibleZombifiedSensor, VillagerPoiSensor,
 };
 use super::Brain;
 
@@ -439,6 +439,57 @@ pub fn frog_brain() -> Brain {
 /// size counts as eligible prey here.
 pub const FROG_FOOD_SPECIES: &[&str] = &["slime", "magma_cube"];
 
+/// `GoAndGiveItemsToTarget`'s own `speedModifier` (`2.25F`) — the fly speed
+/// an allay carrying picked-up items uses toward its delivery target.
+const ALLAY_DELIVER_SPEED: f32 = 2.25;
+
+/// Not a vanilla constant — `GoAndGiveItemsToTarget` throws from wherever it
+/// currently stands once close enough to *start* (its own `range()` reads
+/// `TOO_FAR_FROM_TARGET`/`CLOSE_ENOUGH_TO_TARGET`, a two-threshold hover
+/// band this crate's plain [`WalkToPoi`] cannot reproduce). Chosen as a
+/// single stop distance between the two real jar figures (4 and 16), close
+/// enough that a delivery reads as "landed near the target" without
+/// requiring bounding-box-exact arrival [`WalkToPoi`] has no way to test.
+const ALLAY_DELIVER_CLOSE_ENOUGH: i32 = 2;
+
+/// An allay's brain: [`scaffold_with_panic`] (`AnimalPanic(2.5F)`, `AllayAi`'s
+/// own figure — see [`PANIC_SPEED_MULTIPLIER`]'s `"allay"` row) plus flying a
+/// carried item to its delivery target (issue #230's genuine ask for this
+/// species — the note-block-hearing, inventory and delivery-eligibility
+/// machinery all live host-side, in `lodestone_server::mobs::MobSim`, since
+/// none of it is expressible through this crate's `BrainMob` seam; see that
+/// module's own allay doc for the item-pickup/vibration/duplication half).
+///
+/// # Re-verified inherited blocker: "allay note-block duplication is blocked
+/// — there is nowhere in the event type for the computed pulse to land"
+///
+/// **False.** `crate::redstone_note_block`'s own module doc made exactly
+/// this claim about `RandomTickEvent` (a redstone-specific carrier), and it
+/// was accurate about *that one type* — but a general "post a world event,
+/// let any listener resolve it" seam already existed for the warden (issue
+/// #459's vibration substrate, `MobSim::post_vibration`/`nearest_listenable`),
+/// built independently of the redstone engine and with no note-block
+/// producer wired to it. The capability was real; nothing had called it for
+/// this event. See `crate::redstone_note_block`'s own updated module doc for
+/// what changed and what is still genuinely unmodelled (the client-audible
+/// sound effect).
+#[must_use]
+pub fn allay_brain() -> Brain {
+    let mut brain = scaffold_with_panic(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE, 2.5);
+    brain.add_sensor(Box::new(DeliveryTargetSensor));
+    brain.add_activity(
+        Activity::DELIVER,
+        vec![(0, leaf(WalkToPoi::new(
+            MemoryModuleType::DELIVERY_TARGET,
+            ALLAY_DELIVER_SPEED,
+            ALLAY_DELIVER_CLOSE_ENOUGH,
+        )))],
+        vec![(MemoryModuleType::DELIVERY_TARGET, MemoryStatus::ValuePresent)],
+        Vec::new(),
+    );
+    brain
+}
+
 /// The `WalkToPoi` close-enough distance a warden's melee pursuit stops at —
 /// **not** a vanilla constant (see this function's own doc for why one
 /// cannot be cited). Chosen strictly smaller than
@@ -636,6 +687,11 @@ pub fn brain_for(species: &str) -> Option<BrainGoal> {
     // and a candidate list that offers it.
     if species == "frog" {
         return Some(BrainGoal::new(frog_brain(), vec![Activity::TONGUE, Activity::IDLE]));
+    }
+    // Same shape again: `allay_brain` needs both an extra activity
+    // (`DELIVER`) and a candidate list that offers it.
+    if species == "allay" {
+        return Some(BrainGoal::new(allay_brain(), vec![Activity::DELIVER, Activity::IDLE]));
     }
     // Same shape again: `piglin_brain` needs both an extra activity (`AVOID`)
     // and a candidate list that offers it. `piglin_brute` is deliberately
@@ -938,6 +994,9 @@ mod tests {
         /// this and rely on the same real-relocation `move_to` this struct
         /// already gives the goat ram tests.
         attackable_food: Option<lodestone_model::Vec3>,
+        /// `None` everywhere but the allay `DELIVER` tests, the
+        /// `attackable_food` sibling for [`BrainMob::delivery_target`].
+        delivery: Option<lodestone_model::Vec3>,
     }
 
     impl super::super::mob::BrainMob for RamTestMob {
@@ -974,6 +1033,9 @@ mod tests {
         fn nearest_attackable_food(&self) -> Option<lodestone_model::Vec3> {
             self.attackable_food
         }
+        fn delivery_target(&self) -> Option<lodestone_model::Vec3> {
+            self.delivery
+        }
     }
 
     /// End-to-end through [`brain_for("goat")`], the exact production path
@@ -1000,6 +1062,7 @@ mod tests {
             }],
             attacks: Vec::new(),
             attackable_food: None,
+            delivery: None,
         };
 
         // Generous: prepare (20-tick wait once arrived, plus a few ticks of
@@ -1037,6 +1100,7 @@ mod tests {
             nearby: Vec::new(),
             attacks: Vec::new(),
             attackable_food: None,
+            delivery: None,
         };
 
         for _ in 0..40 {
@@ -1069,6 +1133,7 @@ mod tests {
             nearby: Vec::new(),
             attacks: Vec::new(),
             attackable_food: Some(lodestone_model::Vec3::new(3.0, 0.0, 0.0)),
+            delivery: None,
         };
 
         for _ in 0..20 {
@@ -1106,6 +1171,7 @@ mod tests {
             nearby: Vec::new(),
             attacks: Vec::new(),
             attackable_food: None,
+            delivery: None,
         };
 
         for _ in 0..20 {
@@ -1118,6 +1184,75 @@ mod tests {
         assert!(
             frog.brain().is_active(Activity::IDLE),
             "with nothing to eat, the frog must fall back to IDLE, not freeze in TONGUE"
+        );
+    }
+
+    /// End-to-end through `brain_for("allay")`, the exact production path —
+    /// an allay with a live delivery target must swap into `DELIVER` and fly
+    /// toward it (`WalkToPoi`'s real `move_to`, the same mechanism
+    /// `warden_brain`'s `FIGHT` pursuit already proves end-to-end), landing
+    /// within `WalkToPoi`'s own close-enough distance.
+    #[test]
+    fn an_allay_with_a_delivery_target_flies_toward_it() {
+        let candidates = [Activity::DELIVER, Activity::IDLE];
+        let mut allay = brain_for("allay").expect("allay is a brain species");
+        let mut mob = RamTestMob {
+            pos: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+            time: 0,
+            nearby: Vec::new(),
+            attacks: Vec::new(),
+            attackable_food: None,
+            delivery: Some(lodestone_model::Vec3::new(10.0, 0.0, 0.0)),
+        };
+
+        for _ in 0..6 {
+            allay.brain_mut().set_active_activity_to_first_valid(&candidates);
+            allay.brain_mut().tick(&mut mob);
+            mob.time += 1;
+        }
+
+        assert!(
+            allay.brain().is_active(Activity::DELIVER),
+            "an allay with a live delivery target must swap into DELIVER"
+        );
+        let d = (mob.pos.x - 10.0).abs();
+        assert!(
+            d <= 2.0,
+            "WalkToPoi's own close_enough (2) must be honoured; ended {} blocks from the target",
+            d
+        );
+    }
+
+    /// The negative control: no delivery target means `DELIVER` is never
+    /// eligible, so an allay must fall back to `IDLE` and never move from
+    /// the origin toward the stale `(10, 0, 0)` this test's positive twin
+    /// uses.
+    #[test]
+    fn an_allay_with_no_delivery_target_stays_idle_and_does_not_move_toward_it() {
+        let candidates = [Activity::DELIVER, Activity::IDLE];
+        let mut allay = brain_for("allay").expect("allay is a brain species");
+        let mut mob = RamTestMob {
+            pos: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+            time: 0,
+            nearby: Vec::new(),
+            attacks: Vec::new(),
+            attackable_food: None,
+            delivery: None,
+        };
+
+        for _ in 0..6 {
+            allay.brain_mut().set_active_activity_to_first_valid(&candidates);
+            allay.brain_mut().tick(&mut mob);
+            mob.time += 1;
+        }
+
+        assert!(
+            allay.brain().is_active(Activity::IDLE),
+            "with no delivery target, an allay must fall back to IDLE"
+        );
+        assert!(
+            (mob.pos.x - 10.0).abs() > 2.0,
+            "an allay with nothing to deliver must never approach the stale (10, 0, 0) target"
         );
     }
 

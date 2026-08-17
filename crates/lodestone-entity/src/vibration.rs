@@ -183,6 +183,40 @@ pub fn is_vibration_listener(species: &str) -> bool {
     species == "warden"
 }
 
+/// `Allay.VibrationUser.VIBRATION_EVENT_LISTENER_RANGE` — the allay's own
+/// listener radius, coincidentally the same figure as
+/// [`WARDEN_LISTENER_RADIUS`] but a separate constant on purpose: the two
+/// species' listening ranges are independent jar values that happen to
+/// agree, not one shared figure (see `DESIGN.md`'s own warning about a
+/// derived constant standing in for two things vanilla defines separately).
+pub const ALLAY_LISTENER_RADIUS: f64 = 16.0;
+
+/// The nearest [`VibrationEvent::NoteBlockPlay`] within `radius` blocks of
+/// `origin` — an allay's own listener shape
+/// (`Allay.VibrationUser.getListenableEvents`'s `GameEventTags.ALLAY_CAN_LISTEN`,
+/// which this crate's tag subset does not carry a second name for, since
+/// `NoteBlockPlay` is its only member this substrate produces). A second,
+/// narrower sibling of [`nearest_listenable`] rather than a generalisation
+/// of it — this module's own doc already names "its own radius and its own
+/// tag membership function" as what a second listener species needs, and an
+/// allay's is a single event type rather than a whole tag.
+#[must_use]
+pub fn nearest_note_block_play(
+    origin: Vec3,
+    radius: f64,
+    vibrations: &[PostedVibration],
+) -> Option<PostedVibration> {
+    let radius_sq = radius * radius;
+    vibrations
+        .iter()
+        .copied()
+        .filter(|v| matches!(v.event, VibrationEvent::NoteBlockPlay))
+        .map(|v| (v, distance_sqr(origin, v.position)))
+        .filter(|&(_, d)| d <= radius_sq)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(v, _)| v)
+}
+
 fn distance_sqr(a: Vec3, b: Vec3) -> f64 {
     let (dx, dy, dz) = (a.x - b.x, a.y - b.y, a.z - b.z);
     dx * dx + dy * dy + dz * dz
@@ -425,5 +459,33 @@ mod tests {
         assert!(is_vibration_listener("warden"));
         assert!(!is_vibration_listener("zombie"));
         assert!(!is_vibration_listener("sculk_sensor"), "not a mob at all yet");
+    }
+
+    /// The discriminating check for a second, narrower listener query: a
+    /// `NoteBlockPlay` at the same distance as an `EntityDie` is found, the
+    /// `EntityDie` is not — [`nearest_listenable`]'s own event filter is
+    /// "any warden-listenable event"; this one is "exactly one event type",
+    /// and a test that only posted `NoteBlockPlay` events could not tell the
+    /// two functions apart.
+    #[test]
+    fn nearest_note_block_play_ignores_every_other_event_type() {
+        let origin = Vec3::new(0.0, 0.0, 0.0);
+        let die = PostedVibration { position: Vec3::new(3.0, 0.0, 0.0), event: VibrationEvent::EntityDie, source: None };
+        let note = PostedVibration { position: Vec3::new(3.0, 0.0, 0.0), event: VibrationEvent::NoteBlockPlay, source: None };
+        assert_eq!(
+            nearest_note_block_play(origin, ALLAY_LISTENER_RADIUS, &[die]),
+            None,
+            "an EntityDie must never satisfy an allay's note-block query"
+        );
+        assert_eq!(nearest_note_block_play(origin, ALLAY_LISTENER_RADIUS, &[note]), Some(note));
+    }
+
+    #[test]
+    fn nearest_note_block_play_respects_its_own_radius() {
+        let origin = Vec3::new(0.0, 0.0, 0.0);
+        let inside = PostedVibration { position: Vec3::new(15.9, 0.0, 0.0), event: VibrationEvent::NoteBlockPlay, source: None };
+        let outside = PostedVibration { position: Vec3::new(16.1, 0.0, 0.0), event: VibrationEvent::NoteBlockPlay, source: None };
+        assert_eq!(nearest_note_block_play(origin, ALLAY_LISTENER_RADIUS, &[outside]), None);
+        assert_eq!(nearest_note_block_play(origin, ALLAY_LISTENER_RADIUS, &[inside]), Some(inside));
     }
 }

@@ -87,7 +87,8 @@ use lodestone_entity::equipment::{
 };
 use lodestone_entity::explosion::Aabb as ExplosionAabb;
 use lodestone_entity::vibration::{
-    PostedVibration, VibrationEvent, WARDEN_LISTENER_RADIUS, is_vibration_listener, nearest_listenable,
+    ALLAY_LISTENER_RADIUS, PostedVibration, VibrationEvent, WARDEN_LISTENER_RADIUS,
+    is_vibration_listener, nearest_listenable, nearest_note_block_play,
 };
 use lodestone_entity::item_entity::{ItemEntityRegistry, ItemLifecycle, ItemMotion};
 use lodestone_entity::pathfinding::{Aabb, BlockCues, MobShape, PathType, PathWorld};
@@ -832,6 +833,21 @@ pub enum InteractOutcome {
     /// today. That gap is not specific to the allay: every mob's
     /// `NavigatingMob::main_hand_item` has the identical problem.
     ItemGiven,
+    /// An allay duplicated itself (issue #230) — vanilla `Allay.duplicateAllay`,
+    /// reached from `mobInteract`'s `isDancing() && interactionItem.is(DUPLICATES_ALLAYS)
+    /// && canDuplicate()` gate. Consumes the item, matching
+    /// `removeInteractionItem`'s own `interactionItem.consume(1, player)` call.
+    ///
+    /// **Disclosed substitution**: real vanilla's `isDancing()` is driven by
+    /// a jukebox playing nearby (`GameEvent.JUKEBOX_PLAY`), a mechanic this
+    /// crate does not model at all (no jukebox-playback producer exists
+    /// anywhere in this tree). [`MobSim::interact`]'s allay arm substitutes
+    /// "has recently heard a note block" (the same
+    /// [`SimMob::allay_liked_noteblock`] state `DELIVER` reads) for
+    /// `isDancing()` — a real, disclosed narrowing rather than an invented
+    /// note-block-specific trigger vanilla does not have, named here so a
+    /// reader comparing against the jar is not misled.
+    AllayDuplicated,
 }
 
 impl InteractOutcome {
@@ -861,7 +877,7 @@ impl InteractOutcome {
     #[must_use]
     fn particle(self) -> Option<&'static str> {
         match self {
-            Self::Tamed | Self::InLove => Some("minecraft:heart"),
+            Self::Tamed | Self::InLove | Self::AllayDuplicated => Some("minecraft:heart"),
             Self::TameFailed => Some("minecraft:smoke"),
             Self::Pass
             | Self::SitToggled { .. }
@@ -1070,6 +1086,35 @@ fn axolotl_play_dead_roll(id: u64, health_bits: u32, damage_bits: u32) -> (u32, 
         >> 33;
     ((mix1 % 3) as u32, (mix2 % 3) as u32)
 }
+
+/// `AllayAi.TIME_TO_FORGET_NOTEBLOCK` — the literal `600` a heard note
+/// block's cooldown memory is (re)set to.
+const ALLAY_NOTEBLOCK_COOLDOWN_TICKS: i32 = 600;
+
+/// `Allay.DUPLICATION_COOLDOWN_TICKS`.
+const ALLAY_DUPLICATION_COOLDOWN_TICKS: i32 = 6000;
+
+/// `SimpleContainer(1)`'s max stack size — `Allay`'s inventory holds at
+/// most one stack of whatever it is carrying.
+const ALLAY_INVENTORY_MAX: u32 = 64;
+
+/// Not a vanilla constant — `Allay.ITEM_PICKUP_REACH` (`Vec3i(1, 1, 1)`) is a
+/// bounding-box inflation this seam has no box to apply; chosen generous
+/// enough that a flying allay actually reaches ground items in its path
+/// without this crate's plain squared-distance check missing an item a real
+/// box-overlap test would have caught. A disclosed narrowing, the same
+/// species as [`RamTarget::CONTACT_RANGE`]'s own "no bounding box on this
+/// seam" cut.
+const ALLAY_ITEM_PICKUP_RADIUS: f64 = 1.5;
+
+/// Not a vanilla constant — real `GoAndGiveItemsToTarget` hovers inside a
+/// `CLOSE_ENOUGH_TO_TARGET`(4)/`TOO_FAR_FROM_TARGET`(16) band and throws
+/// while still moving; this seam's [`MobSim::allay_deliver_items`] instead
+/// drops the instant the allay is within this distance of its liked
+/// note block's own `.above()` cell, matching `allay_brain`'s `DELIVER`
+/// activity's own `WalkToPoi` close-enough stop distance so the mob is
+/// actually standing there when this fires.
+const ALLAY_DELIVER_ARRIVAL_DISTANCE: f64 = 2.5;
 
 /// `CamelAi.RandomSitting(20)`'s own `minimalPoseTimeSec * 20` — the minimum
 /// ticks a camel must hold its current pose before [`camel_random_sitting`]
@@ -1462,6 +1507,30 @@ pub struct SimMob<'w> {
     /// gates [`CAMEL_RANDOM_SITTING_MIN_TICKS`], the collapsed stand-in for
     /// `Camel.getPoseTime()`. `0` for every non-camel species.
     camel_pose_tick: i64,
+    /// `AllayAi`'s `LIKED_NOTEBLOCK_POSITION`/`LIKED_NOTEBLOCK_COOLDOWN_TICKS`
+    /// memory pair, collapsed into one field: `Some((pos, ticks))` while a
+    /// heard note block is still "recent" (`ticks > 0`), `None` otherwise.
+    /// Written by [`MobSim::resolve_vibrations`]'s allay arm
+    /// (`AllayAi.hearNoteblock`), decremented once per [`MobSim::tick`] for
+    /// every live allay, and cleared outright once the countdown reaches
+    /// zero — a disclosed simplification of vanilla's own split (real
+    /// `LIKED_NOTEBLOCK_POSITION` lingers with no TTL of its own; only the
+    /// cooldown memory expires, and `getItemDepositPosition` erases the
+    /// position separately the next time it is read as ineligible). `None`
+    /// for every non-allay species.
+    allay_liked_noteblock: Option<(Vec3, i32)>,
+    /// `SimpleContainer(1)` (`InventoryCarrier.getInventory()`) collapsed to
+    /// a plain count — every picked-up item is, by construction
+    /// (`wantsToPickUp`'s `allayConsidersItemEqual` gate), the same item as
+    /// [`MobController::main_hand_item`], so only a count is needed, not a
+    /// second item identity. Filled by [`MobSim::allay_pick_up_items`],
+    /// drained one at a time by [`MobSim::allay_deliver_items`]. `0` for
+    /// every non-allay species.
+    allay_inventory_count: u32,
+    /// `Allay.duplicationCooldown`, ticks remaining before
+    /// [`MobSim::interact`]'s duplication arm can fire again. `0` for every
+    /// non-allay species (and every allay not currently on cooldown).
+    allay_duplication_cooldown: i32,
     /// The [`MobSim::tick_count`] at which this mob stops counting as
     /// player-killed — vanilla's `LivingEntity.lastHurtByPlayerMemoryTime`,
     /// expressed as an absolute deadline for [`Anger`]'s reason.
@@ -1867,6 +1936,23 @@ impl<'w> SimMob<'w> {
     #[must_use]
     pub fn camel_is_sitting(&self) -> bool {
         self.camel_sitting
+    }
+
+    /// The position of the note block this allay most recently heard and
+    /// still remembers (`MemoryModuleType.LIKED_NOTEBLOCK_POSITION`), if the
+    /// cooldown hasn't lapsed — see the backing field's own doc. `None` for
+    /// every non-allay species.
+    #[must_use]
+    pub fn allay_liked_noteblock(&self) -> Option<Vec3> {
+        self.allay_liked_noteblock.and_then(|(pos, ticks)| (ticks > 0).then_some(pos))
+    }
+
+    /// How many items this allay is currently carrying beyond the one held
+    /// in its hand — see the backing field's own doc. `0` for every
+    /// non-allay species.
+    #[must_use]
+    pub fn allay_inventory_count(&self) -> u32 {
+        self.allay_inventory_count
     }
 
     /// The position of whatever most recently hurt this mob, while inside the
@@ -4251,6 +4337,9 @@ impl<'w> MobSim<'w> {
             axolotl_play_dead_ticks: 0,
             camel_sitting: false,
             camel_pose_tick: 0,
+            allay_liked_noteblock: None,
+            allay_inventory_count: 0,
+            allay_duplication_cooldown: 0,
             hurt_by_player_until: None,
             attack_damage,
             hurt_cooldown: HurtCooldown::default(),
@@ -5430,6 +5519,19 @@ impl<'w> MobSim<'w> {
             if m.health > 0.0 && m.axolotl_play_dead_ticks > 0 {
                 m.axolotl_play_dead_ticks -= 1;
             }
+            // `allay_liked_noteblock`'s cooldown countdown, and
+            // `allay_duplication_cooldown`'s — see both fields' own docs.
+            // Cleared outright at zero rather than left as `Some((pos, 0))`,
+            // the disclosed simplification `allay_liked_noteblock`'s own doc
+            // names.
+            if m.health > 0.0 && m.entity_type.path() == "allay" {
+                if let Some((pos, ticks)) = m.allay_liked_noteblock {
+                    m.allay_liked_noteblock = if ticks > 1 { Some((pos, ticks - 1)) } else { None };
+                }
+                if m.allay_duplication_cooldown > 0 {
+                    m.allay_duplication_cooldown -= 1;
+                }
+            }
             // `Camel.tick`'s forced stand-in-water rule, then
             // `camel_random_sitting`'s own approximation of
             // `CamelAi.RandomSitting` — see both functions' own docs. Only
@@ -5853,6 +5955,14 @@ impl<'w> MobSim<'w> {
         self.tick_golem_summon();
         // Issue #229: the cat's chest/lit-furnace/bed candidate search.
         self.tick_cat_block_search();
+        // Issue #230: allay item-carry-and-deliver — pick up matching ground
+        // items, then throw one at a live delivery target. Order matters:
+        // an item picked up this very tick could in principle also be
+        // delivered this tick if the allay is already standing at its
+        // target, matching vanilla's own same-tick pickup-then-throw
+        // possibility rather than an arbitrary one-tick lag.
+        self.allay_pick_up_items();
+        self.allay_deliver_items();
         // Issue #459: the vibration substrate. Last, so every producer
         // earlier in this tick (currently just `reap_dead`'s `entity_die`)
         // has already posted before a listener resolves its nearest answer.
@@ -6147,6 +6257,9 @@ impl<'w> MobSim<'w> {
         // Issue #230: the nearest eligible tongue-attack prey, fed to a
         // frog's `TONGUE` brain activity.
         let mut nearest_attackable_food = vec![None; n];
+        // Issue #230: an allay's own delivery target, fed to its `DELIVER`
+        // brain activity.
+        let mut delivery_target = vec![None; n];
 
         // --- persistent anger (issue #458, primitive 1) --------------------
         //
@@ -6387,6 +6500,28 @@ impl<'w> MobSim<'w> {
                 );
             }
 
+            // --- allay delivery target (issue #230) -------------------------
+            // `AllayAi::getItemDepositPosition`'s note-block half
+            // (`shouldDepositItemsAtLikedNoteblock`): only offered once
+            // there is something to deliver, a recently-heard note block is
+            // still remembered, and the block there is still really a note
+            // block (a player could have mined it since). One tick behind
+            // `resolve_vibrations`'s own write, the same lag every other
+            // activity-swap species' own tests already document — `hearing`
+            // runs at the end of the *previous* tick's `MobSim::tick`.
+            if species == "allay"
+                && me.allay_inventory_count > 0
+                && let Some((liked_pos, ticks)) = me.allay_liked_noteblock
+                && ticks > 0
+                && crate::redstone::base_name(self.world.block_state(
+                    liked_pos.x as i32,
+                    liked_pos.y as i32,
+                    liked_pos.z as i32,
+                )) == crate::redstone_note_block::NOTE_BLOCK
+            {
+                delivery_target[i] = Some(Vec3::new(liked_pos.x, liked_pos.y + 1.0, liked_pos.z));
+            }
+
             // --- patrol group target ---------------------------------------
             // Issue #241a. A leader never reads this — it computes its own
             // fresh target from `LongDistancePatrolGoal` itself; only a
@@ -6501,6 +6636,7 @@ impl<'w> MobSim<'w> {
                 .set_owner_sleep_ticks(owner_sleep_ticks[i])
                 .set_nearest_visible_zombified(nearest_visible_zombified[i])
                 .set_nearest_attackable_food(nearest_attackable_food[i])
+                .set_delivery_target(delivery_target[i])
                 .set_ticks_since_shoulder_dismount(shoulder_dismount_ticks)
                 .set_day_time(day_time);
         }
@@ -6769,21 +6905,33 @@ impl<'w> MobSim<'w> {
             return InteractOutcome::ZombieVillagerConversionStarted;
         }
 
-        // `Allay.mobInteract`'s carrying half: giving an item to an
-        // empty-handed allay makes it hold that item — vanilla's own gate is
-        // exactly `hasItemInSlot(EquipmentSlot.MAINHAND)`. An allay is never
-        // tameable, so — like the villager and zombie-villager arms above —
-        // this is a short-circuit ahead of the `tame_mechanism` dispatch
-        // rather than another case inside it.
+        // `Allay.mobInteract`, both real arms of it (issue #230): duplication
+        // is checked first, matching the jar's own order, then the
+        // empty-handed carrying gift. An allay is never tameable, so — like
+        // the villager and zombie-villager arms above — this is a
+        // short-circuit ahead of the `tame_mechanism` dispatch rather than
+        // another case inside it.
+        //
+        // See `InteractOutcome::AllayDuplicated`'s own doc for the disclosed
+        // `isDancing()` substitution the duplication arm makes.
         //
         // **Not modelled here**: taking the item back (an empty-hand
-        // right-click on a carrying allay), autonomously picking up matching
-        // dropped items, delivering them near a note block, and the
-        // note-block-triggered duplication itself — `crate::redstone_note_block`'s
-        // own module doc already discloses that the "play pulse" it computes
-        // has nowhere in this event type to land, which is the rest of this
-        // gap. This arm only closes the "carries an item" half.
+        // right-click on a carrying allay).
         if species == "allay" {
+            if item == Some("amethyst_shard")
+                && mob.allay_liked_noteblock.is_some_and(|(_, ticks)| ticks > 0)
+                && mob.allay_duplication_cooldown <= 0
+            {
+                self.spawn_species(
+                    ResourceKey::from_str("minecraft:allay").expect("static key is valid"),
+                    pos,
+                )
+                .allay_duplication_cooldown = ALLAY_DUPLICATION_COOLDOWN_TICKS;
+                if let Some(mob) = self.mobs.iter_mut().find(|m| m.id == mob_id) {
+                    mob.allay_duplication_cooldown = ALLAY_DUPLICATION_COOLDOWN_TICKS;
+                }
+                return InteractOutcome::AllayDuplicated;
+            }
             let already_holding = mob.mob.main_hand_item().is_some();
             if already_holding || item.is_none() {
                 return InteractOutcome::Pass;
@@ -8599,6 +8747,151 @@ impl<'w> MobSim<'w> {
             } else {
                 None
             };
+            // `AllayAi.hearNoteblock` (issue #230), the vibration substrate's
+            // second consumer: an allay within `ALLAY_LISTENER_RADIUS` of a
+            // `NoteBlockPlay` this tick either adopts it (no liked note block
+            // yet) or refreshes its cooldown (the *same* position heard
+            // again) — a different position while one is already liked is
+            // ignored, matching the jar's own `else if` exactly.
+            if mob.entity_type.path() == "allay"
+                && let Some(heard) =
+                    nearest_note_block_play(mob.position(), ALLAY_LISTENER_RADIUS, &posted)
+            {
+                match mob.allay_liked_noteblock {
+                    Some((pos, _)) if pos == heard.position => {
+                        mob.allay_liked_noteblock = Some((pos, ALLAY_NOTEBLOCK_COOLDOWN_TICKS));
+                    }
+                    None => {
+                        mob.allay_liked_noteblock =
+                            Some((heard.position, ALLAY_NOTEBLOCK_COOLDOWN_TICKS));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+
+    /// `InventoryCarrier::pickUpItem`/`Allay.wantsToPickUp` (issue #230): a
+    /// held-item allay with inventory room absorbs the nearest matching
+    /// dropped item within [`ALLAY_ITEM_PICKUP_RADIUS`], the ground half of
+    /// this crate's own [`ALLAY_ITEM_PICKUP_RADIUS`] doc-disclosed
+    /// bounding-box substitution. Two passes for the same borrow-checker
+    /// reason [`feed_perception`](Self::feed_perception)'s own doc gives:
+    /// deciding what to pick up reads `self.item_state` while mutating
+    /// `self.mobs` would need it held mutably too.
+    ///
+    /// **Disclosed narrowing**: `wantsToPickUp`'s own `GameRules.MOB_GRIEFING`
+    /// gate is not checked — this sim has no live game-rule value at this
+    /// seam (the same cut `tick.rs`'s own `mob_griefing` stub already
+    /// discloses); every eligible allay always picks up.
+    fn allay_pick_up_items(&mut self) {
+        struct Candidate {
+            mob_index: usize,
+            position: Vec3,
+            held_item: String,
+            room: u32,
+        }
+        let candidates: Vec<Candidate> = self
+            .mobs
+            .iter()
+            .enumerate()
+            .filter_map(|(mob_index, m)| {
+                if m.entity_type.path() != "allay" || m.health <= 0.0 {
+                    return None;
+                }
+                let held_item = m.mob.main_hand_item()?.to_owned();
+                let room = ALLAY_INVENTORY_MAX.saturating_sub(m.allay_inventory_count);
+                if room == 0 {
+                    return None;
+                }
+                Some(Candidate { mob_index, position: m.position(), held_item, room })
+            })
+            .collect();
+
+        let radius_sq = ALLAY_ITEM_PICKUP_RADIUS * ALLAY_ITEM_PICKUP_RADIUS;
+        for candidate in candidates {
+            let hit = self
+                .item_state
+                .iter()
+                .filter(|(_, state)| {
+                    state.item.path() == candidate.held_item
+                        && dist_sqr(state.motion.position, candidate.position) <= radius_sq
+                })
+                .min_by(|a, b| {
+                    dist_sqr(a.1.motion.position, candidate.position)
+                        .total_cmp(&dist_sqr(b.1.motion.position, candidate.position))
+                })
+                .map(|(&id, _)| id);
+            let Some(id) = hit else { continue };
+            let stack = u32::from(self.items.get(id).map_or(0, |l| l.count));
+            let take = stack.min(candidate.room);
+            if take == 0 {
+                continue;
+            }
+            let remaining = stack - take;
+            if remaining == 0 {
+                self.remove_item(id);
+            } else {
+                self.set_item_count(id, u8::try_from(remaining).unwrap_or(u8::MAX));
+            }
+            self.mobs[candidate.mob_index].allay_inventory_count += take;
+        }
+    }
+
+    /// `GoAndGiveItemsToTarget` (issue #230): a carrying allay within
+    /// [`ALLAY_DELIVER_ARRIVAL_DISTANCE`] of its own
+    /// [`SimMob::allay_liked_noteblock`]'s `.above()` cell throws one item
+    /// from its inventory there per tick — a real dropped
+    /// [`ItemEntity`](lodestone_entity::item_entity), not a state flag, so a
+    /// player can actually walk over and collect it. The real jar throws on
+    /// a `GIVE_ITEM_TIMEOUT_DURATION` (20-tick) cadence with a small random
+    /// velocity per throw (`onItemThrown`'s own pitch-varied sound, no
+    /// modelled velocity spread here); this drains one per tick instead — a
+    /// disclosed, faster narrowing rather than porting the timeout memory.
+    ///
+    /// **Not delivered to a liked player as a fallback** — see
+    /// `MemoryModuleType::DELIVERY_TARGET`'s own doc for the disclosed gap
+    /// this shares with the brain-side memory it drives.
+    fn allay_deliver_items(&mut self) {
+        struct Delivery {
+            mob_index: usize,
+            drop_position: Vec3,
+        }
+        let deliveries: Vec<Delivery> = self
+            .mobs
+            .iter()
+            .enumerate()
+            .filter_map(|(mob_index, m)| {
+                if m.entity_type.path() != "allay" || m.health <= 0.0 || m.allay_inventory_count == 0
+                {
+                    return None;
+                }
+                let (liked_pos, ticks) = m.allay_liked_noteblock?;
+                if ticks <= 0 {
+                    return None;
+                }
+                let above = Vec3::new(liked_pos.x, liked_pos.y + 1.0, liked_pos.z);
+                if dist_sqr(m.position(), above) > ALLAY_DELIVER_ARRIVAL_DISTANCE * ALLAY_DELIVER_ARRIVAL_DISTANCE {
+                    return None;
+                }
+                Some(Delivery { mob_index, drop_position: above })
+            })
+            .collect();
+
+        for delivery in deliveries {
+            let Some(item) = self.mobs[delivery.mob_index].mob.main_hand_item() else {
+                continue;
+            };
+            let Ok(item) = ResourceKey::from_str(&format!("minecraft:{item}")) else {
+                continue;
+            };
+            self.spawn_item(
+                item,
+                delivery.drop_position,
+                Vec3::new(0.0, 0.0, 0.0),
+                ItemLifecycle::newly_dropped(1, lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE),
+            );
+            self.mobs[delivery.mob_index].allay_inventory_count -= 1;
         }
     }
 
@@ -12793,6 +13086,189 @@ mod allay_carrying_tests {
         let outcome = sim.interact(id, alice(), None);
         assert_eq!(outcome, InteractOutcome::Pass);
         assert!(sim.get(id).expect("still alive").mob.main_hand_item().is_none());
+    }
+
+    /// `Allay.wantsToPickUp`/`InventoryCarrier::pickUpItem`: a carrying allay
+    /// with a matching item dropped right next to it absorbs the whole
+    /// stack into [`SimMob::allay_inventory_count`] and the ground item is
+    /// gone, driven through the real production path (`MobSim::tick` →
+    /// `allay_pick_up_items`).
+    #[test]
+    fn an_allay_picks_up_a_matching_dropped_item_nearby() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:allay".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+        sim.interact(id, alice(), Some(&"minecraft:stick".parse().expect("valid key")));
+        let stick_id = sim.spawn_item(
+            "minecraft:stick".parse().expect("valid key"),
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            ItemLifecycle::newly_dropped(3, lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE),
+        );
+
+        sim.tick();
+
+        assert_eq!(
+            sim.get(id).expect("alive").allay_inventory_count(),
+            3,
+            "the whole 3-stack must be absorbed"
+        );
+        assert!(
+            sim.item_lifecycle(stick_id).is_none(),
+            "the fully-absorbed ground stack must be removed, not left at count 0"
+        );
+    }
+
+    /// **Control**: an emerald dropped next to a stick-carrying allay must
+    /// never be picked up — `allayConsidersItemEqual`'s own item-identity
+    /// gate, without which the positive test above could be passing because
+    /// every nearby item is absorbed regardless of type.
+    #[test]
+    fn an_allay_ignores_a_dropped_item_of_a_different_type() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:allay".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+        sim.interact(id, alice(), Some(&"minecraft:stick".parse().expect("valid key")));
+        sim.spawn_item(
+            "minecraft:emerald".parse().expect("valid key"),
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            ItemLifecycle::newly_dropped(1, lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE),
+        );
+
+        sim.tick();
+
+        assert_eq!(
+            sim.get(id).expect("alive").allay_inventory_count(),
+            0,
+            "a mismatched item type must never be picked up"
+        );
+        assert_eq!(sim.item_count(), 1, "the mismatched item must still be on the ground");
+    }
+
+    /// `GoAndGiveItemsToTarget`: a carrying allay standing at its own liked
+    /// note block's `.above()` cell throws exactly one item there per tick
+    /// — a real dropped [`crate::item_entity::ItemEntity`] a player could
+    /// walk over, not a state flag. Drives `MobSim::tick` →
+    /// `allay_deliver_items` directly against host state set the way
+    /// `resolve_vibrations`' own `hearNoteblock` arm would have left it,
+    /// isolating the *delivery* half from the *hearing* half already proven
+    /// end-to-end in `crate::tick`'s own note-block gates.
+    #[test]
+    fn a_carrying_allay_at_its_liked_noteblock_delivers_one_item_per_tick() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species(
+                "minecraft:allay".parse().expect("valid key"),
+                Vec3::new(0.0, 1.0, 0.0),
+            )
+            .id();
+        sim.interact(id, alice(), Some(&"minecraft:stick".parse().expect("valid key")));
+        {
+            let mob = sim.get_mut(id).expect("alive");
+            mob.allay_inventory_count = 2;
+            mob.allay_liked_noteblock = Some((Vec3::new(0.0, 0.0, 0.0), 100));
+        }
+
+        sim.tick();
+
+        assert_eq!(
+            sim.get(id).expect("alive").allay_inventory_count(),
+            1,
+            "exactly one item must be thrown this tick"
+        );
+        assert_eq!(sim.item_count(), 1, "the thrown item must be a real ground entity");
+    }
+
+    /// **Control**: the identical fixture but far from any liked note block
+    /// (`allay_liked_noteblock` left `None`) must never deliver — proving
+    /// the arrival check above is a real gate, not unconditional draining.
+    #[test]
+    fn a_carrying_allay_with_no_liked_noteblock_never_delivers() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species(
+                "minecraft:allay".parse().expect("valid key"),
+                Vec3::new(0.0, 1.0, 0.0),
+            )
+            .id();
+        sim.interact(id, alice(), Some(&"minecraft:stick".parse().expect("valid key")));
+        sim.get_mut(id).expect("alive").allay_inventory_count = 2;
+
+        sim.tick();
+
+        assert_eq!(
+            sim.get(id).expect("alive").allay_inventory_count(),
+            2,
+            "with nothing liked, nothing must be thrown"
+        );
+        assert_eq!(sim.item_count(), 0);
+    }
+
+    /// `Allay.mobInteract`'s duplication arm (issue #230), through the real
+    /// production path — driven with the disclosed `isDancing()`
+    /// substitution `InteractOutcome::AllayDuplicated`'s own doc names
+    /// (a live `allay_liked_noteblock` standing in for a jukebox-driven
+    /// dance this crate does not model). An amethyst shard on such an allay
+    /// must spawn a second, real allay and consume the shard.
+    #[test]
+    fn an_amethyst_shard_duplicates_an_allay_that_recently_heard_a_noteblock() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:allay".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+        sim.get_mut(id).expect("alive").allay_liked_noteblock = Some((Vec3::new(3.0, 0.0, 0.0), 100));
+
+        let before = sim.snapshots().iter().filter(|s| s.entity_type.path() == "allay").count();
+        let outcome = sim.interact(
+            id,
+            alice(),
+            Some(&"minecraft:amethyst_shard".parse().expect("valid key")),
+        );
+
+        assert_eq!(outcome, InteractOutcome::AllayDuplicated);
+        assert!(outcome.consumes_item(), "the shard must be consumed");
+        let after = sim.snapshots().iter().filter(|s| s.entity_type.path() == "allay").count();
+        assert_eq!(after, before + 1, "duplication must spawn exactly one real new allay");
+        assert!(
+            sim.get(id).expect("alive").allay_duplication_cooldown > 0,
+            "the original allay must be put on cooldown too"
+        );
+    }
+
+    /// **Control**: the identical shard interaction against an allay that
+    /// has never heard a note block must do nothing — proving the
+    /// `isDancing()` substitute is a real gate, not one that always fires
+    /// on an amethyst shard.
+    #[test]
+    fn an_amethyst_shard_does_nothing_to_an_allay_that_never_heard_a_noteblock() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:allay".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+
+        let before = sim.snapshots().iter().filter(|s| s.entity_type.path() == "allay").count();
+        let outcome = sim.interact(
+            id,
+            alice(),
+            Some(&"minecraft:amethyst_shard".parse().expect("valid key")),
+        );
+
+        assert_ne!(
+            outcome,
+            InteractOutcome::AllayDuplicated,
+            "an allay that never heard a note block must never duplicate"
+        );
+        let after = sim.snapshots().iter().filter(|s| s.entity_type.path() == "allay").count();
+        assert_eq!(after, before, "no new allay must have spawned");
     }
 }
 
