@@ -590,6 +590,13 @@ absence, it is evidence about the moment it was written, not about the tree** �
 grep for comments asserting it does not exist and delete them in the same commit, because the next reader's
 "blocked on X" will be quoting yours.
 
+The mirror image is just as costly and harder to spot: **a comment asserting a *presence* that was never
+built.** `WorldStateHandle::default_game_mode` had zero production readers while the store's own doc said the
+join path read it — and the join path hardcoded `GameMode::Survival`. That doc is exactly why the island
+survived review: anyone reading the store would conclude the field was consumed, so the zero-readers question
+never got asked. **A doc comment describing a wiring is not evidence the wiring exists**, and the cheap check
+is the same one either way — count *production* readers, separately from test readers.
+
 **The highest-decay content in this repo is a doc's own status annotation** — "Landed", "still open", "not
 implemented", "blocked by". A drifted *citation* eventually fails visibly, because the path stops resolving
 or the symbol stops existing; a wrong **"Landed: no"** stays perfectly plausible forever, and nothing about
