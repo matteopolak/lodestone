@@ -2425,6 +2425,73 @@ where
     .await
 }
 
+/// [`serve_connection_with_access`], with the world state and block-entity
+/// registry caller-supplied rather than a private default.
+///
+/// # Why this exists
+///
+/// Every existing entry point that takes a real [`crate::access::AccessHandle`]
+/// builds its `WorldStateHandle`/`BlockEntityHandle` internally and never hands
+/// them back, so nothing outside this function can observe what a connection
+/// actually did — only that it did not error. That is enough to prove a
+/// low-permission caller's `DifficultyChanged`/`DifficultyLockChanged`/
+/// `GameRuleChanged`/`SetCommandBlock`/`ChangeGameMode`/
+/// `REQUEST_GAMERULE_VALUES` packet was *accepted* on the wire, never that its
+/// effect was *refused* — the exact "assertions of an absence need a control
+/// proving the detector works" gap this constructor closes.
+///
+/// # Errors
+///
+/// As [`serve_connection_with_access`].
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_connection_with_access_and_state<T, P, S, E>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    entities: &E,
+    view_radius: i32,
+    access: &crate::access::AccessHandle,
+    world: &crate::world_state::WorldStateHandle,
+    block_entities: &BlockEntityHandle,
+    peer_ip: Option<std::net::IpAddr>,
+) -> Result<ServeSummary, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + 'static,
+    E: EntitySource,
+{
+    serve_connection_inner(
+        conn,
+        proto,
+        SourceRef::Borrowed(source),
+        entities,
+        view_radius,
+        view_radius,
+        block_entities,
+        &MobHandle::default(),
+        &TicketStoreHandle::default(),
+        &BlockTickFeed::default(),
+        &ExplosionFeed::default(),
+        &WeatherFeed::default(),
+        &SleepVote::default(),
+        &SleepFeed::default(),
+        &CommandDispatch::none(),
+        &BorderFeed::default(),
+        &ResourcePackPushFeed::default(),
+        &PluginChannelRegistry::default(),
+        world,
+        &crate::live_save::LiveSaveSlot::default(),
+        access,
+        peer_ip,
+        // Issue #273: this wrapper predates online mode; offline, same as
+        // every other pre-existing entry point.
+        None,
+    )
+    .await
+}
+
 /// [`serve_connection_with_mob_events_shared`], plus a host-installed command
 /// dispatcher (issues #48, #464).
 ///
