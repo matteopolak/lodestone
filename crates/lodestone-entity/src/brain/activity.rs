@@ -49,4 +49,6 @@ impl Activity {
     pub const SWIM: Self = Self("swim");
     /// Preparing, then charging, a ram attack (goat).
     pub const RAM: Self = Self("ram");
+    /// Chasing and eating tongue-attack prey (frog) — vanilla `Activity.TONGUE`.
+    pub const TONGUE: Self = Self("tongue");
 }

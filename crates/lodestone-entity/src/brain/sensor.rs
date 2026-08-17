@@ -287,6 +287,34 @@ impl Sensor for NearestVisibleZombifiedSensor {
     }
 }
 
+/// `FrogAttackablesSensor` (`world/entity/ai/sensing/FrogAttackablesSensor.java`)
+/// — narrowed to a position, the same [`NearestVisibleZombifiedSensor`]
+/// shape and for the same reason: this crate's [`BrainMob`] seam has no
+/// entity handle or species tag a sensor could filter on itself (unlike the
+/// real jar's `Frog.canEat`/size-1 check, run against a live `LivingEntity`),
+/// so the host resolves the species/liveness/range filter and hands back
+/// only whether *something* eligible exists nearby — see
+/// [`BrainMob::nearest_attackable_food`]'s own doc.
+#[derive(Debug, Default)]
+pub struct NearestAttackableFoodSensor;
+
+impl Sensor for NearestAttackableFoodSensor {
+    fn tick(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob) {
+        match mob.nearest_attackable_food() {
+            Some(pos) => mem.set(MemoryModuleType::NEAREST_ATTACKABLE_FOOD, MemoryValue::Pos(pos)),
+            None => mem.erase(MemoryModuleType::NEAREST_ATTACKABLE_FOOD),
+        }
+    }
+
+    fn output_memories(&self) -> Vec<MemoryModuleType> {
+        vec![MemoryModuleType::NEAREST_ATTACKABLE_FOOD]
+    }
+
+    fn name(&self) -> &'static str {
+        "nearest_attackable_food"
+    }
+}
+
 /// Squared Euclidean distance — a plain helper since [`lodestone_model::Vec3`]
 /// carries no `distance_squared` of its own.
 fn distance_sqr(a: Vec3, b: Vec3) -> f64 {

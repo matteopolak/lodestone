@@ -114,6 +114,17 @@ impl MemoryModuleType {
     /// the shape [`RAM_TARGET`] already established rather than inventing a
     /// second one.
     pub const ANGER_TARGET: Self = Self("anger_target");
+    /// The nearest eligible tongue-attack prey's position — a narrowed
+    /// stand-in for vanilla's `MemoryModuleType.NEAREST_ATTACKABLE`
+    /// (`FrogAttackablesSensor`'s own output, a `LivingEntity`). This crate's
+    /// [`super::mob::BrainMob`] seam resolves the species/liveness filter
+    /// host-side and hands back only a position — the same
+    /// [`NEAREST_VISIBLE_ZOMBIFIED`] shape, and the same reason: no entity
+    /// handle crosses this seam, only positions. [`super::behaviors::ShootTongue`]
+    /// reads this directly rather than hopping through a separate
+    /// `ATTACK_TARGET`-acquisition behaviour, a disclosed simplification —
+    /// see that type's own doc.
+    pub const NEAREST_ATTACKABLE_FOOD: Self = Self("nearest_attackable_food");
 }
 
 /// The presence requirement a behaviour places on a memory.

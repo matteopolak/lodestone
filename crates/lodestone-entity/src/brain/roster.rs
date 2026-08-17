@@ -47,14 +47,15 @@ use super::activity::Activity;
 use super::behavior::{Behavior, BehaviorControl, Leaf};
 use super::behaviors::{
     AvoidTarget, CopyMemoryWithExpiry, LookAtTargetSink, MoveToTargetSink, Panic, PrepareRam,
-    RamTarget, RandomStroll, SetPlayerLookTarget, WalkToPoi,
+    RamTarget, RandomStroll, SetPlayerLookTarget, ShootTongue, WalkToPoi,
 };
 use super::driver::BrainGoal;
 use super::gate::GateBehavior;
 use super::memory::{MemoryModuleType, MemoryStatus};
 use super::sensor::{
-    AngerTargetSensor, HurtBySensor, NearestHostileSensor, NearestPlayerSensor,
-    NearestVisibleLivingEntitiesSensor, NearestVisibleZombifiedSensor, VillagerPoiSensor,
+    AngerTargetSensor, HurtBySensor, NearestAttackableFoodSensor, NearestHostileSensor,
+    NearestPlayerSensor, NearestVisibleLivingEntitiesSensor, NearestVisibleZombifiedSensor,
+    VillagerPoiSensor,
 };
 use super::Brain;
 
@@ -380,6 +381,64 @@ pub fn goat_brain() -> Brain {
     brain
 }
 
+/// A frog's brain: [`scaffold_with_panic`] (`AnimalPanic(2.0F)`, `FrogAi`'s
+/// own figure — see [`PANIC_SPEED_MULTIPLIER`]'s `"frog"` row) plus the
+/// tongue attack (issue #230's genuine ask for this species — see
+/// [`super::behaviors::ShootTongue`]'s own doc for exactly what is and is
+/// not ported).
+///
+/// # Re-verified inherited blocker: "frog tongue is blocked on there being
+/// no slime simulation"
+///
+/// **False.** `Frog.canEat` (`Frog.java`) gates eligible prey on
+/// `EntityTypeTags.FROG_FOOD` (`minecraft:slime`/`minecraft:magma_cube`)
+/// plus a size-1 check, both plain entity-type/attribute questions — nothing
+/// about the tongue attack itself needs a slime's own jump-and-split AI to
+/// exist, only that a slime or magma cube entity can be spawned and hurt,
+/// which this crate's generic mob roster already supports. The size-1 check
+/// is the one disclosed narrowing this port makes (see
+/// [`FROG_FOOD_SPECIES`]'s own doc); nothing here is blocked on slime
+/// simulation.
+///
+/// # Why `TONGUE`'s eligibility condition matches [`goat_brain`]'s own reasoning
+///
+/// Same shape as [`goat_brain`]'s own doc: requiring only
+/// `NEAREST_ATTACKABLE_FOOD` present (rather than also gating on it being
+/// absent-when-idle) is exactly what makes `TONGUE` correctly ineligible —
+/// and therefore falls through to `IDLE`'s stroll/look — whenever nothing
+/// eligible is nearby, with no separate "idle timeout" memory needed the
+/// way [`goat_brain`]'s `RAM_COOLDOWN_TICKS` check is.
+#[must_use]
+pub fn frog_brain() -> Brain {
+    let mut brain = scaffold_with_panic(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE, 2.0);
+    brain.add_sensor(Box::new(NearestAttackableFoodSensor));
+    brain.add_activity(
+        Activity::TONGUE,
+        // `FrogAi.initTongueActivity`'s own priority 0.
+        vec![(0, leaf(ShootTongue::new(2.0)))],
+        vec![(
+            MemoryModuleType::NEAREST_ATTACKABLE_FOOD,
+            MemoryStatus::ValuePresent,
+        )],
+        Vec::new(),
+    );
+    brain
+}
+
+/// The two species vanilla's `EntityTypeTags.FROG_FOOD` names
+/// (`data/minecraft/tags/entity_type/frog_food.json`: `minecraft:slime`,
+/// `minecraft:magma_cube`) — the host-side species filter behind
+/// [`NearestAttackableFoodSensor`]'s "eligible prey" answer, consulted by
+/// `lodestone_server::mobs::MobSim::feed_perception` rather than by this
+/// crate (which has no live mob census to search).
+///
+/// **Disclosed narrowing**: `Frog.canEat` additionally requires
+/// `AbstractCubeMob.getSize() == 1` (the smallest slime/magma-cube size) —
+/// this crate's mob census carries no slime-size attribute at the seam
+/// `feed_perception` reads from, so every slime/magma cube regardless of
+/// size counts as eligible prey here.
+pub const FROG_FOOD_SPECIES: &[&str] = &["slime", "magma_cube"];
+
 /// The `WalkToPoi` close-enough distance a warden's melee pursuit stops at —
 /// **not** a vanilla constant (see this function's own doc for why one
 /// cannot be cited). Chosen strictly smaller than
@@ -572,6 +631,11 @@ pub fn brain_for(species: &str) -> Option<BrainGoal> {
     // it — `BrainGoal::idle` only ever offers `IDLE`.
     if species == "goat" {
         return Some(BrainGoal::new(goat_brain(), vec![Activity::RAM, Activity::IDLE]));
+    }
+    // Same shape again: `frog_brain` needs both an extra activity (`TONGUE`)
+    // and a candidate list that offers it.
+    if species == "frog" {
+        return Some(BrainGoal::new(frog_brain(), vec![Activity::TONGUE, Activity::IDLE]));
     }
     // Same shape again: `piglin_brain` needs both an extra activity (`AVOID`)
     // and a candidate list that offers it. `piglin_brute` is deliberately
@@ -870,6 +934,10 @@ mod tests {
         time: i64,
         nearby: Vec<super::super::mob::NearbyBrainEntity>,
         attacks: Vec<lodestone_model::Vec3>,
+        /// `None` for every goat test below; the frog `TONGUE` tests set
+        /// this and rely on the same real-relocation `move_to` this struct
+        /// already gives the goat ram tests.
+        attackable_food: Option<lodestone_model::Vec3>,
     }
 
     impl super::super::mob::BrainMob for RamTestMob {
@@ -903,6 +971,9 @@ mod tests {
         fn attack(&mut self, target: lodestone_model::Vec3) {
             self.attacks.push(target);
         }
+        fn nearest_attackable_food(&self) -> Option<lodestone_model::Vec3> {
+            self.attackable_food
+        }
     }
 
     /// End-to-end through [`brain_for("goat")`], the exact production path
@@ -928,6 +999,7 @@ mod tests {
                 hostile: false,
             }],
             attacks: Vec::new(),
+            attackable_food: None,
         };
 
         // Generous: prepare (20-tick wait once arrived, plus a few ticks of
@@ -964,6 +1036,7 @@ mod tests {
             time: 0,
             nearby: Vec::new(),
             attacks: Vec::new(),
+            attackable_food: None,
         };
 
         for _ in 0..40 {
@@ -977,6 +1050,74 @@ mod tests {
         assert!(
             goat.brain().is_active(Activity::IDLE),
             "with nothing to ram, the goat must fall back to IDLE, not freeze in RAM"
+        );
+    }
+
+    /// End-to-end through `brain_for("frog")`, the exact production path — a
+    /// frog with eligible prey 3 blocks away must swap into `TONGUE`, close
+    /// the distance, and land a [`BrainMob::attack`] on it. The same
+    /// "real-relocation `move_to`" `RamTestMob` already gives the goat ram
+    /// tests, just fed through [`RamTestMob::attackable_food`] instead of
+    /// `nearby`.
+    #[test]
+    fn a_frog_with_nearby_food_closes_the_distance_and_lands_a_hit() {
+        let candidates = [Activity::TONGUE, Activity::IDLE];
+        let mut frog = brain_for("frog").expect("frog is a brain species");
+        let mut mob = RamTestMob {
+            pos: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+            time: 0,
+            nearby: Vec::new(),
+            attacks: Vec::new(),
+            attackable_food: Some(lodestone_model::Vec3::new(3.0, 0.0, 0.0)),
+        };
+
+        for _ in 0..20 {
+            frog.brain_mut().set_active_activity_to_first_valid(&candidates);
+            frog.brain_mut().tick(&mut mob);
+            mob.time += 1;
+            if !mob.attacks.is_empty() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            mob.attacks,
+            vec![lodestone_model::Vec3::new(3.0, 0.0, 0.0)],
+            "the frog must land exactly one attack on the food's position; got {:?}",
+            mob.attacks
+        );
+        assert!(
+            frog.brain().is_active(Activity::TONGUE),
+            "landing the hit must not itself force a fall back to IDLE mid-tick"
+        );
+    }
+
+    /// The negative control: no eligible prey means `TONGUE` never has
+    /// anything to do, so the frog must fall back to `IDLE` and never call
+    /// [`BrainMob::attack`] — a frog alone in the world must not
+    /// spontaneously attack nothing.
+    #[test]
+    fn a_frog_with_no_food_nearby_never_attacks_and_falls_back_to_idle() {
+        let candidates = [Activity::TONGUE, Activity::IDLE];
+        let mut frog = brain_for("frog").expect("frog is a brain species");
+        let mut mob = RamTestMob {
+            pos: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+            time: 0,
+            nearby: Vec::new(),
+            attacks: Vec::new(),
+            attackable_food: None,
+        };
+
+        for _ in 0..20 {
+            frog.brain_mut().set_active_activity_to_first_valid(&candidates);
+            frog.brain_mut().tick(&mut mob);
+            mob.time += 1;
+        }
+
+        assert!(mob.attacks.is_empty(), "an empty world must never produce a tongue attack");
+        assert!(
+            frog.brain().is_active(Activity::IDLE),
+            "with nothing to eat, the frog must fall back to IDLE, not freeze in TONGUE"
         );
     }
 

@@ -945,6 +945,100 @@ impl Behavior for RamTarget {
     }
 }
 
+/// `ShootTongue` (`world/entity/animal/frog/ShootTongue.java`) — a frog's
+/// tongue attack: chase [`MemoryModuleType::NEAREST_ATTACKABLE_FOOD`] and
+/// land a hit once within [`EATING_DISTANCE`](Self::EATING_DISTANCE).
+///
+/// # Disclosed cuts from the jar original
+///
+/// * **No `MOVE_TO_TARGET`/`CATCH_ANIMATION`/`EAT_ANIMATION` state machine.**
+///   Vanilla spends 6 ticks on a catch animation and 10 on an eat animation
+///   before the hit actually lands (`ShootTongue.tick`'s own `State` enum);
+///   this crate has no tongue-animation client state to time against, so the
+///   hit resolves the instant the mob is in range — see
+///   [`super::mob::BrainMob::attack`]'s own doc for the shared melee-hit
+///   seam this reuses, the same one [`RamTarget`] already writes through.
+/// * **No target-locking or reachability memory.** Real `ShootTongue` picks
+///   one target at `start()` and tracks it by identity for the whole
+///   behaviour, falling back to `UNREACHABLE_TONGUE_TARGETS` on a failed
+///   path. This crate's `BrainMob` seam has no entity handle to lock onto —
+///   only a position, host-resolved fresh every tick (see
+///   [`MemoryModuleType::NEAREST_ATTACKABLE_FOOD`]'s own doc) — so this
+///   behaviour re-aims at whatever the sensor currently reports instead,
+///   the same "no `TargetingConditions` filter, lean on `move_to`'s own A\*
+///   to fail closed" trade [`PrepareRam`]'s own doc already discloses for
+///   an identical gap.
+/// * **No `Pose.CROAKING`/breeding gate.** `checkExtraStartConditions`'s own
+///   `body.getPose() != Pose.CROAKING && !isBreeding(mob)` checks are not
+///   modelled — this seam has no pose or breeding-goal state to read.
+#[derive(Debug)]
+pub struct ShootTongue {
+    speed: f32,
+    entry: [(MemoryModuleType, MemoryStatus); 1],
+}
+
+impl ShootTongue {
+    /// The 3D `distanceTo` bound `ShootTongue.EATING_DISTANCE` uses in the
+    /// jar; this port checks it via [`horizontal_distance`] instead, the
+    /// same bounding-box-to-flat-check substitution [`RamTarget::CONTACT_RANGE`]
+    /// already makes for the identical reason (no bounding box on this seam).
+    pub const EATING_DISTANCE: f64 = 1.75;
+
+    /// `speed` is `ShootTongue.tick`'s own `WalkTarget` speed (`2.0F`).
+    #[must_use]
+    pub fn new(speed: f32) -> Self {
+        Self {
+            speed,
+            entry: [(MemoryModuleType::NEAREST_ATTACKABLE_FOOD, MemoryStatus::ValuePresent)],
+        }
+    }
+}
+
+impl Behavior for ShootTongue {
+    fn entry_condition(&self) -> &[(MemoryModuleType, MemoryStatus)] {
+        &self.entry
+    }
+
+    // `ShootTongue.TIME_OUT_DURATION` — a fixed ceiling, not a rolled range.
+    fn min_duration(&self) -> i32 {
+        100
+    }
+
+    fn max_duration(&self) -> i32 {
+        100
+    }
+
+    fn can_still_use(&mut self, mem: &mut Memories, _mob: &mut dyn BrainMob, _time: i64) -> bool {
+        mem.has_value(MemoryModuleType::NEAREST_ATTACKABLE_FOOD)
+    }
+
+    fn tick(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob, _time: i64) {
+        let Some(&MemoryValue::Pos(target)) = mem.get(MemoryModuleType::NEAREST_ATTACKABLE_FOOD) else {
+            return;
+        };
+        mem.set(MemoryModuleType::LOOK_TARGET, MemoryValue::Pos(target));
+        if horizontal_distance(mob.position(), target) <= Self::EATING_DISTANCE {
+            mob.attack(target);
+            mem.erase(MemoryModuleType::WALK_TARGET);
+            mob.stop_navigation();
+        } else {
+            mem.set(
+                MemoryModuleType::WALK_TARGET,
+                MemoryValue::WalkTarget(WalkTarget::new(target, self.speed, 0)),
+            );
+        }
+    }
+
+    fn stop(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob, _time: i64) {
+        mem.erase(MemoryModuleType::LOOK_TARGET);
+        mob.stop_navigation();
+    }
+
+    fn name(&self) -> &'static str {
+        "shoot_tongue"
+    }
+}
+
 #[cfg(test)]
 mod walk_to_poi_tests {
     use super::*;

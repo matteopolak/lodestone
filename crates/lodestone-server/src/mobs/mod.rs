@@ -74,7 +74,7 @@ use lodestone_data::{block_states, collision_shapes, entity_dimensions, entity_t
 // through the whole module.
 use lodestone_physics::{CollisionView, EntityDimensions, Vec3d, collision::collide};
 use lodestone_entity::ai::roster::{self, SpeciesContext};
-use lodestone_entity::brain::{NearbyBrainEntity, is_brain_species};
+use lodestone_entity::brain::{FROG_FOOD_SPECIES, NearbyBrainEntity, is_brain_species};
 use lodestone_entity::ai::navigating_mob::{
     BABY_START_AGE, DEFAULT_FOLLOW_RANGE, PARENT_AGE_AFTER_BREEDING,
 };
@@ -6144,6 +6144,9 @@ impl<'w> MobSim<'w> {
         // Issue #231: the nearest visible zombified piglin, fed to a
         // piglin's `AVOID` brain activity.
         let mut nearest_visible_zombified = vec![None; n];
+        // Issue #230: the nearest eligible tongue-attack prey, fed to a
+        // frog's `TONGUE` brain activity.
+        let mut nearest_attackable_food = vec![None; n];
 
         // --- persistent anger (issue #458, primitive 1) --------------------
         //
@@ -6364,6 +6367,26 @@ impl<'w> MobSim<'w> {
                 );
             }
 
+            // --- nearest eligible tongue-attack prey (issue #230) ----------
+            // A frog's `TONGUE` brain activity. `FrogAttackablesSensor`'s own
+            // range is `TARGET_DETECTION_DISTANCE` (10.0F); `FROG_FOOD_SPECIES`
+            // is the host-side stand-in for `Frog.canEat`'s
+            // `EntityTypeTags.FROG_FOOD` check (see that constant's own doc
+            // for the disclosed size-1 narrowing this does not model).
+            if species == "frog" {
+                nearest_attackable_food[i] = nearest_by(
+                    &self.mobs,
+                    pos,
+                    SimMob::position,
+                    |other| {
+                        other.id != me.id
+                            && other.health > 0.0
+                            && FROG_FOOD_SPECIES.contains(&other.entity_type().path())
+                    },
+                    Some((10.0, 10.0)),
+                );
+            }
+
             // --- patrol group target ---------------------------------------
             // Issue #241a. A leader never reads this — it computes its own
             // fresh target from `LongDistancePatrolGoal` itself; only a
@@ -6477,6 +6500,7 @@ impl<'w> MobSim<'w> {
                 .set_meeting_point(meeting_point)
                 .set_owner_sleep_ticks(owner_sleep_ticks[i])
                 .set_nearest_visible_zombified(nearest_visible_zombified[i])
+                .set_nearest_attackable_food(nearest_attackable_food[i])
                 .set_ticks_since_shoulder_dismount(shoulder_dismount_ticks)
                 .set_day_time(day_time);
         }
