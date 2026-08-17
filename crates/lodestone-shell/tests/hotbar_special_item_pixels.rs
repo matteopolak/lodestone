@@ -428,14 +428,19 @@ fn special_pose_and_extent(item: &str, model_name: &'static str) -> (Mat4, Vec3,
     let item: ResourceLocation = item.parse().expect("valid item id");
     let icon = atlas.icon(&item).expect("item must resolve to an icon");
     let transform = icon.display.get(DisplaySlot::Gui);
-    // The node's own `"transformation"` (only the skull family carries one) —
+    // The item definition's whole root-to-`special` `"transformation"` chain —
     // read from the same `IconPart::Special` `push_special_icon` reads, so this
     // prediction and the production draw cannot disagree about which node field
-    // fed it.
-    let node_transformation = icon.parts.iter().find_map(|p| match p {
-        IconPart::Special { transformation, .. } => *transformation,
-        _ => None,
-    });
+    // fed it. A shield's lives on the enclosing `minecraft:condition` node, not
+    // on the `special` node itself.
+    let node_transformation: Vec<lodestone_assets::ItemNodeTransform> = icon
+        .parts
+        .iter()
+        .find_map(|p| match p {
+            IconPart::Special { transformation, .. } => Some(transformation.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
 
     let models = BlockEntityModelSet::load();
     let mesh = models.get(model_name).unwrap_or_else(|| {
@@ -449,7 +454,7 @@ fn special_pose_and_extent(item: &str, model_name: &'static str) -> (Mat4, Vec3,
     let rect = [rx as f32, ry as f32, rw as f32, rh as f32];
     let outer = gui_item_pose(rect, &transform);
     (
-        lodestone_render::compose_special_node_transform(outer, node_transformation),
+        lodestone_render::compose_special_node_transform(outer, &node_transformation),
         mesh.local_min,
         mesh.local_max,
     )

@@ -866,12 +866,13 @@ impl RenderState {
             inverse_arm_height,
             &transform,
         );
-        // The `special` node's own `"transformation"` (skull family only) composes
-        // *underneath* the display-context pose just built, exactly as
-        // `SpecialModelWrapper.Unbaked.bake` does — see
-        // `compose_special_node_transform`'s doc for the derivation.
+        // The item definition's whole root-to-`special` `"transformation"` chain
+        // composes *underneath* the display-context pose just built, exactly as
+        // `bake` threads it down — see `compose_special_node_transform`'s doc
+        // for the derivation and for why an ancestor node's entry counts (a
+        // shield's `scale [1, -1, -1]` is one).
         let placement =
-            lodestone_render::compose_special_node_transform(placement, form.transformation);
+            lodestone_render::compose_special_node_transform(placement, &form.transformation);
         let light = self.hand_light(camera);
 
         // The banner rig is two meshes sharing this same placement — see

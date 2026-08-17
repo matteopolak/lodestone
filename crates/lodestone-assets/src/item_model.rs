@@ -85,10 +85,26 @@ pub enum ItemModelNode {
         base: ResourceLocation,
         /// The special renderer id.
         kind: String,
-        /// The node's own `"transformation"` field, `None` when the JSON carries
-        /// none (every non-skull `special` kind today). See
-        /// [`ItemNodeTransform`]'s doc for how a caller must compose it.
-        transformation: Option<ItemNodeTransform>,
+        /// Every `"transformation"` on the path from the definition's root down
+        /// to this node, **outermost first** — this node's own is last, and the
+        /// list is empty when nothing on the path carries one.
+        ///
+        /// # Why a chain and not this node's own field
+        ///
+        /// `"transformation"` is a field of *every* `ItemModel.Unbaked` record,
+        /// not of `SpecialModelWrapper.Unbaked` alone: `bake(context,
+        /// transformation)` takes the accumulated parent matrix, and each node
+        /// composes `Transformation.compose(parent, this.transformation)` before
+        /// handing it to its children. Reading only the `special` node's own
+        /// field silently drops an ancestor's — which is exactly what happened
+        /// to `minecraft:shield`, whose `scale [1, -1, -1]` (vanilla's
+        /// `ShieldSpecialRenderer` flip, hoisted into data) sits on the
+        /// enclosing `minecraft:condition` node. See
+        /// `docs/banner-shield-patterns.md` for the pixel-level consequence.
+        ///
+        /// A caller folds the chain left to right onto its outer placement:
+        /// `outer * m[0] * m[1] * …`.
+        transformation: Vec<ItemNodeTransform>,
     },
     /// `minecraft:empty` — renders nothing.
     Empty,
@@ -99,13 +115,17 @@ pub enum ItemModelNode {
     },
 }
 
-/// A `minecraft:special` node's own `"transformation"` field — vanilla's
-/// `Transformation` record (`com.mojang.math.Transformation`): a TRS composed
-/// as `translation * left_rotation * scale * right_rotation`, with a
-/// *quaternion pair* rather than the Euler-angle rotation
-/// [`DisplayTransform`] uses. Only the skull family carries this today
-/// (`assets/minecraft/items/*_skull.json`, `player_head.json`); every other
-/// `special` kind's JSON omits `"transformation"` entirely.
+/// One node's `"transformation"` field — vanilla's `Transformation` record
+/// (`com.mojang.math.Transformation`): a TRS composed as `translation *
+/// left_rotation * scale * right_rotation`, with a *quaternion pair* rather
+/// than the Euler-angle rotation [`DisplayTransform`] uses.
+///
+/// **Any** node type may carry one, not only `special` — measured against the
+/// 26.2 jar, 67 of the shipped `assets/minecraft/items/*.json` do, and 14 of
+/// the 91 `special` nodes sit under an ancestor that carries it instead of
+/// carrying it themselves (`shield`, `trident`, …). An earlier version of this
+/// doc said "only the skull family", which was true of the *files this parser
+/// then looked at* and not of the format.
 ///
 /// Stored as raw JSON numbers, same convention as [`DisplayTransform`]:
 /// units are already blocks (no vanilla `/16` here — that division is
@@ -245,9 +265,11 @@ pub enum ItemModelOutput<'a> {
         base: &'a ResourceLocation,
         /// The special renderer id.
         kind: &'a str,
-        /// The node's own `"transformation"` field — see
-        /// [`ItemNodeTransform`]'s doc for how a caller must compose it.
-        transformation: Option<ItemNodeTransform>,
+        /// Every `"transformation"` on the root-to-node path, outermost first —
+        /// see [`ItemModelNode::Special`]'s field of the same name for why this
+        /// is a chain, and [`ItemNodeTransform`]'s doc for how a caller must
+        /// compose each entry.
+        transformation: &'a [ItemNodeTransform],
     },
 }
 
@@ -332,7 +354,28 @@ fn parse_node(value: &Value) -> Result<ItemModelNode, ItemModelError> {
         .and_then(Value::as_str)
         .ok_or_else(|| ItemModelError::BadField("model node missing \"type\"".into()))?;
 
-    match strip_ns(kind) {
+    // `"transformation"` is a field of every `ItemModel.Unbaked` record, not of
+    // `special` alone (see `ItemModelNode::Special::transformation`). The
+    // `special` arm below consumes its own; every other arm's is pushed into the
+    // subtree at the end of this function.
+    let node = parse_node_body(obj, strip_ns(kind))?;
+    let Some(own) = obj.get("transformation").map(parse_node_transform) else {
+        return Ok(node);
+    };
+    let mut node = node;
+    if !matches!(node, ItemModelNode::Special { .. }) {
+        prepend_node_transform(&mut node, own);
+    }
+    Ok(node)
+}
+
+/// [`parse_node`]'s per-`type` dispatch, split out so the shared
+/// `"transformation"` handling has one place to sit rather than one per arm.
+fn parse_node_body(
+    obj: &serde_json::Map<String, Value>,
+    kind: &str,
+) -> Result<ItemModelNode, ItemModelError> {
+    match kind {
         "model" => {
             let model =
                 ResourceLocation::parse(obj.get("model").and_then(Value::as_str).ok_or_else(
@@ -427,7 +470,13 @@ fn parse_node(value: &Value) -> Result<ItemModelNode, ItemModelError> {
                 .and_then(Value::as_str)
                 .ok_or_else(|| ItemModelError::BadField("special missing model.type".into()))?
                 .to_string();
-            let transformation = obj.get("transformation").map(parse_node_transform);
+            // This node's own field only; `parse_node` prepends every ancestor's
+            // below, which is what makes the stored value a chain.
+            let transformation = obj
+                .get("transformation")
+                .map(parse_node_transform)
+                .into_iter()
+                .collect();
             Ok(ItemModelNode::Special {
                 base,
                 kind,
@@ -438,6 +487,59 @@ fn parse_node(value: &Value) -> Result<ItemModelNode, ItemModelError> {
         other => Ok(ItemModelNode::Other {
             kind: other.to_string(),
         }),
+    }
+}
+
+/// Prepends an ancestor node's `"transformation"` to every [`Special`] node in
+/// `node`'s subtree, so a `Special` ends up holding the whole root-to-node
+/// chain outermost-first.
+///
+/// This is `ItemModel.Unbaked.bake`'s `Transformation.compose(parent,
+/// this.transformation)` done once at parse time rather than per resolve: the
+/// accumulation is static (it does not depend on which branch a predicate
+/// picks), exactly as vanilla's is, so there is nothing to defer.
+///
+/// [`Special`]: ItemModelNode::Special
+fn prepend_node_transform(node: &mut ItemModelNode, outer: ItemNodeTransform) {
+    match node {
+        ItemModelNode::Special { transformation, .. } => transformation.insert(0, outer),
+        ItemModelNode::Composite { models } => {
+            for child in models {
+                prepend_node_transform(child, outer);
+            }
+        }
+        ItemModelNode::Condition {
+            on_true, on_false, ..
+        } => {
+            prepend_node_transform(on_true, outer);
+            prepend_node_transform(on_false, outer);
+        }
+        ItemModelNode::Select {
+            cases, fallback, ..
+        } => {
+            for case in cases {
+                prepend_node_transform(&mut case.model, outer);
+            }
+            if let Some(fallback) = fallback {
+                prepend_node_transform(fallback, outer);
+            }
+        }
+        ItemModelNode::RangeDispatch {
+            entries, fallback, ..
+        } => {
+            for entry in entries {
+                prepend_node_transform(&mut entry.model, outer);
+            }
+            if let Some(fallback) = fallback {
+                prepend_node_transform(fallback, outer);
+            }
+        }
+        // A `model` leaf's own accumulated transform is dropped, as it always
+        // has been: `ItemModelOutput::Model` carries no such field and the
+        // baked-geometry path has nowhere to put one. Vanilla does apply it
+        // (`BlockModelWrapper.bake` takes the same accumulated matrix), so a
+        // bed's `minecraft:model` sub-node transform is still unmodelled here.
+        ItemModelNode::Model { .. } | ItemModelNode::Empty | ItemModelNode::Other { .. } => {}
     }
 }
 
@@ -679,7 +781,7 @@ fn collect_outputs<'a>(node: &'a ItemModelNode, out: &mut Vec<ItemModelOutput<'a
         } => out.push(ItemModelOutput::Special {
             base,
             kind,
-            transformation: *transformation,
+            transformation,
         }),
         ItemModelNode::Composite { models } => {
             models.iter().for_each(|m| collect_outputs(m, out));
@@ -724,7 +826,7 @@ fn resolve_node<'a>(
         } => out.push(ItemModelOutput::Special {
             base,
             kind,
-            transformation: *transformation,
+            transformation,
         }),
         ItemModelNode::Composite { models } => {
             models.iter().for_each(|m| resolve_node(m, ctx, out))

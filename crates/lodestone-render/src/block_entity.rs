@@ -2051,13 +2051,13 @@ impl BlockEntityModelSet {
     /// (`SpecialItemForm::kind`), `item_path` the item's registry path with the
     /// namespace stripped, and `placement` the surface's already-composed
     /// block→world matrix: a dropped stack's bob-and-spin chain, another entity's
-    /// hand chain, or an item frame's wall pose. `transformation` is the
-    /// `minecraft:special` node's own `"transformation"` field
-    /// (`SpecialItemForm::transformation`) — composed *underneath* `placement`,
-    /// same as every other consumer; see
+    /// hand chain, or an item frame's wall pose. `transformation` is the item
+    /// definition's whole root-to-`special` `"transformation"` chain, outermost
+    /// first (`SpecialItemForm::transformation`) — folded *underneath*
+    /// `placement`, same as every other consumer; see
     /// [`crate::compose_special_node_transform`]'s doc for the derivation.
-    /// `None` when the `kind` has no ported rig (six of the ten do not) or the
-    /// rig is not in the corpus.
+    /// Returns `None` when the `kind` has no ported rig (six of the ten do not)
+    /// or the rig is not in the corpus.
     ///
     /// # Why this exists rather than each surface building the instance itself
     ///
@@ -2081,7 +2081,7 @@ impl BlockEntityModelSet {
         kind: &str,
         item_path: &str,
         placement: Mat4,
-        transformation: Option<lodestone_assets::ItemNodeTransform>,
+        transformation: &[lodestone_assets::ItemNodeTransform],
         light: u8,
     ) -> Option<BlockEntityInstance> {
         let (model, texture) = special_item_rig(kind, item_path)?;
@@ -3263,11 +3263,9 @@ pub struct BannerItemRig {
 // `translation: [0.5, 0.0, 0.5]` plus a 180°-about-X `left_rotation` — on the
 // `minecraft:special` model *node itself*
 // (`SpecialModelWrapper.Unbaked.bake`: `Transformation.compose(displayTransform,
-// this.transformation)`), and `ItemModelNode::Special` in `lodestone-assets`
-// carries no field for it at all today. That is a real, separate, unfixed gap
-// — filed rather than patched here under time pressure, because porting a
-// quaternion-based `Transformation` compose into this schema is its own piece
-// of work, not a one-line correction like the flip this note replaces.
+// this.transformation)`). That gap is closed: `ItemModelNode::Special` carries
+// the whole root-to-node `"transformation"` chain and every consumer folds it
+// through `compose_special_node_transform`.
 
 /// One resolved block entity, ready to batch.
 #[derive(Debug, Clone, PartialEq)]
@@ -5301,7 +5299,7 @@ mod special_item_tests {
         let models = BlockEntityModelSet::load();
         let placement = Mat4::from_translation(Vec3::new(12.0, 70.0, -4.0));
         let chest = models
-            .resolve_special_item("minecraft:chest", "chest", placement, None, 0x8F)
+            .resolve_special_item("minecraft:chest", "chest", placement, &[], 0x8F)
             .expect("a plain chest resolves");
         assert_eq!(chest.model, CHEST_SINGLE);
         // **Four**, not three. `chest_single_model`'s root is a real, geometry-free
@@ -5339,7 +5337,7 @@ mod special_item_tests {
         // trapped chest must share the mesh and differ here. Collected, so one
         // wrong arm does not hide the other.
         let trapped = models
-            .resolve_special_item("minecraft:chest", "trapped_chest", placement, None, 0)
+            .resolve_special_item("minecraft:chest", "trapped_chest", placement, &[], 0)
             .expect("a trapped chest resolves");
         let mut wrong: Vec<String> = Vec::new();
         if trapped.model != chest.model {
@@ -5363,7 +5361,7 @@ mod special_item_tests {
             ("mypack:teapot", "teapot"),
         ] {
             if models
-                .resolve_special_item(kind, path, placement, None, 0)
+                .resolve_special_item(kind, path, placement, &[], 0)
                 .is_some()
             {
                 wrong.push(format!("{kind}/{path} resolved to an instance"));

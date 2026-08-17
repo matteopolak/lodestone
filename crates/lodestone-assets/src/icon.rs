@@ -142,13 +142,14 @@ pub enum IconPart {
         base: ResourceLocation,
         /// The special renderer id (e.g. `minecraft:chest`).
         kind: String,
-        /// The `minecraft:special` node's own `"transformation"` field —
-        /// `None` for the ex-`builtin/entity` arm (a different model type
-        /// entirely, no such field) and for the nine of ten `special` kinds
-        /// whose JSON omits it; `Some` for the skull family. A caller
-        /// composes this *underneath* [`ItemIcon::display`]'s pose — see
-        /// [`crate::ItemNodeTransform`]'s doc for the derivation.
-        transformation: Option<crate::ItemNodeTransform>,
+        /// Every `"transformation"` on the definition tree's path down to this
+        /// `special` node, outermost first — see
+        /// [`crate::ItemModelNode::Special`]'s field of the same name for why
+        /// an ancestor's counts, and [`crate::ItemNodeTransform`] for how one
+        /// entry composes. Always empty for the ex-`builtin/entity` arm (a
+        /// different model type entirely, with no such field). A caller folds
+        /// the chain *underneath* [`ItemIcon::display`]'s pose.
+        transformation: Vec<crate::ItemNodeTransform>,
     },
 }
 
@@ -426,7 +427,7 @@ impl<'a> ItemIconBuilder<'a> {
                     Some(IconPart::Special {
                         base: base.clone(),
                         kind: kind.to_string(),
-                        transformation,
+                        transformation: transformation.to_vec(),
                     }),
                     display,
                 ))
@@ -484,7 +485,7 @@ impl<'a> ItemIconBuilder<'a> {
             Some("entity") => Some(IconPart::Special {
                 base: model.clone(),
                 kind: "minecraft:builtin_entity".to_string(),
-                transformation: None,
+                transformation: Vec::new(),
             }),
             // `builtin/empty` and any other builtin sentinel render nothing here.
             Some(_) => None,

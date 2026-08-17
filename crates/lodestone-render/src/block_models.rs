@@ -762,16 +762,16 @@ pub struct SpecialItemForm {
     pub kind: String,
     /// The `base` model's own `display` map, all nine slots.
     pub display: DisplayTransforms,
-    /// The `minecraft:special` node's own `"transformation"` field (translation
-    /// plus a `left_rotation`/`right_rotation` quaternion pair), composed by
-    /// vanilla *underneath* the display-context transform above —
-    /// `Transformation.compose(displayTransform, this.transformation)` in
-    /// `SpecialModelWrapper.Unbaked.bake`. `None` for the six of ten `kind`s
-    /// whose JSON carries no `"transformation"` at all (only the skull family —
-    /// `minecraft:head`/`minecraft:player_head` — has one today). A caller
-    /// composes it as `existing_outer_placement * node_transform_matrix`; see
+    /// Every `"transformation"` on the item definition's path down to this
+    /// `special` node, outermost first (translation plus a `left_rotation`/
+    /// `right_rotation` quaternion pair each), composed by vanilla *underneath*
+    /// the display-context transform above — `Transformation.compose(parent,
+    /// this.transformation)`, threaded through `bake` by every node type and
+    /// not just `SpecialModelWrapper.Unbaked`. Empty when nothing on the path
+    /// carries one. A caller folds it as `existing_outer_placement * m[0] *
+    /// m[1] * …` — [`crate::compose_special_node_transform`] is that fold; see
     /// [`lodestone_assets::ItemNodeTransform`]'s doc for the derivation.
-    pub transformation: Option<ItemNodeTransform>,
+    pub transformation: Vec<ItemNodeTransform>,
 }
 
 impl ItemVariants {
@@ -1031,7 +1031,7 @@ fn collect_item_variants(manager: &ResourceManager) -> ItemVariantParts {
                         SpecialItemForm {
                             kind: kind.to_string(),
                             display,
-                            transformation,
+                            transformation: transformation.to_vec(),
                         },
                     ));
                 }
@@ -2902,7 +2902,7 @@ mod special_form_tests {
             SpecialItemForm {
                 kind: "minecraft:chest".to_string(),
                 display: DisplayTransforms::NONE,
-                transformation: None,
+                transformation: Vec::new(),
             },
         );
         ItemVariants {

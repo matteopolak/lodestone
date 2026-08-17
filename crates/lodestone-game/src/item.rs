@@ -1683,6 +1683,12 @@ mod tests {
                         color: "black".to_string(),
                     },
                 ],
+                // A shield's own dye tint, and deliberately *not* one of the two
+                // colours `banner_patterns` above uses: the three are adjacent
+                // dye-name strings on the same struct, so a fixture that reused
+                // "lime" or "black" here could not tell a transposition from a
+                // correct round trip.
+                base_color: Some("light_blue".to_string()),
                 tool: ToolPatch::Set(tool),
                 max_stack_size: Some(1),
                 max_damage: Some(1561),
