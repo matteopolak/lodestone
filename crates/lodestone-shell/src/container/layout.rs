@@ -338,10 +338,24 @@ fn generic_layout(container_size: usize) -> SlotLayout {
         ));
     }
     let main_y = 18.0 + rows as f32 * SLOT + 13.0;
-    let hotbar_y = append_main_inventory(&mut slots, container_size, main_y);
+    append_main_inventory(&mut slots, container_size, main_y);
     SlotLayout {
         width: 176.0,
-        height: hotbar_y + 24.0,
+        // `ContainerScreen`'s own constructor: `super(menu, inventory, title,
+        // 176, 114 + menu.getRowCount() * 18)` (`ContainerScreen.java`) — a
+        // **second**, independent vanilla constant, not a value derived from
+        // `main_y` above. The two do not sit a fixed 82 px apart: vanilla's
+        // own top/bottom background blits (`containerRows * 18 + 17` then a
+        // fixed `96`) sum to `rows*18 + 113`, one less than `imageHeight`
+        // itself, so this panel's asset geometry already carries a real
+        // one-pixel seam between "where the last row's slots sit" and "how
+        // tall the panel is" — deriving one from the other via a shared
+        // `+ 82` constant (as this used to) can only ever match one of the
+        // two real numbers, not both. `generic_container_inventory_row_
+        // matches_chest_menus_real_offset` pins the slot side of this;
+        // `slot_layout_height_is_vanillas_image_height` (`tests/
+        // container_labels.rs`) pins this one.
+        height: 114.0 + rows as f32 * SLOT,
         slots,
     }
 }
