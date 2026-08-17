@@ -109,13 +109,33 @@ built-in `minecraft:potion_contents` `potion` id, not its patch's custom-effects
 * **A consumer**: read `ActiveEffects::amplifier_of` or `::active()` rather than keeping
   your own copy. That is the whole reason this is one store.
 * **Another producer**: `Effect::ApplyEffect` / `Effect::ClearEffects` in
-  `crate::commands::effect`, applied by `server.rs`'s `apply_own_effect`.
+  `crate::commands::effect`, applied by `server.rs`'s `apply_own_effect`; or a
+  **consumable**, below.
 * **The splash formula**: `mob_effects::potion_splash_effects` is the one entry point
   a caller needs; its pieces (`splash_scale`, `splash_instant_amount`,
   `splash_timed_duration`, `splash_would_be_dropped`) are separated because each is
   independently testable against `AbstractThrownPotion`'s own named constant or
   `MobEffectInstance` method. The entity search that calls it is
   `crate::mobs::projectiles::resolve_potion_splash`.
+
+### Drinking and eating
+
+`server.rs`'s `finish_drinking_potion` reuses `potion_splash_effects` at
+`scale = 1.0`, `duration_scale = 1.0` — both of that function's own scaling formulas
+are the identity transform there, which is exactly `PotionContents.applyToLivingEntity`'s
+own unscaled call, not an approximation borrowed for convenience. `finish_drinking_milk`
+clears every active effect (`ActiveEffects::clear`) and reports which ids were actually
+live, so the caller sends exactly one `remove_mob_effect` per one that changed.
+
+A **food's** own `onConsumeEffects` list (a golden apple's regeneration, a pufferfish's
+poison/hunger/nausea, rotten flesh's probabilistic hunger, …) is a different, smaller
+table — `mob_effects::food_consume_effects`, transcribed straight from
+`Consumables.java`'s `ApplyStatusEffectsConsumeEffect` registrations, each carrying its
+own `probability` (`1.0` unless the Java constructor says otherwise). Applied after
+`finish_consuming`'s food-eat succeeds, once per grant, gated on a roll against that
+probability. Honey bottle's `RemoveStatusEffectsConsumeEffect(POISON)` is the one
+*removal*-shaped row and lives in its own `removes_poison_on_consume`, since it is
+deterministic (no probability field) and the caller only needs a bool.
 
 ### Gotchas
 
@@ -135,29 +155,44 @@ built-in `minecraft:potion_contents` `potion` id, not its patch's custom-effects
 
 ## What is not here
 
-* **Attribute-modifier effects** (`speed`, `slowness`, `health_boost`, `absorption`).
-  These need an attribute system. `lodestone_physics::effect` already classifies the
-  movement ones; the store is here for it to read.
+* **`speed`/`slowness`'s `MOVEMENT_SPEED` attribute fold.** `lodestone_physics::effect`
+  classifies both (`movement_speed_modifier`) and `PlayerState::movement_speed` is a
+  ready-made input field, but nothing calls that classifier in production —
+  `crates/lodestone-shell/src/sim/net_apply.rs`'s `NetUpdate::EffectApplied`/
+  `EffectRemoved` arms already fold the *direct-read* effects (levitation, slow
+  falling, dolphin's grace, jump boost) into `PhysicsState`'s `StatusEffects`, but
+  never touch `movement_speed`. So a Speed or Slowness potion updates the HUD chip and
+  does nothing to how fast the player actually moves. `lodestone-shell` is a separate
+  ownership area from this crate; the missing hunk is that one `EffectApplied`/
+  `EffectRemoved` arm.
+* **`resistance`'s damage reduction and `absorption`'s extra hit points.** Both are
+  granted correctly now (a golden apple, a Potion of Regeneration's sibling potions,
+  a beacon) — they store, tick their duration down, and show in the HUD — but nothing
+  *reads* them back. `Defenses` (`lodestone_entity::damage`) already has
+  `resistance_amplifier`/`absorption` fields ready to consume; every real player
+  damage call site builds its `Defenses` from `PlayerInventory::combat_stats` alone
+  (armour only), so `resistance_amplifier` is always `None` and `absorption` is always
+  `0.0`. Regeneration and Fire Resistance are **not** in this category — both already
+  have a real consumer (`ActiveEffects::tick`'s heal, `crate::burning`'s
+  `fire_resistance` flag) — so granting those two is complete end to end.
 * **A lingering potion's own `AreaEffectCloud` entity.** Real vanilla behaviour is a
   cloud with a radius, a radius-per-tick shrink, a duration and a reapplication delay,
   so the burst lands repeatedly over up to 30 seconds. That entity does not exist here,
   so `resolve_potion_splash` applies a lingering potion's burst exactly **once**, at
   impact — the same as a splash potion — rather than lingering. Tracked as a follow-up.
-* **The `update_mob_effect` / `remove_mob_effect` packets.** Nothing encodes them, so a
-  client's own effect HUD does not light up — the *consequences* (damage, healing,
-  exhaustion) reach the player, the icon does not. A mob's own splash-applied effects
-  ([`SimMob::effects`]) are even less visible: nothing renders a mob's status icons at
-  all, and nothing yet ticks a mob's periodic poison/wither/regeneration — a splash
-  lands the *instance*, but only a player's own vitals timer currently advances one.
 * **`ambient` / `visible` / `showIcon`** and the blend state — purely presentational,
   and `/effect`'s `hideParticles` node is omitted rather than parsed-and-discarded.
-* **Drinking a potion.** `crate::brewing` produces potion *items*; no item-use path
-  turns one into an effect. (A **thrown** splash/lingering potion's impact-time burst
-  is covered above — that path is separate from drinking.)
+* **Drinking milk's `usingConvertsTo`.** Vanilla converts the stack to
+  `minecraft:bucket` rather than consuming it outright; `finish_drinking_milk` empties
+  the whole stack instead, matching every other drink in `item_use`'s module doc's
+  own disclosed `usingConvertsTo` gap (a stew leaving a bowl is the same shape). The
+  effect-clearing half is complete; the container-swap half is not.
 * **`/effect` targeting a mob.** `MobSim` now holds per-mob effect state
   ([`SimMob::effects`], populated by a splash/lingering impact), but the `/effect`
   *command* itself still only resolves player targets — a mob can carry an effect a
-  splash gave it, but nothing can `/effect give`/`/effect clear` one directly yet.
+  splash gave it, but nothing can `/effect give`/`/effect clear` one directly yet. And
+  nothing yet ticks a mob's own periodic poison/wither/regeneration the way a player's
+  vitals timer does — a splash lands the *instance*, but only a player's advances one.
 
 ## Dependencies
 
