@@ -243,6 +243,14 @@ struct Inner {
     /// uuid that is not in `players`, which is also the honest answer for
     /// `/gamemode creative Steve` when Steve just left: nothing to do.
     effects: HashMap<Uuid, Vec<crate::commands::Effect>>,
+    /// `server.properties`' `enforce-secure-profile`, as this crate applies
+    /// it — see [`PlayerRegistry::enforce_secure_profile`]'s own doc for what
+    /// that actually gates. `Default` (`false`) matches every other
+    /// constructor's permissive default (the same shape `LanConfig::access`'s
+    /// own doc names) and — deliberately, unlike every other typed key in
+    /// `crate::properties` — does **not** match vanilla's real default of
+    /// `true`; see `crate::properties`'s own module doc for why.
+    enforce_secure_profile: bool,
 }
 
 /// One line of player chat, as broadcast to every connection.
@@ -692,6 +700,32 @@ impl PlayerRegistry {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.0.lock().expect("player registry lock poisoned")
+    }
+
+    /// Sets this server's `enforce-secure-profile` policy, applied to every
+    /// connection sharing this registry. Called once at
+    /// startup — `crates/lodestone-dedicated-server`'s `main` is the one
+    /// production caller, right after opening the world and before the first
+    /// connection can be accepted, mirroring how `props.gamemode`/
+    /// `props.difficulty` are applied to `world_state()` at the same point.
+    pub fn set_enforce_secure_profile(&self, value: bool) {
+        self.lock().enforce_secure_profile = value;
+    }
+
+    /// Whether an unsigned (or unverifiable) chat message should be dropped
+    /// rather than broadcast.
+    ///
+    /// Consulted by [`crate::chat_session::decide`], which is the actual
+    /// policy — this is only the stored flag. `false` (the default) matches
+    /// this crate's own current relay: every accepted message still goes out
+    /// as an unsigned `system_chat`, never a real signed `player_chat` (see
+    /// `docs/player-chat.md`), so even a message this flag rejects as
+    /// unverified is delivered to *no one* differently from one it lets
+    /// through — the only thing this flag changes is whether an unsigned or
+    /// forged message reaches other players at all.
+    #[must_use]
+    pub fn enforce_secure_profile(&self) -> bool {
+        self.lock().enforce_secure_profile
     }
 }
 

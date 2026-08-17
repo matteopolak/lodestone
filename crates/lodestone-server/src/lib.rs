@@ -132,6 +132,11 @@ mod border;
 /// used here at all (issue #636).
 mod browser_timer;
 mod brewing;
+/// Server-side chat-session bookkeeping: the announced session/chain-position
+/// type and the accept-or-reject policy `crate::server` folds every incoming
+/// `chat` packet through. See this module's own doc for what it does and
+/// does not verify.
+pub mod chat_session;
 mod chunk;
 /// Bit-packed per-section block storage for [`chunk::ChunkColumn`] — issue #551,
 /// unit U8 of `docs/plans/chunk-lifecycle.md`. Private: the representation is an

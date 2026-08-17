@@ -111,7 +111,8 @@ use crate::packets::entity::{pack_degrees, read_lp_vec3, write_lp_vec3};
 use crate::packets::metadata::write_update_attributes;
 use crate::packets::game::{
     AcceptTeleportation, Attack, BlockEntityTagQuery, ChangeDifficultyClientbound,
-    ChangeDifficultyServerbound, ChangeGameMode, ChatCommand, ChatMessage, ChunkBatchReceived,
+    ChangeDifficultyServerbound, ChangeGameMode, ChatAck, ChatCommand, ChatMessage,
+    ChatSessionUpdate, ChunkBatchReceived,
     ClientCommand, ClientTickEnd, CommandSuggestion,
     ConfigurationAcknowledged, ContainerButtonClick, ContainerSlotStateChanged, EditBook,
     ABILITY_FLAG_CAN_FLY, ABILITY_FLAG_FLYING, ABILITY_FLAG_INSTABUILD,
@@ -4184,15 +4185,53 @@ impl ServerProtocol for V770ServerProtocol {
             //
             // `decode_full`, not a partial read: the trailing acknowledgement
             // block is the part most likely to be misread, and a frame we only
-            // half-understand should be dropped rather than broadcast. Every
-            // field but `message` is then discarded — see
-            // `ServerBound::Chat`'s own doc for why an unverifiable signature
-            // is worse than no signature.
+            // half-understand should be dropped rather than broadcast. The
+            // acknowledgement fields (`last_seen_offset`/`acknowledged`/
+            // `checksum`) are still discarded after that — see
+            // `ServerBound::Chat`'s own doc for why — but `timestamp`/`salt`/
+            // `signature` now survive, for `crate::chat_session::decide` to
+            // verify against the sender's announced session, if any.
             State::Play if packet_id == play::serverbound::CHAT => {
                 match decode_full::<ChatMessage>(payload) {
-                    Some(p) => ServerBound::Chat { message: p.message },
+                    Some(p) => ServerBound::Chat {
+                        message: p.message,
+                        timestamp_millis: p.timestamp,
+                        salt: p.salt,
+                        signature: p.signature.map(|s| s.0),
+                    },
                     None => ServerBound::Ignored,
                 }
+            }
+            // `ServerboundChatSessionUpdatePacket` — a client announcing (or
+            // re-announcing) its chat-signing session. `ChatSessionUpdate` is
+            // the **same** struct the client-side encoder in this crate
+            // produces for `ClientAction::AnnounceChatSession`
+            // (`adapter/serverbound.rs`), so decode and encode are pinned to
+            // one another exactly as `CHAT`/`CHAT_COMMAND` above are.
+            State::Play if packet_id == play::serverbound::CHAT_SESSION_UPDATE => {
+                match decode_full::<ChatSessionUpdate>(payload) {
+                    Some(p) => ServerBound::ChatSessionAnnounced {
+                        session_id: p.session_id,
+                        expires_at_millis: p.expires_at,
+                        public_key: p.public_key,
+                        key_signature: p.key_signature,
+                    },
+                    None => ServerBound::Ignored,
+                }
+            }
+            // `ServerboundChatAckPacket` — a single VarInt offset
+            // acknowledging pending signed messages the client has seen.
+            // Decoded so a well-formed frame's byte length is understood (an
+            // unparsed trailing VarInt would otherwise desync the stream one
+            // packet later), then discarded rather than surfaced as its own
+            // `ServerBound` variant: this crate never sends a signed
+            // `player_chat` (see `docs/player-chat.md`'s "signing decision"),
+            // so a real client's own last-seen window — and therefore this
+            // offset — stays permanently `0` regardless of how much chat
+            // happens. There is nothing yet for it to acknowledge.
+            State::Play if packet_id == play::serverbound::CHAT_ACK => {
+                let _ = decode_full::<ChatAck>(payload);
+                ServerBound::Ignored
             }
             State::Play if packet_id == play::serverbound::CHUNK_BATCH_RECEIVED => {
                 match decode_full::<ChunkBatchReceived>(payload) {

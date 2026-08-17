@@ -372,3 +372,92 @@ async fn the_broadcast_works_in_both_directions() {
     let _ = tokio::time::timeout(Duration::from_secs(10), task_a).await;
     let _ = tokio::time::timeout(Duration::from_secs(10), task_b).await;
 }
+
+/// The enforcement half of server-side chat signing, through the **real
+/// production dispatch path** — not `lodestone_server::chat_session::decide` called directly
+/// (covered by that crate's own hermetic unit tests), but a real `chat`
+/// packet through `serve_connection`/`dispatch_play_packet` with
+/// `PlayerRegistry::enforce_secure_profile()` actually consulted.
+///
+/// Two things this proves that a hermetic `decide()` test cannot: the flag
+/// set on the registry actually reaches the connection loop, and a rejected
+/// message is reported back to the **sender alone** — B must see nothing at
+/// all, not even a degraded/unverified version of it.
+#[tokio::test]
+async fn enforcement_rejects_an_unsigned_message_and_replies_only_to_the_sender() {
+    let registry = PlayerRegistry::new();
+    registry.set_enforce_secure_profile(true);
+    let name_a = unique_username();
+    let name_b = unique_username();
+    let source_a = PlayerAwareSource::new(NoEntities, registry.clone());
+    let source_b = PlayerAwareSource::new(NoEntities, registry.clone());
+
+    let (client_a_io, server_a_io) = memory_pair();
+    let (client_b_io, server_b_io) = memory_pair();
+
+    let task_a = tokio::spawn(async move {
+        let mut conn = Connection::new(server_a_io);
+        serve_connection(
+            &mut conn,
+            &V770ServerProtocol,
+            &AirSource,
+            &source_a,
+            0,
+            &BlockEntityHandle::default(),
+            &MobHandle::default(),
+        )
+        .await
+        .map(|_| ())
+    });
+    let task_b = tokio::spawn(async move {
+        let mut conn = Connection::new(server_b_io);
+        serve_connection(
+            &mut conn,
+            &V770ServerProtocol,
+            &AirSource,
+            &source_b,
+            0,
+            &BlockEntityHandle::default(),
+            &MobHandle::default(),
+        )
+        .await
+        .map(|_| ())
+    });
+
+    let mut client_a = Connection::new(client_a_io);
+    let mut client_b = Connection::new(client_b_io);
+    join(&mut client_a, &name_a, Uuid::from_u128(0x33)).await;
+    join(&mut client_b, &name_b, Uuid::from_u128(0x44)).await;
+
+    // A never announced a chat session and this server now requires one.
+    const MESSAGE: &str = "unsigned and should be rejected";
+    client_a
+        .write_packet(play::serverbound::CHAT, &chat_bytes(MESSAGE))
+        .await
+        .unwrap();
+
+    let a_after = drain(&mut client_a).await;
+    let b_after = drain(&mut client_b).await;
+
+    let a_lines = system_chat_lines(&a_after);
+    let b_lines = system_chat_lines(&b_after);
+
+    let broadcast_form = format!("<{name_a}> {MESSAGE}");
+    assert!(
+        !b_lines.contains(&broadcast_form),
+        "B must never see a rejected message: {b_lines:?}"
+    );
+    assert!(
+        !a_lines.contains(&broadcast_form),
+        "the rejected message must not come back to A as a broadcast either: {a_lines:?}"
+    );
+    assert!(
+        a_lines.iter().any(|line| line.contains("not sent")),
+        "the sender alone must be told the message was rejected: {a_lines:?}"
+    );
+
+    drop(client_a);
+    drop(client_b);
+    let _ = tokio::time::timeout(Duration::from_secs(10), task_a).await;
+    let _ = tokio::time::timeout(Duration::from_secs(10), task_b).await;
+}
