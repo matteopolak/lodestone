@@ -145,6 +145,17 @@ pub struct RenderStats {
     /// `block_entities_drawn` either, so without this a broken campfire gather is
     /// invisible in **both** counters at once.
     pub campfire_items_drawn: usize,
+    /// Vault display-item cluster copies drawn this frame — one vault with a
+    /// stack of 20 diamonds counts as
+    /// [`rendered_amount`](lodestone_render::entity::rendered_amount)`(20)` =
+    /// 2, not 1, matching [`item_drops_drawn`](Self::item_drops_drawn)'s own
+    /// per-copy counting.
+    ///
+    /// Its own counter for the reason
+    /// [`campfire_items_drawn`](Self::campfire_items_drawn) has one: a vault's
+    /// renderer contributes nothing to `block_entities_drawn` either, so a
+    /// broken gather would otherwise be invisible in both counters.
+    pub vault_items_drawn: usize,
     /// Filled-map pictures drawn this frame — the held one counts 1, plus one per
     /// item frame carrying a map.
     ///

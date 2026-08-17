@@ -111,10 +111,10 @@ use lodestone_render::{
     BannerAttachment, BannerSpawn, BeaconSpawn, BeamSection, BellShakeDirection, BellSpawn,
     ChestHalf, ChestMaterial, ChestSpawn, ConduitFrame, ConduitSpawn, DecoratedPotSpawn,
     LecternSpawn, SHULKER_COLOURS, ShulkerFacing, ShulkerSpawn, SignKind, SignOrientation,
-    SignSpawn, SkullOrientation, SkullSpawn, SkullType, average_beam_color, beacon_beam_color,
-    beam_radius_scale, conduit_active_rotation_value, conduit_advance, conduit_anim_time,
-    conduit_animation_phase, conduit_frame_scan, horizontal_facing_clockwise_yaw,
-    horizontal_facing_yaw,
+    SignSpawn, SkullOrientation, SkullSpawn, SkullType, VaultSpawn, average_beam_color,
+    beacon_beam_color, beam_radius_scale, conduit_active_rotation_value, conduit_advance,
+    conduit_anim_time, conduit_animation_phase, conduit_frame_scan,
+    entity::vault_spin_degrees, horizontal_facing_clockwise_yaw, horizontal_facing_yaw,
 };
 use lodestone_render::banner_pattern::{DyeColor, StoredPatternLayer};
 use lodestone_world::{ChunkPos, SignText, World};
@@ -5208,5 +5208,249 @@ mod beacon_tests {
         if let Some(copper) = lodestone_data::block_states::state_id("minecraft:copper_block") {
             assert!(!is_beacon_base_block(copper));
         }
+    }
+}
+
+// --- vault ---------------------------------------------------------------
+
+/// `shared_data.display_item.{id, count}`, out of a vault's `BlockEntity.nbt`
+/// — `VaultSharedData.CODEC`'s `display_item` field, an ordinary
+/// `ItemStack.CODEC` (`{id: <string>, count: <int, default 1>, components:
+/// <compound, optional>}`; `components` is not read here, the same limitation
+/// [`campfire_items`]' doc names for its own item id).
+///
+/// `None` for a missing `shared_data` compound, a missing `display_item`, a
+/// `display_item` with no `id`, or `id == "minecraft:air"` — all of these are
+/// `VaultSharedData`'s own "no display item" cases
+/// (`ItemStack.isEmpty()`/`lenientOptionalFieldOf`'s absent-field default),
+/// and `VaultBlockEntity.Client.shouldDisplayActiveEffects` draws nothing for
+/// any of them.
+#[must_use]
+fn vault_display_item(nbt: &lodestone_core::Nbt) -> Option<(lodestone_assets::ResourceLocation, u32)> {
+    use lodestone_core::Nbt;
+
+    let Nbt::Compound(fields) = nbt else {
+        return None;
+    };
+    let Some(Nbt::Compound(shared)) =
+        fields.iter().find(|(name, _)| name == "shared_data").map(|(_, v)| v)
+    else {
+        return None;
+    };
+    let Some(Nbt::Compound(item)) =
+        shared.iter().find(|(name, _)| name == "display_item").map(|(_, v)| v)
+    else {
+        return None;
+    };
+    let field = |key: &str| item.iter().find(|(name, _)| name == key).map(|(_, v)| v);
+    let Some(Nbt::String(id)) = field("id") else {
+        return None;
+    };
+    if id == "minecraft:air" {
+        return None;
+    }
+    // `ExtraCodecs.optionalAlwaysPresentFieldOf(.., "count", 1)`: a missing
+    // field defaults to one copy, not zero.
+    let count = match field("count") {
+        Some(Nbt::Int(n)) => u32::try_from(*n).ok().filter(|n| *n > 0)?,
+        None => 1,
+        _ => return None,
+    };
+    Some((id.parse().ok()?, count))
+}
+
+/// Every vault position within [`VIEW_DISTANCE`], paired with its parsed
+/// display item — a fourth NBT-reading candidate gather beside
+/// [`sign_candidates`]/[`banner_candidates`]/[`campfire_candidates`], for the
+/// same reason those exist: [`chest_candidates`] discards `be.nbt`, and a
+/// vault's whole reward display lives there. The block-name check happens
+/// before the NBT parse, [`campfire_candidates`]' shape: every block entity in
+/// range would otherwise be walked for a `shared_data` compound that only a
+/// vault ever carries.
+#[must_use]
+fn vault_candidates(
+    world: &World,
+    chunks: impl IntoIterator<Item = ChunkPos>,
+    eye: Vec3,
+) -> Vec<([i32; 3], Option<(lodestone_assets::ResourceLocation, u32)>)> {
+    let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
+    let mut candidates = Vec::new();
+    for pos in chunks {
+        let Some(chunk) = world.get(pos) else {
+            continue;
+        };
+        for be in &chunk.block_entities {
+            let x = pos.x * 16 + i32::from(be.rel_x);
+            let z = pos.z * 16 + i32::from(be.rel_z);
+            let y = i32::from(be.y);
+            let centre = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+            if centre.distance_squared(eye) > cutoff {
+                continue;
+            }
+            let state_id = chunk
+                .column
+                .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            let Some(name) = lodestone_data::block_states::block_name(state_id) else {
+                continue;
+            };
+            if name != "minecraft:vault" {
+                continue;
+            }
+            candidates.push(([x, y, z], vault_display_item(&be.nbt)));
+        }
+    }
+    candidates
+}
+
+/// Every vault to draw this frame — the vault sibling of
+/// [`decorated_pot_spawns`], for
+/// [`crate::gpu::RenderState::set_vault_source`]. A vault with no display
+/// item (`VaultState::INACTIVE`, or any state before the server has rolled
+/// one) contributes nothing, matching
+/// `VaultBlockEntity.Client.shouldDisplayActiveEffects`'s guard.
+///
+/// `spin_deg` is resolved once here from `(game_time, partial_tick)` — see
+/// [`vault_spin_degrees`]'s doc for why every vault in this client shares one
+/// clock rather than each carrying its own per-instance phase.
+#[must_use]
+pub fn vault_spawns(handle: &SharedHandle, eye: Vec3, game_time: i64, partial_tick: f32) -> Vec<VaultSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+
+    let candidates = {
+        let world = store.read();
+        vault_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
+    let spin_deg = vault_spin_degrees(game_time, partial_tick);
+    let mut out = Vec::new();
+    for (block, item) in candidates {
+        let Some((item, count)) = item else { continue };
+        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        out.push(VaultSpawn {
+            pos: block,
+            item,
+            count,
+            spin_deg,
+            light,
+        });
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
+#[cfg(test)]
+mod vault_tests {
+    use super::*;
+
+    fn compound(fields: Vec<(&str, lodestone_core::Nbt)>) -> lodestone_core::Nbt {
+        lodestone_core::Nbt::Compound(
+            fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        )
+    }
+
+    /// The shape `VaultSharedData.CODEC` actually writes:
+    /// `{shared_data: {display_item: {id, count}, connected_players: [...],
+    /// connected_particles_range: <double>}}`. Parsed straight through, not a
+    /// hand-restated literal.
+    #[test]
+    fn parses_a_real_shared_data_shape() {
+        let nbt = compound(vec![(
+            "shared_data",
+            compound(vec![
+                (
+                    "display_item",
+                    compound(vec![
+                        (
+                            "id",
+                            lodestone_core::Nbt::String("minecraft:diamond".to_string()),
+                        ),
+                        ("count", lodestone_core::Nbt::Int(3)),
+                    ]),
+                ),
+                (
+                    "connected_particles_range",
+                    lodestone_core::Nbt::Double(8.0),
+                ),
+            ]),
+        )]);
+        let (id, count) = vault_display_item(&nbt).expect("display item must parse");
+        assert_eq!(id.to_string(), "minecraft:diamond");
+        assert_eq!(count, 3);
+    }
+
+    /// A missing `count` field defaults to one copy —
+    /// `ExtraCodecs.optionalAlwaysPresentFieldOf(.., "count", 1)`, not zero
+    /// and not "absent".
+    #[test]
+    fn a_missing_count_defaults_to_one() {
+        let nbt = compound(vec![(
+            "shared_data",
+            compound(vec![(
+                "display_item",
+                compound(vec![(
+                    "id",
+                    lodestone_core::Nbt::String("minecraft:emerald".to_string()),
+                )]),
+            )]),
+        )]);
+        let (_, count) = vault_display_item(&nbt).expect("display item must parse");
+        assert_eq!(count, 1);
+    }
+
+    /// No `shared_data` compound at all (an inactive vault that has never
+    /// rolled a reward) draws nothing — the common case for most vaults in a
+    /// freshly generated trial chamber.
+    #[test]
+    fn an_inactive_vault_with_no_shared_data_has_no_display_item() {
+        assert!(vault_display_item(&compound(vec![])).is_none());
+    }
+
+    /// `minecraft:air` is `ItemStack.EMPTY`'s real registry id — a vault whose
+    /// display item was explicitly cleared must read the same as one that
+    /// never had `shared_data` at all, not as "an air block floating in a
+    /// cage".
+    #[test]
+    fn an_air_display_item_is_treated_as_empty() {
+        let nbt = compound(vec![(
+            "shared_data",
+            compound(vec![(
+                "display_item",
+                compound(vec![(
+                    "id",
+                    lodestone_core::Nbt::String("minecraft:air".to_string()),
+                )]),
+            )]),
+        )]);
+        assert!(vault_display_item(&nbt).is_none());
+    }
+
+    /// `vault_spin_degrees` predicts a value from constants outside this
+    /// module — the shell-side reuse of the render-crate function, so a wire
+    /// mistake in *this* file's plumbing (e.g. swapping `game_time` and
+    /// `partial_tick`) would still show up here.
+    #[test]
+    fn spin_advances_with_game_time_and_partial_tick() {
+        let a = vault_spin_degrees(10, 0.0);
+        let b = vault_spin_degrees(11, 0.0);
+        assert!((b - a - 10.0).abs() < 1e-4);
+        let mid = vault_spin_degrees(10, 0.5);
+        assert!((mid - a - 5.0).abs() < 1e-4);
     }
 }

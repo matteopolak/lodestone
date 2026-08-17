@@ -1062,6 +1062,43 @@ impl std::fmt::Debug for CampfireSource {
     }
 }
 
+/// Where this frame's vault display-item clusters come from.
+///
+/// **The same odd one out as [`CampfireSource`], for the same reason**:
+/// `VaultRenderer.submit` draws an item cluster, not a cuboid rig — the
+/// vault's cage/door/base are all real block-model geometry the terrain
+/// mesher already draws (`blockstates/vault.json` is a plain `variants`
+/// map) — so this feeds
+/// [`RenderState::prepare_item_geometry`](crate::gpu::RenderState) and the
+/// *model* pipeline, not `prepare_block_entities`.
+///
+/// **Must be re-installed every frame**, like [`BeaconSource`]: the spin
+/// advances every tick, and a stale closure freezes it — the same
+/// `game_time`/`partial_tick` capture `Sim::beacon_source` uses, since a
+/// vault's spin needs no per-position tracker either (see
+/// `lodestone_render::entity::vault_spin_degrees`'s doc).
+#[derive(Default)]
+pub struct VaultSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::VaultSpawn> + Send + Sync>>,
+);
+
+impl VaultSource {
+    /// This frame's vault display-item clusters, or none when unset.
+    #[must_use]
+    pub(super) fn vaults(&self, eye: glam::Vec3) -> Vec<lodestone_render::VaultSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for VaultSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("VaultSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
 /// Where this frame's moving pistons come from — vanilla's
 /// `PistonHeadRenderer`.
 ///

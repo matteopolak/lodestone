@@ -21,6 +21,14 @@ work at all; it reuses the **ordinary mob** `EntityPipeline` at a nested placeme
 `prepare_block_entities` nor a dedicated procedural pass like the beacon's.
 paragraph's memory of them.
 
+**Vault is now landed and wired end to end** (19 of 26 registrations) — see [Vault](#vault). A third
+distinct seam again: like mob spawner and trial spawner, a vault's cage is real block-model geometry
+the terrain mesher already draws, so there was no hole to fill — but unlike them, what this pass adds
+(a spinning floating display-item cluster) reuses the **dropped-item** pipeline
+(`gpu/world_items.rs::prepare_item_geometry`), not `EntityPipeline`, and needed no new GPU pass at
+all. No new packet either: `shared_data.display_item` is ordinary generic block-entity NBT, the same
+`BlockEntity.nbt` path chest/skull/sign/decorated-pot/spawner already proved.
+
 **Bell is now fully wired, including its `BLOCK_EVENT` trigger, and the paragraph that used to sit
 here saying otherwise was itself stale** — the live install landed before this note was next read,
 and the shake trigger landed with `BellShakes` (see [Bell](#bell)). Both halves of the gap this
@@ -107,7 +115,9 @@ neither `EntityPipeline`'s cuboid-rig batch nor the moving-block-model seam, but
 pass (`gpu/beacon_beam.rs`). **Mob spawner makes 17 and trial spawner makes 18** (see
 [Mob spawner](#mob-spawner) and [Trial spawner](#trial-spawner)) — sharing the *ordinary mob*
 `EntityPipeline`'s batch at a nested placement, a third seam distinct from both the ones above.
-**18 of 26 registrations are now landed and wired.** The rest are still
+**Vault makes 19** (see [Vault](#vault)) — a fourth seam again, reusing the *dropped-item* pipeline
+(`gpu/world_items.rs::prepare_item_geometry`) rather than any of the three above.
+**19 of 26 registrations are now landed and wired.** The rest are still
 absent. Picking the next few should read this list, not the original issue body.
 
 **The registration list had two entries this document's "what is not built" section never mentioned
@@ -1938,6 +1948,121 @@ The live per-frame install is the **same** `Sim::spawner_source()`/`app/redraw.r
 spawner uses — nothing trial-spawner-specific was needed there, which is the entire payoff of building
 the shared machinery first.
 
+## Vault
+
+Like mob spawner and trial spawner, a vault's cage/door/base are **real block-model geometry** —
+`blockstates/vault.json` is a plain `variants` map over `facing`/`ominous`/`vault_state`, drawn by the
+ordinary terrain mesher regardless of this pass, exactly the shape trial spawner's own per-state textures
+already proved. So there is no hole to fill and no `BlockEntityModelSet` entry: `VaultRenderer.submit` is
+`ItemEntityRenderer.renderMultipleFromCount` at a fixed pose — a **spinning cluster of the vault's
+currently-rolled reward item**, floating above the cage. Before this landed, a vault that had rolled a
+reward looked identical to an empty one; the degradation is "never shows what it holds", not a missing
+block.
+
+### No new packet — `shared_data` is ordinary generic block-entity NBT
+
+`VaultBlockEntity.getUpdateTag` writes one field, `shared_data`
+(`VaultSharedData.CODEC`: `{display_item: <ItemStack>, connected_players: [...],
+connected_particles_range: <double>}`), through the same `ClientboundBlockEntityDataPacket` chest and
+decorated pot already proved reaches `BlockEntity.nbt` generically. `display_item` is an ordinary
+`ItemStack.CODEC` compound — `{id: <string>, count: <int, default 1>, components: <compound, optional>}` —
+confirmed against the real jar source (`ItemStack.MAP_CODEC`) rather than assumed.
+`crate::block_entities::vault_display_item` parses `id`/`count` only; `components` is not read, the same
+limitation `campfire_items`' doc already names for its own item id, so an enchanted display item draws
+without its glint (see [Campfire](#campfire)).
+
+**Active-state resolution is one boolean, not a state machine.** Vanilla's
+`VaultBlockEntity.Client.shouldDisplayActiveEffects` is exactly `sharedData.hasDisplayItem()` —
+`!displayItem.isEmpty()`. So `vault_display_item` returns `None` (draw nothing) for a missing
+`shared_data` compound, a missing `display_item`, or `id == "minecraft:air"` (`ItemStack.EMPTY`'s real
+registry id) — all three are the same "no reward yet" case, and a vault in `VaultState::INACTIVE` (the
+common case in a freshly generated trial chamber) hits the first of them. No `VaultServerData`/`VaultConfig`
+parsing was needed at all: the client never sees those, only the pre-resolved `display_item` the server's
+own loot roll already produced.
+
+### The spin — one shared clock, not a per-vault tracker
+
+`VaultClientData.updateDisplayItemSpin` adds exactly `10°` every client tick, unconditionally, for as long
+as the block entity ticks — no `BLOCK_EVENT` trigger, unlike bell's shake or decorated pot's (still
+undecoded) hit wobble. Because the step is constant, `lodestone_render::entity::vault_spin_degrees(game_time,
+partial_tick) = (game_time + partial_tick) * 10.0` is algebraically the same rotation
+`Mth.rotLerp(partialTick, previousSpin, currentSpin)` produces (the wrap in `Mth.wrapDegrees` only affects
+the *displayed* range, not the rotation `Axis.YP.rotationDegrees` applies, which is periodic mod 360) — so
+**no per-position tracker was needed at all**, the same simplification `Sim::beacon_source` already
+documents for its own rotating core. The one honest gap: real vanilla starts each vault's own counter at
+`0` when its block entity is constructed (effectively when its chunk first loads), so two vaults loaded at
+different moments spin out of phase with each other in a real client. This client ties every vault to one
+shared world-time clock instead, which is decorative-only — nothing about a vault's function reads this
+phase — and is named in `vault_spin_degrees`'s own doc rather than left silent.
+
+### The item cluster reuses the *dropped-item* pipeline, not a new one
+
+`VaultRenderer.submit`'s pose (`translate(0.5, 0.4, 0.5) · rotY(spin)`) composed with
+`ItemEntityRenderer.renderMultipleFromCount`'s per-copy scatter is, term for term, the same algorithm
+`gpu/world_items.rs::prepare_item_geometry` already runs for a dropped item's own up-to-five-copy fan
+(`submitMultipleFromCount` and `renderMultipleFromCount` are the same body under two names in the real jar).
+So this needed **no new GPU pass, no new pipeline and no new shader** — `lodestone_render::entity::
+vault_display_item_matrix`/`vault_display_item_mesh` supply only the vault-specific prefix of the pose
+(`T(block_pos) · T(0.5, 0.4, 0.5) · Ry(spin)`), and `gpu/world_items.rs::merge_vault_items` is the same
+flat/solid depth-threshold fan-vs-jitter loop `prepare_item_geometry`'s drop loop already runs, feeding the
+same shared `ModelMesh` a dropped item merges into. `rendered_amount`, `item_cluster_jitter` and
+`posed_item_z_extent` are reused unchanged from the drop path.
+
+**`DisplaySlot::Ground`, matching a drop.** `VaultRenderer.extractRenderState` resolves the display item in
+`ItemDisplayContext.GROUND` — the identical context a dropped item resolves in — which is why
+`merge_vault_items` calls `ground_transform` rather than a vault-specific display slot.
+
+**The jitter seed is a documented substitution, not the real bytes.** Vanilla seeds
+`renderMultipleFromCount`'s `RandomSource` from `ItemClusterRenderState.getSeedForItemStack`
+(`Item.getId(item) + damageValue`). This reuses the item's registry id (`lodestone_data::items::item_id`)
+as `item_cluster_jitter`'s hash key — the same *property* that function's own doc already accepts for a
+dropped item's scatter (no two clusters scatter in lockstep) rather than the exact unobservable bytes; the
+`+ damageValue` term is not modelled.
+
+### Proof
+
+`crates/lodestone-shell/tests/vault_item_cluster_pixels.rs`, four `#[ignore]`d GPU pixel gates against a
+real headless adapter + `client.jar`:
+
+| gate | measurement |
+|---|---|
+| the cluster draws in its own projected rect | rect `x147..173 y126..151` (676 px); non-sky fill and a non-zero diff against an uninstalled control, which itself paints **zero** px inside that rect |
+| two known spin phases (0°/90°) differ, and the same phase repeated does not | 280 px differ between 0° and 90°; 0 px differ between two renders of 0° |
+| a large stack meshes the *predicted* copy count, not just "more than one" | `rendered_amount(1)=1`, `rendered_amount(16)=2`, `rendered_amount(40)=4`, `rendered_amount(64)=5` — `stats.vault_items_drawn` matched exactly at every one of the four counts |
+| the first-person arm is elsewhere | arm bbox `x247..319 y169..239`, disjoint from the cluster's rect |
+
+```bash
+cargo test -p lodestone-shell --test vault_item_cluster_pixels -- --ignored --nocapture
+```
+
+**Negative control watched failing**: commenting out `merge_vault_items`'s call site in
+`prepare_item_geometry` and re-running reddened three of the four gates with exactly the island
+diagnosis (`vault_items_drawn` stuck at `0` regardless of stack size; the two spin phases became
+pixel-identical), while the arm-disjointness control — which does not depend on the vault pass at
+all — stayed green, confirming the failures were specific to the neutered line. Restored from an
+md5-checked backup before committing.
+
+Live per-frame install: `Sim::vault_source()` mirrors `Sim::beacon_source()` exactly — no per-position
+tracker, just `(game_time, partial_tick)` captured at install time — and **must** be re-installed every
+frame for the same reason beacon's rotating core must: the spin advances every tick, and a stale closure
+freezes it rather than merely going missing. `app/redraw.rs` installs it beside `set_campfire_source`,
+the other source that feeds `prepare_item_geometry` rather than `prepare_block_entities`.
+`sim::tests::vault_source_tracks_connection_state_and_is_safe_before_login` is the same accessor/
+before-login gate every other source in this doc carries.
+
+`cargo test -p lodestone-shell --lib` (targeted `vault`/`block_entities`/`sim` runs during development):
+all new unit tests green — see `block_entities::vault_tests` (NBT parsing: a real `shared_data` shape,
+a missing `count` defaulting to `1`, an absent-`shared_data` vault and an explicit `minecraft:air` display
+item both reading as "no reward") and `lodestone-render`'s `entity::tests::vault_*` (the spin's exact
+per-tick magnitude, the cluster's pivot landing on the block's upper-middle point, and winding
+preservation across several spin angles).
+
+**What is not ported**: the connection-particle effect toward a nearby player who has inserted a key
+(`VaultSharedData.connectedPlayers`/`VAULT_CONNECTION` particles) and the idle smoke/flame particles —
+both are particle-system work, out of this issue's block-entity-renderer scope. The ominous-vault
+soul-fire-vs-small-flame distinction is carried in the parsed block state (`OMINOUS`) but not yet read by
+anything, since no particle emitter consumes it.
+
 ## How to change it
 
 ### Adding a block-entity type
@@ -2269,7 +2394,12 @@ Against the real 26-entry registration list (see above), not the issue's origina
   with the mob spawner above. Still open within its scope: the real
   `nextMobSpawnsAt`-minus-`gameTime` spin-rate formula, which needs a client/server world-age sync
   this codebase does not yet have — see that section's own note for the deliberate substitute.
-- Brushable block, vault, copper golem statue, shelf. End portal/end gateway are their own shader
+- **Vault — landed**, including the live per-frame install (see [Vault](#vault) above): the
+  `shared_data.display_item`-gated cluster, the shared spin clock (`vault_spin_degrees`), and the
+  reuse of the dropped-item pipeline rather than a new pass. No new packet needed. Still open within
+  its scope: the connection-particle/idle-particle effects (`VaultBlockEntity.Client`), which are
+  particle-system work outside this pass's boundary.
+- Brushable block, copper golem statue, shelf. End portal/end gateway are their own shader
   effects, not cuboid rigs (beacon was too, until it landed — see [Beacon](#beacon)), and structure
   block/test instance block are creative/dev-only.
 

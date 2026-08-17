@@ -509,6 +509,17 @@ impl WindowApp {
             render.set_campfire_source(f);
         }
 
+        // Vault display-item clusters. Same odd-one-out shape as campfire's:
+        // consumed by `prepare_item_geometry`, not `prepare_block_entities`,
+        // since a vault's cage/door/base are real block-model geometry and
+        // this closure only supplies the floating reward. **Must** be
+        // re-installed every frame like beacon's — the spin advances every
+        // tick and a stale closure freezes it rather than merely being
+        // absent. An unset source is a vault showing no reward, never a hole.
+        if let Some(f) = self.sim.vault_source() {
+            render.set_vault_source(f);
+        }
+
         // Enchanting-table books. The per-frame install matters more here than
         // anywhere else in this list: the closure captures a snapshot of the
         // animation fold *and* the partial tick, and none of the book's four

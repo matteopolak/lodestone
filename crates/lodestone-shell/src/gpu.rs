@@ -77,6 +77,7 @@ pub use sources::{
     EntityLightSource, HandSwingSource, ItemUseSource, LecternSource, MainHandItem,
     MainHandSource, MapSource, MovingPistonSource, OutlineShapeSource, ShulkerSource, SignSource,
     SkullSource, SkyDarkenSource, SpawnerSource, ThirdPersonBodySource, ThirdPersonBodyState,
+    VaultSource,
 };
 pub use stats::RenderStats;
 
@@ -515,6 +516,13 @@ pub struct RenderState {
     /// mesh: the fire and the logs are block models the terrain pass already
     /// draws, so an unset source leaves a complete campfire cooking nothing.
     campfire_source: CampfireSource,
+    /// Where this frame's vault display-item clusters come from. Same
+    /// odd-one-out shape as [`Self::campfire_source`]: consumed by the item
+    /// geometry pass, not `prepare_block_entities`, because a vault's cage is
+    /// real block-model geometry and `VaultRenderer` draws only the floating
+    /// reward on top of it. An unset source leaves a complete vault showing no
+    /// reward, never a hole.
+    vault_source: VaultSource,
     /// Where this frame's moving pistons come from. Consumed by
     /// [`Self::prepare_moving_blocks`] and the **model** pipeline, not by
     /// `prepare_block_entities` and not by the item path — a third destination, and
