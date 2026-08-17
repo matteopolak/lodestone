@@ -1,4 +1,4 @@
-//! Issues #315 (repeaters/comparators) and #317 (observers), gated against a
+//! Repeaters/comparators and observers, gated against a
 //! **live vanilla 26.2 server** rather than against our own model.
 //!
 //! # The oracle
@@ -33,8 +33,8 @@
 //! * **`/tick step N` *does* advance scheduled block ticks.** An earlier note
 //!   in this repo said it did not. `TickRateManager.tick` sets
 //!   `runGameElements = !isFrozen || frozenTicksToRun > 0`, and
-//!   `ServerLevel.tick` gates `blockTicks.tick(...)` on exactly that value
-//!   (`ServerLevel.java:358,386-389`), so a stepped tick runs them normally.
+//!   `ServerLevel.tick` gates `blockTicks.tick(...)` on exactly that value,
+//!   so a stepped tick runs them normally.
 //!   The original observation was the paused-world symptom above.
 //! * **`time query gametime` is only a tick counter while the world runs.**
 //!   Under the pause it is a constant, which reads as "stepping does nothing".
@@ -157,7 +157,7 @@ fn find(entries: &[((i32, i32, i32), String, u64)], pos: (i32, i32, i32), kind: 
 }
 
 // ---------------------------------------------------------------------------
-// #315 — repeaters
+// Repeaters
 // ---------------------------------------------------------------------------
 
 /// A repeater rig on one row: lit/unlit standing torch source at `x = 1`, dust
@@ -185,7 +185,7 @@ fn repeater_rig(delay: u32, powered: bool, source_lit: bool) -> ChunkColumn {
     column
 }
 
-/// **The load-bearing #315 timing gate.** For every one of the four delay
+/// **The load-bearing repeater timing gate.** For every one of the four delay
 /// settings, on both edges, the production path must schedule the repeater's
 /// flip at exactly the tick the live server changed its output.
 ///
@@ -326,7 +326,7 @@ fn a_repeater_scheduled_tick_produces_the_powered_state_the_live_server_showed()
     assert_eq!(redstone::wire_power(&published.to), 15);
 }
 
-/// **Repeater locking**, the trap issue #315 names by name.
+/// **Repeater locking**, a trap worth naming explicitly.
 ///
 /// Live 26.2, measured one side block at a time on an otherwise identical rig:
 ///
@@ -434,7 +434,7 @@ fn a_locked_repeater_schedules_nothing_while_the_same_rig_unlocked_schedules_at_
 }
 
 // ---------------------------------------------------------------------------
-// #315 — comparators
+// Comparators
 // ---------------------------------------------------------------------------
 
 /// **The comparator value table, all 30 live-measured rows.**
@@ -576,10 +576,10 @@ fn a_comparator_rig_reaches_the_live_output_through_the_production_path() {
 }
 
 // ---------------------------------------------------------------------------
-// #317 — observers
+// Observers
 // ---------------------------------------------------------------------------
 
-/// **The #317 pulse gate.** An observer at `x = 8` facing **west** watches
+/// **The observer pulse gate.** An observer at `x = 8` facing **west** watches
 /// `x = 7` and drives `x = 9` out its back.
 ///
 /// The live server powered the back face on ticks 2 and 3 and nothing else, so

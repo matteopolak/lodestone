@@ -1,4 +1,4 @@
-//! Weather state (issue #324, `docs/plans/world-state.md` W1) — the server
+//! Weather state (`docs/plans/world-state.md` W1) — the server
 //! half of vanilla's rain/thunder cycle.
 //!
 //! Vanilla keeps two independent booleans — `raining` and `thundering` — in
@@ -9,21 +9,22 @@
 //! cycle is a long clear spell, a rain spell, and — at an independent,
 //! longer cadence — a thunder spell that can overlap either. All of it is
 //! server-global, not per-dimension or per-connection; the client's existing
-//! `WeatherCell` (`net.rs:1868` fold) is what these events reach, and the
+//! `WeatherCell` (`WeatherCell::apply` fold) is what these events reach, and the
 //! particles/overlay rendering that cell feeds is a Tier-1 backlog client
 //! item, explicitly not this module.
 //!
-//! This is the exact `advanceWeatherCycle` algorithm
-//! (`ServerLevel.java:708-793`):
+//! This is the exact `ServerLevel.advanceWeatherCycle` algorithm:
 //!
 //! * the two timers count **down** one per tick, and the boolean flips only
 //!   when its timer reaches zero — at which point a *fresh* duration is
-//!   sampled from vanilla's four `UniformInt` ranges (`ServerLevel.java:188-191`)
+//!   sampled from vanilla's four `UniformInt` ranges (`ServerLevel.RAIN_DELAY`/
+//!   `RAIN_DURATION`/`THUNDER_DELAY`/`THUNDER_DURATION`)
 //!   so the next spell is long by construction;
 //! * `clear_weather_time` (the `/weather clear <duration>` spell) short-circuits
 //!   the whole timer block — it forces clear while it counts down;
 //! * the levels interpolate ±0.01F per tick toward 1.0 (raining/thundering)
-//!   or 0.0 (not), clamped to `[0, 1]` (`ServerLevel.java:753-768`);
+//!   or 0.0 (not), clamped to `[0, 1]` (`ServerLevel.advanceWeatherCycle`'s
+//!   level-interpolation tail);
 //! * the caller is told, as a [`WeatherEvent`] list, exactly what changed —
 //!   which the tick loop publishes onto a [`WeatherFeed`] so a connection can
 //!   encode real `GAME_EVENT` packets (ids 1/2/7/8), the same snapshot-feed
@@ -31,12 +32,12 @@
 //!
 //! # What is deliberately not here
 //!
-//! * **Persistence** — the four `WeatherData` scalars load/save with #437
+//! * **Persistence** — the four `WeatherData` scalars have no load/save path yet
 //!   (`world_clocks`-shaped SavedData). Until then every world opens with the
 //!   all-zero fresh state below, exactly as `WeatherData` starts, and the
-//!   `prepareWeather` level-snap (`ServerLevel.java:699-706`) that a saved
-//!   *raining* world does on load is moot. When #437 lands, load calls that
-//!   snap and this struct gains fields from it; the cycle itself is
+//!   `prepareWeather` level-snap (`ServerLevel.prepareWeather`) that a saved
+//!   *raining* world does on load is moot. Once that persistence lands, load
+//!   calls that snap and this struct gains fields from it; the cycle itself is
 //!   unchanged.
 //! * **The `advance_weather` game rule** is read as
 //!   [`crate::tick::advance_weather()`], a function returning vanilla's
@@ -45,7 +46,7 @@
 //!   `GameRules` registry yet (R1 of the world-state plan), and the
 //!   per-connection `WorldAdminState::game_rules` is the wrong side of the
 //!   world for a tick loop that runs with no connection at all.
-//! * **The dimension gate** (`canHaveWeather`, `ServerLevel.java:708`) is
+//! * **The dimension gate** (`Level.canHaveWeather`) is
 //!   unmodelled: this crate has only the overworld, which can have weather.
 //! * **The seed** is a fixed literal (see [`WEATHER_SEED`]): this crate has
 //!   no per-world seed store to draw a "real" one from yet, the same reason
@@ -63,12 +64,14 @@ use lodestone_worldgen::rng::{LegacyRandomSource, RandomSource};
 /// `RANDOM_TICK_BEHAVIOR_SEED`).
 const WEATHER_SEED: u64 = 0x5EED_9ABC;
 
-/// Vanilla's per-tick intensity step, `ServerLevel.java:753-768` — each tick
+/// Vanilla's per-tick intensity step, from `ServerLevel.advanceWeatherCycle`'s
+/// level-interpolation tail — each tick
 /// moves `rainLevel`/`thunderLevel` this far toward the target implied by the
 /// boolean, then clamps to `[0, 1]`.
 pub(crate) const LEVEL_STEP: f32 = 0.01;
 
-// The four `UniformInt` ranges (`ServerLevel.java:188-191`), inclusive both
+// The four `UniformInt` ranges (`ServerLevel.RAIN_DELAY`/`RAIN_DURATION`/
+// `THUNDER_DELAY`/`THUNDER_DURATION`), inclusive both
 // ends. Rain spells are shorter than clear spells (a world is rainy ~15.8% of
 // the time) and thunder spells shorter still (~9.1%).
 const RAIN_DELAY_MIN: i32 = 12_000;
@@ -83,7 +86,7 @@ const THUNDER_DURATION_MAX: i32 = 15_600;
 /// A weather transition a connection must learn about — one element of the
 /// [`WeatherEvent::wire`] table below is exactly one
 /// `ClientboundGameEventPacket` broadcast, in the order
-/// `advanceWeatherCycle` sends them (`ServerLevel.java:771-793`).
+/// `advanceWeatherCycle` sends them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WeatherEvent {
     /// Rain just turned on (`ClientboundGameEventPacket.START_RAINING = 1`).
@@ -101,7 +104,7 @@ pub enum WeatherEvent {
 impl WeatherEvent {
     /// The `ClientboundGameEventPacket` event code and `param` this event
     /// encodes as — `(event, param)` written as `writeByte(event)` +
-    /// `writeFloat(param)` (`ClientboundGameEventPacket.java:14`). Start/stop
+    /// `writeFloat(param)` (`ClientboundGameEventPacket.write`). Start/stop
     /// raining carry `0.0F` exactly as vanilla's own broadcasts do.
     pub fn wire(self) -> (u8, f32) {
         match self {
@@ -121,8 +124,8 @@ impl WeatherEvent {
 ///
 /// Same single-consumer caveat as both of those, and the same resolution:
 /// singleplayer (`crate::IntegratedServer::open_in_memory_with_mobs`) spawns
-/// exactly one connection task per feed instance, and `bind` (LAN, issue
-/// #439) gives each connection its own instance behind a relay arm.
+/// exactly one connection task per feed instance, and `bind` (LAN hosting)
+/// gives each connection its own instance behind a relay arm.
 #[derive(Debug, Clone, Default)]
 pub struct WeatherFeed(Arc<Mutex<Vec<WeatherEvent>>>);
 
@@ -169,7 +172,8 @@ pub struct WeatherState {
     pub(crate) thunder_level: f32,
     /// The level's `java.util.Random`-exact generator (`LegacyRandomSource`),
     /// used for every spell-duration draw in the same order vanilla samples
-    /// them (thunder before rain, `ServerLevel.java:719-742`).
+    /// them (thunder before rain, matching `ServerLevel.advanceWeatherCycle`'s
+    /// sampling order).
     rng: LegacyRandomSource,
 }
 
@@ -198,15 +202,15 @@ impl WeatherState {
         }
     }
 
-    /// Advances the cycle one tick — `ServerLevel.advanceWeatherCycle`
-    /// (`ServerLevel.java:708-793`), translated exactly — and returns the
+    /// Advances the cycle one tick — `ServerLevel.advanceWeatherCycle`,
+    /// translated exactly — and returns the
     /// transitions a client must hear about, in the order vanilla broadcasts
     /// them.
     ///
-    /// `advance_weather` is the `GameRules.ADVANCE_WEATHER` gate
-    /// (`ServerLevel.java:713`); it gates only the *timers* (the boolean
+    /// `advance_weather` is the `GameRules.ADVANCE_WEATHER` gate read inside
+    /// `ServerLevel.advanceWeatherCycle`; it gates only the *timers* (the boolean
     /// flips). The level interpolation runs regardless, exactly as vanilla's
-    /// does (`ServerLevel.java:753-768` is outside the rule check) — so with
+    /// does (the level-interpolation tail sits outside the rule check) — so with
     /// the rule off, levels still converge to whatever state the world is in,
     /// and a mid-ramp level still broadcasts.
     pub fn tick(&mut self, advance_weather: bool) -> Vec<WeatherEvent> {
@@ -274,7 +278,7 @@ impl WeatherState {
         }
         self.rain_level = self.rain_level.clamp(0.0, 1.0);
 
-        // Broadcast order, `ServerLevel.java:771-793`: the two level ramps
+        // Broadcast order, from `ServerLevel.advanceWeatherCycle`'s tail: the two level ramps
         // first, then — only on a rain flip — the start/stop event followed
         // by a re-sent pair of level changes (vanilla re-broadcasts them
         // there unconditionally).

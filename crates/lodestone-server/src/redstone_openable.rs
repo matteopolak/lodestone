@@ -1,4 +1,4 @@
-//! Redstone-openable blocks (issue #319): doors, trapdoors and fence gates
+//! Redstone-openable blocks: doors, trapdoors and fence gates
 //! opening when redstone-powered and closing when unpowered.
 //!
 //! Every family in this module is a *passive* redstone consumer — it never
@@ -12,7 +12,7 @@
 //!
 //! # Cited directly
 //!
-//! `DoorBlock.neighborChanged` (`DoorBlock.java:224-238`):
+//! `DoorBlock.neighborChanged`:
 //!
 //! ```text
 //! boolean signal = level.hasNeighborSignal(pos)
@@ -23,25 +23,25 @@
 //! }
 //! ```
 //!
-//! `TrapDoorBlock.neighborChanged` (`TrapDoorBlock.java:126-143`) and
-//! `FenceGateBlock.neighborChanged` (`FenceGateBlock.java:182-202`) are the
+//! `TrapDoorBlock.neighborChanged` and
+//! `FenceGateBlock.neighborChanged` are the
 //! same shape minus the two-high half: `boolean signal =
 //! level.hasNeighborSignal(pos); if (signal != state.getValue(POWERED)) {
 //! level.setBlock(pos, state.setValue(POWERED, signal).setValue(OPEN, signal),
 //! 2); }`.
 //!
 //! `hasNeighborSignal` is `SignalGetter.getBestNeighborSignal(pos) > 0`
-//! (`SignalGetter.java:95-98`) — the [`redstone::best_neighbor_signal`] query
+//! (`SignalGetter.hasNeighborSignal`) — the [`redstone::best_neighbor_signal`] query
 //! already ported in `crate::redstone`.
 //!
 //! # The door's two halves, and the one deviation
 //!
 //! A door occupies two cells (`HALF` = `lower`/`upper`), and vanilla checks
 //! both halves' neighbours when either one is notified. The halves stay in
-//! sync through `DoorBlock.updateShape` (`DoorBlock.java:88-108`), which
+//! sync through `DoorBlock.updateShape`, which
 //! copies the *whole* neighbour half's state (`OPEN`, `POWERED`, `FACING`,
 //! `HINGE`) over whenever the other half's cell changes shape — reached via
-//! `Level.setBlock`'s shape-update pass (`Level.java:257-262`), which runs
+//! `Level.setBlock`'s shape-update pass, which runs
 //! even for flag 2. **This crate has no `updateShape` mechanism at all**
 //! (`crate::random_tick`'s reaction dispatch is `neighborChanged`-shaped and
 //! nothing here implements the shape pass), so the half-sync vanilla performs
@@ -74,7 +74,7 @@
 //! The three families are recognized by base-name suffix (`_door`,
 //! `_trapdoor`, `_fence_gate`) rather than an enumerated species list — the
 //! same convention `crate::growth_tick`'s `is_sapling`/`is_leaves`
-//! (`growth_tick.rs:318-319,376-377`) uses. All vanilla species (oak, iron,
+//! uses. All vanilla species (oak, iron,
 //! acacia, mangrove, bamboo, crimson, …) share the `neighborChanged` shape,
 //! so a suffix is the honest classifier and an enumerated list would rot as
 //! new wood types land.
@@ -116,8 +116,7 @@ fn base_name(state: &str) -> &str {
 /// to `"lower"` for a state that does not name it — a bare
 /// `minecraft:oak_door` (the only form worldgen/placement could write today,
 /// see the module doc's placement note) is a bottom half by that default,
-/// matching `DoorBlock`'s own `registerDefaultState(... HALF, LOWER)`
-/// (`DoorBlock.java:63-71`).
+/// matching `DoorBlock`'s own constructor, `registerDefaultState(... HALF, LOWER)`.
 #[must_use]
 pub fn door_half(state: &str) -> &str {
     get_str_property(state, "half").unwrap_or("lower")
@@ -159,11 +158,11 @@ pub fn other_door_half_pos(pos: BlockPos, state: &str) -> Option<BlockPos> {
     Some(direction.relative(pos))
 }
 
-/// `SignalGetter.hasNeighborSignal` (`SignalGetter.java:95-98`) as the three
+/// `SignalGetter.hasNeighborSignal` as the three
 /// `neighborChanged` bodies read it: the best neighbour signal is positive.
 /// For a door, both halves are checked (`hasNeighborSignal(pos) ||
 /// hasNeighborSignal(otherHalf)`) — the "respond to power at either half"
-/// property issue #319 calls out; trapdoor/fence gate check only the one
+/// property this module models; trapdoor/fence gate check only the one
 /// position.
 #[must_use]
 pub fn has_neighbor_signal<F>(lookup: &F, pos: BlockPos, state: &str) -> bool
@@ -179,8 +178,9 @@ where
     }
 }
 
-/// The pure flip decision — vanilla's `signal != POWERED` gate
-/// (`DoorBlock.java:230`, `TrapDoorBlock.java:131`, `FenceGateBlock.java:187`):
+/// The pure flip decision — vanilla's `signal != POWERED` gate, shared by
+/// `DoorBlock.neighborChanged`, `TrapDoorBlock.neighborChanged` and
+/// `FenceGateBlock.neighborChanged`:
 /// when the incoming signal differs from the stored `powered`, return the new
 /// state with both `open` and `powered` set to `signal`; otherwise `None`.
 ///

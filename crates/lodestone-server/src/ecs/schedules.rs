@@ -46,7 +46,7 @@ use bevy_ecs::schedule::{ScheduleLabel, SystemSet};
 ///
 /// # This is Phase 0's island detector, not decoration
 ///
-/// `WindowApp.ecs` on the client (issue #37) is an `App` that is constructed
+/// `WindowApp.ecs` on the client is an `App` that is constructed
 /// and never has a schedule run against it — "an inert scaffold nothing
 /// reads", still open. A Phase 0 that only *constructed* an `App` would be
 /// bit-for-bit the same defect. So this schedule exists, production runs it

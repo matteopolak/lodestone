@@ -1,4 +1,4 @@
-//! The GameSpy4 / UT3 server-query protocol (issue #332).
+//! The GameSpy4 / UT3 server-query protocol.
 //!
 //! ## What it is
 //!

@@ -1,9 +1,9 @@
-//! Observers (issue #317): a 1-tick-wide pulse out the back face whenever
+//! Observers: a 1-tick-wide pulse out the back face whenever
 //! the block the observer faces changes.
 //!
 //! # Cited directly
 //!
-//! `ObserverBlock.updateShape`/`startSignal`/`tick` (`ObserverBlock.java:62-84,50-60`):
+//! `ObserverBlock.updateShape`/`startSignal`/`tick`:
 //!
 //! ```text
 //! protected BlockState updateShape(..., final Direction directionToNeighbour, ...) {
@@ -46,21 +46,19 @@
 //! # Named gaps
 //!
 //! **Placement/removal-specific behaviour is not modeled.** `onPlace`
-//! (`:114-123`, forcing a freshly-placed observer unpowered without a pulse
+//! (forcing a freshly-placed observer unpowered without a pulse
 //! if it happened to load already-`POWERED`) and
-//! `affectNeighborsAfterRemoval` (`:125-130`, firing a final pulse on
+//! `affectNeighborsAfterRemoval` (firing a final pulse on
 //! removal if one was mid-flight) both exist for save/load and
 //! player-placement edge cases. This crate has no player-driven block
-//! placement pipeline for any redstone component yet (#314's own "what
-//! exists" survey: nothing) — the same "no producer to exercise it yet"
+//! placement pipeline for any redstone component yet — the same "no producer to exercise it yet"
 //! reasoning `crate::redstone_torch`'s own module doc gives for skipping the
 //! anti-oscillation guard.
 //!
 //! **The trigger surface is narrower than vanilla's `updateShape`.**
 //! Vanilla's hook fires on *any* state change at the watched position,
 //! including a piston pushing a block there or a block-entity data change
-//! vanilla specifically excludes (issue #317's own brief names this
-//! precisely). This crate only ever issues a [`Notification`] from the
+//! vanilla specifically excludes. This crate only ever issues a [`Notification`] from the
 //! handful of mutation families `crate::random_tick`'s reaction dispatch
 //! already covers (grass/dirt, crop/sapling/leaf, gravity, dust, torches,
 //! diodes) — the same "narrower, but real" trigger-surface deviation

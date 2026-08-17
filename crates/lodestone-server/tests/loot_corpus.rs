@@ -1,4 +1,4 @@
-//! Oracle gate for the bundled loot-table subset (issue #337).
+//! Oracle gate for the bundled loot-table subset.
 //!
 //! The tables under `crates/lodestone-server/assets/loot_table/` claim to be
 //! verbatim copies of Mojang's own 26.2 datapack data. This gate re-reads the
@@ -190,7 +190,7 @@ fn clean_corpus() -> Vec<(String, String)> {
         .collect()
 }
 
-/// **Issue #538: the bundle *is* the clean subset of the vanilla corpus, and this
+/// **The bundle *is* the clean subset of the vanilla corpus, and this
 /// generates it or asserts it.**
 ///
 /// `LODESTONE_REGEN=1` rewrites `assets/loot_table/` from the cache; without it,

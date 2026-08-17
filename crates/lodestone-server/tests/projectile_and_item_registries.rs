@@ -1,4 +1,4 @@
-//! Acceptance gate for issues #211/#215: closing the "nothing constructs or
+//! Acceptance gate for closing the "nothing constructs or
 //! ticks `ProjectileRegistry`/`ItemEntityRegistry`" island.
 //!
 //! Both registries (`lodestone_entity::projectile::ProjectileRegistry`,
@@ -12,7 +12,7 @@
 //!
 //! So every test here drives [`MobSim`] instead: the struct
 //! `MobHandle::seeded` (`lodestone-server/src/mobs.rs`) constructs once per
-//! singleplayer session and `tick::run_tick_loop` (issue #284; previously
+//! singleplayer session and `tick::run_tick_loop` (previously
 //! `run_mob_tick_loop`) ticks it every 50ms in production
 //! (`IntegratedServer::open_in_memory_with_mobs`, the constructor
 //! `lodestone-shell`'s `net.rs` uses to start singleplayer). `MobSim::tick`
@@ -39,9 +39,9 @@ fn rk(s: &str) -> ResourceKey {
 }
 
 /// `AbstractArrow.tick` (`.cache/mc/26.2/src/net/minecraft/world/entity/
-/// projectile/arrow/AbstractArrow.java:263-269`): in air, **move -> drag
-/// (`getAirDrag` = `0.99`, line 277) -> gravity** (`getDefaultGravity` =
-/// `0.05`, line 345-347). `Projectile::arrow` already encodes this order and
+/// projectile/arrow/AbstractArrow.java`): in air, **move -> drag
+/// (`AbstractArrow.getAirDrag` = `0.99`) -> gravity**
+/// (`AbstractArrow.getDefaultGravity` = `0.05`). `Projectile::arrow` already encodes this order and
 /// these constants (that is `lodestone-entity`'s own, already-verified half);
 /// this test's job is only to prove `MobSim` — the thing a real server tick
 /// loop owns — actually advances it, by predicting the exact position 10
@@ -95,7 +95,7 @@ fn mobsim_tick_advances_a_registered_projectile_to_the_exact_predicted_position(
     assert!(got.x > start.x, "it must have moved forward");
 }
 
-/// `ThrowableProjectile.tick` (`ThrowableProjectile.java:46-49,111-112`):
+/// `ThrowableProjectile.tick`:
 /// **gravity (`0.03`) -> drag (`0.99` air) -> move**, the opposite order and
 /// different constants from the arrow family above — the two must not
 /// converge to the same trajectory from the same start.
@@ -157,11 +157,11 @@ fn remove_projectile_stops_further_ticking_and_drops_wire_metadata() {
     );
 }
 
-/// `ItemEntity.java:123-124` (pickup delay counts down, stops at the
-/// `32767` never-pickup sentinel it is not here) and `:176-177` (age counts
+/// `ItemEntity.tick` (pickup delay counts down, stops at the
+/// `32767` never-pickup sentinel it is not here; age counts
 /// up unless the `-32768` infinite sentinel). `ItemLifecycle::newly_dropped`
-/// starts at the vanilla `setDefaultPickUpDelay` value of `10`
-/// (`ItemEntity.java:400-401`), so after exactly 10 ticks pickup delay must
+/// starts at the vanilla `ItemEntity.setDefaultPickUpDelay` value of `10`,
+/// so after exactly 10 ticks pickup delay must
 /// read `0` and age must read `10` — an exact prediction, not "it changed".
 #[test]
 fn mobsim_tick_advances_a_registered_item_lifecycle_to_the_exact_predicted_counters() {
@@ -190,7 +190,7 @@ fn mobsim_tick_advances_a_registered_item_lifecycle_to_the_exact_predicted_count
     assert!(after.can_be_picked_up());
 }
 
-/// `ItemEntity.java:188-189`: `this.age >= 6000` discards the entity. Driven
+/// `ItemEntity.tick`: `this.age >= 6000` discards the entity. Driven
 /// exclusively through `MobSim::tick`/`item_lifecycle`/`item_count` — never
 /// through `ItemEntityRegistry::tick` directly — so a regression that
 /// un-wires `MobSim::tick` from `self.items.tick()` fails this, not just the
@@ -278,7 +278,7 @@ fn snapshots_include_projectiles_and_items_with_their_own_identity_and_motion() 
         .find(|s| s.id == item_id)
         .expect("item snapshot present");
     // **This assertion used to read `rk("minecraft:diamond")`, and that was the
-    // bug, not the fix** (issue #337).
+    // bug, not the fix.**
     //
     // `EntitySnapshot::entity_type` is an *entity* type key, and a dropped item's
     // is `minecraft:item` — the stack's own identity travels as entity metadata
@@ -292,8 +292,8 @@ fn snapshots_include_projectiles_and_items_with_their_own_identity_and_motion() 
     // The test name ("with their own identity") and this line agreed with each
     // other, which is why it survived review: it was self-consistent and wrong.
     // Nothing in `cargo xtask connectedness` could see it either — the wire was
-    // fully connected and carrying a wrong value, the same shape as #323's
-    // `SET_TIME`.
+    // fully connected and carrying a wrong value, the same shape as the
+    // wall-clock-instead-of-tick-counter `SET_TIME` regression.
     assert_eq!(
         item_snap.entity_type,
         rk("minecraft:item"),

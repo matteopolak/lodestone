@@ -464,7 +464,8 @@ fn view_walk_curve() {
     // this printed a flat line about a regime it never entered.
     //
     // **`len + evicted`, not `len`** — the same form `age_curve` above uses, and
-    // it is load-bearing rather than cosmetic. Until #503 was fixed, `open_view`
+    // it is load-bearing rather than cosmetic. Until the store's reclamation bug
+    // was fixed, `open_view`
     // could not reach the retention check, so `len` alone *was* the number of
     // entries the walk wanted and this read 2,541. Now that reclamation runs,
     // `len` plateaus at the ceiling by design and a `len`-only assertion would

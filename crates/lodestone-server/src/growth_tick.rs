@@ -1,4 +1,4 @@
-//! Crop growth, sapling growth, and leaf decay (issue #310) — the random-tick
+//! Crop growth, sapling growth, and leaf decay — the random-tick
 //! half of the family `crate::random_tick`'s grass ↔ dirt conversion already
 //! templates. `crate::random_tick::RandomTickScheduler::tick_chunk` dispatches
 //! into this module's functions for any picked position whose block matches
@@ -18,7 +18,7 @@
 //!
 //! # Crop growth, cited directly
 //!
-//! `CropBlock.randomTick` (`CropBlock.java:78-89`):
+//! `CropBlock.randomTick`:
 //!
 //! ```text
 //! protected void randomTick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {
@@ -42,7 +42,7 @@
 //! this crate has no light engine — see that module's doc comment for why
 //! the **draw pattern**, not the literal light value, is what is asserted).
 //!
-//! `getGrowthSpeed` (`CropBlock.java:100-142`) reads farmland moisture
+//! `CropBlock.getGrowthSpeed` reads farmland moisture
 //! (`FarmlandBlock.MOISTURE`) on the block below and up to eight neighbours,
 //! plus same-type crops in the four cardinal/diagonal directions. This crate
 //! has no farmland-moisture block-state property and no vegetation in
@@ -60,7 +60,7 @@
 //!
 //! # Beetroot's extra gate, cited directly
 //!
-//! `BeetrootBlock.randomTick` (`BeetrootBlock.java:45-49`):
+//! `BeetrootBlock.randomTick`:
 //!
 //! ```text
 //! protected void randomTick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {
@@ -76,11 +76,11 @@
 //! draw pattern for beetroot is: 1 draw always; if that draw is `0`
 //! (1-in-3), stop (0 further draws); otherwise fall into the shared
 //! `CropBlock` body above (0 further draws if unlit, 1 further draw if lit).
-//! `BeetrootBlock.MAX_AGE = 3` (`BeetrootBlock.java:20`, `AGE_3`).
+//! `BeetrootBlock.MAX_AGE = 3` (`AGE_3`).
 //!
 //! # Sapling growth, cited directly
 //!
-//! `SaplingBlock.randomTick`/`advanceTree` (`SaplingBlock.java:45-57`):
+//! `SaplingBlock.randomTick`/`advanceTree`:
 //!
 //! ```text
 //! protected void randomTick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {
@@ -120,8 +120,7 @@
 //!
 //! # Leaf decay, cited directly
 //!
-//! `LeavesBlock.isRandomlyTicking`/`randomTick`/`decaying`
-//! (`LeavesBlock.java:61-76`):
+//! `LeavesBlock.isRandomlyTicking`/`randomTick`/`decaying`:
 //!
 //! ```text
 //! protected boolean isRandomlyTicking(BlockState state) {
@@ -150,9 +149,9 @@
 //! scope here) and removes the block (sets it to air), which is the
 //! visually-observable half of decay.
 //!
-//! **The `distance`-recompute half of `LeavesBlock` (`updateShape`
-//! scheduling a `tick()` that walks all six neighbours,
-//! `LeavesBlock.java:88-124`) is deliberately not implemented here.** That
+//! **The `distance`-recompute half of `LeavesBlock` (`LeavesBlock.updateShape`
+//! scheduling a `tick()` that walks all six neighbours)
+//! is deliberately not implemented here.** That
 //! half only matters once something maintains `distance` as logs/leaves are
 //! placed or removed near each other — and nothing in this crate places logs
 //! or leaves at all (no tree feature, as above), so there is no in-world
@@ -196,7 +195,7 @@ fn get_u32_property(state: &str, key: &str) -> Option<u32> {
 /// Parses one `key=value` block-state boolean property. `None` if absent
 /// (see [`get_u32_property`]'s doc comment for the same "absent means the
 /// vanilla default" handling — `persistent`'s vanilla default is `false`,
-/// `LeavesBlock.java:44`).
+/// per `LeavesBlock`'s own constructor).
 fn get_bool_property(state: &str, key: &str) -> Option<bool> {
     let (_, props) = state.split_once('[')?;
     let props = props.strip_suffix(']').unwrap_or(props);
@@ -225,8 +224,7 @@ pub const BEETROOTS: &str = "minecraft:beetroots";
 
 /// `Some(max_age)` for a canonical crop base name, `None` otherwise. `7` for
 /// wheat/carrots/potatoes (`CropBlock.MAX_AGE`, plain `CropBlock` subclasses
-/// with no override); `3` for beetroots (`BeetrootBlock.MAX_AGE`,
-/// `BeetrootBlock.java:20`).
+/// with no override); `3` for beetroots (`BeetrootBlock.MAX_AGE`).
 #[must_use]
 pub fn crop_max_age(base: &str) -> Option<u32> {
     match base {
@@ -237,8 +235,8 @@ pub fn crop_max_age(base: &str) -> Option<u32> {
 }
 
 /// `true` iff `block_state` is a crop strictly below its own max age —
-/// mirrors `CropBlock.isRandomlyTicking` (`CropBlock.java:73-76`,
-/// `!this.isMaxAge(state)`).
+/// mirrors `CropBlock.isRandomlyTicking`
+/// (`!this.isMaxAge(state)`).
 #[must_use]
 pub fn is_growable_crop(block_state: &str) -> bool {
     let base = base_name(block_state);
@@ -248,7 +246,7 @@ pub fn is_growable_crop(block_state: &str) -> bool {
     }
 }
 
-/// The crop's current age (vanilla default `0` — `CropBlock.java:40`,
+/// The crop's current age (vanilla default `0` — `CropBlock`'s own constructor,
 /// `registerDefaultState(... setValue(AGE, 0))`).
 #[must_use]
 pub fn get_age(block_state: &str) -> u32 {
@@ -287,7 +285,7 @@ pub enum CropOutcome {
 /// calling any per-block handler).
 pub fn crop_random_tick(base: &str, age: u32, above_is_air: bool, rng: &mut SpawnRng) -> CropOutcome {
     if base == BEETROOTS {
-        // BeetrootBlock.java:46: `random.nextInt(3) != 0` — unconditional,
+        // `BeetrootBlock.randomTick`: `random.nextInt(3) != 0` — unconditional,
         // before any light check.
         if rng.next_int(3) == 0 {
             return CropOutcome::SkippedByOuterGate;
@@ -320,7 +318,7 @@ pub fn is_sapling(block_state: &str) -> bool {
 }
 
 /// The sapling's current growth stage (vanilla default `0` —
-/// `SaplingBlock.java:36`).
+/// `SaplingBlock`'s own constructor).
 #[must_use]
 pub fn get_stage(block_state: &str) -> u32 {
     get_u32_property(block_state, "stage").unwrap_or(0)
@@ -381,7 +379,7 @@ pub fn is_leaves(block_state: &str) -> bool {
 /// predicate for both `LeavesBlock.isRandomlyTicking` and
 /// `LeavesBlock.decaying` (see this module's doc comment for why those two
 /// are the identical check). `distance` defaults to `7` when the property is
-/// absent (`LeavesBlock.java:44`'s own registered default — a leaf with no
+/// absent (`LeavesBlock`'s own constructor registers this default — a leaf with no
 /// `distance` written is, by vanilla's own default, maximally far from any
 /// log and therefore eligible), `persistent` defaults to `false`.
 #[must_use]
@@ -654,7 +652,7 @@ mod tests {
     #[test]
     fn missing_properties_default_to_the_vanilla_registered_defaults() {
         // No suffix at all: distance defaults to 7, persistent defaults to
-        // false — LeavesBlock.java:44's own registerDefaultState — so a bare
+        // false — LeavesBlock's own registerDefaultState — so a bare
         // "minecraft:oak_leaves" is eligible to decay.
         assert!(leaves_should_decay("minecraft:oak_leaves"));
     }

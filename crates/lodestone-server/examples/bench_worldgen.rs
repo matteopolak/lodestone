@@ -138,8 +138,8 @@ fn main() {
     let speedup = serial_total.as_secs_f64() / par_total.as_secs_f64();
     println!("  speedup   {speedup:.2}x over single-threaded");
 
-    // Record the speedup this run measured — issue #86 asked for the
-    // parallel path to be benchmarked, but its speedup had never actually
+    // Record the speedup this run measured — the parallel path needed to be
+    // benchmarked, but its speedup had never actually
     // been captured into bench-results/generation.jsonl. This is that
     // number, alongside the raw parallel per-chunk wall time. Both are
     // ratios/rates, not absolute-ms assertions — per CLAUDE.md's evidence
@@ -161,12 +161,12 @@ fn main() {
         unit: "us",
     });
 
-    // --- Thread-count sweep (issue #86's remaining ask) --------------------
+    // --- Thread-count sweep ------------------------------------------------
     //
     // The single `workers`-thread measurement above answers "is parallel
     // generation faster"; it can't answer "does it degrade past the core
     // count" or "what does the scaling curve actually look like between 1
-    // and N threads" — both explicitly asked for in #86 and neither
+    // and N threads" — neither
     // derivable from one data point. Sweep 1/2/4/8/workers/2*workers
     // (deduplicated, so a small-core machine doesn't repeat a count) and
     // report scaling *efficiency* (speedup / thread count), the number that
@@ -230,7 +230,7 @@ fn main() {
 
     // --- In-benchmark RNG-determinism parity assertion ---------------------
     //
-    // #86's whole point: the fastest way to "improve" the numbers above is
+    // The whole point of this assertion: the fastest way to "improve" the numbers above is
     // to break per-chunk RNG determinism (HANDOFF.md §4's buried-ore
     // `nextFloat`-before-air-check trap is exactly this class of bug — a
     // wrong draw count desyncs the shared stream and features vanish

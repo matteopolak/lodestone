@@ -1,4 +1,4 @@
-//! Issue #331: `rcon.rs`'s framing checked against a **real vanilla RCON
+//! `rcon.rs`'s framing checked against a **real vanilla RCON
 //! server**, not just our own client/server pair talking to each other.
 //!
 //! `tests/rcon.rs` proves our listener and our own `AsyncRconClient` agree —

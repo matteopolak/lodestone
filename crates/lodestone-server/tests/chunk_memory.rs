@@ -1,4 +1,4 @@
-//! Issue #551's identity gate: packing `ChunkColumn`'s block grid per section
+//! The identity gate for bit-packing: packing `ChunkColumn`'s block grid per section
 //! (`src/chunk_blocks.rs`) must change the **representation** and nothing else.
 //!
 //! # Why an identity gate and not a memory gate

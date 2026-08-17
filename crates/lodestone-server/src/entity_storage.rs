@@ -1,5 +1,4 @@
-//! Per-chunk entity persistence: the `entities/` region set (issue
-//! [#303](https://github.com/matteopolak/lodestone/issues/303)).
+//! Per-chunk entity persistence: the `entities/` region set.
 //!
 //! # What it is
 //!
@@ -68,7 +67,7 @@
 //!   Only chunks we write, or that hold a live UUID, are decoded.
 //! - **The write is atomic per region** — temp file in the same directory, then
 //!   `rename`. Same reasoning as the terrain writer.
-//! - **`DataVersion` is checked on read** (issue #305): an entity chunk from
+//! - **`DataVersion` is checked on read**: an entity chunk from
 //!   another game version is refused rather than mis-decoded, because a
 //!   mis-decoded entity is one we then write back wrong.
 //! - **This module holds no lock and no `Arc<Mutex>`.** It is a directory path;
@@ -349,7 +348,7 @@ impl EntityStorage {
     ///
     /// [`Error::Io`] if the file exists but cannot be read, or
     /// [`Error::Anvil`] if it exists and will not parse — including a
-    /// `DataVersion` this build cannot read (issue #305). A corrupt entity file
+    /// `DataVersion` this build cannot read. A corrupt entity file
     /// is reported rather than silently treated as "this chunk has no mobs",
     /// because the latter is indistinguishable from correct behaviour.
     pub fn load_chunk(&self, cx: i32, cz: i32) -> Result<Vec<SavedEntity>, Error> {
@@ -678,7 +677,7 @@ pub fn chunk_nbt_for(cx: i32, cz: i32, entities: Vec<Nbt>) -> Nbt {
 }
 
 /// Decodes an entity chunk's `Entities` list, refusing an unreadable
-/// `DataVersion` (issue #305).
+/// `DataVersion`.
 fn entities_from_chunk_nbt(nbt: &Nbt) -> Result<Vec<SavedEntity>, lodestone_anvil::Error> {
     lodestone_anvil::require_supported_data_version(match field(nbt, "DataVersion") {
         Some(Nbt::Int(v)) => Some(*v),
@@ -832,8 +831,8 @@ mod tests {
 
     #[test]
     fn an_entity_chunk_from_another_game_version_is_refused() {
-        // The control for #305: the detector must actually fire, and it must not
-        // fire on our own version.
+        // The control for the DataVersion check: the detector must actually fire,
+        // and it must not fire on our own version.
         let ours = chunk_nbt_for(0, 0, vec![sample_item().to_nbt()]);
         assert_eq!(entities_from_chunk_nbt(&ours).expect("current").len(), 1);
 

@@ -1,4 +1,4 @@
-//! Wire-level plugin messaging: the channel registry and dispatch (issue #335).
+//! Wire-level plugin messaging: the channel registry and dispatch.
 //!
 //! Vanilla servers support custom plugin-message channels. A client announces
 //! which channels it supports during Configuration (and may add or remove some
@@ -33,8 +33,8 @@
 //!
 //! # Scope
 //!
-//! Deliberately **not** the plugin-facing API: that is issue #77's "plugin
-//! framework". This is the wire-level registry and dispatch mechanism it will
+//! Deliberately **not** the plugin-facing API: that is a separate "plugin
+//! framework" effort. This is the wire-level registry and dispatch mechanism it will
 //! sit on — receive a payload on a channel, look up registered interest,
 //! deliver it, and drop unregistered traffic without error.
 
@@ -44,8 +44,8 @@ use std::sync::{Arc, Mutex};
 
 use lodestone_model::ResourceKey;
 
-/// The channel a client uses to announce which channels it supports (issue
-/// #335). Payload: a UTF-8 comma-separated list of channel identifiers.
+/// The channel a client uses to announce which channels it supports.
+/// Payload: a UTF-8 comma-separated list of channel identifiers.
 pub const REGISTER_CHANNEL: &str = "minecraft:register";
 /// The channel a client uses to withdraw channel support. Same payload format
 /// as [`REGISTER_CHANNEL`].
@@ -100,7 +100,7 @@ fn channel_names_from_payload(data: &[u8]) -> impl Iterator<Item = &str> {
 /// One connection's set of channels the client has declared support for.
 ///
 /// Populated from the client's `minecraft:register` / `minecraft:unregister`
-/// custom payloads (issue #335). It has two consumers, both per-connection:
+/// custom payloads. It has two consumers, both per-connection:
 ///
 /// * the outbound broadcast drain filters every server→client payload through
 ///   [`supports`](Self::supports), so a client only ever receives a channel it
@@ -198,7 +198,7 @@ struct OutboundPayload {
 }
 
 /// The shared, wire-level registry of channels the server has registered
-/// interest in, plus the server→client broadcast queue (issue #335).
+/// interest in, plus the server→client broadcast queue.
 ///
 /// Clone it freely: every clone is the same registry, like
 /// [`crate::CommandDispatch`] and [`crate::players::PlayerRegistry`]. One is

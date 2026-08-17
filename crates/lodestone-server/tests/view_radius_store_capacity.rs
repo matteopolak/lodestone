@@ -1,6 +1,6 @@
-//! **Issue #505's gate.** The server's `ChunkStore` capacity must be a function
-//! of the view radius the connection actually serves, so that every column of the
-//! streamed view stays resident.
+//! **The store-capacity gate.** The server's `ChunkStore` capacity must be a
+//! function of the view radius the connection actually serves, so that every
+//! column of the streamed view stays resident.
 //!
 //! # What it is
 //!
@@ -79,8 +79,8 @@ const CHUNK: i32 = 0x27;
 const CHUNK_BATCH_FINISHED: i32 = 11;
 
 /// Serverbound: "my render-distance slider moved". Payload is one `i8`. This is
-/// the packet issue #505 is about — `dispatch_play_packet` clamps it to the
-/// server's configured `view_radius` and hands it to
+/// the packet the store-capacity gate is about — `dispatch_play_packet` clamps
+/// it to the server's configured `view_radius` and hands it to
 /// `ViewTracker::set_view_radius`.
 const CLIENT_INFORMATION: i32 = 12;
 /// Serverbound: one chunk batch received. Payload is one `f32`. Without this the
@@ -222,7 +222,7 @@ impl ChunkSource for CountingSource {
 
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; this is a counter, and edits are discarded by design.
-        // Explicit rather than inherited — issue #440.
+        // Explicit rather than inherited.
     }
 }
 
@@ -261,7 +261,7 @@ struct Observation {
     total_generations: u64,
 }
 
-/// Drives one connection through the sequence issue #505 is about:
+/// Drives one connection through the sequence the store-capacity gate is about:
 ///
 /// 1. join at `view_radius`, which streams the whole `[-r, r]²` square;
 /// 2. **shrink** the render distance to [`SHRUNK_RADIUS`] — the client's slider
@@ -284,8 +284,8 @@ struct Observation {
 /// the LRU ceiling — LRU's textbook worst case, where each miss evicts an entry
 /// the same scan is about to ask for — so the count comes out well above the
 /// arithmetic shortfall. **That is a property of this rig's slider sweep, not the
-/// steady state of a walking player**, and conflating the two is the mistake issue
-/// #505's own body makes. `ViewTracker::recenter` *diffs* the window: it generates
+/// steady state of a walking player**, and conflating the two is a real mistake
+/// worth naming here. `ViewTracker::recenter` *diffs* the window: it generates
 /// only `next.difference(&self.loaded)`, so an ordinary walk streams each column
 /// once and never rescans the view. The steady-state cost of a short capacity is
 /// that a fixed band of the view is simply **not resident** — and by the join's
@@ -506,7 +506,7 @@ async fn drain_one_batch<T: Transport>(client: &mut Connection<T>) -> usize {
 
 /// The subject's radius: `render_distance` 12 + 1, i.e. **vanilla's own default
 /// render distance**, and the first setting past 9 where the streamed view
-/// (729 columns) exceeds the 512-column literal issue #505 removed.
+/// (729 columns) exceeds the 512-column literal this gate's fix removed.
 const SUBJECT_RADIUS: i32 = 13;
 
 /// The control's radius: past [`FULLY_RESIDENT_VIEW_RADIUS`], so the shipped cap
@@ -673,7 +673,7 @@ async fn past_the_hosted_capacity_cap_the_view_cannot_stay_resident() {
 /// executable claim rather than a comment.
 ///
 /// `render_distance` 8 is `view_radius` 9 is 361 columns, which fits the
-/// 512-column literal issue #505 replaced. So a gate written here would have
+/// 512-column literal this gate's fix replaced. So a gate written here would have
 /// passed *before and after* the fix — the **world** species of vacuity, the one
 /// you cannot find by reading the test, because the source would be exemplary and
 /// only the input data wrong.
@@ -722,7 +722,7 @@ fn the_default_render_distance_is_under_the_old_ceiling_on_both_arms() {
 async fn the_regeneration_curve_across_the_render_distance_slider() {
     // view_radius, i.e. render_distance + 1. Chosen to straddle both thresholds:
     // 9 is the shell default (under the old literal), 11 and 13 are past it
-    // (10 and 12 on the slider — the cliff issue #505 reports), and 20 is past
+    // (10 and 12 on the slider — the cliff this gate reports), and 20 is past
     // the hosted cap (and, since the integrated policy dropped that ceiling, is
     // the row proving the drop reaches the streamed view rather than only the
     // arithmetic).
@@ -764,17 +764,17 @@ async fn the_regeneration_curve_across_the_render_distance_slider() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #551: the capacity must follow a *live* radius change, not only the one
+// The capacity must follow a *live* radius change, not only the one
 // the connection joined with.
 // ---------------------------------------------------------------------------
 
-/// The radius the #551 arms **join** at: the shell's own default
+/// The radius these arms **join** at: the shell's own default
 /// (`render_distance` 8), whose derived capacity is the [`STORE_CAPACITY_FLOOR`]
 /// literal. Joining here is the point — this is the store every singleplayer
 /// session starts with.
 const JOIN_RADIUS: i32 = 9;
 
-/// The radius the #551 arms **raise to** after joining. Past
+/// The radius these arms **raise to** after joining. Past
 /// `integrated_capacity_for_view_radius(JOIN_RADIUS)`, so the join-time capacity
 /// genuinely cannot hold the raised view; the compile-time premises below are what
 /// hold it to that rather than this comment.
@@ -820,8 +820,8 @@ async fn join_then_raise_then_probe(join_radius: i32, raised_radius: i32) -> Obs
     let per_chunk = Arc::clone(&counting.per_chunk);
 
     // `open_in_memory` is the constructor singleplayer uses, and it passes
-    // `MAX_CLIENT_VIEW_RADIUS` as the ceiling (issue #545) — which is what makes
-    // raising above `join_radius` possible at all.
+    // `MAX_CLIENT_VIEW_RADIUS` as the ceiling — which is what makes raising
+    // above `join_radius` possible at all.
     let (server, client_end) = IntegratedServer::open_in_memory(FakeProtocol, counting, join_radius);
     let mut client = Connection::new(client_end);
 
@@ -882,9 +882,9 @@ async fn join_then_raise_then_probe(join_radius: i32, raised_radius: i32) -> Obs
     }
 }
 
-/// **Issue #551's subject.** A connection that joins at the default render
-/// distance and then *raises* it must end up with a store that holds the raised
-/// view — zero regenerations on a probe of it.
+/// **The live-radius-change subject.** A connection that joins at the default
+/// render distance and then *raises* it must end up with a store that holds the
+/// raised view — zero regenerations on a probe of it.
 ///
 /// # Predicting the value, not the sign
 ///
@@ -954,16 +954,18 @@ async fn raising_the_render_distance_mid_session_resizes_the_store() {
 
 /// **The negative control, and it must fail the assertion above.**
 ///
-/// Reproduces the pre-#551 behaviour as a real *configuration* of the shipped
-/// type rather than as a temporary neuter: a store whose capacity is fixed at the
-/// join radius's derivation and never moves is exactly
-/// `ChunkStore::with_capacity(source, integrated_capacity_for_view_radius(9))`,
-/// which is [`CapacityPolicy::Fixed`] and therefore ignores
-/// `set_retention_radius` by construction.
+/// Reproduces the previous fixed-capacity behaviour as a real *configuration*
+/// of the shipped type rather than as a temporary neuter: a store whose
+/// capacity is fixed at the join radius's derivation and never moves is
+/// exactly `ChunkStore::with_capacity(source,
+/// integrated_capacity_for_view_radius(9))`, which is
+/// [`CapacityPolicy::Fixed`] and therefore ignores `set_retention_radius` by
+/// construction.
 ///
 /// It cannot be driven through `IntegratedServer` — every production constructor
-/// derives from a radius, which is issue #505's fix stated as a type signature —
-/// so this arm drives the store directly and reproduces the access *pattern*
+/// derives from a radius, which is the store-capacity fix stated as a type
+/// signature — so this arm drives the store directly and reproduces the access
+/// *pattern*
 /// instead: the raised view's columns in ring order, twice. That is a weaker rig
 /// than the subject's (it restates the pattern rather than measuring it off the
 /// wire) and it is the right trade for a control, whose only job is to show the

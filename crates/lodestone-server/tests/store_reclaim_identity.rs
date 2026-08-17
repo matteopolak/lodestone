@@ -4,7 +4,7 @@
 //!
 //! # What it is
 //!
-//! Issue #503 / `docs/worldgen-store-distance-leak.md`: `StagedStore`'s
+//! `docs/worldgen-store-distance-leak.md`: `StagedStore`'s
 //! 512-entry retention ceiling was unreachable from `open_view`, the only
 //! insertion path `OverworldGenerator::column` uses, so `reclaim` never ran in a
 //! real session and the store grew without bound as a player walked. The fix

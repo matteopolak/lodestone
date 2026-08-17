@@ -1,5 +1,5 @@
 //! Unit 10's structural gates: the per-ring **barrier** is gone, the in-flight
-//! count is **bounded**, and issue #453's one-column time-to-first-chunk
+//! count is **bounded**, and the one-column time-to-first-chunk property
 //! **survives** — each as a counter, each with a control that must fail it.
 //!
 //! # Why counters and not wall time
@@ -18,7 +18,7 @@
 //! |---|---|---|
 //! | no barrier | max **distinct rings** in flight at once | the per-ring shape, which reports exactly 1 |
 //! | bounded fan-out | max **columns** in flight at once | the per-ring shape, whose maximum is the largest ring (64) |
-//! | #453 latency | columns **completed before the first emit** | the pre-#453 flat shape, which reports 289 |
+//! | latency | columns **completed before the first emit** | the previous flat shape, which reports 289 |
 //!
 //! The first two controls are the *same* arm, which is the point: `4307b59`
 //! conflated two defects, and the per-ring barrier only ever addressed one of them
@@ -173,7 +173,8 @@ struct ArmResult {
     max_inflight: usize,
     max_distinct_rings: usize,
     /// The `completed` counter read at the instant the first column was emitted —
-    /// issue #453's property, and the only one of the three that is about latency.
+    /// the time-to-first-chunk property, and the only one of the three that is
+    /// about latency.
     completed_before_first_emit: usize,
 }
 
@@ -206,7 +207,7 @@ async fn window_arm(coords: &[(i32, i32)], stagger: Duration) -> ArmResult {
 /// It is also, structurally, what the `SourceRef::Borrowed` arm still does (that
 /// arm blocks per ring rather than spawning per column, but the barrier is in the
 /// same place), so its `completed_before_first_emit == 1` assertion below is the
-/// #453 evidence for both arms.
+/// time-to-first-chunk evidence for both arms.
 async fn barrier_arm(coords: &[(i32, i32)], stagger: Duration, view_radius: i32) -> ArmResult {
     let probe = RingProbe::new(coords, stagger);
     let mut emitted = Vec::with_capacity(coords.len());
@@ -241,9 +242,10 @@ async fn barrier_arm(coords: &[(i32, i32)], stagger: Duration, view_radius: i32)
     }
 }
 
-/// **The control for the third counter**: the pre-#453 shape — generate the whole
-/// view, *then* encode any of it. It is what `join_view_rings` was introduced to
-/// replace, and the only arm here whose `completed_before_first_emit` is not 1.
+/// **The control for the third counter**: the previous shape — generate the
+/// whole view, *then* encode any of it. It is what `join_view_rings` was
+/// introduced to replace, and the only arm here whose
+/// `completed_before_first_emit` is not 1.
 async fn flat_arm(coords: &[(i32, i32)], stagger: Duration) -> ArmResult {
     let probe = RingProbe::new(coords, stagger);
     let handles: Vec<_> = coords
@@ -335,8 +337,8 @@ async fn the_per_ring_barrier_is_gone_the_fan_out_is_bounded_and_453_survives() 
         window.max_inflight
     );
 
-    // --- 3. Issue #453 survives: one column of generation before the first
-    // chunk is encoded, unchanged from the barrier shape.
+    // --- 3. Time-to-first-chunk survives: one column of generation before the
+    // first chunk is encoded, unchanged from the barrier shape.
     assert_eq!(
         window.completed_before_first_emit, 1,
         "{} columns had been generated when the first chunk was emitted; #453 requires the \

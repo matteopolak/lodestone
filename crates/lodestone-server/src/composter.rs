@@ -1,4 +1,4 @@
-//! Composter block entity: the seven-tier fill state machine (issue #249).
+//! Composter block entity: the seven-tier fill state machine.
 //!
 //! # Where the truth comes from
 //!
@@ -6,24 +6,25 @@
 //! There is no separate `BlockEntity` class for the composter — the level
 //! (`0..=8`) lives directly on the block state (`LEVEL =
 //! BlockStateProperties.LEVEL_COMPOSTER`, `IntegerProperty.create("level", 0,
-//! 8)`, `BlockStateProperties.java:112`), so [`Composter`] here models that
+//! 8)`, on `BlockStateProperties.LEVEL_COMPOSTER`'s own declaration), so
+//! [`Composter`] here models that
 //! block-state integer plus the one piece of transient timing state vanilla
-//! keeps as a scheduled block tick (`ComposterBlock.java:331-333`,
-//! `:339-344`) rather than persisted NBT.
+//! keeps as a scheduled block tick (`ComposterBlock.addItem`'s
+//! `level.scheduleTick` call and `ComposterBlock.tick`) rather than persisted NBT.
 //!
 //! ## The state machine
 //!
 //! * `MIN_LEVEL = 0`, `MAX_LEVEL = 7`, `READY = 8`
-//!   (`ComposterBlock.java:46-48`).
-//! * [`addItem`] (`ComposterBlock.java:318-336`) is only ever called with
-//!   `fillLevel < 7` (both call sites — `useItemOn`,
-//!   `ComposterBlock.java:257-259`, and the static `insertItem` hoppers/
-//!   dispensers use, `:288-289` — guard on `fillLevel < 7` before calling
-//!   it), and `getContainer` (`:367-374`) hands out an `EmptyContainer` (all
+//!   (`ComposterBlock`'s own static field declarations).
+//! * [`addItem`] (`ComposterBlock.addItem`) is only ever called with
+//!   `fillLevel < 7` (both call sites — `ComposterBlock.useItemOn`,
+//!   and the static `ComposterBlock.insertItem` hoppers/
+//!   dispensers use — guard on `fillLevel < 7` before calling
+//!   it), and `ComposterBlock.getContainer` hands out an `EmptyContainer` (all
 //!   inserts rejected) for level `7`, so an insert at level `7` *or* `8` is
 //!   always a no-op. This is [`Composter::insert`]'s `level >= MAX_FILL_LEVEL`
 //!   guard.
-//! * The per-item chance roll (`addItem`, `:322-325`):
+//! * The per-item chance roll (`ComposterBlock.addItem`):
 //!   ```java
 //!   float chance = COMPOSTABLES.getFloat(itemStack.getItem());
 //!   if ((fillLevel != 0 || !(chance > 0.0F)) && !(level.getRandom().nextDouble() < chance)) {
@@ -38,15 +39,18 @@
 //!   making the whole `&&` condition false: **the first item into an empty
 //!   composter always raises the level, regardless of its own chance value**.
 //!   At any other level the roll is the ordinary `roll < chance` test. Either
-//!   way the item is consumed (`itemStack.consume(1, ...)` in `useItemOn`,
-//!   `:263`; `itemStack.shrink(1)` in `insertItem`, `:291`) whether or not the
+//!   way the item is consumed (`itemStack.consume(1, ...)` in
+//!   `ComposterBlock.useItemOn`; `itemStack.shrink(1)` in
+//!   `ComposterBlock.insertItem`) whether or not the
 //!   level actually increased — a failed roll is not a rejected insert.
 //! * Reaching level `7` schedules a tick **20 game ticks** later
-//!   (`level.scheduleTick(pos, state.getBlock(), 20)`, `:332`), and the tick
-//!   handler (`:339-344`) unconditionally advances `7 -> 8` (`state.cycle
+//!   (`level.scheduleTick(pos, state.getBlock(), 20)`, inside
+//!   `ComposterBlock.addItem`), and the tick
+//!   handler (`ComposterBlock.tick`) unconditionally advances `7 -> 8` (`state.cycle
 //!   (LEVEL)`) — deterministic, no further roll.
-//! * Extraction (`extractProduce`, `:298-309`, reached via `useWithoutItem`
-//!   when `fillLevel == 8`, `:276-279`) resets the level to `0` and yields
+//! * Extraction (`ComposterBlock.extractProduce`, reached via
+//!   `ComposterBlock.useWithoutItem`
+//!   when `fillLevel == 8`) resets the level to `0` and yields
 //!   exactly one `minecraft:bone_meal`.
 //!
 //! ## What this module does not model
@@ -54,23 +58,23 @@
 //! Item consumption from the *caller's* stack (the composter itself never
 //! holds the inserted item — it is shrunk by the caller and only the fill
 //! level state carries over) and the world-facing side effects
-//! (`levelEvent`/particles/sound, `handleFill`, `:200-223`) are for a wiring
+//! (`levelEvent`/particles/sound, `ComposterBlock.handleFill`) are for a wiring
 //! layer to add; [`Composter`] is the pure value type, matching this crate's
 //! established shape for tick-driven mechanics (see
 //! [`crate::vitals::PlayerVitals`], [`crate::fall::FallTracker`]).
 
-/// Vanilla's `ComposterBlock.READY` (`ComposterBlock.java:46`): the level at
+/// Vanilla's `ComposterBlock.READY`: the level at
 /// which the composter holds bone meal instead of accepting compost.
 pub const READY_LEVEL: u8 = 8;
 
-/// Vanilla's `ComposterBlock.MAX_LEVEL` (`ComposterBlock.java:48`): the
+/// Vanilla's `ComposterBlock.MAX_LEVEL`: the
 /// highest level an insert can still land on (`7` itself never accepts an
 /// insert — see [`Composter::insert`]'s doc comment).
 pub const MAX_FILL_LEVEL: u8 = 7;
 
 /// The fixed delay between reaching level `7` and flipping to [`READY_LEVEL`]
-/// (`level.scheduleTick(pos, state.getBlock(), 20)`,
-/// `ComposterBlock.java:332`).
+/// (`level.scheduleTick(pos, state.getBlock(), 20)`, inside
+/// `ComposterBlock.addItem`).
 pub const READY_DELAY_TICKS: u8 = 20;
 
 /// The outcome of one [`Composter::insert`] call.
@@ -162,7 +166,7 @@ impl Composter {
     ///
     /// See [`InsertOutcome`] for what each variant means and the module doc
     /// comment for the exact vanilla formula this implements
-    /// (`ComposterBlock.java:322-325`).
+    /// (`ComposterBlock.addItem`).
     pub fn insert(&mut self, item: &str, roll: f64) -> InsertOutcome {
         if self.level >= MAX_FILL_LEVEL {
             return InsertOutcome::NotAccepting;
@@ -205,8 +209,8 @@ impl Composter {
 
     /// Extracts the bone meal, resetting to level `0`. Returns `true` if
     /// bone meal was actually produced (level was [`READY_LEVEL`]), `false`
-    /// as a no-op otherwise (mirrors `useWithoutItem`'s `fillLevel == 8`
-    /// guard, `ComposterBlock.java:276-279`).
+    /// as a no-op otherwise (mirrors `ComposterBlock.useWithoutItem`'s
+    /// `fillLevel == 8` guard).
     pub fn extract(&mut self) -> bool {
         if self.level == READY_LEVEL {
             self.level = 0;
@@ -217,11 +221,12 @@ impl Composter {
     }
 }
 
-/// The per-item compost chance, restated from `ComposterBlock.java`'s
-/// `bootStrap()` (`:67-189`) — every `add(chance, Items.X)` call, `Items.X`
+/// The per-item compost chance, restated from `ComposterBlock.bootStrap`
+/// — every `add(chance, Items.X)` call, `Items.X`
 /// lowered to its registry id. `None` for anything not in vanilla's
 /// `COMPOSTABLES` table (which defaults every unlisted item to `-1.0F`,
-/// i.e. "rejected", `:68`).
+/// i.e. "rejected", per `COMPOSTABLES.defaultReturnValue(-1.0F)` in that
+/// same method).
 #[must_use]
 pub fn compostable_chance(item: &str) -> Option<f32> {
     Some(match item {

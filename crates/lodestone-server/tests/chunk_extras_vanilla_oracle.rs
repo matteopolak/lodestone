@@ -1,5 +1,5 @@
 //! `block_entities` / `block_ticks` / `fluid_ticks` read from bytes **Mojang's
-//! own server wrote** (issue #468).
+//! own server wrote**.
 //!
 //! # Why the fixtures are real region bytes and not our own output
 //!
@@ -180,7 +180,7 @@ fn vanilla_p_is_the_priority_value_and_the_ordinal_would_be_a_different_priority
          ordinal would silently demote every tick in the world"
     );
 
-    // The full table, against `TickPriority.java:6-12`.
+    // The full table, against `TickPriority`'s own enum constant values.
     for (priority, value) in [
         (TickPriority::ExtremelyHigh, -3),
         (TickPriority::VeryHigh, -2),
@@ -194,7 +194,7 @@ fn vanilla_p_is_the_priority_value_and_the_ordinal_would_be_a_different_priority
         assert_eq!(tick_priority_from_value(value), priority);
     }
 
-    // `TickPriority.byValue`'s own out-of-range clamp (`:21-29`).
+    // `TickPriority.byValue`'s own out-of-range clamp.
     assert_eq!(tick_priority_from_value(-99), TickPriority::ExtremelyHigh);
     assert_eq!(tick_priority_from_value(99), TickPriority::ExtremelyLow);
 }
@@ -207,7 +207,7 @@ fn vanilla_p_is_the_priority_value_and_the_ordinal_would_be_a_different_priority
 /// in `.cache/mc` — chest, vault, mob spawner, decorated pot, brushable block
 /// — and requires the modelled one in the same list to survive.
 ///
-/// Before issue #477, every unmodelled block entity was silently dropped —
+/// Before this fix, every unmodelled block entity was silently dropped —
 /// a chest loaded and re-saved lost its contents. The `Opaque` variant now
 /// preserves every entry verbatim so the whole set round-trips.
 #[test]
@@ -248,7 +248,7 @@ fn unmodelled_block_entity_ids_are_skipped_rather_than_failing_the_chunk() {
         extras.block_entities[5].1,
         BlockEntity::Hopper(_)
     ));
-    // The chest is modelled since issue #337 (structure chests need real slots)
+    // The chest is modelled (structure chests need real slots)
     // and resolves to a `Container`, not `Opaque`.
     assert!(matches!(
         extras.block_entities[0].1,
@@ -264,7 +264,7 @@ fn unmodelled_block_entity_ids_are_skipped_rather_than_failing_the_chunk() {
 
 /// The terrain decoder still reads a fixture carrying block entities and
 /// ticks — the control that adding three lists to the schema did not disturb
-/// the half issue #437 already gated.
+/// the terrain half already gated elsewhere.
 #[test]
 fn the_terrain_half_still_decodes_from_the_same_bytes() {
     for bytes in [BLOCK_ENTITY_CHUNK, TICKS_CHUNK] {

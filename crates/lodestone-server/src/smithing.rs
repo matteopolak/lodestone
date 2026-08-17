@@ -1,4 +1,4 @@
-//! The smithing table (issue #255): netherite upgrade and armour/tool trim —
+//! The smithing table: netherite upgrade and armour/tool trim —
 //! two distinct recipe families sharing one three-input, one-result menu.
 //!
 //! # What it is

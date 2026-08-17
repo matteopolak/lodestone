@@ -1,4 +1,4 @@
-//! The enchanting table (issue #253): bookshelf power, the three-slot level
+//! The enchanting table: bookshelf power, the three-slot level
 //! cost, and the weighted-random enchantment offers each slot draws.
 //!
 //! # What it is
@@ -6,8 +6,9 @@
 //! A port of `EnchantingTableBlock`'s bookshelf-detection shape
 //! (`.cache/mc/26.2/src/net/minecraft/world/level/block/EnchantingTableBlock.java`),
 //! `EnchantmentHelper.getEnchantmentCost`/`selectEnchantment`/
-//! `getAvailableEnchantmentResults` and `EnchantmentMenu`'s own per-slot orchestration
-//! (`.cache/mc/26.2/src/net/minecraft/world/inventory/EnchantmentMenu.java:85-132`),
+//! `getAvailableEnchantmentResults` and `EnchantmentMenu.slotsChanged`'s own
+//! per-slot orchestration
+//! (`.cache/mc/26.2/src/net/minecraft/world/inventory/EnchantmentMenu.java`),
 //! reading [`crate::enchantment_data`] for the weight/cost-curve/exclusivity
 //! table the selection loop draws against.
 //!
