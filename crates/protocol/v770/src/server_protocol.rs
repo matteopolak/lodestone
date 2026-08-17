@@ -309,6 +309,21 @@ const METADATA_IDX_TNT_FUSE: u8 = 8;
 /// own doc for why the producer alone disambiguates them.
 const METADATA_IDX_MINECART_FUEL: u8 = 13;
 
+/// `AbstractBoat.DATA_ID_PADDLE_LEFT` — index 11, serializer `BOOLEAN` (8).
+/// The jar dump's other index-11 claimants (`tests/support/entity_data_index_jvm.txt`)
+/// are `AbstractMinecart.DATA_ID_CUSTOM_DISPLAY_BLOCK` (`OPTIONAL_BLOCK_STATE`),
+/// `Arrow.ID_EFFECT_COLOR` (`INT`), `Display.DATA_TRANSLATION_ID` (`VECTOR3`)
+/// and `ThrownTrident.ID_LOYALTY` (`BYTE`) — none share the `BOOLEAN`
+/// serializer except `LivingEntity.DATA_EFFECT_AMBIENCE_ID`; see
+/// `MetadataField::BoatPaddles`'s own doc for why the producer alone
+/// disambiguates the two.
+const METADATA_IDX_BOAT_PADDLE_LEFT: u8 = 11;
+
+/// `AbstractBoat.DATA_ID_PADDLE_RIGHT` — index 12, serializer `BOOLEAN` (8).
+/// The jar dump's other index-12 `BOOLEAN` claimant is `ThrownTrident.ID_FOIL`;
+/// see [`METADATA_IDX_BOAT_PADDLE_LEFT`].
+const METADATA_IDX_BOAT_PADDLE_RIGHT: u8 = 12;
+
 /// `EnderDragon.DATA_PHASE` — index 16, serializer `INT` (1). Off the jar
 /// dump (`tests/support/entity_data_index_jvm.txt`: `16 EnderDragon.DATA_PHASE
 /// 1 INT`), one of six `INT` claimants at index 16 alongside
@@ -3566,9 +3581,16 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
+            // Issue #262's `PADDLE_BOAT` remainder: this used to decode-and-
+            // discard. `crate::server`'s consumer feeds
+            // `MobSim::apply_boat_paddle`, which is purely cosmetic (see that
+            // method's own doc) but real: a second connected player now sees
+            // someone else's boat animate its paddles.
             State::Play if packet_id == play::serverbound::PADDLE_BOAT => {
-                let _ = decode_full::<PaddleBoat>(payload);
-                ServerBound::Ignored
+                match decode_full::<PaddleBoat>(payload) {
+                    Some(PaddleBoat { left, right }) => ServerBound::PaddleBoat { left, right },
+                    None => ServerBound::Ignored,
+                }
             }
 
             // Entity actions/combat/interaction, remaining 6 of
@@ -3888,12 +3910,18 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // Bonus beyond this issue's own 16-packet count (its "remaining
-            // container/recipe-adjacent ids" clause) — the same bundle-select
-            // struct the client already encodes.
+            // Issue #692: this used to decode-and-discard. Wire-invisible on
+            // the *clientbound* direction (`BundleContents.STREAM_CODEC`
+            // always reconstructs `selectedItem = -1`), but server-side
+            // load-bearing — `crate::server`'s consumer stores it for
+            // `BundleContents.Mutable::removeOne`'s next right-click-extract.
             State::Play if packet_id == play::serverbound::BUNDLE_ITEM_SELECTED => {
-                let _ = decode_full::<SelectBundleItem>(payload);
-                ServerBound::Ignored
+                match decode_full::<SelectBundleItem>(payload) {
+                    Some(SelectBundleItem { slot_id, selected_item_index }) => {
+                        ServerBound::SelectBundleItem { slot_id, selected_item_index }
+                    }
+                    None => ServerBound::Ignored,
+                }
             }
 
             // World/block-admin, remaining packets beyond
@@ -5093,6 +5121,21 @@ impl ServerProtocol for V770ServerProtocol {
                     w.u8(METADATA_IDX_MINECART_FUEL);
                     w.var_i32(METADATA_SER_BOOLEAN);
                     w.bool(*lit);
+                }
+                MetadataField::BoatPaddles { left, right } => {
+                    // `AbstractBoat.DATA_ID_PADDLE_LEFT`/`RIGHT` — indices
+                    // 11/12, the same two-fields-one-arm shape
+                    // `GoatHorns` above already uses. Only
+                    // `MobSim::snapshots`' vehicle loop ever builds this
+                    // variant; see `MetadataField::BoatPaddles`'s own doc
+                    // for the claimants this never collides with in
+                    // practice.
+                    w.u8(METADATA_IDX_BOAT_PADDLE_LEFT);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*left);
+                    w.u8(METADATA_IDX_BOAT_PADDLE_RIGHT);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*right);
                 }
                 MetadataField::DragonPhase(phase) => {
                     // `EnderDragon.DATA_PHASE` — index 16; only

@@ -38,6 +38,8 @@ impl<'w> MobSim<'w> {
                 yaw,
                 boat: lodestone_physics::vehicle::BoatState::default(),
                 rider: None,
+                paddle_left: false,
+                paddle_right: false,
             },
         );
         id
@@ -180,6 +182,24 @@ impl<'w> MobSim<'w> {
         // latched before the player boarded.
         vehicle.boat.status = None;
         vehicle.boat.old_status = None;
+        Some(id)
+    }
+
+    /// Accepts a `ServerboundPaddleBoatPacket` for the vehicle
+    /// `player_entity_id` is riding — purely cosmetic bookkeeping for
+    /// [`snapshots`](Self::snapshots)'s `MetadataField::BoatPaddles`, refused
+    /// the same way [`apply_vehicle_move`](Self::apply_vehicle_move) is when
+    /// the reporting player rides nothing.
+    ///
+    /// The rider's own client never reads this back — `controlBoat`'s paddle
+    /// animation is driven by the rider's own local input, not by a
+    /// server-streamed field — so this only ever matters to a *second*
+    /// connected player watching the boat from outside.
+    pub fn apply_boat_paddle(&mut self, player_entity_id: i32, left: bool, right: bool) -> Option<i32> {
+        let id = self.vehicle_ridden_by(player_entity_id)?;
+        let vehicle = self.vehicles.get_mut(&id)?;
+        vehicle.paddle_left = left;
+        vehicle.paddle_right = right;
         Some(id)
     }
 
@@ -536,6 +556,51 @@ mod vehicle_tests {
         }
         if (streamed.rotation.yaw - 137.0).abs() > f32::EPSILON {
             wrong.push(format!("snapshot yaw {:?}", streamed.rotation));
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// **Paddle input: only the rider may set it, and it reaches the streamed
+    /// snapshot.** Issue #262's `PADDLE_BOAT` remainder — the second half of
+    /// `only_the_rider_may_move_the_boat`'s security property, plus the
+    /// wiring proof that the boolean pair actually shows up in
+    /// `EntitySnapshot::metadata` rather than being stored and never read.
+    #[test]
+    fn only_the_rider_may_set_the_paddle_state_and_it_reaches_the_snapshot() {
+        let world = world();
+        let mut sim = MobSim::new(&world);
+        let boat = sim.spawn_vehicle(
+            "minecraft:oak_boat".parse().expect("a valid key"),
+            Vec3::new(8.5, 63.4, 8.5),
+            0.0,
+        );
+        assert!(sim.mount_vehicle(boat, 7, false));
+
+        let mut wrong = Vec::new();
+        if sim.apply_boat_paddle(8, true, false).is_some() {
+            wrong.push("a player who rides nothing must not set the paddle state".to_owned());
+        }
+        // Pairwise-distinct: left true, right false, so a transposition of
+        // the two booleans cannot survive the round trip.
+        if sim.apply_boat_paddle(7, true, false) != Some(boat) {
+            wrong.push("the rider's report must be applied".to_owned());
+        }
+        let streamed = sim
+            .snapshots()
+            .into_iter()
+            .find(|s| s.id == boat)
+            .expect("a live boat must be streamed");
+        let field = streamed
+            .metadata
+            .iter()
+            .find(|f| matches!(f, crate::protocol::MetadataField::BoatPaddles { .. }));
+        match field {
+            Some(crate::protocol::MetadataField::BoatPaddles { left, right }) => {
+                if !*left || *right {
+                    wrong.push(format!("snapshot paddles left={left} right={right}, expected true/false"));
+                }
+            }
+            _ => wrong.push("no BoatPaddles metadata field in the snapshot".to_owned()),
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
     }
