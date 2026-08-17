@@ -117,6 +117,13 @@ pub(crate) struct KeyGate {
     /// [`crate::container::AnvilRenameState`]'s own module doc for the whole
     /// chain (issue #603).
     pub anvil_rename_active: bool,
+    /// The local player's server-authoritative game mode is `Spectator`
+    /// (`Sim::is_spectator`) — issue #613's `TeleportToEntity` remainder.
+    /// Gates the hotbar-number-key intercept that opens
+    /// [`crate::menu::spectator_menu`]'s screen; **not** gated on
+    /// [`gameplay`](Self::gameplay) itself (that is asked separately at the
+    /// arm), so this flag alone never opens anything outside the world.
+    pub spectator: bool,
 }
 
 /// The single thing a key event means, once precedence has been applied.
@@ -208,6 +215,11 @@ pub(crate) enum KeyOutcome {
     TogglePerspective,
     /// Select hotbar slot `0..=8`.
     SelectSlot(usize),
+    /// A hotbar-number key while spectating (issue #613's
+    /// `TeleportToEntity` remainder) — opens
+    /// [`crate::menu::spectator_menu`]'s screen instead of selecting a
+    /// (meaningless, for a spectator) hotbar slot. See [`KeyGate::spectator`].
+    OpenSpectatorMenu,
     /// A `ContainerInput::SWAP` against the **hovered** slot while a container
     /// screen is open: vanilla's number keys and `key.swapOffhand`, which do
     /// *not* change the selected hotbar slot while a screen is up
@@ -524,6 +536,15 @@ pub(crate) fn resolve_key(
         Some(KeyOutcome::OpenContainer)
     } else if binds.is(InputAction::TogglePerspective, code) && pressed && gate.gameplay {
         Some(KeyOutcome::TogglePerspective)
+    } else if hotbar_slot_for(binds, code).is_some() && pressed && gate.gameplay && gate.spectator {
+        // Issue #613's `TeleportToEntity` remainder: while spectating, every
+        // hotbar-number key opens the Spectator Menu instead of selecting a
+        // slot — see [`KeyOutcome::OpenSpectatorMenu`]'s own doc for why
+        // this ranks *ahead of* the ordinary `SelectSlot` arm immediately
+        // below rather than folding a branch into it. A spectator's hotbar
+        // selection is otherwise inert (no inventory), so this loses nothing
+        // real.
+        Some(KeyOutcome::OpenSpectatorMenu)
     } else if let Some(slot) = hotbar_slot_for(binds, code)
         && pressed
         && gate.gameplay

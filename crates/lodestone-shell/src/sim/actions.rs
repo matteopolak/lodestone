@@ -27,7 +27,6 @@
 
 use super::*;
 // That fix's veto registry -- see `attack_entity`.
-use lodestone_client::GameMode;
 use lodestone_ecs::player::{FireworkBoost, ItemUseTicks};
 use lodestone_ecs::veto::{ActionVetoes, VerbContext, Verdict};
 use lodestone_physics::UseEffects;
@@ -258,15 +257,6 @@ impl Sim {
         }
         // MISS: no block, no entity. Vanilla still swings.
         self.swing_main_hand_live();
-    }
-
-    /// Whether the local player's server-authoritative game mode is
-    /// `Spectator` — `MultiPlayerGameMode.isSpectator()`, [`Self::begin_attack_live`]'s
-    /// first gate.
-    #[must_use]
-    fn is_spectator(&self) -> bool {
-        self.read(|w| w.get::<ServerGameMode>(self.local).and_then(|m| m.0))
-            == Some(GameMode::Spectator)
     }
 
     /// `Minecraft.startAttack`'s spectator branch

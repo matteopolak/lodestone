@@ -304,6 +304,21 @@ impl WindowApp {
                 crate::menu::social::entries_from_tablist(&tab_list, self.sim.local_uuid());
             self.nav.refresh_social(entries);
 
+            // The Spectator Menu (issue #613's `TeleportToEntity`
+            // remainder), same reason and same shape as the Social roster
+            // immediately above — `crate::menu::spectator_menu`'s module
+            // doc names why this cannot be built inside `MenuNav` itself
+            // (it needs a live `TabList` + `Scoreboard`, which only `Sim`
+            // can reach). Every frame regardless of which screen is open,
+            // for the identical staleness reason.
+            let scoreboard = self.sim.scoreboard();
+            let spectator_entries = crate::menu::spectator_menu::spectator_menu_entries(
+                &tab_list,
+                &scoreboard,
+                self.sim.local_uuid(),
+            );
+            self.nav.refresh_spectator_menu(spectator_entries);
+
             // The Statistics screen (#188), for exactly the same reason and in
             // exactly the same shape. `award_stats` is decoded and folded into
             // `lodestone_ecs::SessionStatistics`, and `menu::render::dispatch`

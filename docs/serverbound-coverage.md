@@ -168,8 +168,8 @@ audit:
   `Popped` are still `Route::NOWHERE` below — they are answered directly in
   `net.rs`'s own loop, not through the `forward`/`poll_net` path.
 
-**Eleven were confirmed genuine islands; eleven of eleven have since gained
-real producers, save one** — zero hits for the bare variant name anywhere in
+**Eleven were confirmed genuine islands; all eleven have since gained real
+producers** — zero hits for the bare variant name anywhere in
 `lodestone-shell` or `lodestone-controller`, in any form, at the time this
 section was written: `ContainerButtonClick`, `EditBook`, `PingRequest`,
 `RecipeBookSeenRecipe`, `SeenAdvancements`, `SelectBundleItem`,
@@ -275,25 +275,38 @@ Since fixed:
   own client; the toggle becomes visible only once the server's
   `container_set_data` echoes it back. No render support for the
   disabled-slot sprite exists yet either.
+* **`TeleportToEntity`** — see the paragraph immediately below for the full
+  chain; the short version is `crate::menu::spectator_menu` plus
+  `app/menus.rs`'s `MenuAction::TeleportToEntity` arm.
 
-**`TeleportToEntity` remains, and the issue's own framing of its trigger was
-wrong** — worth recording since it is exactly the "search for the capability,
-not the name" trap. `ClientTabListScreen`/`PlayerTabOverlay` (the tab-list HUD
+**`TeleportToEntity` is now fixed too — all twelve of this issue's variants
+have real producers.** The issue's own framing of the trigger was wrong, and
+that is worth keeping as recorded, exactly the "search for the capability,
+not the name" trap: `ClientTabListScreen`/`PlayerTabOverlay` (the tab-list HUD
 this repo already renders in `tablist.rs`) has **no click handling anywhere**
 in `client-src` — it is a pure readout. The real, sole trigger is
 `PlayerMenuItem.selectItem`, reached only through vanilla's dedicated
 **Spectator Menu** (`SpectatorMenu`/`SpectatorGui`, opened by pressing a
 hotbar-number key while spectating, since spectator mode has no hotbar
-selection to intercept those keys for instead): a bottom radial of categories
-(root: "Team Teleport" grouped by team, then "Teleport to Player" as a flat
-list), each entry rendering a skin face via `PlayerFaceExtractor`. Landing
-this needs that whole menu — keybind interception, category navigation, a
-player list, and skin-face rendering — not a quick follow-on to a click
-handler that already exists. Left unbuilt rather than faked onto an
-unrelated screen (the Social Interactions screen was briefly considered and
-rejected: it has real player rows and click handling, but attaching a
-teleport action there would be a fabricated vanilla behaviour, not a
-simplification of a real one).
+selection to intercept those keys for instead). Bolting a teleport action
+onto the Social Interactions screen was considered and rejected for the
+reason recorded here before: it has real player rows and click handling, but
+attaching a teleport action there would be a fabricated vanilla behaviour,
+not a simplification of a real one.
+
+`crates/lodestone-shell/src/menu/spectator_menu.rs` is the real menu that
+landed instead — see that module's own doc for the full shape and every
+named simplification (a scrolling vertical list rather than vanilla's
+paginated icon-slot bar; a placeholder head icon rather than a real skin
+face; team grouping without vanilla's exact `TeleportToTeam` construction).
+`spectator_menu_entries` folds a live `TabList` + `Scoreboard` snapshot into
+root categories/players; `SpectatorMenuState::activate` resolves a clicked
+row into an expand, a "Back", or a
+`ClientAction::TeleportToEntity { target }` send, the last of which closes
+the screen (`app/menus.rs`'s `MenuAction::TeleportToEntity` arm sends it
+through `Sim::net()`). Opened by any hotbar-number key while
+`Sim::is_spectator()` (`app/input.rs`'s `KeyGate::spectator`, checked ahead
+of the ordinary hotbar-slot-select arm).
 
 ## How to change it
 
