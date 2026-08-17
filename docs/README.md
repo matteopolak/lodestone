@@ -404,6 +404,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `crates/lodestone-shell/src/container.rs` — the screen that draws an open
   [`Menu`](../crates/lodestone-game/src/menu.rs): a panel, a well per slot, the slot
   contents, and (for menus that have one) a crafting grid and result slot.
+- [The container station widgets: enchanting, stonecutter, loom](./container-station-widgets.md) —
+  The three screens whose `ClientAction::ContainerButtonClick` producer lives in
+  `crates/lodestone-shell/src/container/{enchant,stonecutter,loom}.rs`: the enchanting
+  table's three enchant-offer rows, the stonecutter's up-to-32-recipe scroll grid, and
+  the loom's up-to-32-pattern scroll grid. `ContainerButtonClick` was encoded by every
+  protocol family with zero shell callers before this — the same outbound-island
+  shape `ClientAction::SetFlying`/`SetBeaconEffects` were caught in — and these
+  three modules are its producers.
 - [Crafting](./crafting.md) — The version-free crafting stack in `lodestone-game`:
   the recipe data model and matching rules (`recipe.rs`), a loader for Mojang's own
   datapack JSON (`recipe_json.rs`), and the crafting-table menu layout that `menus.rs`
@@ -475,6 +483,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   travel, `/execute in`, end-gateway teleport). **That one is fixed**; the diagnosis
   is kept below because it is the best record of how it failed and of the trap that
   hid it.
+- [Display entity orientation](./display-entity-orientation.md) —
+  `lodestone_render::display`: the shared geometry every `text_display`/
+  `item_display`/`block_display` entity carries — the billboard orientation that
+  decides which way it faces, and the `translation`/`left_rotation`/
+  `scale`/`right_rotation` transformation on top of it. A faithful port of
+  `DisplayRenderer.calculateOrientation` and `Transformation.compose` (`26.2`).
 - [The ender dragon fight](./dragon-fight.md) — The server-side state for the ender
   dragon boss fight: the eleven-phase flight/combat state machine, end-crystal beam
   healing, and the `EndDragonFight` controller (persisted "already defeated" flag,
@@ -751,6 +765,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   nothing rendered into it, so the screen showed a black box where the player belongs.
   It is the first thing in this workspace to draw a full 3-D entity rig inside a 2-D
   GUI panel, and the first to use a GPU scissor.
+- [Potion effects in the inventory](./inventory-potion-effects.md) —
+  `EffectsInInventory` (`26.2`): the column of active-effect chips drawn beside the
+  player's own inventory screen — name, amplifier level, remaining time and an icon
+  per active effect. Ported by reusing the existing top-right HUD chip's
+  fold/tint/font machinery in `crates/lodestone-shell/src/effects.rs`, rather than
+  building a second effect-rendering pipeline next to it.
 - [Island detection (`cargo xtask islands`)](./island-detection.md) — A `syn`-based
   static scanner, `cargo xtask islands` (`xtask/src/islands.rs`), that reports four
   things per workspace crate: functions/methods with zero production call sites,
@@ -1203,6 +1223,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (`MobSim::run_patrol_spawn_cycle`) plus one new goal in
   `lodestone_entity::ai::goals` (`LongDistancePatrolGoal`), registered on the
   pillager's roster row in `lodestone_entity::ai::roster::ranged`.
+- [Player capes](./player-capes.md) — The player cape overlay: a real,
+  per-tick-lagged cloak that sways as the wearer walks, turns and sprints, rather than
+  a flat plane pinned to the back. Before this landed, capes were an island — the
+  profile texture was already parsed and the options toggle already existed, and
+  nothing drew.
 - [Player chat](./player-chat.md) — The inbound half of chat: a player types a
   message, our server decodes it, and every connected player sees it. Before #469 the
   two halves of chat were in opposite states — we could say things to a player

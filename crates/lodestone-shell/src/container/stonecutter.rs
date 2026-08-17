@@ -35,13 +35,17 @@
 //!
 //! Nothing here is hand-maintained: every stonecutting recipe already loads
 //! through the same jar-sourced `RecipeBook` the crafting recipe book uses.
-//! Scrolling ([`start_index_for_scroll`]) is ported but not yet wired to a
-//! mouse-wheel/drag input handler — [`super::enchant`]'s three fixed rows
-//! never needed one, so this module is the first click surface in this crate
-//! to need [`start_index_for_scroll`] at all; a caller that never scrolls
-//! (`scroll_offset` pinned at `0.0`) still sees the first twelve matches,
-//! which covers every stonecutting input in the vanilla corpus that has
-//! twelve or fewer results.
+//! Scrolling ([`start_index_for_scroll`]/[`scroll_offset_after_wheel`]) is
+//! now wired to the mouse wheel — **stale, corrected**: this doc used to say
+//! the scroll formula existed with nothing feeding it, which was true when
+//! written and is not any more. `WindowApp::scroll_stonecutter`
+//! (`app/container_input.rs`) computes a new offset per wheel notch and
+//! persists it on `WindowApp::stonecutter_scroll`, and
+//! `WindowApp::handle_stonecutter_click` reads that persisted offset through
+//! [`start_index_for_scroll`] rather than pinning `start_index` at `0`. The
+//! scrollbar thumb drag is still not wired — the same disclosed cut
+//! [`super::loom`]'s own module doc makes for its scrollbar: the wheel alone
+//! already reaches every match past twelve.
 //!
 //! ## Dependencies
 //!
@@ -152,6 +156,22 @@ pub fn start_index_for_scroll(scroll_offset: f32, recipe_count: usize) -> i32 {
     let clamped = scroll_offset.clamp(0.0, 1.0);
     let rows = offscreen_rows(recipe_count) as f32;
     ((clamped * rows + 0.5) as i32) * COLUMNS
+}
+
+/// `StonecutterScreen.mouseScrolled`'s own step: `scrollOffs = clamp(scrollOffs
+/// - scrollY / offscreenRows, 0, 1)`, gated on `isScrollBarActive()` the same
+/// way vanilla's own `if (this.isScrollBarActive())` guards the whole method
+/// body — a no-op (returns `current` unchanged, pinned at `0.0`) when there is
+/// nothing offscreen, never dividing by zero. Wired to the mouse wheel by
+/// `WindowApp::scroll_stonecutter` (`app/container_input.rs`), the missing
+/// half this module's own doc used to name.
+#[must_use]
+pub fn scroll_offset_after_wheel(current: f32, notches: f32, recipe_count: usize) -> f32 {
+    let rows = offscreen_rows(recipe_count);
+    if rows <= 0 {
+        return 0.0;
+    }
+    (current - notches / rows as f32).clamp(0.0, 1.0)
 }
 
 /// [`hit_test_local`] plus the panel-origin/scale resolution every other

@@ -535,16 +535,28 @@ impl ApplicationHandler for WindowApp {
                         && !consumed_by_enchant
                         && is_left_press
                         && self.handle_stonecutter_click(&menu, w, h);
+                    // The loom's pattern grid, same first-refusal shape as
+                    // `consumed_by_stonecutter` just above (never overlaps a
+                    // real slot, never overlaps another special screen's own
+                    // buttons — each fires on its own `special_layout`).
+                    let consumed_by_loom = !consumed_by_merchant
+                        && !consumed_by_beacon
+                        && !consumed_by_enchant
+                        && !consumed_by_stonecutter
+                        && is_left_press
+                        && self.handle_loom_click(&menu, w, h);
                     let consumed_by_recipe_panel = !consumed_by_merchant
                         && !consumed_by_beacon
                         && !consumed_by_enchant
                         && !consumed_by_stonecutter
+                        && !consumed_by_loom
                         && is_left_press
                         && self.handle_recipe_panel_click(&menu, w, h);
                     if !consumed_by_merchant
                         && !consumed_by_beacon
                         && !consumed_by_enchant
                         && !consumed_by_stonecutter
+                        && !consumed_by_loom
                         && !consumed_by_recipe_panel
                     {
                         // **`hit_test_with_book`, not `hit_test_with_scale`.** This is
@@ -688,9 +700,23 @@ impl ApplicationHandler for WindowApp {
             // `handle_bundle_scroll` returns `false` and this arm does not
             // forward the notch anywhere, matching vanilla: an ordinary
             // container has no other use for the wheel.
+            //
+            // Falls through, in order, to the stonecutter's recipe grid and
+            // the loom's pattern grid — `scroll_stonecutter`/`scroll_loom`
+            // each return whether their own screen is even open, the same
+            // "did this surface claim it" shape `handle_bundle_scroll` uses,
+            // so a wheel notch over an *ordinary* container (no bundle slot
+            // hovered, no stonecutter/loom open) still reaches nothing,
+            // matching vanilla.
             WindowEvent::MouseWheel { delta, .. } if self.ui.is_container_open() => {
-                if let Some((w, h)) = self.target.as_ref().map(RenderTarget::size) {
-                    self.handle_bundle_scroll(wheel_notches(delta), w, h);
+                let notches = wheel_notches(delta);
+                let consumed_by_bundle = self
+                    .target
+                    .as_ref()
+                    .map(RenderTarget::size)
+                    .is_some_and(|(w, h)| self.handle_bundle_scroll(notches, w, h));
+                if !consumed_by_bundle {
+                    let _ = self.scroll_stonecutter(notches) || self.scroll_loom(notches);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } if self.ui.accepts_gameplay_input() => {

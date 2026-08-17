@@ -809,6 +809,25 @@ struct WindowApp {
     /// re-seeds it from the menu's own `container_data` the next time a
     /// beacon is open, so a stale value between sessions is never visible.
     beacon_selection: crate::container::beacon::BeaconSelection,
+    /// The stonecutter recipe grid's persisted scroll offset (`0.0..=1.0`,
+    /// `StonecutterScreen.scrollOffs`) — advanced by
+    /// [`WindowApp::scroll_stonecutter`], read by
+    /// [`WindowApp::handle_stonecutter_click`] through
+    /// [`crate::container::stonecutter::start_index_for_scroll`].
+    ///
+    /// Not reset on close or on an input-slot change, matching
+    /// [`merchant_selected`](Self::merchant_selected)'s own precedent: a
+    /// stale offset past the real match count is harmless, since
+    /// [`crate::container::stonecutter::start_index_for_scroll`]'s own
+    /// `offscreen_rows` clamp bounds it against whatever the *current*
+    /// match count is, every time it is read.
+    stonecutter_scroll: f32,
+    /// The loom pattern grid's persisted scroll offset — the same shape as
+    /// [`stonecutter_scroll`](Self::stonecutter_scroll), advanced by
+    /// [`WindowApp::scroll_loom`] and read by
+    /// [`WindowApp::handle_loom_click`] through
+    /// [`crate::container::loom::start_row_for_scroll`].
+    loom_scroll: f32,
     /// Game-rule overrides collected on Create New World's More tab (issue
     /// #592), queued for exactly one send once the fresh singleplayer session
     /// reaches `SessionPhase::Connected` — see
