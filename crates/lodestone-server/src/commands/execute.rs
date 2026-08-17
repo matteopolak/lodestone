@@ -186,8 +186,8 @@ use std::sync::Arc;
 use lodestone_command::{DoubleArgument, NodeId};
 use lodestone_command_mc::{
     AnchorInput, Axes, BiomeArg, BlockArg, BlockPosArg, DimensionArg, EntityAnchorArg, EntityArg,
-    EntitySelector, EntityTypeArg, IntRangeArg, NbtPathArg, ObjectiveArg, RotationArg,
-    ScoreHolderArg, SnbtValue, StorageIdArg, SwizzleArg, Vec3Arg,
+    EntitySelector, EntityTypeArg, FloatRangeArg, IdentifierArg, IntRangeArg, NbtPathArg,
+    ObjectiveArg, RotationArg, ScoreHolderArg, SnbtValue, StorageIdArg, SwizzleArg, Vec3Arg,
 };
 use lodestone_model::Rotation;
 
@@ -652,7 +652,34 @@ fn register_conditions(registrar: &mut Registrar, execute: NodeId, literal: &str
     register_block_condition(registrar, parent, execute, expected);
     register_biome_condition(registrar, parent, execute, expected);
     register_blocks_condition(registrar, parent, execute, expected);
+    register_stopwatch_condition(registrar, parent, execute, expected);
     register_loaded_condition(registrar, parent, execute, expected);
+}
+
+/// `stopwatch <id> <range>` — `checkStopwatch`'s own boolean shape
+/// (`addConditional`, same as `block`/`dimension`/`biome`), reading
+/// [`crate::commands::stopwatch_store::StopwatchHandle::elapsed_seconds`].
+/// An unknown id is a hard **refusal** (vanilla's own
+/// `StopwatchCommand.ERROR_DOES_NOT_EXIST`), not merely a failing test — the
+/// same "propagate an `Err`, not a `false`" shape
+/// [`register_block_condition`]'s missing-chunk-source case already takes.
+fn register_stopwatch_condition(
+    registrar: &mut Registrar,
+    parent: NodeId,
+    execute: NodeId,
+    expected: bool,
+) {
+    let stopwatch_lit = registrar.literal(parent, "stopwatch");
+    let (id_node, id_key) = registrar.arg(stopwatch_lit, "id", IdentifierArg);
+    let (range_node, range_key) = registrar.arg(id_node, "range", FloatRangeArg);
+    add_boolean_conditional(registrar, range_node, execute, expected, move |ctx| {
+        let id = ctx.get(id_key).to_string();
+        let Some(elapsed) = ctx.world.state.stopwatches().elapsed_seconds(&id) else {
+            return Err(format!("No stopwatch exists by that name: {id}"));
+        };
+        let range = *ctx.get(range_key);
+        Ok(range.matches(elapsed))
+    });
 }
 
 /// `blocks <start> <end> <destination> all|masked` — `ExecuteCommand`'s own

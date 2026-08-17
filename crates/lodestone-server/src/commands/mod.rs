@@ -144,6 +144,8 @@ mod scoreboard;
 pub mod scoreboard_store;
 mod seed;
 pub mod source;
+mod stopwatch;
+pub mod stopwatch_store;
 mod summon;
 mod team;
 pub mod team_store;
@@ -251,6 +253,7 @@ impl ServerCommands {
         nbt_data::register(&mut registrar);
         teleport::register(&mut registrar);
         summon::register(&mut registrar);
+        stopwatch::register(&mut registrar);
         weather::register(&mut registrar);
         default_gamemode::register(&mut registrar);
         help::register(&mut registrar);

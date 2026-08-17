@@ -3177,3 +3177,100 @@ fn execute_summon_then_at_s_cannot_resolve_the_new_non_player_source() {
     let outcome = commands.run(&world, &alice, "execute summon minecraft:cow run gamemode creative @s").expect("root matched");
     assert!(!outcome.response.is_ran(), "{outcome:?}");
 }
+
+// ---------------------------------------------------------------------------
+// /stopwatch
+// ---------------------------------------------------------------------------
+
+/// `create`/`query`/`restart`/`remove` round trip, including the two
+/// name-carrying refusals: a duplicate `create`, and a `query` after
+/// `remove`.
+#[test]
+fn stopwatch_create_query_restart_remove_round_trip() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = data_world(&state, &players);
+
+    let created = commands.run(&world, &alice, "stopwatch create test:timer").expect("root matched");
+    assert!(created.response.is_ran(), "{created:?}");
+
+    let duplicate = commands.run(&world, &alice, "stopwatch create test:timer").expect("root matched");
+    assert!(!duplicate.response.is_ran(), "a duplicate create must refuse: {duplicate:?}");
+    assert!(duplicate.response.lines()[0].contains("test:timer"), "{duplicate:?}");
+
+    let query = commands.run(&world, &alice, "stopwatch query test:timer").expect("root matched");
+    assert!(query.response.is_ran(), "{query:?}");
+
+    let query_scaled = commands.run(&world, &alice, "stopwatch query test:timer 1000.0").expect("root matched");
+    assert!(query_scaled.response.is_ran(), "{query_scaled:?}");
+
+    let restarted = commands.run(&world, &alice, "stopwatch restart test:timer").expect("root matched");
+    assert!(restarted.response.is_ran(), "{restarted:?}");
+
+    let restart_unknown = commands.run(&world, &alice, "stopwatch restart test:nope").expect("root matched");
+    assert!(!restart_unknown.response.is_ran(), "{restart_unknown:?}");
+
+    let removed = commands.run(&world, &alice, "stopwatch remove test:timer").expect("root matched");
+    assert!(removed.response.is_ran(), "{removed:?}");
+
+    let query_after_remove = commands.run(&world, &alice, "stopwatch query test:timer").expect("root matched");
+    assert!(!query_after_remove.response.is_ran(), "a removed stopwatch must no longer query: {query_after_remove:?}");
+}
+
+// ---------------------------------------------------------------------------
+// /execute if/unless stopwatch
+// ---------------------------------------------------------------------------
+
+/// A freshly created stopwatch reads inside `0..1` and outside `5..10` —
+/// timing-sensitive only in the sense that "immediately after creation" must
+/// stay under a second, which every other stopwatch test here also assumes.
+#[test]
+fn execute_if_unless_stopwatch_reads_elapsed_seconds() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = data_world(&state, &players);
+    commands.run(&world, &alice, "stopwatch create test:timer").expect("root matched");
+
+    let in_range = commands
+        .run(&world, &alice, "execute if stopwatch test:timer 0..1 run gamemode creative alice")
+        .expect("root matched");
+    assert!(!in_range.effects.is_empty(), "a fresh stopwatch reads under a second: {in_range:?}");
+
+    let out_of_range = commands
+        .run(&world, &alice, "execute if stopwatch test:timer 5..10 run gamemode creative alice")
+        .expect("root matched");
+    assert!(out_of_range.effects.is_empty(), "a fresh stopwatch must not read 5-10s: {out_of_range:?}");
+
+    // `unless` is the exact complement.
+    let unless_in_range = commands
+        .run(&world, &alice, "execute unless stopwatch test:timer 0..1 run gamemode creative alice")
+        .expect("root matched");
+    assert!(unless_in_range.effects.is_empty(), "{unless_in_range:?}");
+
+    let unless_out_of_range = commands
+        .run(&world, &alice, "execute unless stopwatch test:timer 5..10 run gamemode creative alice")
+        .expect("root matched");
+    assert!(!unless_out_of_range.effects.is_empty(), "{unless_out_of_range:?}");
+}
+
+/// An unknown stopwatch id is a hard refusal, named — vanilla's own
+/// `ERROR_DOES_NOT_EXIST` — not merely a failing test.
+#[test]
+fn execute_if_stopwatch_with_an_unknown_id_refuses_by_name() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = data_world(&state, &players);
+
+    let outcome = commands.run(&world, &alice, "execute if stopwatch test:nope 0..1").expect("root matched");
+    assert!(!outcome.response.is_ran(), "{outcome:?}");
+    assert!(
+        outcome.response.lines()[0].contains("No stopwatch exists"),
+        "the refusal must name the missing stopwatch: {outcome:?}"
+    );
+}
