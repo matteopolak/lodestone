@@ -573,6 +573,25 @@ send an agent at a problem that no longer exists, which has now happened repeate
   producer across the whole tree, not for the consumer in one named file.**
 - **Read the record definition, not a summary of the call site.** Vanilla's
   `DepthStencilState(…, 1.0F, 10.0F)` was transcribed as "constant 1.0, slope 10.0" — backwards.
+- **A field declared on a *base* record is inherited by every variant, and reading it on only the variant
+  you cared about silently drops it everywhere else.** Measured: `"transformation"` is a field of every
+  `ItemModel.Unbaked`, not of `SpecialModelWrapper.Unbaked` alone — `bake(context, transformation)` threads
+  an accumulated matrix down and each node composes `Transformation.compose(parent, this.transformation)`.
+  Our parser read it only on `special` nodes, so `shield.json`'s `scale [1.0, -1.0, -1.0]` — vanilla's
+  `ShieldSpecialRenderer` flip, hoisted out of code into data on the enclosing `minecraft:condition` node —
+  was dropped, and **every shield rendered back-to-front**. **14 of the 91 `special` nodes in the 26.2 jar
+  inherit rather than carry**, so the sample that "worked" was 85%.
+
+  Three things generalise. **The accumulated value is a chain, not an `Option`** — model it as the
+  root-to-node composition, because an `Option` cannot represent a pack that nests two. **A wrong transform
+  is invisible at the draw site and disguises itself as a texture or blending bug**: here the symptoms were
+  "a dyed and a plain shield are bit-identical" and "a loom pattern moves 0 pixels", because the two base
+  textures differ in **exactly 200 texels, all inside the front-face UV rect**, and every mask is **0/264
+  opaque** over the back face. Five pipeline layers were instrumented and all five were genuinely correct —
+  **the defect was an input that never entered the chain**. So when every layer verifies and the output is
+  still wrong, stop instrumenting downstream and go find what was dropped upstream. And **when a parser
+  reads an inherited field, grep the source data for how many instances rely on inheritance** before
+  believing the sample you tested.
 - **A hand-rolled Rust lexer will be wrong about lifetimes** — `&'static str` opened a "char literal"
   flag that never closed, silently disabling comment detection in three scanners.
 - **A grep for a *field name* finds every struct that has one — read what the literal belongs to before
@@ -788,6 +807,26 @@ settling code read the single cell below its *already-moved* position, so a fast
 floor within a tick and land on neither side of that sample, dropping into the void. **Scan every integer cell
 the movement crossed**, not the endpoint. Any per-tick "am I on the ground / in water / inside a block" check
 written against a post-move position has this bug latent in it, and it only shows at high speed.
+
+**When a control lands between the two hypotheses, reframe what it asserts — never fit a threshold to it.**
+Measured on the boat water-mask gate: the raft control was *"a raft must show water changing through its
+hull"*, which is not a property a raft has — it has no cavity. Water paints over **9.2%** of a raft's
+silhouette, against a **masked** boat's 5.8% and an **unmasked** boat's 41.2%, so the raft sits nearer the
+masked boat and **any threshold placed there would have been fitted to the answer**. Restated as the exact
+thing that is true — `"oak_raft"` and `"raft"` must render **byte-identically, 0 px** — it became
+falsifiable, with the boat's own A/B (3,933 px) as the positive control that the comparison can see a mask
+at all. **A control whose number sits between your two hypotheses is measuring the wrong claim**; the fix is
+a different assertion, not a tuned constant.
+
+**And a fixture can hide the exact condition the feature exists for.** The same gate stood the boat *on* the
+water (`feet.y = SURFACE_Y`), so its own opaque hull hid everything the mask would hide — masked and
+unmasked were pixel-identical and the A/B was **0**. The mask is for a **partially submerged** hull. The
+fix was to derive the feet height from the patch plane (bob `0.375` plus half the `0.1875` plate) so the
+surface meets the patch, **derived and asserted at runtime rather than tuned until pixels moved** — and
+rebuilding the fixture is what surfaced a real production bug (`prepare_entities` submitted the depth-only
+patch **before** the hull, depth-rejecting the hull's own below-waterline planks; vanilla's
+`AbstractBoatRenderer.submit` calls `submitModel` *then* `submitTypeAdditions`). **Ask what state the
+feature is for, and check the fixture is actually in it.**
 
 **Assertions of an absence need a control proving the detector works.** "No corrective teleport", "no
 trailing bytes", "zero unresolved" are only as good as the evidence the mechanism *would* have fired.
