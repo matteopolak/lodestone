@@ -82,7 +82,26 @@ not. Wiring it needs `PlayerRegistry` to become world-scoped.
 **Permission levels are stored and fully read.** `permission_level`/`command_permission_level`
 answer 0–4 off the op entry, and every built-in command root is gated at its vanilla level through
 `crate::commands::registrar::Registrar::require_level`, resolved by `crate::commands::level_filter`
-— see `crate::commands`'s own module doc ("Permissions are real now").
+— see `crate::commands`'s own module doc ("Permissions are real now"). The same
+`commands.permission_level` gates six dedicated serverbound packets vanilla uses instead of a
+`/`-command for the same administrative actions — `DifficultyChanged`, `DifficultyLockChanged`,
+`GameRuleChanged`, `SetCommandBlock`, `ChangeGameMode` and `REQUEST_GAMERULE_VALUES`'s `action == 2`
+arm (`server.rs`'s `COMMANDS_GAMEMASTER_LEVEL`).
+
+**The refusal direction of those six gates needed its own harness to become testable at all.**
+Every pre-existing entry point that takes a real `AccessHandle` — `serve_connection_with_access`
+included — builds its `WorldStateHandle`/`BlockEntityHandle` privately, so a test could drive a
+refused request but never observe *what stayed unchanged*, only that the connection did not error.
+`serve_connection_with_access_and_state` (added alongside
+`crates/protocol/v770/tests/gamemaster_packet_permission_gate.rs`) takes both as caller-supplied
+handles instead, and an `AccessLists` naming an owner other than the connecting player — not
+`AccessLists::default()`, which is *unconfigured* and therefore grants every caller
+`MAX_PERMISSION_LEVEL` via the singleplayer-owner fallback — is what makes a non-owner actually
+resolve to permission level 0. Five of the six packets have a real `ClientAction` producer and are
+driven through a real `lodestone-client`; `REQUEST_GAMERULE_VALUES` has none (it is one ordinal on
+`client_command`'s shared `action` byte with no encoder in `lodestone-model`), so its frame is built
+with `Connection::write_packet`'s own encoder and spliced into the server's read side by a small
+transport wrapper, leaving the real client's own traffic on the same duplex untouched.
 
 **Granting/revoking access has a real command surface, scoped to RCON.** `/op`, `/deop` and
 `/whitelist` (`crate::commands::access_commands`) read and write the *shared* `AccessHandle` —

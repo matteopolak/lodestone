@@ -256,13 +256,19 @@ vanilla command uses, so they carry their own id-and-payload-length assertions.
 `lodestone_command_mc::EntityArg`/`EntitySelector` (`crates/lodestone-command-mc/src/entity.rs`)
 and resolved against the roster by `lodestone_server::commands::source::resolve_players`.
 The v1 filter set is `type`, `name`, `distance`, `limit`, `sort`, `gamemode`,
-`x`/`y`/`z`, `dx`/`dy`/`dz` — ported from `EntitySelectorParser`/`EntitySelector`
-in the 26.2 decompile, each with vanilla's `!` inversion where vanilla has one.
-`scores`, `nbt`, `advancements`, `predicate`, `tag`, `team`, `level` and the two
-`*_rotation` options are refused **by name** rather than silently ignored (see
-that module's own doc for why each needs a subsystem this server does not have).
-None of it is visible on the wire — `minecraft:entity` carries one flags byte
-and no option list — so the deferred set cannot desync tree parity.
+`x`/`y`/`z`, `dx`/`dy`/`dz`, `scores` — ported from
+`EntitySelectorParser`/`EntitySelector` in the 26.2 decompile, each with
+vanilla's `!` inversion where vanilla has one. `scores={obj=range,...}` reuses
+`IntRangeArg`'s own range reader (so the selector map syntax and `/execute if
+score`'s range syntax cannot drift apart) and resolves against the real
+`ScoreboardHandle` via a `&dyn Fn(&str, &str) -> Option<i32>` lookup threaded
+through `resolve_players`; an unknown objective or a holder with no recorded
+score both refuse the match. `nbt`, `advancements`, `predicate`, `tag`, `team`,
+`level` and the two `*_rotation` options are refused **by name** rather than
+silently ignored (see that module's own doc for why each needs a subsystem
+this server does not have). None of it is visible on the wire —
+`minecraft:entity` carries one flags byte and no option list — so the deferred
+set cannot desync tree parity.
 
 **Resolution only ever reaches players.** `CommandWorld` carries
 `&[PlayerCandidate]`, never a general entity list, because entity resolution
@@ -805,14 +811,17 @@ Still open, and each is now additive rather than blocked:
 * **Deferred selector options.** `nbt`, `advancements`, `predicate`,
   `tag`, `team`, `level` and the two `*_rotation` options are refused **by name**
   rather than ignored — a silently widened selector is the worst available
-  failure. (`scores` is no longer in this list in spirit — a scoreboard now
-  exists — but the selector *option* itself is still unbuilt; only
-  `/execute if score` and `/scoreboard` read the store directly today.) Each
-  needs a subsystem that does not fully exist yet (entity NBT, the advancement
-  predicate engine, entity tags, experience levels, per-entity
-  rotation tracking). **None of it is visible on the wire**: `minecraft:entity`
-  carries one flags byte and no option list, so deferring options cannot break
-  tree parity.
+  failure. `scores` is no longer on this list at all: it parses
+  (`entity.rs`'s `read_scores_map`) and resolves against the real
+  `ScoreboardHandle` (`source.rs`'s `matches_predicates`), alongside
+  `/execute if score` and `/scoreboard`, which read the same store directly.
+  `team` is not unlocked by the scoreboard existing — teams are a separate,
+  still-unbuilt subsystem (name→team membership, colour, friendly fire), not a
+  scoreboard feature. Each remaining option needs a subsystem that does not
+  fully exist yet (entity NBT, the advancement predicate engine, entity tags,
+  experience levels, per-entity rotation tracking). **None of it is visible on
+  the wire**: `minecraft:entity` carries one flags byte and no option list, so
+  deferring options cannot break tree parity.
 * **`/gamerule` does not have full subtree parity.** Vanilla registers two
   literals per rule (`keep_inventory` *and* `minecraft:keep_inventory`); we
   register one. Closing it is one extra `literal` call. Separately, our
