@@ -11,16 +11,11 @@
 //! inside [`crate::world_state::WorldStateHandle`] as a sibling field for the
 //! identical reachability reason those two document.
 //!
-//! A [`Stopwatch`] is vanilla's own two-`long` record —
-//! `creation_time`/`accumulated_elapsed`, both epoch milliseconds — and
-//! [`Stopwatch::elapsed_millis`] is the same
-//! `accumulatedElapsedTime + (currentTime - creationTime)`. `restart` resets
-//! both fields (a hard reset, not a pause/resume — vanilla's own
-//! `RestartStopwatch` replaces the whole record with `new
-//! Stopwatch(currentTime)`, whose constructor zeroes `accumulatedElapsedTime`
-//! too), so `accumulated_elapsed` only ever matters after a
-//! save/load round trip: `Stopwatches.unpack` seeds it from the persisted
-//! value and starts a fresh `creationTime` ticking forward from there.
+//! A [`Stopwatch`] is vanilla's own `creation_time` field — see that type's
+//! own doc for why the real record's second field, `accumulated_elapsed`, is
+//! not carried here at all. `restart` replaces the whole record with a fresh
+//! one (a hard reset, not a pause/resume — vanilla's own `RestartStopwatch`
+//! does the identical `new Stopwatch(currentTime)`).
 //!
 //! **The clock is [`crate::chat_session::now_millis`], not
 //! `std::time::SystemTime::now()`** — this crate links into the wasm32
@@ -48,24 +43,33 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// `net.minecraft.world.Stopwatch` — a `(creation_time, accumulated_elapsed)`
-/// pair, both epoch milliseconds. See this module's own doc for why
-/// `accumulated_elapsed` is always `0` on a freshly created or just-restarted
-/// stopwatch.
+/// `net.minecraft.world.Stopwatch`, narrowed to `creation_time` alone.
+///
+/// The real record also carries `accumulated_elapsed` — nonzero only after a
+/// `Stopwatches.unpack` seeds it from a **persisted** value on world load, so
+/// a fresh `creationTime` can keep counting forward from where a previous
+/// session's elapsed time left off. This module builds no persistence (see
+/// the module doc), so that field would carry exactly one value, `0`,
+/// everywhere in this crate — `cargo run -p xtask -- islands` flags exactly
+/// that shape (a field with only-default production assignments) as the
+/// dead-complexity smell it is. Dropped rather than kept as an unused
+/// placeholder; reintroducing it is a two-line change the day
+/// `data/stopwatches.dat`-style persistence lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Stopwatch {
     creation_time: i64,
-    accumulated_elapsed: i64,
 }
 
 impl Stopwatch {
     fn new(now: i64) -> Self {
-        Self { creation_time: now, accumulated_elapsed: 0 }
+        Self { creation_time: now }
     }
 
-    /// `Stopwatch.elapsedMilliseconds` — `accumulated + (now - creation)`.
+    /// `Stopwatch.elapsedMilliseconds`, minus the always-zero
+    /// `accumulated_elapsed` term this module does not carry — see this
+    /// struct's own doc.
     fn elapsed_millis(&self, now: i64) -> i64 {
-        self.accumulated_elapsed + (now - self.creation_time)
+        now - self.creation_time
     }
 
     /// `Stopwatch.elapsedSeconds` — `elapsedMilliseconds / 1000.0`.
