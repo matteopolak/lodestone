@@ -50,17 +50,22 @@
 //!   condition out; a caller ignoring it would recheck a hook forever even
 //!   after nothing nearby ever changes again.
 //! * **What this crate does not have yet, named precisely rather than
-//!   guessed**: (1) a block-**removal** hook — `TripWireBlock
-//!   ::affectNeighborsAfterRemoval` is what makes breaking the string an
-//!   *instant* pulse, and nothing here calls [`on_wire_removed`] because
-//!   nothing in this crate's block-breaking path (owned elsewhere) offers a
-//!   "this block, here, is about to stop existing, and here was its state"
-//!   callback; (2) the sound/game-event pair `emitState` plays on every
+//!   guessed**: the sound/game-event pair `emitState` plays on every
 //!   attach/detach/power transition — a client-visible effect with no state
 //!   write behind it, the same shape `redstone_note_block`'s pulse names as
 //!   an unmodelled gap, and the same `tick.rs::publish_openable_sound`
 //!   precedent is the seam to extend for both at once rather than inventing
 //!   two different ones.
+//!
+//! **The block-removal hook now exists.** `crate::server::destroy_block`
+//! captures a broken block's state before overwriting the cell (the same
+//! `broken` binding every other post-break reaction there already reads) and
+//! passes it to `crate::server::propagate_removal_with_entities` →
+//! `crate::random_tick::react_at_removal`, which calls [`on_wire_removed`]
+//! when the removed block was a tripwire and applies whatever
+//! [`calculate_state`] returns for each hook it finds. Breaking a taut
+//! tripwire string now fires the instant pulse the module doc above already
+//! described as the point of [`on_wire_removed`].
 
 use crate::neighbor_update::Direction;
 use crate::redstone::{base_name, direction_to_str, get_bool_property, tripwire_hook_facing, with_property};
@@ -278,9 +283,10 @@ where
 /// state passed to each found hook — `TripWireBlock
 /// ::affectNeighborsAfterRemoval`'s `state.setValue(POWERED, true)`
 /// (`TripWireBlock.java:110`), the "the string just broke" instantaneous
-/// pulse. **Unwired**: see this module's own doc comment for why nothing in
-/// this crate calls it yet.
-#[allow(dead_code)]
+/// pulse. Called from `crate::random_tick::react_at_removal`, which
+/// `crate::server::destroy_block` reaches through
+/// `crate::server::propagate_removal_with_entities` — the block-removal hook
+/// this module's own doc comment named as missing.
 #[must_use]
 pub fn on_wire_removed<F>(lookup: &F, pos: BlockPos, wire_state_before_removal: &str) -> Vec<(BlockPos, WireSource)>
 where

@@ -39,10 +39,10 @@
 //!     `publish_openable_sound` already established for the one other
 //!     "genuinely server-driven sound" case in this crate (issue #530). That
 //!     precedent is the seam to extend, not a new one to invent.
-//!   * right-click **cycling** ([`cycle_note`]) needs a hook in whatever
-//!     dispatches a plain right-click on a block with no item in hand — this
-//!     crate's `hand_use.rs`, which this module does not own. The function is
-//!     ready; the call site is not.
+//!   * right-click **cycling** ([`cycle_note`]) is now wired into
+//!     `hand_use::hand_use`'s note-block arm, the plain-right-click dispatcher
+//!     this module does not own. The pulse sound `changePitch` also plays is
+//!     still not modelled — same gap as the neighbour-triggered pulse above.
 
 use crate::redstone::{base_name, get_bool_property, get_u32_property, with_property};
 
@@ -239,9 +239,8 @@ const NOTE_COUNT: u32 = 25;
 /// (`NoteBlock.java:126`) — advance the pitch by one semitone, wrapping `24`
 /// back to `0`. `None` when `state` is not a note block.
 ///
-/// `#[allow(dead_code)]`: ready for `hand_use.rs`'s right-click dispatcher,
-/// which this module does not own — see this module's own doc comment.
-#[allow(dead_code)]
+/// Called from `hand_use::hand_use`'s note-block arm, the right-click
+/// dispatcher this module does not own — see this module's own doc comment.
 #[must_use]
 pub fn cycle_note(state: &str) -> Option<String> {
     if base_name(state) != NOTE_BLOCK {
