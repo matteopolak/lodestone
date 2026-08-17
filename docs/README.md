@@ -1398,10 +1398,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Regional Difficulty](./regional-difficulty.md) — Vanilla's `DifficultyInstance`:
   a scalar (`effective_difficulty`, roughly `0.0`–`6.75`) grown from world
   difficulty, elapsed world time, a chunk's inhabited time and the moon phase.
-  `crates/lodestone-server/src/regional_difficulty.rs` is the pure formula;
-  `WorldStateHandle::regional_difficulty_at`
-  (`crates/lodestone-server/src/world_state.rs`) is the one wired call site, feeding
-  `crates/lodestone-server/src/lightning.rs`'s skeleton-horse-trap chance.
+  `crates/lodestone-server/src/regional_difficulty.rs` is the pure formula. There is
+  no single wired call site — `crate::tick::run_tick_loop` resolves a fresh
+  `DifficultyInstance` inline, once per tick, from
+  `WorldState::time()`/`difficulty()`, and feeds its two derived quantities to every
+  real consumer that tick: `crate::lightning`'s skeleton-horse-trap chance
+  (`effective_difficulty()` directly) and
+  `MobSim::set_spawn_difficulty`/`set_spawn_monsters_enabled` (`special_multiplier()`/
+  `is_hard()`, feeding the zombie-family gear roll, door-breaking roll and
+  reinforcement roll below).
 - [Registry data ingest (`registry_data`, dimension types, world clocks)](./registry-data-ingest.md) —
   The client's decode of the Configuration-phase `registry_data` packet, and the two
   registries it turns into typed values: `minecraft:dimension_type` and

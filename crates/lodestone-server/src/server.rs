@@ -13572,6 +13572,47 @@ where
                     }
                 }
 
+                // Issue #232's disclosed remainder, closed: `MobSim
+                // ::take_mining_fatigue_auras` computed a real per-tick elder
+                // guardian pulse but had no drain at all, so the mining-fatigue
+                // debuff — a core part of the guardian temple fight — never
+                // once reached a real player. Same single-consumer/filter-by-
+                // uuid shape as `take_player_hits` just above and for the
+                // identical reason (the queue empties for whichever connection
+                // reads it first). `MiningFatigueAura`'s own doc comment names
+                // both obligations this drains: the effect application and the
+                // `GUARDIAN_ELDER_EFFECT` game event (kind `10`,
+                // `ClientboundGameEventPacket.GUARDIAN_ELDER_EFFECT` — read
+                // from the jar, not guessed).
+                if matches!(game_mode, GameMode::Survival | GameMode::Adventure) {
+                    for aura in mobs.with(|sim| sim.take_mining_fatigue_auras()) {
+                        if aura.target.uuid != player_uuid {
+                            continue;
+                        }
+                        effects.apply(
+                            "minecraft:mining_fatigue",
+                            crate::mobs::ELDER_GUARDIAN_EFFECT_DURATION,
+                            crate::mobs::ELDER_GUARDIAN_EFFECT_AMPLIFIER,
+                        );
+                        apply(
+                            conn,
+                            &mut state,
+                            proto.encode_update_mob_effect(
+                                LOCAL_PLAYER_ENTITY_ID,
+                                "minecraft:mining_fatigue",
+                                crate::mobs::ELDER_GUARDIAN_EFFECT_AMPLIFIER,
+                                crate::mobs::ELDER_GUARDIAN_EFFECT_DURATION,
+                                true,
+                                true,
+                                true,
+                                false,
+                            ),
+                        )
+                        .await?;
+                        apply(conn, &mut state, proto.encode_game_event(10, 1.0)).await?;
+                    }
+                }
+
                 // Burning. The ignition producer and the burn consumer in one place,
                 // because both need the same feet-cell read — vanilla splits them
                 // (`BaseFireBlock.entityInside` ignites, `Entity.baseTick` consumes)
@@ -13854,12 +13895,21 @@ where
                             }
                             destination.set_block(death.origin.x, egg_y + 1, death.origin.z, "minecraft:dragon_egg");
                         }
-                        // `outcome.spawn_gateway` is a real signal with
-                        // nothing to apply it to: `fight::FightState`'s own
-                        // doc comment discloses that no gateway position
-                        // formula or shuffled 20-position pool is ported
-                        // anywhere in this repo. A disclosed gap, not a
-                        // silent one.
+                        // Issue #276/#689's remaining gap, closed: `outcome
+                        // .spawn_gateway`'s position formula and shuffled
+                        // 20-slice pool (`crate::dragon::fight::GatewayPool`)
+                        // are real now — `death.gateway_blocks` is already
+                        // resolved to real block writes by
+                        // `dragon::MobSim::record_dragon_death`, empty only
+                        // when `spawn_gateway` was false or the pool was
+                        // exhausted. **The teleport mechanic itself is still
+                        // not ported** — see `fight::gateway_blocks`'s own
+                        // doc for exactly what that means: a real, visible
+                        // structure appears, but standing in it does
+                        // nothing.
+                        for (pos, state) in &death.gateway_blocks {
+                            destination.set_block(pos.x, pos.y, pos.z, state);
+                        }
                     }
                 }
 

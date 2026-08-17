@@ -77,17 +77,12 @@ pub fn boss_bar_value(dragon_killed: bool, health: f32, max_health: f32) -> Boss
 
 /// Persisted per-world fight state — the fields of `EnderDragonFight` that
 /// survive a save/load round trip (`EnderDragonFight.CODEC`), minus two this
-/// module does not model: `respawn_crystals` (the four crystal ids a live
+/// struct does not carry: `respawn_crystals` (the four crystal ids a live
 /// respawn is tracking — [`try_respawn`]'s return value is the same
-/// information, kept out of `FightState` because the caller, not this
-/// module, is the one that persists a respawn in progress) and `gateways`
-/// (the pool of 20 unused gateway positions `EnderDragonFight.spawnNewGateway`
-/// pops from). **No gateway geometry is ported at all** — `DeathOutcome::spawn_gateway`
-/// only signals *that* one should be placed; the position formula
-/// (`Mth.floor(96.0 * Math.cos(...))`/`sin`) and the shuffled-pool bookkeeping
-/// are not implemented here. This is a real, disclosed gap (not attempted,
-/// not stubbed) rather than a modelled-and-simplified one like the exit
-/// portal or the respawn stages.
+/// information) and `gateways` (now [`GatewayPool`], a real, separate type —
+/// both kept out of `FightState` for the identical reason: the caller, not
+/// this module, is the one that persists them, the same "data, not state
+/// ownership" split this module already draws elsewhere).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FightState {
     /// `EnderDragonFight.needsStateScanning` — `true` for a fresh
@@ -299,6 +294,125 @@ pub fn exit_portal_blocks(origin: BlockPos, active: bool) -> Vec<(BlockPos, &'st
     out.push((BlockPos::new(origin.x, pillar_y, origin.z - 1), "minecraft:wall_torch[facing=north]"));
     out.push((BlockPos::new(origin.x + 1, pillar_y, origin.z), "minecraft:wall_torch[facing=east]"));
     out.push((BlockPos::new(origin.x - 1, pillar_y, origin.z), "minecraft:wall_torch[facing=west]"));
+    out
+}
+
+/// `EnderDragonFight.init`'s gateway pool size — the pie is always cut into
+/// twenty slices, `Range.closedOpen(0, 20)`.
+pub const GATEWAY_COUNT: i32 = 20;
+
+/// The pool of unused gateway pie-slice indices (`EnderDragonFight.gateways`)
+/// — twenty of them, shuffled once and consumed one per dragon kill by
+/// [`GatewayPool::pop`]. Kept out of [`FightState`] for the identical reason
+/// [`try_respawn`]'s `respawn_crystals` is: the caller owns persistence, not
+/// this module — see [`FightState`]'s own doc.
+///
+/// **Not byte-identical to vanilla's own draw order.** `EnderDragonFight
+/// .init` shuffles with `RandomSource.createThreadLocalInstance(seed)`, a
+/// thread-local generator whose exact algorithm is a JVM implementation
+/// detail, not a reproducible formula — the same disclosed gap
+/// `crate::mob_spawn`'s own module doc already states for every RNG stream
+/// in this crate ("nothing here promises byte-identical RNG streams with a
+/// real vanilla server"). [`shuffled`](Self::shuffled) ports `Util.shuffle`'s
+/// **algorithm** (a standard Fisher–Yates walk from the end) against this
+/// crate's own [`crate::mob_spawn::SpawnRng`], which yields a real, uniform,
+/// non-repeating draw of all twenty slices — just not vanilla's own sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayPool(Vec<i32>);
+
+impl GatewayPool {
+    /// `EnderDragonFight.init`'s `if (this.gateways.isEmpty())` branch —
+    /// `Util.shuffle` ported clause for clause (`for (i = size; i > 1; i--) {
+    /// swapTo = random.nextInt(i); swap(i - 1, swapTo); }`), against
+    /// `0..GATEWAY_COUNT`. See this struct's own doc for why the RNG itself
+    /// is not vanilla's.
+    #[must_use]
+    pub fn shuffled(rng: &mut crate::mob_spawn::SpawnRng) -> Self {
+        let mut slots: Vec<i32> = (0..GATEWAY_COUNT).collect();
+        let mut i = slots.len();
+        while i > 1 {
+            let swap_to = rng.next_int(i as i32) as usize;
+            slots.swap(i - 1, swap_to);
+            i -= 1;
+        }
+        Self(slots)
+    }
+
+    /// `EnderDragonFight.spawnNewGateway`'s pop — `this.gateways.remove
+    /// (this.gateways.size() - 1)`, or `None` once every slice has been used
+    /// (vanilla's own `if (!this.gateways.isEmpty())` guard: a dragon killed
+    /// more than twenty times spawns no further gateway).
+    pub fn pop(&mut self) -> Option<i32> {
+        self.0.pop()
+    }
+
+    /// Slices remaining, for a caller that wants to persist this — not done
+    /// by anything in this crate today (see [`GatewayPool`]'s own doc).
+    #[must_use]
+    pub fn remaining(&self) -> &[i32] {
+        &self.0
+    }
+}
+
+/// `EnderDragonFight.spawnNewGateway`'s position formula — `gateway` is the
+/// pie-slice index [`GatewayPool::pop`] returned (`0..GATEWAY_COUNT`).
+/// Vanilla writes this as absolute world coordinates with **no offset by the
+/// fight's own origin** (`new BlockPos(x, 75, z)`, not `origin.offset(x, 75,
+/// z)`) — correct only because the one primary End dragon fight's origin is
+/// always `BlockPos.ZERO`; ported the same way (no origin parameter).
+#[must_use]
+pub fn gateway_position(gateway: i32) -> BlockPos {
+    let angle = 2.0 * (-std::f64::consts::PI + (std::f64::consts::PI / 20.0) * f64::from(gateway));
+    BlockPos::new((96.0 * angle.cos()).floor() as i32, 75, (96.0 * angle.sin()).floor() as i32)
+}
+
+/// `EndGatewayFeature.place`, ported clause for clause
+/// (`.cache/mc/26.2/src/net/minecraft/world/level/levelgen/feature/EndGatewayFeature.java`)
+/// for the `END_GATEWAY_DELAYED` configured feature
+/// (`EndGatewayConfiguration.delayedExitSearch()`: no known exit, `exact =
+/// false`) — the only variant `EnderDragonFight.spawnNewGateway` ever places.
+/// Writes a 3×5×3 box around `pos`: the centre column is
+/// `minecraft:end_gateway` (with **no exit position set** — see this
+/// function's own "What this does not attempt" note), a bedrock frame runs
+/// along the four cardinal faces and caps the top/bottom of the centre
+/// column, and every other cell is air.
+///
+/// # What this does not attempt
+///
+/// **The gateway's own teleport mechanic is not ported at all.** Standing in
+/// a `minecraft:end_gateway` block does nothing in this crate: there is no
+/// `TheEndGatewayBlockEntity`, no lazy exit-portal search (the outer-islands
+/// scan `END_GATEWAY_DELAYED`'s `exact = false` triggers on first use), and
+/// no teleport-on-contact entity tick. This function only places the real,
+/// visible block structure the dragon's death signals — a player can see and
+/// walk up to a gateway after a kill, but walking into it is inert. A real,
+/// disclosed gap, the same shape [`crate::dragon::fight`]'s own module doc
+/// already draws around the obsidian pillars.
+#[must_use]
+pub fn gateway_blocks(pos: BlockPos) -> Vec<(BlockPos, &'static str)> {
+    let mut out = Vec::new();
+    for x in (pos.x - 1)..=(pos.x + 1) {
+        for y in (pos.y - 2)..=(pos.y + 2) {
+            for z in (pos.z - 1)..=(pos.z + 1) {
+                let same_x = x == pos.x;
+                let same_y = y == pos.y;
+                let same_z = z == pos.z;
+                let end = (y - pos.y).abs() == 2;
+                let cell = BlockPos::new(x, y, z);
+                if same_x && same_y && same_z {
+                    out.push((cell, "minecraft:end_gateway"));
+                } else if same_y {
+                    out.push((cell, "minecraft:air"));
+                } else if end && same_x && same_z {
+                    out.push((cell, "minecraft:bedrock"));
+                } else if (same_x || same_z) && !end {
+                    out.push((cell, "minecraft:bedrock"));
+                } else {
+                    out.push((cell, "minecraft:air"));
+                }
+            }
+        }
+    }
     out
 }
 
@@ -665,5 +779,77 @@ mod tests {
         let crystals = [1, 2, 3, 4];
         assert!(is_respawn_crystal(&crystals, 3));
         assert!(!is_respawn_crystal(&crystals, 5));
+    }
+
+    /// Ground truth from an independent Python `math.floor(96 *
+    /// math.cos/sin(2*(-pi + (pi/20)*g)))` evaluation, not from this
+    /// function — three non-round slices, none at a cardinal angle that
+    /// would coincide with a wrong sign convention.
+    #[test]
+    fn gateway_position_matches_hand_computed_values() {
+        assert_eq!(gateway_position(0), BlockPos::new(96, 75, 0));
+        assert_eq!(gateway_position(5), BlockPos::new(-1, 75, 96));
+        assert_eq!(gateway_position(19), BlockPos::new(91, 75, -30));
+    }
+
+    #[test]
+    fn gateway_pool_shuffles_a_real_permutation_of_all_twenty_slices() {
+        let mut rng = crate::mob_spawn::SpawnRng::new(1234);
+        let mut pool = GatewayPool::shuffled(&mut rng);
+        let mut popped = Vec::new();
+        while let Some(g) = pool.pop() {
+            popped.push(g);
+        }
+        popped.sort_unstable();
+        assert_eq!(
+            popped,
+            (0..GATEWAY_COUNT).collect::<Vec<_>>(),
+            "every one of the twenty slices must appear exactly once"
+        );
+        assert_eq!(pool.pop(), None, "a 21st pop must find nothing left");
+    }
+
+    /// The discriminating control against "shuffled just hands back `0..20`
+    /// in order (or reverse order)": with a real RNG stream over the
+    /// [`SpawnRng`](crate::mob_spawn::SpawnRng) seed below, both coincide
+    /// with vanishing probability, and this seed is pinned so the assertion
+    /// is exact rather than statistical.
+    #[test]
+    fn gateway_pool_order_is_not_the_identity_or_its_reverse() {
+        let mut rng = crate::mob_spawn::SpawnRng::new(1234);
+        let mut pool = GatewayPool::shuffled(&mut rng);
+        let mut order = Vec::new();
+        while let Some(g) = pool.pop() {
+            order.push(g);
+        }
+        let identity: Vec<i32> = (0..GATEWAY_COUNT).collect();
+        let reversed: Vec<i32> = (0..GATEWAY_COUNT).rev().collect();
+        assert_ne!(order, identity);
+        assert_ne!(order, reversed);
+    }
+
+    #[test]
+    fn gateway_blocks_places_the_real_3x5x3_structure() {
+        let pos = BlockPos::new(10, 75, -20);
+        let blocks = gateway_blocks(pos);
+        assert_eq!(blocks.len(), 45, "a 3x5x3 box, one write per cell");
+        let at = |p: BlockPos| blocks.iter().find(|(bp, _)| *bp == p).map(|(_, s)| *s);
+
+        assert_eq!(at(pos), Some("minecraft:end_gateway"), "the centre cell carries the gateway itself");
+        assert_eq!(
+            at(BlockPos::new(pos.x, pos.y - 1, pos.z)),
+            Some("minecraft:bedrock"),
+            "the frame column, one below the gateway"
+        );
+        assert_eq!(
+            at(BlockPos::new(pos.x, pos.y + 2, pos.z)),
+            Some("minecraft:bedrock"),
+            "the bedrock cap, two above the gateway"
+        );
+        assert_eq!(
+            at(BlockPos::new(pos.x + 1, pos.y + 2, pos.z + 1)),
+            Some("minecraft:air"),
+            "a true corner of the box carries neither the frame nor the gateway"
+        );
     }
 }

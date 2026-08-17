@@ -151,6 +151,39 @@ behaviour moved.
   size. Not modelled: the "leader zombie" bonus roll that can *also* force
   `canBreakDoors` true alongside health/knockback buffs — a separate mechanic,
   not this bug.
+- **`crate::tick::run_tick_loop` now feeds `MobSim::set_spawn_difficulty`/
+  `set_spawn_monsters_enabled` a real `DifficultyInstance` every tick.** Before
+  this, both the door-breaking roll above and
+  `lodestone_entity::spawn_equipment`'s armour/weapon roll were real,
+  correctly-wired *mechanisms* reading fields nothing outside a test ever set
+  — every spawn saw the `0.0`/`false` defaults, so no mob ever broke down a
+  door or spawned wearing gear on a real world. The fix computes
+  `crate::regional_difficulty::DifficultyInstance` from the world's difficulty,
+  game time and moon phase once per tick (`local_game_time` stays `0` — see
+  that module's own doc for why) and calls the setter before any spawn this
+  tick can happen.
+- **The zombie family also calls for reinforcements when hurt on Hard
+  difficulty** — `Zombie.hurtServer`'s `SPAWN_REINFORCEMENTS_CHANCE` roll.
+  `SimMob::reinforcement_chance` is randomized at spawn
+  (`random.nextDouble() * 0.1`, `Zombie.randomizeReinforcementsChance`) for
+  `zombie`/`husk`/`zombie_villager`/`drowned`/`zombified_piglin`; a landed hit
+  in `MobSim::attack_from_player` rolls against it (gated on Hard difficulty
+  and the `spawn_mobs` game rule, both fed the same way as the door roll) and,
+  on success, queues a [`ReinforcementCall`] rather than searching for a
+  placement itself — the same decide-here/place-there split
+  `pending_lightning_fires` established, since finding a valid position needs
+  the live world this version-free sim does not hold.
+  `crate::tick::run_tick_loop` drains the queue and runs a simplified 50-
+  candidate placement search (solid ground below, open air at foot/head
+  height — standing in for `SpawnPlacements.isSpawnPositionOk`/`noCollision`,
+  with no liquid check, a disclosed reduction matching this crate's other
+  simplified spawn-placement passes) before actually spawning the
+  reinforcement and pointing it at the original attacker. **Not modelled:**
+  the "leader zombie" bonus (the same disclosed gap the door-breaking roll
+  already names) and the caller/callee `SPAWN_REINFORCEMENTS_CHANCE`
+  attribute *modifiers* vanilla uses — this crate folds both into one running
+  `f64` per mob instead, which produces the same taper-off behaviour without
+  a modifier stack.
 
 ## Configuration
 

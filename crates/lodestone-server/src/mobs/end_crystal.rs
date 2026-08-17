@@ -195,6 +195,32 @@ mod tests {
         assert!(sim.take_detonations().is_empty());
     }
 
+    /// The gate the issue asked for: destroy a crystal through the *real*
+    /// production entry point, `MobSim::attack_from_player`, not through
+    /// `destroy_end_crystal` directly. Before the `self.crystals` branch
+    /// existed, `attack_from_player` reached neither `self.attack` (only
+    /// reads `self.mobs`) nor `destroy_end_crystal` for a crystal target id,
+    /// so this call returned `None` and the crystal was still listed in
+    /// `end_crystals()` afterward — the exact island the isolated
+    /// `destroy_end_crystal` unit tests above could not see.
+    #[test]
+    fn a_crystal_is_destroyed_through_attack_from_player() {
+        let mut sim = sim();
+        let id = sim.spawn_end_crystal(Vec3::new(2.0, 80.0, 2.0));
+        let outcome = sim.attack_from_player(
+            id,
+            None,
+            Vec3::new(2.0, 80.0, 3.0),
+            6.0,
+            lodestone_entity::DamageFlags::default(),
+            0.0,
+        );
+        assert!(outcome.is_some_and(|o| o.killed), "the crystal hit must report killed");
+        assert_eq!(sim.end_crystal_count(), 0, "the crystal must actually be gone");
+        assert!(sim.end_crystals().is_empty());
+        assert_eq!(sim.take_detonations().len(), 1, "destroying it still queues its blast");
+    }
+
     #[test]
     fn end_crystals_lists_every_live_one() {
         let mut sim = sim();
