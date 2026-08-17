@@ -5685,6 +5685,33 @@ fn game_mode_directives<P: ServerProtocol>(proto: &P, mode: GameMode) -> [Server
     ]
 }
 
+/// Whether a player standing with feet at `(px, py, pz)` overlaps the swept
+/// region of a `moving_piston` cell travelling between `source` and `dest`
+/// (issue #694, item 4). The same box `crate::mobs::piston_shove::mob_aabb`
+/// gives a mob (`0.6` wide, `1.8` tall — vanilla's own standing player
+/// hitbox), against the same union-of-two-unit-cells region
+/// `crate::mobs::piston_shove::swept_cell_aabb` builds for a mob; there is no
+/// shared type between this crate's per-connection player state and its
+/// `MobSim` world to call the mob version directly, so this is that same
+/// arithmetic restated over plain floats rather than a second `Aabb` type
+/// dependency.
+fn player_overlaps_piston_sweep(px: f64, py: f64, pz: f64, source: BlockPos, dest: BlockPos) -> bool {
+    const HALF_WIDTH: f64 = 0.3;
+    const HEIGHT: f64 = 1.8;
+    let min_x = f64::from(source.x.min(dest.x));
+    let max_x = f64::from(source.x.max(dest.x)) + 1.0;
+    let min_y = f64::from(source.y.min(dest.y));
+    let max_y = f64::from(source.y.max(dest.y)) + 1.0;
+    let min_z = f64::from(source.z.min(dest.z));
+    let max_z = f64::from(source.z.max(dest.z)) + 1.0;
+    (px - HALF_WIDTH) < max_x
+        && (px + HALF_WIDTH) > min_x
+        && py < max_y
+        && (py + HEIGHT) > min_y
+        && (pz - HALF_WIDTH) < max_z
+        && (pz + HALF_WIDTH) > min_z
+}
+
 /// Applies one command [`Effect`](crate::Effect) to **this** connection.
 ///
 /// The counterpart to `PlayerRegistry::push_effect`: an effect aimed at the
@@ -7743,10 +7770,9 @@ where
 
 /// Per-connection difficulty + game-rule session state (issue #268).
 ///
-/// This crate has no permission/operator model and no `GameRules` registry —
-/// see [`apply_difficulty_change`]/[`apply_game_rule_changed`]'s own doc
-/// comments — so this is deliberately the smallest state that lets the round
-/// trip (a `ServerBound::DifficultyChanged`/`DifficultyLockChanged`/
+/// This crate has no `GameRules` registry — see [`apply_game_rule_changed`]'s
+/// own doc comment — so this is deliberately the smallest state that lets the
+/// round trip (a `ServerBound::DifficultyChanged`/`DifficultyLockChanged`/
 /// `GameRuleChanged` request in, a confirmation back out) be real and
 /// observable without inventing a full world-rules model. Per-connection
 /// rather than shared across connections, matching `player_pos`/`vitals`/
@@ -7757,15 +7783,21 @@ where
 /// `serve_play`**. That is one store per accepted socket, so two LAN players each
 /// held a private, divergent view, and nothing anywhere read either. It is now
 /// [`crate::world_state::WorldStateHandle`], shared with the tick loop.
+///
+/// (This crate did have no permission/operator model at all when the
+/// paragraph above was first written — that was issue #268's own finding.
+/// `crate::access` closed that gap; the permission check itself lives at each
+/// `dispatch_play_packet` call site, see `COMMANDS_GAMEMASTER_LEVEL`'s own
+/// doc, not in this state struct.)
 /// Applies a difficulty-change request (`ServerBound::DifficultyChanged`),
 /// mirroring `ServerGamePacketListenerImpl::handleChangeDifficulty`
-/// (`.cache/mc/26.2/src/net/minecraft/server/network/ServerGamePacketListenerImpl.java:2088-2099`)
-/// minus its permission check: vanilla gates this on
-/// `Permissions.COMMANDS_GAMEMASTER` **or** `isSingleplayerOwner()`, and
-/// every connection this crate ever serves *is* the singleplayer owner (no
-/// accounts/op model exists — the same simplification `docs/singleplayer.md`
-/// already documents elsewhere for this integrated server), so the check
-/// always passes here. Confirms back to the *same* connection via
+/// (`.cache/mc/26.2/src/net/minecraft/server/network/ServerGamePacketListenerImpl.java:2088-2099`).
+/// Vanilla gates this on `Permissions.COMMANDS_GAMEMASTER` **or**
+/// `isSingleplayerOwner()` — the caller in `dispatch_play_packet` now performs
+/// that same check (`commands.permission_level`, which already resolves an
+/// unconfigured/no-ops world to the singleplayer-owner shape) before this
+/// function ever runs, so a refused request reaches here having changed
+/// nothing. Confirms back to the *same* connection via
 /// [`ServerProtocol::encode_change_difficulty`]; vanilla instead broadcasts
 /// to every player (`MinecraftServer::setDifficulty` → `PlayerList`), which
 /// needs cross-connection state this crate does not share — see
@@ -7787,15 +7819,18 @@ where
 
 /// Applies a game-rule change request (`ServerBound::GameRuleChanged`),
 /// mirroring `ServerGamePacketListenerImpl::handleSetGameRule`
-/// (`.cache/mc/26.2/src/net/minecraft/server/network/ServerGamePacketListenerImpl.java:800-816`)
-/// minus its permission check (see [`apply_difficulty_change`]'s doc comment
-/// for why) and minus rule-name/value validation: vanilla looks each key up
-/// in `BuiltInRegistries.GAME_RULE` and parses `value` through that rule's
-/// own type (`GameRule<T>::deserialize`), discarding an unknown key or an
-/// unparseable value with a warning log. This crate has no `GameRules`
-/// registry (see [`WorldAdminState`]'s own doc comment) — every entry is
-/// stored verbatim as `(String, String)`, unvalidated. Confirms back to the
-/// same connection with exactly the entries that were just set; vanilla's
+/// (`.cache/mc/26.2/src/net/minecraft/server/network/ServerGamePacketListenerImpl.java:800-816`).
+/// The permission check (see [`apply_difficulty_change`]'s own doc comment)
+/// happens before this function is ever called — a refused request arrives
+/// with an empty `entries`, so the reply below is naturally an empty
+/// confirmation rather than this function needing its own refusal branch.
+/// Rule-name/value validation, by contrast, **is** real: vanilla looks each
+/// key up in `BuiltInRegistries.GAME_RULE` and parses `value` through that
+/// rule's own type (`GameRule<T>::deserialize`), and
+/// [`crate::world_state::WorldStateHandle::set_rule`] does the same against
+/// this crate's own rule set, rejecting an unknown key or an unparseable
+/// value rather than storing it verbatim. Confirms back to the same
+/// connection with exactly the entries that were actually set; vanilla's
 /// `broadcastGameRuleChangeToOperators` instead sends one packet per changed
 /// rule to every operator.
 async fn apply_game_rule_changed<T, P>(
@@ -7873,16 +7908,18 @@ where
 ///
 /// # `action == 2`, `REQUEST_GAMERULE_VALUES`
 ///
-/// Mirrors `sendGameRuleValues` minus its permission check (see
-/// [`apply_difficulty_change`]'s own doc comment for why every connection
-/// here is treated as the permission-holding singleplayer owner): replies
-/// with every rule this connection's own [`WorldAdminState`] has ever had
-/// set, via the same [`ServerProtocol::encode_game_rule_values`] confirmation
-/// [`apply_game_rule_changed`] already uses. Vanilla instead enumerates the
-/// full `GameRules` registry, including every rule at its default — this
-/// crate has no such registry (see [`WorldAdminState`]'s own doc comment), so
-/// a rule that was never explicitly set is simply absent from the reply
-/// rather than reported at a registry default.
+/// Mirrors `sendGameRuleValues`, including its permission check (see
+/// [`apply_difficulty_change`]'s own doc comment for the same
+/// `commands.permission_level` reasoning) — a refused request gets nothing
+/// back, matching vanilla's own silent `else` branch here rather than the
+/// "always echo something" shape the mutating packets above take. On success,
+/// replies with every rule this connection's own [`WorldAdminState`] has ever
+/// had set, via the same [`ServerProtocol::encode_game_rule_values`]
+/// confirmation [`apply_game_rule_changed`] already uses. Vanilla instead
+/// enumerates the full `GameRules` registry, including every rule at its
+/// default — this crate has no such registry (see [`WorldAdminState`]'s own
+/// doc comment), so a rule that was never explicitly set is simply absent
+/// from the reply rather than reported at a registry default.
 #[allow(clippy::too_many_arguments)]
 async fn apply_client_command<T, P, S>(
     conn: &mut Connection<T>,
@@ -7914,6 +7951,11 @@ async fn apply_client_command<T, P, S>(
     advancements: &mut AdvancementManager,
     player_uuid: uuid::Uuid,
     action: i32,
+    // `sendGameRuleValues`'s own gate (`action == 2`, `REQUEST_GAMERULE_VALUES`
+    // — see this function's own doc comment). `dispatch_play_packet`'s already-
+    // resolved `commands.permission_level`, the same value `COMMANDS_GAMEMASTER_LEVEL`
+    // gates the mutating `GameRuleChanged`/`DifficultyChanged` packets with.
+    permission_level: u8,
     // Whether `source` above is a portal-travelled dimension rather than the
     // connection's home one — `matches!(source_ref, SourceRef::Dimension(_))`,
     // computed by the caller because only it holds the `SourceRef` this `&S` was
@@ -7988,12 +8030,19 @@ where
             apply(conn, state, proto.encode_award_stats(&snapshot)).await?;
         }
         2 => {
-            apply(
-                conn,
-                state,
-                proto.encode_game_rule_values(&world.rule_entries()),
-            )
-            .await?;
+            // Vanilla logs a warning and sends nothing on refusal
+            // (`sendGameRuleValues`'s own `else` is the only branch that
+            // replies) — matched here rather than the "always echo something"
+            // shape the mutating packets above take, since there is no prior
+            // client-guessed value to correct.
+            if permission_level >= COMMANDS_GAMEMASTER_LEVEL {
+                apply(
+                    conn,
+                    state,
+                    proto.encode_game_rule_values(&world.rule_entries()),
+                )
+                .await?;
+            }
         }
         _ => {}
     }
@@ -10434,6 +10483,17 @@ where
     Ok(())
 }
 
+/// `PermissionLevel.GAMEMASTERS` (`.cache/mc/26.2/src/net/minecraft/server/
+/// permissions/PermissionLevel.java`) — the level `Permissions
+/// .COMMANDS_GAMEMASTER` requires, and the gate `handleChangeDifficulty`/
+/// `handleLockDifficulty`/`handleSetGameRule`/`handleSetCommandBlock`/
+/// `handleChangeGameMode` all share. The built-in `/gamemode`/`/gamerule`/
+/// `/difficulty` commands already carry the identical `2` as their own
+/// per-command constant (`crate::commands::gamemode::GAMEMODE_LEVEL` and
+/// siblings); this one is for the handful of dedicated serverbound packets
+/// vanilla uses for the same administrative actions instead of a `/`-command.
+const COMMANDS_GAMEMASTER_LEVEL: u8 = 2;
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_play_packet<T, P, S>(
     conn: &mut Connection<T>,
@@ -10979,18 +11039,50 @@ where
             .await?;
         }
         ServerBound::DifficultyChanged { difficulty } => {
-            // A **locked** world refuses the change, which vanilla enforces in
-            // `MinecraftServer.setDifficulty`. The confirmation below is sent either
-            // way and carries the value that is actually stored, so a refused
-            // request corrects the client's own UI rather than leaving it wrong.
-            world.set_difficulty(difficulty);
+            // `ServerGamePacketListenerImpl.handleChangeDifficulty`'s own gate:
+            // `Permissions.COMMANDS_GAMEMASTER` (level 2) or the singleplayer
+            // owner. `commands.permission_level` already *is* that check —
+            // `AccessLists::command_permission_level` resolves to the real op
+            // level, or to `MAX_PERMISSION_LEVEL` for a world with no operator
+            // model configured at all (the singleplayer-owner shape), which is
+            // vanilla's `isSingleplayerOwner()` arm restated at the one place
+            // this crate already computes it, not a second check. This was a
+            // disclosed, deliberate omission before `crate::access` existed
+            // (issue #268); it is real now the model does.
+            //
+            // A **locked** world separately refuses the change, which vanilla
+            // enforces in `MinecraftServer.setDifficulty`. The confirmation
+            // below is sent either way and carries the value that is actually
+            // stored, so a refused request (either reason) corrects the
+            // client's own UI rather than leaving it wrong — vanilla itself
+            // sends nothing on a permission refusal, but this crate already
+            // made that choice for the lock case and there is no reason for
+            // the two refusal reasons to behave differently here.
+            if commands.permission_level >= COMMANDS_GAMEMASTER_LEVEL {
+                world.set_difficulty(difficulty);
+            }
             apply_difficulty_change(conn, proto, state, world).await?;
         }
         ServerBound::DifficultyLockChanged { locked } => {
-            world.set_difficulty_locked(locked);
+            // Same gate as `DifficultyChanged` above — vanilla's
+            // `handleLockDifficulty` checks the identical permission.
+            if commands.permission_level >= COMMANDS_GAMEMASTER_LEVEL {
+                world.set_difficulty_locked(locked);
+            }
             apply_difficulty_change(conn, proto, state, world).await?;
         }
         ServerBound::GameRuleChanged { entries } => {
+            // `ServerGamePacketListenerImpl.handleSetGameRule`'s own gate —
+            // see `DifficultyChanged`'s own comment above for why
+            // `commands.permission_level` is the right check to reuse. A
+            // refused request sets nothing, so `apply_game_rule_changed`'s own
+            // "confirm with exactly what was set" reply is naturally empty
+            // rather than needing a separate no-op branch.
+            let entries = if commands.permission_level >= COMMANDS_GAMEMASTER_LEVEL {
+                entries
+            } else {
+                Vec::new()
+            };
             apply_game_rule_changed(conn, proto, state, world, entries).await?;
         }
         ServerBound::CarriedItemChanged { slot } => {
@@ -11330,8 +11422,17 @@ where
         // scheduling here (via `on_automatic_changed`) is faithful to vanilla's
         // own `CommandBlockEntity.setAutomatic` rather than an addition.
         ServerBound::SetCommandBlock { pos, command, mode, track_output, conditional, automatic } => {
-            let is_command_block = block_entities
-                .with(|reg| matches!(reg.get(pos), Some(BlockEntity::CommandBlock(_))));
+            // `Player.canUseGameMasterBlocks`: creative mode (`abilities
+            // .instabuild`, which `Abilities::for_mode` sets only for
+            // `GameMode::Creative`) **and** `Permissions.COMMANDS_GAMEMASTER`
+            // (level 2) — both, not either. This was a disclosed omission
+            // before `crate::access` existed; real now the model does, and
+            // `commands.permission_level` is the same already-resolved check
+            // `DifficultyChanged`'s own comment above explains.
+            let can_use_game_master_blocks =
+                *game_mode == GameMode::Creative && commands.permission_level >= COMMANDS_GAMEMASTER_LEVEL;
+            let is_command_block = can_use_game_master_blocks
+                && block_entities.with(|reg| matches!(reg.get(pos), Some(BlockEntity::CommandBlock(_))));
             if is_command_block {
                 let current_state = source.get().block_state(pos.x, pos.y, pos.z);
                 let facing = crate::command_block::facing(&current_state);
@@ -12039,6 +12140,7 @@ where
                 advancements,
                 player_uuid,
                 action,
+                commands.permission_level,
                 away_from_home,
                 dimension_reset,
             )
@@ -12286,13 +12388,19 @@ where
         }
         // The F4 switcher. A *request*, not an instruction: the two directives
         // below echo the mode this server actually applied, so a client that
-        // guessed is corrected. Nothing gates it today because this crate has
-        // no permission model at all (see the `ChatCommand` arm) — the same
-        // posture `/gamemode` above takes, and the honest one for a
-        // singleplayer/LAN host.
+        // guessed wrong (including one that guessed a refusal wrong) is
+        // corrected either way. `GameModeCommand.PERMISSION_CHECK`
+        // (`Permissions.COMMANDS_GAMEMASTER`, level 2) is
+        // `handleChangeGameMode`'s own gate — real now `crate::access` exists,
+        // see `DifficultyChanged`'s own comment above; this crate's `/gamemode`
+        // built-in already carries the identical `GAMEMODE_LEVEL` check on the
+        // command path, so this brings the packet path to parity with it
+        // rather than introducing a new posture.
         ServerBound::ChangeGameMode { mode } => {
-            *game_mode = mode;
-            for directive in game_mode_directives(proto, mode) {
+            if commands.permission_level >= COMMANDS_GAMEMASTER_LEVEL {
+                *game_mode = mode;
+            }
+            for directive in game_mode_directives(proto, *game_mode) {
                 apply(conn, state, directive).await?;
             }
         }
@@ -14667,6 +14775,29 @@ where
                 // without a click. Single-consumer for the reason the drain above
                 // is; see `BlockTickFeed`'s own doc comment.
                 for effect in block_ticks.drain_effects_for(player_uuid) {
+                    // Issue #694, item 4. `PistonPlayerPush` is the one
+                    // variant `encode_world_effect` never turns into a
+                    // packet (see that variant's own doc) — it is this
+                    // connection's own signal to maybe correct its own
+                    // last-known position, so it is intercepted here rather
+                    // than handed to the generic encoder below.
+                    if let crate::effects::WorldEffect::PistonPlayerPush { source, dest, push_delta } = effect {
+                        if let Some((px, py, pz)) = player_pos
+                            && player_overlaps_piston_sweep(px, py, pz, source, dest)
+                        {
+                            let (nx, ny, nz) =
+                                (px + push_delta.x, py + push_delta.y, pz + push_delta.z);
+                            let current = player_rot.unwrap_or(Rotation { yaw: 0.0, pitch: 0.0 });
+                            player_pos = Some((nx, ny, nz));
+                            apply(
+                                conn,
+                                &mut state,
+                                proto.encode_teleport(nx, ny, nz, current.yaw, current.pitch),
+                            )
+                            .await?;
+                        }
+                        continue;
+                    }
                     apply(conn, &mut state, proto.encode_world_effect(&effect)).await?;
                 }
                 // Issue #425: same shape again, one timer tick later —
@@ -19127,6 +19258,7 @@ mod tests {
             &mut advancements,
             Uuid::nil(),
             0, // PERFORM_RESPAWN
+            4, // irrelevant here: only the `REQUEST_GAMERULE_VALUES` arm reads it
             away_from_home,
             &mut dimension_reset,
         )
@@ -19461,5 +19593,29 @@ mod tests {
             finish_drinking_milk(&mut inv, &mut effects, &started, GameMode::Survival).expect("milk must finish");
         assert!(remainder.is_none(), "the bucket is still consumed");
         assert!(cleared.is_empty());
+    }
+
+    /// Issue #694, item 4: `player_overlaps_piston_sweep` is the overlap test
+    /// behind a connection's own `PistonPlayerPush` self-correction. A player
+    /// standing in either the source or destination cell (matching
+    /// `crate::mobs::piston_shove`'s own two positive cases for a mob) must
+    /// overlap; one standing a full block clear of both must not.
+    #[test]
+    fn player_overlaps_piston_sweep_matches_source_and_dest_but_not_clear_ground() {
+        let source = BlockPos::new(4, 0, 0);
+        let dest = BlockPos::new(5, 0, 0);
+
+        assert!(
+            player_overlaps_piston_sweep(5.5, 0.0, 0.5, source, dest),
+            "a player standing in the destination cell must overlap"
+        );
+        assert!(
+            player_overlaps_piston_sweep(4.5, 0.0, 0.5, source, dest),
+            "a player standing in the source cell must overlap too"
+        );
+        assert!(
+            !player_overlaps_piston_sweep(10.5, 0.0, 0.5, source, dest),
+            "control: a player well clear of both cells must not overlap"
+        );
     }
 }
