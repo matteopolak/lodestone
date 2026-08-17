@@ -203,6 +203,10 @@ pub struct NavigatingMob<'w> {
     /// [`job_site`](Self::job_site)'s sibling for
     /// [`BrainMob::nearest_visible_zombified`]/`MemoryModuleType::NEAREST_VISIBLE_ZOMBIFIED`.
     nearest_visible_zombified: Option<Vec3>,
+    /// Host-injected nearest eligible tongue-attack prey position —
+    /// [`job_site`](Self::job_site)'s sibling for
+    /// [`BrainMob::nearest_attackable_food`]/`MemoryModuleType::NEAREST_ATTACKABLE_FOOD`.
+    nearest_attackable_food: Option<Vec3>,
     /// The block the current path was computed toward, so `move_to` reuses the
     /// active path instead of recomputing every tick (vanilla `moveTo` reuse).
     active_target_block: Option<BlockPos>,
@@ -599,6 +603,7 @@ impl<'w> NavigatingMob<'w> {
             home: None,
             meeting_point: None,
             nearest_visible_zombified: None,
+            nearest_attackable_food: None,
             active_target_block: None,
             last_look: None,
             jumping: false,
@@ -1057,6 +1062,14 @@ impl<'w> NavigatingMob<'w> {
     /// [`BrainMob::nearest_visible_zombified`].
     pub fn set_nearest_visible_zombified(&mut self, target: Option<Vec3>) -> &mut Self {
         self.nearest_visible_zombified = target;
+        self
+    }
+
+    /// Host injection point: the nearest eligible tongue-attack prey's
+    /// position, or `None` — [`set_job_site`](Self::set_job_site)'s sibling
+    /// for [`BrainMob::nearest_attackable_food`].
+    pub fn set_nearest_attackable_food(&mut self, target: Option<Vec3>) -> &mut Self {
+        self.nearest_attackable_food = target;
         self
     }
 
@@ -2174,6 +2187,13 @@ impl BrainMob for NavigatingMob<'_> {
     /// field doc.
     fn nearest_visible_zombified(&self) -> Option<Vec3> {
         self.nearest_visible_zombified
+    }
+
+    /// The host-injected nearest eligible tongue-attack prey position — see
+    /// [`nearest_attackable_food`](Self::nearest_attackable_food)'s own
+    /// field doc.
+    fn nearest_attackable_food(&self) -> Option<Vec3> {
+        self.nearest_attackable_food
     }
 
     /// Delegates to the same `attacks` queue [`MobController::attack`] writes

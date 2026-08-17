@@ -203,6 +203,19 @@ pub trait BrainMob {
         None
     }
 
+    /// The nearest eligible tongue-attack prey's position — feeds
+    /// [`MemoryModuleType::NEAREST_ATTACKABLE_FOOD`](super::MemoryModuleType::NEAREST_ATTACKABLE_FOOD)
+    /// through [`super::sensor::NearestAttackableFoodSensor`], the same
+    /// host-computed-candidate shape
+    /// [`nearest_visible_zombified`](Self::nearest_visible_zombified)
+    /// already uses: this crate's `BrainMob` seam has no species tag a
+    /// sensor could filter on itself (see
+    /// [`super::sensor::NearestAttackableFoodSensor`]'s own doc). Defaults
+    /// to `None`.
+    fn nearest_attackable_food(&self) -> Option<Vec3> {
+        None
+    }
+
     /// Records a melee hit landing on whatever occupies `target` this tick —
     /// vanilla's `LivingEntity.hurtServer`/`knockback` calls a ram or an
     /// attack-target behaviour makes directly on the target entity. This
