@@ -30,11 +30,17 @@
 //!
 //! Same scope note `bell_block_entity_pixels.rs`/`decorated_pot_block_entity_pixels.rs`
 //! carry: this gate calls `RenderState::set_conduit_source` directly with a
-//! hand-built closure, proving the render pass is correct and reachable —
-//! not that a real client's block-store scan
-//! (`crate::block_entities::conduit_spawns`, the shell-side adapter this is
-//! built to be called from) is wired into it yet. See `docs/block-entity-renderers.md`'s
-//! conduit section for the wiring status.
+//! hand-built closure, proving the render pass is correct and reachable. **The
+//! world→spawn adapter (`crate::block_entities::conduit_positions`/
+//! `conduit_spawns`, `ConduitTicks`) and its `Sim::conduit_source`/`app.rs`
+//! live-per-frame install are landed** (`fff5ed7e`) — see
+//! `sim::tests::conduit_source_tracks_connection_state_and_is_safe_before_login`
+//! and `stepping_ticks_conduits_without_panicking_before_login`, and
+//! `docs/block-entity-renderers.md`'s conduit section. What remains unproven
+//! **by any gate in this crate, for chest, skull, sign, bell or conduit
+//! alike** is a real client drawing one through an actual login handshake and
+//! a live `ClientHandle` — pre-existing test-infrastructure scope, not
+//! specific to conduit.
 //!
 //! ```text
 //! cargo test -p lodestone-shell --test conduit_block_entity_pixels -- --ignored --nocapture
