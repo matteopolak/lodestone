@@ -186,8 +186,8 @@ use std::sync::Arc;
 use lodestone_command::{DoubleArgument, NodeId};
 use lodestone_command_mc::{
     AnchorInput, Axes, BiomeArg, BlockArg, BlockPosArg, DimensionArg, EntityAnchorArg, EntityArg,
-    EntitySelector, IntRangeArg, NbtPathArg, ObjectiveArg, RotationArg, ScoreHolderArg, SnbtValue,
-    StorageIdArg, SwizzleArg, Vec3Arg,
+    EntitySelector, EntityTypeArg, IntRangeArg, NbtPathArg, ObjectiveArg, RotationArg,
+    ScoreHolderArg, SnbtValue, StorageIdArg, SwizzleArg, Vec3Arg,
 };
 use lodestone_model::Rotation;
 
@@ -223,6 +223,7 @@ pub(super) fn register(registrar: &mut Registrar) {
     register_align(registrar, execute);
     register_anchored(registrar, execute);
     register_in(registrar, execute);
+    register_summon(registrar, execute);
 }
 
 /// `literal("run").redirect(dispatcher.getRoot())` — no modifier, so the
@@ -590,6 +591,38 @@ fn register_in(registrar: &mut Registrar, execute: NodeId) {
         Ok(vec![next])
     });
     registrar.redirect(dim_node, execute);
+}
+
+// ---- summon --------------------------------------------------------------
+
+/// `Commands.literal("summon").then(argument("entity", …).redirect(execute,
+/// spawnEntityAndRedirect()))` — a plain rewrite (`false`, not a fork:
+/// vanilla registers this with `.redirect`, not `.fork`, so exactly one
+/// source goes in and exactly one comes out), unlike `as`/`at`. Reuses
+/// [`super::summon::spawn_entity`] verbatim rather than re-deriving the
+/// difficulty/peaceful/no-`mobs` checks — `SummonCommand.createEntity` is the
+/// one function both vanilla's `/summon` and this modifier call.
+///
+/// `/summon minecraft:cow` is unaffected: this is a *new* node under
+/// `execute`, not a change to the root `summon` command
+/// ([`super::summon::register`]) at all.
+fn register_summon(registrar: &mut Registrar, execute: NodeId) {
+    let summon_lit = registrar.literal(execute, "summon");
+    let (entity_node, entity_key) = registrar.arg(summon_lit, "entity", EntityTypeArg);
+    registrar.modifier(entity_node, false, move |ctx, sources, _parsed| {
+        let base = one(sources);
+        let entity = ctx.get(entity_key).clone();
+        // `spawnEntityAndRedirect`'s own `source.getPosition()` — the
+        // *current* source's position, honouring whatever `positioned`/`at`
+        // already rewrote earlier in this same chain.
+        let pos = base.position;
+        let new_entity = super::summon::spawn_entity(ctx, &entity, pos)?;
+        let mut next = base;
+        next.name = new_entity.username.clone();
+        next.entity = Some(new_entity);
+        Ok(vec![next])
+    });
+    registrar.redirect(entity_node, execute);
 }
 
 // ---- if / unless -------------------------------------------------------------

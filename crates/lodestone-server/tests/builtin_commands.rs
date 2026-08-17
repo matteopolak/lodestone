@@ -2950,3 +2950,84 @@ fn execute_store_target_is_left_untouched_when_a_forked_condition_matches_nothin
         "a fork matching nothing must leave the store target untouched, not zero it: {outcome:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// /execute summon
+// ---------------------------------------------------------------------------
+
+/// `execute summon <entity>` spawns into the **same** shared `MobHandle`
+/// `/summon` itself does (this modifier calls
+/// `crate::commands::summon::spawn_entity`, not a second code path), at the
+/// *current* source position — honouring an earlier `positioned` in the same
+/// chain, matching `spawnEntityAndRedirect`'s own `source.getPosition()`
+/// read — and the chain continues afterward (`gamemode creative alice`
+/// stands in for "downstream `run` still executes", since this crate's `@s`
+/// selector cannot resolve to the newly summoned non-player source — see
+/// this test's own sibling below for that disclosed gap).
+#[test]
+fn execute_summon_spawns_into_the_shared_mob_handle_at_the_chains_current_position() {
+    use lodestone_server::{EntitySource, MobHandle};
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice"); // (0, 64, 0)
+    let players = roster();
+    let mobs = MobHandle::default();
+
+    let world =
+        CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None, blocks: None };
+
+    let outcome = commands
+        .run(&world, &alice, "execute positioned ~11 ~1 ~4 summon minecraft:cow run gamemode creative alice")
+        .expect("root matched");
+    assert!(outcome.response.is_ran(), "the chain must continue past summon: {outcome:?}");
+    assert!(!outcome.effects.is_empty(), "gamemode creative must still have fired: {outcome:?}");
+
+    let snapshots = mobs.snapshots();
+    let [cow] = snapshots.as_slice() else { panic!("expected exactly one spawned entity, got {snapshots:?}") };
+    assert_eq!(cow.entity_type, "minecraft:cow".parse().unwrap());
+    assert_eq!(cow.position, Vec3::new(11.0, 65.0, 4.0), "summon must read the chain's rewritten position");
+}
+
+/// The peaceful-difficulty refusal `crate::commands::summon::spawn_entity`
+/// already enforces for `/summon` applies identically through
+/// `execute summon` — the shared function, not a second, laxer check.
+#[test]
+fn execute_summon_of_a_hostile_mob_on_peaceful_refuses_and_does_not_continue_the_chain() {
+    use lodestone_server::MobHandle;
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    state.set_difficulty(lodestone_model::Difficulty::Peaceful);
+    let alice = source(1, "alice");
+    let players = roster();
+    let mobs = MobHandle::default();
+
+    let world =
+        CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None, blocks: None };
+
+    let outcome =
+        commands.run(&world, &alice, "execute summon minecraft:zombie run gamemode creative alice").expect("root matched");
+    assert!(!outcome.response.is_ran(), "{outcome:?}");
+    assert!(outcome.effects.is_empty(), "the chain must not continue: {outcome:?}");
+}
+
+/// This crate's `@s` selector resolves an entity uuid against the **player**
+/// roster only (`resolve_players`'s own `current_entity` arm) — a disclosed
+/// gap, not a bug this modifier is expected to close: a summoned mob is
+/// never in that roster, so `@s` after `execute summon` cannot resolve to it.
+/// `on <relation>`/arbitrary-mob-as-source is the larger version of this same
+/// gap (see `crate::commands::execute`'s own module doc).
+#[test]
+fn execute_summon_then_at_s_cannot_resolve_the_new_non_player_source() {
+    use lodestone_server::MobHandle;
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let players = roster();
+    let mobs = MobHandle::default();
+
+    let world =
+        CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None, blocks: None };
+
+    let outcome = commands.run(&world, &alice, "execute summon minecraft:cow run gamemode creative @s").expect("root matched");
+    assert!(!outcome.response.is_ran(), "{outcome:?}");
+}
