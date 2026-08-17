@@ -1029,6 +1029,77 @@ const AMBIENT_SOUND_INTERVAL: i32 = 80;
 /// every hit that passes the invulnerability gate.
 const ARMADILLO_DANGER_TICKS: i32 = 80;
 
+/// `CamelAi.RandomSitting(20)`'s own `minimalPoseTimeSec * 20` — the minimum
+/// ticks a camel must hold its current pose before [`camel_random_sitting`]
+/// is even eligible to flip it again, in either direction (vanilla's own
+/// `checkExtraStartConditions` gates the toggle on this alone, regardless of
+/// which way it is about to flip).
+const CAMEL_RANDOM_SITTING_MIN_TICKS: i64 = 400;
+
+/// `Pose.SITTING.id()` — the real jar ordinal, matching the `10` this
+/// codebase's own `pose_from_id` (`crates/protocol/v770/src/packets/metadata.rs`)
+/// already maps to `EntityPose::Sitting`. Reused here for a species other
+/// than the warden, which is the only other current `MetadataField::Pose`
+/// producer.
+const CAMEL_POSE_SITTING: u32 = 10;
+
+/// `Pose.STANDING.id()` — vanilla's own default pose ordinal, `0`.
+const CAMEL_POSE_STANDING: u32 = 0;
+
+/// An independent, deterministic per-tick coin flip approximating
+/// `CamelAi.RandomSitting`'s trigger. Real vanilla re-rolls this choice (one
+/// of four equally-weighted `IDLE` behaviours) only when `WALK_TARGET` is
+/// absent — a brain-internal signal `MobSim` cannot read, since installing a
+/// [`BrainGoal`](lodestone_entity::brain::BrainGoal) into a mob's goal
+/// selector is one-way (see this file's own doc on why the sim has no read
+/// into it). So this is a disclosed simplification, not a transcription: an
+/// independent per-tick draw, salted differently from
+/// [`roll_ambient_sound`]'s hash so the two streams do not correlate for a
+/// camel that is eligible for both in the same tick. `% 2400` is not a
+/// vanilla constant — there is no fixed one to cite, since real frequency
+/// depends on how often the camel's wander finishes — chosen only to keep
+/// the expected wait (~2 minutes once eligible) long enough to read as a
+/// deliberate rest rather than a flicker.
+fn camel_sit_roll(id: u64, tick_count: u64) -> bool {
+    let mix = tick_count
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(id)
+        .wrapping_mul(1_442_695_040_888_963_407)
+        >> 33;
+    mix % 2400 == 0
+}
+
+/// `CamelAi.RandomSitting`'s toggle, called for a live camel not already
+/// forced to stand by [`MobSim::tick`]'s own water check (see that call
+/// site's doc). Flips [`SimMob::camel_sitting`] when eligible and
+/// [`camel_sit_roll`] fires.
+///
+/// Gated on `CamelAi.RandomSitting.checkExtraStartConditions`'s own
+/// conditions this sim can actually see: at least
+/// [`CAMEL_RANDOM_SITTING_MIN_TICKS`] since the last pose change, not
+/// leashed, and not ridden (`m.rider`, the same field
+/// [`MobSim::tick`]'s goal-tick gate already reads for "is something else
+/// driving this mob's movement"). **Disclosed simplification**: vanilla also
+/// checks `body.onGround()` and `!body.isPanicking()`; `on_ground` has no
+/// per-tick reading for a walking land mob in this sim, and `is_panicking`
+/// exists but is deliberately left out here — it already forces a mob's
+/// *movement* into fleeing, so a hurt camel already refuses to path toward a
+/// sit target the way `MoveToTargetSink` would, without this function
+/// needing to duplicate that gate.
+fn camel_random_sitting(m: &mut SimMob<'_>, tick_count: u64) {
+    if m.is_leashed() || m.rider.is_some() {
+        return;
+    }
+    let pose_time = tick_count as i64 - m.camel_pose_tick;
+    if pose_time < CAMEL_RANDOM_SITTING_MIN_TICKS {
+        return;
+    }
+    if camel_sit_roll(m.id as u64, tick_count) {
+        m.camel_sitting = !m.camel_sitting;
+        m.camel_pose_tick = tick_count as i64;
+    }
+}
+
 /// The flat knockback power `LivingEntity.dealDefaultKnockback` applies to
 /// **every** damaging hit, regardless of the attacker's own
 /// `minecraft:attack_knockback` attribute — `LivingEntity.knockback(0.4F, xd,
@@ -1327,6 +1398,18 @@ pub struct SimMob<'w> {
     /// a liquid, leashed, ridden or a rider — none of those gates are
     /// checked here.
     armadillo_danger_ticks: i32,
+    /// `Camel.isCamelSitting()`'s state — real, client-visible
+    /// `Pose.SITTING` (see [`CAMEL_POSE_SITTING`]). Toggled by
+    /// [`camel_random_sitting`]'s own per-tick approximation of
+    /// `CamelAi.RandomSitting`, and forced back to `false` the instant this
+    /// camel enters water (`Camel.tick`'s own
+    /// `if (isCamelSitting() && isInWater()) standUpInstantly()`). `false`
+    /// for every non-camel species, where nothing reads it.
+    camel_sitting: bool,
+    /// The [`MobSim::tick_count`] this camel's sit state last changed —
+    /// gates [`CAMEL_RANDOM_SITTING_MIN_TICKS`], the collapsed stand-in for
+    /// `Camel.getPoseTime()`. `0` for every non-camel species.
+    camel_pose_tick: i64,
     /// The [`MobSim::tick_count`] at which this mob stops counting as
     /// player-killed — vanilla's `LivingEntity.lastHurtByPlayerMemoryTime`,
     /// expressed as an absolute deadline for [`Anger`]'s reason.
@@ -1716,6 +1799,13 @@ impl<'w> SimMob<'w> {
     #[must_use]
     pub fn armadillo_is_scared(&self) -> bool {
         self.armadillo_danger_ticks > 0
+    }
+
+    /// `Camel.isCamelSitting()`. Always `false` for a non-camel species,
+    /// where the backing field never leaves its default.
+    #[must_use]
+    pub fn camel_is_sitting(&self) -> bool {
+        self.camel_sitting
     }
 
     /// The position of whatever most recently hurt this mob, while inside the
@@ -2638,6 +2728,16 @@ impl<'w> SimMob<'w> {
                 warden::POSE_EMERGING
             } else {
                 warden::POSE_STANDING
+            }));
+        }
+        // Same "unconditional, so the reset reaches the client too" shape as
+        // the warden arm above — a camel that has just stood up must send
+        // `Pose.STANDING` (`0`), not merely stop sending `Pose.SITTING`.
+        if self.entity_type.path() == "camel" {
+            metadata.push(MetadataField::Pose(if self.camel_sitting {
+                CAMEL_POSE_SITTING
+            } else {
+                CAMEL_POSE_STANDING
             }));
         }
         EntitySnapshot {
@@ -4061,6 +4161,8 @@ impl<'w> MobSim<'w> {
             stung_at: None,
             piglin_alert_ticks: -1,
             armadillo_danger_ticks: 0,
+            camel_sitting: false,
+            camel_pose_tick: 0,
             hurt_by_player_until: None,
             attack_damage,
             hurt_cooldown: HurtCooldown::default(),
@@ -5233,6 +5335,21 @@ impl<'w> MobSim<'w> {
             // `health > 0.0`; a corpse's fields are frozen, not ticked).
             if m.health > 0.0 && m.armadillo_danger_ticks > 0 {
                 m.armadillo_danger_ticks -= 1;
+            }
+            // `Camel.tick`'s forced stand-in-water rule, then
+            // `camel_random_sitting`'s own approximation of
+            // `CamelAi.RandomSitting` — see both functions' own docs. Only
+            // one of the two ever fires in a tick: entering water always
+            // wins over the random toggle, matching vanilla checking
+            // `isInWater()` unconditionally before `RandomSitting` even gets
+            // a turn to run.
+            if m.health > 0.0 && m.entity_type.path() == "camel" {
+                if m.camel_sitting && m.in_water() {
+                    m.camel_sitting = false;
+                    m.camel_pose_tick = tick_count as i64;
+                } else {
+                    camel_random_sitting(m, tick_count);
+                }
             }
             let new_attacks = m.mob.take_new_attacks();
             // Issue #233: `Bee.doHurtTarget` — the sting connects the instant
@@ -10137,6 +10254,85 @@ mod follow_range_tests {
             !sim.get(id).expect("alive").armadillo_is_scared(),
             "the 80th tick with no further hit must let the timer reach zero"
         );
+    }
+
+    /// Issue #230's camel `RandomSitting`, gated through the real production
+    /// tick path (`MobSim::tick`, the loop `camel_random_sitting` is called
+    /// from) rather than by calling the function on a bare `SimMob`. A camel
+    /// left alone long enough must eventually sit down — proving both the
+    /// state flip and that it reaches the wire as the real `Pose.SITTING`
+    /// ordinal (`10`) `MetadataField::Pose` already carries for the warden,
+    /// not merely a private bookkeeping bool nothing reads.
+    ///
+    /// The wait is intentionally generous (`CAMEL_RANDOM_SITTING_MIN_TICKS`
+    /// eligibility plus a healthy multiple of `camel_sit_roll`'s ~1-in-2400
+    /// expected wait): this is a deterministic hash of `(id, tick_count)`,
+    /// not real-clock timing, so the same seed always produces the same
+    /// outcome on every run — there is nothing here for a busy machine to
+    /// perturb, unlike the timing hazards this crate's own docs warn about
+    /// elsewhere.
+    #[test]
+    fn a_camel_left_alone_eventually_sits_and_reports_the_real_pose() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:camel").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+
+        assert!(
+            !sim.get(id).expect("alive").camel_is_sitting(),
+            "precondition: a freshly spawned camel is standing"
+        );
+        assert!(
+            !sim.get(id)
+                .expect("alive")
+                .snapshot()
+                .metadata
+                .contains(&MetadataField::Pose(CAMEL_POSE_SITTING)),
+            "precondition: a standing camel must not report the sitting pose"
+        );
+
+        let mut sat = false;
+        for _ in 0..20_000 {
+            sim.tick();
+            if sim.get(id).expect("alive").camel_is_sitting() {
+                sat = true;
+                break;
+            }
+        }
+        assert!(sat, "a camel left alone for 20,000 ticks never sat down");
+        assert!(
+            sim.get(id)
+                .expect("alive")
+                .snapshot()
+                .metadata
+                .contains(&MetadataField::Pose(CAMEL_POSE_SITTING)),
+            "a sitting camel must report the real Pose.SITTING ordinal to the client"
+        );
+    }
+
+    /// **Control**: the identical wait against a cow, a species
+    /// `MobSim::snapshot`'s camel branch never touches — proves the pose
+    /// report is camel-specific rather than every mob eventually gaining a
+    /// `Pose` field this test's positive twin could not, by itself,
+    /// distinguish from a species-blind bug in the metadata builder.
+    #[test]
+    fn only_a_camel_ever_reports_a_sitting_pose_a_cow_never_does() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:cow").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+
+        for _ in 0..20_000 {
+            sim.tick();
+            assert!(
+                !sim.get(id)
+                    .expect("alive")
+                    .snapshot()
+                    .metadata
+                    .contains(&MetadataField::Pose(CAMEL_POSE_SITTING)),
+                "a cow must never report Pose.SITTING, however long it stands around"
+            );
+        }
     }
 
     /// Issue #241's ominous-bottle producer: a pillager patrol leader
