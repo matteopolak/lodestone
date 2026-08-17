@@ -67,8 +67,32 @@
 //! `as`, `at` (position **and** rotation), `positioned` (+ `as`), `rotated`
 //! (+ `as`), `facing` (`<pos>` and `entity <targets> <anchor>`), `align`,
 //! `anchored`, `in` (single-dimension census — see
-//! [`lodestone_command_mc::DimensionArg`]'s own doc), `run`, and
-//! `if`/`unless entity`/`dimension`/`score`/`data storage`/`block`.
+//! [`lodestone_command_mc::DimensionArg`]'s own doc), `run`,
+//! `store result`/`success score`/`data storage`, and
+//! `if`/`unless entity`/`dimension`/`score`/`data storage`/`block`/`loaded`.
+//!
+//! # `store`: the dispatcher change, and what it turned out not to need
+//!
+//! `store` was flagged as needing a dispatcher architecture change — a
+//! result threaded through the chain, not just a [`CommandSource`] — and
+//! that much held: [`registrar::StoreSink`] is exactly that thread.
+//! [`Ctx::add_store_sink`] lets `store`'s own modifier attach one (resolving
+//! its target eagerly, at redirect time, matching vanilla's own
+//! `storeValue`/`storeData`), [`registrar::Dispatcher::dispatch`] carries the
+//! accumulated set alongside each (possibly forked) source exactly the way it
+//! already carries `feedback`/`effects`, and calls every sink once the
+//! terminal executor's own outcome is known. See [`registrar::StoreSink`]'s
+//! own doc for the one vanilla subtlety this reproduces faithfully rather
+//! than approximating: a `store` whose *later* fork (an `if`/`as`/`at`/…)
+//! resolves to zero sources leaves the target **unwritten**, not zeroed —
+//! confirmed against `net.minecraft.commands.execution.tasks.BuildContexts
+//! .execute`, which only ever chains a `store`-wrapped source's callback onto
+//! a command that actually runs.
+//!
+//! Only `score` and `data storage` sinks are built — `bossbar` has no
+//! subsystem in this crate at all (no `/bossbar` command is registered), and
+//! `entity`/`block` need the same live, mutable NBT view `if data`'s
+//! `entity`/`block` targets still lack (see "What is not built" below).
 //!
 //! `at`'s rotation transfer and `rotated as` both needed
 //! `crate::commands::source::PlayerCandidate` to carry a rotation, which it
@@ -114,28 +138,31 @@
 //!
 //! # What is not built, and why — each names its own missing subsystem
 //!
-//! * **`store`, `predicate`, `items`, `function`, `stopwatch`,
-//!   `if`/`unless biome`/`blocks`/`loaded`, and `on <relation>`.**
-//!   (`if`/`unless score`, `data storage` and `block` are now built — see
+//! * **`store bossbar`/`entity`/`block`, `predicate`, `items`, `function`,
+//!   `stopwatch`, `if`/`unless biome`/`blocks`, and `on <relation>`.**
+//!   (`if`/`unless score`, `data storage`, `block` and `loaded`, and
+//!   `store result`/`success score`/`data storage`, are now built — see
 //!   "What is built" above.) Each of these still needs a subsystem this
-//!   server has nowhere: `store`'s own result/success-capture mechanism (a
-//!   real scoreboard *and* NBT storage both now exist for it to write *into*,
-//!   but nothing here yet wraps a following command's return value the way
-//!   `store` needs — the dispatcher only threads a [`CommandSource`], never a
-//!   result, through a chain), `if data`'s `entity`/`block` targets and `if
-//!   items` (a live, command-reachable, mutable NBT view of an entity, block
-//!   entity, or container slot — `storage` needed none of that, which is why
-//!   it alone is built), a loot-predicate engine (`if predicate`), functions
-//!   (explicitly out of scope for this unit — issue #48's remainder tracks
-//!   functions/datapacks separately), a stopwatch registry, a biome lookup
-//!   and a chunk-residency query on [`CommandWorld`] (`blocks` only ever
-//!   answers "what block", never "what biome" or "is this chunk loaded at
-//!   all" — `if blocks` additionally needs to compare a whole *region*,
-//!   which `ChunkSource::block_state` alone makes possible but which was
-//!   left undone here as a second, larger unit of work), and entity
-//!   relationship queries (owner/leasher/target/attacker/vehicle/controller/
-//!   origin/passengers) this crate's mob simulation does not expose to a
-//!   command executor.
+//!   server has nowhere: `store bossbar` needs a `/bossbar` command and
+//!   store this crate has neither; `store`/`if data`'s `entity`/`block`
+//!   targets and `if items` need a live, command-reachable, mutable NBT view
+//!   of an entity, block entity, or container slot — `storage` needed none
+//!   of that, which is why it alone is built on either side; a loot-predicate
+//!   engine (`if predicate`); functions (explicitly out of scope for this
+//!   unit — issue #48's remainder tracks functions/datapacks separately); a
+//!   stopwatch registry; a biome lookup (`if biome`, distinct from `loaded`'s
+//!   residency check — [`crate::chunk::ChunkColumn`] already carries
+//!   `biome_state_at`, but nothing exposes it on the [`crate::chunk::ChunkSource`]
+//!   *trait* the command layer reaches through, and adding a required trait
+//!   method ripples across all ~20 implementors including several test
+//!   doubles — left as its own unit rather than done as a drive-by alongside
+//!   `store`); `if blocks`, which additionally needs to compare a whole
+//!   *region* (`ChunkSource::block_state` alone makes the per-cell read
+//!   possible, but enumerating and reporting a masked/all-mode mismatch over
+//!   an arbitrary box was left undone here as a second, larger unit of
+//!   work); and entity relationship queries
+//!   (owner/leasher/target/attacker/vehicle/controller/origin/passengers)
+//!   this crate's mob simulation does not expose to a command executor.
 //! * **`execute summon <entity>`** (the modifier form that also changes the
 //!   acting entity). Not needed as its own subtree: `/summon` is already a
 //!   root command, so `execute at @s run summon minecraft:cow` reaches it
@@ -154,14 +181,17 @@
 //! own module docs for exactly how far that got and what is still needed to
 //! reach a running command block end-to-end.
 
-use lodestone_command::NodeId;
+use std::sync::Arc;
+
+use lodestone_command::{DoubleArgument, NodeId};
 use lodestone_command_mc::{
     AnchorInput, Axes, BlockArg, BlockPosArg, DimensionArg, EntityAnchorArg, EntityArg,
-    EntitySelector, IntRangeArg, ObjectiveArg, RotationArg, ScoreHolderArg, SwizzleArg, Vec3Arg,
+    EntitySelector, IntRangeArg, NbtPathArg, ObjectiveArg, RotationArg, ScoreHolderArg, SnbtValue,
+    StorageIdArg, SwizzleArg, Vec3Arg,
 };
 use lodestone_model::Rotation;
 
-use super::registrar::{Ctx, Registrar};
+use super::registrar::{ArgKey, Ctx, Registrar, StoreSink};
 use super::source::{CommandSource, EntityAnchor, PlayerCandidate, SelectorError, SourceEntity};
 
 /// `Commands.LEVEL_GAMEMASTERS` — the one permission gate, on the root
@@ -182,6 +212,7 @@ pub(super) fn register(registrar: &mut Registrar) {
     registrar.require_level(execute, EXECUTE_LEVEL);
 
     register_run(registrar, execute, root);
+    register_store(registrar, execute);
     register_conditions(registrar, execute, "if", true);
     register_conditions(registrar, execute, "unless", false);
     register_as(registrar, execute);
@@ -201,6 +232,119 @@ pub(super) fn register(registrar: &mut Registrar) {
 fn register_run(registrar: &mut Registrar, execute: NodeId, root: NodeId) {
     let run = registrar.literal(execute, "run");
     registrar.redirect(run, root);
+}
+
+// ---- store -------------------------------------------------------------
+
+/// `wrapStores` — `store result`/`store success`, each redirecting into
+/// `execute`'s own children exactly like every other subcommand here, but
+/// carrying a [`StoreSink`] instead of rewriting the source. Only the `score`
+/// and `data storage` targets are built: `bossbar` has no subsystem in this
+/// crate (no `/bossbar` command is registered at all — see
+/// `crate::commands::mod`'s registration list), and `entity`/`block` need the
+/// same live, mutable NBT view this module's own doc already names as absent
+/// for `if data`. See [`StoreSink`]'s own doc for exactly when a sink fires
+/// and when a chain silently leaves its target unwritten.
+fn register_store(registrar: &mut Registrar, execute: NodeId) {
+    let store = registrar.literal(execute, "store");
+    register_store_kind(registrar, store, "result", true, execute);
+    register_store_kind(registrar, store, "success", false, execute);
+}
+
+/// One of `result`/`success` — `store_result` is vanilla's own
+/// `storeResult` flag threaded through `storeValue`/`storeData`: `true` means
+/// "write the command's own return value", `false` means "write `1`/`0` for
+/// success/failure" (`storeResult ? result : (success ? 1 : 0)`, the same
+/// expression duplicated at every one of vanilla's sink constructors).
+fn register_store_kind(registrar: &mut Registrar, store: NodeId, literal: &str, store_result: bool, execute: NodeId) {
+    let kind = registrar.literal(store, literal);
+
+    // `store <result|success> score <targets> <objective>`.
+    let score_lit = registrar.literal(kind, "score");
+    let (targets_node, targets_key) = registrar.arg(score_lit, "targets", ScoreHolderArg::multiple());
+    let (obj_node, obj_key) = registrar.arg(targets_node, "objective", ObjectiveArg);
+    registrar.modifier(obj_node, false, move |ctx, sources, _parsed| {
+        let base = one(sources);
+        // Resolved *now*, at redirect time — matching vanilla's own
+        // `ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets")`,
+        // called once inside `wrapStores`'s redirect lambda, not deferred to
+        // whenever the sink eventually fires.
+        let holders = super::scoreboard::resolve_many(ctx, targets_key)?;
+        let objective = ctx.get(obj_key).clone();
+        let sink: StoreSink = Arc::new(move |world, success, result| {
+            let value = if store_result { result } else { i32::from(success) };
+            for holder in &holders {
+                let _ = world.state.scoreboard().set_score(holder, &objective, value);
+            }
+        });
+        ctx.add_store_sink(sink);
+        Ok(vec![base])
+    });
+    registrar.redirect(obj_node, execute);
+
+    // `store <result|success> data storage <target> <path> <type> <scale>`.
+    let data_lit = registrar.literal(kind, "data");
+    let storage_lit = registrar.literal(data_lit, "storage");
+    let (id_node, id_key) = registrar.arg(storage_lit, "target", StorageIdArg);
+    let (path_node, path_key) = registrar.arg(id_node, "path", NbtPathArg);
+    register_store_scale(registrar, path_node, "byte", execute, store_result, id_key, path_key, |v| {
+        #[allow(clippy::cast_possible_truncation)]
+        SnbtValue::Byte(v as i8)
+    });
+    register_store_scale(registrar, path_node, "short", execute, store_result, id_key, path_key, |v| {
+        #[allow(clippy::cast_possible_truncation)]
+        SnbtValue::Short(v as i16)
+    });
+    register_store_scale(registrar, path_node, "int", execute, store_result, id_key, path_key, |v| {
+        #[allow(clippy::cast_possible_truncation)]
+        SnbtValue::Int(v as i32)
+    });
+    register_store_scale(registrar, path_node, "long", execute, store_result, id_key, path_key, |v| {
+        #[allow(clippy::cast_possible_truncation)]
+        SnbtValue::Long(v as i64)
+    });
+    register_store_scale(registrar, path_node, "float", execute, store_result, id_key, path_key, |v| {
+        #[allow(clippy::cast_possible_truncation)]
+        SnbtValue::Float(v as f32)
+    });
+    register_store_scale(registrar, path_node, "double", execute, store_result, id_key, path_key, SnbtValue::Double);
+}
+
+/// One of `byte`/`short`/`int`/`long`/`float`/`double` under
+/// `store … data storage <target> <path>` — six identically-shaped literal
+/// children (`IntTag.valueOf((int)(v * scale))` and five siblings in
+/// vanilla), differing only in `construct`, which scales the `f64` result and
+/// narrows it to the tag type. Rust's `as` cast saturates rather than
+/// wrapping on overflow (unlike Java's narrowing primitive cast, which wraps
+/// for the integral targets) — a documented divergence at the extremes, not
+/// silently inherited.
+#[allow(clippy::too_many_arguments)]
+fn register_store_scale(
+    registrar: &mut Registrar,
+    path_node: NodeId,
+    literal: &str,
+    execute: NodeId,
+    store_result: bool,
+    id_key: ArgKey<String>,
+    path_key: ArgKey<Vec<String>>,
+    construct: fn(f64) -> SnbtValue,
+) {
+    let type_lit = registrar.literal(path_node, literal);
+    let (scale_node, scale_key) = registrar.arg(type_lit, "scale", DoubleArgument::new());
+    registrar.modifier(scale_node, false, move |ctx, sources, _parsed| {
+        let base = one(sources);
+        let id = ctx.get(id_key).clone();
+        let path = ctx.get(path_key).clone();
+        let scale = *ctx.get(scale_key);
+        let sink: StoreSink = Arc::new(move |world, success, result| {
+            let value = if store_result { result } else { i32::from(success) };
+            let scaled = f64::from(value) * scale;
+            world.state.nbt_storage().set(&id, &path, construct(scaled));
+        });
+        ctx.add_store_sink(sink);
+        Ok(vec![base])
+    });
+    registrar.redirect(scale_node, execute);
 }
 
 // ---- as / at ---------------------------------------------------------------
@@ -473,6 +617,34 @@ fn register_conditions(registrar: &mut Registrar, execute: NodeId, literal: &str
     register_score_conditions(registrar, parent, execute, expected);
     register_data_storage_condition(registrar, parent, execute, expected);
     register_block_condition(registrar, parent, execute, expected);
+    register_loaded_condition(registrar, parent, execute, expected);
+}
+
+/// `loaded <pos>` — `ExecuteCommand.isChunkLoaded`'s own boolean shape
+/// (`addConditional`, the same as `block`/`dimension`, not the count-shaped
+/// `if entity`). Vanilla's own test is narrower than "generated": it also
+/// requires the chunk's status to be `FullChunkStatus.ENTITY_TICKING` and
+/// `ServerLevel::areEntitiesLoaded`, neither of which this crate tracks as a
+/// distinct per-column state — [`crate::chunk::ChunkSource::is_column_resident`]
+/// ("generated and retained at all", already reached through the same
+/// `ctx.world.blocks` field `if block` uses) is the coarser, documented stand-in,
+/// not a claim of exact parity. Refuses cleanly rather than panicking when no
+/// chunk source is in scope, exactly like [`register_block_condition`].
+fn register_loaded_condition(registrar: &mut Registrar, parent: NodeId, execute: NodeId, expected: bool) {
+    let loaded_lit = registrar.literal(parent, "loaded");
+    let (pos_node, pos_key) = registrar.arg(loaded_lit, "pos", BlockPosArg);
+    add_boolean_conditional(registrar, pos_node, execute, expected, move |ctx| {
+        let Some(blocks) = ctx.world.blocks else {
+            return Err("Blocks cannot be queried here".to_string());
+        };
+        let coords = *ctx.get(pos_key);
+        let origin = (ctx.source.position.x, ctx.source.position.y, ctx.source.position.z);
+        let rotation = (ctx.source.rotation.yaw, ctx.source.rotation.pitch);
+        let (x, _y, z) = coords.resolve(origin, rotation);
+        let cx = (x.floor() as i32).div_euclid(16);
+        let cz = (z.floor() as i32).div_euclid(16);
+        Ok(blocks.is_column_resident(cx, cz))
+    });
 }
 
 /// `block <pos> <block>` — `BlockPredicateArgument`'s own boolean shape

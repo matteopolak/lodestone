@@ -15,7 +15,7 @@
 //! kind `crate::commands` was built to end. `ServerCommands::from_registrar` is the
 //! seam that lets a gate drive it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use lodestone_command::ParsedCommand;
@@ -39,11 +39,21 @@ use uuid::Uuid;
 #[derive(Default)]
 struct FixedBlockSource {
     blocks: Mutex<HashMap<(i32, i32, i32), String>>,
+    /// Columns [`FixedBlockSource::mark_unloaded`] has named — for
+    /// `/execute if`/`unless loaded`. Empty by default, matching
+    /// [`ChunkSource::is_column_resident`]'s own `true` default, so every
+    /// existing `if block`/`setblock` gate against this fixture is
+    /// unaffected.
+    unloaded: Mutex<HashSet<(i32, i32)>>,
 }
 
 impl FixedBlockSource {
     fn set(&self, x: i32, y: i32, z: i32, block: &str) {
         self.blocks.lock().unwrap().insert((x, y, z), block.to_string());
+    }
+
+    fn mark_unloaded(&self, cx: i32, cz: i32) {
+        self.unloaded.lock().unwrap().insert((cx, cz));
     }
 }
 
@@ -58,6 +68,10 @@ impl ChunkSource for FixedBlockSource {
 
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
         self.set(x, y, z, name);
+    }
+
+    fn is_column_resident(&self, cx: i32, cz: i32) -> bool {
+        !self.unloaded.lock().unwrap().contains(&(cx, cz))
     }
 }
 
@@ -2633,5 +2647,192 @@ fn execute_if_block_with_no_chunk_source_refuses_by_name() {
     assert!(
         outcome.response.lines()[0].contains("Blocks cannot be queried"),
         "the refusal must name the missing capability: {outcome:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// /execute if/unless loaded
+// ---------------------------------------------------------------------------
+
+/// `/execute if`/`unless loaded` against [`FixedBlockSource::mark_unloaded`] —
+/// the resident (default) and marked-unloaded cases both exercised, plus the
+/// no-chunk-source refusal every other `blocks`-backed condition here also
+/// carries.
+#[test]
+fn execute_if_unless_loaded_reads_column_residency() {
+    let commands = ServerCommands::new();
+    let rules = GameRulesHandle::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice"); // (0, 64, 0), chunk (0, 0)
+    let source_blocks = FixedBlockSource::default();
+    source_blocks.mark_unloaded(1, 1); // chunk covering (20, *, 20)
+
+    let world = CommandWorld {
+        rules: &rules as &(dyn RuleStore + Sync),
+        players: &players,
+        state: &state,
+        mobs: None,
+        border: None,
+        #[cfg(not(target_arch = "wasm32"))]
+        access: None,
+        blocks: Some(&source_blocks),
+    };
+
+    let resident = commands.run(&world, &alice, "execute if loaded 0 64 0 run gamemode creative").expect("root matched");
+    assert_eq!(resident.effects.len(), 1, "chunk (0, 0) is resident by the fixture's own default: {resident:?}");
+
+    let unloaded = commands.run(&world, &alice, "execute if loaded 20 64 20 run gamemode creative").expect("root matched");
+    assert!(unloaded.effects.is_empty(), "chunk (1, 1) was marked unloaded: {unloaded:?}");
+
+    // `unless` is the exact complement.
+    let unless_resident =
+        commands.run(&world, &alice, "execute unless loaded 0 64 0 run gamemode creative").expect("root matched");
+    assert!(unless_resident.effects.is_empty(), "{unless_resident:?}");
+
+    let unless_unloaded =
+        commands.run(&world, &alice, "execute unless loaded 20 64 20 run gamemode creative").expect("root matched");
+    assert_eq!(unless_unloaded.effects.len(), 1, "{unless_unloaded:?}");
+
+    // The bare form reports pass/fail itself, same convention as `if block`.
+    let bare_resident = commands.run(&world, &alice, "execute if loaded 0 64 0").expect("root matched");
+    assert!(bare_resident.response.is_ran(), "{bare_resident:?}");
+    let bare_unloaded = commands.run(&world, &alice, "execute if loaded 20 64 20").expect("root matched");
+    assert!(!bare_unloaded.response.is_ran(), "{bare_unloaded:?}");
+}
+
+/// With no chunk source in scope, `if loaded` refuses cleanly by name, same
+/// as `if block`.
+#[test]
+fn execute_if_loaded_with_no_chunk_source_refuses_by_name() {
+    let commands = ServerCommands::new();
+    let rules = GameRulesHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+
+    let outcome = run(&commands, &rules, &players, &alice, "execute if loaded 0 0 0").expect("root matched");
+    assert!(!outcome.response.is_ran(), "{outcome:?}");
+    assert!(
+        outcome.response.lines()[0].contains("Blocks cannot be queried"),
+        "the refusal must name the missing capability: {outcome:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// /execute store
+// ---------------------------------------------------------------------------
+
+/// `store result score` writes the wrapped command's own return value;
+/// `store success score` collapses that same wrapped command down to `0`/`1`
+/// regardless of its magnitude. `scoreboard players set` is the wrapped
+/// command precisely because its own return value (the score it just set) is
+/// neither `0` nor `1` — a fixture where `result` and `success` would read
+/// the same value could not tell the two modifiers apart.
+#[test]
+fn execute_store_score_result_and_success_diverge_on_a_multivalued_wrapped_command() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = data_world(&state, &players);
+
+    commands.run(&world, &alice, "scoreboard objectives add x dummy").unwrap();
+    commands.run(&world, &alice, "scoreboard objectives add out dummy").unwrap();
+
+    let result_outcome = commands
+        .run(&world, &alice, "execute store result score alice out run scoreboard players set alice x 42")
+        .expect("root matched");
+    assert!(result_outcome.response.is_ran(), "{result_outcome:?}");
+    assert_eq!(state.scoreboard().get_score("alice", "out"), Ok(42), "{result_outcome:?}");
+
+    let success_outcome = commands
+        .run(&world, &alice, "execute store success score alice out run scoreboard players set alice x 7")
+        .expect("root matched");
+    assert!(success_outcome.response.is_ran(), "{success_outcome:?}");
+    assert_eq!(
+        state.scoreboard().get_score("alice", "out"),
+        Ok(1),
+        "success must collapse to 1, not carry the wrapped command's own 7 through: {success_outcome:?}"
+    );
+}
+
+/// A wrapped command that itself fails stores `0`, and the outer `execute`
+/// reports the failure too — matching vanilla's own catch path
+/// (`CommandResultCallback::onFailure`, `success = false, result = 0`), not a
+/// silent success with a stray write.
+#[test]
+fn execute_store_a_failing_wrapped_command_writes_zero_and_the_outer_command_refuses() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = data_world(&state, &players);
+
+    commands.run(&world, &alice, "scoreboard objectives add out dummy").unwrap();
+    // A path that was never written is `DataCommand`'s own refusal — see
+    // `get_merge_and_remove_round_trip_through_the_store`.
+    let outcome = commands
+        .run(&world, &alice, "execute store success score alice out run data get storage test:missing nope")
+        .expect("root matched");
+    assert!(!outcome.response.is_ran(), "the wrapped command itself failed: {outcome:?}");
+    assert_eq!(state.scoreboard().get_score("alice", "out"), Ok(0), "{outcome:?}");
+}
+
+/// `store … data storage … <type> <scale>` scales the stored value and tags
+/// it with the requested SNBT type — `int 2` on a wrapped command returning
+/// `21` must write `Int(42)`, not `Int(21)` and not `Double(42.0)`.
+#[test]
+fn execute_store_data_storage_scales_and_types_the_value() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = data_world(&state, &players);
+
+    commands.run(&world, &alice, "scoreboard objectives add x dummy").unwrap();
+    let outcome = commands
+        .run(
+            &world,
+            &alice,
+            "execute store result data storage test:out value int 2 run scoreboard players set alice x 21",
+        )
+        .expect("root matched");
+    assert!(outcome.response.is_ran(), "{outcome:?}");
+    assert_eq!(
+        state.nbt_storage().get("test:out", &["value".to_string()]),
+        Some(SnbtValue::Int(42)),
+        "{outcome:?}"
+    );
+}
+
+/// The sharpest corner of `/execute store`'s semantics, carried over from
+/// vanilla's own `BuildContexts.execute` (see
+/// `lodestone_server::commands::registrar::StoreSink`'s own doc): when a *forked*
+/// condition later in the chain matches nothing, the wrapped command never
+/// runs at all, and the store target is left exactly as it was — not zeroed.
+/// Only a *bare* conditional (nothing after it) reliably reports `0`/`1`,
+/// because that is the executor path, not the fork path.
+#[test]
+fn execute_store_target_is_left_untouched_when_a_forked_condition_matches_nothing() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = data_world(&state, &players);
+
+    commands.run(&world, &alice, "scoreboard objectives add out dummy").unwrap();
+    commands.run(&world, &alice, "scoreboard players set alice out 99").unwrap();
+
+    let outcome = commands
+        .run(
+            &world,
+            &alice,
+            "execute store result score alice out if entity @a[name=nobody] run kill @s",
+        )
+        .expect("root matched");
+    assert_eq!(
+        state.scoreboard().get_score("alice", "out"),
+        Ok(99),
+        "a fork matching nothing must leave the store target untouched, not zero it: {outcome:?}"
     );
 }

@@ -137,6 +137,39 @@ pub type ModifierEntry = Arc<
 >;
 type Modifier = ModifierEntry;
 
+/// `/execute store`'s own piece of `CommandSourceStack.withCallback` —
+/// vanilla attaches a `ResultConsumer` to the source itself, invoked once the
+/// chain's own terminal outcome is known. This crate's [`Dispatcher::dispatch`]
+/// has no per-stage `ContextChain`, only one flat walk to one terminal
+/// executor per (possibly forked) source, so a sink is simpler: a `store`
+/// modifier resolves its target eagerly (the holder names, the storage id and
+/// path — exactly when vanilla's own `storeValue`/`storeData` resolve theirs,
+/// via `c.getSource()` at redirect time, not at apply time) and appends one of
+/// these to [`Ctx::store_sinks`]. [`Dispatcher::dispatch`] calls every
+/// accumulated sink exactly once, with the terminal *executor's* own outcome
+/// (`success = true` and its returned count, or `success = false, result = 0`
+/// on the executor's own failure) — matching vanilla's `BuildContexts.execute`
+/// (`net.minecraft.commands.execution.tasks`), which only ever chains a
+/// `store`-wrapped source's callback onto the *executed* command
+/// (`returningSource.withCallback(...)`, reached only once `currentSources` is
+/// non-empty). A branch that never reaches a terminal at all — a fork
+/// resolving to zero sources, or an earlier modifier throwing mid-chain —
+/// never gets there either in vanilla (the callback is attached to a source
+/// that is simply never executed) or here (the sink is dropped along with the
+/// branch, never called): a store target is genuinely left **unwritten**, not
+/// zeroed, when e.g. `execute store … if entity <nomatch> run …`'s condition
+/// fails. Only a *bare* `execute store … if entity <nomatch>` (nothing after —
+/// `if`'s own terminal executor runs instead of its fork) reliably reports
+/// `0`.
+///
+/// `Fn(&CommandWorld<'_>, bool, i32)` rather than a `Result`-returning
+/// signature: vanilla's own `storeData` swallows a write failure
+/// (`catch (CommandSyntaxException) {}`) rather than letting a store's own
+/// failure change the wrapped command's reported outcome, and every sink
+/// built in `crate::commands::execute` does the same (`let _ =` on the
+/// underlying store call).
+pub type StoreSink = Arc<dyn Fn(&CommandWorld<'_>, bool, i32) + Send + Sync>;
+
 /// One argument node's transmitted identity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WireDescriptor {
@@ -313,6 +346,12 @@ pub struct Ctx<'a> {
     argument_nodes: &'a HashSet<NodeId>,
     feedback: Vec<String>,
     effects: Vec<DirectedEffect>,
+    /// `/execute store`'s accumulated sinks for *this* source's branch — see
+    /// [`StoreSink`]'s own doc. Seeded by [`Dispatcher::dispatch`] with
+    /// whatever earlier `store` subcommands on this same path already
+    /// registered, so a second `store` later in the chain appends rather than
+    /// replaces.
+    store_sinks: Vec<StoreSink>,
 }
 
 impl<'a> Ctx<'a> {
@@ -386,6 +425,13 @@ impl<'a> Ctx<'a> {
     /// Ask for `effect` to be applied to `target`.
     pub fn effect(&mut self, target: uuid::Uuid, effect: Effect) {
         self.effects.push(DirectedEffect::new(target, effect));
+    }
+
+    /// Register `sink` to be called once with this chain's terminal outcome —
+    /// `/execute store`'s own primitive. See [`StoreSink`]'s doc for why this
+    /// exists and when it fires.
+    pub fn add_store_sink(&mut self, sink: StoreSink) {
+        self.store_sinks.push(sink);
     }
 
     /// Every top-level command literal this source's permission level may see —
@@ -624,7 +670,12 @@ impl Dispatcher<'_> {
         source: CommandSource,
         parsed: &ParsedCommand,
     ) -> CommandOutcome {
-        let mut sources = vec![source];
+        // Each source carries its own `/execute store` sinks alongside it —
+        // `store` registers one on whichever branch it runs in, and a fork
+        // afterwards must hand every child the parent's sinks too (`execute
+        // store result score @s v as @a run …` stores once per forked
+        // player). See [`StoreSink`]'s own doc for the whole mechanism.
+        let mut sources: Vec<(CommandSource, Vec<StoreSink>)> = vec![(source, Vec::new())];
         let mut forked = false;
         let mut feedback: Vec<String> = Vec::new();
         let mut effects: Vec<DirectedEffect> = Vec::new();
@@ -637,19 +688,37 @@ impl Dispatcher<'_> {
             let Some(modifier) = self.modifiers.get(node) else { continue };
             let node_forks = self.forks.contains(node);
             forked |= node_forks;
-            let mut next: Vec<CommandSource> = Vec::new();
+            let mut next: Vec<(CommandSource, Vec<StoreSink>)> = Vec::new();
             // One `Ctx` per input source: a modifier reads `ctx.source`, so
             // handing it the whole set at once with somebody else's source in
             // scope would be the wrong context for all but the first.
-            for input in std::mem::take(&mut sources) {
-                let mut ctx = self.context(world, parsed, index + 1, input.clone());
+            for (input, sinks) in std::mem::take(&mut sources) {
+                let mut ctx = self.context(world, parsed, index + 1, input.clone(), sinks);
                 match modifier(&mut ctx, vec![input], parsed) {
                     Ok(produced) => {
                         feedback.append(&mut ctx.feedback);
                         effects.append(&mut ctx.effects);
-                        next.extend(produced);
+                        // `store` (if this node is one) already pushed onto
+                        // `ctx.store_sinks`; every produced source — one for a
+                        // plain rewrite, several for a fork — inherits the
+                        // same accumulated set.
+                        for produced_source in produced {
+                            next.push((produced_source, ctx.store_sinks.clone()));
+                        }
                     }
                     Err(message) => {
+                        // A modifier throwing mid-chain is `BuildContexts
+                        // .execute`'s own `catch (CommandSyntaxException)`
+                        // path in vanilla: it reports the error and drops
+                        // this branch (or the whole command, unforked)
+                        // *without* ever invoking the source's resultConsumer
+                        // — unlike the terminal executor's own failure below,
+                        // which does. So any `store` sink already registered
+                        // on this branch is discarded here, not fired with a
+                        // zero — the same "callback attached to a source that
+                        // never reaches a next stage" shape as a fork that
+                        // produces zero sources (`next` simply stays without
+                        // this branch, below).
                         if node_forks || forked {
                             feedback.push(message);
                         } else {
@@ -676,15 +745,17 @@ impl Dispatcher<'_> {
 
         let mut ran = 0;
         let mut failures: Vec<String> = Vec::new();
-        for input in sources {
-            let mut ctx = self.context(world, parsed, parsed.nodes.len(), input);
+        for (input, sinks) in sources {
+            let mut ctx = self.context(world, parsed, parsed.nodes.len(), input, sinks);
             match executor(&mut ctx) {
                 Ok(count) => {
                     ran += count;
                     feedback.append(&mut ctx.feedback);
                     effects.append(&mut ctx.effects);
+                    apply_store_sinks(&ctx.store_sinks, world, true, count);
                 }
                 Err(message) => {
+                    apply_store_sinks(&ctx.store_sinks, world, false, 0);
                     // A forked path keeps going; an unforked one is a single
                     // invocation and its failure is *the* answer.
                     if forked {
@@ -709,6 +780,7 @@ impl Dispatcher<'_> {
         parsed: &'c ParsedCommand,
         depth: usize,
         source: CommandSource,
+        store_sinks: Vec<StoreSink>,
     ) -> Ctx<'c> {
         Ctx {
             tree: self.tree,
@@ -720,7 +792,19 @@ impl Dispatcher<'_> {
             feedback: Vec::new(),
             effects: Vec::new(),
             argument_nodes: self.argument_nodes,
+            store_sinks,
         }
+    }
+}
+
+/// Calls every accumulated `/execute store` sink for one source's branch with
+/// its chain's terminal outcome. A no-op when `sinks` is empty, which is every
+/// command that never reaches a `store` subcommand — see [`StoreSink`]'s doc
+/// for why `success`/`result` are the same two values vanilla's own
+/// `ResultConsumer` receives.
+fn apply_store_sinks(sinks: &[StoreSink], world: &CommandWorld<'_>, success: bool, result: i32) {
+    for sink in sinks {
+        sink(world, success, result);
     }
 }
 

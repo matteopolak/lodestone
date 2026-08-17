@@ -35,7 +35,11 @@
 //! filter compound — see that type's own doc) is what [`get`](NbtStorageHandle::get)/
 //! [`remove`](NbtStorageHandle::remove) walk; [`merge`](NbtStorageHandle::merge)
 //! is vanilla's own `CompoundTag.merge`: recurse when both sides hold a
-//! compound at the same key, overwrite otherwise.
+//! compound at the same key, overwrite otherwise. [`set`](NbtStorageHandle::set)
+//! is the other vanilla primitive, `NbtPathArgument.NbtPath.set` —
+//! `/execute store data storage`'s own write, which creates every
+//! intermediate compound `path` needs rather than requiring the caller to
+//! shape one.
 //!
 //! # How to change it
 //!
@@ -90,6 +94,23 @@ impl NbtStorageHandle {
         });
     }
 
+    /// `NbtPathArgument.NbtPath.set` — overwrites the single value at `path`
+    /// (creating it, and every intermediate compound `path` walks through
+    /// that does not exist yet, exactly like [`merge`](Self::merge) creates
+    /// the id itself). Unlike `merge`, a non-compound value sitting where an
+    /// intermediate segment needs a compound is replaced outright rather than
+    /// merged into — `/execute store data storage`'s only caller, and vanilla
+    /// itself does the same (`CompoundTag.getCompoundOrEmpty` /
+    /// `NbtPathArgument.NbtPath.set`'s own `getOrCreateTag`-then-overwrite
+    /// walk). A path of `[]` (structurally unreachable — [`lodestone_command_mc::NbtPathArg`]
+    /// requires at least one segment) is a no-op rather than a panic.
+    pub fn set(&self, id: &str, path: &[String], value: SnbtValue) {
+        self.with(|store| {
+            let root = store.entry(id.to_string()).or_default();
+            set_path(root, path, value);
+        });
+    }
+
     /// Removes the value at `path`. Returns whether anything was actually
     /// removed — a `remove` on an id or path that was never set is a no-op,
     /// not an error (matching `NbtPathArgument.NbtPath.remove`'s own count,
@@ -116,6 +137,36 @@ fn get_path(root: &[(String, SnbtValue)], path: &[String]) -> Option<SnbtValue> 
     match value {
         SnbtValue::Compound(inner) => get_path(inner, rest),
         _ => None,
+    }
+}
+
+/// Walks `path` through `root`, creating intermediate compounds as needed,
+/// and overwrites the leaf. See [`NbtStorageHandle::set`]'s own doc for the
+/// one divergence from [`merge_compound`]: a non-compound intermediate is
+/// replaced, not merged into.
+fn set_path(root: &mut Vec<(String, SnbtValue)>, path: &[String], value: SnbtValue) {
+    match path {
+        [] => {}
+        [only] => match root.iter_mut().find(|(k, _)| k == only) {
+            Some(entry) => entry.1 = value,
+            None => root.push((only.clone(), value)),
+        },
+        [first, rest @ ..] => {
+            let index = match root.iter().position(|(k, _)| k == first) {
+                Some(index) => index,
+                None => {
+                    root.push((first.clone(), SnbtValue::Compound(Vec::new())));
+                    root.len() - 1
+                }
+            };
+            if !matches!(root[index].1, SnbtValue::Compound(_)) {
+                root[index].1 = SnbtValue::Compound(Vec::new());
+            }
+            let SnbtValue::Compound(inner) = &mut root[index].1 else {
+                unreachable!("just normalised to a Compound above")
+            };
+            set_path(inner, rest, value);
+        }
     }
 }
 
@@ -225,6 +276,36 @@ mod tests {
         assert!(!storage.remove("minecraft:test", &seg("never.was.here")));
         // An id that was never written at all.
         assert!(!storage.remove("minecraft:ghost", &seg("a")));
+    }
+
+    #[test]
+    fn set_creates_intermediate_compounds_and_writes_the_leaf() {
+        let storage = NbtStorageHandle::default();
+        storage.set("minecraft:test", &seg("a.b.c"), SnbtValue::Int(7));
+        assert_eq!(storage.get("minecraft:test", &seg("a.b.c")), Some(SnbtValue::Int(7)));
+        // The intermediate compounds really were created, not just the leaf.
+        assert_eq!(
+            storage.get("minecraft:test", &seg("a.b")),
+            Some(SnbtValue::Compound(vec![("c".to_string(), SnbtValue::Int(7))]))
+        );
+    }
+
+    #[test]
+    fn set_overwrites_a_scalar_that_is_in_the_way_of_a_deeper_path() {
+        let storage = NbtStorageHandle::default();
+        storage.merge("minecraft:test", vec![("a".to_string(), SnbtValue::Int(1))]);
+        // `a` is currently a scalar; setting `a.b` must replace it with a
+        // compound rather than merging into a non-existent one.
+        storage.set("minecraft:test", &seg("a.b"), SnbtValue::Int(2));
+        assert_eq!(storage.get("minecraft:test", &seg("a.b")), Some(SnbtValue::Int(2)));
+    }
+
+    #[test]
+    fn set_overwrites_an_existing_leaf_in_place() {
+        let storage = NbtStorageHandle::default();
+        storage.set("minecraft:test", &seg("a"), SnbtValue::Int(1));
+        storage.set("minecraft:test", &seg("a"), SnbtValue::Int(2));
+        assert_eq!(storage.get("minecraft:test", &seg("a")), Some(SnbtValue::Int(2)));
     }
 
     #[test]
