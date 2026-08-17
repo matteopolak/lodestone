@@ -2179,3 +2179,178 @@ fn the_store_a_command_writes_is_the_same_one_a_second_call_reads() {
     let read = other_tree.run(&world, &alice, "scoreboard players get p x").expect("root matched");
     assert!(read.response.lines()[0].contains("42"), "{read:?}");
 }
+
+// ---------------------------------------------------------------------------
+// /team, and `team=` selector filtering
+// ---------------------------------------------------------------------------
+
+/// [`scoreboard_world`]'s identical shape — one shared production
+/// `WorldStateHandle` for a sequence of `/team` calls that must see each
+/// other's writes.
+fn team_world<'a>(
+    state: &'a lodestone_server::world_state::WorldStateHandle,
+    players: &'a [PlayerCandidate],
+) -> CommandWorld<'a> {
+    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None, access: None }
+}
+
+#[test]
+fn add_join_list_leave_and_remove_round_trip_through_the_store() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = team_world(&state, &players);
+
+    let outcome = commands.run(&world, &alice, "team add red").expect("root matched");
+    assert!(outcome.response.is_ran(), "{outcome:?}");
+    assert!(state.team().team("red").is_some());
+
+    // A duplicate name is refused, not silently accepted twice.
+    let dup = commands.run(&world, &alice, "team add red").expect("root matched");
+    assert!(!dup.response.is_ran(), "{dup:?}");
+
+    let joined = commands.run(&world, &alice, "team join red bob").expect("root matched");
+    assert!(joined.response.is_ran(), "{joined:?}");
+    assert_eq!(state.team().team_of("bob"), "red");
+
+    // Joining a second team moves bob rather than adding him to both.
+    commands.run(&world, &alice, "team add blue").unwrap();
+    commands.run(&world, &alice, "team join blue bob").unwrap();
+    assert_eq!(state.team().team_of("bob"), "blue");
+    assert!(!state.team().team("red").unwrap().members.iter().any(|m| m == "bob"));
+
+    let listed = commands.run(&world, &alice, "team list red").expect("root matched");
+    assert!(listed.response.lines()[0].contains("no members"), "{listed:?}");
+
+    let left = commands.run(&world, &alice, "team leave bob").expect("root matched");
+    assert!(left.response.is_ran(), "{left:?}");
+    assert_eq!(state.team().team_of("bob"), "");
+
+    let removed = commands.run(&world, &alice, "team remove red").expect("root matched");
+    assert!(removed.response.is_ran(), "{removed:?}");
+    assert!(state.team().team("red").is_none());
+}
+
+/// `team join <team>` with no `<members>` defaults to the caller — vanilla's
+/// own no-members overload.
+#[test]
+fn join_with_no_members_defaults_to_the_caller() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = team_world(&state, &players);
+
+    commands.run(&world, &alice, "team add red").unwrap();
+    let outcome = commands.run(&world, &alice, "team join red").expect("root matched");
+    assert!(outcome.response.is_ran(), "{outcome:?}");
+    assert_eq!(state.team().team_of("alice"), "red");
+}
+
+/// `team empty` clears membership without deleting the team itself.
+#[test]
+fn empty_clears_members_but_leaves_the_team_registered() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = team_world(&state, &players);
+
+    commands.run(&world, &alice, "team add red").unwrap();
+    commands.run(&world, &alice, "team join red alice").unwrap();
+    commands.run(&world, &alice, "team join red bob").unwrap();
+
+    let outcome = commands.run(&world, &alice, "team empty red").expect("root matched");
+    assert!(outcome.response.is_ran(), "{outcome:?}");
+    assert_eq!(state.team().team_of("alice"), "");
+    assert_eq!(state.team().team_of("bob"), "");
+    assert!(state.team().team("red").is_some(), "the team itself must still exist");
+}
+
+/// `team modify` covers every option kind this module registers: free text
+/// (`displayName`), a bool, `minecraft:team_color`, and the two families
+/// registered as literal tokens (a `Visibility`, `CollisionRule`).
+#[test]
+fn modify_reaches_every_option_kind() {
+    use lodestone_server::commands::team_store::{CollisionRule, Visibility};
+    use lodestone_model::text::TextColor;
+
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = team_world(&state, &players);
+
+    commands.run(&world, &alice, "team add red").unwrap();
+
+    commands.run(&world, &alice, "team modify red displayName Red Team").unwrap();
+    assert_eq!(state.team().team("red").unwrap().display_name, "Red Team");
+
+    commands.run(&world, &alice, "team modify red prefix [R]").unwrap();
+    assert_eq!(state.team().team("red").unwrap().prefix, "[R]");
+    commands.run(&world, &alice, "team modify red suffix !").unwrap();
+    assert_eq!(state.team().team("red").unwrap().suffix, "!");
+
+    commands.run(&world, &alice, "team modify red color dark_red").unwrap();
+    assert_eq!(state.team().team("red").unwrap().color, Some(TextColor::DarkRed));
+    commands.run(&world, &alice, "team modify red color reset").unwrap();
+    assert_eq!(state.team().team("red").unwrap().color, None);
+
+    commands.run(&world, &alice, "team modify red friendlyfire false").unwrap();
+    assert!(!state.team().team("red").unwrap().friendly_fire);
+    commands.run(&world, &alice, "team modify red seeFriendlyInvisibles false").unwrap();
+    assert!(!state.team().team("red").unwrap().see_friendly_invisibles);
+
+    commands.run(&world, &alice, "team modify red nametagVisibility hideForOtherTeams").unwrap();
+    assert_eq!(state.team().team("red").unwrap().nametag_visibility, Visibility::HideForOtherTeams);
+    commands.run(&world, &alice, "team modify red deathMessageVisibility never").unwrap();
+    assert_eq!(state.team().team("red").unwrap().death_message_visibility, Visibility::Never);
+
+    commands.run(&world, &alice, "team modify red collisionRule pushOwnTeam").unwrap();
+    assert_eq!(state.team().team("red").unwrap().collision_rule, CollisionRule::PushOwnTeam);
+
+    // Every option refuses cleanly against an unregistered team, rather than
+    // panicking or silently creating one.
+    let outcome = commands.run(&world, &alice, "team modify ghost color red").expect("root matched");
+    assert!(!outcome.response.is_ran(), "{outcome:?}");
+}
+
+/// `team=`, `team=<name>` and `team=!<name>` against a real store — the same
+/// discriminating shape this file's own `scores_filters_against_a_real_scoreboard…`
+/// test uses: pairwise-distinct membership (alice on red, bob on blue) plus
+/// two players on **no** team at all (carol, dave), so `team=` bare (matches
+/// "no team") and `team=red` cannot be satisfied by the same input.
+#[test]
+fn team_filters_against_a_real_store_including_the_no_team_case() {
+    use lodestone_server::Effect;
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = team_world(&state, &players);
+
+    commands.run(&world, &alice, "team add red").unwrap();
+    commands.run(&world, &alice, "team add blue").unwrap();
+    commands.run(&world, &alice, "team join red alice").unwrap();
+    commands.run(&world, &alice, "team join blue bob").unwrap();
+    // carol and dave join no team.
+
+    let targets = |text: &str| -> Vec<Uuid> {
+        commands
+            .run(&world, &alice, text)
+            .expect("root matched")
+            .effects
+            .iter()
+            .filter(|d| matches!(d.effect, Effect::SetGameMode(_)))
+            .map(|d| d.target)
+            .collect()
+    };
+
+    assert_eq!(targets("gamemode creative @a[team=red]"), [uuid(1)]);
+    assert_eq!(targets("gamemode creative @a[team=blue]"), [uuid(2)]);
+    // The bare form matches "no team" — carol and dave, not alice or bob.
+    assert_eq!(targets("gamemode creative @a[team=]"), [uuid(3), uuid(4)]);
+    // Inverted: everybody except whoever is actually on red.
+    assert_eq!(targets("gamemode creative @a[team=!red]"), [uuid(2), uuid(3), uuid(4)]);
+}
