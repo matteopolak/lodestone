@@ -155,6 +155,29 @@ All four *checks* are required, and each catches a class the others structurally
   confinement rules, all passing). Whenever the type system cannot express a constraint, make it *checkable*
   and check it; a comment stating an invariant is documentation of intent, not a guard.
 
+**There is no way to wait for a background run. Run every build and test in the FOREGROUND.** This is the
+most repeated operational failure in this repo by a wide margin — **six agents lost runs to it in a single
+day**, each having read a rule forbidding it, because the rule was filed under memory pressure and the
+instinct that leads there is *correct*: they wanted to report a real test count rather than omit one.
+
+The mechanism is unforgiving. An agent that stops to wait is **marked complete by the harness** and its
+wake-up is **discarded**. The run itself keeps going and finishes fine; nobody ever hears the result. It
+costs the whole tail of a session, and the work is usually already done.
+
+So the honest options are only these:
+
+- **Run it in the foreground and let it take the time.** `cargo test -p lodestone-shell --lib` is ~7
+  minutes, the full `lodestone-server` suite 14–29. **That is not a hang** — see the wedged-lock rule
+  above, and sample the *children* rather than the parents.
+- **Narrow the run** — `--lib` plus the specific binaries you touched is an acceptable substitute **if you
+  say so explicitly**.
+- **Report without it**, naming exactly what you did not run.
+
+A partial, honest report beats a complete one nobody receives. And note the two ways a foreground run still
+lies: **a filter matching nothing prints `0 passed; N filtered out` and exits 0**, and **a truncated run
+reads as a real total** — a "1700/0 across 63 binaries" report was a ~13-minute cut-off of a ~29-minute
+suite against 1972 real test attributes. **Say when a run did not finish.**
+
 Smaller facts, each of which has cost someone an hour:
 
 - **The binary is `lodestone`, not `lodestone-shell`** — the `[[bin]]` name differs from the crate.
