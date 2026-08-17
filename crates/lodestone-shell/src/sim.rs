@@ -797,6 +797,15 @@ pub struct Sim {
     /// from `crate::block_entities::conduit_positions` and
     /// `conduit_scan_frame`; see `crate::block_entities::ConduitTicks`.
     conduit_ticks: crate::block_entities::ConduitTicks,
+    /// Per-position mob-spawner/trial-spawner spin state (issue #23).
+    ///
+    /// The sixth block-entity clock, and started by **both** routes at once:
+    /// a `NetUpdate::BlockEvent` `b0 == 1` resets its `spawnDelay`
+    /// (`BaseSpawner.onEventTriggered`), and it is also advanced every tick
+    /// purely from world state (a proximity test plus the block entity's own
+    /// `SpawnData` NBT), the same way [`enchanting_table_books`](Self::enchanting_table_books)
+    /// is. See `crate::block_entities::SpawnerSpins`.
+    spawner_spins: crate::block_entities::SpawnerSpins,
 
     /// This frame's item pickups (`take_item_entity`), awaiting the fly-to-collector
     /// animation — issue #365.

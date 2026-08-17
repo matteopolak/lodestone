@@ -529,6 +529,21 @@ impl WindowApp {
             render.set_moving_piston_source(f);
         }
 
+        // Mob-spawner/trial-spawner display mobs. A fourth destination: not
+        // `prepare_block_entities` (this draws through the ordinary mob
+        // pipeline, not a `BlockEntityModelSet` rig) and not the moving-block
+        // seam either — see `gpu/spawner_mobs.rs`. Same per-frame staleness
+        // hazard as bell/conduit: the closure reads `Sim::spawner_spins`,
+        // advanced once per tick in `Sim::step`, so a stale install freezes
+        // every cage's spin at whatever partial tick it was installed on.
+        // Leaving this call site out is not a hole in the world the way the
+        // block-entity sources above are — both spawner block types have
+        // real cage geometry drawn by the terrain mesher regardless — it is
+        // an empty cage where a mob should be spinning.
+        if let Some(f) = self.sim.spawner_source() {
+            render.set_spawner_source(f);
+        }
+
         // `GameRenderer.bobHurt` — the damage tilt and the death roll, as an
         // eye-space matrix multiplied into every world view-projection.
         //

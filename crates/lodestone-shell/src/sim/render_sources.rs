@@ -303,6 +303,28 @@ impl Sim {
         })
     }
 
+    /// This frame's spawner/trial-spawner display mobs, for
+    /// [`RenderState::set_spawner_source`](crate::gpu::RenderState::set_spawner_source).
+    ///
+    /// Captures [`Self::spawner_spins`] and the partial tick, like
+    /// [`Self::bell_source`] — the spin/oSpin pair lives in that tracker,
+    /// advanced once per tick in [`Self::step`], and this closure only reads
+    /// what is already there for this frame's partial tick. A stale install
+    /// freezes every cage's spin at the fraction of a tick it was installed
+    /// on.
+    #[must_use]
+    pub fn spawner_source(
+        &self,
+    ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::SpawnerMobSpawn> + Send + Sync + 'static>
+    {
+        let handle = self.net.as_ref()?.shared_handle();
+        let spins = self.spawner_spins.clone();
+        let partial_tick = self.clock().interp_alpha;
+        Some(move |eye: glam::Vec3| {
+            crate::block_entities::spawner_mob_spawns(&handle, &spins, eye, partial_tick)
+        })
+    }
+
     /// This frame's lectern books, for
     /// [`RenderState::set_lectern_source`](crate::gpu::RenderState::set_lectern_source).
     ///

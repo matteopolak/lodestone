@@ -1446,7 +1446,11 @@ impl EntityInstance {
     /// creeper's culling box is constant across its fuse rather than growing frame
     /// by frame — one box that always contains the drawn model, instead of a box
     /// that is exactly right and has to be rebuilt every frame.
-    fn placed(
+    /// `pub(crate)` rather than private: [`EntityModelSet::resolve_at`] (a
+    /// different module in this same crate) needs to build an instance from a
+    /// caller-supplied transform rather than the ordinary feet/yaw placement
+    /// every other constructor here derives one from.
+    pub(crate) fn placed(
         model: &'static str,
         mesh: &EntityMesh,
         transform: Mat4,
@@ -1743,6 +1747,37 @@ impl EntityModelSet {
         } else {
             EntityInstance::new_animated(name, mesh, feet, yaw_deg, scale, anim, swell, death_time)
         })
+    }
+
+    /// Resolve a tracked entity's model at a caller-supplied `transform`,
+    /// bypassing [`entity_model_matrix`]/[`dying_entity_model_matrix`]
+    /// entirely — the seam a **nested** placement needs.
+    ///
+    /// Every other `resolve*` here derives its placement from `(feet, yaw,
+    /// scale)` under vanilla's ordinary entity convention. That is the wrong
+    /// shape for a mob drawn *inside* another transform chain — the mob
+    /// spawner's miniature display entity, `SpawnerRenderer.
+    /// submitEntityInSpawner`, which is vanilla's own pose stack (translate,
+    /// spin, tilt, shrink) with `EntityRenderDispatcher.submit` handing the
+    /// entity's *own* renderer that already-transformed stack, rather than a
+    /// `(feet, yaw)` pair. [`crate::spawner::spawner_display_outer_matrix`]
+    /// builds that outer chain; the caller composes it with
+    /// `entity_model_matrix(Vec3::ZERO, entity_yaw_deg, 1.0)` for the
+    /// entity's own flip/lift, exactly the nesting vanilla's two render calls
+    /// produce, and passes the product here.
+    ///
+    /// `None` for a `type_path` with no baked model, the same miss every
+    /// other `resolve*` here has.
+    #[must_use]
+    pub fn resolve_at(
+        &self,
+        type_path: &str,
+        transform: Mat4,
+        anim: &AnimInput,
+    ) -> Option<EntityInstance> {
+        let name = canonical_model_name(type_path)?;
+        let mesh = self.get(name)?;
+        Some(EntityInstance::placed(name, mesh, transform, anim, 0.0))
     }
 
     /// Resolve, frustum-cull and group a set of tracked entities into an

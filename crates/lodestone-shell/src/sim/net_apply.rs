@@ -144,6 +144,13 @@ impl Sim {
                     // per-type gather is what reads only its own positions back
                     // out, so a rung bell never opens a chest lid and vice versa.
                     self.bell_shakes.apply_block_event(pos, b0, b1);
+                    // Spawners/trial spawners share the same `b0 == 1` for
+                    // `onEventTriggered`'s spawn-delay reset — see
+                    // `SpawnerSpins::apply_block_event`. A third tracker
+                    // offered the same event, same reason as the two above:
+                    // the packet cannot tell a spawner from a chest, only
+                    // the gather at the position can.
+                    self.spawner_spins.apply_block_event(pos, b0, b1);
                 }
                 NetUpdate::Explosion {
                     pos: _,

@@ -370,7 +370,22 @@ impl RenderState {
         // buffers can't be created mid-pass, and the entity camera uniform (no
         // section origin; the world position lives in each instance matrix) must
         // be written first too.
-        let entity_batches = self.prepare_entities(device, queue, camera, entities, &mut stats);
+        let mut entity_batches = self.prepare_entities(device, queue, camera, entities, &mut stats);
+
+        // The mob spawner's/trial spawner's spinning display mob — not a
+        // `BlockEntitySource` consumer, but the ordinary mob pipeline at a
+        // nested placement (see `gpu/spawner_mobs.rs`). Appended into the
+        // *same* batch vec `prepare_entities` returns, so the draw loop below
+        // needs no changes: a spawner's mob is, from that loop's point of
+        // view, just another `EntityDrawBatch`.
+        //
+        // `write_entity_camera_uniform` runs unconditionally first, for the
+        // reason its own doc gives: `prepare_entities` only rewrites group 0
+        // when `entities` is non-empty, and a spawner can be the only thing
+        // in view.
+        self.write_entity_camera_uniform(queue, camera);
+        let spawner_spawns = self.spawner_source.spawner_mobs(camera.position);
+        entity_batches.extend(self.prepare_spawner_mobs(device, camera, &spawner_spawns));
 
         // Humanoid armour layers, over the same instances — resolved from the
         // same `entities` slice and the same resolver, so a helmet cannot be
