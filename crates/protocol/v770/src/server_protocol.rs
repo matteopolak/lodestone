@@ -3415,15 +3415,17 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
             // `ServerboundPlayerInputPacket`: a single flags byte
-            // (`Input.STREAM_CODEC`, `Input.java`) — bit `0x40` is `sprint`,
-            // the only flag `ServerBound::PlayerInput` carries (see its own
-            // doc comment for why the rest are decoded off the wire here and
-            // then dropped rather than threaded further).
+            // (`Input.STREAM_CODEC`, `Input.java`) — bit `0x40` is `sprint`
+            // and bit `0x20` is `shift`, the two flags `ServerBound::PlayerInput`
+            // carries (see its own doc comment for why the rest are decoded
+            // off the wire here and then dropped rather than threaded
+            // further).
             State::Play if packet_id == play::serverbound::PLAYER_INPUT => {
                 let mut r = Reader::new(payload);
                 match r.u8() {
                     Ok(flags) if r.ensure_empty().is_ok() => ServerBound::PlayerInput {
                         sprint: flags & 0x40 != 0,
+                        shift: flags & 0x20 != 0,
                     },
                     _ => ServerBound::Ignored,
                 }
@@ -7447,15 +7449,17 @@ mod combat_decode_tests {
         assert_eq!(decoded, ServerBound::Ignored);
     }
 
-    /// Round-trips through the real client encoder: `sprint` survives,
-    /// bit-identical, out the other side; the other six `Input` flags are
-    /// decoded off the wire (so a malformed byte still fails cleanly) but do
-    /// not appear in `ServerBound::PlayerInput` — see that variant's own doc
-    /// comment for why.
+    /// Round-trips through the real client encoder: `sprint` and `shift`
+    /// survive, bit-identical, out the other side; the other five `Input`
+    /// flags are decoded off the wire (so a malformed byte still fails
+    /// cleanly) but do not appear in `ServerBound::PlayerInput` — see that
+    /// variant's own doc comment for why. `sprint`/`shift` are set
+    /// pairwise-distinct in every arm (never both true or both false) so a
+    /// transposition of the two bits cannot survive this round trip.
     #[test]
-    fn decode_player_input_sprint_from_the_real_client_encoder() {
+    fn decode_player_input_sprint_and_shift_from_the_real_client_encoder() {
         let proto = V770ServerProtocol;
-        for sprint in [true, false] {
+        for (sprint, shift) in [(true, false), (false, true)] {
             let (packet_id, payload) = crate::adapter()
                 .encode_action(
                     ConnectionState::Play,
@@ -7465,7 +7469,7 @@ mod combat_decode_tests {
                         left: false,
                         right: false,
                         jump: false,
-                        shift: false,
+                        shift,
                         sprint,
                     }),
                 )
@@ -7473,7 +7477,11 @@ mod combat_decode_tests {
                 .expect("SetPlayerInput always encodes in Play");
             assert_eq!(packet_id, play::serverbound::PLAYER_INPUT);
             let decoded = proto.decode(State::Play, packet_id, &payload);
-            assert_eq!(decoded, ServerBound::PlayerInput { sprint }, "sprint={sprint}");
+            assert_eq!(
+                decoded,
+                ServerBound::PlayerInput { sprint, shift },
+                "sprint={sprint} shift={shift}"
+            );
         }
     }
 
@@ -7487,17 +7495,39 @@ mod combat_decode_tests {
     }
 
     /// Sanity check on the bit layout itself, independent of the real
-    /// encoder: bit `0x40` alone must decode to `sprint: true`, so a future
-    /// change to `ServerBound::PlayerInput`'s field can be checked against a
+    /// encoder: bit `0x40` alone must decode to `sprint: true, shift: false`
+    /// and bit `0x20` alone to `sprint: false, shift: true`, so a future
+    /// change to `ServerBound::PlayerInput`'s fields can be checked against a
     /// known byte, not only against the adapter's own (also-changeable)
-    /// encoder.
+    /// encoder. Covers a transposition of the two adjacent bits, not just
+    /// their presence.
     #[test]
-    fn decode_player_input_bit_layout_pins_sprint_at_0x40() {
+    fn decode_player_input_bit_layout_pins_sprint_at_0x40_and_shift_at_0x20() {
         let proto = V770ServerProtocol;
         let decoded = proto.decode(State::Play, play::serverbound::PLAYER_INPUT, &[0x40]);
-        assert_eq!(decoded, ServerBound::PlayerInput { sprint: true });
-        let decoded = proto.decode(State::Play, play::serverbound::PLAYER_INPUT, &[0x1F]); // every other flag, not sprint
-        assert_eq!(decoded, ServerBound::PlayerInput { sprint: false });
+        assert_eq!(
+            decoded,
+            ServerBound::PlayerInput {
+                sprint: true,
+                shift: false
+            }
+        );
+        let decoded = proto.decode(State::Play, play::serverbound::PLAYER_INPUT, &[0x20]);
+        assert_eq!(
+            decoded,
+            ServerBound::PlayerInput {
+                sprint: false,
+                shift: true
+            }
+        );
+        let decoded = proto.decode(State::Play, play::serverbound::PLAYER_INPUT, &[0x1F]); // every other flag, not sprint or shift
+        assert_eq!(
+            decoded,
+            ServerBound::PlayerInput {
+                sprint: false,
+                shift: false
+            }
+        );
     }
 }
 
