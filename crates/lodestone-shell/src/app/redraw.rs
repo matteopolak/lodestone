@@ -359,6 +359,10 @@ impl WindowApp {
                         // without this a banner in the hotbar drew its base
                         // colour only, never its pattern.
                         banner_patterns: st.banner_patterns().to_vec(),
+                        // Same crate-boundary loss as the pattern line above,
+                        // for a shield's own dye tint rather than its loom
+                        // patterns.
+                        base_color: st.base_color().map(str::to_owned),
                     })
                 })
             })
@@ -391,6 +395,11 @@ impl WindowApp {
                 // loom patterns, even though the identical stack's hotbar icon
                 // now does.
                 banner_patterns: record.banner_patterns.clone(),
+                // Same crate-boundary loss as the pattern line above, for a
+                // held shield's own dye tint — without this a held shield
+                // combined with a banner drew no base tint even though the
+                // identical stack's hotbar icon now does.
+                base_color: record.base_color.clone(),
             });
         // The item id, re-derived rather than cloned: issue #154's spyglass
         // FOV/vignette needs the bare location further down in this function

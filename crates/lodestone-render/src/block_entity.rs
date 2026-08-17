@@ -893,6 +893,66 @@ pub fn banner_texture_stems() -> Vec<&'static str> {
     vec![BANNER_BASE_TEXTURE_STEM]
 }
 
+/// Model name of a shield's `plate`+`handle` mesh (`lodestone_assets::
+/// block_entity_models::shield_model`) — see that function's doc for why a
+/// shield, unlike a banner, has only one mesh, reused for every draw.
+pub const SHIELD: &str = "shield";
+
+/// `Sheets.SHIELD_BASE_NO_PATTERN` — `entity/shield/shield_base_nopattern`,
+/// the plain wood-and-iron sheet every shield with no `minecraft:base_color`
+/// and no stored `minecraft:banner_patterns` layer draws (the common case,
+/// straight off a crafting table).
+pub const SHIELD_BASE_NO_PATTERN_TEXTURE_STEM: &str = "entity/shield/shield_base_nopattern";
+
+/// `Sheets.SHIELD_BASE` — `entity/shield/shield_base`, the sheet a shield
+/// with a base colour or at least one loom pattern draws its **opaque** pass
+/// with (a plain grey canvas the translucent pattern layers tint and mask
+/// over, mirroring [`BANNER_BASE_TEXTURE_STEM`]'s role for a banner).
+pub const SHIELD_BASE_TEXTURE_STEM: &str = "entity/shield/shield_base";
+
+/// Whether a shield stack's translucent pattern pass draws at all —
+/// vanilla's own `hasPatterns` (`ShieldSpecialRenderer.submit`): `true` when
+/// the stack carries a `minecraft:base_color` **or** at least one stored
+/// `minecraft:banner_patterns` layer. `false` is the common case (a shield
+/// straight off a crafting table), which draws only the opaque
+/// [`SHIELD_BASE_NO_PATTERN_TEXTURE_STEM`] sheet and nothing translucent —
+/// [`shield_pattern_layers`](crate::banner_pattern::shield_pattern_layers)
+/// is never even called for it, matching vanilla's own early-out rather than
+/// calling it and discarding an always-present base mask the way a banner's
+/// own `layers` list (never empty) does.
+#[must_use]
+pub fn shield_has_patterns(base_color: Option<&str>, pattern_count: usize) -> bool {
+    base_color.is_some() || pattern_count > 0
+}
+
+/// `(model, texture)` for a shield item's **opaque** base draw — the one
+/// `plate`+`handle` mesh ([`SHIELD`]), textured by whether the stack has
+/// anything translucent to draw over it. Shared by every surface that draws
+/// a shield (the first-person hand, the GUI icon) the same way
+/// [`banner_item_rig`] is shared by a banner's two surfaces — see this
+/// module's shield section for why there is no second mesh the way a
+/// banner's `flag` is.
+#[must_use]
+pub fn shield_item_rig(has_patterns: bool) -> (&'static str, &'static str) {
+    let texture = if has_patterns {
+        SHIELD_BASE_TEXTURE_STEM
+    } else {
+        SHIELD_BASE_NO_PATTERN_TEXTURE_STEM
+    };
+    (SHIELD, texture)
+}
+
+/// Both sheets a shield can draw its opaque pass with, for
+/// [`block_entity_texture_stems`]'s preload list — unlike
+/// [`banner_texture_stems`]'s single stem, a shield's *runtime* state (has a
+/// base colour or a pattern, or not) picks between two, so both must be
+/// preloaded rather than only the default [`BlockEntityModelEntry::texture`]
+/// a gate with no item state draws.
+#[must_use]
+pub fn shield_texture_stems() -> Vec<&'static str> {
+    vec![SHIELD_BASE_TEXTURE_STEM, SHIELD_BASE_NO_PATTERN_TEXTURE_STEM]
+}
+
 /// Model name of a shulker box's shell (lid + base).
 pub const SHULKER_BOX: &str = "shulker_box";
 
@@ -1911,10 +1971,11 @@ pub fn campfire_item_matrix(pos: [i32; 3], facing_yaw_deg: f32, slot: usize) -> 
 /// Every sheet stem across every block-entity family — what the shell's
 /// texture loader preloads. Union of [`chest_texture_stems`],
 /// [`skull_texture_stems`], [`bell_texture_stems`],
-/// [`banner_texture_stems`] and [`shulker_texture_stems`] rather than the
-/// shell iterating each list itself, so a sixth family only has to update this
-/// one function to reach the loader (see the module doc's "How to change it" —
-/// this is the "entry in the preload list" step, generalised past chest).
+/// [`banner_texture_stems`], [`shield_texture_stems`] and
+/// [`shulker_texture_stems`] rather than the shell iterating each list
+/// itself, so a new family only has to update this one function to reach the
+/// loader (see the module doc's "How to change it" — this is the "entry in
+/// the preload list" step, generalised past chest).
 ///
 /// **Does not include a banner's pattern-mask sprites.** Those are a wholly
 /// separate resource (the banner-pattern atlas, `lodestone-assets` work not
@@ -1927,6 +1988,7 @@ pub fn block_entity_texture_stems() -> Vec<&'static str> {
     stems.extend(skull_texture_stems());
     stems.extend(bell_texture_stems());
     stems.extend(banner_texture_stems());
+    stems.extend(shield_texture_stems());
     stems.extend(shulker_texture_stems());
     stems.extend(book_texture_stems());
     stems.extend(decorated_pot_texture_stems());
@@ -3048,7 +3110,7 @@ pub struct MovingPistonSpawn {
 ///
 /// `chest` (13 item definitions), `shulker_box` (17), `head` (6) and
 /// `player_head` (1) — every `kind` whose rig `BLOCK_ENTITY_MODELS` already holds.
-/// The other six return `None` and draw nothing, which is the behaviour before this
+/// The other five return `None` and draw nothing, which is the behaviour before this
 /// existed:
 ///
 /// | kind | items | why not yet |
@@ -3057,8 +3119,15 @@ pub struct MovingPistonSpawn {
 /// | `conduit` | 1 | rig unported (`ConduitRenderer` calls `bakeLayer` four times) |
 /// | `copper_golem_statue` | 32 | rig unported |
 /// | `decorated_pot` | 1 | needs up to four independently textured sprites per instance |
-/// | `shield` | 2 | rig unported, and it is an item model in the hand, not a block entity |
 /// | `trident` | 2 | rig unported |
+///
+/// **`shield` (2 item definitions) is drawn, but not through this resolver** —
+/// like `banner`, its base texture depends on runtime item state (whether the
+/// stack has a `minecraft:base_color` or any stored pattern layer), which this
+/// function's `(kind, item_path)` signature has no room for. See
+/// [`shield_item_rig`] and the two call sites that use it directly
+/// (`lodestone_shell::gpu::first_person`'s `prepare_special_hand`,
+/// `lodestone_shell::hud::item_icon`'s GUI-icon pass).
 ///
 /// `None` is also the right answer for an item path a `kind` does not recognise (a
 /// datapack item declaring `minecraft:chest` over something that is not a chest):

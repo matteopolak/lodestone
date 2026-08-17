@@ -49,6 +49,9 @@ fn icon_record(stack: &lodestone_game::item::ItemStack) -> Option<HotbarSlot> {
         // banner in a chest, the creative menu or the advancements grid drew
         // its base colour only, never its pattern.
         banner_patterns: stack.banner_patterns().to_vec(),
+        // Same crate-boundary loss as the line above, for a shield's own dye
+        // tint rather than its loom patterns.
+        base_color: stack.base_color().map(str::to_owned),
     })
 }
 

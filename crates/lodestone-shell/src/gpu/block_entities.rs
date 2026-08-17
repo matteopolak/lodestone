@@ -108,6 +108,14 @@ pub(super) struct BlockEntityRenderer {
     /// then draws its pole and blank cloth with no patterns — the fail-open every
     /// other sheet here uses.
     pub(super) banner_patterns: HashMap<String, wgpu::BindGroup>,
+    /// The shield sibling of [`Self::banner_patterns`] — one texture bind
+    /// group per shield **mask**, keyed by the same bare pattern asset id,
+    /// but decoded from `entity/shield/*.png` through
+    /// [`lodestone_assets::banner_pattern_atlas::ShieldPatternAtlas`] rather
+    /// than the banner atlas. **Not the same images**: vanilla ships a
+    /// separately drawn PNG per pattern under each directory, so this cannot
+    /// be derived from [`Self::banner_patterns`] by a lookup-key rename.
+    pub(super) shield_patterns: HashMap<String, wgpu::BindGroup>,
 }
 
 impl BlockEntityRenderer {
@@ -229,6 +237,33 @@ impl BlockEntityRenderer {
                 Err(e) => tracing::warn!(target: "assets", "load banner patterns: {e}"),
             }
         }
+
+        // The shield masks — the identical shape as the banner masks just
+        // above, over `ShieldPatternAtlas`'s own `entity/shield/` tree
+        // (`atlases/shield_patterns.json`) rather than the banner one. See
+        // `BlockEntityRenderer::shield_patterns`'s doc for why this cannot
+        // reuse `banner_patterns`.
+        let mut shield_patterns = HashMap::new();
+        if let Some(manager) = crate::resources::vanilla_manager() {
+            match lodestone_assets::banner_pattern_atlas::ShieldPatternAtlas::load(&manager) {
+                Ok(masks) => {
+                    let ids: Vec<String> = masks.pattern_ids().map(str::to_string).collect();
+                    for id in ids {
+                        if let Some(img) = masks.get(&id) {
+                            let view = super::entities::entity_texture_from_image(device, queue, img);
+                            shield_patterns
+                                .insert(id, pipeline.texture_bind_group(device, &view, &sampler));
+                        }
+                    }
+                    tracing::info!(
+                        target: "assets",
+                        loaded = shield_patterns.len(),
+                        "loaded vanilla shield pattern masks"
+                    );
+                }
+                Err(e) => tracing::warn!(target: "assets", "load shield patterns: {e}"),
+            }
+        }
         let banner_layer_pipeline = pipeline.banner_layer_pipeline(device, color_format);
 
         Self {
@@ -242,6 +277,7 @@ impl BlockEntityRenderer {
             hand_cam_bind_group,
             banner_layer_pipeline,
             banner_patterns,
+            shield_patterns,
         }
     }
 

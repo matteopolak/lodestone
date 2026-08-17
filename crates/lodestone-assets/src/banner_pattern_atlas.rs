@@ -117,36 +117,12 @@ impl BannerPatternAtlas {
     pub fn load_reported(
         manager: &ResourceManager,
     ) -> Result<(Self, BannerPatternAtlasReport), BannerPatternAtlasError> {
-        let bytes = manager
-            .read(BANNER_PATTERNS_ATLAS_PATH)
-            .ok_or_else(|| BannerPatternAtlasError::DescriptorMissing {
-                path: BANNER_PATTERNS_ATLAS_PATH.to_string(),
-            })?;
-        let definition = AtlasDefinition::parse(&bytes)?;
-
-        let mut sprites = HashMap::new();
-        let mut report = BannerPatternAtlasReport::default();
-        for entry in definition.resolve(manager) {
-            // `entry.sprite` is e.g. `minecraft:entity/banner/creeper`; the
-            // directory source's own prefix (`entity/banner/`) is what
-            // guarantees this strip succeeds for every entry it produces.
-            let Some(id) = entry.sprite.path().strip_prefix("entity/banner/") else {
-                continue;
-            };
-            if id == NON_PATTERN_STEM {
-                continue;
-            }
-            match manager.read(&entry.texture_path) {
-                Some(png) => match Image::decode_png(&png) {
-                    Ok(image) => {
-                        sprites.insert(id.to_string(), image);
-                        report.loaded += 1;
-                    }
-                    Err(e) => report.decode_errors.push(format!("{id}: {e}")),
-                },
-                None => report.missing_textures.push(id.to_string()),
-            }
-        }
+        let (sprites, report) = load_pattern_directory(
+            manager,
+            BANNER_PATTERNS_ATLAS_PATH,
+            "entity/banner/",
+            &[NON_PATTERN_STEM],
+        )?;
         Ok((Self { sprites }, report))
     }
 
@@ -184,6 +160,145 @@ impl BannerPatternAtlas {
     /// Number of decoded masks (the real vanilla count is 43 as of 26.2: the
     /// base mask plus 42 named patterns — measured directly against
     /// `client.jar`, see `docs/banner-shield-patterns.md`).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.sprites.len()
+    }
+
+    /// Whether no masks decoded at all — the pack has no `client.jar`-shaped
+    /// texture tree.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sprites.is_empty()
+    }
+
+    /// Every decoded pattern id, in no particular order.
+    pub fn pattern_ids(&self) -> impl Iterator<Item = &str> {
+        self.sprites.keys().map(String::as_str)
+    }
+}
+
+/// Shared `minecraft:directory`-atlas loader for [`BannerPatternAtlas`] and
+/// [`ShieldPatternAtlas`] — the two are vanilla's identical directory-source
+/// atlas shape (see the module doc's "Why 'discovered', not 'hand-listed'")
+/// over a different `entity/<family>/` tree, differing only in which
+/// non-pattern stems living in the same directory (the plain cloth sheet for
+/// a banner, the two base/no-pattern sheets for a shield) to exclude from
+/// the pattern set.
+fn load_pattern_directory(
+    manager: &ResourceManager,
+    atlas_path: &str,
+    prefix: &str,
+    exclude: &[&str],
+) -> Result<(HashMap<String, Image>, BannerPatternAtlasReport), BannerPatternAtlasError> {
+    let bytes = manager
+        .read(atlas_path)
+        .ok_or_else(|| BannerPatternAtlasError::DescriptorMissing {
+            path: atlas_path.to_string(),
+        })?;
+    let definition = AtlasDefinition::parse(&bytes)?;
+
+    let mut sprites = HashMap::new();
+    let mut report = BannerPatternAtlasReport::default();
+    for entry in definition.resolve(manager) {
+        // `entry.sprite` is e.g. `minecraft:entity/banner/creeper` (or
+        // `entity/shield/creeper`); the directory source's own `prefix` is
+        // what guarantees this strip succeeds for every entry it produces.
+        let Some(id) = entry.sprite.path().strip_prefix(prefix) else {
+            continue;
+        };
+        if exclude.contains(&id) {
+            continue;
+        }
+        match manager.read(&entry.texture_path) {
+            Some(png) => match Image::decode_png(&png) {
+                Ok(image) => {
+                    sprites.insert(id.to_string(), image);
+                    report.loaded += 1;
+                }
+                Err(e) => report.decode_errors.push(format!("{id}: {e}")),
+            },
+            None => report.missing_textures.push(id.to_string()),
+        }
+    }
+    Ok((sprites, report))
+}
+
+/// In-pack path of vanilla's own shield-pattern atlas descriptor —
+/// `Sheets.SHIELD_PATTERN_BASE`'s directory source, the shield sibling of
+/// [`BANNER_PATTERNS_ATLAS_PATH`].
+pub const SHIELD_PATTERNS_ATLAS_PATH: &str = "assets/minecraft/atlases/shield_patterns.json";
+
+/// The two non-pattern sheets living in `entity/shield/` alongside every
+/// pattern mask — [`crate::block_entity_models::shield_model`]'s own two
+/// base sheets, `Sheets.SHIELD_BASE`/`Sheets.SHIELD_BASE_NO_PATTERN` — so
+/// [`ShieldPatternAtlas::load_reported`] excludes them the same way
+/// [`NON_PATTERN_STEM`] excludes a banner's plain cloth.
+const SHIELD_NON_PATTERN_STEMS: [&str; 2] = ["shield_base", "shield_base_nopattern"];
+
+/// Every real shield-pattern mask, decoded — the sibling of
+/// [`BannerPatternAtlas`] for `entity/shield/*.png` rather than
+/// `entity/banner/*.png`. **A separate, differently-drawn texture set**, not
+/// a re-keying of the same images: vanilla ships one PNG per pattern under
+/// each of the two directories, cropped and laid out for that family's own
+/// mesh, so a caller must not substitute one atlas for the other even though
+/// the pattern ids (`"creeper"`, `"base"`, …) are identical strings in both.
+#[derive(Debug, Default)]
+pub struct ShieldPatternAtlas {
+    sprites: HashMap<String, Image>,
+}
+
+impl ShieldPatternAtlas {
+    /// Loads every real shield-pattern mask, discarding the report.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BannerPatternAtlasError`] only if
+    /// `atlases/shield_patterns.json` itself is missing or unparsable — see
+    /// [`BannerPatternAtlas::load`]'s identical contract.
+    pub fn load(manager: &ResourceManager) -> Result<Self, BannerPatternAtlasError> {
+        Ok(Self::load_reported(manager)?.0)
+    }
+
+    /// Loads every real shield-pattern mask and returns a coverage report
+    /// alongside it.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::load`].
+    pub fn load_reported(
+        manager: &ResourceManager,
+    ) -> Result<(Self, BannerPatternAtlasReport), BannerPatternAtlasError> {
+        let (sprites, report) = load_pattern_directory(
+            manager,
+            SHIELD_PATTERNS_ATLAS_PATH,
+            "entity/shield/",
+            &SHIELD_NON_PATTERN_STEMS,
+        )?;
+        Ok((Self { sprites }, report))
+    }
+
+    /// Looks up a decoded mask by its bare pattern asset id (e.g.
+    /// `"creeper"`, `"base"`).
+    #[must_use]
+    pub fn get(&self, pattern_id: &str) -> Option<&Image> {
+        self.sprites.get(pattern_id)
+    }
+
+    /// Looks up a decoded mask by a resolver's full sprite location (e.g.
+    /// [`lodestone_render`]'s `PatternLayer::sprite`,
+    /// `minecraft:entity/shield/creeper`). Returns `None` for a banner
+    /// sprite (`entity/banner/…`) or any location outside this atlas's own
+    /// namespace, exactly as a missing key would.
+    #[must_use]
+    pub fn get_sprite(&self, sprite: &ResourceLocation) -> Option<&Image> {
+        sprite
+            .path()
+            .strip_prefix("entity/shield/")
+            .and_then(|id| self.get(id))
+    }
+
+    /// Number of decoded masks.
     #[must_use]
     pub fn len(&self) -> usize {
         self.sprites.len()

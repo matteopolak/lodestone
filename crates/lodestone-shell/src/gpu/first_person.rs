@@ -110,6 +110,13 @@ pub(super) struct HeldItemEquip {
     /// patterns; not part of the swap-trigger comparison in [`Self::step`]
     /// for the same reason the dye/potion pair is not.
     visible_banner_patterns: Vec<lodestone_model::BannerPatternLayer>,
+    /// Mirrors [`Self::visible_dyed_color`] for `minecraft:base_color` — the
+    /// visible stack's own shield dye tint, for
+    /// [`RenderState::prepare_special_hand`]'s shield base-mask layer. `None`
+    /// for a never-dyed shield and for every non-shield item; not part of
+    /// the swap-trigger comparison in [`Self::step`] for the same reason the
+    /// dye/potion pair is not.
+    visible_base_color: Option<String>,
     /// Vanilla's `mainHandHeight`, `0.0` (fully lowered) to `1.0` (fully raised).
     height: f32,
     /// Vanilla's `oMainHandHeight` — last tick's value, for the partial-tick lerp.
@@ -144,6 +151,7 @@ impl Default for HeldItemEquip {
             visible_dyed_color: None,
             visible_potion_color: None,
             visible_banner_patterns: Vec::new(),
+            visible_base_color: None,
             height: EQUIP_REST_HEIGHT,
             previous: EQUIP_REST_HEIGHT,
             accumulator: 0.0,
@@ -185,6 +193,7 @@ impl HeldItemEquip {
         self.visible_dyed_color = expected.and_then(|item| item.dyed_color);
         self.visible_potion_color = expected.and_then(|item| item.potion_color);
         self.visible_banner_patterns = expected.map_or_else(Vec::new, |item| item.banner_patterns.clone());
+        self.visible_base_color = expected.and_then(|item| item.base_color.clone());
     }
 
     /// [`Self::advance`] with the elapsed time supplied rather than read from the
@@ -310,6 +319,15 @@ impl HeldItemEquip {
     /// means the empty/absent state" contract [`Self::visible_tint`] uses.
     pub(super) fn visible_banner_patterns(&self) -> &[lodestone_model::BannerPatternLayer] {
         &self.visible_banner_patterns
+    }
+
+    /// [`Self::visible`]'s `minecraft:base_color`, for
+    /// [`RenderState::prepare_special_hand`]'s shield base-mask layer. `None`
+    /// alongside `visible == None` (bare arm) and alongside `Some` for every
+    /// non-shield item or a never-dyed shield — the same "no live stack
+    /// means the empty/absent state" contract [`Self::visible_tint`] uses.
+    pub(super) fn visible_base_color(&self) -> Option<&str> {
+        self.visible_base_color.as_deref()
     }
 }
 
@@ -493,19 +511,39 @@ pub(super) struct SpecialHandDraw<'a> {
     parts: Vec<(lodestone_render::entity::PartRange, wgpu::Buffer)>,
 }
 
-/// One banner pattern-mask layer to draw over a held banner's flag, in the
-/// hand pass's own camera space — the hand-rig sibling of
-/// `super::block_entities::BannerLayerDrawBatch`, which does the identical
-/// job for a *placed* banner in world space. See that type's doc for why this
-/// is a flat, strictly-ordered list rather than a batch: each layer is one
-/// draw of the *same* flag geometry with its own mask and its own colour.
+/// Which mesh and which mask map [`HandBannerLayerDraw::family`] resolves
+/// against — a banner's layers redraw only the `"flag"` part of
+/// `"banner_flag"`, a shield's redraw the *whole* `"shield"` mesh (both
+/// `plate` and `handle` — see [`lodestone_assets::block_entity_models::
+/// shield_model`]'s doc for why a shield has no separate flag-shaped part to
+/// single out).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HandPatternFamily {
+    Banner,
+    Shield,
+}
+
+/// One pattern-mask layer to draw over a held banner's flag or a held
+/// shield's plate, in the hand pass's own camera space — the hand-rig
+/// sibling of `super::block_entities::BannerLayerDrawBatch`, which does the
+/// identical job for a *placed* banner in world space. See that type's doc
+/// for why this is a flat, strictly-ordered list rather than a batch: each
+/// layer is one draw of the *same* geometry with its own mask and its own
+/// colour. A single [`Self::family`] carried per-layer rather than once per
+/// list keeps the field on the record it actually describes, but every
+/// layer in one call's returned `Vec` is the same family — a stack is a
+/// banner or a shield, never both — so a draw-site reads it once off the
+/// first entry.
 pub(super) struct HandBannerLayerDraw {
+    /// Which mesh/mask-map this layer belongs to.
+    family: HandPatternFamily,
     /// Bare pattern asset id, keying
-    /// [`super::block_entities::BlockEntityRenderer::banner_patterns`].
+    /// [`super::block_entities::BlockEntityRenderer::banner_patterns`] or
+    /// `::shield_patterns`, per [`Self::family`].
     pattern: String,
-    /// A one-instance buffer carrying the flag's own world matrix (shared
-    /// with [`SpecialHandDraw`]'s flag entry), this layer's gamma-space
-    /// colour as the instance tint, and the hand's light.
+    /// A one-instance buffer carrying the mesh's own world matrix (shared
+    /// with [`SpecialHandDraw`]'s corresponding entry), this layer's
+    /// gamma-space colour as the instance tint, and the hand's light.
     instances: wgpu::Buffer,
 }
 
@@ -730,6 +768,7 @@ impl RenderState {
                 device,
                 item,
                 self.equip.visible_banner_patterns(),
+                self.equip.visible_base_color(),
                 form,
                 inverse_arm_height,
                 camera,
@@ -810,6 +849,7 @@ impl RenderState {
         device: &wgpu::Device,
         item: &ResourceLocation,
         banner_patterns: &[lodestone_model::BannerPatternLayer],
+        base_color: Option<&str>,
         form: &lodestone_render::SpecialItemForm,
         inverse_arm_height: f32,
         camera: &Camera,
@@ -886,11 +926,67 @@ impl RenderState {
                     continue;
                 };
                 layers.push(HandBannerLayerDraw {
+                    family: HandPatternFamily::Banner,
                     pattern: pattern.to_string(),
                     instances: buffer,
                 });
             }
             return Some((vec![body, flag], layers));
+        }
+
+        // The shield rig is one mesh (plate+handle together, see
+        // `lodestone_render::block_entity::SHIELD`'s doc) drawn opaque once,
+        // then re-submitted per pattern layer through the same translucent
+        // pass a banner's flag uses — `ShieldSpecialRenderer.submit` ported.
+        // Unlike a banner, there is no separate "flag" quad the layers paint
+        // over: `base` re-tints the *whole* shield mesh each time.
+        if form.kind == "minecraft:shield" {
+            let has_patterns =
+                lodestone_render::shield_has_patterns(base_color, banner_patterns.len());
+            let rig = lodestone_render::shield_item_rig(has_patterns);
+            let base_draw = self.build_special_hand_draw(device, rig, [255, 255, 255], placement, light)?;
+
+            let mut layers = Vec::new();
+            if has_patterns {
+                let stored: Vec<lodestone_render::StoredPatternLayer> = banner_patterns
+                    .iter()
+                    .filter_map(|layer| {
+                        Some(lodestone_render::StoredPatternLayer {
+                            pattern_asset_id: layer.pattern_asset_id.clone(),
+                            color: lodestone_render::DyeColor::from_name(&layer.color)?,
+                        })
+                    })
+                    .collect();
+                // `Objects.requireNonNullElse(baseColor, DyeColor.WHITE)` —
+                // `ShieldSpecialRenderer.submit`'s own default when a shield
+                // has stored patterns but no `minecraft:base_color` at all.
+                let base_dye = base_color
+                    .and_then(lodestone_render::DyeColor::from_name)
+                    .unwrap_or(lodestone_render::DyeColor::White);
+                for layer in lodestone_render::shield_pattern_layers(base_dye, &stored) {
+                    let Some(pattern) = layer.sprite.path().rsplit('/').next() else {
+                        continue;
+                    };
+                    if !self.block_entities.shield_patterns.contains_key(pattern) {
+                        continue;
+                    }
+                    let rgb = lodestone_render::gamma_rgb_to_bytes(layer.color);
+                    let Some(buffer) = upload_instances_tinted(
+                        device,
+                        &[placement],
+                        &[light],
+                        &[lodestone_render::InstanceTint::rgb(rgb)],
+                    ) else {
+                        continue;
+                    };
+                    layers.push(HandBannerLayerDraw {
+                        family: HandPatternFamily::Shield,
+                        pattern: pattern.to_string(),
+                        instances: buffer,
+                    });
+                }
+            }
+            return Some((vec![base_draw], layers));
         }
 
         let (model_name, texture_stem) = lodestone_render::special_item_rig(&form.kind, item.path())?;
@@ -1269,29 +1365,60 @@ impl RenderState {
                 // still painting nothing. Measured live: `parts.first()` was
                 // `PartRange { index_count: 0, .. }`, and switching to the real
                 // "flag" part's index is what made this pass draw at all.
-                if !layers.is_empty()
-                    && let Some(flag) = self.block_entities.gpu_models.get("banner_flag")
-                    && let Some(flag_index) = self
-                        .block_entities
-                        .models
-                        .get("banner_flag")
-                        .and_then(|mesh| mesh.index_of("flag"))
-                    && let Some(range) = flag.parts.get(flag_index)
-                    && range.index_count > 0
-                {
-                    pass.set_pipeline(&self.block_entities.banner_layer_pipeline);
-                    pass.set_bind_group(0, &self.block_entities.hand_cam_bind_group, &[]);
-                    pass.set_vertex_buffer(0, flag.vertices.slice(..));
-                    pass.set_index_buffer(flag.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    for layer in layers {
-                        let Some(mask) = self.block_entities.banner_patterns.get(&layer.pattern) else {
-                            continue;
+                //
+                // **A shield's layers redraw the *whole* mesh, not one named
+                // part.** `ShieldSpecialRenderer.submit` re-submits `this.model`
+                // (both `plate` and `handle`) unchanged per pattern layer —
+                // there is no shield analogue of a banner's separate `"flag"`
+                // quad (see `lodestone_render::block_entity::SHIELD`'s doc) — so
+                // the shield arm below draws every part with `index_count > 0`
+                // rather than singling one out by name.
+                if let Some(family) = layers.first().map(|l| l.family) {
+                    let (mesh_name, single_part): (&str, Option<&str>) = match family {
+                        HandPatternFamily::Banner => ("banner_flag", Some("flag")),
+                        HandPatternFamily::Shield => ("shield", None),
+                    };
+                    let mask_map = match family {
+                        HandPatternFamily::Banner => &self.block_entities.banner_patterns,
+                        HandPatternFamily::Shield => &self.block_entities.shield_patterns,
+                    };
+                    if let Some(gpu) = self.block_entities.gpu_models.get(mesh_name) {
+                        let ranges: Vec<lodestone_render::entity::PartRange> = match single_part {
+                            Some(part_name) => self
+                                .block_entities
+                                .models
+                                .get(mesh_name)
+                                .and_then(|mesh| mesh.index_of(part_name))
+                                .and_then(|i| gpu.parts.get(i))
+                                .filter(|r| r.index_count > 0)
+                                .copied()
+                                .into_iter()
+                                .collect(),
+                            None => gpu
+                                .parts
+                                .iter()
+                                .filter(|r| r.index_count > 0)
+                                .copied()
+                                .collect(),
                         };
-                        pass.set_bind_group(1, mask, &[]);
-                        pass.set_vertex_buffer(1, layer.instances.slice(..));
-                        let end = range.index_start + range.index_count;
-                        pass.draw_indexed(range.index_start..end, 0, 0..1);
-                        stats.draw_calls += 1;
+                        if !ranges.is_empty() {
+                            pass.set_pipeline(&self.block_entities.banner_layer_pipeline);
+                            pass.set_bind_group(0, &self.block_entities.hand_cam_bind_group, &[]);
+                            pass.set_vertex_buffer(0, gpu.vertices.slice(..));
+                            pass.set_index_buffer(gpu.indices.slice(..), wgpu::IndexFormat::Uint32);
+                            for layer in layers {
+                                let Some(mask) = mask_map.get(&layer.pattern) else {
+                                    continue;
+                                };
+                                pass.set_bind_group(1, mask, &[]);
+                                pass.set_vertex_buffer(1, layer.instances.slice(..));
+                                for range in &ranges {
+                                    let end = range.index_start + range.index_count;
+                                    pass.draw_indexed(range.index_start..end, 0, 0..1);
+                                    stats.draw_calls += 1;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1336,6 +1463,7 @@ mod tests {
             dyed_color: None,
             potion_color: None,
             banner_patterns: Vec::new(),
+            base_color: None,
         }
     }
 

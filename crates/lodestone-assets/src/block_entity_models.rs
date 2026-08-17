@@ -96,6 +96,13 @@ const BANNER_SHEET: (u32, u32) = (64, 64);
 /// [`BANNER_SHEET`], named separately so a jar change is one edit per family.
 const SHULKER_SHEET: (u32, u32) = (64, 64);
 
+/// The shield sheet is 64×64 (`ShieldModel.createLayer`'s
+/// `LayerDefinition.create(mesh, 64, 64)`). Same canvas size as
+/// [`CHEST_SHEET`]/[`BANNER_SHEET`]/[`SHULKER_SHEET`], named separately for
+/// the same reason those are: a jar change to any one family is one constant
+/// to edit.
+const SHIELD_SHEET: (u32, u32) = (64, 64);
+
 /// The book sheet is 64×**32** (`BookModel.createBodyLayer`'s
 /// `LayerDefinition.create(mesh, 64, 32)`) — the only non-square canvas in this
 /// module, so a builder that reused [`CHEST_SHEET`] would halve every `v`
@@ -260,6 +267,17 @@ pub const BLOCK_ENTITY_MODELS: &[BlockEntityModelEntry] = &[
         name: "conduit_cage",
         texture: "entity/conduit/cage",
         build: conduit_cage_model,
+    },
+    BlockEntityModelEntry {
+        name: "shield",
+        // The default/no-pattern sheet — `ShieldSpecialRenderer.submit` picks
+        // this one whenever the stack has neither a stored pattern layer nor
+        // a `minecraft:base_color`, which is every shield straight off a
+        // crafting table. `lodestone_render::block_entity::shield_texture_stem`
+        // is the per-instance resolver a real draw uses; this is only the
+        // default a gate with no item state can still draw.
+        texture: "entity/shield/shield_base_nopattern",
+        build: shield_model,
     },
 ];
 
@@ -630,6 +648,52 @@ pub fn banner_wall_flag_model() -> EntityModelDef {
     EntityModelDef {
         texture_width: BANNER_SHEET.0,
         texture_height: BANNER_SHEET.1,
+        root,
+    }
+}
+
+/// A shield — `ShieldModel.createLayer()`:
+///
+/// ```text
+/// plate   texOffs(0,  0)  addBox(-6, -11, -2,  12, 22, 1)  pose ZERO
+/// handle  texOffs(26, 0)  addBox(-1,  -3, -1,   2,  6, 6)  pose ZERO
+/// ```
+///
+/// Two parts, both `PartPose::ZERO` — unlike a banner's body+flag, vanilla
+/// draws the whole shield (plate and handle together) as **one**
+/// `submitModel` call, opaque, then re-submits this exact same mesh once per
+/// pattern layer through the translucent pattern pipeline
+/// (`BannerRenderer.submitPatterns(..., this.model, Unit.INSTANCE, banner =
+/// false, ...)` in `ShieldSpecialRenderer.submit` — the `model` argument is
+/// the whole `ShieldModel`, not a `flag`-only sub-part the way a banner's
+/// masks are). So this crate's shield has no analogue of a banner's
+/// `"banner_flag"`: a caller drawing a pattern layer reuses this same
+/// `"shield"` mesh, at the
+/// same placement, with a different sprite and tint — see
+/// `lodestone_render::block_entity`'s shield section for the draw-order this
+/// enables.
+#[must_use]
+pub fn shield_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "plate",
+            PartDef::new(PartPose::ZERO).with_cube(CubeDef::new(
+                [-6.0, -11.0, -2.0],
+                [12.0, 22.0, 1.0],
+                [0.0, 0.0],
+            )),
+        )
+        .with_child(
+            "handle",
+            PartDef::new(PartPose::ZERO).with_cube(CubeDef::new(
+                [-1.0, -3.0, -1.0],
+                [2.0, 6.0, 6.0],
+                [26.0, 0.0],
+            )),
+        );
+    EntityModelDef {
+        texture_width: SHIELD_SHEET.0,
+        texture_height: SHIELD_SHEET.1,
         root,
     }
 }

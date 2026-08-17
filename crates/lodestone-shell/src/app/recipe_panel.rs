@@ -401,6 +401,7 @@ fn toast_icon(id: &lodestone_model::Identifier) -> Option<HotbarSlot> {
         dyed_color: None,
         potion_color: None,
         banner_patterns: Vec::new(),
+        base_color: None,
     })
 }
 

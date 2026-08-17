@@ -271,6 +271,7 @@ pub(super) fn advancement_toast_view(
                 dyed_color: None,
                 potion_color: None,
                 banner_patterns: Vec::new(),
+                base_color: None,
             }),
         visible_portion: 1.0,
     }
