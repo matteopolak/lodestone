@@ -217,6 +217,11 @@ pub struct WorldStateHandle {
     /// them with no new parameter anywhere. See
     /// `crate::commands::team_store`'s module doc.
     teams: crate::commands::team_store::TeamHandle,
+    /// This world's `/data storage`, a sibling of `state`/`scoreboard`/
+    /// `teams` for the identical reason: every command entry point already
+    /// receives this handle. See `crate::commands::nbt_storage`'s module
+    /// doc.
+    nbt_storage: crate::commands::nbt_storage::NbtStorageHandle,
 }
 
 impl WorldStateHandle {
@@ -260,6 +265,14 @@ impl WorldStateHandle {
     #[must_use]
     pub fn team(&self) -> &crate::commands::team_store::TeamHandle {
         &self.teams
+    }
+
+    /// This world's `/data storage` — see [`Self`]'s own field doc for why a
+    /// command reaches it through here rather than through a handle of its
+    /// own.
+    #[must_use]
+    pub fn nbt_storage(&self) -> &crate::commands::nbt_storage::NbtStorageHandle {
+        &self.nbt_storage
     }
 
     /// Whether this handle and `other` name the same store — for the sharing

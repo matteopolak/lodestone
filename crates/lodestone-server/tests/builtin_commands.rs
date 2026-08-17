@@ -16,7 +16,7 @@
 //! seam that lets a gate drive it.
 
 use lodestone_command::ParsedCommand;
-use lodestone_command_mc::{EntityArg, GameModeArg};
+use lodestone_command_mc::{EntityArg, GameModeArg, SnbtValue};
 use lodestone_model::{GameMode, Rotation, Vec3};
 use lodestone_server::commands::registrar::{Ctx, RuleStore};
 use lodestone_server::commands::{
@@ -2353,4 +2353,111 @@ fn team_filters_against_a_real_store_including_the_no_team_case() {
     assert_eq!(targets("gamemode creative @a[team=]"), [uuid(3), uuid(4)]);
     // Inverted: everybody except whoever is actually on red.
     assert_eq!(targets("gamemode creative @a[team=!red]"), [uuid(2), uuid(3), uuid(4)]);
+}
+
+// ---------------------------------------------------------------------------
+// /data storage, and /execute if/unless data storage
+// ---------------------------------------------------------------------------
+
+/// [`scoreboard_world`]'s identical shape.
+fn data_world<'a>(
+    state: &'a lodestone_server::world_state::WorldStateHandle,
+    players: &'a [PlayerCandidate],
+) -> CommandWorld<'a> {
+    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None, access: None }
+}
+
+#[test]
+fn get_merge_and_remove_round_trip_through_the_store() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = data_world(&state, &players);
+
+    // An id nobody has written yet reads as an empty compound, not a refusal.
+    let empty = commands.run(&world, &alice, "data get storage test:foo").expect("root matched");
+    assert!(empty.response.is_ran(), "{empty:?}");
+    assert!(empty.response.lines()[0].contains("{}"), "{empty:?}");
+
+    let merged = commands.run(&world, &alice, "data merge storage test:foo {a:1,b:{c:2}}").expect("root matched");
+    assert!(merged.response.is_ran(), "{merged:?}");
+    assert_eq!(state.nbt_storage().get("test:foo", &["a".to_string()]), Some(SnbtValue::Int(1)));
+    assert_eq!(
+        state.nbt_storage().get("test:foo", &["b".to_string(), "c".to_string()]),
+        Some(SnbtValue::Int(2))
+    );
+
+    let read_path = commands.run(&world, &alice, "data get storage test:foo a").expect("root matched");
+    assert!(read_path.response.lines()[0].contains('1'), "{read_path:?}");
+
+    // A path that does not exist is a refusal naming that, not a silent
+    // success reading nothing — the same shape a `scores=` miss refuses.
+    let missing = commands.run(&world, &alice, "data get storage test:foo nope").expect("root matched");
+    assert!(!missing.response.is_ran(), "{missing:?}");
+
+    let removed = commands.run(&world, &alice, "data remove storage test:foo a").expect("root matched");
+    assert!(removed.response.is_ran(), "{removed:?}");
+    assert_eq!(state.nbt_storage().get("test:foo", &["a".to_string()]), None);
+    // b.c must still be there — removing `a` must not touch a sibling key.
+    assert_eq!(
+        state.nbt_storage().get("test:foo", &["b".to_string(), "c".to_string()]),
+        Some(SnbtValue::Int(2))
+    );
+
+    // Removing the same path again is a refusal, not a second success.
+    let second_remove = commands.run(&world, &alice, "data remove storage test:foo a").expect("root matched");
+    assert!(!second_remove.response.is_ran(), "{second_remove:?}");
+}
+
+/// `/execute if`/`unless data storage` against a real store, with the
+/// present-path and absent-path cases both exercised so a hardcoded pass
+/// cannot survive. Follows
+/// `execute_if_unless_score_matches_gates_on_the_ranges_own_inclusive_ends`'s
+/// own stated convention: the chained (forked) form answers `Ran` either
+/// way — a forked condition that matches nothing is vanilla's own "ran and
+/// did nothing", not a refusal — so the discriminator is `effects`, not
+/// `response.is_ran()`. The *bare* form (no `run …`) is what does refuse,
+/// and is checked separately below.
+#[test]
+fn execute_if_unless_data_storage_gates_on_real_presence() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = data_world(&state, &players);
+
+    commands.run(&world, &alice, "data merge storage test:cond {present:1}").unwrap();
+
+    let present = commands
+        .run(&world, &alice, "execute if data storage test:cond present run gamemode creative")
+        .expect("root matched");
+    assert!(present.response.is_ran(), "{present:?}");
+    assert_eq!(present.effects.len(), 1, "{present:?}");
+
+    let absent = commands
+        .run(&world, &alice, "execute if data storage test:cond missing run gamemode creative")
+        .expect("root matched");
+    assert!(absent.effects.is_empty(), "an absent path must not run the chained command: {absent:?}");
+
+    // `unless` is the exact complement: it must fire (produce the effect) on
+    // the absent path and produce none on the present one.
+    let unless_absent = commands
+        .run(&world, &alice, "execute unless data storage test:cond missing run gamemode creative")
+        .expect("root matched");
+    assert_eq!(unless_absent.effects.len(), 1, "{unless_absent:?}");
+
+    let unless_present = commands
+        .run(&world, &alice, "execute unless data storage test:cond present run gamemode creative")
+        .expect("root matched");
+    assert!(unless_present.effects.is_empty(), "{unless_present:?}");
+
+    // The **bare** form (no `run`) is the executor itself, not the fork —
+    // this is what actually reports pass/fail, per this module's own doc on
+    // why a condition node needs both.
+    let bare_present = commands.run(&world, &alice, "execute if data storage test:cond present").expect("root matched");
+    assert!(bare_present.response.is_ran(), "{bare_present:?}");
+
+    let bare_absent = commands.run(&world, &alice, "execute if data storage test:cond missing").expect("root matched");
+    assert!(!bare_absent.response.is_ran(), "the bare form must refuse on an absent path: {bare_absent:?}");
 }

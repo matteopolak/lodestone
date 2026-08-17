@@ -340,6 +340,69 @@ fn peek_at(reader: &StringReader, offset: usize) -> Option<char> {
     reader.source().chars().nth(index)
 }
 
+/// Renders back to SNBT text — not a byte-exact transcription of whatever
+/// was typed (whitespace and key-quoting choices are not preserved, since
+/// nothing here retains them), but `parse_value(&value.to_string())` always
+/// reproduces `value`. The one production consumer is
+/// `crate::commands::nbt_data`'s `/data get storage` feedback line, in
+/// `lodestone-server` — this exists here rather than there because it is a
+/// property of the type, not of that one call site.
+impl std::fmt::Display for SnbtValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Byte(v) => write!(f, "{v}b"),
+            Self::Short(v) => write!(f, "{v}s"),
+            Self::Int(v) => write!(f, "{v}"),
+            Self::Long(v) => write!(f, "{v}l"),
+            Self::Float(v) => write!(f, "{v}f"),
+            Self::Double(v) => write!(f, "{v}d"),
+            Self::String(s) => write!(f, "{s:?}"),
+            Self::List(items) => {
+                f.write_str("[")?;
+                write_joined(f, items, |f, v| write!(f, "{v}"))?;
+                f.write_str("]")
+            }
+            Self::ByteArray(items) => {
+                f.write_str("[B;")?;
+                write_joined(f, items, |f, v| write!(f, "{v}b"))?;
+                f.write_str("]")
+            }
+            Self::IntArray(items) => {
+                f.write_str("[I;")?;
+                write_joined(f, items, |f, v| write!(f, "{v}"))?;
+                f.write_str("]")
+            }
+            Self::LongArray(items) => {
+                f.write_str("[L;")?;
+                write_joined(f, items, |f, v| write!(f, "{v}l"))?;
+                f.write_str("]")
+            }
+            Self::Compound(entries) => {
+                f.write_str("{")?;
+                write_joined(f, entries, |f, (key, value)| write!(f, "{key:?}:{value}"))?;
+                f.write_str("}")
+            }
+        }
+    }
+}
+
+/// Comma-joins `items` through `write_one`, with no leading/trailing
+/// delimiter of its own — every [`SnbtValue`] variant above supplies its own
+/// bracket/brace pair around the call.
+fn write_joined<T>(
+    f: &mut std::fmt::Formatter<'_>,
+    items: &[T],
+    mut write_one: impl FnMut(&mut std::fmt::Formatter<'_>, &T) -> std::fmt::Result,
+) -> std::fmt::Result {
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            f.write_str(",")?;
+        }
+        write_one(f, item)?;
+    }
+    Ok(())
+}
+
 /// `minecraft:nbt_tag` — any [`SnbtValue`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NbtTagArg;
@@ -477,6 +540,31 @@ mod tests {
                 ("plain_key".to_string(), SnbtValue::Int(2)),
             ])
         );
+    }
+
+    /// `Display` is not a byte-exact transcription of what was typed (this
+    /// module does not retain whitespace or key-quoting style), but
+    /// `parse_value(&value.to_string())` must always reproduce `value` —
+    /// checked across one of every variant, nested, so a broken bracket or a
+    /// missing separator in any single arm shows up.
+    #[test]
+    fn display_round_trips_through_parse_value_for_every_variant() {
+        let value = SnbtValue::Compound(vec![
+            ("b".to_string(), SnbtValue::Byte(-5)),
+            ("s".to_string(), SnbtValue::Short(300)),
+            ("i".to_string(), SnbtValue::Int(-7)),
+            ("l".to_string(), SnbtValue::Long(9_000_000_000)),
+            ("f".to_string(), SnbtValue::Float(1.5)),
+            ("d".to_string(), SnbtValue::Double(-2.25)),
+            ("str".to_string(), SnbtValue::String("has \"quotes\"".to_string())),
+            ("list".to_string(), SnbtValue::List(vec![SnbtValue::Int(1), SnbtValue::Int(2)])),
+            ("ba".to_string(), SnbtValue::ByteArray(vec![1, -2, 3])),
+            ("ia".to_string(), SnbtValue::IntArray(vec![10, -20])),
+            ("la".to_string(), SnbtValue::LongArray(vec![100, -200])),
+            ("nested".to_string(), SnbtValue::Compound(vec![("inner".to_string(), SnbtValue::Int(9))])),
+        ]);
+        let text = value.to_string();
+        assert_eq!(parse_value(&text).unwrap_or_else(|e| panic!("{text:?} failed to re-parse: {e}")), value);
     }
 
     #[test]

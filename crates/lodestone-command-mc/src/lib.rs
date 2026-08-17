@@ -71,6 +71,7 @@ pub mod entity;
 pub mod entity_type;
 pub mod game_mode;
 pub mod item;
+pub mod nbt_path;
 pub mod position;
 pub mod rotation;
 pub mod scoreboard;
@@ -88,6 +89,7 @@ pub use entity::{
 pub use entity_type::{EntityTypeArg, EntityTypeInput};
 pub use game_mode::GameModeArg;
 pub use item::{ItemArg, ItemInput};
+pub use nbt_path::{NbtPathArg, StorageIdArg};
 pub use position::{BlockPosArg, Coordinate, Coordinates, Vec3Arg};
 pub use rotation::{Rotation2, RotationArg};
 pub use scoreboard::{
