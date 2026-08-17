@@ -27,7 +27,7 @@
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, BinaryHeap, HashSet};
+use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 // The worker pool's plumbing. Native-only: `MeshScheduler`'s browser arm has no
 // threads and no channels — it meshes in-frame under a time budget. See that type.
@@ -1523,7 +1523,11 @@ enum Job {
     /// A snapshot plus the `options.cutoutLeaves` value it was submitted
     /// under — see [`MeshScheduler::submit`]'s doc for why the value travels
     /// with the job rather than being read by the worker from shared state.
-    Mesh(SectionSnapshot, bool),
+    /// The trailing `u64` is the generation [`MeshScheduler::submit`] stamped
+    /// it with, echoed back on the result channel so a stale completion can
+    /// be told from the current one — see
+    /// [`MeshScheduler::latest_generation`]'s doc.
+    Mesh(SectionSnapshot, bool, u64),
 }
 
 /// Mesh one snapshot. **The single meshing body, shared by both schedulers.**
@@ -1599,7 +1603,11 @@ pub struct MeshScheduler {
     /// channel distributes by actual work completion. Benchmarked 20.4ms vs
     /// 25.4ms round-robin at 10 workers; dead-even at 4 workers (31.3ms).
     job_tx: crossbeam_channel::Sender<Job>,
-    result_rx: Mutex<Receiver<Meshed>>,
+    /// Paired with the generation [`Self::submit`] stamped the job with, so
+    /// [`Self::drain`]/[`Self::drain_blocking`] can tell a stale completion
+    /// from the current one — see [`Self::latest_generation`]'s doc for why
+    /// that pairing exists at all.
+    result_rx: Mutex<Receiver<(Meshed, u64)>>,
     workers: Vec<JoinHandle<()>>,
     pending: usize,
     column_source: ColumnSource,
@@ -1608,6 +1616,30 @@ pub struct MeshScheduler {
     /// already needs `&mut self`, and a worker thread never reads this field
     /// at all — only the value its own job carried).
     cutout_leaves: bool,
+    /// The generation number [`Self::submit`] most recently stamped a job
+    /// for this key with — the defence against a **stale mesh silently
+    /// overwriting a fresher one**, which the pool's own doc already admits
+    /// is possible: *"the channel distributes by actual work completion"*
+    /// and *"two concurrent drains... would interleave meshes arbitrarily"*.
+    /// With `worker_count > 1` (the production default), two jobs for the
+    /// *same* section — a client-predicted break's own remesh, then the
+    /// server's correction moments later when the prediction is denied —
+    /// can finish in either order. Without this, a slower worker finishing
+    /// the *older* (predicted) job after a faster one finishes the *newer*
+    /// (corrected) job hands the caller the stale geometry last, and nothing
+    /// ever re-derives it again because no further dirty signal is coming —
+    /// the section is uploaded and never marked dirty again, exactly the
+    /// "block came back (hitbox and all) but the mesh didn't render" report:
+    /// collision reads `ChunkWorld` directly and shows the corrected block,
+    /// while the GPU section map is stuck on the superseded snapshot.
+    ///
+    /// [`Self::drain`]/[`Self::drain_blocking`] drop any completion whose
+    /// generation does not match this map's entry for its key — only the
+    /// *most recently submitted* job for a section is ever allowed through,
+    /// regardless of completion order.
+    latest_generation: HashMap<SectionKey, u64>,
+    /// Monotonic counter [`Self::submit`] draws from to stamp each job.
+    next_generation: u64,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1642,7 +1674,7 @@ impl MeshScheduler {
             ColumnSource::Complete
         };
         let worker_count = worker_count.max(1);
-        let (result_tx, result_rx) = mpsc::channel::<Meshed>();
+        let (result_tx, result_rx) = mpsc::channel::<(Meshed, u64)>();
 
         // Lock-free MPMC: one channel, every worker clones the consumer.
         let (job_tx, job_rx) = crossbeam_channel::unbounded::<Job>();
@@ -1654,12 +1686,14 @@ impl MeshScheduler {
             let classifier = classifier.clone();
             workers.push(thread::spawn(move || {
                 loop {
-                    let (snap, cutout_leaves) = match rx.recv() {
-                        Ok(Job::Mesh(snap, cutout_leaves)) => (snap, cutout_leaves),
+                    let (snap, cutout_leaves, generation) = match rx.recv() {
+                        Ok(Job::Mesh(snap, cutout_leaves, generation)) => {
+                            (snap, cutout_leaves, generation)
+                        }
                         Err(_) => break,
                     };
                     if result_tx
-                        .send(mesh_one(snap, &classifier, cutout_leaves))
+                        .send((mesh_one(snap, &classifier, cutout_leaves), generation))
                         .is_err()
                     {
                         break;
@@ -1675,6 +1709,8 @@ impl MeshScheduler {
             pending: 0,
             column_source,
             cutout_leaves: true,
+            latest_generation: HashMap::new(),
+            next_generation: 0,
         }
     }
 
@@ -1707,12 +1743,20 @@ impl MeshScheduler {
     /// distributes jobs with zero locking.
     pub fn submit(&mut self, snapshot: SectionSnapshot) {
         self.pending += 1;
+        // Stamped *before* the send, and recorded as this key's current
+        // generation immediately — not when the job completes — so a second
+        // `submit` for the same key (the corrected-block case
+        // `latest_generation`'s doc describes) always wins the race no matter
+        // which of the two workers finishes first.
+        self.next_generation += 1;
+        let generation = self.next_generation;
+        self.latest_generation.insert(snapshot.key, generation);
         // Crossbeam MPMC — lock-free send, workers compete on the shared
         // receiver. No round-robin: the channel distributes by which worker
         // finishes its current job first (true work-stealing).
         if self
             .job_tx
-            .send(Job::Mesh(snapshot, self.cutout_leaves))
+            .send(Job::Mesh(snapshot, self.cutout_leaves, generation))
             .is_err()
         {
             self.pending -= 1;
@@ -1725,29 +1769,55 @@ impl MeshScheduler {
         self.pending
     }
 
-    /// Collect any finished meshes without blocking.
+    /// Drop `key`'s entry from [`Self::latest_generation`] — a section this
+    /// session will never mesh again (its column left the view) has nothing
+    /// left to compare a completion against, and there is no reason to keep
+    /// growing the map for the life of the session.
+    pub fn forget_generation(&mut self, key: &SectionKey) {
+        self.latest_generation.remove(key);
+    }
+
+    /// Collect any finished meshes without blocking. A completion whose
+    /// generation is not this key's *latest* submitted one is a stale mesh a
+    /// later `submit` has already superseded — dropped here rather than
+    /// handed to the caller, per [`Self::latest_generation`]'s doc.
     pub fn drain(&mut self) -> Vec<Meshed> {
         let mut out = Vec::new();
         let rx = self.result_rx.get_mut().expect("mesh result queue poisoned");
-        while let Ok(meshed) = rx.try_recv() {
-            out.push(meshed);
+        while let Ok((meshed, generation)) = rx.try_recv() {
+            self.pending -= 1;
+            if self.latest_generation.get(&meshed.key) == Some(&generation) {
+                out.push(meshed);
+            }
         }
-        self.pending -= out.len();
         out
     }
 
-    /// Block until at least `n` results are available (or all pending done),
-    /// returning everything collected. Used by tests and headless runs.
+    /// Block until at least `n` *current* results are available (or every
+    /// currently-pending job — stale or not — has completed), returning
+    /// everything collected. Used by tests and headless runs.
+    ///
+    /// A stale completion (superseded by a later `submit` for the same key,
+    /// see [`Self::latest_generation`]) still counts against the "every
+    /// pending job has completed" bound — it consumed a pool slot and its
+    /// raw arrival is what this loop is waiting on — but is not pushed into
+    /// `out` and does not count toward `n`, so the caller never receives it.
     pub fn drain_blocking(&mut self, n: usize) -> Vec<Meshed> {
         let mut out = Vec::new();
+        let mut received = 0usize;
         let rx = self.result_rx.get_mut().expect("mesh result queue poisoned");
-        while out.len() < n && self.pending > out.len() {
+        while out.len() < n && self.pending > received {
             match rx.recv() {
-                Ok(meshed) => out.push(meshed),
+                Ok((meshed, generation)) => {
+                    received += 1;
+                    if self.latest_generation.get(&meshed.key) == Some(&generation) {
+                        out.push(meshed);
+                    }
+                }
                 Err(_) => break,
             }
         }
-        self.pending -= out.len();
+        self.pending -= received;
         out
     }
 }
@@ -1913,6 +1983,13 @@ impl MeshScheduler {
     pub fn pending(&self) -> usize {
         self.queue.len() + self.ready.len()
     }
+
+    /// No-op here: the browser scheduler is a strict FIFO `VecDeque` on one
+    /// thread, so a section is always meshed in submission order and never
+    /// needs the native pool's staleness map — see
+    /// `MeshScheduler::forget_generation`'s native counterpart, and
+    /// `Self::drain`'s own doc for why ordering cannot invert in this arm.
+    pub fn forget_generation(&mut self, _key: &SectionKey) {}
 
     /// Mesh for at most [`BROWSER_MESH_BUDGET`] and return what got finished.
     ///
@@ -2722,6 +2799,11 @@ impl TerrainMesh {
         for key in gone {
             self.uploaded_sections.remove(&key);
             self.pending_removals.push(key);
+            // Otherwise a section this column never returns to leaves a
+            // permanent entry in the staleness map — harmless (a generation
+            // number that will never be compared against again), but there is
+            // no reason to keep it.
+            self.scheduler.forget_generation(&key);
         }
     }
 
@@ -3738,6 +3820,65 @@ mod tests {
         assert!(
             results.iter().any(|m| m.mesh.quad_count() > 0),
             "at least one section has geometry"
+        );
+    }
+
+    /// **The bug 1 (grief-protection) reproduction.** Two jobs submitted for
+    /// the *same* section — a client-predicted change, then a correction
+    /// moments later — must never let the caller see the stale one,
+    /// regardless of which order the pool's workers happen to finish them
+    /// in. [`MeshScheduler`]'s own `latest_generation` field names the
+    /// real-world trigger this guards: a predicted block break gets
+    /// remeshed once immediately, then again when the server denies it and
+    /// restores the original — and the pool's own doc already admits
+    /// completion order is not submission order ("the channel distributes
+    /// by actual work completion").
+    ///
+    /// This does not need to win a real thread race to make the point: a
+    /// result superseded by a *later* `submit` for the same key is stale
+    /// the moment that second `submit` happens, whether its own completion
+    /// arrives before or after — so a single worker (strictly FIFO, no race
+    /// needed at all) already exercises the generation check on its own.
+    #[test]
+    fn a_stale_completion_never_overwrites_a_fresher_one_for_the_same_section() {
+        let classifier = ShellClassifier::Demo(DemoClassifier);
+        assert_eq!(
+            platform_snapshot(None).key,
+            platform_snapshot(Some([12, 7, 12])).key,
+            "fixture precondition: same section"
+        );
+
+        // Ground truth, meshed directly with no scheduler involved, so the
+        // assertion below is a prediction rather than a tautology.
+        let expected_stale = mesh_one(platform_snapshot(None), &classifier, true)
+            .mesh
+            .quad_count();
+        let expected_fresh = mesh_one(platform_snapshot(Some([12, 7, 12])), &classifier, true)
+            .mesh
+            .quad_count();
+        assert_ne!(
+            expected_stale, expected_fresh,
+            "fixture precondition: the two snapshots must mesh to different \
+             geometry, or a version that always kept the *first* result would \
+             pass this test too"
+        );
+
+        let mut scheduler = MeshScheduler::new(1, classifier);
+        scheduler.submit(platform_snapshot(None));
+        scheduler.submit(platform_snapshot(Some([12, 7, 12])));
+        let results = scheduler.drain_blocking(2);
+
+        assert_eq!(
+            results.len(),
+            1,
+            "the stale completion must be dropped, not handed to the caller: \
+             got {results:?}"
+        );
+        assert_eq!(
+            results[0].mesh.quad_count(),
+            expected_fresh,
+            "the surviving mesh must be the later submission's geometry \
+             ({expected_fresh} quads), not the superseded one ({expected_stale})"
         );
     }
 
