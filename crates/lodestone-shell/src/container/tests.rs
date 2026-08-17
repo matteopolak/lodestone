@@ -1156,6 +1156,48 @@ fn beacon_slot_lands_at_vanillas_real_position_on_a_wider_taller_panel() {
     assert_eq!((main0.x, main0.y), (36.0, 137.0));
 }
 
+/// **Owner's report**: "when i open a menu/container, the items in my
+/// inventory are all one pixel too low (theyre fine in the hotbar and my
+/// inventory when its the only thing open)". `generic_layout` — the
+/// `GENERIC_9x1`..`GENERIC_9x6` shape every chest, barrel, shulker box and
+/// trapped/ender chest uses — computed the player-inventory row origin as
+/// `18 + rows*18 + 14`, one off from `ChestMenu`'s own constructor:
+/// `int inventoryTop = 18 + this.containerRows * 18 + 13;` (`ChestMenu.java`).
+/// A row-count-independent constant, not a scaled term, so the drift is
+/// identical at every chest size — checked here at both ends of the real
+/// range (`1` row and `6` rows) rather than only the common 3-row case, so a
+/// fix that happened to special-case 3 rows could not pass this by accident.
+#[test]
+fn generic_container_inventory_row_matches_chest_menus_real_offset() {
+    let at = |layout: &SlotLayout, i: usize| {
+        layout
+            .slots
+            .iter()
+            .find(|s| s.menu_index == i)
+            .map(|s| s.y)
+    };
+    for rows in [1usize, 2, 3, 4, 5, 6] {
+        let container_size = rows * 9;
+        let layout = slot_layout(&Menu::generic(container_size));
+        // Vanilla's own formula, evaluated independently of the code under
+        // test rather than copied from it.
+        let want_main_y = 18.0 + rows as f32 * SLOT + 13.0;
+        assert_eq!(
+            at(&layout, container_size),
+            Some(want_main_y),
+            "row {rows}: the first main-storage slot (menu index \
+             {container_size}) must sit at ChestMenu's real inventoryTop"
+        );
+        // The wrong hypothesis this rules out: the old `+ 14` constant,
+        // one pixel lower, at every row count.
+        assert_ne!(
+            at(&layout, container_size),
+            Some(want_main_y + 1.0),
+            "row {rows}: must not land one pixel low"
+        );
+    }
+}
+
 /// [`background_kind`] keys the beacon off `special_layout`, not size: a
 /// same-sized (`1`) generic container must not draw the beacon sheet.
 #[test]

@@ -1168,7 +1168,7 @@ pub(super) fn wrap_measured(b: &Quads<'_>, s: &str, max_px: f32, max_lines: usiz
 /// (whitespace or not — the scan below is agnostic to which), re-attaches
 /// each surviving character to the style it came with. Adjacent equal styles
 /// are merged so the draw sees runs, not one span per character.
-fn restyle_wrapped(spans: &[TextSpan], lines: &[String]) -> Vec<Vec<TextSpan>> {
+pub(super) fn restyle_wrapped(spans: &[TextSpan], lines: &[String]) -> Vec<Vec<TextSpan>> {
     let flat: Vec<(char, TextStyle)> = spans
         .iter()
         .flat_map(|s| s.text.chars().map(move |c| (c, s.style)))

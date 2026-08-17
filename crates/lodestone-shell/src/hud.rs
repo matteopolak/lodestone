@@ -4256,7 +4256,40 @@ fn strip_legacy(s: &str) -> String {
 /// alone rather than an owned two-character `String`. Combined with
 /// [`ChatWrapCache`], which persists the result so a frame with no new message
 /// re-wraps nothing at all, this is issue #527's half (a).
+///
+/// **Splits on a literal `\n` first**, the same precedent
+/// [`chat_hover_tooltip_layout`]'s own `wrap` closure and
+/// `menu::render::draw::wrap_measured` already establish: a chat component's
+/// display text can carry one (a server sending a multi-line system message,
+/// or a pasted multi-line player message), and before this the control
+/// character reached the font as an ordinary — undrawable — glyph, drawing a
+/// missing-glyph box instead of breaking the line. Delegated to
+/// [`wrap_legacy_paragraph`] per paragraph rather than duplicated here,
+/// matching `wrap_measured`'s own "one wrapper, one set of rules" reasoning
+/// for the identical greedy algorithm. A blank paragraph still yields one row
+/// for free: `wrap_legacy_paragraph("")` already returns a single empty row
+/// (this function's own "never empty" guarantee, restated below), so two
+/// adjacent `\n`s correctly draw as a blank line rather than collapsing.
 fn wrap_legacy_with(measure: impl Fn(&str) -> f32, s: &str, max_width_px: f32) -> Vec<String> {
+    let mut rows = Vec::new();
+    for paragraph in s.split('\n') {
+        rows.extend(wrap_legacy_paragraph(&measure, paragraph, max_width_px));
+    }
+    rows
+}
+
+/// One `\n`-free line's worth of [`wrap_legacy_with`] — the greedy
+/// break-on-space / hard-break-an-overlong-word body, unchanged from before
+/// the `\n` split was added above it.
+///
+/// Never returns an empty vector: an empty `s` yields one empty row, and a
+/// `max_width_px <= 0.0` (or a line that already fits) is returned as a
+/// single unwrapped row rather than looping forever trying to shrink it.
+fn wrap_legacy_paragraph(
+    measure: impl Fn(&str) -> f32,
+    s: &str,
+    max_width_px: f32,
+) -> Vec<String> {
     if max_width_px <= 0.0 || measure(s) <= max_width_px {
         return vec![s.to_string()];
     }
@@ -4451,9 +4484,56 @@ fn strip_style_spans(spans: &[TextSpan]) -> Vec<TextSpan> {
         .collect()
 }
 
+/// **Splits on a literal `\n` first**, the [`TextSpan`] sibling of
+/// [`wrap_legacy_with`]'s own split — same reasoning, same "one wrapper, one
+/// set of rules" delegation to a per-paragraph body
+/// ([`wrap_spans_paragraph`]). [`split_span_paragraphs`] does the splitting
+/// (a `\n` can sit mid-span, so this cannot be a plain `&str` split the way
+/// the legacy sibling's can — it has to walk the flat `(char, style)` stream
+/// and drop the `\n` while keeping every other character's style) and a blank
+/// paragraph still yields one empty row for free, from
+/// [`wrap_spans_paragraph`]'s own "never empty" guarantee below.
+fn wrap_spans_with(
+    measure: impl Fn(&[TextSpan]) -> f32,
+    spans: &[TextSpan],
+    max_width_px: f32,
+) -> Vec<Vec<TextSpan>> {
+    let paragraphs = split_span_paragraphs(spans);
+    let mut rows = Vec::new();
+    for paragraph in &paragraphs {
+        rows.extend(wrap_spans_paragraph(&measure, paragraph, max_width_px));
+    }
+    rows
+}
+
+/// Splits `spans`' flat character stream on `\n`, dropping the newline itself
+/// and re-merging each resulting run back into minimal [`TextSpan`]s via
+/// [`merge_styled_chars`] — so a `\n` sitting in the middle of a styled run
+/// (a coloured sender name immediately followed by `\n` in the body, say)
+/// still splits cleanly without losing which half of the run belongs to which
+/// paragraph. An empty `spans` yields one (empty) paragraph, matching
+/// [`wrap_spans_paragraph`]'s own empty-input guarantee.
+fn split_span_paragraphs(spans: &[TextSpan]) -> Vec<Vec<TextSpan>> {
+    let mut paragraphs: Vec<Vec<(char, TextStyle)>> = vec![Vec::new()];
+    for span in spans {
+        for ch in span.text.chars() {
+            if ch == '\n' {
+                paragraphs.push(Vec::new());
+            } else {
+                paragraphs.last_mut().expect("seeded above").push((ch, span.style));
+            }
+        }
+    }
+    paragraphs.iter().map(|p| merge_styled_chars(p)).collect()
+}
+
+/// One `\n`-free paragraph's worth of [`wrap_spans_with`] — the greedy
+/// break-on-space / hard-break-an-overlong-word body, unchanged from before
+/// the `\n` split was added above it.
+///
 /// Greedy word-wrap of a styled span list into rows that each fit
 /// `max_width_px`, measured by calling `measure` on each candidate row's
-/// spans. The [`TextSpan`] sibling of [`wrap_legacy_with`]: same greedy
+/// spans. The [`TextSpan`] sibling of [`wrap_legacy_paragraph`]: same greedy
 /// break-on-space / hard-break-an-overlong-word algorithm (mirroring
 /// vanilla's `GuiMessage.splitLines`), generalised from "carry the single
 /// most recent `§` code onto the continuation line" to "every character
@@ -4473,9 +4553,9 @@ fn strip_style_spans(spans: &[TextSpan]) -> Vec<TextSpan> {
 /// Never returns an empty vector: an empty `spans` yields one empty row, and
 /// a `max_width_px <= 0.0` (or a line that already fits) is returned as a
 /// single unwrapped row rather than looping forever trying to shrink it —
-/// exactly [`wrap_legacy_with`]'s own guarantees, so [`ChatWrapCacheSpans`]
+/// exactly [`wrap_legacy_paragraph`]'s own guarantees, so [`ChatWrapCacheSpans`]
 /// can share its caller's expectations about the shape of the result.
-fn wrap_spans_with(
+fn wrap_spans_paragraph(
     measure: impl Fn(&[TextSpan]) -> f32,
     spans: &[TextSpan],
     max_width_px: f32,
@@ -7807,6 +7887,53 @@ mod tests {
         );
     }
 
+    /// **The bug report**: a chat message carrying a literal `\n` (a
+    /// multi-line system message, or a pasted multi-line player message)
+    /// rendered the control character as a missing-glyph box instead of
+    /// breaking the line, because [`wrap_legacy_with`] only ever split on
+    /// `' '`. A width table that charges `\n` a large, easy-to-notice cost
+    /// makes the point unambiguously: if the character survived into a row
+    /// unbroken, the row's measured width would blow way past `max_width_px`
+    /// and this test's own `real_width` closure would report it — the
+    /// control is built into the fixture rather than bolted on afterward.
+    #[test]
+    fn wrap_legacy_with_splits_on_a_literal_newline() {
+        let width = |s: &str| -> f32 {
+            s.chars()
+                .map(|c| if c == '\n' { 1000.0 } else { 1.0 })
+                .sum()
+        };
+        let rows = wrap_legacy_with(width, "first line\nsecond line", 200.0);
+        assert_eq!(
+            rows,
+            vec!["first line".to_string(), "second line".to_string()],
+            "a literal \\n must start a new row, not survive as a character in the \
+             middle of one: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains('\n')),
+            "no returned row may still carry the control character: {rows:?}"
+        );
+    }
+
+    /// [`wrap_measured`]'s own precedent (`menu::render::draw`): a blank line
+    /// in the source is a line, not something that collapses when its
+    /// neighbours are pulled together. `wrap_legacy_paragraph("")`'s
+    /// documented "never empty" guarantee is what makes this fall out for
+    /// free from the `\n` split alone — this test is what proves that
+    /// guarantee actually reaches the outer function rather than being an
+    /// unused promise on the inner one.
+    #[test]
+    fn wrap_legacy_with_treats_a_blank_paragraph_as_a_line() {
+        let width = |s: &str| -> f32 { s.chars().count() as f32 };
+        let rows = wrap_legacy_with(width, "a\n\nb", 200.0);
+        assert_eq!(
+            rows,
+            vec!["a".to_string(), String::new(), "b".to_string()],
+            "a blank line between two real ones must survive as its own empty row: {rows:?}"
+        );
+    }
+
     /// The [`TextSpan`] sibling of [`wrap_uses_real_per_glyph_widths_not_a_flat_character_count`]:
     /// same real-per-glyph-width table over the same `"iiiiiWWWWW"` input, so
     /// [`wrap_spans_with`] is proven against a real width hypothesis rather
@@ -7872,6 +7999,45 @@ mod tests {
             "the lone `W` carried onto this row must keep *its own* colour, not the \
              red run's — a single-pending-style model (one colour per row) would get \
              this wrong on a row that starts one style and ends in another"
+        );
+    }
+
+    /// The [`TextSpan`] sibling of [`wrap_legacy_with_splits_on_a_literal_newline`],
+    /// sharpened past it the one way a span list can be: the `\n` sits
+    /// **inside** a single styled run rather than between two plain `&str`s,
+    /// which is exactly the case [`split_span_paragraphs`] exists for — a
+    /// plain `&str::split('\n')` has no style to preserve, but a `TextSpan`'s
+    /// run does, on both sides of the break.
+    #[test]
+    fn wrap_spans_with_splits_on_a_literal_newline_mid_span() {
+        let width = |spans: &[TextSpan]| -> f32 {
+            spans
+                .iter()
+                .flat_map(|s| s.text.chars())
+                .map(|c| if c == '\n' { 1000.0 } else { 1.0 })
+                .sum()
+        };
+        let styled = TextSpan {
+            text: "before\nafter".to_string(),
+            style: TextStyle {
+                font: None,
+                color: Some(TextColor::Red),
+                ..TextStyle::default()
+            },
+        };
+        let rows = wrap_spans_with(width, std::slice::from_ref(&styled), 200.0);
+        let joined: Vec<String> = rows
+            .iter()
+            .map(|row| row.iter().map(|s| s.text.as_str()).collect())
+            .collect();
+        assert_eq!(
+            joined,
+            vec!["before".to_string(), "after".to_string()],
+            "a \\n sitting inside one styled run must still split into two rows: {joined:?}"
+        );
+        assert!(
+            rows.iter().all(|row| row.iter().all(|s| s.style.color == Some(TextColor::Red))),
+            "both sides of the split must keep the run's original colour: {rows:?}"
         );
     }
 
