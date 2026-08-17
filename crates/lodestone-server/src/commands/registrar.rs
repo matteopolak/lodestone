@@ -399,11 +399,13 @@ impl<'a> Ctx<'a> {
         &self,
         selector: &lodestone_command_mc::EntitySelector,
     ) -> Result<Vec<PlayerCandidate>, SelectorError> {
+        let scoreboard = self.world.state.scoreboard();
         super::source::resolve_players(
             selector,
             &self.source,
             self.world.players,
             &super::source::no_shuffle,
+            &|holder, objective| scoreboard.get_score(holder, objective).ok(),
         )
     }
 }

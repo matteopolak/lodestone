@@ -288,6 +288,64 @@ fn a_selector_that_matches_nobody_is_refused_rather_than_succeeding_emptily() {
     );
 }
 
+/// `scores=` against a real scoreboard, with pairwise-distinct holder values
+/// (alice=5, bob=10, carol=15) and dave left with no score at all — the input
+/// this repo's evidence standard names explicitly: "a `scores` filter tests
+/// nothing against a scoreboard where every player has the same score".
+/// Dave's unset score is the second discriminating case: an in-range value a
+/// holder never received must refuse, not default to a pass.
+#[test]
+fn scores_filters_against_a_real_scoreboard_with_distinct_holder_values() {
+    use lodestone_server::Effect;
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+
+    run_stateful(&commands, &state, &players, &alice, "scoreboard objectives add foo dummy")
+        .expect("root matched");
+    for (name, value) in [("alice", 5), ("bob", 10), ("carol", 15)] {
+        run_stateful(
+            &commands,
+            &state,
+            &players,
+            &alice,
+            &format!("scoreboard players set {name} foo {value}"),
+        )
+        .expect("root matched");
+    }
+
+    let targets = |text: &str| -> Vec<Uuid> {
+        run_stateful(&commands, &state, &players, &alice, text)
+            .expect("root matched")
+            .effects
+            .iter()
+            .filter(|d| matches!(d.effect, Effect::SetGameMode(_)))
+            .map(|d| d.target)
+            .collect()
+    };
+
+    // Only bob and carol fall in [8, 17]; dave has no recorded score at all,
+    // so he is excluded even though 30 (his x-position, not a score) would be
+    // out of range anyway — the exclusion must come from the missing score.
+    assert_eq!(targets("gamemode creative @a[scores={foo=8..17}]"), [uuid(2), uuid(3)]);
+    // An exact value is both ends of the range.
+    assert_eq!(targets("gamemode creative @a[scores={foo=10}]"), [uuid(2)]);
+    // The empty map is the vanilla no-op shape: every player matches.
+    assert_eq!(
+        targets("gamemode creative @a[scores={}]"),
+        [uuid(1), uuid(2), uuid(3), uuid(4)]
+    );
+
+    // An objective this scoreboard has never registered matches nobody, not
+    // everybody — the control that the lookup really discriminates rather
+    // than defaulting open.
+    let outcome =
+        run_stateful(&commands, &state, &players, &alice, "gamemode creative @a[scores={bar=0..100}]")
+            .expect("root matched");
+    assert!(!outcome.response.is_ran(), "{outcome:?}");
+}
+
 /// `@s` from a source with **no entity** (the console) is refused as "must be a
 /// player", not as "no player found" — the two are different messages in vanilla
 /// and conflating them tells an RCON admin their world is empty.
