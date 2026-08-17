@@ -79,20 +79,35 @@
 //! `MemoryModuleType.SONIC_BOOM_COOLDOWN` being absent, which is what this
 //! module now implements.
 //!
-//! **Still not built: `Digging`.** `Warden.java`'s `Digging` behavior does
-//! not just play an animation — `Digging.stop` calls
+//! **`Digging` is now built too — the ambiguity this module used to
+//! disclose is resolved.** `Warden.java`'s `Digging` behavior does not just
+//! play an animation — `Digging.stop` calls
 //! `body.remove(Entity.RemovalReason.DISCARDED)`, i.e. a digging warden
-//! **despawns outright**. Its entry condition
+//! **despawns outright**, after [`DIGGING_DURATION_TICKS`] with `Pose::DIGGING`
+//! ([`POSE_DIGGING`], reaching the wire the same way [`POSE_EMERGING`]
+//! already does). Its entry condition
 //! (`ImmutableSet.of(ROAR_TARGET absent, DIG_COOLDOWN absent)` in
 //! `WardenAi::initDiggingActivity`) depends on `MemoryModuleType.DIG_COOLDOWN`'s
-//! *initial* state, which this pass could not pin down from the decompile
-//! alone (`setDigCooldown`'s own `hasMemoryValue` guard only *refreshes* an
-//! already-present cooldown — nothing in `Warden.java` was found setting it
-//! for the first time). Getting that wrong in either direction is worse than
-//! leaving it open: too permissive and every idle warden vanishes within
-//! seconds of spawning; too restrictive and it never triggers at all, same
-//! as today. [`POSE_DIGGING`] is reserved for whoever resolves the
-//! ambiguity — [`DIGGING_COOLDOWN_TICKS`] and the duration are already cited.
+//! *initial* state, which an earlier pass could not pin down from
+//! `Warden.java` alone (`WardenAi.setDigCooldown`'s own `hasMemoryValue`
+//! guard only *refreshes* an already-present cooldown). The actual answer
+//! was one field away: `Warden.finalizeSpawn` unconditionally calls
+//! `this.getBrain().setMemoryWithExpiry(MemoryModuleType.DIG_COOLDOWN,
+//! Unit.INSTANCE, 1200L)` — so the cooldown starts **present**, not absent,
+//! and every warden is dig-ineligible for its first [`DIGGING_COOLDOWN_TICKS`]
+//! (60 real seconds) after spawning. [`resolve_warden_anger`] ports this
+//! directly: [`SimMob::warden_dig_cooldown`](super::SimMob::warden_dig_cooldown)
+//! seeds at [`DIGGING_COOLDOWN_TICKS`], is refreshed back to that value every
+//! tick the warden is [`AngerLevel::Angry`] (`WardenAi.DIG_COOLDOWN_SETTER`'s
+//! own "refresh only while present" shape, running every tick `FIGHT` is
+//! active), and otherwise decays to `0`, at which point an emerged, calm
+//! warden starts digging. **Disclosed narrowing**: the `ROAR_TARGET absent`
+//! half of the real entry condition is not checked — this crate has no
+//! `ROAR`/`INVESTIGATE` activity at all, so digging is gated purely on the
+//! cooldown and the emerge/anger state this module already tracks; a
+//! sub-Angry disturbance (`setDisturbanceLocation`'s own cooldown refresh)
+//! also does not reset the timer, the one case where this module's cooldown
+//! can now run measurably faster than vanilla's.
 //!
 //! **Also still open: a warden can only ever become angry at another
 //! *mob*.** [`SimMob::warden_anger_target`](super::SimMob::warden_anger_target)
@@ -113,11 +128,9 @@
 //! - **Pursuit speed/stop distance**: `lodestone_entity::brain::roster::warden_brain`'s
 //!   own constants (`SCAFFOLD_STROLL_SPEED`, `WARDEN_PURSUIT_CLOSE_ENOUGH`),
 //!   not this module — this module has no movement code of its own.
-//! - **Digging**: resolve `DIG_COOLDOWN`'s initial-state ambiguity above
-//!   first, then reuse [`POSE_DIGGING`]/[`DIGGING_DURATION_TICKS`]/
-//!   [`DIGGING_COOLDOWN_TICKS`] — the same emerge-ticks/pose shape
-//!   [`resolve_warden_anger`] already builds for [`EMERGE_DURATION_TICKS`],
-//!   ending in mob removal rather than a state reset.
+//! - **Digging's own `ROAR`/`INVESTIGATE` gates**: this module's own doc
+//!   names exactly what is not checked; adding either needs those two
+//!   activities to exist first, which is a larger unit than this module.
 //! - **Sonic boom knockback against a player target**: blocked on this
 //!   crate having no mechanism at all to deliver a velocity impulse to a
 //!   player from the server — see [`SONIC_BOOM_KNOCKBACK_HORIZONTAL`]'s own
@@ -178,9 +191,9 @@ pub const EMERGE_DURATION_TICKS: i32 = 134;
 /// frog before `SITTING` at `10` and `ROARING`/`SNIFFING` at `11`/`12`, so
 /// the warden's own two poses land at `13`/`14`.
 pub const POSE_EMERGING: u32 = 13;
-/// See [`POSE_EMERGING`]. Not yet produced by this module — no `Digging`
-/// consumer exists (see the module doc's own disclosed gap) — but named
-/// here so the id is not re-derived when one is built.
+/// See [`POSE_EMERGING`]. Produced by [`SimMob::snapshot`](super::SimMob::snapshot)
+/// while [`SimMob::warden_digging_ticks`](super::SimMob::warden_digging_ticks)
+/// is positive.
 pub const POSE_DIGGING: u32 = 14;
 /// `Pose.STANDING.id()` — vanilla's own default, and what
 /// [`SimMob::snapshot`](super::SimMob::snapshot) sends once
@@ -189,14 +202,15 @@ pub const POSE_DIGGING: u32 = 14;
 /// update — see `MetadataField::Pose`'s own doc).
 pub const POSE_STANDING: u32 = 0;
 
-/// `WardenAi.DIGGING_DURATION` — `Mth.ceil(100.0F)`. Cited for whoever
-/// builds `Digging` (see the module doc's own disclosed ambiguity); nothing
-/// here starts this countdown yet.
+/// `WardenAi.DIGGING_DURATION` — `Mth.ceil(100.0F)`. How long
+/// [`SimMob::warden_digging_ticks`](super::SimMob::warden_digging_ticks)
+/// counts down before [`resolve_warden_anger`] discards the mob.
 pub const DIGGING_DURATION_TICKS: i32 = 100;
-/// `WardenAi.DIGGING_COOLDOWN` — `1200` ticks, refreshed by
-/// `WardenAi.setDigCooldown` whenever `MemoryModuleType.DIG_COOLDOWN` is
-/// already present. See the module doc for why this module does not yet
-/// know when that memory is first set.
+/// `WardenAi.DIGGING_COOLDOWN` — `1200` ticks. `Warden.finalizeSpawn`'s own
+/// initial seed for `MemoryModuleType.DIG_COOLDOWN` (issue #459's resolved
+/// ambiguity — see the module doc), and `WardenAi.setDigCooldown`'s own
+/// refresh-while-present value; [`resolve_warden_anger`] uses this one
+/// constant for both.
 pub const DIGGING_COOLDOWN_TICKS: i32 = 1200;
 
 /// `SonicBoom.COOLDOWN` — ticks after a boom lands before the next one may
@@ -302,6 +316,10 @@ impl<'w> MobSim<'w> {
     /// module's own "no pursuit" gap for the same honesty standard.
     pub(super) fn resolve_warden_anger(&mut self) {
         let mut strikes: Vec<(i32, i32, Vec3)> = Vec::new();
+        // Issue #459's last gap, closed: `Digging.stop`'s own despawn — see
+        // this method's own digging block below and the module doc's
+        // updated account of the resolved `DIG_COOLDOWN` ambiguity.
+        let mut discarded: Vec<i32> = Vec::new();
         for mob in &mut self.mobs {
             if !lodestone_entity::vibration::is_vibration_listener(mob.entity_type.path()) {
                 continue;
@@ -319,6 +337,22 @@ impl<'w> MobSim<'w> {
             if mob.warden_sonic_boom_cooldown > 0 {
                 mob.warden_sonic_boom_cooldown -= 1;
             }
+            // `Digging`'s own countdown, captured *before* decrementing so
+            // the "just finished this tick" and "not digging at all" cases
+            // stay distinguishable below — an in-place `== 0` check after
+            // the decrement cannot tell those apart, and would let a warden
+            // that just finished digging restart one in the same tick.
+            let was_digging = mob.warden_digging_ticks > 0;
+            if was_digging {
+                mob.warden_digging_ticks -= 1;
+                if mob.warden_digging_ticks == 0 {
+                    // `Digging.stop`: `body.remove(RemovalReason.DISCARDED)`
+                    // — a silent despawn, not a death (no loot, no death
+                    // sound), the same `Entity.discard()` shape a creeper's
+                    // own post-explosion removal already uses in this file.
+                    discarded.push(mob.id);
+                }
+            }
             if mob.warden_anger > 0 {
                 mob.warden_anger = (mob.warden_anger - ANGER_DECAY_PER_TICK).max(0);
                 if mob.warden_anger == 0 {
@@ -335,12 +369,47 @@ impl<'w> MobSim<'w> {
                 }
                 mob.warden_anger = (mob.warden_anger + ANGER_INCREASE).min(MAX_ANGER);
             }
+            let angry = AngerLevel::from_anger(mob.warden_anger).is_angry();
+            // `WardenAi.DIG_COOLDOWN_SETTER`/`setDigCooldown`: both refresh
+            // the cooldown back to its full value, but only while it is
+            // already present — once it has naturally expired, nothing
+            // re-arms it. `FIGHT`'s own `DIG_COOLDOWN_SETTER` runs every
+            // tick that activity is active, which this crate approximates
+            // as "every tick this warden is Angry" (this crate's `FIGHT`
+            // has no other trigger — see `warden_brain`'s own doc).
+            // **Disclosed narrowing**: vanilla also refreshes on a sub-Angry
+            // disturbance (`setDisturbanceLocation`, the `INVESTIGATE`
+            // activity this crate does not build) and when a fight target
+            // goes invalid (`onTargetInvalid`) — both already implied by
+            // "still Angry that tick" in the common case, so only a warden
+            // that hears something *without* crossing the Angry threshold
+            // diverges from vanilla's own cooldown timing.
+            if mob.warden_dig_cooldown > 0 {
+                if angry {
+                    mob.warden_dig_cooldown = DIGGING_COOLDOWN_TICKS;
+                } else {
+                    mob.warden_dig_cooldown -= 1;
+                }
+            } else if !was_digging && mob.warden_emerge_ticks == 0 && !angry {
+                // `WardenAi::initDiggingActivity`'s own entry condition,
+                // minus `ROAR_TARGET absent` — this crate has no `ROAR`
+                // activity to check (disclosed narrowing, see the module
+                // doc), so an emerged, calm warden past its cooldown starts
+                // digging unconditionally. `updateActivity`'s own priority
+                // list (`EMERGE, DIG, ROAR, FIGHT, …`) puts `DIG` ahead of
+                // everything this crate does implement.
+                mob.warden_digging_ticks = DIGGING_DURATION_TICKS;
+            }
             if mob.warden_emerge_ticks == 0
-                && AngerLevel::from_anger(mob.warden_anger).is_angry()
+                && mob.warden_digging_ticks == 0
+                && angry
                 && let Some(target) = mob.warden_anger_target
             {
                 strikes.push((mob.id, target, mob.position()));
             }
+        }
+        if !discarded.is_empty() {
+            self.mobs.retain(|m| !discarded.contains(&m.id));
         }
         for (warden_id, target_id, warden_pos) in strikes {
             // The target may no longer exist (a corpse-derived suspect never
@@ -810,5 +879,81 @@ mod warden_anger_tests {
             source: Some(1),
         };
         assert_eq!(v.source, Some(1));
+    }
+
+    /// Issue #459's resolved ambiguity, end to end through the real
+    /// production `MobSim::tick` path: a warden left completely alone
+    /// (never fought, never disturbed) past its emerge window and the full
+    /// `DIGGING_COOLDOWN_TICKS` becomes digging-eligible, reports the real
+    /// `Pose.DIGGING` ordinal, and despawns outright once
+    /// `DIGGING_DURATION_TICKS` elapses — `Digging.stop`'s own
+    /// `Entity.RemovalReason.DISCARDED`, not a state reset back to
+    /// `IDLING`.
+    #[test]
+    fn an_undisturbed_warden_eventually_digs_and_despawns() {
+        use crate::protocol::MetadataField;
+
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let warden = spawn(&mut sim, "warden", Vec3::new(0.0, 0.0, 0.0));
+
+        let mut saw_digging_pose = false;
+        for _ in 0..(EMERGE_DURATION_TICKS + DIGGING_COOLDOWN_TICKS) {
+            sim.tick();
+            if sim
+                .get(warden)
+                .expect("still alive before the dig completes")
+                .snapshot()
+                .metadata
+                .contains(&MetadataField::Pose(POSE_DIGGING))
+            {
+                saw_digging_pose = true;
+                break;
+            }
+        }
+        assert!(
+            saw_digging_pose,
+            "an undisturbed warden must eventually start digging and report the real Pose.DIGGING ordinal"
+        );
+
+        for _ in 0..DIGGING_DURATION_TICKS {
+            sim.tick();
+        }
+        assert!(
+            sim.get(warden).is_none(),
+            "a warden that finishes digging must despawn outright, not merely reset its pose"
+        );
+    }
+
+    /// **Control**: a warden kept angry throughout the whole cooldown window
+    /// must never let `warden_dig_cooldown` reach zero —
+    /// `WardenAi.DIG_COOLDOWN_SETTER`'s own "refresh only while present"
+    /// shape, ported directly. Without this refresh, the positive test above
+    /// would pass for the wrong reason (any warden digs eventually,
+    /// regardless of how much fighting it did).
+    #[test]
+    fn a_continuously_angry_warden_never_lets_the_dig_cooldown_expire() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let warden = spawn(&mut sim, "warden", Vec3::new(0.0, 0.0, 0.0));
+        let victim = spawn(&mut sim, "zombie", Vec3::new(5.0, 0.0, 0.0));
+
+        for _ in 0..(EMERGE_DURATION_TICKS + DIGGING_COOLDOWN_TICKS) {
+            // Re-arms anger directly every tick, standing in for a
+            // continuous stream of heard vibrations — the substrate itself
+            // is already covered by `vibration_substrate_tests`; this
+            // test's own job is the cooldown-refresh interaction, not
+            // re-proving delivery.
+            if let Some(m) = sim.get_mut(warden) {
+                m.warden_anger = MAX_ANGER;
+                m.warden_anger_target = Some(victim);
+            }
+            sim.tick();
+            assert_ne!(
+                sim.get(warden).expect("alive").warden_dig_cooldown,
+                0,
+                "a continuously angry warden must never let its dig cooldown reach zero"
+            );
+        }
     }
 }
