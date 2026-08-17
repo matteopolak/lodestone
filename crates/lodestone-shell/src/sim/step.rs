@@ -656,6 +656,16 @@ impl Sim {
                 self.conduit_ticks.tick(&conduits, |pos| {
                     crate::block_entities::conduit_scan_frame(&handle, pos)
                 });
+                // Spawner/trial-spawner spin, on the same fixed 20 Hz:
+                // `BaseSpawner.clientTick`'s own rate term
+                // (`1000 / (spawnDelay + 200)`) is a per-tick advance, so a
+                // per-frame one would spin every cage faster at 60 fps than
+                // at 20. `spawner_tick_candidates` reads world state (a
+                // proximity test plus each candidate's own `SpawnData` NBT)
+                // rather than the wire, exactly as `enchanting_table_books`
+                // does above.
+                let spawner_tick_rows = crate::block_entities::spawner_tick_candidates(&handle, eye);
+                self.spawner_spins.tick(&spawner_tick_rows);
             }
             // The HUD status effects and the title/action-bar overlays used to be
             // aged by three hand-written `tick(1)` calls right here. They are now

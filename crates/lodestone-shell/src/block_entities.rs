@@ -337,6 +337,710 @@ impl BellShakes {
     }
 }
 
+/// `BaseSpawner.DEFAULT_REQUIRED_PLAYER_RANGE` — vanilla's own default for
+/// `isNearPlayer`, applied unconditionally rather than read per-position from
+/// `RequiredPlayerRange` NBT (see [`SpawnerSpins`]'s "Simplifications" doc).
+const SPAWNER_REQUIRED_PLAYER_RANGE: f32 = 16.0;
+
+/// `BaseSpawner.DEFAULT_MIN_SPAWN_DELAY` — the fallback when a spawner's own
+/// `MinSpawnDelay` field is absent from its NBT.
+const SPAWNER_DEFAULT_MIN_SPAWN_DELAY: f32 = 200.0;
+
+/// One spawner/trial-spawner block entity's parsed `SpawnData`: the display
+/// entity's type path (for [`spawner_mob_spawn`]) and `MinSpawnDelay` (for
+/// [`SpawnerSpins`]'s tick-rate formula) — everything this module needs out
+/// of `BaseSpawner.load`'s saved NBT.
+#[derive(Debug, Clone, PartialEq)]
+struct SpawnerData {
+    /// `None` when neither `SpawnData` nor the first `SpawnPotentials` entry
+    /// carries an `entity.id` — `BaseSpawner.getOrCreateDisplayEntity`'s own
+    /// "nothing to draw" case (`entityToSpawn.getString("id").isEmpty()`).
+    entity_type: Option<String>,
+    min_spawn_delay: f32,
+}
+
+/// A compound's field by name, in wire order — the same linear scan
+/// [`campfire_items`]/[`banner_patterns`] already use inline; factored out
+/// here because [`spawner_data`] reaches for it four times.
+fn nbt_field<'a>(fields: &'a [(String, lodestone_core::Nbt)], key: &str) -> Option<&'a lodestone_core::Nbt> {
+    fields.iter().find(|(name, _)| name == key).map(|(_, v)| v)
+}
+
+/// Any NBT integer type widened to `i64` — `BaseSpawner.load` reads
+/// `MinSpawnDelay` with `getIntOr`, but `BaseSpawner.save` always writes it
+/// with `putShort`, so the tag actually on the wire is a `Short`; this
+/// accepts any integer width rather than assuming which.
+fn nbt_as_i64(v: &lodestone_core::Nbt) -> Option<i64> {
+    use lodestone_core::Nbt;
+    match v {
+        Nbt::Byte(b) => Some(i64::from(*b)),
+        Nbt::Short(s) => Some(i64::from(*s)),
+        Nbt::Int(i) => Some(i64::from(*i)),
+        Nbt::Long(l) => Some(*l),
+        _ => None,
+    }
+}
+
+/// `SpawnData`'s own shape (`SpawnData.CODEC`): `{ entity: { id: "...", .. },
+/// custom_spawn_rules?, equipment? }`. Reads just the `entity.id` this module
+/// needs to pick a model.
+fn spawn_data_entity_id(spawn_data: &lodestone_core::Nbt) -> Option<String> {
+    use lodestone_core::Nbt;
+    let Nbt::Compound(fields) = spawn_data else {
+        return None;
+    };
+    let Nbt::Compound(entity) = nbt_field(fields, "entity")? else {
+        return None;
+    };
+    match nbt_field(entity, "id")? {
+        Nbt::String(id) => Some(id.clone()),
+        _ => None,
+    }
+}
+
+/// `BaseSpawner.load`'s saved NBT (mob spawner) **or**
+/// `TrialSpawnerStateData.getUpdateTag`'s (trial spawner), parsed into what
+/// this module needs. The two block types disagree on almost everything
+/// about this NBT — the field name's case, whether a weighted-list fallback
+/// exists, whether `MinSpawnDelay` exists at all — but never on the same
+/// position (a state id is one block or the other, never both), so one
+/// function trying every key in turn is simpler than branching the caller on
+/// block identity first.
+///
+/// * **Entity type**: `SpawnData` (`BaseSpawner.nextSpawnData`, PascalCase)
+///   first, falling back to the first `SpawnPotentials` weighted entry
+///   (`Weighted<SpawnData>`'s own `data`/`weight` shape) — the mob spawner's
+///   own fallback order (`BaseSpawner.getOrCreateNextSpawnData`). Then
+///   `spawn_data` (`TrialSpawnerStateData.TAG_SPAWN_DATA`, snake_case) — the
+///   trial spawner's sole source; it has **no** synced weighted-list
+///   fallback, because `TrialSpawnerConfig`'s `spawn_potentials_definition`
+///   is a datapack-defined resource never sent to the client at all
+///   (`TrialSpawnerStateData.getUpdateTag` writes only `spawn_data` and
+///   `next_mob_spawns_at`). A trial spawner nobody has stood near long
+///   enough to roll a `spawn_data` therefore has no display entity, matching
+///   `getOrCreateDisplayEntity`'s own `entityToSpawn.getString("id").isEmpty()`
+///   miss.
+/// * **`min_spawn_delay`**: `MinSpawnDelay`, mob-spawner-only —
+///   [`SPAWNER_DEFAULT_MIN_SPAWN_DELAY`] otherwise, which covers the trial
+///   spawner too (see [`SpawnerSpins`]'s "Simplifications" doc for why its
+///   spin envelope reuses the mob spawner's constant rather than porting
+///   `TrialSpawner.tickClient`'s timestamp-difference formula).
+#[must_use]
+fn spawner_data(nbt: &lodestone_core::Nbt) -> SpawnerData {
+    use lodestone_core::Nbt;
+    let Nbt::Compound(fields) = nbt else {
+        return SpawnerData {
+            entity_type: None,
+            min_spawn_delay: SPAWNER_DEFAULT_MIN_SPAWN_DELAY,
+        };
+    };
+    let entity_type = nbt_field(fields, "SpawnData")
+        .and_then(spawn_data_entity_id)
+        .or_else(|| {
+            let Nbt::List { elements, .. } = nbt_field(fields, "SpawnPotentials")? else {
+                return None;
+            };
+            elements.iter().find_map(|entry| {
+                let Nbt::Compound(entry) = entry else {
+                    return None;
+                };
+                spawn_data_entity_id(nbt_field(entry, "data")?)
+            })
+        })
+        .or_else(|| nbt_field(fields, "spawn_data").and_then(spawn_data_entity_id));
+    let min_spawn_delay = nbt_field(fields, "MinSpawnDelay")
+        .and_then(nbt_as_i64)
+        .map(|v| v as f32)
+        .unwrap_or(SPAWNER_DEFAULT_MIN_SPAWN_DELAY);
+    SpawnerData {
+        entity_type,
+        min_spawn_delay,
+    }
+}
+
+/// `TrialSpawnerBlock.STATE`'s `trial_spawner_state` property value, or
+/// `None` for a state with no such property (every mob-spawner state, and
+/// anything that is not a spawner at all).
+#[must_use]
+fn trial_spawner_state_property(state_id: u32) -> Option<&'static str> {
+    let props = lodestone_data::block_states::properties(state_id)?;
+    props
+        .iter()
+        .find(|(name, _)| *name == "trial_spawner_state")
+        .map(|(_, value)| *value)
+}
+
+/// `TrialSpawnerState.spinningMobSpeed()`/`hasSpinningMob()` — vanilla's
+/// per-state numerator for the spin-rate formula, `None` for a state with no
+/// spinning mob at all (`spinningMobSpeed() < 0.0`). Only
+/// `waiting_for_players` (`200.0`) and `active` (`1000.0`) qualify;
+/// `inactive`, `waiting_for_reward_ejection`, `ejecting_reward` and
+/// `cooldown` all draw an empty cage regardless of whether NBT still names a
+/// display entity — the state gates the draw, not just the rate.
+#[must_use]
+fn trial_spawner_spin_speed(state_id: u32) -> Option<f32> {
+    match trial_spawner_state_property(state_id)? {
+        "waiting_for_players" => Some(200.0),
+        "active" => Some(1000.0),
+        _ => None,
+    }
+}
+
+/// This position's spin-rate numerator and whether it is currently eligible
+/// to show a display entity at all — `None` for a mob-spawner state (which
+/// has no such gate; every mob spawner with a display entity spins) wrapped
+/// as `Some(1000.0)`, and [`trial_spawner_spin_speed`] for a trial spawner.
+/// `None` overall for anything that is not a spawner-family block, or a
+/// trial spawner in a non-spinning state.
+#[must_use]
+fn spawner_spin_speed(state_id: u32) -> Option<f32> {
+    match lodestone_data::block_states::block_name(state_id)? {
+        "minecraft:spawner" => Some(1000.0),
+        "minecraft:trial_spawner" => trial_spawner_spin_speed(state_id),
+        _ => None,
+    }
+}
+
+/// [`lodestone_render::spawner_display_scale`], resolved from a type path via
+/// [`lodestone_data::entity_dimensions`]. An unresolvable type (a future or
+/// malformed entity id) falls back to the base `0.53125` — the `max_len >
+/// 1.0` branch needs real dimensions to trigger, so an unknown type never
+/// under-shrinks into visible overflow, only misses a shrink it might have
+/// deserved.
+#[must_use]
+fn spawner_mob_scale(entity_type: &str) -> f32 {
+    match lodestone_data::entity_type::EntityType::from_name(entity_type) {
+        Some(t) => {
+            let dims = lodestone_data::entity_dimensions::base_dimensions_for(t);
+            lodestone_render::spawner_display_scale(dims.width, dims.height)
+        }
+        None => lodestone_render::spawner_display_scale(0.0, 0.0),
+    }
+}
+
+/// One spawner/trial-spawner's spin state — `BaseSpawner`'s `spin`/`oSpin`
+/// plus `spawnDelay`, the fields `clientTick` reads and writes every tick.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Spin {
+    spin: f32,
+    /// `oSpin`: the value at the start of the current tick, for the
+    /// partial-tick lerp — same convention as [`Lid::previous`]/
+    /// [`Shake::previous`].
+    previous: f32,
+    /// `BaseSpawner.spawnDelay`, decremented while near a player with a
+    /// display entity, and reset to `min_spawn_delay` by a `BLOCK_EVENT`
+    /// `b0 == 1` (`onEventTriggered`).
+    spawn_delay: f32,
+    min_spawn_delay: f32,
+}
+
+impl Default for Spin {
+    fn default() -> Self {
+        Spin {
+            spin: 0.0,
+            previous: 0.0,
+            spawn_delay: SPAWNER_DEFAULT_MIN_SPAWN_DELAY,
+            min_spawn_delay: SPAWNER_DEFAULT_MIN_SPAWN_DELAY,
+        }
+    }
+}
+
+/// Per-position spawner/trial-spawner spin state — `BaseSpawner.clientTick`,
+/// advanced once per client tick, plus its `onEventTriggered` `BLOCK_EVENT`
+/// reset. The spawner sibling of [`ChestLids`]/[`BellShakes`], but its tick
+/// needs the **world** (a proximity test and the NBT-derived
+/// `MinSpawnDelay`) rather than the packet stream alone — see
+/// [`Self::tick`]/[`spawner_tick_candidates`].
+///
+/// # Simplifications from the real `BaseSpawner`
+///
+/// * **Local player only**, for `isNearPlayer` — the same simplification
+///   [`EnchantingTableBooks::tick`]'s own doc records for its nearest-player
+///   check. A remote player standing at a spawner the local player cannot
+///   see leaves its mob frozen.
+/// * **`RequiredPlayerRange` is not read from NBT.**
+///   [`SPAWNER_REQUIRED_PLAYER_RANGE`] is vanilla's own default (`16`)
+///   applied unconditionally; a datapack-customised spawner spins at the
+///   vanilla rate but wakes at the vanilla radius rather than its own.
+/// * **The `near`-but-no-`displayEntity` edge case is folded into `near`
+///   itself** rather than kept as vanilla's third branch (`oSpin` left
+///   untouched from whenever it was last set): since nothing draws without a
+///   display entity either way, the two are visually indistinguishable, and
+///   folding them keeps [`Self::tick`] a single `if` rather than three arms.
+/// * **The trial spawner's real spin-rate formula is not ported.**
+///   `TrialSpawner.tickClient` computes `spawnDelay` from
+///   `max(0, nextMobSpawnsAt - level.getGameTime())` — a difference against
+///   the **server's** absolute world age, which this client does not track
+///   in sync with the server's clock (the local tick counter
+///   [`Sim::beacon_source`] uses for its own scroll cycle is a *local*
+///   count, not `level.getGameTime()`, and the two drift apart from the
+///   moment of login). Porting the real formula would need that sync built
+///   first. Trial spawners share the mob spawner's decrementing-counter
+///   envelope instead (`spawn_delay` counts down from
+///   [`SPAWNER_DEFAULT_MIN_SPAWN_DELAY`], since no `MinSpawnDelay`-shaped
+///   NBT exists for a trial spawner to override it), with vanilla's real
+///   per-state numerator (`200.0`/`1000.0`,
+///   [`trial_spawner_spin_speed`]) substituted for the mob spawner's
+///   constant `1000.0`. The result spins at a real, bounded, non-static
+///   rate in the right ballpark, but its exact phase will not match a real
+///   client standing beside the same trial spawner.
+#[derive(Debug, Default, Clone)]
+pub struct SpawnerSpins {
+    spins: HashMap<[i32; 3], Spin>,
+}
+
+impl SpawnerSpins {
+    /// An empty set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `BaseSpawner.onEventTriggered`: `id == 1` resets `spawnDelay` to
+    /// `minSpawnDelay`. Returns whether this was a spawner event; every other
+    /// `b0` belongs to some other block type and is ignored here, matching
+    /// the sibling trackers' own `apply_block_event`.
+    pub fn apply_block_event(&mut self, pos: [i32; 3], b0: u8, _b1: u8) -> bool {
+        if b0 != 1 {
+            return false;
+        }
+        let entry = self.spins.entry(pos).or_default();
+        entry.spawn_delay = entry.min_spawn_delay;
+        true
+    }
+
+    /// Advances every tracked spawner one client tick.
+    ///
+    /// `tracked` is every spawner/trial-spawner candidate this tick — see
+    /// [`spawner_tick_candidates`] — as `(pos, near_player, min_spawn_delay,
+    /// has_display_entity, speed)`. `speed` is the formula's numerator
+    /// (`BaseSpawner`'s constant `1000.0`, or
+    /// [`trial_spawner_spin_speed`]'s per-state `200.0`/`1000.0`) — see
+    /// [`spawner_spin_speed`]. A position absent from `tracked` is dropped:
+    /// the same eviction [`ChestLids`]/[`BellShakes`] apply, bounded here by
+    /// [`VIEW_DISTANCE`] (via the candidate gather) rather than a
+    /// settled-state test, since a spawner's spin never settles — it only
+    /// freezes while nobody is near (or, for a trial spawner, while its
+    /// state has no spinning mob at all).
+    pub fn tick(&mut self, tracked: &[([i32; 3], bool, f32, bool, f32)]) {
+        let present: std::collections::HashSet<[i32; 3]> =
+            tracked.iter().map(|(pos, ..)| *pos).collect();
+        self.spins.retain(|pos, _| present.contains(pos));
+        for &(pos, near, min_spawn_delay, has_entity, speed) in tracked {
+            let entry = self.spins.entry(pos).or_insert_with(|| Spin {
+                spawn_delay: min_spawn_delay,
+                min_spawn_delay,
+                ..Spin::default()
+            });
+            entry.min_spawn_delay = min_spawn_delay;
+            entry.previous = entry.spin;
+            if near && has_entity {
+                if entry.spawn_delay > 0.0 {
+                    entry.spawn_delay -= 1.0;
+                }
+                entry.spin = (entry.spin + speed / (entry.spawn_delay + 200.0)) % 360.0;
+            }
+        }
+    }
+
+    /// This tick's raw `(previous, spin)` pair for `pos` — `(0.0, 0.0)` for an
+    /// untracked position, matching a spawner nobody has been near yet
+    /// (`BaseSpawner`'s own fields start at `0.0`).
+    #[must_use]
+    fn raw(&self, pos: [i32; 3]) -> (f32, f32) {
+        match self.spins.get(&pos) {
+            Some(s) => (s.previous, s.spin),
+            None => (0.0, 0.0),
+        }
+    }
+
+    /// Number of tracked spawners (for stats and tests).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.spins.len()
+    }
+
+    /// Whether nothing is being tracked.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.spins.is_empty()
+    }
+}
+
+/// Every spawner/trial-spawner position within [`VIEW_DISTANCE`] of `player`
+/// worth ticking this frame, as `(pos, near, min_spawn_delay, has_entity,
+/// speed)` — see [`SpawnerSpins::tick`] for the shape.
+///
+/// **`near` means different things for the two block families.**
+/// `BaseSpawner.clientTick` really does gate a mob spawner's advance on
+/// `isNearPlayer` (within [`SPAWNER_REQUIRED_PLAYER_RANGE`]); a trial
+/// spawner has no such gate at all — `TrialSpawner.tickClient` advances
+/// unconditionally whenever `currentState.hasSpinningMob()` — so `near` is
+/// simply `true` there whenever [`spawner_spin_speed`] returns a rate.
+/// Folding both into one `near` bool rather than a `bool` and a separate
+/// `state_permits_spin` bool is what lets a single [`SpawnerSpins::tick`]
+/// serve both families with one `if near && has_entity` — the "state
+/// permits" half is already baked into `has_entity` being `false` when
+/// [`spawner_spin_speed`] misses.
+///
+/// Reuses [`spawner_candidates`] rather than a fourth NBT-aware scan: the
+/// render-time gather ([`spawner_mob_spawns`]) and this tick-time one differ
+/// only in what they do with the same rows.
+#[must_use]
+pub fn spawner_tick_candidates(
+    handle: &SharedHandle,
+    player: Vec3,
+) -> Vec<([i32; 3], bool, f32, bool, f32)> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+    let candidates = {
+        let world = store.read();
+        spawner_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            player,
+        )
+    };
+    let cutoff = SPAWNER_REQUIRED_PLAYER_RANGE * SPAWNER_REQUIRED_PLAYER_RANGE;
+    candidates
+        .into_iter()
+        .filter_map(|(pos, state_id, data)| {
+            let speed = spawner_spin_speed(state_id)?;
+            let is_trial = lodestone_data::block_states::block_name(state_id)
+                == Some("minecraft:trial_spawner");
+            let near = if is_trial {
+                true
+            } else {
+                let centre = Vec3::new(
+                    pos[0] as f32 + 0.5,
+                    pos[1] as f32 + 0.5,
+                    pos[2] as f32 + 0.5,
+                );
+                centre.distance_squared(player) <= cutoff
+            };
+            Some((pos, near, data.min_spawn_delay, data.entity_type.is_some(), speed))
+        })
+        .collect()
+}
+
+/// Every spawner/trial-spawner position within [`VIEW_DISTANCE`], paired with
+/// its block state and parsed [`SpawnerData`] — the NBT-aware candidate
+/// gather [`spawner_mob_spawns`]/[`spawner_tick_candidates`] both build on,
+/// the same shape [`campfire_candidates`]/[`sign_candidates`] already use for
+/// the same reason: [`chest_candidates`] discards `be.nbt`, and this
+/// renderer's *entire* appearance (which mob, and how fast it spins) lives in
+/// there.
+#[must_use]
+fn spawner_candidates(
+    world: &World,
+    chunks: impl IntoIterator<Item = ChunkPos>,
+    eye: Vec3,
+) -> Vec<([i32; 3], u32, SpawnerData)> {
+    let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
+    let mut candidates = Vec::new();
+    for pos in chunks {
+        let Some(chunk) = world.get(pos) else {
+            continue;
+        };
+        for be in &chunk.block_entities {
+            let x = pos.x * 16 + i32::from(be.rel_x);
+            let z = pos.z * 16 + i32::from(be.rel_z);
+            let y = i32::from(be.y);
+            let centre = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+            if centre.distance_squared(eye) > cutoff {
+                continue;
+            }
+            let state_id = chunk
+                .column
+                .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            candidates.push(([x, y, z], state_id, spawner_data(&be.nbt)));
+        }
+    }
+    candidates
+}
+
+/// One candidate resolved into a [`lodestone_render::SpawnerMobSpawn`], or
+/// `None` if the state at that position is neither a spawner nor a trial
+/// spawner, it has no display entity to draw
+/// (`SpawnData.getEntityToSpawn().getString("id").isEmpty()`'s own "draw
+/// nothing" case), or — trial spawner only — its current
+/// `trial_spawner_state` has no spinning mob at all
+/// (`TrialSpawnerState.hasSpinningMob()`; see [`spawner_spin_speed`]). That
+/// last clause is real state gating the draw, not just the rate: an
+/// `inactive`/`waiting_for_reward_ejection`/`ejecting_reward`/`cooldown`
+/// trial spawner must draw an empty cage even if its NBT still names a
+/// display entity from an earlier `active` phase.
+#[must_use]
+fn spawner_mob_spawn(
+    block: [i32; 3],
+    state_id: u32,
+    data: &SpawnerData,
+    spins: &SpawnerSpins,
+    partial_tick: f32,
+    light: u8,
+) -> Option<lodestone_render::SpawnerMobSpawn> {
+    spawner_spin_speed(state_id)?;
+    let entity_type = data.entity_type.clone()?;
+    let (previous, spin) = spins.raw(block);
+    let spin_deg = lodestone_render::spawner_spin_degrees(previous, spin, partial_tick);
+    let scale = spawner_mob_scale(&entity_type);
+    Some(lodestone_render::SpawnerMobSpawn {
+        pos: block,
+        entity_type,
+        spin_deg,
+        scale,
+        light,
+    })
+}
+
+/// Every spawner/trial-spawner's miniature display mob to draw this frame,
+/// gathered from the client-owned world's block-entity records. Same shape
+/// as [`chest_spawns`]/[`bell_spawns`]: a distance-gated, NBT-aware scan plus
+/// a light sample, sorted by position for deterministic pixel-gate ordering.
+#[must_use]
+pub fn spawner_mob_spawns(
+    handle: &SharedHandle,
+    spins: &SpawnerSpins,
+    eye: Vec3,
+    partial_tick: f32,
+) -> Vec<lodestone_render::SpawnerMobSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+    let candidates = {
+        let world = store.read();
+        spawner_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+    let mut out = Vec::new();
+    for (block, state_id, data) in candidates {
+        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        if let Some(spawn) = spawner_mob_spawn(block, state_id, &data, spins, partial_tick, light) {
+            out.push(spawn);
+        }
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
+#[cfg(test)]
+mod spawner_tests {
+    use super::*;
+
+    fn compound(fields: Vec<(&str, lodestone_core::Nbt)>) -> lodestone_core::Nbt {
+        lodestone_core::Nbt::Compound(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        )
+    }
+
+    fn spawn_data_nbt(entity_id: &str) -> lodestone_core::Nbt {
+        compound(vec![(
+            "entity",
+            compound(vec![("id", lodestone_core::Nbt::String(entity_id.to_string()))]),
+        )])
+    }
+
+    /// `SpawnData` (PascalCase, mob spawner) is read straight off `entity.id`.
+    #[test]
+    fn spawner_data_reads_spawn_data_entity_id() {
+        let nbt = compound(vec![("SpawnData", spawn_data_nbt("minecraft:pig"))]);
+        let data = spawner_data(&nbt);
+        assert_eq!(data.entity_type.as_deref(), Some("minecraft:pig"));
+    }
+
+    /// With no `SpawnData`, the first `SpawnPotentials` entry's `data.entity.id`
+    /// is the fallback — `BaseSpawner.getOrCreateNextSpawnData`'s own order.
+    #[test]
+    fn spawner_data_falls_back_to_the_first_spawn_potential() {
+        let potentials = lodestone_core::Nbt::List {
+            element_type: lodestone_core::NbtTag::Compound,
+            elements: vec![compound(vec![
+                ("data", spawn_data_nbt("minecraft:skeleton")),
+                ("weight", lodestone_core::Nbt::Int(1)),
+            ])],
+        };
+        let nbt = compound(vec![("SpawnPotentials", potentials)]);
+        let data = spawner_data(&nbt);
+        assert_eq!(data.entity_type.as_deref(), Some("minecraft:skeleton"));
+    }
+
+    /// `spawn_data` (snake_case) is the trial spawner's own key, and it has no
+    /// `SpawnPotentials`-shaped fallback — see [`spawner_data`]'s doc.
+    #[test]
+    fn spawner_data_reads_trial_spawners_snake_case_key() {
+        let nbt = compound(vec![("spawn_data", spawn_data_nbt("minecraft:zombie"))]);
+        let data = spawner_data(&nbt);
+        assert_eq!(data.entity_type.as_deref(), Some("minecraft:zombie"));
+    }
+
+    /// Neither key present: no display entity, matching
+    /// `entityToSpawn.getString("id").isEmpty()`'s own "draw nothing".
+    #[test]
+    fn spawner_data_with_neither_key_has_no_entity_type() {
+        let data = spawner_data(&compound(vec![]));
+        assert_eq!(data.entity_type, None);
+    }
+
+    fn trial_spawner_state(state: &str) -> u32 {
+        lodestone_data::block_states::state_id(&format!(
+            "minecraft:trial_spawner[ominous=false,trial_spawner_state={state}]"
+        ))
+        .unwrap_or_else(|| panic!("trial_spawner_state={state} must be a real state"))
+    }
+
+    /// Vanilla's own two spinning states and their numerators
+    /// (`TrialSpawnerState.spinningMobSpeed()`), predicted from the enum
+    /// constants read out of the real jar source, not a remembered pair.
+    #[test]
+    fn trial_spawner_spin_speed_matches_the_two_spinning_states() {
+        assert_eq!(
+            trial_spawner_spin_speed(trial_spawner_state("waiting_for_players")),
+            Some(200.0)
+        );
+        assert_eq!(trial_spawner_spin_speed(trial_spawner_state("active")), Some(1000.0));
+    }
+
+    /// The four non-spinning states all miss — `hasSpinningMob()`'s own
+    /// `spinningMobSpeed() >= 0.0` gate, ported as a `None`.
+    #[test]
+    fn trial_spawner_spin_speed_is_none_for_every_non_spinning_state() {
+        for state in [
+            "inactive",
+            "waiting_for_reward_ejection",
+            "ejecting_reward",
+            "cooldown",
+        ] {
+            assert_eq!(
+                trial_spawner_spin_speed(trial_spawner_state(state)),
+                None,
+                "state {state} must not spin"
+            );
+        }
+    }
+
+    /// The mob spawner has no such state gate at all: every state (there is
+    /// only one) resolves to the constant `1000.0`.
+    #[test]
+    fn plain_spawner_always_has_the_constant_speed() {
+        let id = lodestone_data::block_states::state_id("minecraft:spawner").expect("spawner");
+        assert_eq!(spawner_spin_speed(id), Some(1000.0));
+    }
+
+    /// `spawner_mob_spawn`'s real gate: a trial spawner in `cooldown` must draw
+    /// nothing even though its NBT still names a display entity from an
+    /// earlier `active` phase — this is the exact clause the pixel gate
+    /// (`trial_spawner_mob_pixels.rs`) proves reaches real pixels.
+    #[test]
+    fn a_cooldown_trial_spawner_draws_nothing_regardless_of_stale_spawn_data() {
+        let data = SpawnerData {
+            entity_type: Some("minecraft:pig".to_string()),
+            min_spawn_delay: SPAWNER_DEFAULT_MIN_SPAWN_DELAY,
+        };
+        let spins = SpawnerSpins::new();
+        let spawn = spawner_mob_spawn(
+            [0, 0, 0],
+            trial_spawner_state("cooldown"),
+            &data,
+            &spins,
+            0.0,
+            lodestone_render::ENTITY_FULLBRIGHT,
+        );
+        assert!(
+            spawn.is_none(),
+            "a cooldown trial spawner must draw an empty cage, not the stale display entity"
+        );
+    }
+
+    /// The same position in `active` state, same NBT: it does draw.
+    #[test]
+    fn an_active_trial_spawner_with_spawn_data_draws() {
+        let data = SpawnerData {
+            entity_type: Some("minecraft:pig".to_string()),
+            min_spawn_delay: SPAWNER_DEFAULT_MIN_SPAWN_DELAY,
+        };
+        let spins = SpawnerSpins::new();
+        let spawn = spawner_mob_spawn(
+            [0, 0, 0],
+            trial_spawner_state("active"),
+            &data,
+            &spins,
+            0.0,
+            lodestone_render::ENTITY_FULLBRIGHT,
+        );
+        assert_eq!(spawn.map(|s| s.entity_type), Some("minecraft:pig".to_string()));
+    }
+
+    /// `SpawnerSpins::apply_block_event`/`tick`: a `BLOCK_EVENT` `b0 == 1`
+    /// resets `spawn_delay` to `min_spawn_delay`, and ticking while `near` and
+    /// `has_entity` advances `spin` by the predicted amount — magnitude
+    /// prediction from the formula's own constants, not a sign check.
+    #[test]
+    fn tick_advances_spin_by_the_formula_from_outside_constants() {
+        let mut spins = SpawnerSpins::new();
+        let pos = [1, 2, 3];
+        // First tick: spawn_delay starts at min_spawn_delay (200), so the
+        // formula's own first step decrements it to 199 *before* dividing —
+        // `BaseSpawner.clientTick`'s `if (spawnDelay > 0) spawnDelay--;` runs
+        // before the `spin +=` line, not after.
+        spins.tick(&[(pos, true, 200.0, true, 1000.0)]);
+        let (_, spin_after_one) = spins.raw(pos);
+        let expected = 1000.0 / (199.0 + 200.0);
+        assert!(
+            (spin_after_one - expected).abs() < 1e-4,
+            "spin was {spin_after_one}, expected {expected}"
+        );
+
+        // A BLOCK_EVENT b0==1 resets spawn_delay back to min_spawn_delay.
+        spins.apply_block_event(pos, 1, 0);
+        spins.tick(&[(pos, true, 200.0, true, 1000.0)]);
+        let (previous_after_reset, spin_after_reset) = spins.raw(pos);
+        assert!(
+            (previous_after_reset - spin_after_one).abs() < 1e-4,
+            "previous must be last tick's spin, for the partial-tick lerp"
+        );
+        // The reset put `spawn_delay` back to `min_spawn_delay` (200), so this
+        // tick's decrement-then-divide is identical to the first tick's:
+        // `199.0 + 200.0` again, not `199.0` alone.
+        let expected_after_reset = spin_after_one + expected;
+        assert!(
+            (spin_after_reset - expected_after_reset).abs() < 1e-4,
+            "spin was {spin_after_reset}, expected {expected_after_reset}"
+        );
+    }
+
+    /// A far mob spawner (not near) freezes: `spin` does not move, matching
+    /// `BaseSpawner.clientTick`'s `oSpin = spin;` branch.
+    #[test]
+    fn a_spawner_nobody_is_near_freezes() {
+        let mut spins = SpawnerSpins::new();
+        let pos = [5, 5, 5];
+        spins.tick(&[(pos, true, 200.0, true, 1000.0)]);
+        let (_, spin_before) = spins.raw(pos);
+        spins.tick(&[(pos, false, 200.0, true, 1000.0)]);
+        let (_, spin_after) = spins.raw(pos);
+        assert_eq!(spin_before, spin_after, "spin must not move while not near");
+    }
+}
+
 /// `EnchantingTableBlockEntity.bookAnimationTick`'s trigger radius, in blocks:
 /// `level.getNearestPlayer(x + 0.5, y + 0.5, z + 0.5, 3.0, false)`.
 ///

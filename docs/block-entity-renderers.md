@@ -8,6 +8,17 @@ prepared but not yet wired" line this paragraph used to carry was itself stale**
 file was next read — `a8068c5` wired it in the same session that sentence was written and nobody
 came back to fix the summary at the top, exactly the staleness class `CLAUDE.md` warns is the most
 common defect in this repo's own written record. Read the per-type sections below, not this
+
+**Mob spawner and trial spawner are now landed and wired end to end** (18 of 26 registrations) — see
+[Mob spawner](#mob-spawner) and [Trial spawner](#trial-spawner). Both are the spinning miniature
+display mob only: unlike every type above, neither block's cage is a hole in the world or even a
+partial one — `models/block/spawner.json`/`trial_spawner.json` are real block models with genuine
+geometry, drawn by the ordinary terrain mesher regardless of this pass, including the trial
+spawner's own per-state/`ominous` texture selection. So this pair needed no `BlockEntityModelSet`
+work at all; it reuses the **ordinary mob** `EntityPipeline` at a nested placement
+(`lodestone_render::spawner_display_outer_matrix`, composed with the entity's own
+`entity_model_matrix`) — the first block-entity type in this issue to draw through neither
+`prepare_block_entities` nor a dedicated procedural pass like the beacon's.
 paragraph's memory of them.
 
 **Bell is now fully wired, including its `BLOCK_EVENT` trigger, and the paragraph that used to sit
@@ -93,7 +104,10 @@ the item path. **Decorated pot makes 14 and conduit makes 15** (see [Decorated p
 (`Sim::decorated_pot_source`/`Sim::conduit_source`, installed from `app/redraw.rs`), the same stage bell
 reached before it. **Beacon makes 16** (see [Beacon](#beacon)) — the first registration landed through
 neither `EntityPipeline`'s cuboid-rig batch nor the moving-block-model seam, but a dedicated procedural
-pass (`gpu/beacon_beam.rs`). **16 of 26 registrations are now landed and wired.** The rest are still
+pass (`gpu/beacon_beam.rs`). **Mob spawner makes 17 and trial spawner makes 18** (see
+[Mob spawner](#mob-spawner) and [Trial spawner](#trial-spawner)) — sharing the *ordinary mob*
+`EntityPipeline`'s batch at a nested placement, a third seam distinct from both the ones above.
+**18 of 26 registrations are now landed and wired.** The rest are still
 absent. Picking the next few should read this list, not the original issue body.
 
 **The registration list had two entries this document's "what is not built" section never mentioned
@@ -1708,6 +1722,222 @@ bar `bell_source`'s own pre-live-install gate used — `None` with no net attach
   the scan either way); see `beacon_beam_scan`'s own module doc for the one narrow case they could
   diverge.
 
+## Mob spawner
+
+`assets/minecraft/models/block/spawner.json` is `cube_all_inner_faces` — real geometry, drawn by the
+ordinary terrain mesher. Every visible triangle of the *cage* was already on screen before this
+landed. What was missing is `SpawnerRenderer`'s one job: the miniature mob spinning inside, tilted
+and shrunk to fit the cage.
+
+### Placement is nested, not a single matrix — the reason this is not a `BlockEntityModelSet` entry
+
+`SpawnerRenderer.submitEntityInSpawner`:
+
+```text
+poseStack.translate(0.5, 0.4, 0.5);
+poseStack.mulPose(Axis.YP.rotationDegrees(spin));
+poseStack.translate(0.0, -0.2, 0.0);
+poseStack.mulPose(Axis.XP.rotationDegrees(-30.0));
+poseStack.scale(scale, scale, scale);
+entityRenderer.submit(displayEntity, camera, 0.0, 0.0, 0.0, poseStack, submitNodeCollector);
+```
+
+hands that already-transformed pose stack to `EntityRenderDispatcher.submit`, which dispatches to the
+display entity's *own* renderer — the ordinary mob path, with its own flip/lift/yaw — at zero further
+translation. So the outer chain and the entity's own placement compose, and no single `(feet, yaw,
+scale)` triple the rest of this codebase's `EntityModelSet::resolve*` family takes can express that.
+`lodestone_render::spawner::spawner_display_outer_matrix(spin_deg, scale)` is the outer chain alone;
+the caller (`gpu/spawner_mobs.rs`'s `prepare_spawner_mobs`) composes it with
+`entity_model_matrix(Vec3::ZERO, 0.0, 1.0)` for the entity's own flip/lift, then that whole product
+with the block's world translation, and hands it to a new seam,
+`EntityModelSet::resolve_at(type_path, transform, anim)` — every other `resolve*` bakes its transform
+from `(feet, yaw, scale)` internally; this one takes an already-composed matrix, for exactly this
+nesting. `det(outer) == +1` for any spin/positive scale (`spawner.rs`'s own unit tests) — no flip
+lives in the outer chain, which is why composing it with the entity's own `-1,-1,1` flip still leaves
+the combined determinant with the entity's own sign.
+
+`spawner_display_scale(bb_width, bb_height)` ports the scale term exactly: vanilla's fixed `0.53125`,
+divided by the display entity's own hitbox width/height when either exceeds one block — the clause
+that keeps a large mob's miniature from overflowing the cage. Resolved from a type path via
+`lodestone_data::entity_dimensions::base_dimensions_for`.
+
+### Reusing the *ordinary* mob pipeline, not a new one
+
+`gpu/spawner_mobs.rs`'s `prepare_spawner_mobs` resolves each `SpawnerMobSpawn` into an
+`EntityInstance` through the exact same `EntityModelSet`/`gpu_models`/`textures` maps
+`gpu/entity_passes.rs`'s `prepare_entities` already builds for full-size mobs — a spinning zombie
+needs **no new GPU resource**, it is the same zombie mesh and sheet already loaded. The function's
+own output is the identical `EntityDrawBatch` type `prepare_entities` returns, appended into the
+*same* `Vec` in `gpu/frame.rs` before the pass opens, so the draw loop that iterates
+`entity_batches` needed **zero changes** — a spawner's mob is, from that loop's point of view, just
+another batch.
+
+**One real hazard this surfaced**: `prepare_entities` only rewrites the shared entity-pass camera
+uniform (`self.entities.cam_buffer`) when its own `entities` slice is non-empty, and early-returns
+before that write otherwise. A spawner cage can be the *only* thing on screen (an empty room, no
+other players) — in that case `prepare_entities` produces zero batches and never touches the buffer,
+so without a fix the spawner's mob would draw against whatever camera the buffer last held, or an
+uninitialised one on the very first frame. `gpu/frame.rs` now calls
+`RenderState::write_entity_camera_uniform` unconditionally before both passes; when ordinary entities
+are also present this writes byte-identical bytes a second time, which is cheap and correct in both
+directions.
+
+### The display entity's type comes from NBT — no new packet
+
+`SpawnData`'s wire shape (`SpawnData.CODEC`): `{ entity: { id: "minecraft:pig", .. },
+custom_spawn_rules?, equipment? }`, saved on the block entity under `SpawnData` (`BaseSpawner`'s own
+`nextSpawnData`), falling back to the first `SpawnPotentials` weighted entry
+(`Weighted<SpawnData>`'s `data`/`weight` shape) when nothing has been rolled yet — the identical
+fallback order `BaseSpawner.getOrCreateNextSpawnData` uses. This NBT already reaches the client
+through the same generic `BlockEntity.nbt` path chest/skull/sign proved — no new decode was needed,
+only a typed read of a compound this codebase had never looked inside before.
+
+### The spin clock — client-simulated, real formula, real inputs
+
+Nothing about `spin`/`oSpin` is on the wire; `BaseSpawner.clientTick` is a client-side accumulator,
+ported as `crate::block_entities::SpawnerSpins`, the spawner sibling of `ChestLids`/`BellShakes`:
+
+```text
+if (!isNearPlayer) { oSpin = spin; }
+else if (displayEntity != null) {
+    if (spawnDelay > 0) spawnDelay--;
+    oSpin = spin;
+    spin = (spin + 1000 / (spawnDelay + 200)) % 360;
+}
+```
+
+`isNearPlayer` is `BaseSpawner.DEFAULT_REQUIRED_PLAYER_RANGE` (`16` blocks, applied unconditionally
+rather than read from a per-position `RequiredPlayerRange` NBT field — the one real fidelity gap
+here, alongside using only the **local** player for the proximity test, the same simplification
+`EnchantingTableBooks::tick`'s own doc already records for its nearest-player check).
+`BLOCK_EVENT`'s `b0 == 1` resets `spawnDelay` to `MinSpawnDelay` (`onEventTriggered`) — the third
+tracker offered that same event alongside `ChestLids`/`BellShakes`, since the packet cannot tell a
+spawner from a chest or a bell, only the gather at the position can.
+`SpawnerRenderState.spin = Mth.lerp(partialTick, oSpin, spin) * 10.0` — a plain lerp, not the
+shortest-arc `rotLerp`, because the per-tick advance is small enough (at most `5°`) never to cross the
+`0`/`360` wrap within one interpolation — ported as `spawner_spin_degrees`.
+
+### Status: wired, and proven with real pixels
+
+`crates/lodestone-shell/tests/spawner_mob_pixels.rs`, three `#[ignore]`d GPU gates, same discipline as
+the chest/skull/bell family: coverage measured inside the display mob's own projected rect (from real
+baked vertices through the real nested transform, never a literal), a spin test using **two known
+phases** (`0°`/`90°`, the formula's own quarter turn) rather than a single static frame — a gate that
+samples one frame cannot tell a spin from a static pose — and the arm-disjointness control. Measured
+green (`minecraft:pig`, chosen because its base hitbox sits at the `1.0`-block threshold so it draws
+at the *un-shrunk* `0.53125` scale, the largest a display mob ever gets and the easiest to measure in
+a 320×240 frame):
+
+| gate | measurement |
+|---|---|
+| mob draws | rect `x132..188 y63..162` (5700 px); fill **76.8%**; changed bbox entirely inside |
+| spin moves real pixels | resting-vs-90°-spun changed bbox `x126..218 y52..160` (6229 px), inside the union of both phases' real projected rects, padded 4px |
+| arm is elsewhere | arm bbox `x247..319 y169..239`, disjoint from the mob's rect |
+
+```bash
+cargo test -p lodestone-shell --test spawner_mob_pixels -- --ignored --nocapture
+```
+
+**The negative control was watched failing.** Dropping `prepare_spawner_mobs`'s output instead of
+extending it into `entity_batches` (the exact island shape this codebase's own record warns is the
+dominant defect class) reddened both draw gates immediately:
+
+```text
+the display mob fills only 0.0% of its own projected rect ... (0 of 5700 px)
+spin_deg = 0 and spin_deg = 90 produced pixel-identical frames — the spin angle is computed but never reaches the mesh
+```
+
+— while the arm-disjointness control kept passing unaffected, confirming the failure was specific to
+the neutered line. The line was restored and the suite re-run green, matching the measurements above
+exactly, before anything was committed.
+
+**The live per-frame install is wired too.** `Sim::spawner_source()` mirrors `Sim::bell_source()`
+exactly (captures `SpawnerSpins` and the partial tick; must be re-installed every frame or every
+cage's spin freezes at whatever fraction it was installed on), and `app/redraw.rs` installs it
+alongside the other block-entity sources. `sim::tests::
+spawner_source_tracks_connection_state_and_is_safe_before_login` and `stepping_ticks_spawners_
+without_panicking_before_login` hold it to the same accessor/tick bar bell's own gates do. What no
+gate in this crate proves — the same gap every type in this doc shares — is a real `ClientHandle`
+driving this end to end through an actual login handshake and a loaded chunk carrying a real
+`minecraft:spawner` block entity.
+
+## Trial spawner
+
+Same cage-is-real-geometry shape as the mob spawner: `models/block/trial_spawner.json` is
+`cube_bottom_top_inner_faces`, and its **six** texture variants (inactive/active/ejecting-reward, each
+with an `_ominous` sibling) are already selected by the ordinary block mesher from the real
+`trial_spawner_state`/`ominous` block-state properties — no renderer work needed for the cage itself,
+including its state-dependent look. `TrialSpawnerRenderer.extractRenderState` calls
+`SpawnerRenderer.submitEntityInSpawner` **directly** in the real jar, so this type needed no new
+placement code, no new GPU pass and no new pixel-gate machinery — it is entirely the mob spawner's
+own `SpawnerMobSpawn`/`SpawnerSpins`/`prepare_spawner_mobs` seam, fed from a second gather.
+
+### What actually differs: the NBT key, and a real state gate the mob spawner has none of
+
+`TrialSpawnerStateData.getUpdateTag` writes only `spawn_data` (**snake_case** — `TAG_SPAWN_DATA`,
+`SpawnData.CODEC`'s own shape again) and, only while `ACTIVE`, `next_mob_spawns_at`. There is **no**
+synced `SpawnPotentials`-shaped fallback: `TrialSpawnerConfig`'s own weighted spawn-potentials list is
+a datapack-defined resource never sent to the client, so a trial spawner nobody has stood near long
+enough for the server to roll a `spawn_data` has no display entity at all, matching
+`getOrCreateDisplayEntity`'s own `entityToSpawn.getString("id").isEmpty()` miss.
+`crate::block_entities::spawner_data` tries `SpawnData` (mob spawner), then the `SpawnPotentials`
+fallback (mob spawner only), then `spawn_data` (trial spawner) — one function, since the two block
+types never share a position and their key sets are disjoint in practice.
+
+**`TrialSpawnerState.hasSpinningMob()`/`spinningMobSpeed()` gate the draw itself, not just the rate**:
+only `waiting_for_players` (`200.0`) and `active` (`1000.0`) have a spinning mob at all; `inactive`,
+`waiting_for_reward_ejection`, `ejecting_reward` and `cooldown` all draw an **empty cage**, even if the
+NBT still names a display entity left over from an earlier `active` phase. Ported as
+`trial_spawner_spin_speed`/`spawner_spin_speed`, read off the real `trial_spawner_state` block-state
+property (`BlockStateProperties.TRIAL_SPAWNER_STATE`, key `"trial_spawner_state"`) — the same
+per-state census `mesher.rs` already reads for the cage's own texture, a second, independent consumer
+of the identical property. `crate::block_entities::spawner_mob_spawn` applies this gate before ever
+constructing a spawn, so a cooldown trial spawner's stale `spawn_data` is inert by construction rather
+than filtered at the draw site.
+
+**The real spin-rate formula is not ported — a documented, deliberate gap.**
+`TrialSpawner.tickClient` computes `spawnDelay` from `max(0, nextMobSpawnsAt - level.getGameTime())`,
+a difference against the **server's** absolute world age. This client has no verified sync with that
+clock (the local tick counter `Sim::beacon_source` reads for its own beam-scroll cycle is a *local*
+count, not `level.getGameTime()`, and the two drift from the moment of login), and porting the real
+formula would need that sync built first — out of scope here. Trial spawners instead share the mob
+spawner's decrementing-counter envelope (`spawn_delay` counts down from
+`SPAWNER_DEFAULT_MIN_SPAWN_DELAY`, since no `MinSpawnDelay`-shaped NBT exists for a trial spawner to
+override it), with vanilla's real per-state numerator (`200.0`/`1000.0`) substituted for the mob
+spawner's constant `1000.0`. The result spins at a real, bounded, state-correct rate; its exact phase
+will not match a real client standing beside the same trial spawner. `SpawnerSpins`'s own "Simplifications" doc
+carries this in full.
+
+**`near` means something different for the two block families, in the same tracker.** A mob spawner's
+advance really is gated on `isNearPlayer`; a trial spawner's is not — `TrialSpawner.tickClient`
+advances unconditionally whenever the state has a spinning mob. `spawner_tick_candidates` computes
+`near = true` unconditionally for a trial spawner row and the real distance test for a mob spawner
+row, so one `SpawnerSpins::tick`'s `if near && has_entity` serves both without a third branch.
+
+### Status: wired, and proven with real pixels
+
+`crates/lodestone-shell/tests/trial_spawner_mob_pixels.rs`, two `#[ignore]`d GPU gates. Unlike the mob
+spawner's own gate file, this one is deliberately **not** a from-scratch re-proof of the whole
+draw/spin/arm chain — `spawner_mob_pixels.rs` already proves that chain end to end, and this type
+shares every hop of it. What this file proves is the one clause unique to the trial spawner: that the
+CPU-side state gate (already pinned as a pure function by `block_entities.rs`'s own
+`a_cooldown_trial_spawner_draws_nothing_regardless_of_stale_spawn_data`/
+`an_active_trial_spawner_with_spawn_data_draws` unit tests) actually reaches — or actually withholds —
+real pixels through `RenderState::render`. Measured green:
+
+| gate | measurement |
+|---|---|
+| a spinning state draws | fill **>15%** of the display mob's own projected rect (installed via the same `SpawnerMobSpawn` shape `spawner_mob_spawns` would hand a spinning trial spawner) |
+| a non-spinning state draws nothing | `0` non-sky px inside the same rect with no spawner source installed (the shape `spawner_mob_spawn`'s own gate produces for `cooldown`), while the frame's unconditional first-person arm still paints — proving the render call itself ran rather than failing silently |
+
+```bash
+cargo test -p lodestone-shell --test trial_spawner_mob_pixels -- --ignored --nocapture
+```
+
+The live per-frame install is the **same** `Sim::spawner_source()`/`app/redraw.rs` call site the mob
+spawner uses — nothing trial-spawner-specific was needed there, which is the entire payoff of building
+the shared machinery first.
+
 ## How to change it
 
 ### Adding a block-entity type
@@ -2026,10 +2256,21 @@ Against the real 26-entry registration list (see above), not the issue's origina
   per-frame install (`Sim::beacon_source`, installed from `app/redraw.rs`). Needed no packet at all;
   see that section for why. Proven with a real GPU pixel gate, including the `ALPHA_BLENDING`-aware
   check `CLAUDE.md` requires (the glow pass reads the destination, the solid pass does not).
-- Mob spawner (draws a miniature spinning entity inside the cage —
-  reuses full entity rendering, not a simple cuboid rig), brushable block, trial spawner,
-  vault, copper golem statue, shelf. End portal/end gateway are their own shader effects, not
-  cuboid rigs (beacon was too, until this session — see [Beacon](#beacon)), and structure
+- **Mob spawner — landed**, including the live per-frame install (see [Mob spawner](#mob-spawner)
+  above): the nested placement (`spawner_display_outer_matrix` composed with the entity's own
+  `entity_model_matrix`, drawn through the *ordinary* mob `EntityPipeline` rather than a cuboid rig
+  or a new pass), the NBT-derived display-entity type, and the client-simulated spin clock
+  (`SpawnerSpins`). Still open within its scope: `RequiredPlayerRange` is not read per-position from
+  NBT (vanilla's own default `16` is applied unconditionally), and the proximity test uses the local
+  player only.
+- **Trial spawner — landed**, including the live per-frame install (see
+  [Trial spawner](#trial-spawner) above): the real `trial_spawner_state`-gated draw (only
+  `waiting_for_players`/`active` show a mob) and the `spawn_data` NBT key, sharing every other hop
+  with the mob spawner above. Still open within its scope: the real
+  `nextMobSpawnsAt`-minus-`gameTime` spin-rate formula, which needs a client/server world-age sync
+  this codebase does not yet have — see that section's own note for the deliberate substitute.
+- Brushable block, vault, copper golem statue, shelf. End portal/end gateway are their own shader
+  effects, not cuboid rigs (beacon was too, until it landed — see [Beacon](#beacon)), and structure
   block/test instance block are creative/dev-only.
 
 Also unbuilt for chests specifically: the `BrightnessCombiner` that makes a double chest's two halves
@@ -2056,6 +2297,16 @@ share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behin
 - `lodestone-shell` — `net::{SharedHandle, entity_light_at}`, `resources::asset_root`, and (for sign
   text) `gpu/nametag.rs`'s `pub(super) layout_ink_runs`/`load_font`, reused rather than duplicated a
   third time by `gpu/sign_text.rs`.
+- `lodestone-render` (for the mob spawner/trial spawner) — `spawner::{SpawnerMobSpawn,
+  spawner_display_outer_matrix, spawner_display_scale, spawner_spin_degrees}`, `EntityModelSet::resolve_at`
+  (new — every other `resolve*` takes `(feet, yaw, scale)`; this one takes an already-composed
+  transform), `entity_model_matrix`. Unlike every block-entity type above, this pair reuses the
+  *ordinary* `EntityModelSet`/`EntityPipeline` mob corpus rather than `BlockEntityModelSet`.
+- `lodestone-data` (for the mob spawner/trial spawner) — `entity_type::EntityType::from_name` and
+  `entity_dimensions::base_dimensions_for` (the display entity's real base hitbox, for
+  `spawner_display_scale`'s shrink threshold), plus `block_states::properties` for the trial
+  spawner's own `trial_spawner_state` value (the same per-state census `mesher.rs` reads for the
+  cage's texture).
 
 ## Related
 

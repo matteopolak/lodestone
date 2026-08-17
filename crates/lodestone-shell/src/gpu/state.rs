@@ -46,7 +46,8 @@ use super::{
     NameTagRenderer, OutlineRenderer, OutlineShapeSource,
     PluginBillboardInstance, PluginBillboardRenderer, PluginBillboardsSource,
     RenderState, SKY_COLOR, SignSource, SignTextRenderer, SkullSource, SkyDarkenSource,
-    ThirdPersonBodySource, ThirdPersonBodyState, TimeOfDaySource, transparent_placeholder_atlas,
+    SpawnerSource, ThirdPersonBodySource, ThirdPersonBodyState, TimeOfDaySource,
+    transparent_placeholder_atlas,
 };
 
 impl RenderState {
@@ -339,6 +340,8 @@ impl RenderState {
             // No bells until a caller installs a world source; see
             // `set_bell_source`, installed per frame by `app::redraw`.
             bell_source: BellSource::default(),
+            // Likewise `set_spawner_source`.
+            spawner_source: SpawnerSource::default(),
             // Likewise `set_shulker_source`.
             shulker_source: ShulkerSource::default(),
             // Likewise `set_decorated_pot_source`.
@@ -1316,6 +1319,23 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::BellSpawn> + Send + Sync + 'static,
     ) {
         self.bell_source = BellSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's spawner/trial-spawner display
+    /// mobs — the spawner equivalent of [`set_bell_source`](Self::set_bell_source).
+    ///
+    /// Must be re-installed every frame for the same reason: the closure
+    /// captures the partial tick the spin angle interpolates against.
+    /// `app::redraw` does this from `Sim::spawner_source`. Unlike every
+    /// other source in this family, leaving it unset draws nothing *extra*
+    /// rather than leaving a hole — both the mob spawner and the trial
+    /// spawner have real block-model geometry for the cage, drawn by the
+    /// ordinary terrain mesher regardless of this source.
+    pub fn set_spawner_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::SpawnerMobSpawn> + Send + Sync + 'static,
+    ) {
+        self.spawner_source = SpawnerSource(Some(Box::new(f)));
     }
 
     /// Install the source for this frame's shulker boxes — the shulker

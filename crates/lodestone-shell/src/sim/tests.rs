@@ -1280,6 +1280,32 @@ fn bell_source_tracks_connection_state_and_is_safe_before_login() {
     );
 }
 
+/// Issue #23 (mob spawner/trial spawner): [`Sim::spawner_source`]'s own
+/// island detector, matching
+/// [`bell_source_tracks_connection_state_and_is_safe_before_login`]'s shape
+/// and reasoning — the closure captures `Sim::spawner_spins` and the partial
+/// tick, the same shape bell's own closure carries.
+#[test]
+fn spawner_source_tracks_connection_state_and_is_safe_before_login() {
+    let mut sim = Sim::new(test_config());
+    assert!(
+        sim.spawner_source().is_none(),
+        "no net attached at all must report no source, matching bell_source/skull_source"
+    );
+
+    let (net, _actions, _feed) = NetClient::loopback_with_feed();
+    sim.attach_net(net);
+    let source = sim
+        .spawner_source()
+        .expect("a net is attached, so a source must exist even before login completes");
+    assert_eq!(
+        source(glam::Vec3::ZERO),
+        Vec::new(),
+        "no ClientHandle has been published yet, so the closure must return \
+         no spawns rather than panicking on the empty OnceLock"
+    );
+}
+
 /// [`Sim::beacon_source`]'s own island detector, matching
 /// [`bell_source_tracks_connection_state_and_is_safe_before_login`]'s shape.
 /// Unlike bell's closure, this one carries no cloned tracker — just the game
@@ -1364,6 +1390,27 @@ fn conduit_source_tracks_connection_state_and_is_safe_before_login() {
 /// per-tick block-entity fold's "empty rather than a panic" contract.
 #[test]
 fn stepping_ticks_conduits_without_panicking_before_login() {
+    let (net, _actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+
+    sim.step(5.0 / 20.0);
+
+    assert!(
+        sim.tick_count() > 0,
+        "ticks must still run while connecting, exactly like the movement-packet gate above"
+    );
+}
+
+/// [`stepping_ticks_conduits_without_panicking_before_login`]'s shape, for
+/// `SpawnerSpins::tick` — the newest per-tick gather in the same
+/// `if let Some(net) = ..` block, and the one with the most inputs to get
+/// wrong before login (a world read, an NBT-aware candidate scan, and a
+/// distance test), so it earns its own explicit pin rather than relying on
+/// the conduit test's coverage of the same guarded block.
+#[test]
+fn stepping_ticks_spawners_without_panicking_before_login() {
     let (net, _actions, _feed) = NetClient::loopback_with_feed();
     let mut sim = Sim::new(test_config());
     sim.drain_all_meshes();

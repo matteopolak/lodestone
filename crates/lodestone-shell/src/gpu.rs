@@ -54,6 +54,7 @@ mod screen_effects;
 mod sections;
 mod sign_text;
 mod sources;
+mod spawner_mobs;
 mod state;
 mod stats;
 mod terrain;
@@ -75,7 +76,7 @@ pub use sources::{
     ConduitSource, DecoratedPotSource, EnchantingTableSource,
     EntityLightSource, HandSwingSource, ItemUseSource, LecternSource, MainHandItem,
     MainHandSource, MapSource, MovingPistonSource, OutlineShapeSource, ShulkerSource, SignSource,
-    SkullSource, SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
+    SkullSource, SkyDarkenSource, SpawnerSource, ThirdPersonBodySource, ThirdPersonBodyState,
 };
 pub use stats::RenderStats;
 
@@ -464,9 +465,18 @@ pub struct RenderState {
     /// Where this frame's bells come from. Same "unset means draw nothing"
     /// convention as [`Self::skull_source`], and a separate field for the
     /// reason [`BellSource`] documents. Installed per frame from
-    /// `Sim::bell_source`; a bell always draws at rest, because the shake
-    /// trigger has no producer yet.
+    /// `Sim::bell_source`, which also carries the `BLOCK_EVENT`-driven shake
+    /// trigger (`BellShakes`) — a bell at rest and an untracked bell are
+    /// indistinguishable, not "the trigger has no producer": that used to be
+    /// true and stopped being true once `BellShakes` landed.
     bell_source: BellSource,
+    /// Where this frame's spawner/trial-spawner display mobs come from. Same
+    /// "unset means draw nothing" convention as [`Self::skull_source`], and a
+    /// separate field for [`SpawnerSource`]'s reason. Installed per frame
+    /// from `Sim::spawner_source`; unlike the sources above, leaving this
+    /// unset draws nothing *extra* rather than leaving a hole, because both
+    /// spawner block types have real block-model geometry for the cage.
+    spawner_source: SpawnerSource,
     /// Where this frame's shulker boxes come from. Same "unset means
     /// draw nothing" convention as [`Self::skull_source`] — and here that
     /// degradation is a **hole**, not a missing decoration: a 26.2 shulker box has

@@ -80,6 +80,7 @@ pub mod section_arena;
 pub mod sign;
 pub mod sky;
 pub mod sky_pipeline;
+pub mod spawner;
 pub mod strategy;
 pub mod suballoc;
 pub mod target;
@@ -256,6 +257,9 @@ pub use section_arena::{INDEX_SIZE, SectionArena, draw_region_for};
 pub use sign::{
     HANGING_TEXT_LINE_HEIGHT, SignKind, SignOrientation, SignSpawn, TEXT_LINE_HEIGHT,
     dye_text_color_rgb, sign_side_color, sign_text_transform,
+};
+pub use spawner::{
+    SpawnerMobSpawn, spawner_display_outer_matrix, spawner_display_scale, spawner_spin_degrees,
 };
 pub use sky::{
     CLOUD_CELL_BLOCKS, CLOUD_FANCY_RADIUS_CELLS, CLOUD_FANCY_THICKNESS, CLOUD_HEIGHT,

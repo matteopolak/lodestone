@@ -463,6 +463,7 @@ impl Sim {
             enchanting_table_books: crate::block_entities::EnchantingTableBooks::new(),
             moving_pistons: crate::block_entities::PistonMoves::new(),
             conduit_ticks: crate::block_entities::ConduitTicks::new(),
+            spawner_spins: crate::block_entities::SpawnerSpins::new(),
             // Vanilla's default, not `0.0` — see the field's doc.
             damage_tilt_strength: 1.0,
             // Vanilla's own `70`, so a `Sim` nobody pushes an FOV into builds the

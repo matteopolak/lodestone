@@ -730,6 +730,40 @@ impl std::fmt::Debug for BellSource {
     }
 }
 
+/// Where this frame's spawner/trial-spawner display mobs come from — same
+/// shape as [`BellSource`]: an independent source, since
+/// `crate::block_entities::spawner_mob_spawns` shares no state with any of
+/// the block-entity families above it and is not itself a
+/// [`BlockEntitySource`] consumer (it feeds the ordinary mob `EntityPipeline`
+/// batch, not [`lodestone_render::BlockEntityModelSet`] — see
+/// `gpu/entity_passes.rs`'s `prepare_spawner_mobs`).
+///
+/// **Needs re-installing every frame**, exactly like [`BellSource`]: the
+/// spin/oSpin pair lives in `crate::block_entities::SpawnerSpins`, ticked
+/// once per client tick, and a stale install freezes every cage's spin at
+/// whatever partial-tick fraction the closure was built on.
+#[derive(Default)]
+pub struct SpawnerSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::SpawnerMobSpawn> + Send + Sync>>,
+);
+
+impl SpawnerSource {
+    /// This frame's spawner display mobs, or none when unset.
+    #[must_use]
+    pub(super) fn spawner_mobs(&self, eye: glam::Vec3) -> Vec<lodestone_render::SpawnerMobSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for SpawnerSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SpawnerSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
 /// Where this frame's beacon beams come from — same "unset means draw
 /// nothing" convention as [`SkullSource`]. Unlike every other animated
 /// source in this file, the closure behind this needs **no** per-position
