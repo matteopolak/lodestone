@@ -8,8 +8,6 @@ use lodestone_model::{
     AdapterError, ClientAction, ClientEvent, ConnectionState, Directive, DimensionId, LoginProfile,
     PackedMessageSignature, ResourceKey, ResourcePackResponseKind, ServerAddress, VersionAdapter,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use lodestone_model::{Text, TextColor, TextContent, TextStyle};
 use lodestone_net::{Connection, NetError, Transport};
 #[cfg(not(target_arch = "wasm32"))]
 use lodestone_net::{generate_shared_secret, rsa_encrypt};
@@ -324,30 +322,6 @@ fn verify_chat_message(
     .unwrap_or(false)
 }
 
-/// Vanilla's `chat.tag.not_secure` treatment (`ChatTrustLevel.NOT_SECURE`,
-/// `GuiMessageTag.chatNotSecure`): a light-grey `[Not Secure] ` prefix ahead
-/// of the message, matching `GuiMessageTag`'s own indicator colour
-/// (`0xD0D0D0`) since this client has no separate per-line tag/tooltip widget
-/// to draw vanilla's coloured bar in.
-///
-/// Vanilla also has a `MODIFIED` trust level (a signed message whose
-/// displayed text no longer contains what was signed) — not reproduced here;
-/// every message that is not verified reads as `NOT_SECURE`. See
-/// `ChatTrustLevel.evaluate` for the finer distinction this collapses.
-#[cfg(not(target_arch = "wasm32"))]
-fn tag_not_secure(text: Text) -> Text {
-    Text {
-        content: TextContent::Literal("[Not Secure] ".to_string()),
-        style: TextStyle {
-            font: None,
-            color: Some(TextColor::Rgb(0x00D0_D0D0)),
-            ..TextStyle::default()
-        },
-        extra: vec![text],
-        ..Text::default()
-    }
-}
-
 /// Whether an `Ok(None)` from `encode_action` for `action` at `state` is the
 /// expected "adapter deliberately produced no packet this tick" case rather
 /// than a genuine "no encode arm for this action/state" drop.
@@ -378,6 +352,14 @@ impl<T: Transport> Driver<T> {
         read_timeout: Option<Duration>,
         profile: LoginProfile,
         server: ServerAddress,
+        // A prior session's cookie store, when this connection is a transfer's
+        // reconnect leg (`SessionOutcome::Transferred::cookies`) rather than a
+        // fresh join — empty for every ordinary join, carried across the
+        // boundary the same way vanilla's own client does, so a
+        // `cookie_request` on the far side can still be answered. See
+        // `docs/secure-chat.md`'s transfer section for the full
+        // carried-vs-fresh inventory.
+        initial_cookies: HashMap<ResourceKey, Vec<u8>>,
         #[cfg(not(target_arch = "wasm32"))] auth_session: Option<lodestone_auth::Session>,
         #[cfg(not(target_arch = "wasm32"))] auth_unavailable: Option<(String, String)>,
     ) -> Self {
@@ -403,19 +385,32 @@ impl<T: Transport> Driver<T> {
             read_timeout,
             profile,
             server,
+            // Deliberately fresh regardless of `initial_cookies` above, even
+            // for a transfer's reconnect leg: vanilla's own client tears its
+            // whole session down and rebuilds it wholesale on transfer, so a
+            // last-seen window is per-connection state, never carried. A
+            // future caller reconnecting after `SessionOutcome::Transferred`
+            // must construct a *new* `Driver` (never resume an old one) for
+            // this reset to take effect — see `docs/secure-chat.md`.
             chat_tracker: LastSeenTracker::vanilla(),
             awaiting_player_load: false,
             #[cfg(not(target_arch = "wasm32"))]
             auth_session,
             #[cfg(not(target_arch = "wasm32"))]
             auth_unavailable,
+            // Same "deliberately fresh" note as `chat_tracker` above: `None`
+            // here is what makes `ClientEvent::Login`'s
+            // `self.chat_session.is_none()` guard fetch a new key pair and
+            // re-announce the session on the far side of a transfer, rather
+            // than silently staying signed with a session the new server
+            // never received.
             #[cfg(not(target_arch = "wasm32"))]
             chat_session: None,
             #[cfg(not(target_arch = "wasm32"))]
             http: reqwest::Client::new(),
             bundling: false,
             bundle_buffer: Vec::new(),
-            cookies: HashMap::new(),
+            cookies: initial_cookies,
             dimension: None,
         }
     }
@@ -1289,14 +1284,24 @@ impl<T: Transport> Driver<T> {
         // wire itself guarantees (a server announces a session before
         // sending chat signed with it). `ack.verified` starts `false` (see
         // its own doc — the adapter fails closed) and is only ever raised
-        // here, never lowered; an unverified message is tagged in `text`
-        // itself, this client's stand-in for vanilla's separate
-        // `GuiMessageTag` widget (see `tag_not_secure`'s doc for why).
+        // here, never lowered.
+        //
+        // Only `info.verified` carries the verdict. This used to also prepend
+        // a literal `"[Not Secure] "` to `text` for an unverified message —
+        // vanilla's own not-secure indicator is a separate sprite drawn
+        // *beside* the line with its own hover text, never spliced into the
+        // message body, so that was a mis-transcription rather than a missing
+        // feature: it corrupted the `Text` every downstream reader (the chat
+        // feed, any future logging or moderation surface) sees. A consumer
+        // that wants to show the indicator should read `info.verified` — or
+        // `lodestone_game::chat::MessageTrust::is_not_secure` once something
+        // downstream classifies it — and render its own badge, not parse the
+        // message text for a prefix. See `docs/secure-chat.md` for the
+        // vanilla citation.
         #[cfg(not(target_arch = "wasm32"))]
         if let ClientEvent::Chat {
             sender: Some(sender_id),
             ack: Some(info),
-            text,
             ..
         } = &mut event
         {
@@ -1317,9 +1322,6 @@ impl<T: Transport> Driver<T> {
                     )
                 });
             info.verified = verified;
-            if !verified {
-                *text = tag_not_secure(std::mem::take(text));
-            }
         }
 
         // Fold the (now uniformly lightweight) event into the read-model by

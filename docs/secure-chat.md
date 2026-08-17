@@ -163,10 +163,21 @@ and payload. It does **not** implement the rest of `SignedMessageChain.Decoder`
 fold now retains — see the wire-shapes section below for the retention half
 of this, which was the actual gap), rebuilds the exact `SignedMessageLink`
 from `ChatAckInfo::message_index`/the sender/the session id, and calls this
-function. `ChatAckInfo::verified` carries the result back out; an unmarked
-message (no signature, unknown sender, or a failed check) gets a
-`[Not Secure] ` tag prepended to its text — see "What is still not built"
-below for the link-ordering/expiry/`MODIFIED` pieces this does not cover.
+function. `ChatAckInfo::verified` carries the result back out — see "What is
+still not built" below for the link-ordering/expiry/`MODIFIED` pieces this
+does not cover.
+
+**`verified` no longer rewrites the message text.** It used to prepend a
+literal `"[Not Secure] "` to `text` for an unmarked message, which was a
+mis-port: vanilla's `chat.tag.not_secure` (`GuiMessageTag.chatNotSecure`) is a
+separate indicator sprite drawn *beside* the line with its own hover text,
+never spliced into the message body. Splicing it in corrupted the `Text`
+every downstream reader sees — the chat feed, and any future logging or
+moderation surface. A consumer that wants the indicator should read
+`info.verified` directly, or `lodestone_game::chat::MessageTrust::is_not_secure`
+once something folds the bool into that enum, and render its own badge.
+Rendering the badge properly (a sprite plus hover text, matching
+`GuiMessageTag`) is not built — this only removes the wrong stand-in.
 
 ### Wire shapes — `crates/protocol/v770/src/packets/game.rs` and `player_info.rs`
 
@@ -274,8 +285,8 @@ than a bullet.
   whether the fresh-session choice was the right one.
 - **Landed since — the receive side.** `Driver`'s `emit` now calls
   [`verify_signature`] against the sender's retained `ChatSessionInfo` and
-  surfaces the result (`ChatAckInfo::verified`, and a `[Not Secure] ` text
-  tag on failure — see "How it works" above). What is still missing from
+  surfaces the result as `ChatAckInfo::verified` (see "How it works" above
+  for why the text itself is never rewritten). What is still missing from
   vanilla's own `ChatTrustLevel`/`SignedMessageChain.Decoder`:
   - **link-ordering enforcement and key expiry.** A message whose
     `SignedMessageLink.index` is out of order, or whose key has passed
@@ -299,6 +310,62 @@ against nothing.
 was in `lodestone-net`**: `rsa` 0.9 pins `rand_core` 0.6/`getrandom` 0.2, a
 different major than the rest of the tree, and chat signing needs the
 native-only key fetch anyway. See `Cargo.toml`'s comment before changing this.
+
+## Transfer, and what a reconnect must and must not carry
+
+**Turning signing on by default (`6fc34485`) surfaced a report of *"Chat
+validation failure"* specifically after using a server's transfer feature**
+(`ClientEvent::TransferRequested` → [`SessionOutcome::Transferred`]),
+recoverable only by fully relogging. This section is the trace of that report,
+kept separate from "The chat-validation kick" above because the cause is
+different: that section was about counting unsigned messages; this one is
+about whether session state survives a handover that should reset it.
+
+**What `Driver` does today is already transfer-safe, by construction, as long
+as the reconnect goes through a fresh [`ClientBuilder`].** `ClientEvent::TransferRequested`
+unconditionally ends the session (`Step::Stop(SessionOutcome::Transferred {
+host, port, cookies })`), consuming `self` — there is no code path that keeps
+a `Driver` alive across a transfer. [`Driver::new`] then seeds every
+per-connection field fresh regardless of what the *previous* session held:
+`chat_session: None` (so `ClientEvent::Login`'s `self.chat_session.is_none()`
+guard fetches a new key pair and announces a *new* session on the far side —
+vanilla's own `ClientPacketListener` is rebuilt wholesale on transfer, and a
+session announcement is exactly the kind of per-connection state that rebuild
+discards) and `chat_tracker: LastSeenTracker::vanilla()` (an empty last-seen
+window — the same "per-connection, never carried" reasoning). Both are
+covered by [`Driver::new`]'s own doc comments at each field now, specifically
+so a future edit does not "fix" either into carrying state across.
+
+**What genuinely needs to carry across is narrower: only the cookie store.**
+`SessionOutcome::Transferred::cookies` exists because vanilla's `TransferState`
+carries the in-memory cookie map across the boundary so a `cookie_request` on
+the far side can still be answered — and until now there was no way to feed
+it back in: [`ClientBuilder`] had no cookie-seeding method at all, so even a
+caller that *did* reconnect correctly would have answered every post-transfer
+`cookie_request` with `None`, including a cookie the previous server stored.
+[`ClientBuilder::seed_cookies`] closes that gap.
+
+The carried-vs-fresh split, in full:
+
+| state | carried across a transfer? | where |
+|---|---|---|
+| cookie store | **yes** — [`SessionOutcome::Transferred::cookies`] → [`ClientBuilder::seed_cookies`] | `lodestone-client` |
+| chat session (key pair, announcement) | **no** — re-fetched and re-announced at the new `Login` | `lodestone-client`, already correct |
+| last-seen chat window | **no** — starts empty | `lodestone-client`, already correct |
+| the read-model / ECS world, entities, local position | *not this crate's state* — owned by whatever the caller passed to [`ClientBuilder::ecs`] | caller (`lodestone-shell`) |
+
+**What this doc cannot establish: whether anything actually calls
+`ClientBuilder` again after a transfer.** A repo-wide search for a consumer of
+[`SessionOutcome::Transferred`] or `ClientEvent::TransferRequested` — outside
+where each is produced, across every crate including `lodestone-shell` and
+`web/` — found none. [`SessionOutcome::Transferred`]'s own doc has said since
+it landed that "the driver cannot open that new connection itself... nothing
+generic bridges them", naming the caller as the place this has to happen; if
+no caller does it yet, the fixes above are necessary but not sufficient — a
+transfer would need a caller to construct a fresh `ClientBuilder` (never reuse
+a `Driver`) with the target `host`/`port` and `.seed_cookies(cookies)` before
+any of this class of bug can be observed to be fixed end-to-end. That caller,
+if and when it exists, is outside `lodestone-client`.
 
 **Gotcha — `sha2`'s `oid` feature is required** for
 `Pkcs1v15Sign::new::<Sha256>()`'s `AssociatedOid` bound; it is not part of
@@ -413,3 +480,9 @@ acceptance is the one link nothing here can reach.
 [`lodestone_client::ClientBuilder::online_session`]: ../crates/lodestone-client/src/builder.rs
 
 [`SECURE_CHAT_ENV`]: ../crates/lodestone-client/src/driver.rs
+[`Driver::new`]: ../crates/lodestone-client/src/driver.rs
+[`SessionOutcome::Transferred`]: ../crates/lodestone-client/src/error.rs
+[`SessionOutcome::Transferred::cookies`]: ../crates/lodestone-client/src/error.rs
+[`ClientBuilder`]: ../crates/lodestone-client/src/builder.rs
+[`ClientBuilder::seed_cookies`]: ../crates/lodestone-client/src/builder.rs
+[`ClientBuilder::ecs`]: ../crates/lodestone-client/src/builder.rs

@@ -1247,6 +1247,13 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             // being silently dropped converting a game-crate stack back to
             // the wire shape.
             base_color: stack.base_color().map(str::to_owned),
+            // This crate's component map has no slot for either of these yet
+            // (no plugin/server code path here constructs a crossbow with
+            // charged projectiles or a spear with an attack-range override),
+            // so there is nothing to carry across — same "nothing to carry"
+            // story as `custom_data` above.
+            charged_projectiles: Vec::new(),
+            attack_range: None,
             // See the doc above: not lossy, out of scope.
             has_unmodeled: false,
         };
@@ -1701,6 +1708,12 @@ mod tests {
                 // `lodestone_model::ItemComponents`); not round-tripped for the
                 // same reason as `pot_decorations`/`custom_data` above.
                 repair_cost: 0,
+                // Neither has a slot in this crate's `ComponentValue` map yet
+                // (see the `From<&lodestone_model::ItemStack>` doc), so — same
+                // "not round-tripped by design" story as `custom_data` above —
+                // both collapse to their zero value either way.
+                charged_projectiles: Vec::new(),
+                attack_range: None,
                 has_unmodeled: false,
             },
         };

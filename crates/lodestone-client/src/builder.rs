@@ -1,8 +1,9 @@
 //! The [`ClientBuilder`] entry point.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
-use lodestone_model::{LoginProfile, ServerAddress, VersionAdapter};
+use lodestone_model::{LoginProfile, ResourceKey, ServerAddress, VersionAdapter};
 use lodestone_net::{Connection, Transport};
 use tokio::sync::{mpsc, oneshot};
 
@@ -35,6 +36,10 @@ pub struct ClientBuilder {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     connect_timeout: Option<Duration>,
     event_buffer: usize,
+    /// A prior session's cookie store, seeded via [`Self::seed_cookies`] for the
+    /// reconnect leg of a [`crate::error::SessionOutcome::Transferred`].
+    /// Empty for every ordinary join.
+    initial_cookies: HashMap<ResourceKey, Vec<u8>>,
     /// The caller's `World` and session entity, when the caller has one — §4.1(c).
     /// `None` means "mint your own", which is what a bot with no driver wants.
     ecs: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
@@ -68,6 +73,7 @@ impl ClientBuilder {
             read_timeout: None,
             connect_timeout: None,
             event_buffer: DEFAULT_EVENT_BUFFER,
+            initial_cookies: HashMap::new(),
             ecs: None,
             #[cfg(not(target_arch = "wasm32"))]
             online_session: None,
@@ -199,6 +205,29 @@ impl ClientBuilder {
         self
     }
 
+    /// Seeds the new session's cookie store from a prior one — the reconnect
+    /// leg of [`crate::error::SessionOutcome::Transferred`], whose own doc
+    /// explains why the driver cannot open that connection itself and hands
+    /// the caller everything needed to do it: the target address and this
+    /// map. Without calling this, a `cookie_request` on the far side of a
+    /// transfer always answers `None`, even for a cookie the previous server
+    /// stored — vanilla's own client carries its cookie store across a
+    /// transfer, so this is what closes that gap.
+    ///
+    /// **Only the cookie store carries across a transfer.** Nothing else
+    /// about the previous session should — a fresh [`ClientBuilder`] already
+    /// gives the new [`crate::driver::Driver`] an unannounced chat session and
+    /// an empty last-seen window, which is the correct behaviour (vanilla
+    /// itself tears its whole session down and rebuilds it on a transfer, not
+    /// just the socket); do not add a second seeding method that carries
+    /// anything else forward without re-reading `docs/secure-chat.md`'s
+    /// transfer section first.
+    #[must_use]
+    pub fn seed_cookies(mut self, cookies: HashMap<ResourceKey, Vec<u8>>) -> Self {
+        self.initial_cookies = cookies;
+        self
+    }
+
     /// Connects over TCP and starts the driver.
     ///
     /// Native-only: `wasm32` targets have no TCP stack, so the browser must
@@ -267,6 +296,7 @@ impl ClientBuilder {
             self.read_timeout,
             self.profile,
             self.server,
+            self.initial_cookies,
             #[cfg(not(target_arch = "wasm32"))]
             self.online_session,
             #[cfg(not(target_arch = "wasm32"))]

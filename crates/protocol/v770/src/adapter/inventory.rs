@@ -2,6 +2,10 @@
 //! display, containers, merchant offers, advancements and stats. Split out
 //! of the former monolithic `adapter.rs`.
 use super::*;
+// Not in `adapter::mod`'s own `lodestone_model` import list — added directly
+// here rather than widening that shared glob for one type this file alone
+// needs.
+use lodestone_model::AttackRange;
 
 impl V770Adapter {
     /// Clientbound play-state packets in the inventory domain, split out of the
@@ -1138,6 +1142,46 @@ fn read_component_patch(
                 components.banner_patterns = read_banner_pattern_layers(reader)?;
             }
 
+            // Decoded for the same reason as bundle_contents immediately above:
+            // each entry shares that same item-then-count-then-recursive-patch
+            // per-entry shape and carries no length prefix, so a loaded
+            // crossbow sitting in any container truncated the rest of the
+            // packet from that slot onward. See [`read_charged_projectiles`]
+            // and `docs/item-data-component-decode.md` for the wire citation.
+            Some("minecraft:charged_projectiles") => {
+                let (items, complete) = read_charged_projectiles(reader)?;
+                components.charged_projectiles = items;
+                if !complete {
+                    components.has_unmodeled = true;
+                    let _ = reader.bytes(reader.remaining());
+                    return Ok((components, false));
+                }
+            }
+
+            // Six fixed-width floats (`f32`, not VarInts), no length prefix —
+            // the same class of decode cliff as trim, map id and the rest of
+            // that group: a spear-family item in any container truncated the
+            // rest of the packet from that slot onward. Wire order is
+            // min reach, max reach, min creative reach, max creative reach,
+            // hitbox margin, mob factor — see `docs/item-data-component-decode.md`
+            // for the wire citation.
+            Some("minecraft:attack_range") => {
+                let min_reach = reader.f32().map_err(dec_err)?;
+                let max_reach = reader.f32().map_err(dec_err)?;
+                let min_creative_reach = reader.f32().map_err(dec_err)?;
+                let max_creative_reach = reader.f32().map_err(dec_err)?;
+                let hitbox_margin = reader.f32().map_err(dec_err)?;
+                let mob_factor = reader.f32().map_err(dec_err)?;
+                components.attack_range = Some(AttackRange::new(
+                    min_reach,
+                    max_reach,
+                    min_creative_reach,
+                    max_creative_reach,
+                    hitbox_margin,
+                    mob_factor,
+                ));
+            }
+
             other => {
                 // An unmodeled component: its payload is not length-prefixed, so
                 // it and everything after it in this packet are unreadable. Keep
@@ -1415,29 +1459,41 @@ fn read_block_holder_set(reader: &mut Reader<'_>) -> Result<ToolBlocks, AdapterE
 }
 
 /// Decodes an `ItemEnchantments` component: a VarInt-counted map of
-/// `Holder<Enchantment>` (registry id, holder-encoded as `id + 1`) to a VarInt
-/// level.
+/// `Holder<Enchantment>` to a VarInt level.
+///
+/// # The map key is a *bare* registry id, not a holder-encoded one
+///
+/// This used to read the key as `id + 1` and reject `0` outright as an
+/// "unsupported inline holder", as if this component's per-entry `Holder` used
+/// the same offset-by-one, either-id-or-inline shape `minecraft:instrument`'s
+/// holder does elsewhere in this file. It does not: an enchantment reference is
+/// the same bare, unoffset `idMapper` shape `minecraft:rarity`/`minecraft:dye`
+/// already use here, with no inline form at all — see
+/// `docs/item-data-component-decode.md` for the wire citation this was
+/// re-verified against.
+///
+/// The consequence was two-fold, not one: every *non-zero* wire id decoded to
+/// the *wrong* enchantment (off by one, silently — id 12 read as 11), and wire
+/// id `0` — a real, ordinary enchantment reference, not an inline marker — hard
+/// errored the whole packet. A player or mob wearing an item enchanted with
+/// whatever occupies registry id 0 lost their entire equipment list; every
+/// other enchanted item showed the wrong enchantment.
 fn read_enchantments(reader: &mut Reader<'_>) -> Result<Vec<ItemEnchantment>, AdapterError> {
     let count = reader.var_i32().map_err(dec_err)?;
     let count = usize::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("invalid enchantment count {count}")))?;
-    let mut enchantments = Vec::with_capacity(count.min(64));
+    let mut enchantments = Vec::with_capacity(count.min(reader.remaining()).min(64));
     for _ in 0..count {
         let raw = reader.var_i32().map_err(dec_err)?;
-        if raw <= 0 {
-            // 0 is an inline holder (a full Enchantment definition); vanilla
-            // sends registry references for item enchantments, never inline.
-            return Err(AdapterError::Decode(
-                "inline enchantment holder is not supported".to_owned(),
-            ));
+        if raw < 0 {
+            return Err(AdapterError::Decode(format!(
+                "negative enchantment registry id {raw}"
+            )));
         }
         let level = reader.var_i32().map_err(dec_err)?;
         let level = u32::try_from(level)
             .map_err(|_| AdapterError::Decode(format!("negative enchantment level {level}")))?;
-        enchantments.push(ItemEnchantment {
-            id: raw - 1,
-            level,
-        });
+        enchantments.push(ItemEnchantment { id: raw, level });
     }
     Ok(enchantments)
 }
@@ -2252,6 +2308,50 @@ fn read_bundle_contents(reader: &mut Reader<'_>) -> Result<(Vec<ItemStack>, bool
         )));
     }
     let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        let item_id = reader.var_i32().map_err(dec_err)?;
+        let name = item_name(item_id)
+            .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
+        let item_count = reader.var_i32().map_err(dec_err)?;
+        let item_count = u32::try_from(item_count)
+            .map_err(|_| AdapterError::Decode(format!("invalid item count {item_count}")))?;
+        let (components, complete) = read_component_patch(reader, name)?;
+        items.push(ItemStack {
+            item: parse_key(name, "item")?,
+            count: item_count,
+            components,
+        });
+        if !complete {
+            return Ok((items, false));
+        }
+    }
+    Ok((items, true))
+}
+
+/// Decodes `minecraft:charged_projectiles`' payload: the same
+/// item-then-count-then-recursive-`DataComponentPatch` per-entry shape
+/// [`read_bundle_contents`] reads, capped at 1024 entries — the codec's own
+/// declared maximum, so a declared count above it is a malformed packet rather
+/// than a legitimately large one.
+///
+/// An unmodeled component inside a *charged* stack is exactly as unrecoverable
+/// as one at the top level, so it stops the whole list the same way
+/// [`read_bundle_contents`] does rather than hard-failing the packet — a loaded
+/// crossbow in a hotbar is not a case this decoder can afford to treat as
+/// fatal.
+///
+/// The reservation is bounded by the bytes actually available, not by the
+/// declared count alone: every entry costs at least the two single-byte
+/// VarInts an empty patch needs, so no more than `reader.remaining()` of them
+/// can ever be produced, and the count is attacker-influenced.
+fn read_charged_projectiles(reader: &mut Reader<'_>) -> Result<(Vec<ItemStack>, bool), AdapterError> {
+    let count = read_count(reader, "charged_projectiles item")?;
+    if count > 1024 {
+        return Err(AdapterError::Decode(format!(
+            "charged_projectiles declares {count} items, more than the codec's own 1024 cap"
+        )));
+    }
+    let mut items = Vec::with_capacity(count.min(reader.remaining()));
     for _ in 0..count {
         let item_id = reader.var_i32().map_err(dec_err)?;
         let name = item_name(item_id)
