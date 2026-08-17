@@ -56,6 +56,8 @@ use lodestone_game::item::ItemStack;
 use lodestone_game::menu::Menu;
 use lodestone_model::text::TextSpan;
 
+use crate::hud::VanillaFont;
+
 use super::builder::Builder;
 
 /// `TooltipRenderUtil.MOUSE_OFFSET` (`TooltipRenderUtil.java`) — the tooltip's
@@ -106,6 +108,51 @@ const RED: [f32; 4] = [1.0, 85.0 / 255.0, 85.0 / 255.0, 1.0];
 /// `ChatFormatting.DARK_PURPLE`, `0xAA00AA` — `potion.whenDrank`'s
 /// (`"When Applied:"`) colour.
 const DARK_PURPLE: [f32; 4] = [170.0 / 255.0, 0.0, 170.0 / 255.0, 1.0];
+
+/// `ClientBundleTooltip.GRID_WIDTH`/`getWidth` (`ClientBundleTooltip.java`) —
+/// the bundle image component's own fixed width, centred within a wider box
+/// exactly like [`title_line`]'s text is left-aligned within it.
+const BUNDLE_GRID_W: f32 = 96.0;
+/// `ClientBundleTooltip.SLOT_SIZE`.
+const BUNDLE_SLOT: f32 = 24.0;
+/// `ClientBundleTooltip.SLOT_MARGIN` — the icon's inset within its slot cell.
+const BUNDLE_SLOT_MARGIN: f32 = 4.0;
+/// `ClientBundleTooltip.PROGRESSBAR_HEIGHT`/`_WIDTH`.
+const BUNDLE_PROGRESSBAR_H: f32 = 13.0;
+const BUNDLE_PROGRESSBAR_W: f32 = 96.0;
+/// `ClientBundleTooltip.PROGRESSBAR_FILL_MAX` — the fill's own inner span,
+/// one pixel shy of the border on each side.
+const BUNDLE_PROGRESSBAR_FILL_MAX: f32 = 94.0;
+/// The vertical gap [`bundle_image_height`] spends twice — once between the
+/// grid/description and the bar (`PROGRESSBAR_MARGIN_Y`), once below the bar
+/// closing out the component — `backgroundHeight() = itemGridHeight() + 13 +
+/// 8`, where the trailing `8` is this constant counted twice.
+const BUNDLE_BOTTOM_PAD: f32 = 4.0;
+/// A bundle slot cell's plain (unselected) fill — this module's own flat
+/// stand-in for `container/bundle/slot_background`, the same simplification
+/// [`TOOLTIP_BG`]'s doc explains for the main box: the sprite atlas is out of
+/// reach from this stream (see this module's doc), so a flat colour close to
+/// vanilla's real sprite art draws instead.
+const BUNDLE_SLOT_BG: [f32; 4] = [1.0, 1.0, 1.0, 0.15];
+/// The selected slot's back fill — this module's stand-in for
+/// `container/bundle/slot_highlight_back`, noticeably brighter than
+/// [`BUNDLE_SLOT_BG`] so the highlight the scroll wiring produces is
+/// actually visible, which is the entire point of this module existing.
+const BUNDLE_SLOT_HIGHLIGHT: [f32; 4] = [1.0, 1.0, 1.0, 0.4];
+/// The selected slot's one-pixel front border — this module's stand-in for
+/// `container/bundle/slot_highlight_front`, drawn over the icon the same way
+/// the real sprite is (`extractSlot`'s own back-then-icon-then-front order).
+const BUNDLE_SLOT_HIGHLIGHT_BORDER: [f32; 4] = [1.0, 1.0, 1.0, 0.9];
+/// The progress bar's empty track — this module's stand-in for
+/// `container/bundle/slot_background`'s progressbar sibling.
+const BUNDLE_PROGRESSBAR_BG: [f32; 4] = [1.0, 1.0, 1.0, 0.15];
+/// The progress bar's fill — a plain, readable green rather than vanilla's
+/// own two-tone sprite gradient.
+const BUNDLE_PROGRESSBAR_FILL: [f32; 4] = [80.0 / 255.0, 200.0 / 255.0, 120.0 / 255.0, 1.0];
+/// `item.minecraft.bundle.empty.description` (`en_us.json`) — the same
+/// "no language table reaches this module" simplification [`tooltip_lines`]'s
+/// own doc already carries for `item.durability`/`item.components`.
+const BUNDLE_EMPTY_DESCRIPTION: &str = "Can hold a mixed stack of items";
 
 /// One tooltip line: its text and its colour.
 #[derive(Debug, Clone, PartialEq)]
@@ -459,6 +506,7 @@ fn format_attribute_amount(raw_amount: f64, percent: bool) -> String {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_tooltip(
     b: &mut Builder<'_>,
+    assets: &crate::hud::item_icon::IconAssets<'_>,
     menu: &Menu,
     hovered: Option<usize>,
     cursor: Option<[f32; 2]>,
@@ -467,6 +515,7 @@ pub(super) fn emit_tooltip(
     width: u32,
     height: u32,
     canvas: (f32, f32),
+    bundle_selection: Option<super::bundle::BundleSelection>,
 ) {
     let Some([cx, cy]) = cursor else { return };
     if menu.carried().is_some() {
@@ -477,7 +526,18 @@ pub(super) fn emit_tooltip(
     let Some(stack) = menu.slot_item(index) else {
         return;
     };
-    emit_tooltip_for_stack(b, stack, cursor, advanced, gui_scale, width, height, canvas);
+    // Only a selection tracked against *this* hovered slot applies — see
+    // `crate::container::bundle`'s module doc for why the tracked selection
+    // lives beside the menu rather than mutated into the stack itself, and
+    // `ContainerFrame::bundle_selection`'s own doc for why the window-id
+    // filter happens one layer up, at the render call site.
+    #[allow(clippy::cast_possible_wrap)]
+    let selected = bundle_selection
+        .filter(|s| s.slot == index as i32)
+        .map(|s| s.selected);
+    emit_tooltip_for_stack(
+        b, assets, stack, cursor, advanced, gui_scale, width, height, canvas, selected,
+    );
 }
 
 /// The box-and-lines half of [`emit_tooltip`], for a caller that already knows which
@@ -491,6 +551,7 @@ pub(super) fn emit_tooltip(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_tooltip_for_stack(
     b: &mut Builder<'_>,
+    assets: &crate::hud::item_icon::IconAssets<'_>,
     stack: &ItemStack,
     cursor: Option<[f32; 2]>,
     advanced: bool,
@@ -498,6 +559,7 @@ pub(super) fn emit_tooltip_for_stack(
     width: u32,
     height: u32,
     canvas: (f32, f32),
+    bundle_selected: Option<i32>,
 ) {
     let Some([cx, cy]) = cursor else { return };
     let Some(font) = b.font else { return };
@@ -506,23 +568,46 @@ pub(super) fn emit_tooltip_for_stack(
         return;
     }
 
+    // `ItemStack.getTooltipImage`/`BundleItem.getTooltipImage`: a bundle's own
+    // tooltip carries an extra "image" component (the item grid), inserted
+    // right after the title line — see `bundle_image_height`'s own doc.
+    let bundle_image_h =
+        lodestone_game::item::is_bundle(stack.item()).then(|| bundle_image_height(font, stack));
+
     // `cursor` is physical viewport space (`hit_test`'s), this builder is the
     // logical canvas — the same division the carried-stack draw performs, and for
     // the same reason.
     let scale = crate::config::calculate_gui_scale(gui_scale, width, height).max(1) as f32;
     let (cx, cy) = (cx / scale, cy / scale);
 
-    let text_w = lines
+    let mut text_w = lines
         .iter()
         .map(|l| font.width(&l.text, 1.0))
         .fold(0.0f32, f32::max);
+    // The image component (currently only a bundle's grid) is centred within
+    // the box rather than left-aligned like every text line — `ClientBundleTooltip
+    // .getWidth` is a fixed `96`, so a box narrower than that (a short title,
+    // no advanced lines) must still grow to fit it.
+    if bundle_image_h.is_some() {
+        text_w = text_w.max(BUNDLE_GRID_W);
+    }
     // The height walk: one `LINE_H` per line at `LINE_PITCH`, plus vanilla's extra
-    // 2 px under the title when there is a body.
-    let text_h = if lines.len() > 1 {
+    // 2 px under the title when there is a body — and the image component's own
+    // height, inserted right after the title (see `bundle_image_h`'s own doc
+    // above). The `lines.len() == 1` arm needs its own gap added, since the base
+    // formula only adds `TITLE_GAP` when a *text* body follows; an image-only
+    // tail still needs separation from the title.
+    let mut text_h = if lines.len() > 1 {
         LINE_H + TITLE_GAP + (lines.len() - 1) as f32 * LINE_PITCH
     } else {
         LINE_H
     };
+    if let Some(image_h) = bundle_image_h {
+        if lines.len() == 1 {
+            text_h += TITLE_GAP;
+        }
+        text_h += image_h;
+    }
 
     // `DefaultTooltipPositioner.positionTooltip` (`:13-27`), verbatim: `(+12,
     // -12)` from the cursor, then flip left of the cursor if it would overflow the
@@ -576,8 +661,247 @@ pub(super) fn emit_tooltip_for_stack(
         y += LINE_PITCH;
         if i == 0 {
             y += TITLE_GAP;
+            // The image component, right after the title — see
+            // `ItemStack.getTooltipImage`'s own insertion point
+            // (`components.add(components.isEmpty() ? 0 : 1, …)`), and
+            // `bundle_image_h`'s doc above for why this is the only image
+            // kind implemented.
+            if let Some(image_h) = bundle_image_h {
+                draw_bundle_image(b, assets, font, stack, tx, y, text_w, bundle_selected);
+                y += image_h;
+            }
         }
     }
+}
+
+/// How many rows [`draw_bundle_image`]'s grid needs — `Mth.positiveCeilDiv
+/// (slotCount, 4)` where `slotCount = min(12, contents.len())`
+/// (`ClientBundleTooltip.gridSizeY`/`slotCount`). Only meaningful for a
+/// non-empty bundle; the empty case has its own layout entirely (see
+/// [`bundle_image_height`]).
+fn bundle_grid_rows(len: usize) -> usize {
+    len.min(12).div_ceil(4).max(1)
+}
+
+/// The bundle tooltip's own image-component height —
+/// `ClientBundleTooltip.getHeight`/`backgroundHeight`/
+/// `getEmptyBundleBackgroundHeight`, ported directly: an empty bundle shows
+/// wrapped description text over the (always-empty) progress bar; a
+/// non-empty one shows the item grid over the (weight-filled) bar. Both tack
+/// on the same `13 + 8` tail — the bar's own height plus
+/// [`BUNDLE_BOTTOM_PAD`] spent twice, once above the bar and once below it.
+fn bundle_image_height(font: &VanillaFont, stack: &ItemStack) -> f32 {
+    let content_h = if stack.bundle_contents().is_empty() {
+        wrap_bundle_description(font).len() as f32 * LINE_H
+    } else {
+        bundle_grid_rows(stack.bundle_contents().len()) as f32 * BUNDLE_SLOT
+    };
+    content_h + BUNDLE_PROGRESSBAR_H + BUNDLE_BOTTOM_PAD * 2.0
+}
+
+/// A plain greedy word-wrap of [`BUNDLE_EMPTY_DESCRIPTION`] against
+/// [`BUNDLE_GRID_W`] — the same reduction of vanilla's `StringSplitter
+/// ::splitLines` `crate::menu::advancements::wrap` already uses for a single
+/// unstyled run, kept as a private copy here rather than made `pub(crate)`
+/// there: the two live in unrelated subsystems and a shared helper would be
+/// a coupling with no other caller to justify it.
+fn wrap_bundle_description(font: &VanillaFont) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in BUNDLE_EMPTY_DESCRIPTION.split_whitespace() {
+        let candidate = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        if font.width(&candidate, 1.0) <= BUNDLE_GRID_W || current.is_empty() {
+            current = candidate;
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current = word.to_string();
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// `BundleContents.getWeight`/`computeContentWeight`/`getWeight`
+/// (`BundleContents.java`) as an `f32` rather than an exact `Fraction` — this
+/// build has no rational type, and the progress bar only ever quantises the
+/// result to [`BUNDLE_PROGRESSBAR_FILL_MAX`] steps, so a float loses nothing
+/// the sprite could show. Recurses for a bundle nested inside a bundle
+/// (`BUNDLE_IN_BUNDLE_WEIGHT = 1/16`, added on top of the nested bundle's own
+/// weight) — the recursive-decode chain issue #692's audit found genuinely
+/// complete (see this module's caller for the pointer). A beehive's
+/// `minecraft:bees` clause (`getWeight`'s `BEEHIVE_WEIGHT = 1`) is not
+/// modelled: this build has no `Bees` component anywhere, so a bee nest
+/// dropped into a bundle falls through to the ordinary `1 / max_stack_size`
+/// term below instead of the real flat `1` — a documented, narrow gap rather
+/// than a guess.
+fn bundle_weight(stack: &ItemStack) -> f32 {
+    stack
+        .bundle_contents()
+        .iter()
+        .map(|item| {
+            let per_item = if lodestone_game::item::is_bundle(item.item()) {
+                bundle_weight(item) + (1.0 / 16.0)
+            } else {
+                // `max_stack_size` is already clamped to `1..=99`, so this
+                // can never divide by zero.
+                1.0 / item.max_stack_size() as f32
+            };
+            per_item * item.count().max(0) as f32
+        })
+        .sum()
+}
+
+/// The progress bar — `ClientBundleTooltip::extractProgressbar`, as a flat
+/// fill over a flat track rather than the two real sprites (see
+/// [`BUNDLE_PROGRESSBAR_BG`]'s own doc). `weight` is [`bundle_weight`]'s
+/// output, already clamped to `[0, 1]` by the caller for the fill width but
+/// read unclamped here for the full/empty text choice, matching
+/// `getProgressBarFillText`'s own `Fraction` comparisons.
+fn draw_bundle_progressbar(b: &mut Builder<'_>, font: &VanillaFont, x: f32, y: f32, weight: f32) {
+    b.rect_px(x, y, BUNDLE_PROGRESSBAR_W, BUNDLE_PROGRESSBAR_H, BUNDLE_PROGRESSBAR_BG);
+    let fill_w = (weight.clamp(0.0, 1.0) * BUNDLE_PROGRESSBAR_FILL_MAX).round();
+    if fill_w > 0.0 {
+        b.rect_px(x + 1.0, y + 1.0, fill_w, BUNDLE_PROGRESSBAR_H - 2.0, BUNDLE_PROGRESSBAR_FILL);
+    }
+    b.rect_px(x, y, BUNDLE_PROGRESSBAR_W, 1.0, BORDER_TOP);
+    b.rect_px(x, y + BUNDLE_PROGRESSBAR_H - 1.0, BUNDLE_PROGRESSBAR_W, 1.0, BORDER_BOTTOM);
+    let text = if weight <= 0.0 {
+        Some("Empty")
+    } else if weight >= 1.0 {
+        Some("Full")
+    } else {
+        None
+    };
+    if let Some(text) = text {
+        let tw = font.width(text, 1.0);
+        b.shadowed_label(
+            text,
+            x + BUNDLE_PROGRESSBAR_W / 2.0 - tw / 2.0,
+            y + 3.0,
+            1.0,
+            NAME_COLOUR,
+        );
+    }
+}
+
+/// The bundle tooltip's own image component —
+/// `ClientBundleTooltip::extractImage`/`extractBundleWithItemsTooltip`/
+/// `extractEmptyBundleTooltip`, ported directly including the item grid's
+/// bottom-to-top, right-to-left fill order (`extractBundleWithItemsTooltip`'s
+/// own `rowNumber`/`columnNumber` walk) and the `+N` overflow count in the
+/// bottom-right cell when the bundle holds more than
+/// [`lodestone_game::item::ItemStack::bundle_items_to_show`] can display.
+///
+/// `x` is the tooltip content box's own left edge (vanilla's `x` parameter to
+/// `extractImage`, *not* pre-centred), `y` is this component's own top, and
+/// `box_w` is the overall box's content width — the same three vanilla hands
+/// `extractImage`. The grid itself is centred within `box_w` via
+/// `getContentXOffset`; text lines elsewhere in this file stay left-aligned
+/// at `x`, which is why centring happens here rather than by widening `x`
+/// itself.
+///
+/// `selected` is the shown-item index — [`crate::container::bundle
+/// ::BundleSelection::selected`]'s own index space, which is already the same
+/// one `BundleContents.getSelectedItemIndex()`/`itemVisualOrderIndex` use (both
+/// range over the *shown* subset, `0` = most recently inserted), so no
+/// remapping happens here.
+#[allow(clippy::too_many_arguments)]
+fn draw_bundle_image(
+    b: &mut Builder<'_>,
+    assets: &crate::hud::item_icon::IconAssets<'_>,
+    font: &VanillaFont,
+    stack: &ItemStack,
+    x: f32,
+    y: f32,
+    box_w: f32,
+    selected: Option<i32>,
+) {
+    let content_x = x + (box_w - BUNDLE_GRID_W) / 2.0;
+    let contents = stack.bundle_contents();
+    if contents.is_empty() {
+        // `extractEmptyBundleDescriptionText`'s own colour, `-5592406` —
+        // `0xFFAAAAAA`, i.e. [`GRAY`] at full alpha.
+        let lines = wrap_bundle_description(font);
+        let mut ly = y;
+        for line in &lines {
+            b.shadowed_label(line, content_x, ly, 1.0, GRAY);
+            ly += LINE_H;
+        }
+        draw_bundle_progressbar(b, font, content_x, ly + BUNDLE_BOTTOM_PAD, 0.0);
+        return;
+    }
+
+    let show = stack.bundle_items_to_show();
+    let shown = &contents[..show.min(contents.len())];
+    let rows = bundle_grid_rows(contents.len());
+    let overflowing = contents.len() > 12;
+    let x_start = content_x + BUNDLE_GRID_W;
+    let y_start = y + rows as f32 * BUNDLE_SLOT;
+    let mut slot_number = 1usize;
+    for row in 1..=rows {
+        for col in 1..=4u32 {
+            let draw_x = x_start - col as f32 * BUNDLE_SLOT;
+            let draw_y = y_start - row as f32 * BUNDLE_SLOT;
+            if overflowing && row == 1 && col == 1 {
+                // `extractCount`'s own anchor: centred text at `(drawX+12,
+                // drawY+10)`.
+                let hidden: i64 = contents.iter().skip(shown.len()).map(|s| i64::from(s.count())).sum();
+                let text = format!("+{hidden}");
+                let tw = font.width(&text, 1.0);
+                b.shadowed_label(&text, draw_x + 12.0 - tw / 2.0, draw_y + 10.0, 1.0, NAME_COLOUR);
+            } else if shown.len() >= slot_number {
+                // `itemVisualOrderIndex = shownItems.size() - slotNumber`
+                // (`extractSlot`), using the pre-increment `slotNumber`.
+                let item_index = shown.len() - slot_number;
+                let highlighted = selected == Some(item_index as i32);
+                b.rect_px(
+                    draw_x,
+                    draw_y,
+                    BUNDLE_SLOT,
+                    BUNDLE_SLOT,
+                    if highlighted { BUNDLE_SLOT_HIGHLIGHT } else { BUNDLE_SLOT_BG },
+                );
+                b.draw_stack(assets, &shown[item_index], draw_x + BUNDLE_SLOT_MARGIN, draw_y + BUNDLE_SLOT_MARGIN);
+                if highlighted {
+                    // The front highlight ring, over the icon — `extractSlot`'s
+                    // own back-then-icon-then-front order.
+                    b.rect_px(draw_x, draw_y, BUNDLE_SLOT, 1.0, BUNDLE_SLOT_HIGHLIGHT_BORDER);
+                    b.rect_px(draw_x, draw_y + BUNDLE_SLOT - 1.0, BUNDLE_SLOT, 1.0, BUNDLE_SLOT_HIGHLIGHT_BORDER);
+                    b.rect_px(draw_x, draw_y, 1.0, BUNDLE_SLOT, BUNDLE_SLOT_HIGHLIGHT_BORDER);
+                    b.rect_px(draw_x + BUNDLE_SLOT - 1.0, draw_y, 1.0, BUNDLE_SLOT, BUNDLE_SLOT_HIGHLIGHT_BORDER);
+                }
+                slot_number += 1;
+            }
+        }
+    }
+
+    // The selected item's own floating name — `extractSelectedItemTooltip`,
+    // the thing that makes the scroll-selection feature legible at a glance
+    // rather than just a brighter square: `getStyledHoverName`'s own
+    // `&|_| None` fallback matches [`title_line`]'s (no language table here).
+    if let Some(item) = selected
+        .and_then(|i| usize::try_from(i).ok())
+        .and_then(|i| shown.get(i))
+    {
+        let name = lodestone_game::item::styled_hover_name(item, &|_| None);
+        let tw = font.width(&name, 1.0);
+        let center = x + box_w / 2.0 - 12.0;
+        let name_x = center - tw / 2.0;
+        let name_y = y - 15.0;
+        b.rect_px(name_x - PADDING, name_y - PADDING, tw + PADDING * 2.0, LINE_H + PADDING * 2.0, TOOLTIP_BG);
+        b.shadowed_label(&name, name_x, name_y, 1.0, NAME_COLOUR);
+    }
+
+    draw_bundle_progressbar(b, font, content_x, y + rows as f32 * BUNDLE_SLOT + BUNDLE_BOTTOM_PAD, bundle_weight(stack));
 }
 
 #[cfg(test)]
@@ -774,5 +1098,199 @@ mod tests {
         let lines = tooltip_lines(&stack, false);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "Enchanted Book");
+    }
+
+    fn id(s: &str) -> lodestone_model::Identifier {
+        s.parse().expect("valid id")
+    }
+
+    fn bundle_of(items: Vec<ItemStack>) -> ItemStack {
+        let mut stack = ItemStack::new(id("minecraft:bundle"), 1);
+        stack.set_bundle_contents(items);
+        stack
+    }
+
+    fn torches(count: usize) -> Vec<ItemStack> {
+        (0..count).map(|_| ItemStack::new(id("minecraft:torch"), 1)).collect()
+    }
+
+    /// `BundleContents.getWeight` for a flat bundle: each torch (default max
+    /// stack size 64, since [`ItemStack::new`] carries no
+    /// `minecraft:max_stack_size` override) contributes `1/64`.
+    #[test]
+    fn bundle_weight_sums_reciprocal_max_stack_sizes() {
+        let stack = bundle_of(torches(3));
+        assert!(
+            (bundle_weight(&stack) - 3.0 / 64.0).abs() < 1e-6,
+            "got {}",
+            bundle_weight(&stack)
+        );
+    }
+
+    /// The recursive clause: a bundle nested inside a bundle contributes its
+    /// own weight plus [`BUNDLE_IN_BUNDLE_WEIGHT`]'s `1/16` —
+    /// `BundleContents::getWeight`'s `nestedWeight.add(BUNDLE_IN_BUNDLE_WEIGHT)`.
+    /// This is also the discriminating case for issue #692's own claim that the
+    /// recursive bundle-in-bundle decode is complete: a weight that only ever
+    /// read the outer stack's own component would silently treat the inner
+    /// bundle as weightless instead of `4/64 + 1/16`.
+    #[test]
+    fn bundle_weight_recurses_into_a_nested_bundle() {
+        let inner = bundle_of(torches(4));
+        let outer = bundle_of(vec![inner]);
+        let expected = 4.0 / 64.0 + 1.0 / 16.0;
+        assert!(
+            (bundle_weight(&outer) - expected).abs() < 1e-6,
+            "got {}, want {expected}",
+            bundle_weight(&outer)
+        );
+    }
+
+    /// [`bundle_grid_rows`] against the same four worked cases
+    /// `ItemStack::bundle_items_to_show`'s own test already establishes for
+    /// `getNumberOfItemsToShow` — `Mth.positiveCeilDiv(min(12, size), 4)`.
+    #[test]
+    fn bundle_grid_rows_matches_vanillas_worked_cases() {
+        let cases = [(4, 1), (6, 2), (16, 3), (13, 3)];
+        let mut mismatches = Vec::new();
+        for (size, want) in cases {
+            let got = bundle_grid_rows(size);
+            if got != want {
+                mismatches.push(format!("size {size}: got {got} rows, want {want}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    /// The whole point of this module: a tracked scroll selection must draw a
+    /// visibly different fill on its own slot, and an *absent* selection must
+    /// draw that fill nowhere — the control that proves the highlight isn't
+    /// just always on. Jar-less-safe would need no font at all, but the box's
+    /// own layout (and therefore where the grid lands) is measured through
+    /// [`VanillaFont`], so this skips without one rather than asserting
+    /// against the fixed-advance debug font's different metrics.
+    #[test]
+    fn a_selected_bundle_slot_draws_the_highlight_fill_and_an_absent_one_draws_none() {
+        let Some(font) = VanillaFont::shared() else {
+            return; // jar-less: nothing to measure against
+        };
+        let stack = bundle_of(vec![
+            ItemStack::new(id("minecraft:torch"), 1),
+            ItemStack::new(id("minecraft:torch"), 1),
+            ItemStack::new(id("minecraft:stick"), 1),
+        ]);
+        let assets = crate::hud::item_icon::IconAssets { items: None, models: None };
+        let has_alpha = |verts: &[f32], alpha: f32| {
+            verts.chunks_exact(6).any(|v| (v[5] - alpha).abs() < 1e-4)
+        };
+
+        let mut selected_b = Builder::new(400.0, 300.0, Some(&font));
+        emit_tooltip_for_stack(
+            &mut selected_b,
+            &assets,
+            &stack,
+            Some([50.0, 50.0]),
+            false,
+            2,
+            800,
+            600,
+            (400.0, 300.0),
+            Some(1),
+        );
+        assert!(
+            has_alpha(&selected_b.verts, BUNDLE_SLOT_HIGHLIGHT[3]),
+            "a tracked selection must draw the highlight fill somewhere in the grid"
+        );
+
+        let mut unselected_b = Builder::new(400.0, 300.0, Some(&font));
+        emit_tooltip_for_stack(
+            &mut unselected_b,
+            &assets,
+            &stack,
+            Some([50.0, 50.0]),
+            false,
+            2,
+            800,
+            600,
+            (400.0, 300.0),
+            None,
+        );
+        assert!(
+            !has_alpha(&unselected_b.verts, BUNDLE_SLOT_HIGHLIGHT[3]),
+            "control: no tracked selection must draw the highlight fill nowhere"
+        );
+    }
+
+    /// [`emit_tooltip`] itself: the router-level wiring from a hovered slot's
+    /// index plus a [`crate::container::bundle::BundleSelection`] down to the
+    /// same highlight fill the function above exercises directly. Proves the
+    /// window/slot filter in `emit_tooltip` passes the *matching* selection
+    /// through rather than only that `emit_tooltip_for_stack` can draw one it
+    /// is handed directly.
+    #[test]
+    fn emit_tooltip_forwards_a_selection_tracked_against_the_hovered_slot() {
+        let Some(font) = VanillaFont::shared() else {
+            return; // jar-less: nothing to measure against
+        };
+        let mut menu = lodestone_game::menu::Menu::generic(9);
+        let stack = bundle_of(vec![
+            ItemStack::new(id("minecraft:torch"), 1),
+            ItemStack::new(id("minecraft:torch"), 1),
+        ]);
+        menu.set_slot_item(0, Some(stack));
+        let assets = crate::hud::item_icon::IconAssets { items: None, models: None };
+        let has_alpha = |verts: &[f32], alpha: f32| {
+            verts.chunks_exact(6).any(|v| (v[5] - alpha).abs() < 1e-4)
+        };
+
+        let selection = crate::container::bundle::BundleSelection {
+            window_id: 1,
+            slot: 0,
+            selected: 0,
+        };
+        let mut b = Builder::new(400.0, 300.0, Some(&font));
+        emit_tooltip(
+            &mut b,
+            &assets,
+            &menu,
+            Some(0),
+            Some([50.0, 50.0]),
+            false,
+            2,
+            800,
+            600,
+            (400.0, 300.0),
+            Some(selection),
+        );
+        assert!(
+            has_alpha(&b.verts, BUNDLE_SLOT_HIGHLIGHT[3]),
+            "a selection tracked against the hovered slot must reach the grid"
+        );
+
+        // Control: a selection tracked against a *different* slot must not
+        // paint a highlight into this slot's grid.
+        let mismatched = crate::container::bundle::BundleSelection {
+            window_id: 1,
+            slot: 5,
+            selected: 0,
+        };
+        let mut b2 = Builder::new(400.0, 300.0, Some(&font));
+        emit_tooltip(
+            &mut b2,
+            &assets,
+            &menu,
+            Some(0),
+            Some([50.0, 50.0]),
+            false,
+            2,
+            800,
+            600,
+            (400.0, 300.0),
+            Some(mismatched),
+        );
+        assert!(
+            !has_alpha(&b2.verts, BUNDLE_SLOT_HIGHLIGHT[3]),
+            "control: a selection for a different slot must not highlight this one"
+        );
     }
 }

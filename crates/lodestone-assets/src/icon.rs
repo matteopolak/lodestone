@@ -106,6 +106,20 @@ pub enum IconPart {
         transform: DisplayTransform,
         /// The GUI lighting mode (side-lit for blocks, front-lit for flat items).
         gui_light: GuiLight,
+        /// The `minecraft:model` **item-definition-tree** node's own
+        /// root-to-node `"transformation"` chain — [`ItemModelOutput::Model`]'s
+        /// field of the same name, carried through unchanged. Distinct from
+        /// [`Self::Model::transform`] above: that one is the *model JSON's*
+        /// own `display.gui` slot (read once, per model, Euler-angle based);
+        /// this one is the *item definition's* selector-tree-level TRS chain
+        /// (1.21.4+, quaternion based), composed **on top of** whatever pose
+        /// a caller already builds from `transform` — see
+        /// [`crate::item_model::ItemNodeTransform`]'s doc for the exact
+        /// composition order. Empty for the overwhelming majority of items;
+        /// every coloured bed's `foot` sub-model is the real, shipped case
+        /// (see [`crate::item_model::ItemModelNode::Model`]'s own doc for the
+        /// jar-wide count).
+        node_transformation: Vec<crate::item_model::ItemNodeTransform>,
     },
     /// A code-driven special renderer (chest, shulker box, banner, shield, …) —
     /// ten `kind`s over 91 item definitions, and the whole family has **no item
@@ -432,7 +446,11 @@ impl<'a> ItemIconBuilder<'a> {
                     display,
                 ))
             }
-            ItemModelOutput::Model { model, tints } => self.part_for_model(model, tints),
+            ItemModelOutput::Model {
+                model,
+                tints,
+                transformation,
+            } => self.part_for_model_transformed(model, tints, transformation),
         }
     }
 
@@ -451,6 +469,26 @@ impl<'a> ItemIconBuilder<'a> {
         &self,
         model: &ResourceLocation,
         tints: &[TintSource],
+    ) -> Result<(Option<IconPart>, Option<DisplayTransforms>), IconError> {
+        self.part_for_model_transformed(model, tints, &[])
+    }
+
+    /// [`Self::part_for_model`], carrying a `minecraft:model` item-definition-tree
+    /// node's own root-to-node `"transformation"` chain onto the resulting
+    /// [`IconPart::Model::node_transformation`] — see that field's doc. `&[]`
+    /// (what [`Self::part_for_model`] passes) is right for every caller that
+    /// only wants to know *which model* a definition resolves to (picking the
+    /// GUI form, say); a caller building the actual placed geometry — one
+    /// [`ItemModelOutput::Model`] at a time — must pass that output's own
+    /// `transformation` through here instead, or a coloured bed's `foot`
+    /// sub-model bakes with no record of the offset that keeps it from
+    /// z-fighting the `head`.
+    #[allow(clippy::type_complexity)]
+    pub fn part_for_model_transformed(
+        &self,
+        model: &ResourceLocation,
+        tints: &[TintSource],
+        transformation: &[crate::item_model::ItemNodeTransform],
     ) -> Result<(Option<IconPart>, Option<DisplayTransforms>), IconError> {
         let resolved = self.resolver.resolve(model)?;
         // Read once, up front, and hand to whichever arm wins: *every* drawable
@@ -500,6 +538,7 @@ impl<'a> ItemIconBuilder<'a> {
                         model: model.clone(),
                         transform: display.get(DisplaySlot::Gui),
                         gui_light: resolved.gui_light,
+                        node_transformation: transformation.to_vec(),
                     })
                 }
             }

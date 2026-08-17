@@ -3108,9 +3108,10 @@ pub struct MovingPistonSpawn {
 ///
 /// # Which kinds resolve today
 ///
-/// `chest` (13 item definitions), `shulker_box` (17), `head` (6) and
-/// `player_head` (1) — every `kind` whose rig `BLOCK_ENTITY_MODELS` already holds.
-/// The other five return `None` and draw nothing, which is the behaviour before this
+/// `chest` (13 item definitions), `shulker_box` (17), `head` (6),
+/// `player_head` (1) and `shield` (2, undyed/pattern-less only — see below) —
+/// every `kind` whose rig `BLOCK_ENTITY_MODELS` already holds. The other five
+/// return `None` and draw nothing, which is the behaviour before this
 /// existed:
 ///
 /// | kind | items | why not yet |
@@ -3121,13 +3122,23 @@ pub struct MovingPistonSpawn {
 /// | `decorated_pot` | 1 | needs up to four independently textured sprites per instance |
 /// | `trident` | 2 | rig unported |
 ///
-/// **`shield` (2 item definitions) is drawn, but not through this resolver** —
-/// like `banner`, its base texture depends on runtime item state (whether the
-/// stack has a `minecraft:base_color` or any stored pattern layer), which this
-/// function's `(kind, item_path)` signature has no room for. See
-/// [`shield_item_rig`] and the two call sites that use it directly
-/// (`lodestone_shell::gpu::first_person`'s `prepare_special_hand`,
-/// `lodestone_shell::hud::item_icon`'s GUI-icon pass).
+/// **`shield` also resolves here now, but only ever as the undyed,
+/// pattern-less rig.** The first-person hand and the GUI icon both bypass
+/// this function and call [`shield_item_rig`] directly, because *they* carry
+/// real per-stack state (`minecraft:base_color`, `minecraft:banner_patterns`)
+/// this function's `(kind, item_path)` signature has no room for — see that
+/// pair's own call sites (`lodestone_shell::gpu::first_person`'s
+/// `prepare_special_hand`, `lodestone_shell::hud::item_icon`'s GUI-icon
+/// pass). But this resolver's three callers (a dropped stack, another
+/// entity's hand, an item frame) had **no** shield arm at all until this one
+/// landed — `_ => None` swallowed every one of them, so a dropped or framed
+/// shield drew nothing, full stop, not merely undyed. Resolving it here to
+/// the no-pattern sheet unconditionally is the same *bounded* shortfall this
+/// module already accepts elsewhere on these three surfaces (a dropped
+/// stack's own doc: "no stack multiplication"; a framed item's own doc: "the
+/// in-frame rotation is undecoded") — a real shield reaching real pixels,
+/// just not its dye or loom pattern, because neither surface threads that
+/// state through `EntityDraw` today.
 ///
 /// `None` is also the right answer for an item path a `kind` does not recognise (a
 /// datapack item declaring `minecraft:chest` over something that is not a chest):
@@ -3168,6 +3179,10 @@ pub fn special_item_rig(kind: &str, item_path: &str) -> Option<(&'static str, &'
             let ty = SkullType::from_block_path(item_path)?;
             Some((ty.model(), skull_texture_stem(ty)))
         }
+        // Always the no-pattern sheet — see this function's own doc for why
+        // a dyed or patterned shield still only reaches pixels through the
+        // hand/GUI call sites that bypass this resolver entirely.
+        "minecraft:shield" => Some((SHIELD, SHIELD_BASE_NO_PATTERN_TEXTURE_STEM)),
         _ => None,
     }
 }
@@ -5096,6 +5111,7 @@ mod special_item_tests {
             ("minecraft:head", "creeper_head"),
             ("minecraft:head", "zombie_head"),
             ("minecraft:player_head", "player_head"),
+            ("minecraft:shield", "shield"),
         ] {
             let Some((model, stem)) = special_item_rig(kind, path) else {
                 wrong.push(format!("{kind}/{path}: resolved to nothing"));
@@ -5166,8 +5182,36 @@ mod special_item_tests {
         assert_ne!(model, CHEST_RIGHT);
     }
 
-    /// The six unported `kind`s, and the item paths a `kind` must decline, resolve to
-    /// nothing rather than to a plausible wrong rig.
+    /// A dropped/framed/other-entity's-hand shield now resolves to the real rig and
+    /// the **no-pattern** sheet specifically — never [`SHIELD_BASE_TEXTURE_STEM`],
+    /// which would draw an opaque canvas meant to sit *under* a translucent
+    /// dye/pattern layer this resolver never issues. Getting that backwards would
+    /// still "resolve" (both stems are in the preload list) and still pass the
+    /// corpus-wide lookup gate above, so this checks the sheet by name rather than
+    /// merely that one was returned.
+    #[test]
+    fn shield_resolves_to_the_no_pattern_rig_and_sheet() {
+        let (model, stem) =
+            special_item_rig("minecraft:shield", "shield").expect("a shield now resolves here");
+        assert_eq!(model, SHIELD);
+        assert_eq!(
+            stem, SHIELD_BASE_NO_PATTERN_TEXTURE_STEM,
+            "a shield with no runtime dye/pattern state reaching this resolver must \
+             draw the opaque no-pattern sheet, not the sheet meant to sit under a \
+             translucent layer this resolver never issues"
+        );
+        assert_ne!(
+            stem, SHIELD_BASE_TEXTURE_STEM,
+            "the two sheets differ (the shield-bug fix's own 200-texel measurement), \
+             so drawing the wrong one is a real, visible regression, not a rename"
+        );
+    }
+
+    /// The five unported `kind`s, and the item paths a `kind` must decline, resolve to
+    /// nothing rather than to a plausible wrong rig. `shield` is deliberately **not**
+    /// in this list any more — see [`special_item_rig`]'s own doc for why it now
+    /// resolves here too (always undyed/pattern-less), and
+    /// [`shield_resolves_to_the_no_pattern_rig_and_sheet`] for its own positive gate.
     ///
     /// The `dragon_head`/`piglin_head` arm is the sharp one: both are real
     /// `minecraft:head` items in 26.2, so the `kind` matches and only
@@ -5182,7 +5226,6 @@ mod special_item_tests {
             ("minecraft:conduit", "conduit"),
             ("minecraft:copper_golem_statue", "copper_golem_statue"),
             ("minecraft:decorated_pot", "decorated_pot"),
-            ("minecraft:shield", "shield"),
             ("minecraft:trident", "trident"),
             // Real `minecraft:head` items whose rigs are unrelated multi-part ones.
             ("minecraft:head", "dragon_head"),

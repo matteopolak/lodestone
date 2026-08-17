@@ -301,3 +301,49 @@ fn the_pack_bakes_more_variants_than_items() {
         );
     }
 }
+
+/// The bed family's real gap, over the real jar rather than a synthetic
+/// fixture: `items/black_bed.json` composites `block/black_bed_head` (no
+/// `"transformation"`) with `block/black_bed_foot` (`translation [0, 0, 1]`),
+/// and both must now carry their own `node_transformation` through
+/// `BlockModels::build`'s bake — the field `collect_item_variants`'s own doc
+/// used to say `IconPart::Model` dropped outright.
+///
+/// This is the *data* half only: it proves the value reaches the baked
+/// `ItemGeometry`, not that anything yet draws the head and foot together as
+/// one composite icon (see that doc's own "composite-render boundary").
+#[test]
+#[ignore = "requires a fetched vanilla client.jar and generated/reports/blocks.json"]
+fn a_beds_foot_submodel_bakes_with_its_own_node_transformation_and_the_head_does_not() {
+    let models = build_models();
+    let bed = forms(&models, "minecraft:black_bed");
+
+    let head = bed
+        .variant(&loc("minecraft:block/black_bed_head"))
+        .expect("black_bed_head baked");
+    let foot = bed
+        .variant(&loc("minecraft:block/black_bed_foot"))
+        .expect("black_bed_foot baked");
+
+    eprintln!("=== minecraft:black_bed composite parts ===");
+    eprintln!("  head: node_transformation = {:?}", head.node_transformation);
+    eprintln!("  foot: node_transformation = {:?}", foot.node_transformation);
+
+    assert!(
+        head.node_transformation.is_empty(),
+        "black_bed_head carries no \"transformation\" of its own in the real jar, so its \
+         baked chain must be empty; got {:?}",
+        head.node_transformation
+    );
+    assert_eq!(
+        foot.node_transformation.len(),
+        1,
+        "black_bed_foot carries exactly one \"transformation\" in the real jar; got {:?}",
+        foot.node_transformation
+    );
+    assert_eq!(
+        foot.node_transformation[0].translation,
+        [0.0, 0.0, 1.0],
+        "the real jar's own literal — the offset that keeps the foot from z-fighting the head"
+    );
+}

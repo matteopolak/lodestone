@@ -1504,7 +1504,20 @@ impl WindowApp {
                 .with_beacon_selection(
                     self.beacon_selection.primary.as_ref(),
                     self.beacon_selection.secondary.as_ref(),
-                );
+                )
+                // The bundle scroll-selection highlight (issue #616's
+                // `BUNDLE_ITEM_SELECTED`/#613's `SelectBundleItem` remainder,
+                // the tooltip's own consumer half — see
+                // `crate::container::bundle`'s module doc). Filtered to the
+                // *currently open* window here rather than inside
+                // `ContainerFrame` itself, which carries no window id of its
+                // own: a selection tracked against a bundle in a screen that
+                // has since closed (or a different one that has since
+                // opened) must not paint a highlight in the new screen just
+                // because a slot index happens to coincide.
+                .with_bundle_selection(self.bundle_selection.filter(|selection| {
+                    selection.window_id == open_menu.as_ref().map_or(0, |open| open.window_id)
+                }));
             // `render_with_icons_scaled`, **not** `render_scaled`: the latter
             // hardcodes `depth: None, models: None`, so `want_models` was always
             // false and `push_item_model` returned early. Flat sprite icons still

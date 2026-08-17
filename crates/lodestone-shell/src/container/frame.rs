@@ -194,6 +194,16 @@ pub struct ContainerFrame<'a> {
     pub beacon_primary: Option<&'a lodestone_model::ResourceKey>,
     /// See [`Self::beacon_primary`].
     pub beacon_secondary: Option<&'a lodestone_model::ResourceKey>,
+    /// The bundle slot currently tracking a scroll-driven selection highlight
+    /// (`crate::container::bundle::BundleSelection`), already filtered to the
+    /// menu this frame belongs to — the caller (`redraw`) is responsible for
+    /// checking `window_id` before passing this in, since a `ContainerFrame`
+    /// has no window id of its own to compare against. `None` (the default)
+    /// draws the bundle tooltip's grid with nothing singled out, matching
+    /// `BundleContents::NO_SELECTED_ITEM_INDEX`. See
+    /// [`with_bundle_selection`](Self::with_bundle_selection) and
+    /// `super::tooltip`'s bundle-image drawing.
+    pub bundle_selection: Option<crate::container::bundle::BundleSelection>,
 }
 
 impl<'a> ContainerFrame<'a> {
@@ -224,6 +234,7 @@ impl<'a> ContainerFrame<'a> {
             anvil_name: None,
             beacon_primary: None,
             beacon_secondary: None,
+            bundle_selection: None,
         }
     }
 
@@ -252,6 +263,7 @@ impl<'a> ContainerFrame<'a> {
             anvil_name: None,
             beacon_primary: None,
             beacon_secondary: None,
+            bundle_selection: None,
         }
     }
 
@@ -425,6 +437,19 @@ impl<'a> ContainerFrame<'a> {
     ) -> Self {
         self.beacon_primary = primary;
         self.beacon_secondary = secondary;
+        self
+    }
+
+    /// Attach the bundle scroll-selection highlight — see
+    /// [`Self::bundle_selection`]. The caller must already have filtered this
+    /// to the currently open menu's own window id; this struct carries no
+    /// window id to check it against.
+    #[must_use]
+    pub fn with_bundle_selection(
+        mut self,
+        selection: Option<crate::container::bundle::BundleSelection>,
+    ) -> Self {
+        self.bundle_selection = selection;
         self
     }
 }

@@ -676,6 +676,11 @@ pub struct ItemGeometry {
     /// palette, never [`item_tint::resolve`], so there is nothing here to
     /// re-resolve.
     pub live_tints: Vec<(u8, lodestone_assets::TintSource)>,
+    /// This part's own root-to-node `"transformation"` chain — see
+    /// [`ItemModelPart::node_transformation`]'s doc, which this is carried
+    /// through from unchanged. Empty for every item but the 16 coloured beds'
+    /// `foot` sub-model.
+    pub node_transformation: Vec<lodestone_assets::item_model::ItemNodeTransform>,
 }
 
 /// **Every** baked form one item can take, plus the definition tree that chooses
@@ -896,6 +901,14 @@ struct ItemModelPart {
     transform: DisplayTransform,
     display: DisplayTransforms,
     gui_light: GuiLight,
+    /// This part's own root-to-node `"transformation"` chain — see
+    /// [`lodestone_assets::icon::IconPart::Model::node_transformation`]'s
+    /// doc. Carried through unposed, exactly like `transform`/`display`
+    /// above; a draw-time caller composes it onto whatever placement it
+    /// already builds. Non-empty today only for the 16 coloured beds' `foot`
+    /// sub-model — see [`collect_item_variants`]'s own doc for why a bed's
+    /// two parts would otherwise z-fight.
+    node_transformation: Vec<lodestone_assets::item_model::ItemNodeTransform>,
 }
 
 /// One variant of one item whose model is a flat `builtin/generated` layer stack,
@@ -979,11 +992,23 @@ struct ItemVariantPlan {
 /// 26.2 that is the 16 beds and nothing else: `items/<colour>_bed.json`
 /// composites `block/<colour>_bed_head` with `block/<colour>_bed_foot` plus a
 /// per-part `transformation` (`translation [0, 0, 1]`) that positions the foot
-/// behind the head. `lodestone_assets`'s [`IconPart::Model`] does not carry that
-/// transformation — `item_model.rs` never parses it — so concatenating the parts
-/// would stack the foot *inside* the head and z-fight, which is strictly worse
-/// than drawing the head alone. (Both parts are still *baked*, under their own
-/// refs; nothing resolves to the foot, so nothing draws it.)
+/// behind the head.
+///
+/// **The transformation itself now reaches this far** — `ItemModelPart::
+/// node_transformation`, threaded from [`ItemModelOutput::Model`]'s own field
+/// of the same name, is exactly the fix the shield un-mirroring pass
+/// (`5c99876e`) landed for `Special` nodes, ported to `Model` leaves: neither
+/// `item_model.rs`'s parser nor `IconPart::Model` dropped it silently on the
+/// floor any more, and `ItemGeometry::node_transformation` carries it into the
+/// baked form below. **What is still true, and still bounded rather than
+/// silent:** nothing yet *draws* two composite parts together as one icon —
+/// `ItemVariantPlan::gui` remains a single `Option<ResourceLocation>`, so a
+/// bed's inventory slot still shows the head alone, and the foot bakes under
+/// its own ref with nowhere for its now-correctly-carried offset to land.
+/// Making a composite GUI icon draw every part it names (each posed by its own
+/// `node_transformation` composed onto the shared placement) is a real,
+/// separate change to every icon draw site — `IconPart`'s own doc table — not
+/// a data-plumbing one, and is out of this pass's scope.
 fn collect_item_variants(manager: &ResourceManager) -> ItemVariantParts {
     let builder = ItemIconBuilder::new(manager);
     let mut out = ItemVariantParts {
@@ -1037,13 +1062,18 @@ fn collect_item_variants(manager: &ResourceManager) -> ItemVariantParts {
                 }
                 continue;
             }
-            let ItemModelOutput::Model { model, tints } = output else {
+            let ItemModelOutput::Model {
+                model,
+                tints,
+                transformation,
+            } = output
+            else {
                 continue;
             };
             if !seen.insert(model.clone()) {
                 continue;
             }
-            let part = match builder.part_for_model(model, tints) {
+            let part = match builder.part_for_model_transformed(model, tints, transformation) {
                 Ok((part, display)) => part.map(|p| (p, display.unwrap_or(DisplayTransforms::NONE))),
                 Err(e) => {
                     out.notes.push(format!("{id} ({model}): {e}"));
@@ -1061,6 +1091,7 @@ fn collect_item_variants(manager: &ResourceManager) -> ItemVariantParts {
                         model: geometry,
                         transform,
                         gui_light,
+                        node_transformation,
                     },
                     display,
                 )) => out.models.push(ItemModelPart {
@@ -1069,6 +1100,7 @@ fn collect_item_variants(manager: &ResourceManager) -> ItemVariantParts {
                     transform,
                     display,
                     gui_light,
+                    node_transformation,
                 }),
                 // Every layer is kept — vanilla's `ItemModelGenerator.bake` walks
                 // `layer0..layer4` and concatenates each layer's extrusion into
@@ -1109,7 +1141,7 @@ fn gui_variant_of(
     let mut first_sprite = None;
     let mut model_parts = 0usize;
     for output in definition.resolve(&GuiItemContext) {
-        let ItemModelOutput::Model { model, tints } = output else {
+        let ItemModelOutput::Model { model, tints, .. } = output else {
             continue;
         };
         let Ok((Some(part), _)) = builder.part_for_model(model, tints) else {
@@ -1901,6 +1933,7 @@ impl BlockModels {
                     // A real 3-D item model's tints go through `vanilla_tint_kind`
                     // above, never `item_tint::resolve` — see `live_tints`'s doc.
                     live_tints: Vec::new(),
+                    node_transformation: part.node_transformation.clone(),
                 },
             );
         }
@@ -1951,6 +1984,12 @@ impl BlockModels {
                     // items' `[0, 3, 0]` / 0.25 — see `ground_transform_for`.
                     gui_light: GuiLight::Front,
                     live_tints: live_tint_slots(&part.layers, &layer_slots),
+                    // No real `builtin/generated` item in the 26.2 corpus carries
+                    // a `"transformation"` (measured: every one of the 16 real
+                    // cases is a coloured bed's `block/*_bed_foot` sub-model,
+                    // which is baked geometry, not a flat sprite) — always empty
+                    // here, not merely unthreaded.
+                    node_transformation: Vec::new(),
                 },
             );
         }

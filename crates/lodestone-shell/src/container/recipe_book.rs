@@ -1267,6 +1267,7 @@ pub(super) fn recipe_book_panel_geometry_inner(
     {
         super::tooltip::emit_tooltip_for_stack(
             &mut b,
+            assets,
             stack,
             Some(cursor),
             tooltip.advanced,
@@ -1274,6 +1275,10 @@ pub(super) fn recipe_book_panel_geometry_inner(
             width,
             height,
             (w, h),
+            // No scroll-selection tracking on this screen — a bundle in the
+            // recipe book preview always draws its grid with nothing
+            // highlighted, matching `BundleContents::NO_SELECTED_ITEM_INDEX`.
+            None,
         );
     }
 

@@ -141,6 +141,7 @@ fn block_item_becomes_a_model_under_the_gui_transform() {
             model,
             transform,
             gui_light,
+            ..
         } => {
             assert_eq!(*model, loc("minecraft:block/stone"));
             assert_eq!(*gui_light, GuiLight::Side, "block models are side-lit");
@@ -154,6 +155,82 @@ fn block_item_becomes_a_model_under_the_gui_transform() {
         }
         other => panic!("expected Model, got {other:?}"),
     }
+}
+
+/// A bed-shaped `composite`: two `minecraft:model` sub-models, the second
+/// carrying its own `"transformation"` — `black_bed.json`'s exact shape. Both
+/// resolve into the icon's `parts` (composite outputs are not collapsed to
+/// one, unlike the single-model gate above), and each carries its *own*
+/// `node_transformation` rather than the other's or a merged one — the
+/// per-part carry `lodestone_render::block_models::collect_item_variants`'s
+/// own doc names as the reason a bed's two parts no longer z-fight in
+/// principle, even though nothing yet draws them together as one icon (see
+/// that doc for the composite-render boundary this test does not cross).
+#[test]
+fn composite_bed_carries_each_parts_own_node_transformation() {
+    let mgr = manager(&[
+        (
+            "assets/minecraft/items/black_bed.json",
+            r#"{"model":{"type":"minecraft:composite","models":[
+                {"type":"minecraft:model","model":"minecraft:block/black_bed_head"},
+                {"type":"minecraft:model","model":"minecraft:block/black_bed_foot",
+                    "transformation":{
+                        "left_rotation":[0.0,0.0,0.0,1.0],
+                        "right_rotation":[0.0,0.0,0.0,1.0],
+                        "scale":[1.0,1.0,1.0],
+                        "translation":[0.0,0.0,1.0]
+                    }}
+            ]}}"#,
+        ),
+        (
+            "assets/minecraft/models/block/black_bed_head.json",
+            r##"{
+                "textures":{"all":"minecraft:block/black_bed"},
+                "elements":[{"from":[0,0,0],"to":[16,16,16],
+                    "faces":{"up":{"texture":"#all"}}}]
+            }"##,
+        ),
+        (
+            "assets/minecraft/models/block/black_bed_foot.json",
+            r##"{
+                "textures":{"all":"minecraft:block/black_bed"},
+                "elements":[{"from":[0,0,0],"to":[16,16,16],
+                    "faces":{"up":{"texture":"#all"}}}]
+            }"##,
+        ),
+    ]);
+    let builder = ItemIconBuilder::new(&mgr);
+    let icon = builder.icon(&loc("minecraft:black_bed")).unwrap();
+
+    assert_eq!(icon.parts.len(), 2, "both composite sub-models must reach the icon: {:?}", icon.parts);
+    let mut mismatches = Vec::new();
+    for (i, (part, want_model, want_len)) in [
+        (&icon.parts[0], "minecraft:block/black_bed_head", 0usize),
+        (&icon.parts[1], "minecraft:block/black_bed_foot", 1usize),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        match part {
+            IconPart::Model { model, node_transformation, .. } => {
+                if *model != loc(want_model) {
+                    mismatches.push(format!("part {i}: model {model} != {want_model}"));
+                }
+                if node_transformation.len() != want_len {
+                    mismatches.push(format!(
+                        "part {i}: node_transformation.len() = {}, want {want_len}",
+                        node_transformation.len()
+                    ));
+                }
+            }
+            other => mismatches.push(format!("part {i}: expected Model, got {other:?}")),
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+    let IconPart::Model { node_transformation, .. } = &icon.parts[1] else {
+        unreachable!("checked above");
+    };
+    assert_eq!(node_transformation[0].translation, [0.0, 0.0, 1.0]);
 }
 
 #[test]
