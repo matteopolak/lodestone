@@ -2606,6 +2606,13 @@ pub trait ServerProtocol: Send + Sync {
                 block_entity_type,
                 nbt,
             } => self.encode_block_entity_data(*pos, block_entity_type, nbt),
+            // Issue #694, item 4: not a packet — see the variant's own doc
+            // for why. `crate::server`'s world-effect drain intercepts it
+            // before ever reaching this dispatcher in the one real consumer
+            // that needs its payload; any caller that lets it fall through
+            // here (a test driving `encode_world_effect` directly, say)
+            // gets an honest no-op rather than a made-up packet.
+            crate::effects::WorldEffect::PistonPlayerPush { .. } => ServerDirective::None,
         }
     }
 

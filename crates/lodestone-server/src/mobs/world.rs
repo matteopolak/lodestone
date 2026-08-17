@@ -343,6 +343,32 @@ impl PathWorld for ChunkWorld {
         // shape (air, water, lava, cobweb). Falls back to the old full-cell
         // solid/air guess on the same not-expected-in-practice lookup miss as
         // `base_path_type` above.
+        //
+        // `minecraft:moving_piston` is a **deliberate exception to that table
+        // read** (issue #694). Vanilla's own `MovingPistonBlock.getCollisionShape`
+        // delegates to the moving block entity's per-tick interpolated shape
+        // (`PistonMovingBlockEntity.getCollisionShape`) rather than a per-state
+        // constant, so the state census this table was dumped from queried it
+        // with no block entity present and correctly recorded `Shapes.empty()`
+        // for every `moving_piston` state — see
+        // `lodestone_data::collision_shapes`'s own module doc for why that dump
+        // has no world context to resolve a delegate against. Reading the table
+        // literally therefore makes every `moving_piston` cell a hole: a mob
+        // standing on a block mid-push (`crate::piston::begin_move`/
+        // `finish_move`'s two-tick window) fell straight through it.
+        //
+        // This crate's piston move is a discrete one-block swap, not vanilla's
+        // continuous animation (see `crate::piston`'s own module doc), so there
+        // is no interpolated progress to reproduce and no moved-block identity
+        // reachable from a bare `(x, y, z)` block-state query — the carried
+        // block's name lives in the pending scheduled tick's kind string, not on
+        // the cell. Treating the cell as a full block for the two ticks it holds
+        // `moving_piston` is a disclosed narrowing (not the exact carried
+        // block's own shape, not interpolated) that fixes the actual symptom the
+        // issue named: a mob does not fall through a block being pushed.
+        if crate::piston::is_moving_piston(self.block_state(x, y, z)) {
+            return 1.0;
+        }
         self.state_id(x, y, z)
             .and_then(collision_shapes::collision_boxes)
             .map_or_else(

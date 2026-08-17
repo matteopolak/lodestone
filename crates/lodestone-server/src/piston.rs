@@ -108,7 +108,7 @@
 //! [`crate::neighbor_update::Direction`]. No block-state census: push reaction is
 //! per *block*, not per state, so a name table is the right shape.
 
-use lodestone_model::BlockPos;
+use lodestone_model::{BlockPos, Vec3};
 
 use crate::neighbor_update::ALL_DIRECTIONS;
 // Re-exported: `MovingBlockEntity` and `piston_facing` both name this type in
@@ -861,6 +861,30 @@ impl MovingBlockEntity {
             Direction::West => 4,
             Direction::East => 5,
         }
+    }
+
+    /// The direction the *carried block* actually travels, as distinct from
+    /// [`Self::direction`] — the piston's own facing, unchanged by whether
+    /// this is an extension or a retraction. Vanilla's own
+    /// `PistonMovingBlockEntity.getMovementDirection`.
+    #[must_use]
+    pub fn push_direction(&self) -> Direction {
+        if self.extending { self.direction } else { self.direction.opposite() }
+    }
+}
+
+/// `direction`'s unit step vector as a float triple, for translating a
+/// continuous entity/player position rather than an integer cell — the same
+/// shape [`Direction::relative`] computes for a [`BlockPos`].
+#[must_use]
+pub fn push_delta(direction: Direction) -> Vec3 {
+    match direction {
+        Direction::Down => Vec3::new(0.0, -1.0, 0.0),
+        Direction::Up => Vec3::new(0.0, 1.0, 0.0),
+        Direction::North => Vec3::new(0.0, 0.0, -1.0),
+        Direction::South => Vec3::new(0.0, 0.0, 1.0),
+        Direction::West => Vec3::new(-1.0, 0.0, 0.0),
+        Direction::East => Vec3::new(1.0, 0.0, 0.0),
     }
 }
 
