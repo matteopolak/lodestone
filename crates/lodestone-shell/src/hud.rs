@@ -1974,12 +1974,15 @@ pub struct SuggestionPopup<'a> {
 /// rather than claiming full parity.
 #[derive(Debug, Clone, Copy)]
 pub struct ChatHoverTooltip<'a> {
-    /// The tooltip body, legacy `§`-coded via [`lodestone_model::Text::
-    /// to_legacy_string`] so a coloured `show_text` hover keeps its colour.
-    /// May contain a literal `\n` — vanilla's `show_text` tooltips are
-    /// routinely multi-line (an enchanted book's enchantment list, for
-    /// instance), and this is split on it before word-wrap.
-    pub text: &'a str,
+    /// The tooltip body, via [`lodestone_model::Text::to_spans`] so a
+    /// hex-coloured `show_text` hover keeps its real colour — a plain
+    /// [`lodestone_model::Text::to_legacy_string`] flatten used to sit here
+    /// and could only represent the sixteen legacy codes, exactly the class
+    /// of bug issue #656 tracks. May contain a literal `\n` — vanilla's
+    /// `show_text` tooltips are routinely multi-line (an enchanted book's
+    /// enchantment list, for instance), and this is split on it before
+    /// word-wrap.
+    pub spans: &'a [TextSpan],
     /// The pointer, in logical-canvas pixels — [`HudRenderer::canvas_cursor`]'s
     /// own output, the same anchor [`SuggestionPopup::cursor`] uses.
     pub cursor: (f32, f32),
@@ -3459,18 +3462,23 @@ const CHAT_TOOLTIP_MAX_WIDTH: f32 = 200.0;
 ///
 /// Splits on a literal `\n` first — vanilla's `show_text` tooltips are
 /// routinely multi-line — then greedily word-wraps each resulting line.
+///
+/// Takes [`TextSpan`]s, not a flat `&str`: [`ChatHoverTooltip::spans`] is the
+/// span-carrying sibling of the flattened string this used to take, so a
+/// hex-coloured `show_text` hover reaches real per-glyph colour rather than
+/// losing it to [`lodestone_model::Text::to_legacy_string`]'s sixteen-code
+/// ceiling (issue #656).
 fn chat_hover_tooltip_layout(
     tooltip: &ChatHoverTooltip,
     canvas_w: f32,
-    wrap: impl Fn(&str, f32) -> Vec<String>,
-    width: impl Fn(&str) -> f32,
-) -> (Vec<String>, f32, f32, f32, f32) {
+    wrap: impl Fn(&[TextSpan], f32) -> Vec<Vec<TextSpan>>,
+    width: impl Fn(&[TextSpan]) -> f32,
+) -> (Vec<Vec<TextSpan>>, f32, f32, f32, f32) {
     const LINE_H: f32 = font::GLYPH_H as f32 + 1.0;
 
-    let rows: Vec<String> = tooltip
-        .text
-        .split('\n')
-        .flat_map(|line| wrap(line, CHAT_TOOLTIP_MAX_WIDTH))
+    let rows: Vec<Vec<TextSpan>> = split_span_paragraphs(tooltip.spans)
+        .into_iter()
+        .flat_map(|paragraph| wrap(&paragraph, CHAT_TOOLTIP_MAX_WIDTH))
         .collect();
     let tw = rows.iter().map(|row| width(row)).fold(0.0f32, f32::max);
     let th = rows.len() as f32 * LINE_H;
@@ -3492,15 +3500,15 @@ fn draw_chat_hover_tooltip(b: &mut Builder, tooltip: &ChatHoverTooltip) {
     let (rows, tx, ty, w, h) = chat_hover_tooltip_layout(
         tooltip,
         b.w,
-        |line, max_w| b.wrap_legacy(line, max_w, 1.0),
-        |s| b.legacy_width(s, 1.0),
+        |spans, max_w| b.wrap_spans(spans, max_w, 1.0),
+        |spans| b.spans_width(spans, 1.0),
     );
     if rows.is_empty() {
         return;
     }
     b.rect_px(tx, ty, w, h, SUGGESTION_FILL);
     for (i, row) in rows.iter().enumerate() {
-        b.text_legacy(
+        b.text_spans(
             row,
             tx + CHAT_TOOLTIP_PAD,
             ty + CHAT_TOOLTIP_PAD + i as f32 * LINE_H,
@@ -10745,22 +10753,30 @@ mod chat_hover_tooltip_gate {
         f
     }
 
-    /// The no-font fallback path [`Builder::wrap_legacy`]/
-    /// [`Builder::legacy_width`] themselves fall back to — `item_icon::text_w`
-    /// over the legacy-stripped string — reproduced with no `Builder` so the
-    /// test can predict the draw's exact rect from outside it, the same
+    /// The no-font fallback path [`Builder::wrap_spans`]/
+    /// [`Builder::spans_width`] themselves fall back to — `item_icon::text_w`
+    /// summed over each span's plain text — reproduced with no `Builder` so
+    /// the test can predict the draw's exact rect from outside it, the same
     /// discipline `recipe_toast_rect` established.
-    fn no_font_width(s: &str) -> f32 {
-        item_icon::text_w(&strip_legacy(s), 1.0)
+    fn no_font_spans_width(spans: &[TextSpan]) -> f32 {
+        spans.iter().map(|s| item_icon::text_w(&s.text, 1.0)).sum()
     }
 
-    fn no_font_wrap(line: &str, max_w: f32) -> Vec<String> {
-        wrap_legacy_with(no_font_width, line, max_w)
+    fn no_font_spans_wrap(spans: &[TextSpan], max_w: f32) -> Vec<Vec<TextSpan>> {
+        wrap_spans_with(no_font_spans_width, spans, max_w)
+    }
+
+    /// A single unstyled [`TextSpan`] carrying `s` — the plain-text fixture
+    /// shape every test in this module needs now that
+    /// [`ChatHoverTooltip::spans`] replaced the flattened `&str` it used to
+    /// carry (issue #656).
+    fn plain_spans(s: &str) -> Vec<TextSpan> {
+        vec![TextSpan { text: s.to_string(), style: TextStyle::default() }]
     }
 
     fn predicted_rect(tooltip: &ChatHoverTooltip, canvas_w: f32) -> (f32, f32, f32, f32) {
         let (_, x, y, w, h) =
-            chat_hover_tooltip_layout(tooltip, canvas_w, no_font_wrap, no_font_width);
+            chat_hover_tooltip_layout(tooltip, canvas_w, no_font_spans_wrap, no_font_spans_width);
         (x, y, w, h)
     }
 
@@ -10781,7 +10797,8 @@ mod chat_hover_tooltip_gate {
     fn no_tooltip_frame_paints_nothing_in_the_tooltip_rect() {
         let stats = DebugStats::default();
         let (cw, ch) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, W, H);
-        let tooltip = ChatHoverTooltip { text: "Nether Star", cursor: (100.0, 100.0) };
+        let spans = plain_spans("Nether Star");
+        let tooltip = ChatHoverTooltip { spans: &spans, cursor: (100.0, 100.0) };
         let rect = rect_px_to_ndc(predicted_rect(&tooltip, cw), cw, ch);
 
         let geo = HudGeometry::build(&bare_frame(&stats), W, H);
@@ -10801,7 +10818,8 @@ mod chat_hover_tooltip_gate {
     fn a_hover_tooltip_covers_its_own_predicted_rect() {
         let stats = DebugStats::default();
         let (cw, ch) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, W, H);
-        let tooltip = ChatHoverTooltip { text: "Nether Star", cursor: (100.0, 100.0) };
+        let spans = plain_spans("Nether Star");
+        let tooltip = ChatHoverTooltip { spans: &spans, cursor: (100.0, 100.0) };
         let rect = rect_px_to_ndc(predicted_rect(&tooltip, cw), cw, ch);
 
         let mut frame = bare_frame(&stats);
@@ -10825,8 +10843,10 @@ mod chat_hover_tooltip_gate {
     fn a_multi_line_hover_body_is_taller_than_one_line() {
         let stats = DebugStats::default();
         let (cw, _) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, W, H);
-        let one_line = ChatHoverTooltip { text: "Sharpness V", cursor: (100.0, 100.0) };
-        let two_lines = ChatHoverTooltip { text: "Sharpness V\nCurse of Binding", cursor: (100.0, 100.0) };
+        let one_line_spans = plain_spans("Sharpness V");
+        let one_line = ChatHoverTooltip { spans: &one_line_spans, cursor: (100.0, 100.0) };
+        let two_lines_spans = plain_spans("Sharpness V\nCurse of Binding");
+        let two_lines = ChatHoverTooltip { spans: &two_lines_spans, cursor: (100.0, 100.0) };
 
         let (_, _, h1, _) = predicted_rect(&one_line, cw);
         let (_, _, h2, _) = predicted_rect(&two_lines, cw);
@@ -10853,22 +10873,106 @@ mod chat_hover_tooltip_gate {
     /// *producer*, not just that the draw paints when handed a frame by
     /// hand. `chat_interaction_at` (already exhaustively gated above by
     /// `chat_interaction_at_finds_a_hover_and_a_neighbouring_pixel_does_not`)
-    /// is exercised directly here through `to_legacy_string`, the exact
-    /// conversion `app/redraw.rs`'s frame-building code applies before
-    /// handing the text to `HudFrame::chat_hover_tooltip`.
+    /// is exercised directly here through `to_spans`, the exact conversion
+    /// `app/redraw.rs`'s frame-building code applies before handing the
+    /// text to `HudFrame::chat_hover_tooltip` — `to_legacy_string` sat here
+    /// until issue #656's fix routed this tooltip through spans instead, so
+    /// a hex-coloured `show_text` hover keeps its real colour.
     #[test]
-    fn a_hover_events_value_survives_to_legacy_string_for_the_frame() {
+    fn a_hover_events_value_survives_to_spans_for_the_frame() {
         use lodestone_model::text::{HoverAction, HoverEvent};
 
         let hover = HoverEvent {
             action: HoverAction::ShowText,
             value: Box::new(lodestone_model::Text::literal("Diamond Sword")),
         };
-        let text = hover.value.to_legacy_string();
+        let spans = hover.value.to_spans();
+        let text: String = spans.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(
             text, "Diamond Sword",
             "a plain-text hover_event's payload must survive verbatim to the \
-             string the tooltip frame field carries"
+             spans the tooltip frame field carries"
+        );
+    }
+
+    /// Issue #656: a hex-coloured `show_text` hover must keep its real
+    /// colour through to a drawn vertex, not flatten to the sixteen legacy
+    /// codes `Text::to_legacy_string` is limited to. Same three-clause
+    /// fixture shape (hex / inline `§` / named) as
+    /// `container::builder::tests::shadowed_label_spans_carries_hex_named_and_inline_legacy_colour_to_distinct_vertices`,
+    /// with the same control proving the *old* path really did lose it.
+    #[test]
+    fn a_hex_coloured_hover_tooltip_reaches_distinct_vertices_and_the_legacy_path_loses_it() {
+        use lodestone_model::text::{Text, TextColor, TextContent, TextStyle};
+
+        let hex = Text {
+            content: TextContent::Literal("Hex".to_string()),
+            style: TextStyle {
+                font: None,
+                color: Some(TextColor::Rgb(0x1a_2b3c)),
+                ..TextStyle::default()
+            },
+            ..Text::default()
+        };
+        let inline_legacy = Text::literal("\u{00a7}cRed");
+        let named = Text {
+            content: TextContent::Literal("Gray".to_string()),
+            style: TextStyle {
+                font: None,
+                color: Some(TextColor::Gray),
+                ..TextStyle::default()
+            },
+            ..Text::default()
+        };
+        let root = Text {
+            extra: vec![hex, inline_legacy, named],
+            ..Text::default()
+        };
+        let spans = root.to_spans();
+        assert_eq!(spans.len(), 3, "sanity: three runs in, three runs out — {spans:?}");
+
+        let stats = DebugStats::default();
+        let tooltip = ChatHoverTooltip { spans: &spans, cursor: (10.0, 10.0) };
+        let mut frame = bare_frame(&stats);
+        frame.chat_hover_tooltip = Some(tooltip);
+        let geo = HudGeometry::build(&frame, W, H);
+
+        let byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        let has_colour = |verts: &[f32], rgb: (u8, u8, u8)| {
+            verts
+                .chunks_exact(FLOATS_PER_VERTEX)
+                .any(|v| (byte(v[2]), byte(v[3]), byte(v[4])) == rgb)
+        };
+        let expected = [
+            ("hex", (0x1a_u8, 0x2b_u8, 0x3c_u8)),
+            ("inline §c", (0xff_u8, 0x55_u8, 0x55_u8)),
+            ("named gray", (0xaa_u8, 0xaa_u8, 0xaa_u8)),
+        ];
+        let missing: Vec<&str> = expected
+            .iter()
+            .filter(|(_, rgb)| !has_colour(&geo.verts, *rgb))
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these colours never reached a vertex: {missing:?} (full expected set: {expected:?})"
+        );
+
+        // Control: the same three-way name through the *old* path — a single
+        // plain span carrying the flattened legacy string, which
+        // `Text::to_legacy_string` has no `TextColor::Rgb` representation for.
+        // Must show the loss, or the assertion above proves nothing about
+        // which path actually carries the colour.
+        let flattened = root.to_legacy_string();
+        let legacy_spans = vec![TextSpan { text: flattened, style: TextStyle::default() }];
+        let legacy_tooltip = ChatHoverTooltip { spans: &legacy_spans, cursor: (10.0, 10.0) };
+        let mut legacy_frame = bare_frame(&stats);
+        legacy_frame.chat_hover_tooltip = Some(legacy_tooltip);
+        let legacy_geo = HudGeometry::build(&legacy_frame, W, H);
+        assert!(
+            !has_colour(&legacy_geo.verts, (0x1a, 0x2b, 0x3c)),
+            "control failed: the legacy-string path was expected to lose the hex colour \
+             (that is the bug), but it drew it anyway — this test's premise is wrong"
         );
     }
 }
