@@ -366,6 +366,14 @@ impl RenderState {
         stats.beacon_beam_solid_vertices = beacon_solid_count;
         stats.beacon_beam_glow_vertices = beacon_glow_count;
 
+        // End gateway teleport beams — same pass, a second texture. See
+        // `gpu/beacon_beam.rs::BeaconBeamRenderer::prepare_gateway`'s doc
+        // for why this does not rewrite `cam_uniform` itself (the call just
+        // above already did, unconditionally, this frame).
+        let end_gateway_beams = self.end_gateway_beam_source.beams(camera.position);
+        let (end_gateway_beam_solid_count, end_gateway_beam_glow_count) =
+            self.beacon_beam.prepare_gateway(queue, &end_gateway_beams);
+
         // End portals / end gateways, same "upload before the pass opens"
         // constraint and the same not-derived-from-`entities` shape as the
         // beacon beam above — both are *blocks*, gathered from world state.
@@ -1043,6 +1051,10 @@ impl RenderState {
             // surface. The outer **glow** is translucent and drawn far below,
             // among the other alpha-blended world geometry.
             self.beacon_beam.draw_solid(&mut pass, beacon_solid_count);
+            // The end gateway teleport beam's own solid core — same
+            // pipeline, own texture and buffer.
+            self.beacon_beam
+                .draw_gateway_solid(&mut pass, end_gateway_beam_solid_count);
 
             // The end portal / end gateway star-field surface — fully
             // opaque (`DepthStencilState.DEFAULT`, no blend), so it belongs
@@ -1366,6 +1378,10 @@ impl RenderState {
             // buffer that already holds every opaque surface, including
             // translucent water and blocks, or it would show through them.
             self.beacon_beam.draw_glow(&mut pass, beacon_glow_count);
+            // The end gateway teleport beam's own glow — same placement
+            // reasoning as the beacon's, own texture and buffer.
+            self.beacon_beam
+                .draw_gateway_glow(&mut pass, end_gateway_beam_glow_count);
 
             // The *translucent* half of the debris last among the world geometry
             // (the opaque half is above, before the water): it is alpha-blended

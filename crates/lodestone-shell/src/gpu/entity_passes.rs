@@ -1660,6 +1660,9 @@ impl RenderState {
         let eye = camera.position;
         let chests = self.block_entity_source.chests(eye);
         let skulls = self.skull_source.skulls(eye);
+        let copper_golem_statues = self
+            .copper_golem_statue_source
+            .copper_golem_statues(eye);
         let bells = self.bell_source.bells(eye);
         let shulkers = self.shulker_source.shulkers(eye);
         let banners = self.banner_source.banners(eye);
@@ -1691,6 +1694,7 @@ impl RenderState {
         let specials = self.special_item_instances(camera, entities, stats);
         if chests.is_empty()
             && skulls.is_empty()
+            && copper_golem_statues.is_empty()
             && bells.is_empty()
             && shulkers.is_empty()
             && banners.is_empty()
@@ -1739,6 +1743,12 @@ impl RenderState {
                 .iter()
                 .filter_map(|spawn| self.block_entities.models.resolve_skull(spawn)),
         );
+        // Copper golem statues. A real cuboid rig like chest/skull above —
+        // `copper_golem_statue.json` is a total-absence hole — so this joins
+        // the same batcher rather than `prepare_item_geometry`.
+        instances.extend(copper_golem_statues.iter().filter_map(|spawn| {
+            self.block_entities.models.resolve_copper_golem_statue(spawn)
+        }));
         instances.extend(
             bells
                 .iter()

@@ -74,6 +74,11 @@ impl From<lodestone_render::BeamVertex> for BeamGpuVertex {
 /// glass colour stacked ten deep comfortably fits.
 const MAX_BEAM_VERTICES: usize = 24_000;
 
+/// Fixed vertex capacity for the end gateway's own solid/glow buffers — one
+/// beam, one section, so the bare `4 quads × 6 vertices = 24` is exact
+/// rather than a generous cap.
+const MAX_GATEWAY_BEAM_VERTICES: usize = 24;
+
 /// Draws the beacon light beam — see the module doc for the two-pipeline
 /// shape.
 #[derive(Debug)]
@@ -87,6 +92,17 @@ pub(super) struct BeaconBeamRenderer {
     texture: Option<wgpu::BindGroup>,
     solid_vertices: wgpu::Buffer,
     glow_vertices: wgpu::Buffer,
+    /// The end gateway teleport beam's own texture — a **second** bind
+    /// group over the identical `texture_layout`, reusing
+    /// [`solid_pipeline`](Self::solid_pipeline)/[`glow_pipeline`](Self::glow_pipeline)
+    /// unchanged: a `wgpu::RenderPipeline` embeds no texture data, only a
+    /// bind-group-layout compatibility contract, so a second texture needs
+    /// no second pipeline pair. `None` off a jar-less run.
+    gateway_texture: Option<wgpu::BindGroup>,
+    /// A single beam's worth of vertices — at most one section, unlike the
+    /// beacon's own (up to `MAX_BEAM_VERTICES`) accumulated-sections buffer.
+    gateway_solid_vertices: wgpu::Buffer,
+    gateway_glow_vertices: wgpu::Buffer,
 }
 
 impl BeaconBeamRenderer {
@@ -176,6 +192,36 @@ impl BeaconBeamRenderer {
             })
         });
 
+        // The end gateway's own beam texture, over the identical
+        // `texture_layout` — see [`BeaconBeamRenderer::gateway_texture`]'s
+        // doc for why this needs no second pipeline pair.
+        let gateway_texture = crate::resources::load_end_gateway_beam_texture().map(|img| {
+            let view = super::entities::entity_texture_from_image(device, queue, &img);
+            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("lodestone-end-gateway-beam-sampler"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::Repeat,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            });
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("lodestone-end-gateway-beam-texture-bg"),
+                layout: &texture_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                ],
+            })
+        });
+
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("lodestone-beacon-beam-layout"),
             bind_group_layouts: &[Some(&cam_layout), Some(&texture_layout)],
@@ -250,6 +296,18 @@ impl BeaconBeamRenderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let gateway_solid_vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lodestone-end-gateway-beam-solid-vertices"),
+            size: (MAX_GATEWAY_BEAM_VERTICES * std::mem::size_of::<BeamGpuVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let gateway_glow_vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lodestone-end-gateway-beam-glow-vertices"),
+            size: (MAX_GATEWAY_BEAM_VERTICES * std::mem::size_of::<BeamGpuVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         Self {
             solid_pipeline,
@@ -259,6 +317,9 @@ impl BeaconBeamRenderer {
             texture,
             solid_vertices,
             glow_vertices,
+            gateway_texture,
+            gateway_solid_vertices,
+            gateway_glow_vertices,
         }
     }
 
@@ -333,6 +394,85 @@ impl BeaconBeamRenderer {
         pass.set_bind_group(0, &self.cam_bind_group, &[]);
         pass.set_bind_group(1, texture, &[]);
         pass.set_vertex_buffer(0, self.glow_vertices.slice(..));
+        pass.draw(0..count, 0..1);
+    }
+
+    /// Uploads this frame's end gateway teleport-beam geometry. Does **not**
+    /// rewrite `cam_uniform` — [`prepare`](Self::prepare) already does that
+    /// unconditionally every frame, and this is always called immediately
+    /// after it (see `gpu/frame.rs`), so a second write here would only be
+    /// redundant, not incorrect if ever reordered.
+    pub(super) fn prepare_gateway(
+        &self,
+        queue: &wgpu::Queue,
+        gateways: &[lodestone_render::EndGatewayBeamSpawn],
+    ) -> (u32, u32) {
+        if self.gateway_texture.is_none() {
+            return (0, 0);
+        }
+        let mut solid = Vec::new();
+        let mut glow = Vec::new();
+        for gateway in gateways {
+            let (s, g) = lodestone_render::end_gateway_beam_vertices(
+                gateway.pos,
+                gateway.scale,
+                gateway.animation_time,
+                gateway.height,
+                gateway.color,
+            );
+            solid.extend(s.into_iter().map(BeamGpuVertex::from));
+            glow.extend(g.into_iter().map(BeamGpuVertex::from));
+        }
+        let solid_len = solid.len().min(MAX_GATEWAY_BEAM_VERTICES);
+        if solid_len > 0 {
+            queue.write_buffer(
+                &self.gateway_solid_vertices,
+                0,
+                bytemuck::cast_slice(&solid[..solid_len]),
+            );
+        }
+        let glow_len = glow.len().min(MAX_GATEWAY_BEAM_VERTICES);
+        if glow_len > 0 {
+            queue.write_buffer(
+                &self.gateway_glow_vertices,
+                0,
+                bytemuck::cast_slice(&glow[..glow_len]),
+            );
+        }
+        (solid_len as u32, glow_len as u32)
+    }
+
+    /// Records the end gateway beam's solid-core draw — same pipeline as
+    /// [`draw_solid`](Self::draw_solid), a different texture and vertex
+    /// buffer.
+    pub(super) fn draw_gateway_solid(&self, pass: &mut wgpu::RenderPass<'_>, count: u32) {
+        let Some(texture) = &self.gateway_texture else {
+            return;
+        };
+        if count == 0 {
+            return;
+        }
+        pass.set_pipeline(&self.solid_pipeline);
+        pass.set_bind_group(0, &self.cam_bind_group, &[]);
+        pass.set_bind_group(1, texture, &[]);
+        pass.set_vertex_buffer(0, self.gateway_solid_vertices.slice(..));
+        pass.draw(0..count, 0..1);
+    }
+
+    /// Records the end gateway beam's glow draw — same pipeline as
+    /// [`draw_glow`](Self::draw_glow), a different texture and vertex
+    /// buffer.
+    pub(super) fn draw_gateway_glow(&self, pass: &mut wgpu::RenderPass<'_>, count: u32) {
+        let Some(texture) = &self.gateway_texture else {
+            return;
+        };
+        if count == 0 {
+            return;
+        }
+        pass.set_pipeline(&self.glow_pipeline);
+        pass.set_bind_group(0, &self.cam_bind_group, &[]);
+        pass.set_bind_group(1, texture, &[]);
+        pass.set_vertex_buffer(0, self.gateway_glow_vertices.slice(..));
         pass.draw(0..count, 0..1);
     }
 }

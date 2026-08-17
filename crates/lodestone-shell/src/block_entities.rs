@@ -110,6 +110,7 @@ use glam::Vec3;
 use lodestone_render::{
     BannerAttachment, BannerSpawn, BeaconSpawn, BeamSection, BellShakeDirection, BellSpawn,
     BrushableItemSpawn, ChestHalf, ChestMaterial, ChestSpawn, ConduitFrame, ConduitSpawn,
+    CopperGolemOxidation, CopperGolemPose, CopperGolemStatueSpawn,
     DecoratedPotSpawn, EndGatewaySpawn, EndPortalSpawn, LecternSpawn, SHELF_SLOTS,
     SHULKER_COLOURS, ShelfItemSpawn, ShulkerFacing, ShulkerSpawn, SignKind, SignOrientation,
     SignSpawn, SkullOrientation, SkullSpawn, SkullType, VaultSpawn, average_beam_color,
@@ -335,6 +336,82 @@ impl BellShakes {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.shakes.is_empty()
+    }
+}
+
+/// `TheEndGatewayBlockEntity.teleportCooldown` (issue #23), a per-position
+/// counter driven by the gateway's own `BLOCK_EVENT` and advanced once per
+/// client tick — the same `b0 == 1` collision [`BellShakes`]'s doc already
+/// names, told apart by the block at the position rather than the packet.
+///
+/// Mirrors `TheEndGatewayBlockEntity.beamAnimationTick`, the tick function
+/// vanilla's own client actually runs for this block entity (`portalTick` is
+/// the *server's* function, which also reads `Age`'s wall-clock role for the
+/// rarer spawn arm — see [`end_gateway_beam_spawns`] for why that half is a
+/// stateless per-frame NBT read instead of a second tracked field here):
+///
+/// ```text
+/// entity.age++;
+/// if (entity.isCoolingDown()) entity.teleportCooldown--;
+/// ```
+///
+/// Entries are dropped once `teleportCooldown` reaches `0` — a gateway not
+/// cooling down is indistinguishable from an absent entry, the same
+/// `ChestLids`/`BellShakes` garbage-collection property.
+#[derive(Debug, Default, Clone)]
+pub struct GatewayCooldowns {
+    cooldowns: HashMap<[i32; 3], i32>,
+}
+
+impl GatewayCooldowns {
+    /// An empty set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Applies one `BLOCK_EVENT` to the gateway at `pos`, returning whether
+    /// it was a teleport-cooldown trigger.
+    ///
+    /// `TheEndGatewayBlockEntity.triggerEvent`: only `b0 == 1` sets
+    /// `teleportCooldown = 40` (`COOLDOWN_TIME`); `b1` carries nothing for
+    /// this type (unlike the bell's own `b0 == 1`, which packs the hit
+    /// direction into `b1`) and is accepted but ignored, matching every
+    /// other tracker offered this same collision.
+    pub fn apply_block_event(&mut self, pos: [i32; 3], b0: u8, _b1: u8) -> bool {
+        if b0 != 1 {
+            return false;
+        }
+        self.cooldowns.insert(pos, 40);
+        true
+    }
+
+    /// Advances every cooldown one client tick, dropping the finished ones —
+    /// `beamAnimationTick`'s `if (isCoolingDown()) teleportCooldown--`.
+    pub fn tick(&mut self) {
+        self.cooldowns.retain(|_, ticks| {
+            *ticks -= 1;
+            *ticks > 0
+        });
+    }
+
+    /// The cooldown ticks remaining at `pos`, or `None` for a gateway not
+    /// cooling down.
+    #[must_use]
+    pub fn cooldown(&self, pos: [i32; 3]) -> Option<i32> {
+        self.cooldowns.get(&pos).copied()
+    }
+
+    /// Number of gateways currently cooling down (for stats and tests).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.cooldowns.len()
+    }
+
+    /// Whether nothing is being tracked.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cooldowns.is_empty()
     }
 }
 
@@ -6161,5 +6238,389 @@ mod shelf_tests {
         if let Some(id) = lodestone_data::block_states::state_id("minecraft:chiseled_bookshelf") {
             assert!(shelf_facing_yaw(id).is_none());
         }
+    }
+}
+
+// --- copper golem statue -------------------------------------------------
+
+/// The block's `copper_golem_pose` property, or `None` for any other block.
+#[must_use]
+fn copper_golem_statue_pose(state_id: u32) -> Option<CopperGolemPose> {
+    let props = lodestone_data::block_states::properties(state_id)?;
+    let value = props
+        .iter()
+        .find(|(name, _)| *name == "copper_golem_pose")
+        .map(|(_, v)| *v)?;
+    Some(match value {
+        "standing" => CopperGolemPose::Standing,
+        "sitting" => CopperGolemPose::Sitting,
+        "running" => CopperGolemPose::Running,
+        "star" => CopperGolemPose::Star,
+        _ => return None,
+    })
+}
+
+/// The block's oxidation level, from its registry name — `WeatheringCopper
+/// .getPreviousState`'s own four-level chain, restated as a name-prefix
+/// match the way [`chest_material`] already does for copper chest variants.
+/// `waxed_` is stripped first: waxing halts further weathering but does not
+/// change which of the four textures a statue currently uses
+/// (`CopperGolemOxidationLevels` has no fifth, waxed-specific entry).
+#[must_use]
+fn copper_golem_statue_oxidation(state_id: u32) -> Option<CopperGolemOxidation> {
+    let name = lodestone_data::block_states::block_name(state_id)?;
+    let path = name.strip_prefix("minecraft:").unwrap_or(name);
+    let path = path.strip_prefix("waxed_").unwrap_or(path);
+    Some(match path {
+        "copper_golem_statue" => CopperGolemOxidation::Unaffected,
+        "exposed_copper_golem_statue" => CopperGolemOxidation::Exposed,
+        "weathered_copper_golem_statue" => CopperGolemOxidation::Weathered,
+        "oxidized_copper_golem_statue" => CopperGolemOxidation::Oxidized,
+        _ => return None,
+    })
+}
+
+/// Resolves one block state id into a copper golem statue spawn, or `None`
+/// if it is not a statue, or its `facing`/`copper_golem_pose` properties do
+/// not resolve.
+#[must_use]
+pub fn copper_golem_statue_spawn(
+    block: [i32; 3],
+    state_id: u32,
+    light: u8,
+) -> Option<CopperGolemStatueSpawn> {
+    let oxidation = copper_golem_statue_oxidation(state_id)?;
+    let pose = copper_golem_statue_pose(state_id)?;
+    let props = lodestone_data::block_states::properties(state_id)?;
+    let facing_yaw_deg = props
+        .iter()
+        .find(|(name, _)| *name == "facing")
+        .and_then(|(_, value)| horizontal_facing_yaw(value))?;
+    Some(CopperGolemStatueSpawn {
+        pos: block,
+        facing_yaw_deg,
+        pose,
+        oxidation,
+        light,
+    })
+}
+
+/// Every copper golem statue to draw this frame — the statue sibling of
+/// [`skull_spawns`], reusing [`chest_candidates`] for the same reason that
+/// one does: no NBT is needed at all (pose, oxidation and facing are all
+/// block-state/block-name driven), so the generic position gather is the
+/// whole job.
+#[must_use]
+pub fn copper_golem_statue_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<CopperGolemStatueSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+
+    let candidates = {
+        let world = store.read();
+        chest_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
+    let mut out = Vec::new();
+    for (block, state_id) in candidates {
+        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        if let Some(spawn) = copper_golem_statue_spawn(block, state_id, light) {
+            out.push(spawn);
+        }
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
+#[cfg(test)]
+mod copper_golem_statue_tests {
+    use super::*;
+
+    /// Every one of the four oxidation levels resolves, for both the
+    /// unwaxed and waxed block-name forms — waxing must not silently change
+    /// which texture the statue reads.
+    #[test]
+    fn every_oxidation_level_resolves_waxed_and_unwaxed() {
+        let names = [
+            ("minecraft:copper_golem_statue", CopperGolemOxidation::Unaffected),
+            ("minecraft:waxed_copper_golem_statue", CopperGolemOxidation::Unaffected),
+            ("minecraft:exposed_copper_golem_statue", CopperGolemOxidation::Exposed),
+            (
+                "minecraft:waxed_exposed_copper_golem_statue",
+                CopperGolemOxidation::Exposed,
+            ),
+            (
+                "minecraft:weathered_copper_golem_statue",
+                CopperGolemOxidation::Weathered,
+            ),
+            (
+                "minecraft:waxed_weathered_copper_golem_statue",
+                CopperGolemOxidation::Weathered,
+            ),
+            (
+                "minecraft:oxidized_copper_golem_statue",
+                CopperGolemOxidation::Oxidized,
+            ),
+            (
+                "minecraft:waxed_oxidized_copper_golem_statue",
+                CopperGolemOxidation::Oxidized,
+            ),
+        ];
+        for (name, want) in names {
+            let Some(id) = lodestone_data::block_states::state_id(name) else {
+                continue;
+            };
+            assert_eq!(
+                copper_golem_statue_oxidation(id),
+                Some(want),
+                "{name} resolved wrong"
+            );
+        }
+    }
+
+    /// The four pose strings parse to the right enum variant — checked
+    /// directly against the raw state-id search space (a statue's own default
+    /// state plus a short scan for the other three pose values), rather than
+    /// assuming a specific state-id encoding.
+    #[test]
+    fn every_pose_string_resolves_to_its_own_variant() {
+        let Some(base_id) = lodestone_data::block_states::state_id("minecraft:copper_golem_statue")
+        else {
+            return;
+        };
+        // The default state must resolve to *some* real pose, not `None`.
+        assert!(copper_golem_statue_pose(base_id).is_some());
+        let wanted = [
+            ("standing", CopperGolemPose::Standing),
+            ("sitting", CopperGolemPose::Sitting),
+            ("running", CopperGolemPose::Running),
+            ("star", CopperGolemPose::Star),
+        ];
+        // A statue has `copper_golem_pose` (4) x `facing` (4) x
+        // `waterlogged` (2) = 32 states; scanning that window from the base
+        // id is enough to find all four pose values without assuming which
+        // offset each one sits at.
+        for (value, want) in wanted {
+            let found = (base_id..base_id.saturating_add(32)).find(|id| {
+                lodestone_data::block_states::properties(*id).is_some_and(|p| {
+                    p.iter()
+                        .any(|(n, v)| *n == "copper_golem_pose" && *v == value)
+                })
+            });
+            if let Some(id) = found {
+                assert_eq!(copper_golem_statue_pose(id), Some(want), "pose {value}");
+            }
+        }
+    }
+}
+
+// --- end gateway teleport beam --------------------------------------------
+
+/// A generic stand-in for `level.getMaxY()` — the real dimension height the
+/// spawning arm's beam grows toward (`beamDistance = isSpawning() ?
+/// level.getMaxY() : 50.0`). This client resolves a dimension's real height
+/// through world data already loaded, not through this gather, and threading
+/// it in is not worth the plumbing for an effect visible for ~10 seconds per
+/// gateway lifetime — a deliberate simplification, the same shape
+/// `beacon.rs`'s module doc already accepts for scoping/zoom. `320.0`
+/// (a generic "very tall") is harmless either high or low: it only sets how
+/// fast the beam grows toward whatever height is actually visible.
+const END_GATEWAY_SPAWN_BEAM_DISTANCE: f32 = 320.0;
+
+/// `TheEndGatewayBlockEntity.saveAdditional`'s `Age` — an `Nbt::Long` — or
+/// `0` when absent, matching `input.getLongOr("Age", 0L)`.
+#[must_use]
+fn end_gateway_age(nbt: &lodestone_core::Nbt) -> i64 {
+    use lodestone_core::Nbt;
+    let Nbt::Compound(fields) = nbt else {
+        return 0;
+    };
+    match fields.iter().find(|(name, _)| name == "Age").map(|(_, v)| v) {
+        Some(Nbt::Long(v)) => *v,
+        _ => 0,
+    }
+}
+
+/// Every end gateway within [`VIEW_DISTANCE`], paired with its `Age` NBT —
+/// a second, NBT-carrying candidate gather beside [`end_gateway_spawns`]'s
+/// [`chest_candidates`] reuse: that one discards NBT (it only needs the face
+/// list), and the beam needs `Age` for the spawning arm.
+#[must_use]
+fn end_gateway_beam_candidates(
+    world: &World,
+    chunks: impl IntoIterator<Item = ChunkPos>,
+    eye: Vec3,
+) -> Vec<([i32; 3], i64)> {
+    let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
+    let mut candidates = Vec::new();
+    for pos in chunks {
+        let Some(chunk) = world.get(pos) else {
+            continue;
+        };
+        for be in &chunk.block_entities {
+            let x = pos.x * 16 + i32::from(be.rel_x);
+            let z = pos.z * 16 + i32::from(be.rel_z);
+            let y = i32::from(be.y);
+            let centre = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+            if centre.distance_squared(eye) > cutoff {
+                continue;
+            }
+            let state_id = chunk
+                .column
+                .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            let Some(name) = lodestone_data::block_states::block_name(state_id) else {
+                continue;
+            };
+            if name != "minecraft:end_gateway" {
+                continue;
+            }
+            candidates.push(([x, y, z], end_gateway_age(&be.nbt)));
+        }
+    }
+    candidates
+}
+
+/// Every end gateway's teleport beam to draw this frame — vanilla's
+/// `TheEndGatewayRenderer.submit`'s `BeaconRenderer.submitBeaconBeam` call,
+/// shown while `isSpawning()` (real `Age` NBT, read fresh each frame — a
+/// **stateless** per-frame computation, unlike `teleportCooldown` below)
+/// or `isCoolingDown()` (`cooldowns`, [`GatewayCooldowns`] — a real
+/// per-position, `BLOCK_EVENT`-driven tracker, ticked once per client tick
+/// in `Sim::step` and captured here at install time like [`bell_spawns`]).
+///
+/// **Why `age` is not itself tracked locally, unlike `teleportCooldown`**:
+/// `getUpdateTag` (`Age`'s only path to the client) is sent on initial load
+/// and again whenever `spawning != isSpawning()` flips — rare, not every
+/// tick — so a purely-tracked local clock would need to be *seeded* from
+/// that NBT with no channel to do so (the render-source closure captures an
+/// owned snapshot each frame; it cannot write back into a tracker). Reading
+/// `Age` fresh from the world every frame and adding `partial_tick` is the
+/// cheaper, honest alternative: correct at the instant a snapshot arrives,
+/// static between snapshots — visible only as a slightly chunky spawn ramp
+/// during the rare (and short) 200-tick window a gateway is newly created
+/// with a player already nearby, named here as a real simplification rather
+/// than silently approximated.
+#[must_use]
+pub fn end_gateway_beam_spawns(
+    handle: &SharedHandle,
+    cooldowns: &GatewayCooldowns,
+    eye: Vec3,
+    game_time: i64,
+    partial_tick: f32,
+) -> Vec<lodestone_render::EndGatewayBeamSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+
+    let candidates = {
+        let world = store.read();
+        end_gateway_beam_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+
+    let animation_time =
+        game_time.rem_euclid(40) as f32 + partial_tick;
+    let mut out = Vec::new();
+    for (pos, age) in candidates {
+        let is_spawning = age < 200;
+        let cooldown = cooldowns.cooldown(pos);
+        let is_cooling_down = cooldown.is_some();
+        if !is_spawning && !is_cooling_down {
+            continue;
+        }
+        let (scale01, beam_distance, color) = if is_spawning {
+            let t = (age as f32 + partial_tick) / 200.0;
+            (
+                t.clamp(0.0, 1.0),
+                END_GATEWAY_SPAWN_BEAM_DISTANCE,
+                DyeColor::Magenta.packed_rgb(),
+            )
+        } else {
+            // `cooldown` is `Some` here — `is_cooling_down` guarantees it.
+            let ticks = cooldown.unwrap_or(0) as f32;
+            let t = 1.0 - ((ticks - partial_tick) / 40.0).clamp(0.0, 1.0);
+            (t, 50.0, DyeColor::Purple.packed_rgb())
+        };
+        let scale = (scale01 * std::f32::consts::PI).sin();
+        let height = (scale * beam_distance).floor() as i32;
+        out.push(lodestone_render::EndGatewayBeamSpawn {
+            pos,
+            scale,
+            animation_time,
+            height,
+            color,
+        });
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
+#[cfg(test)]
+mod end_gateway_beam_tests {
+    use super::*;
+
+    /// `Age` present and small, no `BLOCK_EVENT` ever received: only the
+    /// spawning arm fires, colour magenta.
+    #[test]
+    fn a_fresh_gateway_with_small_age_is_spawning_and_magenta() {
+        let cooldowns = GatewayCooldowns::new();
+        assert!(cooldowns.cooldown([0, 0, 0]).is_none());
+        // Directly exercise the pure math the gather applies, since building
+        // a real `World`/`SharedHandle` is out of scope for a unit test here
+        // — `end_gateway_age` and the cooldown lookup are what this test
+        // actually holds down.
+        let nbt = lodestone_core::Nbt::Compound(vec![(
+            "Age".to_string(),
+            lodestone_core::Nbt::Long(5),
+        )]);
+        assert_eq!(end_gateway_age(&nbt), 5);
+        assert!(5 < 200, "age 5 must read as spawning");
+    }
+
+    /// No `Age` field at all reads as `0`, matching `getLongOr("Age", 0L)`.
+    #[test]
+    fn missing_age_defaults_to_zero() {
+        let nbt = lodestone_core::Nbt::Compound(vec![]);
+        assert_eq!(end_gateway_age(&nbt), 0);
+    }
+
+    /// `GatewayCooldowns` round-trips exactly like `BellShakes`: a `b0 == 1`
+    /// event starts a 40-tick countdown, ticking decrements it, and the
+    /// entry disappears once it reaches zero.
+    #[test]
+    fn cooldown_counts_down_from_forty_and_then_disappears() {
+        let mut cooldowns = GatewayCooldowns::new();
+        assert!(!cooldowns.apply_block_event([1, 2, 3], 0, 0), "b0 != 1 is not a trigger");
+        assert!(cooldowns.apply_block_event([1, 2, 3], 1, 0));
+        assert_eq!(cooldowns.cooldown([1, 2, 3]), Some(40));
+        for expected in (0..40).rev() {
+            cooldowns.tick();
+            if expected == 0 {
+                assert_eq!(cooldowns.cooldown([1, 2, 3]), None);
+            } else {
+                assert_eq!(cooldowns.cooldown([1, 2, 3]), Some(expected));
+            }
+        }
+        assert!(cooldowns.is_empty());
     }
 }

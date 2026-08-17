@@ -1383,6 +1383,30 @@ fn brushable_source_tracks_connection_state_and_is_safe_before_login() {
     );
 }
 
+/// Issue #23 (copper golem statue): [`Sim::copper_golem_statue_source`]'s
+/// own island detector, matching
+/// [`shelf_source_tracks_connection_state_and_is_safe_before_login`]'s shape.
+#[test]
+fn copper_golem_statue_source_tracks_connection_state_and_is_safe_before_login() {
+    let mut sim = Sim::new(test_config());
+    assert!(
+        sim.copper_golem_statue_source().is_none(),
+        "no net attached at all must report no source, matching skull_source/shelf_source"
+    );
+
+    let (net, _actions, _feed) = NetClient::loopback_with_feed();
+    sim.attach_net(net);
+    let source = sim
+        .copper_golem_statue_source()
+        .expect("a net is attached, so a source must exist even before login completes");
+    assert_eq!(
+        source(glam::Vec3::ZERO),
+        Vec::new(),
+        "no ClientHandle has been published yet, so the closure must return \
+         no spawns rather than panicking on the empty OnceLock"
+    );
+}
+
 /// Issue #23 (shelf): [`Sim::shelf_source`]'s own island detector, matching
 /// [`brushable_source_tracks_connection_state_and_is_safe_before_login`]'s
 /// shape exactly.

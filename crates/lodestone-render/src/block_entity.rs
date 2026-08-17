@@ -2091,6 +2091,129 @@ pub fn shelf_slot_matrix(
         * Mat4::from_scale(Vec3::splat(SHELF_ITEM_SCALE))
 }
 
+/// Which of `CopperGolemStatueBlock.Pose`'s four values a placed statue is
+/// showing — `copper_golem_pose` on the block state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CopperGolemPose {
+    Standing,
+    Sitting,
+    Running,
+    Star,
+}
+
+impl CopperGolemPose {
+    /// The [`BlockEntityModelSet`] model name for this pose — one of the four
+    /// `copper_golem_statue_*` entries in [`BLOCK_ENTITY_MODELS`].
+    #[must_use]
+    pub const fn model_name(self) -> &'static str {
+        match self {
+            CopperGolemPose::Standing => "copper_golem_statue_standing",
+            CopperGolemPose::Sitting => "copper_golem_statue_sitting",
+            CopperGolemPose::Running => "copper_golem_statue_running",
+            CopperGolemPose::Star => "copper_golem_statue_star",
+        }
+    }
+}
+
+/// Every copper golem statue pose, for enumerating stems and exhaustiveness
+/// in tests — the [`SKULL_TYPES`] shape for this family.
+pub const COPPER_GOLEM_POSES: &[CopperGolemPose] = &[
+    CopperGolemPose::Standing,
+    CopperGolemPose::Sitting,
+    CopperGolemPose::Running,
+    CopperGolemPose::Star,
+];
+
+/// `WeatheringCopper.WeatherState` restricted to the four values a statue's
+/// own block name can encode — `CopperGolemOxidationLevels.getOxidationLevel`'s
+/// key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CopperGolemOxidation {
+    Unaffected,
+    Exposed,
+    Weathered,
+    Oxidized,
+}
+
+/// `CopperGolemOxidationLevels.getOxidationLevel(state).texture()` — the
+/// sheet stem for each oxidation level. Waxing does not change the texture
+/// (it only halts further weathering), so there is no fifth stem for a waxed
+/// variant — [`copper_golem_statue_oxidation_from_block_name`] already folds
+/// `waxed_` away before this ever runs.
+#[must_use]
+pub const fn copper_golem_statue_texture_stem(oxidation: CopperGolemOxidation) -> &'static str {
+    match oxidation {
+        CopperGolemOxidation::Unaffected => "entity/copper_golem/copper_golem",
+        CopperGolemOxidation::Exposed => "entity/copper_golem/copper_golem_exposed",
+        CopperGolemOxidation::Weathered => "entity/copper_golem/copper_golem_weathered",
+        CopperGolemOxidation::Oxidized => "entity/copper_golem/copper_golem_oxidized",
+    }
+}
+
+/// Every copper golem statue sheet stem the renderer can ask for — what the
+/// shell preloads, mirroring [`skull_texture_stems`].
+#[must_use]
+pub fn copper_golem_statue_texture_stems() -> Vec<&'static str> {
+    [
+        CopperGolemOxidation::Unaffected,
+        CopperGolemOxidation::Exposed,
+        CopperGolemOxidation::Weathered,
+        CopperGolemOxidation::Oxidized,
+    ]
+    .iter()
+    .map(|o| copper_golem_statue_texture_stem(*o))
+    .collect()
+}
+
+/// The world placement matrix for a copper golem statue —
+/// `CopperGolemStatueBlockRenderer.createModelTransformation`, composed with
+/// the model's own `root.zRot = PI` (`CopperGolemStatueModel.setupAnim`):
+///
+/// ```text
+/// T(pos) · T(0.5, 0, 0.5) · Ry(-oppositeYaw) · Rz(180°)
+/// ```
+///
+/// **`oppositeYaw`, not `facing_yaw_deg` itself**: vanilla's
+/// `TRANSFORMATIONS` map is built from `entityDirection.getOpposite().toYRot()`
+/// — the *opposite* of the block's own `facing`, unlike every other
+/// block-entity placement in this crate (chest/skull/sign all rotate by the
+/// facing directly). `facing_yaw_deg` here is still [`horizontal_facing_yaw`]'s
+/// raw convention; the opposite is `+ 180°`, folded in below rather than
+/// pushed onto every caller.
+///
+/// `Rz(180°) == scale(-1, -1, 1)` exactly (`cos(180°) = -1`, `sin(180°) = 0`,
+/// so `RotZ(180°)`'s matrix *is* `diag(-1, -1, 1)`) — the same Y-down-model
+/// flip [`skull_ground_placement_matrix`] applies via an explicit scale;
+/// this function uses the rotation form because that is what the real jar's
+/// own `setupAnim` does, and the two are algebraically identical.
+#[must_use]
+pub fn copper_golem_statue_placement_matrix(pos: [i32; 3], facing_yaw_deg: f32) -> Mat4 {
+    let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
+    let opposite_yaw_deg = facing_yaw_deg + 180.0;
+    Mat4::from_translation(origin + Vec3::new(0.5, 0.0, 0.5))
+        * Mat4::from_rotation_y(-opposite_yaw_deg.to_radians())
+        * Mat4::from_rotation_z(std::f32::consts::PI)
+}
+
+/// One copper golem statue to draw this frame — vanilla's
+/// `CopperGolemStatueBlockRenderer`. Resolved through [`BlockEntityModelSet`]
+/// like chest/skull/bell (a real cuboid rig, unlike the campfire/vault/
+/// brushable/shelf item-model family), since `copper_golem_statue.json` is a
+/// total-absence hole exactly like chest's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CopperGolemStatueSpawn {
+    /// Block position of the statue.
+    pub pos: [i32; 3],
+    /// The block's own `facing`, in [`horizontal_facing_yaw`]'s convention.
+    pub facing_yaw_deg: f32,
+    /// The block's `copper_golem_pose` property.
+    pub pose: CopperGolemPose,
+    /// The block's own oxidation level, from its registry name.
+    pub oxidation: CopperGolemOxidation,
+    /// Packed sky/block light at the statue.
+    pub light: u8,
+}
+
 /// Every sheet stem across every block-entity family — what the shell's
 /// texture loader preloads. Union of [`chest_texture_stems`],
 /// [`skull_texture_stems`], [`bell_texture_stems`],
@@ -2116,6 +2239,7 @@ pub fn block_entity_texture_stems() -> Vec<&'static str> {
     stems.extend(book_texture_stems());
     stems.extend(decorated_pot_texture_stems());
     stems.extend(conduit_texture_stems());
+    stems.extend(copper_golem_statue_texture_stems());
     stems
 }
 
@@ -2289,6 +2413,30 @@ impl BlockEntityModelSet {
         Some(BlockEntityInstance {
             model,
             texture: skull_texture_stem(spawn.skull_type),
+            transform: placement,
+            part_transforms,
+            aabb_min,
+            aabb_max,
+            light: spawn.light,
+            tint: [255, 255, 255],
+        })
+    }
+
+    /// Resolves one copper golem statue into a drawable instance, or `None`
+    /// if that pose's model is not in the corpus.
+    #[must_use]
+    pub fn resolve_copper_golem_statue(
+        &self,
+        spawn: &CopperGolemStatueSpawn,
+    ) -> Option<BlockEntityInstance> {
+        let model = spawn.pose.model_name();
+        let mesh = self.get(model)?;
+        let placement = copper_golem_statue_placement_matrix(spawn.pos, spawn.facing_yaw_deg);
+        let part_transforms = mesh.part_transforms(placement, &[]);
+        let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
+        Some(BlockEntityInstance {
+            model,
+            texture: copper_golem_statue_texture_stem(spawn.oxidation),
             transform: placement,
             part_transforms,
             aabb_min,
@@ -4065,6 +4213,82 @@ mod tests {
             south0.transform_point3(Vec3::ZERO).distance(west.transform_point3(Vec3::ZERO)) > 1e-3,
             "a 90 degree facing change must move slot 0's world position"
         );
+    }
+
+    /// `Rz(180°) == scale(-1, -1, 1)`, algebraically — measured, not asserted
+    /// from the trig identity alone, so the placement matrix's own
+    /// determinant is checked against the value that identity predicts.
+    /// `det(RotY) = det(RotZ(180°)) = 1`, so the whole placement — despite
+    /// visually "flipping" a Y-down rig upright — is a proper rotation, the
+    /// same `det == +1` invariant [`skull_placement_preserves_orientation`]
+    /// holds for the entity flip's `scale(-1,-1,1)` form.
+    #[test]
+    fn copper_golem_statue_placement_preserves_orientation() {
+        for yaw in [0.0_f32, 90.0, 180.0, 270.0] {
+            let m = copper_golem_statue_placement_matrix([4, 70, 4], yaw);
+            assert!(
+                (m.determinant() - 1.0).abs() < 1e-4,
+                "yaw {yaw}: det {}",
+                m.determinant()
+            );
+        }
+    }
+
+    /// The rotation term is the **opposite** of `facing_yaw_deg`, not the
+    /// facing itself — `TRANSFORMATIONS`'s own `entityDirection.getOpposite()
+    /// .toYRot()`, the one real surprise in this placement. A south-facing
+    /// statue (`facing_yaw_deg = 0`, opposite = north = `180°`) must
+    /// therefore differ from a north-facing one (`facing_yaw_deg = 180`,
+    /// opposite = south = `0°`) — if the opposite term were dropped, south
+    /// and north would swap results entirely, but *comparing north's real
+    /// world direction against south's* is what actually pins the sign, not
+    /// merely "the two differ".
+    #[test]
+    fn copper_golem_statue_rotates_by_the_opposite_of_its_facing() {
+        const POS: [i32; 3] = [0, 64, 0];
+        // Predicted by composing both matrix factors, not just the RotY term
+        // alone (dropping the model's own Rz(180) from the prediction is an
+        // easy mistake, and would silently swap the two expected answers
+        // below): `M*X = RotY(-opposite_yaw) * (RotZ(180) * X)`, and
+        // `RotZ(180) * X = -X` regardless of yaw.
+        //
+        // South-facing (`facing_yaw_deg = 0`): opposite = north = `180°`,
+        // so `RotY(-180) * -X = +X` — local +X ends up unchanged.
+        // North-facing (`facing_yaw_deg = 180`): opposite = south = `0°`,
+        // so `RotY(0) * -X = -X` — local +X ends up flipped.
+        // The two must therefore *disagree*, which a placement using
+        // `facing_yaw_deg` directly (instead of its opposite) cannot
+        // reproduce: that wrong hypothesis gives south `RotY(0)*-X = -X` and
+        // north `RotY(-180)*-X = +X` — the same two answers, swapped.
+        let south = copper_golem_statue_placement_matrix(POS, 0.0);
+        let north = copper_golem_statue_placement_matrix(POS, 180.0);
+        let south_x = south.transform_vector3(Vec3::X).normalize();
+        let north_x = north.transform_vector3(Vec3::X).normalize();
+        assert!(
+            south_x.dot(Vec3::X) > 0.999,
+            "south-facing (opposite=north=180deg) should leave local +X at world +X, got {south_x:?}"
+        );
+        assert!(
+            north_x.dot(-Vec3::X) > 0.999,
+            "north-facing (opposite=south=0deg) should point local +X at world -X, got {north_x:?}"
+        );
+    }
+
+    /// `Rz(180°)` flips both the model's local X and Y axes (never Z) —
+    /// exactly the `scale(-1, -1, 1)` every Y-down mob rig needs when placed
+    /// as a block entity, told apart from a wrong single-axis flip (which
+    /// would also satisfy `det == +1`, so that test alone cannot catch it).
+    #[test]
+    fn copper_golem_statue_flips_x_and_y_but_not_z() {
+        // Cancel the rotation term by using yaw 180 (opposite = 0, no
+        // rotation), isolating the model's own Rz(180) flip.
+        let m = copper_golem_statue_placement_matrix([0, 0, 0], 180.0);
+        let local_x = m.transform_vector3(Vec3::X);
+        let local_y = m.transform_vector3(Vec3::Y);
+        let local_z = m.transform_vector3(Vec3::Z);
+        assert!(local_x.dot(Vec3::X) < -0.999, "local X must flip: {local_x:?}");
+        assert!(local_y.dot(Vec3::Y) < -0.999, "local Y must flip: {local_y:?}");
+        assert!(local_z.dot(Vec3::Z) > 0.999, "local Z must NOT flip: {local_z:?}");
     }
 
     /// `(slot + facing.get2DDataValue()) % 4`: turning the campfire a quarter turn

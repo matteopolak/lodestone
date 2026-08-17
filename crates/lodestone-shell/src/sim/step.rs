@@ -608,6 +608,10 @@ impl Sim {
             // window, so advancing it per frame would make the swing's speed a
             // function of the frame rate.
             self.bell_shakes.tick();
+            // End gateway teleport cooldowns, on the same fixed 20 Hz —
+            // `beamAnimationTick`'s own `teleportCooldown--` is a per-tick
+            // decrement, not per-frame.
+            self.gateway_cooldowns.tick();
             // Enchanting-table books, on the same fixed 20 Hz. Three of vanilla's
             // terms here are per-tick rates (`open` ±0.1, `tRot` +0.02, and the
             // 90% smoothing on `flipA`), so a per-frame advance would make the
