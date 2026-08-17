@@ -526,14 +526,25 @@ impl ApplicationHandler for WindowApp {
                         && !consumed_by_beacon
                         && is_left_press
                         && self.handle_enchant_click(&menu, w, h);
+                    // The stonecutter's recipe grid, same first-refusal shape
+                    // and the same "never overlaps a real slot, never overlaps
+                    // another special screen's own buttons" reasoning as
+                    // `consumed_by_enchant` just above.
+                    let consumed_by_stonecutter = !consumed_by_merchant
+                        && !consumed_by_beacon
+                        && !consumed_by_enchant
+                        && is_left_press
+                        && self.handle_stonecutter_click(&menu, w, h);
                     let consumed_by_recipe_panel = !consumed_by_merchant
                         && !consumed_by_beacon
                         && !consumed_by_enchant
+                        && !consumed_by_stonecutter
                         && is_left_press
                         && self.handle_recipe_panel_click(&menu, w, h);
                     if !consumed_by_merchant
                         && !consumed_by_beacon
                         && !consumed_by_enchant
+                        && !consumed_by_stonecutter
                         && !consumed_by_recipe_panel
                     {
                         // **`hit_test_with_book`, not `hit_test_with_scale`.** This is
