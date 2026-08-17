@@ -9,6 +9,23 @@ roster **cannot be built first**: eight of the thirteen implemented goals are st
 of firing in production today, so this plan sequences a perception-and-driver spine ahead of every
 species unit.
 
+**Status note, 2026-08-17: C2 (#230, Brain passive roster) partially landed, not closed.** Of the
+seven species #230 names, four now have a real, wired, tested behaviour beyond the generic CORE+IDLE
+scaffold: goat (ram attack, landed earlier), armadillo (roll-up-on-threat, landed earlier), axolotl
+(play-dead-on-low-health) and frog (tongue attack) landed this pass, and allay (item-carry-and-deliver,
+note-block hearing via the warden's own vibration substrate, and a disclosed-substitute duplication
+arm) landed this pass too. **Two gaps remain and #230 stays open**: camel has sitting but not the
+rider-triggered dash (needs a `PlayerInput` jump-bit decode this crate currently discards, plus new
+vehicle-physics wiring — out of scope this pass), and sniffer has none of its dig/seek/egg state
+machine at all (a much larger unit — a block-interaction/digging mechanic, an egg-spawn producer, and
+a multi-phase timer, none of which exist yet). See `brain/roster.rs`'s own module doc and
+`crate::mobs::allay_carrying_tests` (`lodestone-server`) for the per-species detail. Two previously-
+recorded blockers in #230's own issue thread were re-verified and found false this pass: "frog tongue
+needs slime simulation" (`Frog.canEat` is a plain entity-type/size check, no AI dependency) and "allay
+note-block duplication has nowhere for the pulse to land" (the warden's vibration substrate already
+had room for a second listener; `crate::redstone_note_block::played_pulse_on_transition` re-derives
+the pulse from a `RandomTickEvent`'s existing `(from, to)` pair with no new field).
+
 **Status note, 2026-08-15: B4 (#233, neutral/aggro) landed.** All four headline mechanisms — enderman
 teleport-on-stare, zombified piglin group aggro, bee sting-then-die, wolf pack aggro — are
 `Coverage::Modelled` and tested against a real `NavigatingMob`. See §3's B4 entry for the summary and
