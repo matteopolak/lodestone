@@ -5151,6 +5151,15 @@ where
         }
     }
     let mut fanned: Vec<(BlockPos, String)> = Vec::new();
+    // `TripWireBlock.affectNeighborsAfterRemoval` — the "the string just broke"
+    // instant pulse. `broken` is `pos`'s own state from *before* this function
+    // overwrote it, exactly what `propagate_removal_with_entities` needs; a
+    // no-op for every block that is not a tripwire.
+    {
+        let (mut changed, scheduled) = propagate_removal_with_entities(source, pos, &broken);
+        block_ticks.request_scheduled_ticks(scheduled);
+        fanned.append(&mut changed);
+    }
     let mut fan_origins: Vec<BlockPos> = vec![pos];
     fan_origins.extend(collapsed.iter().map(|(cell, _)| *cell));
     for origin in fan_origins {
@@ -7634,6 +7643,54 @@ where
     // re-`schedule`s each entry and so assigns it a fresh `sub_tick_order`, which
     // makes *this* order the one that decides tie-breaks later — so it has to be
     // deterministic. `u64::MAX` drains everything regardless of delay.
+    let scheduled: Vec<ScheduledTick<String>> = block_ticks.drain_due(u64::MAX, usize::MAX);
+    let changed = events
+        .into_iter()
+        .map(|event| {
+            let (ex, ey, ez) = event.pos;
+            source.set_block(ex, ey, ez, &event.to);
+            (BlockPos::new(ex, ey, ez), event.to)
+        })
+        .collect();
+    (changed, scheduled)
+}
+
+/// `TripWireBlock.affectNeighborsAfterRemoval`'s bridge from a [`ChunkSource`]
+/// to [`crate::random_tick::react_at_removal`] — the block-**removal** twin
+/// of [`propagate_placement_with_entities`], same column-snapshot shape.
+/// `wire_state_before_removal` is the removed block's own state just before
+/// the caller overwrote the cell; anything other than a tripwire is a fast
+/// no-op via `react_at_removal`'s own guard, so a caller may call this
+/// unconditionally on every break.
+pub(crate) fn propagate_removal_with_entities<S>(
+    source: &S,
+    target: BlockPos,
+    wire_state_before_removal: &str,
+) -> (Vec<(BlockPos, String)>, Vec<ScheduledTick<String>>)
+where
+    S: ChunkSource + ?Sized,
+{
+    let cx = target.x.div_euclid(16);
+    let cz = target.z.div_euclid(16);
+    let (min_x, min_z) = (cx * 16, cz * 16);
+    // Reflects the removal already applied — same contract
+    // `propagate_placement_with_entities` relies on for its own placement.
+    let mut column = source.column(cx, cz);
+    if target.y < column.min_y || target.y >= column.min_y + column.height {
+        return (Vec::new(), Vec::new());
+    }
+    let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    let events = crate::random_tick::react_at_removal(
+        &mut column,
+        min_x,
+        min_z,
+        target.x,
+        target.y,
+        target.z,
+        wire_state_before_removal,
+        &mut block_ticks,
+        0,
+    );
     let scheduled: Vec<ScheduledTick<String>> = block_ticks.drain_due(u64::MAX, usize::MAX);
     let changed = events
         .into_iter()
@@ -11665,8 +11722,43 @@ where
                 }
             });
         }
-        ServerBound::PlayerInput { sprint } => {
+        ServerBound::PlayerInput { sprint, shift } => {
             *sprinting = sprint;
+            // `Player.rideTick`: `!level.isClientSide && wantsToStopRiding() &&
+            // isPassenger()` → `stopRiding()`, where `wantsToStopRiding()` is
+            // exactly `isShiftKeyDown()` — tested every tick a passenger is
+            // aboard, not on a press-edge. This dismounts on every *received*
+            // `shift: true` rather than replaying a stored per-tick flag, which
+            // reproduces the same observable behaviour without a stale-state
+            // hazard: `lodestone_controller::ecs::send_player_input` only queues
+            // this packet when the input actually changes (`LastPlayerInput`'s
+            // own edge check — real vanilla resends on change too,
+            // `LocalPlayer.tick`'s `!lastSentInput.equals(...)`), so a received
+            // `shift: true` already *is* the rising edge here, not a level held
+            // across many packets. And even a literal level check would be safe:
+            // `mount_vehicle`'s own `using_secondary_action` gate (and the
+            // horse-family arm of `MobSim::interact`) reads a *fresh*
+            // `using_secondary_action` bit straight off the `INTERACT` packet,
+            // not this stored flag, so a sneaking player simply cannot board in
+            // the first place — there is no re-board race to lock them out of.
+            //
+            // A player rides at most one of the three maps at a time ("one map's
+            // worry" — see `mount_vehicle`'s own doc), so trying vehicle, then
+            // minecart, then mob in sequence finds whichever one (if any) is
+            // occupied without risking a double-dismount.
+            if shift {
+                let dismounted = mobs.with(|sim| {
+                    sim.dismount_rider(player_entity_id)
+                        .or_else(|| sim.dismount_minecart_rider(player_entity_id))
+                        .or_else(|| sim.dismount_mob(player_entity_id))
+                });
+                if let Some(vehicle_id) = dismounted {
+                    // `Entity.stopRiding`'s own wire consequence — the vehicle's
+                    // whole (now empty) passenger list, the same `SET_PASSENGERS`
+                    // handoff every mount arm above uses to announce boarding.
+                    apply(conn, state, proto.encode_set_passengers(vehicle_id, &[])).await?;
+                }
+            }
         }
         ServerBound::CreativeModeSlotSet { slot, item } => {
             apply_creative_mode_slot_set(inventory, slot, item, *game_mode == GameMode::Creative);

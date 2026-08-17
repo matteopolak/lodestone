@@ -97,6 +97,10 @@ const ADD_ENTITY_S2C: i32 = 58;
 const LOCAL_PLAYER_ENTITY_ID: i32 = 1;
 const REMOVE_ENTITIES_S2C: i32 = 59;
 const TAKE_ITEM_ENTITY_S2C: i32 = 60;
+/// Stand-in `set_passengers`: a VarInt vehicle id then a VarInt-prefixed
+/// VarInt array, matching the real wire shape `encode_set_passengers`'s own
+/// doc comment describes. Dismounting is this packet with an empty array.
+const SET_PASSENGERS_S2C: i32 = 61;
 /// A stand-in `change_game_mode` (one byte ordinal). Needed because
 /// `SET_CREATIVE_MODE_SLOT` is gated on creative mode server-side — vanilla's own
 /// `hasInfiniteMaterials()` check — so a test that gives itself an item has to be
@@ -259,6 +263,7 @@ impl ServerProtocol for FakeProtocol {
                 let mut r = Reader::new(payload);
                 ServerBound::PlayerInput {
                     sprint: r.u8().expect("sprint flag") != 0,
+                    shift: r.u8().expect("shift flag") != 0,
                 }
             }
             State::Play if packet_id == SET_GAME_RULE_C2S => {
@@ -595,6 +600,19 @@ impl ServerProtocol for FakeProtocol {
             payload: w.as_slice().to_vec(),
         }
     }
+
+    fn encode_set_passengers(&self, vehicle_id: i32, passenger_ids: &[i32]) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(vehicle_id);
+        w.var_i32(i32::try_from(passenger_ids.len()).unwrap_or(i32::MAX));
+        for &id in passenger_ids {
+            w.var_i32(id);
+        }
+        ServerDirective::Send {
+            packet_id: SET_PASSENGERS_S2C,
+            payload: w.as_slice().to_vec(),
+        }
+    }
 }
 
 /// Drives the client side of handshake → login → configuration → the
@@ -790,10 +808,11 @@ async fn send_creative_slot(client: &mut Connection<DuplexStream>, slot: i16, it
     send_game_mode(client, 0).await;
 }
 
-/// Sends the stand-in `player_input` sprint flag.
-async fn send_player_input(client: &mut Connection<DuplexStream>, sprint: bool) {
+/// Sends the stand-in `player_input` sprint and shift flags.
+async fn send_player_input(client: &mut Connection<DuplexStream>, sprint: bool, shift: bool) {
     let mut w = Writer::default();
     w.u8(u8::from(sprint));
+    w.u8(u8::from(shift));
     client
         .write_packet(PLAYER_INPUT_C2S, w.as_slice())
         .await
@@ -4827,7 +4846,7 @@ async fn a_sprinting_player_loses_saturation_then_food_on_the_wire() {
     // Establish a starting position, then sprint 250 blocks in z from it. The
     // exhaustion charge needs the *previous* position, so the first move is the
     // baseline and the second is the one that costs.
-    send_player_input(&mut client, true).await;
+    send_player_input(&mut client, true, false).await;
     send_player_moved(&mut client, 8.0, 8.0, 8.0).await;
     send_player_moved(&mut client, 8.0, 8.0, 258.0).await;
 
@@ -5080,4 +5099,106 @@ async fn a_player_standing_in_air_never_burns() {
 
     drop(client);
     let _ = server.await.unwrap();
+}
+
+/// **The boat-dismount gate — the last open symptom tracked by issue #11.**
+///
+/// The chain that was broken: the client already sent the sneak bit every
+/// tick, `server_protocol.rs`'s `PLAYER_INPUT` decode arm only read bit
+/// `0x40` (sprint) and never `0x20` (shift), `ServerBound::PlayerInput` had
+/// no field to carry it, and `MobSim::dismount_rider` — the mechanism that
+/// actually removes a rider — had zero callers anywhere in the tree. This
+/// drives the real `dispatch_play_packet` path (not `dismount_rider`
+/// directly, which would pass whether or not the server ever called it) and
+/// asserts both the sim state and the wire.
+///
+/// Mounting goes through the real `MobSim` API rather than a wire-level
+/// `INTERACT_ENTITY` (this file's stand-in protocol has no decode arm for
+/// that packet, and boarding wiring is pre-existing, not part of this fix) —
+/// only the dismount half is under test.
+///
+/// `Player.rideTick`'s `wantsToStopRiding()` is exactly `isShiftKeyDown()`, a
+/// **level** check run every tick a passenger is aboard, not an edge. That is
+/// safe here (does not lock a sneaking player out of re-boarding) only
+/// because `AbstractBoat.interact`/`mount_vehicle`'s own
+/// `using_secondary_action` gate already refuses to board while sneaking —
+/// ported and checked in `mount_vehicle`'s own tests. This gate's own
+/// precondition assertion (`boarded` while *not* sneaking) is the other half
+/// of that argument holding.
+#[tokio::test(start_paused = true)]
+async fn sneaking_dismounts_a_boat_on_the_wire() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+    let mobs = MobHandle::default();
+    let mobs_for_server = mobs.clone();
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &source,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &mobs_for_server,
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Sailor", 1).await;
+
+    let boat = mobs.with(|sim| {
+        sim.spawn_vehicle(
+            "minecraft:oak_boat".parse().expect("valid key"),
+            Vec3::new(8.0, 8.0, 8.0),
+            0.0,
+        )
+    });
+    let boarded = mobs.with(|sim| sim.mount_vehicle(boat, LOCAL_PLAYER_ENTITY_ID, false));
+    assert!(
+        boarded,
+        "precondition: mounting must succeed while not sneaking"
+    );
+    assert_eq!(
+        mobs.with(|sim| sim.vehicle_ridden_by(LOCAL_PLAYER_ENTITY_ID)),
+        Some(boat),
+        "precondition: the player is aboard before the sneak packet is sent"
+    );
+    let _ = drain_available(&mut client).await;
+
+    // The fix under test: a real `PLAYER_INPUT` with `shift: true`, through
+    // the real dispatch path.
+    send_player_input(&mut client, false, true).await;
+
+    let packets = drain_available(&mut client).await;
+    let payload = packets
+        .iter()
+        .find(|(id, _)| *id == SET_PASSENGERS_S2C)
+        .map(|(_, payload)| payload.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "sneaking while aboard must send SET_PASSENGERS — the only channel a \
+                 client learns it dismounted through; got packet ids {:?}",
+                packets.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+            )
+        });
+    let mut r = Reader::new(&payload);
+    let vehicle_id = r.var_i32().expect("vehicle id");
+    let count = r.var_i32().expect("passenger count");
+    assert_eq!(vehicle_id, boat, "must name the boat the player just left");
+    assert_eq!(
+        count, 0,
+        "dismounting sends the vehicle's whole (now empty) passenger list, not a delta"
+    );
+
+    assert_eq!(
+        mobs.with(|sim| sim.vehicle_ridden_by(LOCAL_PLAYER_ENTITY_ID)),
+        None,
+        "the sim itself must actually vacate the boat, not just announce it on the wire"
+    );
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
 }

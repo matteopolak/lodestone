@@ -1130,12 +1130,17 @@ pub enum ServerBound {
         target_entity_id: Option<i32>,
     },
     /// The client's movement-input flags for the current tick
-    /// (`ServerboundPlayerInputPacket`, issue #12). Decoded for exactly one
-    /// reason: `sprint` is half of vanilla's melee knockback-bonus gate
+    /// (`ServerboundPlayerInputPacket`). Two of the seven flags are threaded
+    /// through: `sprint` is half of vanilla's melee knockback-bonus gate
     /// (`Player.attack`'s `isSprinting() && fullStrengthAttack` — see
     /// `crate::server::apply_attack`'s own doc comment for the other half,
-    /// which this crate cannot track). The other six flags
-    /// (forward/backward/left/right/jump/shift) are decoded off the wire by
+    /// which this crate cannot track), and `shift` drives vanilla's
+    /// `Player.rideTick` dismount check (`wantsToStopRiding()` is
+    /// `isShiftKeyDown()`, tested every tick a passenger is aboard — see
+    /// `crate::server`'s `PlayerInput` consumer for why reacting to each
+    /// received packet already reproduces that edge, given this packet's own
+    /// producer only sends on change). The other five
+    /// flags (forward/backward/left/right/jump) are decoded off the wire by
     /// [`ServerProtocol::decode`] but not threaded through here — nothing in
     /// this crate's server-authoritative model needs them yet, the same
     /// "decode what the loop needs, not the whole packet" convention
@@ -1144,6 +1149,9 @@ pub enum ServerBound {
     PlayerInput {
         /// Whether the client reports itself as sprinting this tick.
         sprint: bool,
+        /// Whether the client reports itself as sneaking this tick —
+        /// vanilla's `wantsToStopRiding()` input.
+        shift: bool,
     },
     /// A creative-mode inventory slot write predicted locally by the client
     /// (`ServerboundSetCreativeModeSlotPacket`, issue #266). Uses the exact
