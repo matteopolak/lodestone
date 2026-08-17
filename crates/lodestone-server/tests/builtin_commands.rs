@@ -35,10 +35,19 @@ fn candidate(n: u128, name: &str, x: f64, mode: GameMode) -> PlayerCandidate {
         entity_id: 1000 + n as i32,
         username: name.to_string(),
         position: Vec3::new(x, 64.0, 0.0),
+        rotation: Rotation { yaw: 0.0, pitch: 0.0 },
         game_mode: mode,
         xp_level: 0,
         xp_points: 0,
     }
+}
+
+/// [`candidate`], with a caller-chosen rotation — for the `/execute at`/
+/// `rotated as` rotation-transfer gates, which need a candidate whose
+/// rotation is discriminable from the default `(0, 0)` every other fixture
+/// here uses.
+fn candidate_with_rotation(n: u128, name: &str, x: f64, mode: GameMode, rotation: Rotation) -> PlayerCandidate {
+    PlayerCandidate { rotation, ..candidate(n, name, x, mode) }
 }
 
 /// The caller: `alice`, at the origin, level 4.
@@ -1434,6 +1443,88 @@ fn execute_at_then_positioned_lands_where_neither_raw_coordinate_would() {
     assert_ne!(pos, (5, 64, 0), "must not be bob's raw position (an `at`-with-no-`positioned` bug)");
     assert_ne!(pos, (1, 65, 1), "must not be alice's own position offset by the same delta (an `at`-ignored bug)");
     assert_ne!(pos, (1, 1, 1), "must not be the literal offset read as absolute");
+}
+
+/// `execute at <targets>` must transfer the target's **rotation**, not just
+/// its position — `PlayerCandidate::rotation`'s whole reason for existing.
+/// Discriminated with a `^`-local `positioned` hop immediately after: local
+/// coordinates resolve against whatever rotation is in the source at that
+/// point, so a version that kept the caller's own rotation (the pre-fix
+/// behaviour) lands on a provably different block.
+#[test]
+fn execute_at_transfers_the_targets_rotation_not_just_its_position() {
+    use lodestone_server::Effect;
+    let commands = ServerCommands::new();
+    // Alice faces yaw 0 (south, +Z per `lodestone_command_mc::position`'s own
+    // module doc).
+    let alice = source(1, "alice");
+    // Bob faces yaw -90 (east, +X) — chosen so the two hypotheses' `^0 ^0 ^5`
+    // offsets land on two different axes entirely, not just different signs.
+    let players = vec![candidate_with_rotation(
+        2,
+        "bob",
+        5.0,
+        GameMode::Creative,
+        Rotation { yaw: -90.0, pitch: 0.0 },
+    )];
+
+    let outcome = run(
+        &commands,
+        &GameRulesHandle::new(),
+        &players,
+        &alice,
+        "execute at bob positioned ^ ^ ^5 run setblock ~ ~ ~ minecraft:stone",
+    )
+    .expect("root matched");
+
+    let Some(Effect::SetBlock { pos, .. }) = outcome.effects.first().map(|d| d.effect.clone()) else {
+        panic!("expected exactly one SetBlock effect: {:?}", outcome.effects);
+    };
+    assert_eq!(pos, (10, 64, 0), "bob's position (5, 64, 0) plus 5 forward along HIS yaw (-90, facing +X)");
+    assert_ne!(
+        pos,
+        (5, 64, 5),
+        "must not be bob's position plus 5 forward along ALICE's yaw (0, facing +Z) -- \
+         the pre-fix behaviour, which silently kept the caller's own rotation"
+    );
+}
+
+/// `rotated as <targets>` in isolation — reached through `positioned as`
+/// (which this module's own doc states transfers position only, anchor and
+/// rotation both untouched) so this test cannot pass merely because `at`
+/// already transfers rotation too.
+#[test]
+fn execute_rotated_as_copies_the_targets_rotation() {
+    use lodestone_server::Effect;
+    let commands = ServerCommands::new();
+    let alice = source(1, "alice"); // yaw 0, faces +Z
+    let players = vec![candidate_with_rotation(
+        2,
+        "bob",
+        5.0,
+        GameMode::Creative,
+        Rotation { yaw: -90.0, pitch: 0.0 },
+    )];
+
+    let outcome = run(
+        &commands,
+        &GameRulesHandle::new(),
+        &players,
+        &alice,
+        "execute positioned as bob rotated as bob positioned ^ ^ ^5 run setblock ~ ~ ~ minecraft:stone",
+    )
+    .expect("root matched");
+
+    let Some(Effect::SetBlock { pos, .. }) = outcome.effects.first().map(|d| d.effect.clone()) else {
+        panic!("expected exactly one SetBlock effect: {:?}", outcome.effects);
+    };
+    assert_eq!(pos, (10, 64, 0), "bob's position plus 5 forward along bob's OWN yaw (-90, +X)");
+    assert_ne!(
+        pos,
+        (5, 64, 5),
+        "must not be bob's position plus 5 forward along alice's yaw (0, +Z) -- \
+         the pre-fix behaviour with no `rotated as` subtree registered at all"
+    );
 }
 
 /// Two `positioned` hops in a row compose: the second's `~`-relative offset is

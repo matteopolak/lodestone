@@ -133,6 +133,11 @@ pub struct PlayerCandidate {
     pub entity_id: i32,
     pub username: String,
     pub position: Vec3,
+    /// Body/head rotation, as `crate::players::PlayerRegistry` last recorded
+    /// it — the field `/execute at`'s rotation transfer and `rotated as`
+    /// (`crate::commands::execute`) both need and, until now, had nowhere to
+    /// read from.
+    pub rotation: Rotation,
     pub game_mode: GameMode,
     /// `Player.experienceLevel`, the same "republished on every mutation"
     /// mirror `game_mode` already is — see [`crate::players::PlayerRegistry::set_experience`].
