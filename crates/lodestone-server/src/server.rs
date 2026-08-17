@@ -92,7 +92,9 @@ use crate::chunk::{
     is_air_or_fluid, is_water,
 };
 use crate::fall::{FallSample, FallTracker};
-use crate::container_click::{Click, MayPickup, MenuKind, MenuLayout, SlotKind, Station, do_click_with};
+use crate::container_click::{
+    Click, MayPickup, MenuKind, MenuLayout, SelectedBundleIndex, SlotKind, Station, do_click_with,
+};
 use crate::crafting::CraftingState;
 use crate::inventory::{HOTBAR_SIZE, OFFHAND_NATIVE, PlayerInventory, window_zero_menu_slot};
 use crate::mob_spawn::SpawnRng;
@@ -4019,6 +4021,8 @@ where
             | ServerBound::EditBook { .. }
             | ServerBound::SetBeacon { .. }
             | ServerBound::SelectTrade { .. }
+            | ServerBound::SelectBundleItem { .. }
+            | ServerBound::PaddleBoat { .. }
             | ServerBound::PickItemFromBlock { .. }
             | ServerBound::PickItemFromEntity { .. }
             | ServerBound::TeleportToEntity { .. }
@@ -8400,6 +8404,12 @@ fn apply_container_clicked<P: ServerProtocol>(
     let recipe = |cells: &[Option<ItemStack>]| {
         crate::crafting::derive_result(grid_width, grid_height, cells)
     };
+    // `ServerboundSelectBundleItemPacket`'s last claim for this menu slot —
+    // `container_click::pickup`'s own `tryItemClickBehaviourOverride`
+    // right-click-extract branch reads this to pick which nested item comes
+    // out, exactly as `AbstractContainerMenu.selectedBundleItemIndex` does.
+    let selected_bundle = |slot: usize| inventory.selected_bundle_item(slot);
+    let selected_bundle: Option<SelectedBundleIndex<'_>> = Some(&selected_bundle);
     let dropped = do_click_with(
         &layout,
         &mut slots,
@@ -8412,6 +8422,7 @@ fn apply_container_clicked<P: ServerProtocol>(
         // slot does, and that shape is handled by `apply_workstation_clicked`
         // above, never reaching here.
         None,
+        selected_bundle,
     );
     *inventory.click_state_mut() = state;
 
@@ -8611,7 +8622,9 @@ fn apply_workstation_clicked<P: ServerProtocol>(
     .cost;
     let anvil_may_pickup = move |_index: usize, _item: &ItemStack| (creative || xp_level >= anvil_cost) && anvil_cost > 0;
     let may_pickup: Option<MayPickup<'_>> = (station == Station::Anvil).then_some(&anvil_may_pickup as _);
-    let dropped = do_click_with(&layout, &mut slots, &mut state, click, creative, Some(&recipe), may_pickup);
+    let dropped = do_click_with(
+        &layout, &mut slots, &mut state, click, creative, Some(&recipe), may_pickup, None,
+    );
     *inventory.click_state_mut() = state;
 
     let mut new_cells = cells.clone();
@@ -8714,7 +8727,7 @@ fn apply_enchanting_clicked<P: ServerProtocol>(
     let mut slots = read(inventory, &cells);
     let before = slots.clone();
     let mut state = inventory.click_state().clone();
-    let dropped = do_click_with(&layout, &mut slots, &mut state, click, creative, None, None);
+    let dropped = do_click_with(&layout, &mut slots, &mut state, click, creative, None, None, None);
     *inventory.click_state_mut() = state;
 
     let mut new_cells = cells;
@@ -11037,6 +11050,12 @@ where
                 returning.push(carried);
             }
             inventory.click_state_mut().reset();
+            // Issue #692: the same "menu-owned scratch state, cleared on
+            // `removed`" shape as the crafting grid and workstation cells
+            // above — `AbstractContainerMenu.selectedBundleItemIndex` is a
+            // field on the menu instance itself, so it does not survive past
+            // the menu that set it.
+            inventory.clear_selected_bundle_items();
             let mut spilled = Vec::new();
             for stack in returning {
                 if let (_, Some(leftover)) = inventory.add(stack) {
@@ -11279,6 +11298,16 @@ where
                 )
                 .await?;
             }
+        }
+        // Issue #692: a bundle-tooltip highlight claim. Stored, not acted on
+        // immediately — `container_click::pickup`'s next right-click-on-empty
+        // against this slot is what actually reads it
+        // (`selected_bundle_item`), mirroring vanilla's own two-step
+        // select-then-extract (`ServerboundSelectBundleItemPacket` just
+        // updates `AbstractContainerMenu.selectedBundleItemIndex`; the
+        // extraction happens on the following `PICKUP` click).
+        ServerBound::SelectBundleItem { slot_id, selected_item_index } => {
+            inventory.set_selected_bundle_item(slot_id, selected_item_index);
         }
         // Issue #616's remainder, `SET_BEACON`. See `apply_set_beacon`'s own
         // doc for the gate.
@@ -11816,6 +11845,15 @@ where
                 {
                     sim.apply_mob_move(player_entity_id, position, yaw);
                 }
+            });
+        }
+        // Issue #262's `PADDLE_BOAT` remainder — purely cosmetic (see
+        // `MobSim::apply_boat_paddle`'s own doc) so there is no directive to
+        // send here; the next `snapshots()` diff carries it to every other
+        // connected client via `MetadataField::BoatPaddles`.
+        ServerBound::PaddleBoat { left, right } => {
+            mobs.with(|sim| {
+                sim.apply_boat_paddle(player_entity_id, left, right);
             });
         }
         ServerBound::PlayerInput { sprint, shift } => {
@@ -16566,6 +16604,51 @@ mod tests {
         );
         assert_eq!(inventory.native(4), Some(&stack("minecraft:stone", 4)));
         assert!(inventory.click_state().carried.is_none());
+    }
+
+    /// Issue #692, end to end through the production dispatch path (not just
+    /// `container_click`'s own unit tests): a `ServerBound::SelectBundleItem`
+    /// packet's consumer (`inventory.set_selected_bundle_item`) is exactly
+    /// what `apply_container_clicked`'s later right-click-extract reads.
+    /// Without the store-then-read join this proves, a scroll-selected
+    /// bundle item would always come out as the front one regardless of
+    /// what the player highlighted — the bug the control below actually
+    /// caught in `bundle_other_stacked_on_me`'s first draft.
+    #[test]
+    fn a_select_bundle_item_packet_changes_which_item_a_later_extract_pops() {
+        let mut inventory = PlayerInventory::new();
+        let mut bundle = stack("minecraft:bundle", 1);
+        bundle.components.bundle_contents =
+            vec![stack("minecraft:torch", 3), stack("minecraft:oak_planks", 5)];
+        // Menu slot 9 is native 9 for window 0 (`MenuLayout::player`'s own
+        // storage-first ordering, the same join `container_clicked_against_
+        // window_zero_derives_the_move` above already relies on).
+        inventory.set_native(9, Some(bundle));
+        let block_entities = BlockEntityHandle::new();
+
+        // The dispatch arm's own body: `ServerBound::SelectBundleItem { slot_id:
+        // 9, selected_item_index: 1 } => inventory.set_selected_bundle_item(9, 1)`.
+        inventory.set_selected_bundle_item(9, 1);
+
+        // Right-click (button 1, PICKUP) on slot 9 with an empty cursor.
+        apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            None,
+            0,
+            Click { slot: 9, button: 1, click_type: 0 },
+            &[],
+            None,
+            false,
+            i32::MAX,
+        );
+
+        assert_eq!(
+            inventory.click_state().carried.as_ref().map(|s| s.item.to_string()),
+            Some("minecraft:oak_planks".to_owned()),
+            "the selected index (1) should have been extracted, not the front item (0)"
+        );
     }
 
     /// **The security property.** A client claiming a slot now holds an item it

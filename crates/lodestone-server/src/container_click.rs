@@ -64,10 +64,17 @@
 //! * **Max stack size is per item**, from the same prototype table. Defaulting to
 //!   64 would let the server itself derive a 64-stack of swords — not minting, but
 //!   the same duplication with extra steps.
-//! * **What is deliberately *not* modelled**: `tryItemClickBehaviourOverride`
-//!   (bundles), `canDropItems`, the tutorial hooks, and the drop-into-the-world
-//!   *entity* (a `Throw` or an outside-click yields its stacks in [`do_click`]'s
-//!   return value and the caller decides what to do with them). Also unmodelled:
+//! * **`tryItemClickBehaviourOverride` (bundles) is modelled for `PICKUP` only**,
+//!   the one arm vanilla itself calls it from — [`pickup`]'s own
+//!   [`bundle_stacked_on_other`]/[`bundle_other_stacked_on_me`] hooks, gated on
+//!   [`SelectedBundleIndex`]. `QUICK_MOVE`/`THROW`/drag never call
+//!   `tryItemClickBehaviourOverride` in vanilla either, so a bundle shift-clicked
+//!   or thrown behaves as an ordinary stack, matching real behaviour rather than
+//!   a gap.
+//! * **What is deliberately *not* modelled**: `canDropItems`, the tutorial
+//!   hooks, and the drop-into-the-world *entity* (a `Throw` or an outside-click
+//!   yields its stacks in [`do_click`]'s return value and the caller decides
+//!   what to do with them). Also unmodelled:
 //!   creative-mode `Clone` is gated on the caller's `creative` flag, matching
 //!   `player.hasInfiniteMaterials()`.
 //! * **`Slot.mayPickup` is modelled as a caller-supplied hook, [`MayPickup`],
@@ -110,6 +117,7 @@
 //! `lodestone_data::item_prototypes` (stack caps, equipment slots),
 //! `lodestone-model` for [`ItemStack`]. No protocol, no packet id.
 
+use lodestone_game::item::is_bundle;
 use lodestone_model::{EquipmentSlot, ItemStack};
 
 use crate::inventory::{OFFHAND_NATIVE, PLAYER_NATIVE_SIZE};
@@ -634,6 +642,163 @@ fn slot_may_pickup(index: usize, item: &ItemStack, hook: Option<MayPickup<'_>>) 
     hook.map_or(true, |f| f(index, item))
 }
 
+/// A menu slot's currently-selected bundle-content index, for
+/// [`bundle_remove_one`]'s "nothing validly selected" fallback — vanilla
+/// tracks this on the menu itself (`AbstractContainerMenu
+/// ::setSelectedBundleItemIndex`, driven by `ServerboundSelectBundleItemPacket`),
+/// never on the `ItemStack`. `lodestone_model::ItemComponents::bundle_contents`
+/// deliberately carries no such field (see its own doc: the wire never carries
+/// a real value in the client-decode direction), so the caller's authoritative
+/// copy has to live beside [`ClickState`], not inside the stack — the same
+/// shape [`MayPickup`]/[`ResultRecipe`] already are.
+pub type SelectedBundleIndex<'a> = &'a dyn Fn(usize) -> Option<usize>;
+
+/// `BundleContents`'s weight arithmetic — `1/max_stack_size` for an ordinary
+/// item, a nested bundle's own weight plus `1/16`, exact in 64ths because
+/// every vanilla max stack size (`1`, `16`, `64`) divides 64 evenly. A future
+/// item whose max stack size does not divide 64 would round; nothing in this
+/// crate's data currently does.
+fn item_weight_64(item: &ItemStack) -> u32 {
+    if is_bundle(&item.item) {
+        bundle_weight_64(&item.components.bundle_contents) + 4 // +1/16
+    } else {
+        (64 / max_stack_size(item).max(1)).max(1)
+    }
+}
+
+fn bundle_weight_64(items: &[ItemStack]) -> u32 {
+    items
+        .iter()
+        .map(|s| item_weight_64(s).saturating_mul(s.count.max(1)))
+        .sum()
+}
+
+/// `BundleContents.Mutable::tryInsert` — inserts as much of `adding` as fits
+/// under the 64-unit weight cap (`amountToAdd`), merging into an existing
+/// same-item-same-components entry at the front or prepending a fresh one.
+/// Returns how many were actually added. A nested bundle is refused, the
+/// disclosed simplification `canItemBeInBundle` stands in for here (this
+/// crate has no per-item container-nesting flag yet, only the bundle-item
+/// check itself).
+fn bundle_try_insert(contents: &mut Vec<ItemStack>, adding: &ItemStack) -> u32 {
+    if adding.count == 0 || is_bundle(&adding.item) {
+        return 0;
+    }
+    let used_64 = bundle_weight_64(contents);
+    let per_item_64 = item_weight_64(adding).max(1);
+    let room_64 = 64u32.saturating_sub(used_64);
+    let amount = adding.count.min(room_64 / per_item_64);
+    if amount == 0 {
+        return 0;
+    }
+    if let Some(pos) = contents.iter().position(|s| same(s, adding)) {
+        let mut merged = contents.remove(pos);
+        merged.count += amount;
+        contents.insert(0, merged);
+    } else {
+        let mut fresh = adding.clone();
+        fresh.count = amount;
+        contents.insert(0, fresh);
+    }
+    amount
+}
+
+/// `BundleContents.Mutable::removeOne` — pops the selected index (or the
+/// front item, `0`, when nothing is validly selected — vanilla's
+/// `indexIsOutsideAllowedBounds`).
+fn bundle_remove_one(contents: &mut Vec<ItemStack>, selected: Option<usize>) -> Option<ItemStack> {
+    let index = selected.filter(|&i| i < contents.len()).unwrap_or(0);
+    (!contents.is_empty()).then(|| contents.remove(index))
+}
+
+/// `BundleItem.overrideStackedOnOther` — the cursor holds a bundle and the
+/// click lands on `index`. Left-click-with-item transfers as much of the
+/// clicked slot into the bundle as fits; right-click-on-empty pops one item
+/// out into the slot. Returns whether the click was fully handled (vanilla's
+/// own `true` on both branches it takes) — `false` falls through to
+/// [`pickup`]'s ordinary place/take logic unchanged, exactly as
+/// `tryItemClickBehaviourOverride`'s boolean return does.
+fn bundle_stacked_on_other(
+    carried: &mut ItemStack,
+    slots: &mut [Option<ItemStack>],
+    index: usize,
+    primary: bool,
+    selected: SelectedBundleIndex<'_>,
+) -> bool {
+    if !is_bundle(&carried.item) {
+        return false;
+    }
+    let mut contents = carried.components.bundle_contents.clone();
+    if primary {
+        let Some(other) = slots[index].clone().filter(|s| s.count > 0) else {
+            return false;
+        };
+        let inserted = bundle_try_insert(&mut contents, &other);
+        if inserted > 0 {
+            let mut remaining = other;
+            remaining.count -= inserted;
+            slots[index] = (remaining.count > 0).then_some(remaining);
+        }
+        carried.components.bundle_contents = contents;
+        true
+    } else if slots[index].is_none() {
+        if let Some(removed) = bundle_remove_one(&mut contents, selected(index)) {
+            slots[index] = Some(removed);
+        }
+        carried.components.bundle_contents = contents;
+        true
+    } else {
+        false
+    }
+}
+
+/// `BundleItem.overrideOtherStackedOnMe` — the clicked slot holds a bundle.
+/// Left-click-on-empty-cursor is deselect-only and falls through (vanilla's
+/// own early `return false` after `toggleSelectedItem`); the caller does not
+/// need to model the deselect here since selection lives outside `ItemStack`
+/// in this crate (see [`SelectedBundleIndex`]) — the real effect callers care
+/// about is the two `true` branches below.
+fn bundle_other_stacked_on_me(
+    slot_item: &mut ItemStack,
+    carried: &mut Option<ItemStack>,
+    primary: bool,
+    index: usize,
+    selected: SelectedBundleIndex<'_>,
+) -> bool {
+    if !is_bundle(&slot_item.item) {
+        return false;
+    }
+    if primary && carried.is_none() {
+        return false; // deselect-only; ordinary take-into-cursor still runs.
+    }
+    let mut contents = slot_item.components.bundle_contents.clone();
+    if primary {
+        let adding = carried.as_ref().expect("checked Some above");
+        let inserted = bundle_try_insert(&mut contents, adding);
+        if inserted > 0 {
+            let mut left = carried.take().expect("checked Some above");
+            left.count -= inserted;
+            *carried = (left.count > 0).then_some(left);
+        }
+        slot_item.components.bundle_contents = contents;
+        true
+    } else if carried.is_none() {
+        // `AbstractContainerMenu.setSelectedBundleItemIndex` keys the
+        // selection by the slot the bundle currently occupies — this is
+        // exactly that slot, unlike `bundle_stacked_on_other`'s own
+        // right-click branch (a cursor-carried bundle is not addressable by
+        // `ServerboundSelectBundleItemPacket`'s `slotIndex` at all, so it has
+        // no selection to read and always pops the front item).
+        if let Some(removed) = bundle_remove_one(&mut contents, selected(index)) {
+            *carried = Some(removed);
+        }
+        slot_item.components.bundle_contents = contents;
+        true
+    } else {
+        false
+    }
+}
+
 /// Upper bound on [`quick_move`]'s repeat rounds — vanilla's `while` loop has none,
 /// relying on the grid draining. A malformed [`ResultRecipe`] that refilled the
 /// result without consuming anything would spin forever, and a server that hangs on
@@ -656,7 +821,7 @@ pub fn do_click(
     click: Click,
     creative: bool,
 ) -> Vec<ItemStack> {
-    do_click_with(layout, slots, state, click, creative, None, None)
+    do_click_with(layout, slots, state, click, creative, None, None, None)
 }
 
 /// [`do_click`], with the menu's own recipe corpus so the result slot is **live for
@@ -677,6 +842,7 @@ pub fn do_click_with(
     creative: bool,
     recipe: Option<ResultRecipe<'_>>,
     may_pickup: Option<MayPickup<'_>>,
+    selected_bundle: Option<SelectedBundleIndex<'_>>,
 ) -> Vec<ItemStack> {
     let mut dropped = Vec::new();
     let index = usize::try_from(click.slot).ok();
@@ -711,7 +877,7 @@ pub fn do_click_with(
                     }
                 }
             } else if state.drag.status == 2 {
-                finish_drag(layout, slots, state, recipe, may_pickup);
+                finish_drag(layout, slots, state, recipe, may_pickup, selected_bundle);
                 state.drag = Drag::default();
             } else {
                 state.drag = Drag::default();
@@ -739,7 +905,17 @@ pub fn do_click_with(
                 if click.click_type == 1 {
                     quick_move(layout, slots, index, &mut dropped, recipe, may_pickup);
                 } else {
-                    pickup(layout, slots, state, index, primary, &mut dropped, recipe, may_pickup);
+                    pickup(
+                        layout,
+                        slots,
+                        state,
+                        index,
+                        primary,
+                        &mut dropped,
+                        recipe,
+                        may_pickup,
+                        selected_bundle,
+                    );
                 }
             }
         }
@@ -900,6 +1076,7 @@ fn finish_drag(
     state: &mut ClickState,
     recipe: Option<ResultRecipe<'_>>,
     may_pickup: Option<MayPickup<'_>>,
+    selected_bundle: Option<SelectedBundleIndex<'_>>,
 ) {
     if state.drag.slots.is_empty() {
         return;
@@ -913,7 +1090,17 @@ fn finish_drag(
         let primary = state.drag.kind == 0;
         let mut dropped = Vec::new();
         state.drag = Drag::default();
-        pickup(layout, slots, state, index, primary, &mut dropped, recipe, may_pickup);
+        pickup(
+            layout,
+            slots,
+            state,
+            index,
+            primary,
+            &mut dropped,
+            recipe,
+            may_pickup,
+            selected_bundle,
+        );
         return;
     }
 
@@ -955,7 +1142,38 @@ fn pickup(
     dropped: &mut Vec<ItemStack>,
     recipe: Option<ResultRecipe<'_>>,
     may_pickup: Option<MayPickup<'_>>,
+    selected_bundle: Option<SelectedBundleIndex<'_>>,
 ) {
+    // `tryItemClickBehaviourOverride`: cursor-first, then slot — vanilla's own
+    // order in `Slot.safeInsert`'s caller, `AbstractContainerMenu.doClick`'s
+    // `PICKUP` arm. A bundle handled here returns immediately, matching
+    // vanilla's own early-return on a `true` override.
+    if let Some(mut carried) = state.carried.clone() {
+        let handled = bundle_stacked_on_other(
+            &mut carried,
+            slots,
+            index,
+            primary,
+            selected_bundle.unwrap_or(&|_| None),
+        );
+        if handled {
+            state.carried = (carried.count > 0).then_some(carried);
+            return;
+        }
+    }
+    if let Some(mut clicked) = slots[index].clone() {
+        if bundle_other_stacked_on_me(
+            &mut clicked,
+            &mut state.carried,
+            primary,
+            index,
+            selected_bundle.unwrap_or(&|_| None),
+        ) {
+            slots[index] = (clicked.count > 0).then_some(clicked);
+            return;
+        }
+    }
+
     let clicked = slots[index].clone();
     let carried = state.carried.clone();
 
@@ -1732,6 +1950,7 @@ mod tests {
             false,
             Some(recipe),
             None,
+            None,
         );
 
         assert_eq!(
@@ -1812,7 +2031,7 @@ mod tests {
             let mut slots = vec![None; layout.len()];
             slots[result_index] = Some(stack("minecraft:diamond_pickaxe", 1));
             let mut state = ClickState::default();
-            do_click_with(&layout, &mut slots, &mut state, click(2, 0, 0), false, None, Some(refuse));
+            do_click_with(&layout, &mut slots, &mut state, click(2, 0, 0), false, None, Some(refuse), None);
             if slots[result_index].is_none() || state.carried.is_some() {
                 failures.push(format!(
                     "PICKUP took the result: slot={:?} cursor={:?}",
@@ -1827,7 +2046,7 @@ mod tests {
             let mut slots = vec![None; layout.len()];
             slots[result_index] = Some(stack("minecraft:diamond_pickaxe", 1));
             let mut state = ClickState::default();
-            do_click_with(&layout, &mut slots, &mut state, click(2, 0, 1), false, None, Some(refuse));
+            do_click_with(&layout, &mut slots, &mut state, click(2, 0, 1), false, None, Some(refuse), None);
             let tail_has_item = slots[(result_index + 1)..].iter().any(Option::is_some);
             if slots[result_index].is_none() || tail_has_item {
                 failures.push(format!(
@@ -1850,7 +2069,7 @@ mod tests {
             // storage half — `item_combiner`'s own layout, storage then hotbar.
             let hotbar_native_0 = layout.len() - 9;
             let mut state = ClickState::default();
-            do_click_with(&layout, &mut slots, &mut state, click(2, 0, 2), false, None, Some(refuse));
+            do_click_with(&layout, &mut slots, &mut state, click(2, 0, 2), false, None, Some(refuse), None);
             if slots[result_index].as_ref().map(|s| s.item.to_string()) != Some("minecraft:diamond_pickaxe".to_owned())
                 || slots[hotbar_native_0].is_some()
             {
@@ -1866,8 +2085,9 @@ mod tests {
             let mut slots = vec![None; layout.len()];
             slots[result_index] = Some(stack("minecraft:diamond_pickaxe", 1));
             let mut state = ClickState::default();
-            let dropped =
-                do_click_with(&layout, &mut slots, &mut state, click(2, button, 4), false, None, Some(refuse));
+            let dropped = do_click_with(
+                &layout, &mut slots, &mut state, click(2, button, 4), false, None, Some(refuse), None,
+            );
             if !dropped.is_empty() || slots[result_index].is_none() {
                 failures.push(format!(
                     "THROW (button {button}) dropped the result: dropped={dropped:?} slot={:?}",
@@ -1892,12 +2112,139 @@ mod tests {
         let mut slots = vec![None; layout.len()];
         slots[result_index] = Some(stack("minecraft:diamond_pickaxe", 1));
         let mut state = ClickState::default();
-        do_click_with(&layout, &mut slots, &mut state, click(2, 0, 0), false, None, Some(allow));
+        do_click_with(&layout, &mut slots, &mut state, click(2, 0, 0), false, None, Some(allow), None);
 
         assert_eq!(slots[result_index], None, "a permitted PICKUP must take the result");
         assert_eq!(
             state.carried.as_ref().map(|s| s.item.to_string()),
             Some("minecraft:diamond_pickaxe".to_owned())
+        );
+    }
+
+    /// `tryItemClickBehaviourOverride`: a bundle on the cursor absorbs a
+    /// left-clicked stack from the slot — `BundleItem.overrideStackedOnOther`,
+    /// issue #692.
+    #[test]
+    fn bundle_on_cursor_absorbs_a_left_clicked_slot() {
+        let layout = MenuLayout::container(27);
+        let mut slots = vec![None; layout.len()];
+        slots[0] = Some(stack("minecraft:oak_planks", 10));
+        let mut state = ClickState::default();
+        state.carried = Some(stack("minecraft:bundle", 1));
+
+        do_click_with(&layout, &mut slots, &mut state, click(0, 0, 0), false, None, None, None);
+
+        assert_eq!(slots[0], None, "all 10 planks should have moved into the bundle");
+        let bundle = state.carried.as_ref().expect("bundle still on cursor");
+        assert_eq!(bundle.components.bundle_contents.len(), 1);
+        assert_eq!(bundle.components.bundle_contents[0].count, 10);
+        assert_eq!(bundle.components.bundle_contents[0].item.to_string(), "minecraft:oak_planks");
+    }
+
+    /// The reciprocal: a bundle sitting in the slot absorbs a left-clicked
+    /// cursor stack — `BundleItem.overrideOtherStackedOnMe`.
+    #[test]
+    fn bundle_in_slot_absorbs_a_left_clicked_cursor_stack() {
+        let layout = MenuLayout::container(27);
+        let mut slots = vec![None; layout.len()];
+        slots[0] = Some(stack("minecraft:bundle", 1));
+        let mut state = ClickState::default();
+        state.carried = Some(stack("minecraft:oak_planks", 10));
+
+        do_click_with(&layout, &mut slots, &mut state, click(0, 0, 0), false, None, None, None);
+
+        assert!(
+            state.carried.is_none(),
+            "all 10 planks should have gone into the bundle, emptying the cursor"
+        );
+        let bundle = slots[0].as_ref().expect("bundle still in slot");
+        assert_eq!(bundle.components.bundle_contents.len(), 1);
+        assert_eq!(bundle.components.bundle_contents[0].count, 10);
+    }
+
+    /// Right-click-on-empty-cursor against a bundle pops the front item —
+    /// `BundleContents.Mutable::removeOne`'s `-1`/no-selection fallback.
+    #[test]
+    fn right_click_extracts_the_front_item_with_no_selection() {
+        let layout = MenuLayout::container(27);
+        let mut bundle = stack("minecraft:bundle", 1);
+        bundle.components.bundle_contents =
+            vec![stack("minecraft:torch", 3), stack("minecraft:oak_planks", 5)];
+        let mut slots = vec![None; layout.len()];
+        slots[0] = Some(bundle);
+        let mut state = ClickState::default();
+
+        do_click_with(&layout, &mut slots, &mut state, click(0, 1, 0), false, None, None, None);
+
+        assert_eq!(
+            state.carried.as_ref().map(|s| s.item.to_string()),
+            Some("minecraft:torch".to_owned()),
+            "index 0 (front) is popped when nothing is selected"
+        );
+        let remaining = &slots[0].as_ref().expect("bundle stays in slot").components.bundle_contents;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].item.to_string(), "minecraft:oak_planks");
+    }
+
+    /// The same right-click, but with a real [`SelectedBundleIndex`] hook
+    /// naming the *second* item — proving the selection actually threads
+    /// through `container_click` end to end, not merely that the front-item
+    /// fallback works. This is the control: without the hook wired, this
+    /// test extracts the torch (index 0) instead, exactly like the test
+    /// above — so a regression that stops threading the hook shows up here
+    /// and not there.
+    #[test]
+    fn right_click_extracts_the_selected_index_when_one_is_supplied() {
+        let layout = MenuLayout::container(27);
+        let mut bundle = stack("minecraft:bundle", 1);
+        bundle.components.bundle_contents =
+            vec![stack("minecraft:torch", 3), stack("minecraft:oak_planks", 5)];
+        let mut slots = vec![None; layout.len()];
+        slots[0] = Some(bundle);
+        let mut state = ClickState::default();
+        let selected: SelectedBundleIndex<'_> = &|slot| (slot == 0).then_some(1);
+
+        do_click_with(
+            &layout,
+            &mut slots,
+            &mut state,
+            click(0, 1, 0),
+            false,
+            None,
+            None,
+            Some(selected),
+        );
+
+        assert_eq!(
+            state.carried.as_ref().map(|s| s.item.to_string()),
+            Some("minecraft:oak_planks".to_owned()),
+            "the selected index (1) should be popped, not the front item"
+        );
+    }
+
+    /// A bundle cannot be inserted into another bundle — `canItemBeInBundle`'s
+    /// disclosed stand-in refuses it, and vanilla's own
+    /// `overrideStackedOnOther` still reports the click "handled" (a failed
+    /// insert plays a fail sound rather than falling through), so nothing
+    /// here should move at all — not even an ordinary swap.
+    #[test]
+    fn a_bundle_cannot_be_inserted_into_another_bundle() {
+        let layout = MenuLayout::container(27);
+        let mut slots = vec![None; layout.len()];
+        slots[0] = Some(stack("minecraft:bundle", 1));
+        let mut state = ClickState::default();
+        state.carried = Some(stack("minecraft:white_bundle", 1));
+
+        do_click_with(&layout, &mut slots, &mut state, click(0, 0, 0), false, None, None, None);
+
+        assert_eq!(
+            state.carried.as_ref().map(|s| s.item.to_string()),
+            Some("minecraft:white_bundle".to_owned()),
+            "the failed insert is still a handled click, not a fall-through swap"
+        );
+        assert_eq!(
+            slots[0].as_ref().map(|s| s.item.to_string()),
+            Some("minecraft:bundle".to_owned())
         );
     }
 }

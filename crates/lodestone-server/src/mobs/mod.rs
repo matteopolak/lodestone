@@ -3213,6 +3213,14 @@ struct TrackedVehicle {
     /// The **player entity id** of the controlling passenger, or `None` for an
     /// empty boat. `Some` suspends the server-side tick entirely.
     rider: Option<i32>,
+    /// `AbstractBoat.DATA_ID_PADDLE_LEFT`/`RIGHT` — the rider's last reported
+    /// `ServerboundPaddleBoatPacket`, purely cosmetic (a *second* connected
+    /// player's own paddle animation; the rider's own client always animates
+    /// locally regardless of what this crate streams back). See
+    /// [`MetadataField::BoatPaddles`](crate::protocol::MetadataField::BoatPaddles)
+    /// for the wire-index collision this stands clear of.
+    paddle_left: bool,
+    paddle_right: bool,
 }
 
 /// One live `PrimedTnt` — wire identity, motion and the fuse countdown.
@@ -8793,21 +8801,24 @@ impl<'w> MobSim<'w> {
                 ),
                 // `AbstractBoat.defineSynchedData` registers `DATA_ID_PADDLE_LEFT`,
                 // `DATA_ID_PADDLE_RIGHT` and `DATA_ID_BUBBLE_TIME`, on top of
-                // `VehicleEntity`'s hurt/hurtdir/damage triple. **None is sent
-                // here, and the omission is deliberate rather than pending.**
+                // `VehicleEntity`'s hurt/hurtdir/damage triple.
                 //
-                // The paddle pair is the only one with a visible consequence, and
-                // its wire index is shared: index 18 has 37 claimants in the
-                // committed `EntityDataIndexOracle` dump, four of them `BYTE`, so a
-                // producer must know the species and no census column separates
-                // them. Since the rider's own client animates the paddles from its
-                // *local* `ClientAction::PaddleBoat` simulation, sending them buys
-                // nothing in singleplayer — the case that exists today — and a
-                // wrongly-keyed field draws another entity's state. When a second
-                // player needs to see someone else rowing, add a `MetadataField`
-                // variant per accessor and check the guard against the dump, exactly
-                // as `MetadataField::Item` and `ExperienceOrbValue` did.
-                metadata: Vec::new(),
+                // The paddle pair is now sent — issue #262's `PADDLE_BOAT`
+                // remainder — via `MetadataField::BoatPaddles`, whose own doc
+                // has the index-11/12 collision this loop is the guard for
+                // (every entry here is a boat by construction, never the
+                // `LivingEntity`/`ThrownTrident` that also claim those
+                // indices). Always included, even at its `false, false`
+                // default — the same "always included" convention
+                // `CreeperSwellDir`'s own doc states, and load-bearing here:
+                // a stop-paddling transition must reach a diffing consumer as
+                // a real `false, false` rather than as an absent field.
+                // `DATA_ID_BUBBLE_TIME` stays unsent: nothing in this crate's
+                // boat physics tracks a bubble-column timer.
+                metadata: vec![crate::protocol::MetadataField::BoatPaddles {
+                    left: vehicle.paddle_left,
+                    right: vehicle.paddle_right,
+                }],
                 // `AbstractBoat` does not override `getAddEntityPacket`.
                 object_data: 0,
                 // A boat is never a `Leashable`.

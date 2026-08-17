@@ -455,6 +455,32 @@ pub enum MetadataField {
     /// this variant, and it never fires for a command-block minecart (this
     /// crate does not model that entity type).
     MinecartFuel(bool),
+    /// `AbstractBoat.DATA_ID_PADDLE_LEFT`/`DATA_ID_PADDLE_RIGHT` — purely
+    /// cosmetic: whether each paddle is currently animating. Issue #262's
+    /// `PADDLE_BOAT` remainder — a second connected player watching a rowed
+    /// boat from outside is the only consumer, since the rider's own client
+    /// always animates its paddles from local input regardless of what this
+    /// crate streams back (`crate::mobs::vehicles::MobSim::apply_boat_paddle`'s
+    /// own doc).
+    ///
+    /// **Indices 11 and 12**, each a two-way `BOOLEAN` collision in the
+    /// committed jar dump (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`):
+    /// index 11 is `AbstractBoat.DATA_ID_PADDLE_LEFT` and
+    /// `LivingEntity.DATA_EFFECT_AMBIENCE_ID`; index 12 is
+    /// `AbstractBoat.DATA_ID_PADDLE_RIGHT` and `ThrownTrident.ID_FOIL`. No
+    /// census column separates them, so — the same rule
+    /// [`TamableFlags`](Self::TamableFlags) states — the guard is the
+    /// producer's own species knowledge: only
+    /// [`crate::mobs::MobSim::snapshots`]'s vehicle loop ever builds this
+    /// variant, and every entry in that loop is a boat (`TrackedVehicle`
+    /// carries no other species), never a `LivingEntity` or a
+    /// `ThrownTrident`.
+    BoatPaddles {
+        /// Index 11.
+        left: bool,
+        /// Index 12.
+        right: bool,
+    },
     /// `EnderDragon.DATA_PHASE` — the dragon's current
     /// `crate::dragon::phase::Phase` id (`Phase::id`), the wire twin of the
     /// state [`crate::mobs::MobSim::tick_dragons`] already drives for real.
@@ -1497,6 +1523,35 @@ pub enum ServerBound {
         /// Index into the open merchant's accumulated offer list
         /// (`crate::mobs::villager::trades::offers_up_to`'s own order).
         index: i32,
+    },
+    /// A rider's paddle input (`ServerboundPaddleBoatPacket`, issue #262's
+    /// `PADDLE_BOAT` remainder). `crate::server`'s consumer resolves the
+    /// vehicle from the reporting connection's own `player_entity_id`
+    /// (`MobSim::apply_boat_paddle`), the same "the wire carries no window/
+    /// vehicle id, the connection supplies it" shape [`SelectTrade`] already
+    /// uses.
+    PaddleBoat {
+        /// Left paddle in use.
+        left: bool,
+        /// Right paddle in use.
+        right: bool,
+    },
+    /// A bundle-tooltip highlight claim (`ServerboundSelectBundleItemPacket`,
+    /// issue #692). Wire-invisible on ordinary decode — vanilla's own
+    /// `BundleContents.STREAM_CODEC` always reconstructs `selectedItem = -1`,
+    /// so this is the *only* place the value ever appears — but server-side
+    /// load-bearing: `BundleContents.Mutable::removeOne` reads it to decide
+    /// which nested item a right-click extracts. `crate::server`'s consumer
+    /// stores it in the tracked `PlayerInventory` (`set_selected_bundle_item`)
+    /// for `container_click::pickup`'s next click to read.
+    SelectBundleItem {
+        /// The menu slot holding the bundle, matching `container_click`'s own
+        /// slot indices — the packet carries no window id, so this is
+        /// interpreted against whichever menu is currently open, exactly as
+        /// `SelectTrade` above is.
+        slot_id: i32,
+        /// Highlighted stack's index within the bundle, or `-1` for none.
+        selected_item_index: i32,
     },
     /// A packet the loop does not need to act on (teleport confirmations,
     /// look-only or status-only movement, and several other decoded-but-

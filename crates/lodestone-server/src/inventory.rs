@@ -42,6 +42,8 @@
 //! `docs/container-cost-screens.md` already documents for the anvil/
 //! enchanting-table costs.
 
+use std::collections::HashMap;
+
 use lodestone_entity::equipment::EquipmentSlot;
 use lodestone_model::ItemStack;
 
@@ -117,6 +119,17 @@ pub struct PlayerInventory {
     /// [`open_workstation`](Self::open_workstation) and set to a fresh draw by
     /// `crate::server::open_enchanting_screen`'s own caller.
     enchant_seed: i64,
+    /// Menu-index → highlighted bundle-content index, from
+    /// `ServerboundSelectBundleItemPacket` (`crate::container_click`'s
+    /// `SelectedBundleIndex`). Vanilla keeps this on the open
+    /// `AbstractContainerMenu` instance itself
+    /// (`setSelectedBundleItemIndex`); this struct is the per-connection menu
+    /// scratch state that already fills that role for `click_state` and
+    /// `workstation`, so it lives here rather than adding a new field to
+    /// `dispatch_play_packet`. A missing entry (never selected, or the last
+    /// select cleared it with `-1`) reads as "nothing selected," matching
+    /// `BundleContents.Mutable::indexIsOutsideAllowedBounds`'s fallback.
+    selected_bundle: HashMap<i32, u32>,
 }
 
 impl Default for PlayerInventory {
@@ -130,6 +143,7 @@ impl Default for PlayerInventory {
             workstation: None,
             pending_rename: None,
             enchant_seed: 0,
+            selected_bundle: HashMap::new(),
         }
     }
 }
@@ -299,6 +313,39 @@ impl PlayerInventory {
     /// the cursor to the world.
     pub fn click_state_mut(&mut self) -> &mut crate::container_click::ClickState {
         &mut self.click_state
+    }
+
+    /// Records or clears a `ServerboundSelectBundleItemPacket`'s claim for
+    /// menu slot `slot` — `selected < 0` clears it (vanilla's own "`-1` means
+    /// none" convention, `AbstractContainerMenu.setSelectedBundleItemIndex`),
+    /// matching [`Self::selected_bundle_item`]'s read side.
+    pub fn set_selected_bundle_item(&mut self, slot: i32, selected: i32) {
+        match u32::try_from(selected) {
+            Ok(selected) => {
+                self.selected_bundle.insert(slot, selected);
+            }
+            Err(_) => {
+                self.selected_bundle.remove(&slot);
+            }
+        }
+    }
+
+    /// The last selected bundle-content index for menu slot `slot`, if any —
+    /// [`crate::container_click::SelectedBundleIndex`]'s read side.
+    #[must_use]
+    pub fn selected_bundle_item(&self, slot: usize) -> Option<usize> {
+        i32::try_from(slot)
+            .ok()
+            .and_then(|slot| self.selected_bundle.get(&slot))
+            .map(|&selected| selected as usize)
+    }
+
+    /// Clears every tracked bundle selection — a menu close, mirroring
+    /// `AbstractContainerMenu.removed`'s own scratch-state teardown
+    /// ([`Self::click_state_mut`]'s `reset`, [`Self::take_table_crafting`]
+    /// and [`Self::take_workstation`] are the same shape).
+    pub fn clear_selected_bundle_items(&mut self) {
+        self.selected_bundle.clear();
     }
 
     /// The open crafting **table**'s 3×3 grid, if a table menu is open.
