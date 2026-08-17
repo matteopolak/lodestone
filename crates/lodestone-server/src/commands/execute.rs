@@ -67,9 +67,10 @@
 //! `as`, `at` (position **and** rotation), `positioned` (+ `as`), `rotated`
 //! (+ `as`), `facing` (`<pos>` and `entity <targets> <anchor>`), `align`,
 //! `anchored`, `in` (single-dimension census — see
-//! [`lodestone_command_mc::DimensionArg`]'s own doc), `run`,
-//! `store result`/`success score`/`data storage`, and
-//! `if`/`unless entity`/`dimension`/`score`/`data storage`/`block`/`loaded`.
+//! [`lodestone_command_mc::DimensionArg`]'s own doc), `run`, `summon
+//! <entity>`, `store result`/`success score`/`data storage`, and
+//! `if`/`unless entity`/`dimension`/`score`/`data storage`/`block`/`biome`/
+//! `blocks`/`stopwatch`/`loaded`.
 //!
 //! # `store`: the dispatcher change, and what it turned out not to need
 //!
@@ -136,42 +137,127 @@
 //! [`lodestone_command_mc::BlockArg`] already takes (no property list), so
 //! `if block ~ ~ ~ furnace` matches regardless of `facing`/`lit`.
 //!
+//! `if`/`unless biome` (`register_biome_condition`) needed a biome read on
+//! the same [`CommandWorld::blocks`](super::registrar::CommandWorld::blocks)
+//! chunk source — [`crate::chunk::ChunkColumn::biome_state_at`] already
+//! existed, but nothing exposed it on the [`crate::chunk::ChunkSource`]
+//! *trait* the command layer reaches through. Added as a **required** method
+//! (`biome_state_at`, no default — see that method's own doc for why a
+//! defaulted version would be exactly the island-generating wrapper shape
+//! this crate has already been burned by), forwarded through all ~63
+//! implementors across `lodestone-server`, `lodestone-v770`'s and
+//! `lodestone-event-logger`'s own test doubles. [`lodestone_command_mc::BiomeArg`]
+//! is a bare id, no tag support — the same v1 reduction `BlockArg` already
+//! makes — validated against a new hand-listed 66-entry census in
+//! `lodestone-data` (`lodestone_data::biomes`; see that module's own doc for
+//! why it needs no generated network-id table alongside it, unlike every
+//! other census in that crate).
+//!
+//! `if`/`unless blocks` (`register_blocks_condition`) needed no `ChunkSource`
+//! change at all — `block_state` plus the already-defaulted `block_entity`
+//! were enough, so this is pure command-layer logic: [`compare_regions`]
+//! walks the `[start, end]` box against its `destination`-relative twin,
+//! comparing the raw block-state string (closer to vanilla's full
+//! `BlockState` comparison than `if block`'s own reduction) and each side's
+//! generated block entity. Vanilla's own fork test is **presence**-based,
+//! not `count > 0` (a `masked` region whose every source cell is air matches
+//! vacuously with `count == 0`), so this is its own conditional shape rather
+//! than reusing [`add_boolean_conditional`]/[`add_numeric_conditional`].
+//!
+//! `stopwatch` (both `/stopwatch` itself and `if`/`unless stopwatch <id>
+//! <range>`) needed a new registry, [`crate::commands::stopwatch_store::StopwatchHandle`],
+//! a sibling store on [`crate::world_state::WorldStateHandle`] alongside
+//! `scoreboard`/`team`/`nbt_storage`. Uses
+//! [`crate::chat_session::now_millis`] (`web_time`-backed), never
+//! `std::time::SystemTime::now` — this crate links into the wasm32 bundle
+//! and that call traps at runtime there. **No persistence**: vanilla's
+//! `Stopwatches` is a `SavedData` written to `data/stopwatches.dat`, and this
+//! store is process-lifetime only, a disclosed gap in the same shape
+//! [`crate::chunk::ChunkSource::claim_dragon_fight_start`]'s own doc already
+//! accepts for the End-fight flag — a restart clears every stopwatch.
+//!
+//! `execute summon <entity>` (the modifier form that also changes the
+//! acting entity — distinct from `execute at @s run summon minecraft:cow`,
+//! which already reached `/summon` through `run` with no new code, but
+//! leaves the *caller* as the acting source for anything chained after it).
+//! [`crate::commands::summon::spawn_entity`] was split out of `/summon`'s own
+//! executor so both call sites share one difficulty/peaceful/no-`mobs` check
+//! rather than duplicating it. The new source's position is read from the
+//! *current* chain source (`spawnEntityAndRedirect`'s own
+//! `source.getPosition()`), honouring an earlier `positioned`/`at`. **A
+//! summoned mob still cannot become the target of a later `@s`** — see
+//! `on <relation>` below, which is the same gap in its general form.
+//!
 //! # What is not built, and why — each names its own missing subsystem
 //!
-//! * **`store bossbar`/`entity`/`block`, `predicate`, `items`, `function`,
-//!   `stopwatch`, `if`/`unless biome`/`blocks`, and `on <relation>`.**
-//!   (`if`/`unless score`, `data storage`, `block` and `loaded`, and
-//!   `store result`/`success score`/`data storage`, are now built — see
-//!   "What is built" above.) Each of these still needs a subsystem this
-//!   server has nowhere: `store bossbar` needs a `/bossbar` command and
-//!   store this crate has neither; `store`/`if data`'s `entity`/`block`
-//!   targets and `if items` need a live, command-reachable, mutable NBT view
-//!   of an entity, block entity, or container slot — `storage` needed none
-//!   of that, which is why it alone is built on either side; a loot-predicate
-//!   engine (`if predicate`); functions (explicitly out of scope for this
-//!   unit — issue #48's remainder tracks functions/datapacks separately); a
-//!   stopwatch registry; a biome lookup (`if biome`, distinct from `loaded`'s
-//!   residency check — [`crate::chunk::ChunkColumn`] already carries
-//!   `biome_state_at`, but nothing exposes it on the [`crate::chunk::ChunkSource`]
-//!   *trait* the command layer reaches through, and adding a required trait
-//!   method ripples across all ~20 implementors including several test
-//!   doubles — left as its own unit rather than done as a drive-by alongside
-//!   `store`); `if blocks`, which additionally needs to compare a whole
-//!   *region* (`ChunkSource::block_state` alone makes the per-cell read
-//!   possible, but enumerating and reporting a masked/all-mode mismatch over
-//!   an arbitrary box was left undone here as a second, larger unit of
-//!   work); and entity relationship queries
-//!   (owner/leasher/target/attacker/vehicle/controller/origin/passengers)
-//!   this crate's mob simulation does not expose to a command executor.
-//! * **`execute summon <entity>`** (the modifier form that also changes the
-//!   acting entity). Not needed as its own subtree: `/summon` is already a
-//!   root command, so `execute at @s run summon minecraft:cow` reaches it
-//!   through `run` with no new code at all — only the source-rewriting
-//!   `.redirect(execute, spawnEntityAndRedirect)` form (which additionally
-//!   makes the *newly summoned* entity the acting source for anything chained
-//!   after it) is absent.
-//! * **`positioned over <heightmap>`.** Needs a heightmap query `CommandWorld`
-//!   does not carry.
+//! * **`store bossbar`/`entity`/`block`, `if items`, `if`/`unless data
+//!   entity`/`block`.** Each needs a live, command-reachable, **mutable** NBT
+//!   or inventory view of an entity, block entity, or container slot that
+//!   this crate has nowhere — `storage` needed none of that, which is why it
+//!   alone is built on either side of `store`/`if data`. Concretely: a
+//!   command executor only ever *pushes* a [`super::effect::Effect`] at a
+//!   player's own connection (`/clear`'s own [`Effect::ClearInventory`] is
+//!   the shape every inventory-touching command already takes), which is
+//!   write-only and asynchronous — there is no synchronous read-back path
+//!   for a live entity's inventory contents at all, so even *counting* items
+//!   (`if items`) is unreachable, not just mutating them. `store bossbar`
+//!   additionally needs a `/bossbar` command and store this crate has
+//!   neither.
+//! * **`predicate`.** The loot-*condition* engine this needs already exists
+//!   and is real: `crate::loot`'s `LootCondition` enum parses and evaluates
+//!   `all_of`/`any_of`/`inverted`/`match_tool`/`block_state_property`/… — the
+//!   same primitives vanilla's own standalone predicate JSON is built from.
+//!   The actual blocker is one layer up: vanilla's `<predicate>` argument
+//!   (`ResourceOrIdArgument.lootPredicate`) resolves a resource location
+//!   against the `minecraft:predicate` **registry**, which is populated
+//!   **only by datapacks** (`data/<namespace>/predicate/*.json`) — and the
+//!   base game ships **zero** files under that directory (verified against
+//!   `.cache/mc/26.2/{src,client-src}/data/minecraft/predicate/`, unlike
+//!   `data/minecraft/loot_table/`'s 1,241 vanilla-authored files, which is
+//!   why `crate::loot` could bundle those the same way `assets/loot_table/`
+//!   does). So `if predicate` is not "a subsystem not yet built" so much as
+//!   "coupled to datapack loading" — the exact thing issue #48's remainder
+//!   scopes to functions/datapacks, out of this unit. Building a
+//!   lodestone-specific predicate registry with no vanilla datapack behind
+//!   it would not be `if predicate` — it would be a different, invented
+//!   feature wearing that name.
+//! * **`function`.** Explicitly out of scope for this unit — issue #48's
+//!   remainder tracks functions/datapacks separately.
+//! * **`on <relation>`**
+//!   (owner/leasher/target/attacker/vehicle/controller/origin/passengers).
+//!   Narrower than "the mob simulation does not expose relationship queries"
+//!   — several of those *are* already `pub` on `SimMob` (`owner_uuid`,
+//!   `leash_holder`, `attack_target_id`, the mount/rider pair on `MobSim`).
+//!   The real, deeper blocker sits one layer below: **a non-player entity
+//!   can never become the acting source of an `/execute` chain at all**, on
+//!   this server, today. `as <targets>`/`positioned as`/`rotated as`/`facing
+//!   entity` all resolve `<targets>` through [`Ctx::resolve`] →
+//!   `super::source::resolve_players`, which only ever matches against
+//!   `ctx.world.players: &[PlayerCandidate]` — a mob's uuid is never in that
+//!   list, selector or not. `execute summon <entity>` is the one way this
+//!   file makes a non-player the acting source, and its own doc above notes
+//!   the same consequence: `@s` afterward cannot resolve it either. So
+//!   `on <relation>` needs selector resolution widened to cover arbitrary
+//!   entities first — a `CommandSource`/`PlayerCandidate` architecture
+//!   change, not an addition to this file — before the relationship
+//!   accessors above are reachable from anywhere.
+//! * **`positioned over <heightmap>`.** [`lodestone_command_mc::HeightmapArg`]
+//!   is built and tested (the four `Heightmap.Types::keepAfterWorldgen`
+//!   survivors), but unwired: computing a heightmap needs the **world's
+//!   vertical bounds** to scan, and those are not reachable through
+//!   [`CommandWorld::blocks`](super::registrar::CommandWorld::blocks)'s
+//!   `Option<&dyn ChunkSource>` — `min_y`/`height` are real methods on
+//!   `OverworldChunkSource` itself, deliberately read from the live
+//!   generator rather than hardcoded (see that type's own doc: "hardcoding
+//!   `(-64, 384)` … is a guess that drifts the moment the overworld's shape
+//!   changes"), and a `dyn ChunkSource` trait object cannot name them.
+//!   Closing this needs the same class of change `biome_state_at` just
+//!   took — a required trait method (or an equivalent field on
+//!   `CommandWorld` itself) — rippled through every implementor a second
+//!   time; left as its own unit rather than a drive-by here. The per-cell
+//!   predicate math (`lodestone_data::block_solidity::blocks_motion`, a
+//!   fluid check, a leaf-block check) is otherwise ordinary and already
+//!   scoped in `HeightmapKind`'s own doc.
 //!
 //! # Command blocks are the other half of this issue and are not this file
 //!
