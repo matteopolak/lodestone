@@ -381,6 +381,15 @@ const METADATA_IDX_GOAT_HAS_LEFT_HORN: u8 = 19;
 /// [`METADATA_IDX_GOAT_HAS_LEFT_HORN`]'s own doc.
 const METADATA_IDX_GOAT_HAS_RIGHT_HORN: u8 = 20;
 
+/// `Axolotl.DATA_PLAYING_DEAD` — index 19, serializer `BOOLEAN` (8). Off the
+/// jar dump (`tests/support/entity_data_index_jvm.txt`: `19
+/// Axolotl.DATA_PLAYING_DEAD 8 BOOLEAN`) — one of the `BOOLEAN` claimants
+/// [`METADATA_IDX_GOAT_HAS_LEFT_HORN`]'s own doc already names at this
+/// index. The producer (`SimMob::snapshot`'s `"axolotl"` arm, the sole
+/// caller) disambiguates, exactly as that constant's own doc describes for
+/// its pair.
+const METADATA_IDX_AXOLOTL_PLAYING_DEAD: u8 = 19;
+
 /// The overworld world-clock's registry holder id
 /// (`WorldClocks::bootstrap` registers `minecraft:overworld` first,
 /// `minecraft:the_end` second — see `packets::time::ClockUpdate::holder_id`'s
@@ -5236,6 +5245,16 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(METADATA_SER_BOOLEAN);
                     w.bool(*has_right);
                 }
+                MetadataField::PlayingDead(playing_dead) => {
+                    // `Axolotl.DATA_PLAYING_DEAD` — index 19; only
+                    // `MobSim::snapshots`' `"axolotl"` arm ever builds this
+                    // variant. See `METADATA_IDX_AXOLOTL_PLAYING_DEAD`'s own
+                    // doc for the claimants this never collides with in
+                    // practice.
+                    w.u8(METADATA_IDX_AXOLOTL_PLAYING_DEAD);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*playing_dead);
+                }
                 MetadataField::CrystalBeamTarget(target) => {
                     // `EndCrystal.DATA_BEAM_TARGET` — index 8,
                     // `OPTIONAL_BLOCK_POS`: a presence bool, then (if present)
@@ -9052,6 +9071,60 @@ mod goat_horns_tests {
         assert_eq!(r.u8().expect("right horn index"), METADATA_IDX_GOAT_HAS_RIGHT_HORN);
         assert_eq!(r.var_i32().expect("right horn serializer"), METADATA_SER_BOOLEAN);
         assert!(r.bool().expect("right horn value"), "has_right was true");
+        assert_eq!(r.u8().expect("terminator"), 0xFF);
+        assert!(r.ensure_empty().is_ok(), "no trailing bytes");
+    }
+}
+
+/// `Axolotl.DATA_PLAYING_DEAD` at index 19 — the same census-premise-plus-
+/// encode-exactness shape [`goat_horns_tests`] already uses for its own
+/// claimed index.
+#[cfg(test)]
+mod axolotl_playing_dead_tests {
+    use lodestone_core::Reader;
+    use lodestone_server::{MetadataField, ServerDirective, ServerProtocol};
+
+    use super::{METADATA_IDX_AXOLOTL_PLAYING_DEAD, METADATA_SER_BOOLEAN, V770ServerProtocol};
+
+    const INDEX_DUMP: &str = include_str!("../tests/support/entity_data_index_jvm.txt");
+
+    fn dump_row(owner_field: &str) -> (u8, i32) {
+        for line in INDEX_DUMP.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut tok = line.split_whitespace();
+            let index: u8 = tok.next().expect("index column").parse().expect("u8");
+            let owner = tok.next().expect("owner.FIELD column");
+            let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
+            if owner == owner_field {
+                return (index, serializer);
+            }
+        }
+        panic!("{owner_field} is not in the jar dump — read the dump before changing the constant")
+    }
+
+    #[test]
+    fn axolotl_playing_dead_index_matches_the_jar_dump() {
+        let (index, ser) = dump_row("Axolotl.DATA_PLAYING_DEAD");
+        assert_eq!(index, METADATA_IDX_AXOLOTL_PLAYING_DEAD);
+        assert_eq!(ser, METADATA_SER_BOOLEAN);
+    }
+
+    #[test]
+    fn playing_dead_encodes_at_index_nineteen() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { payload, .. } =
+            proto.encode_set_entity_data(11, &[MetadataField::PlayingDead(true)])
+        else {
+            panic!("encode_set_entity_data must emit a Send");
+        };
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.var_i32().expect("entity id"), 11);
+        assert_eq!(r.u8().expect("index"), METADATA_IDX_AXOLOTL_PLAYING_DEAD);
+        assert_eq!(r.var_i32().expect("serializer"), METADATA_SER_BOOLEAN);
+        assert!(r.bool().expect("value"), "true was pushed");
         assert_eq!(r.u8().expect("terminator"), 0xFF);
         assert!(r.ensure_empty().is_ok(), "no trailing bytes");
     }

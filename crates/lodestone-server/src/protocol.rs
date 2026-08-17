@@ -594,6 +594,22 @@ pub enum MetadataField {
         has_left: bool,
         has_right: bool,
     },
+    /// `Axolotl.DATA_PLAYING_DEAD` — index 19, one of the `BOOLEAN`
+    /// claimants [`GoatHorns`](Self::GoatHorns)'s own doc already names at
+    /// that index. The producer ([`crate::mobs::SimMob::snapshot`]'s
+    /// `"axolotl"` arm, the sole caller) disambiguates it from every other
+    /// claimant, the same shape every crowded-index field in this enum
+    /// already uses; never push this variant for anything but a
+    /// `minecraft:axolotl`.
+    ///
+    /// Pushed unconditionally for every axolotl, matching
+    /// [`GoatHorns`](Self::GoatHorns)'s own "the reset must reach the client
+    /// too" reasoning: an axolotl that stops playing dead must send `false`,
+    /// not merely stop sending `true`. Backed by
+    /// [`crate::mobs::SimMob::axolotl_is_playing_dead`], itself
+    /// `Axolotl.hurtServer`'s own trigger collapsed to a plain countdown —
+    /// see that method's own doc for the roll and the disclosed narrowings.
+    PlayingDead(bool),
 }
 
 /// One generated trade offer, ready for the wire (issue #245) —

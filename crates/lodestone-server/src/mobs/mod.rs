@@ -1042,6 +1042,35 @@ const AMBIENT_SOUND_INTERVAL: i32 = 80;
 /// every hit that passes the invulnerability gate.
 const ARMADILLO_DANGER_TICKS: i32 = 80;
 
+/// `Axolotl.hurtServer`'s literal `200` — the tick count `PLAY_DEAD_TICKS`
+/// is set to on a successful roll.
+const AXOLOTL_PLAY_DEAD_TICKS: i32 = 200;
+
+/// An independent, deterministic per-*hit* approximation of
+/// `Axolotl.hurtServer`'s own two `random.nextInt(3)` draws — the same
+/// "no shared RNG stream reaches this seam" shape [`camel_sit_roll`]'s own
+/// doc discloses, salted from the hit itself (the mob's id plus the
+/// pre-hit health and raw-damage bit patterns) rather than from a tick
+/// counter, since this fires once per hit rather than once per tick. The
+/// two draws are mixed with different constants so they do not correlate.
+/// Returns `(nextInt(3), nextInt(3))`, matching vanilla's own two calls in
+/// declaration order; the caller reproduces
+/// `first == 0 && (second < damage || health_ratio < 0.5)` itself.
+fn axolotl_play_dead_roll(id: u64, health_bits: u32, damage_bits: u32) -> (u32, u32) {
+    let seed = (u64::from(health_bits) << 32) | u64::from(damage_bits);
+    let mix1 = seed
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(id)
+        .wrapping_mul(1_442_695_040_888_963_407)
+        >> 33;
+    let mix2 = seed
+        .wrapping_mul(2_862_933_555_777_941_757)
+        .wrapping_add(id ^ 0x9E37_79B9_7F4A_7C15)
+        .wrapping_mul(3_935_559_000_370_003_845)
+        >> 33;
+    ((mix1 % 3) as u32, (mix2 % 3) as u32)
+}
+
 /// `CamelAi.RandomSitting(20)`'s own `minimalPoseTimeSec * 20` — the minimum
 /// ticks a camel must hold its current pose before [`camel_random_sitting`]
 /// is even eligible to flip it again, in either direction (vanilla's own
@@ -1411,6 +1440,16 @@ pub struct SimMob<'w> {
     /// a liquid, leashed, ridden or a rider — none of those gates are
     /// checked here.
     armadillo_danger_ticks: i32,
+    /// `Axolotl`'s `PLAY_DEAD_TICKS` brain memory, collapsed to a plain
+    /// countdown — the same shape [`armadillo_danger_ticks`]'s own doc
+    /// already establishes for a memory this crate has no `Brain` timer
+    /// primitive to host directly. `0` is idle; any positive value means
+    /// [`SimMob::axolotl_is_playing_dead`] reports `true`. Set to
+    /// [`AXOLOTL_PLAY_DEAD_TICKS`] by [`SimMob::apply_damage`]'s own
+    /// `axolotl_play_dead_roll` gate, decremented once per [`MobSim::tick`]
+    /// for every live axolotl. `0` for every non-axolotl species, where
+    /// nothing reads it.
+    axolotl_play_dead_ticks: i32,
     /// `Camel.isCamelSitting()`'s state — real, client-visible
     /// `Pose.SITTING` (see [`CAMEL_POSE_SITTING`]). Toggled by
     /// [`camel_random_sitting`]'s own per-tick approximation of
@@ -1812,6 +1851,15 @@ impl<'w> SimMob<'w> {
     #[must_use]
     pub fn armadillo_is_scared(&self) -> bool {
         self.armadillo_danger_ticks > 0
+    }
+
+    /// `Axolotl.isPlayingDead()` — whether this mob is currently in its
+    /// play-dead window (see [`apply_damage`](Self::apply_damage)'s own
+    /// axolotl arm for the trigger). Always `false` for a non-axolotl
+    /// species, where the backing field never leaves `0`.
+    #[must_use]
+    pub fn axolotl_is_playing_dead(&self) -> bool {
+        self.axolotl_play_dead_ticks > 0
     }
 
     /// `Camel.isCamelSitting()`. Always `false` for a non-camel species,
@@ -2300,6 +2348,27 @@ impl<'w> SimMob<'w> {
         } else {
             raw_damage
         };
+        // `Axolotl.hurtServer` — runs before `super.hurtServer`'s own
+        // invulnerability-frame gate, exactly like the armadillo halving
+        // above, so this reads `self.health`/`raw_damage` directly rather
+        // than the post-`on_hurt` `amount`. **Disclosed narrowing**: real
+        // vanilla additionally requires a live source/direct entity
+        // (`source.getEntity() != null || source.getDirectEntity() != null`)
+        // — this seam has no attacker-identity input to gate on, the same
+        // simplification `armadillo_danger_ticks`'s own doc already
+        // discloses for its identical gap.
+        if self.entity_type.path() == "axolotl"
+            && self.axolotl_play_dead_ticks <= 0
+            && self.in_water()
+            && raw_damage < self.health
+        {
+            let health_ratio = self.health / self.max_health;
+            let (roll_a, roll_b) =
+                axolotl_play_dead_roll(self.id as u64, self.health.to_bits(), raw_damage.to_bits());
+            if roll_a == 0 && ((roll_b as f32) < raw_damage || health_ratio < 0.5) {
+                self.axolotl_play_dead_ticks = AXOLOTL_PLAY_DEAD_TICKS;
+            }
+        }
         let amount = match self.hurt_cooldown.on_hurt(raw_damage, flags) {
             HurtDecision::Ignored => return 0.0,
             HurtDecision::Full { amount } | HurtDecision::Topup { amount } => amount,
@@ -2731,6 +2800,11 @@ impl<'w> SimMob<'w> {
                 has_left: self.has_left_horn,
                 has_right: self.has_right_horn,
             });
+        }
+        // `Axolotl.DATA_PLAYING_DEAD`, index 19 — same "unconditional, so
+        // the reset reaches the client too" shape as `GoatHorns` above.
+        if self.entity_type.path() == "axolotl" {
+            metadata.push(MetadataField::PlayingDead(self.axolotl_play_dead_ticks > 0));
         }
         // `Entity.DATA_POSE`, index 6 — pushed unconditionally for a warden,
         // not only while emerging, for the same "the reset must reach the
@@ -4174,6 +4248,7 @@ impl<'w> MobSim<'w> {
             stung_at: None,
             piglin_alert_ticks: -1,
             armadillo_danger_ticks: 0,
+            axolotl_play_dead_ticks: 0,
             camel_sitting: false,
             camel_pose_tick: 0,
             hurt_by_player_until: None,
@@ -5348,6 +5423,12 @@ impl<'w> MobSim<'w> {
             // `health > 0.0`; a corpse's fields are frozen, not ticked).
             if m.health > 0.0 && m.armadillo_danger_ticks > 0 {
                 m.armadillo_danger_ticks -= 1;
+            }
+            // `axolotl_play_dead_ticks`'s countdown — same "a corpse's
+            // fields are frozen, not ticked" gate as the armadillo one
+            // above.
+            if m.health > 0.0 && m.axolotl_play_dead_ticks > 0 {
+                m.axolotl_play_dead_ticks -= 1;
             }
             // `Camel.tick`'s forced stand-in-water rule, then
             // `camel_random_sitting`'s own approximation of
@@ -10292,6 +10373,95 @@ mod follow_range_tests {
         assert!(
             !sim.get(id).expect("alive").armadillo_is_scared(),
             "the 80th tick with no further hit must let the timer reach zero"
+        );
+    }
+
+    /// A floor with a real `minecraft:water` layer at `y=0` — distinct from
+    /// `flat_world`'s dry ground (`y=-1` stone, `y=0` air) so the axolotl
+    /// play-dead gate below can prove its own `in_water()` precondition
+    /// rather than assuming the fixture provides it.
+    fn water_world() -> ChunkWorld {
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=48 {
+            for z in -8..=8 {
+                world.set_solid(x, -1, z, true);
+                world.set_block(x, 0, z, "minecraft:water");
+            }
+        }
+        world
+    }
+
+    /// Issue #230's axolotl play-dead (`Axolotl.hurtServer`'s own
+    /// `PLAY_DEAD_TICKS` gate), gated through the real production path
+    /// (`MobSim::attack` → `SimMob::apply_damage`). The trigger is
+    /// probabilistic (`axolotl_play_dead_roll`'s own two `nextInt(3)`-shaped
+    /// draws), so — the "predict the value" standard, applied to a
+    /// probabilistic trigger instead of a fixed one — this searches a small
+    /// range of raw-damage values for one this mob's own roll stream
+    /// actually fires on, using the exact function `apply_damage` calls,
+    /// rather than looping the real attack call hoping for a hit.
+    #[test]
+    fn a_hurt_axolotl_in_water_plays_dead_on_a_winning_roll() {
+        let world = water_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:axolotl").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+        sim.get_mut(id).expect("alive").set_health(100.0);
+
+        assert!(
+            !sim.get(id).expect("alive").axolotl_is_playing_dead(),
+            "precondition: a fresh axolotl is not playing dead"
+        );
+        assert!(
+            sim.get(id).expect("alive").in_water(),
+            "precondition: the fixture must actually place the axolotl in water"
+        );
+
+        let health_bits = 100.0_f32.to_bits();
+        let raw_damage = (1..30)
+            .map(|d| d as f32)
+            .find(|&d| {
+                let (a, b) = axolotl_play_dead_roll(id as u64, health_bits, d.to_bits());
+                a == 0 && (b as f32) < d
+            })
+            .expect("a 1-in-3 draw over 29 tries must fire at least once");
+
+        sim.attack(id, Vec3::new(1.0, 0.0, 0.0), raw_damage, DamageFlags::default(), 0.0)
+            .expect("the axolotl is a live target");
+
+        assert!(
+            sim.get(id).expect("alive").axolotl_is_playing_dead(),
+            "a hit whose own roll stream fires must set the play-dead window"
+        );
+    }
+
+    /// **Control**: the identical fixture and winning-roll damage against a
+    /// dry axolotl (`flat_world`, no water) must never play dead — proving
+    /// `in_water()` is a real gate here, not dead code the roll bypasses.
+    #[test]
+    fn a_dry_axolotl_never_plays_dead_even_on_a_winning_roll() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:axolotl").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+        sim.get_mut(id).expect("alive").set_health(100.0);
+        assert!(!sim.get(id).expect("alive").in_water(), "precondition: dry ground");
+
+        let health_bits = 100.0_f32.to_bits();
+        let raw_damage = (1..30)
+            .map(|d| d as f32)
+            .find(|&d| {
+                let (a, b) = axolotl_play_dead_roll(id as u64, health_bits, d.to_bits());
+                a == 0 && (b as f32) < d
+            })
+            .expect("a 1-in-3 draw over 29 tries must fire at least once");
+
+        sim.attack(id, Vec3::new(1.0, 0.0, 0.0), raw_damage, DamageFlags::default(), 0.0)
+            .expect("the axolotl is a live target");
+
+        assert!(
+            !sim.get(id).expect("alive").axolotl_is_playing_dead(),
+            "a dry axolotl must never enter the play-dead window regardless of the roll"
         );
     }
 
