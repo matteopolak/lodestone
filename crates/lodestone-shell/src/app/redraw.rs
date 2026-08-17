@@ -1089,11 +1089,14 @@ impl WindowApp {
         // calls the same `HudRenderer::chat_interaction_at` directly off the
         // already-borrowed local instead of duplicating its logic.
         //
-        // `to_legacy_string` (not a flatten to spans) because
-        // `Builder::text_legacy`/`wrap_legacy` is what a tooltip box draws
-        // with, matching `SuggestionLayer::Tooltip`'s own plain-string shape
-        // just above.
-        let chat_hover_tooltip_text: Option<String> = chat_open
+        // `to_spans`, not `to_legacy_string` — issue #656's tooltip-title fix
+        // gave `draw_chat_hover_tooltip` a span-carrying `wrap_spans`/
+        // `text_spans` pair to draw with (the same primitives
+        // `container::builder::Builder::shadowed_label_spans` already
+        // reaches for), so a hex-coloured `show_text` hover no longer has to
+        // flatten through `to_legacy_string`'s sixteen-code ceiling the way
+        // `SuggestionLayer::Tooltip`'s plain-string popup still does.
+        let chat_hover_tooltip_spans: Option<Vec<lodestone_model::TextSpan>> = chat_open
             .then(|| {
                 let entries = self.sim.recent_chat_interactive(100);
                 hud.chat_interaction_at(
@@ -1108,7 +1111,7 @@ impl WindowApp {
             })
             .flatten()
             .and_then(|hit| hit.hover)
-            .map(|hover| hover.value.to_legacy_string());
+            .map(|hover| hover.value.to_spans());
 
         let mut hud_frame = HudFrame::new(&self.sim.stats);
         hud_frame.show_debug = self.show_debug;
@@ -1162,8 +1165,8 @@ impl WindowApp {
         // did before this fix, and zero pixels change -- see this local's own
         // doc for the `chat_open` gate.
         hud_frame.chat_hover_tooltip =
-            chat_hover_tooltip_text.as_deref().map(|text| crate::hud::ChatHoverTooltip {
-                text,
+            chat_hover_tooltip_spans.as_deref().map(|spans| crate::hud::ChatHoverTooltip {
+                spans,
                 cursor: crate::hud::HudRenderer::canvas_cursor(w, h, self.nav.gui_scale(), self.cursor),
             });
         // Without this the whole chat-option chain is an island: the fields are
@@ -1378,10 +1381,19 @@ impl WindowApp {
                 if menu.special_layout() != Some(lodestone_game::menu::SpecialLayout::Anvil) {
                     return None;
                 }
+                // `plain_hover_name`, not `styled_hover_name`: this seeds an
+                // *editable* text field and is later compared for equality
+                // against the item's own name to decide whether a rename is
+                // real (`AnvilRenameState::resolve_rename`) — vanilla's own
+                // `AnvilScreen.onNameChanged` seeds and compares against
+                // `ItemStack.getHoverName().getString()`, the plain-text
+                // accessor with no `§` codes at all, not the legacy-coded
+                // string `styled_hover_name` would give an edit box nowhere
+                // to render (issue #656).
                 let item = menu.slot_item(0).map(|stack| {
                     (
                         stack.custom_name().is_some(),
-                        lodestone_game::item::styled_hover_name(stack, self.sim.translator().as_ref()),
+                        lodestone_game::item::plain_hover_name(stack, self.sim.translator().as_ref()),
                     )
                 });
                 self.anvil_rename.sync(
