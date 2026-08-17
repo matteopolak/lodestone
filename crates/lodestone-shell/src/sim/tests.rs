@@ -4848,6 +4848,107 @@ fn use_item_live_writes_the_held_items_use_effects_not_a_constant() {
     assert_eq!(read_effects(&mut sim), None);
 }
 
+/// The owner's report, end to end: *"when i right click in the air it slows
+/// me down as if im eating... it should only slow me down if im actually
+/// using an item like food, bow, etc."* Before [`item_has_use_animation`]'s
+/// gate, `use_item_live` armed [`ItemUseEffects`] for *any* held item —
+/// including an empty hand aimed at open air — so every right-click cut
+/// ground speed by `UseEffects::DEFAULT`'s fifth-input scale regardless of
+/// what, if anything, was in hand. Measures real displacement over a real
+/// tick run (via [`Sim::step`]) against a no-click control walking the same
+/// ticks with the same input, rather than merely asserting the resource
+/// stayed unset.
+#[test]
+fn right_clicking_with_an_empty_hand_does_not_slow_movement() {
+    let walk = |click: bool| -> f64 {
+        let mut sim = Sim::new(test_config());
+        // Player spawns at (0.5, feet, 0.5) facing north (-Z, yaw 180). Lay a
+        // solid floor and clear head-room along -Z, the same unobstructed
+        // straight-line setup `sprint_vs_walk`-shaped gates in this file use,
+        // so the measured distance reflects the speed multiplier and not
+        // terrain the default demo world happens to put in the way.
+        let feet_y = sim.player().position.y.floor() as i32;
+        for dz in -25..=1 {
+            for dx in -1..=1 {
+                sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
+                sim.set_block_world([dx, feet_y, dz], id::AIR);
+                sim.set_block_world([dx, feet_y + 1, dz], id::AIR);
+                sim.set_block_world([dx, feet_y + 2, dz], id::AIR);
+            }
+        }
+        // Settle onto the fresh floor first so the measured window is pure
+        // ground-friction walking, not still-falling noise.
+        for _ in 0..20 {
+            sim.step(1.0 / 20.0);
+        }
+        let start = sim.player().position;
+        if click {
+            assert!(sim.target().is_none(), "precondition: no block targeted");
+            assert!(sim.entity_target().is_none(), "precondition: no entity targeted");
+            sim.use_item_live();
+        }
+        sim.input_mut(|i| i.set(lodestone_controller::Action::Forward, true));
+        for _ in 0..20 {
+            sim.step(1.0 / 20.0);
+        }
+        sim.player().position.subtract(start).length()
+    };
+
+    let plain = walk(false);
+    let clicked = walk(true);
+    assert!(
+        (clicked - plain).abs() < 1e-6,
+        "an empty-hand right-click in open air must not change ground speed \
+         at all: plain={plain} clicked={clicked}"
+    );
+}
+
+/// The positive control for the gate above: a **genuine** use item (food)
+/// held through the same click *does* cut ground speed — proving the
+/// harness can actually tell the two cases apart. Without this, the test
+/// above would pass just as well against a version that never applies any
+/// use-item slowdown at all, which is exactly the vacuous shape
+/// `CLAUDE.md` warns a negative-only assertion can take.
+#[test]
+fn right_clicking_with_a_food_item_does_slow_movement() {
+    let walk = |eating: bool| -> f64 {
+        let mut sim = Sim::new(test_config());
+        // Same unobstructed straight-line floor as the negative control above.
+        let feet_y = sim.player().position.y.floor() as i32;
+        for dz in -25..=1 {
+            for dx in -1..=1 {
+                sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
+                sim.set_block_world([dx, feet_y, dz], id::AIR);
+                sim.set_block_world([dx, feet_y + 1, dz], id::AIR);
+                sim.set_block_world([dx, feet_y + 2, dz], id::AIR);
+            }
+        }
+        for _ in 0..20 {
+            sim.step(1.0 / 20.0);
+        }
+        if eating {
+            give_main_hand_item(&mut sim, "minecraft:bread");
+        }
+        let start = sim.player().position;
+        assert!(sim.target().is_none(), "precondition: no block targeted");
+        assert!(sim.entity_target().is_none(), "precondition: no entity targeted");
+        sim.use_item_live();
+        sim.input_mut(|i| i.set(lodestone_controller::Action::Forward, true));
+        for _ in 0..20 {
+            sim.step(1.0 / 20.0);
+        }
+        sim.player().position.subtract(start).length()
+    };
+
+    let plain = walk(false);
+    let eating = walk(true);
+    assert!(
+        eating < plain * 0.5,
+        "eating bread must cut ground speed sharply (UseEffects::DEFAULT scales \
+         input to a fifth): plain={plain} eating={eating}"
+    );
+}
+
 /// Vanilla's `getCurrentItemAttackStrengthDelay`/`getAttackStrengthScale`
 /// (`Player.java`): with no [`Attributes`] component at all (the
 /// pre-login default `attribute_value` falls back to — see

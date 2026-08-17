@@ -54,6 +54,41 @@ const FIREWORK_BOOST_TICKS: u32 = 20;
 /// answers and only one of them should read as level 0.
 const RIPTIDE_ENCHANTMENT_ID: i32 = 32;
 
+/// Whether `id`'s `Item.getUseAnimation` is anything other than `NONE` — i.e.
+/// whether right-clicking with it would actually enter vanilla's
+/// `isUsingItem()` state at all, the gate [`Sim::use_item_live`] applies
+/// before arming [`UsingItem`]/[`ItemUseEffects`].
+///
+/// `Item.java`'s own base implementation resolves this from three
+/// components: `minecraft:consumable` (food/drink — [`consumable_for_item`]),
+/// `minecraft:blocks_attacks` (the shield) and `minecraft:kinetic_weapon`
+/// (the seven `*_spear` items, `Item.Properties.spear(...)`); everything else
+/// falls to `NONE`. Seven item classes override it unconditionally, each
+/// returning one fixed `ItemUseAnimation` regardless of stack state:
+/// `BowItem` (`minecraft:bow`), `CrossbowItem` (`minecraft:crossbow`),
+/// `SpyglassItem` (`minecraft:spyglass`), `TridentItem`
+/// (`minecraft:trident`), `BrushItem` (`minecraft:brush`), `InstrumentItem`
+/// (`minecraft:goat_horn` is the only item built on it) and `BundleItem`
+/// (every `*_bundle` colour, plus the plain `minecraft:bundle`, share the
+/// class).
+///
+/// A sword, a tool, a plain block and an empty hand all have none of the
+/// three components and no class override, so `getUseAnimation` returns
+/// `NONE` and vanilla's `use()` never calls `startUsingItem` for them — this
+/// must return `false` for exactly that set.
+#[must_use]
+fn item_has_use_animation(id: &str) -> bool {
+    if lodestone_game::consumable::consumable_for_item(id).is_some() {
+        return true;
+    }
+    let path = id.rsplit_once(':').map_or(id, |(_, path)| path);
+    matches!(
+        path,
+        "shield" | "bow" | "crossbow" | "spyglass" | "trident" | "brush" | "goat_horn" | "bundle"
+    ) || path.ends_with("_spear")
+        || path.ends_with("_bundle")
+}
+
 impl Sim {
     /// Break the currently targeted block (set it to air) and remesh. Returns
     /// whether a block was broken.
@@ -856,49 +891,54 @@ impl Sim {
         if self.is_dead() {
             return;
         }
-        // Marks [`UsingItem`] so a later [`Self::end_use`] knows the button
-        // was actually pressed — see that resource's own docs for why this is
-        // an input-state mirror rather than vanilla's real `isUsingItem()`.
-        // Set unconditionally here rather than in every branch below: vanilla
-        // arms `player.isUsingItem()` from the held item's own `use()` call,
-        // which can happen inside any of this method's block/entity/generic
-        // branches, and this client has no equivalent per-item hook to mark
-        // it from.
-        self.write(|w| w.resource_mut::<UsingItem>().0 = true);
-        // Arm vanilla's `timeHeld`, which is what
-        // `TridentItem.releaseUsing` compares against its 10-tick threshold on
-        // the release edge. Zero here and advanced by
-        // `lodestone_ecs::player::tick_item_use`, so the count is in 20 Hz ticks
-        // and not in frames — a 200 fps client must not reach the threshold ten
-        // times sooner than a 20 fps one.
-        self.write(|w| w.resource_mut::<ItemUseTicks>().0 = Some(0));
-        // [`ItemUseEffects`]'s writer (issue #671): resolve which
-        // [`UseEffects`] the held main-hand item arms — the same
-        // `player_menu().player_native(selected_slot())` lookup
-        // [`Self::start_firework_boost_if_gliding`] just made two lines
-        // above, read again here rather than threaded through because that
-        // call intentionally returns nothing this one needs. An empty main
-        // hand resolves to `UseEffects::DEFAULT`, matching `UseEffects::for_item`'s
-        // own doc — there is no vanilla item id an empty hand could report,
-        // and `DEFAULT` (no sprinting, a fifth of input) is the correct
-        // fallback in that case as much as for any unrecognised id. Set once,
-        // for the duration of the press — mirroring how `UsingItem`/
-        // `ItemUseTicks` above are also start/end edges rather than
-        // re-derived every tick, since vanilla itself cannot change which
-        // item a use is charging mid-use.
-        let use_effects = self
+        // **Gated on the held item actually having a use, matching
+        // `Item.getUseAnimation` — see [`item_has_use_animation`].** Before
+        // this gate, [`UsingItem`]/[`ItemUseEffects`] were armed for *every*
+        // right click, so aiming at open air with an empty hand (or any item
+        // with no use at all, a sword included) applied the same
+        // `UseEffects::DEFAULT` movement slowdown as eating: `isUsingItem()`
+        // in vanilla only becomes true when the item's own `use()` calls
+        // `startUsingItem`, and the base `Item.use()` — which is what a
+        // sword, a block or an empty hand all fall back to — never does.
+        let held = self
             .player_menu()
             .player_native(self.selected_slot())
             .filter(|stack| !stack.is_empty())
-            .map_or(UseEffects::DEFAULT, |stack| {
-                UseEffects::for_item(&stack.item().to_string())
+            .map(|stack| stack.item().to_string());
+        let uses_item = held.as_deref().is_some_and(item_has_use_animation);
+        if uses_item {
+            // Marks [`UsingItem`] so a later [`Self::end_use`] knows the
+            // button was actually pressed — see that resource's own docs for
+            // why this is an input-state mirror rather than vanilla's real
+            // `isUsingItem()`.
+            self.write(|w| w.resource_mut::<UsingItem>().0 = true);
+            // Arm vanilla's `timeHeld`, which is what
+            // `TridentItem.releaseUsing` compares against its 10-tick threshold on
+            // the release edge. Zero here and advanced by
+            // `lodestone_ecs::player::tick_item_use`, so the count is in 20 Hz ticks
+            // and not in frames — a 200 fps client must not reach the threshold ten
+            // times sooner than a 20 fps one.
+            self.write(|w| w.resource_mut::<ItemUseTicks>().0 = Some(0));
+            // [`ItemUseEffects`]'s writer (issue #671): resolve which
+            // [`UseEffects`] the held main-hand item arms. `UseEffects::for_item`
+            // itself still only distinguishes spear-vs-default — `uses_item`
+            // above is what keeps a non-use item from ever reaching it in the
+            // first place, since `for_item` has no "no effect at all" case of
+            // its own (see that function's own doc). Set once, for the
+            // duration of the press — mirroring how `UsingItem`/`ItemUseTicks`
+            // above are also start/end edges rather than re-derived every
+            // tick, since vanilla itself cannot change which item a use is
+            // charging mid-use.
+            let use_effects = held
+                .as_deref()
+                .map_or(UseEffects::DEFAULT, UseEffects::for_item);
+            let local = self.local;
+            self.write(|w| {
+                if let Some(mut effects) = w.get_mut::<ItemUseEffects>(local) {
+                    effects.0 = Some(use_effects);
+                }
             });
-        let local = self.local;
-        self.write(|w| {
-            if let Some(mut effects) = w.get_mut::<ItemUseEffects>(local) {
-                effects.0 = Some(use_effects);
-            }
-        });
+        }
         // A firework rocket used while gliding is the boost, and it
         // is not an interaction with anything the branches below resolve — so it
         // is decided here, before them, off the held stack alone.
