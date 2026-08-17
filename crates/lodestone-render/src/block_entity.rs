@@ -1968,6 +1968,65 @@ pub fn campfire_item_matrix(pos: [i32; 3], facing_yaw_deg: f32, slot: usize) -> 
         * Mat4::from_scale(Vec3::splat(CAMPFIRE_ITEM_SCALE))
 }
 
+/// `BrushableBlockRenderer.translations`'s base offset — `[0.5, 0.0, 0.5]`
+/// before the hit-direction override below replaces one axis.
+const BRUSHABLE_ITEM_BASE_OFFSET: Vec3 = Vec3::new(0.5, 0.0, 0.5);
+
+/// `BrushableBlockRenderer.submit`'s outward lift along the hit direction:
+/// `completionState / 10.0F * 0.75F`, where `completionState` is the block
+/// state's own `dusted` property (`0..=3`, `BrushableBlockEntity.getCompletionState`'s
+/// own range) fed straight in — **not** rescaled to `0..=10` first, matching
+/// the real jar's own (slightly odd) division by a constant larger than the
+/// value's own range.
+#[must_use]
+fn brushable_item_offset(hit_direction: lodestone_assets::Direction, dust_progress: u8) -> Vec3 {
+    use lodestone_assets::Direction;
+    let completion_offset = f32::from(dust_progress) / 10.0 * 0.75;
+    let mut xyz = BRUSHABLE_ITEM_BASE_OFFSET;
+    match hit_direction {
+        Direction::East => xyz.x = 0.73 + completion_offset,
+        Direction::West => xyz.x = 0.25 - completion_offset,
+        Direction::Up => xyz.y = 0.25 + completion_offset,
+        Direction::Down => xyz.y = -0.23 - completion_offset,
+        Direction::North => xyz.z = 0.25 - completion_offset,
+        Direction::South => xyz.z = 0.73 + completion_offset,
+    }
+    xyz
+}
+
+/// The world placement matrix for the item revealed by brushing a suspicious
+/// sand/gravel block, ported from `BrushableBlockRenderer.submit`'s pose
+/// stack term for term:
+///
+/// ```text
+/// T(pos) · T(0, 0.5, 0) · T(translations(hitDirection, dustProgress))
+///        · Ry(75°) · Ry((eastWest ? 90 : 0) + 11°) · S(0.5)
+/// ```
+///
+/// Compose with the item's own `display.fixed` on the right —
+/// [`crate::entity::brushable_item_mesh`] does this, the same composition
+/// [`campfire_item_matrix`] uses for the same `ItemDisplayContext.FIXED`
+/// reason (`extractRenderState` resolves `blockEntity.getItem()` in `FIXED`,
+/// not `GROUND`).
+#[must_use]
+pub fn brushable_item_matrix(
+    pos: [i32; 3],
+    hit_direction: lodestone_assets::Direction,
+    dust_progress: u8,
+) -> Mat4 {
+    use lodestone_assets::Direction;
+    let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
+    let offset = brushable_item_offset(hit_direction, dust_progress);
+    let east_west = matches!(hit_direction, Direction::East | Direction::West);
+    let extra_deg: f32 = if east_west { 90.0 } else { 0.0 } + 11.0;
+    Mat4::from_translation(origin)
+        * Mat4::from_translation(Vec3::new(0.0, 0.5, 0.0))
+        * Mat4::from_translation(offset)
+        * Mat4::from_rotation_y(75f32.to_radians())
+        * Mat4::from_rotation_y(extra_deg.to_radians())
+        * Mat4::from_scale(Vec3::splat(0.5))
+}
+
 /// Every sheet stem across every block-entity family — what the shell's
 /// texture loader preloads. Union of [`chest_texture_stems`],
 /// [`skull_texture_stems`], [`bell_texture_stems`],
@@ -3019,6 +3078,41 @@ pub struct CampfireItemSpawn {
     pub light: u8,
 }
 
+/// One suspicious sand/gravel block's revealed item, for this frame —
+/// vanilla's `BrushableBlockRenderer`.
+///
+/// **A second `*Spawn` here [`BlockEntityModelSet`] does not resolve**, for the
+/// same reason [`CampfireItemSpawn`] is the first: `BrushableBlockRenderer`
+/// draws an *item model*, not a cuboid part rig — the sand/gravel a player
+/// sees is the ordinary **block** model, real geometry the terrain mesher
+/// already draws (`suspicious_sand`/`suspicious_gravel` are not a hole in the
+/// world), so this feeds the model pipeline through
+/// [`crate::entity::brushable_item_mesh`] the way a dropped item does.
+///
+/// Present only once **both** `BrushableBlockEntity.getHitDirection()` is
+/// non-null (a player has brushed at least once) and `item` is non-empty (a
+/// loot table has actually rolled a reward) and `dustProgress > 0` —
+/// vanilla's own three-part guard in `BrushableBlockRenderer.submit`. A brand
+/// new, never-brushed block therefore contributes no spawn at all.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrushableItemSpawn {
+    /// Block position of the suspicious sand/gravel.
+    pub pos: [i32; 3],
+    /// The face a player last brushed, from `hit_direction` NBT
+    /// (`Direction.LEGACY_ID_CODEC`) — feeds [`brushable_item_matrix`].
+    pub hit_direction: lodestone_assets::Direction,
+    /// The block state's own `dusted` property, `0..=3` —
+    /// `BrushableBlockEntity.getCompletionState()`'s range, read off the
+    /// state rather than re-derived from `brushCount` (which is not on the
+    /// wire; only the property is).
+    pub dust_progress: u8,
+    /// The revealed item's id, from the block entity's `item` NBT
+    /// (`ItemStack.CODEC`).
+    pub item: ResourceLocation,
+    /// Packed sky/block light at the block.
+    pub light: u8,
+}
+
 /// One vault's floating display-item cluster, for this frame — vanilla's
 /// `VaultRenderer`.
 ///
@@ -3710,6 +3804,99 @@ mod tests {
                 "slot {slot} pose origin {origin:?}, expected {want:?}"
             );
         }
+    }
+
+    /// `translations()`'s per-direction override, predicted from the real jar's
+    /// arithmetic rather than restated: at `dust_progress = 3` (the maximum,
+    /// `BrushableBlockEntity.getCompletionState()`'s own ceiling),
+    /// `completionOffset = 3 / 10.0 * 0.75 = 0.225`, so an `EAST` hit pushes the
+    /// item's `x` to `0.73 + 0.225 = 0.955` and leaves `y`/`z` at the base
+    /// `0.0`/`0.5`.
+    #[test]
+    fn brushable_offset_moves_outward_along_the_hit_face() {
+        use lodestone_assets::Direction;
+        let offset = brushable_item_offset(Direction::East, 3);
+        assert!(
+            (offset.x - 0.955).abs() < 1e-5,
+            "east offset.x = {}, expected 0.955",
+            offset.x
+        );
+        assert!((offset.y - 0.0).abs() < 1e-5);
+        assert!((offset.z - 0.5).abs() < 1e-5);
+
+        let west = brushable_item_offset(Direction::West, 3);
+        assert!(
+            (west.x - 0.025).abs() < 1e-5,
+            "west offset.x = {}, expected 0.025 (0.25 - 0.225)",
+            west.x
+        );
+    }
+
+    /// Every hit direction moves the item to a **distinct** point at the same
+    /// `dust_progress`, and the outward distance grows monotonically with
+    /// progress — the two properties `BrushableBlockRenderer.translations`
+    /// exists to give: which face, and how far the dig has revealed the item.
+    #[test]
+    fn brushable_offset_differs_per_direction_and_grows_with_progress() {
+        use lodestone_assets::Direction;
+        const DIRS: [Direction; 6] = [
+            Direction::Down,
+            Direction::Up,
+            Direction::West,
+            Direction::North,
+            Direction::East,
+            Direction::South,
+        ];
+        let mut at_zero = Vec::new();
+        for d in DIRS {
+            let o = brushable_item_offset(d, 0);
+            assert!(
+                at_zero.iter().all(|p: &Vec3| p.distance(o) > 1e-4),
+                "direction {d:?} collided with an earlier direction at {o:?}"
+            );
+            at_zero.push(o);
+        }
+        for d in DIRS {
+            let near = BRUSHABLE_ITEM_BASE_OFFSET.distance(brushable_item_offset(d, 1));
+            let far = BRUSHABLE_ITEM_BASE_OFFSET.distance(brushable_item_offset(d, 3));
+            assert!(
+                far > near,
+                "{d:?}: distance from base did not grow with dust_progress ({near} -> {far})"
+            );
+        }
+    }
+
+    /// The extra `Ry` term is `11°` on north/south/up/down and `101°` on
+    /// east/west — `(eastWest ? 90 : 0) + 11`, predicted rather than restated.
+    /// Told apart via the local `+Z` axis after the fixed `75°` turn is undone
+    /// algebraically: composing the matrix's own rotation out would just
+    /// restate the code under test, so this instead checks the two east/west
+    /// results agree with each other and disagree with the four others, which
+    /// a dropped `eastWest` branch (always `+11°`) cannot produce.
+    #[test]
+    fn brushable_matrix_turns_an_extra_ninety_degrees_on_the_horizontal_axis() {
+        use lodestone_assets::Direction;
+        const POS: [i32; 3] = [5, 70, 5];
+        let east = brushable_item_matrix(POS, Direction::East, 2);
+        let west = brushable_item_matrix(POS, Direction::West, 2);
+        let north = brushable_item_matrix(POS, Direction::North, 2);
+        let south = brushable_item_matrix(POS, Direction::South, 2);
+        let east_x = east.transform_vector3(Vec3::X).normalize();
+        let west_x = west.transform_vector3(Vec3::X).normalize();
+        let north_x = north.transform_vector3(Vec3::X).normalize();
+        let south_x = south.transform_vector3(Vec3::X).normalize();
+        assert!(
+            east_x.dot(west_x) > 0.999,
+            "east/west should share the same +90 extra turn"
+        );
+        assert!(
+            north_x.dot(south_x) > 0.999,
+            "north/south should share the same +0 extra turn"
+        );
+        assert!(
+            east_x.dot(north_x) < 0.999,
+            "east/west and north/south must differ by the extra 90 degrees"
+        );
     }
 
     /// `(slot + facing.get2DDataValue()) % 4`: turning the campfire a quarter turn

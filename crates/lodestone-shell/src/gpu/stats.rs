@@ -156,6 +156,14 @@ pub struct RenderStats {
     /// renderer contributes nothing to `block_entities_drawn` either, so a
     /// broken gather would otherwise be invisible in both counters.
     pub vault_items_drawn: usize,
+    /// Brushable-block revealed items drawn this frame — one per block whose
+    /// `hit_direction`/`item` NBT and `dusted` state all resolve, so a
+    /// never-brushed or empty-roll block contributes 0.
+    ///
+    /// Its own counter for the reason [`campfire_items_drawn`](Self::campfire_items_drawn)
+    /// has one: a brushable block's renderer contributes nothing to
+    /// `block_entities_drawn` either.
+    pub brushable_items_drawn: usize,
     /// Filled-map pictures drawn this frame — the held one counts 1, plus one per
     /// item frame carrying a map.
     ///

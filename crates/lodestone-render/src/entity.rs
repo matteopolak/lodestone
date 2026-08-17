@@ -2921,6 +2921,30 @@ pub fn campfire_item_mesh(
     mesh_item_quads_with_light(quads, pose, gui_light, light)
 }
 
+/// Mesh a suspicious sand/gravel block's revealed item into a world-space
+/// [`ModelMesh`], for the same model-pipeline draw [`dropped_item_mesh`] feeds.
+///
+/// The placement is
+/// [`brushable_item_matrix`](crate::block_entity::brushable_item_matrix) —
+/// ported from `BrushableBlockRenderer.submit`'s pose stack — composed with
+/// the item's own `display.fixed` on the right, for the identical reason
+/// [`campfire_item_mesh`] composes there: `BrushableBlockRenderer.extractRenderState`
+/// resolves the item in `ItemDisplayContext.FIXED`, not `GROUND`.
+#[must_use]
+pub fn brushable_item_mesh(
+    quads: &[BakedQuad],
+    gui_light: GuiLight,
+    fixed: &DisplayTransform,
+    pos: [i32; 3],
+    hit_direction: lodestone_assets::Direction,
+    dust_progress: u8,
+    light: u8,
+) -> ModelMesh {
+    let pose = crate::block_entity::brushable_item_matrix(pos, hit_direction, dust_progress)
+        * display_matrix(fixed);
+    mesh_item_quads_with_light(quads, pose, gui_light, light)
+}
+
 /// [`mesh_item_quads`] followed by the world-light override both
 /// [`dropped_item_mesh`] and [`held_item_mesh`] need: the baked geometry nails
 /// every vertex to [`GUI_ITEM_LIGHT`](crate::GUI_ITEM_LIGHT) (an inventory slot

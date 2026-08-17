@@ -40,7 +40,7 @@ use super::terrain::{
 use super::{
     AmbientLightSource, BannerSource, BeaconBeamRenderer, BeaconSource, BellSource,
     EndGatewaySource, EndPortalRenderer, EndPortalSource,
-    BlockEntityRenderer, BlockEntitySource, CampfireSource, ConduitSource,
+    BlockEntityRenderer, BlockEntitySource, BrushableSource, CampfireSource, ConduitSource,
     DEFAULT_RENDER_DISTANCE_CHUNKS, DecoratedPotSource, EnchantingTableSource, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
     HandSwingSource, ItemUseSource, LecternSource, MainHandSource, MapSource, MovingPistonSource,
@@ -360,6 +360,8 @@ impl RenderState {
             campfire_source: CampfireSource::default(),
             // Likewise `set_vault_source`.
             vault_source: VaultSource::default(),
+            // Likewise `set_brushable_source`.
+            brushable_source: BrushableSource::default(),
             // Likewise `set_moving_piston_source`.
             moving_piston_source: MovingPistonSource::default(),
             // Likewise `set_enchanting_table_source`.
@@ -1475,6 +1477,21 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::VaultSpawn> + Send + Sync + 'static,
     ) {
         self.vault_source = VaultSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's brushable-block revealed items.
+    ///
+    /// Clock-free like [`set_campfire_source`](Self::set_campfire_source) — a
+    /// revealed item does not animate — and feeds
+    /// [`prepare_item_geometry`](Self::prepare_item_geometry) rather than
+    /// `prepare_block_entities`, for the same odd-one-out reason
+    /// [`BrushableSource`]'s doc gives: the suspicious sand/gravel a player
+    /// sees is entirely a real block model.
+    pub fn set_brushable_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::BrushableItemSpawn> + Send + Sync + 'static,
+    ) {
+        self.brushable_source = BrushableSource(Some(Box::new(f)));
     }
 
     /// Install the source for this frame's moving pistons — vanilla's

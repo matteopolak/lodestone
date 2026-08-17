@@ -522,6 +522,16 @@ impl WindowApp {
             render.set_campfire_source(f);
         }
 
+        // Brushable-block revealed items. Same odd-one-out shape as
+        // campfire's: consumed by `prepare_item_geometry`, not
+        // `prepare_block_entities`, since the suspicious sand/gravel a
+        // player sees is entirely a real block model. An unset source is a
+        // correctly-dusted block with no item floating above it, never a
+        // hole.
+        if let Some(f) = self.sim.brushable_source() {
+            render.set_brushable_source(f);
+        }
+
         // Vault display-item clusters. Same odd-one-out shape as campfire's:
         // consumed by `prepare_item_geometry`, not `prepare_block_entities`,
         // since a vault's cage/door/base are real block-model geometry and

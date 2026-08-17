@@ -18,9 +18,10 @@ use lodestone_assets::DisplaySlot;
 use lodestone_render::{
     Camera, ENTITY_FULLBRIGHT, GpuModelMesh, ItemStateContext, ModelMesh,
     entity::{
-        Arm, FLAT_ITEM_DEPTH_THRESHOLD, camera_orientation, campfire_item_mesh, dropped_item_mesh,
-        ground_transform, hand_transform, held_item_mesh, item_bob_offset, item_cluster_jitter,
-        posed_item_z_extent, rendered_amount, thrown_item_for, thrown_item_mesh,
+        Arm, FLAT_ITEM_DEPTH_THRESHOLD, brushable_item_mesh, camera_orientation,
+        campfire_item_mesh, dropped_item_mesh, ground_transform, hand_transform, held_item_mesh,
+        item_bob_offset, item_cluster_jitter, posed_item_z_extent, rendered_amount,
+        thrown_item_for, thrown_item_mesh,
     },
 };
 
@@ -206,6 +207,11 @@ impl RenderState {
         // vault's renderer owns no cuboid mesh, only a spinning item cluster,
         // so there is nothing to batch through `prepare_block_entities`.
         self.merge_vault_items(model, camera, &frustum, &mut combined, stats);
+        // Brushable-block revealed items. Same reason as campfire/vault: the
+        // suspicious sand/gravel a player sees is entirely a real block
+        // model, and `BrushableBlockRenderer` draws only the single revealed
+        // item on top of it.
+        self.merge_brushable_items(model, camera, &frustum, &mut combined, stats);
         let Some(mesh) = GpuModelMesh::upload(device, &combined) else {
             return (None, None);
         };
@@ -362,6 +368,62 @@ impl RenderState {
                 combined.merge(&mesh);
                 stats.vault_items_drawn += 1;
             }
+        }
+    }
+
+    /// Merge every brushable block's revealed item into `combined` — vanilla's
+    /// `BrushableBlockRenderer`.
+    ///
+    /// # Why this lives in the item pass and not with the other block entities
+    ///
+    /// `BrushableBlockRenderer` bakes no layer, binds no sheet and has no model
+    /// field: its `submit` is a single `ItemStackRenderState.submit` at one
+    /// pose. The suspicious sand/gravel a player sees is the *block* model,
+    /// drawn by the terrain mesher with no help from here — so an unset
+    /// [`BrushableSource`](super::BrushableSource) leaves a complete,
+    /// correctly-dusted block with no item above it, not a hole.
+    ///
+    /// # `DisplaySlot::Fixed`, matching a campfire item
+    ///
+    /// `extractRenderState` calls `updateForTopItem(.., ItemDisplayContext.FIXED,
+    /// ..)`, the identical context [`merge_campfire_items`] resolves in — the
+    /// item-frame pose, not `Ground`.
+    ///
+    /// No glint arm and no multi-copy scatter, for the same reason
+    /// [`merge_campfire_items`] has neither: this draws the block entity's
+    /// single `item` stack (no `components`, no glint), one copy, at one pose.
+    fn merge_brushable_items(
+        &self,
+        model: &ModelRenderer,
+        camera: &Camera,
+        frustum: &lodestone_render::Frustum,
+        combined: &mut ModelMesh,
+        stats: &mut RenderStats,
+    ) {
+        let ctx = ItemStateContext::new(DisplaySlot::Fixed);
+        for spawn in self.brushable_source.brushable_items(camera.position) {
+            let min = glam::Vec3::new(
+                spawn.pos[0] as f32,
+                spawn.pos[1] as f32,
+                spawn.pos[2] as f32,
+            );
+            if !frustum.intersects_aabb(min, min + glam::Vec3::ONE) {
+                continue;
+            }
+            let Some(geometry) = model.items.get(&spawn.item).and_then(|v| v.resolve(&ctx))
+            else {
+                continue;
+            };
+            combined.merge(&brushable_item_mesh(
+                &geometry.quads,
+                geometry.gui_light,
+                &geometry.display.get(DisplaySlot::Fixed),
+                spawn.pos,
+                spawn.hit_direction,
+                spawn.dust_progress,
+                spawn.light,
+            ));
+            stats.brushable_items_drawn += 1;
         }
     }
 

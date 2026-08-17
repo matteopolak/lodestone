@@ -109,12 +109,13 @@ use std::collections::HashMap;
 use glam::Vec3;
 use lodestone_render::{
     BannerAttachment, BannerSpawn, BeaconSpawn, BeamSection, BellShakeDirection, BellSpawn,
-    ChestHalf, ChestMaterial, ChestSpawn, ConduitFrame, ConduitSpawn, DecoratedPotSpawn,
-    EndGatewaySpawn, EndPortalSpawn, LecternSpawn, SHULKER_COLOURS, ShulkerFacing, ShulkerSpawn,
-    SignKind, SignOrientation, SignSpawn, SkullOrientation, SkullSpawn, SkullType, VaultSpawn,
-    average_beam_color, beacon_beam_color, beam_radius_scale, conduit_active_rotation_value,
-    conduit_advance, conduit_anim_time, conduit_animation_phase, conduit_frame_scan,
-    entity::vault_spin_degrees, horizontal_facing_clockwise_yaw, horizontal_facing_yaw,
+    BrushableItemSpawn, ChestHalf, ChestMaterial, ChestSpawn, ConduitFrame, ConduitSpawn,
+    DecoratedPotSpawn, EndGatewaySpawn, EndPortalSpawn, LecternSpawn, SHULKER_COLOURS,
+    ShulkerFacing, ShulkerSpawn, SignKind, SignOrientation, SignSpawn, SkullOrientation,
+    SkullSpawn, SkullType, VaultSpawn, average_beam_color, beacon_beam_color, beam_radius_scale,
+    conduit_active_rotation_value, conduit_advance, conduit_anim_time, conduit_animation_phase,
+    conduit_frame_scan, entity::vault_spin_degrees, horizontal_facing_clockwise_yaw,
+    horizontal_facing_yaw,
 };
 use lodestone_render::banner_pattern::{DyeColor, StoredPatternLayer};
 use lodestone_world::{ChunkPos, SignText, World};
@@ -5584,5 +5585,286 @@ mod vault_tests {
         assert!((b - a - 10.0).abs() < 1e-4);
         let mid = vault_spin_degrees(10, 0.5);
         assert!((mid - a - 5.0).abs() < 1e-4);
+    }
+}
+
+// --- brushable block -------------------------------------------------------
+
+/// `Direction.LEGACY_ID_CODEC`'s byte, resolved to [`lodestone_assets::Direction`]
+/// rather than a unit step vector — the [`direction_step_from_3d`] sibling for
+/// callers that need the enum itself. Same order as that function
+/// (`Direction`'s own declaration order: `DOWN, UP, NORTH, SOUTH, WEST, EAST`),
+/// which is **not** `lodestone_assets::Direction`'s declaration order (that one
+/// lists `East` before `West`) — a `transmute`-shaped `as` cast here would
+/// silently swap east and west.
+#[must_use]
+fn block_entity_direction_from_legacy_id(id: i8) -> Option<lodestone_assets::Direction> {
+    use lodestone_assets::Direction;
+    Some(match id {
+        0 => Direction::Down,
+        1 => Direction::Up,
+        2 => Direction::North,
+        3 => Direction::South,
+        4 => Direction::West,
+        5 => Direction::East,
+        _ => return None,
+    })
+}
+
+/// A brushable block's NBT, decoded — `BrushableBlockEntity.getUpdateTag`'s two
+/// optional fields.
+///
+/// `hit_direction` is `Direction.LEGACY_ID_CODEC` (`Codec.BYTE`), so this reads
+/// an [`lodestone_core::Nbt::Byte`], **not** an int — the same trap
+/// [`MovingPistonNbt`]'s doc names for its own `direction` field. `item` is an
+/// ordinary `ItemStack.CODEC` compound (`{id, count, components}`); only `id`
+/// is read, matching [`vault_display_item`]'s own limitation for the same
+/// codec shape.
+///
+/// Returns `None` unless **both** fields are present — vanilla's own guard in
+/// `BrushableBlockRenderer.submit` (`hitDirection != null && !itemState.isEmpty()`)
+/// — so a freshly placed, never-brushed block contributes nothing rather than
+/// a stack drawn in a default direction.
+#[must_use]
+fn brushable_item(nbt: &lodestone_core::Nbt) -> Option<(lodestone_assets::Direction, lodestone_assets::ResourceLocation)> {
+    use lodestone_core::Nbt;
+
+    let Nbt::Compound(fields) = nbt else {
+        return None;
+    };
+    let field = |key: &str| fields.iter().find(|(name, _)| name == key).map(|(_, v)| v);
+    let Some(Nbt::Byte(direction_id)) = field("hit_direction") else {
+        return None;
+    };
+    let direction = block_entity_direction_from_legacy_id(*direction_id)?;
+    let Some(Nbt::Compound(item)) = field("item") else {
+        return None;
+    };
+    let Some(Nbt::String(id)) = item.iter().find(|(name, _)| name == "id").map(|(_, v)| v)
+    else {
+        return None;
+    };
+    if id == "minecraft:air" {
+        return None;
+    }
+    Some((direction, id.parse().ok()?))
+}
+
+/// The block state's own `dusted` property (`0..=3`) —
+/// `BrushableBlockEntity.getCompletionState()`'s range, already reflected in
+/// the state the server sends rather than re-derived from `brushCount` (not
+/// on the wire).
+#[must_use]
+fn brushable_dust_progress(state_id: u32) -> u8 {
+    lodestone_data::block_states::properties(state_id)
+        .and_then(|props| props.iter().find(|(name, _)| *name == "dusted"))
+        .and_then(|(_, value)| value.parse::<u8>().ok())
+        .unwrap_or(0)
+}
+
+/// Every suspicious sand/gravel position within [`VIEW_DISTANCE`], paired with
+/// its parsed hit direction/item (if any) and its `dusted` progress — the
+/// brushable-block sibling of [`vault_candidates`].
+#[must_use]
+fn brushable_candidates(
+    world: &World,
+    chunks: impl IntoIterator<Item = ChunkPos>,
+    eye: Vec3,
+) -> Vec<(
+    [i32; 3],
+    u8,
+    Option<(lodestone_assets::Direction, lodestone_assets::ResourceLocation)>,
+)> {
+    let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
+    let mut candidates = Vec::new();
+    for pos in chunks {
+        let Some(chunk) = world.get(pos) else {
+            continue;
+        };
+        for be in &chunk.block_entities {
+            let x = pos.x * 16 + i32::from(be.rel_x);
+            let z = pos.z * 16 + i32::from(be.rel_z);
+            let y = i32::from(be.y);
+            let centre = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+            if centre.distance_squared(eye) > cutoff {
+                continue;
+            }
+            let state_id = chunk
+                .column
+                .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            let Some(name) = lodestone_data::block_states::block_name(state_id) else {
+                continue;
+            };
+            if name != "minecraft:suspicious_sand" && name != "minecraft:suspicious_gravel" {
+                continue;
+            }
+            candidates.push((
+                [x, y, z],
+                brushable_dust_progress(state_id),
+                brushable_item(&be.nbt),
+            ));
+        }
+    }
+    candidates
+}
+
+/// Every brushable block's revealed item to draw this frame, for
+/// [`crate::gpu::RenderState::set_brushable_source`]. A block that has never
+/// been brushed, or whose loot table has not yet rolled an item, contributes
+/// nothing — matching `BrushableBlockRenderer.submit`'s three-part guard
+/// (`dustProgress > 0 && hitDirection != null && !itemState.isEmpty()`).
+///
+/// No clock captured, like [`campfire_spawns`]: nothing about a revealed item
+/// animates.
+#[must_use]
+pub fn brushable_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<BrushableItemSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+
+    let candidates = {
+        let world = store.read();
+        brushable_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
+    let mut out = Vec::new();
+    for (block, dust_progress, hit) in candidates {
+        if dust_progress == 0 {
+            continue;
+        }
+        let Some((hit_direction, item)) = hit else {
+            continue;
+        };
+        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        out.push(BrushableItemSpawn {
+            pos: block,
+            hit_direction,
+            dust_progress,
+            item,
+            light,
+        });
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
+#[cfg(test)]
+mod brushable_tests {
+    use super::*;
+
+    fn compound(fields: Vec<(&str, lodestone_core::Nbt)>) -> lodestone_core::Nbt {
+        lodestone_core::Nbt::Compound(
+            fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        )
+    }
+
+    /// The shape `BrushableBlockEntity.getUpdateTag` actually writes:
+    /// `{hit_direction: <byte>, item: {id, count}}`.
+    #[test]
+    fn parses_a_real_brushable_shape() {
+        let nbt = compound(vec![
+            ("hit_direction", lodestone_core::Nbt::Byte(1)), // UP
+            (
+                "item",
+                compound(vec![
+                    (
+                        "id",
+                        lodestone_core::Nbt::String("minecraft:brick".to_string()),
+                    ),
+                    ("count", lodestone_core::Nbt::Int(1)),
+                ]),
+            ),
+        ]);
+        let (direction, item) = brushable_item(&nbt).expect("brushable item must parse");
+        assert_eq!(direction, lodestone_assets::Direction::Up);
+        assert_eq!(item.to_string(), "minecraft:brick");
+    }
+
+    /// A never-brushed block (no `hit_direction`, no `item`) parses to
+    /// nothing, the common case for most suspicious sand in a freshly
+    /// generated desert well or ocean ruin.
+    #[test]
+    fn a_never_brushed_block_has_no_item() {
+        assert!(brushable_item(&compound(vec![])).is_none());
+    }
+
+    /// `hit_direction` present with no `item` (a player has started digging
+    /// but the loot table has not rolled yet, or rolled empty) also parses to
+    /// nothing — matching `!itemState.isEmpty()`.
+    #[test]
+    fn a_hit_direction_with_no_item_is_not_enough() {
+        let nbt = compound(vec![("hit_direction", lodestone_core::Nbt::Byte(0))]);
+        assert!(brushable_item(&nbt).is_none());
+    }
+
+    /// `hit_direction` is a **byte**, not an int — reading it as one would
+    /// silently default every brushable block to `DOWN`, matching
+    /// [`MovingPistonNbt`]'s documented trap for the identical codec.
+    #[test]
+    fn hit_direction_as_an_int_does_not_parse() {
+        let nbt = compound(vec![
+            ("hit_direction", lodestone_core::Nbt::Int(5)), // EAST, wrong type
+            (
+                "item",
+                compound(vec![(
+                    "id",
+                    lodestone_core::Nbt::String("minecraft:emerald".to_string()),
+                )]),
+            ),
+        ]);
+        assert!(brushable_item(&nbt).is_none());
+    }
+
+    /// `minecraft:air` reads the same as no item at all — the same "explicitly
+    /// cleared" case [`vault_display_item`]'s doc names.
+    #[test]
+    fn an_air_item_is_treated_as_empty() {
+        let nbt = compound(vec![
+            ("hit_direction", lodestone_core::Nbt::Byte(2)),
+            (
+                "item",
+                compound(vec![(
+                    "id",
+                    lodestone_core::Nbt::String("minecraft:air".to_string()),
+                )]),
+            ),
+        ]);
+        assert!(brushable_item(&nbt).is_none());
+    }
+
+    /// Every one of the six legacy ids round-trips to the direction
+    /// `Direction`'s own declaration order says it should — the control for
+    /// [`block_entity_direction_from_legacy_id`]'s doc warning about
+    /// `lodestone_assets::Direction`'s differently-ordered declaration.
+    #[test]
+    fn legacy_ids_resolve_in_directions_own_declaration_order() {
+        use lodestone_assets::Direction;
+        let expected = [
+            (0, Direction::Down),
+            (1, Direction::Up),
+            (2, Direction::North),
+            (3, Direction::South),
+            (4, Direction::West),
+            (5, Direction::East),
+        ];
+        for (id, want) in expected {
+            assert_eq!(block_entity_direction_from_legacy_id(id), Some(want));
+        }
+        assert_eq!(block_entity_direction_from_legacy_id(6), None);
     }
 }
