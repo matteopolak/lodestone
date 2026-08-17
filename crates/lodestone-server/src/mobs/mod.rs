@@ -6930,6 +6930,14 @@ impl<'w> MobSim<'w> {
                 if let Some(mob) = self.mobs.iter_mut().find(|m| m.id == mob_id) {
                     mob.allay_duplication_cooldown = ALLAY_DUPLICATION_COOLDOWN_TICKS;
                 }
+                // This short-circuit returns before the shared
+                // `outcome.particle()` tail below runs (the same reason the
+                // villager/zombie-villager arms above never reach it
+                // either), so `Allay.handleEntityEvent(18)`'s heart burst
+                // has to be pushed here directly rather than relying on that
+                // generic path.
+                self.pending_vocalisations
+                    .push(taming_particles("minecraft:heart", pos));
                 return InteractOutcome::AllayDuplicated;
             }
             let already_holding = mob.mob.main_hand_item().is_some();
@@ -13240,6 +13248,14 @@ mod allay_carrying_tests {
         assert!(
             sim.get(id).expect("alive").allay_duplication_cooldown > 0,
             "the original allay must be put on cooldown too"
+        );
+        assert!(
+            sim.take_vocalisations().iter().any(|effect| matches!(
+                effect,
+                crate::effects::WorldEffect::Particles { particle, .. } if particle == "minecraft:heart"
+            )),
+            "Allay.handleEntityEvent(18)'s heart burst must reach the production \
+             queue too, not just the outcome's own particle() classification"
         );
     }
 
