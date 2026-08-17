@@ -244,6 +244,48 @@ impl Sim {
         })
     }
 
+    /// This frame's end portals, for
+    /// [`RenderState::set_end_portal_source`](crate::gpu::RenderState::set_end_portal_source).
+    ///
+    /// No clock captured at all, unlike [`Self::beacon_source`]: an end
+    /// portal's `shouldRenderFace` reads no world state and no NBT (see
+    /// `lodestone_render::end_portal`'s module doc), so there is nothing
+    /// here that depends on the game tick or the partial tick — only where
+    /// the loaded world currently has one.
+    #[must_use]
+    pub fn end_portal_source(
+        &self,
+    ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::EndPortalSpawn> + Send + Sync + 'static>
+    {
+        let handle = self.net.as_ref()?.shared_handle();
+        Some(move |eye: glam::Vec3| crate::block_entities::end_portal_spawns(&handle, eye))
+    }
+
+    /// This frame's end gateways, for
+    /// [`RenderState::set_end_gateway_source`](crate::gpu::RenderState::set_end_gateway_source).
+    /// Same shape as [`Self::end_portal_source`] — no clock, since the
+    /// gateway's own teleport beam (the one thing that *would* need one) is
+    /// a deliberate, documented gap this source does not carry.
+    /// The ever-increasing tick clock plus partial tick, for
+    /// [`RenderState::set_end_portal_game_time`](crate::gpu::RenderState::set_end_portal_game_time) —
+    /// the star-field shader's `GameTime` term needs an unbounded value,
+    /// unlike [`Self::beacon_source`]'s own `floorMod(40)`-wrapped
+    /// `animation_time`.
+    #[must_use]
+    pub fn game_time_for_shaders(&self) -> f32 {
+        let clock = self.clock();
+        clock.ticks as f32 + clock.interp_alpha
+    }
+
+    #[must_use]
+    pub fn end_gateway_source(
+        &self,
+    ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::EndGatewaySpawn> + Send + Sync + 'static>
+    {
+        let handle = self.net.as_ref()?.shared_handle();
+        Some(move |eye: glam::Vec3| crate::block_entities::end_gateway_spawns(&handle, eye))
+    }
+
     /// This frame's vault display-item clusters, for
     /// [`RenderState::set_vault_source`](crate::gpu::RenderState::set_vault_source).
     ///

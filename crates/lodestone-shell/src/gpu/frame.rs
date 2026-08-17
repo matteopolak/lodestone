@@ -366,6 +366,24 @@ impl RenderState {
         stats.beacon_beam_solid_vertices = beacon_solid_count;
         stats.beacon_beam_glow_vertices = beacon_glow_count;
 
+        // End portals / end gateways, same "upload before the pass opens"
+        // constraint and the same not-derived-from-`entities` shape as the
+        // beacon beam above — both are *blocks*, gathered from world state.
+        // `game_time` follows the same ticks-plus-partial-tick convention
+        // `beacon_source`'s own `animation_time` uses; see
+        // `gpu/end_portal.wgsl`'s doc for why the exact vanilla `GameTime`
+        // scale is not re-derived here.
+        let end_portals = self.end_portal_source.portals(camera.position);
+        let end_gateways = self.end_gateway_source.gateways(camera.position);
+        let end_portal_count = self.end_portal.prepare(
+            queue,
+            &view_proj,
+            self.end_portal_game_time,
+            &end_portals,
+            &end_gateways,
+        );
+        stats.end_portal_vertices = end_portal_count;
+
         // Resolve, frustum-cull and upload entity instances *before* the pass —
         // buffers can't be created mid-pass, and the entity camera uniform (no
         // section origin; the world position lives in each instance matrix) must
@@ -1025,6 +1043,12 @@ impl RenderState {
             // surface. The outer **glow** is translucent and drawn far below,
             // among the other alpha-blended world geometry.
             self.beacon_beam.draw_solid(&mut pass, beacon_solid_count);
+
+            // The end portal / end gateway star-field surface — fully
+            // opaque (`DepthStencilState.DEFAULT`, no blend), so it belongs
+            // here too, before translucent water, for the same
+            // depth-writing reason as the beacon beam's solid core above.
+            self.end_portal.draw(&mut pass, end_portal_count);
 
             // Experience-orb billboards. After every opaque and cutout entity
             // layer above, and still **before translucent water** for the reason

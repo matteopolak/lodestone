@@ -449,6 +449,19 @@ impl WindowApp {
             render.set_beacon_source(f);
         }
 
+        // End portals / end gateways. Same per-frame install as the sources
+        // above, for uniformity — neither closure actually needs
+        // reinstalling every frame (`Sim::end_portal_source`'s doc: no clock
+        // captured at all), but installing alongside every other
+        // block-entity source keeps this call site's shape simple to audit.
+        if let Some(f) = self.sim.end_portal_source() {
+            render.set_end_portal_source(f);
+        }
+        if let Some(f) = self.sim.end_gateway_source() {
+            render.set_end_gateway_source(f);
+        }
+        render.set_end_portal_game_time(self.sim.game_time_for_shaders());
+
         // Bells. Same per-frame install as the three above — the render pass,
         // the GPU-side wiring in `gpu.rs` and the CPU-side gather
         // (`Sim::bell_source`) were all already landed; this call site was

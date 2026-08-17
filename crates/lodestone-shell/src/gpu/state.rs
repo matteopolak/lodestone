@@ -39,6 +39,7 @@ use super::terrain::{
 };
 use super::{
     AmbientLightSource, BannerSource, BeaconBeamRenderer, BeaconSource, BellSource,
+    EndGatewaySource, EndPortalRenderer, EndPortalSource,
     BlockEntityRenderer, BlockEntitySource, CampfireSource, ConduitSource,
     DEFAULT_RENDER_DISTANCE_CHUNKS, DecoratedPotSource, EnchantingTableSource, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
@@ -136,6 +137,7 @@ impl RenderState {
         let nametag = NameTagRenderer::new(device, color_format);
         let sign_text = SignTextRenderer::new(device, color_format);
         let beacon_beam = BeaconBeamRenderer::new(device, queue, color_format);
+        let end_portal = EndPortalRenderer::new(device, queue, color_format);
 
         // The live vanilla atlas carries baked model geometry; build the model
         // render pass over its *complete* atlas (whose UVs the baked quads index,
@@ -387,6 +389,12 @@ impl RenderState {
             // No beacon beams until the shell installs a world source; see
             // `set_beacon_source`.
             beacon_source: BeaconSource::default(),
+            end_portal,
+            // No end portals/gateways until the shell installs a world
+            // source; see `set_end_portal_source`/`set_end_gateway_source`.
+            end_portal_source: EndPortalSource::default(),
+            end_gateway_source: EndGatewaySource::default(),
+            end_portal_game_time: 0.0,
             // No rain/snow droplets until the shell installs the two environment
             // textures; see `install_weather`.
             weather: None,
@@ -1589,6 +1597,38 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::BeaconSpawn> + Send + Sync + 'static,
     ) {
         self.beacon_source = BeaconSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's end portals — same shape as
+    /// [`set_sign_source`](Self::set_sign_source): no per-frame animation
+    /// state to go stale, so unlike [`set_beacon_source`](Self::set_beacon_source)
+    /// there is no *requirement* to reinstall every frame, though
+    /// `app::redraw` does anyway alongside every other block-entity source
+    /// for uniformity. `app::redraw` calls this from `Sim::end_portal_source`.
+    pub fn set_end_portal_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::EndPortalSpawn> + Send + Sync + 'static,
+    ) {
+        self.end_portal_source = EndPortalSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's end gateways — same shape as
+    /// [`set_end_portal_source`](Self::set_end_portal_source).
+    /// `app::redraw` calls this from `Sim::end_gateway_source`.
+    pub fn set_end_gateway_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::EndGatewaySpawn> + Send + Sync + 'static,
+    ) {
+        self.end_gateway_source = EndGatewaySource(Some(Box::new(f)));
+    }
+
+    /// Sets the end-portal/end-gateway star-field shader's `GameTime` term —
+    /// an ever-increasing tick clock, unlike [`set_beacon_source`](Self::set_beacon_source)'s
+    /// own `floorMod(40)`-wrapped `animation_time`. A plain scalar rather
+    /// than a closure-backed source, since the swirl needs it every frame
+    /// regardless of which (if any) portals are in view.
+    pub fn set_end_portal_game_time(&mut self, game_time: f32) {
+        self.end_portal_game_time = game_time;
     }
 
     /// Install the source for the targeted block's outline shape.
