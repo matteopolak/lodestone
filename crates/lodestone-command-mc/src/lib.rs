@@ -76,6 +76,7 @@ pub mod rotation;
 pub mod scoreboard;
 pub mod snbt;
 pub mod swizzle;
+pub mod team;
 pub mod time;
 
 pub use anchor::{AnchorInput, EntityAnchorArg};
@@ -95,6 +96,7 @@ pub use scoreboard::{
 };
 pub use snbt::{NbtCompoundArg, NbtTagArg, SnbtValue};
 pub use swizzle::{Axes, SwizzleArg};
+pub use team::{TeamArg, TeamColorArg};
 pub use time::TimeArg;
 
 use lodestone_command::{

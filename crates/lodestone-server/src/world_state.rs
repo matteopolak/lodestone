@@ -211,6 +211,12 @@ pub struct WorldStateHandle {
     /// independently-constructed handle would be the island this crate has
     /// already paid to learn about once.
     scoreboard: crate::commands::scoreboard_store::ScoreboardHandle,
+    /// This world's teams — a sibling of `state`/`scoreboard` for the
+    /// identical reason: every `/team`/`/execute` command entry point already
+    /// receives this handle to reach `state`, so riding here reaches all of
+    /// them with no new parameter anywhere. See
+    /// `crate::commands::team_store`'s module doc.
+    teams: crate::commands::team_store::TeamHandle,
 }
 
 impl WorldStateHandle {
@@ -247,6 +253,13 @@ impl WorldStateHandle {
     #[must_use]
     pub fn scoreboard(&self) -> &crate::commands::scoreboard_store::ScoreboardHandle {
         &self.scoreboard
+    }
+
+    /// This world's teams — see [`Self`]'s own field doc for why a command
+    /// reaches it through here rather than through a handle of its own.
+    #[must_use]
+    pub fn team(&self) -> &crate::commands::team_store::TeamHandle {
+        &self.teams
     }
 
     /// Whether this handle and `other` name the same store — for the sharing

@@ -143,6 +143,8 @@ pub mod scoreboard_store;
 mod seed;
 pub mod source;
 mod summon;
+mod team;
+pub mod team_store;
 mod teleport;
 mod time;
 mod weather;
@@ -252,6 +254,7 @@ impl ServerCommands {
         execute::register(&mut registrar);
         worldborder::register(&mut registrar);
         scoreboard::register(&mut registrar);
+        team::register(&mut registrar);
         Self::from_registrar(registrar)
     }
 

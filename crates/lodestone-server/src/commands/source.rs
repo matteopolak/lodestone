@@ -207,6 +207,12 @@ pub fn resolve_players(
     // here, resolution there" split), and so a test can supply a hand-built
     // table with no scoreboard at all.
     score: &dyn Fn(&str, &str) -> Option<i32>,
+    // `team=` resolution: `holder -> team name`, `""` for a holder on no team
+    // — see `lodestone_command_mc::SelectorPredicate::Team`'s own doc for why
+    // there is no `Option` here. Same closure-over-handle shape as `score`,
+    // for the identical reason: this crate must stay ignorant of
+    // `crate::commands::team_store`'s storage shape.
+    team: &dyn Fn(&str) -> String,
 ) -> Result<Vec<PlayerCandidate>, SelectorError> {
     if selector.current_entity {
         let Some(entity) = source.entity.as_ref() else {
@@ -215,7 +221,7 @@ pub fn resolve_players(
         let Some(me) = candidates.iter().find(|c| c.uuid == entity.uuid) else {
             return Err(SelectorError::NoPlayersFound);
         };
-        return if matches_predicates(me, selector, score) {
+        return if matches_predicates(me, selector, score, team) {
             Ok(vec![me.clone()])
         } else {
             Err(SelectorError::NoPlayersFound)
@@ -248,7 +254,7 @@ pub fn resolve_players(
 
     let mut matched: Vec<PlayerCandidate> = candidates
         .iter()
-        .filter(|c| matches_predicates(c, selector, score))
+        .filter(|c| matches_predicates(c, selector, score, team))
         .filter(|c| matches_region(c, selector, origin))
         .cloned()
         .collect();
@@ -302,6 +308,7 @@ fn matches_predicates(
     candidate: &PlayerCandidate,
     selector: &EntitySelector,
     score: &dyn Fn(&str, &str) -> Option<i32>,
+    team: &dyn Fn(&str) -> String,
 ) -> bool {
     // `limit_to_type` is `minecraft:player` for every player-shaped selector,
     // and a roster only holds players, so it is satisfied by construction. A
@@ -332,6 +339,11 @@ fn matches_predicates(
         SelectorPredicate::Scores(entries) => entries.iter().all(|(objective, range)| {
             score(&candidate.username, objective).is_some_and(|value| range.matches(value))
         }),
+        // `EntitySelectorOptions.registerTeam`: compare the holder's team
+        // name (`""` when on no team) against `name` directly — see
+        // `SelectorPredicate::Team`'s own doc for why there is no `Option`
+        // three-way to model here.
+        SelectorPredicate::Team { name, inverted } => (team(&candidate.username) == *name) != *inverted,
     })
 }
 
@@ -378,4 +390,11 @@ pub fn no_shuffle(len: usize) -> Vec<usize> {
 #[must_use]
 pub fn no_scores(_holder: &str, _objective: &str) -> Option<i32> {
     None
+}
+
+/// No teams at all — every holder reads as on no team. For a caller (or a
+/// test) with no team store to offer.
+#[must_use]
+pub fn no_team(_holder: &str) -> String {
+    String::new()
 }

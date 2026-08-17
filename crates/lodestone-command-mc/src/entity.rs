@@ -179,6 +179,14 @@ pub enum SelectorPredicate {
     /// unknown objective or a holder with no score on a known one — both are
     /// modelled the same way here: the lookup returning `None`.
     Scores(Vec<(String, crate::scoreboard::IntRange)>),
+    /// `team=` / `team=!` — `EntitySelectorOptions.registerTeam`: `name` is
+    /// the empty string for the bare `team=` form (matches an entity with no
+    /// team), or a team name. Vanilla's own comparison is against the
+    /// entity's team name **or `""` when it has none** — there is no
+    /// three-way "no team"/"named team"/"different team" split, just a string
+    /// equality — so the resolver side needs no `Option`, only a holder's
+    /// team name defaulted to `""`.
+    Team { name: String, inverted: bool },
 }
 
 /// The `x`/`y`/`z` overrides: which components of the caller's position the
@@ -616,13 +624,17 @@ fn parse_option(
             let entries = read_scores_map(reader)?;
             selector.predicates.push(SelectorPredicate::Scores(entries));
         }
+        "team" => {
+            let inverted = read_inversion(reader);
+            let name = reader.read_unquoted_string();
+            selector.predicates.push(SelectorPredicate::Team { name, inverted });
+        }
         // Known to vanilla, not implemented here, and named so the author knows
         // which it is. Each needs a subsystem that does not exist: entity NBT
         // (`nbt`), the advancement predicate engine (`advancements`,
-        // `predicate`), entity tags (`tag`), teams (`team`), experience levels
-        // (`level`), or per-entity rotation tracking (`*_rotation`).
-        "nbt" | "advancements" | "predicate" | "tag" | "team" | "level" | "x_rotation"
-        | "y_rotation" => {
+        // `predicate`), entity tags (`tag`), experience levels (`level`), or
+        // per-entity rotation tracking (`*_rotation`).
+        "nbt" | "advancements" | "predicate" | "tag" | "level" | "x_rotation" | "y_rotation" => {
             Err(refuse(key_position, format!("selector option '{key}' is not supported yet")))?;
         }
         _ => Err(refuse(key_position, key.to_string()))?,
@@ -943,6 +955,27 @@ mod tests {
         ] {
             assert!(parse(EntityArg::players(), bad).is_err(), "{bad:?} must not parse");
         }
+    }
+
+    /// `team=`, `team=<name>` and `team=!<name>` — the bare form (empty
+    /// name) is vanilla's own "no team" spelling, not a parse error, so it
+    /// must round-trip to a predicate with an empty `name` rather than being
+    /// refused as a missing value the way an empty `scores=` is.
+    #[test]
+    fn team_parses_a_bare_name_and_its_inverted_and_no_team_forms() {
+        let s = players("@a[team=red]");
+        assert_eq!(s.predicates, [SelectorPredicate::Team { name: "red".to_string(), inverted: false }]);
+
+        let s = players("@a[team=!red]");
+        assert_eq!(s.predicates, [SelectorPredicate::Team { name: "red".to_string(), inverted: true }]);
+
+        // The bare form: no name at all, meaning "on no team".
+        let s = players("@a[team=]");
+        assert_eq!(s.predicates, [SelectorPredicate::Team { name: String::new(), inverted: false }]);
+
+        // Inverted-bare: "on some team, any team".
+        let s = players("@a[team=!]");
+        assert_eq!(s.predicates, [SelectorPredicate::Team { name: String::new(), inverted: true }]);
     }
 
     /// A deferred option is refused by name, and an unknown one is refused as

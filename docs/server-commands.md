@@ -256,19 +256,22 @@ vanilla command uses, so they carry their own id-and-payload-length assertions.
 `lodestone_command_mc::EntityArg`/`EntitySelector` (`crates/lodestone-command-mc/src/entity.rs`)
 and resolved against the roster by `lodestone_server::commands::source::resolve_players`.
 The v1 filter set is `type`, `name`, `distance`, `limit`, `sort`, `gamemode`,
-`x`/`y`/`z`, `dx`/`dy`/`dz`, `scores` — ported from
+`x`/`y`/`z`, `dx`/`dy`/`dz`, `scores`, `team` — ported from
 `EntitySelectorParser`/`EntitySelector` in the 26.2 decompile, each with
 vanilla's `!` inversion where vanilla has one. `scores={obj=range,...}` reuses
 `IntRangeArg`'s own range reader (so the selector map syntax and `/execute if
 score`'s range syntax cannot drift apart) and resolves against the real
 `ScoreboardHandle` via a `&dyn Fn(&str, &str) -> Option<i32>` lookup threaded
 through `resolve_players`; an unknown objective or a holder with no recorded
-score both refuse the match. `nbt`, `advancements`, `predicate`, `tag`, `team`,
-`level` and the two `*_rotation` options are refused **by name** rather than
-silently ignored (see that module's own doc for why each needs a subsystem
-this server does not have). None of it is visible on the wire —
-`minecraft:entity` carries one flags byte and no option list — so the deferred
-set cannot desync tree parity.
+score both refuse the match. `team=`/`team=!` resolves the identical way,
+through a second `&dyn Fn(&str) -> String` closure over
+`crate::commands::team_store::TeamHandle` (`""` for a holder on no team, the
+same string vanilla itself compares against — no `Option` three-way). `nbt`,
+`advancements`, `predicate`, `tag`, `level` and the two `*_rotation` options
+are refused **by name** rather than silently ignored (see that module's own
+doc for why each needs a subsystem this server does not have). None of it is
+visible on the wire — `minecraft:entity` carries one flags byte and no option
+list — so the deferred set cannot desync tree parity.
 
 **Resolution only ever reaches players.** `CommandWorld` carries
 `&[PlayerCandidate]`, never a general entity list, because entity resolution
@@ -328,6 +331,51 @@ simply `EntityArg` reused).
 **Not built:** `objectives setdisplay` and any display-slot concept (nothing
 in this crate renders a sidebar, so a stored slot would be write-only), and
 `players enable` (meaningless with no criteria semantics modelled at all).
+
+#### `/team`
+
+`crate::commands::team` plus `crate::commands::team_store::TeamHandle` — a
+**separate** store from the scoreboard, matching vanilla's own `Scoreboard`
+keeping objectives/scores and teams as two tables; landing `/scoreboard` did
+not unlock this. `list [<team>]`, `add <team> [<displayName>]`, `remove
+<team>`, `empty <team>`, `join <team> [<members>]`, `leave <members>`, and
+`modify <team> <option> <value>` for every option vanilla's own
+`TeamCommand.java` registers: `displayName`, `color`, `friendlyfire`,
+`seeFriendlyInvisibles`, `nametagVisibility`, `deathMessageVisibility`,
+`collisionRule`, `prefix`, `suffix`. `<members>` reuses
+`lodestone_command_mc::ScoreHolderArg`/`crate::commands::scoreboard::resolve_many`
+rather than `EntityArg`, matching vanilla's own `TeamCommand`
+(`ScoreHolderArgument.greedyScoreHolder()`), so a selector, `*`, or a bare
+"fake player" name work here exactly as they do for a score.
+
+A holder is on at most one team (`TeamHandle::join` removes it from whatever
+team it was already on first, matching `Scoreboard.addPlayerToTeam`). The
+store rides inside `WorldStateHandle` as a sibling of `scoreboard`, the
+identical reachability shape that module's own section above already
+explains.
+
+New argument types: `lodestone_command_mc::{TeamArg, TeamColorArg}`
+(`minecraft:team`/`minecraft:team_color`); `nametagVisibility`/
+`deathMessageVisibility`/`collisionRule` are registered as literal-token
+children rather than a generic argument type, matching
+`TeamCommand.addTeamOptions`'s own shape for those three.
+
+`team=`/`team=!` is also a new selector predicate
+(`lodestone_command_mc::SelectorPredicate::Team`), resolved through
+`crate::commands::source::resolve_players`'s new `team` closure parameter —
+the identical closure-over-handle shape `scores=` already uses, so this crate
+stays ignorant of the store's actual layout. The bare `team=` form (empty
+name) matches a holder on **no** team, matching vanilla's own comparison
+against `""` rather than a three-way `Option`.
+
+**Not built:** `displayName`/`prefix`/`suffix` accept plain text
+(`StringArgument::greedy`), not vanilla's JSON text component — the same
+honest omission `/scoreboard objectives add`'s `displayName` already makes,
+since this crate has no textual component parser anywhere.
+`friendlyfire`/`seeFriendlyInvisibles`/`collisionRule` are stored and
+reported back but not yet *enforced* by the mob/combat simulation — "stored
+and broadcast is not enforced" is the same shape difficulty was in before its
+first real consumer landed (see `crate::world_state`'s own module doc).
 
 #### The four mechanisms
 
@@ -434,10 +482,14 @@ changes at all: every branch point in vanilla's own tree offers at most one
 argument children — `/tp`'s own gap, see that command's module doc) never
 engages here.
 
-Built: `as`, `at`, `positioned` (+ `as`), `rotated` (redirect only), `facing`
-(`<pos>` and `entity <targets> <anchor>`), `align`, `anchored`, `in`
-(single-hosted-dimension census), `run`, and `if`/`unless entity`/`dimension`/
-`score`. Each subcommand is one [`Registrar::modifier`] rewriting the one
+Built: `as`, `at` (position **and** rotation), `positioned` (+ `as`), `rotated`
+(+ `as`), `facing` (`<pos>` and `entity <targets> <anchor>`), `align`,
+`anchored`, `in` (single-hosted-dimension census), `run`, and `if`/`unless
+entity`/`dimension`/`score`. `at`'s rotation transfer and `rotated as` needed
+`PlayerCandidate` to carry a rotation, which it now does —
+`crate::players::PlayerRegistry` was already tracking a live per-connection
+`Rotation` and simply never threading it through. Each subcommand is one
+[`Registrar::modifier`] rewriting the one
 [`CommandSource`] flowing through it, redirected back to `execute`'s own
 children — the modifier/fork substrate this document already named as "built
 before `/execute` needs it" now has its first production caller.
@@ -468,23 +520,21 @@ see that function's own doc comment for the failure mode it closes (a fork
 that empties the source set before the bare form's pass/fail message ever
 gets to run).
 
-Not built, each naming its own missing subsystem: `rotated as`/`at`'s rotation
-transfer (`PlayerCandidate` carries no rotation — the identical gap `/tp`'s own
-module doc names), `store` (a scoreboard now exists to write *into* — see
-"`/scoreboard`" below — but nothing in the dispatcher yet wraps a chained
-command's own return value the way `store` needs to capture it), `if
-data`/`items` (no NBT storage or container-slot query reachable from a
-command — a textual SNBT *parser* now exists, `lodestone_command_mc::snbt`,
-but `if data` additionally needs somewhere to read NBT *from*, which this
-crate still has nowhere), `if predicate` (no loot-predicate engine),
-`stopwatch` (no stopwatch registry), `if block`/`biome`/`blocks`/`loaded` (no
-read-only block/biome/chunk-residency query on `CommandWorld`, which today
-only ever *writes* blocks), `on <relation>` (no entity-relationship query on
-the mob simulation), the `execute summon` modifier form (unnecessary as its
-own subtree — `/summon` is already a root command reachable through `run`),
-and `positioned over <heightmap>` (no heightmap query).
-`crate::commands::execute`'s own module doc is the up-to-date source for this
-list.
+Not built, each naming its own missing subsystem: `store` (a scoreboard now
+exists to write *into* — see "`/scoreboard`" below — but nothing in the
+dispatcher yet wraps a chained command's own return value the way `store`
+needs to capture it), `if data`/`items` (no NBT storage or container-slot
+query reachable from a command — a textual SNBT *parser* now exists,
+`lodestone_command_mc::snbt`, but `if data` additionally needs somewhere to
+read NBT *from*, which this crate still has nowhere), `if predicate` (no
+loot-predicate engine), `stopwatch` (no stopwatch registry), `if
+block`/`biome`/`blocks`/`loaded` (no read-only block/biome/chunk-residency
+query on `CommandWorld`, which today only ever *writes* blocks), `on
+<relation>` (no entity-relationship query on the mob simulation), the
+`execute summon` modifier form (unnecessary as its own subtree — `/summon` is
+already a root command reachable through `run`), and `positioned over
+<heightmap>` (no heightmap query). `crate::commands::execute`'s own module
+doc is the up-to-date source for this list.
 
 Tested in `crates/lodestone-server/tests/builtin_commands.rs`, each assertion
 predicting a rewritten answer a caller-position/caller-entity reading of the
@@ -737,7 +787,13 @@ Still open, and each is now additive rather than blocked:
 * **A real scoreboard now exists** (`crate::commands::scoreboard`,
   `crate::commands::scoreboard_store::ScoreboardHandle` — see the
   `#### /scoreboard` section above), and `/execute if`/`unless score` is built
-  on it. What is still open: **`store`** (a scoreboard exists to write *into*,
+  on it. **A real team store now exists too** (`crate::commands::team`,
+  `crate::commands::team_store::TeamHandle` — see `#### /team` above),
+  separately from the scoreboard as vanilla itself keeps them, and `team=` is
+  a real selector filter. **`at`'s rotation transfer and `rotated as` are also
+  built now** — `PlayerCandidate` carries a live rotation (`crate::players`
+  already tracked one per connection and simply never threaded it through).
+  What is still open: **`store`** (a scoreboard exists to write *into*,
   but the dispatcher does not yet wrap a chained command's return value the
   way `store` needs to capture it), **`if data`/`items`** (a textual SNBT
   *parser* now exists — `lodestone_command_mc::snbt::{NbtTagArg,

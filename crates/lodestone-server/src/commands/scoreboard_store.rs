@@ -10,9 +10,13 @@
 //! behave identically here, because nothing in this server increments a
 //! score on its own. Every score changes because a command (or `/execute
 //! store`, not yet built — see `crate::commands::execute`'s module doc)
-//! asked for it to. Teams and display slots (`/scoreboard objectives
-//! setdisplay`) are not modelled at all: nothing in this crate renders a
-//! sidebar, so a stored display slot would be write-only.
+//! asked for it to. **Teams are a separate store** —
+//! `crate::commands::team_store`, reached through the identical
+//! `WorldStateHandle`-sibling shape this module uses, not folded in here,
+//! matching vanilla's own `Scoreboard` keeping objectives/scores and teams as
+//! two tables. Display slots (`/scoreboard objectives setdisplay`) are still
+//! not modelled at all: nothing in this crate renders a sidebar, so a stored
+//! display slot would be write-only.
 //!
 //! # How it works
 //!
