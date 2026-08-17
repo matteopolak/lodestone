@@ -76,6 +76,8 @@ impl WindowApp {
             merchant_selected: 0,
             anvil_rename: crate::container::AnvilRenameState::new(),
             beacon_selection: crate::container::beacon::BeaconSelection::new(),
+            stonecutter_scroll: 0.0,
+            loom_scroll: 0.0,
             pending_game_rules: None,
             last_ping_request: None,
         }

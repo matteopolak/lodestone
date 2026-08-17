@@ -94,16 +94,20 @@ pub enum SpecialLayout {
     /// ingredient `(79,17)`, fuel `(17,17)` — `BrewingStandMenu.java:48-52`.
     Brewing,
     /// `LoomMenu`: banner `(13,26)`, dye `(33,26)`, pattern `(23,45)`, result
-    /// `(143,57)` — `LoomMenu.java:64-82`. The pattern-selection button grid
-    /// (`clickMenuButton`) is not modelled — see `docs/container-clicks.md`'s
-    /// "screens whose logic does not exist" framing; it needs the banner
-    /// pattern registry and a `ContainerButtonClick` producer, neither of
-    /// which this tree has yet.
+    /// `(143,57)` — `LoomMenu.java`. **Stale, corrected**: this used to say
+    /// the pattern-selection button grid was unmodelled, needing a banner
+    /// pattern registry and a `ContainerButtonClick` producer this tree
+    /// lacked. Both now exist — `lodestone-server`'s `loom` module computes
+    /// real results and `lodestone-shell`'s `container::loom` is the click
+    /// surface; see `docs/container-station-widgets.md`.
     Loom,
     /// `StonecutterMenu`: input `(20,33)`, result `(143,33)` —
-    /// `StonecutterMenu.java:54-55`. The recipe-selection scroll list is not
-    /// modelled, for the same reason as [`Loom`](Self::Loom)'s pattern grid:
-    /// it needs the stonecutter recipe set, which is server-only data here.
+    /// `StonecutterMenu.java`. **Stale, corrected**: this used to say the
+    /// recipe-selection scroll list was unmodelled, needing server-only
+    /// recipe data this tree lacked. It now loads through the same
+    /// jar-sourced `RecipeBook` the crafting recipe book uses, and
+    /// `lodestone-shell`'s `container::stonecutter` is the click surface;
+    /// see `docs/container-station-widgets.md`.
     Stonecutter,
     /// `CartographyTableMenu`: map `(15,15)`, additional `(15,52)`, result
     /// `(145,39)` — `CartographyTableMenu.java:49-61`.
@@ -501,15 +505,17 @@ impl Menu {
 
     /// Builds the loom menu: banner (`0`), dye (`1`), pattern (`2`), then a
     /// take-only result slot (`3`), then the player's main storage and
-    /// hotbar (`LoomMenu.java:64-106`).
+    /// hotbar (`LoomMenu.java`).
     ///
-    /// The banner-pattern selection grid (`LoomMenu.clickMenuButton`) is not
-    /// modelled — see [`SpecialLayout::Loom`]'s doc comment. The slots
-    /// themselves need no such data: a banner/dye/pattern item is accepted
-    /// or refused by its own item kind, which is a placement predicate this
-    /// menu leaves on the generic "accept anything, let the server correct
-    /// it" order along with the routing gap above, and the result slot is
-    /// still correctly take-only.
+    /// **Stale, corrected**: this used to say the banner-pattern selection
+    /// grid was not modelled here at all. That was true when written and is
+    /// not any more — `lodestone-shell`'s `container::loom` module is the
+    /// grid's click surface (see `docs/container-station-widgets.md`); this
+    /// constructor still needs no pattern data of its own, since a
+    /// banner/dye/pattern item is accepted or refused by its own item kind, a
+    /// placement predicate this menu leaves on the generic "accept anything,
+    /// let the server correct it" order, and the result slot is still
+    /// correctly take-only.
     #[must_use]
     pub fn loom() -> Self {
         let mut menu = Self::generic(4);

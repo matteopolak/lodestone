@@ -58,6 +58,9 @@ mod frame;
 mod geometry;
 mod input;
 mod layout;
+/// The loom's 32-pattern grid (`ContainerButtonClick`'s remainder for this
+/// screen) — see its own module doc.
+pub mod loom;
 /// The merchant/trading screen's own trade-list layout, prices and click
 /// hit-test (that fix's UI half) — see `docs/merchant-screen.md`.
 pub mod merchant;

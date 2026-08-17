@@ -377,19 +377,20 @@ impl WindowApp {
         true
     }
 
-    /// The stonecutter's recipe-selection grid (issue #613's
-    /// `ContainerButtonClick` remainder for this screen — see
+    /// The stonecutter's recipe-selection grid (`ContainerButtonClick`'s
+    /// remainder for this screen — see
     /// [`crate::container::stonecutter`]'s module doc). Same shape as
     /// [`Self::handle_enchant_click`]: a hit *is* the send, pre-validated
     /// client-side the same way vanilla's own `StonecutterMenu` mirror gates
     /// `clickMenuButton` before ever reaching the network.
     ///
-    /// `start_index` is pinned at `0` — this crate has no persisted scroll
-    /// state for this screen yet (see
-    /// [`crate::container::stonecutter`]'s "How to change it"), so a
-    /// stonecutting input with more than twelve matches only exposes the
-    /// first twelve here. The screen stays open afterwards, matching
-    /// `StonecutterScreen`: selecting a recipe never closes it.
+    /// `start_index` reads the persisted [`Self::stonecutter_scroll`] offset
+    /// through [`crate::container::stonecutter::start_index_for_scroll`] —
+    /// **stale, corrected**: this used to be pinned at `0` with no scroll
+    /// input wired anywhere, which was true when written and is not any
+    /// more (see [`Self::scroll_stonecutter`]). The screen stays open
+    /// afterwards, matching `StonecutterScreen`: selecting a recipe never
+    /// closes it.
     pub(super) fn handle_stonecutter_click(&mut self, menu: &Menu, w: u32, h: u32) -> bool {
         if menu.special_layout() != Some(lodestone_game::menu::SpecialLayout::Stonecutter) {
             return false;
@@ -403,6 +404,8 @@ impl WindowApp {
         if recipe_count == 0 {
             return false;
         }
+        let start_index =
+            crate::container::stonecutter::start_index_for_scroll(self.stonecutter_scroll, recipe_count);
         let Some(index) = crate::container::stonecutter::button_hit_test(
             menu,
             self.nav.gui_scale(),
@@ -411,11 +414,109 @@ impl WindowApp {
             self.cursor.0,
             self.cursor.1,
             recipe_count,
-            0,
+            start_index,
         ) else {
             return false;
         };
         self.sim.send_container_button_click(open.window_id, index);
+        true
+    }
+
+    /// One `MouseWheel` notch over an open stonecutter screen: advances
+    /// [`Self::stonecutter_scroll`] through
+    /// [`crate::container::stonecutter::scroll_offset_after_wheel`] —
+    /// `StonecutterScreen.mouseScrolled`'s own step. Returns whether the
+    /// notch was consumed (the stonecutter screen is open and has a
+    /// non-empty match list), the same "did this surface claim it" shape
+    /// [`Self::handle_bundle_scroll`] uses, so a caller can gate any further
+    /// scroll handling on it.
+    ///
+    /// Unlike vanilla's `mouseScrolled`, this does not check the cursor
+    /// position — vanilla does not either: `StonecutterScreen` overrides
+    /// `mouseScrolled` with no bounds check at all, since the whole screen
+    /// has exactly one scrollable region.
+    pub(super) fn scroll_stonecutter(&mut self, notches: f64) -> bool {
+        let Some(menu) = self.active_container_menu() else { return false };
+        if menu.special_layout() != Some(lodestone_game::menu::SpecialLayout::Stonecutter) {
+            return false;
+        }
+        let Some(book) = self.recipe_book.as_ref() else { return false };
+        let Some(input) = menu.slot_item(crate::container::stonecutter::INPUT_SLOT) else {
+            return false;
+        };
+        let recipe_count = crate::container::stonecutter::matches(book, input.item()).len();
+        if recipe_count == 0 {
+            return false;
+        }
+        self.stonecutter_scroll = crate::container::stonecutter::scroll_offset_after_wheel(
+            self.stonecutter_scroll,
+            notches as f32,
+            recipe_count,
+        );
+        true
+    }
+
+    /// The loom's 32-pattern grid (`ContainerButtonClick`'s remainder for
+    /// this screen — see [`crate::container::loom`]'s module doc). Same
+    /// shape as [`Self::handle_stonecutter_click`]: a hit *is* the send,
+    /// pre-validated client-side against
+    /// [`crate::container::loom::display_patterns`]/
+    /// [`crate::container::loom::selectable_pattern_count`] the same way
+    /// vanilla's own `LoomMenu` mirror gates `clickMenuButton` before ever
+    /// reaching the network. The screen stays open afterwards, matching
+    /// `LoomScreen`: selecting a pattern never closes it.
+    pub(super) fn handle_loom_click(&mut self, menu: &Menu, w: u32, h: u32) -> bool {
+        if menu.special_layout() != Some(lodestone_game::menu::SpecialLayout::Loom) {
+            return false;
+        }
+        let Some(open) = self.sim.open_menu() else { return false };
+        let banner = menu.slot_item(crate::container::loom::BANNER_SLOT);
+        let dye = menu.slot_item(crate::container::loom::DYE_SLOT);
+        let pattern_item = menu.slot_item(crate::container::loom::PATTERN_SLOT);
+        if !crate::container::loom::display_patterns(banner, dye, pattern_item) {
+            return false;
+        }
+        let pattern_count = crate::container::loom::selectable_pattern_count(pattern_item);
+        let start_row =
+            crate::container::loom::start_row_for_scroll(self.loom_scroll, pattern_count);
+        let Some(index) = crate::container::loom::button_hit_test(
+            menu,
+            self.nav.gui_scale(),
+            w,
+            h,
+            self.cursor.0,
+            self.cursor.1,
+            pattern_count,
+            start_row,
+        ) else {
+            return false;
+        };
+        self.sim.send_container_button_click(open.window_id, index);
+        true
+    }
+
+    /// One `MouseWheel` notch over an open loom screen — the same shape as
+    /// [`Self::scroll_stonecutter`], advancing [`Self::loom_scroll`] through
+    /// [`crate::container::loom::scroll_offset_after_wheel`]
+    /// (`LoomScreen.mouseScrolled`'s own step, also with no cursor-position
+    /// check, matching vanilla).
+    pub(super) fn scroll_loom(&mut self, notches: f64) -> bool {
+        let Some(menu) = self.active_container_menu() else { return false };
+        if menu.special_layout() != Some(lodestone_game::menu::SpecialLayout::Loom) {
+            return false;
+        }
+        let banner = menu.slot_item(crate::container::loom::BANNER_SLOT);
+        let dye = menu.slot_item(crate::container::loom::DYE_SLOT);
+        let pattern_item = menu.slot_item(crate::container::loom::PATTERN_SLOT);
+        if !crate::container::loom::display_patterns(banner, dye, pattern_item) {
+            return false;
+        }
+        let pattern_count = crate::container::loom::selectable_pattern_count(pattern_item);
+        self.loom_scroll = crate::container::loom::scroll_offset_after_wheel(
+            self.loom_scroll,
+            notches as f32,
+            pattern_count,
+        );
         true
     }
 
