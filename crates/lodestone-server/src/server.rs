@@ -4012,6 +4012,7 @@ where
             // wildcard so that adding a variant stays a compile error.
             | ServerBound::ChatCommand { .. }
             | ServerBound::Chat { .. }
+            | ServerBound::ChatSessionAnnounced { .. }
             | ServerBound::PlayerCommand { .. }
             | ServerBound::RenameItem { .. }
             | ServerBound::ContainerButtonClick { .. }
@@ -10474,6 +10475,13 @@ async fn dispatch_play_packet<T, P, S>(
     // registry and this connection's username) because the caller already
     // owns both, and this function already takes 25.
     outgoing_chat: &mut Vec<String>,
+    // This connection's announced chat-signing session (if any) and the
+    // verification chain position tracked against it — mirrors
+    // `pending_keep_alive`/`player_pos`'s shape exactly: connection-scoped
+    // state the caller owns and this function mutates in place. See
+    // `crate::chat_session`'s own module doc for what it is and is not used
+    // for.
+    chat_session: &mut Option<crate::chat_session::ServerChatSession>,
     // The shared player registry, for the `ChatCommand` arm alone: a command's
     // entity selectors resolve against the roster, and a command's effects aimed
     // at *another* player are queued on it.
@@ -12313,10 +12321,63 @@ where
         // Empty messages are dropped rather than broadcast. Vanilla rejects
         // them upstream of the packet (the client will not send one), so a
         // frame carrying one is malformed rather than meaningful.
-        ServerBound::Chat { message } => {
+        //
+        // Decode/verification half: `crate::chat_session::decide`
+        // is consulted before broadcasting at all. A rejected message is
+        // never queued on `outgoing_chat` — it is reported back to the
+        // sender alone (mirroring vanilla's `handleMessageDecodeFailure`,
+        // which never disconnects for this), not to every connection the way
+        // a real broadcast would. See that module's own doc for exactly what
+        // "verified" does and does not mean here.
+        ServerBound::Chat {
+            message,
+            timestamp_millis,
+            salt,
+            signature,
+        } => {
             if !message.trim().is_empty() {
-                outgoing_chat.push(message);
+                let enforce = players.is_some_and(PlayerRegistry::enforce_secure_profile);
+                let decision = crate::chat_session::decide(
+                    chat_session,
+                    player_uuid,
+                    enforce,
+                    signature.as_ref().map(|s| s.as_slice()),
+                    &message,
+                    timestamp_millis,
+                    salt,
+                    crate::chat_session::now_millis(),
+                );
+                match decision {
+                    crate::chat_session::ChatDecision::Accept { .. } => {
+                        outgoing_chat.push(message);
+                    }
+                    crate::chat_session::ChatDecision::Reject { reason } => {
+                        apply(
+                            conn,
+                            state,
+                            proto.encode_system_chat(&format!("Your message was not sent: {reason}")),
+                        )
+                        .await?;
+                    }
+                }
             }
+        }
+        // `crate::chat_session::ServerChatSession::new` replaces
+        // whatever session this connection had announced before — see that
+        // type's own doc for why a fresh announcement always resets the
+        // verification chain rather than trying to reconcile it.
+        ServerBound::ChatSessionAnnounced {
+            session_id,
+            expires_at_millis,
+            public_key,
+            key_signature,
+        } => {
+            *chat_session = Some(crate::chat_session::ServerChatSession::new(
+                session_id,
+                expires_at_millis,
+                public_key,
+                key_signature,
+            ));
         }
         // Issue #335. Wire-level plugin messaging, Play-phase: the
         // register/unregister control channels update this connection's
@@ -12828,6 +12889,11 @@ where
     // Issue #469. Filled by `dispatch_play_packet`, drained immediately after
     // it returns — it exists only to carry a message across that call.
     let mut outgoing_chat: Vec<String> = Vec::new();
+    // This connection's announced chat-signing session, if any —
+    // `None` until a `chat_session_update` arrives, exactly like every other
+    // per-connection `Option` this loop threads (`pending_keep_alive`,
+    // `player_pos`'s rotation half). See `crate::chat_session`'s own doc.
+    let mut chat_session: Option<crate::chat_session::ServerChatSession> = None;
     // This connection's read position in the shared chat log. Started at the
     // log's *current end* so a joining player is not replayed the backlog of
     // everything said before they arrived.
@@ -13052,6 +13118,7 @@ where
                     &mut advancements,
                     player_uuid,
                     &mut outgoing_chat,
+                    &mut chat_session,
                     entities.players(),
                     block_ticks,
                     &mut composter_rng,
@@ -15555,6 +15622,8 @@ where
     let mut pending_chunk_batches: VecDeque<Vec<ServerDirective>> = VecDeque::new();
     // Issue #469 — see the native loop's identical binding.
     let mut outgoing_chat: Vec<String> = Vec::new();
+    // See the native loop's identical binding.
+    let mut chat_session: Option<crate::chat_session::ServerChatSession> = None;
 
     // `ServerPlayer::initInventoryMenu` — see the native `serve_play`'s identical
     // send and `join_inventory_snapshot`'s own doc comment. Placed *before* the
@@ -15677,6 +15746,7 @@ where
             &mut advancements,
             player_uuid,
             &mut outgoing_chat,
+            &mut chat_session,
             entities.players(),
             block_ticks,
             &mut composter_rng,

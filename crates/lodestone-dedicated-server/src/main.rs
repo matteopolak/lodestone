@@ -168,6 +168,14 @@ async fn main() {
         .world_state()
         .set_default_game_mode(props.gamemode);
     server.world_state().set_difficulty(props.difficulty);
+    // Same "set before `publish_with_config` opens the listener"
+    // ordering as the two calls above — see `lodestone_server::chat_session`'s
+    // module doc for what this flag does and does not verify, and
+    // `ServerProperties`'s own doc comment for why its default here is `false`
+    // rather than vanilla's real `true`.
+    if let Some(players) = server.players() {
+        players.set_enforce_secure_profile(props.enforce_secure_profile);
+    }
 
     let online_mode = if props.online_mode {
         // The same crypto-provider install `lodestone-auth`'s own login path

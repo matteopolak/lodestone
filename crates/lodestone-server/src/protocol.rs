@@ -1306,33 +1306,72 @@ pub enum ServerBound {
     /// so grepping for "chat" found a finished feature and hid the fact that
     /// a player could not say anything to us at all.
     ///
-    /// # Only the text survives decoding, deliberately
+    /// # Signature and timestamp/salt now survive decoding; the acknowledgement does not
     ///
-    /// The wire packet also carries a timestamp, a salt, an optional 256-byte
-    /// signature and a last-seen acknowledgement block
-    /// (`ServerboundChatPacket`, 26.2). Those are decoded — the layout has to
-    /// be read to find the end of the frame — and then **dropped**, because
-    /// this crate has no session-key infrastructure to verify a signature
-    /// against: it never handles `chat_session_update`, holds no player public
-    /// keys, and reports `enforcesSecureChat = false` in its own status
-    /// response. Carrying an unverifiable signature into the server loop would
-    /// be strictly worse than not carrying it, because a later reader could
-    /// mistake its presence for validation.
+    /// The wire packet also carries a last-seen acknowledgement block
+    /// (`ServerboundChatPacket`, 26.2) — a varint offset, a fixed 20-bit bit
+    /// set and a checksum byte. That part is decoded (the layout has to be
+    /// read to find the end of the frame) and then still **dropped**, for the
+    /// same reason it always was: the sequence counter belongs to whoever
+    /// drives the connection, and a second writer forks it (see
+    /// `ChatAckInfo`'s unreachability from the WASM plugin ABI,
+    /// `lodestone-wasm-host`'s `abi.rs`, for the same shape). This crate also
+    /// still never sends a signed `player_chat` (see "Chat is therefore
+    /// broadcast unsigned" below), so a real client's own outgoing
+    /// last-seen window stays permanently empty regardless — there is
+    /// nothing yet for the acknowledgement to carry.
     ///
-    /// Chat is therefore **broadcast unsigned**, as a `system_chat` component
-    /// rendered in vanilla's own `chat.type.text` (`"<%s> %s"`) form, rather
-    /// than as a real `player_chat` packet. Verifying signatures and emitting
-    /// `player_chat` is a separate, larger piece of work; see
-    /// `docs/player-chat.md`.
+    /// `timestamp`/`salt`/`signature` **do** now survive, because
+    /// `crate::chat_session::decide` needs them to verify a message against
+    /// the sender's announced [`ChatSessionAnnounced`](Self::ChatSessionAnnounced)
+    /// session. See that module's own doc for exactly what this verifies and
+    /// what it does not (in particular: no Mojang-provenance check on the
+    /// announced key itself).
     ///
-    /// The acknowledgement `offset` is dropped for the same reason
-    /// `ChatAckInfo` is unreachable from the WASM plugin ABI
-    /// (`lodestone-wasm-host`'s `abi.rs`): the sequence counter belongs to
-    /// whoever drives the connection, and a second writer forks it.
+    /// Chat is still **broadcast unsigned to every peer**, as a `system_chat`
+    /// component rendered in vanilla's own `chat.type.text` (`"<%s> %s"`)
+    /// form, rather than as a real `player_chat` packet — verification only
+    /// gates whether *this server* accepts the message, it does not let any
+    /// other client verify it too. Emitting real `player_chat` is a separate,
+    /// larger piece of work; see `docs/player-chat.md`.
     Chat {
         /// The message text exactly as the player typed it, capped at 256
         /// characters by the wire format.
         message: String,
+        /// Client-reported timestamp, epoch milliseconds
+        /// (`ServerboundChatPacket.timestamp`). Part of the signed payload —
+        /// see [`crate::chat_session::decide`].
+        timestamp_millis: i64,
+        /// Random salt used for signing (`0` for unsigned chat).
+        salt: i64,
+        /// The 256-byte signature, when the client sent one. `None` for
+        /// unsigned chat, or when this player has never announced a session
+        /// at all.
+        signature: Option<[u8; 256]>,
+    },
+    /// A client announced (or re-announced) its chat-signing session
+    /// (`minecraft:chat_session_update`) —
+    /// `ServerboundChatSessionUpdatePacket` → `RemoteChatSession.Data`.
+    ///
+    /// `crate::chat_session::ServerChatSession::new` is this variant's one
+    /// consumer: it replaces whatever session this connection had announced
+    /// before (resetting the verification chain to index 0, mirroring
+    /// vanilla's `resetPlayerChatState` swapping the whole
+    /// `signedMessageDecoder` rather than repairing one) — see that type's
+    /// own doc for what is and is not checked about it.
+    ChatSessionAnnounced {
+        /// The client-generated session UUID every signed message's chain is
+        /// rooted at (`SignedMessageLink.sessionId`).
+        session_id: Uuid,
+        /// Profile public key expiry, epoch milliseconds.
+        expires_at_millis: i64,
+        /// DER-encoded (X.509 `SubjectPublicKeyInfo`) RSA public key, verbatim
+        /// off the wire.
+        public_key: Vec<u8>,
+        /// Mojang's signature over `public_key` (`publicKeySignatureV2`),
+        /// carried but never checked against Mojang's own Services key — see
+        /// `crate::chat_session`'s module doc for why.
+        key_signature: Vec<u8>,
     },
     /// A tab-completion request (`ServerboundCommandSuggestionPacket`, the
     /// wire half of issue #48 that `ChatCommand` alone does not cover).

@@ -28,6 +28,17 @@
 //! * **`online-mode`'s real default is `true`.** A hand-authored default
 //!   would be tempting to leave `false` (the safer footgun to ship); vanilla's
 //!   own default is online, and [`default_raw`] matches it.
+//! * **`enforce-secure-profile`'s default here is `false`, and that is a
+//!   deliberate divergence from vanilla's real default (`true`), not a typo.**
+//!   Every other key above is a faithful transcription; this one key is not,
+//!   because faithfully copying the default would overclaim: this crate's
+//!   verifier (`crate::chat_session`) checks a signature against whatever
+//!   public key a client announced, but never checks that key's Mojang
+//!   provenance (no fetch of Mojang's Services signing key — see
+//!   `crate::chat_session`'s own module doc), so turning enforcement on here
+//!   does not buy the identity guarantee vanilla's `enforce-secure-profile`
+//!   promises. Defaulting off avoids a fresh `server.properties` claiming
+//!   protection this crate cannot yet back up. See `docs/player-chat.md`.
 //!
 //! ## How it works
 //!
@@ -267,7 +278,9 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("enable-query", "false"),
     ("enable-rcon", "false"),
     ("enable-status", "true"),
-    ("enforce-secure-profile", "true"),
+    // Vanilla's own real default is "true" — see this module's doc comment
+    // for why the value written here is deliberately not that.
+    ("enforce-secure-profile", "false"),
     ("enforce-whitelist", "false"),
     ("entity-broadcast-range-percentage", "100"),
     ("force-gamemode", "false"),
@@ -379,6 +392,12 @@ pub struct ServerProperties {
     /// `query.port`. Parsed and preserved; not wired (same reason as
     /// `enable_query` — see the doc above).
     pub query_port: u16,
+    /// `enforce-secure-profile`. Wired: `crate::main`-equivalent
+    /// callers apply it via `PlayerRegistry::set_enforce_secure_profile`,
+    /// which `crate::chat_session::decide` actually consults. **Defaults to
+    /// `false` here, not vanilla's real `true`** — see this module's own doc
+    /// comment for why.
+    pub enforce_secure_profile: bool,
     /// Everything else, including every key above (kept in sync by
     /// [`Self::to_raw`]) and every real vanilla key this struct does not
     /// model — round-tripped verbatim.
@@ -453,6 +472,7 @@ impl ServerProperties {
             rcon_password: get("rcon.password", ""),
             enable_query: get_bool("enable-query", false),
             query_port: get_u16("query.port", 25565),
+            enforce_secure_profile: get_bool("enforce-secure-profile", false),
             raw,
         }
     }
@@ -482,6 +502,7 @@ impl ServerProperties {
         raw.set("rcon.password", self.rcon_password.clone());
         raw.set("enable-query", self.enable_query.to_string());
         raw.set("query.port", self.query_port.to_string());
+        raw.set("enforce-secure-profile", self.enforce_secure_profile.to_string());
         raw
     }
 }
@@ -624,6 +645,7 @@ rcon.port=25576
 rcon.password=distinct-rcon-pw
 enable-query=true
 query.port=25567
+enforce-secure-profile=true
 ";
         let props = ServerProperties::from_raw(RawProperties::parse(text));
         assert!(!props.online_mode);
@@ -645,6 +667,7 @@ query.port=25567
         assert_eq!(props.rcon_password, "distinct-rcon-pw");
         assert!(props.enable_query);
         assert_eq!(props.query_port, 25567);
+        assert!(props.enforce_secure_profile);
     }
 
     #[test]
@@ -671,6 +694,11 @@ query.port=25567
         assert!(created_first);
         assert!(first.online_mode, "vanilla's real default is online-mode=true");
         assert_eq!(first.motd, "A Minecraft Server");
+        assert!(
+            !first.enforce_secure_profile,
+            "this crate's default deliberately diverges from vanilla's real \
+             enforce-secure-profile=true — see this module's own doc comment"
+        );
         let (_second, created_second) = ServerProperties::load_or_create(&path).unwrap();
         assert!(!created_second);
         std::fs::remove_dir_all(&dir).ok();

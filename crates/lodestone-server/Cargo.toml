@@ -179,6 +179,18 @@ web-sys = { version = "0.3", features = ["Window"] }
 # periodic time-of-day broadcast without a real 15-second wait — the same
 # precedent `lodestone-net`'s own dev-dependency (`Cargo.toml`) already sets.
 tokio = { workspace = true, features = ["test-util"] }
+# `src/chat_session.rs`'s tests build a throwaway RSA key pair (the same
+# fixed PKCS#8-DER test key `lodestone-auth`'s own `chat_session` tests and
+# `lodestone-client`'s `driver.rs` tests already use) to sign a fixture
+# message and independently re-verify it against `crate::chat_session::decide`.
+# Dev-only and therefore never part of the `wasm32` production build this
+# crate's own `Cargo.toml` otherwise guards closely: `cargo build` excludes
+# `[dev-dependencies]`, only `cargo test` pulls them in, and this crate's own
+# tests run natively (see `crate::chat_session`'s test module, gated
+# `not(target_arch = "wasm32")` to match `lodestone-auth`'s own gate on the
+# real dependency).
+rsa = { workspace = true }
+base64 = { workspace = true }
 serde_json = { workspace = true }
 lodestone-client = { path = "../lodestone-client" }
 lodestone-model = { path = "../lodestone-model" }
