@@ -197,6 +197,127 @@ pub fn geometry(chips: &[EffectChip], width: f32, height: f32) -> Vec<f32> {
     b.verts
 }
 
+/// `EffectsInInventory.ICON_SIZE` (`26.2`) — the icon swatch's side length.
+const INV_ICON_SIZE: f32 = 18.0;
+/// `EffectsInInventory.SPRITE_SQUARE_SIZE` — the background widget's fixed
+/// height, and the compact (icon-only) width used when there is no room for
+/// text.
+const INV_BACKGROUND: f32 = 32.0;
+/// `EffectsInInventory.extractRenderState`'s `yStep` when five or fewer
+/// effects are showing.
+const INV_Y_STEP: f32 = 33.0;
+/// `EffectsInInventory.extractRenderState`'s crowded-column span (`132`),
+/// divided by `count - 1` once more than five effects are active so the
+/// column still fits the panel's height instead of running off the bottom.
+const INV_CROWDED_SPAN: f32 = 132.0;
+
+/// Where the inventory effect column starts, and how much width it has to
+/// work with — `EffectsInInventory.canSeeEffects`/`extractRenderState`
+/// (`26.2`): `x0 = leftPos + imageWidth + 2`, `availableWidth = screenWidth -
+/// x0`. Real 26.2 source, read directly — **not** the older
+/// `EffectRenderingInventoryScreen` shape some descriptions of this feature
+/// still name: this version never repositions the container panel itself
+/// (`InventoryScreen`'s own `leftPos` comes from the ordinary centred/
+/// recipe-book-shifted layout, untouched by whether any effect is active) —
+/// it only decides whether there is *already* enough free canvas beside the
+/// panel to draw into. A panel-shifting "make room" step does not exist in
+/// this version's `EffectsInInventory`/`InventoryScreen`, so this port does
+/// not add one either.
+#[must_use]
+pub fn inventory_column_x0(panel_x: f32, panel_width: f32) -> f32 {
+    panel_x + panel_width + 2.0
+}
+
+/// `EffectsInInventory.canSeeEffects`: `availableWidth >= 32`.
+#[must_use]
+pub fn inventory_can_see_effects(available_width: f32) -> bool {
+    available_width >= INV_BACKGROUND
+}
+
+/// `EffectsInInventory.extractRenderState`'s `maxWidth`:
+/// `availableWidth >= 120 ? availableWidth - 7 : 32`.
+#[must_use]
+fn inventory_max_width(available_width: f32) -> f32 {
+    if available_width >= 120.0 {
+        available_width - 7.0
+    } else {
+        INV_BACKGROUND
+    }
+}
+
+/// `EffectsInInventory.extractRenderState`'s `yStep`: `33` for five or fewer
+/// active effects, `132 / (count - 1)` above that so a crowded column still
+/// fits between `topPos` and the bottom of the panel instead of overflowing.
+#[must_use]
+fn inventory_y_step(count: usize) -> f32 {
+    if count > 5 {
+        INV_CROWDED_SPAN / (count as f32 - 1.0)
+    } else {
+        INV_Y_STEP
+    }
+}
+
+/// Emit the player-inventory effect column — `EffectsInInventory`'s own
+/// widgets, ported with this module's existing swatch-for-icon and bitmap
+/// font substitutions (see [`tint_for`]/[`Quads::text`]) rather than the real
+/// `container/inventory/effect_background` sprite and vanilla's proportional
+/// font, the same disclosed simplification [`geometry`]'s HUD chips already
+/// make.
+///
+/// `panel_x`/`panel_width` are the container panel's own `leftPos`/
+/// `imageWidth` in the **logical** GUI canvas (matching
+/// `container::layout::panel_origin_with_scale`'s output — the same space
+/// [`geometry`]'s `width`/`height` are, since both are pixel-space emitters
+/// feeding the same NDC conversion). `panel_y` is `topPos`, where the column
+/// starts. Returns an empty vector when there is no room
+/// ([`inventory_can_see_effects`]) or no active effect carries an icon,
+/// exactly mirroring [`geometry`]'s empty-input behaviour.
+#[must_use]
+pub fn inventory_geometry(
+    chips: &[EffectChip],
+    panel_x: f32,
+    panel_y: f32,
+    panel_width: f32,
+    canvas_w: f32,
+    canvas_h: f32,
+) -> Vec<f32> {
+    if chips.is_empty() {
+        return Vec::new();
+    }
+    let x0 = inventory_column_x0(panel_x, panel_width);
+    let available_width = canvas_w - x0;
+    if !inventory_can_see_effects(available_width) {
+        return Vec::new();
+    }
+    let max_width = inventory_max_width(available_width);
+    let y_step = inventory_y_step(chips.len());
+
+    let mut b = Quads::new(canvas_w, canvas_h);
+    let mut y0 = panel_y;
+    for chip in chips {
+        let name_width = INV_BACKGROUND + text_px(&chip.label) + 7.0;
+        let duration_width = INV_BACKGROUND + text_px(&chip.time) + 7.0;
+        let texture_width = max_width.min(name_width.max(duration_width));
+
+        let alpha = if chip.ambient { 0.6 } else { 0.85 };
+        b.rect(x0, y0, texture_width, INV_BACKGROUND, [0.05, 0.05, 0.05, alpha]);
+
+        let t = chip.tint;
+        b.rect(x0 + 7.0, y0 + 7.0, INV_ICON_SIZE, INV_ICON_SIZE, [t[0], t[1], t[2], 1.0]);
+
+        let text_x = x0 + INV_BACKGROUND;
+        let max_text_width = texture_width - INV_BACKGROUND - 7.0;
+        if max_text_width > 0.0 {
+            b.text(&chip.label, text_x, y0 + 7.0, [1.0, 1.0, 1.0, 1.0]);
+            if !chip.time.is_empty() {
+                b.text(&chip.time, text_x, y0 + 16.0, [0.65, 0.65, 0.65, 1.0]);
+            }
+        }
+        y0 += y_step;
+    }
+    b.verts
+}
+
 /// A minimal pixel-space quad emitter to NDC, mirroring the HUD's builder but
 /// self-contained (this module owns no dependency on the HUD's private types).
 struct Quads {
@@ -358,6 +479,49 @@ impl EffectsRenderer {
         if verts.is_empty() {
             return;
         }
+        self.draw_verts(device, queue, view, &verts);
+    }
+}
+
+impl EffectsRenderer {
+    /// Draw the player-inventory effect column over the current frame
+    /// contents — the same pipeline/buffer [`Self::render`] uses (plain
+    /// coloured quads), just positioned beside the container panel instead of
+    /// pinned to the screen's top-right corner. A no-op when
+    /// [`inventory_geometry`] has nothing to draw (no active effect, or no
+    /// room beside the panel), so a caller can call this unconditionally
+    /// every frame a container screen is open.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_in_inventory(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        fx: &ActiveEffects,
+        panel_x: f32,
+        panel_y: f32,
+        panel_width: f32,
+        width: u32,
+        height: u32,
+    ) {
+        let chips = chips_from(fx);
+        let verts = inventory_geometry(
+            &chips,
+            panel_x,
+            panel_y,
+            panel_width,
+            width as f32,
+            height as f32,
+        );
+        if verts.is_empty() {
+            return;
+        }
+        self.draw_verts(device, queue, view, &verts);
+    }
+
+    /// Shared upload+draw tail of [`Self::render`]/[`Self::render_in_inventory`]:
+    /// grow the buffer if needed, write it and issue one `Load`-pass draw call.
+    fn draw_verts(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView, verts: &[f32]) {
         if verts.len() > self.capacity_floats {
             self.capacity_floats = verts.len().next_power_of_two();
             self.buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -367,7 +531,7 @@ impl EffectsRenderer {
                 mapped_at_creation: false,
             });
         }
-        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&verts));
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(verts));
 
         let vertex_count = (verts.len() / FLOATS_PER_VERTEX) as u32;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -557,6 +721,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inventory_layout_matches_effects_in_inventory_java() {
+        // `canSeeEffects`: exactly `>= 32` is visible, one pixel under is not.
+        assert!(inventory_can_see_effects(32.0));
+        assert!(!inventory_can_see_effects(31.999));
+        // `maxWidth`: the `>= 120` branch subtracts 7; below it, pinned at 32.
+        assert_eq!(inventory_max_width(200.0), 193.0);
+        assert_eq!(inventory_max_width(120.0), 113.0);
+        assert_eq!(inventory_max_width(119.999), INV_BACKGROUND);
+        assert_eq!(inventory_max_width(40.0), INV_BACKGROUND);
+        // `yStep`: 33 up to and including five effects, `132 / (n - 1)` above.
+        assert_eq!(inventory_y_step(1), 33.0);
+        assert_eq!(inventory_y_step(5), 33.0);
+        assert_eq!(inventory_y_step(6), 132.0 / 5.0);
+        assert_eq!(inventory_y_step(7), 132.0 / 6.0);
+    }
+
+    #[test]
+    fn inventory_geometry_is_empty_with_no_effects_or_no_room() {
+        let mut fx = ActiveEffects::new();
+        fx.apply(effect("speed", 0, 200));
+        let chips = chips_from(&fx);
+
+        assert!(
+            inventory_geometry(&[], 20.0, 8.0, 176.0, 400.0, 300.0).is_empty(),
+            "no active effects: nothing to draw"
+        );
+        // Panel occupies the whole canvas: `available_width` is negative, well
+        // under the `>= 32` floor.
+        assert!(
+            inventory_geometry(&chips, 0.0, 0.0, 176.0, 178.0, 166.0).is_empty(),
+            "no room beside the panel: nothing to draw, matching canSeeEffects() == false"
+        );
+    }
+
+    /// Same discipline as [`geometry_covers_the_top_right_rect_only_when_effects_are_present`]:
+    /// rasterise the emitted quads and require coverage exactly in the column
+    /// beside the panel, none over the panel itself.
+    #[test]
+    fn inventory_geometry_covers_only_the_column_beside_the_panel() {
+        let (w, h) = (400.0_f32, 300.0_f32);
+        let (panel_x, panel_y, panel_w) = (20.0_f32, 8.0_f32, 176.0_f32);
+        let column_x0 = inventory_column_x0(panel_x, panel_w);
+
+        let lit_in = |verts: &[f32], rx0: f32, ry0: f32, rx1: f32, ry1: f32| -> usize {
+            let mut n = 0usize;
+            for quad in verts.chunks_exact(FLOATS_PER_VERTEX * 6) {
+                let (mut nx0, mut ny0, mut nx1, mut ny1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                for v in quad.chunks_exact(FLOATS_PER_VERTEX) {
+                    nx0 = nx0.min(v[0]);
+                    nx1 = nx1.max(v[0]);
+                    ny0 = ny0.min(v[1]);
+                    ny1 = ny1.max(v[1]);
+                }
+                let px0 = ((nx0 + 1.0) * 0.5 * w).round() as i32;
+                let px1 = ((nx1 + 1.0) * 0.5 * w).round() as i32;
+                let py0 = ((1.0 - ny1) * 0.5 * h).round() as i32;
+                let py1 = ((1.0 - ny0) * 0.5 * h).round() as i32;
+                for py in py0..py1 {
+                    for px in px0..px1 {
+                        let (fx, fy) = (px as f32, py as f32);
+                        if fx >= rx0 && fx < rx1 && fy >= ry0 && fy < ry1 {
+                            n += 1;
+                        }
+                    }
+                }
+            }
+            n
+        };
+
+        let mut fx = ActiveEffects::new();
+        fx.apply(effect("speed", 1, 1800));
+        fx.apply(effect("strength", 0, 600));
+        let chips = chips_from(&fx);
+        let verts = inventory_geometry(&chips, panel_x, panel_y, panel_w, w, h);
+        assert!(!verts.is_empty());
+
+        let in_column = lit_in(&verts, column_x0, 0.0, w, h);
+        let over_panel = lit_in(&verts, 0.0, 0.0, panel_x + panel_w, h);
+        assert!(
+            in_column > 200,
+            "two effects should light a substantial run of pixels in the column \
+             beside the panel, only {in_column} covered"
+        );
+        assert_eq!(
+            over_panel, 0,
+            "the effect column must never paint over the container panel itself; \
+             {over_panel} px leaked onto it"
+        );
+    }
+
     /// Headless GPU proof that the real pipeline draws: render the overlay to an
     /// offscreen target and read pixels back, asserting an empty set stays
     /// background and a populated set lights the top-right. Mirrors the HUD's
@@ -675,6 +930,112 @@ mod tests {
             corner_lit, 0,
             "the effects overlay must stay in the top-right; {corner_lit} px leaked into the \
              bottom-left corner — a blanket fill would pass the widget check but fail here"
+        );
+    }
+
+    /// Headless GPU proof for [`EffectsRenderer::render_in_inventory`], same
+    /// discipline as [`overlay_rasterises_to_pixels`]: an empty set stays
+    /// background, a populated set lights the column beside the panel, and —
+    /// the load-bearing control — nothing leaks onto the panel itself.
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn inventory_overlay_rasterises_beside_the_panel_only() {
+        use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget};
+
+        let ctx = GpuContext::new_headless_blocking().expect(
+            "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+             run on a host with a GPU, don't 'skip' — a silent pass here would assert nothing",
+        );
+        let device = ctx.device();
+        let queue = ctx.queue();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let (w, h) = (400u32, 300u32);
+        let (panel_x, panel_y, panel_w) = (20.0_f32, 8.0_f32, 176.0_f32);
+        let clear = wgpu::Color {
+            r: 0.04,
+            g: 0.04,
+            b: 0.08,
+            a: 1.0,
+        };
+        let bg = [10i32, 10, 20];
+
+        let render_frame = |fx: &ActiveEffects| -> Vec<u8> {
+            let mut target = HeadlessTarget::new(device, w, h, format);
+            let frame = target.acquire().expect("headless acquire");
+            {
+                let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("clear"),
+                });
+                enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("effects-inventory-clear"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: frame.view(),
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(clear),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                queue.submit(std::iter::once(enc.finish()));
+            }
+            let mut renderer = EffectsRenderer::new(device, format);
+            renderer.render_in_inventory(device, queue, frame.view(), fx, panel_x, panel_y, panel_w, w, h);
+            target.read_texels(device, queue)
+        };
+
+        let lit_in = |pixels: &[u8], x0: u32, y0: u32, x1: u32, y1: u32| -> usize {
+            let mut n = 0;
+            for py in y0..y1 {
+                for px in x0..x1 {
+                    let i = ((py * w + px) * 4) as usize;
+                    let d = (i32::from(pixels[i]) - bg[0]).abs()
+                        + (i32::from(pixels[i + 1]) - bg[1]).abs()
+                        + (i32::from(pixels[i + 2]) - bg[2]).abs();
+                    if d > 40 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+
+        let column_x0 = inventory_column_x0(panel_x, panel_w) as u32;
+        let panel_right = (panel_x + panel_w) as u32;
+
+        let empty = render_frame(&ActiveEffects::new());
+        let mut fx = ActiveEffects::new();
+        fx.apply(effect("speed", 1, 1800));
+        fx.apply(effect("strength", 0, 600));
+        let full = render_frame(&fx);
+
+        let empty_lit = lit_in(&empty, 0, 0, w, h);
+        let column_lit = lit_in(&full, column_x0, 0, w, h);
+        let over_panel_lit = lit_in(&full, 0, 0, panel_right, h);
+
+        eprintln!("=== inventory effects overlay rasterisation ===");
+        eprintln!("empty overlay lit px (whole frame) = {empty_lit}");
+        eprintln!("two-effect overlay lit px (column beside panel) = {column_lit}");
+        eprintln!("two-effect overlay lit px (over panel, must be 0) = {over_panel_lit}");
+
+        assert!(
+            empty_lit < 20,
+            "an empty effect set should read as background, but {empty_lit} px were lit"
+        );
+        assert!(
+            column_lit > 300,
+            "two effects should rasterise swatches + glyphs beside the panel, only \
+             {column_lit} lit — the pipeline or geometry path may be a no-op"
+        );
+        assert_eq!(
+            over_panel_lit, 0,
+            "the inventory effect column must never paint over the panel itself; \
+             {over_panel_lit} px leaked onto it"
         );
     }
 }
