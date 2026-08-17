@@ -1786,6 +1786,22 @@ pub struct SimMob<'w> {
     /// [`warden::MobSim::resolve_warden_anger`]'s own gate on how often a
     /// warden may re-use the ranged attack. `0` for every non-warden species.
     warden_sonic_boom_cooldown: i32,
+    /// `MemoryModuleType.DIG_COOLDOWN`'s own TTL — [`warden::DIGGING_COOLDOWN_TICKS`]
+    /// (1200) at spawn (`Warden.finalizeSpawn`'s own unconditional
+    /// `setMemoryWithExpiry`, issue #459's resolved ambiguity — see
+    /// [`warden`] module doc), continuously refreshed back to that value
+    /// every tick this warden is [`warden::AngerLevel::Angry`]
+    /// (`WardenAi.DIG_COOLDOWN_SETTER`'s own "refresh only while present"
+    /// shape), and decremented toward `0` otherwise. Digging becomes
+    /// eligible only once this reaches `0` — real vanilla's `DIG_COOLDOWN
+    /// absent`. `0` for every non-warden species.
+    warden_dig_cooldown: i32,
+    /// `WardenAi.DIGGING_DURATION` (100 ticks) counted down while
+    /// `Pose::Digging` — [`warden::MobSim::resolve_warden_anger`] discards
+    /// this mob outright once it reaches `0`, matching `Digging.stop`'s own
+    /// `body.remove(Entity.RemovalReason.DISCARDED)`. `0` for every
+    /// non-warden species and for a warden not currently digging.
+    warden_digging_ticks: i32,
     /// `Goat.DATA_HAS_LEFT_HORN`. `true` for every non-goat species (the
     /// field is meaningless there) and for a goat that has not lost this
     /// horn. Rolled once at spawn (`Goat.finalizeSpawn`'s own `nextFloat() <
@@ -2964,6 +2980,8 @@ impl<'w> SimMob<'w> {
         if self.entity_type.path() == "warden" {
             metadata.push(MetadataField::Pose(if self.warden_emerge_ticks > 0 {
                 warden::POSE_EMERGING
+            } else if self.warden_digging_ticks > 0 {
+                warden::POSE_DIGGING
             } else {
                 warden::POSE_STANDING
             }));
@@ -4452,6 +4470,8 @@ impl<'w> MobSim<'w> {
             warden_anger_target: None,
             warden_emerge_ticks: if is_warden { warden::EMERGE_DURATION_TICKS } else { 0 },
             warden_sonic_boom_cooldown: 0,
+            warden_dig_cooldown: if is_warden { warden::DIGGING_COOLDOWN_TICKS } else { 0 },
+            warden_digging_ticks: 0,
             has_left_horn: true,
             has_right_horn: true,
             reinforcement_chance: 0.0,
@@ -6389,6 +6409,11 @@ impl<'w> MobSim<'w> {
             .map(|me| {
                 if me.entity_type().path() != "warden"
                     || me.warden_emerge_ticks > 0
+                    // `DIG` outranks `FIGHT` in `WardenAi::updateActivity`'s
+                    // own priority list, the same reason `warden_emerge_ticks`
+                    // above already gates this off — a digging warden must
+                    // not also start walking toward whatever it is angry at.
+                    || me.warden_digging_ticks > 0
                     || !warden::AngerLevel::from_anger(me.warden_anger).is_angry()
                 {
                     return None;
