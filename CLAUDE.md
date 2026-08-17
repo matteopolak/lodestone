@@ -723,6 +723,20 @@ Know its scope, because outside it the instrument is *silent* rather than wrong 
   feature "does not work" and the function that implements it looks right, **stop reading the consumer and
   go find who constructs its input** — and the count that finds it is not "how many sites assign this
   field" but **"how many production sites assign it something other than the default"**. Zero is the tell.
+- **And a table keyed on "does this need behaviour?" is the wrong key for "does this need to exist?" — one
+  membership test, two questions.** Measured: `block_entity_for_item` creates a `BlockEntityRegistry` entry
+  only for the dozen block-entity types this server *simulates* (furnaces, hoppers, containers…), and both
+  persistence and chunk serving source their block-entity lists from that live registry. A skull needs a
+  record purely so the client will *draw* it — its render is block-entity-driven, like a chest's, not derived
+  from block state — so it entered no registry, was never written to disk, and was served in a chunk packet
+  carrying the right block state and an empty block-entity list. **~49 vanilla types are in this class and
+  only ~12 were covered.**
+
+  The symptom is the tell and it points at the wrong crate: a later `BLOCK_UPDATE` lets the client synthesize
+  the record itself off the state, so the block **appears the moment you interact with it** — which reads as a
+  client render bug, and was reported as one. **A thing that is invisible until touched is a missing
+  server-side record, not a draw bug.** The repair also generalises: synthesizing the gap at *load* time, not
+  just at placement, self-heals every already-broken save instead of only fixing new placements.
 - **Do not quote a coverage number from memory or from a doc — run it and quote that.** Legacy families
   are thin, and *decode* and *connectedness* are different axes; five issue bodies inherited one
   wrong-axis figure. Serverbound decode lives in `crates/protocol/v770/src/server_protocol.rs`, **not**
@@ -976,6 +990,22 @@ invariant behind *"never collide with terrain you cannot see"*. **So when a repo
 number is a hypothesis too.** The cheapest discriminator is usually an input that cannot physically affect the
 quantity — a pure camera rotation cannot change residency, so any movement in a residency counter under
 rotation alone localises the bug to the accounting before you read a line of the subsystem.
+
+**And a rate counter placed upstream of a throttle counts intentions, not events — so "N per second" is not
+a flood until you check which side of the transform the counter sits on.** Measured: a log showing ~20
+movement actions per 500 ms was read (by me, into a brief) as the client flooding the wire while standing
+still. `send_move_action` really does push one `ClientAction::Move` per tick — but v770's
+`select_move_packet` is already a tested port of `LocalPlayer.sendPosition`'s dirty-tracking, so on an idle
+tick it emits **nothing**, and the count was of queued actions upstream of it.
+
+The follow-on is the part worth carrying, because the "obvious" fix is a regression: **gating the producer
+starves the consumer's counter.** That port's 20-tick `positionReminder` only advances when it is *invoked*,
+exactly mirroring vanilla calling `sendPosition()` every real tick — so skipping pushes at the producer
+would silently kill the periodic resync while changing the packet rate not at all. **When the dirty-tracking
+lives downstream, the throttle belongs downstream too**, next to the "last actually sent" state it needs.
+(The real gap the same investigation found is elsewhere: `v47`/`v340`/`v735` encode a move packet
+unconditionally on every call, with no tracker of their own, so a legacy-family session genuinely does send
+20/s while idle.)
 
 **A throughput measurement structurally cannot see a latency defect, and the symptom will send you to the
 wrong instrument.** Measured while diagnosing a keep-alive timeout: the server kicked its own client because
