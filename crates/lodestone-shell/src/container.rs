@@ -67,6 +67,10 @@ pub mod merchant;
 mod player_preview;
 mod recipe_book;
 mod renderer;
+/// The stonecutter's recipe-selection scroll list (issue #613's
+/// `ContainerButtonClick` remainder for this screen) — see its own module
+/// doc.
+pub mod stonecutter;
 mod tooltip;
 
 pub use anvil_rename::AnvilRenameState;

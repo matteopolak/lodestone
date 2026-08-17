@@ -377,6 +377,48 @@ impl WindowApp {
         true
     }
 
+    /// The stonecutter's recipe-selection grid (issue #613's
+    /// `ContainerButtonClick` remainder for this screen — see
+    /// [`crate::container::stonecutter`]'s module doc). Same shape as
+    /// [`Self::handle_enchant_click`]: a hit *is* the send, pre-validated
+    /// client-side the same way vanilla's own `StonecutterMenu` mirror gates
+    /// `clickMenuButton` before ever reaching the network.
+    ///
+    /// `start_index` is pinned at `0` — this crate has no persisted scroll
+    /// state for this screen yet (see
+    /// [`crate::container::stonecutter`]'s "How to change it"), so a
+    /// stonecutting input with more than twelve matches only exposes the
+    /// first twelve here. The screen stays open afterwards, matching
+    /// `StonecutterScreen`: selecting a recipe never closes it.
+    pub(super) fn handle_stonecutter_click(&mut self, menu: &Menu, w: u32, h: u32) -> bool {
+        if menu.special_layout() != Some(lodestone_game::menu::SpecialLayout::Stonecutter) {
+            return false;
+        }
+        let Some(open) = self.sim.open_menu() else { return false };
+        let Some(book) = self.recipe_book.as_ref() else { return false };
+        let Some(input) = menu.slot_item(crate::container::stonecutter::INPUT_SLOT) else {
+            return false;
+        };
+        let recipe_count = crate::container::stonecutter::matches(book, input.item()).len();
+        if recipe_count == 0 {
+            return false;
+        }
+        let Some(index) = crate::container::stonecutter::button_hit_test(
+            menu,
+            self.nav.gui_scale(),
+            w,
+            h,
+            self.cursor.0,
+            self.cursor.1,
+            recipe_count,
+            0,
+        ) else {
+            return false;
+        };
+        self.sim.send_container_button_click(open.window_id, index);
+        true
+    }
+
     /// Report this panel's open/filter state for `book_type` to the server —
     /// vanilla's `ServerboundRecipeBookChangeSettingsPacket`, sent from
     /// `RecipeBookComponent`'s own toggle and filter handlers.
