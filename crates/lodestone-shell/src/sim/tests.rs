@@ -4396,6 +4396,73 @@ fn begin_attack_live_does_nothing_while_dead() {
     assert_eq!(peak, 0.0, "a dead player must not swing on attack");
 }
 
+/// Issue #613: `ClientAction::SpectatorAction` had zero producers anywhere.
+/// `Minecraft.startAttack`'s spectator branch is checked *before* any item or
+/// hit-result logic — [`begin_attack_live_prefers_an_entity_target_over_mining`]
+/// above proves the ordinary switch prefers an entity target; this proves a
+/// spectator's left-click on that same entity target takes a completely
+/// different branch and never reaches `attack_entity`/`Attacking` at all.
+#[test]
+fn begin_attack_live_spectates_the_entity_target_instead_of_attacking() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    let local = sim.local;
+    sim.write(|w| {
+        w.entity_mut(local)
+            .insert(ServerGameMode(Some(lodestone_client::GameMode::Spectator)));
+        w.resource_mut::<EntityRayTarget>().0 = Some(42);
+    });
+
+    sim.begin_attack_live();
+
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert_eq!(
+        sent,
+        vec![ClientAction::SpectatorAction {
+            target_entity_id: Some(42)
+        }],
+        "a spectator's left-click on an entity must send SpectatorAction(Some(id)) \
+         and nothing else — no attack packet, no swing"
+    );
+    let attacking = sim.read(|w| w.resource::<Attacking>().0);
+    assert!(!attacking, "spectating must not arm the hold-to-mine loop");
+}
+
+/// The other half of the same gate: a spectator's left-click with no entity
+/// target (a block, or nothing at all) sends `SpectatorAction(None)` —
+/// `MultiPlayerGameMode.spectatorNoAction`. Distinct from the miss-swings-the-arm
+/// case a non-spectator hits, matching vanilla's own "neither arm swings"
+/// behaviour.
+#[test]
+fn begin_attack_live_sends_no_target_spectator_action_on_a_miss() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    let local = sim.local;
+    sim.write(|w| {
+        w.entity_mut(local)
+            .insert(ServerGameMode(Some(lodestone_client::GameMode::Spectator)));
+    });
+    assert!(sim.entity_target().is_none(), "precondition: no entity targeted");
+
+    sim.begin_attack_live();
+
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert_eq!(
+        sent,
+        vec![ClientAction::SpectatorAction {
+            target_entity_id: None
+        }],
+        "a spectator's left-click with no entity under the crosshair must send \
+         SpectatorAction(None), got {sent:?}"
+    );
+    let peak = peak_swing_over(&mut sim, 10);
+    assert_eq!(peak, 0.0, "a spectator's click must not swing the arm either way");
+}
+
 /// Puts `item` into the local player's main-hand hotbar slot (native
 /// index 0, [`Sim::selected_slot`]'s default) via the same
 /// [`lodestone_ecs::SessionMenus`] fold a real `ContainerSetSlot`
@@ -4416,6 +4483,73 @@ fn give_main_hand_item(sim: &mut Sim, item: &str) {
             });
         }
     });
+}
+
+/// Issue #613: `ClientAction::Stab` had zero producers. `Minecraft.startAttack`
+/// checks the held item for `DataComponents.PIERCING_WEAPON` *before* the
+/// normal ENTITY/BLOCK/MISS switch and takes it unconditionally — proved here
+/// with an entity under the crosshair (the case the ordinary switch would
+/// otherwise prefer, per `begin_attack_live_prefers_an_entity_target_over_mining`)
+/// so a regression that let the entity switch win first would show up as a
+/// missing `Stab`/extra `InteractEntity` rather than passing by coincidence.
+#[test]
+fn begin_attack_live_stabs_with_a_spear_instead_of_the_normal_attack_switch() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, "minecraft:diamond_spear");
+    sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = Some(42));
+
+    sim.begin_attack_live();
+
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert!(
+        sent.iter().any(|a| matches!(a, ClientAction::Stab)),
+        "holding a piercing weapon must send Stab, got {sent:?}"
+    );
+    assert!(
+        !sent.iter().any(|a| matches!(a, ClientAction::InteractEntity { .. })),
+        "a piercing weapon must take over the switch entirely, not send the \
+         ordinary attack packet too — got {sent:?}"
+    );
+    assert!(
+        sent.iter()
+            .any(|a| matches!(a, ClientAction::SwingArm { hand: Hand::Main })),
+        "vanilla still swings the main hand after piercingAttack — got {sent:?}"
+    );
+    let attacking = sim.read(|w| w.resource::<Attacking>().0);
+    assert!(!attacking, "a stab must not arm the hold-to-mine loop either");
+}
+
+/// A non-spear weapon must not take the `Stab` branch — the negative control
+/// for the item-identity gate `is_piercing_weapon` implements.
+#[test]
+fn begin_attack_live_does_not_stab_with_an_ordinary_sword() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, "minecraft:diamond_sword");
+    sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = Some(42));
+
+    sim.begin_attack_live();
+
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert!(
+        !sent.iter().any(|a| matches!(a, ClientAction::Stab)),
+        "an ordinary sword must never send Stab, got {sent:?}"
+    );
+    assert!(
+        sent.iter().any(|a| matches!(
+            a,
+            ClientAction::InteractEntity {
+                interaction: EntityInteraction::Attack,
+                ..
+            }
+        )),
+        "an ordinary sword must still take the normal attack switch, got {sent:?}"
+    );
 }
 
 /// Finding 2 (combat scoping doc): before this fix, `use_item_live`

@@ -27,6 +27,7 @@
 
 use super::*;
 // That fix's veto registry -- see `attack_entity`.
+use lodestone_client::GameMode;
 use lodestone_ecs::player::{FireworkBoost, ItemUseTicks};
 use lodestone_ecs::veto::{ActionVetoes, VerbContext, Verdict};
 use lodestone_physics::UseEffects;
@@ -216,8 +217,30 @@ impl Sim {
 
     /// The live half of [`Self::begin_attack`]. See that method's docs for the
     /// three-way switch this implements.
+    ///
+    /// Two more gates now sit ahead of that switch, both ported from
+    /// `Minecraft.startAttack` in the same order the jar checks them:
+    ///
+    /// 1. **Spectator.** `MultiPlayerGameMode.isSpectator()`, checked before
+    ///    any item or hit-result logic at all — see [`Self::spectate_or_no_action`].
+    ///    Neither of vanilla's two spectator arms swings the arm or falls
+    ///    through to the ordinary switch below.
+    /// 2. **Piercing weapon.** `heldItem.get(DataComponents.PIERCING_WEAPON)`,
+    ///    checked next and, when present, taken unconditionally regardless of
+    ///    what — if anything — is under the crosshair; vanilla's own switch on
+    ///    `hitResult.getType()` is never reached for a piercing weapon. See
+    ///    [`Self::held_item_is_piercing_weapon`]/[`Self::stab`].
     pub(crate) fn begin_attack_live(&mut self) {
         if self.is_dead() {
+            return;
+        }
+        if self.is_spectator() {
+            self.spectate_or_no_action();
+            return;
+        }
+        if self.held_item_is_piercing_weapon() {
+            self.stab();
+            self.swing_main_hand_live();
             return;
         }
         if let Some(entity_id) = self.entity_target() {
@@ -235,6 +258,61 @@ impl Sim {
         }
         // MISS: no block, no entity. Vanilla still swings.
         self.swing_main_hand_live();
+    }
+
+    /// Whether the local player's server-authoritative game mode is
+    /// `Spectator` — `MultiPlayerGameMode.isSpectator()`, [`Self::begin_attack_live`]'s
+    /// first gate.
+    #[must_use]
+    fn is_spectator(&self) -> bool {
+        self.read(|w| w.get::<ServerGameMode>(self.local).and_then(|m| m.0))
+            == Some(GameMode::Spectator)
+    }
+
+    /// `Minecraft.startAttack`'s spectator branch
+    /// (`MultiPlayerGameMode.spectate`/`spectatorNoAction`): left-clicking an
+    /// entity while spectating attaches the spectator camera to it
+    /// (`SpectatorAction { target_entity_id: Some(id) }`); left-clicking
+    /// anything else — a block, or nothing at all — detaches it
+    /// (`target_entity_id: None`). [`Self::entity_target`] already resolves
+    /// the same nearer entity-or-block pick every other left-click branch
+    /// here uses, so both vanilla arms fold into one send. Neither vanilla
+    /// arm swings the arm or falls through to the ordinary attack switch —
+    /// `startAttack` returns immediately after either call.
+    fn spectate_or_no_action(&mut self) {
+        let target_entity_id = self.entity_target();
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::SpectatorAction { target_entity_id });
+        }
+    }
+
+    /// Whether the main-hand stack carries `minecraft:piercing_weapon`
+    /// (`DataComponents.PIERCING_WEAPON`) — `Minecraft.startAttack`'s gate,
+    /// checked before the normal ENTITY/BLOCK/MISS switch. See
+    /// [`lodestone_game::item::is_piercing_weapon`]'s own doc for why this
+    /// checks item identity (the seven real spear items) rather than an
+    /// actual component value.
+    #[must_use]
+    fn held_item_is_piercing_weapon(&self) -> bool {
+        let slot = self.selected_slot();
+        self.player_menu()
+            .player_native(slot)
+            .is_some_and(|stack| lodestone_game::item::is_piercing_weapon(stack.item()))
+    }
+
+    /// `MultiPlayerGameMode.piercingAttack`'s outbound half: send the wire
+    /// `Stab` action. Vanilla's own local-only follow-up
+    /// (`onAttack`/`postPiercingAttack`, a sound) all feed the crosshair
+    /// cooldown indicator and hit sound/particles this shell does not model
+    /// yet for the *ordinary* attack path either — see [`Self::begin_attack`]'s
+    /// own doc for why that gap is out of scope here too, same reasoning.
+    /// The caller is responsible for the swing, matching
+    /// `player.swing(InteractionHand.MAIN_HAND)` sitting beside
+    /// `piercingAttack()` at the call site rather than inside it.
+    fn stab(&mut self) {
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::Stab);
+        }
     }
 
     /// Swing the main hand for a **live** discrete click: the wire packet and

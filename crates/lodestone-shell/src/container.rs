@@ -40,6 +40,9 @@ pub mod beacon;
 /// Bundle scroll-to-select tracking (issue #616's `BUNDLE_ITEM_SELECTED` /
 /// #613's `SelectBundleItem` remainder) — see its own module doc.
 pub mod bundle;
+/// The crafter's slot-disable toggle (issue #613's `SetContainerSlotState`
+/// remainder) — see its own module doc.
+pub mod crafter;
 /// The enchanting table's three enchant-offer buttons (issue #613's
 /// `ContainerButtonClick` remainder) — see its own module doc.
 pub mod enchant;

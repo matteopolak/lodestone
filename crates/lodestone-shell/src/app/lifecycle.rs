@@ -576,6 +576,15 @@ impl ApplicationHandler for WindowApp {
                             self.cursor.1,
                             self.recipe_panel.open,
                         );
+                        // The crafter's slot-disable toggle (issue #613's
+                        // `SetContainerSlotState`) — a side effect alongside the
+                        // ordinary click below, not part of the `consumed_by_*`
+                        // chain above it; see `maybe_toggle_crafter_slot`'s own
+                        // doc for why it must not consume. Gated on a plain
+                        // (non-shift) press, matching `ContainerInput::PICKUP`.
+                        if matches!(state, ElementState::Pressed) && !self.shift_held {
+                            self.maybe_toggle_crafter_slot(&menu, hit);
+                        }
                         let ctx = MenuContext {
                             cursor_loaded: menu.carried().is_some(),
                             // No game-mode plumbing exists on `Sim` to source this

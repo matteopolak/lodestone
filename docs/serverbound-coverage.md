@@ -168,13 +168,14 @@ audit:
   `Popped` are still `Route::NOWHERE` below — they are answered directly in
   `net.rs`'s own loop, not through the `forward`/`poll_net` path.
 
-**Eleven were confirmed genuine islands; eight have since gained real
-producers** — zero hits for the bare variant name anywhere in `lodestone-shell`
-or `lodestone-controller`, in any form, at the time this section was written:
-`ContainerButtonClick`, `EditBook`, `PingRequest`, `RecipeBookSeenRecipe`,
-`SeenAdvancements`, `SelectBundleItem`, `SetBeaconEffects`,
-`SetContainerSlotState`, `SpectatorAction`, `Stab`, `TeleportToEntity`. Each is
-screen- or input-blocked in the same shape as the seventeen in `KNOWN_UNPRODUCED`
+**Eleven were confirmed genuine islands; eleven of eleven have since gained
+real producers, save one** — zero hits for the bare variant name anywhere in
+`lodestone-shell` or `lodestone-controller`, in any form, at the time this
+section was written: `ContainerButtonClick`, `EditBook`, `PingRequest`,
+`RecipeBookSeenRecipe`, `SeenAdvancements`, `SelectBundleItem`,
+`SetBeaconEffects`, `SetContainerSlotState`, `SpectatorAction`, `Stab`,
+`TeleportToEntity`. Each was screen- or input-blocked in the same shape as the
+seventeen in `KNOWN_UNPRODUCED`
 above (an editor/UI that does not exist yet, or a keybind that is not wired).
 
 Since fixed:
@@ -228,36 +229,71 @@ Since fixed:
   screen. `WindowApp::recipe_book_seen: HashSet<i32>` dedups so a recipe
   whose button stays on screen for many frames is reported exactly once.
 
-Remaining: `SetContainerSlotState`, `SpectatorAction`, `Stab`,
-`TeleportToEntity`.
+**`Stab`, `SpectatorAction` and `SetContainerSlotState` are now fixed; only
+`TeleportToEntity` remains.**
 
-**`Stab`'s trigger is not actually unknown — a prior claim that it has "no
-reference anywhere in the decompiled source beyond an unrelated enum value"
-was wrong, and cost two agents a declined guess.** It has real, named call
-sites: `Minecraft.startAttack()` reads `heldItem.get(DataComponents.PIERCING_WEAPON)`
-*before* its normal `hitResult`-type switch and, when present, calls
-`MultiPlayerGameMode.piercingAttack(weapon)` instead of the ordinary attack —
-unconditionally, even with no entity in range (an "air stab"), then swings the
-arm. `piercingAttack` sends exactly `ClientAction::Stab`'s wire shape
-(`ServerboundPlayerActionPacket(Action.STAB, BlockPos.ZERO, Direction.DOWN)`,
-`play::serverbound::PLAYER_ACTION` ordinal 7 — matching
-`crates/protocol/v770/src/adapter/serverbound.rs`'s own encoder exactly). So
-the real blocker is: **the trigger is a left-click attack while the main-hand
-item carries an unmodelled `minecraft:piercing_weapon` data component**
-(`PiercingWeapon.java`: `dealsKnockback: bool`, `dismounts: bool`,
-`sound`/`hitSound: Optional<Holder<SoundEvent>>`), not "an unknown input" —
-26.2 ships seven real items with it (`{wooden,stone,copper,iron,golden,diamond,
-netherite}_spear`, per `generated/reports/minecraft/components/item/*_spear.json`).
-Landing this needs the component modelled in `lodestone_model::ItemComponents`
-plus decode/encode support alongside the other component-patch fields, and the
-shell's attack-input path (`Minecraft.startAttack`'s equivalent) branching on
-it — a real subsystem in its own right, not a quick follow-on, so it stays
-listed here rather than attempted in the same pass as this finding.
+* **`Stab`** — `Sim::begin_attack_live` (`sim/actions.rs`) now checks
+  `lodestone_game::item::is_piercing_weapon` on the main-hand stack *before*
+  its ordinary entity/block/miss switch, matching `Minecraft.startAttack()`
+  reading `heldItem.get(DataComponents.PIERCING_WEAPON)` in the same place —
+  unconditionally, even with no entity in range (an "air stab"), then
+  swinging the arm. A prior claim that this had "no reference anywhere in the
+  decompiled source beyond an unrelated enum value" was wrong (cost two
+  agents a declined guess); the real call chain is
+  `MultiPlayerGameMode.piercingAttack(weapon)`, sending exactly
+  `ClientAction::Stab`'s wire shape
+  (`ServerboundPlayerActionPacket(Action.STAB, BlockPos.ZERO, Direction.DOWN)`).
+  **Named simplification**: this crate has no item-prototype default-component
+  merge step, so there is no actual `piercing_weapon` component value on a
+  stack to read even for a real spear — `is_piercing_weapon` checks item
+  identity against the fixed list of the seven real spear tiers instead (same
+  shape `is_bundle` already takes for the missing `#minecraft:bundles` tag).
+* **`SpectatorAction`** — the same call site, one branch earlier:
+  `MultiPlayerGameMode.isSpectator()` is `Minecraft.startAttack()`'s *first*
+  gate, ahead of the piercing-weapon check and the ordinary switch alike.
+  `Sim::begin_attack_live` now checks the local player's `ServerGameMode`
+  first and, while spectating, sends `SpectatorAction { target_entity_id:
+  self.entity_target() }` — `Some(id)` on a left-click over an entity
+  (`MultiPlayerGameMode.spectate`), `None` otherwise
+  (`spectatorNoAction`) — reusing the same nearer entity-or-block pick every
+  other left-click branch here already resolves. Neither vanilla arm swings
+  the arm.
+* **`SetContainerSlotState`** — `crate::container::crafter::toggle_decision`
+  (pure, unit-tested) transcribes `CrafterScreen.slotClicked`'s `PICKUP` case:
+  re-enable a disabled slot unconditionally, or disable an enabled one only
+  when nothing is carried. `app::container_input::WindowApp::
+  maybe_toggle_crafter_slot` gates it on the open menu's `menu_type ==
+  "crafter_3x3"` and an empty slot inside the 9-slot craft grid, then
+  `Sim::send_set_container_slot_state` sends. **Unlike every other producer in
+  this file, this one never *consumes* the click** — vanilla's own override
+  still calls `super.slotClicked(...)` right after its toggle check, so it is
+  wired as a side effect alongside the ordinary slot click, not as a
+  first-refusal widget. **Named simplifications**: only a plain click is
+  handled (vanilla's `SWAP` case — a hotbar number pressed over a disabled
+  slot holding a matching item — is not), and there is no local, optimistic
+  `containerData` mutation the way `CrafterMenu.setSlotState` gives vanilla's
+  own client; the toggle becomes visible only once the server's
+  `container_set_data` echoes it back. No render support for the
+  disabled-slot sprite exists yet either.
 
-Filed as one narrow follow-up rather than eleven separate issues, per the pattern
-this doc's own "How to change it" section already sets: each needs its own
-screen or input binding designed, none is a one-line fix, and grouping them keeps
-the tracker from drowning in near-duplicate "no producer" reports.
+**`TeleportToEntity` remains, and the issue's own framing of its trigger was
+wrong** — worth recording since it is exactly the "search for the capability,
+not the name" trap. `ClientTabListScreen`/`PlayerTabOverlay` (the tab-list HUD
+this repo already renders in `tablist.rs`) has **no click handling anywhere**
+in `client-src` — it is a pure readout. The real, sole trigger is
+`PlayerMenuItem.selectItem`, reached only through vanilla's dedicated
+**Spectator Menu** (`SpectatorMenu`/`SpectatorGui`, opened by pressing a
+hotbar-number key while spectating, since spectator mode has no hotbar
+selection to intercept those keys for instead): a bottom radial of categories
+(root: "Team Teleport" grouped by team, then "Teleport to Player" as a flat
+list), each entry rendering a skin face via `PlayerFaceExtractor`. Landing
+this needs that whole menu — keybind interception, category navigation, a
+player list, and skin-face rendering — not a quick follow-on to a click
+handler that already exists. Left unbuilt rather than faked onto an
+unrelated screen (the Social Interactions screen was briefly considered and
+rejected: it has real player rows and click handling, but attaching a
+teleport action there would be a fabricated vanilla behaviour, not a
+simplification of a real one).
 
 ## How to change it
 

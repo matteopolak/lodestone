@@ -184,6 +184,40 @@ pub fn is_bundle(item: &Identifier) -> bool {
     item.namespace() == VANILLA_ITEM_NAMESPACE && item.path().ends_with("bundle")
 }
 
+/// The seven vanilla items carrying `minecraft:piercing_weapon`
+/// (`DataComponents.PIERCING_WEAPON`) in 26.2 — every tier of the spear,
+/// transcribed from the real jar's item registration rather than guessed
+/// from a naming convention (unlike [`is_bundle`], "ends with `_spear`" is
+/// not itself the vanilla rule, just how this particular family happens to
+/// be named).
+const PIERCING_WEAPON_ITEMS: [&str; 7] = [
+    "wooden_spear",
+    "stone_spear",
+    "copper_spear",
+    "iron_spear",
+    "golden_spear",
+    "diamond_spear",
+    "netherite_spear",
+];
+
+/// Whether `item` carries `minecraft:piercing_weapon` — `Minecraft.startAttack`'s
+/// gate (`heldItem.get(DataComponents.PIERCING_WEAPON) != null`) that routes a
+/// left-click through `MultiPlayerGameMode.piercingAttack` instead of the
+/// normal entity/block attack switch.
+///
+/// **Disclosed simplification, same shape as [`is_bundle`]**: this crate has
+/// no item-prototype default-component merge step (no adapter attaches an
+/// item's registered default components to a stack's effective
+/// [`ItemComponents`] the way a real server's `DataComponentMap` would), so
+/// there is no actual `piercing_weapon` component value to read off a stack
+/// even for a real spear. This checks item identity against the fixed
+/// [`PIERCING_WEAPON_ITEMS`] list instead — every real spear matches and
+/// nothing else in the current registry does.
+#[must_use]
+pub fn is_piercing_weapon(item: &Identifier) -> bool {
+    item.namespace() == VANILLA_ITEM_NAMESPACE && PIERCING_WEAPON_ITEMS.contains(&item.path())
+}
+
 /// A canonical, version-free component value.
 ///
 /// Component payloads are, in the wire protocol, arbitrary NBT. Rather than
@@ -1342,6 +1376,26 @@ pub fn styled_hover_name_spans(stack: &ItemStack, translate: &dyn Fn(&str) -> Op
     styled_hover_text(stack, translate).to_spans()
 }
 
+/// The **plain** sibling of [`styled_hover_name`]: identical construction,
+/// flattened through [`Text::to_plain_string_with`] instead of
+/// [`Text::to_legacy_string`] — vanilla's `ItemStack.getHoverName().getString()`,
+/// which strips styling entirely rather than encoding it as `§` codes.
+///
+/// This is the accessor an anvil's rename box should seed from
+/// (`AnvilScreen`'s own `onNameChanged` compares against exactly this), not
+/// [`styled_hover_name`]: seeding an *editable* text field from a
+/// legacy-coded string means a custom name carrying real `§` characters (or,
+/// worse, one whose colour survived as a code) shows those codes as literal
+/// text the moment the box gains focus, and compares unequal to the item's
+/// own name even when nothing was actually changed. Issue #656's own report
+/// named this as a real, separate divergence from `styled_hover_name`'s
+/// hex-colour bug — not fixed by routing to spans, since an edit box has
+/// nowhere to put colour either way.
+#[must_use]
+pub fn plain_hover_name(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<String>) -> String {
+    styled_hover_text(stack, translate).to_plain_string_with(translate)
+}
+
 /// The shared construction behind [`styled_hover_name`] and
 /// [`styled_hover_name_spans`]: the custom name (or best-effort base name),
 /// wrapped in an empty root forced italic when a custom name is present. See
@@ -1561,6 +1615,28 @@ mod tests {
         assert!(!name.contains('\u{a7}'), "no format codes expected: {name}");
     }
 
+    /// `plain_hover_name`'s whole reason to exist: a custom-named item's
+    /// forced-italic `§o` reaches `styled_hover_name` (pinned above by
+    /// `custom_named_item_is_forced_italic_and_keeps_its_own_text`) but must
+    /// **not** reach the plain sibling — vanilla's `getHoverName().getString()`
+    /// strips styling, it does not encode it. An anvil rename box seeded from
+    /// the legacy string would show `§oExcalibur` as literal text the instant
+    /// it gained focus; seeded from this, it shows `Excalibur`.
+    #[test]
+    fn plain_hover_name_never_carries_a_legacy_code_even_when_custom_and_italic() {
+        let mut stack = ItemStack::new(id("minecraft:diamond_sword"), 1);
+        let key: Identifier = CUSTOM_NAME_COMPONENT.parse().unwrap();
+        stack
+            .components_mut()
+            .insert(key, ComponentValue::Text(Text::literal("Excalibur")));
+        assert_eq!(styled_hover_name(&stack, &no_translation), "\u{a7}oExcalibur");
+        assert_eq!(
+            plain_hover_name(&stack, &no_translation),
+            "Excalibur",
+            "the plain accessor must strip styling, not encode it as a code"
+        );
+    }
+
     // -- Issue #143: the component read/write seam ---------------------
 
     /// The bug the `dyed_color` branch fixes, pinned. Before it, a dyed model
@@ -1733,6 +1809,25 @@ mod tests {
         assert!(!is_bundle(&id("minecraft:torch")));
         assert!(!is_bundle(&id("minecraft:bundle_of_joy")));
         assert!(!is_bundle(&id("lodestone:custom_bundle")));
+    }
+
+    /// `is_piercing_weapon` matches all seven real spear tiers and rejects a
+    /// non-spear weapon, a namespaced look-alike, and a name that merely
+    /// contains "spear" without being one of the seven registered items.
+    #[test]
+    fn is_piercing_weapon_matches_every_spear_tier_and_nothing_else() {
+        for tier in [
+            "wooden", "stone", "copper", "iron", "golden", "diamond", "netherite",
+        ] {
+            assert!(
+                is_piercing_weapon(&id(&format!("minecraft:{tier}_spear"))),
+                "{tier}_spear must carry piercing_weapon"
+            );
+        }
+        assert!(!is_piercing_weapon(&id("minecraft:diamond_sword")));
+        assert!(!is_piercing_weapon(&id("minecraft:trident")));
+        assert!(!is_piercing_weapon(&id("lodestone:netherite_spear")));
+        assert!(!is_piercing_weapon(&id("minecraft:spearmint")));
     }
 
     /// `getNumberOfItemsToShow`'s own worked cases: a full row shows
