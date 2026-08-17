@@ -1024,6 +1024,11 @@ const PLAYER_HURT_EXPERIENCE_TIME: u64 = 100;
 /// per-tick chance of firing again starts climbing from zero.
 const AMBIENT_SOUND_INTERVAL: i32 = 80;
 
+/// `Armadillo.actuallyHurt`'s `setMemoryWithExpiry(DANGER_DETECTED_RECENTLY,
+/// true, 80L)` — the ticks [`SimMob::armadillo_danger_ticks`] is (re)set to on
+/// every hit that passes the invulnerability gate.
+const ARMADILLO_DANGER_TICKS: i32 = 80;
+
 /// The flat knockback power `LivingEntity.dealDefaultKnockback` applies to
 /// **every** damaging hit, regardless of the attacker's own
 /// `minecraft:attack_knockback` attribute — `LivingEntity.knockback(0.4F, xd,
@@ -1292,6 +1297,36 @@ pub struct SimMob<'w> {
     /// loses and later reacquires a target rerolls rather than resuming a
     /// stale countdown.
     piglin_alert_ticks: i32,
+    /// `Armadillo`'s `DANGER_DETECTED_RECENTLY` memory, collapsed to a plain
+    /// countdown — the real jar tracks a `ROLLING`/`SCARED`/`UNROLLING`
+    /// animation sub-state machine (10/50/30-tick phases) purely for the
+    /// client-visible roll animation, but the **gameplay** consequences
+    /// (`isScared()`: halved incoming damage, no love, no ambient sound, no
+    /// player interaction beyond a brush) are identical across all three
+    /// phases and keyed on one thing — whether this timer is still running.
+    /// `0` is idle (matches `ArmadilloState.IDLE`'s absence of danger memory);
+    /// any positive value is "scared" in the collapsed sense.
+    ///
+    /// Set to [`ARMADILLO_DANGER_TICKS`] by every hit that passes the
+    /// invulnerability gate ([`SimMob::apply_damage`]) — vanilla's
+    /// `actuallyHurt` unconditionally refreshes the memory to 80 ticks and
+    /// calls `rollUp()` (a no-op if already scared), so a second hit while
+    /// still curled keeps the timer topped up rather than letting it run
+    /// down mid-fight. Decremented once per [`MobSim::tick`] for every live
+    /// armadillo. `0` for every non-armadillo species, where nothing reads
+    /// it.
+    ///
+    /// **Disclosed narrowing**: real `actuallyHurt` only refreshes this for a
+    /// `LivingEntity` attacker and rolls back out early for an
+    /// environmental (`PANIC_ENVIRONMENTAL_CAUSES`-tagged) one; this seam's
+    /// `apply_damage` has no attacker-identity or damage-type-tag input to
+    /// discriminate on (the same simplification this function's own
+    /// `note_hurt` comment already discloses for panic), so *any* damage an
+    /// armadillo takes triggers/refreshes it. **Also disclosed**: real
+    /// `canStayRolledUp` additionally refuses to roll up while panicking, in
+    /// a liquid, leashed, ridden or a rider — none of those gates are
+    /// checked here.
+    armadillo_danger_ticks: i32,
     /// The [`MobSim::tick_count`] at which this mob stops counting as
     /// player-killed — vanilla's `LivingEntity.lastHurtByPlayerMemoryTime`,
     /// expressed as an absolute deadline for [`Anger`]'s reason.
@@ -1657,6 +1692,15 @@ impl<'w> SimMob<'w> {
     #[must_use]
     pub fn is_panicking(&self) -> bool {
         self.mob.is_panicking()
+    }
+
+    /// `Armadillo.isScared()` — whether this mob is currently curled up
+    /// (halved incoming damage; see [`apply_damage`](Self::apply_damage)).
+    /// Always `false` for a non-armadillo species, where the backing field
+    /// never leaves `0`.
+    #[must_use]
+    pub fn armadillo_is_scared(&self) -> bool {
+        self.armadillo_danger_ticks > 0
     }
 
     /// The position of whatever most recently hurt this mob, while inside the
@@ -2115,6 +2159,16 @@ impl<'w> SimMob<'w> {
         if self.health <= 0.0 {
             return 0.0;
         }
+        // `Armadillo.hurtServer`'s override, which runs *before* the
+        // invulnerability-frame check below (it wraps `super.hurtServer`, not
+        // `actuallyHurt`) — a curled-up armadillo halves the raw hit before
+        // anything else sees it, including whether the hit even breaks
+        // through i-frames.
+        let raw_damage = if self.entity_type.path() == "armadillo" && self.armadillo_danger_ticks > 0 {
+            ((raw_damage - 1.0) / 2.0).max(0.0)
+        } else {
+            raw_damage
+        };
         let amount = match self.hurt_cooldown.on_hurt(raw_damage, flags) {
             HurtDecision::Ignored => return 0.0,
             HurtDecision::Full { amount } | HurtDecision::Topup { amount } => amount,
@@ -2136,6 +2190,14 @@ impl<'w> SimMob<'w> {
         // Placed here, in the single funnel every damage path already goes
         // through, so a new damage source cannot forget it.
         self.mob.note_hurt(None);
+        // `Armadillo.actuallyHurt`'s own tail: refresh (or start) the danger
+        // memory on every hit that reached this point — see
+        // `armadillo_danger_ticks`'s own doc for the disclosed narrowing
+        // (real vanilla additionally requires a `LivingEntity` attacker and
+        // gates the roll itself on `canStayRolledUp`).
+        if self.entity_type.path() == "armadillo" {
+            self.armadillo_danger_ticks = ARMADILLO_DANGER_TICKS;
+        }
         outcome.to_health
     }
 
@@ -3950,6 +4012,7 @@ impl<'w> MobSim<'w> {
             anger: None,
             stung_at: None,
             piglin_alert_ticks: -1,
+            armadillo_danger_ticks: 0,
             hurt_by_player_until: None,
             attack_damage,
             hurt_cooldown: HurtCooldown::default(),
@@ -5113,6 +5176,13 @@ impl<'w> MobSim<'w> {
                         m.piglin_alert_ticks = -1;
                     }
                 }
+            }
+            // `armadillo_danger_ticks`'s countdown — see its own doc comment.
+            // A dead armadillo does not un-scare (matching every other
+            // per-mob timer in this loop, which is likewise gated on
+            // `health > 0.0`; a corpse's fields are frozen, not ticked).
+            if m.health > 0.0 && m.armadillo_danger_ticks > 0 {
+                m.armadillo_danger_ticks -= 1;
             }
             let new_attacks = m.mob.take_new_attacks();
             // Issue #233: `Bee.doHurtTarget` — the sting connects the instant
@@ -9910,6 +9980,108 @@ mod follow_range_tests {
         assert!(
             dropped.iter().any(|(item, _)| item == "minecraft:beef"),
             "the beef pool is `rolls: 1` with `uniform 1..3`, so it is never absent: {dropped:?}"
+        );
+    }
+
+    /// Issue #230's armadillo roll-up, gated through the real production
+    /// path (`MobSim::attack`, `crate::server::apply_attack`'s own entry
+    /// point) rather than calling `apply_damage` on a bare `SimMob` — the
+    /// same standard this crate applies to every other combat gate. A first
+    /// hit lands at full strength and switches the armadillo to "scared";
+    /// a **second** hit, once the invulnerability window has cleared, is
+    /// halved via `(damage - 1) / 2`.
+    #[test]
+    fn armadillo_rolls_up_after_a_hit_and_halves_the_next_one() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:armadillo").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+        sim.get_mut(id).expect("alive").set_health(100.0);
+
+        assert!(
+            !sim.get(id).expect("alive").armadillo_is_scared(),
+            "precondition: a fresh armadillo is not scared"
+        );
+
+        let first = sim
+            .attack(id, Vec3::new(1.0, 0.0, 0.0), 10.0, DamageFlags::default(), 0.0)
+            .expect("the armadillo is a live target");
+        assert_eq!(first.damage_dealt, 10.0, "the triggering hit itself is not reduced");
+        assert!(
+            sim.get(id).expect("alive").armadillo_is_scared(),
+            "a hit that passes the i-frame gate must roll the armadillo up"
+        );
+
+        // Clear the 20-tick invulnerability window (see `HurtCooldown::on_hurt`)
+        // so the second hit is not merely dropped as "not stronger".
+        for _ in 0..11 {
+            sim.tick();
+        }
+        assert!(
+            sim.get(id).expect("alive").armadillo_is_scared(),
+            "11 of 80 danger ticks must not have expired the scared state yet"
+        );
+
+        let second = sim
+            .attack(id, Vec3::new(1.0, 0.0, 0.0), 10.0, DamageFlags::default(), 0.0)
+            .expect("still a live target");
+        assert_eq!(
+            second.damage_dealt, 4.5,
+            "Armadillo.hurtServer: (10.0 - 1.0) / 2.0 == 4.5, while scared"
+        );
+    }
+
+    /// **Control**: the identical fixture and hit sequence against a cow —
+    /// a species `apply_damage`'s armadillo branch must never touch — proves
+    /// the halving is armadillo-specific rather than a general "second hit is
+    /// cheaper" bug the first test could not, by itself, distinguish from a
+    /// mistake in the i-frame/topup arithmetic.
+    #[test]
+    fn only_armadillo_halves_a_repeat_hit_a_cow_does_not() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:cow").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+        sim.get_mut(id).expect("alive").set_health(100.0);
+
+        sim.attack(id, Vec3::new(1.0, 0.0, 0.0), 10.0, DamageFlags::default(), 0.0)
+            .expect("live target");
+        for _ in 0..11 {
+            sim.tick();
+        }
+        let second = sim
+            .attack(id, Vec3::new(1.0, 0.0, 0.0), 10.0, DamageFlags::default(), 0.0)
+            .expect("still live");
+        assert_eq!(second.damage_dealt, 10.0, "a cow never rolls up, so the second hit is unreduced");
+    }
+
+    /// The danger memory expires 80 ticks after the hit that (re)armed it,
+    /// with nothing further landing in between — `Armadillo`'s own
+    /// `DANGER_DETECTED_RECENTLY` memory duration — and the armadillo
+    /// un-scares on schedule rather than staying curled forever.
+    #[test]
+    fn armadillo_unscares_eighty_ticks_after_its_last_hit() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:armadillo").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+        sim.get_mut(id).expect("alive").set_health(100.0);
+
+        sim.attack(id, Vec3::new(1.0, 0.0, 0.0), 10.0, DamageFlags::default(), 0.0)
+            .expect("live target");
+        assert!(sim.get(id).expect("alive").armadillo_is_scared());
+
+        for _ in 0..79 {
+            sim.tick();
+        }
+        assert!(
+            sim.get(id).expect("alive").armadillo_is_scared(),
+            "the 79th tick must still be inside the 80-tick window"
+        );
+        sim.tick();
+        assert!(
+            !sim.get(id).expect("alive").armadillo_is_scared(),
+            "the 80th tick with no further hit must let the timer reach zero"
         );
     }
 
