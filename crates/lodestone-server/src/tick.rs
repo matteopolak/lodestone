@@ -668,6 +668,36 @@ fn publish_openable_sound(out: &BlockTickFeed, pos: BlockPos, from: &str, to: &s
     }
 }
 
+/// Posts `VibrationEvent::NoteBlockPlay` for a real note-block pulse — the
+/// closing half of `crate::redstone_note_block`'s own previously-disclosed
+/// (now re-verified false) "nowhere for the pulse to land" gap. Called at
+/// every one of this file's four `propagate_and_react_with_entities`
+/// consumers, so every code path that can trigger a note block (a rising
+/// redstone edge, wherever it originates) reaches an allay's ear the same
+/// way. `world.block_state` is read **after** this event's own write already
+/// landed, matching every other post-write consumer in this file
+/// (`publish_moving_piston` reads the committed state the same way) — the
+/// block above the note block is unaffected by that write either way.
+fn post_note_block_vibration<W: crate::chunk::ChunkSource>(
+    world: &std::sync::Arc<W>,
+    mobs: &MobHandle,
+    pos: (i32, i32, i32),
+    from: &str,
+    to: &str,
+) {
+    let (x, y, z) = pos;
+    let above_is_air = crate::random_tick::is_air_variant(&world.block_state(x, y + 1, z));
+    if crate::redstone_note_block::played_pulse_on_transition(from, to, above_is_air) {
+        mobs.with(|sim| {
+            sim.post_vibration(
+                lodestone_model::Vec3::new(f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(z) + 0.5),
+                lodestone_entity::vibration::VibrationEvent::NoteBlockPlay,
+                None,
+            );
+        });
+    }
+}
+
 /// Publishes the moving block entity for a cell a piston move just filled.
 ///
 /// A `moving_piston` block state is `INVISIBLE` and says nothing about *which*
@@ -2332,6 +2362,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             ) {
                 let (ex, ey, ez) = event.pos;
                 world.set_block(ex, ey, ez, &event.to);
+                post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                 block_tick_out.publish(ex, ey, ez, event.to);
             }
         }
@@ -2489,6 +2520,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                         let (ex, ey, ez) = event.pos;
                         world.set_block(ex, ey, ez, &event.to);
                         publish_moving_piston(&block_tick_out, &block_ticks, ex, ey, ez, &event.to);
+                        post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                         block_tick_out.publish(ex, ey, ez, event.to);
                     }
                 }
@@ -3063,6 +3095,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     publish_openable_sound(&block_tick_out, BlockPos::new(ex, ey, ez), &event.from, &event.to, game_tick);
                     world.set_block(ex, ey, ez, &event.to);
                     publish_moving_piston(&block_tick_out, &block_ticks, ex, ey, ez, &event.to);
+                    post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                     block_tick_out.publish(ex, ey, ez, event.to);
                 }
             }
@@ -3270,6 +3303,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     let (ex, ey, ez) = event.pos;
                     world.set_block(ex, ey, ez, &event.to);
                     publish_moving_piston(&block_tick_out, &block_ticks, ex, ey, ez, &event.to);
+                    post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                     block_tick_out.publish(ex, ey, ez, event.to);
                 }
             }
@@ -5366,5 +5400,68 @@ mod tests {
             "slot 0 must hold a filled water bucket after pickup: {slot0:?}"
         );
         assert_eq!(slot0.map(|s| s.count), Some(1));
+    }
+
+    /// Issue #230: `post_note_block_vibration` is what makes every one of
+    /// this file's four `propagate_and_react_with_entities` consumers reach
+    /// an allay's ear — see this function's own doc for the previously-
+    /// disclosed (now re-verified false) blocker it closes. A rising-edge
+    /// transition on an unburied harp note block, one block from a spawned
+    /// allay, must post a vibration `MobSim::tick`'s own `resolve_vibrations`
+    /// then resolves into `SimMob::allay_liked_noteblock`.
+    #[test]
+    fn a_note_block_pulse_reaches_an_allays_ear() {
+        let mobs = MobHandle::new(ChunkWorld::new(-64, 384));
+        let allay_id = mobs.with(|sim| {
+            sim.spawn_species(
+                lodestone_model::ResourceKey::from_str("minecraft:allay").expect("valid key"),
+                lodestone_model::Vec3::new(1.0, 0.0, 0.0),
+            )
+            .id()
+        });
+
+        let world: Arc<EmptyWorld> = Arc::new(EmptyWorld);
+        let from = "minecraft:note_block[instrument=harp,note=0,powered=false]";
+        let to = "minecraft:note_block[instrument=harp,note=0,powered=true]";
+        post_note_block_vibration(&world, &mobs, (0, 0, 0), from, to);
+
+        mobs.with(MobSim::tick);
+
+        assert_eq!(
+            mobs.with(|sim| sim.get(allay_id).expect("alive").allay_liked_noteblock()),
+            Some(lodestone_model::Vec3::new(0.5, 0.5, 0.5)),
+            "a rising-edge pulse one block away must reach the allay's LIKED_NOTEBLOCK_POSITION, \
+             at the block-centre position post_note_block_vibration posts"
+        );
+    }
+
+    /// **Control**: the falling edge never plays a pulse
+    /// (`redstone_note_block::on_neighbor_changed`'s own gate), so an
+    /// identical fixture with `from`/`to` swapped must post nothing and the
+    /// allay must never hear anything — proving the positive test above
+    /// exercises a real gate, not one that fires unconditionally.
+    #[test]
+    fn a_note_block_falling_edge_posts_nothing() {
+        let mobs = MobHandle::new(ChunkWorld::new(-64, 384));
+        let allay_id = mobs.with(|sim| {
+            sim.spawn_species(
+                lodestone_model::ResourceKey::from_str("minecraft:allay").expect("valid key"),
+                lodestone_model::Vec3::new(1.0, 0.0, 0.0),
+            )
+            .id()
+        });
+
+        let world: Arc<EmptyWorld> = Arc::new(EmptyWorld);
+        let from = "minecraft:note_block[instrument=harp,note=0,powered=true]";
+        let to = "minecraft:note_block[instrument=harp,note=0,powered=false]";
+        post_note_block_vibration(&world, &mobs, (0, 0, 0), from, to);
+
+        mobs.with(MobSim::tick);
+
+        assert_eq!(
+            mobs.with(|sim| sim.get(allay_id).expect("alive").allay_liked_noteblock()),
+            None,
+            "a falling edge must never be heard as a note-block play"
+        );
     }
 }

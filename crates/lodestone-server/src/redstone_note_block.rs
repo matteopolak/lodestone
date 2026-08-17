@@ -28,9 +28,10 @@
 //!   `ownSignal` override), so nothing needs to be notified afterward.
 //! * **Scheduled tick**: none.
 //! * **What it needs from *outside* the redstone engine, and does not have
-//!   yet**: two things this module cannot supply and are named as gaps below
-//!   rather than guessed —
-//!   * the actual sound/particle **pulse** (`level.blockEvent`,
+//!   yet**: one real gap remains, and one that used to be listed here turned
+//!   out false on re-verification (issue #230's own "re-verify before
+//!   routing around" standard) —
+//!   * the actual client-audible sound/particle **pulse** (`level.blockEvent`,
 //!     `NoteBlock.triggerEvent`) is a client-visible effect with no state
 //!     write behind it, so nothing in this crate's `RandomTickEvent` (a
 //!     state-diff carrier) can transport it. [`on_neighbor_changed`] answers
@@ -38,11 +39,30 @@
 //!     block-action-shaped wire path — the same shape `tick.rs`'s
 //!     `publish_openable_sound` already established for the one other
 //!     "genuinely server-driven sound" case in this crate (issue #530). That
-//!     precedent is the seam to extend, not a new one to invent.
-//!   * right-click **cycling** ([`cycle_note`]) is now wired into
+//!     precedent is the seam to extend, not a new one to invent. This is
+//!     still open.
+//!   * **Previously claimed, now false**: "nothing in this crate has
+//!     anywhere for the computed pulse to land at all." [`RandomTickEvent`]'s
+//!     `(from, to)` pair already carries every input `playNote`'s gate needs
+//!     ([`played_pulse_on_transition`] re-derives it with no new field), and
+//!     `lodestone_entity::vibration`'s `MobSim::post_vibration` — built for
+//!     the warden (issue #459), not this module — is a real, general
+//!     "post a world event, let *any* listener resolve it" seam with room
+//!     for a second listener species. `tick.rs`'s four
+//!     `propagate_and_react_with_entities` consumers now call
+//!     [`played_pulse_on_transition`] and post
+//!     `VibrationEvent::NoteBlockPlay` on a hit, which is what makes an
+//!     allay's item-carry-and-deliver (issue #230) real rather than blocked.
+//!     The *sound effect* is still unmodelled — that is the bullet above —
+//!     but the *game-event* an allay listens to was never actually stuck.
+//!   * right-click **cycling** ([`cycle_note`]) is wired into
 //!     `hand_use::hand_use`'s note-block arm, the plain-right-click dispatcher
-//!     this module does not own. The pulse sound `changePitch` also plays is
-//!     still not modelled — same gap as the neighbour-triggered pulse above.
+//!     this module does not own, and — a disclosed, narrower gap than the
+//!     redstone path above — does **not** yet post a vibration itself
+//!     (`hand_use::hand_use` has no [`MobHandle`](crate::mobs::MobHandle) to
+//!     post through); only a redstone-triggered pulse reaches an allay's ear
+//!     today. The pulse sound `changePitch` also plays is still not
+//!     modelled either way — same gap as the bullet above.
 
 use crate::redstone::{base_name, get_bool_property, get_u32_property, with_property};
 
@@ -232,6 +252,38 @@ pub fn on_neighbor_changed(state: &str, has_signal: bool, above_is_air: bool) ->
     })
 }
 
+/// Re-derives [`NeighborReaction::play_pulse`] from the **already-written**
+/// before/after states of a note block, for a caller that only has a
+/// [`crate::random_tick::RandomTickEvent`]'s `(from, to)` pair rather than
+/// the [`NeighborReaction`] this module built it from — every one of
+/// `crate::tick`'s four `propagate_and_react_with_entities` consumers is
+/// exactly that caller, and this is what closes the gap this module's own
+/// doc used to call unclosable ("nowhere in this event type to put it"):
+/// **re-verified false** — a `RandomTickEvent`'s two state strings already
+/// carry every input `playNote`'s own gate needs (`POWERED`'s rising edge,
+/// off `from`/`to`; `INSTRUMENT`, off `to`, unchanged by a `POWERED` flip),
+/// so nothing needed to be added to that struct at all. `above_is_air` is
+/// still an environmental read the caller must supply — a block above the
+/// note block is not part of its own state string.
+///
+/// Reproduces exactly the same boolean [`on_neighbor_changed`] computes so
+/// the two cannot silently drift — see this crate's own evidence standard on
+/// two derivations of one rule needing to agree; `tests::transition_agrees_with_on_neighbor_changed`
+/// is the check.
+#[must_use]
+pub fn played_pulse_on_transition(from: &str, to: &str, above_is_air: bool) -> bool {
+    if base_name(to) != NOTE_BLOCK {
+        return false;
+    }
+    let was_powered = get_bool_property(from, "powered").unwrap_or(false);
+    let is_powered = get_bool_property(to, "powered").unwrap_or(false);
+    if !is_powered || is_powered == was_powered {
+        return false;
+    }
+    let instrument = instrument_property(to);
+    instrument.works_above_note_block() || above_is_air
+}
+
 /// The `NOTE` property's 25 values (`0..=24`, `BlockStateProperties.NOTE`).
 const NOTE_COUNT: u32 = 25;
 
@@ -380,5 +432,33 @@ mod tests {
         let unpowered = "minecraft:note_block[instrument=creeper,note=0,powered=false]";
         let reaction = on_neighbor_changed(unpowered, true, false).expect("signal arrived");
         assert!(reaction.play_pulse, "a head instrument works standing alone, air above or not");
+    }
+
+    /// [`played_pulse_on_transition`] must agree with [`on_neighbor_changed`]'s
+    /// own `play_pulse` on every arm the latter test already exercises — the
+    /// two-derivations-of-one-rule check this crate's own evidence standard
+    /// asks for, so the two functions cannot silently drift apart.
+    #[test]
+    fn transition_agrees_with_on_neighbor_changed() {
+        let cases: &[(&str, bool, bool)] = &[
+            ("minecraft:note_block[instrument=harp,note=0,powered=false]", true, true),
+            ("minecraft:note_block[instrument=harp,note=0,powered=false]", true, false),
+            ("minecraft:note_block[instrument=harp,note=0,powered=true]", false, true),
+            ("minecraft:note_block[instrument=creeper,note=0,powered=false]", true, false),
+        ];
+        let mut mismatches = Vec::new();
+        for &(state, has_signal, above_is_air) in cases {
+            let Some(reaction) = on_neighbor_changed(state, has_signal, above_is_air) else {
+                continue;
+            };
+            let via_transition = played_pulse_on_transition(state, &reaction.new_state, above_is_air);
+            if via_transition != reaction.play_pulse {
+                mismatches.push((state, has_signal, above_is_air, reaction.play_pulse, via_transition));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "played_pulse_on_transition disagreed with on_neighbor_changed: {mismatches:?}"
+        );
     }
 }

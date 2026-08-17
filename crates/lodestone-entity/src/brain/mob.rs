@@ -216,6 +216,17 @@ pub trait BrainMob {
         None
     }
 
+    /// Where an allay carrying picked-up items should currently fly to drop
+    /// them — feeds
+    /// [`MemoryModuleType::DELIVERY_TARGET`](super::MemoryModuleType::DELIVERY_TARGET)
+    /// the same [`nearest_visible_zombified`](Self::nearest_visible_zombified)
+    /// host-computed-candidate shape: the host resolves the whole
+    /// inventory/cooldown/still-a-note-block eligibility chain and hands
+    /// back only the answer. Defaults to `None`.
+    fn delivery_target(&self) -> Option<Vec3> {
+        None
+    }
+
     /// Records a melee hit landing on whatever occupies `target` this tick —
     /// vanilla's `LivingEntity.hurtServer`/`knockback` calls a ram or an
     /// attack-target behaviour makes directly on the target entity. This

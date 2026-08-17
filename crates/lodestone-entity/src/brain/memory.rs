@@ -125,6 +125,19 @@ impl MemoryModuleType {
     /// `ATTACK_TARGET`-acquisition behaviour, a disclosed simplification —
     /// see that type's own doc.
     pub const NEAREST_ATTACKABLE_FOOD: Self = Self("nearest_attackable_food");
+    /// Where an allay carrying picked-up items should fly to drop them — a
+    /// narrowed stand-in for vanilla's own two-step
+    /// `AllayAi::getItemDepositPosition` (a `PositionTracker`, resolved from
+    /// `MemoryModuleType.LIKED_NOTEBLOCK_POSITION`/`LIKED_PLAYER`). This
+    /// crate's host resolves the whole eligibility chain
+    /// (`shouldDepositItemsAtLikedNoteblock`'s cooldown/distance/still-a-
+    /// note-block checks) and hands back only the answer, the same
+    /// [`NEAREST_VISIBLE_ZOMBIFIED`] shape used everywhere else a sensor
+    /// would need same-tick census data this crate's `BrainMob` seam does
+    /// not carry. **Disclosed narrowing**: only the note-block half of
+    /// `getItemDepositPosition` is modelled — the `LIKED_PLAYER` fallback
+    /// this crate's host does not resolve.
+    pub const DELIVERY_TARGET: Self = Self("delivery_target");
 }
 
 /// The presence requirement a behaviour places on a memory.
