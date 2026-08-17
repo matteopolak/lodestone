@@ -58,11 +58,14 @@ Two mechanical backstops sit behind the type:
 
 ## The census
 
-46 of 111 component types are consumed (drifted upward from an earlier count of 42 —
-`profile`, `potion_contents`, `writable_book_content`, `written_book_content` and
-`bundle_contents` were the ones this doc had lost track of; re-verified against the match
-arms directly rather than carried forward). The 65 that are not are each still a truncation
-point. Regenerate the list with a scan of the added-component match arms against
+49 of 111 component types are consumed (drifted upward from an earlier count of 46 —
+`charged_projectiles` and `attack_range` were modeled after they surfaced as live
+truncations, and a scan of the match arms directly turned up one more already-modeled arm
+this doc's own count had lost track of; re-verified by scanning the `read_component_patch`
+source rather than carrying the figure forward). A loaded crossbow and a spear-family item
+were each ending the packet at that slot, the same shape `bundle_contents` fixed earlier. The
+62 that are not consumed are each still a truncation point. Regenerate the list with a scan of
+the added-component match arms against
 `lodestone_data::data_component_types::DATA_COMPONENT_TYPE_NAMES`.
 
 Consumed, grouped by the wire shape they share — each group is one rule, not one arm per id:
@@ -73,18 +76,54 @@ Consumed, grouped by the wire shape they share — each group is one rule, not o
 | unit | **zero bytes** (`StreamCodec.unit`) | `unbreakable`, `creative_slot_lock`, `glider` |
 | VarInt | one VarInt | `max_stack_size`, `max_damage`, `damage`, `rarity`, `repair_cost`, `additional_trade_cost`, `ominous_bottle_amplifier`, `enchantable`, `dye`, `base_color`, `map_post_processing`, `map_id` |
 | fixed-width | `INT` / `FLOAT` / `BOOL` | `dyed_color`, `map_color`, `minimum_attack_charge`, `potion_duration_scale`, `enchantment_glint_override` |
+| six floats | `FLOAT` × 6, no length prefix | `attack_range` |
 | identifier | one UTF-8 string | `item_model`, `tooltip_style`, `note_block_sound` |
 | chat component | network NBT | `custom_name`, `item_name` |
-| composite | see the reader | `enchantments`, `stored_enchantments`, `tool`, `trim`, `pot_decorations`, `lore`, `custom_model_data`, `tooltip_display`, `attribute_modifiers`, `potion_contents`, `profile`, `writable_book_content`, `written_book_content`, `bundle_contents` |
+| composite | see the reader | `enchantments`, `stored_enchantments`, `tool`, `trim`, `pot_decorations`, `lore`, `custom_model_data`, `tooltip_display`, `attribute_modifiers`, `potion_contents`, `profile`, `writable_book_content`, `written_book_content`, `bundle_contents`, `charged_projectiles` |
 
 `custom_name`, `damage`, `enchantments`, `dyed_color`, `trim`, `map_id`, `pot_decorations`,
-`profile`, `writable_book_content`, `written_book_content` and `bundle_contents` are
-**surfaced** into `ItemComponents` as-decoded; `potion_contents` is surfaced already mixed
-into an opaque colour (`potion_color`), and `tool`/`max_stack_size`/`max_damage`/`equippable`
-as prototype-folded **effective** values (see that type's own doc for the patch-vs-effective
-split). `custom_data` is carried as an opaque byte blob. The rest are consumed for alignment
-and thrown away, which is the entire point — the value is worthless and consuming the right
-number of bytes is worth a whole packet.
+`profile`, `writable_book_content`, `written_book_content`, `bundle_contents`,
+`charged_projectiles` and `attack_range` are **surfaced** into `ItemComponents` as-decoded;
+`potion_contents` is surfaced already mixed into an opaque colour (`potion_color`), and
+`tool`/`max_stack_size`/`max_damage`/`equippable` as prototype-folded **effective** values
+(see that type's own doc for the patch-vs-effective split). `custom_data` is carried as an
+opaque byte blob. The rest are consumed for alignment and thrown away, which is the entire
+point — the value is worthless and consuming the right number of bytes is worth a whole
+packet.
+
+### `charged_projectiles` shares `bundle_contents`' reader, not its own
+
+`minecraft:charged_projectiles` (a loaded crossbow's arrow(s)/firework) and
+`minecraft:bundle_contents` both carry a list of whole `ItemStackTemplate`s — item id, count,
+then a recursive nested `DataComponentPatch` per entry, with no length prefix on any of it.
+`read_charged_projectiles` is a near-duplicate of `read_bundle_contents` rather than a shared
+generic: the two differ only in their cap (1024 vs. 64, each the source codec's own declared
+maximum) and in which `ItemComponents` field they write. An unmodeled component inside a
+charged stack degrades the same way as inside a bundled one — it stops the list, flags the
+outer stack `has_unmodeled`, and drops the rest of the packet, never a fatal error.
+
+### `minecraft:attack_range`'s six floats are all independent, and none is length-prefixed
+
+`AttackRange` (`world/item/component/AttackRange.java`) is a plain six-field record —
+`min_reach`, `max_reach`, `min_creative_reach`, `max_creative_reach`, `hitbox_margin`,
+`mob_factor`, all `f32`, in that wire order — **not** a single scalar. Stored on
+`ItemComponents` as bits (`AttackRange::new`/accessor pattern, the same `f32`-is-not-`Eq`
+convention `ItemTool::default_mining_speed` documents) so the struct keeps its `Eq` impl.
+
+### `minecraft:enchantments`' map key is a bare registry id, not a holder offset
+
+`read_enchantments` (shared by `minecraft:enchantments` and `minecraft:stored_enchantments`)
+used to read its per-entry key as `id + 1` and reject `0` as an unsupported "inline holder" —
+a mis-transcription of `ByteBufCodecs.holder`'s two-shape codec (`0` = a full inline
+definition, `id + 1` = a registry reference), which `Enchantment.STREAM_CODEC` does **not**
+use. It is `ByteBufCodecs.holderRegistry(Registries.ENCHANTMENT)`, built on the plain
+`registry()` helper: a bare id, no offset, no inline arm. The fix reads the id as-is; there is
+no "inline enchantment" case to handle at all. This was found on a live `SET_EQUIPMENT`
+packet: any entity wearing an item enchanted with whatever occupies registry id 0 lost its
+entire equipment list, and every other enchanted item was silently decoding to the wrong
+enchantment (off by one). Same trap `read_bundle_contents`' sibling functions warn about for
+width, one level over — confusing which `ByteBufCodecs` *helper* a component's `Holder` uses,
+not just how wide its payload is.
 
 ### The derived-NBT family is easy to miss
 
@@ -102,7 +141,7 @@ list tag and the `Unit`-valued members to an empty compound.
 | component | cost |
 |---|---|
 | `can_place_on` / `can_break` | `AdventureModePredicate`: a list of `BlockPredicate`s, each with state/NBT matchers. Adventure-mode servers send them |
-| `container` / `charged_projectiles` | lists of whole `ItemStack`s — recursive through this same decoder, the same shape `bundle_contents` (now modeled, see the composite row above and `read_bundle_contents`) used to occupy here |
+| `container` | a list of whole `ItemStack`s — recursive through this same decoder, the same shape `bundle_contents`/`charged_projectiles` (both now modeled, see the composite row above) already occupy here |
 | `food` / `consumable` / `use_cooldown` / `use_remainder` / `weapon` / `blocks_attacks` | multi-field records with nested effect lists |
 | `entity_data` / `block_entity_data` / `bucket_entity_data` | `TypedEntityData`: a registry id then NBT. Cheap, but each uses a *different* registry codec |
 | the 29 `*/variant`, `*/collar`, `*/color`, `salmon/size` ids | individually trivial (holder VarInt or enum VarInt) but each needs its registry checked for static vs dynamic, since a dynamic-registry `Holder` uses the inline-`0` sentinel and a static one does not. Only mob buckets and spawn eggs carry them |
@@ -118,6 +157,12 @@ after it decodes to a plausible wrong value. The recurring widths to check:
   `dyed_color`, `map_color` and `attribute_modifiers`' amount are all in this trap.
 * `ByteBufCodecs.holderRegistry` writes a **bare** id; `ByteBufCodecs.holder` writes `0` for
   an inline definition and `id + 1` otherwise. `holderSet` offsets only the **size**.
+  **`enchantments`/`stored_enchantments` shipped violating this exact rule** — `read_enchantments`
+  read a bare `holderRegistry` id (`Enchantment.STREAM_CODEC`) as if it were the offset `holder`
+  form, off-by-one on every non-zero id and a fatal "unsupported inline holder" error on `0`,
+  which is an ordinary reference under the correct reading. The rule was written down correctly
+  here the whole time; the arm just did not follow it. Re-check every `Holder<T>` arm against
+  which helper its jar codec actually calls, not against this table from memory.
 * `idMapper` is a bare VarInt with no offset and no sentinel.
 
 Two gotchas about the tests:

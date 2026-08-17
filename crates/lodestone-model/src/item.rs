@@ -336,6 +336,31 @@ pub struct ItemComponents {
     /// mask is derived from the *item id* rather than this component —
     /// `crate::banner_pattern` in `lodestone-render`, not here).
     pub base_color: Option<String>,
+    /// `minecraft:charged_projectiles`: a crossbow's loaded arrow(s) or firework,
+    /// in load order. Empty for every non-crossbow item and for an unloaded
+    /// crossbow; the two are indistinguishable here, the same absent-patch-field-
+    /// and-explicitly-empty convention [`enchantments`](Self::enchantments)
+    /// already uses.
+    ///
+    /// Each entry is a **full nested `ItemStack`**, the same
+    /// item-then-count-then-recursive-patch shape
+    /// [`bundle_contents`](Self::bundle_contents) carries, and for the same
+    /// reason: the per-entry payload has no length prefix, so a loaded crossbow
+    /// sitting in any container used to truncate the rest of the packet from
+    /// that slot onward.
+    pub charged_projectiles: Vec<ItemStack>,
+    /// `minecraft:attack_range`: the melee reach an item grants, both in and out
+    /// of creative, plus the hitbox margin and the mob-wielded scale factor.
+    /// `None` for every item that does not override the entity's default reach
+    /// (most items — a player's own base interaction range is entity state, not
+    /// an item component, so an ordinary sword carries no `minecraft:attack_range`
+    /// at all).
+    ///
+    /// Decoded rather than treated as unmodeled for the same reason as
+    /// [`trim`](Self::trim) and the rest of that group: the payload is six
+    /// fixed-width floats with no length prefix, so a spear-family item in any
+    /// container used to truncate the rest of the packet from that slot onward.
+    pub attack_range: Option<AttackRange>,
     /// True when the stack's patch carried at least one component this build
     /// does not model, so decoding stopped early and the modeled fields above
     /// may be incomplete. The modeled fields that were decoded remain valid.
@@ -457,6 +482,82 @@ pub struct ItemProfile {
     /// distinct state from "no properties field at all": the wire component
     /// has no such distinction either.
     pub properties: Vec<ProfileProperty>,
+}
+
+/// The melee reach a `minecraft:attack_range` component grants: minimum and
+/// maximum reach, the creative-mode alternates of each, a hitbox margin and a
+/// mob-wielded scale factor — six independent floats, in that wire order.
+///
+/// Stored as raw IEEE-754 bits, the same convention [`ItemTool::default_mining_speed`]
+/// documents, so [`ItemComponents`] keeps its `Eq` impl (`f32` is not `Eq`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AttackRange {
+    min_reach_bits: u32,
+    max_reach_bits: u32,
+    min_creative_reach_bits: u32,
+    max_creative_reach_bits: u32,
+    hitbox_margin_bits: u32,
+    mob_factor_bits: u32,
+}
+
+impl AttackRange {
+    /// Builds an attack-range component from its six decoded fields, in wire
+    /// order.
+    #[must_use]
+    pub fn new(
+        min_reach: f32,
+        max_reach: f32,
+        min_creative_reach: f32,
+        max_creative_reach: f32,
+        hitbox_margin: f32,
+        mob_factor: f32,
+    ) -> Self {
+        Self {
+            min_reach_bits: min_reach.to_bits(),
+            max_reach_bits: max_reach.to_bits(),
+            min_creative_reach_bits: min_creative_reach.to_bits(),
+            max_creative_reach_bits: max_creative_reach.to_bits(),
+            hitbox_margin_bits: hitbox_margin.to_bits(),
+            mob_factor_bits: mob_factor.to_bits(),
+        }
+    }
+
+    /// The minimum survival-mode reach, in blocks.
+    #[must_use]
+    pub fn min_reach(&self) -> f32 {
+        f32::from_bits(self.min_reach_bits)
+    }
+
+    /// The maximum survival-mode reach, in blocks.
+    #[must_use]
+    pub fn max_reach(&self) -> f32 {
+        f32::from_bits(self.max_reach_bits)
+    }
+
+    /// The minimum creative-mode reach, in blocks.
+    #[must_use]
+    pub fn min_creative_reach(&self) -> f32 {
+        f32::from_bits(self.min_creative_reach_bits)
+    }
+
+    /// The maximum creative-mode reach, in blocks.
+    #[must_use]
+    pub fn max_creative_reach(&self) -> f32 {
+        f32::from_bits(self.max_creative_reach_bits)
+    }
+
+    /// The extra distance a target's own hitbox extends the reach by.
+    #[must_use]
+    pub fn hitbox_margin(&self) -> f32 {
+        f32::from_bits(self.hitbox_margin_bits)
+    }
+
+    /// The multiplier applied to both reaches when a non-player entity wields
+    /// this item.
+    #[must_use]
+    pub fn mob_factor(&self) -> f32 {
+        f32::from_bits(self.mob_factor_bits)
+    }
 }
 
 /// A smithing-table armour trim — vanilla's `ArmorTrim` record

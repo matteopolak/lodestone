@@ -22,8 +22,8 @@
 
 use lodestone_core::{Nbt, Writer, write_network_nbt};
 use lodestone_model::{
-    ClientEvent, ConnectionState, Directive, ItemEnchantment, Text, ToolBlocks, ToolPatch,
-    VersionAdapter,
+    ClientEvent, ConnectionState, Directive, EquipmentSlot, ItemEnchantment, Text, ToolBlocks,
+    ToolPatch, VersionAdapter,
 };
 use lodestone_v770::V770Adapter;
 use lodestone_data::data_component_types::component_type_name;
@@ -138,10 +138,14 @@ fn decodes_modeled_components() {
     patch.var_i32(component_id("minecraft:damage"));
     patch.var_i32(137);
 
-    // enchantments: a VarInt map of Holder<Enchantment> (id + 1) -> VarInt level.
+    // enchantments: a VarInt map of Holder<Enchantment> -> VarInt level. The
+    // key is a *bare* registry id, not the offset-by-one form
+    // `minecraft:instrument`'s holder uses elsewhere in this crate — see
+    // `read_enchantments`'s own doc, and `docs/item-data-component-decode.md`,
+    // for why.
     patch.var_i32(component_id("minecraft:enchantments"));
     patch.var_i32(1); // one entry
-    patch.var_i32(12 + 1); // enchantment registry id 12, holder-encoded
+    patch.var_i32(12); // enchantment registry id 12, bare
     patch.var_i32(4); // level IV
 
     let payload = set_slot_with_patch("minecraft:diamond_pickaxe", 1, patch.as_slice());
@@ -1367,5 +1371,87 @@ fn merchant_offers_abandons_the_packet_instead_of_reading_past_a_partial_result(
         "the offer list has no per-entry length prefix and its trailing scalars \
          sit past it, so there is nothing to resynchronise to — the packet is \
          abandoned rather than half-reported: {directives:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `minecraft:enchantments` — a bare registry id, not a holder-offset one
+// ---------------------------------------------------------------------------
+
+/// The bug this section is named for: `minecraft:enchantments`' map key is a
+/// *bare* registry id, not the offset-by-one, either-id-or-inline holder shape
+/// other component families (`minecraft:instrument`) really do use — see
+/// `read_enchantments`'s own doc and `docs/item-data-component-decode.md` for
+/// the wire citation. Wire id `0` is therefore an ordinary registry
+/// reference, not an "inline holder" marker — the decoder used to reject it
+/// outright and fail the whole packet.
+///
+/// `SET_EQUIPMENT` is the real packet this surfaced on: any entity wearing an
+/// item enchanted with whatever occupies registry id 0 lost its entire
+/// equipment list. Two slots, pairwise-distinct entity/item/enchantment/level
+/// values, and the continuation bit chaining past the id-0 entry into a
+/// second, ordinarily-enchanted slot — so this proves both that id 0 no
+/// longer aborts the packet and that a non-zero id decodes to *itself*, not
+/// to itself minus one.
+#[test]
+fn enchantment_registry_id_0_is_an_ordinary_reference_not_an_inline_holder() {
+    let mut helmet_patch = Writer::default();
+    helmet_patch.var_i32(1); // one added component
+    helmet_patch.var_i32(0);
+    helmet_patch.var_i32(component_id("minecraft:enchantments"));
+    helmet_patch.var_i32(1); // one entry
+    helmet_patch.var_i32(0); // enchantment registry id 0 -- an ordinary reference
+    helmet_patch.var_i32(1); // level I
+
+    let mut sword_patch = Writer::default();
+    sword_patch.var_i32(1);
+    sword_patch.var_i32(0);
+    sword_patch.var_i32(component_id("minecraft:enchantments"));
+    sword_patch.var_i32(1);
+    sword_patch.var_i32(7); // a pairwise-distinct enchantment id
+    sword_patch.var_i32(3); // level III
+
+    let mut w = Writer::default();
+    w.var_i32(9); // entity id
+    // Slot byte: low 7 bits are the ordinal, the high bit signals another
+    // entry follows.
+    w.u8(EquipmentSlot::Head.ordinal() | 0x80);
+    w.var_i32(1); // stack count
+    w.var_i32(item_id("minecraft:diamond_helmet").expect("known item"));
+    w.bytes(helmet_patch.as_slice());
+    w.u8(EquipmentSlot::MainHand.ordinal()); // last entry, no continuation bit
+    w.var_i32(1);
+    w.var_i32(item_id("minecraft:diamond_sword").expect("known item"));
+    w.bytes(sword_patch.as_slice());
+
+    let directives = handle(play::clientbound::SET_EQUIPMENT, &w.into_vec());
+    let ClientEvent::EntityEquipmentUpdated {
+        entity_id,
+        equipment,
+    } = expect_single_emit(&directives)
+    else {
+        panic!("expected an EntityEquipmentUpdated emit, got {directives:?}");
+    };
+    assert_eq!(*entity_id, 9);
+    assert_eq!(
+        equipment.len(),
+        2,
+        "both slots must survive: an enchantment registry id of 0 must never \
+         truncate the equipment list"
+    );
+    let helmet = equipment[0].item.as_ref().expect("the helmet slot");
+    assert!(!helmet.components.has_unmodeled);
+    assert_eq!(
+        helmet.components.enchantments,
+        vec![ItemEnchantment { id: 0, level: 1 }],
+        "registry id 0 must decode as an ordinary enchantment reference, not \
+         an unsupported inline holder"
+    );
+    let sword = equipment[1].item.as_ref().expect("the sword slot");
+    assert!(!sword.components.has_unmodeled);
+    assert_eq!(
+        sword.components.enchantments,
+        vec![ItemEnchantment { id: 7, level: 3 }],
+        "a non-zero id must decode to itself, not to itself minus one"
     );
 }

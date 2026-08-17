@@ -38,6 +38,7 @@ struct FakeAdapter {
     brand_resp_id: Option<i32>,
     pong_resp_id: Option<i32>,
     resource_pack_resp_id: Option<i32>,
+    cookie_resp_id: Option<i32>,
     calls: Arc<Mutex<Vec<(ConnectionState, i32)>>>,
     /// Chunk columns to write into the [`lodestone_model::WorldSink`] when a
     /// scripted `(state, packet_id)` arrives, as `(chunk_x, chunk_z)`.
@@ -114,6 +115,16 @@ impl FakeAdapter {
     /// on the wire; without this it stays unrepresentable (`Ok(None)`).
     fn resource_pack_response_to(mut self, id: i32) -> Self {
         self.resource_pack_resp_id = Some(id);
+        self
+    }
+
+    /// Makes `CookieResponse` encode to an observable packet so a test can
+    /// prove the key and the (seeded-store-or-absent) payload that actually
+    /// went out. The payload is `[state, key_len_be, key_bytes,
+    /// present_flag, cookie_bytes?]` so a test can distinguish a seeded
+    /// cookie from a genuinely absent one without a second channel.
+    fn cookie_response_to(mut self, id: i32) -> Self {
+        self.cookie_resp_id = Some(id);
         self
     }
 
@@ -265,6 +276,22 @@ impl VersionAdapter for FakeAdapter {
                     (resp_id, payload)
                 }))
             }
+            // Observable only when a test opts in via `cookie_response_to`;
+            // see that method's doc for the payload layout.
+            ClientAction::CookieResponse { key, payload } => Ok(self.cookie_resp_id.map(|id| {
+                let mut out = vec![state_code(state)];
+                let key_bytes = key.to_string().into_bytes();
+                out.extend_from_slice(&(key_bytes.len() as u32).to_be_bytes());
+                out.extend_from_slice(&key_bytes);
+                match payload {
+                    Some(bytes) => {
+                        out.push(1);
+                        out.extend_from_slice(bytes);
+                    }
+                    None => out.push(0),
+                }
+                (id, out)
+            })),
             _ => Ok(None),
         }
     }
@@ -436,7 +463,106 @@ fn start_with_player_loaded(
     (handle, events, Connection::new(server_io))
 }
 
+/// Starts a session with a prior session's cookie store seeded via
+/// [`ClientBuilder::seed_cookies`] — the reconnect leg of
+/// [`SessionOutcome::Transferred`], simulated here without a real transfer so
+/// the seeding itself can be pinned hermetically.
+fn start_with_cookies(
+    adapter: FakeAdapter,
+    cookies: HashMap<lodestone_model::ResourceKey, Vec<u8>>,
+) -> (
+    lodestone_client::ClientHandle,
+    lodestone_client::EventStream,
+    Connection<tokio::io::DuplexStream>,
+) {
+    let (client_io, server_io) = memory_pair();
+    let (handle, events) = ClientBuilder::new(server(), profile(), Box::new(adapter))
+        .seed_cookies(cookies)
+        .connect_with(client_io);
+    (handle, events, Connection::new(server_io))
+}
+
 // --- Tests ------------------------------------------------------------------
+
+/// [`ClientBuilder::seed_cookies`]: a `cookie_request` for a key the *prior*
+/// session had stored answers from the seeded map, and a key that was never
+/// stored — seeded or otherwise — still answers `None`, exactly like an
+/// ordinary unseeded session (`self.cookies.get(key).cloned()` in `Driver`'s
+/// `emit`, unchanged). This is the transfer reconnect leg
+/// `docs/secure-chat.md`'s "Transfer, and what a reconnect must and must not
+/// carry" section documents: without seeding, every post-transfer
+/// `cookie_request` answered `None` even for a cookie the previous server had
+/// stored, because there was no way to hand `SessionOutcome::Transferred`'s
+/// cookie map to a new `ClientBuilder` at all.
+#[tokio::test]
+async fn seeded_cookies_answer_a_request_and_an_unseeded_key_still_answers_none() {
+    const SEEDED_REQUEST: i32 = 0x50;
+    const MISSING_REQUEST: i32 = 0x51;
+    const COOKIE_RESP: i32 = 0x60;
+
+    let seeded_key = lodestone_model::Identifier::new("lodestone", "seeded").unwrap();
+    let missing_key = lodestone_model::Identifier::new("lodestone", "missing").unwrap();
+    let mut cookies = HashMap::new();
+    cookies.insert(seeded_key.clone(), vec![0xAA, 0xBB, 0xCC]);
+
+    let adapter = FakeAdapter::new()
+        .cookie_response_to(COOKIE_RESP)
+        .on(
+            ConnectionState::Handshaking,
+            SEEDED_REQUEST,
+            vec![Directive::Emit(ClientEvent::CookieRequested {
+                key: seeded_key.clone(),
+            })],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            MISSING_REQUEST,
+            vec![Directive::Emit(ClientEvent::CookieRequested {
+                key: missing_key.clone(),
+            })],
+        );
+
+    let (handle, mut events, mut peer) = start_with_cookies(adapter, cookies);
+
+    peer.write_packet(SEEDED_REQUEST, &[]).await.unwrap();
+    assert!(matches!(
+        events.recv().await,
+        Some(ClientEvent::CookieRequested { .. })
+    ));
+    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, COOKIE_RESP);
+    let key_len = u32::from_be_bytes(payload[1..5].try_into().unwrap()) as usize;
+    let key_end = 5 + key_len;
+    assert_eq!(&payload[5..key_end], seeded_key.to_string().as_bytes());
+    assert_eq!(
+        payload[key_end],
+        1,
+        "the seeded cookie must be present, not answered as absent"
+    );
+    assert_eq!(
+        &payload[key_end + 1..],
+        &[0xAA, 0xBB, 0xCC],
+        "the seeded bytes must be answered verbatim"
+    );
+
+    peer.write_packet(MISSING_REQUEST, &[]).await.unwrap();
+    assert!(matches!(
+        events.recv().await,
+        Some(ClientEvent::CookieRequested { .. })
+    ));
+    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, COOKIE_RESP);
+    let key_len = u32::from_be_bytes(payload[1..5].try_into().unwrap()) as usize;
+    let key_end = 5 + key_len;
+    assert_eq!(&payload[5..key_end], missing_key.to_string().as_bytes());
+    assert_eq!(
+        payload[key_end], 0,
+        "a key with no cookie — seeded or otherwise — must answer absent, \
+         never a guess"
+    );
+
+    drop(handle);
+}
 
 /// A `SetState` after a send in the same batch must not retroactively affect
 /// the send. Here the "send" is the auto keep-alive response, which is emitted
@@ -1452,17 +1578,17 @@ async fn incoming_signed_chat_is_verified_against_the_announced_public_key() {
             ..
         }) => {
             assert!(!info.verified, "a tampered signature must not verify");
-            assert!(
-                matches!(
-                    &text.content,
-                    lodestone_model::TextContent::Literal(s) if s == "[Not Secure] "
-                ),
-                "an unverified message must carry the not-secure tag, got {text:?}"
-            );
+            // The message body must be untouched either way — an unverified
+            // message is a classification (`info.verified`), never a rewrite
+            // of `text` itself. This used to prepend a literal
+            // `"[Not Secure] "` here, which was a mis-port of vanilla's
+            // separate not-secure indicator sprite into the message content;
+            // see `driver.rs`'s own note at the verification call site.
             assert_eq!(
-                text.extra.first(),
-                Some(&Text::literal(content)),
-                "the original text must survive as the tag's child"
+                text,
+                Text::literal(content),
+                "an unverified message's text must still be untouched — only \
+                 `info.verified` carries the trust verdict"
             );
         }
         other => panic!("expected the tampered signed chat event, got {other:?}"),
