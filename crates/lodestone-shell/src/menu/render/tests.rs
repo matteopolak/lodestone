@@ -10,8 +10,8 @@
 use super::*;
 use super::account_screen::{ACCOUNTS_BUTTON_W, ACCOUNTS_FOOTER_SPACING, ACCOUNTS_HEAD_ICON, AccountsBlock, accounts_block, accounts_button_slot, accounts_failed_frame, accounts_idle_frame};
 use super::draw::{
-    Quads, TOOLTIP_BG, TOOLTIP_LINE_H, TOOLTIP_MOUSE_OFFSET, TOOLTIP_PAD, wrap_bounded,
-    wrap_measured,
+    Quads, TOOLTIP_BG, TOOLTIP_LINE_H, TOOLTIP_MOUSE_OFFSET, TOOLTIP_PAD, restyle_wrapped,
+    wrap_bounded, wrap_measured,
 };
 use super::renderer::{FLOATS_PER_VERTEX, SPRITE_FLOATS_PER_VERTEX};
 use super::screens::credits_frame;
@@ -2657,6 +2657,64 @@ fn wrap_measured_keeps_filling_the_last_visible_line_past_the_cap() {
         vec!["aa bb cc".to_string(), "dd ee ff".to_string()],
         "the second line must keep accepting words that fit it after the \
          line cap is reached, not stop at its first word"
+    );
+}
+
+/// **Owner's report**: "sometimes the spacing is missing for text (generally
+/// when its coloured), it might be ignoring a space when its preceded by a
+/// colour". `restyle_wrapped` re-attaches `wrap_measured`'s plain-string
+/// output to the original styled spans by walking both in lockstep and
+/// probing forward for each character; a space sitting exactly at a colour
+/// change is the one input that makes that probe cross a style boundary
+/// instead of staying inside one run. Two placements, both real: the space
+/// as the *trailing* character of the red run and as the *leading* character
+/// of the blue one — a bug that only dropped one direction would still pass
+/// a test that only tried the other.
+#[test]
+fn restyle_wrapped_keeps_a_space_sitting_at_a_colour_boundary() {
+    use lodestone_model::TextColor;
+
+    let red = TextStyle {
+        color: Some(TextColor::Red),
+        ..TextStyle::default()
+    };
+    let blue = TextStyle {
+        color: Some(TextColor::Blue),
+        ..TextStyle::default()
+    };
+
+    // Case 1: the space trails the red run ("Hello " + "World").
+    let trailing = [
+        TextSpan { text: "Hello ".to_string(), style: red },
+        TextSpan { text: "World".to_string(), style: blue },
+    ];
+    let rows = restyle_wrapped(&trailing, &["Hello World".to_string()]);
+    assert_eq!(rows.len(), 1);
+    let joined: String = rows[0].iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(
+        joined, "Hello World",
+        "a space trailing the coloured run must survive: got {rows:?}"
+    );
+    assert!(
+        rows[0].iter().any(|s| s.text.contains(' ')),
+        "the space must appear in *some* run's text, not vanish entirely: {rows:?}"
+    );
+
+    // Case 2: the space leads the blue run ("Hello" + " World").
+    let leading = [
+        TextSpan { text: "Hello".to_string(), style: red },
+        TextSpan { text: " World".to_string(), style: blue },
+    ];
+    let rows = restyle_wrapped(&leading, &["Hello World".to_string()]);
+    assert_eq!(rows.len(), 1);
+    let joined: String = rows[0].iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(
+        joined, "Hello World",
+        "a space leading the coloured run must survive too: got {rows:?}"
+    );
+    assert!(
+        rows[0].iter().any(|s| s.text.contains(' ')),
+        "the space must appear in *some* run's text, not vanish entirely: {rows:?}"
     );
 }
 

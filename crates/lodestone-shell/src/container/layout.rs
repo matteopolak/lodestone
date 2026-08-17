@@ -311,6 +311,21 @@ fn player_layout() -> SlotLayout {
     }
 }
 
+/// The `GENERIC_9x1`..`GENERIC_9x6` shape every chest-like container (chest,
+/// barrel, shulker box, ender chest, trapped chest, hopper minecart, …) uses.
+///
+/// `main_y`'s `+ 13` is `ChestMenu`'s own constructor, verbatim:
+/// `int inventoryTop = 18 + this.containerRows * 18 + 13;`
+/// (`ChestMenu.java`, fed the real `containerRows` every `GENERIC_9x*` size
+/// passes to it). **Not `+ 14`** — that one-off constant sat here as a
+/// plausible-looking neighbour of the real value and put the player's own
+/// inventory section one pixel too low in every chest-shaped screen,
+/// regardless of row count (the error is a constant added once, not scaled
+/// by `rows`, so a 1-row hopper minecart and a 6-row large chest were both
+/// off by the identical one pixel). The always-fixed screens
+/// ([`SpecialLayout`]'s `84.0`/`51.0`/`137.0` in [`slot_layout`]) and the
+/// standalone inventory screen ([`player_layout`]) do not share this
+/// function, which is why only a chest-shaped container showed the drift.
 fn generic_layout(container_size: usize) -> SlotLayout {
     let cols = 9usize;
     let rows = container_size.div_ceil(cols).max(1);
@@ -322,7 +337,7 @@ fn generic_layout(container_size: usize) -> SlotLayout {
             18.0 + (i / cols) as f32 * SLOT,
         ));
     }
-    let main_y = 18.0 + rows as f32 * SLOT + 14.0;
+    let main_y = 18.0 + rows as f32 * SLOT + 13.0;
     let hotbar_y = append_main_inventory(&mut slots, container_size, main_y);
     SlotLayout {
         width: 176.0,
