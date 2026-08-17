@@ -355,6 +355,17 @@ impl RenderState {
         let sign_text_count = self.sign_text.prepare(queue, &view_proj, &signs);
         stats.sign_text_vertices = sign_text_count;
 
+        // Beacon beams, same "upload before the pass opens" constraint and
+        // the same not-derived-from-`entities` shape as sign text above — a
+        // beacon is a *block*, gathered from world state. See
+        // `gpu/beacon_beam.rs`'s module doc for why this returns two counts
+        // (solid core / outer glow) rather than one.
+        let beacons = self.beacon_source.beacons(camera.position);
+        let (beacon_solid_count, beacon_glow_count) =
+            self.beacon_beam.prepare(queue, &view_proj, &beacons);
+        stats.beacon_beam_solid_vertices = beacon_solid_count;
+        stats.beacon_beam_glow_vertices = beacon_glow_count;
+
         // Resolve, frustum-cull and upload entity instances *before* the pass —
         // buffers can't be created mid-pass, and the entity camera uniform (no
         // section origin; the world position lives in each instance matrix) must
@@ -990,6 +1001,16 @@ impl RenderState {
             // `gpu/sign_text.rs`'s module doc for the depth pipeline.
             self.sign_text.draw(&mut pass, sign_text_count);
 
+            // The beacon beam's **solid core** only — opaque, depth-writing
+            // (`BEACON_BEAM_OPAQUE`, see `gpu/beacon_beam.rs`'s module doc),
+            // so it belongs here with the rest of this pass's opaque/cutout
+            // geometry and **before translucent water** for the same reason
+            // block entities are: it writes depth, so drawing it after water
+            // would paint a beam segment submerged in a pool over the water
+            // surface. The outer **glow** is translucent and drawn far below,
+            // among the other alpha-blended world geometry.
+            self.beacon_beam.draw_solid(&mut pass, beacon_solid_count);
+
             // Experience-orb billboards. After every opaque and cutout entity
             // layer above, and still **before translucent water** for the reason
             // the mobs and block entities are: an orb writes depth, so drawing it
@@ -1296,6 +1317,16 @@ impl RenderState {
                     &mut stats.terrain_camera_bind_group_switches,
                 );
             }
+
+            // The beacon beam's outer **glow** — alpha-blended, depth-test
+            // only (`BEACON_BEAM_TRANSLUCENT`, see `gpu/beacon_beam.rs`'s
+            // module doc). Placed here, after translucent terrain and
+            // outside the `if let Some(model)` gate above (a beacon draws
+            // with or without the vanilla-atlas terrain renderer), for the
+            // same reason the translucent debris below is: it needs a depth
+            // buffer that already holds every opaque surface, including
+            // translucent water and blocks, or it would show through them.
+            self.beacon_beam.draw_glow(&mut pass, beacon_glow_count);
 
             // The *translucent* half of the debris last among the world geometry
             // (the opaque half is above, before the water): it is alpha-blended

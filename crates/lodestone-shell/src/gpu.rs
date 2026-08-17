@@ -37,6 +37,7 @@ mod debug_lines;
 // +48%-brightness bug waiting to happen. Everything else in here stays
 // `pub(super)`, i.e. `pub(in crate::gpu)`.
 pub(crate) mod entities;
+mod beacon_beam;
 mod entity_passes;
 mod first_person;
 mod frame;
@@ -70,7 +71,7 @@ pub use plugin_billboards::{PluginBillboardInstance, plugin_billboard_vertices};
 pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{
-    AmbientLightSource, BannerSource, BellSource, BlockEntitySource, CampfireSource,
+    AmbientLightSource, BannerSource, BeaconSource, BellSource, BlockEntitySource, CampfireSource,
     ConduitSource, DecoratedPotSource, EnchantingTableSource,
     EntityLightSource, HandSwingSource, ItemUseSource, LecternSource, MainHandItem,
     MainHandSource, MapSource, MovingPistonSource, OutlineShapeSource, ShulkerSource, SignSource,
@@ -78,6 +79,7 @@ pub use sources::{
 };
 pub use stats::RenderStats;
 
+use beacon_beam::BeaconBeamRenderer;
 use block_entities::BlockEntityRenderer;
 use debug_lines::{DebugLineRenderer, DebugLinesSource};
 use entities::EntityRenderer;
@@ -531,6 +533,17 @@ pub struct RenderState {
     /// Where this frame's signs come from. Same "unset means draw nothing"
     /// convention as [`Self::skull_source`].
     sign_source: SignSource,
+    /// The beacon light beam. Always constructed, like [`Self::sign_text`]:
+    /// it loads its own jar-sourced texture and fail-opens to drawing
+    /// nothing. Not a hole in the world the way chest/skull are — a 26.2
+    /// beacon's block model has real pyramid-frame geometry — but before
+    /// this landed a beacon had **no visual sign it was active at all**.
+    beacon_beam: BeaconBeamRenderer,
+    /// Where this frame's beacon beams come from. Same "unset means draw
+    /// nothing" convention as [`Self::skull_source`]. See [`BeaconSource`]
+    /// for why this needs no per-position tracker the way
+    /// [`Self::bell_source`] does.
+    beacon_source: BeaconSource,
     /// The rain/snow pass, built once `textures/environment/{rain,snow}.png` are
     /// available. `None` — no `client.jar`, a headless test, or simply before
     /// [`RenderState::install_weather`] runs — draws no precipitation, the same

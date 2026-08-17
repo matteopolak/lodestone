@@ -28,6 +28,21 @@ installs both per frame beside the other block-entity sources — see [Decorated
 `stepping_ticks_conduits_without_panicking_before_login`), and all 9 of the bell/conduit/decorated-pot
 `#[ignore]`d GPU pixel gates still pass against a real headless adapter + `client.jar`.
 
+**The beacon light beam is now landed and wired end to end** (16 of 26 registrations) — see
+[Beacon](#beacon). Unlike everything above, it is not a cuboid rig: `BeaconRenderer.submitBeaconBeam`
+builds two nested translucent quad-cylinders procedurally every frame, so
+`lodestone_render::beacon` has its own geometry functions rather than an `EntityModelDef`, and
+`gpu/beacon_beam.rs` is its own two-pipeline pass (opaque solid core / translucent glow) rather than
+a `BlockEntityModelSet` consumer. It also needed **no new packet**: `levels`/`beamSections` are pure
+functions of current block state — the base pyramid below the beacon and the run of coloured glass
+above it — the same client-side block-entity ticker vanilla itself runs on both sides, so
+`Sim::beacon_source` recomputes them fresh from `lodestone_world::World::block_state_at` every frame
+rather than carrying a `ChestLids`-shaped tracker. This was previously listed in this issue's "out of
+scope" bucket as "its own shader effect, not a cuboid rig" — that framing undersold it: the beam needed
+real engineering (the exact `BeaconBlockEntity.tick` base-pyramid and beam-colour scan, including its
+`checkingBeamSections.size() <= 1` quirk) but no shader-effect infrastructure beyond an ordinary second
+`wgpu::RenderPipeline` sharing one shader module.
+
 ## The real vanilla scope, from the registration list — not the issue's guess-list
 
 `BlockEntityRenderers.java`'s static block
@@ -76,8 +91,10 @@ the first entry landed through the *moving-block-model* seam rather than through
 the item path. **Decorated pot makes 14 and conduit makes 15** (see [Decorated pot](#decorated-pot) and
 [Conduit](#conduit)) — both fully wired end to end, including the live per-frame install
 (`Sim::decorated_pot_source`/`Sim::conduit_source`, installed from `app/redraw.rs`), the same stage bell
-reached before it. **15 of 26 registrations are now landed and wired.** The rest are still absent.
-Picking the next few should read this list, not the original issue body.
+reached before it. **Beacon makes 16** (see [Beacon](#beacon)) — the first registration landed through
+neither `EntityPipeline`'s cuboid-rig batch nor the moving-block-model seam, but a dedicated procedural
+pass (`gpu/beacon_beam.rs`). **16 of 26 registrations are now landed and wired.** The rest are still
+absent. Picking the next few should read this list, not the original issue body.
 
 **The registration list had two entries this document's "what is not built" section never mentioned
 either way: `LECTERN` (`LecternRenderer`, the open book on a lectern) and `CONDUIT` (`ConduitRenderer`,
@@ -1565,6 +1582,132 @@ cargo test -p lodestone-assets --test texture -- first_animation_frame
 cargo test -p lodestone-shell --test conduit_block_entity_pixels -- --ignored --nocapture
 ```
 
+## Beacon
+
+The first registration in this doc that is not a cuboid rig. `assets/minecraft/models/block/beacon.json`
+has real geometry for the glass/obsidian pyramid frame — a beacon was never a *hole* the way chest and
+skull are — but before this landed, an active beacon looked identical to an inactive one: nothing
+indicated it was running at all. `BeaconRenderer.submitBeaconBeam`
+(`.cache/mc/26.2/client-src/net/minecraft/client/renderer/blockentity/BeaconRenderer.java`) builds the
+beam procedurally every frame — a rotating diamond-cross-section "solid core" plus a static
+axis-aligned "outer glow" square, both scrolling `textures/entity/beacon/beacon_beam.png` vertically —
+so there is no baked mesh here at all: `lodestone_render::beacon`'s geometry functions (chiefly
+[`beacon_beam_vertices`]) *are* the model, the same relationship `lodestone_render::sign`'s functions
+have to sign text rather than to `BLOCK_ENTITY_MODELS`.
+
+### No packet needed — a real vanilla client-side ticker
+
+In vanilla, `BeaconBlockEntity.tick` is an ordinary block-entity ticker, and `Level.tickBlockEntities`
+runs those on **both** sides — the same mechanism that lets a furnace's flame flicker client-side with
+no server round trip. `levels` (the base-pyramid level count, `0..=4`) and `beamSections` (the resolved
+colour-per-height run above the beacon) are therefore pure functions of block state the client already
+has loaded: the four concentric square rings below the beacon (`BeaconBlockEntity.updateBase`, gated on
+the five-member `minecraft:beacon_base_blocks` tag — iron/gold/diamond/emerald/netherite blocks, no tag
+table anywhere in this workspace so `crate::block_entities::BEACON_BASE_BLOCKS` hardcodes the five names
+per `CLAUDE.md`'s note on small vanilla censuses), and the run of `minecraft:beacon_beam_block`s
+(the beacon itself plus every stained-glass (pane) block) directly above it.
+
+So `crate::block_entities::beacon_spawns` recomputes both fresh every gather against
+`lodestone_world::World::block_state_at`, rather than carrying a `ChestLids`-shaped tracker advanced in
+`Sim::step` — there is no server signal to integrate, only current world state to read. It is the only
+animated block-entity source in this file with no per-position `HashMap` alongside it. Vanilla paces its
+own scan at 10 blocks per server tick (`BLOCKS_CHECK_PER_TICK`) purely to avoid a tick-loop spike; a
+client render source evaluated once per frame against already-resident chunk data has no equivalent
+budget to protect, and the *result* does not depend on how many ticks the scan took, so this gather runs
+it to completion in one call. `crate::block_entities::beacon_beam_scan`'s own module doc has the one
+real subtlety worth reading before touching it: `checkingBeamSections.size() <= 1`'s "first two beam
+blocks each start their own section, even same-coloured" quirk, ported literally rather than simplified
+to `is_empty()`.
+
+### Geometry and colour — `lodestone_render::beacon`
+
+[`beacon_beam_vertices`] ports `submitBeaconBeam`/`renderPart`/`renderQuad`/`addVertex` term for term:
+four quads per section for the solid core (radius `0.2 × beam_radius_scale`, rotating with
+`animation_time * 2.25 - 45°`) and four for the glow (radius `0.25 × beam_radius_scale`, axis-aligned,
+alpha `32/255`), both scrolling a shared V offset (`Mth.frac`). The **last** section always renders as
+if it reached `MAX_RENDER_Y` (2048) however tall it actually scanned, while `beamStart` still advances
+by each section's real height — `a_middle_sections_top_is_its_own_real_height_not_max_render_y` pins the
+distinction. `beacon_beam_color` resolves a block's registry path to a colour (`"beacon"` is always
+`DyeColor::White`, `BeaconBlock.getColor()`; `"<colour>_stained_glass"`/`"_pane"` resolve through the
+same `DyeColor::from_name`/`packed_rgb` banner patterns already use — a real cross-check, not a
+coincidence, since `DyeColor::White.packed_rgb()` is the identical `0x00F9FFFE` both consumers share).
+`average_beam_color` ports `ARGB.average` for the case two differently-coloured runs meet.
+
+`beam_radius_scale` ports `Math.max(1.0F, distanceToBeacon / 96.0F)` — the un-scoped arm only; this
+client has no zoom/scope feature, so the `player.isScoping() ? 1.0F : …` branch is not ported (a
+documented gap, not a silent one — see the module doc's own "What is deliberately not ported").
+
+### The GPU pass — `gpu/beacon_beam.rs`, two pipelines over one shader
+
+`BeaconRenderer.submitBeaconBeam` submits through `RenderTypes.beaconBeam(texture, translucent)`
+**twice** per section, and the two resolve to genuinely different vanilla pipelines
+(`RenderPipelines.BEACON_BEAM_OPAQUE`/`BEACON_BEAM_TRANSLUCENT`): the solid core is
+`ColorTargetState.DEFAULT` — `Optional.empty()`, i.e. **no blend function at all**, a real overwrite —
+with depth write on; the glow is `BlendFunction.TRANSLUCENT` with depth write off. Both share
+`DepthStencilState`'s `GREATER_THAN_OR_EQUAL` compare, which this engine's `[0,1]` DirectX-style depth
+flips to `LessEqual` per `CLAUDE.md`'s rendering constraints. One `beacon_beam.wgsl` (texture × vertex
+colour, no lighting term — vanilla submits at `setLight(15728880)`, full-bright, so there is nothing for
+a light channel to attenuate) backs both `wgpu::RenderPipeline`s; only the blend/depth-write fields
+differ. Two bind groups only (camera / texture), well inside wgpu's 4-group floor. Cull mode is `None`
+throughout — a player routinely stands *inside* a beam, where single-sided culling would remove the
+near-side faces the camera needs.
+
+Placement in `gpu/frame.rs`: the **solid** draw sits with the other opaque/cutout geometry (right after
+sign text, before translucent water) because it writes depth: drawing it after water would paint a
+submerged beam segment over the water surface. The **glow** draw sits after translucent terrain and
+outside the `if let Some(model)` gate (a beacon draws with or without the vanilla-atlas terrain
+renderer), for the same reason the translucent particle debris below it is: it needs a depth buffer
+that already holds every opaque surface, including water, or it would show through them.
+
+### Status: wired, and proven with real pixels — including the `ALPHA_BLENDING` check
+
+`crates/lodestone-shell/tests/beacon_beam_pixels.rs`, three `#[ignore]`d GPU gates. The expected rect
+comes from [`beacon_beam_vertices`] itself (the exact function `gpu/beacon_beam.rs::prepare` calls),
+projected through the real `Camera::view_projection` — never a remembered literal, and computed
+separately for the solid and glow footprints since the third test needs to tell them apart. Measured
+green:
+
+| gate | measurement |
+|---|---|
+| beam draws | solid rect `x152..168 y0..172`, glow rect `x146..174 y0..173`; changed bbox `x147..172 y0..172` (4498 px), entirely inside the padded glow rect; fill 47.4% |
+| glow blends, solid does not | annulus (glow-only, outside the solid rect): 1392/1392 px (100%) differ between a black and a white clear colour; solid core: 1260/3654 px (34.5%) — substantially lower, the discriminating claim `CLAUDE.md`'s `ALPHA_BLENDING` rule requires |
+| arm is elsewhere | arm bbox `x247..319 y169..239`, disjoint from the beam's rect |
+
+```bash
+cargo test -p lodestone-shell --test beacon_beam_pixels -- --ignored --nocapture
+```
+
+**The negative control was watched failing**: commenting out `self.beacon_beam.draw_solid`/`draw_glow`
+in `gpu/frame.rs` and re-running produced exactly the island shape —
+
+```text
+the beam fills only 0.0% of its own projected rect … (0 of 5046 px)
+the solid core's disagreement ratio (100.0%) is not substantially lower than the always-blending
+annulus's (100.0%) — … its rect should disagree far less often than a translucent region does
+```
+
+— while `the_first_person_arm_is_somewhere_else` (which does not depend on the beam drawing at all) kept
+passing, confirming the failure was specific to the neutered lines. The lines were restored (checked
+against an md5 of the pre-edit file) and the suite re-run green, matching the measurements above
+exactly, before anything was committed.
+
+**What no gate here proves, the same gap every type in this doc shares**: a real `ClientHandle` driving
+this end to end through an actual login handshake and a loaded chunk. `sim::tests::
+beacon_source_tracks_connection_state_and_is_safe_before_login` holds `Sim::beacon_source` to the same
+bar `bell_source`'s own pre-live-install gate used — `None` with no net attached, `Some` and panic-safe
+(empty `Vec`, not a panic on the unpopulated `ClientHandle`) once one is, before login completes.
+
+**Not ported, named rather than silently missing:**
+
+- The scoping/zoom radius shrink (`beam_radius_scale`'s doc).
+- Fog (`gpu/beacon_beam.rs`'s module doc — the same simplification `gpu/sign_text.rs` already makes for
+  its own jar-sourced-texture pass; a full-bright effect is the least visible place for it to be
+  missing).
+- The base-pyramid scan's termination uses the loaded column's own height ceiling rather than vanilla's
+  `Heightmap.Types.WORLD_SURFACE` — coincide in every case that matters (an opaque block already stops
+  the scan either way); see `beacon_beam_scan`'s own module doc for the one narrow case they could
+  diverge.
+
 ## How to change it
 
 ### Adding a block-entity type
@@ -1878,11 +2021,16 @@ Against the real 26-entry registration list (see above), not the issue's origina
   (`ConduitTicks`, the conduit sibling of `BellShakes`) and installed from `app/redraw.rs`. Still open
   within its scope: the wind sheets' real animation (drawn static, frame 0 only — see the Conduit
   section's own note).
+- **Beacon — landed** (see [Beacon](#beacon) above): the solid core and outer glow, the base-pyramid
+  level count, the beam-colour scan (including its one real quirk — see that section), and the live
+  per-frame install (`Sim::beacon_source`, installed from `app/redraw.rs`). Needed no packet at all;
+  see that section for why. Proven with a real GPU pixel gate, including the `ALPHA_BLENDING`-aware
+  check `CLAUDE.md` requires (the glow pass reads the destination, the solid pass does not).
 - Mob spawner (draws a miniature spinning entity inside the cage —
   reuses full entity rendering, not a simple cuboid rig), brushable block, trial spawner,
-  vault, copper golem statue, shelf. End portal/end gateway/beacon are their own shader effects, not
-  cuboid rigs, and structure block/test instance block are creative/dev-only — none of the four
-  belong in "what a survival player sees."
+  vault, copper golem statue, shelf. End portal/end gateway are their own shader effects, not
+  cuboid rigs (beacon was too, until this session — see [Beacon](#beacon)), and structure
+  block/test instance block are creative/dev-only.
 
 Also unbuilt for chests specifically: the `BrightnessCombiner` that makes a double chest's two halves
 share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behind
@@ -1897,9 +2045,11 @@ share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behin
 - `lodestone-world` — `BlockEntity`, `LoadedChunk::block_entities`, `ChunkColumn::get_block`,
   `World::sync_block_entity` / `BlockEntitySync`, and (for sign text) `sign_text::{SignText, SignSide,
   SignDyeColor}` plus a real (non-dev) `serde_json` dependency for the JSON-text message parse.
-- `lodestone-data` — `block_states::{block_name, properties}` for the material and the
-  `facing`/`type` properties; `block_entity_types::block_entity_type` for the state→type census the
-  block-update path creates records from.
+- `lodestone-data` — `block_states::{block_name, properties, state_id, STATE_COUNT}` for the material
+  and the `facing`/`type` properties; `block_entity_types::block_entity_type` for the state→type census
+  the block-update path creates records from; `light_props::dampening` (for the beacon's beam-colour
+  scan's "does this block stop the beam" check — the same per-state census `mesher.rs`'s relight already
+  uses, not a second opacity table).
 - `lodestone-render` (for sign text) — `sign::{SignOrientation, SignSpawn, TEXT_LINE_HEIGHT,
   dye_text_color_rgb, sign_side_color, sign_text_transform}`, itself depending on `lodestone-world`
   for `SignSide`/`SignDyeColor` (already a real, non-optional dependency of this crate).

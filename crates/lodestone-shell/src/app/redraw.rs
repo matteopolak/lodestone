@@ -437,6 +437,18 @@ impl WindowApp {
             render.set_sign_source(f);
         }
 
+        // Beacon beams. Same per-frame install as the two above, for the
+        // reason `Sim::beacon_source` documents: the closure captures the
+        // game tick and the partial tick the beam's scroll and spin animate
+        // against, so a stale install freezes it. Unlike bell/conduit below,
+        // it carries no cloned tracker alongside those clocks — a beacon's
+        // `levels`/`beamSections` are recomputed fresh from current world
+        // state every call, the same client-side block-entity ticker vanilla
+        // itself runs.
+        if let Some(f) = self.sim.beacon_source() {
+            render.set_beacon_source(f);
+        }
+
         // Bells. Same per-frame install as the three above — the render pass,
         // the GPU-side wiring in `gpu.rs` and the CPU-side gather
         // (`Sim::bell_source`) were all already landed; this call site was

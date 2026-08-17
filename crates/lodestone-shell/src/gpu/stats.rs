@@ -339,6 +339,15 @@ pub struct RenderStats {
     /// `0`, which is why a pixel gate must also install real text to tell
     /// them apart).
     pub sign_text_vertices: u32,
+    /// Beacon-beam **solid core** vertices uploaded this frame — the same
+    /// exact, non-pixel-based corroboration [`sign_text_vertices`](Self::sign_text_vertices)
+    /// gives sign text: `0` means either no beacon beam in view, or a
+    /// jar-less run with no `beacon_beam.png` (both draw nothing), which a
+    /// pixel gate must also disambiguate by installing a real section.
+    pub beacon_beam_solid_vertices: u32,
+    /// Beacon-beam **outer glow** vertices uploaded this frame — the
+    /// translucent sibling of [`beacon_beam_solid_vertices`](Self::beacon_beam_solid_vertices).
+    pub beacon_beam_glow_vertices: u32,
     /// Mining-crack overlays actually drawn this frame — one per
     /// [`CrackTarget`](crate::gpu::CrackTarget) in the slice passed to
     /// [`RenderState::render_with_crack`](crate::gpu::RenderState::render_with_crack)

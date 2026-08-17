@@ -38,8 +38,8 @@ use super::terrain::{
     anim_slots_at,
 };
 use super::{
-    AmbientLightSource, BannerSource, BellSource, BlockEntityRenderer, BlockEntitySource,
-    CampfireSource, ConduitSource,
+    AmbientLightSource, BannerSource, BeaconBeamRenderer, BeaconSource, BellSource,
+    BlockEntityRenderer, BlockEntitySource, CampfireSource, ConduitSource,
     DEFAULT_RENDER_DISTANCE_CHUNKS, DecoratedPotSource, EnchantingTableSource, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
     HandSwingSource, ItemUseSource, LecternSource, MainHandSource, MapSource, MovingPistonSource,
@@ -134,6 +134,7 @@ impl RenderState {
         let entities = EntityRenderer::new(device, queue, color_format);
         let nametag = NameTagRenderer::new(device, color_format);
         let sign_text = SignTextRenderer::new(device, color_format);
+        let beacon_beam = BeaconBeamRenderer::new(device, queue, color_format);
 
         // The live vanilla atlas carries baked model geometry; build the model
         // render pass over its *complete* atlas (whose UVs the baked quads index,
@@ -377,6 +378,10 @@ impl RenderState {
             // No signs until the shell installs a world source; see
             // `set_sign_source`.
             sign_source: SignSource::default(),
+            beacon_beam,
+            // No beacon beams until the shell installs a world source; see
+            // `set_beacon_source`.
+            beacon_source: BeaconSource::default(),
             // No rain/snow droplets until the shell installs the two environment
             // textures; see `install_weather`.
             weather: None,
@@ -1530,6 +1535,18 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::SignSpawn> + Send + Sync + 'static,
     ) {
         self.sign_source = SignSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's beacon beams — same shape as
+    /// [`set_sign_source`](Self::set_sign_source). Must be re-installed every
+    /// frame: the closure captures the game tick and the partial tick the
+    /// beam's scroll/spin animate against, so a stale install freezes it.
+    /// `app::redraw` does this from `Sim::beacon_source`.
+    pub fn set_beacon_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::BeaconSpawn> + Send + Sync + 'static,
+    ) {
+        self.beacon_source = BeaconSource(Some(Box::new(f)));
     }
 
     /// Install the source for the targeted block's outline shape.

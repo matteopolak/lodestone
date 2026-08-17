@@ -730,6 +730,36 @@ impl std::fmt::Debug for BellSource {
     }
 }
 
+/// Where this frame's beacon beams come from — same "unset means draw
+/// nothing" convention as [`SkullSource`]. Unlike every other animated
+/// source in this file, the closure behind this needs **no** per-position
+/// tracker alongside it: `levels`/`beamSections` are pure functions of
+/// current block state (`Sim::beacon_source`'s doc explains why — the same
+/// client-side block-entity ticker vanilla itself runs), so there is
+/// nothing to advance in `Sim::step`, only current world state to read
+/// fresh each frame.
+#[derive(Default)]
+pub struct BeaconSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::BeaconSpawn> + Send + Sync>>,
+);
+
+impl BeaconSource {
+    /// This frame's beacon beams, or none when unset.
+    #[must_use]
+    pub(super) fn beacons(&self, eye: glam::Vec3) -> Vec<lodestone_render::BeaconSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for BeaconSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("BeaconSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
 /// Where this frame's shulker boxes come from — same shape as [`SkullSource`],
 /// and the thinnest of the family: the closure needs no partial tick and no
 /// animation map at all, because a shulker box's whole appearance is a function

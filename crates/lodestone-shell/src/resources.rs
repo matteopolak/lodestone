@@ -1052,6 +1052,31 @@ pub fn load_weather_textures() -> Option<lodestone_render::WeatherTextures> {
     }
 }
 
+/// The beacon beam's scrolling texture (`textures/entity/beacon/beacon_beam.png`),
+/// for [`crate::gpu`]'s beacon-beam pass. Same fail-open shape as
+/// [`load_glint_texture`]: `None` on a jar-less run, and the pass simply
+/// draws nothing rather than the run failing.
+#[must_use]
+pub fn load_beacon_beam_texture() -> Option<lodestone_assets::Image> {
+    let manager = open_vanilla_pack_stack()?;
+    let path = "assets/minecraft/textures/entity/beacon/beacon_beam.png";
+    let png = manager.read(path)?;
+    match lodestone_assets::Image::decode_png(&png) {
+        Ok(img) => {
+            tracing::info!(
+                target: "assets",
+                beacon_beam = format!("{}x{}", img.width, img.height),
+                "loaded vanilla beacon-beam texture"
+            );
+            Some(img)
+        }
+        Err(e) => {
+            tracing::warn!(target: "assets", "decode {path}: {e}");
+            None
+        }
+    }
+}
+
 /// Decode vanilla's enchantment-glint sheet
 /// (`assets/minecraft/textures/misc/enchanted_glint_item.png`) for the
 /// first-person glint second pass.
