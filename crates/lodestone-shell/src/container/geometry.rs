@@ -903,8 +903,13 @@ impl ContainerGeometry {
         // different calls — and they *did* disagree, because the highlight's call
         // was the unshifted one. One resolution, two consumers.
         if let Some(advanced) = frame.tooltips {
+            // `frame.bundle_selection`'s own `slot` is matched against
+            // `hovered` inside `emit_tooltip` — a selection tracked against a
+            // slot the cursor is no longer over must not paint a highlight in
+            // whatever the cursor now sits on.
             super::tooltip::emit_tooltip(
                 &mut b,
+                assets,
                 menu,
                 hovered,
                 frame.cursor,
@@ -913,6 +918,7 @@ impl ContainerGeometry {
                 width,
                 height,
                 (w, h),
+                frame.bundle_selection,
             );
         }
 

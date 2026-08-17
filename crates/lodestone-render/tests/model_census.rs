@@ -174,6 +174,7 @@ fn item_model_parts(manager: &ResourceManager) -> (Vec<ItemModelPart>, usize) {
                 model,
                 transform,
                 gui_light,
+                ..
             } = part
             {
                 parts.push(ItemModelPart {

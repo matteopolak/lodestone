@@ -45,6 +45,7 @@ fn parses_plain_model_leaf() {
         ItemModelNode::Model {
             model: loc("minecraft:block/stone"),
             tints: vec![],
+            transformation: vec![],
         }
     );
     assert_eq!(m.model_refs(), vec![&loc("minecraft:block/stone")]);
@@ -106,7 +107,8 @@ fn bow_range_dispatch_picks_greatest_threshold_not_exceeding_value() {
         m.resolve(&ctx),
         vec![ItemModelOutput::Model {
             model: &loc("minecraft:item/bow"),
-            tints: &[]
+            tints: &[],
+            transformation: &[]
         }]
     );
 }
@@ -359,11 +361,13 @@ fn composite_renders_every_submodel() {
         vec![
             ItemModelOutput::Model {
                 model: &loc("minecraft:item/a"),
-                tints: &[]
+                tints: &[],
+                transformation: &[]
             },
             ItemModelOutput::Model {
                 model: &loc("minecraft:item/b"),
-                tints: &[]
+                tints: &[],
+                transformation: &[]
             },
         ]
     );
@@ -380,6 +384,140 @@ fn tints_are_captured_on_model_leaves() {
     assert_eq!(tints.len(), 1);
     assert_eq!(tints[0].kind, "minecraft:dye");
     assert_eq!(tints[0].default, Some(-6265536));
+}
+
+/// The bed family's real gap, closed the same way the skull family's own
+/// `special`-node transformation was: `black_bed.json`'s exact shape
+/// (trimmed to two colours' worth of literal), where the `foot` sub-model
+/// carries its own `"transformation"` and the sibling `head` sub-model
+/// carries none.
+#[test]
+fn model_node_carries_its_own_transformation() {
+    let json = br#"{"model":{"type":"minecraft:composite","models":[
+        {"type":"minecraft:model","model":"minecraft:block/black_bed_head"},
+        {"type":"minecraft:model","model":"minecraft:block/black_bed_foot",
+            "transformation":{
+                "left_rotation":[0.0,0.0,0.0,1.0],
+                "right_rotation":[0.0,0.0,0.0,1.0],
+                "scale":[1.0,1.0,1.0],
+                "translation":[0.0,0.0,1.0]
+            }}
+    ]}}"#;
+    let m = ItemModel::parse(json).unwrap();
+    let ItemModelNode::Composite { models } = &m.root else {
+        panic!("expected a composite root");
+    };
+    let [ItemModelNode::Model { transformation: head_t, .. }, ItemModelNode::Model { transformation: foot_t, .. }] =
+        models.as_slice()
+    else {
+        panic!("expected two model leaves: {models:?}");
+    };
+    assert!(head_t.is_empty(), "the head sub-model carries no transformation of its own");
+    let [t] = foot_t.as_slice() else {
+        panic!("the foot sub-model carries exactly one node transformation");
+    };
+    assert_eq!(t.translation, [0.0, 0.0, 1.0]);
+    assert_eq!(t.scale, [1.0, 1.0, 1.0]);
+
+    // Resolving still surfaces it on the output, not just the parsed node.
+    let ctx = Ctx::default();
+    let resolved = m.resolve(&ctx);
+    let [ItemModelOutput::Model { transformation: head_t, .. }, ItemModelOutput::Model { transformation: foot_t, .. }] =
+        resolved.as_slice()
+    else {
+        panic!("expected two model outputs: {resolved:?}");
+    };
+    assert!(head_t.is_empty());
+    assert_eq!(foot_t[0].translation, [0.0, 0.0, 1.0]);
+}
+
+/// An **ancestor** node's `"transformation"` reaches a `model` leaf under it —
+/// the same mechanism [`an_ancestor_nodes_transformation_reaches_the_special_node_under_it`]
+/// proves for `special`, over the sibling variant that used to drop it
+/// outright (`prepend_node_transform`'s `Model` arm was a no-op). No shipped
+/// 26.2 item actually needs this (measured: 2,131 `minecraft:model` leaves,
+/// 16 carry their own transformation, zero inherit one from an ancestor —
+/// unlike `special`'s 14 of 91), so this is a synthetic fixture proving the
+/// chain shape holds for a pack that does combine the two, not a
+/// transcription of a real file.
+#[test]
+fn an_ancestor_nodes_transformation_reaches_the_model_node_under_it() {
+    let json = br#"{"model":{
+        "type":"minecraft:condition",
+        "property":"minecraft:using_item",
+        "on_false":{"type":"minecraft:model","model":"minecraft:block/stone"},
+        "on_true":{"type":"minecraft:model","model":"minecraft:block/cobblestone"},
+        "transformation":{
+            "left_rotation":[0.0,0.0,0.0,1.0],
+            "right_rotation":[0.0,0.0,0.0,1.0],
+            "scale":[2.0,2.0,2.0],
+            "translation":[1.0,0.0,0.0]
+        }}}"#;
+    let m = ItemModel::parse(json).unwrap();
+
+    // Both branches inherit it — the accumulation is static.
+    let all = m.outputs();
+    assert_eq!(all.len(), 2, "both branches are model leaves: {all:?}");
+    for output in &all {
+        let ItemModelOutput::Model { transformation, .. } = output else {
+            panic!("expected a model output, got {output:?}");
+        };
+        assert_eq!(transformation.len(), 1, "branch missing the chain: {output:?}");
+        assert_eq!(transformation[0].scale, [2.0, 2.0, 2.0]);
+        assert_eq!(transformation[0].translation, [1.0, 0.0, 0.0]);
+    }
+}
+
+/// A `model` leaf's own transformation composes **after** its ancestors' —
+/// same ordering claim [`nested_transformations_accumulate_outermost_first`]
+/// makes for `special`, over the `Model` variant.
+#[test]
+fn nested_transformations_accumulate_outermost_first_for_model_nodes() {
+    let json = br#"{"model":{
+        "type":"minecraft:condition",
+        "property":"minecraft:using_item",
+        "on_false":{"type":"minecraft:model","model":"minecraft:block/stone",
+            "transformation":{
+                "left_rotation":[0.0,0.0,0.0,1.0],
+                "right_rotation":[0.0,0.0,0.0,1.0],
+                "scale":[2.0,2.0,2.0],
+                "translation":[9.0,0.0,0.0]
+            }},
+        "on_true":{"type":"minecraft:empty"},
+        "transformation":{
+            "left_rotation":[0.0,0.0,0.0,1.0],
+            "right_rotation":[0.0,0.0,0.0,1.0],
+            "scale":[1.0,-1.0,-1.0],
+            "translation":[0.0,3.0,0.0]
+        }}}"#;
+    let m = ItemModel::parse(json).unwrap();
+    let ItemModelNode::Condition { on_false, .. } = &m.root else {
+        panic!("expected a condition root");
+    };
+    let ItemModelNode::Model { transformation, .. } = on_false.as_ref() else {
+        panic!("expected a model leaf under on_false");
+    };
+    assert_eq!(transformation.len(), 2, "{transformation:?}");
+    // Outermost (the condition) first, then the leaf's own.
+    assert_eq!(transformation[0].scale, [1.0, -1.0, -1.0]);
+    assert_eq!(transformation[0].translation, [0.0, 3.0, 0.0]);
+    assert_eq!(transformation[1].scale, [2.0, 2.0, 2.0]);
+    assert_eq!(transformation[1].translation, [9.0, 0.0, 0.0]);
+}
+
+/// A `model` leaf whose JSON omits `"transformation"` entirely, and whose
+/// ancestors carry none either (the overwhelming majority of items), parses
+/// to an **empty chain** — the same "compose nothing, not the identity"
+/// distinction [`special_node_with_no_transformation_field_parses_to_an_empty_chain`]
+/// makes.
+#[test]
+fn model_node_with_no_transformation_field_parses_to_an_empty_chain() {
+    let json = br#"{"model":{"type":"minecraft:model","model":"minecraft:block/stone"}}"#;
+    let m = ItemModel::parse(json).unwrap();
+    let ItemModelNode::Model { transformation, .. } = &m.root else {
+        panic!("expected a model leaf");
+    };
+    assert!(transformation.is_empty(), "{transformation:?}");
 }
 
 #[test]

@@ -745,7 +745,136 @@ present as "the feature does nothing" rather than as "the feature is wrong";
 diffing the two sheets and asking *where* they differ localised it faster than
 any amount of GPU instrumentation could.
 
-**Still unmodelled:** the accumulated transformation reaches `special` nodes
-only. `ItemModelOutput::Model` has no field for one, so a `minecraft:model`
-leaf's own transformation (e.g. `black_bed.json`'s sub-node) is still dropped,
-as it always was. Vanilla applies it there too, via `BlockModelWrapper.bake`.
+**Landed since:** the accumulated transformation now reaches `minecraft:model`
+leaves too, not `special` nodes alone — see "The chain, ported to `model`
+leaves" below.
+
+## The chain, ported to `model` leaves
+
+The gap the previous section called "still unmodelled" was the same defect,
+one variant over: `ItemModelNode::Model` carried no `"transformation"` field
+at all, so a `minecraft:model` leaf's own accumulated transform — or an
+ancestor's, prepended the same way `Special` accumulates one — was silently
+dropped on the floor in `prepend_node_transform`'s `Model` arm. Vanilla does
+apply it there (`BlockModelWrapper.bake` takes the same accumulated matrix
+`SpecialModelWrapper.bake` does), so this was a real, if narrow, gap.
+
+`ItemModelNode::Model`/`ItemModelOutput::Model` now carry the identical
+`Vec<ItemNodeTransform>` chain `Special` does, parsed and composed by the
+same `prepend_node_transform`/`parse_node` machinery — no second code path.
+It threads through `IconPart::Model::node_transformation` (the icon
+classification layer), `ItemModelPart::node_transformation` and
+`ItemGeometry::node_transformation` (the render-side bake), so the value
+survives all the way to the baked, ready-to-pose geometry.
+
+**Measured, not guessed, before landing it:** a scan of the shipped 26.2 jar's
+1,537 `assets/minecraft/items/*.json` files found **2,131** `minecraft:model`
+leaves total. Of those, **16** carry their own `"transformation"` — every
+coloured bed's `block/<colour>_bed_foot` sub-model, offsetting it
+`translation [0, 0, 1]` from the sibling `block/<colour>_bed_head` node in
+the same `composite` (`black_bed.json`'s own two-entry list is the worked
+example) — and **zero** inherit one from an ancestor `composite`/
+`condition`/`select`/`range_dispatch` node. That is the mirror image of
+`special`'s own split (14 of 91 inherit, none carry their own), which is why
+the chain shape still matters here even though every real 26.2 case happens
+to be the simpler "carries" form: an `Option` could represent today's 16
+cases, but not a resource pack that combined the two, or nested one inside
+the other.
+
+Verified end to end against the real jar (`item_variant_gate.rs`,
+`--ignored`): `minecraft:black_bed`'s baked `block/black_bed_head` variant
+carries an empty chain and `block/black_bed_foot` carries exactly one entry,
+`translation [0.0, 0.0, 1.0]` — read back off `BlockModels::build`'s own
+output, not asserted against the parser's own echo of its input.
+
+**What this does not yet do: draw two composite parts as one icon.**
+`ItemVariantPlan::gui` (the model an inventory slot actually shows) is still
+a single `Option<ResourceLocation>` — `gui_variant_of` picks the *first*
+`IconPart::Model` a composite yields and stops there, so a bed's inventory
+slot still shows the head alone; the foot bakes under its own ref with
+nowhere for its now-correctly-carried offset to land. Making a composite icon
+draw every part it names, each posed by its own `node_transformation`
+composed onto the shared placement, is a real rendering change (every icon
+draw site, not just the data-plumbing layer this section covers) and is
+untouched by this fix. `collect_item_variants`'s own doc in
+`crates/lodestone-render/src/block_models.rs` carries the same boundary.
+
+## Shield: the world surfaces `special_item_rig` had no arm for
+
+The un-mirroring fix above closed the parser gap for every surface that
+resolves a shield through `shield_item_rig` directly — the first-person hand
+(`RenderState::prepare_special_hand`) and the GUI icon
+(`hud::item_icon::push_special_icon`), both of which carry real per-stack
+state (`minecraft:base_color`, `minecraft:banner_patterns`) neither
+`special_item_rig` nor its three callers in `gpu/entity_passes.rs` (a dropped
+stack, another entity's hand, an item frame) have ever had access to.
+
+**Those three callers had no `"minecraft:shield"` arm in `special_item_rig`
+at all** — the function's own doc said outright that shield "is drawn, but
+not through this resolver", naming only the hand/GUI pair as the two direct
+call sites. So a dropped shield, a shield in another entity's third-person
+hand, or a shield hanging in an item frame drew **nothing whatsoever** — not
+mirrored, not undyed, absent — which is a different and worse defect than the
+one the un-mirroring fix closed.
+
+`special_item_rig` now resolves `"minecraft:shield"` too, always to the
+no-pattern sheet (`SHIELD_BASE_NO_PATTERN_TEXTURE_STEM`) — the same *bounded,
+documented* shortfall this resolver already accepts for its other kinds (a
+dropped chest never multiplies past one copy; a framed item's own rotation is
+undecoded), because neither `EntityDraw` nor the item-frame case threads a
+shield's dye/pattern state through this pass. A real shield now reaches real
+pixels on these three surfaces; its colour and pattern do not, and would need
+`EntityDraw` to grow the fields to carry them plus a per-surface consumer,
+which is out of this pass's scope.
+
+Measured (`special_item_world_pixels.rs`, `--ignored`, real GPU adapter):
+
+| surface | stat before | stat after | lit px | bbox |
+|---|---|---|---|---|
+| dropped stack | `special_item_drops_drawn` stayed `0` | `1` | 642 | x 152..169, y 98..133 |
+| item frame | `special_item_frames_drawn` stayed `0` | `1` | 420 | x 153..167, y 124..151 |
+
+Both gates' executed negative controls (no entity, an item entity with no
+reported stack, an empty item frame) read exactly `0` lit pixels and `0` for
+the corresponding stat, and the far screen corner opposite the subject never
+moved — the same shape `dropped_item_pixels.rs` already established.
+
+## Shield: the hand path is still broken, and this time it is real
+
+**`first_person_shield_hand_pixels.rs` is red, on purpose, and that redness
+is the finding, not a broken gate.** A held shield's dye colour and loom
+pattern do not reach the first-person hand at all: a `red`, a `light_blue`
+and a plain (`base_color: None`) shield render **byte-identical** (`red
+r - b = 5.7`, `light_blue b - r = -5.7`, `plain spread = 5.7` — all three the
+same small, neutral-grey magnitude, nowhere near the ~15-70 margins the GUI
+icon and the held-banner gates measure for a real dye).
+
+Every step of the CPU-side pipeline was instrumented live and traced, then
+the instrumentation removed once each step was confirmed correct:
+`form.transformation` carries the real `scale [1, -1, -1]` flip,
+`shield_has_patterns` reports `true` for the dyed cases (`draw_calls` 4
+against the plain case's 2, so the extra translucent pass is genuinely
+issued), the uploaded tint bytes are the real, distinct `[176, 46, 38]`/
+`[58, 179, 218]`, the `"base"` pattern mask resolves in `self.block_entities
+.shield_patterns`, and the draw index ranges are two real, non-degenerate
+36-index parts. So the translucent layer is submitted with entirely correct
+data on entirely correct geometry and still changes nothing on screen.
+
+**Unconfirmed leading hypothesis:** the shield rig is a double-sided
+(`cull_mode: None`) thin box, so — unlike a banner's separate `"flag"` quad —
+both the front (masked) and back (blank) faces of the same box rasterise in
+both the opaque base pass and the translucent layer pass, and the depth test
+(`CompareFunction::LessEqual`, zero bias) picks a winner per fragment
+independently in each pass. If the front face ends up farther from the
+camera than the back face specifically under the hand's own placement chain
+(`first_person_item_matrix`/`hand_transform`) — a relationship that is a
+property of the *whole* composed transform, not of the shield's own local
+flip alone — the opaque pass's nearer (back) fragment wins and gets written
+to the depth buffer, and the layer pass's farther (front, masked) fragment
+then loses the depth race against it. This would not contradict the GUI
+icon's own success, since the GUI's "outer" placement (`gui_item_pose`, an
+isometric pose) is an unrelated matrix from the hand's own procedural one.
+**This needs a real GPU frame capture to confirm** (RenderDoc, Xcode's GPU
+frame debugger, or equivalent) — not available in the environment this was
+investigated in — so it is recorded as a hypothesis and flagged for
+follow-up, not fixed.

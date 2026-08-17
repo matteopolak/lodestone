@@ -40,6 +40,28 @@ pub enum ItemModelNode {
         model: ResourceLocation,
         /// Tint sources applied to the model's layers (data; evaluated by the game).
         tints: Vec<TintSource>,
+        /// Every `"transformation"` on the path from the definition's root down
+        /// to this node, **outermost first** — the same chain
+        /// [`ItemModelNode::Special::transformation`] carries, for the same
+        /// reason: `"transformation"` is a field of *every* `ItemModel.Unbaked`
+        /// record, not of `SpecialModelWrapper.Unbaked` alone, and
+        /// `BlockModelWrapper.bake` composes the accumulated parent matrix onto
+        /// this node's own exactly as `SpecialModelWrapper.bake` does — see
+        /// [`ItemModelNode::Special::transformation`]'s doc for the full
+        /// derivation and the composition order a caller must use.
+        ///
+        /// Measured against the shipped 26.2 jar: 2,131 `minecraft:model`
+        /// leaves total, of which 16 carry their **own** `"transformation"`
+        /// (every coloured bed's `foot` sub-model, offsetting it from the
+        /// `head` sub-model the sibling `minecraft:model` node in the same
+        /// `composite` carries — `black_bed.json`'s own two-entry list is the
+        /// worked example) and **zero** inherit one from an ancestor
+        /// `composite`/`condition`/`select`/`range_dispatch` node. So unlike
+        /// `special` (14 of 91 inherit, none carry their own), every real case
+        /// here is "carries", not "inherits" — but the chain shape still holds
+        /// for a pack that combines both, which an `Option` could not
+        /// represent.
+        transformation: Vec<ItemNodeTransform>,
     },
     /// `minecraft:composite` — render every listed sub-model together.
     Composite {
@@ -258,6 +280,13 @@ pub enum ItemModelOutput<'a> {
         model: &'a ResourceLocation,
         /// Its tint sources.
         tints: &'a [TintSource],
+        /// Every `"transformation"` on the root-to-node path, outermost first
+        /// — see [`ItemModelNode::Model`]'s field of the same name for why
+        /// this is a chain, and [`ItemNodeTransform`]'s doc for how a caller
+        /// must compose each entry (on top of whatever pose the caller
+        /// already builds for this model — its own resolved `display.gui`/
+        /// `display.firstperson_*` transform, none of which this replaces).
+        transformation: &'a [ItemNodeTransform],
     },
     /// Invoke this special renderer over this base model.
     Special {
@@ -363,7 +392,15 @@ fn parse_node(value: &Value) -> Result<ItemModelNode, ItemModelError> {
         return Ok(node);
     };
     let mut node = node;
-    if !matches!(node, ItemModelNode::Special { .. }) {
+    // `Special` and `Model` both consume *their own* `"transformation"` field
+    // directly in `parse_node_body` (into the tail of their own chain), so
+    // skipping them here is what stops this node's own field being applied
+    // twice — once directly, once more via `prepend_node_transform` finding
+    // itself as its own descendant, which it structurally cannot (the guard
+    // exists for the *other six* node kinds, which have no chain of their
+    // own and must push this transform down into whichever `Special`/`Model`
+    // descendants they have).
+    if !matches!(node, ItemModelNode::Special { .. } | ItemModelNode::Model { .. }) {
         prepend_node_transform(&mut node, own);
     }
     Ok(node)
@@ -386,7 +423,19 @@ fn parse_node_body(
                 .and_then(Value::as_array)
                 .map(|arr| arr.iter().map(parse_tint).collect())
                 .unwrap_or_default();
-            Ok(ItemModelNode::Model { model, tints })
+            // This node's own field only, the same shape `"special"`'s own arm
+            // uses — `parse_node` prepends every ancestor's below, which is
+            // what makes the stored value a chain.
+            let transformation = obj
+                .get("transformation")
+                .map(parse_node_transform)
+                .into_iter()
+                .collect();
+            Ok(ItemModelNode::Model {
+                model,
+                tints,
+                transformation,
+            })
         }
         "composite" => {
             let models = obj
@@ -534,12 +583,14 @@ fn prepend_node_transform(node: &mut ItemModelNode, outer: ItemNodeTransform) {
                 prepend_node_transform(fallback, outer);
             }
         }
-        // A `model` leaf's own accumulated transform is dropped, as it always
-        // has been: `ItemModelOutput::Model` carries no such field and the
-        // baked-geometry path has nowhere to put one. Vanilla does apply it
-        // (`BlockModelWrapper.bake` takes the same accumulated matrix), so a
-        // bed's `minecraft:model` sub-node transform is still unmodelled here.
-        ItemModelNode::Model { .. } | ItemModelNode::Empty | ItemModelNode::Other { .. } => {}
+        // A `model` leaf accumulates the chain exactly like `Special` now —
+        // this used to say the accumulated transform was dropped outright
+        // (`ItemModelOutput::Model` carried no such field), which was the
+        // same defect the shield fix closed one variant over: `bake(context,
+        // transformation)` threads the parent matrix down to *every*
+        // `ItemModel.Unbaked`, not `SpecialModelWrapper.Unbaked` alone.
+        ItemModelNode::Model { transformation, .. } => transformation.insert(0, outer),
+        ItemModelNode::Empty | ItemModelNode::Other { .. } => {}
     }
 }
 
@@ -773,7 +824,7 @@ fn collect_specials<'a>(node: &'a ItemModelNode, out: &mut Vec<(&'a ResourceLoca
 /// so the alternative was a second trait, for no gain over eight arms.
 fn collect_outputs<'a>(node: &'a ItemModelNode, out: &mut Vec<ItemModelOutput<'a>>) {
     match node {
-        ItemModelNode::Model { model, tints } => out.push(ItemModelOutput::Model { model, tints }),
+        ItemModelNode::Model { model, tints, transformation } => out.push(ItemModelOutput::Model { model, tints, transformation }),
         ItemModelNode::Special {
             base,
             kind,
@@ -818,7 +869,7 @@ fn resolve_node<'a>(
     out: &mut Vec<ItemModelOutput<'a>>,
 ) {
     match node {
-        ItemModelNode::Model { model, tints } => out.push(ItemModelOutput::Model { model, tints }),
+        ItemModelNode::Model { model, tints, transformation } => out.push(ItemModelOutput::Model { model, tints, transformation }),
         ItemModelNode::Special {
             base,
             kind,

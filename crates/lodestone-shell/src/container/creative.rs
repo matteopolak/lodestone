@@ -949,6 +949,7 @@ pub fn creative_geometry(
         if let Some(stack) = stack {
             super::tooltip::emit_tooltip_for_stack(
                 &mut b,
+                &assets,
                 &stack,
                 view.cursor,
                 advanced,
@@ -956,6 +957,9 @@ pub fn creative_geometry(
                 width,
                 height,
                 (w, h),
+                // Same as the recipe book's own call: no scroll-selection
+                // tracking exists on the creative screen.
+                None,
             );
         }
     }
