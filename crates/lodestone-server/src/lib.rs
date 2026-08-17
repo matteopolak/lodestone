@@ -466,6 +466,13 @@ pub use advancements::{
     StatType,
 };
 pub use block_entities::{BlockEntity, BlockEntityHandle, BlockEntityRegistry, block_entity_for_item};
+// `command_block` itself stays private (its module doc is an internal design
+// record, not a public surface); this one type is re-exported because
+// `BlockEntity::CommandBlock`'s payload is otherwise unreachable from outside
+// the crate — a test that needs to seed a command block entity (rather than
+// route one in through a full block-place + chunk-hydration path) has no
+// other way to construct one.
+pub use command_block::CommandBlockData;
 pub use border::{ABSOLUTE_MAX_SIZE, MAX_CENTER_COORDINATE, MAX_SIZE, BorderFeed, WorldBorder};
 pub use brewing::{
     BREW_TIME_TICKS, Bottle, BottleKind, BrewTick, BrewingStand, FUEL_USES, has_mix, is_ingredient,
@@ -570,6 +577,8 @@ pub use server::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::serve_connection_with_access;
+#[cfg(not(target_arch = "wasm32"))]
+pub use server::serve_connection_with_access_and_state;
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::{OnlineModeConfig, serve_connection_with_online_mode};
 pub use tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
