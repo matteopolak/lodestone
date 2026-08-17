@@ -925,13 +925,35 @@ impl<S: ChunkSource> RegionChunkSource<S> {
         let (_, nbt) = read_named_nbt(&mut reader).ok()?;
         let mut column =
             chunk_nbt::column_from_nbt(&nbt, self.state.min_y, self.state.height).ok()?;
-        let extras = chunk_nbt::extras_from_nbt(&nbt);
+        let mut extras = chunk_nbt::extras_from_nbt(&nbt);
         // The column carries its own copy so `encode_chunk` can put them on the
         // wire (issue #520). Before this, a chest read off disk reached the tick
         // loop's registry and nothing else — the chunk packet claimed the chunk
         // had no block entities at all. The registry stays the authority for
         // *saving*, because a live furnace is newer than the disk one.
         column.set_block_entities(extras.block_entities.clone());
+        // Repair any block-entity-owning state this saved chunk's own NBT
+        // never recorded — see `ChunkColumn::missing_block_entity_states`'s
+        // own doc for why that gap exists (`block_entity_for_item` only
+        // covers the dozen types this crate simulates) and what it costs a
+        // client: a skull, banner, jukebox, … with a correct state and no
+        // record draws nothing at all until an unrelated later block update.
+        // `Nbt::End` matches what a real save/load round trip already
+        // produces for a block-entity type this crate does not otherwise
+        // model (`chunk_nbt::block_entity_from_nbt`'s own catch-all arm).
+        let missing = column.missing_block_entity_states(cx, cz, &extras.block_entities);
+        if !missing.is_empty() {
+            for (pos, type_name) in missing {
+                extras.block_entities.push((
+                    pos,
+                    crate::block_entities::BlockEntity::Opaque {
+                        id: type_name.to_owned(),
+                        nbt: lodestone_core::Nbt::End,
+                    },
+                ));
+            }
+            column.set_block_entities(extras.block_entities.clone());
+        }
         let restored = self.restore_block_entities(&extras);
         let ticks = self
             .state
@@ -1933,6 +1955,78 @@ mod tests {
             source.retained_columns(),
             1,
             "the edit made under an active ticket must stay in the edit map, saved or not"
+        );
+    }
+
+    /// The reported regression: a block whose state owns a block entity
+    /// (a wither skeleton skull) with a correct state on disk and **no**
+    /// block-entity NBT at all — exactly the shape a chunk saved before
+    /// `ChunkColumn::missing_block_entity_states` existed already carries,
+    /// and exactly the shape the old placement path (`set_block` alone, no
+    /// registry insert) produced for any type `block_entity_for_item` did
+    /// not cover. Reproduced directly with `set_block` rather than through
+    /// `apply_use_item_on`, which lives in `crate::server` and is not
+    /// reachable from here — `set_block` writes only the state, which is
+    /// the one property this fixture needs from the old buggy path.
+    ///
+    /// The fresh `RegionChunkSource` over the same directory is a fresh
+    /// server process reading the world back: the "joined and it was
+    /// already invisible" scenario the owner reported, not a same-session
+    /// resend — the discriminating input is a block entity missing from the
+    /// chunk as first loaded, not one that could still be patched up by a
+    /// later in-memory write.
+    #[test]
+    fn a_skull_state_with_no_saved_block_entity_gets_one_synthesized_on_load() {
+        use crate::block_entities::BlockEntity;
+
+        let dir = tempdir("skull-repair");
+        const SKULL: &str = "minecraft:wither_skeleton_skull";
+        {
+            let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+                .expect("open world");
+            source.set_block(1, 70, 1, SKULL);
+            source.save_handle().save().expect("seed save");
+        }
+
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+            .expect("reopen world");
+        let column = source.column(0, 0);
+        let pos = BlockPos::new(1, 70, 1);
+        let entity_type = column
+            .block_entities()
+            .iter()
+            .find(|(p, _)| *p == pos)
+            .map(|(_, e)| e.type_id());
+        assert_eq!(
+            entity_type,
+            Some("minecraft:skull"),
+            "a skull state with no on-disk record must get an empty one synthesized on load, \
+             or the client never learns to draw it at all"
+        );
+    }
+
+    /// The negative control: a state that owns **no** block-entity type
+    /// (plain stone via `MARKER`) must never gain a synthesized record —
+    /// `ChunkColumn::missing_block_entity_states`'s palette-classification
+    /// fast path must reject it outright, not merely happen not to find a
+    /// position for it. Without this, the positive gate above could be
+    /// passing because the repair fires unconditionally rather than because
+    /// it is gated on the state actually owning a block-entity type.
+    #[test]
+    fn a_plain_block_gets_no_synthesized_block_entity() {
+        let dir = tempdir("no-skull-repair");
+        {
+            let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+                .expect("open world");
+            source.set_block(1, 70, 1, MARKER);
+            source.save_handle().save().expect("seed save");
+        }
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+            .expect("reopen world");
+        let column = source.column(0, 0);
+        assert!(
+            column.block_entities().is_empty(),
+            "a state with no block-entity type must never gain a synthesized record"
         );
     }
 }
