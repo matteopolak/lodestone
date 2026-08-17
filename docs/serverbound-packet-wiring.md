@@ -17,15 +17,29 @@ hand-derived coverage numbers that were wrong in four different ways).
 
 | axis | measured | meaning |
 |---|---|---|
-| serverbound **decoded** | **63/69** | `decode` has a real arm and reads the wire |
-| serverbound **connected** | **45/69** | that arm produces a `ServerBound` variant a consumer acts on |
-| decodes-to-`Ignored`-only | **18** | examined, understood, reaching nothing |
-| never examined | **6** | no arm at all |
+| serverbound **decoded** | **66/69** | `decode` has a real arm and reads the wire |
+| serverbound **connected** | **47/69** | that arm produces a `ServerBound` variant a consumer acts on |
+| decodes-to-`Ignored`-only | **19** | examined, understood, reaching nothing |
+| never examined | **3** | no arm at all — `COOKIE_RESPONSE`, `DEBUG_SUBSCRIPTION_REQUEST`, `TEST_INSTANCE_BLOCK_ACTION` |
 
-**Updated this pass**: `PADDLE_BOAT` and `BUNDLE_ITEM_SELECTED` both moved from
-`decodes-to-Ignored-only` to connected (43 → 45), re-run directly via `cargo xtask
-connectedness` rather than hand-derived. See "Why … stay `Ignored`" below for what
-changed on each.
+**Updated this pass** (`af9fb81b`, `cargo xtask connectedness` re-run directly): the
+whole chat/command family now decodes. `CHAT_SESSION_UPDATE` and `CHAT_ACK` were
+added by the prior pass (`chat_session::ServerChatSession`, real signature
+verification against an announced session — see `docs/player-chat.md`'s "signing
+decision"); `CHAT_COMMAND_SIGNED` is added by **this** pass, routed through the
+same `ServerBound::ChatCommand` consumer the unsigned form uses (its per-argument
+signatures are decoded to find the frame's end and then dropped — see the decode
+arm's own comment for why there is nothing for per-argument verification to gate
+here, unlike `minecraft:chat`'s whole-message signature). Before this pass:
+`decoded 63/69, connected 45/69`. Only `CHAT_ACK` in this family stays
+decode-only-`Ignored` (deliberately — see below); every other member of the
+six-packet #271 list (`CHAT`, `CHAT_COMMAND`, `CHAT_COMMAND_SIGNED`,
+`CHAT_SESSION_UPDATE`, `COMMAND_SUGGESTION`) is now decoded **and** connected.
+Verified against real tests, not just the scanner: `cargo test -p lodestone-server
+--lib chat_session` (7/7, including a forged-signature control that breaks the
+chain) and `cargo test -p lodestone-v770 --test server_chat_broadcast` (3/3,
+including `enforcement_rejects_an_unsigned_message_and_replies_only_to_the_sender`
+— the enforcement control, watched rejecting rather than merely asserted to).
 
 Reading taken at `ee00ba6a` (`cargo xtask connectedness` re-run directly, not
 carried forward from the `62/69, 34/69` table below it — that reading is
@@ -59,6 +73,39 @@ command-minecart/custom-click-dialog remainder genuinely stranded) both stay
 open — not every variant in either is connected, so per this repo's own
 "close only if every variant is genuinely connected" standard neither
 qualifies yet.
+
+**#262 and #268 closed this pass (`af9fb81b`), on a different standard than the one
+above: every remaining stranded variant in each is blocked on a missing subsystem,
+not a missing arm, and the subsystem is out of scope for a connectivity pass.**
+Re-measured directly rather than trusted:
+
+- **#262 — 11/11 decoded, 7/11 connected.** Stranded: `PLAYER_ABILITIES`,
+  `PLAYER_LOADED`, `CLIENT_TICK_END` (each vanilla handler only ever feeds a gate —
+  `hasClientLoaded()`, `receivedMovementThisTick` — that nothing in this crate reads
+  back; tracking the flag with nothing consulting it would be its own island) and
+  `ACCEPT_TELEPORTATION` (there is no clientbound position-sync/teleport encode
+  anywhere in this crate to confirm — see the "position-sync-dependent" row below).
+  Building any of the four needs a real subsystem (flight model, or a
+  server-authoritative teleport/position-sync path), not a decode-arm fix.
+- **#268 — 12/13 decoded, 4/13 connected.** Connected: `SET_COMMAND_BLOCK`,
+  `CHANGE_DIFFICULTY`, `LOCK_DIFFICULTY`, `SET_GAME_RULE`. Stranded, each
+  documented per-packet in the "world/block admin" row below and at its own decode
+  arm's comment: `SET_COMMAND_MINECART`, `SET_STRUCTURE_BLOCK`, `SET_JIGSAW_BLOCK`,
+  `JIGSAW_GENERATE`, `SET_TEST_BLOCK`, `CUSTOM_CLICK_ACTION` (decoded, no consumer —
+  no jigsaw/structure/game-test/custom-UI subsystem exists) and
+  `TEST_INSTANCE_BLOCK_ACTION` (never decoded — no codec for its nested composite).
+  Also unchanged: **no permission/op model exists anywhere in `lodestone-server`**
+  (see "The permission model is the blocker" below) — the four already-connected
+  packets in this family are wired *with that omission disclosed on each consumer's
+  doc comment*, which is the right shape; the alternative for the rest would be a
+  fake permission check bolted under packets whose real subsystem does not exist,
+  which is worse than leaving them `Ignored` and documented.
+
+Both are closed on the finding that **decode is complete and every remaining gap
+has a named, real, out-of-scope blocker** — not on "every variant connects," which
+was always going to be false for a family whose whole point is administering
+subsystems (jigsaw, structure blocks, game tests, flight, teleport-confirmation)
+this crate does not implement.
 
 Reading taken at `c7029614` (`cargo xtask connectedness` re-run directly, not
 copied from an older pass — see `CLAUDE.md`'s standing instruction to always
@@ -94,12 +141,13 @@ method was needed. Matches `ServerGamePacketListenerImpl.handlePingRequest`
 (`this.connection.send(new ClientboundPongResponsePacket(packet.getTime()))`)
 exactly.
 
-The seven with no arm at all: `CHAT_ACK`, `CHAT_COMMAND_SIGNED`,
-`CHAT_SESSION_UPDATE`, `COMMAND_SUGGESTION` (the remaining chat/command family —
-`CHAT_COMMAND` itself now decodes and connects — needing signature verification
-that does not exist anywhere in the tree), plus `COOKIE_RESPONSE`,
-`DEBUG_SUBSCRIPTION_REQUEST` and `TEST_INSTANCE_BLOCK_ACTION`. Each of the last
-three is deliberately undecoded for a reason stated at the wildcard arm in
+**Stale, corrected above**: the paragraph below once listed seven packets with no
+decode arm at all, four of them the chat/command family. That family is now fully
+decoded (see the top of this section) — the only packets left with **no arm** are
+the three below. Kept for their per-packet reasoning, which is still accurate.
+
+`COOKIE_RESPONSE`, `DEBUG_SUBSCRIPTION_REQUEST` and `TEST_INSTANCE_BLOCK_ACTION`
+are each deliberately undecoded for a reason stated at the wildcard arm in
 `crates/protocol/v770/src/server_protocol.rs` — no encoder to cross-check
 against, no VarInt id table to resolve a registry-keyed set, and no codec
 support for a nested `Optional<ResourceKey>`/`Vec3i`/`Rotation` composite,

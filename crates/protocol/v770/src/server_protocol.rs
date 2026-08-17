@@ -111,7 +111,7 @@ use crate::packets::entity::{pack_degrees, read_lp_vec3, write_lp_vec3};
 use crate::packets::metadata::write_update_attributes;
 use crate::packets::game::{
     AcceptTeleportation, Attack, BlockEntityTagQuery, ChangeDifficultyClientbound,
-    ChangeDifficultyServerbound, ChangeGameMode, ChatAck, ChatCommand, ChatMessage,
+    ChangeDifficultyServerbound, ChangeGameMode, ChatAck, ChatCommand, ChatCommandSigned, ChatMessage,
     ChatSessionUpdate, ChunkBatchReceived,
     ClientCommand, ClientTickEnd, CommandSuggestion,
     ConfigurationAcknowledged, ContainerButtonClick, ContainerSlotStateChanged, EditBook,
@@ -4145,15 +4145,32 @@ impl ServerProtocol for V770ServerProtocol {
             // byte here means we misread the packet, and a misread command is
             // worse than an ignored one: it would run *something*.
             //
-            // `CHAT_COMMAND_SIGNED` is deliberately **not** decoded and falls
-            // to the wildcard. Its body carries a timestamp, salt, per-argument
-            // signatures and a last-seen acknowledgement block, none of which
-            // this crate has a session key to verify — and a client only sends
-            // it for arguments the server declared signable in a `COMMANDS`
-            // tree we do not yet send, so in practice every command from a real
-            // client arrives here unsigned.
             State::Play if packet_id == play::serverbound::CHAT_COMMAND => {
                 match decode_full::<ChatCommand>(payload) {
+                    Some(p) => ServerBound::ChatCommand { command: p.command },
+                    None => ServerBound::Ignored,
+                }
+            }
+            // `ChatCommandSigned` — sent instead of the plain `chat_command`
+            // only when the client's command contains an argument the
+            // server's `COMMANDS` tree declared signable
+            // (`ArgumentSignatures.signCommand`). This server never declares
+            // any argument signable (`ServerBound::ChatCommand`'s own doc
+            // comment), so no real client sends this form today, but it is
+            // decoded and routed through the same
+            // `ServerBound::ChatCommand` consumer rather than left `Ignored`:
+            // the `command` text is well-formed and executable regardless of
+            // whether its arguments carry a signature, and `ArgumentSignatures`
+            // verifies individual *arguments* against a signable-argument
+            // declaration this crate never makes — there is nothing for that
+            // verification to gate here, unlike `minecraft:chat`'s
+            // whole-message signature, which `crate::chat_session::decide`
+            // does verify. `timestamp`/`salt`/`argument_signatures` and the
+            // trailing acknowledgement block are decoded (to find the end of
+            // the frame) and then dropped, the same convention `CHAT_ACK`
+            // below uses.
+            State::Play if packet_id == play::serverbound::CHAT_COMMAND_SIGNED => {
+                match decode_full::<ChatCommandSigned>(payload) {
                     Some(p) => ServerBound::ChatCommand { command: p.command },
                     None => ServerBound::Ignored,
                 }
@@ -7088,6 +7105,73 @@ mod world_admin_tests {
             }
             other => panic!("expected Send, got {other:?}"),
         }
+    }
+}
+
+/// `CHAT_COMMAND_SIGNED` — see the decode arm's own comment for why this
+/// routes through the same `ServerBound::ChatCommand` consumer as the plain
+/// `CHAT_COMMAND` rather than a dedicated variant.
+#[cfg(test)]
+mod chat_command_signed_tests {
+    use super::*;
+    use lodestone_core::State;
+
+    fn encode<T: Encode>(packet: &T) -> Vec<u8> {
+        let mut w = Writer::default();
+        packet.encode(&mut w, CTX).expect("well-formed struct encodes");
+        w.into_vec()
+    }
+
+    /// Pairwise-distinct fixture: `command`, `timestamp` and `salt` are each
+    /// individually distinguishable, and a non-empty `argument_signatures`
+    /// list plus a non-zero `last_seen_offset`/`acknowledged`/`checksum` tail
+    /// are present precisely so a decoder that stops early (or misreads the
+    /// frame length) fails loudly rather than by coincidence.
+    #[test]
+    fn decode_chat_command_signed_runs_the_same_command_as_the_unsigned_form() {
+        let proto = V770ServerProtocol;
+        let mut sig_bytes = [0u8; 256];
+        for (i, b) in sig_bytes.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let body = encode(&ChatCommandSigned {
+            command: "gamemode creative Notch".to_owned(),
+            timestamp: 1_700_000_000_123,
+            salt: 42,
+            argument_signatures: vec![crate::packets::game::ArgumentSignatureEntry {
+                name: "player".to_owned(),
+                signature: crate::packets::game::MessageSignature(sig_bytes),
+            }],
+            last_seen_offset: 3,
+            acknowledged: [0b0000_0001, 0, 0],
+            checksum: 7,
+        });
+        let decoded = proto.decode(State::Play, play::serverbound::CHAT_COMMAND_SIGNED, &body);
+        assert_eq!(
+            decoded,
+            ServerBound::ChatCommand {
+                command: "gamemode creative Notch".to_owned(),
+            }
+        );
+    }
+
+    /// Control: a truncated frame (missing the acknowledgement tail) must
+    /// drop to `Ignored`, not silently accept a shorter-than-declared packet.
+    #[test]
+    fn decode_chat_command_signed_rejects_a_truncated_frame() {
+        let proto = V770ServerProtocol;
+        let mut body = encode(&ChatCommandSigned {
+            command: "help".to_owned(),
+            timestamp: 1,
+            salt: 2,
+            argument_signatures: vec![],
+            last_seen_offset: 0,
+            acknowledged: [0, 0, 0],
+            checksum: 0,
+        });
+        body.truncate(body.len() - 1);
+        let decoded = proto.decode(State::Play, play::serverbound::CHAT_COMMAND_SIGNED, &body);
+        assert_eq!(decoded, ServerBound::Ignored);
     }
 }
 

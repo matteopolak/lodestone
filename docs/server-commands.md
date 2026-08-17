@@ -605,15 +605,13 @@ lives in the plugin API.**
   distinguish them — check which case a packet is in before assuming.
   Measured delta for this work: `serverbound decoded 60/69, connected 17/69` →
   `61/69` and `18/69`, with `decodes-to-Ignored-only` unchanged at 43.
-* **`CHAT_COMMAND_SIGNED` is deliberately not decoded.** Its body carries a
-  timestamp, salt, per-argument signatures and a last-seen acknowledgement
-  block, none of which we have a session key to verify. A client only sends the
-  signed form for arguments the server declared **signable**, and a `COMMANDS`
-  tree does not by itself declare anything signable — that is
-  `chat_session_update` plus the server reporting `enforcesSecureProfile`, neither
-  of which we do. So every command from a real client still arrives unsigned even
-  now that the tree is sent. Revisit if secure chat ever lands, not because of
-  this encoder.
+* **`CHAT_COMMAND_SIGNED` is now decoded, corrected from an earlier "deliberately not
+  decoded" note here.** It routes through the same `ServerBound::ChatCommand` consumer
+  as the plain form — the per-argument signatures are decoded (to find the end of the
+  frame) and then dropped rather than verified, since a client only sends this form for
+  arguments the server's `COMMANDS` tree declared **signable**, and this server declares
+  none. So every command still executes identically regardless of which wire form
+  carried it; see `ServerBound::ChatCommand`'s own doc comment.
 * **The serverbound suggestion request now decodes, dispatches and answers —
   but is still unreachable from a real client, for a *different* reason than
   before.** `minecraft:command_suggestion` (serverbound id 15) decodes to
