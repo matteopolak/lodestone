@@ -212,11 +212,15 @@ pulse generator) does not exist.** That remaining verification is what #316 stay
 * **To make a push cross a chunk border**, the redstone family needs a neighbourhood-wide lookup, not
   a per-column one. Everything in `piston.rs` is already written against `Fn(BlockPos) -> String`
   and needs no change.
-* **Levers, buttons and pressure plates cannot power a piston**, and neither can
-  `minecraft:redstone_block`. `redstone::is_signal_source` is `torch || diode || observer`, and
-  neither `weak_signal` nor `direct_signal` has an arm for a `powered=true` lever. That is a gap in
-  `redstone.rs`, not in this module — but it is the first thing to try interactively and it looks
-  exactly like a broken piston, so **verify with a lit redstone torch**, an observer or a repeater.
+* **Stale as of this reading, kept as a record of the trap rather than deleted**: an earlier version
+  of this page said levers, buttons and pressure plates could not power a piston because
+  `redstone::is_signal_source` had no arm for a `powered=true` lever. `redstone.rs`'s `is_input_source`
+  now covers lever, button, both pressure-plate families, tripwire hook, detector rail, target,
+  daylight detector and `minecraft:redstone_block`, and `weak_signal`/`direct_signal` both have real
+  arms for all of them — `piston.rs`'s own
+  `the_placement_path_carries_the_commits_when_a_lever_is_the_trigger` test drives a piston from a
+  lever end to end and is green. If a piston still looks unpowered by one of these in play, the bug is
+  new, not this one — re-derive from `redstone.rs` rather than assuming this note still applies.
 
 ## Configuration
 

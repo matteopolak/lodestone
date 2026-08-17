@@ -24,6 +24,7 @@
 //! | fence gate | `FenceGateBlock.useWithoutItem` (`:143-159`) | cycle `open`, and re-face toward the player when opening |
 //! | lever | `LeverBlock.useWithoutItem` (`:63-76`) → `pull` | cycle `powered` |
 //! | button | `ButtonBlock.useWithoutItem` (`:86-95`) → `press` | set `powered = true`, schedule a release |
+//! | note block | `NoteBlock.useWithoutItem` (`NoteBlock.java:126`) → `changePitch` | cycle `note`, wrapping `24` back to `0` |
 //!
 //! **`open` alone, not `open` *and* `powered`.** [`crate::redstone_openable`]'s
 //! `with_open_and_powered` writes both, because for the redstone path they move
@@ -86,7 +87,16 @@ pub struct HandUse {
 /// Cheap and total, so `apply_use_item_on` can ask before doing any work.
 #[must_use]
 pub fn is_hand_usable(state: &str) -> bool {
-    crate::redstone_openable::is_openable(state) || is_lever(state) || is_button(state)
+    crate::redstone_openable::is_openable(state)
+        || is_lever(state)
+        || is_button(state)
+        || is_note_block(state)
+}
+
+/// `minecraft:note_block`.
+#[must_use]
+pub fn is_note_block(state: &str) -> bool {
+    base(state) == crate::redstone_note_block::NOTE_BLOCK
 }
 
 /// `minecraft:lever`.
@@ -160,6 +170,15 @@ pub fn hand_use(
             changes: vec![(pos, with_property(state, "powered", if now { "false" } else { "true" }))],
             release_after: None,
         });
+    }
+    if is_note_block(state) {
+        // `NoteBlock.useWithoutItem` → `changePitch`: `state.cycle(NOTE)`, wrapping
+        // 24 back to 0. The `playNote` half of `changePitch` is not modelled — see
+        // `crate::redstone_note_block`'s own module doc for why the pulse sound has
+        // no wire path here yet (the same `LEVEL_EVENT`/block-event gap its
+        // neighbour-triggered pulse already discloses).
+        return crate::redstone_note_block::cycle_note(state)
+            .map(|new_state| HandUse { changes: vec![(pos, new_state)], release_after: None });
     }
     if !crate::redstone_openable::is_openable(state) || !can_open_by_hand(state) {
         return None;
@@ -391,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn is_hand_usable_covers_the_five_families_and_nothing_else() {
+    fn is_hand_usable_covers_the_six_families_and_nothing_else() {
         for yes in [
             "minecraft:oak_door",
             "minecraft:oak_trapdoor",
@@ -399,6 +418,7 @@ mod tests {
             "minecraft:lever",
             "minecraft:stone_button",
             "minecraft:polished_blackstone_button",
+            "minecraft:note_block",
         ] {
             assert!(is_hand_usable(yes), "{yes} must be hand-usable");
         }
@@ -411,6 +431,36 @@ mod tests {
         ] {
             assert!(!is_hand_usable(no), "{no} must not be");
         }
+    }
+
+    /// A right-click on a note block advances its pitch by one semitone and
+    /// wraps `24` back to `0`, with no `release_after` (unlike a button) and
+    /// no second `changes` entry (unlike a door).
+    #[test]
+    fn a_note_block_click_cycles_its_pitch_and_wraps() {
+        let out = hand_use(
+            pos(0, 0, 0),
+            "minecraft:note_block[instrument=harp,note=0,powered=false]",
+            None,
+            None,
+        )
+        .expect("cycles");
+        assert_eq!(out.changes.len(), 1);
+        assert!(out.changes[0].1.contains("note=1"), "{}", out.changes[0].1);
+        assert_eq!(out.release_after, None);
+
+        let out = hand_use(
+            pos(0, 0, 0),
+            "minecraft:note_block[instrument=harp,note=24,powered=false]",
+            None,
+            None,
+        )
+        .expect("wraps");
+        assert!(
+            out.changes[0].1.contains("note=0"),
+            "24 must wrap back to 0: {}",
+            out.changes[0].1
+        );
     }
 
     #[test]

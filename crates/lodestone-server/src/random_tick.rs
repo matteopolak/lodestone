@@ -1560,6 +1560,66 @@ pub(crate) fn run_tripwire_recheck(column: &mut crate::chunk::ChunkColumn, min_x
     own
 }
 
+/// `TripWireBlock.affectNeighborsAfterRemoval` (`TripWireBlock.java:108-111`)
+/// — the "the string just broke" instantaneous pulse, the block-**removal**
+/// twin of the placement arm above (`redstone_tripwire::find_controlling_hooks`
+/// called from a placed wire cell). `wire_state_before_removal` is the
+/// tripwire's own state *just before* the caller overwrote the cell — the
+/// caller must capture it first, the same as every other post-break reaction
+/// in `crate::server::destroy_block` already does with its own `broken`
+/// binding.
+///
+/// A no-op for anything that is not `minecraft:tripwire`, so a caller can call
+/// this unconditionally on every removed block without a guard of its own —
+/// the same shape [`redstone::is_tripwire_hook`]'s placement counterpart is
+/// gated on inline rather than by the caller.
+pub(crate) fn react_at_removal(
+    column: &mut crate::chunk::ChunkColumn,
+    min_x: i32,
+    min_z: i32,
+    x: i32,
+    y: i32,
+    z: i32,
+    wire_state_before_removal: &str,
+    block_ticks: &mut ScheduledTickQueue<String>,
+    current_tick: u64,
+) -> Vec<RandomTickEvent> {
+    let mut own = Vec::new();
+    if base_name(wire_state_before_removal) != redstone_tripwire::TRIPWIRE {
+        return own;
+    }
+    let pos = BlockPos::new(x, y, z);
+    let found = {
+        let lookup = redstone::make_lookup(column, min_x, min_z);
+        redstone_tripwire::on_wire_removed(&lookup, pos, wire_state_before_removal)
+    };
+    for (hook_pos, source) in found {
+        let hook_state = redstone::make_lookup(column, min_x, min_z)(hook_pos);
+        if base_name(&hook_state) != redstone_tripwire::TRIPWIRE_HOOK {
+            continue;
+        }
+        let result = {
+            let lookup = redstone::make_lookup(column, min_x, min_z);
+            redstone_tripwire::calculate_state(&lookup, hook_pos, &hook_state, false, Some(&source))
+        };
+        apply_tripwire_result(column, min_x, min_z, &result, &mut own);
+        if result.reschedule_recheck
+            && !block_ticks.has_scheduled(
+                (hook_pos.x, hook_pos.y, hook_pos.z),
+                &redstone_tripwire::TICK_TRIPWIRE_RECHECK.to_string(),
+            )
+        {
+            block_ticks.schedule(
+                (hook_pos.x, hook_pos.y, hook_pos.z),
+                redstone_tripwire::TICK_TRIPWIRE_RECHECK.to_string(),
+                current_tick + u64::from(redstone_tripwire::RECHECK_DELAY),
+                TickPriority::Normal,
+            );
+        }
+    }
+    own
+}
+
 pub(crate) fn propagate_and_react(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,
@@ -3839,5 +3899,91 @@ mod tests {
                  (found one) — scenario A's control above proves this would otherwise happen"
             );
         }
+    }
+
+    /// **The tripwire block-removal hook** (`TripWireBlock.affectNeighborsAfterRemoval`),
+    /// wired for the first time through [`react_at_removal`].
+    ///
+    /// Layout: hook@(0,5,0) facing east, real wire cells at x=1 and x=3 (neither
+    /// powered), the wire at x=2 already broken to air, and a receiver hook@(4,5,0)
+    /// facing west. Every real wire cell is `powered=false` — the discriminating
+    /// choice: if the removal hook's own `powered=true` override on the broken
+    /// cell had no effect, the controlling hook could only ever read `powered:
+    /// false` here, because nothing else in this rig is powered at all.
+    #[test]
+    fn breaking_a_tripwire_wire_cell_pulses_its_controlling_hook_powered_true() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(0, 5, 0, "minecraft:tripwire_hook[facing=east,attached=true,powered=false]");
+        column.set_block(1, 5, 0, "minecraft:tripwire[attached=true,powered=false,disarmed=false]");
+        // x=2 is already air by the time the reaction runs — `destroy_block`
+        // overwrites the cell before calling `propagate_removal_with_entities`.
+        let broken = "minecraft:tripwire[attached=true,powered=false,disarmed=false]".to_string();
+        column.set_block(3, 5, 0, "minecraft:tripwire[attached=true,powered=false,disarmed=false]");
+        column.set_block(4, 5, 0, "minecraft:tripwire_hook[facing=west,attached=true,powered=false]");
+
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let events = react_at_removal(&mut column, 0, 0, 2, 5, 0, &broken, &mut block_ticks, 0);
+
+        let hook_now = column.block_state(0, 5, 0).to_string();
+        assert_eq!(
+            hook_now, "minecraft:tripwire_hook[facing=east,attached=true,powered=true]",
+            "even though neither surviving wire cell is itself powered, breaking the \
+             middle one must pulse the controlling hook powered=true for one instant"
+        );
+        assert!(
+            events.iter().any(|e| e.pos == (0, 5, 0) && e.to.contains("powered=true")),
+            "the hook rewrite must be reported as an event, not just written silently \
+             into the column: {events:?}"
+        );
+
+        // One scan, two endpoints: the receiver hook is rewritten too.
+        let receiver_now = column.block_state(4, 5, 0).to_string();
+        assert_eq!(
+            receiver_now, "minecraft:tripwire_hook[facing=west,attached=true,powered=true]"
+        );
+
+        // The pulse is transient: a recheck is scheduled so the hook settles
+        // back down once the real (now genuinely gapped) world is re-read.
+        assert!(
+            block_ticks.has_scheduled(
+                (0, 5, 0),
+                &redstone_tripwire::TICK_TRIPWIRE_RECHECK.to_string()
+            ),
+            "the pulse must schedule the periodic recheck that settles it back down"
+        );
+
+        // The control: recomputing from the real (post-removal) world with no
+        // synthetic override — what a plain rescan would see — finds the x=2
+        // gap for real and must NOT report the pulse. This is what proves the
+        // `on_wire_removed` override, not something else, produced the result
+        // above.
+        let lookup = redstone::make_lookup(&column, 0, 0);
+        let naive = redstone_tripwire::calculate_state(
+            &lookup,
+            BlockPos::new(0, 5, 0),
+            "minecraft:tripwire_hook[facing=east,attached=true,powered=false]",
+            false,
+            None,
+        );
+        assert!(
+            !naive.powered && !naive.attached,
+            "a rescan with no removal override must see the real gap at x=2 and settle \
+             attached=false, powered=false — {naive:?}"
+        );
+    }
+
+    /// A no-op control: breaking a block that is not a tripwire must produce
+    /// no events and schedule nothing, so [`react_at_removal`]'s guard is
+    /// proven rather than merely assumed.
+    #[test]
+    fn breaking_a_non_tripwire_block_is_a_no_op_for_the_removal_hook() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(0, 5, 0, "minecraft:tripwire_hook[facing=east,attached=true,powered=false]");
+        column.set_block(1, 5, 0, "minecraft:tripwire[attached=true,powered=false,disarmed=false]");
+        let broken = "minecraft:stone".to_string();
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let events = react_at_removal(&mut column, 0, 0, 2, 5, 0, &broken, &mut block_ticks, 0);
+        assert!(events.is_empty(), "breaking stone must not touch any tripwire hook: {events:?}");
+        assert!(block_ticks.drain_due(u64::MAX, usize::MAX).is_empty());
     }
 }
