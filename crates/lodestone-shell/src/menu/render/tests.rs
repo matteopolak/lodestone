@@ -2591,6 +2591,75 @@ fn wrap_bounded_breaks_a_run_that_no_whitespace_wrap_could() {
     assert!(starved.iter().all(|l| l.chars().count() == 1));
 }
 
+/// A server MOTD padded with leading spaces (a common way to fake centring
+/// on a fixed-width client) must keep them — `split_whitespace` would
+/// otherwise discard the whole leading run as mere word separation, which is
+/// indistinguishable from "the server sent no padding at all" once dropped.
+///
+/// The discriminating input, per this fix's own reasoning: a one-line MOTD
+/// coincides under both hypotheses if it starts with a *non*-space
+/// character, so this pads with real leading spaces and checks they land in
+/// the output verbatim.
+#[test]
+fn wrap_measured_preserves_a_paragraphs_leading_spaces() {
+    let b = Quads::new(854.0, 480.0);
+    // 3 leading spaces + "Hello" comfortably fits one line at this width.
+    let motd = "   Hello";
+    let lines = wrap_measured(&b, motd, 200.0, 2);
+    assert_eq!(
+        lines,
+        vec!["   Hello".to_string()],
+        "the leading padding must survive into the wrapped line, not be \
+         trimmed to \"Hello\""
+    );
+}
+
+/// A second-page paragraph's leading spaces must survive too, not only the
+/// very first paragraph in the string — the leading-whitespace restoration
+/// is per-paragraph, not a one-shot fixup of the whole MOTD.
+#[test]
+fn wrap_measured_preserves_leading_spaces_after_a_newline() {
+    let b = Quads::new(854.0, 480.0);
+    let motd = "Title\n  Subtitle";
+    let lines = wrap_measured(&b, motd, 200.0, 2);
+    assert_eq!(lines, vec!["Title".to_string(), "  Subtitle".to_string()]);
+}
+
+/// **The line-cap bug.** A two-line MOTD whose second line, correctly
+/// wrapped, holds three words — the discriminating input the guard's old
+/// position (checked before every word, rather than only when a *new* line
+/// is about to be pushed) could not survive: the moment `out.len()` reached
+/// `max_lines` it returned immediately, truncating the last visible line to
+/// whichever single word had just opened it. A one-word second line passes
+/// either way and proves nothing.
+///
+/// Widths are exact, not eyeballed: the hermetic `Quads` with no font
+/// attached measures every character (including a join space) at a fixed
+/// `(GLYPH_W + 1) = 6px` advance (`text_px`/`text_w`). Six two-letter words
+/// at `max_px = 50.0`: `"aa bb cc"` is 8 chars = 48px (fits), `"aa bb cc
+/// dd"` is 11 chars = 66px (does not) — so line 1 is forced to stop at
+/// three words and line 2 must be able to grow past its first word to
+/// prove the fix, not merely reach two lines.
+#[test]
+fn wrap_measured_keeps_filling_the_last_visible_line_past_the_cap() {
+    let b = Quads::new(854.0, 480.0);
+    let motd = "aa bb cc dd ee ff";
+    let max_px = 50.0;
+
+    // Predictions from outside the function under test, using the same
+    // fixed-advance arithmetic `text_px` uses (6px per character).
+    assert_eq!(b.text_width("aa bb cc", 1.0), 48.0);
+    assert_eq!(b.text_width("aa bb cc dd", 1.0), 66.0);
+
+    let lines = wrap_measured(&b, motd, max_px, 2);
+    assert_eq!(
+        lines,
+        vec!["aa bb cc".to_string(), "dd ee ff".to_string()],
+        "the second line must keep accepting words that fit it after the \
+         line cap is reached, not stop at its first word"
+    );
+}
+
 /// One wheel notch on the accounts list moves **18 px**, through the generic router.
 ///
 /// The magnitude is the claim, not the direction: "it scrolled" is satisfied by the

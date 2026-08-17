@@ -360,7 +360,14 @@ impl V770Adapter {
         }
         if packet_id == login::clientbound::LOGIN_DISCONNECT {
             let body: LoginDisconnect = decode_body(payload)?;
-            return Ok(vec![Directive::Disconnect(Text::literal(body.reason))]);
+            // Login state predates the NBT text migration — `reason` is a JSON
+            // chat component on the wire (see the packet's own field doc), not
+            // NBT, so `nbt_reason_text` is the wrong helper here despite the
+            // Play/Configuration arms using it. `Text::from_json` falls back to
+            // a literal on a parse failure on its own, so a malformed or
+            // legacy-plain reason still surfaces *something* rather than
+            // erroring the disconnect away.
+            return Ok(vec![Directive::Disconnect(Text::from_json(&body.reason))]);
         }
         if packet_id == login::clientbound::COOKIE_REQUEST {
             // This state had no arm at all before now, a
@@ -578,5 +585,130 @@ fn decode_server_links(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     Ok(vec![Directive::Emit(ClientEvent::ServerLinksReceived {
         links,
     })])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lodestone_model::TextColor;
+
+    /// A length-prefixed string, exactly how `login::clientbound::
+    /// LOGIN_DISCONNECT`'s body is framed (see `nbt_reason_text`'s sibling
+    /// arm and `crates/protocol/v770/tests/server_disconnect.rs`'s own
+    /// `login_phase_reason_is_json_and_play_phase_reason_is_nbt`).
+    fn framed_string(s: &str) -> Vec<u8> {
+        let mut w = Writer::default();
+        w.string(s);
+        w.into_vec()
+    }
+
+    /// **The owner-reported bug, reproduced from a real captured shape.**
+    /// A server refusing a login (banned/whitelisted/wrong version) sends a
+    /// styled component — `extra` children, a root `color`, a `bold` run —
+    /// as a **JSON** chat component (`login/ClientboundLoginDisconnectPacket
+    /// .java`'s `ByteBufCodecs.lenientJson`), not NBT. Before this fix the
+    /// login-state arm ran the raw JSON straight through `Text::literal`, so
+    /// a player saw the brace-and-quote source text instead of a message —
+    /// exactly the report: `{"extra":... with colour, bold, etc.}` on
+    /// screen. This asserts the *parsed* result, not merely that it stopped
+    /// containing braces: the plain text, the `extra` child's own colour,
+    /// and the root's `bold` flag must all survive.
+    #[test]
+    fn login_disconnect_parses_the_real_json_shape_including_extra_and_styles() {
+        let json = r#"{
+            "text": "You are not white-listed on this server!",
+            "bold": true,
+            "extra": [
+                {"text": " Contact an admin.", "color": "red", "bold": false}
+            ]
+        }"#;
+        let payload = framed_string(json);
+
+        let adapter = V770Adapter::default();
+        let directives = adapter
+            .handle_login(login::clientbound::LOGIN_DISCONNECT, &payload)
+            .expect("a real captured login_disconnect JSON shape must decode");
+        let Some(Directive::Disconnect(text)) = directives.into_iter().next() else {
+            panic!("expected a Disconnect directive");
+        };
+
+        assert_eq!(
+            text.to_plain_string(),
+            "You are not white-listed on this server! Contact an admin.",
+            "the root text and the extra child's text must both survive, \
+             concatenated — not the raw JSON source",
+        );
+        assert_eq!(
+            text.style.bold,
+            Some(true),
+            "the root component's bold flag must survive",
+        );
+        assert_eq!(
+            text.extra.len(),
+            1,
+            "the styled `extra` child must survive as its own node, not be \
+             flattened away",
+        );
+        assert_eq!(
+            text.extra[0].style.color,
+            Some(TextColor::Red),
+            "the extra child's own colour must survive",
+        );
+        assert_eq!(
+            text.extra[0].style.bold,
+            Some(false),
+            "the extra child's explicit bold=false must survive rather than \
+             inheriting the root's bold=true",
+        );
+
+        // The control this fix replaces: the *old* behaviour (`Text::literal`
+        // on the raw JSON) would have put the brace-laden source verbatim
+        // into the plain string. Watch it fail under the old code path.
+        let literal = Text::literal(json);
+        assert_ne!(
+            literal.to_plain_string(),
+            text.to_plain_string(),
+            "sanity: a literal wrap of the raw JSON must differ from the \
+             parsed result, or this test cannot discriminate the fix from \
+             the bug it replaces",
+        );
+    }
+
+    /// A malformed/legacy-plain reason must still show *something* — the
+    /// `Text::from_json` fallback this fix relies on, exercised through the
+    /// real login arm rather than asserted only at the `Text` layer.
+    #[test]
+    fn login_disconnect_falls_back_to_literal_on_malformed_json() {
+        let payload = framed_string("not actually json");
+        let adapter = V770Adapter::default();
+        let directives = adapter
+            .handle_login(login::clientbound::LOGIN_DISCONNECT, &payload)
+            .expect("a malformed reason must still decode, not error the disconnect away");
+        let Some(Directive::Disconnect(text)) = directives.into_iter().next() else {
+            panic!("expected a Disconnect directive");
+        };
+        assert_eq!(text.to_plain_string(), "not actually json");
+    }
+
+    /// The negative control the coordinator asked for: the configuration-state
+    /// arm shares `ClientboundDisconnectPacket` with Play (NBT, not JSON) —
+    /// see `.cache/mc/26.2/client-src/net/minecraft/network/protocol/common/
+    /// ClientboundDisconnectPacket.java`'s `TRUSTED_CONTEXT_FREE_STREAM_CODEC`
+    /// versus login's own `ByteBufCodecs.lenientJson`. A JSON payload fed to
+    /// the configuration arm must NOT decode as if it were NBT.
+    #[test]
+    fn configuration_disconnect_rejects_a_json_payload_as_not_nbt() {
+        let json = r#"{"text":"nope"}"#;
+        let payload = framed_string(json);
+        let adapter = V770Adapter::default();
+        let result = adapter.handle_configuration(configuration::clientbound::DISCONNECT, &payload);
+        assert!(
+            result.is_err(),
+            "a JSON-framed string is not valid network NBT; the configuration \
+             arm must reject it rather than silently misparsing it, which is \
+             the tell that it is still using `nbt_reason_text` and not the \
+             login arm's JSON path",
+        );
+    }
 }
 
