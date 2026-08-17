@@ -562,6 +562,21 @@ struct WoolPartAccum {
     tints: Vec<InstanceTint>,
 }
 
+/// One player's uploaded cape-instance buffer for a frame, grouped by cape
+/// **URL** rather than by part — unlike wool/armour the cape's texture is
+/// per-player, not fixed, so the grouping key `prepare_entities`' own skin
+/// batching uses is the one that applies here too. There is exactly one part
+/// (`"cape"`) in `EntityRenderer::cape_model`, so unlike [`WoolPartAccum`]
+/// there is nothing left to key by once the URL is fixed.
+struct CapeDrawBatch {
+    /// The cape texture URL this batch's instances share — looked up in
+    /// `EntityRenderer::player_skins` at draw time, the same cache (and the
+    /// same "not installed yet" fallback behaviour) a body's own skin uses.
+    url: String,
+    buffer: wgpu::Buffer,
+    count: u32,
+}
+
 /// One model type's uploaded flame-instance buffer for a frame
 /// — the mob-fire counterpart to [`WoolPartAccum`]/`ArmourDrawBatch`, simpler
 /// than either because the flame mesh has no per-part skeleton attachment:

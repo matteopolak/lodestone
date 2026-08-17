@@ -141,7 +141,7 @@ use lodestone_assets::ResourceLocation;
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::entity::{
     AttackSwing, DeathTime, EntityFlags, EntityIndex, ExperienceOrbValue, FallingBlockState,
-    HurtTime, ItemUse, MinecraftEntityId, MobState, Pose,
+    HurtTime, ItemUse, MinecraftEntityId, MobState, OnGround, Pose,
 };
 use lodestone_ecs::player::{
     CollisionSource, LocalPlayer, PhysicsState, PlayerCollision, Profile,
@@ -965,6 +965,13 @@ pub struct EntityDraw {
     /// synced) and `count` (how many absorptions the entity holds after merging,
     /// server-only) as two different numbers, and only the first is on the wire.
     pub experience_orb_value: Option<i32>,
+    /// This frame's interpolated `(capeLean, capeLean2, capeFlap)`, all
+    /// degrees — see [`cape_sway`] for the derivation and [`CapeLag`] for the
+    /// per-tick state it comes from. Computed for every tracked entity (the
+    /// state is cheap — see [`CapeLag`]'s doc), consumed only when
+    /// [`Self::type_path`] is `"player"` and [`Self::player_skin`] declares a
+    /// cape, exactly like [`Self::swim_amount`]'s single player-only reader.
+    pub cape_sway: (f32, f32, f32),
 }
 
 impl EntityDraw {
@@ -1259,6 +1266,146 @@ pub fn tick_swim_ramp(
             (ramp.current - SWIM_AMOUNT_PER_TICK).max(0.0)
         };
     }
+}
+
+/// The lagged "cloak" position vanilla's `ClientAvatarState` tracks per
+/// avatar (`xCloak`/`yCloak`/`zCloak`, `26.2`) — the position the cape's
+/// pivot chases, easing 25% of the remaining gap toward the entity's real
+/// per-tick position every tick, with a 10-block teleport snap. The gap
+/// between this lagged point and the entity's real position, resolved
+/// against body yaw, is what makes a cape swing wide on a turn and trail
+/// behind on a sprint — see [`tick_cape_lag`] and [`cape_sway`].
+///
+/// **Present on every track entity**, the same "costs nothing to carry"
+/// choice [`SwimRamp`] makes: the extra state is three `f64` pairs and one
+/// `f32` pair, and gating it by [`RenderKind`] would need the same
+/// "well-known but changeable skin url" plumbing [`RenderPlayerSkin`] already
+/// carries, for no measurable win — only a `"player"` [`EntityDraw::type_path`]
+/// ever reads the derived sway, exactly like [`EntityDraw::swim_amount`]'s
+/// player-only consumer.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct CapeLag {
+    /// The lagged position, current tick.
+    pub cloak: Vec3,
+    /// The lagged position, one tick ago — what [`extract_entity_draws`]
+    /// interpolates *from*.
+    pub cloak_o: Vec3,
+    /// The real per-tick position [`tick_cape_lag`] last eased toward
+    /// (`InterpTo::feet`), kept so the *next* tick can compute a fresh delta
+    /// without re-reading the query tuple's `InterpTo` a second time.
+    pub last_feet: Vec3,
+    /// `ClientAvatarState.bob`: an eased 0..0.1 walk-bob amplitude,
+    /// `AbstractClientPlayer.updateBob`'s `tBob` (this tick's horizontal
+    /// travel, clamped to `0.1`, zeroed while swimming) eased by `0.4` per
+    /// tick toward the target.
+    pub bob: f32,
+    /// `bob`, one tick ago — what [`extract_entity_draws`] interpolates
+    /// *from*.
+    pub bob_o: f32,
+}
+
+impl CapeLag {
+    /// A freshly tracked entity starts with its cloak pinned to wherever it
+    /// first appears — `ClientAvatarState`'s fields all default to `0.0`, but
+    /// unlike vanilla (which only ever constructs one per real player, at a
+    /// real position) a spawned track can appear anywhere, so pinning here
+    /// avoids one tick of the cape lunging in from the world origin. `bob`
+    /// starts at rest, same as [`SwimRamp::IDLE`].
+    pub fn at(feet: Vec3) -> Self {
+        Self {
+            cloak: feet,
+            cloak_o: feet,
+            last_feet: feet,
+            bob: 0.0,
+            bob_o: 0.0,
+        }
+    }
+}
+
+/// `ClientAvatarState.moveCloak` + `AbstractClientPlayer.updateBob`, one 20 Hz
+/// step, for every tracked entity — cheap enough (see [`CapeLag`]'s doc) not
+/// to gate by type, and it must run at tick rate: both are per-tick eases in
+/// vanilla, not per-frame ones, exactly like [`tick_swim_ramp`].
+///
+/// **Approximation, stated rather than hidden:** vanilla's `tBob` also gates
+/// on `!isDeadOrDying()`, which would need [`DeathTime`] bridged through
+/// [`EntityIndex`] the way [`OnGround`]/[`Pose`] are below; a dying entity's
+/// cape bob not freezing on the killing blow is the one behaviour this port
+/// does not chase, in exchange for not widening this query further.
+pub fn tick_cape_lag(
+    index: Res<EntityIndex>,
+    grounded: Query<&OnGround>,
+    poses: Query<&Pose>,
+    mut tracks: Query<(&MinecraftEntityId, &InterpTo, &mut CapeLag)>,
+) {
+    const EASE: f32 = 0.25;
+    const TELEPORT_THRESHOLD: f32 = 10.0;
+    const BOB_EASE: f32 = 0.4;
+    const MAX_BOB_TARGET: f32 = 0.1;
+
+    for (id, to, mut lag) in &mut tracks {
+        lag.cloak_o = lag.cloak;
+        let delta = to.feet - lag.cloak;
+        // Vanilla checks each axis independently, so a huge single-axis
+        // teleport (through a portal, say) snaps only what actually jumped —
+        // reproduced faithfully rather than snapping all three together.
+        let ease_axis = |gap: f32, cur: f32, target: f32| {
+            if gap.abs() > TELEPORT_THRESHOLD {
+                target
+            } else {
+                cur + gap * EASE
+            }
+        };
+        lag.cloak = Vec3::new(
+            ease_axis(delta.x, lag.cloak.x, to.feet.x),
+            ease_axis(delta.y, lag.cloak.y, to.feet.y),
+            ease_axis(delta.z, lag.cloak.z, to.feet.z),
+        );
+
+        let horizontal = (to.feet - lag.last_feet).with_y(0.0).length();
+        lag.last_feet = to.feet;
+        let entity = index.get(id.0);
+        let swimming = entity
+            .and_then(|e| poses.get(e).ok())
+            .is_some_and(|pose| pose.0 == lodestone_model::EntityPose::Swimming);
+        let on_ground = entity.and_then(|e| grounded.get(e).ok()).is_some_and(|g| g.0);
+        let bob_target = if on_ground && !swimming {
+            horizontal.min(MAX_BOB_TARGET)
+        } else {
+            0.0
+        };
+        lag.bob_o = lag.bob;
+        lag.bob += (bob_target - lag.bob) * BOB_EASE;
+    }
+}
+
+/// Vanilla's `AvatarRenderer.extractCapeState` (`26.2`), given this frame's
+/// interpolated cloak lag and body yaw: the `(capeLean, capeLean2, capeFlap)`
+/// triple [`lodestone_render::entity::cape_local_rotation`] turns into a
+/// rotation.
+///
+/// `body_yaw_deg` must be the **body** yaw (not head yaw) — vanilla derives
+/// `forwardX`/`forwardZ` from `yBodyRot`, using [`lodestone_physics::mth`]'s
+/// quantised sin/cos rather than `f32::sin`/`cos` (this repo's own rule: the
+/// two diverge at cardinal angles, and a body yaw of exactly `0`/`90`/`180`/
+/// `270` is not a rare fixture here — it is spawn-facing).
+///
+/// `fall_flying_scale` (vanilla multiplies `capeLean` by
+/// `1.0 - state.fallFlyingScale()`) is not threaded through: no draw in this
+/// codebase currently resolves elytra-flight scale for a remote entity, so
+/// this is the identity case (`fall_flying_scale == 0.0`) unconditionally —
+/// correct for every grounded/walking/swimming player, and a slightly wider
+/// lean than vanilla for one actively gliding.
+#[must_use]
+pub fn cape_sway(delta: Vec3, body_yaw_deg: f32, bob: f32, walk_distance: f32) -> (f32, f32, f32) {
+    let yaw = f64::from(body_yaw_deg.to_radians());
+    let forward_x = mth::sin(yaw);
+    let forward_z = -mth::cos(yaw);
+    let flap_lag = (delta.y * 10.0).clamp(-6.0, 32.0);
+    let lean = ((delta.x * forward_x + delta.z * forward_z) * 100.0).clamp(0.0, 150.0);
+    let lean2 = ((delta.x * forward_z - delta.z * forward_x) * 100.0).clamp(-20.0, 20.0);
+    let flap = flap_lag + mth::sin(f64::from(walk_distance * 6.0)) * 32.0 * bob;
+    (lean, lean2, flap)
 }
 
 /// The occupied equipment slots, narrowed from [`EntityFacts::equipment`].
@@ -1630,6 +1777,7 @@ pub fn extract_pickup_draws(
             // the bar, so there is no flight animation for one to reuse.
             block_state: None,
             experience_orb_value: None,
+            cape_sway: (0.0, 0.0, 0.0),
             feet,
             yaw: 0.0,
             head_yaw: 0.0,
@@ -2291,14 +2439,24 @@ pub fn extract_entity_draws(
         &RenderWool,
         &RenderNameTag,
         &RenderPlayerSkin,
-        // `Option`, not `&CreeperFuse` bare: present only on creepers, same
-        // "absence is the switch" shape `ItemPhysics` uses elsewhere in this
-        // module. Every non-creeper entity matches `None` here at zero cost.
-        Option<&CreeperFuse>,
-        // Bare, not `Option`: `spawn_track` inserts this on every track entity
-        // unconditionally — see [`SwimRamp`]'s own doc for why it is not
-        // gated by `RenderKind` the way `CreeperFuse` is.
-        &SwimRamp,
+        // Nested into one tuple slot, not three top-level ones, for the same
+        // `SystemParam`/`WorldQuery` tuple-arity reason `(tameds, vehicles,
+        // armor_stands)` above is nested — this tuple was already at fourteen
+        // top-level items before `CapeLag` needed to join it.
+        (
+            // `Option`, not `&CreeperFuse` bare: present only on creepers,
+            // same "absence is the switch" shape `ItemPhysics` uses elsewhere
+            // in this module. Every non-creeper entity matches `None` here at
+            // zero cost.
+            Option<&CreeperFuse>,
+            // Bare, not `Option`: `spawn_track` inserts this on every track
+            // entity unconditionally — see [`SwimRamp`]'s own doc for why it
+            // is not gated by `RenderKind` the way `CreeperFuse` is.
+            &SwimRamp,
+            // Bare too, same reason and the same unconditional
+            // `spawn_track` insert — see [`CapeLag`]'s own doc.
+            &CapeLag,
+        ),
     )>,
     mut out: ResMut<ExtractedDraws>,
 ) {
@@ -2322,8 +2480,7 @@ pub fn extract_entity_draws(
         wool,
         name_tag,
         player_skin,
-        fuse,
-        swim,
+        (fuse, swim, cape_lag),
     ) in &tracks
     {
         // One lookup, not two: `item` and `count` both come from the same
@@ -2432,6 +2589,27 @@ pub fn extract_entity_draws(
         // `Mth.lerp(partialTick, swimAmountO, swimAmount)` — see [`SwimRamp`]
         // for why this is integrated here rather than read off the wire.
         let swim_amount = swim.old + (swim.current - swim.old) * partial_tick;
+        // `AvatarRenderer.extractCapeState`, given this frame's interpolated
+        // lagged cloak position (against the *drawn* feet, exactly as
+        // vanilla's own `Mth.lerp(partialTicks, entity.xo, entity.getX())`
+        // resolves against the same partial tick every other interpolated
+        // field here does) and this frame's body yaw. `walk.walk.position_lerp`
+        // stands in for `ClientAvatarState.getInterpolatedWalkDistance` — a
+        // different accumulator in vanilla, but the same shape (a
+        // monotonic walk-cycle distance that drives the flap's footstep-synced
+        // wobble), and the only one already tracked on this component.
+        let cape_lag_pos = Vec3::new(
+            cape_lag.cloak_o.x + (cape_lag.cloak.x - cape_lag.cloak_o.x) * partial_tick,
+            cape_lag.cloak_o.y + (cape_lag.cloak.y - cape_lag.cloak_o.y) * partial_tick,
+            cape_lag.cloak_o.z + (cape_lag.cloak.z - cape_lag.cloak_o.z) * partial_tick,
+        );
+        let cape_bob = cape_lag.bob_o + (cape_lag.bob - cape_lag.bob_o) * partial_tick;
+        let cape_sway_value = cape_sway(
+            cape_lag_pos - render_feet(from, to, clock),
+            render_yaw(from, to, clock),
+            cape_bob,
+            walk.walk.position_lerp(partial_tick),
+        );
         // Bit `0x01` of the shared-flags byte. `false` for an entity that has
         // never reported the byte at all (`EntityFlags` absent, like
         // `HurtTime`/`AttackSwing`) — see `EntityDraw::on_fire`.
@@ -2546,6 +2724,7 @@ pub fn extract_entity_draws(
             armor_stand,
             player_skin: player_skin.0.clone(),
             experience_orb_value,
+            cape_sway: cape_sway_value,
         });
     }
 }
@@ -3073,7 +3252,13 @@ fn resolve_entity_facts(
 fn default_remote_skin(uuid: uuid::Uuid) -> crate::remote_skins::RemoteSkin {
     let (hi, lo) = uuid.as_u64_pair();
     let skin = lodestone_assets::skin::default_skin_for_uuid(hi as i64, lo as i64);
-    crate::remote_skins::RemoteSkin { url: String::new(), model: skin.model }
+    crate::remote_skins::RemoteSkin {
+        url: String::new(),
+        model: skin.model,
+        // The 18 hash-picked built-in identities carry no cape — vanilla's
+        // `DefaultPlayerSkin` has none either.
+        cape: None,
+    }
 }
 
 /// Fold this frame's entity state into the render component set: spawn tracks
@@ -3239,6 +3424,7 @@ fn spawn_track(world: &mut World, snap: &EntityFacts) {
         RenderNameTag(snap.name_tag.clone()),
         RenderPlayerSkin(snap.player_skin.clone()),
         SwimRamp::IDLE,
+        CapeLag::at(snap.feet),
     ));
     if is_item {
         entity.insert(new_item_physics(snap));
@@ -3454,6 +3640,7 @@ impl Plugin for EntityInterpPlugin {
         app.add_systems(GameTick, tick_pickup_animations.in_set(TickSet::Animate));
         app.add_systems(GameTick, tick_creeper_fuse.in_set(TickSet::Animate));
         app.add_systems(GameTick, tick_swim_ramp.in_set(TickSet::Animate));
+        app.add_systems(GameTick, tick_cape_lag.in_set(TickSet::Animate));
         // See `BodyYawState`'s doc: without this, a remote player's reported
         // body yaw and head yaw are the same wire number forever, and the
         // entity turns as one rigid block with no head lead.
@@ -4558,6 +4745,7 @@ mod tests {
                 player_skin: skin,
                 // A player, not an experience orb.
                 experience_orb_value: None,
+                cape_sway: (0.0, 0.0, 0.0),
             }
         }
 

@@ -831,6 +831,7 @@ mod tests {
             // Not an experience orb: `None` keeps this subject out of the orb
             // billboard pass entirely.
             experience_orb_value: None,
+            cape_sway: (0.0, 0.0, 0.0),
         };
         // A raster is required to reach the distance check at all in
         // `prepare`, but `push_entity_quads` itself only needs one to lay
@@ -913,6 +914,7 @@ mod tests {
             // Not an experience orb: `None` keeps this subject out of the orb
             // billboard pass entirely.
             experience_orb_value: None,
+            cape_sway: (0.0, 0.0, 0.0),
         };
         push_entity_quads(
             &raster,
@@ -1017,6 +1019,7 @@ mod tests {
             // Not an experience orb: `None` keeps this subject out of the orb
             // billboard pass entirely.
             experience_orb_value: None,
+            cape_sway: (0.0, 0.0, 0.0),
         };
         push_entity_quads(
             &raster,

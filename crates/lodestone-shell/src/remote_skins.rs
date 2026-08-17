@@ -98,6 +98,14 @@ pub struct RemoteSkin {
     pub url: String,
     /// The declared rig, from `metadata.model`.
     pub model: PlayerModelType,
+    /// The `CAPE` property's texture URL, when the profile declares one.
+    /// Fetched through the exact same URL-keyed pipeline as [`Self::url`] —
+    /// [`request`]/[`drain_ready`] know nothing about skins vs. capes, so a
+    /// cape URL just becomes one more entry in [`FETCHED`]/[`READY`], and the
+    /// GPU-side bind-group cache (`RenderState::player_skins`,
+    /// `install_pending_player_skins`) already caches by URL, not by "is this
+    /// a skin". Not yet host-checked, same as [`Self::url`].
+    pub cape: Option<String>,
 }
 
 /// What we know about one texture URL.
@@ -202,6 +210,7 @@ pub fn skin_for_profile(profile: &lodestone_game::tablist::GameProfile) -> Optio
                 textures.skin.map(|skin| RemoteSkin {
                     url: skin.url,
                     model: skin.model,
+                    cape: textures.cape,
                 })
             });
         if decoded.is_none() {

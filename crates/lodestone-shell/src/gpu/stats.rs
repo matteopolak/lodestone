@@ -193,6 +193,13 @@ pub struct RenderStats {
     /// at zero, so a broken wool attach cannot hide behind "nothing rendered
     /// at all".
     pub wool_layers_drawn: usize,
+    /// Player capes drawn this frame — one per frustum-visible player whose
+    /// skin declares a cape URL with an installed bind group. Zero for a
+    /// player with no declared cape, for one whose cape texture has not
+    /// finished fetching yet, and — the same "does not hide behind a
+    /// non-zero `entities_drawn`" role `wool_layers_drawn` documents — zero
+    /// on a body-pass regression that still draws every other player fine.
+    pub cape_layers_drawn: usize,
     /// Mob-fire billboards drawn this frame — one per on-fire,
     /// frustum-visible entity whose type has a baked flame mesh. Zero with no
     /// vanilla pack (no flame texture) or when no entity currently has
