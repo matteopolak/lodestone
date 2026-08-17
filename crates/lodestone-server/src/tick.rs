@@ -752,11 +752,23 @@ fn publish_moving_piston(
 /// the whole of the query region regardless of which cell (a pushed block,
 /// an extending head, a retracting base) this is.
 ///
+/// **Item 4 of the same issue rides along here too.** `MobSim` never holds a
+/// connected player (position is client-reported — see
+/// `crate::mobs::piston_shove`'s own module doc), so a player cannot be
+/// shoved through the same call `sim.shove_from_piston` makes below. This
+/// publishes a [`crate::effects::WorldEffect::PistonPlayerPush`] alongside it
+/// — a server-side-only signal (see that variant's own doc) — carrying
+/// exactly the two cells and the push direction a connection needs to
+/// correct its own last-known position, without adding a `PlayerRegistry`
+/// parameter to `run_tick_loop`'s already-long signature and its two dozen
+/// callers.
+///
 /// A no-op for any other state, so a caller can hand it every block change
 /// it publishes without testing first — the same convention
 /// [`publish_moving_piston`] already establishes.
 fn shove_entities_from_piston(
     mobs: &MobHandle,
+    block_tick_out: &BlockTickFeed,
     block_ticks: &crate::scheduled_tick::ScheduledTickQueue<String>,
     x: i32,
     y: i32,
@@ -773,11 +785,16 @@ fn shove_entities_from_piston(
     else {
         return;
     };
-    let push_direction = if entity.extending { entity.direction } else { entity.direction.opposite() };
+    let push_direction = entity.push_direction();
     let dest = BlockPos::new(x, y, z);
     let source = push_direction.opposite().relative(dest);
     mobs.with(|sim| {
         sim.shove_from_piston(source, dest, push_direction);
+    });
+    block_tick_out.publish_effect(crate::effects::WorldEffect::PistonPlayerPush {
+        source,
+        dest,
+        push_delta: crate::piston::push_delta(push_direction),
     });
 }
 
@@ -2402,7 +2419,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             ) {
                 let (ex, ey, ez) = event.pos;
                 world.set_block(ex, ey, ez, &event.to);
-                shove_entities_from_piston(&mobs, &block_ticks, ex, ey, ez, &event.to);
+                shove_entities_from_piston(&mobs, &block_tick_out, &block_ticks, ex, ey, ez, &event.to);
                 post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                 block_tick_out.publish(ex, ey, ez, event.to);
             }
@@ -2561,7 +2578,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                         let (ex, ey, ez) = event.pos;
                         world.set_block(ex, ey, ez, &event.to);
                         publish_moving_piston(&block_tick_out, &block_ticks, ex, ey, ez, &event.to);
-                        shove_entities_from_piston(&mobs, &block_ticks, ex, ey, ez, &event.to);
+                        shove_entities_from_piston(&mobs, &block_tick_out, &block_ticks, ex, ey, ez, &event.to);
                         post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                         block_tick_out.publish(ex, ey, ez, event.to);
                     }
@@ -3137,7 +3154,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     publish_openable_sound(&block_tick_out, BlockPos::new(ex, ey, ez), &event.from, &event.to, game_tick);
                     world.set_block(ex, ey, ez, &event.to);
                     publish_moving_piston(&block_tick_out, &block_ticks, ex, ey, ez, &event.to);
-                    shove_entities_from_piston(&mobs, &block_ticks, ex, ey, ez, &event.to);
+                    shove_entities_from_piston(&mobs, &block_tick_out, &block_ticks, ex, ey, ez, &event.to);
                     post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                     block_tick_out.publish(ex, ey, ez, event.to);
                 }
@@ -3210,7 +3227,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                         let (x, y, z) = event.pos;
                         world.set_block(x, y, z, &event.to);
                         publish_moving_piston(&block_tick_out, &block_ticks, x, y, z, &event.to);
-                        shove_entities_from_piston(&mobs, &block_ticks, x, y, z, &event.to);
+                        shove_entities_from_piston(&mobs, &block_tick_out, &block_ticks, x, y, z, &event.to);
                         block_tick_out.publish(x, y, z, event.to);
                     }
                 }
@@ -3347,7 +3364,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     let (ex, ey, ez) = event.pos;
                     world.set_block(ex, ey, ez, &event.to);
                     publish_moving_piston(&block_tick_out, &block_ticks, ex, ey, ez, &event.to);
-                    shove_entities_from_piston(&mobs, &block_ticks, ex, ey, ez, &event.to);
+                    shove_entities_from_piston(&mobs, &block_tick_out, &block_ticks, ex, ey, ez, &event.to);
                     post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                     block_tick_out.publish(ex, ey, ez, event.to);
                 }
@@ -5566,7 +5583,7 @@ mod tests {
 
         for event in &events {
             let (ex, ey, ez) = event.pos;
-            shove_entities_from_piston(&mobs, &block_ticks, ex, ey, ez, &event.to);
+            shove_entities_from_piston(&mobs, &BlockTickFeed::default(), &block_ticks, ex, ey, ez, &event.to);
         }
 
         let after = mobs.with(|sim| sim.get(pig_id).expect("alive").position());
@@ -5575,6 +5592,67 @@ mod tests {
             (after.z - before.z - 1.0).abs() < 1e-9 && after.x == before.x && after.y == before.y,
             "must move exactly one block further south (the push direction), no other axis: \
              before={before:?} after={after:?}"
+        );
+    }
+
+    /// Issue #694, item 4: the same real rig as
+    /// [`a_real_piston_extension_shoves_a_mob_standing_in_its_path`], but
+    /// checking [`shove_entities_from_piston`]'s other production effect —
+    /// the [`crate::effects::WorldEffect::PistonPlayerPush`] a connection
+    /// reads to correct a player standing in the same swept region, since
+    /// `MobSim` (asserted above) has no reach to a connected player at all.
+    #[test]
+    fn a_real_piston_extension_publishes_a_player_push_effect_for_its_own_swept_region() {
+        let mut column = crate::chunk::ChunkColumn::new(0, 16);
+        column.set_block(4, 1, 8, "minecraft:piston[facing=south,extended=false]");
+        column.set_block(4, 1, 9, "minecraft:dirt");
+        column.set_block(3, 1, 8, &crate::redstone_torch::set_standing_lit(false));
+
+        let mobs = MobHandle::new(ChunkWorld::new(-64, 384));
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        column.set_block(3, 1, 8, &crate::redstone_torch::set_standing_lit(true));
+        let events = crate::random_tick::propagate_and_react(
+            &mut column,
+            0,
+            0,
+            3,
+            1,
+            8,
+            &mut block_ticks,
+            40,
+        );
+        assert!(
+            events.iter().any(|e| {
+                e.pos == (4, 1, 10) && crate::piston::is_moving_piston(&e.to)
+            }),
+            "PREMISE FAILED: extending must write a moving_piston at the pushed dirt's own \
+             destination (4, 1, 10) -- events: {events:?}"
+        );
+
+        let block_tick_out = BlockTickFeed::default();
+        for event in &events {
+            let (ex, ey, ez) = event.pos;
+            shove_entities_from_piston(&mobs, &block_tick_out, &block_ticks, ex, ey, ez, &event.to);
+        }
+
+        // Single-consumer drain (see `BlockTickFeed::drain_effects_for`'s own
+        // doc) — any uuid works, since this effect is `publish_effect`'d with
+        // no `except`.
+        let published = block_tick_out.drain_effects_for(uuid::Uuid::nil());
+        let push = published.iter().find_map(|effect| match effect {
+            crate::effects::WorldEffect::PistonPlayerPush { source, dest, push_delta } => {
+                Some((*source, *dest, *push_delta))
+            }
+            _ => None,
+        });
+        let (source, dest, push_delta) =
+            push.unwrap_or_else(|| panic!("no PistonPlayerPush effect was published, got {published:?}"));
+
+        assert_eq!(dest, BlockPos::new(4, 1, 10), "must name the pushed dirt's own destination cell");
+        assert_eq!(source, BlockPos::new(4, 1, 9), "must name the cell the dirt vacated");
+        assert!(
+            (push_delta.z - 1.0).abs() < 1e-9 && push_delta.x == 0.0 && push_delta.y == 0.0,
+            "the push direction must be one block south, matching the mob shove above: {push_delta:?}"
         );
     }
 
@@ -5619,7 +5697,7 @@ mod tests {
 
         for event in &events {
             let (ex, ey, ez) = event.pos;
-            shove_entities_from_piston(&mobs, &block_ticks, ex, ey, ez, &event.to);
+            shove_entities_from_piston(&mobs, &BlockTickFeed::default(), &block_ticks, ex, ey, ez, &event.to);
         }
 
         let after = mobs.with(|sim| sim.get(pig_id).expect("alive").position());

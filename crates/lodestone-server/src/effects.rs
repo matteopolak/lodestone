@@ -125,6 +125,33 @@ pub enum WorldEffect {
         /// The `getUpdateTag` payload, as a nameless compound.
         nbt: lodestone_core::Nbt,
     },
+    /// Issue #694, item 4: a **server-side-only** correction signal, not a
+    /// wire-mirrored packet like every other variant above (that is why it is
+    /// named a "push" rather than after a real clientbound packet, and why
+    /// [`crate::ServerProtocol::encode_world_effect`]'s only real
+    /// implementation returns [`crate::protocol::ServerDirective::None`] for
+    /// it). This crate has no server-side physics for a connected player —
+    /// position is client-reported, the same boundary
+    /// `crate::mobs::piston_shove`'s own module doc already states for why a
+    /// player is not shoved through [`crate::mobs::MobSim`] — so a piston
+    /// push cannot go through that path. This is the next cheapest thing:
+    /// the two swept cells and the push direction ride this channel's
+    /// existing single-consumer transport (rather than a new parameter
+    /// threaded through `crate::tick::run_tick_loop`'s already-long
+    /// signature and its two dozen callers) so the *player's own connection*
+    /// can correct its own last-known position when it overlaps, and send a
+    /// real teleport for it — see `crate::server`'s handling of this variant.
+    PistonPlayerPush {
+        /// The cell the moved block (or piston head/base) vacated.
+        source: BlockPos,
+        /// The cell it now occupies — the `moving_piston` write's own
+        /// position, per `crate::mobs::piston_shove`'s module doc.
+        dest: BlockPos,
+        /// The one-block displacement a player standing in the swept region
+        /// is pushed by, matching `crate::mobs::MobSim::shove_from_piston`'s
+        /// own displacement for a mob in the same position.
+        push_delta: Vec3,
+    },
 }
 
 /// `LevelEvent.PARTICLES_DESTROY_BLOCK`
