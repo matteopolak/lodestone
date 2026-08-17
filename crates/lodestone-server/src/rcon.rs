@@ -520,6 +520,10 @@ pub(crate) fn run_command_as(
         // production caller that gets `Some` here; see `RconConfig::access`'s
         // own doc for why.
         access: config.access.as_ref(),
+        // `/execute if`/`unless block`'s read-only surface — the same
+        // `world_source` `/setblock`/`/fill` already write through when RCON
+        // has one (see this module's own doc, "How to change it").
+        blocks: config.world_source.as_ref().map(|s| &**s as &dyn crate::chunk::ChunkSource),
     };
     let source = CommandSource::console(
         caller_name,

@@ -68,7 +68,7 @@
 //! (+ `as`), `facing` (`<pos>` and `entity <targets> <anchor>`), `align`,
 //! `anchored`, `in` (single-dimension census — see
 //! [`lodestone_command_mc::DimensionArg`]'s own doc), `run`, and
-//! `if`/`unless entity`/`dimension`/`score`/`data storage`.
+//! `if`/`unless entity`/`dimension`/`score`/`data storage`/`block`.
 //!
 //! `at`'s rotation transfer and `rotated as` both needed
 //! `crate::commands::source::PlayerCandidate` to carry a rotation, which it
@@ -97,11 +97,26 @@
 //! see `crate::commands::nbt_data`'s module doc for why `entity`/`block` are
 //! a separate, still-missing subsystem, not an oversight here.
 //!
+//! `if`/`unless block` (`register_block_condition`) needed a read-only chunk
+//! query on [`CommandWorld`], which it now has —
+//! [`super::registrar::CommandWorld::blocks`], `Option<&dyn
+//! crate::chunk::ChunkSource>`, the same `Option<&concrete-type>` shape
+//! [`CommandWorld::mobs`](super::registrar::CommandWorld::mobs)/
+//! [`border`](super::registrar::CommandWorld::border) already take (never a
+//! `&mut World`). A live connection's `ChatCommand` arm and a command
+//! block's own tick both get `Some` (the same `chunk_source` `Effect::SetBlock`/
+//! `Fill` already reach through); RCON gets `Some` whenever it has a
+//! `world_source` configured; this crate's own test helpers get `None` and
+//! the condition refuses by name rather than panicking. Compares only the
+//! base block id — the same v1 reduction
+//! [`lodestone_command_mc::BlockArg`] already takes (no property list), so
+//! `if block ~ ~ ~ furnace` matches regardless of `facing`/`lit`.
+//!
 //! # What is not built, and why — each names its own missing subsystem
 //!
 //! * **`store`, `predicate`, `items`, `function`, `stopwatch`,
-//!   `if`/`unless block`/`biome`/`blocks`/`loaded`, and `on <relation>`.**
-//!   (`if`/`unless score` and `if`/`unless data storage` are now built — see
+//!   `if`/`unless biome`/`blocks`/`loaded`, and `on <relation>`.**
+//!   (`if`/`unless score`, `data storage` and `block` are now built — see
 //!   "What is built" above.) Each of these still needs a subsystem this
 //!   server has nowhere: `store`'s own result/success-capture mechanism (a
 //!   real scoreboard *and* NBT storage both now exist for it to write *into*,
@@ -112,13 +127,15 @@
 //!   entity, or container slot — `storage` needed none of that, which is why
 //!   it alone is built), a loot-predicate engine (`if predicate`), functions
 //!   (explicitly out of scope for this unit — issue #48's remainder tracks
-//!   functions/datapacks separately), a stopwatch registry, a read-only
-//!   block/biome/chunk-residency query on [`CommandWorld`] (which today only
-//!   ever *writes* blocks, through [`super::Effect::SetBlock`]/
-//!   [`super::Effect::Fill`] — see that enum's own doc for why even those two
-//!   are self-targeted-only), and entity relationship queries (owner/leasher/
-//!   target/attacker/vehicle/controller/origin/passengers) this crate's mob
-//!   simulation does not expose to a command executor.
+//!   functions/datapacks separately), a stopwatch registry, a biome lookup
+//!   and a chunk-residency query on [`CommandWorld`] (`blocks` only ever
+//!   answers "what block", never "what biome" or "is this chunk loaded at
+//!   all" — `if blocks` additionally needs to compare a whole *region*,
+//!   which `ChunkSource::block_state` alone makes possible but which was
+//!   left undone here as a second, larger unit of work), and entity
+//!   relationship queries (owner/leasher/target/attacker/vehicle/controller/
+//!   origin/passengers) this crate's mob simulation does not expose to a
+//!   command executor.
 //! * **`execute summon <entity>`** (the modifier form that also changes the
 //!   acting entity). Not needed as its own subtree: `/summon` is already a
 //!   root command, so `execute at @s run summon minecraft:cow` reaches it
@@ -139,8 +156,8 @@
 
 use lodestone_command::NodeId;
 use lodestone_command_mc::{
-    AnchorInput, Axes, DimensionArg, EntityAnchorArg, EntityArg, EntitySelector, IntRangeArg,
-    ObjectiveArg, RotationArg, ScoreHolderArg, SwizzleArg, Vec3Arg,
+    AnchorInput, Axes, BlockArg, BlockPosArg, DimensionArg, EntityAnchorArg, EntityArg,
+    EntitySelector, IntRangeArg, ObjectiveArg, RotationArg, ScoreHolderArg, SwizzleArg, Vec3Arg,
 };
 use lodestone_model::Rotation;
 
@@ -455,6 +472,44 @@ fn register_conditions(registrar: &mut Registrar, execute: NodeId, literal: &str
 
     register_score_conditions(registrar, parent, execute, expected);
     register_data_storage_condition(registrar, parent, execute, expected);
+    register_block_condition(registrar, parent, execute, expected);
+}
+
+/// `block <pos> <block>` — `BlockPredicateArgument`'s own boolean shape
+/// (`ExecuteCommand`'s `block` branch is `addConditional`'s
+/// [`add_boolean_conditional`], same as `dimension`, not the count-shaped
+/// `if entity`). Compares only the base block id, matching
+/// [`lodestone_command_mc::BlockArg`]'s own v1 reduction (no property list —
+/// `minecraft:furnace[facing=north]` matches `if block ~ ~ ~ furnace`
+/// regardless of `facing`), and refuses cleanly rather than panicking when no
+/// chunk source is in scope (`ctx.world.blocks` is `None` for RCON and this
+/// module's own test helpers — see [`super::registrar::CommandWorld::blocks`]'s
+/// own doc for the full list of who gets `Some`).
+fn register_block_condition(
+    registrar: &mut Registrar,
+    parent: NodeId,
+    execute: NodeId,
+    expected: bool,
+) {
+    let block_lit = registrar.literal(parent, "block");
+    let (pos_node, pos_key) = registrar.arg(block_lit, "pos", BlockPosArg);
+    let (block_node, block_key) = registrar.arg(pos_node, "block", BlockArg);
+    add_boolean_conditional(registrar, block_node, execute, expected, move |ctx| {
+        let Some(blocks) = ctx.world.blocks else {
+            return Err("Blocks cannot be queried here".to_string());
+        };
+        let coords = *ctx.get(pos_key);
+        let origin = (ctx.source.position.x, ctx.source.position.y, ctx.source.position.z);
+        let rotation = (ctx.source.rotation.yaw, ctx.source.rotation.pitch);
+        let (x, y, z) = coords.resolve(origin, rotation);
+        let (x, y, z) = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
+        let state = blocks.block_state(x, y, z);
+        // The base id, stripping any `[...]` property suffix the store's
+        // canonical state string may carry — see this function's own doc.
+        let actual = state.split('[').next().unwrap_or(state.as_str());
+        let expected_id = ctx.get(block_key).block.to_string();
+        Ok(actual == expected_id)
+    });
 }
 
 /// `data storage <source> <path>` — `DataCommand`'s own numeric-conditional

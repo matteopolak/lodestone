@@ -518,7 +518,7 @@ engages here.
 Built: `as`, `at` (position **and** rotation), `positioned` (+ `as`), `rotated`
 (+ `as`), `facing` (`<pos>` and `entity <targets> <anchor>`), `align`,
 `anchored`, `in` (single-hosted-dimension census), `run`, and `if`/`unless
-entity`/`dimension`/`score`/`data storage`. `at`'s rotation transfer and `rotated as` needed
+entity`/`dimension`/`score`/`data storage`/`block`. `at`'s rotation transfer and `rotated as` needed
 `PlayerCandidate` to carry a rotation, which it now does —
 `crate::players::PlayerRegistry` was already tracking a live per-connection
 `Rotation` and simply never threading it through. Each subcommand is one
@@ -541,6 +541,16 @@ shape (a count, matching `if entity` rather than `if score`'s boolean),
 because real vanilla paths can carry wildcards — `NbtPathArg`'s v1 grammar
 can only ever produce `0` or `1` here, but the shape is kept so nothing needs
 to change if the path grammar is ever widened.
+
+`if`/`unless block <pos> <block>` needed a read-only chunk query on
+`CommandWorld`, which it now has: `CommandWorld::blocks`,
+`Option<&dyn ChunkSource>` — the identical `Option<&concrete-type>` shape
+`CommandWorld::mobs`/`::border` already take, never a `&mut World`. A live
+connection's `ChatCommand` arm and a command block's own tick both pass
+`Some` (the same chunk source `Effect::SetBlock`/`Fill` already reach
+through); RCON passes `Some` whenever `RconConfig::world_source` is
+configured. Compares only the base block id, the same v1 reduction
+`lodestone_command_mc::BlockArg` already takes (no property list).
 
 `run <command>` carries **no modifier at all**: `registrar.redirect(run_node,
 registrar.root())`, matching vanilla's own `literal("run")
@@ -568,14 +578,16 @@ own return value the way `store` needs to capture it), `if data`'s
 entity, block entity, or container slot reachable from a command — `storage`
 needed none of that, which is why it alone is built; see "`/data storage`"
 below), `if predicate` (no loot-predicate engine), `stopwatch` (no
-stopwatch registry), `if block`/`biome`/`blocks`/`loaded` (no read-only
-block/biome/chunk-residency
-query on `CommandWorld`, which today only ever *writes* blocks), `on
-<relation>` (no entity-relationship query on the mob simulation), the
-`execute summon` modifier form (unnecessary as its own subtree — `/summon` is
-already a root command reachable through `run`), and `positioned over
-<heightmap>` (no heightmap query). `crate::commands::execute`'s own module
-doc is the up-to-date source for this list.
+stopwatch registry), `if biome`/`blocks`/`loaded` (`CommandWorld::blocks`
+answers "what block", never "what biome" or "is this chunk loaded at all" —
+`if blocks` additionally needs to compare a whole *region*, a second, larger
+unit of work `ChunkSource::block_state` alone makes possible but which was
+left undone here), `on <relation>` (no entity-relationship query on the mob
+simulation), the `execute summon` modifier form (unnecessary as its own
+subtree — `/summon` is already a root command reachable through `run`), and
+`positioned over <heightmap>` (no heightmap query).
+`crate::commands::execute`'s own module doc is the up-to-date source for
+this list.
 
 Tested in `crates/lodestone-server/tests/builtin_commands.rs`, each assertion
 predicting a rewritten answer a caller-position/caller-entity reading of the
@@ -838,15 +850,21 @@ Still open, and each is now additive rather than blocked:
   (`crate::commands::nbt_storage::NbtStorageHandle` — see `#### /data
   storage` above), so `/data storage` and `/execute if`/`unless data
   storage` are both built; only the `entity`/`block` targets remain missing.
+  **`CommandWorld` also gained a read-only chunk query** (`::blocks`,
+  `Option<&dyn ChunkSource>`, the same shape `::mobs`/`::border` already
+  take), so `/execute if`/`unless block` is built too — real connections, a
+  command block's own tick, and RCON (when it has a `world_source`) all pass
+  `Some`.
   What is still open: **`store`** (a scoreboard and NBT storage both exist
   to write *into*, but the dispatcher does not yet wrap a chained command's
   return value the way `store` needs to capture it), **`if data`'s
   `entity`/`block` targets and `if items`** (no live, mutable NBT view of an
   entity, block entity, or container slot reachable from a command),
   **`if predicate`** (no loot-predicate engine), **`stopwatch`** (no
-  stopwatch registry), **`if block`/`biome`/`blocks`/`loaded`** (no read-only
-  block/biome/chunk-residency query on `CommandWorld`, which today only ever
-  *writes* blocks), and **`on <relation>`** (no entity-relationship query on
+  stopwatch registry), **`if biome`/`blocks`/`loaded`** (`::blocks` answers
+  "what block", never "what biome" or "is this chunk loaded" — `if blocks`
+  additionally needs to compare a whole region, left as a second, larger
+  unit of work), and **`on <relation>`** (no entity-relationship query on
   the mob simulation). Functions/datapacks remain entirely unattempted, as
   scoped. **Command blocks now run end to end from "Always Active"**:
   `SET_COMMAND_BLOCK` decodes and writes the block entity, and `tick.rs`'s

@@ -15,6 +15,9 @@
 //! kind `crate::commands` was built to end. `ServerCommands::from_registrar` is the
 //! seam that lets a gate drive it.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use lodestone_command::ParsedCommand;
 use lodestone_command_mc::{EntityArg, GameModeArg, SnbtValue};
 use lodestone_model::{GameMode, Rotation, Vec3};
@@ -23,7 +26,40 @@ use lodestone_server::commands::{
     CommandSource, CommandWorld, PlayerCandidate, Registrar, ServerCommands, overworld_dimension,
 };
 use lodestone_server::game_rules::GameRulesHandle;
+use lodestone_server::{ChunkColumn, ChunkSource};
 use uuid::Uuid;
+
+/// A settable-block fixture for `/execute if`/`unless block` — everything is
+/// `"minecraft:air"` until [`FixedBlockSource::set`] names a coordinate,
+/// which is deliberately **not** the same as [`ChunkSource::set_block`]
+/// (that one goes through the real trait method, exercised separately);
+/// this constructor lets a test seed a block without going through a command
+/// at all, so `if block` and `/setblock` cannot pass each other's test by
+/// sharing a code path neither is supposed to depend on.
+#[derive(Default)]
+struct FixedBlockSource {
+    blocks: Mutex<HashMap<(i32, i32, i32), String>>,
+}
+
+impl FixedBlockSource {
+    fn set(&self, x: i32, y: i32, z: i32, block: &str) {
+        self.blocks.lock().unwrap().insert((x, y, z), block.to_string());
+    }
+}
+
+impl ChunkSource for FixedBlockSource {
+    fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+        ChunkColumn::new(0, 16)
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        self.blocks.lock().unwrap().get(&(x, y, z)).cloned().unwrap_or_else(|| "minecraft:air".to_string())
+    }
+
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        self.set(x, y, z, name);
+    }
+}
 
 fn uuid(n: u128) -> Uuid {
     Uuid::from_u128(n)
@@ -88,6 +124,7 @@ fn run(
         mobs: None,
         border: None,
     access: None,
+        blocks: None,
     };
     commands.run(&world, source, text)
 }
@@ -643,6 +680,7 @@ fn gamerule_writes_the_store_it_is_handed_including_the_production_world_state()
         mobs: None,
         border: None,
     access: None,
+        blocks: None,
     };
     let outcome = commands
         .run(&command_world, &alice, "gamerule random_tick_speed 6")
@@ -779,7 +817,7 @@ fn run_stateful(
     source: &CommandSource,
     text: &str,
 ) -> Option<lodestone_server::CommandOutcome> {
-    let world = CommandWorld { rules: state, players, state, mobs: None, border: None, access: None };
+    let world = CommandWorld { rules: state, players, state, mobs: None, border: None, access: None, blocks: None };
     commands.run(&world, source, text)
 }
 
@@ -1293,7 +1331,7 @@ fn summon_spawns_into_the_shared_mob_handle_at_the_resolved_position() {
 
     assert!(mobs.snapshots().is_empty(), "nothing spawned yet");
 
-    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None };
+    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None, blocks: None };
     let outcome =
         commands.run(&world, &alice, "summon minecraft:cow ~11 ~1 ~4").expect("root matched");
     assert!(outcome.response.is_ran(), "{outcome:?}");
@@ -1318,7 +1356,7 @@ fn summon_refuses_an_unknown_entity_type_at_parse_time() {
     let players = roster();
     let mobs = lodestone_server::MobHandle::default();
 
-    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None };
+    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None, blocks: None };
     let outcome =
         commands.run(&world, &alice, "summon minecraft:not_a_real_mob").expect("root matched");
     assert!(!outcome.response.is_ran(), "{outcome:?}");
@@ -1748,7 +1786,7 @@ fn worldborder_world<'a>(
     state: &'a lodestone_server::world_state::WorldStateHandle,
     feed: &'a lodestone_server::BorderFeed,
 ) -> CommandWorld<'a> {
-    CommandWorld { rules: state, players: &[], state, mobs: None, border: Some(feed), access: None }
+    CommandWorld { rules: state, players: &[], state, mobs: None, border: Some(feed), access: None, blocks: None }
 }
 
 /// **The composition that matters**: the command mutates the *same* feed the
@@ -1931,7 +1969,7 @@ fn worldborder_setting_to_the_current_value_is_refused_and_does_not_mutate() {
 fn worldborder_with_no_border_refuses_cleanly_instead_of_panicking() {
     let commands = ServerCommands::new();
     let state = lodestone_server::world_state::WorldStateHandle::new();
-    let world = CommandWorld { rules: &state, players: &[], state: &state, mobs: None, border: None, access: None };
+    let world = CommandWorld { rules: &state, players: &[], state: &state, mobs: None, border: None, access: None, blocks: None };
     let alice = source(1, "alice");
 
     let outcome = commands.run(&world, &alice, "worldborder get").expect("root matched");
@@ -1991,7 +2029,7 @@ fn scoreboard_world<'a>(
     state: &'a lodestone_server::world_state::WorldStateHandle,
     players: &'a [PlayerCandidate],
 ) -> CommandWorld<'a> {
-    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None, access: None }
+    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None, access: None, blocks: None }
 }
 
 #[test]
@@ -2191,7 +2229,7 @@ fn team_world<'a>(
     state: &'a lodestone_server::world_state::WorldStateHandle,
     players: &'a [PlayerCandidate],
 ) -> CommandWorld<'a> {
-    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None, access: None }
+    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None, access: None, blocks: None }
 }
 
 #[test]
@@ -2364,7 +2402,7 @@ fn data_world<'a>(
     state: &'a lodestone_server::world_state::WorldStateHandle,
     players: &'a [PlayerCandidate],
 ) -> CommandWorld<'a> {
-    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None, access: None }
+    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None, access: None, blocks: None }
 }
 
 #[test]
@@ -2460,4 +2498,86 @@ fn execute_if_unless_data_storage_gates_on_real_presence() {
 
     let bare_absent = commands.run(&world, &alice, "execute if data storage test:cond missing").expect("root matched");
     assert!(!bare_absent.response.is_ran(), "the bare form must refuse on an absent path: {bare_absent:?}");
+}
+
+// ---------------------------------------------------------------------------
+// /execute if/unless block
+// ---------------------------------------------------------------------------
+
+/// `if`/`unless block` against a real, settable [`FixedBlockSource`] — the
+/// present block and an absent (wrong-block) case both exercised, plus the
+/// `blocks: None` refusal that stands in for RCON/a command block with no
+/// chunk source in scope.
+#[test]
+fn execute_if_unless_block_reads_a_real_chunk_source() {
+    let commands = ServerCommands::new();
+    let rules = GameRulesHandle::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice"); // (0, 64, 0)
+    let source_blocks = FixedBlockSource::default();
+    source_blocks.set(5, 64, 5, "minecraft:stone");
+
+    let world = CommandWorld {
+        rules: &rules as &(dyn RuleStore + Sync),
+        players: &players,
+        state: &state,
+        mobs: None,
+        border: None,
+        #[cfg(not(target_arch = "wasm32"))]
+        access: None,
+        blocks: Some(&source_blocks),
+    };
+
+    let matches = commands
+        .run(&world, &alice, "execute if block 5 64 5 minecraft:stone run gamemode creative")
+        .expect("root matched");
+    assert_eq!(matches.effects.len(), 1, "the real block matches: the chain must run: {matches:?}");
+
+    let no_match = commands
+        .run(&world, &alice, "execute if block 5 64 5 minecraft:dirt run gamemode creative")
+        .expect("root matched");
+    assert!(no_match.effects.is_empty(), "stone is not dirt: the chain must not run: {no_match:?}");
+
+    // The un-set position is air by this fixture's own default.
+    let air = commands
+        .run(&world, &alice, "execute if block 0 0 0 minecraft:air run gamemode creative")
+        .expect("root matched");
+    assert_eq!(air.effects.len(), 1, "{air:?}");
+
+    // `unless` is the exact complement.
+    let unless_matches = commands
+        .run(&world, &alice, "execute unless block 5 64 5 minecraft:stone run gamemode creative")
+        .expect("root matched");
+    assert!(unless_matches.effects.is_empty(), "{unless_matches:?}");
+
+    let unless_no_match = commands
+        .run(&world, &alice, "execute unless block 5 64 5 minecraft:dirt run gamemode creative")
+        .expect("root matched");
+    assert_eq!(unless_no_match.effects.len(), 1, "{unless_no_match:?}");
+
+    // The bare form actually refuses/succeeds rather than folding into an
+    // empty `Ran`, same convention as the `data storage` gate above.
+    let bare_match = commands.run(&world, &alice, "execute if block 5 64 5 minecraft:stone").expect("root matched");
+    assert!(bare_match.response.is_ran(), "{bare_match:?}");
+    let bare_no_match = commands.run(&world, &alice, "execute if block 5 64 5 minecraft:dirt").expect("root matched");
+    assert!(!bare_no_match.response.is_ran(), "{bare_no_match:?}");
+}
+
+/// With no chunk source in scope (`blocks: None` — RCON, a command block
+/// helper missing one, or this file's own other test worlds), `if block`
+/// refuses cleanly by name rather than panicking or silently passing.
+#[test]
+fn execute_if_block_with_no_chunk_source_refuses_by_name() {
+    let commands = ServerCommands::new();
+    let rules = GameRulesHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+
+    let outcome = run(&commands, &rules, &players, &alice, "execute if block 0 0 0 minecraft:air").expect("root matched");
+    assert!(!outcome.response.is_ran(), "{outcome:?}");
+    assert!(
+        outcome.response.lines()[0].contains("Blocks cannot be queried"),
+        "the refusal must name the missing capability: {outcome:?}"
+    );
 }

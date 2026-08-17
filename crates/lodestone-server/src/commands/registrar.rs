@@ -215,6 +215,20 @@ pub struct CommandWorld<'a> {
     /// to grant them through.
     #[cfg(not(target_arch = "wasm32"))]
     pub access: Option<&'a crate::access::AccessHandle>,
+    /// `/execute if`/`unless block`'s read-only surface — deliberately the
+    /// **only** new capability this field grants: [`Self::mobs`]/
+    /// [`Self::border`] are already `Option<&concrete type>`, never `&mut
+    /// World`, and this keeps the identical shape rather than becoming a
+    /// route to write through. `Option` for the same reason those two are:
+    /// RCON, a command block's own tick, and this module's own test helpers
+    /// build a [`CommandWorld`] with no chunk source in scope at all, and a
+    /// live connection's `ChatCommand` arm is today's one production `Some`
+    /// (`SourceRef::get`, captured before the arm's own `source` binding is
+    /// shadowed by the command's `CommandSource` — see that arm's own
+    /// comment). `dyn ChunkSource` already requires `Send + Sync` at its own
+    /// definition, so unlike [`Self::rules`] this needs no extra `+ Sync`
+    /// written here.
+    pub blocks: Option<&'a dyn crate::chunk::ChunkSource>,
 }
 
 /// Read/write access to the world's game rules, abstracted over *which* store.

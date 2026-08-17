@@ -12358,6 +12358,10 @@ where
                 // doc for why that scoping is deliberate, not a gap.
                 #[cfg(not(target_arch = "wasm32"))]
                 access: None,
+                // `/execute if`/`unless block`'s read-only surface — the same
+                // `chunk_source` captured above `Effect::SetBlock`/`Fill`
+                // already reach through this arm's own `apply_own_effect`.
+                blocks: Some(chunk_source.get()),
             };
             match commands.builtins.run(&command_world, &source, &command) {
                 Some(outcome) => {
