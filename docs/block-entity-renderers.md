@@ -29,6 +29,19 @@ the terrain mesher already draws, so there was no hole to fill — but unlike th
 all. No new packet either: `shared_data.display_item` is ordinary generic block-entity NBT, the same
 `BlockEntity.nbt` path chest/skull/sign/decorated-pot/spawner already proved.
 
+**Brushable block, shelf, copper golem statue and the end gateway's teleport beam are now landed**
+(25 of 26 registrations) — see [Brushable block](#brushable-block), [Shelf](#shelf), [Copper golem
+statue](#copper-golem-statue), and the teleport-beam addition to [End portal and end
+gateway](#end-portal-and-end-gateway). Three more seams: brushable block and shelf both reuse the
+*item-model* pipeline exactly like campfire/vault (`gpu/world_items.rs`), copper golem statue is a
+fourth-pose cuboid rig through the *same* batcher chest/skull/bell already share (needing no new
+pipeline at all), and the teleport beam reuses `gpu/beacon_beam.rs`'s existing pipeline objects with a
+**second** texture bind group rather than a parallel pass — a `wgpu::RenderPipeline` embeds no texture
+data, only a bind-group-layout contract, so the beacon's own `solid_pipeline`/`glow_pipeline` draw the
+gateway's beam unmodified. **Structure block is the only remaining registration** — creative/dev-only,
+needing a debug-line "gizmo" world overlay this session did not build; see
+[What is not built](#what-is-not-built).
+
 **End portal and end gateway are now landed and wired end to end** (21 of 26 registrations) — see
 [End portal and end gateway](#end-portal-and-end-gateway). Unlike everything above, both are a genuine
 hole-in-the-world case again (`end_portal.json`/`end_gateway.json` have zero model elements) and the
@@ -131,9 +144,16 @@ pass (`gpu/beacon_beam.rs`). **Mob spawner makes 17 and trial spawner makes 18**
 **End portal makes 20 and end gateway makes 21** (see
 [End portal and end gateway](#end-portal-and-end-gateway)) — a fifth seam: a dedicated shader
 (`gpu/end_portal.wgsl`) sampling its own screen-space projection, with no baked mesh and no atlas lookup
-at all.
-**21 of 26 registrations are now landed and wired.** The rest are still
-absent. Picking the next few should read this list, not the original issue body.
+at all. **Brushable block makes 22** (see [Brushable block](#brushable-block)) — the third type to reuse
+the *item-model* pipeline, alongside campfire and vault. **Shelf makes 23** (see [Shelf](#shelf)) — a
+fourth reuse of that same pipeline, and the first consumer of `DisplaySlot::OnShelf`. **Copper golem
+statue makes 24** (see [Copper golem statue](#copper-golem-statue)) — a real cuboid rig again, sharing
+`prepare_block_entities`'s batcher with chest/skull/bell rather than any of the item-model family.
+**25 of 26 registrations are now landed and wired**, plus the end gateway's teleport beam (an addition
+*within* an already-landed registration, not a 26th). **Structure block is the only registration left**
+(test instance block is creative/dev-only and out of scope alongside it — see
+[What is not built](#what-is-not-built)). Picking it up should read this list, not the original issue
+body.
 
 **The registration list had two entries this document's "what is not built" section never mentioned
 either way: `LECTERN` (`LecternRenderer`, the open book on a lectern) and `CONDUIT` (`ConduitRenderer`,
@@ -2162,16 +2182,51 @@ back-face culling on, a backwards winding reads as "this face silently draws not
 shape `CLAUDE.md` warns about — so culling is disabled outright, at the cost of at most 12 extra triangles
 per instance (this pass's entire geometry budget).
 
-### The gateway's teleport beam is a deliberate, documented gap
+### The gateway's teleport beam — landed in a later session
 
 `TheEndGatewayRenderer.submit` also calls `BeaconRenderer.submitBeaconBeam` while `isSpawning()`
-(first 200 ticks after creation) or `isCoolingDown()` (40 ticks after every teleport-through). Not built
-this session: it needs a per-position, client-simulated `teleportCooldown` tracker fed by the gateway's
-own `BLOCK_EVENT` (`b0 == 1` — the same collision [Bell](#bell)'s doc already names, told apart by the
-block at the position rather than the packet) plus the block entity's `Age` NBT for the rarer spawn-phase
-arm. A real gateway's beam is visible for ~10 s once after placement and ~2 s after every teleport, a
-small fraction of a gateway's total lifetime, so the always-visible swirl face was the priority within this
-session's budget.
+(first 200 ticks after creation) or `isCoolingDown()` (40 ticks after every teleport-through). This was
+a deliberate, documented gap for one session and is now built.
+
+**Reuses `gpu/beacon_beam.rs`'s existing pipeline objects rather than a parallel pass.** A
+`wgpu::RenderPipeline` embeds no texture data, only a bind-group-layout compatibility contract, so the
+beacon's own `solid_pipeline`/`glow_pipeline` draw the gateway's beam unmodified — only a **second**
+texture bind group (`textures/entity/end_portal/end_gateway_beam.png`, loaded by
+`resources::load_end_gateway_beam_texture`) and a second, smaller pair of vertex buffers
+(`BeaconBeamRenderer::gateway_solid_vertices`/`gateway_glow_vertices`, sized for one beam/one section
+rather than the beacon's accumulated-sections cap) were new. `BeaconBeamRenderer::prepare_gateway`/
+`draw_gateway_solid`/`draw_gateway_glow` are the three new entry points; `gpu/frame.rs` calls them
+immediately beside the beacon's own `prepare`/`draw_solid`/`draw_glow`, same pass, same depth ordering
+(solid before translucent water, glow after).
+
+**`lodestone_render::beacon`'s own `submitBeaconBeam` port had to be widened first.** The pre-existing
+`push_beam_section` hardcoded beacon's own radius formula (`SOLID_BEAM_RADIUS * beam_radius_scale`) and
+implicitly assumed `scale = 1.0` (true only for beacon's private 6-argument overload) — the gateway's
+own call site passes its own `0.15`/`0.175` radii directly and a real `scale` term (`state.scale`, the
+spawn/cooldown percent). `push_beam_section` now takes final radii and an explicit `scale` — the true
+general 9-parameter `submitBeaconBeam` port — with `beacon_beam_vertices` supplying
+`SOLID_BEAM_RADIUS * beam_radius_scale`/`scale = 1.0` unchanged (the eight pre-existing `beacon::tests`
+still pass, confirming the refactor is a no-op for beacon's own beam), and a new
+`end_gateway_beam_vertices(pos, scale, animation_time, height, color)` supplying the gateway's own
+`0.15`/`0.175` and real scale directly.
+
+**`teleportCooldown` is a real per-position, `BLOCK_EVENT`-driven tracker; `age`/`isSpawning()` is not.**
+`GatewayCooldowns` (`shell/block_entities.rs`) mirrors `BellShakes`'s shape exactly — the same `b0 == 1`
+collision [Bell](#bell)'s doc already names, offered to a fourth tracker alongside `ChestLids`/
+`BellShakes`/`SpawnerSpins`, ticked once per client tick in `Sim::step` (`beamAnimationTick`'s own
+`teleportCooldown--`), entries dropped once the countdown reaches zero. `age` is deliberately **not**
+tracked the same way: `getUpdateTag` (`Age`'s only path to the client) is sent on initial load and again
+whenever `spawning != isSpawning()` flips — rare, not every tick — and the render-source closure
+captures an owned snapshot each frame with no channel to seed a tracker from it. `end_gateway_beam_spawns`
+instead reads `Age` fresh from the world's `BlockEntity.nbt` every frame and adds `partial_tick` directly
+— correct at the instant a snapshot arrives, static between snapshots. Named as a real simplification: a
+gateway newly created *and* observed live (the common real case — a fresh exit gateway from a first
+teleport-through, since a naturally world-generated gateway's age is already far past 200 ticks by the
+time any player reaches it) shows a slightly chunky spawn ramp rather than a perfectly smooth one.
+`level.getMaxY()` (the spawning arm's beam-distance scale) is likewise a fixed constant
+(`END_GATEWAY_SPAWN_BEAM_DISTANCE = 320.0`) rather than threaded from live dimension data — harmless
+either high or low, since it only sets how fast the beam grows toward whatever height is actually
+visible.
 
 ### Wiring, end to end
 
@@ -2229,6 +2284,140 @@ statically-bounded loop with no uniformity warning.
 **What is not ported**: the gateway's teleport beam (see above), fog (the same simplification
 `gpu/sign_text.rs`/`gpu/beacon_beam.rs` already make for their own jar-sourced-texture passes), and the
 swirl's own anti-aliasing (the `textureSampleLevel` fix above).
+
+## Brushable block
+
+The archaeology dig-state item for suspicious sand/gravel — `BrushableBlockRenderer`. Reuses the
+*item-model* pipeline exactly like [Campfire](#campfire)/[Vault](#vault): `suspicious_sand`/
+`suspicious_gravel` are ordinary real block models (not a hole in the world), and the renderer draws
+only the single revealed item hovering off the last-brushed face.
+
+`hit_direction`/`item` come off the block entity's generic `BlockEntity.nbt` — `hit_direction` is
+`Direction.LEGACY_ID_CODEC`, an `Nbt::Byte`, **not** an int (the same trap
+[the moving-piston NBT](#piston-head) already names for the identical codec); `item` is an ordinary
+`ItemStack.CODEC` compound, only `id` read. `dust_progress` (`0..=3`) comes off the block state's own
+`dusted` property, not re-derived from `brushCount` (not on the wire). All three must be present —
+`dust_progress > 0 && hit_direction.is_some() && item.is_some()` — matching
+`BrushableBlockRenderer.submit`'s three-part guard; a never-brushed block contributes nothing.
+
+`lodestone_render::block_entity::brushable_item_matrix` ports `BrushableBlockRenderer.submit`'s pose
+stack term for term, including the direction-dependent outward offset (`translations()`) and the
+`(eastWest ? 90 : 0) + 11` degree extra turn; `entity::brushable_item_mesh` composes it with the item's
+own `display.fixed` transform, `ItemDisplayContext.FIXED` like campfire's item (not `Ground`).
+
+Wired end to end: `brushable_spawns` → `Sim::brushable_source` (no clock — a revealed item does not
+animate) → `app/redraw.rs`'s per-frame install → `RenderState::set_brushable_source` →
+`gpu/world_items.rs::merge_brushable_items`, called from `prepare_item_geometry` beside
+`merge_campfire_items`/`merge_vault_items`. `RenderStats::brushable_items_drawn` is its own counter,
+for the reason `campfire_items_drawn`'s doc gives: this renderer contributes nothing to
+`block_entities_drawn` either.
+
+`cargo test -p lodestone-render --lib brushable`: 3/3 (the per-direction offset, the growth with
+`dust_progress`, the extra 90-degree turn on the horizontal axis — told apart via the transformed `+X`
+axis's dot product, since composing the fixed `75°` turn back out algebraically would just restate the
+code under test). `cargo test -p lodestone-shell --lib brushable`: 7/7 (a real NBT shape, an
+un-brushed block, a direction with no item, `hit_direction` as the wrong NBT type not parsing,
+`minecraft:air` reading as empty, every legacy id resolving in `Direction`'s own declaration order, and
+the source accessor's island detector). No GPU pixel gate was built this session — see
+[Configuration](#configuration)'s note on verification scope.
+
+## Shelf
+
+The 26.x shelf block's up to three displayed items — `ShelfRenderer`. A fourth reuse of the item-model
+pipeline: a shelf's board/back/sides are all real block-model geometry, so the renderer draws only the
+items in its `Items` NBT, one `ItemStackRenderState` per occupied slot.
+
+**The one genuinely new piece: `DisplaySlot::OnShelf`.** `lodestone-assets` already carried the variant
+(`ItemDisplayContext.ON_SHELF` — `model.rs`'s doc calls it "26.2's shelf block"), but this pass is its
+first real consumer. `shelf_item_mesh` resolves each item in that context and needs the item's own
+*posed* bounding box (`ItemStackRenderState.getModelBoundingBox()`, computed after the `ON_SHELF`
+display transform) for `ShelfRenderer.submitItem`'s `offsetY` correction — exactly what
+[`posed_item_y_extent`](#dependencies) already computed for a dropped item's hover lift, reused rather
+than re-derived.
+
+`lodestone_render::block_entity::shelf_slot_matrix` ports `ShelfRenderer.submitItem`'s pose stack up to
+(not including) the final `offsetY` translate — that piece needs the item's own baked geometry, which
+the placement function never sees, so `entity::shelf_item_mesh` supplies it as a right-hand factor
+composed *inside* the `0.25×` scale (vanilla calls `poseStack.translate` after `poseStack.scale`, so the
+offset lands unscaled in world terms — held down by
+`shelf_matrix_rotates_by_the_negated_facing_yaw`'s own worked-out expectation, not restated). Rotation
+is `Ry(-facing_yaw_deg)`, the same sign [`block_entity_placement_matrix`](#how-it-works) uses for a
+chest — `ShelfBlock.FACING` is horizontal-only in the real jar, so vanilla's own `180°`-if-vertical
+fallback arm is unreachable for a placed shelf and is not ported.
+
+`Items`/`align_items_to_bottom` come off the identical `ContainerHelper`-shaped generic NBT
+[Campfire](#campfire)'s `Items` list already proved (`Slot` an unsigned byte field, **not** the list
+index). The block-name check is a `_shelf` suffix test (with the leading underscore), which is what
+keeps it from also matching `minecraft:bookshelf`/`minecraft:chiseled_bookshelf` — two unrelated blocks,
+neither drawn by this renderer.
+
+Wired end to end: `shelf_spawns` → `Sim::shelf_source` (no clock) → `app/redraw.rs`'s per-frame install
+→ `RenderState::set_shelf_source` → `gpu/world_items.rs::merge_shelf_items`, beside
+`merge_brushable_items`. `RenderStats::shelf_items_drawn` is its own counter.
+
+`cargo test -p lodestone-render --lib shelf`: 3/3 (the three slots' even spacing about the centre slot,
+`align_items_to_bottom` only moving `y`, the negated-facing-yaw rotation). `cargo test -p lodestone-shell
+--lib shelf`: 6/6 (a real `Items`/`align_items_to_bottom` shape, an empty shelf, `Slot` read from the
+field not the list index, an out-of-range slot dropped, plain `bookshelf`/`chiseled_bookshelf` resolving
+no facing, and the source accessor's island detector). No GPU pixel gate this session.
+
+## Copper golem statue
+
+The 26.x copper golem statue — `CopperGolemStatueBlockRenderer`. A genuine hole-in-the-world case again
+(`copper_golem_statue.json` is zero-element, like chest), and the first block-entity type since
+[Skull](#skull-skeleton-wither-skeleton-zombie-creeper-player) to reuse a **mob's own rig geometry** as a
+cuboid rig — but through `BlockEntityModelSet`/`prepare_block_entities`, not `EntityPipeline`: a placed
+statue is static, with no walk/attack animation to drive, so it needed no `EntityModelSet` machinery at
+all, only four baked poses.
+
+**Four independent pose rigs, not one animated one.** `copper_golem_pose` (`standing`/`sitting`/
+`running`/`star`) selects among four separate `LayerDefinition`s in the real jar
+(`CopperGolemModel.createBodyLayer`/`createRunningPoseBodyLayer`/`createSittingPoseBodyLayer`/
+`createStarPoseBodyLayer`), not one rig with four pose presets — `lodestone-assets`' four
+`copper_golem_statue_{standing,running,sitting,star}_model()` builders and four `BLOCK_ENTITY_MODELS`
+entries mirror that exactly. `STANDING` is the plain, unnested seven-part tree every other rig in this
+corpus uses; `RUNNING`/`SITTING` nest every limb one level deeper (a bare pivot part holding one `_r1`
+child carrying the real box at a further `offsetAndRotation`) — a 3D-pose-tool export shape transcribed
+node-for-node rather than collapsed, since collapsing would silently drop the two-stage translate;
+`STAR` nests only the arms/legs, not the head. `every_copper_golem_pose_has_the_same_seven_parts`'s
+naive form does not hold — the corpus needed three separate part-tree assertions instead of one, exactly
+because the four builders are independent transcriptions with genuinely different shapes.
+
+**Placement rotates by the block's `facing`'s *opposite*, unlike every other type in this corpus.**
+`CopperGolemStatueBlockRenderer.createModelTransformation` is
+`T(0.5, 0, 0.5) · Ry(-entityDirection.getOpposite().toYRot())` — chest/skull/shelf/bell all rotate by the
+facing directly. `copper_golem_statue_placement_matrix` folds the `+180°` opposite in internally so
+callers still pass the raw `facing_yaw_deg` every other placement takes.
+
+**The model's own `root.zRot = PI` flip is algebraically the entity Y-down flip, not a separate
+mechanism.** `RotZ(180°)`'s matrix is `diag(-1, -1, 1)` exactly (`cos(180°) = -1`, `sin(180°) = 0`) — the
+identical flip [`skull_ground_placement_matrix`](#skull-skeleton-wither-skeleton-zombie-creeper-player)
+applies via an explicit `scale(-1, -1, 1)`, here expressed as vanilla's own rotation form instead.
+`copper_golem_statue_flips_x_and_y_but_not_z` measures this directly (both axes flip, `Z` does not) —
+`det == +1` alone cannot tell a correct two-axis flip from a wrong single-axis one, since both satisfy
+it.
+
+**Oxidation is read off the block's registry name, not NBT** — `waxed_` stripped first (waxing halts
+further weathering but does not change which of the four textures a statue currently shows;
+`CopperGolemOxidationLevels` has no fifth, waxed-specific entry), then one of four
+`{,exposed_,weathered_,oxidized_}copper_golem_statue` prefixes resolves to the matching sheet. No block
+entity NBT is read at all — pose, oxidation and facing are every one block-state/block-name driven, so
+the gather reuses [`chest_candidates`](#the-consumer-chain-end-to-end) exactly as
+[Skull](#skull-skeleton-wither-skeleton-zombie-creeper-player) does.
+
+Wired end to end: `copper_golem_statue_spawns` → `Sim::copper_golem_statue_source` (no clock, no
+per-position tracker) → `app/redraw.rs`'s per-frame install → `RenderState::set_copper_golem_statue_source`
+→ `gpu/entity_passes.rs::prepare_block_entities`'s own emptiness condition and `instances.extend`,
+alongside chest/skull/bell — **not** the item-model family the last two sections join.
+
+`cargo test -p lodestone-assets --lib copper_golem`: 4/4 (every pose's exact part-tree shape, the
+head's four-box count in every pose). `cargo test -p lodestone-render --lib copper_golem`: 3/3 (`det ==
++1` across four facings, the opposite-yaw rotation told apart from the direct-facing hypothesis by
+composing *both* matrix factors — a prediction using only the `Ry` term and forgetting the model's own
+`Rz(180°)` gives the two answers backwards, a mistake this test's own first run made and caught), the
+X/Y-flip-not-Z check). `cargo test -p lodestone-shell --lib copper_golem`: 3/3 (all eight
+waxed/unwaxed oxidation-name combinations, every `copper_golem_pose` string, the source accessor's
+island detector). No GPU pixel gate this session.
 
 ## How to change it
 
@@ -2372,6 +2561,19 @@ chests **draw nothing** rather than a synthetic placeholder. That asymmetry with
 get a placeholder) is deliberate — a flat-magenta mob reads as "this sheet is missing", but a
 flat-magenta chest-shaped box reads as a renderer bug. `RenderStats::block_entity_sheets_loaded` is
 what distinguishes the two from outside.
+
+**A note on verification scope.** Brushable block, shelf, copper golem statue and the end gateway's
+teleport beam were verified with real CPU-side unit tests (pose/placement algebra, NBT parsing, the
+tracker's own state machine) and a real end-to-end wiring chain (source → per-frame install →
+`RenderState` consumer → the same GPU pass every sibling in their family already proves with a pixel
+gate), but **no new `#[ignore]`d GPU pixel-gate suite** was built for any of the four in the session that
+landed them — a real gap against this doc's own evidence standard for the fourteen types above. The
+islands this doc's evidence section warns about (a merge call site commented out, a counter stuck at
+zero) are exactly what a pixel gate would catch and a wiring review can miss; treat these four as
+verified-by-construction rather than verified-by-measurement until a pixel gate exists for each,
+following the same `#[ignore]`d pattern (a fixture builds a real headless adapter and a real `client.jar`,
+asserts coverage inside the subject's own projected rect, and is watched failing against a deliberately
+neutered merge call site before being trusted).
 
 ## Proof
 
@@ -2568,12 +2770,30 @@ Against the real 26-entry registration list (see above), not the issue's origina
   particle-system work outside this pass's boundary.
 - **End portal and end gateway — landed**, including the live per-frame install (see
   [End portal and end gateway](#end-portal-and-end-gateway) above): the star-field surface for both
-  types, the axis-only vs neighbor-occlusion face selection, and the squash that distinguishes them.
-  Still open within scope: the end gateway's teleport beam (`isSpawning()`/`isCoolingDown()`, a
-  deliberate, documented gap — see that section), fog, and the swirl's own anti-aliasing
-  (`textureSampleLevel` forces mip 0).
-- Brushable block, copper golem statue, shelf are not built, and structure block/test instance block
-  are creative/dev-only, out of scope.
+  types, the axis-only vs neighbor-occlusion face selection, the squash that distinguishes them, and
+  (landed in a later session) the gateway's own teleport beam — `isSpawning()`/`isCoolingDown()`, a real
+  per-position `teleportCooldown` tracker (`GatewayCooldowns`) reusing `gpu/beacon_beam.rs`'s pipeline
+  with a second texture. Still open within scope: fog, the swirl's own anti-aliasing
+  (`textureSampleLevel` forces mip 0), and `isSpawning()`'s own `age` term is a stateless per-frame NBT
+  read rather than a locally-ticked clock (see that section's note on why).
+- **Brushable block — landed** (see [Brushable block](#brushable-block) above): the dig-state revealed
+  item, reusing the item-model pipeline. No GPU pixel gate built this session (CPU-side unit tests only
+  — see [Configuration](#configuration)).
+- **Shelf — landed** (see [Shelf](#shelf) above): all three slots, `align_items_to_bottom`, the first
+  real consumer of `DisplaySlot::OnShelf`. No GPU pixel gate this session.
+- **Copper golem statue — landed** (see [Copper golem statue](#copper-golem-statue) above): all four
+  poses, all four oxidation levels (waxed and unwaxed), through the same cuboid-rig batcher chest/skull
+  share. No GPU pixel gate this session.
+- **Structure block is the only registration left**, and test instance block alongside it — both
+  creative/dev-only (`BlockEntityWithBoundingBoxRenderer`, gated on `player.canUseGameMasterBlocks() ||
+  player.isSpectator()`, drawing a wireframe box through vanilla's `Gizmos` line-drawing API). This
+  client already has an equivalent world-space line pipeline (`gpu/debug_lines.rs`'s
+  `DebugLineRenderer`/`push_box`), but it is currently wired only to the F3 debug overlay's own
+  install-once (not per-frame) closure (`app/session.rs::install_debug_lines_source`), and this client
+  tracks no "game master"/op permission at all — only `GameMode`. Folding a live per-frame world scan
+  for structure/test-instance blocks into that closure, and choosing a permission proxy (creative and/or
+  spectator mode is the natural one, since op level is not tracked), is real but scoped work for whoever
+  picks this up next; not attempted this session given its low value relative to the other four items.
 
 Also unbuilt for chests specifically: the `BrightnessCombiner` that makes a double chest's two halves
 share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behind
@@ -2609,6 +2829,22 @@ share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behin
   `spawner_display_scale`'s shrink threshold), plus `block_states::properties` for the trial
   spawner's own `trial_spawner_state` value (the same per-state census `mesher.rs` reads for the
   cage's texture).
+- `lodestone-render` (for brushable block/shelf) — `entity::{brushable_item_mesh, shelf_item_mesh,
+  posed_item_y_extent}`, `block_entity::{brushable_item_matrix, shelf_slot_matrix,
+  shelf_item_offset}`, `DisplaySlot::{Fixed, OnShelf}` — the shelf's `resolve` call is the first real
+  consumer of `OnShelf`.
+- `lodestone-data`/`lodestone-assets` (for copper golem statue) — `block_states::{properties,
+  block_name}` for `copper_golem_pose`/`facing`/oxidation (all block-state or block-name driven, no
+  NBT); `entity::{CubeDef, PartDef, PartPose}` for the four independent pose builders in
+  `block_entity_models.rs`.
+- `lodestone-render`/`lodestone-shell` (for the end gateway teleport beam) —
+  `beacon::{end_gateway_beam_vertices, EndGatewayBeamSpawn, END_GATEWAY_SOLID_BEAM_RADIUS,
+  END_GATEWAY_BEAM_GLOW_RADIUS}` (the widened, general `push_beam_section` primitive's second caller,
+  beside `beacon_beam_vertices`); `gpu/beacon_beam.rs`'s `BeaconBeamRenderer::prepare_gateway`/
+  `draw_gateway_solid`/`draw_gateway_glow` (a second texture bind group and vertex-buffer pair over
+  the *same* `solid_pipeline`/`glow_pipeline` the beacon's own beam uses);
+  `resources::load_end_gateway_beam_texture`; `block_entities::GatewayCooldowns` (a fourth tracker
+  offered the bell/chest/spawner `BLOCK_EVENT` `b0 == 1` collision).
 
 ## Related
 

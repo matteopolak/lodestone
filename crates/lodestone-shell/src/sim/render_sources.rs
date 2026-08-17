@@ -181,6 +181,22 @@ impl Sim {
         Some(move |eye: glam::Vec3| crate::block_entities::skull_spawns(&handle, eye))
     }
 
+    /// The copper golem statue sibling of [`Self::skull_source`] — see
+    /// `crate::block_entities::copper_golem_statue_spawns`. No clock, no
+    /// per-position tracker: pose, oxidation and facing are all block-state
+    /// or block-name driven, the same reason skulls need none.
+    #[must_use]
+    pub fn copper_golem_statue_source(
+        &self,
+    ) -> Option<
+        impl Fn(glam::Vec3) -> Vec<lodestone_render::CopperGolemStatueSpawn> + Send + Sync + 'static,
+    > {
+        let handle = self.net.as_ref()?.shared_handle();
+        Some(move |eye: glam::Vec3| {
+            crate::block_entities::copper_golem_statue_spawns(&handle, eye)
+        })
+    }
+
     /// The sign sibling of [`Self::skull_source`] — see
     /// `crate::block_entities::sign_spawns`. Captures no partial tick and no
     /// animation state, for the same reason skulls do not: sign text does not
@@ -263,9 +279,11 @@ impl Sim {
 
     /// This frame's end gateways, for
     /// [`RenderState::set_end_gateway_source`](crate::gpu::RenderState::set_end_gateway_source).
-    /// Same shape as [`Self::end_portal_source`] — no clock, since the
-    /// gateway's own teleport beam (the one thing that *would* need one) is
-    /// a deliberate, documented gap this source does not carry.
+    /// Same shape as [`Self::end_portal_source`] — no clock: this source is
+    /// only the always-visible star-field face list. The gateway's own
+    /// teleport beam is a **separate** source,
+    /// [`Self::end_gateway_beam_source`], since it needs a clock and a
+    /// per-position tracker this one deliberately does not carry.
     /// The ever-increasing tick clock plus partial tick, for
     /// [`RenderState::set_end_portal_game_time`](crate::gpu::RenderState::set_end_portal_game_time) —
     /// the star-field shader's `GameTime` term needs an unbounded value,
@@ -284,6 +302,36 @@ impl Sim {
     {
         let handle = self.net.as_ref()?.shared_handle();
         Some(move |eye: glam::Vec3| crate::block_entities::end_gateway_spawns(&handle, eye))
+    }
+
+    /// This frame's end gateway teleport beams, for
+    /// [`RenderState::set_end_gateway_beam_source`](crate::gpu::RenderState::set_end_gateway_beam_source).
+    ///
+    /// Captures the [`GatewayCooldowns`](crate::block_entities::GatewayCooldowns)
+    /// tracker *and* the game/partial tick, like [`Self::bell_source`] —
+    /// must be re-installed every frame, or a gateway's cooldown countdown
+    /// (and its spawn-arm's `partial_tick` smoothing) freezes at whatever
+    /// tick it was captured.
+    #[must_use]
+    pub fn end_gateway_beam_source(
+        &self,
+    ) -> Option<
+        impl Fn(glam::Vec3) -> Vec<lodestone_render::EndGatewayBeamSpawn> + Send + Sync + 'static,
+    > {
+        let handle = self.net.as_ref()?.shared_handle();
+        let cooldowns = self.gateway_cooldowns.clone();
+        let clock = self.clock();
+        let game_time = clock.ticks as i64;
+        let partial_tick = clock.interp_alpha;
+        Some(move |eye: glam::Vec3| {
+            crate::block_entities::end_gateway_beam_spawns(
+                &handle,
+                &cooldowns,
+                eye,
+                game_time,
+                partial_tick,
+            )
+        })
     }
 
     /// This frame's vault display-item clusters, for

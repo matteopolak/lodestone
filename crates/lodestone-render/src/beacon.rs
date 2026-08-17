@@ -68,6 +68,12 @@ use glam::Vec3;
 pub const SOLID_BEAM_RADIUS: f32 = 0.2;
 /// `BeaconRenderer.BEAM_GLOW_RADIUS`.
 pub const BEAM_GLOW_RADIUS: f32 = 0.25;
+/// `TheEndGatewayRenderer.submit`'s own hardcoded `solidBeamRadius` argument
+/// to the general `submitBeaconBeam` overload — narrower than a beacon's own
+/// [`SOLID_BEAM_RADIUS`], and (unlike a beacon's) never scaled by distance.
+pub const END_GATEWAY_SOLID_BEAM_RADIUS: f32 = 0.15;
+/// `TheEndGatewayRenderer.submit`'s own hardcoded `beamGlowRadius` argument.
+pub const END_GATEWAY_BEAM_GLOW_RADIUS: f32 = 0.175;
 /// `BeaconRenderer.MAX_RENDER_Y` — the topmost beam section (the one with no
 /// block above it to bound it) renders as if it reached this world height,
 /// however tall it actually scanned.
@@ -105,6 +111,30 @@ pub struct BeaconSpawn {
     /// [`beam_radius_scale`]'s result for this beacon's distance from the
     /// eye this frame.
     pub beam_radius_scale: f32,
+}
+
+/// One end gateway's teleport beam, for this frame — vanilla's
+/// `TheEndGatewayRenderer.submit`'s `BeaconRenderer.submitBeaconBeam` call,
+/// shown while `isSpawning()`/`isCoolingDown()`. Everything here is already
+/// resolved by the gather (`lodestone_shell::block_entities::
+/// end_gateway_beam_spawns`) — [`end_gateway_beam_vertices`] is a pure
+/// function of these five fields.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EndGatewayBeamSpawn {
+    /// The gateway block's own integer corner.
+    pub pos: [i32; 3],
+    /// `getSpawnPercent`/`getCooldownPercent`'s result — `sin(clamp(..) *
+    /// PI)` already applied, matching `EndGatewayRenderState.scale`.
+    pub scale: f32,
+    /// `floorMod(gameTime, 40) + partialTicks` — the same scroll/spin clock
+    /// [`BeaconSpawn::animation_time`] carries.
+    pub animation_time: f32,
+    /// `Mth.floor(scale * beamDistance)` — the beam's half-height; the drawn
+    /// beam spans `y ∈ [-height, height]`. `0` (or negative) draws nothing.
+    pub height: i32,
+    /// `DyeColor.MAGENTA`/`PURPLE`'s texture diffuse colour, gamma-space
+    /// `0x00RRGGBB` — magenta while spawning, purple while cooling down.
+    pub color: u32,
 }
 
 /// One beam vertex: world-space position, gamma-space RGBA colour (already
@@ -208,11 +238,15 @@ pub fn beacon_beam_vertices(
         };
         push_beam_section(
             base,
-            beam_radius_scale,
+            // Beacon's own private 6-argument overload always passes
+            // `scale = 1.0F` to the general form below.
+            1.0,
             animation_time,
             beam_start,
             beam_start + render_height,
             section.color,
+            SOLID_BEAM_RADIUS * beam_radius_scale,
+            BEAM_GLOW_RADIUS * beam_radius_scale,
             &mut solid,
             &mut glow,
         );
@@ -221,14 +255,65 @@ pub fn beacon_beam_vertices(
     (solid, glow)
 }
 
+/// `TheEndGatewayBlockEntity`'s teleport beam — the *general* 9-parameter
+/// `BeaconRenderer.submitBeaconBeam` overload
+/// (`TheEndGatewayRenderer.submit`'s own call site), distinct from beacon's
+/// own private 6-argument wrapper that [`beacon_beam_vertices`] calls: a
+/// gateway passes its own `scale` (the spawn/cooldown percent, **not**
+/// `1.0`) and its own fixed `0.15`/`0.175` radii rather than beacon's
+/// `0.2`/`0.25` times a distance-derived scale.
+///
+/// One beam only, spanning `y ∈ [-height, height]` relative to the gateway's
+/// own corner — `submitBeaconBeam(.., -state.height, state.height * 2, ..)`
+/// gives `beamEnd = beamStart + height = -state.height + state.height*2 =
+/// state.height`, i.e. centred on the block and reaching equally up and
+/// down. `height <= 0` (not spawning/cooling down) draws nothing, matching
+/// `TheEndGatewayRenderer.submit`'s own `if (state.height > 0)` guard.
+#[must_use]
+pub fn end_gateway_beam_vertices(
+    pos: [i32; 3],
+    scale: f32,
+    animation_time: f32,
+    height: i32,
+    color: u32,
+) -> (Vec<BeamVertex>, Vec<BeamVertex>) {
+    let mut solid = Vec::new();
+    let mut glow = Vec::new();
+    if height <= 0 {
+        return (solid, glow);
+    }
+    let base = Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32, pos[2] as f32 + 0.5);
+    push_beam_section(
+        base,
+        scale,
+        animation_time,
+        -height,
+        height,
+        color,
+        END_GATEWAY_SOLID_BEAM_RADIUS,
+        END_GATEWAY_BEAM_GLOW_RADIUS,
+        &mut solid,
+        &mut glow,
+    );
+    (solid, glow)
+}
+
+/// The general port of `BeaconRenderer.submitBeaconBeam`
+/// (`renderPart`/`renderQuad`/`addVertex` folded in) — the 9-parameter form,
+/// taking already-final radii and an explicit `scale` rather than deriving
+/// either from a beacon-specific distance term. [`beacon_beam_vertices`] and
+/// [`end_gateway_beam_vertices`] are its two callers, each supplying its own
+/// radii/scale the way the real jar's two call sites do.
 #[allow(clippy::too_many_arguments)]
 fn push_beam_section(
     base: Vec3,
-    beam_radius_scale: f32,
+    scale: f32,
     animation_time: f32,
     beam_start: i32,
     beam_end: i32,
     color: u32,
+    solid_radius: f32,
+    glow_radius: f32,
     solid: &mut Vec<BeamVertex>,
     glow: &mut Vec<BeamVertex>,
 ) {
@@ -249,7 +334,7 @@ fn push_beam_section(
     let vv2 = -1.0 + tex_v_off;
 
     // Solid inner core: a diamond cross-section that spins with the clock.
-    let solid_r = SOLID_BEAM_RADIUS * beam_radius_scale;
+    let solid_r = solid_radius;
     let angle = (animation_time * 2.25 - 45.0).to_radians();
     let (sin_a, cos_a) = angle.sin_cos();
     // `Axis.YP.rotationDegrees` — a right-handed rotation about +Y.
@@ -258,7 +343,7 @@ fn push_beam_section(
     let (enx, enz) = rot(solid_r, 0.0);
     let (wsx, wsz) = rot(-solid_r, 0.0);
     let (esx, esz) = rot(0.0, -solid_r);
-    let vv1_solid = height as f32 * (0.5 / solid_r) + vv2;
+    let vv1_solid = height as f32 * scale * (0.5 / solid_r) + vv2;
     let solid_rgba = unpack_rgba(color, 255);
     push_beam_part(
         base, beam_start, beam_end, solid_rgba, wnx, wnz, enx, enz, wsx, wsz, esx, esz, uu1, uu2,
@@ -266,12 +351,12 @@ fn push_beam_section(
     );
 
     // Outer glow: an axis-aligned square, no rotation, low alpha.
-    let glow_r = BEAM_GLOW_RADIUS * beam_radius_scale;
+    let glow_r = glow_radius;
     let (wnx, wnz) = (-glow_r, -glow_r);
     let (enx, enz) = (glow_r, -glow_r);
     let (wsx, wsz) = (-glow_r, glow_r);
     let (esx, esz) = (glow_r, glow_r);
-    let vv1_glow = height as f32 + vv2;
+    let vv1_glow = height as f32 * scale + vv2;
     // `ARGB.color(32, color)` — alpha forced to 32/255, RGB unchanged.
     let glow_rgba = unpack_rgba(color, 32);
     push_beam_part(

@@ -75,7 +75,8 @@ pub use screen_effects::ScreenEffects;
 pub use sources::{
     AmbientLightSource, BannerSource, BeaconSource, BellSource, BlockEntitySource, BrushableSource,
     CampfireSource,
-    ConduitSource, DecoratedPotSource, EnchantingTableSource, EndGatewaySource, EndPortalSource,
+    ConduitSource, CopperGolemStatueSource, DecoratedPotSource, EnchantingTableSource,
+    EndGatewayBeamSource, EndGatewaySource, EndPortalSource,
     EntityLightSource, HandSwingSource, ItemUseSource, LecternSource, MainHandItem,
     MainHandSource, MapSource, MovingPistonSource, OutlineShapeSource, ShelfSource, ShulkerSource,
     SignSource, SkullSource, SkyDarkenSource, SpawnerSource, ThirdPersonBodySource,
@@ -466,6 +467,12 @@ pub struct RenderState {
     /// nothing" convention as [`Self::block_entity_source`], and a separate
     /// field for the reason [`SkullSource`] documents.
     skull_source: SkullSource,
+    /// Where this frame's copper golem statues come from. Same "unset means
+    /// draw nothing" convention as [`Self::skull_source`], and a real cuboid
+    /// rig through this same batcher — see [`CopperGolemStatueSource`]'s doc
+    /// for why it does *not* join the campfire/vault/brushable/shelf
+    /// item-model family below.
+    copper_golem_statue_source: CopperGolemStatueSource,
     /// Where this frame's bells come from. Same "unset means draw nothing"
     /// convention as [`Self::skull_source`], and a separate field for the
     /// reason [`BellSource`] documents. Installed per frame from
@@ -591,9 +598,13 @@ pub struct RenderState {
     /// needs no per-position tracker — see [`EndPortalSource`]'s doc.
     end_portal_source: EndPortalSource,
     /// Where this frame's end gateways come from — same shape as
-    /// [`Self::end_portal_source`]. See [`EndGatewaySource`]'s doc for the
-    /// gateway teleport beam this deliberately does not carry.
+    /// [`Self::end_portal_source`]. Only the always-visible star-field face
+    /// list; the teleport beam is [`Self::end_gateway_beam_source`], a
+    /// separate source with its own clock and tracker.
     end_gateway_source: EndGatewaySource,
+    /// Where this frame's end gateway teleport beams come from. See
+    /// [`EndGatewayBeamSource`]'s doc.
+    end_gateway_beam_source: EndGatewayBeamSource,
     /// The end-portal star-field shader's `GameTime` term — an
     /// ever-increasing tick clock, unlike [`Self::beacon_source`]'s own
     /// `floorMod(40)`-wrapped `animation_time`. A plain scalar rather than a

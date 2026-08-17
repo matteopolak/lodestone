@@ -151,6 +151,11 @@ impl Sim {
                     // the packet cannot tell a spawner from a chest, only
                     // the gather at the position can.
                     self.spawner_spins.apply_block_event(pos, b0, b1);
+                    // End gateway teleport cooldowns share the same `b0 ==
+                    // 1` — see `GatewayCooldowns::apply_block_event`. A
+                    // fourth tracker offered the same event, same reason as
+                    // the three above.
+                    self.gateway_cooldowns.apply_block_event(pos, b0, b1);
                 }
                 NetUpdate::Explosion {
                     pos: _,

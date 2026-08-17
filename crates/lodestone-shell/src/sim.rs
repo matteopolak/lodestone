@@ -769,6 +769,11 @@ pub struct Sim {
     /// and the *gather* is what decides which tracker a given position reads
     /// from (see `block_entities::BellShakes::apply_block_event`).
     bell_shakes: crate::block_entities::BellShakes,
+    /// Per-position end gateway teleport-cooldown state (issue #23). Fed by
+    /// `NetUpdate::BlockEvent` and advanced once per tick, the same
+    /// `b0 == 1` collision [`bell_shakes`](Self::bell_shakes) documents —
+    /// see `crate::block_entities::GatewayCooldowns`.
+    gateway_cooldowns: crate::block_entities::GatewayCooldowns,
     /// Per-position enchanting-table book animation state (issue #23).
     ///
     /// **Not fed by any packet**, which is what makes it the odd one of the three:

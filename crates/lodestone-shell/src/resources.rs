@@ -1077,6 +1077,32 @@ pub fn load_beacon_beam_texture() -> Option<lodestone_assets::Image> {
     }
 }
 
+/// The end gateway teleport beam's scrolling texture
+/// (`textures/entity/end_portal/end_gateway_beam.png`), for
+/// [`crate::gpu`]'s beacon-beam pass — the same shader and pipeline the
+/// beacon's own beam uses, bound to a second texture. Same fail-open shape
+/// as [`load_beacon_beam_texture`].
+#[must_use]
+pub fn load_end_gateway_beam_texture() -> Option<lodestone_assets::Image> {
+    let manager = open_vanilla_pack_stack()?;
+    let path = "assets/minecraft/textures/entity/end_portal/end_gateway_beam.png";
+    let png = manager.read(path)?;
+    match lodestone_assets::Image::decode_png(&png) {
+        Ok(img) => {
+            tracing::info!(
+                target: "assets",
+                end_gateway_beam = format!("{}x{}", img.width, img.height),
+                "loaded vanilla end-gateway-beam texture"
+            );
+            Some(img)
+        }
+        Err(e) => {
+            tracing::warn!(target: "assets", "decode {path}: {e}");
+            None
+        }
+    }
+}
+
 /// The end portal/end gateway star-field shader's two textures
 /// (`textures/environment/end_sky.png`, `textures/entity/end_portal/end_portal.png`)
 /// for [`crate::gpu`]'s end-portal pass. Same fail-open shape as

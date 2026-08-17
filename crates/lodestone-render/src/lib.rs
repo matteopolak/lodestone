@@ -107,9 +107,10 @@ pub use banner_pattern::{
     gamma_rgb_to_bytes, shield_pattern_layers,
 };
 pub use beacon::{
-    BEAM_GLOW_RADIUS, BEAM_SCALE_THRESHOLD, BeaconSpawn, BeamSection, BeamVertex, MAX_RENDER_Y,
-    SOLID_BEAM_RADIUS, average_beam_color, beacon_beam_color, beacon_beam_vertices,
-    beam_radius_scale,
+    BEAM_GLOW_RADIUS, BEAM_SCALE_THRESHOLD, END_GATEWAY_BEAM_GLOW_RADIUS,
+    END_GATEWAY_SOLID_BEAM_RADIUS, BeaconSpawn, BeamSection, BeamVertex, EndGatewayBeamSpawn,
+    MAX_RENDER_Y, SOLID_BEAM_RADIUS, average_beam_color, beacon_beam_color, beacon_beam_vertices,
+    beam_radius_scale, end_gateway_beam_vertices,
 };
 pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
 pub use end_portal::{
@@ -125,8 +126,9 @@ pub use block_entity::{
     CHEST_SINGLE, CONDUIT_CAGE, CONDUIT_CAGE_TEXTURE_STEM, CONDUIT_CLOSED_EYE_TEXTURE_STEM,
     CONDUIT_EYE, CONDUIT_FRAME_CANDIDATE_COUNT, CONDUIT_OPEN_EYE_TEXTURE_STEM, CONDUIT_SHELL,
     CONDUIT_SHELL_TEXTURE_STEM, CONDUIT_WIND, CONDUIT_WIND_TEXTURE_STEM,
-    CONDUIT_WIND_VERTICAL_TEXTURE_STEM, BrushableItemSpawn, CampfireItemSpawn, ChestHalf, ChestMaterial, ChestSpawn,
-    ConduitFrame, ConduitSpawn,
+    CONDUIT_WIND_VERTICAL_TEXTURE_STEM, COPPER_GOLEM_POSES, BrushableItemSpawn, CampfireItemSpawn,
+    ChestHalf, ChestMaterial, ChestSpawn, ConduitFrame, ConduitSpawn, CopperGolemOxidation,
+    CopperGolemPose, CopperGolemStatueSpawn,
     DECORATED_POT_BASE, DECORATED_POT_BASE_TEXTURE_STEM, DECORATED_POT_SIDE_BACK,
     DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM, DECORATED_POT_SIDE_FRONT, DECORATED_POT_SIDE_LEFT,
     DECORATED_POT_SIDE_RIGHT, DecoratedPotSpawn,
@@ -145,6 +147,8 @@ pub use block_entity::{
     conduit_active_axis_rotation_radians, conduit_active_rotation_value, conduit_advance,
     conduit_anim_time, conduit_animation_phase, conduit_bob, conduit_frame_scan,
     conduit_inactive_y_rot_radians, conduit_texture_stems,
+    copper_golem_statue_placement_matrix, copper_golem_statue_texture_stem,
+    copper_golem_statue_texture_stems,
     decorated_pot_pattern_texture_stem, decorated_pot_placement_matrix,
     decorated_pot_texture_stems,
     enchanting_table_book_hover, enchanting_table_book_openness,

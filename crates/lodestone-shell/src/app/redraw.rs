@@ -431,6 +431,13 @@ impl WindowApp {
             render.set_skull_source(f);
         }
 
+        // Copper golem statues. Same per-frame install and the same
+        // hole-in-the-world failure mode as chests/skulls:
+        // `copper_golem_statue.json` has no block model of its own.
+        if let Some(f) = self.sim.copper_golem_statue_source() {
+            render.set_copper_golem_statue_source(f);
+        }
+
         // Signs. Same per-frame install as chests and skulls above; see
         // `Sim::sign_source` for why it captures no partial tick.
         if let Some(f) = self.sim.sign_source() {
@@ -461,6 +468,14 @@ impl WindowApp {
             render.set_end_gateway_source(f);
         }
         render.set_end_portal_game_time(self.sim.game_time_for_shaders());
+
+        // End gateway teleport beams. **Must** be re-installed every frame,
+        // unlike the two sources just above: the closure captures the
+        // `teleportCooldown` tracker plus the game/partial tick, so a stale
+        // install freezes an in-progress countdown.
+        if let Some(f) = self.sim.end_gateway_beam_source() {
+            render.set_end_gateway_beam_source(f);
+        }
 
         // Bells. Same per-frame install as the three above — the render pass,
         // the GPU-side wiring in `gpu.rs` and the CPU-side gather

@@ -460,6 +460,7 @@ impl Sim {
             first_chunk_at: None,
             chest_lids: crate::block_entities::ChestLids::new(),
             bell_shakes: crate::block_entities::BellShakes::new(),
+            gateway_cooldowns: crate::block_entities::GatewayCooldowns::new(),
             enchanting_table_books: crate::block_entities::EnchantingTableBooks::new(),
             moving_pistons: crate::block_entities::PistonMoves::new(),
             conduit_ticks: crate::block_entities::ConduitTicks::new(),

@@ -1082,6 +1082,68 @@ impl std::fmt::Debug for EnchantingTableSource {
     }
 }
 
+/// Where this frame's end gateway teleport beams come from — the beam
+/// sibling of `EndGatewaySource` (that one carries only the always-visible
+/// star-field face list). Feeds the same `gpu/beacon_beam.rs` pass the
+/// beacon's own beam uses, via
+/// `BeaconBeamRenderer::prepare_gateway`/`draw_gateway_solid`/`draw_gateway_glow`.
+#[derive(Default)]
+pub struct EndGatewayBeamSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<
+        Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::EndGatewayBeamSpawn> + Send + Sync>,
+    >,
+);
+
+impl EndGatewayBeamSource {
+    /// This frame's end gateway teleport beams, or none when unset.
+    #[must_use]
+    pub(super) fn beams(&self, eye: glam::Vec3) -> Vec<lodestone_render::EndGatewayBeamSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for EndGatewayBeamSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("EndGatewayBeamSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
+/// Where this frame's copper golem statues come from — a real cuboid rig
+/// through [`prepare_block_entities`](crate::gpu::RenderState::prepare_block_entities),
+/// unlike every `*ItemSpawn` source below: `copper_golem_statue.json` is a
+/// total-absence hole like chest's, so this feeds the same batcher chest and
+/// skull do, not the item-model pipeline.
+#[derive(Default)]
+pub struct CopperGolemStatueSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<
+        Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::CopperGolemStatueSpawn> + Send + Sync>,
+    >,
+);
+
+impl CopperGolemStatueSource {
+    /// This frame's copper golem statues, or none when unset — the same
+    /// "unset means draw nothing" convention [`SkullSource`] uses.
+    #[must_use]
+    pub(super) fn copper_golem_statues(
+        &self,
+        eye: glam::Vec3,
+    ) -> Vec<lodestone_render::CopperGolemStatueSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for CopperGolemStatueSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("CopperGolemStatueSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
 /// Where this frame's campfire cooking items come from.
 ///
 /// **The odd one out of this family**: every other block-entity source above

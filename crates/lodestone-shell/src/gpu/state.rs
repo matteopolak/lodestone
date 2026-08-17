@@ -39,9 +39,9 @@ use super::terrain::{
 };
 use super::{
     AmbientLightSource, BannerSource, BeaconBeamRenderer, BeaconSource, BellSource,
-    EndGatewaySource, EndPortalRenderer, EndPortalSource,
+    EndGatewayBeamSource, EndGatewaySource, EndPortalRenderer, EndPortalSource,
     BlockEntityRenderer, BlockEntitySource, BrushableSource, CampfireSource, ConduitSource,
-    ShelfSource,
+    CopperGolemStatueSource, ShelfSource,
     DEFAULT_RENDER_DISTANCE_CHUNKS, DecoratedPotSource, EnchantingTableSource, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
     HandSwingSource, ItemUseSource, LecternSource, MainHandSource, MapSource, MovingPistonSource,
@@ -340,6 +340,8 @@ impl RenderState {
             // `set_block_entity_source`.
             block_entity_source: BlockEntitySource::default(),
             skull_source: SkullSource::default(),
+            // Likewise `set_copper_golem_statue_source`.
+            copper_golem_statue_source: CopperGolemStatueSource::default(),
             // No bells until a caller installs a world source; see
             // `set_bell_source`, installed per frame by `app::redraw`.
             bell_source: BellSource::default(),
@@ -399,6 +401,7 @@ impl RenderState {
             // source; see `set_end_portal_source`/`set_end_gateway_source`.
             end_portal_source: EndPortalSource::default(),
             end_gateway_source: EndGatewaySource::default(),
+            end_gateway_beam_source: EndGatewayBeamSource::default(),
             end_portal_game_time: 0.0,
             // No rain/snow droplets until the shell installs the two environment
             // textures; see `install_weather`.
@@ -1323,6 +1326,18 @@ impl RenderState {
         self.skull_source = SkullSource(Some(Box::new(f)));
     }
 
+    /// Install the source for this frame's copper golem statues — the
+    /// statue equivalent of [`set_skull_source`](Self::set_skull_source): a
+    /// real cuboid rig through `prepare_block_entities`, no clock, no
+    /// per-position tracker (pose/oxidation/facing are all block-state/
+    /// block-name driven).
+    pub fn set_copper_golem_statue_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::CopperGolemStatueSpawn> + Send + Sync + 'static,
+    ) {
+        self.copper_golem_statue_source = CopperGolemStatueSource(Some(Box::new(f)));
+    }
+
     /// Install the source for this frame's bells — the bell equivalent of
     /// [`set_skull_source`](Self::set_skull_source).
     ///
@@ -1654,6 +1669,20 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::EndGatewaySpawn> + Send + Sync + 'static,
     ) {
         self.end_gateway_source = EndGatewaySource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's end gateway teleport beams.
+    ///
+    /// **Must be re-installed every frame**, like
+    /// [`set_bell_source`](Self::set_bell_source): the closure captures a
+    /// snapshot of the `teleportCooldown` tracker plus the game/partial
+    /// tick, so a stale install both freezes an in-progress countdown and
+    /// leaves the spawn arm's smoothing pinned at the tick it was captured.
+    pub fn set_end_gateway_beam_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::EndGatewayBeamSpawn> + Send + Sync + 'static,
+    ) {
+        self.end_gateway_beam_source = EndGatewayBeamSource(Some(Box::new(f)));
     }
 
     /// Sets the end-portal/end-gateway star-field shader's `GameTime` term —
