@@ -40,6 +40,12 @@
 # Never repo state.
 /logs/
 
+# rustc ICE dumps. Written into whatever directory rustc was invoked from, so
+# they land in the repo root and are untracked where another agent's `git add`
+# can sweep them up. Four appeared in one minute from a single incremental-cache
+# fingerprint failure -- they are diagnostic scratch, never repo state.
+rustc-ice-*.txt
+
 # OS
 .DS_Store
 
