@@ -2027,6 +2027,70 @@ pub fn brushable_item_matrix(
         * Mat4::from_scale(Vec3::splat(0.5))
 }
 
+/// How many item slots a shelf has — `ShelfBlockEntity.MAX_ITEMS`.
+pub const SHELF_SLOTS: usize = 3;
+
+/// `ShelfRenderer.ITEM_SIZE`: the uniform scale each shelved item is drawn at.
+pub const SHELF_ITEM_SCALE: f32 = 0.25;
+
+/// `ShelfRenderer.ALIGN_ITEMS_TO_BOTTOM`: the extra downward offset applied
+/// when `align_items_to_bottom` is set, in the pre-scale (0.25×) local frame.
+pub const SHELF_ALIGN_BOTTOM_OFFSET: f32 = -0.25;
+
+/// `ShelfRenderer.submitItem`'s per-slot offset, before the item's own
+/// bounding-box correction: `((slot - 1) * 0.3125, alignToBottom ? -0.25 :
+/// 0.0, -0.25)`. Slot `0` sits left of centre, slot `2` right of it, each
+/// `0.3125` blocks apart in the *pre-scale* local frame (so `0.3125 * 0.25 =
+/// 0.078125` world blocks).
+#[must_use]
+pub fn shelf_item_offset(slot: usize, align_to_bottom: bool) -> Vec3 {
+    let item_slot_position = (slot as f32 - 1.0) * 0.3125;
+    Vec3::new(
+        item_slot_position,
+        if align_to_bottom {
+            SHELF_ALIGN_BOTTOM_OFFSET
+        } else {
+            0.0
+        },
+        -0.25,
+    )
+}
+
+/// The world placement matrix for the item in a shelf's `slot`, up to (but
+/// not including) the item's own bounding-box correction — see
+/// [`crate::entity::shelf_item_mesh`] for why that last piece has to be
+/// supplied by the caller: it needs the item's baked geometry, which this
+/// function never sees.
+///
+/// Ports `ShelfRenderer.submitItem`'s pose stack up to (not including) the
+/// final `poseStack.translate(0.0, offsetY, 0.0)`:
+///
+/// ```text
+/// T(pos) · T(0.5, 0.5, 0.5) · Ry(yRot) · T(offset) · S(0.25)
+/// ```
+///
+/// `facing_yaw_deg` is [`horizontal_facing_yaw`]'s convention (south `0`) —
+/// `ShelfBlock.FACING` is horizontal-only in the real jar (`north`/`south`/
+/// `west`/`east`), so `ShelfRenderer.submit`'s `state.facing.getAxis()
+/// .isHorizontal() ? -state.facing.toYRot() : 180.0F` never actually reaches
+/// its `180.0F` arm for a placed shelf; this function ports only the
+/// reachable horizontal case for that reason, taking the yaw directly rather
+/// than a `Direction`.
+#[must_use]
+pub fn shelf_slot_matrix(
+    pos: [i32; 3],
+    facing_yaw_deg: f32,
+    slot: usize,
+    align_to_bottom: bool,
+) -> Mat4 {
+    let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
+    let offset = shelf_item_offset(slot, align_to_bottom);
+    Mat4::from_translation(origin + Vec3::new(0.5, 0.5, 0.5))
+        * Mat4::from_rotation_y(-facing_yaw_deg.to_radians())
+        * Mat4::from_translation(offset)
+        * Mat4::from_scale(Vec3::splat(SHELF_ITEM_SCALE))
+}
+
 /// Every sheet stem across every block-entity family — what the shell's
 /// texture loader preloads. Union of [`chest_texture_stems`],
 /// [`skull_texture_stems`], [`bell_texture_stems`],
@@ -3113,6 +3177,34 @@ pub struct BrushableItemSpawn {
     pub light: u8,
 }
 
+/// One item on a shelf's `slot`, for this frame — vanilla's `ShelfRenderer`.
+///
+/// **A third `*Spawn` here [`BlockEntityModelSet`] does not resolve**, for the
+/// same reason [`CampfireItemSpawn`]/[`BrushableItemSpawn`] are the first
+/// two: `ShelfRenderer` draws item models, not a cuboid part rig — a shelf's
+/// own board/back/sides are all real block-model geometry the terrain
+/// mesher already draws — so this feeds the model pipeline through
+/// [`crate::entity::shelf_item_mesh`] the way a dropped item does.
+///
+/// One per **occupied** slot, matching `ShelfRenderer.submit`'s per-slot
+/// `if (itemStackRenderState != null)` guard — an empty shelf yields none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShelfItemSpawn {
+    /// Block position of the shelf.
+    pub pos: [i32; 3],
+    /// The shelf block's `facing`, in [`horizontal_facing_yaw`]'s convention.
+    pub facing_yaw_deg: f32,
+    /// Which of the three slots (`0..SHELF_SLOTS`) this item is in.
+    pub slot: usize,
+    /// `ShelfBlockEntity.getAlignItemsToBottom()`'s own NBT flag.
+    pub align_to_bottom: bool,
+    /// The item id whose baked geometry to draw, from the block entity's
+    /// `Items` NBT list.
+    pub item: ResourceLocation,
+    /// Packed sky/block light at the shelf.
+    pub light: u8,
+}
+
 /// One vault's floating display-item cluster, for this frame — vanilla's
 /// `VaultRenderer`.
 ///
@@ -3896,6 +3988,82 @@ mod tests {
         assert!(
             east_x.dot(north_x) < 0.999,
             "east/west and north/south must differ by the extra 90 degrees"
+        );
+    }
+
+    /// `(slot - 1) * 0.3125`: slot 1 sits exactly on the shelf's own local
+    /// x-axis centre (offset `0`), slot 0 sits `0.3125` in the local frame to
+    /// one side and slot 2 the same distance to the other — predicted from
+    /// the constant, not restated.
+    #[test]
+    fn shelf_slots_are_evenly_spaced_about_the_centre_slot() {
+        let s0 = shelf_item_offset(0, false);
+        let s1 = shelf_item_offset(1, false);
+        let s2 = shelf_item_offset(2, false);
+        assert!((s1.x - 0.0).abs() < 1e-6, "slot 1 must sit on centre, got {}", s1.x);
+        assert!(
+            (s0.x - (-0.3125)).abs() < 1e-6,
+            "slot 0 must sit 0.3125 left of centre, got {}",
+            s0.x
+        );
+        assert!(
+            (s2.x - 0.3125).abs() < 1e-6,
+            "slot 2 must sit 0.3125 right of centre, got {}",
+            s2.x
+        );
+        // `z` and the align-to-bottom `y` term are shared by every slot.
+        for s in [s0, s1, s2] {
+            assert!((s.z - (-0.25)).abs() < 1e-6);
+            assert!((s.y - 0.0).abs() < 1e-6);
+        }
+    }
+
+    /// `align_items_to_bottom` moves every slot's `y` offset to `-0.25` in
+    /// the pre-scale local frame, and leaves `x`/`z` untouched.
+    #[test]
+    fn shelf_align_to_bottom_only_changes_the_y_offset() {
+        for slot in 0..SHELF_SLOTS {
+            let top = shelf_item_offset(slot, false);
+            let bottom = shelf_item_offset(slot, true);
+            assert!((bottom.x - top.x).abs() < 1e-6);
+            assert!((bottom.z - top.z).abs() < 1e-6);
+            assert!(
+                (bottom.y - SHELF_ALIGN_BOTTOM_OFFSET).abs() < 1e-6,
+                "aligned-to-bottom y should be {SHELF_ALIGN_BOTTOM_OFFSET}, got {}",
+                bottom.y
+            );
+        }
+    }
+
+    /// `shelf_slot_matrix`'s rotation term is `Ry(-facing_yaw_deg)`, the same
+    /// sign [`block_entity_placement_matrix`] uses for a chest — a south-facing
+    /// shelf (`facing_yaw_deg = 0`) applies no rotation at all, so its slot
+    /// centre sits directly on the block's own centre column.
+    #[test]
+    fn shelf_matrix_rotates_by_the_negated_facing_yaw() {
+        const POS: [i32; 3] = [2, 64, 9];
+        let south = shelf_slot_matrix(POS, 0.0, 1, false);
+        let origin = south.transform_point3(Vec3::ZERO);
+        // Slot 1's offset is `(0, 0, -0.25)` and the offset translate happens
+        // *before* the `0.25x` scale in the pose stack, so it lands unscaled:
+        // `pos + (0.5, 0.5, 0.5) + (0, 0, -0.25)`.
+        let expected = Vec3::new(
+            POS[0] as f32 + 0.5,
+            POS[1] as f32 + 0.5,
+            POS[2] as f32 + 0.5 - 0.25,
+        );
+        assert!(
+            origin.distance(expected) < 1e-5,
+            "south-facing slot-1 origin {origin:?}, expected {expected:?}"
+        );
+        // A 90-degree facing turns the local x-offset direction; south vs west
+        // must therefore disagree, which a dropped rotation term cannot
+        // produce.
+        let west = shelf_slot_matrix(POS, 90.0, 0, false);
+        let south0 = shelf_slot_matrix(POS, 0.0, 0, false);
+        assert!(
+            south0.transform_point3(Vec3::ZERO).distance(west.transform_point3(Vec3::ZERO)) > 1e-3,
+            "a 90 degree facing change must move slot 0's world position"
         );
     }
 

@@ -532,6 +532,14 @@ impl WindowApp {
             render.set_brushable_source(f);
         }
 
+        // Shelved items. Same odd-one-out shape as campfire/brushable's:
+        // consumed by `prepare_item_geometry`, not `prepare_block_entities`,
+        // since a shelf's board/back/sides are entirely real block-model
+        // geometry. An unset source is a complete, empty shelf, never a hole.
+        if let Some(f) = self.sim.shelf_source() {
+            render.set_shelf_source(f);
+        }
+
         // Vault display-item clusters. Same odd-one-out shape as campfire's:
         // consumed by `prepare_item_geometry`, not `prepare_block_entities`,
         // since a vault's cage/door/base are real block-model geometry and
