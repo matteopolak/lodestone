@@ -177,8 +177,9 @@ fn chest_becomes_a_special_renderer() {
         } => {
             assert_eq!(*base, loc("minecraft:item/chest"));
             assert_eq!(kind, "minecraft:chest");
-            // chest.json carries no node-level `"transformation"` at all.
-            assert_eq!(*transformation, None);
+            // chest.json carries no `"transformation"` on the node or on any
+            // ancestor of it, so the chain is empty.
+            assert!(transformation.is_empty(), "got {transformation:?}");
         }
         other => panic!("expected Special, got {other:?}"),
     }
@@ -211,7 +212,9 @@ fn skull_special_renderer_carries_its_own_node_transformation() {
             ..
         } => {
             assert_eq!(kind, "minecraft:head");
-            let t = transformation.expect("skull carries its own node transformation");
+            let [t] = transformation.as_slice() else {
+                panic!("skull carries exactly one node transformation");
+            };
             assert_eq!(t.translation, [0.5, 0.0, 0.5]);
             assert_eq!(t.left_rotation, [1.0, 0.0, 0.0, -0.0]);
         }

@@ -434,7 +434,7 @@ pub(crate) fn draw_item_icon_counted(
                         kind,
                         &slot.banner_patterns,
                         slot.base_color.as_deref(),
-                        *transformation,
+                        transformation,
                         &icon.display.get(DisplaySlot::Gui),
                         x,
                         y,
@@ -603,7 +603,7 @@ pub(crate) fn draw_item_icon_popped(
                         kind,
                         &slot.banner_patterns,
                         slot.base_color.as_deref(),
-                        *transformation,
+                        transformation,
                         &icon.display.get(DisplaySlot::Gui),
                         x,
                         y,
@@ -737,11 +737,12 @@ fn push_item_model(
 /// line — read from the record definition rather than from a summary of the call
 /// site. Vanilla centres a chest icon about the block centre too.
 ///
-/// `node_transform` is the `special` node's own `"transformation"` field
-/// (only the skull family has one today) and is composed *underneath*
+/// `node_transform` is the item definition's whole root-to-`special`
+/// `"transformation"` chain, outermost first, and is folded *underneath*
 /// `transform`'s `display.gui` pose via
 /// [`lodestone_render::compose_special_node_transform`] — see that
-/// function's doc for why it is a right-, not left-, multiply.
+/// function's doc for why it is a right-, not left-, multiply, and for why an
+/// ancestor node's entry counts.
 ///
 /// `patterns` is the slot's own decoded `minecraft:banner_patterns` (empty
 /// for every non-banner/non-shield slot and for a producer with no live
@@ -758,7 +759,7 @@ fn push_special_icon(
     kind: &str,
     patterns: &[lodestone_model::BannerPatternLayer],
     base_color: Option<&str>,
-    node_transform: Option<lodestone_assets::ItemNodeTransform>,
+    node_transform: &[lodestone_assets::ItemNodeTransform],
     transform: &DisplayTransform,
     x: f32,
     y: f32,

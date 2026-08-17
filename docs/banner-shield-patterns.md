@@ -675,3 +675,77 @@ see "Steps D–F: landed" above. See `banner_pattern_layer_pixels.rs`'s own doc
 comment for why the original plan (predict an exact composited byte from
 the textbook `ALPHA_BLENDING` formula) had to change: this backend's
 effective blend alpha is measurably not the raw fragment alpha byte.
+
+## Shield: the flip that made every shield draw its own back
+
+For its first day in the tree the shield work above was, at the pixel level,
+entirely inert: a red, a light-blue and a plain shield in the hotbar rendered
+**bit-identical** (mean rgb `[59.098, 51.529, 40.490]` over 102 lit px in each
+cell), and adding a `creeper` loom pattern moved **0** pixels. Every layer
+between the item stack and the GPU was instrumented live and every one was
+correct — `shield_has_patterns` computed `true`, `build_special_batches`
+resolved two distinct opaque batches with the right sheets, the mask atlas
+held 43 real masks, and both mesh parts issued `draw_indexed` with 36 indices
+each. The defect was downstream of correctly-issued draw calls.
+
+**The cause is in the item-definition parser, three crates away.**
+`assets/minecraft/items/shield.json` carries `"transformation": scale
+[1.0, -1.0, -1.0]` — vanilla's `ShieldSpecialRenderer` flip, hoisted out of
+code and into data — on the enclosing **`minecraft:condition`** node, not on
+the `minecraft:special` node under it. `lodestone_assets::item_model` read
+`"transformation"` only on `special`, so the flip was dropped and the shield
+drew mirrored in `z`: the camera saw the **back** of the plate.
+
+That single fact produces both symptoms, and each is invisible:
+
+- `entity/shield/shield_base.png` and `shield_base_nopattern.png` differ in
+  **exactly 200 texels, every one of them inside the plate's front-face UV
+  rect** `u[1,13) v[1,23)` (measured over the whole 64×64 sheet; the rest is
+  byte-identical). So with the front face hidden, the "patterned" sheet and
+  the "plain" sheet are the same image, and no base colour can separate them.
+- Every loom mask (`entity/shield/base.png`, `creeper.png`, …) is **0/264
+  opaque** over that same back-face rect — the masks cover the front only. So
+  a pattern layer with a perfect tint, a correct mask bind group and a real
+  draw call still composites nothing.
+
+The general rule the format actually follows: **`"transformation"` is a field
+of every `ItemModel.Unbaked` record, not of `SpecialModelWrapper.Unbaked`
+alone.** `bake(context, transformation)` takes the accumulated parent matrix
+and each node composes `Transformation.compose(parent, this.transformation)`
+before handing it down — `ConditionalItemModel.Unbaked.bake` does it as
+plainly as `SpecialModelWrapper.Unbaked.bake` does. So
+`ItemModelNode::Special::transformation` is a **chain**, outermost first, and
+`compose_special_node_transform` folds it (`outer * m[0] * m[1] * …`). Of the
+91 `special` nodes in the 26.2 jar, **14 sit under an ancestor that carries
+the transformation instead of carrying it themselves** (`shield`, `trident`,
+…) and none has two on one path — so a single `Option` was wrong for 14 items
+and would have been unrepresentable for a resource pack that nested two.
+
+Numbers after the fix, same gate, same cells:
+
+| slot | mean rgb | discriminator |
+|---|---|---|
+| red base colour | `[98.235, 43.902, 42.078]` | `r - b = 56.2` |
+| light-blue base colour | `[48.676, 99.784, 117.422]` | `b - r = 68.7` |
+| plain (no colour, no patterns) | `[72.010, 61.118, 45.108]` | channel spread `26.9` |
+
+The plain shield is the mid-magnitude anchor: its spread must sit below half
+of either dyed one's (`26.9 < 28.1`), which is what separates "the translucent
+layer is genuinely gated on `shield_has_patterns`" from "it always draws,
+tinted white, and happens to look plausible". A lime `creeper` layer over the
+red base moves **8** of 102 px to `[76, 118, 18]` while the other 94 stay
+`[97.7, 45.3, 43.7]` — the mask covers 20 of the 200 tintable texels, so ~8 px
+is the arithmetic and not a coincidence.
+
+**Two habits this is worth for.** First, when a subsystem's own instrumentation
+is green at every layer, the remaining suspects are the *inputs* the whole
+chain shares — here a matrix that was never in the chain to begin with.
+Second, a texture pair that differs on only one face makes a wrong-face bug
+present as "the feature does nothing" rather than as "the feature is wrong";
+diffing the two sheets and asking *where* they differ localised it faster than
+any amount of GPU instrumentation could.
+
+**Still unmodelled:** the accumulated transformation reaches `special` nodes
+only. `ItemModelOutput::Model` has no field for one, so a `minecraft:model`
+leaf's own transformation (e.g. `black_bed.json`'s sub-node) is still dropped,
+as it always was. Vanilla applies it there too, via `BlockModelWrapper.bake`.

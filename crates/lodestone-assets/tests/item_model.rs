@@ -153,7 +153,7 @@ fn special_node_surfaces_renderer_kind_and_base() {
         ItemModelNode::Special {
             base: loc("minecraft:item/template_skull"),
             kind: "minecraft:player_head".into(),
-            transformation: None,
+            transformation: Vec::new(),
         }
     );
     // The data-vs-code seam: the special renderer is enumerable as (base, kind).
@@ -173,7 +173,7 @@ fn special_node_surfaces_renderer_kind_and_base() {
         vec![ItemModelOutput::Special {
             base: &loc("minecraft:item/template_skull"),
             kind: "minecraft:player_head",
-            transformation: None,
+            transformation: &[],
         }]
     );
 }
@@ -196,7 +196,9 @@ fn special_node_carries_its_own_transformation() {
     let ItemModelNode::Special { transformation, .. } = &m.root else {
         panic!("expected a special node");
     };
-    let t = transformation.expect("the skull family carries a node transformation");
+    let [t] = transformation.as_slice() else {
+        panic!("the skull family carries exactly one node transformation");
+    };
     assert_eq!(t.translation, [0.5, 0.0, 0.5]);
     assert_eq!(t.left_rotation, [1.0, 0.0, 0.0, -0.0]);
     assert_eq!(t.scale, [1.0, 1.0, 1.0]);
@@ -209,17 +211,129 @@ fn special_node_carries_its_own_transformation() {
     let [ItemModelOutput::Special { transformation, .. }] = resolved.as_slice() else {
         panic!("expected one special output");
     };
-    assert_eq!(transformation.unwrap().translation, [0.5, 0.0, 0.5]);
+    assert_eq!(transformation[0].translation, [0.5, 0.0, 0.5]);
 }
 
-/// A `special` node whose JSON omits `"transformation"` entirely (every
-/// non-skull kind today, e.g. `chest.json`) parses to `None`, not to
-/// `Transformation::default()` — the caller must be able to tell "compose
-/// nothing" from "compose the identity", even though the two matrices are
-/// equal, because only the `None` case matches vanilla's `Optional::isEmpty`
-/// short-circuit in `Transformation.compose`.
+/// An **ancestor** node's `"transformation"` reaches the `special` node under
+/// it. This is `assets/minecraft/items/shield.json`'s exact shape, trimmed to
+/// the branch under test: the `scale [1, -1, -1]` that vanilla's
+/// `ShieldSpecialRenderer` used to apply in code is hoisted into the item
+/// definition and sits on the enclosing `minecraft:condition` node, **not** on
+/// the `minecraft:special` node.
+///
+/// Reading only the `special` node's own field dropped it, and the pixel-level
+/// consequence is unusually invisible: a shield drawn without the `z` flip
+/// shows the *back* of its plate, whose UV region is byte-identical between
+/// `entity/shield/shield_base.png` and `shield_base_nopattern.png` (they differ
+/// in exactly 200 texels, all inside the front-face rect), and over which every
+/// loom mask is fully transparent. So a dyed, a patterned and a plain shield
+/// all render bit-identical and every pattern layer moves zero pixels, with
+/// every draw call correctly issued.
+///
+/// The expected values come from the shipped jar file, not from this parser.
 #[test]
-fn special_node_with_no_transformation_field_parses_to_none() {
+fn an_ancestor_nodes_transformation_reaches_the_special_node_under_it() {
+    let json = br#"{"model":{
+        "type":"minecraft:condition",
+        "property":"minecraft:using_item",
+        "on_false":{"type":"minecraft:special",
+            "base":"minecraft:item/shield",
+            "model":{"type":"minecraft:shield"}},
+        "on_true":{"type":"minecraft:special",
+            "base":"minecraft:item/shield_blocking",
+            "model":{"type":"minecraft:shield"}},
+        "transformation":{
+            "left_rotation":[0.0,0.0,0.0,1.0],
+            "right_rotation":[0.0,0.0,0.0,1.0],
+            "scale":[1.0,-1.0,-1.0],
+            "translation":[0.0,0.0,0.0]
+        }}}"#;
+    let m = ItemModel::parse(json).unwrap();
+
+    // Both branches inherit it — the accumulation is static, exactly as
+    // vanilla's `bake` passes one composed matrix to `onTrue` and `onFalse`.
+    let ctx = Ctx::default();
+    let resolved = m.resolve(&ctx);
+    let [ItemModelOutput::Special { transformation, .. }] = resolved.as_slice() else {
+        panic!("expected one special output, got {resolved:?}");
+    };
+    assert_eq!(
+        transformation.len(),
+        1,
+        "the condition node's transformation must reach the special node's chain"
+    );
+    assert_eq!(transformation[0].scale, [1.0, -1.0, -1.0]);
+    assert_eq!(transformation[0].translation, [0.0, 0.0, 0.0]);
+
+    // `outputs()` walks every branch, so both `on_true` and `on_false` must
+    // carry it — a fix that only threaded the resolved branch would pass the
+    // assertion above and leave the blocking pose flipped the wrong way.
+    let all = m.outputs();
+    assert_eq!(all.len(), 2, "both branches are special nodes: {all:?}");
+    for output in &all {
+        let ItemModelOutput::Special { transformation, .. } = output else {
+            panic!("expected a special output, got {output:?}");
+        };
+        assert_eq!(transformation.len(), 1, "branch missing the chain: {output:?}");
+        assert_eq!(transformation[0].scale, [1.0, -1.0, -1.0]);
+    }
+}
+
+/// A node's own `"transformation"` composes **after** its ancestors', so the
+/// chain is ordered outermost-first — the order
+/// `compose_special_node_transform` folds it in, and the one vanilla's
+/// repeated `Transformation.compose(parent, this.transformation)` produces.
+///
+/// No shipped 26.2 item nests two (measured: 77 `special` nodes with exactly
+/// one on the path, 14 with none, zero with two), so this is the case only a
+/// resource pack reaches — and the case a design that stored a single
+/// `Option` could not represent at all.
+#[test]
+fn nested_transformations_accumulate_outermost_first() {
+    let json = br#"{"model":{
+        "type":"minecraft:condition",
+        "property":"minecraft:using_item",
+        "on_false":{"type":"minecraft:special",
+            "base":"minecraft:item/shield",
+            "model":{"type":"minecraft:shield"},
+            "transformation":{
+                "left_rotation":[0.0,0.0,0.0,1.0],
+                "right_rotation":[0.0,0.0,0.0,1.0],
+                "scale":[2.0,2.0,2.0],
+                "translation":[9.0,0.0,0.0]
+            }},
+        "on_true":{"type":"minecraft:empty"},
+        "transformation":{
+            "left_rotation":[0.0,0.0,0.0,1.0],
+            "right_rotation":[0.0,0.0,0.0,1.0],
+            "scale":[1.0,-1.0,-1.0],
+            "translation":[0.0,3.0,0.0]
+        }}}"#;
+    let m = ItemModel::parse(json).unwrap();
+    let ItemModelNode::Condition { on_false, .. } = &m.root else {
+        panic!("expected a condition root");
+    };
+    let ItemModelNode::Special { transformation, .. } = on_false.as_ref() else {
+        panic!("expected a special under on_false");
+    };
+    assert_eq!(transformation.len(), 2, "{transformation:?}");
+    // Outermost (the condition) first, then the node's own. The two differ on
+    // every component, so a reversed chain cannot satisfy this by accident.
+    assert_eq!(transformation[0].scale, [1.0, -1.0, -1.0]);
+    assert_eq!(transformation[0].translation, [0.0, 3.0, 0.0]);
+    assert_eq!(transformation[1].scale, [2.0, 2.0, 2.0]);
+    assert_eq!(transformation[1].translation, [9.0, 0.0, 0.0]);
+}
+
+/// A `special` node whose JSON omits `"transformation"` entirely, and whose
+/// ancestors carry none either (e.g. `chest.json`), parses to an **empty
+/// chain** rather than to a one-entry chain holding `Transformation::default()`
+/// — the caller must be able to tell "compose nothing" from "compose the
+/// identity", even though the two matrices are equal, because only the empty
+/// case matches vanilla's `Optional::isEmpty` short-circuit in
+/// `Transformation.compose`.
+#[test]
+fn special_node_with_no_transformation_field_parses_to_an_empty_chain() {
     let json = br#"{"model":{"type":"minecraft:special",
         "base":"minecraft:item/template_chest",
         "model":{"type":"minecraft:chest","texture":"minecraft:normal"}}}"#;
@@ -227,7 +341,10 @@ fn special_node_with_no_transformation_field_parses_to_none() {
     let ItemModelNode::Special { transformation, .. } = &m.root else {
         panic!("expected a special node");
     };
-    assert_eq!(*transformation, None);
+    assert!(
+        transformation.is_empty(),
+        "expected an empty chain, got {transformation:?}"
+    );
 }
 
 #[test]

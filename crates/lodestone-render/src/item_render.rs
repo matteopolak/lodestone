@@ -209,14 +209,23 @@ pub fn node_transform_matrix(t: &ItemNodeTransform) -> Mat4 {
 /// column-vector, right-to-left convention, so the direct translation is
 /// `outer * node_transform_matrix`, not the other way round.
 ///
-/// A no-op (`outer` unchanged) when `transformation` is `None` — vanilla's
-/// `Optional::isEmpty` short-circuit in the same `compose` overload.
+/// # Why a slice
+///
+/// `"transformation"` is a field of every item-definition node, not of
+/// `special` alone, and `bake` threads the accumulated matrix down the tree —
+/// so what reaches a `special` renderer is the whole root-to-node chain,
+/// outermost first. Folding left to right (`outer * m[0] * m[1] * …`)
+/// reproduces vanilla's repeated `parent.mul(child)`. An empty slice leaves
+/// `outer` unchanged, vanilla's `Optional::isEmpty` short-circuit.
+///
+/// Passing only the `special` node's own entry is what drew every shield
+/// back-to-front: its `scale [1, -1, -1]` lives on the enclosing
+/// `minecraft:condition` node.
 #[must_use]
-pub fn compose_special_node_transform(outer: Mat4, transformation: Option<ItemNodeTransform>) -> Mat4 {
-    match transformation {
-        Some(t) => outer * node_transform_matrix(&t),
-        None => outer,
-    }
+pub fn compose_special_node_transform(outer: Mat4, transformation: &[ItemNodeTransform]) -> Mat4 {
+    transformation
+        .iter()
+        .fold(outer, |acc, t| acc * node_transform_matrix(t))
 }
 
 /// The **GUI pixel space → clip space** projection for a `width_px × height_px`
