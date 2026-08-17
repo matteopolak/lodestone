@@ -399,11 +399,21 @@ fn the_boat_water_mask_hides_the_hollow_interior_a_bare_boat_rig_does_not() {
     // instance was submitted, so any pixel that differs between them is
     // attributable to the mask alone.
     let mut moved: Vec<usize> = Vec::new();
+    let (mut bb_x0, mut bb_y0, mut bb_x1, mut bb_y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
     for (i, (a, b)) in masked_water.chunks_exact(4).zip(unmasked_water.chunks_exact(4)).enumerate() {
         if differs(a, b) {
             moved.push(i);
+            let x = (i as u32) % W;
+            let y = (i as u32) / W;
+            bb_x0 = bb_x0.min(x);
+            bb_y0 = bb_y0.min(y);
+            bb_x1 = bb_x1.max(x);
+            bb_y1 = bb_y1.max(y);
         }
     }
+    eprintln!(
+        "moved-set bounding box: x{bb_x0}..{bb_x1} y{bb_y0}..{bb_y1} (frame {W}x{H})"
+    );
 
     let mut confirmed = 0usize;
     let mut mask_holds_but_reveal_fails = 0usize;
@@ -426,6 +436,22 @@ fn the_boat_water_mask_hides_the_hollow_interior_a_bare_boat_rig_does_not() {
 
     let total_masked_vs_nowater = diff_count(&masked_water, &masked_nowater);
     let total_unmasked_vs_nowater = diff_count(&unmasked_water, &unmasked_nowater);
+
+    // Sample up to 5 moved pixels' full RGBA across all four renders, to
+    // diagnose *what* is actually changing when the theory (water toggling
+    // through the gap) does not explain the moved set.
+    for &i in moved.iter().take(5) {
+        let px = i * 4;
+        let x = (i as u32) % W;
+        let y = (i as u32) / W;
+        eprintln!(
+            "  sample ({x},{y}): masked_water={:?} masked_nowater={:?} unmasked_water={:?} unmasked_nowater={:?}",
+            &masked_water[px..px + 4],
+            &masked_nowater[px..px + 4],
+            &unmasked_water[px..px + 4],
+            &unmasked_nowater[px..px + 4],
+        );
+    }
 
     eprintln!("=== boat water-clip mask pixel gate ===");
     eprintln!(
