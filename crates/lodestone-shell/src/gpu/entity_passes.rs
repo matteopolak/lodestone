@@ -661,36 +661,55 @@ impl RenderState {
             // `RaftRenderer`'s own empty `submitTypeAdditions` — see
             // `lodestone_assets::entity_models::boat_water_patch_model`'s doc
             // for why rafts get none of this. Pushed into the *same* `groups`
-            // key as the boat's own instance above: the patch shares no
-            // colour with anything (`write_mask` is empty), so `white`
-            // riding along is inert, and keeping one key means one fewer
-            // linear scan of `groups` per boat rather than two.
-            if e.type_path.as_ref().ends_with("_boat")
-                && let Some(patch) = self.entities.models.resolve_animated(
-                    "boat_water_patch",
-                    e.feet,
-                    e.yaw,
-                    e.pitch,
-                    e.scale,
-                    &e.anim,
-                    0.0,
-                    0.0,
-                )
-            {
-                let patch = patch.with_light(entity_light(&self.entity_light, e));
-                match groups.iter_mut().position(|(hurt, flash, url, s, _)| {
-                    *hurt == e.hurt && *flash == white && *url == skin && *s == sheet
-                }) {
-                    Some(i) => groups[i].4.push(patch),
-                    None => groups.push((e.hurt, white, skin.clone(), sheet, vec![patch])),
-                }
-            }
+            // key as the boat's own instance: the patch shares no colour with
+            // anything (`write_mask` is empty), so `white` riding along is
+            // inert, and keeping one key means one fewer linear scan of
+            // `groups` per boat rather than two.
+            //
+            // **After the boat's own instance, never before, and this is not a
+            // cosmetic ordering.** `plan_entities` batches in first-appearance
+            // order and `gpu/frame.rs` draws the batches in that order, so a
+            // patch pushed first writes depth at the waterline *before* the
+            // hull is drawn and the hull's own below-waterline planks then fail
+            // the depth test — a colour-write-disabled draw leaves whatever was
+            // already in the target, so the boat's interior comes out as
+            // background. Measured: 5,492 px of hull replaced by sky, with no
+            // water anywhere in the scene. Vanilla's order is explicit —
+            // `AbstractBoatRenderer.submit` calls `submitModel(this.model(),
+            // …)` and *then* `this.submitTypeAdditions(…)`, which is where
+            // `BoatRenderer` submits the patch.
+            let patch = if e.type_path.as_ref().ends_with("_boat") {
+                self.entities
+                    .models
+                    .resolve_animated(
+                        "boat_water_patch",
+                        e.feet,
+                        e.yaw,
+                        e.pitch,
+                        e.scale,
+                        &e.anim,
+                        0.0,
+                        0.0,
+                    )
+                    .map(|patch| patch.with_light(entity_light(&self.entity_light, e)))
+            } else {
+                None
+            };
 
             match groups.iter_mut().position(|(hurt, flash, url, s, _)| {
                 *hurt == e.hurt && *flash == white && *url == skin && *s == sheet
             }) {
                 Some(i) => groups[i].4.push(instance),
-                None => groups.push((e.hurt, white, skin, sheet, vec![instance])),
+                None => groups.push((e.hurt, white, skin.clone(), sheet, vec![instance])),
+            }
+
+            if let Some(patch) = patch {
+                match groups.iter_mut().position(|(hurt, flash, url, s, _)| {
+                    *hurt == e.hurt && *flash == white && *url == skin && *s == sheet
+                }) {
+                    Some(i) => groups[i].4.push(patch),
+                    None => groups.push((e.hurt, white, skin, sheet, vec![patch])),
+                }
             }
         }
 

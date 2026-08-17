@@ -36,31 +36,51 @@
 //!
 //! # The metric
 //!
-//! Four renders through one real water-filled world and one real camera:
-//! `masked_water` (`"oak_boat"`, water uploaded), `masked_nowater` (same
-//! entity, terrain skipped), `unmasked_water` (`"boat"`, water uploaded),
-//! `unmasked_nowater` (same, terrain skipped). The **moved set** is every
-//! pixel differing between `masked_water` and `unmasked_water` — by
-//! construction (identical camera, identical terrain, identical hull mesh)
-//! this can only be the hollow-interior region the mask does or does not
-//! occlude. Within that set, a working mask predicts two things at once,
-//! checked per pixel: `masked_water` must stay close to `masked_nowater`
-//! (masking hides the gap regardless of whether water exists to hide) and
-//! `unmasked_water` must move far from `unmasked_nowater` (revealing water
-//! is what a *missing* mask does). Both halves are asserted, mirroring
-//! `first_person_banner_hand_pixels.rs`'s moved/unmoved split — a mask that
-//! merely dims everything, or one bound to the wrong pipeline entirely,
-//! cannot satisfy both.
+//! Six renders through one real world and one real camera. Two are
+//! **entity-free references** — `bg` (no entity, no terrain: the background
+//! this scene actually has, rendered rather than restated as a constant) and
+//! `water_only` (no entity, puddle uploaded) — and four are the A/B:
+//! `masked_water` (`"oak_boat"`, puddle), `masked_nowater`, `unmasked_water`
+//! (`"boat"`, puddle), `unmasked_nowater`.
+//!
+//! Everything is scoped to two derived probes rather than to the frame. The
+//! coarse one is [`patch_screen_rect`], the water patch's **own baked
+//! vertices** projected through the **same** `part_transforms` the draw uses.
+//! The fine one is [`silhouette`]: the pixels the hull covers, measured
+//! against `bg`. The coarse rect alone is not enough — it also contains open
+//! water beside the hull, which legitimately changes with the puddle and
+//! which the mask correctly does not hide.
+//!
+//! Three separate claims come out of that, and each has failed for a
+//! different reason during this gate's life:
+//!
+//! 1. **The mask must not occlude the boat it belongs to.** With no water
+//!    anywhere, a depth-only draw has nothing behind it to hide, so adding the
+//!    mask instance must change **zero** pixels. Measured at 5,492 px when
+//!    `prepare_entities` pushed the patch *before* the boat's own instance:
+//!    `plan_entities` batches in first-appearance order, so the patch's depth
+//!    write depth-rejected the hull's own below-waterline planks and, having
+//!    no colour to write, left background showing through them.
+//! 2. **Without the mask, water paints inside the hull.** Measured: 4,578 of
+//!    the hull's 11,124 silhouette pixels.
+//! 3. **With the mask, it does not.** Measured: 645 — the residue being the
+//!    submerged *outside* of the hull, which vanilla's patch does not cover
+//!    either. The 3,933-pixel difference is then checked per pixel, and all
+//!    3,933 satisfy both halves at once (masked stays put when water is added
+//!    or removed, unmasked visibly reveals water): `confirmed=3933
+//!    mask-only=0 reveal-only=0`.
 //!
 //! # The negative control
 //!
-//! `RaftRenderer` has no `submitTypeAdditions` override, so
-//! `boat_water_patch_model`'s own doc records rafts get no mask at all —
-//! already checked at the CPU level
-//! (`entity_passes.rs`'s `ends_with("_boat")` never matches `"_raft"`). This
-//! file makes it a pixel one too: an `"oak_raft"` floating on the same water,
-//! same camera, must show a real, non-trivial pixel change between water
-//! present and absent, exactly like the unmasked boat.
+//! See [`a_raft_gets_no_mask_and_still_shows_real_water_change`]. It is not
+//! the claim its name suggests, and the reason is worth reading before
+//! trusting the number: a raft has no cavity, so water paints over only 9.2%
+//! of its silhouette against a *masked* boat's 5.8% and an unmasked boat's
+//! 41.2%. The raft sits nearer the masked boat, so any threshold separating
+//! the two on that axis would be fitted. What it asserts instead is exact:
+//! `"oak_raft"` and `"raft"` render byte-identically (the suffix rule does not
+//! fire), with `"oak_boat"` versus `"boat"` as the positive control that the
+//! comparison can see a mask at all.
 //!
 //! Fail-closed like every gate in this crate: no GPU adapter or no
 //! `client.jar` is a failure, never a skip.
@@ -83,13 +103,14 @@ const H: u32 = 360;
 const FOV_Y_DEGREES: f32 = 50.0;
 
 /// Render distance for the water world, in chunks — small on purpose: this
-/// gate needs a lake big enough to fill the frame around one boat, not a
-/// realistic view distance.
+/// gate needs a few loaded columns around one boat, not a realistic view
+/// distance. The water itself is a 3x3 puddle; see [`water_world`].
 const RD_CHUNKS: i32 = 3;
 const MIN_Y: i32 = 0;
-/// Water fills `[MIN_Y, SURFACE_Y)`; the boat floats with its feet exactly at
-/// the surface, matching how `distant_flat_terrain_holes.rs` stands a player
-/// on `SURFACE_Y`. One section of water plus one of headroom for the boat and
+/// The water surface: the puddle occupies the single layer `SURFACE_Y - 1`, so
+/// its top face is at `SURFACE_Y`. The boat does **not** stand on it — see
+/// [`BOAT_FEET_Y`] for the draft that makes this gate able to measure
+/// anything. One section for the water plus one of headroom for the boat and
 /// camera.
 const SURFACE_Y: i32 = 16;
 const SECTION_COUNT: usize = 2;
@@ -135,8 +156,32 @@ fn air_state() -> u32 {
         .expect("minecraft:air must exist in the 26.2 block-state table")
 }
 
-/// A flat lake of radius [`RD_CHUNKS`] chunks, fully loaded before any
-/// section is meshed, under open daylight.
+/// Half-width, in blocks, of the water the boat floats on — a **puddle**, not
+/// a lake. See [`water_world`]'s doc for why the size is the whole point. The
+/// value is not free: the puddle must contain the hull's whole world-space
+/// footprint (asserted, from the resolved instance's own AABB) and no more.
+const PUDDLE_RADIUS: i32 = 1;
+
+/// A 3×3×1 puddle of water directly under the boat, in an otherwise empty
+/// air world, fully loaded before any section is meshed, under open daylight.
+///
+/// # Why this is a puddle and not a lake
+///
+/// The first version of this fixture filled every block of a 7×7-chunk region
+/// below `SURFACE_Y` with water. That made the gate unable to answer its own
+/// question, in the way `CLAUDE.md` calls the *world* species: the raft
+/// negative control measured **159,068** changed pixels between water present
+/// and water absent — 92% of a 480×360 frame — because it was measuring the
+/// background ocean, not the raft's hollow, and the boat arm's whole-frame
+/// numbers (157,812 either way) were the same quantity. Neither figure had
+/// anything to do with the hull.
+///
+/// Water only under the boat makes every water/no-water difference a *local*
+/// one, and [`patch_screen_rect`] then narrows it further to the exact region
+/// the mask covers. `PUDDLE_RADIUS` is the smallest value whose world extent
+/// still contains the hull's own footprint, and the gate asserts that
+/// containment from the resolved instance's AABB rather than trusting the
+/// constant.
 ///
 /// See `distant_flat_terrain_holes.rs::flat_world`'s doc for why the light
 /// step is not optional: a column's light defaults to `LightData::Missing`,
@@ -168,11 +213,139 @@ fn water_world() -> World {
             );
         }
     }
-    let lo = -RD_CHUNKS * 16;
-    let hi = RD_CHUNKS * 16 + 15;
-    let written = world.fill_region([lo, MIN_Y, lo], [hi, SURFACE_Y - 1, hi], water);
-    assert!(written > 0, "fixture: fill_region must actually write water");
+    let written = world.fill_region(
+        [-PUDDLE_RADIUS, SURFACE_Y - 1, -PUDDLE_RADIUS],
+        [PUDDLE_RADIUS, SURFACE_Y - 1, PUDDLE_RADIUS],
+        water,
+    );
+    let expected = (2 * PUDDLE_RADIUS + 1).pow(2) as usize;
+    assert_eq!(
+        written, expected,
+        "fixture: the puddle must be exactly {expected} water blocks, one layer deep"
+    );
     world
+}
+
+/// A screen-space rectangle, half-open on neither edge (both bounds
+/// inclusive), in target pixels.
+#[derive(Debug, Clone, Copy)]
+struct Rect {
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+}
+
+impl Rect {
+    fn contains(self, x: u32, y: u32) -> bool {
+        x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
+    }
+
+    fn area(self) -> usize {
+        ((self.x1 - self.x0 + 1) as usize) * ((self.y1 - self.y0 + 1) as usize)
+    }
+}
+
+/// World point → target pixel, the same expression every other pixel gate in
+/// this crate uses (`bell_block_entity_pixels.rs`'s `project`).
+fn project(view_proj: glam::Mat4, world: glam::Vec3) -> (f32, f32) {
+    let clip = view_proj * glam::Vec4::new(world.x, world.y, world.z, 1.0);
+    (
+        (clip.x / clip.w * 0.5 + 0.5) * W as f32,
+        (1.0 - (clip.y / clip.w * 0.5 + 0.5)) * H as f32,
+    )
+}
+
+/// The screen rect the water-clip mask actually covers, projected from the
+/// `boat_water_patch` mesh's **own baked vertices** through the **same**
+/// `part_transforms` the draw uses — never a hand-guessed rect, and never the
+/// bounding box of a measurement this gate then asserts on.
+///
+/// This is the probe the old whole-frame diffs lacked. `mesh.local_min`/
+/// `local_max` would do as a coarser version, but the patch is a plate posed
+/// by a 90° X rotation under its root, so its rest AABB and its posed extent
+/// are different rectangles and only the posed one is where pixels land.
+fn patch_screen_rect(
+    models: &lodestone_render::EntityModelSet,
+    feet: glam::Vec3,
+    yaw: f32,
+    view_proj: glam::Mat4,
+) -> Rect {
+    let anim = AnimInput::REST;
+    let patch = models
+        .resolve_animated("boat_water_patch", feet, yaw, 0.0, 1.0, &anim, 0.0, 0.0)
+        .expect("\"boat_water_patch\" must resolve through the real corpus loader");
+    let mesh = models
+        .get("boat_water_patch")
+        .expect("the corpus must carry the water-patch mesh");
+    let mut min = (f32::MAX, f32::MAX);
+    let mut max = (f32::MIN, f32::MIN);
+    for (index, range) in mesh.parts.iter().enumerate() {
+        let start = range.vertex_start as usize;
+        let end = start + range.vertex_count as usize;
+        for vertex in &mesh.vertices[start..end] {
+            let world =
+                patch.part_transforms[index].transform_point3(glam::Vec3::from(vertex.position));
+            let (sx, sy) = project(view_proj, world);
+            min = (min.0.min(sx), min.1.min(sy));
+            max = (max.0.max(sx), max.1.max(sy));
+        }
+    }
+    assert!(
+        min.0 < max.0 && min.1 < max.1,
+        "the water patch projected to a degenerate rect ({min:?}..{max:?}) — the camera does \
+         not see it at all and every measurement below would be of empty background"
+    );
+    Rect {
+        x0: min.0.max(0.0).floor() as u32,
+        y0: min.1.max(0.0).floor() as u32,
+        x1: max.0.min((W - 1) as f32).ceil() as u32,
+        y1: max.1.min((H - 1) as f32).ceil() as u32,
+    }
+}
+
+/// The screen rect the puddle itself occupies, projected from the world AABB
+/// [`water_world`] fills — the "and not everywhere" half of this fixture,
+/// expressed as a containment claim a whole-frame *fraction* cannot make.
+fn puddle_screen_rect(view_proj: glam::Mat4) -> Rect {
+    let lo = -PUDDLE_RADIUS as f32;
+    let hi = (PUDDLE_RADIUS + 1) as f32;
+    let (mut min, mut max) = ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN));
+    for &x in &[lo, hi] {
+        for &y in &[(SURFACE_Y - 1) as f32, SURFACE_Y as f32] {
+            for &z in &[lo, hi] {
+                let (sx, sy) = project(view_proj, glam::Vec3::new(x, y, z));
+                min = (min.0.min(sx), min.1.min(sy));
+                max = (max.0.max(sx), max.1.max(sy));
+            }
+        }
+    }
+    Rect {
+        x0: min.0.max(0.0).floor() as u32,
+        y0: min.1.max(0.0).floor() as u32,
+        x1: max.0.min((W - 1) as f32).ceil() as u32,
+        y1: max.1.min((H - 1) as f32).ceil() as u32,
+    }
+}
+
+/// Pixels differing between `a` and `b` that lie **outside** `rect`.
+fn diff_outside(a: &[u8], b: &[u8], rect: Rect) -> usize {
+    a.chunks_exact(4)
+        .zip(b.chunks_exact(4))
+        .enumerate()
+        .filter(|(i, _)| !rect.contains((*i as u32) % W, (*i as u32) / W))
+        .filter(|(_, (x, y))| differs(x, y))
+        .count()
+}
+
+/// [`diff_count`], restricted to `rect`.
+fn diff_in(a: &[u8], b: &[u8], rect: Rect) -> usize {
+    a.chunks_exact(4)
+        .zip(b.chunks_exact(4))
+        .enumerate()
+        .filter(|(i, _)| rect.contains((*i as u32) % W, (*i as u32) / W))
+        .filter(|(_, (x, y))| differs(x, y))
+        .count()
 }
 
 /// Mesh and upload every section through the real live-vanilla path
@@ -240,6 +413,43 @@ const BOAT_FEET_X: f32 = 0.5;
 const BOAT_FEET_Z: f32 = 0.5;
 const BOAT_YAW: f32 = 35.0;
 
+/// How far above `feet` the water-patch plate's **centre** sits, in blocks,
+/// composed from the two offsets that put it there:
+///
+/// * `non_living_vehicle_matrix`'s `0.375` bob (vanilla's
+///   `poseStack.translate(0, 0.375F, 0)` in `AbstractBoatRenderer.submit`), and
+/// * the plate's own `PartPose::offset(0, -3, 1)` — `3/16 = 0.1875` blocks,
+///   sign-flipped by the placement's `scale(-1, -1, 1)` — and its `3/16`
+///   thickness, whose midpoint is therefore `0.375 + 0.1875/2`.
+///
+/// Measured against the resolved instance rather than trusted: with `feet.y`
+/// at `16.0` the patch's world AABB is `16.3750..16.5625`, centre `16.46875`.
+const PATCH_CENTRE_ABOVE_FEET: f32 = 0.375 + 0.1875 / 2.0;
+
+/// The boat's floating height: the one placement at which the world's water
+/// **surface** lies inside the water patch.
+///
+/// # Why this is the whole fixture
+///
+/// The first version of this gate put `feet.y` at `SURFACE_Y` exactly, which
+/// stands the boat *on top of* the water like a bathtub on a floor: measured,
+/// the hull spanned `16.0000..16.8836` and the patch `16.3750..16.5625` with
+/// the water surface at `16.0`, so every part of the boat was above every part
+/// of the water. The mask then has nothing to occlude — its own opaque hull
+/// already hides the surface — and the gate measured `reveal == hidden ==
+/// 3016` with the masked and unmasked renders **pixel-identical** inside the
+/// mask's own rect. That is `CLAUDE.md`'s *world* species exactly: the input
+/// does not contain the structure the code under test exists to handle.
+///
+/// What the mask is *for* is a **partially submerged** boat, where the water
+/// surface plane passes through the open hull and the translucent water pass
+/// (depth-write off, drawn after entities) paints it inside the boat's cavity.
+/// Vanilla authors the patch at the boat's own waterline, so aligning the
+/// surface with the patch plane is not a tuned number — it is the definition
+/// of floating, read off the model. The resulting draft (`0.53` blocks
+/// submerged, `0.35` proud) is asserted at runtime rather than assumed.
+const BOAT_FEET_Y: f32 = SURFACE_Y as f32 - PATCH_CENTRE_ABOVE_FEET;
+
 fn boat_draw(type_path: &str) -> EntityDraw {
     EntityDraw {
         hurt: false,
@@ -250,7 +460,7 @@ fn boat_draw(type_path: &str) -> EntityDraw {
         equipment: Vec::new(),
         equipment_dye: Vec::new(),
         equipment_trim: Vec::new(),
-        feet: glam::Vec3::new(BOAT_FEET_X, SURFACE_Y as f32, BOAT_FEET_Z),
+        feet: glam::Vec3::new(BOAT_FEET_X, BOAT_FEET_Y, BOAT_FEET_Z),
         yaw: BOAT_YAW,
         head_yaw: BOAT_YAW,
         pitch: 0.0,
@@ -322,7 +532,7 @@ fn render_frame(
     models: &lodestone_render::BlockModels,
     camera: &Camera,
     upload_terrain: bool,
-    entity_type_path: &str,
+    entity_type_path: Option<&str>,
 ) -> (Vec<u8>, lodestone::gpu::RenderStats) {
     let mut state = RenderState::new(device, queue, format, W, H, Some(atlas));
     suppress_first_person_arm(&mut state);
@@ -336,10 +546,75 @@ fn render_frame(
     // section renders as pure fog colour, indistinguishable from having no
     // water at all.
     state.update_animation(queue, FADE_COMPLETE_TICK);
-    let boat = boat_draw(entity_type_path);
+    // `None` is the entity-free reference render: the background this scene
+    // actually has, rendered rather than restated as a constant. `CLAUDE.md`
+    // records the measurement that makes this mandatory — the real background
+    // is `SkyFrame::clear_color`, a time-of-day and eye-height resolved fog
+    // colour under a sky disc, not any `SKY_COLOR` a test could hardcode.
+    let entity = entity_type_path.map(boat_draw);
+    let entities: &[EntityDraw] = match &entity {
+        Some(e) => std::slice::from_ref(e),
+        None => &[],
+    };
     let frame = target.acquire().expect("headless acquire");
-    let stats = state.render(device, queue, frame.view(), camera, None, std::slice::from_ref(&boat));
+    let stats = state.render(device, queue, frame.view(), camera, None, entities);
     (target.read_texels(device, queue), stats)
+}
+
+
+
+/// The **exact** world-space XZ footprint of a resolved entity: its baked
+/// vertices through its own `part_transforms`, not `EntityInstance::aabb_*`.
+///
+/// The instance AABB is a *cull* box and is padded — measured, the boat's is
+/// `x -1.302..2.302` against a real hull footprint under half that. Using it
+/// as a fixture premise would demand a puddle twice the size the boat needs.
+fn world_footprint(
+    mesh: &lodestone_render::entity::EntityMesh,
+    part_transforms: &[glam::Mat4],
+) -> (glam::Vec2, glam::Vec2) {
+    let mut min = glam::Vec2::splat(f32::MAX);
+    let mut max = glam::Vec2::splat(f32::MIN);
+    for (index, range) in mesh.parts.iter().enumerate() {
+        let start = range.vertex_start as usize;
+        let end = start + range.vertex_count as usize;
+        for vertex in &mesh.vertices[start..end] {
+            let w = part_transforms[index].transform_point3(glam::Vec3::from(vertex.position));
+            min = min.min(glam::Vec2::new(w.x, w.z));
+            max = max.max(glam::Vec2::new(w.x, w.z));
+        }
+    }
+    (min, max)
+}
+
+/// The pixels inside `rect` where `subject` differs from the entity-free
+/// `bg` render — the entity's own silhouette, **measured** against a rendered
+/// reference rather than derived from a colour constant.
+///
+/// This is the probe every water claim below is scoped to, and it is a
+/// tighter one than [`patch_screen_rect`]'s axis-aligned bounding box. The
+/// box is right for "where could the mask possibly act", but it also contains
+/// open water beside the hull, which legitimately changes when the puddle is
+/// added or removed and which the mask is correctly not hiding. Measured with
+/// the box alone: 8,038 px "revealed" against 4,001 px "hidden", of which the
+/// great majority on both sides was that open water.
+fn silhouette(subject: &[u8], bg: &[u8], rect: Rect) -> Vec<usize> {
+    subject
+        .chunks_exact(4)
+        .zip(bg.chunks_exact(4))
+        .enumerate()
+        .filter(|(i, _)| rect.contains((*i as u32) % W, (*i as u32) / W))
+        .filter(|(_, (s, b))| differs(s, b))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// How many of `indices` differ between `a` and `b`.
+fn changed_within(indices: &[usize], a: &[u8], b: &[u8]) -> usize {
+    indices
+        .iter()
+        .filter(|&&i| differs(&a[i * 4..i * 4 + 4], &b[i * 4..i * 4 + 4]))
+        .count()
 }
 
 #[test]
@@ -356,142 +631,256 @@ fn the_boat_water_mask_hides_the_hollow_interior_a_bare_boat_rig_does_not() {
         .models()
         .expect("the vanilla load must attach baked block models");
 
+    let rig = lodestone_render::EntityModelSet::load();
+    let feet = glam::Vec3::new(BOAT_FEET_X, BOAT_FEET_Y, BOAT_FEET_Z);
+
     // Premise, asserted directly rather than assumed: `"boat"` and
     // `"oak_boat"` must resolve to the identical rig, or this A/B is not
     // isolating the mask at all.
-    {
-        let rig = lodestone_render::EntityModelSet::load();
-        let anim = AnimInput::REST;
-        let feet = glam::Vec3::new(BOAT_FEET_X, SURFACE_Y as f32, BOAT_FEET_Z);
-        let bare = rig
-            .resolve_animated("boat", feet, BOAT_YAW, 0.0, 1.0, &anim, 0.0, 0.0)
-            .expect("\"boat\" must resolve");
-        let real = rig
-            .resolve_animated("oak_boat", feet, BOAT_YAW, 0.0, 1.0, &anim, 0.0, 0.0)
-            .expect("\"oak_boat\" must resolve");
-        assert_eq!(
-            bare.model, real.model,
-            "\"boat\" and \"oak_boat\" must resolve to the same corpus rig for this A/B to \
-             isolate only the water-mask instance"
-        );
-        assert_eq!(
-            bare.transform, real.transform,
-            "\"boat\" and \"oak_boat\" must place identically for this A/B to isolate only \
-             the water-mask instance"
-        );
-    }
+    let anim = AnimInput::REST;
+    let hull = rig
+        .resolve_animated("boat", feet, BOAT_YAW, 0.0, 1.0, &anim, 0.0, 0.0)
+        .expect("\"boat\" must resolve");
+    let real = rig
+        .resolve_animated("oak_boat", feet, BOAT_YAW, 0.0, 1.0, &anim, 0.0, 0.0)
+        .expect("\"oak_boat\" must resolve");
+    assert_eq!(
+        hull.model, real.model,
+        "\"boat\" and \"oak_boat\" must resolve to the same corpus rig for this A/B to \
+         isolate only the water-mask instance"
+    );
+    assert_eq!(
+        hull.transform, real.transform,
+        "\"boat\" and \"oak_boat\" must place identically for this A/B to isolate only the \
+         water-mask instance"
+    );
+    let patch = rig
+        .resolve_animated("boat_water_patch", feet, BOAT_YAW, 0.0, 1.0, &anim, 0.0, 0.0)
+        .expect("\"boat_water_patch\" must resolve");
+
+    let (foot_min, foot_max) = world_footprint(
+        rig.get(hull.model).expect("the hull mesh resolved above"),
+        &hull.part_transforms,
+    );
 
     let world = water_world();
     let cam = camera();
+    let probe = patch_screen_rect(&rig, feet, BOAT_YAW, cam.view_projection());
+    let puddle = puddle_screen_rect(cam.view_projection());
 
-    let (masked_water, masked_water_stats) =
-        render_frame(device, queue, format, &mut target, &atlas, &world, models, &cam, true, "oak_boat");
-    let (masked_nowater, _) =
-        render_frame(device, queue, format, &mut target, &atlas, &world, models, &cam, false, "oak_boat");
-    let (unmasked_water, unmasked_water_stats) =
-        render_frame(device, queue, format, &mut target, &atlas, &world, models, &cam, true, "boat");
-    let (unmasked_nowater, _) =
-        render_frame(device, queue, format, &mut target, &atlas, &world, models, &cam, false, "boat");
+    let shoot = |target: &mut HeadlessTarget, terrain: bool, entity: Option<&str>| {
+        render_frame(
+            device, queue, format, target, &atlas, &world, models, &cam, terrain, entity,
+        )
+    };
 
-    // The moved set: by construction (identical camera, identical terrain,
-    // identical hull mesh) the only geometry difference between
-    // `masked_water` and `unmasked_water` is whether the water-clip mask
-    // instance was submitted, so any pixel that differs between them is
-    // attributable to the mask alone.
-    let mut moved: Vec<usize> = Vec::new();
-    let (mut bb_x0, mut bb_y0, mut bb_x1, mut bb_y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
-    for (i, (a, b)) in masked_water.chunks_exact(4).zip(unmasked_water.chunks_exact(4)).enumerate() {
-        if differs(a, b) {
-            moved.push(i);
-            let x = (i as u32) % W;
-            let y = (i as u32) / W;
-            bb_x0 = bb_x0.min(x);
-            bb_y0 = bb_y0.min(y);
-            bb_x1 = bb_x1.max(x);
-            bb_y1 = bb_y1.max(y);
-        }
-    }
-    eprintln!(
-        "moved-set bounding box: x{bb_x0}..{bb_x1} y{bb_y0}..{bb_y1} (frame {W}x{H})"
-    );
+    // The two entity-free references. `bg` is what this scene's background
+    // actually is (rendered, never a hardcoded sky constant — `CLAUDE.md`
+    // records the measurement that makes that mandatory), and `water_only` is
+    // where the puddle paints with no hull in the way.
+    let (bg, _) = shoot(&mut target, false, None);
+    let (water_only, _) = shoot(&mut target, true, None);
 
+    let (masked_water, masked_stats) = shoot(&mut target, true, Some("oak_boat"));
+    let (masked_nowater, _) = shoot(&mut target, false, Some("oak_boat"));
+    let (unmasked_water, unmasked_stats) = shoot(&mut target, true, Some("boat"));
+    let (unmasked_nowater, _) = shoot(&mut target, false, Some("boat"));
+
+    // The boat's own silhouette, in the dry scene: every pixel the hull
+    // covers. Water appearing on any of these in the wet scene is water
+    // painting *over the boat*, which is the whole subject.
+    let hull_px = silhouette(&unmasked_nowater, &bg, probe);
+
+    let water_frame = diff_count(&water_only, &bg);
+    let water_outside = diff_outside(&water_only, &bg, puddle);
+    // The ordering guard: with no water anywhere, a depth-only draw has
+    // nothing behind it to hide, so adding the mask must change nothing.
+    let mask_eats_hull = diff_count(&masked_nowater, &unmasked_nowater);
+    let wet_unmasked = changed_within(&hull_px, &unmasked_water, &unmasked_nowater);
+    let wet_masked = changed_within(&hull_px, &masked_water, &masked_nowater);
+
+    // The moved set and its per-pixel confirmation — the original metric this
+    // gate was written around, now against a fixture that can produce it.
+    let mut moved = 0usize;
     let mut confirmed = 0usize;
-    let mut mask_holds_but_reveal_fails = 0usize;
-    let mut reveal_holds_but_mask_fails = 0usize;
-    for &i in &moved {
+    let mut mask_only = 0usize;
+    let mut reveal_only = 0usize;
+    let (mut bx0, mut by0, mut bx1, mut by1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for i in 0..(W * H) as usize {
         let px = i * 4;
-        let mw = &masked_water[px..px + 4];
-        let mn = &masked_nowater[px..px + 4];
-        let uw = &unmasked_water[px..px + 4];
-        let un = &unmasked_nowater[px..px + 4];
-        let mask_holds = !differs(mw, mn);
-        let reveal_holds = differs(uw, un);
-        match (mask_holds, reveal_holds) {
+        let (mw, mn) = (&masked_water[px..px + 4], &masked_nowater[px..px + 4]);
+        let (uw, un) = (&unmasked_water[px..px + 4], &unmasked_nowater[px..px + 4]);
+        if !differs(mw, uw) {
+            continue;
+        }
+        moved += 1;
+        let (x, y) = ((i as u32) % W, (i as u32) / W);
+        bx0 = bx0.min(x);
+        by0 = by0.min(y);
+        bx1 = bx1.max(x);
+        by1 = by1.max(y);
+        match (!differs(mw, mn), differs(uw, un)) {
             (true, true) => confirmed += 1,
-            (true, false) => mask_holds_but_reveal_fails += 1,
-            (false, true) => reveal_holds_but_mask_fails += 1,
+            (true, false) => mask_only += 1,
+            (false, true) => reveal_only += 1,
             (false, false) => {}
         }
     }
 
-    let total_masked_vs_nowater = diff_count(&masked_water, &masked_nowater);
-    let total_unmasked_vs_nowater = diff_count(&unmasked_water, &unmasked_nowater);
-
-    // Sample up to 5 moved pixels' full RGBA across all four renders, to
-    // diagnose *what* is actually changing when the theory (water toggling
-    // through the gap) does not explain the moved set.
-    for &i in moved.iter().take(5) {
-        let px = i * 4;
-        let x = (i as u32) % W;
-        let y = (i as u32) / W;
-        eprintln!(
-            "  sample ({x},{y}): masked_water={:?} masked_nowater={:?} unmasked_water={:?} unmasked_nowater={:?}",
-            &masked_water[px..px + 4],
-            &masked_nowater[px..px + 4],
-            &unmasked_water[px..px + 4],
-            &unmasked_nowater[px..px + 4],
-        );
-    }
-
     eprintln!("=== boat water-clip mask pixel gate ===");
     eprintln!(
-        "masked_water: third_person_body_drawn={} entity draw_calls={}",
-        masked_water_stats.third_person_body_drawn, masked_water_stats.draw_calls
+        "geometry: feet.y={:.4}, water surface y={SURFACE_Y}, hull y {:.4}..{:.4}, \
+         patch y {:.4}..{:.4}, hull footprint x {:.3}..{:.3} z {:.3}..{:.3}",
+        feet.y,
+        hull.aabb_min.y,
+        hull.aabb_max.y,
+        patch.aabb_min.y,
+        patch.aabb_max.y,
+        foot_min.x,
+        foot_max.x,
+        foot_min.y,
+        foot_max.y
     );
     eprintln!(
-        "unmasked_water: third_person_body_drawn={} entity draw_calls={}",
-        unmasked_water_stats.third_person_body_drawn, unmasked_water_stats.draw_calls
+        "probe rect (projected water patch) = x{}..{} y{}..{} ({} px); puddle rect = \
+         x{}..{} y{}..{} ({} px); frame {W}x{H}",
+        probe.x0,
+        probe.x1,
+        probe.y0,
+        probe.y1,
+        probe.area(),
+        puddle.x0,
+        puddle.x1,
+        puddle.y0,
+        puddle.y1,
+        puddle.area()
     );
     eprintln!(
-        "moved (masked_water vs unmasked_water) = {} px, of which confirmed={confirmed} \
-         (mask holds + reveal fires), mask-only={mask_holds_but_reveal_fails}, \
-         reveal-only={reveal_holds_but_mask_fails}",
-        moved.len()
+        "entity draw calls: masked={} unmasked={}",
+        masked_stats.draw_calls, unmasked_stats.draw_calls
     );
     eprintln!(
-        "whole-frame diff masked_water vs masked_nowater   = {total_masked_vs_nowater} px \
-         (includes legitimate water beside the hull, not just the interior)"
+        "puddle vs empty background: {water_frame} px whole frame, {water_outside} px outside \
+         the puddle's own projected rect"
     );
+    eprintln!("mask with no water in the scene at all = {mask_eats_hull} px");
+    eprintln!("hull silhouette inside the probe = {} px", hull_px.len());
+    eprintln!("  water paints over the hull, unmasked = {wet_unmasked} px");
+    eprintln!("  water paints over the hull, masked   = {wet_masked} px");
     eprintln!(
-        "whole-frame diff unmasked_water vs unmasked_nowater = {total_unmasked_vs_nowater} px"
+        "moved (masked vs unmasked, both wet) = {moved} px, bbox x{bx0}..{bx1} y{by0}..{by1}; \
+         confirmed={confirmed} mask-only={mask_only} reveal-only={reveal_only}"
     );
 
+    // --- Fixture premises, before any claim about the mask -------------------
+
+    let surface = SURFACE_Y as f32;
     assert!(
-        moved.len() > 40,
-        "masked_water and unmasked_water (identical hull mesh, identical camera, identical \
-         terrain, differing only in whether the water-clip mask instance was submitted) are \
-         pixel-identical to within a rounding wobble ({} px moved) — the mask is reaching no \
-         pixels at all, which is exactly the gap this gate exists to close",
-        moved.len()
+        hull.aabb_min.y < surface && hull.aabb_max.y > surface,
+        "the hull spans {:.4}..{:.4} against a water surface at {surface} — the boat is not \
+         partially submerged, so the water plane never enters its cavity. Measured in that \
+         state (feet at SURFACE_Y): the mask changed nothing at all, `reveal == hidden == \
+         3016` and the masked and unmasked renders were pixel-identical. See `BOAT_FEET_Y`",
+        hull.aabb_min.y,
+        hull.aabb_max.y
     );
     assert!(
-        confirmed as f32 > moved.len() as f32 * 0.5,
-        "of {} pixels the mask instance moved, only {confirmed} satisfy BOTH halves of the \
-         claim (masked stays put when water is added/removed, AND unmasked visibly reveals \
-         water) — mask-only (moved but water never actually shows through when unmasked) = \
-         {mask_holds_but_reveal_fails}, reveal-only (water shows through even with the mask \
-         present) = {reveal_holds_but_mask_fails}. A working mask should dominate this set.",
-        moved.len()
+        patch.aabb_min.y < surface && patch.aabb_max.y > surface,
+        "the water patch spans {:.4}..{:.4} against a water surface at {surface} — the mask \
+         must straddle the surface it exists to occlude, or its depth write lands behind the \
+         water and changes nothing",
+        patch.aabb_min.y,
+        patch.aabb_max.y
+    );
+    assert!(
+        water_frame > 0,
+        "the puddle painted no pixels at all against an empty background — the fixture is not \
+         rendering water and everything below would be measuring nothing"
+    );
+    // A *puddle*, not an ocean — as a containment claim rather than a
+    // whole-frame fraction, because a fraction is a threshold and this is an
+    // exact property: water may only paint where the region `water_world`
+    // fills projects to.
+    assert_eq!(
+        water_outside, 0,
+        "{water_outside} pixels changed when the puddle was added that lie outside the \
+         puddle's own projected rect — the fixture is putting water somewhere other than \
+         under the boat, which is the background-ocean measurement this gate used to make"
+    );
+    // …and the containment claim must not be vacuous: it says nothing if the
+    // projected rect has been clamped to the whole frame.
+    assert!(
+        puddle.area() < (W * H) as usize,
+        "the puddle's projected rect covers the entire {}x{} frame, so the containment \
+         assertion above proves nothing about locality",
+        W,
+        H
+    );
+    // The other half of "exactly under the boat": the puddle must contain the
+    // hull's whole world footprint, or part of the boat floats over air and
+    // the water plane never enters that part of its cavity. Derived from the
+    // resolved instance's own AABB and the region `water_world` fills, so
+    // neither `PUDDLE_RADIUS` nor `BOAT_YAW` can drift out of agreement
+    // silently.
+    let (p_lo, p_hi) = (-PUDDLE_RADIUS as f32, (PUDDLE_RADIUS + 1) as f32);
+    assert!(
+        foot_min.x >= p_lo && foot_max.x <= p_hi && foot_min.y >= p_lo && foot_max.y <= p_hi,
+        "the hull's footprint x {:.3}..{:.3} z {:.3}..{:.3} is not inside the puddle's \
+         {p_lo}..{p_hi} square — part of the boat is over dry air",
+        foot_min.x,
+        foot_max.x,
+        foot_min.y,
+        foot_max.y
+    );
+    assert!(
+        hull_px.len() > 500,
+        "the boat's silhouette inside the mask's own rect is only {} px — too small to \
+         measure anything through",
+        hull_px.len()
+    );
+
+    // --- The mask must not occlude the boat it belongs to --------------------
+
+    assert_eq!(
+        mask_eats_hull, 0,
+        "with no water anywhere in the scene, adding the depth-only water-mask instance \
+         changed {mask_eats_hull} pixels — a colour-write-disabled draw can only do that by \
+         depth-rejecting geometry drawn after it, i.e. the boat's own hull, which then shows \
+         background. Vanilla submits the model first (`AbstractBoatRenderer.submit`: \
+         `submitModel(this.model(), ...)` then `this.submitTypeAdditions(...)`), so \
+         `prepare_entities` must push the patch instance after the boat's own — \
+         `plan_entities` batches in first-appearance order and `gpu/frame.rs` draws them in \
+         that order. Measured in the wrong order: 5,492 px of hull replaced by sky"
+    );
+
+    // --- The mask does its job ----------------------------------------------
+
+    assert!(
+        wet_unmasked > 500,
+        "without the mask, water painted over only {wet_unmasked} of the boat's {} silhouette \
+         pixels — the water plane is not reaching the hull's interior even unmasked, so there \
+         is nothing for the mask to hide and every claim below would be vacuous",
+        hull_px.len()
+    );
+    assert!(
+        wet_masked * 4 < wet_unmasked,
+        "the mask left water painting over {wet_masked} of the boat's silhouette where the \
+         unmasked rig shows {wet_unmasked} — the patch covers the hull's whole interior at \
+         the waterline, so it must remove the great majority of them. What it correctly does \
+         not remove is the submerged *outside* of the hull, which vanilla's patch does not \
+         cover either"
+    );
+    assert!(
+        moved > 40,
+        "masked and unmasked renders of the same scene (identical hull mesh, identical \
+         camera, identical water) differ by only {moved} pixels — the mask is reaching no \
+         pixels at all, which is exactly the gap this gate exists to close"
+    );
+    assert!(
+        confirmed as f32 > moved as f32 * 0.5,
+        "of {moved} pixels the mask instance moved, only {confirmed} satisfy BOTH halves of \
+         the claim (masked stays put when water is added or removed, AND unmasked visibly \
+         reveals water) — mask-only={mask_only}, reveal-only={reveal_only}"
     );
     assert!(
         confirmed > 20,
@@ -501,10 +890,38 @@ fn the_boat_water_mask_hides_the_hollow_interior_a_bare_boat_rig_does_not() {
 }
 
 /// The negative control: `RaftRenderer` has no `submitTypeAdditions`
-/// override (`boat_water_patch_model`'s own doc), so a raft gets none of
-/// this and must still show water changing through its own hollow hull —
-/// the CPU-level check (`entity_passes.rs`'s `ends_with("_boat")` never
-/// matching `"_raft"`) made into a pixel one.
+/// override, so a raft gets no water mask — `entity_passes.rs`'s
+/// `ends_with("_boat")` never matches `"_raft"`.
+///
+/// # Why this is *not* "a raft must show water changing through its hull"
+///
+/// That was this test's first form and it is not a property a raft has.
+/// Measured on the rebuilt fixture: water paints over **10.5%** of a raft's
+/// own silhouette against **43.2%** of an *unmasked boat's* — a raft is a flat
+/// slab of logs with no cavity for the water plane to appear inside, so the
+/// only water on it is the submerged outside of the hull, which is exactly
+/// what a *masked* boat also shows (**6.9%**). The raft's number sits nearer
+/// the masked boat's than the unmasked one's, so any threshold separating
+/// "masked" from "unmasked" on that axis would have been fitted rather than
+/// derived. (The original whole-frame version reported 159,068 px and read as
+/// decisive only because it was measuring the background ocean.)
+///
+/// # What a raft *can* establish, exactly
+///
+/// The suffix rule fires for `oak_boat` and not for `oak_raft`, in pixels.
+/// `"raft"` and `"oak_raft"` resolve to the same corpus rig at the same
+/// placement, and neither ends with `"_boat"`, so their renders must be
+/// **byte-identical**: zero pixels, not a small number. The `"boat"` /
+/// `"oak_boat"` pair through the identical comparison is the positive control
+/// that the detector fires at all — without it, "0 px" is what two blank
+/// frames also measure.
+
+/// override, so a raft gets no mask — `entity_passes.rs`'s
+/// `ends_with("_boat")` never matches `"_raft"`. Made a pixel claim rather
+/// than a source one, and scoped to each hull's **own measured silhouette**
+/// rather than to the whole frame: the previous whole-frame form reported
+/// 159,068 changed pixels, which was the background ocean and would have
+/// passed with the raft rendered as one opaque cube.
 #[test]
 #[ignore = "requires a GPU adapter and the vanilla client.jar"]
 fn a_raft_gets_no_mask_and_still_shows_real_water_change() {
@@ -519,27 +936,76 @@ fn a_raft_gets_no_mask_and_still_shows_real_water_change() {
         .models()
         .expect("the vanilla load must attach baked block models");
 
+    let rig = lodestone_render::EntityModelSet::load();
+    let feet = glam::Vec3::new(BOAT_FEET_X, BOAT_FEET_Y, BOAT_FEET_Z);
     let world = water_world();
     let cam = camera();
+    let probe = patch_screen_rect(&rig, feet, BOAT_YAW, cam.view_projection());
+    let puddle = puddle_screen_rect(cam.view_projection());
 
-    let (raft_water, raft_water_stats) =
-        render_frame(device, queue, format, &mut target, &atlas, &world, models, &cam, true, "oak_raft");
-    let (raft_nowater, _) =
-        render_frame(device, queue, format, &mut target, &atlas, &world, models, &cam, false, "oak_raft");
+    let shoot = |target: &mut HeadlessTarget, terrain: bool, entity: Option<&str>| {
+        render_frame(
+            device, queue, format, target, &atlas, &world, models, &cam, terrain, entity,
+        )
+    };
 
-    let raft_diff = diff_count(&raft_water, &raft_nowater);
+    let (bg, _) = shoot(&mut target, false, None);
+    let (raft_water, raft_stats) = shoot(&mut target, true, Some("oak_raft"));
+    let (raft_nowater, _) = shoot(&mut target, false, Some("oak_raft"));
+    let (bare_raft_water, _) = shoot(&mut target, true, Some("raft"));
+    let (boat_water, _) = shoot(&mut target, true, Some("oak_boat"));
+    let (boat_nowater, _) = shoot(&mut target, false, Some("oak_boat"));
+    let (bare_boat_water, _) = shoot(&mut target, true, Some("boat"));
+
+    let raft_px = silhouette(&raft_nowater, &bg, probe);
+    let boat_px = silhouette(&boat_nowater, &bg, probe);
+    let raft_wet = changed_within(&raft_px, &raft_water, &raft_nowater);
+    let boat_wet = changed_within(&boat_px, &boat_water, &boat_nowater);
+    let raft_outside = diff_outside(&raft_water, &raft_nowater, puddle);
+
+    // The claim: the suffix rule fires for one pair and not the other.
+    let raft_pair = diff_count(&raft_water, &bare_raft_water);
+    let boat_pair = diff_count(&boat_water, &bare_boat_water);
 
     eprintln!("=== raft negative-control pixel gate ===");
+    eprintln!("raft entity draw calls = {}", raft_stats.draw_calls);
     eprintln!(
-        "raft_water: third_person_body_drawn={} entity draw_calls={}",
-        raft_water_stats.third_person_body_drawn, raft_water_stats.draw_calls
+        "raft: silhouette {} px, water paints over {raft_wet} px ({:.1}%), {raft_outside} px \
+         outside the puddle rect",
+        raft_px.len(),
+        raft_wet as f32 / raft_px.len().max(1) as f32 * 100.0
     );
-    eprintln!("diff(raft_water, raft_nowater) = {raft_diff} px");
+    eprintln!(
+        "masked boat, same scene: silhouette {} px, water paints over {boat_wet} px ({:.1}%)",
+        boat_px.len(),
+        boat_wet as f32 / boat_px.len().max(1) as f32 * 100.0
+    );
+    eprintln!("diff(\"oak_raft\", \"raft\") = {raft_pair} px");
+    eprintln!("diff(\"oak_boat\", \"boat\") = {boat_pair} px  (positive control)");
 
     assert!(
-        raft_diff > 200,
-        "a raft floating on real water should show a large, real pixel change between water \
-         present and absent (no mask protects any part of it, hull included) — got only \
-         {raft_diff} px, which reads as the fixture not actually seeing water at all"
+        raft_px.len() > 500,
+        "the raft's silhouette is only {} px inside the probe rect — \"identical renders\" \
+         is what two blank frames also measure, so nothing below would mean anything",
+        raft_px.len()
+    );
+    assert_eq!(
+        raft_outside, 0,
+        "{raft_outside} of the raft scene's water-response pixels lie outside the puddle's \
+         own projected rect — the fixture has water somewhere other than under the raft, \
+         which is exactly the background-ocean measurement this control used to be"
+    );
+    // The positive control, first: the comparison must be able to see a mask.
+    assert!(
+        boat_pair > 40,
+        "\"oak_boat\" and \"boat\" render within {boat_pair} px of each other in this scene \
+         — the suffix rule is not adding a mask for either, so the raft's zero below would \
+         prove nothing"
+    );
+    assert_eq!(
+        raft_pair, 0,
+        "\"oak_raft\" and \"raft\" differ by {raft_pair} px — they resolve to the same rig at \
+         the same placement and neither ends with \"_boat\", so something is submitting a \
+         water mask for a raft. `RaftRenderer` has no `submitTypeAdditions` override at all"
     );
 }

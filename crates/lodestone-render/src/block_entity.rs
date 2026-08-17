@@ -3722,10 +3722,11 @@ mod tests {
         let set = set();
         assert_eq!(
             set.len(),
-            21,
+            22,
             "3 chest layers + 2 skull canvases + bell + 4 banner parts (standing \
-             and wall, body and flag) + shulker box + book + decorated pot (base \
-             plus 4 side models) + 4 conduit layers (eye, wind, shell, cage)"
+             and wall, body and flag) + shield + shulker box + book + decorated \
+             pot (base plus 4 side models) + 4 conduit layers (eye, wind, shell, \
+             cage)"
         );
         for (name, mesh) in set.iter() {
             assert!(mesh.quad_count() > 0, "{name} baked no quads");

@@ -98,6 +98,55 @@ This is also the first reader of `ServerBound::InteractEntity::using_secondary_a
 
 ## Gotchas, and the gaps
 
+* **The water-clip mask must be submitted *after* the boat's own model, and the ordering is
+  load-bearing rather than cosmetic.** `BoatModel.createWaterPatch` is a colour-write-disabled,
+  depth-writing plate that fills the hull's interior at the waterline, so the translucent water
+  pass (drawn after entities, depth-write off) fails its depth test there and the boat's inside
+  reads dry. `AbstractBoatRenderer.submit` calls `submitModel(this.model(), …)` and *then*
+  `this.submitTypeAdditions(…)`, which is where `BoatRenderer` submits the patch.
+
+  `prepare_entities` originally pushed the patch instance **before** the boat's own. Because
+  `plan_entities` batches in first-appearance order and `gpu/frame.rs` draws the batches in that
+  order, the patch's depth write then landed before the hull was drawn and depth-rejected the
+  hull's own below-waterline planks — and a draw with no colour write leaves whatever is already
+  in the target, so the boat's interior came out as background. Measured on a scene containing
+  **no water at all**: 5,492 px of hull replaced by sky, and the hull's own silhouette collapsing
+  from 11,124 px to 5,696 px. Nothing about the mask itself was wrong; it was correctly resolved,
+  correctly pipelined and correctly issued.
+
+  `boat_water_mask_pixels.rs` guards it with the discriminating scene — *no water present* — where
+  a working mask must change exactly zero pixels.
+
+* **A boat standing on the water surface is not a boat floating in it, and a fixture that gets
+  this wrong cannot measure the mask at all.** The mask exists for a *partially submerged* hull,
+  where the water plane passes through the open cavity and the translucent pass paints it inside
+  the boat. `boat_water_mask_pixels.rs`'s first fixture put the boat's feet at the surface exactly,
+  which stands it on top like a bathtub on a floor: measured, hull `16.0000..16.8836` and patch
+  `16.3750..16.5625` against a surface at `16.0`, every part of the boat above every part of the
+  water. The hull's own opaque planks then hide everything the mask would have hidden, and the
+  gate measured the masked and unmasked renders as **pixel-identical**.
+
+  Vanilla authors the patch at the boat's waterline, so aligning the surface with the patch plane
+  is the definition of floating rather than a tuned number: the patch centre sits `0.375 + 0.1875/2`
+  blocks above `feet` (the renderer's own bob, plus the plate's `PartPose::offset(0, -3, 1)` and
+  thickness, sign-flipped by the placement's `scale(-1, -1, 1)`). At that draft the gate measures
+  water over 4,578 of the hull's 11,124 silhouette pixels unmasked and 645 masked, with all 3,933
+  moved pixels satisfying both halves of the claim.
+
+  The residual 645 is not a leak: it is the submerged *outside* of the hull, which vanilla's patch
+  does not cover either.
+
+* **A raft is not a usable pixel control for the mask.** `RaftRenderer` has no
+  `submitTypeAdditions` override, so it really does get no mask — but a raft is a flat slab with no
+  cavity, so water paints over only **9.2%** of its silhouette against a *masked* boat's **5.8%**
+  and an unmasked boat's **41.2%**. The raft's number sits nearer the masked boat's, so a threshold
+  separating "masked" from "unmasked" on that axis would be fitted rather than derived. (The
+  original whole-frame form of that control reported 159,068 changed pixels and read as decisive
+  only because it was measuring a world-filling lake.) What a raft *can* establish exactly is that
+  the `ends_with("_boat")` rule does not fire for it: `"oak_raft"` and `"raft"` must render
+  byte-identically, with `"oak_boat"` versus `"boat"` (3,933 px) as the positive control that the
+  comparison can see a mask at all.
+
 * **The `USE_ITEM_ON` → `USE_ITEM` fall-through is now wired, and it is *conditional*.** This
   was the gap that made a boat aimed at land do nothing while a boat aimed at open water past
   block reach worked (the crosshair ray ignores fluids, misses, and the no-target branch
