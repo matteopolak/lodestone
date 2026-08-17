@@ -2354,6 +2354,60 @@ fn modify_reaches_every_option_kind() {
     assert!(!outcome.response.is_ran(), "{outcome:?}");
 }
 
+/// `team list <team>` must actually echo every configurable field back —
+/// the read side that makes `nametagVisibility`/`deathMessageVisibility`/
+/// `collisionRule`/`color`/`prefix`/`suffix`/`displayName` real,
+/// production-reachable values rather than fields only a command's own
+/// write path and this crate's tests ever touch. Confirmed by
+/// `cargo run -q -p xtask -- islands`, which flagged
+/// `Team::nametag_visibility`/`Team::death_message_visibility` as zero
+/// production reads before `register_list`'s single-team branch gained this
+/// second feedback line.
+#[test]
+fn list_echoes_every_configurable_field_back() {
+    use lodestone_server::commands::team_store::{CollisionRule, Visibility};
+
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = team_world(&state, &players);
+
+    commands.run(&world, &alice, "team add red").unwrap();
+    commands.run(&world, &alice, "team modify red displayName Red Squad").unwrap();
+    commands.run(&world, &alice, "team modify red prefix [R]").unwrap();
+    commands.run(&world, &alice, "team modify red suffix !!").unwrap();
+    commands.run(&world, &alice, "team modify red color dark_red").unwrap();
+    commands.run(&world, &alice, "team modify red friendlyfire false").unwrap();
+    commands.run(&world, &alice, "team modify red seeFriendlyInvisibles false").unwrap();
+    commands.run(&world, &alice, "team modify red nametagVisibility hideForOwnTeam").unwrap();
+    commands.run(&world, &alice, "team modify red deathMessageVisibility never").unwrap();
+    commands.run(&world, &alice, "team modify red collisionRule pushOtherTeams").unwrap();
+
+    // The store's own state, predicted from outside the read path under
+    // test — not derived from the feedback text this test is about to check.
+    let stored = state.team().team("red").expect("red exists");
+    assert_eq!(stored.nametag_visibility, Visibility::HideForOwnTeam);
+    assert_eq!(stored.death_message_visibility, Visibility::Never);
+    assert_eq!(stored.collision_rule, CollisionRule::PushOtherTeams);
+
+    let listed = commands.run(&world, &alice, "team list red").expect("root matched");
+    let report = listed.response.lines().join("\n");
+    for expected in [
+        "Red Squad",
+        "\"[R]\"",
+        "\"!!\"",
+        "dark_red",
+        "friendlyFire=false",
+        "seeFriendlyInvisibles=false",
+        "nametagVisibility=hideForOwnTeam",
+        "deathMessageVisibility=never",
+        "collisionRule=pushOtherTeams",
+    ] {
+        assert!(report.contains(expected), "{expected:?} missing from team list's own report: {report:?}");
+    }
+}
+
 /// `team=`, `team=<name>` and `team=!<name>` against a real store — the same
 /// discriminating shape this file's own `scores_filters_against_a_real_scoreboard…`
 /// test uses: pairwise-distinct membership (alice on red, bob on blue) plus

@@ -83,8 +83,37 @@ fn register_list(registrar: &mut Registrar, team: lodestone_command::NodeId) {
                 team.members.join(", ")
             ));
         }
+        // Every `/team modify`-able field, echoed back — the read side that
+        // makes each of them a real, production-reachable value rather than
+        // write-only storage. `friendlyfire`/`seeFriendlyInvisibles`/
+        // `collisionRule` are still not *enforced* by the combat/mob
+        // simulation (see this module's own doc), but that is a documented
+        // reduction; reading them back here is not the same gap as never
+        // reading them at all.
+        ctx.send_success(describe_team_options(&team));
         Ok(i32::try_from(count).unwrap_or(i32::MAX))
     });
+}
+
+/// `/team list <team>`'s second feedback line — every configurable field
+/// vanilla's own `PlayerTeam` carries, in one place so `add`/`modify`'s own
+/// confirmation lines do not need to duplicate this formatting.
+fn describe_team_options(team: &super::team_store::Team) -> String {
+    let color = team.color.map_or_else(|| "reset".to_string(), |c| c.name());
+    format!(
+        "{name} displays as \"{display}\", colour {color}, prefix {prefix:?}, suffix {suffix:?}, \
+         friendlyFire={ff}, seeFriendlyInvisibles={sfi}, nametagVisibility={ntv}, \
+         deathMessageVisibility={dmv}, collisionRule={cr}",
+        name = team.name,
+        display = team.display_name,
+        prefix = team.prefix,
+        suffix = team.suffix,
+        ff = team.friendly_fire,
+        sfi = team.see_friendly_invisibles,
+        ntv = team.nametag_visibility.wire_name(),
+        dmv = team.death_message_visibility.wire_name(),
+        cr = team.collision_rule.wire_name(),
+    )
 }
 
 // ---- add / remove ---------------------------------------------------------
