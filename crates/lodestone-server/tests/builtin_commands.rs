@@ -2665,6 +2665,152 @@ fn execute_if_block_with_no_chunk_source_refuses_by_name() {
 }
 
 // ---------------------------------------------------------------------------
+// /execute if/unless blocks
+// ---------------------------------------------------------------------------
+
+/// `if`/`unless blocks … all` against a real, settable [`FixedBlockSource`] —
+/// a two-cell source pattern copied verbatim to a matching destination, then
+/// broken at one destination cell to flip the outcome. `all` mode compares
+/// every cell in the region, air included, unlike `masked` below.
+#[test]
+fn execute_if_unless_blocks_all_compares_every_cell() {
+    let commands = ServerCommands::new();
+    let rules = GameRulesHandle::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let source_blocks = FixedBlockSource::default();
+    // Source region (0,64,0)-(1,64,1): stone, air, air, dirt.
+    source_blocks.set(0, 64, 0, "minecraft:stone");
+    source_blocks.set(1, 64, 1, "minecraft:dirt");
+    // Destination region at (10,64,10), same pattern, offset (10,0,10).
+    source_blocks.set(10, 64, 10, "minecraft:stone");
+    source_blocks.set(11, 64, 11, "minecraft:dirt");
+
+    let world = CommandWorld {
+        rules: &rules as &(dyn RuleStore + Sync),
+        players: &players,
+        state: &state,
+        mobs: None,
+        border: None,
+        #[cfg(not(target_arch = "wasm32"))]
+        access: None,
+        blocks: Some(&source_blocks),
+    };
+
+    let matches = commands
+        .run(&world, &alice, "execute if blocks 0 64 0 1 64 1 10 64 10 all run gamemode creative alice")
+        .expect("root matched");
+    assert!(!matches.effects.is_empty(), "the region matches cell for cell: {matches:?}");
+
+    let bare_match = commands.run(&world, &alice, "execute if blocks 0 64 0 1 64 1 10 64 10 all").expect("root matched");
+    assert!(bare_match.response.is_ran(), "{bare_match:?}");
+    assert!(bare_match.response.lines()[0].contains("count: 4"), "all four cells: {bare_match:?}");
+
+    // Break the destination's (11,64,11) cell — now the regions disagree.
+    source_blocks.set(11, 64, 11, "minecraft:sand");
+    let no_match = commands
+        .run(&world, &alice, "execute if blocks 0 64 0 1 64 1 10 64 10 all run gamemode creative alice")
+        .expect("root matched");
+    assert!(no_match.effects.is_empty(), "the region no longer matches: {no_match:?}");
+
+    // `unless` is the exact complement.
+    let unless_no_match = commands
+        .run(&world, &alice, "execute unless blocks 0 64 0 1 64 1 10 64 10 all run gamemode creative alice")
+        .expect("root matched");
+    assert!(!unless_no_match.effects.is_empty(), "{unless_no_match:?}");
+}
+
+/// `masked` mode skips a source cell that is `minecraft:air` entirely — so a
+/// destination that disagrees *only* under an air source cell still counts
+/// as a match, unlike `all` above.
+#[test]
+fn execute_if_blocks_masked_skips_air_source_cells() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let source_blocks = FixedBlockSource::default();
+    // Source (0,64,0) is stone; (1,64,0) is left air (the fixture's default).
+    source_blocks.set(0, 64, 0, "minecraft:stone");
+    // Destination (10,64,0) matches the stone; (11,64,0) is deliberately
+    // something other than air — `all` would refuse this, `masked` must not.
+    source_blocks.set(10, 64, 0, "minecraft:stone");
+    source_blocks.set(11, 64, 0, "minecraft:sand");
+
+    let world = CommandWorld {
+        rules: &state,
+        players: &players,
+        state: &state,
+        mobs: None,
+        border: None,
+        #[cfg(not(target_arch = "wasm32"))]
+        access: None,
+        blocks: Some(&source_blocks),
+    };
+
+    let all_fails = commands
+        .run(&world, &alice, "execute if blocks 0 64 0 1 64 0 10 64 0 all run gamemode creative alice")
+        .expect("root matched");
+    assert!(all_fails.effects.is_empty(), "all mode must see the air/sand mismatch: {all_fails:?}");
+
+    let masked_passes = commands
+        .run(&world, &alice, "execute if blocks 0 64 0 1 64 0 10 64 0 masked run gamemode creative alice")
+        .expect("root matched");
+    assert!(!masked_passes.effects.is_empty(), "masked mode must skip the air source cell: {masked_passes:?}");
+
+    let bare_masked = commands.run(&world, &alice, "execute if blocks 0 64 0 1 64 0 10 64 0 masked").expect("root matched");
+    assert!(bare_masked.response.lines()[0].contains("count: 1"), "only the one non-air cell is counted: {bare_masked:?}");
+}
+
+/// A region whose cell count exceeds vanilla's own 32768 cap refuses with a
+/// message naming both numbers, rather than scanning unbounded.
+#[test]
+fn execute_if_blocks_over_the_area_cap_refuses_by_name() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let source_blocks = FixedBlockSource::default();
+    let world = CommandWorld {
+        rules: &state,
+        players: &players,
+        state: &state,
+        mobs: None,
+        border: None,
+        #[cfg(not(target_arch = "wasm32"))]
+        access: None,
+        blocks: Some(&source_blocks),
+    };
+
+    // 40 * 40 * 40 = 64000 > 32768.
+    let outcome =
+        commands.run(&world, &alice, "execute if blocks 0 0 0 39 39 39 100 0 0 all").expect("root matched");
+    assert!(!outcome.response.is_ran(), "{outcome:?}");
+    assert!(
+        outcome.response.lines()[0].contains("64000") && outcome.response.lines()[0].contains("32768"),
+        "the refusal must name both the actual and the maximum area: {outcome:?}"
+    );
+}
+
+/// With no chunk source in scope, `if blocks` refuses cleanly by name, same
+/// as `if block`.
+#[test]
+fn execute_if_blocks_with_no_chunk_source_refuses_by_name() {
+    let commands = ServerCommands::new();
+    let rules = GameRulesHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+
+    let outcome = run(&commands, &rules, &players, &alice, "execute if blocks 0 0 0 1 1 1 10 0 0 all").expect("root matched");
+    assert!(!outcome.response.is_ran(), "{outcome:?}");
+    assert!(
+        outcome.response.lines()[0].contains("Blocks cannot be queried"),
+        "the refusal must name the missing capability: {outcome:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // /execute if/unless biome
 // ---------------------------------------------------------------------------
 

@@ -651,7 +651,148 @@ fn register_conditions(registrar: &mut Registrar, execute: NodeId, literal: &str
     register_data_storage_condition(registrar, parent, execute, expected);
     register_block_condition(registrar, parent, execute, expected);
     register_biome_condition(registrar, parent, execute, expected);
+    register_blocks_condition(registrar, parent, execute, expected);
     register_loaded_condition(registrar, parent, execute, expected);
+}
+
+/// `blocks <start> <end> <destination> all|masked` — `ExecuteCommand`'s own
+/// `checkRegions`, restated. Neither [`add_boolean_conditional`] nor
+/// [`add_numeric_conditional`] fit: vanilla's own fork test is
+/// **presence**-based (`checkRegions(..).isPresent()`), not `count > 0` — a
+/// `masked` region whose every source cell is air matches vacuously with
+/// `count == 0`, and that must still fork/pass, unlike `if entity`'s zero
+/// convention. So this is its own conditional shape, registered the same way
+/// the other two are (a `forks: true` modifier plus the node's own executor).
+///
+/// Compares only the base block id — [`compare_regions`]'s own doc has the
+/// exact string comparison — and, when either side has one, the source's own
+/// *generated* block entity ([`crate::chunk::ChunkSource::block_entity`], not
+/// the live, player-mutated registry — the same distinction
+/// [`register_block_condition`]'s neighbours already accept). Vanilla's own
+/// 32768-cell area cap is reproduced, so a malformed region refuses cleanly
+/// rather than scanning unbounded on the tick thread.
+fn register_blocks_condition(
+    registrar: &mut Registrar,
+    parent: NodeId,
+    execute: NodeId,
+    expected: bool,
+) {
+    let blocks_lit = registrar.literal(parent, "blocks");
+    let (start_node, start_key) = registrar.arg(blocks_lit, "start", BlockPosArg);
+    let (end_node, end_key) = registrar.arg(start_node, "end", BlockPosArg);
+    let (dest_node, dest_key) = registrar.arg(end_node, "destination", BlockPosArg);
+
+    for (literal, skip_air) in [("all", false), ("masked", true)] {
+        let mode_lit = registrar.literal(dest_node, literal);
+        registrar.modifier(mode_lit, true, move |ctx, sources, _parsed| {
+            let base = one(sources);
+            let count = compare_regions(ctx, start_key, end_key, dest_key, skip_air)?;
+            Ok(if count.is_some() == expected { vec![base] } else { Vec::new() })
+        });
+        registrar.exec(mode_lit, move |ctx| {
+            let count = compare_regions(ctx, start_key, end_key, dest_key, skip_air)?;
+            match (count, expected) {
+                (Some(n), true) => {
+                    ctx.send_success(format!("Test passed, count: {n}"));
+                    Ok(n)
+                }
+                (None, false) => {
+                    ctx.send_success("Test passed");
+                    Ok(1)
+                }
+                (Some(n), false) => Err(format!("Test failed, count: {n}")),
+                (None, true) => Err("Test failed".to_string()),
+            }
+        });
+        registrar.redirect(mode_lit, execute);
+    }
+}
+
+/// Vanilla's own cell cap (`ExecuteCommand.ERROR_AREA_TOO_LARGE`'s bound) —
+/// `BoundingBox.fromCorners(start, end)`'s span product.
+const MAX_BLOCKS_REGION_AREA: i64 = 32768;
+
+/// `BoundingBox.fromCorners` plus the cell-by-cell walk
+/// (`ExecuteCommand.checkRegions`). `Some(count)` when every considered cell
+/// matches — every cell under `all`, every **non-air** source cell under
+/// `masked` (vanilla's own `skipAir`) — `None` on the first mismatch,
+/// short-circuiting the remaining scan exactly as vanilla's early `return
+/// OptionalInt.empty()` does. `destination` is the corner the `[start, end]`
+/// box's own **minimum** corner maps to, matching
+/// `BoundingBox.fromCorners(destPos, destPos.offset(from.getLength()))`.
+///
+/// The block-state comparison is the raw canonical string — including any
+/// `[...]` property suffix the store's own state string may carry, unlike
+/// [`register_block_condition`]'s own user-typed-literal comparison (which
+/// must strip it, since [`lodestone_command_mc::BlockArg`] cannot parse one
+/// in). Both sides here come from the same [`crate::chunk::ChunkSource::block_state`]
+/// accessor, so a raw compare is well-defined and closer to vanilla's own
+/// full-`BlockState` comparison than the base-id reduction elsewhere in this
+/// file.
+fn compare_regions(
+    ctx: &Ctx<'_>,
+    start_key: ArgKey<lodestone_command_mc::Coordinates>,
+    end_key: ArgKey<lodestone_command_mc::Coordinates>,
+    dest_key: ArgKey<lodestone_command_mc::Coordinates>,
+    skip_air: bool,
+) -> Result<Option<i32>, String> {
+    let Some(blocks) = ctx.world.blocks else {
+        return Err("Blocks cannot be queried here".to_string());
+    };
+    let origin = (ctx.source.position.x, ctx.source.position.y, ctx.source.position.z);
+    let rotation = (ctx.source.rotation.yaw, ctx.source.rotation.pitch);
+    let resolve = |key: ArgKey<lodestone_command_mc::Coordinates>| -> (i32, i32, i32) {
+        let coords = *ctx.get(key);
+        let (x, y, z) = coords.resolve(origin, rotation);
+        (x.floor() as i32, y.floor() as i32, z.floor() as i32)
+    };
+    let start = resolve(start_key);
+    let end = resolve(end_key);
+    let dest = resolve(dest_key);
+
+    let (min_x, max_x) = min_max(start.0, end.0);
+    let (min_y, max_y) = min_max(start.1, end.1);
+    let (min_z, max_z) = min_max(start.2, end.2);
+    let (span_x, span_y, span_z) =
+        (i64::from(max_x - min_x + 1), i64::from(max_y - min_y + 1), i64::from(max_z - min_z + 1));
+
+    let area = span_x * span_y * span_z;
+    if area > MAX_BLOCKS_REGION_AREA {
+        return Err(format!(
+            "The size of the box ({area}) is greater than the maximum allowed ({MAX_BLOCKS_REGION_AREA})"
+        ));
+    }
+
+    let offset = (dest.0 - min_x, dest.1 - min_y, dest.2 - min_z);
+
+    let mut count: i32 = 0;
+    for z in min_z..=max_z {
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let source_state = blocks.block_state(x, y, z);
+                if skip_air && source_state == "minecraft:air" {
+                    continue;
+                }
+                let (dx, dy, dz) = (x + offset.0, y + offset.1, z + offset.2);
+                if source_state != blocks.block_state(dx, dy, dz) {
+                    return Ok(None);
+                }
+                if blocks.block_entity(x, y, z) != blocks.block_entity(dx, dy, dz) {
+                    return Ok(None);
+                }
+                count += 1;
+            }
+        }
+    }
+    Ok(Some(count))
+}
+
+fn min_max(a: i32, b: i32) -> (i32, i32) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 /// `biome <pos> <biome>` — `ResourceOrTagArgument`'s own boolean shape
