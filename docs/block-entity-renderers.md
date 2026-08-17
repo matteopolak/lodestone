@@ -2228,6 +2228,37 @@ time any player reaches it) shows a slightly chunky spawn ramp rather than a per
 either high or low, since it only sets how fast the beam grows toward whatever height is actually
 visible.
 
+#### Proof
+
+`crates/lodestone-shell/tests/end_gateway_beam_pixels.rs`, five `#[ignore]`d GPU pixel gates against a
+real headless adapter + `client.jar` — same shape as [Beacon's](#beacon) `beacon_beam_pixels.rs`,
+including the `ALPHA_BLENDING` black-vs-white-background check, run against the gateway's **own** draw
+calls and texture (`draw_gateway_solid`/`draw_gateway_glow`) rather than trusted by inheritance from the
+beacon's own test, since the two are genuinely different code paths sharing only the pipeline objects.
+The expected rects project [`end_gateway_beam_vertices`]'s own output through the real
+`Camera::view_projection`, the exact function `gpu/beacon_beam.rs::prepare_gateway` feeds.
+
+| gate | measurement |
+|---|---|
+| the beam draws in its own rect | solid rect `x154..166 y0..239`, glow rect `x150..170 y0..239`; changed bbox `x151..168 y0..239` (4320 px), entirely inside; fill 47.6% |
+| `height <= 0` draws nothing (vanilla's `if (state.height > 0)` guard) | `0` px differ between a height-0 spawn and no source installed at all |
+| the glow blends but the solid core does not (`CLAUDE.md`'s `ALPHA_BLENDING` rule) | annulus (glow only): 960/960 px differ between black/white backgrounds (100.0%); solid core: 1680/4080 differ (41.2%) — comfortably below the always-blending annulus, matching the beacon's own measured ~34% for the identical pipeline |
+| two known animation phases (`t=0`/`t=8`, an `18°` core rotation — not a multiple of 90°, which would alias against the core's own 4-fold symmetry) | 2,952 px differ between the two phases; `0` px differ between two renders of the same phase |
+| the first-person arm is elsewhere | arm bbox `x247..319 y169..239`, disjoint from the beam's rect |
+
+```bash
+cargo test -p lodestone-shell --test end_gateway_beam_pixels -- --ignored --nocapture
+```
+
+**Negative control watched failing**: commenting out `self.beacon_beam.draw_gateway_solid(...)`/
+`draw_gateway_glow(...)`'s call sites in `gpu/frame.rs` and re-running reddened 3 of 5 gates with
+exactly the island diagnosis — `0.0%` fill in the beam's own rect, `0` px differing between the two
+animation phases, and the blending check's solid-vs-annulus distinction collapsing to `100.0%` vs
+`100.0%` (both arms reduced to bare background, so the "genuine overwrite" property the check exists to
+find had nothing left to measure) — while the arm-disjointness control and the `height <= 0` control
+(which does not depend on the beam ever drawing, since both arms already draw nothing) stayed green.
+Restored from an md5-checked backup before committing.
+
 ### Wiring, end to end
 
 `block_entities::end_portal_spawns`/`end_gateway_spawns` (mirroring `beacon_spawns`'s shape, reusing
@@ -2318,8 +2349,30 @@ axis's dot product, since composing the fixed `75°` turn back out algebraically
 code under test). `cargo test -p lodestone-shell --lib brushable`: 7/7 (a real NBT shape, an
 un-brushed block, a direction with no item, `hit_direction` as the wrong NBT type not parsing,
 `minecraft:air` reading as empty, every legacy id resolving in `Direction`'s own declaration order, and
-the source accessor's island detector). No GPU pixel gate was built this session — see
-[Configuration](#configuration)'s note on verification scope.
+the source accessor's island detector).
+
+### Proof
+
+`crates/lodestone-shell/tests/brushable_block_pixels.rs`, three `#[ignore]`d GPU pixel gates against a
+real headless adapter + `client.jar`, same shape as [Vault's proof](#vault): the expected rect projects
+`lodestone_render::entity::brushable_item_mesh`'s own world-space vertices through the real
+`Camera::view_projection`, never a remembered literal.
+
+| gate | measurement |
+|---|---|
+| the revealed item draws in its own rect | rect `x158..162 y106..134`; changed bbox `x159..161 y107..132` (68 px), entirely inside; fill 46.9% |
+| `dust_progress` 1 vs 3 project to different rects (a real per-state change, not an animation) | rect `x158..162 y110..138` vs `x158..162 y102..130`; changed bbox between the two real frames: `x159..161 y104..135` (56 px) |
+| the first-person arm is elsewhere | arm bbox `x247..319 y169..239`, disjoint from the item's rect |
+
+```bash
+cargo test -p lodestone-shell --test brushable_block_pixels -- --ignored --nocapture
+```
+
+**Negative control watched failing**: commenting out `self.merge_brushable_items(...)`'s call site in
+`gpu/world_items.rs::prepare_item_geometry` and re-running reddened 2 of 3 gates with exactly the
+island diagnosis — `brushable_items_drawn` stuck at `0` (`left: 0, right: 1`) and the two
+`dust_progress` frames becoming pixel-identical — while the arm-disjointness control (which does not
+depend on this pass at all) stayed green. Restored from an md5-checked backup before committing.
 
 ## Shelf
 
@@ -2359,7 +2412,31 @@ Wired end to end: `shelf_spawns` → `Sim::shelf_source` (no clock) → `app/red
 `align_items_to_bottom` only moving `y`, the negated-facing-yaw rotation). `cargo test -p lodestone-shell
 --lib shelf`: 6/6 (a real `Items`/`align_items_to_bottom` shape, an empty shelf, `Slot` read from the
 field not the list index, an out-of-range slot dropped, plain `bookshelf`/`chiseled_bookshelf` resolving
-no facing, and the source accessor's island detector). No GPU pixel gate this session.
+no facing, and the source accessor's island detector).
+
+### Proof
+
+`crates/lodestone-shell/tests/shelf_pixels.rs`, four `#[ignore]`d GPU pixel gates against a real
+headless adapter + `client.jar`: the expected rect projects
+`lodestone_render::entity::shelf_item_mesh`'s own world-space vertices through the real
+`Camera::view_projection`, the exact function `gpu/world_items.rs::merge_shelf_items` calls.
+
+| gate | measurement |
+|---|---|
+| a shelved item draws in its own rect (centre slot) | rect `x153..167 y118..132`; changed bbox `x155..164 y120..130` (82 px), entirely inside; fill 36.4% |
+| three occupied slots mesh three items, not just "more than one" | `stats.shelf_items_drawn == 3` for three occupied slots — a magnitude prediction, not a direction check |
+| slot 0 and slot 2 project to different rects — `DisplaySlot::OnShelf`'s first real consumer | rect `x169..184 y118..132` vs `x136..151 y118..132`; changed bbox between the real frames `x139..180 y120..130` (162 px) |
+| the first-person arm is elsewhere | arm bbox `x247..319 y169..239`, disjoint from the item's rect |
+
+```bash
+cargo test -p lodestone-shell --test shelf_pixels -- --ignored --nocapture
+```
+
+**Negative control watched failing**: commenting out `self.merge_shelf_items(...)`'s call site in
+`gpu/world_items.rs::prepare_item_geometry` and re-running reddened 3 of 4 gates with exactly the
+island diagnosis — `shelf_items_drawn` stuck at `0` for both the single-item gate (`left: 0, right: 1`)
+and the three-slot gate (`left: 0, right: 3`), and slot 0 vs slot 2 becoming pixel-identical — while the
+arm-disjointness control stayed green. Restored from an md5-checked backup before committing.
 
 ## Copper golem statue
 
@@ -2417,7 +2494,32 @@ composing *both* matrix factors — a prediction using only the `Ry` term and fo
 `Rz(180°)` gives the two answers backwards, a mistake this test's own first run made and caught), the
 X/Y-flip-not-Z check). `cargo test -p lodestone-shell --lib copper_golem`: 3/3 (all eight
 waxed/unwaxed oxidation-name combinations, every `copper_golem_pose` string, the source accessor's
-island detector). No GPU pixel gate this session.
+island detector).
+
+### Proof
+
+`crates/lodestone-shell/tests/copper_golem_statue_pixels.rs`, three `#[ignore]`d GPU pixel gates
+against a real headless adapter + `client.jar` — same shape as `skull_block_entity_pixels.rs` (see
+[Skull](#skull-skeleton-wither-skeleton-zombie-creeper-player)'s own proof above): the expected rect is
+projected from the real baked vertices of the real corpus mesh (`standing` pose) through the same
+`Camera::view_projection` the render call uses and the same `part_transforms`
+`BlockEntityModelSet::resolve_copper_golem_statue` produces.
+
+| gate | measurement |
+|---|---|
+| a statue draws in its own rect where no block model could | rect `x137..183 y162..239` (4048 px); changed bbox `x138..181 y163..239` (2354 px), entirely inside; fill 64.2% |
+| `standing` vs `star` poses (independently transcribed rigs) project to different rects | rect `x137..183 y162..239` vs `x133..187 y89..166`; changed bbox between the real frames `x134..185 y90..239` (4093 px) |
+| the first-person arm is elsewhere | arm bbox `x247..319 y169..239` (4291 px), disjoint from the statue's rect |
+
+```bash
+cargo test -p lodestone-shell --test copper_golem_statue_pixels -- --ignored --nocapture
+```
+
+**Negative control watched failing**: commenting out the `instances.extend(copper_golem_statues...)`
+call site in `gpu/entity_passes.rs::prepare_block_entities` and re-running reddened 2 of 3 gates with
+exactly the island diagnosis — `block_entities_drawn` stuck at `0` (`left: 0, right: 1`) and the
+`standing`/`star` frames becoming pixel-identical — while the arm-disjointness control stayed green.
+Restored from an md5-checked backup before committing.
 
 ## How to change it
 
@@ -2562,18 +2664,19 @@ get a placeholder) is deliberate — a flat-magenta mob reads as "this sheet is 
 flat-magenta chest-shaped box reads as a renderer bug. `RenderStats::block_entity_sheets_loaded` is
 what distinguishes the two from outside.
 
-**A note on verification scope.** Brushable block, shelf, copper golem statue and the end gateway's
-teleport beam were verified with real CPU-side unit tests (pose/placement algebra, NBT parsing, the
-tracker's own state machine) and a real end-to-end wiring chain (source → per-frame install →
-`RenderState` consumer → the same GPU pass every sibling in their family already proves with a pixel
-gate), but **no new `#[ignore]`d GPU pixel-gate suite** was built for any of the four in the session that
-landed them — a real gap against this doc's own evidence standard for the fourteen types above. The
-islands this doc's evidence section warns about (a merge call site commented out, a counter stuck at
-zero) are exactly what a pixel gate would catch and a wiring review can miss; treat these four as
-verified-by-construction rather than verified-by-measurement until a pixel gate exists for each,
-following the same `#[ignore]`d pattern (a fixture builds a real headless adapter and a real `client.jar`,
-asserts coverage inside the subject's own projected rect, and is watched failing against a deliberately
-neutered merge call site before being trusted).
+**A note on verification scope — closed.** Brushable block, shelf, copper golem statue and the end
+gateway's teleport beam originally landed with real CPU-side unit tests (pose/placement algebra, NBT
+parsing, the tracker's own state machine) and a real end-to-end wiring chain, but **no `#[ignore]`d GPU
+pixel gate** for any of the four — a real gap against this doc's own evidence standard for the fourteen
+types above, verified-by-construction rather than verified-by-measurement. That gap is now closed: all
+four have `#[ignore]`d GPU pixel gates (`brushable_block_pixels.rs`, `shelf_pixels.rs`,
+`copper_golem_statue_pixels.rs`, `end_gateway_beam_pixels.rs`), each asserting coverage inside the
+subject's own projected rect with a negative control watched failing against a deliberately neutered
+merge/draw call site — see each type's own "Proof" subsection above for the measurements. None of the
+four turned out to be an island: every merge/draw call site the controls targeted was live, and every
+gate passed on the first real run against the wired code. The four `#[ignore]`d suites were run against
+a real headless adapter + `client.jar` on this machine (`cargo test -p lodestone-shell --test <name> --
+--ignored --nocapture`), not merely written.
 
 ## Proof
 
@@ -2773,17 +2876,20 @@ Against the real 26-entry registration list (see above), not the issue's origina
   types, the axis-only vs neighbor-occlusion face selection, the squash that distinguishes them, and
   (landed in a later session) the gateway's own teleport beam — `isSpawning()`/`isCoolingDown()`, a real
   per-position `teleportCooldown` tracker (`GatewayCooldowns`) reusing `gpu/beacon_beam.rs`'s pipeline
-  with a second texture. Still open within scope: fog, the swirl's own anti-aliasing
+  with a second texture. A GPU pixel gate for the teleport beam now exists and is green — see
+  [End portal and end gateway](#end-portal-and-end-gateway)'s "The gateway's teleport beam" subsection
+  below. Still open within scope: fog, the swirl's own anti-aliasing
   (`textureSampleLevel` forces mip 0), and `isSpawning()`'s own `age` term is a stateless per-frame NBT
   read rather than a locally-ticked clock (see that section's note on why).
-- **Brushable block — landed** (see [Brushable block](#brushable-block) above): the dig-state revealed
-  item, reusing the item-model pipeline. No GPU pixel gate built this session (CPU-side unit tests only
-  — see [Configuration](#configuration)).
-- **Shelf — landed** (see [Shelf](#shelf) above): all three slots, `align_items_to_bottom`, the first
-  real consumer of `DisplaySlot::OnShelf`. No GPU pixel gate this session.
-- **Copper golem statue — landed** (see [Copper golem statue](#copper-golem-statue) above): all four
-  poses, all four oxidation levels (waxed and unwaxed), through the same cuboid-rig batcher chest/skull
-  share. No GPU pixel gate this session.
+- **Brushable block — landed** (see [Brushable block](#brushable-block) above, including its own
+  "Proof" subsection): the dig-state revealed item, reusing the item-model pipeline. A GPU pixel gate
+  now exists and is green.
+- **Shelf — landed** (see [Shelf](#shelf) above, including its own "Proof" subsection): all three
+  slots, `align_items_to_bottom`, the first real consumer of `DisplaySlot::OnShelf`. A GPU pixel gate
+  now exists and is green.
+- **Copper golem statue — landed** (see [Copper golem statue](#copper-golem-statue) above, including
+  its own "Proof" subsection): all four poses, all four oxidation levels (waxed and unwaxed), through
+  the same cuboid-rig batcher chest/skull share. A GPU pixel gate now exists and is green.
 - **Structure block is the only registration left**, and test instance block alongside it — both
   creative/dev-only (`BlockEntityWithBoundingBoxRenderer`, gated on `player.canUseGameMasterBlocks() ||
   player.isSpectator()`, drawing a wireframe box through vanilla's `Gizmos` line-drawing API). This
