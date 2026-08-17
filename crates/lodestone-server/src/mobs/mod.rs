@@ -238,6 +238,11 @@ pub mod warden;
 // is part of `SimMob::snapshot`'s metadata output.
 pub mod sniffer;
 
+// Issue #694: piston entity shoving. Not `pub` — `crate::tick` reaches it
+// through `MobSim::shove_from_piston` alone, which `MobSim` (already
+// re-exported) already carries.
+mod piston_shove;
+
 /// Reads a computed attribute value from `attrs` by bare path (e.g.
 /// `"max_health"`), applying the registry default when the attribute is not
 /// explicitly present — mirrors [`AttributeMap::value`]'s own fallback so a
