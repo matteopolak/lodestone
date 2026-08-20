@@ -4,8 +4,9 @@
 
 The per-item `minecraft:max_stack_size`, `minecraft:max_damage` and
 `minecraft:equippable` values for protocol 776 (Minecraft 26.2) — three data
-components that a clientbound item stack **never carries**, dumped from the real
-26.2 server and committed as a generated table.
+components normally absent from clientbound patches and therefore dumped from
+the real 26.2 server and committed as a generated table. Explicit patches can
+still carry and override each value.
 
 Companion to [`tool-mining.md`](./tool-mining.md), which does exactly this for
 `minecraft:tool`. Same reason, same pattern, same `LODESTONE_REGEN=1` flow.
@@ -14,11 +15,11 @@ Companion to [`tool-mining.md`](./tool-mining.md), which does exactly this for
 
 A clientbound `ItemStack` is `(count, item registry id, DataComponentPatch)`, and
 that patch is the **delta** from the item's built-in prototype component map.
-Vanilla keeps all three of these components in that map, so `/give …
+Vanilla normally keeps all three of these components in that map, so `/give …
 diamond_helmet` arrives as an *empty patch* and the client is expected to already
-know them. No packet capture, at any level of effort, can supply them, because
-they are never on the wire. `registries.json` carries item names and ids but no
-components; `blocks.json` is block properties only.
+know them. Explicit patches can override them, but no packet capture can supply
+the prototype defaults that are normally omitted. `registries.json` carries item
+names and ids but no components; `blocks.json` is block properties only.
 
 What each one broke while it was missing (all three were, until this landed):
 
@@ -106,6 +107,13 @@ them. Not because servers send them — they essentially never do — but becaus
 an unmodeled component halts patch decoding, which would leave the seeded
 prototype value silently stale.
 
+`minecraft:equippable` is decoded for the same reason. Its eleven-field stream
+record updates the effective slot with its `EquipmentSlot` `idMapper` value;
+the other ten fields are consumed for alignment and discarded. The slot is not
+an enum ordinal: wire id `5` is `OffHand`, while enum ordinal `5` is `Head`.
+This makes an explicit component patch override a seeded prototype slot rather
+than reporting that known value as stale or dropping the rest of the packet.
+
 Removals are handled too, and the removal semantics are *not* "fall back to the
 prototype": a removal clears the component to nothing, and vanilla's own fallback
 with no `minecraft:max_stack_size` at all is **1**, not 64
@@ -146,17 +154,18 @@ check alone excludes it from a player armour slot — and
 future version that puts a restriction on a humanoid-slot item fails the test
 instead of silently letting a player wear it.
 
-The other nine `Equippable` fields (`equipSound`, `assetId`, `cameraOverlay`,
-`dispensable`, `swappable`, `damageOnHurt`, `equipOnInteract`, `canBeSheared`,
-`shearingSound`) are not carried at all.
+When a patch explicitly provides `minecraft:equippable`, its slot replaces the
+prototype value. Its remaining ten fields (`equipSound`, `assetId`,
+`cameraOverlay`, `allowedEntities`, `dispensable`, `swappable`, `damageOnHurt`,
+`equipOnInteract`, `canBeSheared`, `shearingSound`) are consumed but not carried.
 
-### 3. `minecraft:equippable` in a patch is reported as unknown, not stale
+### 3. `minecraft:equippable` in a patch overrides the prototype slot
 
 `Equippable`'s stream codec is an eleven-field record with a
-`HolderSet<EntityType>`; it is not decoded. When the patch carries it, decoding
-halts (as it does for any unmodeled component) — but the decoder additionally
-sets `equippable = None`, because the seeded prototype value is *known* to be
-overridden. Reporting unknown beats reporting a value we can see is wrong.
+`HolderSet<EntityType>`. The decoder consumes every field and keeps the
+`EquipmentSlot` only, so a patch replaces the prototype slot and later
+components or stacks remain aligned. Entity restrictions are still not carried:
+the existing non-humanoid-slot census is the safety backstop described above.
 
 ### 4. `has_damage` is carried but unread
 

@@ -568,9 +568,13 @@ impl WindowApp {
             .and_then(crate::net::NetClient::world_dimensions)
             .map_or((-64, 384), |d| (d.min_y, d.height));
         let local = self.sim.local_entity();
-        render.set_debug_lines_source(move || {
+        let structure_blocks = self
+            .sim
+            .net()
+            .map(crate::net::NetClient::shared_handle);
+        render.set_debug_lines_source(move |eye| {
             use std::sync::atomic::Ordering;
-            lodestone_ecs::hold_read(&ecs, |world| {
+            let (mut out, permission_level, instabuild, spectator) = lodestone_ecs::hold_read(&ecs, |world| {
                 let mut out = crate::gpu::debug_line_vertices(
                     &world.resource::<lodestone_ecs::DebugLines>().0,
                 );
@@ -584,11 +588,32 @@ impl WindowApp {
                         .get::<lodestone_ecs::player::PhysicsState>(local)
                         .map_or([0.0, 0.0, 0.0], |s| {
                             [s.0.position.x, s.0.position.y, s.0.position.z]
-                        });
+                    });
                     out.extend(crate::gpu::chunk_border_vertices(p, min_y, height));
                 }
-                out
-            })
+                let permission_level = world
+                    .get::<lodestone_ecs::session::ServerPermissionLevel>(local)
+                    .map_or(0, |level| level.0);
+                let instabuild = world
+                    .get::<lodestone_ecs::session::Abilities>(local)
+                    .is_some_and(|abilities| abilities.instabuild);
+                let spectator = world
+                    .get::<lodestone_ecs::session::ServerGameMode>(local)
+                    .is_some_and(|mode| {
+                        matches!(mode.0, Some(lodestone_model::GameMode::Spectator))
+                    });
+                (out, permission_level, instabuild, spectator)
+            });
+            if let Some(handle) = structure_blocks.as_ref() {
+                out.extend(crate::block_entities::structure_block_vertices(
+                    handle,
+                    eye,
+                    permission_level,
+                    instabuild,
+                    spectator,
+                ));
+            }
+            out
         });
     }
 

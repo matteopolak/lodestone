@@ -823,9 +823,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   inventory".
 - [Item prototype components](./item-prototypes.md) — The per-item
   `minecraft:max_stack_size`, `minecraft:max_damage` and `minecraft:equippable` values
-  for protocol 776 (Minecraft 26.2) — three data components that a clientbound item
-  stack **never carries**, dumped from the real 26.2 server and committed as a
-  generated table.
+  for protocol 776 (Minecraft 26.2) — three data components normally absent from
+  clientbound patches and therefore dumped from the real 26.2 server and committed as
+  a generated table. Explicit patches can still carry and override each value.
 - [Item tint pipeline](./item-tint.md) — Resolving an item model's `tints` list —
   potion liquid colour, leather dye, map colour, foliage constants — to a concrete
   ARGB that the item's tinted sprite layer multiplies, and carrying that colour
@@ -870,6 +870,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   per-entity-kind slice): `MobSim::try_leash`, `MobSim::try_leash_to_fence`,
   `MobSim::tick_leashes`, plus the `LeashHolder`/`LeashOutcome` types and a
   `leash_holder` field on `SimMob`.
+- [Legacy movement packet selection](./legacy-movement-packet-selection.md) — The
+  v47 (Minecraft 1.8.9), v340 (1.12.2), and v735 (1.16.5) protocol adapters select a
+  serverbound movement packet from the pose actually last transmitted on that
+  connection. This keeps the controller's per-tick `ClientAction::Move` producer
+  independent from each protocol's wire cadence.
 - [Legal notices and attribution](./legal-notices.md) — The record behind this
   repository's `README.md` disclaimer, `NOTICE`, `LICENSE-MIT`, and `LICENSE-APACHE`
   files: what an IP/attribution audit found, on what evidence, and which questions are

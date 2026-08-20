@@ -2494,10 +2494,9 @@ mod tests {
              run in production however green this test's feed() calls are"
         );
         assert!(
-            !lodestone_model::event::route(&death).session,
-            "EntityStatus must not also be claimed by session: the fold writes a \
-             per-entity component, and a second router asked for it is a second \
-             writer nothing coordinates"
+            lodestone_model::event::route(&death).session,
+            "the local player's status 24..28 is a disjoint session permission \
+             fold; this event must continue to reach both consumers"
         );
 
         let mut world = ingest_world();

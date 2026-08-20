@@ -134,6 +134,96 @@ use uuid::Uuid;
 use crate::entities::NameTag;
 use crate::offline_identity::OfflineIdentity;
 
+/// The local integrated server's bridge into the client plugin registry.
+///
+/// It owns only the ECS handle; each command takes one short write guard to
+/// resolve and run a plugin handler, with no await or client-handle callback
+/// while the guard is held. Remote and Open-to-LAN connections never construct
+/// this sink.
+struct EcsCommandSink {
+    ecs: lodestone_ecs::EcsHandle,
+}
+
+impl EcsCommandSink {
+    fn direct_source(caller: &lodestone_server::CommandCaller) -> lodestone_ecs::commands::CommandSource {
+        lodestone_ecs::commands::CommandSource::player(caller.uuid, caller.username.clone())
+    }
+
+    fn contextual_source(
+        request: &lodestone_server::ContextualCommandRequest,
+    ) -> lodestone_ecs::commands::CommandSource {
+        let entity = request.source.entity.as_ref().map(|entity| {
+            lodestone_ecs::commands::CommandEntity {
+                uuid: entity.uuid,
+                entity_id: entity.entity_id,
+                username: entity.username.clone(),
+            }
+        });
+        let subject = entity.as_ref().map_or(
+            lodestone_ecs::permissions::PermissionSubject::Console,
+            |entity| lodestone_ecs::permissions::PermissionSubject::Player(entity.uuid),
+        );
+        lodestone_ecs::commands::CommandSource::contextual(
+            subject,
+            request.source.name.clone(),
+            lodestone_ecs::commands::CommandExecutionContext {
+                entity,
+                position: request.source.position,
+                rotation: request.source.rotation,
+                dimension: request.source.dimension.clone(),
+                anchor: match request.source.anchor {
+                    lodestone_server::ContextualEntityAnchor::Feet => {
+                        lodestone_ecs::commands::CommandAnchor::Feet
+                    }
+                    lodestone_server::ContextualEntityAnchor::Eyes => {
+                        lodestone_ecs::commands::CommandAnchor::Eyes
+                    }
+                },
+                permission_level: request.source.permission_level,
+            },
+        )
+    }
+}
+
+impl lodestone_server::CommandSink for EcsCommandSink {
+    fn run(
+        &self,
+        caller: &lodestone_server::CommandCaller,
+        command: &str,
+    ) -> lodestone_server::CommandResponse {
+        let source = Self::direct_source(caller);
+        lodestone_ecs::hold_write(&self.ecs, |world| {
+            match lodestone_ecs::commands::dispatch(world, &source, command) {
+                Ok(lodestone_ecs::commands::CommandOutcome::Success(_)) => {
+                    lodestone_server::CommandResponse::ran()
+                }
+                Ok(lodestone_ecs::commands::CommandOutcome::Failure(message)) => {
+                    lodestone_server::CommandResponse::refused(message)
+                }
+                Err(error) => lodestone_server::CommandResponse::refused(error.message()),
+            }
+        })
+    }
+
+    fn run_contextual(
+        &self,
+        request: &lodestone_server::ContextualCommandRequest,
+    ) -> lodestone_server::ContextualCommandResponse {
+        let source = Self::contextual_source(request);
+        lodestone_ecs::hold_write(&self.ecs, |world| {
+            match lodestone_ecs::commands::dispatch(world, &source, &request.command) {
+                Ok(lodestone_ecs::commands::CommandOutcome::Success(result)) => {
+                    lodestone_server::ContextualCommandResponse::ran(result)
+                }
+                Ok(lodestone_ecs::commands::CommandOutcome::Failure(message)) => {
+                    lodestone_server::ContextualCommandResponse::refused(message)
+                }
+                Err(error) => lodestone_server::ContextualCommandResponse::refused(error.message()),
+            }
+        })
+    }
+}
+
 /// A handle to the live client, published by the net thread once the session is
 /// up and read by the render/mesh thread. `None` until login completes.
 ///
@@ -2717,6 +2807,18 @@ async fn run_async(
                     // of wandering mobs, not the whole streamed view.
                     let mob_radius = view_radius.clamp(1, 3);
                     let mob_area = (-mob_radius..=mob_radius, -mob_radius..=mob_radius);
+                    // Only the local in-memory connection receives this
+                    // bridge. The Open-to-LAN branch above deliberately never
+                    // constructs it: a remote peer must not execute commands
+                    // registered in the host client's plugin registry.
+                    let commands = session.as_ref().map_or_else(
+                        lodestone_server::CommandDispatch::none,
+                        |(ecs, _)| {
+                            lodestone_server::CommandDispatch::installed(Arc::new(EcsCommandSink {
+                                ecs: Arc::clone(ecs),
+                            }))
+                        },
+                    );
                     // Issue #468: the whole point. `open_persistent_with_mobs`
                     // wraps `source` in a `RegionChunkSource` *below* the
                     // `ChunkStore` and above the generator, so every existing
@@ -2735,7 +2837,7 @@ async fn run_async(
                     // can drift from the generator that produced them.
                     let (server, client_io) = match &world_dir {
                         Some(dir) => {
-                            match lodestone_server::IntegratedServer::open_persistent_with_mobs(
+                            match lodestone_server::IntegratedServer::open_persistent_with_mobs_and_commands(
                                 server_protocol,
                                 dir,
                                 source,
@@ -2746,6 +2848,7 @@ async fn run_async(
                                 6,
                                 view_radius,
                                 AUTOSAVE_INTERVAL,
+                                commands.clone(),
                             ) {
                                 // The third element is a second handle to the
                                 // same world, for callers that mutate outside
@@ -2770,13 +2873,14 @@ async fn run_async(
                                 }
                             }
                         }
-                        None => lodestone_server::IntegratedServer::open_in_memory_with_mobs(
+                        None => lodestone_server::IntegratedServer::open_in_memory_with_mobs_and_commands(
                             server_protocol,
                             source,
                             mob_area,
                             (8, 8),
                             6,
                             view_radius,
+                            commands,
                         ),
                     };
                     (server, Some(client_io), None)
@@ -2784,7 +2888,8 @@ async fn run_async(
                 };
                 #[cfg(target_arch = "wasm32")]
                 let (server, client_io, lan_address): (_, _, Option<ServerAddress>) = {
-                    // `open_in_memory_with_items`, not `open_in_memory`: the
+                    // `open_in_memory_with_items_and_commands`, not
+                    // `open_in_memory`: the
                     // latter's `NoEntities` source meant a block break rolled
                     // its loot into a real (but unstreamed) `MobHandle` and
                     // never once reached the wire — a real item entity,
@@ -2793,10 +2898,23 @@ async fn run_async(
                     // so a drop still does not fall, merge or despawn on its
                     // own; it is at least visible and pickable now. See that
                     // constructor's own doc comment.
-                    let (server, io) = lodestone_server::IntegratedServer::open_in_memory_with_items(
+                    // This is the same local-only bridge the native
+                    // singleplayer route installs. It deliberately uses the
+                    // current session's ECS registry and never escapes to a
+                    // LAN listener (which browser singleplayer has none of).
+                    let commands = session.as_ref().map_or_else(
+                        lodestone_server::CommandDispatch::none,
+                        |(ecs, _)| {
+                            lodestone_server::CommandDispatch::installed(Arc::new(EcsCommandSink {
+                                ecs: Arc::clone(ecs),
+                            }))
+                        },
+                    );
+                    let (server, io) = lodestone_server::IntegratedServer::open_in_memory_with_items_and_commands(
                         server_protocol,
                         source,
                         view_radius,
+                        commands,
                     );
                     (server, Some(io), None)
                 };

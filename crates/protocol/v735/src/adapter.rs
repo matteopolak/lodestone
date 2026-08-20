@@ -1,6 +1,6 @@
 //! [`VersionAdapter`] implementation driving the protocol 754 join flow.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LockResult, Mutex, MutexGuard, PoisonError};
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
 use lodestone_data::block_entity_types::block_entity_type;
@@ -29,9 +29,10 @@ use crate::packets::game::{
     AttachEntity, BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook,
     Collect, DifficultyPacket, EntityAction, EntityEffect, JoinGame, KickDisconnect,
     OpenSignEntity, PlayerlistHeader, RecipeBook, RemoveEntityEffect, Respawn,
-    ServerboundArmAnimation, ServerboundChat, ServerboundPositionLook, SetPassengers, Spectate,
-    SpawnPosition, TeleportConfirm, UpdateHealth, UpdateTime, UseEntity, UseEntityAt,
-    UseEntityInteract, UseItem,
+    ServerboundArmAnimation, ServerboundChat, ServerboundFlying, ServerboundLook,
+    ServerboundPosition, ServerboundPositionLook, SetPassengers, Spectate, SpawnPosition,
+    TeleportConfirm, UpdateHealth, UpdateTime, UseEntity, UseEntityAt, UseEntityInteract,
+    UseItem,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
@@ -79,6 +80,35 @@ const REL_Z: i8 = 0x04;
 const REL_YAW: i8 = 0x08;
 const REL_PITCH: i8 = 0x10;
 
+/// Per-connection state used by 1.16.5's `LocalPlayer.sendPosition`.
+#[derive(Debug, Clone, Copy)]
+struct MovementSendState {
+    last_pos: Vec3,
+    last_yaw: f32,
+    last_pitch: f32,
+    last_on_ground: bool,
+    position_reminder: u32,
+}
+
+
+impl Default for MovementSendState {
+    fn default() -> Self {
+        Self {
+            last_pos: Vec3::new(0.0, 0.0, 0.0),
+            last_yaw: 0.0,
+            last_pitch: 0.0,
+            last_on_ground: false,
+            position_reminder: 0,
+        }
+    }
+}
+
+fn recover_movement_state<'a>(
+    result: LockResult<MutexGuard<'a, MovementSendState>>,
+) -> MutexGuard<'a, MovementSendState> {
+    result.unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Version adapter implementing protocol 754 (Minecraft 1.16.5).
 ///
 /// Holds a [`ChunkShape`] for the paletted chunk decoder. In 1.16 the shape no
@@ -93,6 +123,7 @@ pub struct V735Adapter {
     /// only implicitly (`spawn_position` carries no dimension field at all)
     /// can still report one.
     current_dimension: Arc<Mutex<String>>,
+    movement: Arc<Mutex<MovementSendState>>,
 }
 
 impl Default for V735Adapter {
@@ -108,7 +139,69 @@ impl V735Adapter {
         Self {
             shape: Arc::new(Mutex::new(ChunkShape::overworld())),
             current_dimension: Arc::new(Mutex::new("minecraft:overworld".to_owned())),
+            movement: Arc::new(Mutex::new(MovementSendState::default())),
         }
+    }
+
+    /// Selects the 1.16.5 movement shape. This is deliberately local to the
+    /// family: 1.16 shares the 1.12 rule, but not 1.8's idle cadence or the
+    /// modern horizontal-collision status bit.
+    fn select_move_packet(
+        &self,
+        pos: Vec3,
+        rotation: Rotation,
+        on_ground: bool,
+    ) -> Result<Option<(i32, Vec<u8>)>, AdapterError> {
+        let mut state = recover_movement_state(self.movement.lock());
+        let dx = pos.x - state.last_pos.x;
+        let dy = pos.y - state.last_pos.y;
+        let dz = pos.z - state.last_pos.z;
+        state.position_reminder += 1;
+        let moved = dx * dx + dy * dy + dz * dz > 9.0e-4 || state.position_reminder >= 20;
+        let rotated = rotation.yaw != state.last_yaw || rotation.pitch != state.last_pitch;
+
+        let packet = if moved && rotated {
+            let body = ServerboundPositionLook {
+                x: pos.x,
+                y: pos.y,
+                z: pos.z,
+                yaw: rotation.yaw,
+                pitch: rotation.pitch,
+                on_ground,
+            };
+            Some((play::serverbound::POSITION_LOOK, encode_body(&body)?))
+        } else if moved {
+            let body = ServerboundPosition {
+                x: pos.x,
+                y: pos.y,
+                z: pos.z,
+                on_ground,
+            };
+            Some((play::serverbound::POSITION, encode_body(&body)?))
+        } else if rotated {
+            let body = ServerboundLook {
+                yaw: rotation.yaw,
+                pitch: rotation.pitch,
+                on_ground,
+            };
+            Some((play::serverbound::LOOK, encode_body(&body)?))
+        } else if state.last_on_ground != on_ground {
+            let body = ServerboundFlying { on_ground };
+            Some((play::serverbound::FLYING, encode_body(&body)?))
+        } else {
+            None
+        };
+
+        if moved {
+            state.last_pos = pos;
+            state.position_reminder = 0;
+        }
+        if rotated {
+            state.last_yaw = rotation.yaw;
+            state.last_pitch = rotation.pitch;
+        }
+        state.last_on_ground = on_ground;
+        Ok(packet)
     }
 
     /// Returns the current dimension's chunk shape.
@@ -1724,20 +1817,7 @@ impl VersionAdapter for V735Adapter {
                 // horizontal-collision bit — only `onGround` — so there is
                 // nothing to forward it into.
                 horizontal_collision: _,
-            } => {
-                let body = ServerboundPositionLook {
-                    x: pos.x,
-                    y: pos.y,
-                    z: pos.z,
-                    yaw: rotation.yaw,
-                    pitch: rotation.pitch,
-                    on_ground: *on_ground,
-                };
-                Ok(Some((
-                    play::serverbound::POSITION_LOOK,
-                    encode_body(&body)?,
-                )))
-            }
+            } => self.select_move_packet(*pos, *rotation, *on_ground),
             ClientAction::SwingArm { hand } => {
                 let body = ServerboundArmAnimation {
                     hand: match hand {
@@ -2183,5 +2263,26 @@ impl VersionAdapter for V735Adapter {
 
             _ => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod movement_tests {
+    use super::*;
+
+    #[test]
+    fn poisoned_movement_state_is_recovered() {
+        let adapter = V735Adapter::new();
+        let guard = adapter.movement.lock().expect("fresh movement state");
+        let state = recover_movement_state(Err(PoisonError::new(guard)));
+        drop(state);
+
+        assert_eq!(
+            adapter
+                .select_move_packet(Vec3::new(1.0, 0.0, 0.0), Rotation::default(), false)
+                .expect("poisoned state is recovered")
+                .map(|(id, _)| id),
+            Some(play::serverbound::POSITION)
+        );
     }
 }

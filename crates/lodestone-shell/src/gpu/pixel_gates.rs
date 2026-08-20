@@ -254,18 +254,12 @@ fn block_outline_draws_visible_edges() {
 /// through [`RenderState::set_debug_lines_source`], not merely that a
 /// pipeline object exists. Same differential idiom as
 /// `block_outline_draws_visible_edges`: render the same scene with the
-/// source unset and with it returning a bright line across open sky, and
-/// confirm the second frame lit pixels the first did not.
-///
-/// This is deliberately the *only* place that calls
-/// `set_debug_lines_source` in this repo today — see that method's docs,
-/// and [`DebugLinesSource`]'s, for why the ECS `DebugLines` resource is
-/// not actually polled by anything yet. This test proves the pipeline
-/// side works in isolation; it does not and cannot prove the ECS-to-here
-/// wire exists, because that wire is unbuilt.
+/// source unset and with a real structure-block outline, and confirm the
+/// second frame lit pixels the first did not. The structure geometry is what
+/// the live source supplies after its permission and world-data gates.
 #[test]
 #[ignore = "requires a GPU adapter"]
-fn debug_lines_source_draws_visible_pixels() {
+fn structure_block_outline_draws_visible_pixels() {
     let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
         "headless GPU test opted in via --ignored but no wgpu adapter is available; \
          run on a host with a GPU (or a software adapter such as \
@@ -296,23 +290,15 @@ fn debug_lines_source_draws_visible_pixels() {
     state.render(device, queue, frame.view(), &camera, None, &[]);
     let without_lines = target.read_texels(device, queue);
 
-    // A bright red line squarely in view, well inside the frustum near
-    // and far planes, and thick enough (drawn as several parallel
-    // segments) to survive the near-black outline's "only darkens" logic
-    // not applying here — a bright line lightens sky-blue pixels.
-    state.set_debug_lines_source(|| {
-        let mut verts = Vec::new();
-        for dy in [-0.5f32, 0.0, 0.5] {
-            verts.push(DebugLineVertex {
-                position: [-3.0, 64.0 + dy, 4.0],
-                color: [1.0, 0.0, 0.0, 1.0],
-            });
-            verts.push(DebugLineVertex {
-                position: [3.0, 64.0 + dy, 4.0],
-                color: [1.0, 0.0, 0.0, 1.0],
-            });
-        }
-        verts
+    let structure = lodestone_core::Nbt::Compound(vec![
+        ("mode".to_owned(), lodestone_core::Nbt::String("SAVE".to_owned())),
+        ("posY".to_owned(), lodestone_core::Nbt::Int(0)),
+        ("sizeX".to_owned(), lodestone_core::Nbt::Int(6)),
+        ("sizeY".to_owned(), lodestone_core::Nbt::Int(4)),
+        ("sizeZ".to_owned(), lodestone_core::Nbt::Int(6)),
+    ]);
+    state.set_debug_lines_source(move |_| {
+        crate::block_entities::structure_block_outline_vertices([0, 64, 4], &structure)
     });
 
     let frame = target.acquire().expect("acquire");
@@ -332,12 +318,12 @@ fn debug_lines_source_draws_visible_pixels() {
         }
     }
 
-    eprintln!("=== debug-line pixel readback ===");
-    eprintln!("pixels changed by debug lines = {changed}");
+    eprintln!("=== structure-block outline pixel readback ===");
+    eprintln!("pixels changed by the structure outline = {changed}");
 
     assert!(
         changed > 20,
-        "installing a debug-lines source should visibly change the frame, \
+        "installing a structure-block outline should visibly change the frame, \
          only {changed} px moved"
     );
 }

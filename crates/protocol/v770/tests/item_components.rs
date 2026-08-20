@@ -976,6 +976,121 @@ fn retains_modeled_components_before_an_unmodeled_one() {
 }
 
 // ---------------------------------------------------------------------------
+// `minecraft:repairable` / `minecraft:equippable`
+// ---------------------------------------------------------------------------
+
+/// `minecraft:repairable` is one `HolderSet<Item>` (`Repairable.STREAM_CODEC`).
+/// Its direct form has the usual `count + 1` discriminator but **bare** item
+/// ids; the following custom name is the alignment witness. Before this reader
+/// consumed repairable, an enchanted-golden-apple-like patch stopped at id 33
+/// and silently discarded every component after it.
+#[test]
+fn repairable_direct_holder_set_keeps_the_following_component_aligned() {
+    let mut patch = Writer::default();
+    patch.var_i32(2); // repairable, then custom_name
+    patch.var_i32(0); // no removals
+
+    patch.var_i32(component_id("minecraft:repairable"));
+    patch.var_i32(2 + 1); // direct HolderSet with two entries
+    patch.var_i32(item_id("minecraft:iron_ingot").expect("known repair item"));
+    patch.var_i32(item_id("minecraft:gold_ingot").expect("known repair item"));
+
+    patch.var_i32(component_id("minecraft:custom_name"));
+    write_network_nbt(&mut patch, &Nbt::String("Mended Apple".to_owned())).unwrap();
+
+    let payload = set_slot_with_patch("minecraft:apple", 4, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(!item.components.has_unmodeled);
+    assert_eq!(item.count, 4);
+    assert_eq!(
+        item.components.custom_name.as_ref().map(Text::to_plain_string),
+        Some("Mended Apple".to_owned()),
+        "the component after repairable proves its direct HolderSet was consumed exactly"
+    );
+}
+
+/// An explicit `minecraft:equippable` patch overrides the horse armour's
+/// prototype `Body` slot with `OffHand`, then leaves both a modeled component
+/// in its own patch and a pairwise-distinct trailing stack readable.
+///
+/// `Equippable.STREAM_CODEC` is deliberately exercised field-for-field:
+/// `EquipmentSlot`'s idMapper id 5 (`OffHand`, distinct from enum ordinal 1),
+/// a direct `equipSound` with a fixed range, present asset and overlay ids, a
+/// present tag-backed entity HolderSet, five non-uniform booleans, and a
+/// referenced `shearingSound` holder. If any field is omitted, reordered, or
+/// decoded as the wrong holder shape, the custom name or sword entry fails to
+/// decode and this test goes red.
+#[test]
+fn equippable_patch_overrides_slot_and_consumes_all_wire_fields() {
+    let mut patch = Writer::default();
+    patch.var_i32(2); // equippable, then custom_name
+    patch.var_i32(0); // no removals
+
+    patch.var_i32(component_id("minecraft:equippable"));
+    patch.var_i32(5); // EquipmentSlot idMapper id 5 = OffHand, not ordinal 5 = Head
+
+    // equipSound: Holder<SoundEvent> direct arm (0), then SoundEvent's
+    // Identifier and present fixed-range optional float.
+    patch.var_i32(0);
+    patch.string("minecraft:entity.horse.armor");
+    patch.bool(true);
+    patch.f32(23.5);
+
+    patch.bool(true); // assetId present
+    patch.string("minecraft:equipment/horse_armor");
+    patch.bool(true); // cameraOverlay present
+    patch.string("minecraft:textures/misc/horse_armor.png");
+
+    patch.bool(true); // allowedEntities present
+    patch.var_i32(0); // HolderSet tag arm
+    patch.string("minecraft:can_wear_horse_armor");
+
+    patch.bool(true); // dispensable
+    patch.bool(false); // swappable
+    patch.bool(true); // damageOnHurt
+    patch.bool(false); // equipOnInteract
+    patch.bool(true); // canBeSheared
+
+    // shearingSound: Holder<SoundEvent> reference arm. A reference to registry
+    // id 16 is encoded as 17 because ByteBufCodecs.holder reserves 0 for direct.
+    patch.var_i32(17);
+
+    patch.var_i32(component_id("minecraft:custom_name"));
+    write_network_nbt(&mut patch, &Nbt::String("Borrowed Reins".to_owned())).unwrap();
+
+    let payload = set_content(&[
+        ("minecraft:leather_horse_armor", 2, patch.into_vec()),
+        ("minecraft:diamond_sword", 7, empty_patch()),
+    ]);
+    let directives = handle(play::clientbound::CONTAINER_SET_CONTENT, &payload);
+    let ClientEvent::ContainerContent { items, .. } = expect_single_emit(&directives) else {
+        panic!("wrong event");
+    };
+    let names: Vec<_> = items
+        .iter()
+        .map(|slot| slot.as_ref().map(|stack| (stack.item.to_string(), stack.count)))
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            Some(("minecraft:leather_horse_armor".to_owned(), 2)),
+            Some(("minecraft:diamond_sword".to_owned(), 7)),
+        ],
+        "the trailing stack is readable only when every equippable field is consumed"
+    );
+
+    let armor = items[0].as_ref().expect("horse armour stack");
+    assert!(!armor.components.has_unmodeled);
+    assert_eq!(armor.components.equippable, Some(EquipmentSlot::OffHand));
+    assert_eq!(
+        armor.components.custom_name.as_ref().map(Text::to_plain_string),
+        Some("Borrowed Reins".to_owned()),
+        "the component after equippable proves the record tail stayed aligned"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // `minecraft:bundle_contents`
 // ---------------------------------------------------------------------------
 

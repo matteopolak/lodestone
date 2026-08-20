@@ -37,7 +37,7 @@
 //! # How it works
 //!
 //! The runtime half wraps one tick of a caller-chosen schedule in
-//! [`within_budget`] — a spawned thread joined through a bounded channel with a
+//! [`within_budget`] — a spawned thread synchronized through a bounded channel with a
 //! timeout — the same shape `mining_deadlock.rs` uses and for the same reason:
 //! a wedged thread is **leaked on purpose**, because joining it is the one
 //! thing that would turn this harness into the hang it exists to detect.
@@ -124,14 +124,33 @@ pub fn within_budget<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, RecvTimeoutError> {
     let (tx, rx) = sync_channel(1);
-    std::thread::spawn(move || {
+    let worker = std::thread::spawn(move || {
         let value = f();
         // A full channel cannot happen (capacity 1, one send); a disconnected
         // one means the caller already gave up, which is not this thread's
         // problem.
         let _ = tx.send(value);
     });
-    rx.recv_timeout(timeout)
+    match rx.recv_timeout(timeout) {
+        Ok(value) => {
+            // The send happens immediately before the worker returns. Joining
+            // keeps a following test panic from racing the worker's teardown.
+            let _ = worker.join();
+            Ok(value)
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            // A panic drops `tx` while unwinding. Wait until that panic has
+            // completely finished before the caller reports its own panic;
+            // starting both concurrently aborts on some Rust/macOS runtimes.
+            let _ = worker.join();
+            Err(RecvTimeoutError::Disconnected)
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            // The worker is deliberately detached here: joining a wedged
+            // schedule would turn the watchdog itself into a deadlock.
+            Err(RecvTimeoutError::Timeout)
+        }
+    }
 }
 
 /// Wrap `app`'s `World` as an [`EcsHandle`] the way a real driver would hold

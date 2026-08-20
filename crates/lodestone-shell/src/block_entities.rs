@@ -121,7 +121,10 @@ use lodestone_render::{
 use lodestone_render::banner_pattern::{DyeColor, StoredPatternLayer};
 use lodestone_world::{ChunkPos, SignText, World};
 
-use crate::net::{SharedHandle, entity_light_at};
+use crate::{
+    gpu::{DebugLineVertex, push_box},
+    net::{SharedHandle, entity_light_at},
+};
 
 /// Vanilla's per-renderer cutoff: `BlockEntityRenderer.getViewDistance()`
 /// returns `64`, and `shouldRender` compares it against the distance from the
@@ -132,6 +135,206 @@ use crate::net::{SharedHandle, entity_light_at};
 /// because the `atCenterOf` offset is the difference between a chest popping in
 /// at 64.0 and at 63.1.
 pub const VIEW_DISTANCE: f32 = 64.0;
+
+const STRUCTURE_BLOCK_VIEW_DISTANCE: f32 = 96.0;
+const STRUCTURE_BOX_COLOR: [f32; 4] = [0.9, 0.9, 0.9, 1.0];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StructureBox {
+    min: [i32; 3],
+    max: [i32; 3],
+}
+
+/// `Some(None)` means the field is absent, while `None` means that a present
+/// field has the wrong wire tag.  Structure Block's codec supplies defaults
+/// only for absence; treating malformed tags as defaults can manufacture an
+/// overlay for corrupt block-entity data.
+fn nbt_int_field(fields: &[(String, lodestone_core::Nbt)], key: &str) -> Option<Option<i32>> {
+    match fields.iter().find(|(name, _)| name == key).map(|(_, value)| value) {
+        Some(lodestone_core::Nbt::Int(value)) => Some(Some(*value)),
+        None => Some(None),
+        Some(_) => None,
+    }
+}
+
+fn nbt_string_field<'a>(
+    fields: &'a [(String, lodestone_core::Nbt)],
+    key: &str,
+) -> Option<Option<&'a str>> {
+    match fields.iter().find(|(name, _)| name == key).map(|(_, value)| value) {
+        Some(lodestone_core::Nbt::String(value)) => Some(Some(value)),
+        None => Some(None),
+        Some(_) => None,
+    }
+}
+
+fn nbt_bool_field(fields: &[(String, lodestone_core::Nbt)], key: &str) -> Option<Option<bool>> {
+    match fields.iter().find(|(name, _)| name == key).map(|(_, value)| value) {
+        Some(lodestone_core::Nbt::Byte(value)) => Some(Some(*value != 0)),
+        None => Some(None),
+        Some(_) => None,
+    }
+}
+
+fn structure_box(block: [i32; 3], nbt: &lodestone_core::Nbt) -> Option<StructureBox> {
+    let lodestone_core::Nbt::Compound(fields) = nbt else {
+        return None;
+    };
+    let mode = nbt_string_field(fields, "mode")?.unwrap_or("DATA");
+    let show_bounding_box = nbt_bool_field(fields, "showboundingbox")?.unwrap_or(true);
+    if mode != "SAVE" && (mode != "LOAD" || !show_bounding_box) {
+        return None;
+    }
+
+    let origin = [
+        nbt_int_field(fields, "posX")?.unwrap_or(0).clamp(-48, 48),
+        nbt_int_field(fields, "posY")?.unwrap_or(1).clamp(-48, 48),
+        nbt_int_field(fields, "posZ")?.unwrap_or(0).clamp(-48, 48),
+    ];
+    let size = [
+        nbt_int_field(fields, "sizeX")?.unwrap_or(0).clamp(0, 48),
+        nbt_int_field(fields, "sizeY")?.unwrap_or(0).clamp(0, 48),
+        nbt_int_field(fields, "sizeZ")?.unwrap_or(0).clamp(0, 48),
+    ];
+    if size.iter().any(|axis| *axis < 1) {
+        return None;
+    }
+
+    let (x_diff, z_diff) = match nbt_string_field(fields, "mirror")?.unwrap_or("NONE") {
+        "LEFT_RIGHT" => (size[0], -size[2]),
+        "FRONT_BACK" => (-size[0], size[2]),
+        _ => (size[0], size[2]),
+    };
+    let (x0, z0, x1, z1) = match nbt_string_field(fields, "rotation")?.unwrap_or("NONE") {
+        "CLOCKWISE_90" => {
+            let x0 = if z_diff < 0 { origin[0] } else { origin[0] + 1 };
+            let z0 = if x_diff < 0 { origin[2] + 1 } else { origin[2] };
+            (x0, z0, x0 - z_diff, z0 + x_diff)
+        }
+        "CLOCKWISE_180" => {
+            let x0 = if x_diff < 0 { origin[0] } else { origin[0] + 1 };
+            let z0 = if z_diff < 0 { origin[2] } else { origin[2] + 1 };
+            (x0, z0, x0 - x_diff, z0 - z_diff)
+        }
+        "COUNTERCLOCKWISE_90" => {
+            let x0 = if z_diff < 0 { origin[0] + 1 } else { origin[0] };
+            let z0 = if x_diff < 0 { origin[2] } else { origin[2] + 1 };
+            (x0, z0, x0 + z_diff, z0 - x_diff)
+        }
+        _ => {
+            let x0 = if x_diff < 0 { origin[0] + 1 } else { origin[0] };
+            let z0 = if z_diff < 0 { origin[2] + 1 } else { origin[2] };
+            (x0, z0, x0 + x_diff, z0 + z_diff)
+        }
+    };
+
+    Some(StructureBox {
+        min: [block[0] + x0.min(x1), block[1] + origin[1], block[2] + z0.min(z1)],
+        max: [block[0] + x0.max(x1), block[1] + origin[1] + size[1], block[2] + z0.max(z1)],
+    })
+}
+
+#[must_use]
+pub(crate) fn can_render_structure_boxes(
+    permission_level: u8,
+    instabuild: bool,
+    spectator: bool,
+) -> bool {
+    spectator || (instabuild && permission_level >= 2)
+}
+
+#[must_use]
+pub(crate) fn structure_block_outline_vertices(
+    block: [i32; 3],
+    nbt: &lodestone_core::Nbt,
+) -> Vec<DebugLineVertex> {
+    let Some(bounds) = structure_box(block, nbt) else {
+        return Vec::new();
+    };
+    let mut vertices = Vec::with_capacity(24);
+    push_box(
+        &mut vertices,
+        bounds.min.map(|axis| axis as f32),
+        bounds.max.map(|axis| axis as f32),
+        STRUCTURE_BOX_COLOR,
+    );
+    vertices
+}
+
+#[must_use]
+fn structure_block_vertices_from_loaded_world(
+    world: &World,
+    chunks: impl IntoIterator<Item = ChunkPos>,
+    eye: Vec3,
+    permission_level: u8,
+    instabuild: bool,
+    spectator: bool,
+) -> Vec<DebugLineVertex> {
+    if !can_render_structure_boxes(permission_level, instabuild, spectator) {
+        return Vec::new();
+    }
+    let cutoff = STRUCTURE_BLOCK_VIEW_DISTANCE * STRUCTURE_BLOCK_VIEW_DISTANCE;
+    let mut vertices = Vec::new();
+    for chunk_pos in chunks {
+        let Some(chunk) = world.get(chunk_pos) else {
+            continue;
+        };
+        for entity in &chunk.block_entities {
+            let block = [
+                chunk_pos.x * 16 + i32::from(entity.rel_x),
+                i32::from(entity.y),
+                chunk_pos.z * 16 + i32::from(entity.rel_z),
+            ];
+            let centre = Vec3::new(
+                block[0] as f32 + 0.5,
+                block[1] as f32 + 0.5,
+                block[2] as f32 + 0.5,
+            );
+            // `Vec3.closerThan` is a strict `<` comparison: the exact 96-block
+            // boundary is outside Structure Block's renderer range.
+            if centre.distance_squared(eye) >= cutoff {
+                continue;
+            }
+            let state_id = chunk.column.get_block(
+                usize::from(entity.rel_x),
+                block[1],
+                usize::from(entity.rel_z),
+            );
+            if lodestone_data::block_states::block_name(state_id) != Some("minecraft:structure_block") {
+                continue;
+            }
+            vertices.extend(structure_block_outline_vertices(block, &entity.nbt));
+        }
+    }
+    vertices
+}
+
+#[must_use]
+pub(crate) fn structure_block_vertices(
+    handle: &SharedHandle,
+    eye: Vec3,
+    permission_level: u8,
+    instabuild: bool,
+    spectator: bool,
+) -> Vec<DebugLineVertex> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+    let world = store.read();
+    structure_block_vertices_from_loaded_world(
+        &world,
+        chunks.into_iter().map(|chunk| ChunkPos {
+            x: chunk.x,
+            z: chunk.z,
+        }),
+        eye,
+        permission_level,
+        instabuild,
+        spectator,
+    )
+}
 
 /// Vanilla's `ChestLidController` ramp, per tick.
 const LID_SPEED: f32 = 0.1;
@@ -6622,5 +6825,259 @@ mod end_gateway_beam_tests {
             }
         }
         assert!(cooldowns.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod structure_block_tests {
+    use super::*;
+    use lodestone_world::{BlockEntity, ChunkColumn, ColumnLight, Heightmaps, LoadedChunk, PaletteKind};
+
+    fn structure_nbt(fields: Vec<(&str, lodestone_core::Nbt)>) -> lodestone_core::Nbt {
+        lodestone_core::Nbt::Compound(
+            fields
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value))
+                .collect(),
+        )
+    }
+
+    fn sized_save(extra: Vec<(&str, lodestone_core::Nbt)>) -> lodestone_core::Nbt {
+        let mut fields = vec![
+            ("mode", lodestone_core::Nbt::String("SAVE".into())),
+            ("posX", lodestone_core::Nbt::Int(1)),
+            ("posY", lodestone_core::Nbt::Int(2)),
+            ("posZ", lodestone_core::Nbt::Int(3)),
+            ("sizeX", lodestone_core::Nbt::Int(4)),
+            ("sizeY", lodestone_core::Nbt::Int(5)),
+            ("sizeZ", lodestone_core::Nbt::Int(6)),
+        ];
+        for (name, value) in extra {
+            if let Some((_, existing)) = fields.iter_mut().find(|(field, _)| *field == name) {
+                *existing = value;
+            } else {
+                fields.push((name, value));
+            }
+        }
+        structure_nbt(fields)
+    }
+
+    #[test]
+    fn rotations_and_mirrors_follow_the_vanilla_renderable_box_table() {
+        let cases = [
+            ("NONE", "NONE", [11, 66, 13], [15, 71, 19]),
+            ("NONE", "CLOCKWISE_90", [6, 66, 13], [12, 71, 17]),
+            ("NONE", "CLOCKWISE_180", [8, 66, 8], [12, 71, 14]),
+            ("NONE", "COUNTERCLOCKWISE_90", [11, 66, 10], [17, 71, 14]),
+            ("LEFT_RIGHT", "NONE", [11, 66, 8], [15, 71, 14]),
+            ("LEFT_RIGHT", "CLOCKWISE_90", [11, 66, 13], [17, 71, 17]),
+            ("LEFT_RIGHT", "CLOCKWISE_180", [8, 66, 13], [12, 71, 19]),
+            (
+                "LEFT_RIGHT",
+                "COUNTERCLOCKWISE_90",
+                [6, 66, 10],
+                [12, 71, 14],
+            ),
+            ("FRONT_BACK", "NONE", [8, 66, 13], [12, 71, 19]),
+            ("FRONT_BACK", "CLOCKWISE_90", [6, 66, 10], [12, 71, 14]),
+            ("FRONT_BACK", "CLOCKWISE_180", [11, 66, 8], [15, 71, 14]),
+            (
+                "FRONT_BACK",
+                "COUNTERCLOCKWISE_90",
+                [11, 66, 13],
+                [17, 71, 17],
+            ),
+        ];
+        for (mirror, rotation, min, max) in cases {
+            let nbt = sized_save(vec![
+                ("mirror", lodestone_core::Nbt::String(mirror.into())),
+                ("rotation", lodestone_core::Nbt::String(rotation.into())),
+            ]);
+            let bounds = structure_box([10, 64, 10], &nbt).expect("valid NBT must render");
+            assert_eq!(bounds.min, min, "{mirror}/{rotation} minimum");
+            assert_eq!(bounds.max, max, "{mirror}/{rotation} maximum");
+        }
+    }
+
+    #[test]
+    fn structure_box_visibility_needs_gamemaster_creative_or_spectator() {
+        assert!(can_render_structure_boxes(2, true, false));
+        assert!(can_render_structure_boxes(0, false, true));
+        assert!(!can_render_structure_boxes(1, true, false));
+        assert!(!can_render_structure_boxes(2, false, false));
+    }
+
+    #[test]
+    fn non_rendering_modes_and_hidden_load_boxes_emit_no_geometry() {
+        let data = structure_nbt(vec![("mode", lodestone_core::Nbt::String("DATA".into()))]);
+        assert!(structure_block_outline_vertices([0, 64, 0], &data).is_empty());
+
+        let hidden_load = structure_nbt(vec![
+            ("mode", lodestone_core::Nbt::String("LOAD".into())),
+            ("showboundingbox", lodestone_core::Nbt::Byte(0)),
+            ("sizeX", lodestone_core::Nbt::Int(1)),
+            ("sizeY", lodestone_core::Nbt::Int(1)),
+            ("sizeZ", lodestone_core::Nbt::Int(1)),
+        ]);
+        assert!(structure_block_outline_vertices([0, 64, 0], &hidden_load).is_empty());
+    }
+
+    #[test]
+    fn absent_vanilla_defaulted_fields_are_allowed_but_wrong_tags_are_not() {
+        let defaults = structure_nbt(vec![
+            ("mode", lodestone_core::Nbt::String("SAVE".into())),
+            ("sizeX", lodestone_core::Nbt::Int(1)),
+            ("sizeY", lodestone_core::Nbt::Int(1)),
+            ("sizeZ", lodestone_core::Nbt::Int(1)),
+        ]);
+        assert_eq!(
+            structure_block_outline_vertices([0, 64, 0], &defaults).len(),
+            24,
+            "missing position/mirror/rotation fields have vanilla defaults"
+        );
+
+        for malformed in [
+            sized_save(vec![("posX", lodestone_core::Nbt::String("1".into()))]),
+            sized_save(vec![("sizeY", lodestone_core::Nbt::Byte(1))]),
+            sized_save(vec![("mode", lodestone_core::Nbt::Int(0))]),
+            sized_save(vec![("mirror", lodestone_core::Nbt::Int(0))]),
+            sized_save(vec![("rotation", lodestone_core::Nbt::Int(0))]),
+            structure_nbt(vec![
+                ("mode", lodestone_core::Nbt::String("LOAD".into())),
+                ("sizeX", lodestone_core::Nbt::Int(1)),
+                ("sizeY", lodestone_core::Nbt::Int(1)),
+                ("sizeZ", lodestone_core::Nbt::Int(1)),
+                ("showboundingbox", lodestone_core::Nbt::Int(1)),
+            ]),
+        ] {
+            assert!(
+                structure_block_outline_vertices([0, 64, 0], &malformed).is_empty(),
+                "a present field with the wrong NBT tag must not inherit a default"
+            );
+        }
+    }
+
+    fn state_id(name: &str) -> u32 {
+        (0..lodestone_data::block_states::STATE_COUNT)
+            .find(|id| lodestone_data::block_states::block_name(*id) == Some(name))
+            .unwrap_or_else(|| panic!("{name} must be present in the 26.2 state table"))
+    }
+
+    fn world_with_block_entity(
+        chunk: ChunkPos,
+        rel_x: u8,
+        y: i16,
+        state: u32,
+        nbt: lodestone_core::Nbt,
+    ) -> World {
+        let mut column = ChunkColumn::new(
+            0,
+            16,
+            PaletteKind::block_states(),
+            PaletteKind::biomes(),
+            0,
+            0,
+        );
+        column.set_block(usize::from(rel_x), i32::from(y), 0, state);
+        let mut world = World::new();
+        world.load(
+            chunk,
+            LoadedChunk::new(
+                column,
+                ColumnLight::new(16),
+                Heightmaps::new(),
+                vec![BlockEntity {
+                    rel_x,
+                    rel_z: 0,
+                    y,
+                    type_id: 0,
+                    nbt,
+                }],
+            ),
+        );
+        world
+    }
+
+    #[test]
+    fn loaded_structure_blocks_pass_permission_and_strict_96_block_scanner_gates() {
+        let chunk = ChunkPos::new(6, 0);
+        let world = world_with_block_entity(
+            chunk,
+            0,
+            4,
+            state_id("minecraft:structure_block"),
+            sized_save(Vec::new()),
+        );
+        let eye = Vec3::new(0.5, 4.5, 0.5);
+        assert!(
+            structure_block_vertices_from_loaded_world(&world, [chunk], eye, 2, true, false).is_empty(),
+            "Vec3.closerThan uses a strict cutoff, so the exact 96-block boundary is culled"
+        );
+        assert_eq!(
+            structure_block_vertices_from_loaded_world(
+                &world,
+                [chunk],
+                Vec3::new(1.5, 4.5, 0.5),
+                2,
+                true,
+                false,
+            )
+            .len(),
+            24,
+            "a loaded, permitted structure block strictly inside 96 blocks emits its 24 outline vertices"
+        );
+        assert!(
+            structure_block_vertices_from_loaded_world(
+                &world,
+                [chunk],
+                Vec3::new(0.49, 4.5, 0.5),
+                2,
+                true,
+                false,
+            )
+            .is_empty(),
+            "a structure block just beyond the 96-block cutoff is culled"
+        );
+        assert!(
+            structure_block_vertices_from_loaded_world(
+                &world,
+                [ChunkPos::new(0, 0)],
+                eye,
+                2,
+                true,
+                false,
+            )
+            .is_empty(),
+            "a resident world column outside the client's loaded-chunk list is not scanned"
+        );
+        assert!(
+            structure_block_vertices_from_loaded_world(&world, [chunk], eye, 1, true, false)
+                .is_empty(),
+            "permission is applied before scanning block entities"
+        );
+    }
+
+    #[test]
+    fn scanner_rejects_a_block_entity_when_its_current_block_state_disagrees() {
+        let chunk = ChunkPos::new(0, 0);
+        let world = world_with_block_entity(
+            chunk,
+            0,
+            4,
+            state_id("minecraft:chest"),
+            sized_save(Vec::new()),
+        );
+        assert!(
+            structure_block_vertices_from_loaded_world(
+                &world,
+                [chunk],
+                Vec3::new(0.5, 4.5, 0.5),
+                2,
+                true,
+                false,
+            )
+            .is_empty(),
+            "block state, rather than the raw block-entity type/NBT, is the render truth"
+        );
     }
 }

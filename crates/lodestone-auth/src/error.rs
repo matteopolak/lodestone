@@ -188,6 +188,14 @@ pub enum AuthError {
     #[cfg(not(target_arch = "wasm32"))]
     #[error("chat session key pair response was malformed: {0}")]
     ChatSessionKeyMalformed(String),
+
+    /// Mojang's unauthenticated `/publickeys` response did not contain usable
+    /// X.509 RSA player-certificate verification keys. The key set is separate
+    /// from a player's chat key: it verifies Mojang's certificate signature
+    /// over that player key, not individual chat messages.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("Mojang public-key response was malformed: {0}")]
+    MojangPublicKeyMalformed(String),
 }
 
 /// Convenience result alias for this crate.

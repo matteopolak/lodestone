@@ -13,19 +13,14 @@
 //!
 //! ## What is deliberately not built here
 //!
-//! * **The announced public key's Mojang provenance is never checked.**
-//!   Vanilla validates `chat_session_update`'s `key_signature` against
-//!   Mojang's own Services signing key before adopting a session
-//!   (`Services::profileKeySignatureValidator`, fetched from
-//!   `https://api.minecraftservices.com/publickeys` at server boot) — this
-//!   crate has no such fetch. [`decide`] therefore only proves a message was
-//!   signed by *whoever's* private key matches the *announced* public key; it
-//!   cannot prove that key was ever issued to the account it claims. A
-//!   verified message here is evidence against tampering in transit or reuse
-//!   across sessions, not evidence of the sender's real identity — narrower
-//!   than what `enforce-secure-profile=true` promises on a real vanilla
-//!   server. See `docs/player-chat.md` for the consequence this has for that
-//!   setting's default here.
+//! * **Mojang provenance is checked before adoption.** It is checked before
+//!   installing an announcement on every native online-mode connection when a
+//!   current issuer-key cache is available, independently of whether the host
+//!   requires signed chat. That validation binds the public key to the UUID
+//!   returned by `hasJoined`; it is intentionally unavailable on offline and
+//!   wasm32 connections, where vanilla's non-enforcing degradation remains.
+//!   This module's later message decision then proves the signed message came
+//!   from that installed key.
 //! * **No real `player_chat` relay.** A verified message is still broadcast
 //!   as an unsigned `system_chat`, exactly like every other message (see
 //!   `docs/player-chat.md`'s "signing decision" section) — `verified` is
@@ -49,12 +44,11 @@
 //!
 //! ## How to change it
 //!
-//! Adding Mojang provenance checking means fetching and caching
-//! `https://api.minecraftservices.com/publickeys` (native-only, like every
-//! other `lodestone-auth` network call) and verifying `key_signature` against
-//! one of the returned keys before constructing a [`ServerChatSession`] at
-//! all — see [`ServerChatSession::new`]'s call site in
-//! `crate::server`'s `ServerBound::ChatSessionAnnounced` arm.
+//! `crate::server::OnlineModeConfig` owns the host-shared issuer cache and
+//! calls [`adopt_announced_session`] from its
+//! `ServerBound::ChatSessionAnnounced` arm. Keep the pure adoption routine
+//! separate from cache/HTTP policy: its tests inject public issuer keys and
+//! certificate data, while the service refresh happens outside the cache lock.
 //!
 //! Building the real relay (`encode_player_chat`, a `MessageSignatureCache`
 //! consumer, and real `chat_ack` bookkeeping) is out of scope here; see
@@ -63,15 +57,18 @@
 //! ## Configuration
 //!
 //! `server.properties`' `enforce-secure-profile` — [`crate::properties`] parses
-//! it, `crate::PlayerRegistry::set_enforce_secure_profile` applies it, and
-//! [`decide`]'s `enforce_secure_profile` parameter is what actually consults
-//! it.
+//! it and [`crate::PlayerRegistry::set_enforce_secure_profile`] applies it.
+//! It controls whether a player with no adopted session must sign. Provenance
+//! validation itself is independent of the property and runs on any
+//! online-authenticated native connection with usable Mojang issuer keys;
+//! offline operation and a services-key outage retain vanilla's degradation.
 //!
 //! ## Dependencies
 //!
-//! `lodestone_auth::{SignedMessageLink, verify_signature}` (native-only,
-//! matching every other RSA-touching path in this crate — see
-//! `Cargo.toml`'s comment on the `lodestone-auth` dependency). On `wasm32`
+//! `lodestone_auth::{MojangPublicKeys, ProfilePublicKeyData, SignedMessageLink,
+//! verify_signature}` (native-only, matching every other RSA-touching path in
+//! this crate — see `Cargo.toml`'s comment on the `lodestone-auth` dependency).
+//! On `wasm32`
 //! [`decide`] still compiles and still tracks chain state, but never reports
 //! a message as verified, matching this crate's existing "wasm32 receives
 //! degraded chat" gap (`docs/player-chat.md`'s "Chat on wasm32" section).
@@ -90,8 +87,8 @@ pub struct ServerChatSession {
     session_id: Uuid,
     expires_at_millis: i64,
     public_key_der: Vec<u8>,
-    /// Mojang's signature over `public_key_der` (`publicKeySignatureV2`),
-    /// carried but never checked — see this module's own doc for why.
+    /// Mojang's `publicKeySignatureV2`, retained after provenance validation
+    /// for this session's wire-level identity.
     #[allow(dead_code)]
     key_signature: Vec<u8>,
     /// Next expected `SignedMessageLink.index`. `None` once the chain is
@@ -101,6 +98,12 @@ pub struct ServerChatSession {
     /// wholesale, exactly like vanilla's `resetPlayerChatState` swapping the
     /// whole `signedMessageDecoder` rather than repairing one.
     next_index: Option<i32>,
+    /// Timestamp of the most recent signed body this session accepted.
+    ///
+    /// Starts at the Unix epoch, matching `SignedMessageChain`'s
+    /// `Instant.EPOCH`; a signed body older than this breaks the chain rather
+    /// than being accepted out of order.
+    last_timestamp_millis: i64,
 }
 
 impl ServerChatSession {
@@ -114,13 +117,51 @@ impl ServerChatSession {
             public_key_der,
             key_signature,
             next_index: Some(0),
+            last_timestamp_millis: 0,
         }
     }
 
     #[must_use]
     fn is_expired(&self, now_millis: i64) -> bool {
-        self.expires_at_millis <= now_millis
+        self.expires_at_millis < now_millis
     }
+
+    /// Whether installing `self` would roll an existing session back to a key
+    /// with a strictly earlier expiry. Equality is allowed, matching vanilla.
+    #[must_use]
+    pub fn expires_before(&self, current: &Self) -> bool {
+        self.expires_at_millis < current.expires_at_millis
+    }
+}
+
+/// Validates and adopts one announced chat session whenever Mojang issuer keys
+/// are available.
+///
+/// This is deliberately independent of `enforce-secure-profile`: vanilla uses
+/// that property to decide whether a player *must* sign chat, while a valid
+/// announcement is adopted whenever the authenticated service can validate it.
+/// A service-key outage passes `None`, so the caller ignores the announcement
+/// and retains any previous session rather than trusting a client-supplied key.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn adopt_announced_session(
+    issuer_keys: Option<&lodestone_auth::MojangPublicKeys>,
+    authenticated_profile_id: Uuid,
+    session_id: Uuid,
+    data: lodestone_auth::ProfilePublicKeyData,
+) -> Option<ServerChatSession> {
+    let issuer_keys = issuer_keys?;
+    if data.profile_id != authenticated_profile_id
+        || !issuer_keys.verify_profile_public_key(&data).unwrap_or(false)
+    {
+        return None;
+    }
+    Some(ServerChatSession::new(
+        session_id,
+        data.expires_at_millis,
+        data.public_key_der,
+        data.key_signature,
+    ))
 }
 
 /// The outcome of folding one incoming `chat` packet through the sender's
@@ -175,9 +216,10 @@ pub enum ChatDecision {
 /// 3. The announced key has expired: rejected (`EXPIRED_PROFILE_KEY`).
 /// 4. A signed message against a live session: verified against the
 ///    reconstructed [`lodestone_auth::SignedMessageLink`] with an always-empty
-///    last-seen list (see this module's own doc for why that is sound here),
-///    and the chain position advances on success or breaks on failure —
-///    `INVALID_SIGNATURE`.
+///    last-seen list (see this module's own doc for why that is sound here).
+///    A timestamp older than the previous signed body breaks the chain; on a
+///    valid timestamp the chain position advances on success or breaks on
+///    failure — `INVALID_SIGNATURE`.
 #[must_use]
 pub fn decide(
     session: &mut Option<ServerChatSession>,
@@ -213,6 +255,13 @@ pub fn decide(
             reason: "this chat session's signature chain is broken; rejoin to start a new one",
         };
     };
+    if timestamp_millis < session.last_timestamp_millis {
+        session.next_index = None;
+        return ChatDecision::Reject {
+            reason: "chat message timestamp is older than the previous signed message",
+        };
+    }
+    session.last_timestamp_millis = timestamp_millis;
     let verified = verify(session, sender, index, signature, content, timestamp_millis, salt);
     if !verified {
         session.next_index = None;
@@ -367,6 +416,41 @@ mod tests {
         signature.to_vec()
     }
 
+    fn official_profile_key_fixture() -> (
+        lodestone_auth::ProfilePublicKeyData,
+        lodestone_auth::MojangPublicKeys,
+    ) {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../lodestone-auth/tests/fixtures/mojang-profile-key-certificate.json"
+        ))
+        .expect("public fixture JSON");
+        let public_key_der = BASE64
+            .decode(fixture["public_key_der_base64"].as_str().expect("fixture public key"))
+            .expect("fixture public-key base64");
+        let key_signature = BASE64
+            .decode(fixture["key_signature_base64"].as_str().expect("fixture signature"))
+            .expect("fixture signature base64");
+        let issuer_keys = fixture["player_certificate_service_public_keys_base64"]
+            .as_array()
+            .expect("fixture issuer key array")
+            .iter()
+            .map(|value| value.as_str().expect("fixture issuer key").to_owned())
+            .collect::<Vec<_>>();
+        let data = lodestone_auth::ProfilePublicKeyData {
+            profile_id: Uuid::parse_str(fixture["profile_id"].as_str().expect("fixture profile id"))
+                .expect("fixture profile UUID"),
+            expires_at_millis: fixture["expires_at_millis"]
+                .as_i64()
+                .expect("fixture expiry"),
+            public_key_der,
+            key_signature,
+        };
+        let issuer_keys =
+            lodestone_auth::MojangPublicKeys::from_player_certificate_keys_base64(&issuer_keys)
+                .expect("fixture issuer keys");
+        (data, issuer_keys)
+    }
+
     #[test]
     fn a_real_signature_against_the_announced_key_verifies_and_broadcasts() {
         let sender = Uuid::from_u128(11);
@@ -431,6 +515,66 @@ mod tests {
     }
 
     #[test]
+    fn an_out_of_order_signed_timestamp_is_rejected_and_breaks_the_chain() {
+        let sender = Uuid::from_u128(23);
+        let (mut signer_session, public_key_der, session_id) = signer(sender);
+        let mut session = Some(ServerChatSession::new(session_id, i64::MAX, public_key_der, vec![]));
+
+        // Each signed body is valid and each fixture field differs, so this
+        // isolates timestamp order rather than a malformed signature or a
+        // repeated fixture. Vanilla rejects the second body because its time
+        // precedes the first accepted body, then leaves the chain broken.
+        let first_signature = sign(&mut signer_session, "later first", 1_700_000_009_000, 71);
+        assert_eq!(
+            decide(
+                &mut session,
+                sender,
+                true,
+                Some(&first_signature),
+                "later first",
+                1_700_000_009_000,
+                71,
+                0,
+            ),
+            ChatDecision::Accept { verified: true }
+        );
+
+        let older_signature = sign(&mut signer_session, "older second", 1_700_000_005_000, 72);
+        assert_eq!(
+            decide(
+                &mut session,
+                sender,
+                true,
+                Some(&older_signature),
+                "older second",
+                1_700_000_005_000,
+                72,
+                0,
+            ),
+            ChatDecision::Reject {
+                reason: "chat message timestamp is older than the previous signed message"
+            }
+        );
+
+        let next_signature = sign(&mut signer_session, "newer third", 1_700_000_013_000, 73);
+        assert_eq!(
+            decide(
+                &mut session,
+                sender,
+                true,
+                Some(&next_signature),
+                "newer third",
+                1_700_000_013_000,
+                73,
+                0,
+            ),
+            ChatDecision::Reject {
+                reason: "this chat session's signature chain is broken; rejoin to start a new one"
+            }
+        );
+    }
+
+    #[test]
     fn unsigned_chat_is_accepted_unverified_when_enforcement_is_off() {
         let mut session = None;
         let decision = decide(&mut session, Uuid::from_u128(1), false, None, "hi", 0, 0, 0);
@@ -474,6 +618,80 @@ mod tests {
                 reason: "the announced chat session's key has expired"
             }
         );
+    }
+
+    #[test]
+    fn session_expiry_uses_vanillas_strict_is_before_boundary() {
+        let session = ServerChatSession::new(Uuid::from_u128(3), 1_000, vec![], vec![]);
+        assert!(!session.is_expired(1_000));
+        assert!(session.is_expired(1_001));
+    }
+
+    #[test]
+    fn issuer_provenance_rejects_bogus_or_wrong_profile_certificates() {
+        let (data, issuer_keys) = official_profile_key_fixture();
+        assert!(adopt_announced_session(
+            Some(&issuer_keys),
+            data.profile_id,
+            Uuid::from_u128(90),
+            data.clone(),
+        )
+        .is_some());
+
+        let mut bogus_signature = data.clone();
+        bogus_signature.key_signature[0] ^= 1;
+        assert!(adopt_announced_session(
+            Some(&issuer_keys),
+            data.profile_id,
+            Uuid::from_u128(90),
+            bogus_signature,
+        )
+        .is_none());
+
+        let authenticated_profile_id = data.profile_id;
+        let mut wrong_profile = data;
+        wrong_profile.profile_id = Uuid::from_u128(wrong_profile.profile_id.as_u128() ^ 1);
+        assert!(adopt_announced_session(
+            Some(&issuer_keys),
+            authenticated_profile_id,
+            Uuid::from_u128(90),
+            wrong_profile,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn unavailable_issuer_keys_preserve_vanillas_non_enforcing_degradation() {
+        let (mut data, _) = official_profile_key_fixture();
+        data.key_signature[0] ^= 1;
+        assert!(adopt_announced_session(
+            None,
+            data.profile_id,
+            Uuid::from_u128(90),
+            data,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn an_announcement_cannot_be_adopted_without_an_issuer_key() {
+        let (data, _) = official_profile_key_fixture();
+        assert!(adopt_announced_session(
+            None,
+            data.profile_id,
+            Uuid::from_u128(90),
+            data,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn replacement_expiry_comparison_is_strict() {
+        let current = ServerChatSession::new(Uuid::from_u128(1), 2_000, vec![], vec![]);
+        let equal = ServerChatSession::new(Uuid::from_u128(2), 2_000, vec![], vec![]);
+        let earlier = ServerChatSession::new(Uuid::from_u128(3), 1_999, vec![], vec![]);
+        assert!(!equal.expires_before(&current));
+        assert!(earlier.expires_before(&current));
     }
 
     #[test]

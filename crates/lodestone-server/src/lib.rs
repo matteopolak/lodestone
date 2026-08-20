@@ -499,7 +499,9 @@ pub use chunk_store::{
     integrated_capacity_for_view_radius as integrated_store_capacity_for_view_radius, view_columns,
 };
 pub use command::{
-    CommandCaller, CommandDispatch, CommandResponse, CommandSink, UNKNOWN_COMMAND,
+    CommandCaller, CommandDispatch, CommandResponse, CommandSink, ContextualCommandEntity,
+    ContextualCommandRequest, ContextualCommandResponse, ContextualCommandSource,
+    ContextualEntityAnchor, UNKNOWN_COMMAND,
 };
 pub use composter::{
     Composter, InsertOutcome as ComposterInsertOutcome, MAX_FILL_LEVEL as COMPOSTER_MAX_FILL_LEVEL,

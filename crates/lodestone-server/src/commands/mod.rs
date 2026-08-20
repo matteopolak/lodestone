@@ -174,7 +174,7 @@ pub use source::{
     CommandSource, EntityAnchor, PlayerCandidate, SelectorError, SourceEntity, resolve_players,
 };
 
-use crate::command::CommandResponse;
+use crate::command::{CommandCaller, CommandDispatch, CommandResponse};
 use registrar::{Dispatcher, TreeId};
 
 /// `minecraft:overworld`, the only dimension this server hosts.
@@ -392,6 +392,36 @@ impl ServerCommands {
         source: &CommandSource,
         command: &str,
     ) -> Option<CommandOutcome> {
+        self.run_inner(world, source, command, None, None)
+    }
+
+    /// Run a built-in command, allowing only a terminal `/execute ... run`
+    /// whose built-in root is unknown to call the host's contextual seam.
+    ///
+    /// Direct roots keep [`Self::run`]'s existing caller/permission behaviour;
+    /// this method is intentionally opt-in so RCON and command blocks retain
+    /// their current built-in-only policy until a real host supplies a safe
+    /// contextual adapter for those ingress paths.
+    #[must_use]
+    pub fn run_with_contextual_dispatch(
+        &self,
+        world: &CommandWorld<'_>,
+        source: &CommandSource,
+        command: &str,
+        dispatch: &CommandDispatch,
+        caller: &CommandCaller,
+    ) -> Option<CommandOutcome> {
+        self.run_inner(world, source, command, Some(dispatch), Some(caller))
+    }
+
+    fn run_inner(
+        &self,
+        world: &CommandWorld<'_>,
+        source: &CommandSource,
+        command: &str,
+        contextual_dispatch: Option<&CommandDispatch>,
+        contextual_caller: Option<&CommandCaller>,
+    ) -> Option<CommandOutcome> {
         let filter = level_filter(source.permission_level);
         let parsed = match self.inner.tree.parse_filtered(command, &filter) {
             Ok(parsed) => parsed,
@@ -414,7 +444,13 @@ impl ServerCommands {
             forks: &self.inner.forks,
             argument_nodes: &self.inner.argument_nodes,
         };
-        Some(dispatcher.dispatch(world, source.clone(), &parsed))
+        Some(dispatcher.dispatch(
+            world,
+            source.clone(),
+            &parsed,
+            contextual_dispatch,
+            contextual_caller,
+        ))
     }
 }
 

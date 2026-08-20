@@ -119,9 +119,10 @@ silently, so tab completion never reveals a command you cannot run).
 
 ### Entry points
 
-`serve_connection_with_commands` is the only entry point that takes a
-`CommandDispatch`. Every other `serve_connection*` passes the inert
-`CommandDispatch::none()`, so their wire bytes are unchanged.
+`serve_connection_with_commands` is the public focused entry point that takes a
+`CommandDispatch`; the integrated command-serving helper carries the same handle
+for native mob-backed and browser items-backed local duplexes. Other serving
+entry points retain `CommandDispatch::none()`, so their wire bytes are unchanged.
 
 This is a **new entry point rather than a changed signature** on purpose, and it
 is the established pattern here (`serve_connection_with_block_ticks`,
@@ -146,13 +147,17 @@ empty. So **`/gamerule` typed by a player did nothing at all**, its own tests we
 green, and nothing in the tree was red. `rcon.rs` was worse: it called the host
 sink *only*, so RCON bypassed the built-ins entirely.
 
-Two call sites close it — the `ChatCommand` arm and `rcon.rs::run_command` — and
-the precedence at both is:
+The `ChatCommand` arm closes the player-wire path with this precedence:
 
 | outcome | meaning | the caller does |
 |---|---|---|
 | `Some(outcome)` | a built-in root matched | send its lines, apply its effects; **do not** consult the host |
 | `None` | nothing at the root matched | fall through to `CommandDispatch` |
+
+`rcon.rs::run_command` is deliberately built-in-only: it uses the same tree for
+known roots and reports an unknown root directly, but never falls through to a
+`CommandDispatch`. Command blocks and console follow that same built-in-only
+policy.
 
 `None` is keyed on `ParseErrorKind::UnknownCommand` specifically, which the tree
 produces only when *no token matched at the root at all*. `/gamerule nonsense`
@@ -508,12 +513,14 @@ the commands registered on top of them.
 
 #### `/execute`
 
-`crate::commands::execute` (`ExecuteCommand.java`). The parser needed no
-changes at all: every branch point in vanilla's own tree offers at most one
+`crate::commands::execute` (`ExecuteCommand.java`). The ordinary grammar needs no
+ambiguity handling: every branch point in vanilla's own tree offers at most one
 *argument* child alongside its literal children, so the one ambiguity
 `lodestone_command::CommandTree::parse` cannot resolve (multiple simultaneous
 argument children — `/tp`'s own gap, see that command's module doc) never
-engages here.
+engages here. One targeted parser fallback now exists at `run`: after its
+redirected built-in root consumes nothing, its greedy plugin child is considered. A known
+built-in root that consumed any input still owns its parse error and never falls through.
 
 Built: `as`, `at` (position **and** rotation), `positioned` (+ `as`), `rotated`
 (+ `as`), `facing` (`<pos>` and `entity <targets> <anchor>`), `align`,
@@ -560,6 +567,23 @@ tree, which is what makes `execute as Steve run kill` affect Steve and not the
 caller, and what makes nesting a second `execute` inside `run` ordinary syntax
 rather than a special case.
 
+For an opt-in caller, that same `run` node can now end at a plugin root. `ServerCommands::run_with_contextual_dispatch`
+threads the already-rewritten `CommandSource` into `CommandDispatch::run_contextual`; the
+request includes entity/identity, position, rotation, dimension, anchor and permission level.
+`ContextualCommandResponse::Ran { result }` is returned as the terminal command result, so the
+existing `StoreSink` writes it for `execute store result`; a refusal writes zero for `store
+success` and remains a command refusal. A missing contextual sink refuses with `UNKNOWN_COMMAND`.
+The server-only gate covers `execute as bob at bob`, success/failure stores, no-sink refusal and
+built-in-root precedence; the v770 host-adapter gate proves the real ECS handler receives the
+mapped source and unchanged integer.
+
+This is deliberately not enabled by plain `ServerCommands::run`. Command blocks and RCON/console
+continue to use that built-in-only entry point, so they cannot invoke a plugin through `/execute`
+and do not silently acquire a host `World` or a cross-thread lock. Integrated chat on native and
+browser builds uses `run_with_contextual_dispatch` with the shell's local `EcsHandle` adapter;
+Open-to-LAN peers remain on their configured server dispatch and never receive the client plugin
+registry.
+
 `if`/`unless` needed one small change to `Dispatcher::dispatch`: vanilla's
 `addConditional` attaches **both** a fork modifier (`execute if entity @a run
 …`) and an executor (`execute if entity @a` alone) to the same condition node,
@@ -570,10 +594,7 @@ see that function's own doc comment for the failure mode it closes (a fork
 that empties the source set before the bare form's pass/fail message ever
 gets to run).
 
-Not built, each naming its own missing subsystem: `store` (a scoreboard *and*
-NBT storage now both exist to write *into* — see "`/scoreboard`"/"`/data
-storage`" below — but nothing in the dispatcher yet wraps a chained command's
-own return value the way `store` needs to capture it), `if data`'s
+Not built, each naming its own missing subsystem: `if data`'s
 `entity`/`block` targets and `if items` (no live, mutable NBT view of an
 entity, block entity, or container slot reachable from a command — `storage`
 needed none of that, which is why it alone is built; see "`/data storage`"
@@ -802,9 +823,10 @@ lives in the plugin API.**
 
 ## Configuration
 
-None. No env vars, no feature flags. Whether commands work at all is decided by
-one thing: whether the host called `serve_connection_with_commands` with a
-`CommandDispatch::installed(..)` rather than the default.
+None. No env vars or feature flags. Built-ins require no host configuration;
+plugin roots require a host-installed `CommandDispatch`, either through
+`serve_connection_with_commands` in a focused host or through the integrated
+native/browser command-serving constructors. The default remains fail-closed.
 
 ## Known gaps
 
@@ -815,20 +837,13 @@ installed**, which is the shipping configuration —
 reads the effect back as a real `game_event`/`container_set_slot` the real client
 decoded rather than as a chat line.
 
-**Plugin commands still have no production sink**, so the paragraph below is about
-the *plugin* half only. What is missing is host wiring, in three files owned by
-other work:
-
-1. `PluginCommandsPlugin` is added in **zero** production code paths (only
-   tests), so no production `World` even holds a `CommandRegistry`. The place to
-   add it is `client_app`, `crates/lodestone-shell/src/sim/build.rs`.
-2. `IntegratedServer::open_in_memory_with_mobs`
-   (`crates/lodestone-server/src/integrated.rs`) — the production
-   singleplayer constructor — has no way to accept a `CommandDispatch` and calls
-   `serve_connection_with_mob_events_shared` internally.
-3. `connect_impl`, `crates/lodestone-shell/src/net.rs`, is the one place a `World` handle and
-   the `IntegratedServer` are simultaneously in scope, so it is where the sink
-   would be constructed and installed.
+**Plugin commands have a local production sink.** `connect_impl` builds an ECS-backed
+`CommandSink` only for an integrated world with an `EcsHandle`. Native local worlds use the
+additive `open_*_with_mobs_and_commands` constructors; browser local worlds use the portable
+`open_in_memory_with_items_and_commands` constructor. Both pass the sink through the local duplex
+to `serve_connection_with_mob_events_and_commands_shared`. The short `hold_write` guard maps
+direct roots from the authenticated caller and terminal `/execute` roots from their rewritten
+source. Open-to-LAN peers, RCON, console and command blocks remain outside that bridge.
 
 **The `COMMANDS` (id 16) encoder now sends.** `server.rs` transmits the
 per-player-pruned projection at the join sequence's vanilla position, so a

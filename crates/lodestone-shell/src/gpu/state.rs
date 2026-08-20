@@ -1708,12 +1708,13 @@ impl RenderState {
     /// Install the source for this frame's world-space debug lines (see
     /// [`DebugLinesSource`]). Until installed, [`render`](Self::render) draws
     /// none — this pass is a real pipeline, not a stub, but it is wired to
-    /// nothing until a caller polls `lodestone_ecs::player::DebugLines` and
-    /// hands the result here (typically once, at connect time, next to
-    /// [`set_outline_shape_source`](Self::set_outline_shape_source)).
+    /// nothing until a caller supplies geometry here (typically once, at
+    /// connect time, next to [`set_outline_shape_source`](Self::set_outline_shape_source)).
+    /// The source receives the camera position so view-relative debug geometry
+    /// can use vanilla's camera-distance rules.
     pub fn set_debug_lines_source(
         &mut self,
-        f: impl Fn() -> Vec<DebugLineVertex> + Send + Sync + 'static,
+        f: impl Fn(glam::Vec3) -> Vec<DebugLineVertex> + Send + Sync + 'static,
     ) {
         self.debug_lines_source = DebugLinesSource(Some(Box::new(f)));
     }

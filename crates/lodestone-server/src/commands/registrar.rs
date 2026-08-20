@@ -47,7 +47,11 @@ use lodestone_model::command_tree::ArgumentParser;
 use lodestone_model::ids::ResourceKey;
 
 use super::effect::{DirectedEffect, Effect};
-use super::source::{CommandSource, PlayerCandidate, SelectorError};
+use super::source::{CommandSource, EntityAnchor, PlayerCandidate, SelectorError};
+use crate::command::{
+    CommandCaller, CommandDispatch, ContextualCommandEntity, ContextualCommandRequest,
+    ContextualCommandResponse, ContextualCommandSource, ContextualEntityAnchor,
+};
 use crate::game_rules::GameRulesHandle;
 
 /// Identifies which [`Registrar`]'s arena an [`ArgKey`] indexes into.
@@ -352,6 +356,11 @@ pub struct Ctx<'a> {
     /// registered, so a second `store` later in the chain appends rather than
     /// replaces.
     store_sinks: Vec<StoreSink>,
+    /// The optional host bridge for a terminal `execute ... run <plugin>`.
+    /// It is absent for ordinary built-in/RCON/command-block dispatches, which
+    /// therefore fail closed if they somehow reach the contextual terminal.
+    contextual_dispatch: Option<&'a CommandDispatch>,
+    contextual_caller: Option<&'a CommandCaller>,
 }
 
 impl<'a> Ctx<'a> {
@@ -432,6 +441,48 @@ impl<'a> Ctx<'a> {
     /// exists and when it fires.
     pub fn add_store_sink(&mut self, sink: StoreSink) {
         self.store_sinks.push(sink);
+    }
+
+    /// Call the host for a terminal plugin command using this invocation's
+    /// already-rewritten source. The integer response is returned unchanged so
+    /// [`StoreSink`] keeps its ordinary `/execute store result` behaviour.
+    pub fn run_contextual(&mut self, command: &str) -> CommandResult {
+        let Some(dispatch) = self.contextual_dispatch else {
+            return Err(crate::command::UNKNOWN_COMMAND.to_owned());
+        };
+        let Some(caller) = self.contextual_caller else {
+            return Err(crate::command::UNKNOWN_COMMAND.to_owned());
+        };
+        let source = ContextualCommandSource {
+            entity: self.source.entity.as_ref().map(|entity| ContextualCommandEntity {
+                uuid: entity.uuid,
+                entity_id: entity.entity_id,
+                username: entity.username.clone(),
+            }),
+            name: self.source.name.clone(),
+            position: self.source.position,
+            rotation: self.source.rotation,
+            dimension: self.source.dimension.clone(),
+            anchor: match self.source.anchor {
+                EntityAnchor::Feet => ContextualEntityAnchor::Feet,
+                EntityAnchor::Eyes => ContextualEntityAnchor::Eyes,
+            },
+            permission_level: self.source.permission_level,
+        };
+        let request = ContextualCommandRequest {
+            caller: caller.clone(),
+            source,
+            command: command.to_owned(),
+        };
+        match dispatch.run_contextual(&request) {
+            ContextualCommandResponse::Ran { feedback, result } => {
+                for line in feedback {
+                    self.send_success(line);
+                }
+                Ok(result)
+            }
+            ContextualCommandResponse::Refused { message } => Err(message),
+        }
     }
 
     /// Every top-level command literal this source's permission level may see —
@@ -669,6 +720,8 @@ impl Dispatcher<'_> {
         world: &CommandWorld<'_>,
         source: CommandSource,
         parsed: &ParsedCommand,
+        contextual_dispatch: Option<&CommandDispatch>,
+        contextual_caller: Option<&CommandCaller>,
     ) -> CommandOutcome {
         // Each source carries its own `/execute store` sinks alongside it —
         // `store` registers one on whichever branch it runs in, and a fork
@@ -693,7 +746,15 @@ impl Dispatcher<'_> {
             // handing it the whole set at once with somebody else's source in
             // scope would be the wrong context for all but the first.
             for (input, sinks) in std::mem::take(&mut sources) {
-                let mut ctx = self.context(world, parsed, index + 1, input.clone(), sinks);
+                let mut ctx = self.context(
+                    world,
+                    parsed,
+                    index + 1,
+                    input.clone(),
+                    sinks,
+                    contextual_dispatch,
+                    contextual_caller,
+                );
                 match modifier(&mut ctx, vec![input], parsed) {
                     Ok(produced) => {
                         feedback.append(&mut ctx.feedback);
@@ -746,7 +807,15 @@ impl Dispatcher<'_> {
         let mut ran = 0;
         let mut failures: Vec<String> = Vec::new();
         for (input, sinks) in sources {
-            let mut ctx = self.context(world, parsed, parsed.nodes.len(), input, sinks);
+            let mut ctx = self.context(
+                world,
+                parsed,
+                parsed.nodes.len(),
+                input,
+                sinks,
+                contextual_dispatch,
+                contextual_caller,
+            );
             match executor(&mut ctx) {
                 Ok(count) => {
                     ran += count;
@@ -781,6 +850,8 @@ impl Dispatcher<'_> {
         depth: usize,
         source: CommandSource,
         store_sinks: Vec<StoreSink>,
+        contextual_dispatch: Option<&'c CommandDispatch>,
+        contextual_caller: Option<&'c CommandCaller>,
     ) -> Ctx<'c> {
         Ctx {
             tree: self.tree,
@@ -793,6 +864,8 @@ impl Dispatcher<'_> {
             effects: Vec::new(),
             argument_nodes: self.argument_nodes,
             store_sinks,
+            contextual_dispatch,
+            contextual_caller,
         }
     }
 }

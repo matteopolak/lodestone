@@ -263,7 +263,7 @@ impl RenderState {
         // `prepare` returns early on an empty slice.
         let debug_line_count =
             self.debug_lines
-                .prepare(queue, &view_proj, &self.debug_lines_source.sample());
+                .prepare(queue, &view_proj, &self.debug_lines_source.sample(camera.position));
 
         // Same constraint for the plugin-billboard pass (issue #161): sample
         // and upload before the pass opens. Zero instances (the default,

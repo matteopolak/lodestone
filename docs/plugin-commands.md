@@ -126,43 +126,19 @@ it still had access to whatever it needed, so the dependency points the right wa
 built once, at plugin-build time, and must keep seeing fresh data. `sync_player_directory`
 refreshes it once per `GameTick` from `SessionTabList`.
 
-## What is NOT wired — read this before believing the gate
+## Current wire boundary
 
-**No player's typed `/command` reaches `dispatch` yet, on either side.** This is the honest
-boundary, and it is two separate gaps in crates outside this work's ownership:
+v770 decodes serverbound `CHAT_COMMAND`, and the server sends its built-in command tree. A host
+that installs `CommandDispatch::installed(..)` can therefore drive a plugin root from a real
+client frame; `crates/protocol/v770/tests/command_wire_path.rs` proves that complete wire path,
+including permission refusal and a no-sink refusal.
 
-- **Serverbound.** `lodestone-server` never decodes `CHAT_COMMAND` (serverbound id 7).
-  `crates/protocol/v770/src/server_protocol.rs` has no arm for it, so it falls to
-  `_ => ServerBound::Ignored` and then to an empty match arm at
-  `crates/lodestone-server/src/server.rs`'s `dispatch_play_packet`. A player's command is
-  dropped **twice over**, before any registry could see it.
-- **Clientbound.** No protocol family encodes `COMMANDS` (clientbound id 16), so no client is
-  ever sent the tree. `command_tree_for` exists so that arm has something to serialise, with
-  the pruning already correct.
-
-`crates/lodestone-ecs/tests/plugin_command_registry.rs` therefore drives the **registry** —
-registering through the public plugin API exactly as a third-party plugin does, then
-dispatching a real input string and asserting the world changed. What it cannot assert is the
-wire hop, and no test in this crate can.
-
-### The brokered patch shape for the serverbound gap
-
-For whoever owns `crates/protocol/**` and `crates/lodestone-server/**`:
-
-1. In `crates/protocol/v770/src/server_protocol.rs`, add an arm for
-   `play::serverbound::CHAT_COMMAND` (id 7) decoding the packet's single `command: String`
-   field into a new `ServerBound::ChatCommand { command }`.
-2. In `crates/lodestone-server/src/protocol.rs`, add that variant.
-3. In `crates/lodestone-server/src/server.rs`'s `dispatch_play_packet`, call
-   `lodestone_ecs::commands::dispatch` with a `CommandSource::player(uuid, name)` built from
-   the connection's profile, and send `CommandOutcome::Failure`/`CommandDispatchError::message`
-   back as a system chat message.
-
-Note step 3 requires `lodestone-server` to depend on `lodestone-ecs`, which its manifest
-currently and deliberately refuses ("Deliberately NOT `lodestone-ecs`, despite
-`docs/server-ecs.md`'s title" — it links neither bevy nor this crate). That decision has to be
-revisited before the serverbound half can land, and it is a bigger architectural call than a
-decode arm. **Do not treat it as a one-line wire-up.**
+Integrated singleplayer installs the shell's ECS-backed `CommandSink` on its local duplex
+connection on both native and browser builds, so direct plugin roots and terminal
+`/execute ... run <plugin>` reach this registry in the shipped local path. The server remains
+free of an `lodestone-ecs` dependency; the browser uses the portable items-plus-commands
+constructor because it has no server tick loop.
+Open-to-LAN peers, RCON, console and command blocks do not receive that client registry.
 
 ## Why the registry is here and not in `lodestone-server`
 
@@ -257,24 +233,28 @@ island — confirmed directly against the current source rather than assumed her
 - **Adding a resolution step to permission gating means editing
   `lodestone_ecs::permissions`, not here.** This module only supplies the filter closure.
 
-## `/execute` interop is **not** closed, and needs a context object
+## `/execute` interop
 
-`CommandSource` is deliberately only an identity — a subject and a display name. It is **not**
-a vanilla `CommandSourceStack`.
+`CommandSource` still represents a direct plugin root as just its original
+`PermissionSubject` and display name. It now also has an optional
+`CommandExecutionContext` for a terminal server `/execute ... run <plugin>`:
+entity identity, position, rotation, dimension, anchor and permission level.
+The registry continues to gate permissions through `source.subject`; a host maps the rewritten
+executor entity to that subject, so `execute as bob` is checked as Bob rather than as the
+connection that typed the command.
 
-Vanilla's `/execute as <selector> at <selector> run <command>` rewrites a *context*: executor
-entity, position, rotation, dimension, anchor, plus `store`/`if`/`unless` result propagation.
-None of those fields exist here, and there is nothing to consume them: `/execute` itself does
-not exist, and the server has no command dispatch at all. Inventing the
-context object now would be a context-rewriter with nothing to rewrite and nobody to call
-it — an island of precisely the shape `CLAUDE.md` warns about, and the tracking note for this
-gap says it "should be filed as a reminder rather than started now".
+The server boundary is value-only (`ContextualCommandRequest` and
+`ContextualCommandResponse`), never an ECS `World`. The response carries the plugin handler's
+integer result so the server dispatcher can pass it unchanged to `/execute store result` and
+convert a refusal to the normal `store success = 0` outcome. `CommandSink::run_contextual` has a
+default `UNKNOWN_COMMAND` refusal; an older host therefore remains safe and direct roots continue
+to use `run` unchanged.
 
-What this work gives that future `/execute` work is the **seam**: `dispatch` takes the source
-by reference and never
-reads it except to resolve permissions, so a future `/execute` can substitute a different
-subject without touching the registry or the tree. Widening `CommandSource` is additive when
-the server-side Brigadier dispatcher lands.
+The focused adapter in `crates/protocol/v770/tests/command_wire_path.rs` is the reference shape:
+lock the host-owned `World`, map the request into `CommandSource::contextual`, and call
+`dispatch`. It proves the actual plugin handler sees rewritten context and that `store result`/
+`store success` preserve its integer success/failure outcomes. The production shell uses the
+same mapping against its `EcsHandle`, but only for the local integrated duplex.
 
 ## Configuration
 

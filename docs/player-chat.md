@@ -76,18 +76,21 @@ have three different answers.
 
 `chat_session_update` is decoded (`ServerBound::ChatSessionAnnounced`) and held per connection
 as `crate::chat_session::ServerChatSession` — a session id, key expiry and the announced
-public key, plus the chain position this server tracks against it. A `chat` packet's
-`timestamp`/`salt`/`signature` now survive decoding too, and `crate::chat_session::decide`
-verifies a signed message against the announced key with
+public key, plus the chain position and most-recent signed timestamp this server tracks
+against it. A signed `chat` body older than that timestamp is rejected and breaks the
+session chain, matching `SignedMessageChain.Decoder`'s out-of-order protection. A `chat`
+packet's `timestamp`/`salt`/`signature` now survive decoding too, and
+`crate::chat_session::decide` verifies a signed message against the announced key with
 `lodestone_auth::verify_signature` before it is allowed anywhere near step 3 above. See that
 module's own doc comment for the exact accept/reject rules (mirroring
-`SignedMessageChain.Decoder`/`.unsigned`) and, more importantly, for what verification here
-does **not** establish: the announced public key's Mojang provenance is never checked (no
-fetch of Mojang's Services signing key), so a verified message proves the sender holds the
-private key matching whatever they announced, not that the key was ever issued to their real
-account. That is narrower than what a real vanilla server's `enforce-secure-profile=true`
-promises — see `crate::properties`'s own doc comment for why this crate's default for that
-key is deliberately `false`, not vanilla's real `true`.
+`SignedMessageChain.Decoder`/`.unsigned`). On native online-mode connections the server now
+also validates the announcement's Mojang certificate against the public
+`playerCertificateKeys` service key and the UUID returned by `hasJoined` before installing
+it. That provenance check is independent of `enforce-secure-profile`; the property controls
+whether a player with no valid adopted session must sign. Offline, browser, and issuer-service
+outage paths ignore an untrusted announcement and retain any previous session. See
+`docs/secure-chat.md` for the exact SHA1withRSA certificate payload, cache/backoff policy, and
+replacement-expiry rollback guard.
 
 `server.properties`' `enforce-secure-profile` is wired (`ServerProperties::enforce_secure_profile`
 → `PlayerRegistry::set_enforce_secure_profile`, consulted by `decide`): once a client has

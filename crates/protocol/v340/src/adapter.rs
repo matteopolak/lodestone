@@ -1,7 +1,7 @@
 //! [`VersionAdapter`] implementation driving the protocol 340 join flow.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LockResult, Mutex, MutexGuard, PoisonError};
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
 use lodestone_data::block_entity_types::block_entity_type;
@@ -37,9 +37,9 @@ use crate::packets::game::{
     ClientboundEntityEquipment, ClientboundPositionLook, Collect, DifficultyPacket, EntityAction,
     EntityEffect, JoinGame, KickDisconnect, NamedSoundEffect, OpenSignEntity, PlayerlistHeader,
     RemoveEntityEffect, Respawn, ScoreboardDisplayObjective, ServerboundArmAnimation,
-    ServerboundChat, ServerboundPositionLook, SetPassengers, SoundEffect, Spectate,
-    SpawnPosition, TeleportConfirm, UpdateHealth, UpdateTime, UseEntity, UseEntityAt,
-    UseEntityInteract,
+    ServerboundChat, ServerboundFlying, ServerboundLook, ServerboundPosition,
+    ServerboundPositionLook, SetPassengers, SoundEffect, Spectate, SpawnPosition,
+    TeleportConfirm, UpdateHealth, UpdateTime, UseEntity, UseEntityAt, UseEntityInteract,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
@@ -84,6 +84,35 @@ const REL_Z: i8 = 0x04;
 const REL_YAW: i8 = 0x08;
 const REL_PITCH: i8 = 0x10;
 
+/// Per-connection state used by 1.12.2's `EntityPlayerSP.onUpdateWalkingPlayer`.
+#[derive(Debug, Clone, Copy)]
+struct MovementSendState {
+    last_pos: Vec3,
+    last_yaw: f32,
+    last_pitch: f32,
+    last_on_ground: bool,
+    position_reminder: u32,
+}
+
+
+impl Default for MovementSendState {
+    fn default() -> Self {
+        Self {
+            last_pos: Vec3::new(0.0, 0.0, 0.0),
+            last_yaw: 0.0,
+            last_pitch: 0.0,
+            last_on_ground: false,
+            position_reminder: 0,
+        }
+    }
+}
+
+fn recover_movement_state<'a>(
+    result: LockResult<MutexGuard<'a, MovementSendState>>,
+) -> MutexGuard<'a, MovementSendState> {
+    result.unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Version adapter implementing protocol 340 (Minecraft 1.12.2).
 ///
 /// Holds the current dimension's [`ChunkShape`] because a `map_chunk` cannot
@@ -104,6 +133,7 @@ pub struct V340Adapter {
     /// nor a replacement range (both added in 1.13) — see the `TAB_COMPLETE`
     /// arm in `handle_play` for how this is used to reconstruct them.
     pending_tab_complete: Arc<Mutex<Option<PendingTabComplete>>>,
+    movement: Arc<Mutex<MovementSendState>>,
 }
 
 /// The half of an outgoing `command_suggestion` request 1.12.2's reply does
@@ -157,7 +187,69 @@ impl V340Adapter {
             shape: Arc::new(Mutex::new(ChunkShape::overworld())),
             current_dimension: Arc::new(Mutex::new(0)),
             pending_tab_complete: Arc::new(Mutex::new(None)),
+            movement: Arc::new(Mutex::new(MovementSendState::default())),
         }
+    }
+
+    /// Selects the 1.12.2 movement shape, retaining the pose last sent on
+    /// each axis and only sending the base `flying` packet for an on-ground
+    /// transition.
+    fn select_move_packet(
+        &self,
+        pos: Vec3,
+        rotation: Rotation,
+        on_ground: bool,
+    ) -> Result<Option<(i32, Vec<u8>)>, AdapterError> {
+        let mut state = recover_movement_state(self.movement.lock());
+        let dx = pos.x - state.last_pos.x;
+        let dy = pos.y - state.last_pos.y;
+        let dz = pos.z - state.last_pos.z;
+        state.position_reminder += 1;
+        let moved = dx * dx + dy * dy + dz * dz > 9.0e-4 || state.position_reminder >= 20;
+        let rotated = rotation.yaw != state.last_yaw || rotation.pitch != state.last_pitch;
+
+        let packet = if moved && rotated {
+            let body = ServerboundPositionLook {
+                x: pos.x,
+                y: pos.y,
+                z: pos.z,
+                yaw: rotation.yaw,
+                pitch: rotation.pitch,
+                on_ground,
+            };
+            Some((play::serverbound::POSITION_LOOK, encode_body(&body)?))
+        } else if moved {
+            let body = ServerboundPosition {
+                x: pos.x,
+                y: pos.y,
+                z: pos.z,
+                on_ground,
+            };
+            Some((play::serverbound::POSITION, encode_body(&body)?))
+        } else if rotated {
+            let body = ServerboundLook {
+                yaw: rotation.yaw,
+                pitch: rotation.pitch,
+                on_ground,
+            };
+            Some((play::serverbound::LOOK, encode_body(&body)?))
+        } else if state.last_on_ground != on_ground {
+            let body = ServerboundFlying { on_ground };
+            Some((play::serverbound::FLYING, encode_body(&body)?))
+        } else {
+            None
+        };
+
+        if moved {
+            state.last_pos = pos;
+            state.position_reminder = 0;
+        }
+        if rotated {
+            state.last_yaw = rotation.yaw;
+            state.last_pitch = rotation.pitch;
+        }
+        state.last_on_ground = on_ground;
+        Ok(packet)
     }
 
     /// Records the request `TAB_COMPLETE`'s reply cannot echo back itself.
@@ -2266,20 +2358,7 @@ impl VersionAdapter for V340Adapter {
                 // horizontal-collision bit — only `onGround` — so there is
                 // nothing to forward it into.
                 horizontal_collision: _,
-            } => {
-                let body = ServerboundPositionLook {
-                    x: pos.x,
-                    y: pos.y,
-                    z: pos.z,
-                    yaw: rotation.yaw,
-                    pitch: rotation.pitch,
-                    on_ground: *on_ground,
-                };
-                Ok(Some((
-                    play::serverbound::POSITION_LOOK,
-                    encode_body(&body)?,
-                )))
-            }
+            } => self.select_move_packet(*pos, *rotation, *on_ground),
             ClientAction::SwingArm { hand } => {
                 let body = ServerboundArmAnimation {
                     hand: match hand {
@@ -2735,5 +2814,26 @@ impl VersionAdapter for V340Adapter {
 
             _ => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod movement_tests {
+    use super::*;
+
+    #[test]
+    fn poisoned_movement_state_is_recovered() {
+        let adapter = V340Adapter::new();
+        let guard = adapter.movement.lock().expect("fresh movement state");
+        let state = recover_movement_state(Err(PoisonError::new(guard)));
+        drop(state);
+
+        assert_eq!(
+            adapter
+                .select_move_packet(Vec3::new(1.0, 0.0, 0.0), Rotation::default(), false)
+                .expect("poisoned state is recovered")
+                .map(|(id, _)| id),
+            Some(play::serverbound::POSITION)
+        );
     }
 }

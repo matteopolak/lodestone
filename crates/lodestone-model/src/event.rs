@@ -3346,16 +3346,13 @@ pub fn route(event: &ClientEvent) -> Route {
             session: true,
             ..Route::NOWHERE
         },
-        // Per-entity state, so `ingest` and **not** `session`: the fold
-        // (`ingest::apply_entity_status`) writes a `DeathTime` on the entity the
-        // status names, alongside the `HurtTime` its sibling folds write, and no
-        // session system holds a mutable query on either. Only vanilla's
-        // `EntityEvent.DEATH` (byte 3) is claimed today — the other ~40 codes are
-        // particle and sound effects with nothing here to receive them, and are
-        // dropped by that system rather than by this table, which is the right place
-        // for the distinction: this answers "is anything *asked*".
+        // Most statuses remain per-entity `ingest` state: byte 3 starts a
+        // `DeathTime` on the entity the packet names. The local player additionally
+        // consumes bytes 24..28 as its permission level, so the one queued event
+        // also reaches the session fold. The two systems write disjoint components.
         ClientEvent::EntityStatus { .. } => Route {
             ingest: true,
+            session: true,
             ..Route::NOWHERE
         },
         // `ingest` spawns the entity; the shell arm is guarded on

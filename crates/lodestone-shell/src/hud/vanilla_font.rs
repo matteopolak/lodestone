@@ -272,8 +272,26 @@ pub struct VanillaFont {
     /// from the same resource-pack-aware manager the default font uses (see
     /// [`jar_manager`]) and cached — `None` for an id that failed to load, so
     /// a malformed or absent pack font is not re-resolved every frame it
-    /// appears in. See [`Self::select_font`].
-    custom: Mutex<HashMap<FontId, Option<Arc<RasterFont>>>>,
+    /// appears in. The whole cache is invalidated when the resource-pack
+    /// generation changes: this `VanillaFont` survives a server pack's
+    /// asynchronous installation, while its prior negative lookup must not.
+    /// See [`Self::select_font`].
+    custom: Mutex<CustomFontCache>,
+}
+
+/// Custom-font entries resolved against one exact resource-pack stack.
+///
+/// A pack-generation change can add, remove or override any font, so retaining
+/// either a successful or failed lookup across it is wrong. Keeping a single
+/// generation instead of keying every entry by generation bounds the cache when
+/// a player changes packs repeatedly during one session. This is the shared
+/// [`crate::resources::pack_generation`] signal, so a mipmap-only change also
+/// conservatively clears this tiny cache; that may reload a font once, but
+/// needs no second cross-subsystem generation counter.
+#[derive(Debug, Default)]
+struct CustomFontCache {
+    generation: Option<u64>,
+    entries: HashMap<FontId, Option<Arc<RasterFont>>>,
 }
 
 /// Process-wide cache. The jar is ~37 MB and the font is tiny; loading it once
@@ -317,7 +335,7 @@ impl VanillaFont {
                     raster,
                     obfuscation_pool,
                     obfuscation_rng: AtomicU64::new(0x9E37_79B9_7F4A_7C15),
-                    custom: Mutex::new(HashMap::new()),
+                    custom: Mutex::new(CustomFontCache::default()),
                 }))
             }
             Err(e) => {
@@ -347,7 +365,7 @@ impl VanillaFont {
             raster,
             obfuscation_pool,
             obfuscation_rng: AtomicU64::new(0x9E37_79B9_7F4A_7C15),
-            custom: Mutex::new(HashMap::new()),
+            custom: Mutex::new(CustomFontCache::default()),
         })
     }
 
@@ -361,18 +379,42 @@ impl VanillaFont {
     /// must degrade to the default font, not be retried every frame it
     /// appears in a message, and never panic — the pack is untrusted input.
     fn custom_raster(&self, id: FontId) -> Option<Arc<RasterFont>> {
+        self.custom_raster_for_generation(id, crate::resources::pack_generation(), || {
+            load_custom_font(id.name())
+        })
+    }
+
+    /// Resolves one custom font against `generation`'s pack stack.
+    ///
+    /// Kept separate from [`Self::custom_raster`] so the cache policy has a
+    /// hermetic test seam: tests can change the generation and make a synthetic
+    /// font available without mutating the process-wide resource-pack state or
+    /// requiring a `client.jar`.
+    fn custom_raster_for_generation<F>(
+        &self,
+        id: FontId,
+        generation: u64,
+        load: F,
+    ) -> Option<Arc<RasterFont>>
+    where
+        F: FnOnce() -> Option<Arc<RasterFont>>,
+    {
         if id.name() == DEFAULT_FONT_NAME {
             return None;
         }
-        {
-            let cache = self.custom.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(entry) = cache.get(&id) {
-                return entry.clone();
-            }
+        let mut cache = recover_poisoned_lock(self.custom.lock());
+        if cache.generation != Some(generation) {
+            cache.generation = Some(generation);
+            cache.entries.clear();
         }
-        let loaded = load_custom_font(id.name());
-        let mut cache = self.custom.lock().unwrap_or_else(PoisonError::into_inner);
-        cache.insert(id, loaded.clone());
+        if let Some(entry) = cache.entries.get(&id) {
+            return entry.clone();
+        }
+        // Font opens are rare (only on the first glyph for a font/generation),
+        // and the mutex protects only this small cache. Keep it while loading
+        // so concurrent nameplates share this one result and one warning.
+        let loaded = load();
+        cache.entries.insert(id, loaded.clone());
         loaded
     }
 
@@ -901,6 +943,13 @@ impl VanillaFont {
     }
 }
 
+/// Keeps the custom-font cache fail-open after a loader panic poisoned its
+/// mutex. Resource-pack contents are untrusted, so a later nameplate must be
+/// able to fall back instead of panicking again.
+fn recover_poisoned_lock<T>(result: Result<T, PoisonError<T>>) -> T {
+    result.unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Groups every codepoint this font can actually draw pixels for by
 /// `ceil(advance)`, mirroring `FontSet.glyphsByWidth`
 /// (`FontSet.java`) restricted to codepoints
@@ -1138,6 +1187,148 @@ mod unihex_wiring {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// A tiny raster font is enough to exercise the custom-font cache without
+    /// requiring a local `client.jar`: this test is about cache invalidation,
+    /// not bitmap drawing.
+    fn space_raster(ch: char) -> RasterFont {
+        let mut source = lodestone_assets::MemorySource::new("custom-font-cache");
+        source.insert(
+            "assets/minecraft/font/default.json",
+            format!(r#"{{"providers":[{{"type":"space","advances":{{"{ch}":4}}}}]}}"#)
+                .into_bytes(),
+        );
+        let manager = ResourceManager::new(vec![Box::new(source)]);
+        let id: ResourceLocation = "minecraft:default".parse().expect("valid fixture id");
+        FontLoader::new(&manager)
+            .load_raster(&id, &FontOptions::none())
+            .expect("space-only fixture font loads")
+    }
+
+    fn font_with_custom_cache() -> VanillaFont {
+        let raster = space_raster(' ');
+        VanillaFont {
+            obfuscation_pool: build_obfuscation_pool(&raster),
+            raster,
+            obfuscation_rng: AtomicU64::new(0x9E37_79B9_7F4A_7C15),
+            custom: Mutex::new(CustomFontCache::default()),
+        }
+    }
+
+    /// A missing custom font is cached during one pack generation so a chat
+    /// nameplate does not attempt a load every frame. Once the pack stack
+    /// changes, that negative result must be retried: the same `VanillaFont`
+    /// outlives an asynchronously installed server pack.
+    #[test]
+    fn custom_font_cache_retries_a_missing_font_after_pack_generation_changes() {
+        let font = font_with_custom_cache();
+        let id = FontId::intern("nameplates:default");
+        let available = std::cell::Cell::new(false);
+        let attempts = std::cell::Cell::new(0);
+        let load = || {
+            attempts.set(attempts.get() + 1);
+            available.get().then(|| Arc::new(space_raster('X')))
+        };
+
+        assert!(
+            font.custom_raster_for_generation(id, 41, load).is_none(),
+            "the pre-install lookup must fail"
+        );
+        assert_eq!(attempts.get(), 1);
+
+        available.set(true);
+        assert!(
+            font.custom_raster_for_generation(id, 41, || {
+                attempts.set(attempts.get() + 1);
+                Some(Arc::new(space_raster('X')))
+            })
+            .is_none(),
+            "an unchanged generation must retain the negative cache entry"
+        );
+        assert_eq!(attempts.get(), 1, "an unchanged generation must not reload every frame");
+
+        let loaded = font
+            .custom_raster_for_generation(id, 42, || {
+                attempts.set(attempts.get() + 1);
+                Some(Arc::new(space_raster('X')))
+            })
+            .expect("a changed pack generation must retry and use the newly available font");
+        assert!(loaded.font().contains('X' as u32));
+        assert_eq!(attempts.get(), 2);
+    }
+
+    /// The first lookup owns the cache mutex until it records its result. A
+    /// second thread asking for the same font/generation must consume that
+    /// result rather than loading (and warning about) the same missing font.
+    #[test]
+    fn concurrent_custom_font_lookups_share_one_first_load() {
+        let font = Arc::new(font_with_custom_cache());
+        let id = FontId::intern("nameplates:shift_1");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (first_started_tx, first_started_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let first_font = Arc::clone(&font);
+        let first_attempts = Arc::clone(&attempts);
+        let first = std::thread::Builder::new()
+            .name("font-cache-first-loader".to_owned())
+            .spawn(move || {
+                first_font.custom_raster_for_generation(id, 88, || {
+                    first_attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                    first_started_tx.send(()).expect("test is listening");
+                    release_first_rx.recv().expect("test releases first loader");
+                    None
+                })
+            })
+            .expect("native test worker starts");
+        first_started_rx.recv().expect("first loader started");
+
+        let (second_call_tx, second_call_rx) = mpsc::channel();
+        let (second_loader_tx, second_loader_rx) = mpsc::channel();
+        let second_font = Arc::clone(&font);
+        let second_attempts = Arc::clone(&attempts);
+        let second = std::thread::Builder::new()
+            .name("font-cache-second-loader".to_owned())
+            .spawn(move || {
+                second_call_tx.send(()).expect("test is listening");
+                second_font.custom_raster_for_generation(id, 88, || {
+                    second_attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                    second_loader_tx.send(()).expect("test is listening");
+                    None
+                })
+            })
+            .expect("native test worker starts");
+        second_call_rx.recv().expect("second lookup started");
+
+        // Before the fix the second call reaches its loader while the first
+        // one waits above. With the mutex held, it cannot get past the cache
+        // lookup until the first call stores its negative result.
+        let duplicate_load = second_loader_rx.recv_timeout(Duration::from_millis(100));
+        release_first_tx.send(()).expect("first loader is waiting");
+        assert!(first.join().expect("first worker did not panic").is_none());
+        assert!(second.join().expect("second worker did not panic").is_none());
+        assert!(
+            duplicate_load.is_err(),
+            "the second same-generation lookup invoked its loader before the first cached its result"
+        );
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    /// The custom-font cache follows this module's existing fail-open mutex
+    /// policy: a panic while holding it must not turn later nameplates into a
+    /// second panic.
+    #[test]
+    fn custom_font_cache_recovers_after_its_mutex_is_poisoned() {
+        // The default Cranelift test backend aborts on a deliberately panicking
+        // spawned thread (documented in Cargo.toml), so construct the exact
+        // poisoned lock result instead. Production calls this helper with the
+        // cache mutex's `lock()` result.
+        let recovered = recover_poisoned_lock(Err(PoisonError::new(CustomFontCache::default())));
+        assert_eq!(recovered.generation, None);
+        assert!(recovered.entries.is_empty());
+    }
 
     /// The shadow is a quarter of each channel in the space the HUD works in,
     /// with alpha untouched. Vanilla's `ARGB.scaleRGB(0xFFFFFFFF, 0.25F)` is

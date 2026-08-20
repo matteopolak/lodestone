@@ -255,7 +255,23 @@ impl CommandTree {
                 return Err(ParseError::new(reader.cursor(), ParseErrorKind::RedirectCycle));
             }
             visited_redirects.push(key);
-            return self.parse_nodes(target, reader, visited_redirects, nodes, arguments, filter);
+            let cursor = reader.cursor();
+            let nodes_len = nodes.len();
+            let arguments_len = arguments.len();
+            self.parse_nodes(target, reader, visited_redirects, nodes, arguments, filter)?;
+
+            // `/execute ... run` redirects into the ordinary root so built-in
+            // commands retain their normal grammar.  Its own greedy fallback
+            // is deliberately considered only when that root consumed
+            // *nothing*: a known built-in root with bad arguments must remain
+            // a built-in parse error, while an unknown terminal root may be
+            // handed to the host dispatcher with the already-rewritten source.
+            if reader.cursor() != cursor || self.node(child_id).children().is_empty() {
+                return Ok(());
+            }
+            nodes.truncate(nodes_len);
+            arguments.truncate(arguments_len);
+            return self.parse_nodes(child_id, reader, visited_redirects, nodes, arguments, filter);
         }
 
         if !self.node(child_id).children().is_empty() {

@@ -975,6 +975,20 @@ fn read_component_patch(
                     AdapterError::Decode(format!("negative item max_damage {max}"))
                 })?);
             }
+            // `Repairable.STREAM_CODEC` is one `HolderSet<Item>`. The repair
+            // items themselves have no consumer here, but this component is
+            // unframed like every other patch payload, so consuming it is what
+            // keeps a repaired item from ending the rest of its packet.
+            Some("minecraft:repairable") => {
+                let _repair_items = read_holder_set(reader)?;
+            }
+            // `Equippable.STREAM_CODEC` is an eleven-field record. Only its
+            // slot reaches `ItemComponents` today, but every field must be read:
+            // a patched horse armour otherwise drops the remainder of the
+            // container packet at this component.
+            Some("minecraft:equippable") => {
+                components.equippable = Some(read_equippable(reader)?);
+            }
 
             // ---------------------------------------------------------------
             // Consumed-for-alignment components.
@@ -1200,16 +1214,6 @@ fn read_component_patch(
                 // way to stop a given component being a decode cliff is to model
                 // it, which is what the `minecraft:trim` arm above does.
                 //
-                // One special case: if the component we cannot decode is
-                // `minecraft:equippable` itself, the prototype slot seeded above
-                // is *known* to be overridden, so report "unknown" rather than a
-                // value we can see is wrong. (`Equippable`'s stream codec is an
-                // eleven-field record with a `HolderSet<EntityType>`; decoding it
-                // for the sake of a component no vanilla server patches is not
-                // worth the surface.)
-                if other == Some("minecraft:equippable") {
-                    components.equippable = None;
-                }
                 components.has_unmodeled = true;
                 tracing::warn!(
                     item,
@@ -1868,12 +1872,14 @@ fn decode_award_stats(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     })])
 }
 
-/// Consumes a `HolderSet<Item>` (`Ingredient.CONTENTS_STREAM_CODEC`) and returns
-/// the explicit item ids, or an empty list for the tag form.
+/// Consumes a `HolderSet<T>` and returns the direct entries' registry ids, or an
+/// empty list for the tag form.
 ///
-/// Same wire shape as [`read_block_holder_set`], one registry over: a VarInt where
-/// `0` means a tag identifier follows and `n` means `n - 1` explicit ids.
-fn read_item_holder_set(reader: &mut Reader<'_>) -> Result<Vec<i32>, AdapterError> {
+/// `ByteBufCodecs.holderSet` uses this same wire shape for `Item` ingredients,
+/// `Repairable`'s items, and `Equippable`'s entity types: a VarInt where `0`
+/// means a tag identifier follows and `n` means `n - 1` explicit bare registry
+/// ids. The caller decides whether those ids are worth retaining.
+fn read_holder_set(reader: &mut Reader<'_>) -> Result<Vec<i32>, AdapterError> {
     let discriminator = reader.var_i32().map_err(dec_err)?;
     if discriminator == 0 {
         let _tag = reader.string(32767).map_err(dec_err)?;
@@ -1886,6 +1892,58 @@ fn read_item_holder_set(reader: &mut Reader<'_>) -> Result<Vec<i32>, AdapterErro
         items.push(reader.var_i32().map_err(dec_err)?);
     }
     Ok(items)
+}
+
+/// Consumes a `Holder<SoundEvent>` (`SoundEvent.STREAM_CODEC`).
+///
+/// `ByteBufCodecs.holder` writes `0` for a direct sound definition, whose body
+/// is an identifier and an optional fixed-range float; a positive value is a
+/// registry reference encoded as `id + 1` and has no body. The decoded sound is
+/// intentionally discarded: equippable-slot alignment is the only consumer.
+fn read_sound_event_holder(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
+    if reader.var_i32().map_err(dec_err)? == 0 {
+        reader.string(32767).map_err(dec_err)?;
+        if reader.bool().map_err(dec_err)? {
+            reader.f32().map_err(dec_err)?;
+        }
+    }
+    Ok(())
+}
+
+/// Decodes `Equippable.STREAM_CODEC`, retaining only the slot.
+///
+/// The slot is a `ByteBufCodecs.idMapper(BY_ID, ...)`, not an enum ordinal.
+/// In particular wire id 5 is `OffHand` while enum ordinal 5 is `Head`; map
+/// from the ids in `EquipmentSlot.java` explicitly. `BY_ID` uses its ZERO
+/// out-of-bounds strategy, so malformed ids alias `MainHand` just as vanilla
+/// does rather than inventing a second validation policy here.
+fn read_equippable(reader: &mut Reader<'_>) -> Result<EquipmentSlot, AdapterError> {
+    let slot = match reader.var_i32().map_err(dec_err)? {
+        0 => EquipmentSlot::MainHand,
+        1 => EquipmentSlot::Feet,
+        2 => EquipmentSlot::Legs,
+        3 => EquipmentSlot::Chest,
+        4 => EquipmentSlot::Head,
+        5 => EquipmentSlot::OffHand,
+        6 => EquipmentSlot::Body,
+        7 => EquipmentSlot::Saddle,
+        _ => EquipmentSlot::MainHand,
+    };
+    read_sound_event_holder(reader)?; // equipSound
+    if reader.bool().map_err(dec_err)? {
+        reader.string(32767).map_err(dec_err)?; // assetId ResourceKey
+    }
+    if reader.bool().map_err(dec_err)? {
+        reader.string(32767).map_err(dec_err)?; // cameraOverlay Identifier
+    }
+    if reader.bool().map_err(dec_err)? {
+        let _allowed_entities = read_holder_set(reader)?;
+    }
+    for _ in 0..5 {
+        reader.bool().map_err(dec_err)?;
+    }
+    read_sound_event_holder(reader)?; // shearingSound
+    Ok(slot)
 }
 
 /// Decodes `ClientboundRecipeBookAddPacket`.
@@ -1921,7 +1979,7 @@ fn decode_recipe_book_add(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
                 ))
             })?;
             for _ in 0..requirement_count {
-                let _ingredient = read_item_holder_set(&mut reader)?;
+                let _ingredient = read_holder_set(&mut reader)?;
             }
         }
         let flags = reader.i8().map_err(dec_err)?;
@@ -1973,7 +2031,7 @@ fn decode_update_recipes(payload: &[u8]) -> Result<Vec<Directive>, AdapterError>
     for _ in 0..stonecutter_count {
         // `SingleInputEntry`: an `Ingredient` (HolderSet<Item>) then a
         // `SlotDisplay` — a bare display, not a whole `RecipeDisplay`.
-        let _input = read_item_holder_set(&mut reader)?;
+        let _input = read_holder_set(&mut reader)?;
         let display = read_slot_display(&mut reader, 0)?;
         if !display.complete {
             // Emit what was decoded before the unmodeled entry rather than the
@@ -2495,4 +2553,3 @@ fn read_count(reader: &mut Reader<'_>, what: &str) -> Result<usize, AdapterError
     let count = reader.var_i32().map_err(dec_err)?;
     usize::try_from(count).map_err(|_| AdapterError::Decode(format!("invalid {what} count {count}")))
 }
-
