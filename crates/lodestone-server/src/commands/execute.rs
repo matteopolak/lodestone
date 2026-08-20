@@ -269,7 +269,7 @@
 
 use std::sync::Arc;
 
-use lodestone_command::{DoubleArgument, NodeId};
+use lodestone_command::{DoubleArgument, NodeId, StringArgument};
 use lodestone_command_mc::{
     AnchorInput, Axes, BiomeArg, BlockArg, BlockPosArg, DimensionArg, EntityAnchorArg, EntityArg,
     EntitySelector, EntityTypeArg, FloatRangeArg, IdentifierArg, IntRangeArg, NbtPathArg,
@@ -319,6 +319,15 @@ pub(super) fn register(registrar: &mut Registrar) {
 fn register_run(registrar: &mut Registrar, execute: NodeId, root: NodeId) {
     let run = registrar.literal(execute, "run");
     registrar.redirect(run, root);
+    // The redirect keeps every built-in terminal command on its ordinary root
+    // path. When that root consumes nothing, `CommandTree::parse` falls back
+    // to this greedy child, preserving the source modifiers accumulated before
+    // `run` for the host-installed plugin dispatcher.
+    let (plugin, plugin_key) = registrar.arg(run, "plugin", StringArgument::greedy());
+    registrar.exec(plugin, move |ctx| {
+        let command = ctx.get(plugin_key).clone();
+        ctx.run_contextual(&command)
+    });
 }
 
 // ---- store -------------------------------------------------------------

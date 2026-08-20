@@ -51,7 +51,12 @@ pub fn debug_line_vertices(lines: &[lodestone_ecs::player::DebugLine]) -> Vec<De
 ///
 /// The one primitive both F3 sub-modes below are built from — a box is twelve
 /// segments, which at [`MAX_DEBUG_LINE_SEGMENTS`] leaves room for ~340 of them.
-fn push_box(out: &mut Vec<DebugLineVertex>, min: [f32; 3], max: [f32; 3], color: [f32; 4]) {
+pub(crate) fn push_box(
+    out: &mut Vec<DebugLineVertex>,
+    min: [f32; 3],
+    max: [f32; 3],
+    color: [f32; 4],
+) {
     let [x0, y0, z0] = min;
     let [x1, y1, z1] = max;
     let corner = |x: f32, y: f32, z: f32| DebugLineVertex {
@@ -414,7 +419,7 @@ impl DebugLineRenderer {
 /// how `app.rs` reaches the `EcsHandle`):
 ///
 /// ```text
-/// render_state.set_debug_lines_source(move || {
+/// render_state.set_debug_lines_source(move |_| {
 ///     let world = ecs_handle.read();
 ///     lodestone_render_shell::gpu::debug_line_vertices(
 ///         &world.resource::<lodestone_ecs::player::DebugLines>().0,
@@ -424,13 +429,13 @@ impl DebugLineRenderer {
 #[derive(Default)]
 pub struct DebugLinesSource(
     #[allow(clippy::type_complexity)]
-    pub(super) Option<Box<dyn Fn() -> Vec<DebugLineVertex> + Send + Sync>>,
+    pub(super) Option<Box<dyn Fn(glam::Vec3) -> Vec<DebugLineVertex> + Send + Sync>>,
 );
 
 impl DebugLinesSource {
     #[must_use]
-    pub(super) fn sample(&self) -> Vec<DebugLineVertex> {
-        self.0.as_ref().map_or_else(Vec::new, |f| f())
+    pub(super) fn sample(&self, eye: glam::Vec3) -> Vec<DebugLineVertex> {
+        self.0.as_ref().map_or_else(Vec::new, |f| f(eye))
     }
 }
 

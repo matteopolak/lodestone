@@ -365,6 +365,10 @@ pub struct Xp(pub Option<(f32, i32, i32)>);
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ServerEntityId(pub Option<i32>);
 
+/// The local player's server-granted permission level, `0..=4`.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServerPermissionLevel(pub u8);
+
 /// The local player's game mode as the server last reported it, `None` before
 /// login.
 ///
@@ -856,6 +860,7 @@ pub fn apply_local_player_state(
             &mut Vitals,
             &mut Xp,
             &mut ServerEntityId,
+            &mut ServerPermissionLevel,
             &mut ServerGameMode,
             &mut ServerDimension,
             &mut ServerDimensionType,
@@ -880,6 +885,7 @@ pub fn apply_local_player_state(
             mut vitals,
             mut xp,
             mut id,
+            mut permission_level,
             mut game_mode,
             mut dimension,
             mut dimension_type,
@@ -919,9 +925,20 @@ pub fn apply_local_player_state(
                     dimension: dim,
                 } => {
                     id.0 = Some(*entity_id);
+                    permission_level.0 = 0;
                     game_mode.0 = Some(*mode);
                     dimension.0 = Some(dim.clone());
                     alive.0 = true;
+                }
+                ClientEvent::EntityStatus { entity_id, status } if id.0 == Some(*entity_id) => {
+                    permission_level.0 = match status {
+                        24 => 0,
+                        25 => 1,
+                        26 => 2,
+                        27 => 3,
+                        28 => 4,
+                        _ => permission_level.0,
+                    };
                 }
                 // `Respawned` is *also* how the server reports portal travel, not
                 // only death — see [`ServerDimension`].
@@ -930,6 +947,7 @@ pub fn apply_local_player_state(
                     game_mode: mode,
                     ..
                 } => {
+                    permission_level.0 = 0;
                     dimension.0 = Some(dim.clone());
                     game_mode.0 = Some(*mode);
                     alive.0 = true;
@@ -1109,6 +1127,7 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             Vitals::default(),
             Xp::default(),
             ServerEntityId::default(),
+            ServerPermissionLevel::default(),
             ServerGameMode::default(),
             ServerDimension::default(),
             ServerDimensionType::default(),
@@ -2220,6 +2239,106 @@ mod tests {
         };
         assert!(handles_event(&mode));
         assert!(!crate::ingest::handles_event(&mode));
+    }
+
+    #[test]
+    fn entity_status_reaches_the_session_fold_for_local_permissions() {
+        let event = ClientEvent::EntityStatus {
+            entity_id: 7,
+            status: 26,
+        };
+        assert!(
+            crate::ingest::handles_event(&event),
+            "the existing per-entity status fold must keep receiving death events"
+        );
+        assert!(
+            handles_event(&event),
+            "the local-player permission meaning of status 24..28 needs the session fold"
+        );
+    }
+
+    #[test]
+    fn local_entity_statuses_fold_permission_level_without_claiming_other_entities() {
+        let (mut app, entity) = session_app();
+        fold(
+            &mut app,
+            ClientEvent::Login {
+                entity_id: 7,
+                game_mode: GameMode::Creative,
+                dimension: dim("overworld"),
+            },
+        );
+
+        fold(
+            &mut app,
+            ClientEvent::EntityStatus {
+                entity_id: 7,
+                status: 26,
+            },
+        );
+        assert_eq!(app.world().get::<ServerPermissionLevel>(entity).unwrap().0, 2);
+
+        fold(
+            &mut app,
+            ClientEvent::EntityStatus {
+                entity_id: 7,
+                status: 25,
+            },
+        );
+        assert_eq!(app.world().get::<ServerPermissionLevel>(entity).unwrap().0, 1);
+
+        fold(
+            &mut app,
+            ClientEvent::EntityStatus {
+                entity_id: 7,
+                status: 27,
+            },
+        );
+        assert_eq!(app.world().get::<ServerPermissionLevel>(entity).unwrap().0, 3);
+
+        fold(
+            &mut app,
+            ClientEvent::EntityStatus {
+                entity_id: 8,
+                status: 28,
+            },
+        );
+        assert_eq!(
+            app.world().get::<ServerPermissionLevel>(entity).unwrap().0,
+            3,
+            "a non-local entity's status cannot grant local permissions"
+        );
+
+        fold(
+            &mut app,
+            ClientEvent::EntityStatus {
+                entity_id: 7,
+                status: 24,
+            },
+        );
+        assert_eq!(app.world().get::<ServerPermissionLevel>(entity).unwrap().0, 0);
+
+        fold(
+            &mut app,
+            ClientEvent::EntityStatus {
+                entity_id: 7,
+                status: 28,
+            },
+        );
+        fold(
+            &mut app,
+            ClientEvent::Respawned {
+                dimension: dim("overworld"),
+                game_mode: GameMode::Creative,
+                previous_game_mode: Some(GameMode::Creative),
+                last_death_location: None,
+            },
+        );
+        assert_eq!(
+            app.world().get::<ServerPermissionLevel>(entity).unwrap().0,
+            0,
+            "a respawn replaces vanilla's LocalPlayer and must not retain permissions"
+        );
     }
 
     /// The `BiomeVisuals` routing control, the fifth instance of the same pair.

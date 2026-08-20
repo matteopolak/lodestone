@@ -227,6 +227,13 @@ fn auth_servers_down_reason() -> Text {
     Text::literal("Authentication servers are down. Please try again later. Sorry!")
 }
 
+/// Vanilla's disconnect component when a client attempts to replace its chat
+/// session with a valid certificate that expires before the installed one.
+#[cfg(not(target_arch = "wasm32"))]
+fn expired_profile_public_key_reason() -> Text {
+    Text::translate("multiplayer.disconnect.expired_public_key", Vec::new())
+}
+
 /// Cadence of the periodic time-of-day broadcast.
 ///
 /// Vanilla re-broadcasts the world's monotonic game time every 20 ticks
@@ -1725,6 +1732,11 @@ pub enum ServerError {
     #[cfg(not(target_arch = "wasm32"))]
     #[error("online-mode authentication service error: {0}")]
     AuthServiceUnavailable(#[from] lodestone_auth::AuthError),
+    /// A valid chat-session announcement attempted to roll this connection
+    /// back to a profile key with an earlier expiry than the installed key.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("chat-session update rejected: replacement profile key expires earlier than the installed key")]
+    ProfilePublicKeyRollback,
 }
 
 /// The session-server check a login performs once encryption is up: given the
@@ -1760,6 +1772,10 @@ pub struct OnlineModeConfig {
     /// share one client's connection pool across every player who joins.
     pub http: reqwest::Client,
     verify: SessionVerify,
+    /// Host-shared Mojang issuer keys for profile-key provenance. The mutex
+    /// covers only the tiny cache update/read; HTTP always happens after it is
+    /// released so one slow services request never stalls another login.
+    profile_key_cache: Arc<Mutex<lodestone_auth::MojangPublicKeyCache>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1783,6 +1799,9 @@ impl OnlineModeConfig {
             verify: Arc::new(|http, username, hash| {
                 Box::pin(async move { lodestone_auth::has_joined(&http, &username, &hash).await })
             }),
+            profile_key_cache: Arc::new(Mutex::new(
+                lodestone_auth::MojangPublicKeyCache::empty(),
+            )),
         }
     }
 
@@ -1834,7 +1853,49 @@ impl OnlineModeConfig {
                 let result = verify(username, hash);
                 Box::pin(async move { result })
             }),
+            profile_key_cache: Arc::new(Mutex::new(
+                lodestone_auth::MojangPublicKeyCache::empty(),
+            )),
         }
+    }
+
+    /// Returns the latest issuer-key snapshot, refreshing the shared cache
+    /// when authlib policy says it is due. A successful response lives for 24
+    /// hours; failures retain the last good set and schedule the capped
+    /// 5–320-minute backoff. A first-fetch failure returns `None`, which makes
+    /// secure-profile enforcement degrade exactly as vanilla does when it
+    /// cannot validate profile keys.
+    async fn profile_key_issuers(
+        &self,
+        now_millis: i64,
+    ) -> Option<lodestone_auth::MojangPublicKeys> {
+        let due = self
+            .profile_key_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .needs_refresh(now_millis);
+        if due {
+            let fetched = lodestone_auth::fetch_mojang_public_keys(&self.http).await;
+            let mut cache = self
+                .profile_key_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match fetched {
+                Ok(keys) => cache.record_success(keys, now_millis),
+                Err(error) => {
+                    cache.record_failure(now_millis);
+                    tracing::warn!(
+                        error = %error,
+                        "Mojang profile-key issuer refresh failed; announcement validation and secure-profile enforcement are unavailable until a key set is cached"
+                    );
+                }
+            }
+        }
+        self.profile_key_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .cloned()
     }
 }
 
@@ -2503,11 +2564,12 @@ where
 /// have to come in on; the borrowed-source
 /// [`serve_connection_with_commands`] cannot serve it.
 ///
-/// Added *beside* `serve_connection_with_mob_events_shared` rather than by
-/// giving that function a tenth parameter, deliberately: its one caller lives
-/// in `integrated.rs`, a file this issue's ownership split does not cover, and
-/// a changed signature would break it from the outside. This way the wiring
-/// there is a purely additive constructor whenever its owner lands it.
+/// It carries the same live view ceiling, sleep, border and save handles as
+/// the plain singleplayer wrapper. The local command constructor must not
+/// replace those with defaults merely to install a dispatch: doing so would
+/// make plugin commands silently change unrelated integrated-world behaviour.
+/// LAN callers pass their existing disconnected defaults explicitly and retain
+/// their own configured `CommandDispatch` policy.
 ///
 /// # Errors
 ///
@@ -2519,6 +2581,7 @@ pub(crate) async fn serve_connection_with_mob_events_and_commands_shared<T, P, S
     source: &Arc<S>,
     entities: &E,
     view_radius: i32,
+    max_view_radius: i32,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
     // Issue #619. `IntegratedServer`'s real handle — see
@@ -2528,7 +2591,10 @@ pub(crate) async fn serve_connection_with_mob_events_and_commands_shared<T, P, S
     tickets: &TicketStoreHandle,
     block_ticks: &BlockTickFeed,
     explosions: &ExplosionFeed,
+    sleep_vote: &SleepVote,
+    sleep_feed: &SleepFeed,
     commands: &CommandDispatch,
+    border: &BorderFeed,
     // Issue #535. The three host-supplied surfaces every other constructor
     // hardcodes to `::default()`. `IntegratedServer::open_to_lan` is the one
     // caller that can actually carry a configured one, which is why they are
@@ -2538,6 +2604,7 @@ pub(crate) async fn serve_connection_with_mob_events_and_commands_shared<T, P, S
     // Issues #327/#328/#323: the world's shared scalars, the *same* handle
     // `run_tick_loop` ticks. See `serve_connection_inner`'s parameter comment.
     world: &crate::world_state::WorldStateHandle,
+    live_save: &crate::live_save::LiveSaveSlot,
     // The host's ops/whitelist/ban lists, shared by every accepted connection,
     // plus this connection's own remote address for the IP ban list. Parameters
     // here and nowhere else for the same reason the three above are:
@@ -2565,25 +2632,21 @@ where
         SourceRef::Shared(source),
         entities,
         view_radius,
-        // Issue #545: the join radius is also the ceiling here — this wrapper
-        // serves no path with its own capacity policy. See `ViewTracker::max_radius`.
-        view_radius,
+        max_view_radius,
         block_entities,
         mobs,
         tickets,
         block_ticks,
         explosions,
         &WeatherFeed::default(),
-        // Issue #325: a fresh vote/feed no tick loop reads (see
-        // `serve_connection_inner`'s parameter comments).
-        &SleepVote::default(),
-        &SleepFeed::default(),
+        sleep_vote,
+        sleep_feed,
         commands,
-        &BorderFeed::default(),
+        border,
         resource_packs,
         plugin_channels,
         world,
-        &crate::live_save::LiveSaveSlot::default(),
+        live_save,
         #[cfg(not(target_arch = "wasm32"))]
         access,
         #[cfg(not(target_arch = "wasm32"))]
@@ -3227,6 +3290,11 @@ where
     // `PlayerInfo` map, so a second, independently derived uuid would produce a
     // spawn every client silently discards.
     let mut login_uuid: Option<uuid::Uuid> = None;
+    // A configured online-mode listener is not enough: only this flag, set
+    // after `hasJoined` replaces the claimed identity, authorizes profile-key
+    // provenance enforcement in Play.
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut online_authenticated = false;
     // Issue #273. `Some` between the moment `LoginStart` sends an
     // `EncryptionRequest` and the moment the matching `EncryptionResponse`
     // arrives — the RSA keypair the request's public key came from (needed
@@ -3403,6 +3471,7 @@ where
                     Ok(Some(profile)) => {
                         login_uuid = Some(profile.id);
                         username = Some(profile.name.clone());
+                        online_authenticated = true;
                         for directive in proto.login_success(&profile.name, profile.id) {
                             apply(conn, &mut state, directive).await?;
                         }
@@ -3998,6 +4067,27 @@ where
                     chunk_ms,
                     welcome_ms,
                 );
+                // Vanilla validates an announced profile key whenever this
+                // connection completed online authentication and the Mojang
+                // issuer service is usable. `enforce-secure-profile` is a
+                // separate policy: it decides whether a player must sign, not
+                // whether an otherwise-valid announcement is adopted. Fetching
+                // remains outside the cache lock in `profile_key_issuers`.
+                #[cfg(not(target_arch = "wasm32"))]
+                let profile_key_issuers = if online_authenticated {
+                    online_mode
+                        .expect("an online-authenticated connection has OnlineModeConfig")
+                        .profile_key_issuers(crate::chat_session::now_millis())
+                        .await
+                } else {
+                    None
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                let enforce_secure_profile = online_authenticated
+                    && entities
+                        .players()
+                        .is_some_and(PlayerRegistry::enforce_secure_profile)
+                    && profile_key_issuers.is_some();
                 return serve_play(
                     conn,
                     proto,
@@ -4024,6 +4114,10 @@ where
                     commands,
                     advancements,
                     player_uuid,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    profile_key_issuers,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    enforce_secure_profile,
                     border,
                     resource_packs,
                     &mut client_channels,
@@ -10624,6 +10718,17 @@ async fn dispatch_play_packet<T, P, S>(
     // see that function's own doc comment.
     advancements: &mut AdvancementManager,
     player_uuid: uuid::Uuid,
+    // `Some` only after an online-authenticated Play handoff found a usable
+    // Mojang issuer-key cache. This validates announcements independently of
+    // whether the host requires signed chat. The cfg preserves the browser's
+    // no-auth/degraded surface without linking `lodestone-auth` there.
+    #[cfg(not(target_arch = "wasm32"))]
+    profile_key_issuers: Option<&lodestone_auth::MojangPublicKeys>,
+    // The separate vanilla policy gate: authenticated online connection,
+    // `enforce-secure-profile`, and a usable issuer cache. An adopted session
+    // still requires signatures even when this is false; this flag governs a
+    // player that has announced no valid session.
+    enforce_secure_profile: bool,
     // Issue #469. Mirrors `player_pos`/`player_rot` exactly — filled here,
     // read back by the caller, republished to the `PlayerRegistry` so *other*
     // connections see it. An out-parameter rather than two more parameters (a
@@ -12301,6 +12406,15 @@ where
             // `Fill` need the former and nothing else in this arm has a name for
             // it once the shadow takes effect.
             let chunk_source = source;
+            // The connection may already be in the Nether or End.  Keep that
+            // live source dimension in the command stack so `/execute ... run`
+            // passes the actual context on to a host dispatcher rather than
+            // silently manufacturing an overworld context.
+            let command_dimension = chunk_source
+                .dimension()
+                .key()
+                .parse()
+                .expect("server dimensions always have valid resource keys");
             // The roster the command's selectors resolve against.
             //
             // With no registry — singleplayer, where `open_in_memory` builds no
@@ -12333,7 +12447,7 @@ where
                 username,
                 position,
                 player_rot.unwrap_or(Rotation { yaw: 0.0, pitch: 0.0 }),
-                crate::commands::overworld_dimension(),
+                command_dimension,
                 commands.permission_level,
             );
             let command_world = crate::commands::CommandWorld {
@@ -12363,7 +12477,13 @@ where
                 // already reach through this arm's own `apply_own_effect`.
                 blocks: Some(chunk_source.get()),
             };
-            match commands.builtins.run(&command_world, &source, &command) {
+            match commands.builtins.run_with_contextual_dispatch(
+                &command_world,
+                &source,
+                &command,
+                &commands.dispatch,
+                &commands.caller,
+            ) {
                 Some(outcome) => {
                     for directed in outcome.effects {
                         if directed.target != player_uuid {
@@ -12559,11 +12679,10 @@ where
             signature,
         } => {
             if !message.trim().is_empty() {
-                let enforce = players.is_some_and(PlayerRegistry::enforce_secure_profile);
                 let decision = crate::chat_session::decide(
                     chat_session,
                     player_uuid,
-                    enforce,
+                    enforce_secure_profile,
                     signature.as_ref().map(|s| s.as_slice()),
                     &message,
                     timestamp_millis,
@@ -12595,12 +12714,51 @@ where
             public_key,
             key_signature,
         } => {
-            *chat_session = Some(crate::chat_session::ServerChatSession::new(
-                session_id,
-                expires_at_millis,
-                public_key,
-                key_signature,
-            ));
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let data = lodestone_auth::ProfilePublicKeyData {
+                    // `player_uuid` is the identity the session server returned
+                    // after `hasJoined`, never the UUID the client claimed in
+                    // LoginStart. Mojang signs this exact UUID into the
+                    // certificate payload.
+                    profile_id: player_uuid,
+                    expires_at_millis,
+                    public_key_der: public_key,
+                    key_signature,
+                };
+                if let Some(session) = crate::chat_session::adopt_announced_session(
+                    profile_key_issuers,
+                    player_uuid,
+                    session_id,
+                    data,
+                ) {
+                    if chat_session
+                        .as_ref()
+                        .is_some_and(|current| session.expires_before(current))
+                    {
+                        let directive = proto.encode_disconnect(
+                            *state,
+                            &expired_profile_public_key_reason(),
+                        );
+                        apply(conn, state, directive).await?;
+                        return Err(ServerError::ProfilePublicKeyRollback);
+                    }
+                    *chat_session = Some(session);
+                } else if profile_key_issuers.is_some() {
+                    // A live issuer set makes an invalid update a fail-closed
+                    // replacement. Without one vanilla ignores the update and
+                    // retains any existing session instead.
+                    *chat_session = None;
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                // Browser integrated play has no online-authentication or
+                // Mojang issuer service. Match the unavailable-service native
+                // path: ignore the untrusted announcement and retain the
+                // existing session rather than installing a self-asserted key.
+                let _ = (session_id, expires_at_millis, public_key, key_signature);
+            }
         }
         // Issue #335. Wire-level plugin messaging, Play-phase: the
         // register/unregister control channels update this connection's
@@ -12961,6 +13119,13 @@ async fn serve_play<T, P, S, E>(
     // `CommandSession`'s caller, resolved the same way (a nil uuid fails
     // closed: the connection tracks nothing).
     player_uuid: uuid::Uuid,
+    // A host-shared snapshot fetched after this connection has completed
+    // online authentication. `Some` permits announcement validation;
+    // `None` deliberately preserves vanilla's service-unavailable degradation.
+    profile_key_issuers: Option<lodestone_auth::MojangPublicKeys>,
+    // Separate from issuer availability: whether the host requires a player
+    // with no adopted session to sign chat.
+    enforce_secure_profile: bool,
     // Issue #326 B1: the world border, snapshotted on the vitals timer for
     // border damage (a default feed is the full-size static border today — see
     // `serve_connection_inner`'s parameter comment).
@@ -13340,6 +13505,8 @@ where
                     &commands,
                     &mut advancements,
                     player_uuid,
+                    profile_key_issuers.as_ref(),
+                    enforce_secure_profile,
                     &mut outgoing_chat,
                     &mut chat_session,
                     entities.players(),
@@ -15991,6 +16158,7 @@ where
             &commands,
             &mut advancements,
             player_uuid,
+            false,
             &mut outgoing_chat,
             &mut chat_session,
             entities.players(),

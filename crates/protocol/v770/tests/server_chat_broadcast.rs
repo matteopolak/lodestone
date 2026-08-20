@@ -383,18 +383,18 @@ async fn the_broadcast_works_in_both_directions() {
     let _ = tokio::time::timeout(Duration::from_secs(10), task_b).await;
 }
 
-/// The enforcement half of server-side chat signing, through the **real
-/// production dispatch path** — not `lodestone_server::chat_session::decide` called directly
-/// (covered by that crate's own hermetic unit tests), but a real `chat`
-/// packet through `serve_connection`/`dispatch_play_packet` with
-/// `PlayerRegistry::enforce_secure_profile()` actually consulted.
+/// The offline degradation half of server-side chat signing, through the
+/// **real production dispatch path** — not
+/// `lodestone_server::chat_session::decide` called directly (covered by that
+/// crate's own hermetic unit tests), but a real `chat` packet through
+/// `serve_connection`/`dispatch_play_packet` with
+/// `PlayerRegistry::enforce_secure_profile()` set.
 ///
-/// Two things this proves that a hermetic `decide()` test cannot: the flag
-/// set on the registry actually reaches the connection loop, and a rejected
-/// message is reported back to the **sender alone** — B must see nothing at
-/// all, not even a degraded/unverified version of it.
+/// Vanilla only makes that property effective for an authenticated online-mode
+/// connection with usable Mojang issuer keys. This wrapper is deliberately
+/// offline, so the property must not turn an unsigned message into a rejection.
 #[tokio::test]
-async fn enforcement_rejects_an_unsigned_message_and_replies_only_to_the_sender() {
+async fn offline_mode_degrades_even_when_secure_profile_is_configured() {
     let registry = PlayerRegistry::new();
     registry.set_enforce_secure_profile(true);
     let name_a = unique_username();
@@ -439,8 +439,9 @@ async fn enforcement_rejects_an_unsigned_message_and_replies_only_to_the_sender(
     join(&mut client_a, &name_a, Uuid::from_u128(0x33)).await;
     join(&mut client_b, &name_b, Uuid::from_u128(0x44)).await;
 
-    // A never announced a chat session and this server now requires one.
-    const MESSAGE: &str = "unsigned and should be rejected";
+    // A never announced a chat session. The configured property is inert on
+    // this offline connection, so the unsigned message is still broadcast.
+    const MESSAGE: &str = "unsigned through offline degradation";
     client_a
         .write_packet(play::serverbound::CHAT, &chat_bytes(MESSAGE))
         .await
@@ -454,16 +455,16 @@ async fn enforcement_rejects_an_unsigned_message_and_replies_only_to_the_sender(
 
     let broadcast_form = format!("<{name_a}> {MESSAGE}");
     assert!(
-        !b_lines.contains(&broadcast_form),
-        "B must never see a rejected message: {b_lines:?}"
+        b_lines.contains(&broadcast_form),
+        "B must see the offline-degraded unsigned message: {b_lines:?}"
     );
     assert!(
-        !a_lines.contains(&broadcast_form),
-        "the rejected message must not come back to A as a broadcast either: {a_lines:?}"
+        a_lines.contains(&broadcast_form),
+        "A must see the same accepted broadcast: {a_lines:?}"
     );
     assert!(
-        a_lines.iter().any(|line| line.contains("not sent")),
-        "the sender alone must be told the message was rejected: {a_lines:?}"
+        a_lines.iter().all(|line| !line.contains("not sent")),
+        "offline degradation must not report a rejection: {a_lines:?}"
     );
 
     drop(client_a);

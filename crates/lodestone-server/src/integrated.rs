@@ -46,6 +46,7 @@ use tokio::sync::Notify;
 
 use crate::block_entities::BlockEntityHandle;
 use crate::chunk::ChunkSource;
+use crate::command::CommandDispatch;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::chunk::generate_columns_offloaded;
 use crate::chunk_store::ChunkStore;
@@ -57,7 +58,7 @@ use crate::players::{PlayerAwareSource, PlayerRegistry};
 use crate::protocol::ServerProtocol;
 use crate::server::{
     EntitySource, NoEntities, serve_connection_shared,
-    serve_connection_with_mob_events_and_commands_shared, serve_connection_with_mob_events_shared,
+    serve_connection_with_mob_events_and_commands_shared,
 };
 // `OnlineModeConfig`/`serve_connection_with_online_mode` are themselves
 // `#[cfg(not(target_arch = "wasm32"))]`-gated in `server.rs` (issue #273 is
@@ -1121,6 +1122,31 @@ impl IntegratedServer {
         P: ServerProtocol + 'static,
         S: ChunkSource + 'static,
     {
+        Self::open_in_memory_with_items_and_commands(
+            protocol,
+            source,
+            view_radius,
+            CommandDispatch::none(),
+        )
+    }
+
+    /// Like [`open_in_memory_with_items`](Self::open_in_memory_with_items),
+    /// with a host-installed command dispatch for this local connection.
+    ///
+    /// This stays portable: browser singleplayer uses the identical duplex
+    /// connection and can install its host adapter without making this crate
+    /// depend on the ECS or plugin registry.
+    #[must_use]
+    pub fn open_in_memory_with_items_and_commands<P, S>(
+        protocol: P,
+        source: S,
+        view_radius: i32,
+        commands: CommandDispatch,
+    ) -> (Self, DuplexStream)
+    where
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+    {
         let (client_end, server_end) = memory_pair();
         let shutdown = ShutdownSignal::new();
         let signal = shutdown.clone();
@@ -1150,11 +1176,48 @@ impl IntegratedServer {
         // involved.
         let mobs = MobHandle::default();
 
+        let world_state = crate::world_state::WorldStateHandle::default();
+        let conn_world_state = world_state.clone();
+        let live_save = crate::live_save::LiveSaveSlot::default();
+        let conn_live_save = live_save.clone();
         let task = spawn(async move {
             let mut conn = Connection::new(server_end);
+            let block_ticks = BlockTickFeed::default();
+            let explosions = ExplosionFeed::default();
+            let sleep_vote = crate::sleep::SleepVote::default();
+            let sleep_feed = crate::sleep::SleepFeed::default();
+            let border = crate::border::BorderFeed::default();
+            let resource_packs = crate::server::ResourcePackPushFeed::default();
+            let plugin_channels = crate::plugin_channels::PluginChannelRegistry::default();
+            #[cfg(not(target_arch = "wasm32"))]
+            let access = crate::access::AccessHandle::default();
             tokio::select! {
                 _ = signal.notified() => {}
-                _ = serve_connection_shared(&mut conn, &protocol, &source, &mobs, view_radius, crate::server::MAX_CLIENT_VIEW_RADIUS, &block_entities, &mobs, &tickets) => {}
+                _ = serve_connection_with_mob_events_and_commands_shared(
+                    &mut conn,
+                    &protocol,
+                    &source,
+                    &mobs,
+                    view_radius,
+                    crate::server::MAX_CLIENT_VIEW_RADIUS,
+                    &block_entities,
+                    &mobs,
+                    &tickets,
+                    &block_ticks,
+                    &explosions,
+                    &sleep_vote,
+                    &sleep_feed,
+                    &commands,
+                    &border,
+                    &resource_packs,
+                    &plugin_channels,
+                    &conn_world_state,
+                    &conn_live_save,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    &access,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    None,
+                ) => {}
             }
         });
 
@@ -1197,8 +1260,8 @@ impl IntegratedServer {
                 #[cfg(not(target_arch = "wasm32"))]
                 border: None,
                 // No tick loop here, so there is nothing to share a store *with*.
-                world_state: crate::world_state::WorldStateHandle::default(),
-                live_save: crate::live_save::LiveSaveSlot::default(),
+                world_state,
+                live_save,
                 #[cfg(not(target_arch = "wasm32"))]
                 rcon_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1461,6 +1524,44 @@ impl IntegratedServer {
             // No world directory, so a Nether/End sibling stays
             // in-memory-only, same as everything else this constructor opens.
             None,
+            CommandDispatch::none(),
+        )
+    }
+
+    /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs) with a
+    /// command dispatch installed on its one local duplex connection.
+    ///
+    /// This is deliberately separate from `open_to_lan`: the dispatch reaches
+    /// only the shell's local player, never a published TCP peer.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_in_memory_with_mobs_and_commands<P, S>(
+        protocol: P,
+        source: S,
+        mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
+        mob_center: (i32, i32),
+        mob_count: usize,
+        view_radius: i32,
+        commands: CommandDispatch,
+    ) -> (Self, DuplexStream)
+    where
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+    {
+        Self::open_in_memory_with_mobs_using(
+            protocol,
+            source,
+            mob_area,
+            mob_center,
+            mob_count,
+            view_radius,
+            BlockEntityHandle::default(),
+            crate::region_source::ScheduledTickHandle::default(),
+            None,
+            crate::portal::PortalIndex::new(),
+            None,
+            commands,
         )
     }
 
@@ -1525,6 +1626,9 @@ impl IntegratedServer {
         // world directory reaches this constructor" everywhere else in this
         // file.
         world_dir: Option<PathBuf>,
+        // The local singleplayer command host. `open_to_lan` keeps its own
+        // configured dispatch policy, so this value never reaches TCP peers.
+        commands: CommandDispatch,
     ) -> (Self, DuplexStream)
     where
         P: ServerProtocol + 'static,
@@ -1919,6 +2023,11 @@ impl IntegratedServer {
         // move the original out of the handle's reach).
         let live_save = crate::live_save::LiveSaveSlot::new();
         let conn_live_save = live_save.clone();
+        let conn_commands = commands;
+        let conn_resource_packs = crate::server::ResourcePackPushFeed::default();
+        let conn_plugin_channels = crate::plugin_channels::PluginChannelRegistry::default();
+        #[cfg(not(target_arch = "wasm32"))]
+        let conn_access = crate::access::AccessHandle::default();
         let task = spawn(async move {
             let mut conn = Connection::new(server_end);
             tokio::select! {
@@ -1928,7 +2037,7 @@ impl IntegratedServer {
                 // one core thread it shares with `run_tick_loop` below.
                 // `&conn_source` rather than `&*conn_source` is the entire
                 // call-site change — see `crate::server::SourceRef`.
-                _ = serve_connection_with_mob_events_shared(
+                _ = serve_connection_with_mob_events_and_commands_shared(
                     &mut conn,
                     &*conn_protocol,
                     &conn_source,
@@ -1944,14 +2053,21 @@ impl IntegratedServer {
                     crate::server::MAX_CLIENT_VIEW_RADIUS,
                     &conn_block_entities,
                     &conn_mobs,
+                    &conn_tickets,
                     &conn_block_ticks,
                     &conn_explosions,
                     &conn_sleep_vote,
                     &conn_sleep_feed,
+                    &conn_commands,
                     &conn_border,
+                    &conn_resource_packs,
+                    &conn_plugin_channels,
                     &conn_world_state,
                     &conn_live_save,
-                    &conn_tickets,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    &conn_access,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    None,
                 ) => {}
             }
             // Issue #562: lets the relay task above drop this connection's
@@ -2188,7 +2304,7 @@ impl IntegratedServer {
     /// worth playing" argument the entity restore already makes.
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::too_many_arguments)]
-    pub fn open_persistent_with_mobs<P, S>(
+    pub fn open_persistent_with_mobs_and_commands<P, S>(
         protocol: P,
         world_dir: &std::path::Path,
         source: S,
@@ -2199,6 +2315,7 @@ impl IntegratedServer {
         mob_count: usize,
         view_radius: i32,
         autosave: std::time::Duration,
+        commands: CommandDispatch,
     ) -> Result<
         (
             Self,
@@ -2311,6 +2428,7 @@ impl IntegratedServer {
             // `dimensions/minecraft/<dimension>/`, a sibling of the overworld
             // `region/` `persistent` above is already rooted at.
             Some(world_dir.to_path_buf()),
+            commands,
         );
 
         let autosave_handle = save.clone();
@@ -2436,6 +2554,49 @@ impl IntegratedServer {
         // handle.
         server.autosave_task = Some(autosave_task);
         Ok((server, client_end, world))
+    }
+
+    /// [`open_persistent_with_mobs_and_commands`](Self::open_persistent_with_mobs_and_commands)
+    /// without a host command dispatcher.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_persistent_with_mobs<P, S>(
+        protocol: P,
+        world_dir: &std::path::Path,
+        source: S,
+        min_y: i32,
+        height: i32,
+        mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
+        mob_center: (i32, i32),
+        mob_count: usize,
+        view_radius: i32,
+        autosave: std::time::Duration,
+    ) -> Result<
+        (
+            Self,
+            DuplexStream,
+            crate::region_source::RegionChunkSource<S>,
+        ),
+        crate::region_source::Error,
+    >
+    where
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+    {
+        Self::open_persistent_with_mobs_and_commands(
+            protocol,
+            world_dir,
+            source,
+            min_y,
+            height,
+            mob_area,
+            mob_center,
+            mob_count,
+            view_radius,
+            autosave,
+            CommandDispatch::none(),
+        )
     }
 
     /// The world's shared game rules, difficulty and clock (issues #327/#328/#323).
@@ -3062,6 +3223,10 @@ impl IntegratedServer {
                         // `JoinHandle` detaches, it does not abort, on drop).
                         drop(spawn(async move {
                             let mut conn = Connection::new(socket);
+                            let sleep_vote = SleepVote::default();
+                            let sleep_feed = SleepFeed::default();
+                            let border = crate::border::BorderFeed::default();
+                            let live_save = crate::live_save::LiveSaveSlot::default();
                             // `_shared` + `&source` (issue #293): chunk
                             // generation for this connection runs on the
                             // blocking pool, so a LAN player crossing a chunk
@@ -3109,9 +3274,12 @@ impl IntegratedServer {
                                 None => {
                                     serve_connection_with_mob_events_and_commands_shared(
                                         &mut conn, &*protocol, &source, &entities, view_radius,
+                                        view_radius,
                                         &block_entities, &mobs, &tickets,
                                         &conn_block_ticks, &conn_explosions,
-                                        &commands, &resource_packs, &plugin_channels, &world_state,
+                                        &sleep_vote, &sleep_feed, &commands, &border,
+                                        &resource_packs, &plugin_channels, &world_state,
+                                        &live_save,
                                         &access, peer_ip,
                                     )
                                     .await
@@ -3411,6 +3579,10 @@ impl IntegratedServer {
                             .push(subscriber);
                         drop(spawn(async move {
                             let mut conn = Connection::new(socket);
+                            let sleep_vote = SleepVote::default();
+                            let sleep_feed = SleepFeed::default();
+                            let border = crate::border::BorderFeed::default();
+                            let live_save = crate::live_save::LiveSaveSlot::default();
                             // Same fork `open_to_lan`'s own accept loop makes,
                             // for the same reason: `serve_connection_with_online_mode`
                             // is additive over the plain wrapper, never a
@@ -3436,12 +3608,14 @@ impl IntegratedServer {
                                 None => {
                                     serve_connection_with_mob_events_and_commands_shared(
                                         &mut conn, &*protocol, &source, &entities, view_radius,
+                                        view_radius,
                                         &block_entities, &mobs, &tickets,
                                         &conn_block_ticks, &conn_explosions,
-                                        &commands,
+                                        &sleep_vote, &sleep_feed, &commands, &border,
                                         &crate::server::ResourcePackPushFeed::default(),
                                         &crate::plugin_channels::PluginChannelRegistry::default(),
                                         &world_state,
+                                        &live_save,
                                         &access,
                                         peer_ip,
                                     )

@@ -263,15 +263,18 @@ test`, not a property of `catch_unwind` itself.
 
 **Fix landed, not just documented**: `Cargo.toml` now carries
 `codegen-backend = "llvm"` package overrides for `lodestone-ecs`,
-`lodestone-fuzz`, and `lodestone-testsupport` — the three in-ownership crates
-whose panic-isolation or panic-detection machinery is demonstrably broken
-under Cranelift. All three verified green again after the override:
+`lodestone-fuzz`, `lodestone-testsupport`, `lodestone-render`, and
+`lodestone-plugin-support` — the five crates whose panic-isolation or
+panic-detection machinery is demonstrably broken under Cranelift. The original
+three verified green again after the override:
 `lodestone-ecs --lib` 309/309, `lodestone-testsupport` 4/4 (incl. one doctest),
 `lodestone-fuzz`'s `harness_control` control passing (full-suite re-run
 blocked mid-session by an unrelated in-flight edit to `lodestone-anvil`, a
 transitive dependency — the single control test was re-verified directly).
-`lodestone-render`'s `fog::ramp_gate` instance is reported to that crate's
-owner rather than fixed here (off-limits). This is the exact contingency
+`lodestone-render` later took the same override for its `fog::ramp_gate`
+control. `lodestone-plugin-support` followed when its reentrancy watchdog's
+fresh worker panic reproduced the documented fatal-abort shape under Cranelift
+and passed under LLVM. This is the exact contingency
 `#666`'s own filing anticipated — "with an explicit LLVM override for any
 crate that turns out incompatible" — except the incompatibility is a runtime
 correctness defect, not a compile failure, so nothing before this audit would
@@ -383,7 +386,7 @@ that pattern; that is open work, not a "checked, clean" result.
   whether the catch actually catches at runtime.
 - If a *new* crate's own panic-isolation or panic-detection control turns out
   to need the same LLVM carve-out, add
-  `[profile.dev.package.<crate>] codegen-backend = "llvm"` next to the three
+  `[profile.dev.package.<crate>] codegen-backend = "llvm"` next to the five
   existing ones in the root `Cargo.toml`, with a comment naming the specific
   control that is red under Cranelift and citing this doc.
 
@@ -395,10 +398,11 @@ that pattern; that is open work, not a "checked, clean" result.
   `[profile.dev] codegen-backend = "cranelift"`: Cranelift is the default debug
   backend workspace-wide, landed 2026-08-16.
 - `Cargo.toml` — `[profile.dev.package.<name>] codegen-backend = "llvm"` for
-  `lodestone-ecs`, `lodestone-fuzz`, and `lodestone-testsupport`: the LLVM
-  carve-out the "Behavioural differences" section above measures the need for.
+  `lodestone-ecs`, `lodestone-fuzz`, `lodestone-testsupport`,
+  `lodestone-render`, and `lodestone-plugin-support`: the LLVM carve-out the
+  "Behavioural differences" section above measures the need for.
   A per-package override wins over the workspace-wide `[profile.dev]` setting,
-  so these three build (and only these three) under LLVM while everything else
+  so these five build (and only these five) under LLVM while everything else
   stays on Cranelift; verified this mixes cleanly within one linked test
   binary (a crate's dependencies still build under whatever *their* profile
   says, so e.g. `lodestone-ecs`'s own code is LLVM while `bevy_ecs` beneath it
@@ -414,5 +418,5 @@ that pattern; that is open work, not a "checked, clean" result.
   cache-key/flip-cost precedent this doc reuses), `rust-toolchain.toml` (the
   pin both this and Cranelift depend on), and `Cargo.toml`'s `[profile.dev]`
   package overrides (`lodestone-worldgen`'s `opt-level = 2`, confirmed
-  compatible with Cranelift above; the three `codegen-backend = "llvm"`
+  compatible with Cranelift above; the five `codegen-backend = "llvm"`
   overrides above are not compatible with it, which is the point).

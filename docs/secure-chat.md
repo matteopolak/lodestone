@@ -133,6 +133,59 @@ the response into a [`ChatKeyPair`]:
 `refreshedAfter.isBefore(now)` — and is the caller's signal to call
 [`fetch_key_pair`] again.
 
+### Server-side profile-key provenance — `lodestone_auth::MojangPublicKeys`
+
+A chat-session announcement is not trustworthy merely because it contains an
+RSA key: the player chose the bytes, and a self-signed test proves only that
+some key can sign chat. Before a server installs an announced key, it must
+verify Mojang's `publicKeySignatureV2` over exactly the payload vanilla calls
+`ProfilePublicKey.Data.signedPayload`:
+
+1. profile UUID most-significant bits, then least-significant bits (two
+   big-endian `i64`s);
+2. expiry epoch milliseconds (one big-endian `i64`);
+3. the original X.509 SubjectPublicKeyInfo DER, with no length prefix.
+
+`MojangPublicKeys::verify_profile_public_key` does that pure verification with
+the issuer algorithm **SHA1withRSA** (RSA PKCS#1 v1.5), trying every current
+`playerCertificateKeys` entry from the unauthenticated official
+`https://api.minecraftservices.com/publickeys` endpoint. Those issuer SPKIs
+are RSA-4096 (validated at parse time); this is deliberately not the player's
+RSA-2048 `SHA256withRSA` message algorithm. `MojangPublicKeyCache` is policy
+only: callers own HTTP/timers, retain the last successful set on a failure,
+refresh successes every 24 hours, and retry initial/failing fetches after
+vanilla authlib's capped 5, 10, 20, 40, 80, 160, 320, 320… minute sequence.
+That separation lets a server inject a deterministic key set in a test and
+decide its own startup behavior.
+
+On the native server, each `OnlineModeConfig` owns one shared cache. At the
+Configuration-to-Play handoff an issuer refresh is attempted for every
+connection that completed `hasJoined` authentication; the HTTP request is made
+outside the cache mutex. The resulting issuer snapshot is retained for that
+connection. A valid announced key is adopted whenever the connection is
+authenticated and usable issuer keys exist, independently of
+`enforce-secure-profile`. That property is the separate policy deciding whether
+a player with no adopted session must sign chat; vanilla does not use it to
+disable validation of a session the player does announce.
+
+The server checks the certificate against the post-`hasJoined` UUID before
+constructing a `ServerChatSession`; a bad certificate clears the session (fail
+closed). A valid replacement whose expiry is strictly earlier than the current
+session is rejected and disconnects the client, preventing certificate
+rollback; equal expiry is allowed. If issuer keys are unavailable, or the
+connection is offline, the announcement is ignored and any previous session is
+retained, matching vanilla's degradation rather than treating a client-supplied
+key as trustworthy. Browser integrated play has no online authentication or
+issuer service and follows that same ignore-untrusted-announcement path.
+
+Provenance and usability are independent. `profile_public_key_has_expired`
+matches vanilla's strict `expiresAt.isBefore(now)` boundary (equality is not
+expired); a historical certificate can still have a valid Mojang signature
+after it expires, but it must not be accepted for a live chat session. Vanilla
+uses no grace period in the server decoder. The client-facing eight-hour grace
+period belongs to a separate remote-chat display/message-validator path, not
+to server admission.
+
 ### Per-message signing — `lodestone_auth::ChatSession`
 
 [`build_signature_payload`] is the exact byte layout
@@ -389,6 +442,10 @@ an online-mode account signs, offline play does not.
   verification. Already a dependency of `lodestone-net` for the encryption
   handshake; now also a direct dependency of `lodestone-auth` for the same
   reason.
+- `sha1` (native-only, `oid` feature) — Mojang's RSA-4096 issuer-key
+  verification for profile-key certificates. This is mandated by authlib's
+  `SHA1withRSA` service-signature algorithm; it is not a replacement for the
+  `sha2` chat-message digest.
 - `sha2` (native-only, `oid` feature) — the digest `Pkcs1v15Sign` signs over.
 - `base64`, `serde`/`serde_json` — already crate dependencies, reused for PEM
   body decoding and the `/player/certificates` response shape.
@@ -416,6 +473,18 @@ byte layout against a genuinely independent implementation.
 `lodestone_auth::server_hash` remains the standard this crate holds itself
 to (Mojang's three published vectors); this is the closest equivalent that
 was achievable for a scheme with no published vectors of its own.
+
+**Profile-key provenance is now externally checked offline.**
+`crates/lodestone-auth/tests/fixtures/mojang-profile-key-certificate.json`
+contains only public material captured from the official
+`/player/certificates` and `/publickeys` endpoints on 2026-08-20: a public
+profile UUID, RSA-2048 SPKI key, Mojang's 512-byte issuer signature, and the
+two then-current public RSA-4096 `playerCertificateKeys`. It contains no
+access token, refresh token, cookie, or private key. The regression test
+verifies that real signature, then proves that changing either the signed
+SPKI payload or the issuer signature fails. Its expiry is intentionally not a
+live assertion: certificate expiry naturally passes, while cryptographic
+issuer provenance remains a stable historical test vector.
 
 **The wiring's own evidence, gathered this pass**: `crates/protocol/v770/tests/chat_dispatch.rs`'s
 `send_signed_chat_encodes_millis_timestamp_and_ack_fields_in_order` asserts

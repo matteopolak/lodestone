@@ -1231,7 +1231,9 @@ names rather than only re-running `mining_deadlock.rs`'s one historical shape:
   control — a toy plugin that captures its own `EcsHandle` as a resource and takes a raw
   `handle.read()` from inside a system, proving the watchdog actually reports `Wedged` for a bypass of
   `hold_read`/`hold_write`'s panic-based ledger, paired with a benign-plugin gate proving it does not
-  false-positive on ordinary systems.
+  false-positive on ordinary systems. A worker that panics is joined before the watchdog reports
+  `Panicked`; this prevents the caller's diagnostic panic from racing the worker's unwind, while a
+  timed-out worker is still deliberately detached so the watchdog cannot inherit its deadlock.
 
 ## How to change it, and the gotchas
 

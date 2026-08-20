@@ -68,6 +68,7 @@ mod tests;
 pub use debug_lines::{
     DebugLineVertex, chunk_border_vertices, debug_line_vertices, entity_hitbox_vertices,
 };
+pub(crate) use debug_lines::push_box;
 pub use occlusion::TerrainOcclusion;
 pub use plugin_billboards::{PluginBillboardInstance, plugin_billboard_vertices};
 pub use outline::{CrackTarget, gather_crack_targets};

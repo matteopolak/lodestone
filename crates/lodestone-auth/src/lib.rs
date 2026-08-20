@@ -103,8 +103,11 @@ pub use tls::install_crypto_provider;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use chat_session::{
-    ChatKeyPair, ChatSession, LAST_SEEN_MAX_LEN, SIGNATURE_BYTES, SignedMessageLink,
-    build_signature_payload, fetch_key_pair, verify_signature,
+    ChatKeyPair, ChatSession, LAST_SEEN_MAX_LEN, MOJANG_PUBLIC_KEYS_URL,
+    MOJANG_PUBLIC_KEY_FAILURE_BACKOFF_BASE_MILLIS, MOJANG_PUBLIC_KEY_REFRESH_MILLIS,
+    MojangPublicKeyCache, MojangPublicKeys, ProfilePublicKeyData, SIGNATURE_BYTES,
+    SignedMessageLink, build_signature_payload, fetch_key_pair, fetch_mojang_public_keys,
+    profile_public_key_has_expired, profile_public_key_signature_payload, verify_signature,
 };
 
 pub use error::XstsErrorKind;

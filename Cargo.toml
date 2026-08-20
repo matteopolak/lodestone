@@ -281,6 +281,13 @@ opt-level = 2
 [profile.dev.package.lodestone-ecs]
 codegen-backend = "llvm"
 
+# The plugin reentrancy watchdog deliberately runs a schedule on a fresh OS
+# thread and distinguishes a worker panic from a timeout. Cranelift on this
+# pinned macOS toolchain aborts before such a panic can unwind (the same #686
+# failure mode as lodestone-ecs's async worker), so this crate needs LLVM too.
+[profile.dev.package.lodestone-plugin-support]
+codegen-backend = "llvm"
+
 # Same class, different symptom: lodestone-fuzz's `catch()` is the wrapper every
 # property test in the crate uses to turn a decoder panic into a reported `Err` instead
 # of aborting `cargo test` outright (its own doc comment says so). Its dedicated control,

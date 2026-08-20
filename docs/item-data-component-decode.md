@@ -58,13 +58,14 @@ Two mechanical backstops sit behind the type:
 
 ## The census
 
-49 of 111 component types are consumed (drifted upward from an earlier count of 46 —
-`charged_projectiles` and `attack_range` were modeled after they surfaced as live
-truncations, and a scan of the match arms directly turned up one more already-modeled arm
-this doc's own count had lost track of; re-verified by scanning the `read_component_patch`
-source rather than carrying the figure forward). A loaded crossbow and a spear-family item
-were each ending the packet at that slot, the same shape `bundle_contents` fixed earlier. The
-62 that are not consumed are each still a truncation point. Regenerate the list with a scan of
+51 of 111 component types are consumed (drifted upward from an earlier count of 46 —
+`charged_projectiles`, `attack_range`, `repairable`, and `equippable` were modeled after they
+surfaced as live truncations, and a scan of the match arms directly turned up one more
+already-modeled arm this doc's own count had lost track of; re-verified by scanning the
+`read_component_patch` source rather than carrying the figure forward). A loaded crossbow, a
+spear-family item, repairable apple, and horse armour were each ending the packet at that slot,
+the same shape `bundle_contents` fixed earlier. The 60 that are not consumed are each still a
+truncation point. Regenerate the list with a scan of
 the added-component match arms against
 `lodestone_data::data_component_types::DATA_COMPONENT_TYPE_NAMES`.
 
@@ -79,7 +80,7 @@ Consumed, grouped by the wire shape they share — each group is one rule, not o
 | six floats | `FLOAT` × 6, no length prefix | `attack_range` |
 | identifier | one UTF-8 string | `item_model`, `tooltip_style`, `note_block_sound` |
 | chat component | network NBT | `custom_name`, `item_name` |
-| composite | see the reader | `enchantments`, `stored_enchantments`, `tool`, `trim`, `pot_decorations`, `lore`, `custom_model_data`, `tooltip_display`, `attribute_modifiers`, `potion_contents`, `profile`, `writable_book_content`, `written_book_content`, `bundle_contents`, `charged_projectiles` |
+| composite | see the reader | `enchantments`, `stored_enchantments`, `tool`, `trim`, `pot_decorations`, `lore`, `custom_model_data`, `tooltip_display`, `attribute_modifiers`, `potion_contents`, `profile`, `writable_book_content`, `written_book_content`, `bundle_contents`, `charged_projectiles`, `repairable`, `equippable` |
 
 `custom_name`, `damage`, `enchantments`, `dyed_color`, `trim`, `map_id`, `pot_decorations`,
 `profile`, `writable_book_content`, `written_book_content`, `bundle_contents`,
@@ -109,6 +110,22 @@ outer stack `has_unmodeled`, and drops the rest of the packet, never a fatal err
 `mob_factor`, all `f32`, in that wire order — **not** a single scalar. Stored on
 `ItemComponents` as bits (`AttackRange::new`/accessor pattern, the same `f32`-is-not-`Eq`
 convention `ItemTool::default_mining_speed` documents) so the struct keeps its `Eq` impl.
+
+### `repairable` is one HolderSet; `equippable` must consume ten discarded fields
+
+`Repairable.STREAM_CODEC` is a single `ByteBufCodecs.holderSet(Registries.ITEM)`. The item
+ids are not useful to a consumer today, but the set is consumed so an apple with an explicit
+repair material list does not become a packet cliff.
+
+`Equippable.STREAM_CODEC` is, in order: an `EquipmentSlot` `idMapper`, a `Holder<SoundEvent>`,
+optional equipment-asset `ResourceKey`, optional camera-overlay `Identifier`, optional
+`HolderSet<EntityType>`, five booleans, and another `Holder<SoundEvent>`. Only the slot is
+surfaced as the prototype-folded effective `ItemComponents::equippable`; the other ten fields
+are consumed and discarded. The slot is **not an enum ordinal**: `EquipmentSlot.BY_ID` spells
+wire id 5 as `OffHand`, whereas declaration ordinal 5 is `Head`. A sound holder uses the
+opposite shape from a holder set: `0` introduces an inline `(Identifier, optional f32)` sound,
+and a positive value is a reference id plus one. `holderSet` uses `0` for a named tag and
+otherwise writes `count + 1` followed by bare ids.
 
 ### `minecraft:enchantments`' map key is a bare registry id, not a holder offset
 

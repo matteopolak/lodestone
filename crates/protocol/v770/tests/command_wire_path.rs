@@ -52,15 +52,23 @@ use bevy_ecs::resource::Resource;
 use bevy_ecs::world::World;
 use lodestone_client::{ClientBuilder, LoginProfile, ServerAddress};
 use lodestone_ecs::commands::{
-    CommandOutcome, CommandRegistry, CommandSource, PluginCommand, PluginCommandsPlugin, dispatch,
+    CommandAnchor, CommandEntity, CommandExecutionContext, CommandOutcome, CommandRegistry,
+    CommandSource, PluginCommand, PluginCommandsPlugin, dispatch,
 };
-use lodestone_ecs::permissions::Permissions;
-use lodestone_model::{ClientEvent, Text};
+use lodestone_ecs::permissions::{PermissionSubject, Permissions};
+use lodestone_model::{ClientEvent, GameMode, Rotation, Text, Vec3};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
-    CommandCaller, CommandDispatch, CommandResponse, CommandSink, NoEntities, UNKNOWN_COMMAND,
-    WorldgenChunkSource, serve_connection_with_commands,
+    ChunkSource, CommandCaller, CommandDispatch, CommandResponse, CommandSink,
+    CommandSource as ServerCommandSource, ContextualCommandRequest, ContextualCommandResponse,
+    ContextualEntityAnchor, NoEntities, IntegratedServer, PlayerCandidate, ServerCommands,
+    UNKNOWN_COMMAND, WorldgenChunkSource,
+    serve_connection_with_commands,
 };
+use lodestone_server::commands::{CommandWorld, overworld_dimension};
+use lodestone_server::dimension::{Dimension, DimensionalSource};
+use lodestone_server::game_rules::GameRulesHandle;
+use lodestone_server::portal::PortalIndex;
 use lodestone_v770::{V770ServerProtocol, adapter};
 use lodestone_worldgen::density::Density;
 
@@ -78,6 +86,12 @@ use lodestone_worldgen::density::Density;
 struct Beacons {
     lit: u32,
 }
+
+/// Sources the real plugin handler observed. This lets the bridge test prove
+/// the context reached the registry handler itself, rather than merely a host
+/// adapter that reconstructed it and never dispatched.
+#[derive(Resource, Default, Debug, Clone, PartialEq)]
+struct ObservedSources(Vec<CommandSource>);
 
 /// The permission node the test command is gated behind.
 const LIGHT_BEACON: &str = "lodestone.test.beacon.light";
@@ -113,6 +127,10 @@ impl EcsCommandSink {
     fn beacons(&self) -> Beacons {
         *self.world.lock().expect("world lock").resource::<Beacons>()
     }
+
+    fn observed_sources(&self) -> ObservedSources {
+        self.world.lock().expect("world lock").resource::<ObservedSources>().clone()
+    }
 }
 
 impl CommandSink for EcsCommandSink {
@@ -131,6 +149,38 @@ impl CommandSink for EcsCommandSink {
             Err(error) => CommandResponse::refused(error.message()),
         }
     }
+
+    fn run_contextual(&self, request: &ContextualCommandRequest) -> ContextualCommandResponse {
+        let mut world = self.world.lock().expect("world lock");
+        let entity = request.source.entity.as_ref().map(|entity| CommandEntity {
+            uuid: entity.uuid,
+            entity_id: entity.entity_id,
+            username: entity.username.clone(),
+        });
+        let subject = entity
+            .as_ref()
+            .map_or(PermissionSubject::Console, |entity| PermissionSubject::Player(entity.uuid));
+        let source = CommandSource::contextual(
+            subject,
+            request.source.name.clone(),
+            CommandExecutionContext {
+                entity,
+                position: request.source.position,
+                rotation: request.source.rotation,
+                dimension: request.source.dimension.clone(),
+                anchor: match request.source.anchor {
+                    ContextualEntityAnchor::Feet => CommandAnchor::Feet,
+                    ContextualEntityAnchor::Eyes => CommandAnchor::Eyes,
+                },
+                permission_level: request.source.permission_level,
+            },
+        );
+        match dispatch(&mut world, &source, &request.command) {
+            Ok(CommandOutcome::Success(result)) => ContextualCommandResponse::ran(result),
+            Ok(CommandOutcome::Failure(message)) => ContextualCommandResponse::refused(message),
+            Err(error) => ContextualCommandResponse::refused(error.message()),
+        }
+    }
 }
 
 /// Builds the host side: a real `App` with the real plugin, one registered
@@ -146,6 +196,7 @@ fn host(caller_uuid: uuid::Uuid, permissions: Option<bool>) -> Arc<EcsCommandSin
     let mut app = App::new();
     app.add_plugins(PluginCommandsPlugin);
     app.insert_resource(Beacons::default());
+    app.insert_resource(ObservedSources::default());
 
     let mut command = PluginCommand::new("beacon");
     let root = command.root();
@@ -159,6 +210,25 @@ fn host(caller_uuid: uuid::Uuid, permissions: Option<bool>) -> Arc<EcsCommandSin
         .resource_mut::<CommandRegistry>()
         .register(command)
         .expect("the test command must register");
+
+    let mut observe = PluginCommand::new("observe");
+    let root = observe.root();
+    observe.on_execute(root, |invocation| {
+        invocation.world.resource_mut::<ObservedSources>().0.push(invocation.source.clone());
+        CommandOutcome::Success(3)
+    });
+    app.world_mut()
+        .resource_mut::<CommandRegistry>()
+        .register(observe)
+        .expect("the context-observing command must register");
+
+    let mut fail = PluginCommand::new("fail");
+    let root = fail.root();
+    fail.on_execute(root, |_| CommandOutcome::Failure("plugin failed".to_owned()));
+    app.world_mut()
+        .resource_mut::<CommandRegistry>()
+        .register(fail)
+        .expect("the failing command must register");
 
     match permissions {
         Some(granted) => {
@@ -187,6 +257,86 @@ fn host(caller_uuid: uuid::Uuid, permissions: Option<bool>) -> Arc<EcsCommandSin
     Arc::new(EcsCommandSink {
         world: Mutex::new(world),
     })
+}
+
+/// Direct plugin roots retain their established caller identity, while the new
+/// contextual method is required to deliver `/execute`'s rewritten source to
+/// the real registry handler and preserve its integer return value.
+#[test]
+fn direct_and_contextual_plugin_dispatch_keep_their_distinct_source_contracts() {
+    let alice = uuid::Uuid::from_u128(1);
+    let bob = uuid::Uuid::from_u128(2);
+    let sink = host(alice, Some(true));
+
+    assert!(sink.run(&CommandCaller::new(alice, "alice"), "observe").is_ran());
+    let direct = sink.observed_sources();
+    assert_eq!(direct.0.len(), 1);
+    assert_eq!(direct.0[0].subject, PermissionSubject::Player(alice));
+    assert_eq!(direct.0[0].name, "alice");
+
+    let rules = GameRulesHandle::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = vec![
+        PlayerCandidate {
+            uuid: alice,
+            entity_id: 41,
+            username: "alice".to_owned(),
+            position: Vec3::new(0.0, 64.0, 0.0),
+            rotation: Rotation { yaw: 0.0, pitch: 0.0 },
+            game_mode: GameMode::Survival,
+            xp_level: 0,
+            xp_points: 0,
+        },
+        PlayerCandidate {
+            uuid: bob,
+            entity_id: 42,
+            username: "bob".to_owned(),
+            position: Vec3::new(12.0, 70.0, -4.0),
+            rotation: Rotation { yaw: 30.0, pitch: -15.0 },
+            game_mode: GameMode::Survival,
+            xp_level: 0,
+            xp_points: 0,
+        },
+    ];
+    let source = ServerCommandSource::player(
+        alice,
+        41,
+        "alice",
+        Vec3::new(0.0, 64.0, 0.0),
+        Rotation { yaw: 0.0, pitch: 0.0 },
+        overworld_dimension(),
+        4,
+    );
+    let world = CommandWorld {
+        rules: &rules,
+        players: &players,
+        state: &state,
+        mobs: None,
+        border: None,
+        access: None,
+        blocks: None,
+    };
+    let outcome = ServerCommands::new()
+        .run_with_contextual_dispatch(
+            &world,
+            &source,
+            "execute as bob at bob anchored eyes run observe",
+            &CommandDispatch::installed(sink.clone()),
+            &CommandCaller::new(alice, "alice"),
+        )
+        .expect("`execute` is a server root");
+    assert!(outcome.response.is_ran(), "{outcome:?}");
+
+    let observed = sink.observed_sources();
+    let contextual = observed.0.last().expect("the contextual handler must run");
+    assert_eq!(contextual.subject, PermissionSubject::Player(bob));
+    assert_eq!(contextual.name, "bob");
+    assert_eq!(contextual.execution.as_ref().and_then(|context| context.entity.as_ref().map(|entity| entity.entity_id)), Some(42));
+    assert_eq!(contextual.execution.as_ref().map(|context| context.position), Some(Vec3::new(12.0, 70.0, -4.0)));
+    assert_eq!(contextual.execution.as_ref().map(|context| context.rotation), Some(Rotation { yaw: 30.0, pitch: -15.0 }));
+    assert_eq!(contextual.execution.as_ref().map(|context| context.dimension.clone()), Some(overworld_dimension()));
+    assert_eq!(contextual.execution.as_ref().map(|context| context.anchor), Some(CommandAnchor::Eyes));
+    assert_eq!(contextual.execution.as_ref().map(|context| context.permission_level), Some(4));
 }
 
 // ---------------------------------------------------------------------------
@@ -227,6 +377,7 @@ fn cheap_source() -> WorldgenChunkSource {
 /// line the client actually decoded off the wire.
 struct Run {
     beacons: Beacons,
+    observed_sources: ObservedSources,
     chat: Vec<String>,
 }
 
@@ -237,9 +388,36 @@ struct Run {
 /// the same call the game's own chat box makes, so the encoder under test is
 /// the production one.
 async fn run_command(sink: Arc<EcsCommandSink>, uuid: uuid::Uuid, command: &str) -> Run {
+    run_commands(sink, uuid, &[command], 1).await
+}
+
+/// The multi-command form of [`run_command`]. `expected_replies` is explicit
+/// because successful plugin terminals are allowed to be silent; a later
+/// built-in readback supplies the observable replies for store tests.
+async fn run_commands(
+    sink: Arc<EcsCommandSink>,
+    uuid: uuid::Uuid,
+    commands: &[&str],
+    expected_replies: usize,
+) -> Run {
+    run_commands_from_source(sink, uuid, commands, expected_replies, cheap_source()).await
+}
+
+/// [`run_commands`] with an explicit connection source. This makes the
+/// dimension regression drive the same real `ChatCommand` wire arm after the
+/// connection source has changed dimensions.
+async fn run_commands_from_source<S>(
+    sink: Arc<EcsCommandSink>,
+    uuid: uuid::Uuid,
+    commands: &[&str],
+    expected_replies: usize,
+    source: S,
+) -> Run
+where
+    S: ChunkSource + 'static,
+{
     let (client_end, server_end) = memory_pair();
     let dispatch = CommandDispatch::installed(sink.clone());
-    let source = cheap_source();
 
     let server = tokio::spawn(async move {
         let mut conn = Connection::new(server_end);
@@ -270,14 +448,16 @@ async fn run_command(sink: Arc<EcsCommandSink>, uuid: uuid::Uuid, command: &str)
         .await
         .expect("client never spawned");
 
-    handle.command(command).expect("send the command");
+    for command in commands {
+        handle.command(*command).expect("send the command");
+    }
 
     // Collect chat until the reply arrives or the window closes. A bounded
     // wait, not an unbounded one: a test that hangs when the wire is broken is
     // a worse failure report than one that returns an empty `chat`.
     let mut chat = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < deadline && chat.is_empty() {
+    while tokio::time::Instant::now() < deadline && chat.len() < expected_replies {
         match tokio::time::timeout_at(deadline, events.recv()).await {
             Ok(Some(ClientEvent::Chat { text, .. })) => {
                 let line = plain(&text);
@@ -293,9 +473,100 @@ async fn run_command(sink: Arc<EcsCommandSink>, uuid: uuid::Uuid, command: &str)
     }
 
     let beacons = sink.beacons();
+    let observed_sources = sink.observed_sources();
     handle.shutdown();
     server.abort();
-    Run { beacons, chat }
+    Run { beacons, observed_sources, chat }
+}
+
+/// The local production constructor, not just the lower-level serving helper.
+/// This is the route `lodestone-shell::net` takes for a native singleplayer
+/// session after it installs its ECS host adapter.
+async fn run_integrated_commands(
+    sink: Arc<EcsCommandSink>,
+    uuid: uuid::Uuid,
+    commands: &[&str],
+    expected_replies: usize,
+) -> Run {
+    let dispatch = CommandDispatch::installed(sink.clone());
+    let (server, client_end) = IntegratedServer::open_in_memory_with_mobs_and_commands(
+        V770ServerProtocol,
+        cheap_source(),
+        (-1..=1, -1..=1),
+        (8, 8),
+        0,
+        0,
+        dispatch,
+    );
+
+    run_integrated_connection(sink, uuid, commands, expected_replies, server, client_end).await
+}
+
+/// The portable items constructor used by browser singleplayer. This test runs
+/// it natively to exercise its real duplex/dispatch shape; the wasm target
+/// check proves that identical constructor and shell call site compile there.
+async fn run_items_integrated_commands(
+    sink: Arc<EcsCommandSink>,
+    uuid: uuid::Uuid,
+    commands: &[&str],
+    expected_replies: usize,
+) -> Run {
+    let dispatch = CommandDispatch::installed(sink.clone());
+    let (server, client_end) = IntegratedServer::open_in_memory_with_items_and_commands(
+        V770ServerProtocol,
+        cheap_source(),
+        0,
+        dispatch,
+    );
+
+    run_integrated_connection(sink, uuid, commands, expected_replies, server, client_end).await
+}
+
+/// Drives one real integrated duplex after a constructor selected the host's
+/// local connection shape.
+async fn run_integrated_connection(
+    sink: Arc<EcsCommandSink>,
+    uuid: uuid::Uuid,
+    commands: &[&str],
+    expected_replies: usize,
+    server: IntegratedServer,
+    client_end: tokio::io::DuplexStream,
+) -> Run {
+    let (mut handle, mut events) = ClientBuilder::new(
+        address(),
+        profile("Commander", uuid),
+        Box::new(adapter()),
+    )
+    .connect_with(client_end);
+
+    handle
+        .wait_for_spawn(Duration::from_secs(30))
+        .await
+        .expect("integrated client never spawned");
+    for command in commands {
+        handle.command(*command).expect("send the command");
+    }
+
+    let mut chat = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline && chat.len() < expected_replies {
+        match tokio::time::timeout_at(deadline, events.recv()).await {
+            Ok(Some(ClientEvent::Chat { text, .. })) => {
+                let line = plain(&text);
+                if line != "Welcome to Lodestone" {
+                    chat.push(line);
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    let beacons = sink.beacons();
+    let observed_sources = sink.observed_sources();
+    handle.shutdown();
+    drop(server);
+    Run { beacons, observed_sources, chat }
 }
 
 /// The plain text of a chat component.
@@ -348,6 +619,106 @@ async fn a_real_chat_command_frame_reaches_a_registered_handler_and_its_effect_i
         vec![LIT_MESSAGE.to_owned()],
         "the handler's feedback must come back as a real system_chat frame"
     );
+}
+
+/// A terminal plugin root under `/execute ... run` is still delivered over the
+/// real wire, with the rewritten source and its integer result observed by the
+/// existing store machinery. This specifically exercises the production Play
+/// command arm rather than calling `ServerCommands` as a unit-level shortcut.
+#[tokio::test]
+async fn execute_run_reaches_a_plugin_over_the_wire_with_context_and_store_outcomes() {
+    let uuid = uuid::Uuid::new_v4();
+    let run = run_integrated_commands(
+        host(uuid, Some(true)),
+        uuid,
+        &[
+            "scoreboard objectives add out dummy",
+            "execute as @s at @s anchored eyes run observe",
+            "execute store result score @s out run observe",
+            "scoreboard players get @s out",
+            "execute store success score @s out run fail",
+            "scoreboard players get @s out",
+        ],
+        4,
+    )
+    .await;
+
+    let source = run
+        .observed_sources
+        .0
+        .first()
+        .expect("the terminal plugin handler must run over the wire");
+    assert_eq!(source.subject, PermissionSubject::Player(uuid));
+    let execution = source
+        .execution
+        .as_ref()
+        .expect("/execute must carry a rewritten execution context");
+    assert_eq!(execution.anchor, CommandAnchor::Eyes);
+    assert_eq!(execution.entity.as_ref().map(|entity| entity.uuid), Some(uuid));
+    assert_eq!(execution.permission_level, 4);
+    assert!(
+        run.chat.iter().any(|line| line == "Commander has 3 out"),
+        "store result must preserve the plugin's integer outcome: {:?}",
+        run.chat
+    );
+    assert!(
+        run.chat.iter().any(|line| line == "Commander has 0 out"),
+        "store success must write zero when the plugin handler fails: {:?}",
+        run.chat
+    );
+}
+
+/// A `ChatCommand` source takes its dimension from the live connection source,
+/// not an overworld literal. The protocol's initial login still says overworld
+/// in this focused fixture; the server-side source is deliberately Nether so
+/// the handler can prove the context the dispatcher actually receives.
+#[tokio::test]
+async fn execute_run_forwards_the_connection_dimension_to_the_plugin_handler() {
+    let uuid = uuid::Uuid::new_v4();
+    let source = DimensionalSource::alone(cheap_source(), Dimension::Nether, PortalIndex::new());
+    let run = run_commands_from_source(
+        host(uuid, Some(true)),
+        uuid,
+        &["execute as @s at @s run observe", "gamerule keepinventory"],
+        1,
+        source,
+    )
+    .await;
+
+    let execution = run
+        .observed_sources
+        .0
+        .first()
+        .and_then(|source| source.execution.as_ref())
+        .expect("the contextual plugin handler must run over the wire");
+    let nether: lodestone_model::ResourceKey = "minecraft:the_nether"
+        .parse()
+        .expect("literal resource key");
+    assert_eq!(execution.dimension, nether);
+}
+
+/// Browser singleplayer has no tick loop and therefore chooses the portable
+/// items constructor. Its local connection must still reach the same host
+/// dispatch and carry `/execute`'s rewritten context.
+#[tokio::test]
+async fn portable_items_constructor_runs_execute_plugin_terminals() {
+    let uuid = uuid::Uuid::new_v4();
+    let run = run_items_integrated_commands(
+        host(uuid, Some(true)),
+        uuid,
+        &["execute as @s at @s anchored eyes run observe", "gamerule keepinventory"],
+        1,
+    )
+    .await;
+
+    let execution = run
+        .observed_sources
+        .0
+        .first()
+        .and_then(|source| source.execution.as_ref())
+        .expect("the portable local constructor must reach the plugin handler");
+    assert_eq!(execution.anchor, CommandAnchor::Eyes);
+    assert_eq!(execution.entity.as_ref().map(|entity| entity.uuid), Some(uuid));
 }
 
 /// **Permissions are enforced on the wire path, not only at the registry.**

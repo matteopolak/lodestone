@@ -16,7 +16,7 @@
 //! seam that lets a gate drive it.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use lodestone_command::ParsedCommand;
 use lodestone_command_mc::{EntityArg, GameModeArg, SnbtValue};
@@ -26,7 +26,10 @@ use lodestone_server::commands::{
     CommandSource, CommandWorld, PlayerCandidate, Registrar, ServerCommands, overworld_dimension,
 };
 use lodestone_server::game_rules::GameRulesHandle;
-use lodestone_server::{ChunkColumn, ChunkSource};
+use lodestone_server::{
+    ChunkColumn, ChunkSource, CommandCaller, CommandDispatch, CommandSink, ContextualCommandRequest,
+    ContextualCommandResponse, UNKNOWN_COMMAND,
+};
 use uuid::Uuid;
 
 /// A settable-block fixture for `/execute if`/`unless block` — everything is
@@ -2981,6 +2984,165 @@ fn execute_if_loaded_with_no_chunk_source_refuses_by_name() {
 // ---------------------------------------------------------------------------
 // /execute store
 // ---------------------------------------------------------------------------
+
+/// The host seam must receive the source *after* `/execute` rewrites it, and
+/// its integer outcome must be the value `/execute store result` observes.
+/// This stays server-only on purpose: the fake sink is the dependency-free
+/// contract that the ECS adapter is required to implement.
+#[test]
+fn execute_run_forwards_rewritten_context_and_plugin_result_to_store_sinks() {
+    #[derive(Default)]
+    struct PluginTerminal(Mutex<Vec<ContextualCommandRequest>>);
+
+    impl CommandSink for PluginTerminal {
+        fn run(&self, _: &CommandCaller, _: &str) -> lodestone_server::CommandResponse {
+            panic!("`execute run` must use the contextual host method")
+        }
+
+        fn run_contextual(&self, request: &ContextualCommandRequest) -> ContextualCommandResponse {
+            self.0.lock().unwrap().push(request.clone());
+            match request.command.as_str() {
+                "plugin succeeds" => ContextualCommandResponse::ran(7),
+                "plugin fails" => ContextualCommandResponse::refused("plugin refused"),
+                other => panic!("unexpected plugin command {other:?}"),
+            }
+        }
+    }
+
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = CommandWorld {
+        rules: &GameRulesHandle::new(),
+        players: &players,
+        state: &state,
+        mobs: None,
+        border: None,
+        access: None,
+        blocks: None,
+    };
+    commands.run(&world, &alice, "scoreboard objectives add out dummy").unwrap();
+
+    let terminal = Arc::new(PluginTerminal::default());
+    let dispatch = CommandDispatch::installed(terminal.clone());
+    let caller = CommandCaller::new(uuid(1), "alice");
+
+    let outcome = commands
+        .run_with_contextual_dispatch(
+            &world,
+            &alice,
+            "execute as bob at bob run plugin succeeds",
+            &dispatch,
+            &caller,
+        )
+        .expect("`execute` is a built-in root");
+    assert!(outcome.response.is_ran(), "{outcome:?}");
+
+    let requests = terminal.0.lock().unwrap();
+    let [request] = requests.as_slice() else {
+        panic!("expected one contextual request, got {requests:?}");
+    };
+    assert_eq!(request.command, "plugin succeeds");
+    assert_eq!(request.source.entity.as_ref().map(|entity| entity.uuid), Some(uuid(2)));
+    assert_eq!(request.source.name, "bob");
+    assert_eq!(request.source.position, Vec3::new(5.0, 64.0, 0.0));
+    assert_eq!(request.source.rotation, Rotation { yaw: 0.0, pitch: 0.0 });
+    assert_eq!(request.source.dimension, overworld_dimension());
+    assert_eq!(request.source.permission_level, 4);
+    drop(requests);
+
+    let stored = commands
+        .run_with_contextual_dispatch(
+            &world,
+            &alice,
+            "execute store result score alice out run plugin succeeds",
+            &dispatch,
+            &caller,
+        )
+        .expect("`execute` is a built-in root");
+    assert!(stored.response.is_ran(), "{stored:?}");
+    assert_eq!(state.scoreboard().get_score("alice", "out"), Ok(7));
+
+    let failed = commands
+        .run_with_contextual_dispatch(
+            &world,
+            &alice,
+            "execute store success score alice out run plugin fails",
+            &dispatch,
+            &caller,
+        )
+        .expect("`execute` is a built-in root");
+    assert!(!failed.response.is_ran(), "{failed:?}");
+    assert_eq!(state.scoreboard().get_score("alice", "out"), Ok(0));
+}
+
+/// A contextual bridge without a host must fail closed, and a known built-in
+/// root must never be handed to that host just because one is installed.
+#[test]
+fn execute_plugin_bridge_fails_closed_and_keeps_builtin_precedence() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let players = roster();
+    let alice = source(1, "alice");
+    let world = CommandWorld {
+        rules: &GameRulesHandle::new(),
+        players: &players,
+        state: &state,
+        mobs: None,
+        border: None,
+        access: None,
+        blocks: None,
+    };
+    let caller = CommandCaller::new(uuid(1), "alice");
+
+    let no_sink = commands
+        .run_with_contextual_dispatch(
+            &world,
+            &alice,
+            "execute run plugin succeeds",
+            &CommandDispatch::none(),
+            &caller,
+        )
+        .expect("`execute` is a built-in root");
+    assert_eq!(no_sink.response.lines(), [UNKNOWN_COMMAND]);
+
+    #[derive(Default)]
+    struct NeverCalled;
+    impl CommandSink for NeverCalled {
+        fn run(&self, _: &CommandCaller, _: &str) -> lodestone_server::CommandResponse {
+            panic!("built-in roots must not fall through")
+        }
+
+        fn run_contextual(&self, _: &ContextualCommandRequest) -> ContextualCommandResponse {
+            panic!("a malformed known built-in root must not become a plugin terminal")
+        }
+    }
+    let builtin = commands
+        .run_with_contextual_dispatch(
+            &world,
+            &alice,
+            "gamerule keep_inventory false",
+            &CommandDispatch::installed(Arc::new(NeverCalled)),
+            &caller,
+        )
+        .expect("built-in root must match before the host");
+    assert!(builtin.response.is_ran(), "{builtin:?}");
+
+    let malformed = commands
+        .run_with_contextual_dispatch(
+            &world,
+            &alice,
+            "execute run gamerule keep_inventory definitely-not-a-bool",
+            &CommandDispatch::installed(Arc::new(NeverCalled)),
+            &caller,
+        )
+        .expect("`execute` remains the owner of a malformed built-in terminal");
+    assert!(
+        !malformed.response.is_ran(),
+        "a malformed built-in must report its own parse error: {malformed:?}"
+    );
+}
 
 /// `store result score` writes the wrapped command's own return value;
 /// `store success score` collapses that same wrapped command down to `0`/`1`

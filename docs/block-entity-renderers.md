@@ -1,13 +1,11 @@
 # Block entity renderers
 
-**Issue:** [#23](https://github.com/matteopolak/lodestone/issues/23) — still open; chest, skull,
-standing/wall sign text, and the bell body/rim are landed and wired (see
-[Skull](#skull-skeleton-wither-skeleton-zombie-creeper-player),
-[Sign](#sign-standingwall-text) and [Bell](#bell)), the rest are not. **The "skull's screen half is
-prepared but not yet wired" line this paragraph used to carry was itself stale** by the time this
-file was next read — `a8068c5` wired it in the same session that sentence was written and nobody
-came back to fix the summary at the top, exactly the staleness class `CLAUDE.md` warns is the most
-common defect in this repo's own written record. Read the per-type sections below, not this
+**Issue:** [#23](https://github.com/matteopolak/lodestone/issues/23) — 25 of vanilla's 26 renderer
+registrations now have an end-to-end Lodestone consumer, including Structure Block. The sole literal
+exception is `TEST_INSTANCE_BLOCK`, a creative/dev-only renderer with separate data and overlay behaviour;
+see [Structure block](#structure-block) and [What is not built](#what-is-not-built). The historical
+summary that once named only chest, skull, sign and bell was stale: use the registration census and
+per-type sections below as the current record, not an old issue checklist.
 
 **Mob spawner and trial spawner are now landed and wired end to end** (18 of 26 registrations) — see
 [Mob spawner](#mob-spawner) and [Trial spawner](#trial-spawner). Both are the spinning miniature
@@ -29,18 +27,18 @@ the terrain mesher already draws, so there was no hole to fill — but unlike th
 all. No new packet either: `shared_data.display_item` is ordinary generic block-entity NBT, the same
 `BlockEntity.nbt` path chest/skull/sign/decorated-pot/spawner already proved.
 
-**Brushable block, shelf, copper golem statue and the end gateway's teleport beam are now landed**
-(25 of 26 registrations) — see [Brushable block](#brushable-block), [Shelf](#shelf), [Copper golem
+**Brushable block, shelf, copper golem statue, the end gateway's teleport beam, and Structure Block
+are now landed** (25 of 26 registrations) — see [Brushable block](#brushable-block), [Shelf](#shelf), [Copper golem
 statue](#copper-golem-statue), and the teleport-beam addition to [End portal and end
-gateway](#end-portal-and-end-gateway). Three more seams: brushable block and shelf both reuse the
+gateway](#end-portal-and-end-gateway), plus [Structure block](#structure-block). Three more seams: brushable block and shelf both reuse the
 *item-model* pipeline exactly like campfire/vault (`gpu/world_items.rs`), copper golem statue is a
 fourth-pose cuboid rig through the *same* batcher chest/skull/bell already share (needing no new
 pipeline at all), and the teleport beam reuses `gpu/beacon_beam.rs`'s existing pipeline objects with a
 **second** texture bind group rather than a parallel pass — a `wgpu::RenderPipeline` embeds no texture
 data, only a bind-group-layout contract, so the beacon's own `solid_pipeline`/`glow_pipeline` draw the
-gateway's beam unmodified. **Structure block is the only remaining registration** — creative/dev-only,
-needing a debug-line "gizmo" world overlay this session did not build; see
-[What is not built](#what-is-not-built).
+gateway's beam unmodified. Structure Block is the debug-line seam: it consumes the decoded block-entity
+NBT through the already-live world-space line pipeline, gated exactly as vanilla is by local permissions
+and mode. `TEST_INSTANCE_BLOCK` remains the one deliberate creative/dev-only exception.
 
 **End portal and end gateway are now landed and wired end to end** (21 of 26 registrations) — see
 [End portal and end gateway](#end-portal-and-end-gateway). Unlike everything above, both are a genuine
@@ -120,7 +118,8 @@ wrong in both directions:
   (`SpawnerRenderer`, a miniature spinning entity inside the cage), `piston head`
   (`PistonHeadRenderer`), `end portal`/`end gateway` (their own full-bright shader effects, not
   cuboid rigs), `beacon` (a light-shaft pipeline, not a cuboid rig), **`skull`** (see below),
-  `structure block`/`test instance block` (creative/dev-only, not player-facing — out of scope),
+  `structure block` (a permission-gated developer overlay) and `test instance block` (creative/dev-only,
+  still out of scope),
   `campfire` (items cooking on top), `brushable block` (suspicious sand/gravel), `trial spawner`,
   `vault`, and two 26.x additions, `copper golem statue` and `shelf`.
 
@@ -149,11 +148,11 @@ the *item-model* pipeline, alongside campfire and vault. **Shelf makes 23** (see
 fourth reuse of that same pipeline, and the first consumer of `DisplaySlot::OnShelf`. **Copper golem
 statue makes 24** (see [Copper golem statue](#copper-golem-statue)) — a real cuboid rig again, sharing
 `prepare_block_entities`'s batcher with chest/skull/bell rather than any of the item-model family.
-**25 of 26 registrations are now landed and wired**, plus the end gateway's teleport beam (an addition
-*within* an already-landed registration, not a 26th). **Structure block is the only registration left**
-(test instance block is creative/dev-only and out of scope alongside it — see
-[What is not built](#what-is-not-built)). Picking it up should read this list, not the original issue
-body.
+**Structure Block makes 25 of 26 registration calls landed and wired**, plus the end gateway's teleport
+beam (an addition *within* an already-landed registration, not a 26th). The previous claim that this was
+already "25 of 26" while Structure was absent was an arithmetic error: `TEST_INSTANCE_BLOCK` is itself
+one of `BlockEntityRenderers.java`'s 26 `register(...)` calls, even though it is a deliberate
+creative/dev-only exception. Picking up scope should read the list, not the original issue body.
 
 **The registration list had two entries this document's "what is not built" section never mentioned
 either way: `LECTERN` (`LecternRenderer`, the open book on a lectern) and `CONDUIT` (`ConduitRenderer`,
@@ -2797,6 +2796,56 @@ exercised standalone — copied into a scratchpad with a stand-in census and run
 `rustc --edition 2024 --test`, where the chest/slab/log/stone resolutions and all four declines pass —
 but that is the pure function, not the gate.
 
+## Structure block
+
+Structure Block is the last player-meaningful entry from vanilla's 26 registration calls. It draws the
+outer renderable bounding box as twelve pale-grey debug-line segments. The renderer is intentionally a
+world overlay rather than an ordinary block-entity model: the normal Structure Block model already comes
+from terrain, while vanilla's `BlockEntityWithBoundingBoxRenderer` submits a `Gizmos` wireframe.
+
+The live consumer chain is:
+
+```text
+ENTITY_EVENT (local id, status 24..28)
+  -> ClientEvent::EntityStatus -> ServerPermissionLevel
+  -> app/session.rs debug-line source
+  -> structure_block_vertices (loaded BlockEntity NBT + block-state truth)
+  -> DebugLineRenderer -> pixels
+```
+
+`LocalPlayer.handleEntityEvent` maps statuses 24 through 28 to no permission, moderator, game master,
+admin and owner respectively. The session fold applies those only when the event's entity id equals the
+local player's login id, without taking the pre-existing ingest-side status consumer away. The visibility
+predicate is vanilla's `player.canUseGameMasterBlocks() || player.isSpectator()`: spectator always sees
+the box; otherwise the player needs `Abilities.instabuild` and a permission level of at least game master
+(2). Login and respawn clear the cached level before the server reports it again.
+
+For every loaded block entity strictly within vanilla's 96-block renderer cutoff, the shell checks the current block
+state is `minecraft:structure_block`, then reads its already-decoded NBT. `SAVE` draws when all three
+sizes are at least one; `LOAD` also needs `showboundingbox`; `CORNER` and `DATA` draw nothing. The
+`pos*`, `size*`, `mirror`, and `rotation` fields are clamped and transformed with
+`StructureBlockEntity.getRenderableBox()`'s exact outer-box rules before the line vertices are emitted.
+The debug-line source receives the current camera position so its 96-block cull is frame-correct.
+
+There is no configuration surface: the relevant constants are vanilla's 96-block cutoff and the existing
+debug-line pipeline. The focused scanner test constructs an actual loaded `World` column and `BlockEntity`,
+then exercises the production loaded-world helper through its permission predicate, strict cutoff (including culling at exactly 96 blocks), loaded-list,
+current block-state, NBT, and line-vertex gates. Separate focused tests prove mode, malformed-tag rejection,
+bounds, and rotate/mirror geometry. The opted-in headless GPU gate proves only that already-supplied outline
+vertices rasterize, and its paired unset-source gate is the negative control; it does not cover the scanner.
+
+Sources: `.cache/mc/26.2/client-src/net/minecraft/client/player/LocalPlayer.java`
+(`handleEntityEvent`, statuses 24--28), `net/minecraft/world/entity/player/Player.java`
+(`canUseGameMasterBlocks`),
+`net/minecraft/client/renderer/blockentity/BlockEntityWithBoundingBoxRenderer.java`
+(visibility, 96-block cutoff and line submission), and
+`net/minecraft/world/level/block/entity/StructureBlockEntity.java`
+(`renderMode` and `getRenderableBox`).
+
+Residual fidelity: vanilla additionally draws the per-block invisible/structure-void/barrier/light
+markers for `SAVE` mode when `showair` is true; Lodestone currently draws only the outer box. The
+separate Test Instance renderer remains unimplemented.
+
 ## What is not built
 
 Against the real 26-entry registration list (see above), not the issue's original twelve-item guess:
@@ -2890,16 +2939,10 @@ Against the real 26-entry registration list (see above), not the issue's origina
 - **Copper golem statue — landed** (see [Copper golem statue](#copper-golem-statue) above, including
   its own "Proof" subsection): all four poses, all four oxidation levels (waxed and unwaxed), through
   the same cuboid-rig batcher chest/skull share. A GPU pixel gate now exists and is green.
-- **Structure block is the only registration left**, and test instance block alongside it — both
-  creative/dev-only (`BlockEntityWithBoundingBoxRenderer`, gated on `player.canUseGameMasterBlocks() ||
-  player.isSpectator()`, drawing a wireframe box through vanilla's `Gizmos` line-drawing API). This
-  client already has an equivalent world-space line pipeline (`gpu/debug_lines.rs`'s
-  `DebugLineRenderer`/`push_box`), but it is currently wired only to the F3 debug overlay's own
-  install-once (not per-frame) closure (`app/session.rs::install_debug_lines_source`), and this client
-  tracks no "game master"/op permission at all — only `GameMode`. Folding a live per-frame world scan
-  for structure/test-instance blocks into that closure, and choosing a permission proxy (creative and/or
-  spectator mode is the natural one, since op level is not tracked), is real but scoped work for whoever
-  picks this up next; not attempted this session given its low value relative to the other four items.
+- **Test Instance block remains unimplemented.** It is one of the 26 registration calls, so it is the
+  sole literal census exception, but it is creative/dev-only and has distinct test-instance data, beam,
+  and error-overlay behaviour. It is not a Structure Block alias. Structure Block itself is landed; its
+  only fidelity gap is the optional `SAVE`-mode invisible-block markers described above.
 
 Also unbuilt for chests specifically: the `BrightnessCombiner` that makes a double chest's two halves
 share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behind

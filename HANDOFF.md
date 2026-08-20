@@ -17,11 +17,11 @@ state of the project; work that out yourself from the tracker and the tree.
   a conclusion to implement. Mark which constants you verified against the jar or decompiled source and
   which you are passing on faith. Ask for "anything in this brief that turned out wrong" and read that
   part of the report first. When an agent contradicts you and is right, say so and move on.
-- **Do not run tests often.** One shared checkout, no worktrees, one shared `Cargo.lock` and `target/`.
-  Concurrent cargo runs contend, and a count taken while agents are mid-edit is a sample rather than a
-  measurement — the invariant is zero failures, never a number. Tell agents not to run `cargo` at all,
-  have them report their unverified surface honestly, and run **one** batched verification when a group
-  lands, using the health checks in `CLAUDE.md` — `just health` (see
+- **Parallel Cargo runs are supported through sccache.** Give each agent its own literal `--target-dir`
+  under `/tmp` and a bounded `-j` value, following [`docs/build-caching.md`](./docs/build-caching.md).
+  A count taken while agents are mid-edit is still a sample rather than a measurement — the invariant is
+  zero failures, never a number. Run a final integrated verification when a group lands, using the health
+  checks in `CLAUDE.md` — `just health` (see
   [`docs/task-runner.md`](./docs/task-runner.md)), or the four `just check`/`check-all`/`check-seam`/`test`
   recipes individually when you need to name which one failed. Feed failures back to the owning agent by
   name. Also run `just wasm-check` (and, less often, `just wasm-size`) as part of the same batched pass —
@@ -109,9 +109,8 @@ your own log with a cheap `grep` for `Finished` / `test result:` rather than sto
 finished before reading any count out of it — a count read from a log cargo is still writing looks exactly
 like a pass, which the orchestrator also got wrong once.
 
-Note this failure became much rarer once builds got fast: per-agent private target dirs removed the
-shared-`target/` lock, and one agent whose test run had died four times in four different ways completed
-it in full on the first attempt afterwards.
+Per-agent private target dirs and sccache make parallel foreground builds practical; they do not change
+the foreground-only lifecycle rule above.
 
 **Slow new feature work when architecture would pay more.** Landing modularity, throughput and
 performance improvements ahead of the next feature batch is wanted, not a detour. The four choke-point

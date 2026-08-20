@@ -66,27 +66,24 @@
 //! future `/execute`-context dispatcher — inserts the same resource and calls
 //! the same [`dispatch`]. Nothing here knows or cares which side it is on.
 //!
-//! ## What is NOT wired, stated plainly
+//! ## Wire reachability and remaining boundary
 //!
-//! **No player's typed `/command` reaches [`dispatch`] yet, on either side.**
-//! This is the honest boundary of this module, and it is two separate gaps:
+//! Native integrated singleplayer now installs a shell-owned `CommandSink` on
+//! its local duplex connection. `CHAT_COMMAND` reaches the server's built-ins
+//! first; an unknown direct root calls [`dispatch`] as the authenticated player,
+//! while a terminal `/execute ... run <plugin>` carries its rewritten entity,
+//! position, rotation, dimension, anchor and permission level into
+//! [`CommandSource::contextual`]. The v770 wire gate drives both forms through
+//! a real client/server pair and verifies `store result` and `store success`.
 //!
-//! - **Serverbound.** `lodestone-server` never decodes `CHAT_COMMAND`
-//!   (serverbound id 7): `crates/protocol/v770/src/server_protocol.rs` has no
-//!   arm for it, so it falls to `_ => ServerBound::Ignored` and then to an empty
-//!   match arm in `server.rs`. A player's command is dropped twice over, before
-//!   any registry could see it. Closing that needs an edit to
-//!   `crates/protocol/**` and `crates/lodestone-server/**`, both outside this
-//!   work's ownership; `docs/plugin-commands.md` carries the exact patch shape.
-//! - **Clientbound.** Nothing sends the tree to a client, because no protocol
-//!   family encodes `COMMANDS` (clientbound id 16) either. [`command_tree_for`]
-//!   exists so that arm has something to serialise when it is written, and
-//!   applies the same permission pruning vanilla's `fillUsableCommands` does.
+//! This is intentionally **not** a general network-plugin host. Open-to-LAN
+//! peers do not receive the client registry, and RCON, console and command-block
+//! paths remain built-in-only. Those boundaries avoid handing an arbitrary
+//! remote caller the shell's ECS handle.
 //!
-//! The gate `plugin_command_registry_gate.rs` therefore drives the **registry**
-//! — registering through the public API exactly as a third-party plugin does,
-//! then dispatching a real input string and asserting the world changed. What
-//! it cannot assert is the wire hop, and no test in this crate can.
+//! Clientbound command-tree encoding remains absent: no protocol family emits
+//! `COMMANDS` (clientbound id 16). [`command_tree_for`] is ready for that arm
+//! and applies the same permission pruning vanilla's `fillUsableCommands` does.
 //!
 //! ## How to change it
 //!
@@ -140,6 +137,7 @@ use lodestone_command::{
     ArgumentType, ChoicesArgument, CommandTree, NodeId, ParseError, ParseErrorKind, ParsedCommand,
     ParsedValue,
 };
+use lodestone_model::{ResourceKey, Rotation, Vec3};
 use parking_lot::RwLock;
 
 use crate::permissions::{PermissionSubject, Permissions};
@@ -148,27 +146,46 @@ use crate::sets::TickSet;
 
 /// Who is running a command.
 ///
-/// # The `/execute` gap
+/// # `/execute` context
 ///
-/// This is deliberately **only** an identity — a subject and a display name. It
-/// is *not* a vanilla `CommandSourceStack`, and that is why a real `/execute`
-/// cannot be closed by this work. Vanilla's `/execute as <selector> at
-/// <selector> run <command>` rewrites a *context*: executor entity, position,
-/// rotation, dimension, anchor, plus `store`/`if`/`unless` result propagation.
-/// None of those fields exist here, and inventing them without a dispatcher to
-/// consume them would be a context object with no context-rewriter — an island
-/// of exactly the shape this repo's `CLAUDE.md` warns about.
-///
-/// What this type does give `/execute` is the *seam*: [`dispatch`] takes the
-/// source by reference and never reads it except to resolve permissions, so a
-/// future `/execute` can substitute a different subject without touching the
-/// registry or the tree. Widening this struct is additive when that dispatcher
-/// lands.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Direct roots retain `execution: None`, preserving the original identity-only
+/// API. A server host may set [`Self::execution`] for a terminal `/execute ...
+/// run`; registry permission resolution intentionally continues to use
+/// [`Self::subject`], which the host derives from the rewritten executor
+/// identity.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CommandSource {
     pub subject: PermissionSubject,
     /// Display name, for messages back to the sender.
     pub name: String,
+    /// The rewritten server context, absent for a direct plugin root.
+    pub execution: Option<CommandExecutionContext>,
+}
+
+/// The entity identity in a contextual plugin invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandEntity {
+    pub uuid: uuid::Uuid,
+    pub entity_id: i32,
+    pub username: String,
+}
+
+/// Which point local coordinates resolve from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandAnchor {
+    Feet,
+    Eyes,
+}
+
+/// Value-only `/execute` context exposed to a plugin handler.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandExecutionContext {
+    pub entity: Option<CommandEntity>,
+    pub position: Vec3,
+    pub rotation: Rotation,
+    pub dimension: ResourceKey,
+    pub anchor: CommandAnchor,
+    pub permission_level: u8,
 }
 
 impl CommandSource {
@@ -176,6 +193,7 @@ impl CommandSource {
         Self {
             subject: PermissionSubject::Player(id),
             name: name.into(),
+            execution: None,
         }
     }
 
@@ -185,7 +203,18 @@ impl CommandSource {
         Self {
             subject: PermissionSubject::Console,
             name: "Console".to_string(),
+            execution: None,
         }
+    }
+
+    /// A host-provided source for a terminal `/execute ... run`.
+    #[must_use]
+    pub fn contextual(
+        subject: PermissionSubject,
+        name: impl Into<String>,
+        execution: CommandExecutionContext,
+    ) -> Self {
+        Self { subject, name: name.into(), execution: Some(execution) }
     }
 }
 
@@ -700,8 +729,10 @@ fn canonicalize(registry: &CommandRegistry, input: &str) -> Option<(Arc<Register
 
 /// Resolve, gate and run one command against the registry.
 ///
-/// This is the function a `CHAT_COMMAND` decode arm would call — see the module
-/// doc for why nothing calls it from the wire yet.
+/// The shell's local `CommandSink` adapter calls this after the server's
+/// `CHAT_COMMAND` arm resolves a plugin terminal (directly or through
+/// `/execute ... run`). The server stays ECS-free; this crate only receives the
+/// version-free source and command string across that host seam.
 pub fn dispatch(
     world: &mut World,
     source: &CommandSource,

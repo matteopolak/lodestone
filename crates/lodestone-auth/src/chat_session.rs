@@ -42,8 +42,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use rsa::pkcs1v15::Pkcs1v15Sign;
 use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey};
+use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde::Deserialize;
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -52,6 +54,22 @@ use crate::error::{AuthError, Result};
 /// `POST`-only, empty body, `Authorization: Bearer <minecraft access token>` —
 /// see this module's doc comment for how the route was confirmed.
 const KEY_PAIR_URL: &str = "https://api.minecraftservices.com/player/certificates";
+
+/// Mojang's unauthenticated service-key endpoint. Its `playerCertificateKeys`
+/// are the RSA-4096 issuer keys that authenticate `publicKeySignatureV2`; they
+/// are distinct from both profile-property and authentication service keys.
+pub const MOJANG_PUBLIC_KEYS_URL: &str = "https://api.minecraftservices.com/publickeys";
+
+/// Vanilla authlib refreshes a successfully fetched service-key set every 24
+/// hours (`YggdrasilServicesKeyInfo.REFRESH_INTERVAL_HOURS`).
+pub const MOJANG_PUBLIC_KEY_REFRESH_MILLIS: i64 = 24 * 60 * 60 * 1_000;
+
+/// Vanilla's first service-key fetch retry delay (`BASE_FAILURE_INTERVAL_MINUTES`).
+pub const MOJANG_PUBLIC_KEY_FAILURE_BACKOFF_BASE_MILLIS: i64 = 5 * 60 * 1_000;
+
+/// `YggdrasilServicesKeyInfo.KEY_SIZE_BITS`: every service issuer key uses
+/// 4096-bit RSA, unlike the player's 2048-bit message-signing key.
+pub const MOJANG_PUBLIC_KEY_BITS: usize = 4_096;
 
 /// The RSA signature length vanilla hard-codes
 /// (`MessageSignature.BYTES`/`Crypt.SIGNATURE_BYTES` = 256, i.e. a 2048-bit
@@ -90,6 +108,222 @@ struct KeyPairData {
     private_key: String,
     #[serde(rename = "publicKey")]
     public_key: String,
+}
+
+/// The subset of Mojang's `/publickeys` response which authenticates player
+/// chat-session certificates. `profilePropertyKeys` and `authenticationKeys`
+/// intentionally do not enter this type: vanilla maps only
+/// `playerCertificateKeys` to `ServicesKeyType.PROFILE_KEY`.
+#[derive(Deserialize)]
+struct MojangPublicKeysResponse {
+    #[serde(rename = "playerCertificateKeys")]
+    player_certificate_keys: Vec<MojangPublicKeyResponse>,
+}
+
+#[derive(Deserialize)]
+struct MojangPublicKeyResponse {
+    #[serde(rename = "publicKey")]
+    public_key: String,
+}
+
+// --- Mojang profile-key provenance ----------------------------------------
+
+/// The public data a client announces in `RemoteChatSession.Data` / vanilla's
+/// `ProfilePublicKey.Data`. Its signature is issued by Mojang, not by the
+/// player: use [`MojangPublicKeys::verify_profile_public_key`] before accepting
+/// it as the signing key for that connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfilePublicKeyData {
+    /// The online-authenticated Minecraft profile UUID. This exact identity,
+    /// rather than a packet-supplied name, is part of Mojang's signed payload.
+    pub profile_id: Uuid,
+    /// The certificate expiry (`Instant.toEpochMilli()`), carried verbatim on
+    /// the wire. Provenance verification does not make an expired certificate
+    /// usable; enforce [`profile_public_key_has_expired`] separately.
+    pub expires_at_millis: i64,
+    /// X.509 `SubjectPublicKeyInfo` DER for the player's RSA-2048 chat key.
+    pub public_key_der: Vec<u8>,
+    /// `publicKeySignatureV2`, decoded from standard base64.
+    pub key_signature: Vec<u8>,
+}
+
+/// Builds the byte sequence Mojang signs for `ProfilePublicKey.Data`:
+/// profile UUID most-significant bits, least-significant bits, expiry epoch
+/// milliseconds (all signed big-endian `i64`), then the original SPKI DER.
+///
+/// This is `ProfilePublicKey.Data#signedPayload` from vanilla 26.2; neither a
+/// VarInt nor a length prefix appears in the signed sequence.
+#[must_use]
+pub fn profile_public_key_signature_payload(data: &ProfilePublicKeyData) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(24 + data.public_key_der.len());
+    payload.extend_from_slice(&data.profile_id.as_u128().to_be_bytes());
+    payload.extend_from_slice(&data.expires_at_millis.to_be_bytes());
+    payload.extend_from_slice(&data.public_key_der);
+    payload
+}
+
+/// Vanilla's `ProfilePublicKey.Data#hasExpired`: expiry is strict (`isBefore`)
+/// so equality is still usable and one millisecond earlier is expired.
+#[must_use]
+pub fn profile_public_key_has_expired(expires_at_millis: i64, now_millis: i64) -> bool {
+    expires_at_millis < now_millis
+}
+
+/// Mojang's parsed player-certificate issuer keys. This deliberately owns no
+/// network/cache policy, letting a server inject a fresh, cached, or test key
+/// set while certificate verification remains deterministic and offline.
+#[derive(Clone)]
+pub struct MojangPublicKeys {
+    player_certificate_keys: Vec<RsaPublicKey>,
+}
+
+impl std::fmt::Debug for MojangPublicKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MojangPublicKeys")
+            .field("player_certificate_key_count", &self.player_certificate_keys.len())
+            .finish()
+    }
+}
+
+impl MojangPublicKeys {
+    /// Parses standard-base64, X.509-SPKI player-certificate service keys from
+    /// Mojang's public endpoint. Exposed for deterministic fixtures and for
+    /// callers that persist a verified endpoint response outside this crate.
+    ///
+    /// # Errors
+    /// Returns [`AuthError::MojangPublicKeyMalformed`] if any key is not valid
+    /// standard base64/X.509 RSA, or the set is empty.
+    pub fn from_player_certificate_keys_base64(keys: &[String]) -> Result<Self> {
+        let mut parsed = Vec::with_capacity(keys.len());
+        for key in keys {
+            let der = BASE64.decode(key.trim()).map_err(|e| {
+                AuthError::MojangPublicKeyMalformed(format!(
+                    "playerCertificateKeys.publicKey is not base64: {e}"
+                ))
+            })?;
+            let key = RsaPublicKey::from_public_key_der(&der).map_err(|e| {
+                AuthError::MojangPublicKeyMalformed(format!(
+                    "playerCertificateKeys.publicKey is not X.509 SPKI RSA: {e}"
+                ))
+            })?;
+            if key.n().bits() != MOJANG_PUBLIC_KEY_BITS {
+                return Err(AuthError::MojangPublicKeyMalformed(format!(
+                    "playerCertificateKeys.publicKey was {} bits, expected {MOJANG_PUBLIC_KEY_BITS}",
+                    key.n().bits()
+                )));
+            }
+            parsed.push(key);
+        }
+        if parsed.is_empty() {
+            return Err(AuthError::MojangPublicKeyMalformed(
+                "playerCertificateKeys was empty".to_owned(),
+            ));
+        }
+        Ok(Self {
+            player_certificate_keys: parsed,
+        })
+    }
+
+    /// Verifies `publicKeySignatureV2` with any current Mojang
+    /// `playerCertificateKeys` entry. Vanilla uses `SHA1withRSA` (PKCS#1 v1.5)
+    /// here; this must not be confused with a player's `SHA256withRSA` chat
+    /// message signatures.
+    ///
+    /// `Ok(false)` means the public data is well-formed enough to attempt
+    /// verification but no configured Mojang key signed it. It deliberately
+    /// does not check expiry, because a fixture or a logged historic packet can
+    /// retain cryptographic provenance after it is no longer usable for chat.
+    #[must_use]
+    pub fn verify_profile_public_key(&self, data: &ProfilePublicKeyData) -> Result<bool> {
+        let digest = Sha1::digest(profile_public_key_signature_payload(data));
+        Ok(self.player_certificate_keys.iter().any(|key| {
+            key.verify(Pkcs1v15Sign::new::<Sha1>(), &digest, &data.key_signature)
+                .is_ok()
+        }))
+    }
+}
+
+/// Fetches and parses Mojang's current player-certificate issuer keys. It is
+/// unauthenticated; callers supply their own [`MojangPublicKeyCache`] policy
+/// and may retain the last successful set when this request fails.
+///
+/// # Errors
+/// Returns [`AuthError::Http`] for transport failures,
+/// [`AuthError::Service`] for a non-success status (without retaining the
+/// response body), or [`AuthError::MojangPublicKeyMalformed`] for an unusable
+/// JSON/key shape.
+pub async fn fetch_mojang_public_keys(client: &reqwest::Client) -> Result<MojangPublicKeys> {
+    let http = client.get(MOJANG_PUBLIC_KEYS_URL).send().await?;
+    if !http.status().is_success() {
+        return Err(AuthError::Service {
+            step: "mojang_public_keys",
+            message: http.status().to_string(),
+        });
+    }
+    let response: MojangPublicKeysResponse = http.json().await?;
+    let keys = response
+        .player_certificate_keys
+        .into_iter()
+        .map(|key| key.public_key)
+        .collect::<Vec<_>>();
+    MojangPublicKeys::from_player_certificate_keys_base64(&keys)
+}
+
+/// A policy-only cache for Mojang issuer keys. It never fetches on its own:
+/// users call [`Self::needs_refresh`], perform their own HTTP request, and then
+/// report either [`Self::record_success`] or [`Self::record_failure`]. That
+/// keeps connection startup asynchronous and makes production use injectible.
+#[derive(Debug, Clone, Default)]
+pub struct MojangPublicKeyCache {
+    keys: Option<MojangPublicKeys>,
+    consecutive_failures: u32,
+    next_refresh_at_millis: i64,
+}
+
+impl MojangPublicKeyCache {
+    /// Starts without keys, due for an immediate first fetch.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// The latest successful key set, if any. A failed refresh never clears
+    /// this value, matching authlib's availability-first policy.
+    #[must_use]
+    pub fn keys(&self) -> Option<&MojangPublicKeys> {
+        self.keys.as_ref()
+    }
+
+    /// When the caller should try the public endpoint again.
+    #[must_use]
+    pub fn needs_refresh(&self, now_millis: i64) -> bool {
+        now_millis >= self.next_refresh_at_millis
+    }
+
+    /// Exposes the next scheduled refresh for observability/tests without
+    /// coupling callers to this cache's internals.
+    #[must_use]
+    pub fn next_refresh_at_millis(&self) -> i64 {
+        self.next_refresh_at_millis
+    }
+
+    /// Installs a successful response, resets failures, and schedules vanilla's
+    /// fixed 24-hour refresh interval.
+    pub fn record_success(&mut self, keys: MojangPublicKeys, now_millis: i64) {
+        self.keys = Some(keys);
+        self.consecutive_failures = 0;
+        self.next_refresh_at_millis = now_millis.saturating_add(MOJANG_PUBLIC_KEY_REFRESH_MILLIS);
+    }
+
+    /// Keeps the previous successful keys (if any) and schedules vanilla's
+    /// exponential 5, 10, 20, 40, 80, 160, 320, 320… minute retry sequence.
+    pub fn record_failure(&mut self, now_millis: i64) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let exponent = self.consecutive_failures.saturating_sub(1).min(6);
+        let delay = MOJANG_PUBLIC_KEY_FAILURE_BACKOFF_BASE_MILLIS
+            .saturating_mul(1_i64 << exponent);
+        self.next_refresh_at_millis = now_millis.saturating_add(delay);
+    }
 }
 
 // --- Key pair ---------------------------------------------------------------
@@ -221,10 +455,12 @@ pub async fn fetch_key_pair(
         .await?;
     if !http.status().is_success() {
         let status = http.status();
-        let text = http.text().await.unwrap_or_default();
         return Err(AuthError::Service {
             step: "chat_session_key_pair",
-            message: format!("{status}: {text}"),
+            // This endpoint is authenticated. Preserve the actionable status
+            // without retaining an arbitrary service response body in a
+            // diagnostic that callers may log beside account information.
+            message: status.to_string(),
         });
     }
     let resp: KeyPairResponse = http.json().await?;
@@ -980,5 +1216,94 @@ srD3mQIDAQAB\n\
             refreshed_after: "2024-01-01T00:00:00Z".to_owned(),
         };
         assert!(parse_key_pair_response(resp).is_err());
+    }
+
+    #[derive(Deserialize)]
+    struct MojangCertificateFixture {
+        profile_id: String,
+        expires_at_millis: i64,
+        public_key_der_base64: String,
+        key_signature_base64: String,
+        player_certificate_service_public_keys_base64: Vec<String>,
+    }
+
+    fn mojang_certificate_fixture() -> (MojangCertificateFixture, ProfilePublicKeyData) {
+        let fixture: MojangCertificateFixture = serde_json::from_str(include_str!(
+            "../tests/fixtures/mojang-profile-key-certificate.json"
+        ))
+        .unwrap();
+        let data = ProfilePublicKeyData {
+            profile_id: Uuid::parse_str(&fixture.profile_id).unwrap(),
+            expires_at_millis: fixture.expires_at_millis,
+            public_key_der: BASE64.decode(&fixture.public_key_der_base64).unwrap(),
+            key_signature: BASE64.decode(&fixture.key_signature_base64).unwrap(),
+        };
+        (fixture, data)
+    }
+
+    #[test]
+    fn real_mojang_profile_key_fixture_has_valid_provenance() {
+        let (fixture, data) = mojang_certificate_fixture();
+        let keys = MojangPublicKeys::from_player_certificate_keys_base64(
+            &fixture.player_certificate_service_public_keys_base64,
+        )
+        .unwrap();
+        assert!(keys.verify_profile_public_key(&data).unwrap());
+    }
+
+    #[test]
+    fn profile_key_provenance_rejects_a_changed_payload_or_signature() {
+        let (fixture, mut data) = mojang_certificate_fixture();
+        let keys = MojangPublicKeys::from_player_certificate_keys_base64(
+            &fixture.player_certificate_service_public_keys_base64,
+        )
+        .unwrap();
+        data.profile_id = Uuid::from_u128(data.profile_id.as_u128() ^ 1);
+        assert!(!keys.verify_profile_public_key(&data).unwrap());
+
+        let (_, mut data) = mojang_certificate_fixture();
+        data.expires_at_millis += 1;
+        assert!(!keys.verify_profile_public_key(&data).unwrap());
+
+        let (_, mut data) = mojang_certificate_fixture();
+        data.public_key_der[0] ^= 1;
+        assert!(!keys.verify_profile_public_key(&data).unwrap());
+
+        let (_, mut data) = mojang_certificate_fixture();
+        data.key_signature[0] ^= 1;
+        assert!(!keys.verify_profile_public_key(&data).unwrap());
+    }
+
+    #[test]
+    fn profile_key_expiry_matches_vanillas_strict_is_before_boundary() {
+        assert!(!profile_public_key_has_expired(1_000, 1_000));
+        assert!(profile_public_key_has_expired(999, 1_000));
+    }
+
+    #[test]
+    fn public_key_cache_keeps_last_success_and_uses_vanilla_backoff() {
+        let (fixture, _) = mojang_certificate_fixture();
+        let keys = MojangPublicKeys::from_player_certificate_keys_base64(
+            &fixture.player_certificate_service_public_keys_base64,
+        )
+        .unwrap();
+        let mut cache = MojangPublicKeyCache::empty();
+        assert!(cache.needs_refresh(0));
+        cache.record_failure(0);
+        assert_eq!(cache.next_refresh_at_millis(), 5 * 60 * 1_000);
+        cache.record_failure(5 * 60 * 1_000);
+        assert_eq!(cache.next_refresh_at_millis(), 15 * 60 * 1_000);
+        cache.record_success(keys, 20 * 60 * 1_000);
+        assert!(!cache.needs_refresh(20 * 60 * 1_000));
+        assert_eq!(
+            cache.next_refresh_at_millis(),
+            20 * 60 * 1_000 + 24 * 60 * 60 * 1_000
+        );
+        cache.record_failure(20 * 60 * 1_000 + 24 * 60 * 60 * 1_000);
+        assert!(cache.keys().is_some());
+        assert_eq!(
+            cache.next_refresh_at_millis(),
+            20 * 60 * 1_000 + 24 * 60 * 60 * 1_000 + 5 * 60 * 1_000
+        );
     }
 }

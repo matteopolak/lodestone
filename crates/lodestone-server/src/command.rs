@@ -90,6 +90,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use lodestone_model::{ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
 /// Who sent a command.
@@ -116,6 +117,72 @@ impl CommandCaller {
             uuid,
             username: username.into(),
         }
+    }
+}
+
+/// The entity identity carried by a contextual command source.
+///
+/// This is deliberately value-only: a host can map it into its own world
+/// vocabulary without `lodestone-server` naming an ECS entity or a protocol
+/// packet type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextualCommandEntity {
+    pub uuid: Uuid,
+    pub entity_id: i32,
+    pub username: String,
+}
+
+/// Whether local coordinates resolve from feet or eyes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextualEntityAnchor {
+    Feet,
+    Eyes,
+}
+
+/// The complete value context a terminal `/execute ... run` hands to a host.
+///
+/// The authenticated [`CommandCaller`] remains separately recorded in the
+/// request. `source.entity` is intentionally the *rewritten* executor
+/// identity, which is what a plugin command must use for `execute as`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextualCommandSource {
+    pub entity: Option<ContextualCommandEntity>,
+    pub name: String,
+    pub position: Vec3,
+    pub rotation: Rotation,
+    pub dimension: ResourceKey,
+    pub anchor: ContextualEntityAnchor,
+    pub permission_level: u8,
+}
+
+/// A host-dispatched terminal command plus its authenticated caller and
+/// rewritten server command source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextualCommandRequest {
+    pub caller: CommandCaller,
+    pub source: ContextualCommandSource,
+    pub command: String,
+}
+
+/// The contextual host's terminal result.
+///
+/// Unlike [`CommandResponse`], this carries Brigadier's integer result so
+/// `/execute store result` can retain its existing semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextualCommandResponse {
+    Ran { feedback: Vec<String>, result: i32 },
+    Refused { message: String },
+}
+
+impl ContextualCommandResponse {
+    #[must_use]
+    pub fn ran(result: i32) -> Self {
+        Self::Ran { feedback: Vec::new(), result }
+    }
+
+    #[must_use]
+    pub fn refused(message: impl Into<String>) -> Self {
+        Self::Refused { message: message.into() }
     }
 }
 
@@ -206,6 +273,15 @@ pub trait CommandSink: Send + Sync {
     /// Must not panic: this runs on a connection task, and a panic here takes
     /// the player's connection with it.
     fn run(&self, caller: &CommandCaller, command: &str) -> CommandResponse;
+
+    /// Run a terminal plugin command with the source produced by `/execute`.
+    ///
+    /// The default is deliberately fail-closed so existing hosts retain their
+    /// direct-root behaviour but cannot accidentally grant an unimplemented
+    /// contextual path.
+    fn run_contextual(&self, _request: &ContextualCommandRequest) -> ContextualCommandResponse {
+        ContextualCommandResponse::refused(UNKNOWN_COMMAND)
+    }
 }
 
 /// A cheap, cloneable handle to the host's [`CommandSink`], or to no sink at
@@ -262,6 +338,16 @@ impl CommandDispatch {
         match &self.sink {
             Some(sink) => sink.run(caller, command),
             None => CommandResponse::refused(UNKNOWN_COMMAND),
+        }
+    }
+
+    /// Run a terminal command with its rewritten `/execute` source, or refuse
+    /// when no host is installed.
+    #[must_use]
+    pub fn run_contextual(&self, request: &ContextualCommandRequest) -> ContextualCommandResponse {
+        match &self.sink {
+            Some(sink) => sink.run_contextual(request),
+            None => ContextualCommandResponse::refused(UNKNOWN_COMMAND),
         }
     }
 }

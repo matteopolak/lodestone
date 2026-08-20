@@ -197,14 +197,14 @@ pub fn tick_sprint_window(mut input: ResMut<RawInput>) {
 /// already lives) would starve that counter and silently break the 20-tick
 /// periodic resync, not fix anything.
 ///
-/// **The legacy families do not have this throttle at all** —
-/// `v47`/`v340`/`v735`'s `ClientAction::Move` arms encode a real packet
-/// unconditionally on every call, with no dirty-tracking of their own
-/// (verified against `crates/protocol/v47/src/adapter.rs` and
-/// `crates/protocol/v340/src/adapter.rs`). Joining a server over one of
-/// those families genuinely does send one movement packet per tick even
-/// while standing still; closing that gap needs a `select_move_packet`-style
-/// tracker built per family, not a change here.
+/// The legacy adapters make the same distinction, with deliberately different
+/// family rules. v47 tracks the last pose and periodically refreshes it, but
+/// still emits its base `flying` packet on every otherwise-idle tick; that is
+/// vanilla 1.8 behavior. v340 and v735 throttle idle movement, emitting
+/// `flying` only for an on-ground transition and otherwise staying quiet
+/// until their periodic position reminder expires. The controller must still
+/// invoke every family every tick: each adapter owns and advances the
+/// per-connection reminder state that determines its cadence.
 ///
 /// Only once we are actually in the world — before the server places us, a
 /// version adapter (correctly) has no Play-state packet for a move, so

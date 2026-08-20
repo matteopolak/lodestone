@@ -123,6 +123,17 @@ prepends the server pack ahead of the local selection — vanilla's own
 local Resource Packs screen's own list, matching vanilla keeping downloaded
 packs out of `PackRepository`.
 
+The HUD's lazy custom-font cache (`hud::vanilla_font::VanillaFont`) also
+observes this generation. It retains both successful and failed
+`"font": "namespace:name"` lookups while the stack is unchanged, avoiding a
+resource load for every rendered nameplate; a changed generation clears those
+entries before the next lookup. This matters for a font first requested while
+an accepted server pack is still downloading: once `set_server_pack` installs
+the bytes, the next nameplate can resolve it instead of keeping the old
+fallback forever. A warning for a name that remains missing after a generation
+change still means the pack did not provide a usable font (or was never
+installed); it is not suppressed by this cache policy.
+
 ### The per-server policy (`menu::servers::ServerPackPolicy`)
 
 `Enabled`/`Disabled`/`Prompt`, matching vanilla's `ServerData.ServerPackStatus`
@@ -165,6 +176,13 @@ connect.
   `resources.rs`'s in-memory cell for the session. There is therefore no
   "resource pack cache directory" to document, clean up, or bound
   separately from `MAX_PACK_SIZE_BYTES` itself.
+- **Font warnings distinguish timing from bad content.** A missing custom font
+  is retried after every pack-generation change, not every frame. If its
+  `load resource-pack font <name>: font not found` warning persists after the
+  server reports `SuccessfullyLoaded`, inspect the pack's
+  `assets/<namespace>/font/<name>.json` and its providers; a rejected,
+  corrupt, or genuinely non-providing pack still correctly falls back to the
+  default font.
 - **`decide_resource_pack_push` is a pure function, tested against a full
   truth table.** If vanilla's own condition in
   `ClientCommonPacketListenerImpl.handleResourcePackPush` ever needs
