@@ -24,9 +24,10 @@
 //! that the **driver** (a) generates a secret and RSA-wraps it against the
 //! public key the directive carried (not a hardcoded one), (b) asks the
 //! adapter to frame the reply and writes it *before* enabling its own cipher,
-//! (c) actually flips its connection's cipher on, and (d) correctly skips the
-//! session-server call when `should_authenticate` is `false` and correctly
-//! *refuses* to proceed at all when it's `true` with no session configured.
+//! (c) actually flips its connection's cipher on, and (d) correctly treats an
+//! explicit offline identity differently from a failed online account: offline
+//! skips Mojang for either authentication flag, while the latter refuses a
+//! requested proof before sending a response.
 //! The `should_authenticate: true` **success** path (an authenticated
 //! `join_server` call reaching the real `sessionserver.mojang.com`) is
 //! **not** exercised here — same reason `flow.rs`'s tests don't cover it —
@@ -173,12 +174,11 @@ fn generate_server_keypair() -> (RsaPrivateKey, Vec<u8>) {
     (priv_key, pub_der)
 }
 
-/// The `should_authenticate: false` path: no Mojang session-server call is
-/// needed, so the whole handshake should complete and a packet sent
-/// afterwards should decode cleanly — proof the cipher is on and consistent
-/// in both directions.
-#[tokio::test]
-async fn begin_encryption_without_authentication_completes_the_handshake() {
+/// An explicit offline intent never calls Mojang. It still completes the
+/// encryption exchange for either value a server gives `should_authenticate`,
+/// which is necessary for hybrid/cracked servers that encrypt their transport
+/// without requiring a Mojang proof.
+async fn assert_offline_encryption_completes(should_authenticate: bool) {
     let (priv_key, pub_der) = generate_server_keypair();
     let verify_token = vec![9u8, 8, 7, 6];
 
@@ -186,7 +186,7 @@ async fn begin_encryption_without_authentication_completes_the_handshake() {
         server_id: "srv".to_owned(),
         public_key_der: pub_der,
         verify_token: verify_token.clone(),
-        should_authenticate: false,
+        should_authenticate,
     };
 
     let (client_io, server_io) = memory_pair();
@@ -235,37 +235,46 @@ async fn begin_encryption_without_authentication_completes_the_handshake() {
     drop(handle);
 }
 
-/// `should_authenticate: true` with no `ClientBuilder::online_session`
-/// configured must fail **fast and typed**, before any crypto or network
-/// happens at all — not complete the handshake and only then fail a
-/// session-server call it was never going to be able to make.
 #[tokio::test]
-async fn begin_encryption_requiring_auth_without_a_session_fails_fast() {
-    let (_priv_key, pub_der) = generate_server_keypair();
+async fn offline_encryption_without_authentication_completes_the_handshake() {
+    assert_offline_encryption_completes(false).await;
+}
 
+#[tokio::test]
+async fn offline_encryption_with_authentication_flag_completes_without_mojang() {
+    assert_offline_encryption_completes(true).await;
+}
+
+/// A selected online account that could not refresh is retained rather than
+/// retried as offline. If the server does not request a Mojang proof, its
+/// encryption handshake still completes under the caller-provided profile.
+#[tokio::test]
+async fn unavailable_online_account_encrypts_when_authentication_is_not_requested() {
+    let (_priv_key, pub_der) = generate_server_keypair();
     let adapter = FakeOnlineAdapter {
         server_id: "srv".to_owned(),
         public_key_der: pub_der,
         verify_token: vec![1, 2, 3],
-        should_authenticate: true,
+        should_authenticate: false,
     };
 
     let (client_io, server_io) = memory_pair();
     let (handle, _events) = ClientBuilder::new(server(), profile(), Box::new(adapter))
+        .online_session_unavailable(
+            "Steve".to_owned(),
+            "the saved Microsoft session has expired".to_owned(),
+        )
         .connect_with(client_io);
     let mut peer: Connection<DuplexStream> = Connection::new(server_io);
 
     peer.write_packet(TRIGGER, &[]).await.unwrap();
-
-    // No `EncryptionResponse` should ever be written — the driver must bail
-    // out before spending a round trip on crypto it knows is pointless.
-    // `drop(peer)` closes the read side; if the driver actually did write a
-    // key packet, `handle.join()` below still tells us definitively via the
-    // session outcome, which is the authoritative assertion.
-    match handle.join().await {
-        SessionOutcome::Failed(ClientError::OnlineModeSessionRequired) => {}
-        other => panic!("expected OnlineModeSessionRequired, got {other:?}"),
-    }
+    let (id, _) = peer
+        .read_packet()
+        .await
+        .unwrap()
+        .expect("encryption response for a server that did not request Mojang proof");
+    assert_eq!(id, KEY_PACKET_ID);
+    drop(handle);
 }
 
 /// The same fail-fast path, but for a caller that *had* an account and could not

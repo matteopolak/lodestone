@@ -13,6 +13,43 @@ use crate::driver::Driver;
 use crate::error::ClientError;
 use crate::handle::{ClientHandle, EventStream};
 
+/// The account policy a native client carries into the login handshake.
+///
+/// This is deliberately not an `Option<Session>`: an explicit offline identity,
+/// a usable online session, and an online account whose session could not be
+/// refreshed have different security behaviour when the server asks for
+/// encryption. See [`ClientBuilder::authentication_intent`].
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub enum AuthenticationIntent {
+    /// Never contact Microsoft or Mojang services for this connection.
+    Offline,
+    /// Use this session if, and only if, the server requests authentication.
+    Online(lodestone_auth::Session),
+    /// Retain a selected online account's failure until the server proves that
+    /// authentication is required.
+    OnlineUnavailable {
+        /// The selected account's display name or stable identifier.
+        account: String,
+        /// A user-facing explanation that contains no credential material.
+        detail: String,
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl AuthenticationIntent {
+    pub(crate) fn online_session(&self) -> Option<&lodestone_auth::Session> {
+        match self {
+            Self::Online(session) => Some(session),
+            Self::Offline | Self::OnlineUnavailable { .. } => None,
+        }
+    }
+
+    pub(crate) fn should_join_session_server(&self, should_authenticate: bool) -> bool {
+        should_authenticate && matches!(self, Self::Online(_))
+    }
+}
+
 /// Default capacity of the event channel.
 const DEFAULT_EVENT_BUFFER: usize = 256;
 
@@ -43,16 +80,48 @@ pub struct ClientBuilder {
     /// The caller's `World` and session entity, when the caller has one — §4.1(c).
     /// `None` means "mint your own", which is what a bot with no driver wants.
     ecs: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
-    /// The authenticated Microsoft/Minecraft session for an online-mode join
-    /// (issue #65), or `None` for the default offline-mode path — see
-    /// [`Self::online_session`].
+    /// The selected account policy for an online-mode join. It is a typed
+    /// intent rather than an optional session so explicit offline play cannot
+    /// be mistaken for a failed online sign-in.
     #[cfg(not(target_arch = "wasm32"))]
-    online_session: Option<lodestone_auth::Session>,
-    /// Why [`Self::online_session`] was not called, when the caller *tried* to
-    /// resolve an account and failed — see [`Self::online_session_unavailable`].
-    /// `None` means nobody is signed in, which is a different message.
-    #[cfg(not(target_arch = "wasm32"))]
-    online_session_unavailable: Option<(String, String)>,
+    authentication_intent: AuthenticationIntent,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    fn session() -> lodestone_auth::Session {
+        lodestone_auth::Session {
+            access_token: "test-token".to_owned(),
+            profile: lodestone_auth::Profile {
+                name: "OnlinePlayer".to_owned(),
+                id: uuid::Uuid::nil(),
+                skin: None,
+            },
+            expires_at: u64::MAX,
+        }
+    }
+
+    #[test]
+    fn authentication_intent_only_joins_for_a_valid_online_session_when_requested() {
+        let offline = AuthenticationIntent::Offline;
+        let online = AuthenticationIntent::Online(session());
+        let unavailable = AuthenticationIntent::OnlineUnavailable {
+            account: "OnlinePlayer".to_owned(),
+            detail: "the saved session has expired".to_owned(),
+        };
+
+        for intent in [&offline, &online, &unavailable] {
+            assert!(
+                !intent.should_join_session_server(false),
+                "no intent may call Mojang without a server request"
+            );
+        }
+        assert!(!offline.should_join_session_server(true));
+        assert!(online.should_join_session_server(true));
+        assert!(!unavailable.should_join_session_server(true));
+    }
 }
 
 impl ClientBuilder {
@@ -76,9 +145,7 @@ impl ClientBuilder {
             initial_cookies: HashMap::new(),
             ecs: None,
             #[cfg(not(target_arch = "wasm32"))]
-            online_session: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            online_session_unavailable: None,
+            authentication_intent: AuthenticationIntent::Offline,
         }
     }
 
@@ -91,23 +158,46 @@ impl ClientBuilder {
     /// Without this, [`ClientBuilder::connect`]/[`ClientBuilder::connect_with`]
     /// still work exactly as before against an offline-mode server (the
     /// default, unchanged path — nothing about this method is required to
-    /// join a server that doesn't ask for encryption). Connecting to an
-    /// online-mode server *without* calling this fails fast with
-    /// [`crate::ClientError::OnlineModeSessionRequired`] the moment the
-    /// server's `EncryptionRequest`/`hello` arrives, rather than completing
-    /// the crypto handshake and only then failing the session-server join.
+    /// join a server that doesn't ask for encryption). The default is an
+    /// explicit offline intent, which can still complete a server's RSA/AES
+    /// request without calling Mojang; only this online intent calls Mojang,
+    /// and only when the request's `should_authenticate` flag is true.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn online_session(mut self, session: lodestone_auth::Session) -> Self {
-        self.online_session = Some(session);
+        self.authentication_intent = AuthenticationIntent::Online(session);
+        self
+    }
+
+    /// Explicitly selects the offline identity for this connection.
+    ///
+    /// This is also the default for backwards compatibility. In contrast to a
+    /// missing online session, this means the RSA/AES portion of an encryption
+    /// request still proceeds and Mojang is never contacted.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn offline_authentication(mut self) -> Self {
+        self.authentication_intent = AuthenticationIntent::Offline;
+        self
+    }
+
+    /// Supplies the complete authentication policy for this connection.
+    ///
+    /// Prefer [`Self::online_session`] and
+    /// [`Self::online_session_unavailable`] for the common cases. This method
+    /// exists for callers that already model account selection with
+    /// [`AuthenticationIntent`].
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn authentication_intent(mut self, intent: AuthenticationIntent) -> Self {
+        self.authentication_intent = intent;
         self
     }
 
     /// Records that the caller *had* an account to use and could not resolve a
     /// session for it, so an online-mode server produces
     /// [`crate::ClientError::OnlineModeSessionUnavailable`] naming `account`
-    /// instead of [`crate::ClientError::OnlineModeSessionRequired`]'s
-    /// "nobody is signed in".
+    /// rather than silently becoming an offline join.
     ///
     /// **This must not stop the connection.** An offline-mode server never
     /// sends an encryption request at all (vanilla gates it on
@@ -123,7 +213,12 @@ impl ClientBuilder {
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn online_session_unavailable(mut self, account: String, detail: String) -> Self {
-        self.online_session_unavailable = Some((account, detail));
+        // A usable session is stronger evidence than an earlier resolution
+        // diagnostic. Preserve the established API's "real session wins"
+        // behaviour regardless of method order.
+        if !matches!(self.authentication_intent, AuthenticationIntent::Online(_)) {
+            self.authentication_intent = AuthenticationIntent::OnlineUnavailable { account, detail };
+        }
         self
     }
 
@@ -298,9 +393,7 @@ impl ClientBuilder {
             self.server,
             self.initial_cookies,
             #[cfg(not(target_arch = "wasm32"))]
-            self.online_session,
-            #[cfg(not(target_arch = "wasm32"))]
-            self.online_session_unavailable,
+            self.authentication_intent,
         );
 
         let task = crate::spawn::spawn_driver(driver.run(actions_rx, shutdown_rx));

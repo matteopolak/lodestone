@@ -1660,6 +1660,7 @@ impl RenderState {
         let eye = camera.position;
         let chests = self.block_entity_source.chests(eye);
         let skulls = self.skull_source.skulls(eye);
+        crate::block_entities::request_player_head_skins(&skulls);
         let copper_golem_statues = self
             .copper_golem_statue_source
             .copper_golem_statues(eye);
@@ -1860,7 +1861,7 @@ impl RenderState {
             .iter()
             .map(|batch| BlockEntityDrawBatch {
                 model: batch.model,
-                texture: batch.texture,
+                texture: batch.texture.clone(),
                 count: batch.count(),
                 // One buffer per part, for the reason `prepare_entities` gives:
                 // vertices are part-local, so the lid only moves if its own

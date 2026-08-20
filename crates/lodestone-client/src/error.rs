@@ -30,15 +30,14 @@ pub enum ClientError {
     #[error("client driver task panicked")]
     DriverPanicked,
 
-    /// The server's login sequence asked for online-mode encryption
-    /// (`Directive::BeginEncryption { should_authenticate: true, .. }`), and
-    /// **no Microsoft account is signed in at all**.
+    /// Compatibility error for a login path that asked for online-mode
+    /// encryption but supplied no authentication policy.
     ///
-    /// Deliberately checked *before* the RSA/AES handshake even starts:
-    /// without this check, an offline profile connecting to an online-mode
-    /// server would still complete the crypto exchange and only then fail
-    /// the session-server `join`, which the server also can't tell apart from
-    /// a genuine Mojang-side rejection. Fail fast, fail clearly.
+    /// [`crate::ClientBuilder`] now always supplies an explicit policy, so its
+    /// default offline identity completes RSA/AES without Mojang and an
+    /// unavailable online account produces
+    /// [`ClientError::OnlineModeSessionUnavailable`] instead. The variant is
+    /// retained for public API compatibility with callers that match it.
     ///
     /// # Why the text names a player action rather than a builder method
     ///

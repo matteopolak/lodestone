@@ -74,24 +74,11 @@ pub(crate) struct Driver<T: Transport> {
     /// the wire when the adapter encodes a `player_loaded` packet (older versions
     /// encode `None`).
     awaiting_player_load: bool,
-    /// The authenticated Microsoft/Minecraft session to prove ownership with
-    /// during a `Directive::BeginEncryption { should_authenticate: true, .. }`
-    /// (issue #65), or `None` for an offline-mode connection. Offline
-    /// connections that hit an online-mode server fail fast with
-    /// [`ClientError::OnlineModeSessionRequired`] rather than completing the
-    /// crypto handshake and only then failing the session-server join.
+    /// The selected authentication policy. This must remain a typed intent:
+    /// `Offline` is permitted to encrypt without Mojang, while an unresolved
+    /// online account is not.
     #[cfg(not(target_arch = "wasm32"))]
-    auth_session: Option<lodestone_auth::Session>,
-    /// `(account, detail)` when the caller had an account selected and could not
-    /// resolve a session for it — see
-    /// [`crate::ClientBuilder::online_session_unavailable`]. Read only on the
-    /// `auth_session.is_none()` path, to choose
-    /// [`ClientError::OnlineModeSessionUnavailable`] over
-    /// [`ClientError::OnlineModeSessionRequired`]. Never consulted otherwise: a
-    /// resolved session makes it irrelevant, and an offline-mode server never
-    /// reaches the check at all.
-    #[cfg(not(target_arch = "wasm32"))]
-    auth_unavailable: Option<(String, String)>,
+    authentication_intent: crate::builder::AuthenticationIntent,
     /// The live chat-signing session, once its key pair has been fetched from
     /// the same authenticated surface `auth_session` proves ownership with
     /// (`docs/secure-chat.md`) — `None` for offline play, or online play
@@ -360,8 +347,8 @@ impl<T: Transport> Driver<T> {
         // `docs/secure-chat.md`'s transfer section for the full
         // carried-vs-fresh inventory.
         initial_cookies: HashMap<ResourceKey, Vec<u8>>,
-        #[cfg(not(target_arch = "wasm32"))] auth_session: Option<lodestone_auth::Session>,
-        #[cfg(not(target_arch = "wasm32"))] auth_unavailable: Option<(String, String)>,
+        #[cfg(not(target_arch = "wasm32"))]
+        authentication_intent: crate::builder::AuthenticationIntent,
     ) -> Self {
         // reqwest is built with `rustls-no-provider` (issue #446), which leaves
         // the rustls crypto provider for the application to choose. The
@@ -395,9 +382,7 @@ impl<T: Transport> Driver<T> {
             chat_tracker: LastSeenTracker::vanilla(),
             awaiting_player_load: false,
             #[cfg(not(target_arch = "wasm32"))]
-            auth_session,
-            #[cfg(not(target_arch = "wasm32"))]
-            auth_unavailable,
+            authentication_intent,
             // Same "deliberately fresh" note as `chat_tracker` above: `None`
             // here is what makes `ClientEvent::Login`'s
             // `self.chat_session.is_none()` guard fetch a new key pair and
@@ -837,26 +822,20 @@ impl<T: Transport> Driver<T> {
         verify_token: Vec<u8>,
         should_authenticate: bool,
     ) -> Step {
-        // Fail fast, before spending a round trip on crypto the server will
-        // reject anyway: an offline profile has nothing to prove ownership
-        // with, and completing the handshake first would only trade a clear
-        // client-side error for the server's generic "unverified username"
-        // disconnect (see `lodestone-net`'s `online_handshake` test for what
-        // that looks like from the other side of exactly this gap).
-        //
-        // Two distinct errors, not one: the check fires for a player who has
-        // never signed in *and* for a player whose saved session went stale, and
-        // reporting both as "no session was configured" is what made a working
-        // account switcher look like a broken build. `auth_unavailable` is set
-        // only on the second, by the caller that tried and failed to resolve it.
-        if should_authenticate && self.auth_session.is_none() {
-            let error = match self.auth_unavailable.take() {
-                Some((account, detail)) => {
-                    ClientError::OnlineModeSessionUnavailable { account, detail }
-                }
-                None => ClientError::OnlineModeSessionRequired,
-            };
-            return Step::Stop(Box::new(SessionOutcome::Failed(error)));
+        // Do not infer account policy from an absent session. Explicit offline
+        // play is allowed to complete an RSA/AES exchange even when a hybrid
+        // server sets `should_authenticate`; only an online account that could
+        // not produce a session must stop before the response reaches the wire.
+        if should_authenticate
+            && let crate::builder::AuthenticationIntent::OnlineUnavailable { account, detail } =
+                &self.authentication_intent
+        {
+            return Step::Stop(Box::new(SessionOutcome::Failed(
+                ClientError::OnlineModeSessionUnavailable {
+                    account: account.clone(),
+                    detail: detail.clone(),
+                },
+            )));
         }
 
         let secret = generate_shared_secret();
@@ -896,13 +875,13 @@ impl<T: Transport> Driver<T> {
         // the join durable at the session server before the host can
         // possibly ask about it — the same guarantee vanilla's ordering
         // gives.
-        if should_authenticate {
-            // `.expect()` is safe: the early return above guarantees `Some`
-            // whenever `should_authenticate` is true.
-            let session = self
-                .auth_session
-                .as_ref()
-                .expect("should_authenticate implies auth_session is Some (checked above)");
+        if self
+            .authentication_intent
+            .should_join_session_server(should_authenticate)
+        {
+            let Some(session) = self.authentication_intent.online_session() else {
+                unreachable!("only an online intent may request a session-server join");
+            };
             let hash = lodestone_auth::server_hash(&server_id, &secret, &public_key);
             if let Err(error) = lodestone_auth::join_server(&self.http, session, &hash).await {
                 return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Auth(error))));
@@ -1009,7 +988,7 @@ impl<T: Transport> Driver<T> {
                 // associated with it seemed the riskier of the two guesses.
                 #[cfg(not(target_arch = "wasm32"))]
                 if secure_chat_enabled()
-                    && let Some(session) = self.auth_session.as_ref()
+                    && let Some(session) = self.authentication_intent.online_session()
                     && self.chat_session.as_ref().is_some_and(|chat_session| {
                         let now_millis = lodestone_time::epoch_duration().as_millis() as i64;
                         chat_session.key_pair().due_refresh(now_millis)
@@ -1102,9 +1081,10 @@ impl<T: Transport> Driver<T> {
                 // Secure chat: fetch this account's Mojang-issued signing key
                 // pair and announce the session, mirroring
                 // `AccountProfileKeyPairManager`'s own join-time timing. Only
-                // for an online-mode join (`auth_session` is `None` for
+                // for an online-mode join (`authentication_intent` is offline for
                 // offline play, and this is native-only for the same reason
-                // `auth_session` itself is — see `docs/secure-chat.md`).
+                // the same reason the online session itself is — see
+                // `docs/secure-chat.md`).
                 // Best-effort: a failed fetch degrades to unsigned chat for
                 // the rest of the session rather than ending it, the same
                 // choice `emit`'s other auto-responses make for a failure
@@ -1118,7 +1098,7 @@ impl<T: Transport> Driver<T> {
                 #[cfg(not(target_arch = "wasm32"))]
                 if secure_chat_enabled()
                     && self.chat_session.is_none()
-                    && let Some(session) = self.auth_session.as_ref()
+                    && let Some(session) = self.authentication_intent.online_session()
                 {
                     let access_token = session.access_token.clone();
                     let sender = session.profile.id;
@@ -1574,7 +1554,7 @@ mod tests {
     /// signed-out sends unsigned — is [`Driver::maybe_sign_chat`]'s one-line
     /// early return when `chat_session` is `None`, which is exactly the path
     /// every pre-existing `SendChat` test in `tests/driver.rs` already takes
-    /// (none of them ever populate `auth_session`/`chat_session`) and which
+    /// (none of them ever populate an online intent or `chat_session`) and which
     /// stayed green across this change, so it is not re-asserted here.
     #[test]
     fn sign_chat_action_signs_over_the_real_last_seen_chain_with_correct_units() {

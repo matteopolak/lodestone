@@ -105,13 +105,14 @@
 //!   uninstallable.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use glam::Vec3;
 use lodestone_render::{
     BannerAttachment, BannerSpawn, BeaconSpawn, BeamSection, BellShakeDirection, BellSpawn,
     BrushableItemSpawn, ChestHalf, ChestMaterial, ChestSpawn, ConduitFrame, ConduitSpawn,
     CopperGolemOxidation, CopperGolemPose, CopperGolemStatueSpawn,
-    DecoratedPotSpawn, EndGatewaySpawn, EndPortalSpawn, LecternSpawn, SHELF_SLOTS,
+    BlockEntityTexture, DecoratedPotSpawn, EndGatewaySpawn, EndPortalSpawn, LecternSpawn, SHELF_SLOTS,
     SHULKER_COLOURS, ShelfItemSpawn, ShulkerFacing, ShulkerSpawn, SignKind, SignOrientation,
     SignSpawn, SkullOrientation, SkullSpawn, SkullType, VaultSpawn, average_beam_color,
     beacon_beam_color, beam_radius_scale, conduit_active_rotation_value, conduit_advance,
@@ -120,6 +121,7 @@ use lodestone_render::{
 };
 use lodestone_render::banner_pattern::{DyeColor, StoredPatternLayer};
 use lodestone_world::{ChunkPos, SignText, World};
+use lodestone_core::{Nbt, NbtTag};
 
 use crate::{
     gpu::{DebugLineVertex, push_box},
@@ -1854,6 +1856,51 @@ fn skull_type_for_state(state_id: u32) -> Option<SkullType> {
     SkullType::from_block_path(path)
 }
 
+/// Finds the one profile property that can name a placed player head's skin.
+///
+/// Modern skull block entities keep a normal game profile under `profile`, but
+/// its properties arrive as NBT compounds rather than the tab-list's typed
+/// `GameProfile`. Only the `textures` value matters: name and UUID are not an
+/// authority to contact Mojang, and `signature` is intentionally not widened
+/// into an authentication feature. Wrong tags fail closed to Steve.
+#[must_use]
+fn player_head_skin_url(nbt: &Nbt) -> Option<Arc<str>> {
+    let Nbt::Compound(root) = nbt else {
+        return None;
+    };
+    let Nbt::Compound(profile) = root.iter().find_map(|(name, tag)| (name == "profile").then_some(tag))? else {
+        return None;
+    };
+    let Nbt::List {
+        element_type: NbtTag::Compound,
+        elements,
+    } = profile
+        .iter()
+        .find_map(|(name, tag)| (name == "properties").then_some(tag))?
+    else {
+        return None;
+    };
+    let value = elements.iter().find_map(|property| {
+        let Nbt::Compound(fields) = property else {
+            return None;
+        };
+        let name = fields
+            .iter()
+            .find_map(|(name, tag)| (name == "name").then_some(tag));
+        let value = fields
+            .iter()
+            .find_map(|(name, tag)| (name == "value").then_some(tag));
+        match (name, value) {
+            (Some(Nbt::String(name)), Some(Nbt::String(value))) if name == "textures" => {
+                Some(value.as_str())
+            }
+            _ => None,
+        }
+    })?;
+    crate::remote_skins::skin_for_textures_property(value)
+        .map(|skin| Arc::<str>::from(skin.url))
+}
+
 /// One candidate resolved into a [`SkullSpawn`], or `None` if the state at
 /// that position is not a ported skull type.
 ///
@@ -1869,19 +1916,55 @@ pub fn skull_spawn(block: [i32; 3], state_id: u32, light: u8) -> Option<SkullSpa
         pos: block,
         orientation,
         skull_type,
+        texture: BlockEntityTexture::Static(lodestone_render::skull_texture_stem(skull_type)),
         light,
     })
+}
+
+/// The NBT-aware candidate gather for skulls.
+///
+/// `chest_candidates` intentionally discards NBT because chest appearance is
+/// entirely state-driven. A player-head profile is the exception: retain only
+/// the already-decoded usable URL, never the whole untrusted NBT tree.
+#[must_use]
+fn skull_candidates(
+    world: &World,
+    chunks: impl IntoIterator<Item = ChunkPos>,
+    eye: Vec3,
+) -> Vec<([i32; 3], u32, Option<Arc<str>>)> {
+    let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
+    let mut candidates = Vec::new();
+    for pos in chunks {
+        let Some(chunk) = world.get(pos) else {
+            continue;
+        };
+        for be in &chunk.block_entities {
+            let x = pos.x * 16 + i32::from(be.rel_x);
+            let y = i32::from(be.y);
+            let z = pos.z * 16 + i32::from(be.rel_z);
+            let centre = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+            if centre.distance_squared(eye) > cutoff {
+                continue;
+            }
+            let state_id = chunk
+                .column
+                .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            let skin = (skull_type_for_state(state_id) == Some(SkullType::Player))
+                .then(|| player_head_skin_url(&be.nbt))
+                .flatten();
+            candidates.push(([x, y, z], state_id, skin));
+        }
+    }
+    candidates
 }
 
 /// Every skull/head to draw this frame, gathered from the client-owned
 /// world's block-entity records.
 ///
-/// Reuses [`chest_candidates`] rather than a second scan of
-/// `chunk.block_entities`: that gather is already generic over block-entity
-/// *type* (it filters by distance and returns the raw state id, never
-/// touching anything chest-specific), so a second copy here would only be
-/// able to drift from it. Everything this adds on top is skull-specific
-/// resolution and the light sample, the same division [`chest_spawns`] keeps.
+/// Uses [`skull_candidates`] rather than [`chest_candidates`]: chest gathering
+/// correctly discards NBT, while a placed player head's optional texture URL
+/// lives there. The gather retains only that URL, alongside the same distance
+/// and state checks every other block entity uses.
 ///
 /// No lid-style animation state: none of the five ported skull types pose
 /// their head (see [`lodestone_render::BlockEntityModelSet::resolve_skull`]'s
@@ -1899,7 +1982,7 @@ pub fn skull_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<SkullSpawn> {
 
     let candidates = {
         let world = store.read();
-        chest_candidates(
+        skull_candidates(
             &world,
             chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
             eye,
@@ -1915,15 +1998,30 @@ pub fn skull_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<SkullSpawn> {
     };
 
     let mut out = Vec::new();
-    for (block, state_id) in candidates {
+    for (block, state_id, skin) in candidates {
         let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
             .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
-        if let Some(spawn) = skull_spawn(block, state_id, light) {
+        if let Some(mut spawn) = skull_spawn(block, state_id, light) {
+            if let Some(url) = skin {
+                spawn.texture = BlockEntityTexture::PlayerSkin(url);
+            }
             out.push(spawn);
         }
     }
     out.sort_by_key(|s| s.pos);
     out
+}
+
+/// Starts the shared remote-skin fetch for each visible placed player-head URL.
+///
+/// The loader itself owns deduplication and failure memoisation, so this can run
+/// every frame alongside block-entity extraction without multiplying requests.
+pub(crate) fn request_player_head_skins(skulls: &[SkullSpawn]) {
+    crate::remote_skins::request_all(
+        skulls
+            .iter()
+            .filter_map(|spawn| spawn.texture.player_skin_url()),
+    );
 }
 
 /// Resolves one block state id into whether it names a bell — `None` for
@@ -4067,6 +4165,104 @@ mod skull_tests {
     fn skull_spawns_before_login_is_empty_rather_than_a_panic() {
         let handle: SharedHandle = std::sync::Arc::new(std::sync::OnceLock::new());
         assert!(skull_spawns(&handle, Vec3::ZERO).is_empty());
+    }
+
+    fn base64_encode(bytes: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [
+                chunk[0],
+                chunk.get(1).copied().unwrap_or(0),
+                chunk.get(2).copied().unwrap_or(0),
+            ];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(char::from(TABLE[((n >> (18 - 6 * i)) & 0x3f) as usize]));
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    fn player_head_profile(value: Nbt) -> Nbt {
+        Nbt::Compound(vec![(
+            "profile".to_owned(),
+            Nbt::Compound(vec![(
+                "properties".to_owned(),
+                Nbt::List {
+                    element_type: NbtTag::Compound,
+                    elements: vec![Nbt::Compound(vec![
+                        ("name".to_owned(), Nbt::String("textures".to_owned())),
+                        ("value".to_owned(), value),
+                        ("signature".to_owned(), Nbt::String("unused".to_owned())),
+                    ])],
+                },
+            )]),
+        )])
+    }
+
+    #[test]
+    fn a_modern_player_head_profile_extracts_its_decoded_skin_url() {
+        let url = "https://textures.minecraft.net/texture/placed-player-head";
+        let value = base64_encode(format!(r#"{{"textures":{{"SKIN":{{"url":"{url}"}}}}}}"#).as_bytes());
+        assert_eq!(player_head_skin_url(&player_head_profile(Nbt::String(value))).as_deref(), Some(url));
+    }
+
+    #[test]
+    fn malformed_player_head_profiles_fall_back_without_a_url() {
+        let cases = [
+            Nbt::End,
+            Nbt::Compound(vec![("profile".to_owned(), Nbt::String("wrong".to_owned()))]),
+            player_head_profile(Nbt::Int(4)),
+            player_head_profile(Nbt::String("not-base64".to_owned())),
+        ];
+        for nbt in cases {
+            assert!(player_head_skin_url(&nbt).is_none(), "{nbt:?}");
+        }
+    }
+
+    #[test]
+    fn static_skulls_keep_their_static_sheet_when_profile_nbt_is_present() {
+        let state = (0..lodestone_data::block_states::STATE_COUNT)
+            .find(|id| lodestone_data::block_states::block_name(*id) == Some("minecraft:skeleton_skull"))
+            .expect("skeleton skull must be in the state table");
+        let spawn = skull_spawn([0, 0, 0], state, lodestone_render::ENTITY_FULLBRIGHT)
+            .expect("a skeleton skull must resolve");
+        assert_eq!(spawn.texture, lodestone_render::skull_texture_stem(SkullType::Skeleton));
+        assert!(player_head_skin_url(&player_head_profile(Nbt::String("not-base64".to_owned()))).is_none());
+    }
+
+    #[test]
+    fn repeated_player_head_urls_request_one_shared_skin_fetch() {
+        let url = "https://textures.minecraft.net/texture/placed-head-request-once";
+        let before = crate::remote_skins::requested_urls()
+            .iter()
+            .filter(|seen| seen.as_str() == url)
+            .count();
+        let skin = BlockEntityTexture::PlayerSkin(Arc::<str>::from(url));
+        let skulls = [
+            SkullSpawn {
+                skull_type: SkullType::Player,
+                texture: skin.clone(),
+                ..SkullSpawn::at([0, 0, 0])
+            },
+            SkullSpawn {
+                skull_type: SkullType::Player,
+                texture: skin,
+                ..SkullSpawn::at([1, 0, 0])
+            },
+        ];
+        request_player_head_skins(&skulls);
+        let after = crate::remote_skins::requested_urls()
+            .iter()
+            .filter(|seen| seen.as_str() == url)
+            .count();
+        assert_eq!(after - before, 1, "one fetch per repeated player-head URL");
     }
 }
 

@@ -965,9 +965,22 @@ impl RenderState {
                     let Some(model) = self.block_entities.gpu_models.get(batch.model) else {
                         continue;
                     };
-                    // Keyed by *sheet*, not model: a trapped chest shares the
-                    // single-chest mesh and differs only here.
-                    let Some(texture) = self.block_entities.textures.get(batch.texture) else {
+                    // Static sheets stay in this pass's texture set; placed
+                    // player heads reuse the entity pass's remote-skin cache.
+                    // A dynamic cache miss is normal while its fetch or upload
+                    // is pending (or failed), and deliberately falls back to
+                    // the existing Steve bind group for that one frame.
+                    let texture = match &batch.texture {
+                        lodestone_render::BlockEntityTexture::Static(stem) => {
+                            self.block_entities.textures.get(stem)
+                        }
+                        lodestone_render::BlockEntityTexture::PlayerSkin(url) => self
+                            .entities
+                            .player_skins
+                            .get(url.as_ref())
+                            .or_else(|| self.block_entities.textures.get("entity/player/wide/steve")),
+                    };
+                    let Some(texture) = texture else {
                         continue;
                     };
                     pass.set_bind_group(1, texture, &[]);

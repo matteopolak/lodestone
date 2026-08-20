@@ -117,6 +117,8 @@ use lodestone_client::{
     EntityView, LoginProfile, OpenMenuSnapshot, PlayerListEntry, Reported, RespawnPolicy,
     Rotation, SectionLight, ServerAddress, Vec3, WorldDimensions,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use lodestone_client::AuthenticationIntent;
 use lodestone_game::menu::Menu;
 use lodestone_game::scoreboard::Scoreboard;
 use lodestone_game::tablist::TabList;
@@ -2982,8 +2984,8 @@ async fn run_async(
             }
         };
 
-        // Turn the [`RemoteAuth`] *request* into either a live session or a
-        // reason there isn't one. This is the step whose absence was the whole
+        // Turn the [`RemoteAuth`] *request* into its explicit client intent.
+        // This is the step whose absence was the whole
         // bug: `ClientBuilder::online_session` had exactly one shell caller
         // (`connect_online`) and that constructor had none, so no join ever
         // carried a session and an online-mode server always answered "no
@@ -3005,9 +3007,9 @@ async fn run_async(
         // work. The reason is handed to the builder instead and only spent if the
         // server turns out to demand online mode.
         #[cfg(not(target_arch = "wasm32"))]
-        let (auth, auth_unavailable) = match auth {
-            RemoteAuth::Offline => (None, None),
-            RemoteAuth::Session(session) => (Some(session), None),
+        let (auth, unavailable_profile) = match auth {
+            RemoteAuth::Offline => (AuthenticationIntent::Offline, None),
+            RemoteAuth::Session(session) => (AuthenticationIntent::Online(session), None),
             RemoteAuth::SelectedAccount => {
                 // `reqwest::Client::new()` panics with no rustls provider
                 // installed, and that is a runtime panic no `cargo check` sees —
@@ -3027,16 +3029,20 @@ async fn run_async(
                             account = %session.profile.name,
                             "joining with the selected Microsoft account"
                         );
-                        (Some(session), None)
+                        (AuthenticationIntent::Online(session), None)
                     }
                     lodestone_auth::SelectedAccount::Offline => {
                         tracing::info!(
                             target: "auth",
                             "no Microsoft account selected; joining with the offline identity"
                         );
-                        (None, None)
+                        (AuthenticationIntent::Offline, None)
                     }
-                    lodestone_auth::SelectedAccount::Unavailable { account, detail } => {
+                    lodestone_auth::SelectedAccount::Unavailable {
+                        account,
+                        profile_id,
+                        detail,
+                    } => {
                         // `warn`, not `error`: against an offline-mode server
                         // this is genuinely harmless and the session that
                         // follows is fine.
@@ -3044,10 +3050,15 @@ async fn run_async(
                             target: "auth",
                             %account,
                             %detail,
-                            "could not use the selected Microsoft account; \
-                             joining offline (an online-mode server will refuse this)"
+                            "could not use the selected Microsoft account; retaining its auth error"
                         );
-                        (None, Some((account, detail)))
+                        (
+                            AuthenticationIntent::OnlineUnavailable { account: account.clone(), detail },
+                            Some(LoginProfile {
+                                username: account,
+                                uuid: profile_id,
+                            }),
+                        )
                     }
                 }
             }
@@ -3083,12 +3094,18 @@ async fn run_async(
         // does not exist" and needs no stand-in profile.
         let profile = match &auth {
             #[cfg(not(target_arch = "wasm32"))]
-            Some(session) => LoginProfile {
+            AuthenticationIntent::Online(session) => LoginProfile {
                 username: session.profile.name.clone(),
                 uuid: session.profile.id,
             },
+            #[cfg(not(target_arch = "wasm32"))]
+            AuthenticationIntent::Offline => offline.login_profile(),
+            #[cfg(not(target_arch = "wasm32"))]
+            AuthenticationIntent::OnlineUnavailable { .. } => unavailable_profile
+                .expect("an unavailable online intent carries its selected profile"),
             #[cfg(target_arch = "wasm32")]
             Some(session) => match *session {},
+            #[cfg(target_arch = "wasm32")]
             None => offline.login_profile(),
         };
         // Published immediately, not after login: issue #189's roster refresh
@@ -3130,16 +3147,8 @@ async fn run_async(
             .read_timeout(Some(READ_TIMEOUT))
             .respawn_policy(RespawnPolicy::Manual);
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(session) = auth {
-            builder = builder.online_session(session);
-        }
-        // Mutually exclusive with the arm above by construction — the resolution
-        // yields a session or a reason, never both — but wired as an independent
-        // `if` so that stays true by the builder's own contract (a real session
-        // wins) rather than by this function's control flow.
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some((account, detail)) = auth_unavailable {
-            builder = builder.online_session_unavailable(account, detail);
+        {
+            builder = builder.authentication_intent(auth);
         }
         // `OnlineSession` is uninhabited here, so this branch cannot be entered and
         // `match session {}` says so to the compiler rather than to a reader.

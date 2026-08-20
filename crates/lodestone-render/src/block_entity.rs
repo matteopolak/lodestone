@@ -74,6 +74,8 @@
 //!   group, and the shell falls back — visible, but wrong. Both are derived from
 //!   the same match, so add the arm and the list entry together.
 
+use std::sync::Arc;
+
 use glam::{Mat4, Quat, Vec3};
 use lodestone_assets::ResourceLocation;
 use lodestone_assets::block_entity_models::{BLOCK_ENTITY_MODELS, BlockEntityModelEntry};
@@ -350,9 +352,8 @@ pub enum SkullType {
     Zombie,
     /// `minecraft:creeper_head`/`creeper_wall_head`.
     Creeper,
-    /// `minecraft:player_head`/`player_wall_head`, always drawn with the
-    /// default Steve skin (`DefaultPlayerSkin.getDefaultTexture()`) — a real
-    /// profile skin needs a network fetch, out of scope here.
+    /// `minecraft:player_head`/`player_wall_head`. Its spawn carries either
+    /// the default Steve sheet or the placed head's decoded remote-skin URL.
     Player,
 }
 
@@ -2338,7 +2339,7 @@ impl BlockEntityModelSet {
         let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
         Some(BlockEntityInstance {
             model,
-            texture,
+            texture: BlockEntityTexture::Static(texture),
             transform: placement,
             part_transforms,
             aabb_min,
@@ -2377,7 +2378,7 @@ impl BlockEntityModelSet {
         let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
         Some(BlockEntityInstance {
             model,
-            texture: chest_texture_stem(spawn.material, spawn.half),
+            texture: BlockEntityTexture::Static(chest_texture_stem(spawn.material, spawn.half)),
             transform: placement,
             part_transforms,
             aabb_min,
@@ -2412,7 +2413,7 @@ impl BlockEntityModelSet {
         let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
         Some(BlockEntityInstance {
             model,
-            texture: skull_texture_stem(spawn.skull_type),
+            texture: spawn.texture.clone(),
             transform: placement,
             part_transforms,
             aabb_min,
@@ -2436,7 +2437,7 @@ impl BlockEntityModelSet {
         let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
         Some(BlockEntityInstance {
             model,
-            texture: copper_golem_statue_texture_stem(spawn.oxidation),
+            texture: BlockEntityTexture::Static(copper_golem_statue_texture_stem(spawn.oxidation)),
             transform: placement,
             part_transforms,
             aabb_min,
@@ -2477,7 +2478,7 @@ impl BlockEntityModelSet {
         let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
         Some(BlockEntityInstance {
             model: BELL,
-            texture: BELL_TEXTURE_STEM,
+            texture: BlockEntityTexture::Static(BELL_TEXTURE_STEM),
             transform: placement,
             part_transforms,
             aabb_min,
@@ -2513,7 +2514,7 @@ impl BlockEntityModelSet {
         let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
         Some(BlockEntityInstance {
             model: SHULKER_BOX,
-            texture: shulker_texture_stem(spawn.colour),
+            texture: BlockEntityTexture::Static(shulker_texture_stem(spawn.colour)),
             transform: placement,
             part_transforms,
             aabb_min,
@@ -2564,7 +2565,7 @@ impl BlockEntityModelSet {
             let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
             Some(BlockEntityInstance {
                 model,
-                texture,
+                texture: BlockEntityTexture::Static(texture),
                 transform: placement,
                 part_transforms,
                 aabb_min,
@@ -2625,7 +2626,7 @@ impl BlockEntityModelSet {
             let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
             Some(BlockEntityInstance {
                 model,
-                texture,
+                texture: BlockEntityTexture::Static(texture),
                 transform: placement,
                 part_transforms,
                 aabb_min,
@@ -2778,7 +2779,7 @@ impl BlockEntityModelSet {
             transformed_aabb(&placement, body_mesh.local_min, body_mesh.local_max);
         let body = BlockEntityInstance {
             model: body_model,
-            texture: BANNER_BASE_TEXTURE_STEM,
+            texture: BlockEntityTexture::Static(BANNER_BASE_TEXTURE_STEM),
             transform: placement,
             part_transforms: body_transforms,
             aabb_min: body_min,
@@ -2799,7 +2800,7 @@ impl BlockEntityModelSet {
         let flag_world = flag_transforms[flag_index];
         let flag = BlockEntityInstance {
             model: flag_model,
-            texture: BANNER_BASE_TEXTURE_STEM,
+            texture: BlockEntityTexture::Static(BANNER_BASE_TEXTURE_STEM),
             transform: placement,
             part_transforms: flag_transforms,
             aabb_min: flag_min,
@@ -2865,7 +2866,7 @@ impl BlockEntityModelSet {
         let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
         Some(BlockEntityInstance {
             model: BOOK,
-            texture: BOOK_TEXTURE_STEM,
+            texture: BlockEntityTexture::Static(BOOK_TEXTURE_STEM),
             transform: placement,
             part_transforms,
             aabb_min,
@@ -2923,7 +2924,7 @@ impl BlockEntityModelSet {
         let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
         Some(BlockEntityInstance {
             model: BOOK,
-            texture: BOOK_TEXTURE_STEM,
+            texture: BlockEntityTexture::Static(BOOK_TEXTURE_STEM),
             transform: placement,
             part_transforms,
             aabb_min,
@@ -3077,7 +3078,7 @@ impl ChestSpawn {
 ///
 /// The caller owns every field, the same contract as [`ChestSpawn`]: block
 /// state → `orientation`/`skull_type`, world light → `light`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SkullSpawn {
     /// Block position.
     pub pos: [i32; 3],
@@ -3085,6 +3086,8 @@ pub struct SkullSpawn {
     pub orientation: SkullOrientation,
     /// Which mob's model and sheet.
     pub skull_type: SkullType,
+    /// Static skull sheet or the URL of a placed player head's remote skin.
+    pub texture: BlockEntityTexture,
     /// Packed sky/block light. Pass [`ENTITY_FULLBRIGHT`] only when there is
     /// genuinely no world to sample.
     pub light: u8,
@@ -3099,6 +3102,7 @@ impl SkullSpawn {
             pos,
             orientation: SkullOrientation::Floor { rotation_segment: 0 },
             skull_type: SkullType::Skeleton,
+            texture: BlockEntityTexture::Static(skull_texture_stem(SkullType::Skeleton)),
             light: ENTITY_FULLBRIGHT,
         }
     }
@@ -3654,13 +3658,53 @@ pub struct BannerItemRig {
 // the whole root-to-node `"transformation"` chain and every consumer folds it
 // through `compose_special_node_transform`.
 
+/// The texture identity a block-entity draw carries through batching.
+///
+/// The URL is deliberately an [`Arc<str>`]: a placed player head is retained
+/// in world state across frames, and cloning the identity while extracting,
+/// resolving, and batching must not copy an unbounded server-provided URL.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BlockEntityTexture {
+    /// A sheet packaged with the client jar and owned by the block-entity
+    /// texture map.
+    Static(&'static str),
+    /// A remote player skin, shared with `EntityRenderer::player_skins`.
+    PlayerSkin(Arc<str>),
+}
+
+impl BlockEntityTexture {
+    /// Returns this dynamic texture URL, if this is a remote player skin.
+    #[must_use]
+    pub fn player_skin_url(&self) -> Option<&str> {
+        match self {
+            Self::Static(_) => None,
+            Self::PlayerSkin(url) => Some(url),
+        }
+    }
+}
+
+impl std::fmt::Display for BlockEntityTexture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Static(stem) => f.write_str(stem),
+            Self::PlayerSkin(url) => f.write_str(url),
+        }
+    }
+}
+
+impl PartialEq<&str> for BlockEntityTexture {
+    fn eq(&self, other: &&str) -> bool {
+        matches!(self, Self::Static(stem) if stem == other)
+    }
+}
+
 /// One resolved block entity, ready to batch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockEntityInstance {
     /// Model name (the mesh key).
     pub model: &'static str,
-    /// Texture stem (the bind-group key).
-    pub texture: &'static str,
+    /// Texture identity (the bind-group key).
+    pub texture: BlockEntityTexture,
     /// The placement matrix (block → world).
     pub transform: Mat4,
     /// One world matrix per part, in mesh part order.
@@ -3745,8 +3789,8 @@ pub struct BannerInstances {
 pub struct BlockEntityBatch {
     /// Model name.
     pub model: &'static str,
-    /// Texture stem.
-    pub texture: &'static str,
+    /// Texture identity.
+    pub texture: BlockEntityTexture,
     /// `parts[p][i]` is part `p` of instance `i` — the same per-part instance
     /// layout the entity pass uses, because vertices are part-local and a lid
     /// only moves if its own matrices are uploaded.
@@ -3821,7 +3865,7 @@ pub fn plan_block_entities(
             }
             None => batches.push(BlockEntityBatch {
                 model: inst.model,
-                texture: inst.texture,
+                texture: inst.texture.clone(),
                 parts: inst.part_transforms.iter().map(|m| vec![*m]).collect(),
                 lights: vec![u32::from(inst.light)],
                 tints: vec![InstanceTint::rgb(inst.tint)],
@@ -4719,6 +4763,42 @@ mod tests {
     }
 
     #[test]
+    fn player_head_skin_urls_are_part_of_the_block_entity_batch_key() {
+        let set = set();
+        let first = std::sync::Arc::<str>::from("https://textures.minecraft.net/texture/first");
+        let second = std::sync::Arc::<str>::from("https://textures.minecraft.net/texture/second");
+        let a = set
+            .resolve_skull(&SkullSpawn {
+                skull_type: SkullType::Player,
+                texture: BlockEntityTexture::PlayerSkin(first.clone()),
+                ..SkullSpawn::at([0, 0, 0])
+            })
+            .expect("player skull must resolve");
+        let same_url = set
+            .resolve_skull(&SkullSpawn {
+                skull_type: SkullType::Player,
+                texture: BlockEntityTexture::PlayerSkin(first),
+                ..SkullSpawn::at([1, 0, 0])
+            })
+            .expect("player skull must resolve");
+        let other_url = set
+            .resolve_skull(&SkullSpawn {
+                skull_type: SkullType::Player,
+                texture: BlockEntityTexture::PlayerSkin(second),
+                ..SkullSpawn::at([2, 0, 0])
+            })
+            .expect("player skull must resolve");
+        let frame = plan_block_entities(
+            &[a, same_url, other_url],
+            &Frustum::from_view_projection(looking_at_origin().view_projection()),
+        );
+        assert_eq!(frame.batches.len(), 2, "distinct URLs must not share a batch");
+        let counts: Vec<_> = frame.batches.iter().map(BlockEntityBatch::count).collect();
+        assert!(counts.contains(&2), "repeated URLs must share one batch: {counts:?}");
+        assert!(counts.contains(&1), "the other URL needs its own batch: {counts:?}");
+    }
+
+    #[test]
     fn light_reaches_the_batch_unchanged() {
         let set = set();
         let dark = set
@@ -4805,6 +4885,7 @@ mod tests {
         for t in SKULL_TYPES {
             let spawn = SkullSpawn {
                 skull_type: *t,
+                texture: BlockEntityTexture::Static(skull_texture_stem(*t)),
                 ..SkullSpawn::at([0, 0, 0])
             };
             let inst = set

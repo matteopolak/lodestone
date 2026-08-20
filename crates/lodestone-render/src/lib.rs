@@ -121,6 +121,7 @@ pub use block_entity::{
     BELL_TEXTURE_STEM, BOOK, BOOK_TEXTURE_STEM, BannerAttachment, BannerInstances,
     BannerLayerDraw, BannerSpawn, BellShakeDirection,
     BellSpawn, BlockEntityBatch, BlockEntityCullStats, BlockEntityFrame, BlockEntityInstance,
+    BlockEntityTexture,
     BlockEntityMesh, BlockEntityModelSet, CAMPFIRE_ITEM_LIFT, CAMPFIRE_ITEM_SCALE, CAMPFIRE_SLOTS,
     CHEST_LEFT, CHEST_MATERIALS, CHEST_RIGHT,
     CHEST_SINGLE, CONDUIT_CAGE, CONDUIT_CAGE_TEXTURE_STEM, CONDUIT_CLOSED_EYE_TEXTURE_STEM,

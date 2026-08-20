@@ -134,6 +134,19 @@ fallback forever. A warning for a name that remains missing after a generation
 change still means the pack did not provide a usable font (or was never
 installed); it is not suppressed by this cache policy.
 
+When a span names a custom font, selection happens per codepoint: a glyph the
+custom font declares uses that font's metrics and pixels, while an uncovered
+codepoint falls back to `minecraft:default`. `spans_width` performs the same
+selection as drawing, so a centred component cannot measure with default
+advances and then draw with wider or narrower custom glyphs.
+
+Bitmap font sheets retain native RGBA rather than being reduced to a white ink
+mask. The HUD multiplies each bitmap texel's RGB and alpha by the component's
+text colour/pass alpha, emits no geometry for zero final alpha, and breaks a
+horizontal merged run whenever adjacent final RGBA differs. This permits pack
+authors to use coloured or translucent font pixels. Unihex remains binary
+white/transparent and TTF keeps its existing thresholded binary rasterisation.
+
 ### The per-server policy (`menu::servers::ServerPackPolicy`)
 
 `Enabled`/`Disabled`/`Prompt`, matching vanilla's `ServerData.ServerPackStatus`

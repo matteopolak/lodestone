@@ -176,6 +176,39 @@ fn bitmap_glyph_carries_cell_rect() {
     assert_eq!(g.file, loc("minecraft:font/t.png"));
 }
 
+#[test]
+fn bitmap_raster_preserves_native_rgba_including_partial_alpha() {
+    // A resource-pack glyph is not necessarily vanilla's white opaque mask:
+    // its grey RGB and 50%-ish alpha must reach the HUD unchanged. The second
+    // texel has RGB despite zero alpha, proving alpha still decides ink.
+    let png = encode_png(
+        2,
+        1,
+        &[
+            64, 96, 128, 127, // coloured, partially transparent ink
+            250, 240, 230, 0, // transparent, never drawable
+        ],
+    );
+    let json = br#"{"providers":[{"type":"bitmap","file":"minecraft:font/t.png",
+        "ascent":7,"height":1,"chars":["A"]}]}"#;
+    let mgr = manager(vec![
+        ("assets/minecraft/textures/font/t.png", png),
+        ("assets/minecraft/font/default.json", json.to_vec()),
+    ]);
+    let raster = FontLoader::new(&mgr)
+        .load_raster(&loc("minecraft:default"), &FontOptions::none())
+        .expect("load raster font");
+    let glyph = raster.raster('A' as u32).expect("A has a bitmap raster");
+
+    assert_eq!(
+        glyph.texel_rgba(0, 0),
+        [64.0 / 255.0, 96.0 / 255.0, 128.0 / 255.0, 127.0 / 255.0]
+    );
+    assert!(glyph.is_ink(0, 0), "partial alpha is still drawable ink");
+    assert_eq!(glyph.texel_rgba(1, 0), [250.0 / 255.0, 240.0 / 255.0, 230.0 / 255.0, 0.0]);
+    assert!(!glyph.is_ink(1, 0), "zero alpha is never drawable ink");
+}
+
 // --- space provider ------------------------------------------------------
 
 #[test]

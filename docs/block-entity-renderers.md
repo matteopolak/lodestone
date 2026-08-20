@@ -435,10 +435,15 @@ file) and the wall case's outward `0.25`-block offset from `Direction.getStepX()
 not a mirror), and `wall_offset_moves_toward_the_named_direction` pins the offset against a
 hand-verified `Direction` table rather than the function under test.
 
-Player skulls always draw the **default Steve skin** (`entity/player/wide/steve`,
-`DefaultPlayerSkin.getDefaultTexture()`'s own choice). A real profile skin needs a session-server
-lookup and a network fetch — out of scope here, tracked as a gap rather than silently wrong (every
-player skull looks the same rather than looking like a *specific* wrong player).
+Player skulls read the modern block-entity `profile.properties` list and pass its `textures` value
+through the existing remote-profile decoder. The resolved identity is either a static jar texture
+stem or `PlayerSkin(Arc<str>)`; batching includes that full identity, so matching URLs instance
+together while distinct player heads cannot borrow each other's bind group. The existing
+URL-keyed remote-skin fetch and GPU cache are shared with player entities. While a download is
+pending, malformed, missing, or failed, the draw binds the normal **default Steve** sheet
+(`entity/player/wide/steve`); once `EntityRenderer::player_skins` installs the matching URL, the
+same retained batch uses it on a later frame. The client does not look up profile UUIDs or names
+through Mojang, and the skull model and UV layout remain unchanged.
 
 Texture stems are the **mob skins already on disk for entity rendering** — `skull_texture_stem`
 just names five of them (`entity/{skeleton/skeleton, skeleton/wither_skeleton, zombie/zombie,
@@ -452,10 +457,11 @@ skull draws every frame with no bind group.
 
 Everything CPU-side is in place and tested against the real 26.2 state table: `SkullType` resolution,
 both placements, `BlockEntityModelSet::resolve_skull`, and the shell's `skull_spawn`/`skull_spawns`
-gather (`crates/lodestone-shell/src/block_entities.rs`, reusing `chest_candidates` — already generic
-over block-entity type, so a second scan was never needed). `plan_block_entities`/`BlockEntityInstance`
-needed **zero changes**: `chests_and_skulls_batch_independently_in_one_frame` proves a chest and a
-skull batch correctly in the same frame through the existing generic path.
+gather (`crates/lodestone-shell/src/block_entities.rs`). Player heads use the NBT-aware
+`skull_candidates` companion rather than `chest_candidates`, because the latter intentionally
+discards NBT; it keeps only an already decoded texture URL. `plan_block_entities` carries the
+typed texture identity so `player_head_skin_urls_are_part_of_the_block_entity_batch_key` proves
+repeated URLs coalesce while distinct URLs split.
 
 **The `gpu.rs` wiring landed too** — `RenderState` now carries a `SkullSource` alongside
 `BlockEntitySource`, and `prepare_block_entities` resolves and batches both families in the same

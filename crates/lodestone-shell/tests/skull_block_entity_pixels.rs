@@ -438,7 +438,7 @@ fn wall_and_floor_skulls_project_to_different_rects() {
     let shoot = |spawn: SkullSpawn| -> Vec<u8> {
         let mut target = HeadlessTarget::new(device, W, H, format);
         let mut state = RenderState::new(device, queue, format, W, H, None);
-        state.set_skull_source(move |_eye| vec![spawn]);
+        state.set_skull_source(move |_eye| vec![spawn.clone()]);
         let frame = target.acquire().expect("headless acquire");
         state.render(device, queue, frame.view(), &camera, None, &[]);
         target.read_texels(device, queue)
