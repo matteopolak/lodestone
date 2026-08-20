@@ -53,7 +53,7 @@
 use std::collections::HashMap;
 
 use lodestone_render::{
-    BlockEntityModelSet, CONDUIT_WIND_TEXTURE_STEM, CONDUIT_WIND_VERTICAL_TEXTURE_STEM,
+    BlockEntityModelSet, BlockEntityTexture, CONDUIT_WIND_TEXTURE_STEM, CONDUIT_WIND_VERTICAL_TEXTURE_STEM,
     CameraUniform, EntityCameraUniform, EntityPipeline, GpuEntityModel, block_entity_texture_stems,
     entity_camera_buffer, fog::FogUniform,
 };
@@ -293,7 +293,7 @@ impl BlockEntityRenderer {
 #[derive(Debug)]
 pub(super) struct BlockEntityDrawBatch {
     pub(super) model: &'static str,
-    pub(super) texture: &'static str,
+    pub(super) texture: BlockEntityTexture,
     pub(super) count: u32,
     pub(super) parts: Vec<Option<wgpu::Buffer>>,
 }

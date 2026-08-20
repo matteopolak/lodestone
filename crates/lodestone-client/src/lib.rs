@@ -89,6 +89,8 @@ mod spawn;
 mod state;
 
 pub use builder::ClientBuilder;
+#[cfg(not(target_arch = "wasm32"))]
+pub use builder::AuthenticationIntent;
 pub use channel::ChannelRegistry;
 pub use config::{KeepAlivePolicy, PlayerLoadedPolicy, RespawnPolicy};
 pub use error::{BotError, ClientClosed, ClientError, SessionOutcome, WaitError};

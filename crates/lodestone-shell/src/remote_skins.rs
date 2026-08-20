@@ -200,6 +200,17 @@ fn with_map<K, V, R>(
 #[must_use]
 pub fn skin_for_profile(profile: &lodestone_game::tablist::GameProfile) -> Option<RemoteSkin> {
     let value = profile.skin_texture()?;
+    skin_for_textures_property(value)
+}
+
+/// The usable skin declared by one raw `textures` profile-property value.
+///
+/// This is shared by tab-list profiles and placed player-head block entities:
+/// both wire formats ultimately carry the same Base64-encoded Mojang texture
+/// payload, so keeping the memoisation here prevents the two producers from
+/// growing subtly different URL or model parsing rules.
+#[must_use]
+pub fn skin_for_textures_property(value: &str) -> Option<RemoteSkin> {
     with_map(&DECODED, |map| {
         if let Some(cached) = map.get(value) {
             return cached.clone();
@@ -218,8 +229,7 @@ pub fn skin_for_profile(profile: &lodestone_game::tablist::GameProfile) -> Optio
             // which is the point of caching the `None` as well as the `Some`.
             tracing::debug!(
                 target: "assets",
-                player = %profile.name,
-                "the profile properties carry no usable skin texture"
+                "a profile textures property carries no usable skin texture"
             );
         }
         map.insert(value.to_owned(), decoded.clone());

@@ -1458,10 +1458,9 @@ enum RasterKind<'a> {
 }
 
 /// Coverage-to-ink threshold for a `ttf` glyph. [`fontdue`] returns
-/// antialiased 0..=255 coverage, but this renderer draws opaque merged quads
-/// (no per-texel alpha blending — the same reason a bitmap sheet's ink test is
-/// a bare `!= 0`), so a `ttf` glyph's edges are binarised at roughly half
-/// coverage rather than blended. This reproduces the glyph's *shape*, not
+/// antialiased 0..=255 coverage, but this renderer intentionally exposes TTF
+/// texels as binary white or transparent, so its edges are binarised at roughly
+/// half coverage rather than blended. This reproduces the glyph's *shape*, not
 /// vanilla's antialiasing.
 const TTF_INK_THRESHOLD: u8 = 127;
 
@@ -1536,6 +1535,56 @@ impl GlyphRaster<'_> {
         }
     }
 
+    /// The source RGBA of the texel at `(tx, ty)` within the cell.
+    ///
+    /// Bitmap providers preserve the decoded PNG's native RGBA8 values, which
+    /// lets resource-pack fonts use coloured glyphs and partial alpha. Unihex
+    /// remains its native binary mask — opaque white ink or transparent — and
+    /// TTF retains the existing [`TTF_INK_THRESHOLD`] binary behaviour rather
+    /// than introducing antialiasing as a side effect of this accessor.
+    #[must_use]
+    pub fn texel_rgba(&self, tx: u32, ty: u32) -> [f32; 4] {
+        match &self.kind {
+            RasterKind::Sheet { glyph, image } => {
+                if tx >= self.cell_width() || ty >= self.cell_height() {
+                    return [0.0; 4];
+                }
+                let x = glyph.cell[0] + tx;
+                let y = glyph.cell[1] + ty;
+                if x >= image.width || y >= image.height {
+                    return [0.0; 4];
+                }
+                let idx = ((y * image.width + x) * 4) as usize;
+                image.rgba.get(idx..idx + 4).map_or([0.0; 4], |rgba| {
+                    [
+                        rgba[0] as f32 / 255.0,
+                        rgba[1] as f32 / 255.0,
+                        rgba[2] as f32 / 255.0,
+                        rgba[3] as f32 / 255.0,
+                    ]
+                })
+            }
+            RasterKind::Unihex(g) => {
+                if g.is_ink(tx, ty) {
+                    [1.0; 4]
+                } else {
+                    [0.0; 4]
+                }
+            }
+            RasterKind::Ttf { glyph, bitmap } => {
+                if tx >= glyph.width || ty >= glyph.height {
+                    return [0.0; 4];
+                }
+                let idx = (ty * glyph.width + tx) as usize;
+                if bitmap.get(idx).is_some_and(|&c| c > TTF_INK_THRESHOLD) {
+                    [1.0; 4]
+                } else {
+                    [0.0; 4]
+                }
+            }
+        }
+    }
+
     /// Whether the texel at `(tx, ty)` within the cell is ink.
     ///
     /// For a sheet glyph, vanilla's `getActualGlyphWidth` tests
@@ -1547,22 +1596,7 @@ impl GlyphRaster<'_> {
     /// [`TTF_INK_THRESHOLD`] — see that constant for why this is a threshold
     /// and not a `!= 0` test.
     pub fn is_ink(&self, tx: u32, ty: u32) -> bool {
-        match &self.kind {
-            RasterKind::Sheet { glyph, image } => {
-                if tx >= self.cell_width() || ty >= self.cell_height() {
-                    return false;
-                }
-                alpha_at(image, glyph.cell[0] + tx, glyph.cell[1] + ty) != 0
-            }
-            RasterKind::Unihex(g) => g.is_ink(tx, ty),
-            RasterKind::Ttf { glyph, bitmap } => {
-                if tx >= glyph.width || ty >= glyph.height {
-                    return false;
-                }
-                let idx = (ty * glyph.width + tx) as usize;
-                bitmap.get(idx).is_some_and(|&c| c > TTF_INK_THRESHOLD)
-            }
-        }
+        self.texel_rgba(tx, ty)[3] != 0.0
     }
 }
 

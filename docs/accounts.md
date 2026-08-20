@@ -375,16 +375,21 @@ new consumer:
    in the clear, *then* call `Connection::enable_encryption` — ordering
    matters and mirrors `Connection::enable_encryption`'s own documented
    contract.
-4. If `should_authenticate`, compute the server-hash (`lodestone_auth::server_hash`,
-   already verified against Mojang's three published vectors) and call
-   `lodestone_auth::join_server`. Any failure here — including every XSTS
-   variant above — surfaces as `ClientError::Auth(AuthError)`, so a caller
-   matching on it gets the fully typed reason, not a string.
+4. If `should_authenticate` **and** the intent is a usable online session,
+   compute the server-hash (`lodestone_auth::server_hash`, already verified
+   against Mojang's three published vectors) and call
+   `lodestone_auth::join_server`. Explicit offline intent never contacts
+   Mojang, even when a server requests encryption; an unavailable selected
+   online account instead stops before the response is sent. Any join failure
+   surfaces as `ClientError::Auth(AuthError)`, so a caller matching on it gets
+   the fully typed reason, not a string.
 
 `ClientBuilder::online_session` is the new seam: supply a `lodestone_auth::Session`
 (from `login::try_cached_session`/`finish_interactive`) to join online-mode
-servers; omit it and everything behaves exactly as before (the offline-mode
-default, unchanged).
+servers. `ClientBuilder::authentication_intent` carries the three explicit
+states: `Offline`, `Online(Session)`, and `OnlineUnavailable`. Omitting it is
+the backwards-compatible explicit `Offline` default, not an absent session
+whose meaning the driver has to guess.
 
 ### The shell: `net.rs`'s `RemoteAuth`
 
@@ -406,11 +411,13 @@ eviction and dead-player-blackout hazard `connect_as` exists to avoid.
 Singleplayer matches vanilla: `handleHello` skips the encryption request for
 `isMemoryConnection()`, so there is nothing to authenticate.
 
-**A failed resolution does not abort the join.** An offline-mode server never
-sends an encryption request at all, so a dead refresh token has no bearing on
-joining one; refusing to dial would break joins that work today. The reason is
-carried to `ClientBuilder::online_session_unavailable` and only spent if the
-server turns out to demand online mode.
+**A failed resolution does not abort the dial.** It becomes
+`OnlineUnavailable`, retaining the selected account's last-known name and UUID.
+If the server sends no authentication request (or sends encryption with
+`should_authenticate = false`), the connection continues under that selected
+identity without a Mojang call. If proof is requested, the retained diagnostic
+is returned before an encryption response is sent. It never silently retries as
+an offline identity.
 
 **`production_origin` forks on `#[cfg(test)]`.** Resolving an account opens the
 OS keychain, POSTs to Microsoft, and — because the refresh token rotates on
@@ -433,7 +440,7 @@ distinct typed values, and a fourth path that is not ours at all:
 
 | situation | value | says |
 |---|---|---|
-| nobody signed in | `ClientError::OnlineModeSessionRequired` | add an account in Options ▸ Accounts and select it |
+| explicit offline identity | no client auth error | encrypt if requested, but never contact Mojang; a server may still reject that identity |
 | an account is selected but unusable — expired/revoked token, Microsoft unreachable, locked keychain, no `LODESTONE_MS_CLIENT_ID` | `ClientError::OnlineModeSessionUnavailable { account, detail }` | names the account and the reason |
 | the sessionserver `join` failed | `ClientError::Auth(AuthError)` | Mojang's own typed reason |
 | the **server** kicked us | `ClientEvent::Disconnect` → `NetUpdate::Disconnected` | the server's own `Text`, untouched |
@@ -462,9 +469,10 @@ Hermetic (`crates/lodestone-client/tests/online_mode_handshake.rs`):
 - the reply is written before the cipher is enabled, and a packet sent
   afterwards decrypts correctly (the cipher really did turn on, with the
   right secret, in both directions);
-- `should_authenticate: false` skips the session-server call entirely;
-- `should_authenticate: true` with no configured session fails fast with the
-  typed `OnlineModeSessionRequired`, before any crypto happens;
+- explicit offline intent completes RSA/AES for both values of
+  `should_authenticate` and skips the session-server call entirely;
+- an unavailable online account with `should_authenticate: false` completes
+  RSA/AES under its retained selected profile without a Mojang call;
 - `should_authenticate: true` with an *unusable* account fails with
   `OnlineModeSessionUnavailable`, and the rendered message names the account and
   the reason and is **not** the nobody-signed-in sentence — the arm that goes red

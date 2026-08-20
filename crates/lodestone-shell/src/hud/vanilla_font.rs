@@ -473,24 +473,25 @@ impl VanillaFont {
 
     /// The width of a styled span list in device pixels at `scale`.
     ///
-    /// This is the measurement half of [`draw_spans`](Self::draw_spans), and it
-    /// takes the route `Font::legacy_width`'s own doc prescribes for structured
-    /// components: decompose to `(codepoint, bold)` and call
-    /// [`advance_bold`](lodestone_assets::font::Font::advance_bold). Bold is the
-    /// only flag that changes an advance (`+1` per glyph); italic shears in
+    /// This is the measurement half of [`draw_spans`](Self::draw_spans). It
+    /// resolves the span's requested [`FontId`] and each codepoint's custom-font
+    /// coverage exactly as drawing does, then derives that selected glyph's
+    /// advance. Bold is the only flag that changes an advance; italic shears in
     /// place, and underline/strikethrough/obfuscated leave the pen alone.
     #[must_use]
     pub fn spans_width(&self, spans: &[TextSpan], scale: f32) -> f32 {
-        let font = self.raster.font();
         let total: f32 = spans
             .iter()
             .map(|span| {
                 let bold = span.style.bold.unwrap_or(false);
+                let custom = span.style.font.and_then(|id| self.custom_raster(id));
                 span.text
                     .chars()
                     .map(|ch| {
-                        font.advance_bold(ch as u32, bold)
-                            .unwrap_or(MISSING_ADVANCE + if bold { 1.0 } else { 0.0 })
+                        let cp = ch as u32;
+                        let font = self.select_font(cp, custom.as_deref());
+                        let raster = font.raster(cp);
+                        glyph_advance(font, cp, raster.as_ref(), bold)
                     })
                     .sum::<f32>()
             })
@@ -713,7 +714,7 @@ impl VanillaFont {
         scale: f32,
         alpha: f32,
         shadow: bool,
-    ) {
+    ) -> f32 {
         let mut cursor = x;
         for (position, g) in glyphs.iter().enumerate() {
             let c = [g.rgb[0], g.rgb[1], g.rgb[2], alpha];
@@ -737,6 +738,7 @@ impl VanillaFont {
             };
             cursor += self.glyph_styled(cs, g.ch, gx, gy, scale, c, g.style, position == 0, font);
         }
+        cursor - x
     }
 
     // There is deliberately no un-styled `glyph` primitive here any more, and no
@@ -781,26 +783,22 @@ impl VanillaFont {
         // Matches by reference (not `base_r` by value): `GlyphRaster` is not
         // `Copy`, and `base_r` is matched again below to draw the glyph, so
         // moving it here would make that second match a use-after-move.
-        let advance = match &base_r {
-            Some(r) => r.advance(),
-            None if font.font().contains(cp) => font.advance(cp).unwrap_or(MISSING_ADVANCE),
-            None => {
-                missing_box(cs, x, y, scale, c);
-                MISSING_ADVANCE
-            }
-        };
+        let advance = glyph_advance(font, cp, base_r.as_ref(), false);
         // `GlyphInfo.getAdvance(boolean)`: `advance + boldOffset` when bold,
         // unchanged otherwise. Vanilla applies this to *every* glyph, drawable
         // or not — a bold space is wider too. The offset is **per glyph**, not a
         // font constant: `UnihexProvider.Glyph.info` overrides `getBoldOffset`
         // to 0.5F because a unihex glyph is drawn at oversample 2, so bold CJK
         // shifts one source texel rather than two.
-        let bold_extra = if style.bold {
-            font.font().bold_offset(cp)
-        } else {
-            0.0
-        };
-        let bold_advance = advance + bold_extra;
+        let bold_extra = font.font().bold_offset(cp);
+        let bold_advance = glyph_advance(font, cp, base_r.as_ref(), style.bold);
+
+        // Alpha-zero text must still advance its pen but must not leave empty
+        // colour-stream geometry behind (including missing-glyph and effect
+        // quads). This also keeps a fully transparent shadow pass a no-op.
+        if c[3] == 0.0 {
+            return bold_advance * scale;
+        }
 
         if let Some(base_r) = base_r {
             // `§k` (and not a space, per `Font.getGlyph`'s `codepoint != 32`
@@ -827,6 +825,8 @@ impl VanillaFont {
                     style.italic,
                 );
             }
+        } else if !font.font().contains(cp) {
+            missing_box(cs, x, y, scale, c);
         }
 
         if style.has_effect() {
@@ -856,7 +856,9 @@ impl VanillaFont {
     /// Emit one glyph raster's ink as merged horizontal runs, with the line's
     /// top-left at `(x, y)`. An 8×8 cell is at most 8 quads instead of up to
     /// 64, and the merged quad is pixel-identical because every texel in a
-    /// run shares one colour.
+    /// run shares one final colour. Bitmap providers can supply coloured or
+    /// partially transparent texels, so a run is split whenever source RGBA
+    /// modulation makes adjacent texels differ.
     ///
     /// When `italic`, each row is sheared independently: `v` is that row's own
     /// logical-pixel offset from the line's top (matching what
@@ -889,12 +891,15 @@ impl VanillaFont {
         for ty in 0..r.cell_height() {
             let mut tx = 0;
             while tx < r.cell_width() {
-                if !r.is_ink(tx, ty) {
+                let Some(colour) = modulated_texel_rgba(r, tx, ty, c) else {
                     tx += 1;
                     continue;
-                }
+                };
                 let start = tx;
-                while tx < r.cell_width() && r.is_ink(tx, ty) {
+                tx += 1;
+                while tx < r.cell_width()
+                    && modulated_texel_rgba(r, tx, ty, c) == Some(colour)
+                {
                     tx += 1;
                 }
                 let shear = if italic {
@@ -908,7 +913,7 @@ impl VanillaFont {
                     top + ty as f32 * texel,
                     (tx - start) as f32 * texel,
                     texel,
-                    c,
+                    colour,
                 );
             }
         }
@@ -941,6 +946,50 @@ impl VanillaFont {
         let idx = (z as usize) % pool.len();
         self.raster.raster(pool[idx] as u32)
     }
+}
+
+/// The logical advance that [`VanillaFont::glyph_styled`] and
+/// [`VanillaFont::spans_width`] must agree on. `raster` is the same lookup the
+/// draw path already made, so a drawable glyph takes its raster's metrics; a
+/// declared-but-non-drawable glyph (such as a space) still takes its provider
+/// advance; an uncovered codepoint takes the default missing-glyph advance.
+fn glyph_advance(
+    font: &RasterFont,
+    codepoint: u32,
+    raster: Option<&GlyphRaster<'_>>,
+    bold: bool,
+) -> f32 {
+    let advance = match raster {
+        Some(raster) => raster.advance(),
+        None if font.font().contains(codepoint) => font.advance(codepoint).unwrap_or(MISSING_ADVANCE),
+        None => MISSING_ADVANCE,
+    };
+    advance
+        + if bold {
+            font.font().bold_offset(codepoint)
+        } else {
+            0.0
+        }
+}
+
+/// The final colour a raster texel contributes after the component/text pass
+/// colour has modulated its native source RGBA. Transparent source or pass
+/// alpha deliberately produces no quad at all rather than six transparent
+/// vertices in the HUD stream.
+fn modulated_texel_rgba(
+    raster: &GlyphRaster<'_>,
+    tx: u32,
+    ty: u32,
+    tint: [f32; 4],
+) -> Option<[f32; 4]> {
+    let source = raster.texel_rgba(tx, ty);
+    let rgba = [
+        source[0] * tint[0],
+        source[1] * tint[1],
+        source[2] * tint[2],
+        source[3] * tint[3],
+    ];
+    (rgba[3] != 0.0).then_some(rgba)
 }
 
 /// Keeps the custom-font cache fail-open after a loader panic poisoned its
@@ -1187,6 +1236,7 @@ mod unihex_wiring {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_model::text::TextStyle;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::mpsc;
     use std::time::Duration;
@@ -1210,12 +1260,160 @@ mod tests {
 
     fn font_with_custom_cache() -> VanillaFont {
         let raster = space_raster(' ');
+        font_with_raster(raster)
+    }
+
+    fn font_with_raster(raster: RasterFont) -> VanillaFont {
         VanillaFont {
             obfuscation_pool: build_obfuscation_pool(&raster),
             raster,
             obfuscation_rng: AtomicU64::new(0x9E37_79B9_7F4A_7C15),
             custom: Mutex::new(CustomFontCache::default()),
         }
+    }
+
+    fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+        assert_eq!(rgba.len(), (width * height * 4) as usize);
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .expect("PNG header")
+            .write_image_data(rgba)
+            .expect("PNG data");
+        bytes
+    }
+
+    /// A one-row bitmap font fixture with explicitly controlled source texels.
+    fn bitmap_raster(chars: &str, cell_width: u32, rgba: &[u8]) -> RasterFont {
+        let width = cell_width * chars.chars().count() as u32;
+        let png = encode_png(width, 1, rgba);
+        let mut source = lodestone_assets::MemorySource::new("font-rgba-fixture");
+        source.insert("assets/minecraft/textures/font/t.png", png);
+        source.insert(
+            "assets/minecraft/font/default.json",
+            format!(
+                r#"{{"providers":[{{"type":"bitmap","file":"minecraft:font/t.png","ascent":1,"height":1,"chars":["{chars}"]}}]}}"#
+            )
+            .into_bytes(),
+        );
+        let manager = ResourceManager::new(vec![Box::new(source)]);
+        let id: ResourceLocation = "minecraft:default".parse().expect("valid fixture id");
+        FontLoader::new(&manager)
+            .load_raster(&id, &FontOptions::none())
+            .expect("bitmap fixture font loads")
+    }
+
+    fn span(text: &str, font: Option<FontId>) -> TextSpan {
+        TextSpan {
+            text: text.to_owned(),
+            style: TextStyle {
+                font,
+                ..TextStyle::default()
+            },
+        }
+    }
+
+    #[test]
+    fn bitmap_rgba_is_tinted_alpha_modulated_and_run_split() {
+        // Adjacent texels differ only in source colour, so a binary-ink run
+        // merger would wrongly emit one quad. Both have partial alpha.
+        let font = font_with_raster(bitmap_raster(
+            "A",
+            2,
+            &[
+                128, 128, 128, 128, // grey, 50% source alpha
+                64, 128, 192, 64,   // a distinct translucent source colour
+            ],
+        ));
+        let mut verts = Vec::new();
+        {
+            let mut cs = ColourStream {
+                verts: &mut verts,
+                w: 100.0,
+                h: 100.0,
+            };
+            font.draw_plain(&mut cs, "A", 10.0, 10.0, 1.0, [0.5, 0.25, 1.0, 0.5]);
+        }
+        // `ColourStream::rect` writes six vertices with six floats each.
+        assert_eq!(verts.len(), 72, "different final RGBA texels need two runs");
+        assert_eq!(
+            &verts[2..6],
+            &[
+                128.0 / 255.0 * 0.5,
+                128.0 / 255.0 * 0.25,
+                128.0 / 255.0,
+                128.0 / 255.0 * 0.5,
+            ]
+        );
+        assert_eq!(
+            &verts[38..42],
+            &[
+                64.0 / 255.0 * 0.5,
+                128.0 / 255.0 * 0.25,
+                192.0 / 255.0,
+                64.0 / 255.0 * 0.5,
+            ]
+        );
+
+        let mut transparent = Vec::new();
+        {
+            let mut cs = ColourStream {
+                verts: &mut transparent,
+                w: 100.0,
+                h: 100.0,
+            };
+            font.draw_plain(&mut cs, "A", 10.0, 10.0, 1.0, [1.0, 1.0, 1.0, 0.0]);
+        }
+        assert!(transparent.is_empty(), "alpha-zero text must emit no vertices");
+    }
+
+    #[test]
+    fn spans_width_uses_custom_metrics_then_default_fallback_and_matches_pen() {
+        // Default A/B advance 2 each; custom A advances 5 and deliberately
+        // omits B. A structured span must therefore measure/draw A=5, B=2.
+        let font = font_with_raster(bitmap_raster(
+            "AB",
+            1,
+            &[
+                255, 255, 255, 255, // default A
+                255, 255, 255, 255, // default B
+            ],
+        ));
+        let custom_id = FontId::intern("test:wide-icons");
+        let custom = Arc::new(bitmap_raster(
+            "A",
+            4,
+            &[
+                255, 255, 255, 255,
+                255, 255, 255, 255,
+                255, 255, 255, 255,
+                255, 255, 255, 255,
+            ],
+        ));
+        let generation = crate::resources::pack_generation();
+        {
+            let mut cache = font.custom.lock().expect("custom cache lock");
+            cache.generation = Some(generation);
+            cache.entries.insert(custom_id, Some(custom));
+        }
+        let spans = [span("AB", Some(custom_id))];
+
+        assert_eq!(font.spans_width(&spans, 1.0), 7.0);
+        let mut glyphs = font.resolve_spans(&spans, [1.0, 1.0, 1.0]);
+        bidi_reorder_glyphs(&mut glyphs);
+        let mut verts = Vec::new();
+        let pen = {
+            let mut cs = ColourStream {
+                verts: &mut verts,
+                w: 100.0,
+                h: 100.0,
+            };
+            font.draw_resolved(&mut cs, &glyphs, 20.0, 20.0, 1.0, 1.0, false)
+        };
+        assert_eq!(pen, font.spans_width(&spans, 1.0));
     }
 
     /// A missing custom font is cached during one pack generation so a chat

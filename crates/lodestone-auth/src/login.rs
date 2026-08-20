@@ -310,6 +310,11 @@ pub enum SelectedAccount {
         /// `profiles.json` has no row for the selected id — something to name
         /// in the message either way, never an empty string.
         account: String,
+        /// The selected account's stable identity. Callers retain this for a
+        /// server that encrypts but does not request Mojang authentication;
+        /// an unavailable online account must not silently become a different
+        /// offline identity in that case.
+        profile_id: uuid::Uuid,
         /// One sentence, already user-facing, about why this account could not
         /// be used. Never a raw token or any part of one.
         detail: String,
@@ -361,6 +366,7 @@ pub async fn resolve_selected_account_with(
         Err(e) => {
             return SelectedAccount::Unavailable {
                 account,
+                profile_id,
                 detail: e.to_string(),
             };
         }
@@ -375,6 +381,7 @@ pub async fn resolve_selected_account_with(
         Ok(CachedSessionOutcome::NoAccountSelected) => SelectedAccount::Offline,
         Ok(CachedSessionOutcome::SessionExpired { .. }) => SelectedAccount::Unavailable {
             account,
+            profile_id,
             detail: "the saved Microsoft session has expired; sign in to this account again"
                 .to_owned(),
         },
@@ -383,6 +390,7 @@ pub async fn resolve_selected_account_with(
         // player whose network is down should not be told to sign in again.
         Err(e) => SelectedAccount::Unavailable {
             account,
+            profile_id,
             detail: format!("could not renew the Microsoft session: {e}"),
         },
     }
@@ -584,10 +592,16 @@ mod tests {
         // No client id in this process, so this stops at the client-id step —
         // still `Unavailable`, still naming Alice, and *not* silently offline.
         let resolved = resolve_selected_account_with(&client, &secrets, &metadata).await;
-        let SelectedAccount::Unavailable { account, detail } = resolved else {
+        let SelectedAccount::Unavailable {
+            account,
+            profile_id,
+            detail,
+        } = resolved
+        else {
             panic!("a selected account that cannot be resolved must be Unavailable, got {resolved:?}");
         };
         assert_eq!(account, "Alice", "the failure must name the account");
+        assert_eq!(profile_id, id, "the selected identity must survive the failure");
         assert!(
             !detail.is_empty(),
             "an Unavailable with no explanation is the vague message this split exists to remove"
