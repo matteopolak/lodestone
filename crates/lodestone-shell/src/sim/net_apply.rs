@@ -466,10 +466,38 @@ impl Sim {
                     // un-suppressible.
                     let level = self.particle_level;
                     self.particles_mut(|p| {
+                        // Both refusals below are silent by nature — the packet
+                        // arrives, nothing spawns, and no counter moves — so
+                        // each says why. A particle the server sent and this
+                        // client chose not to draw must be distinguishable from
+                        // one that was never sent, and from one that spawned and
+                        // failed to resolve a sprite (`Particles::extract` logs
+                        // that third case on the same target).
                         let spawn = if long_distance {
                             true
+                        } else if !within_cutoff {
+                            tracing::debug!(
+                                target: "particles",
+                                kind = %kind,
+                                distance = dx.mul_add(dx, dy.mul_add(dy, dz * dz)).sqrt(),
+                                "dropped: past the 32-block cutoff and the packet did not \
+                                 set override-limiter"
+                            );
+                            false
+                        } else if p.particle_level_permits(level, false) {
+                            true
                         } else {
-                            within_cutoff && p.particle_level_permits(level, false)
+                            tracing::debug!(
+                                target: "particles",
+                                kind = %kind,
+                                ?level,
+                                "dropped: the Particles video option suppressed it. \
+                                 `always_show` is hardcoded false here because \
+                                 the wire field is decoded and not carried on \
+                                 ClientEvent::Particles, so Minimal drops strictly \
+                                 more than vanilla would"
+                            );
+                            false
                         };
                         if spawn {
                             p.spawn_particles(
