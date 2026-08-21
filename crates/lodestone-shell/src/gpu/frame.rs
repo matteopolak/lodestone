@@ -374,7 +374,10 @@ impl RenderState {
         // camera, unlike a sign's fixed orientation — so `camera` (not just
         // `camera.position`) is threaded through. See `gpu/display_text.rs`'s
         // module doc.
-        let display_text_count = self.display_text.prepare(queue, &view_proj, &self.display_draws, camera);
+        // `(background_count, glyph_count)`: the panels and the ink go
+        // through two different pipelines, matching vanilla's own
+        // `RenderPipelines.TEXT_BACKGROUND`/`TEXT_POLYGON_OFFSET` split.
+        let display_text_counts = self.display_text.prepare(queue, &view_proj, &self.display_draws, camera);
 
         // Beacon beams, same "upload before the pass opens" constraint and
         // the same not-derived-from-`entities` shape as sign text above — a
@@ -1149,7 +1152,7 @@ impl RenderState {
             // text for the same "already in the depth buffer, opaque/cutout
             // geometry" reasoning, though this pass carries no polygon-offset
             // bias of its own — see `gpu/display_text.rs`'s module doc.
-            self.display_text.draw(&mut pass, display_text_count);
+            self.display_text.draw(&mut pass, display_text_counts);
 
             // The beacon beam's **solid core** only — opaque, depth-writing
             // (`BEACON_BEAM_OPAQUE`, see `gpu/beacon_beam.rs`'s module doc),

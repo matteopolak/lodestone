@@ -1284,20 +1284,29 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             ("minecraft:spawner", fields)
         }
         // `SignText.DIRECT_CODEC`: `messages`/`color`/`has_glowing_text` per
-        // side, under `front_text`/`back_text`, plus a sibling `is_waxed` —
-        // read off `crate::block_entities::SignData`'s own doc comment, which
-        // cites the real wire probe this shape was confirmed against
-        // (`lodestone_world::sign_text`'s module doc). `messages` elements
-        // are **JSON-serialized text**, not the NBT-structural component
-        // shape every other resolved text in this crate uses — a bare
-        // `"hello"` line is stored as the 7-character string `"hello"`,
-        // quotes included, matching what a bare string component serializes
-        // to. `serde_json::to_string` on a `&String` produces exactly that
-        // (proper JSON escaping included, unlike a hand-rolled
-        // quote-and-concatenate). Colour/glow are not modelled (see
-        // `SignData`'s own doc for why), so every side is written black and
-        // unglowing — the codec's own defaults, and what `SignText::parse`
-        // falls back to for an absent field anyway.
+        // side, under `front_text`/`back_text`, plus a sibling `is_waxed`.
+        //
+        // A `messages` element is a `Component` under
+        // `ComponentSerialization.CODEC`, whose encoder collapses a plain,
+        // unstyled, sibling-less component to a **bare string holding the
+        // text verbatim** (`tryCollapseToString`) and only falls back to a
+        // structural compound otherwise. Every line this server writes is a
+        // plain `String` with no style at all, so the collapsed form is the
+        // right — and the only correct — encoding: `Nbt::String(line)`, no
+        // quoting.
+        //
+        // This used to write `serde_json::to_string(line)` instead, storing
+        // `hello` as the seven-character string `"hello"`, on the strength
+        // of a wire probe that had itself set the sign over RCON with SNBT
+        // that already contained those quotes. `lodestone_world::sign_text`
+        // parsed it back symmetrically, so the pair round-tripped perfectly
+        // and neither half matched what a real server sends — see that
+        // module's doc for the closed loop and what it cost.
+        //
+        // Colour/glow are not modelled (see `SignData`'s own doc for why),
+        // so every side is written black and unglowing — the codec's own
+        // defaults, and what `SignText::parse` falls back to for an absent
+        // field anyway.
         BlockEntity::Sign(sign) => {
             let side = |lines: &[String; 4]| {
                 Nbt::Compound(vec![
@@ -1309,11 +1318,7 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
                             element_type: NbtTag::String,
                             elements: lines
                                 .iter()
-                                .map(|line| {
-                                    Nbt::String(
-                                        serde_json::to_string(line).unwrap_or_else(|_| "\"\"".to_owned()),
-                                    )
-                                })
+                                .map(|line| Nbt::String(line.clone()))
                                 .collect(),
                         },
                     ),
@@ -1668,13 +1673,19 @@ pub fn extras_from_nbt(nbt: &Nbt) -> ChunkExtras {
 /// self-consistent misunderstanding of it. `#[ignore]`d for the same reason
 /// that oracle is: it requires `.cache/mc/survival/world`, which is not repo
 /// state.
-/// [`block_entity_to_nbt`]'s new `Sign` arm, checked against the **real
-/// client-side decoder** (`lodestone_world::sign_text::SignText::parse`) —
-/// not a self-authored assertion of the NBT shape. This is the two-file join
-/// this crate's own evidence standards ask for: the producer here and the
-/// consumer in `lodestone-world` were written by different agents from the
-/// same wire probe (`docs/block-entity-renderers.md`), so agreement between
-/// them is real evidence rather than one implementation checking itself.
+/// [`block_entity_to_nbt`]'s `Sign` arm, round-tripped through the real
+/// client-side decoder (`lodestone_world::sign_text::SignText::parse`).
+///
+/// **Read what this does and does not prove.** Two different agents wrote
+/// the two halves, but both worked from the *same* wire probe, and that
+/// probe was wrong about the element encoding — so for a while this gate
+/// was green while neither half matched a real server, which is the closed
+/// `decode(encode(x)) == x` loop this repo's evidence standards forbid.
+/// What settles the encoding is outside both: `SignText.LINES_CODEC` is
+/// `ComponentSerialization.CODEC.listOf()`, whose encoder collapses an
+/// unstyled component to a bare string. This round trip is still worth
+/// keeping — it catches a field-name or front/back transposition — but it
+/// is a consistency check, not evidence about the wire.
 #[cfg(test)]
 mod sign_nbt_tests {
     use lodestone_world::{SignDyeColor, SignText};

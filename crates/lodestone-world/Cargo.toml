@@ -11,12 +11,13 @@ workspace = true
 [dependencies]
 lodestone-core = { workspace = true }
 thiserror = { workspace = true }
-# `sign_text`'s message lines arrive as JSON-encoded text-component strings
-# (see that module's doc) — a real dependency, promoted from the dev-only
-# entry this crate's tests/benches used to be the sole user of.
-serde_json = { workspace = true }
 
 [dev-dependencies]
+# Test/bench-only again. `sign_text` briefly promoted this to a real
+# dependency, on the belief that a sign's message lines arrive as
+# JSON-encoded text-component strings; they arrive as structural NBT
+# components (see that module's doc), so the library needs no JSON parser.
+serde_json = { workspace = true }
 # Issue #80's shared bench/test terrain fixture (`bench_fixtures::
 # synthetic_overworld_column`), reused here by `tests/memory.rs` and
 # `benches/light_propagation.rs` in place of each file's own hand-rolled
