@@ -358,9 +358,39 @@ Toggles are `Arc<AtomicBool>` because the source closure is
   is the only on-screen report of whether F3+B and F3+G are on, so a shell-side
   copy that drifts turns the overlay's most trustworthy property — that it is
   believed — into the bug. Same for the chord literals; see above.
-- **Not built**: the four debug charts and the profiler pie, the lightmap blit,
-  vanilla's runtime entry-enable screen and its `debug-profile.json`, and the nine
-  `visualize_*` world overlays. All are additions; none is a gap in what is here.
+- **F3+B/F3+G's lines were a `PrimitiveTopology::LineList` until this fix**,
+  which rasterizes at exactly one *physical* pixel regardless of resolution or
+  DPI scale — the same failure `gpu/outline.rs`'s own module doc already names
+  for the block-highlight box. At a real gameplay resolution that reads as
+  "doesn't draw at all" rather than merely thin, even though the closure
+  feeding it (`install_debug_lines_source`) was producing correct geometry the
+  whole time. `DebugLineRenderer` (`gpu/debug_lines.rs`) now expands each
+  segment into a screen-space-thickened triangle ribbon — the identical
+  technique `OutlineRenderer` uses — with per-vertex colour threaded through
+  `debug_lines.wgsl` so a hitbox's white and a chunk border's yellow/blue
+  survive the expansion. `MIN_LINE_WIDTH_PX = 1.5` is deliberately thinner
+  than the outline pass's `2.5`: a diagnostic wireframe should read as a
+  *line*, not a highlighted edge.
+- **No existing pixel gate exercised `entity_hitbox_vertices`/
+  `chunk_border_vertices` specifically.** Every debug-line gate in
+  `gpu/pixel_gates.rs` installed a synthetic closure
+  (`structure_block_outline_vertices`, a bare billboard), so a break in either
+  real producer was invisible to the rest of that corpus — the
+  shared-construction-path blindness `DESIGN.md` §12 already names for a
+  render frame reached through one factory, one hop from the pipeline.
+  `entity_hitbox_and_chunk_border_vertices_draw_visible_pixels` closes that
+  gap: it feeds the real production functions through the real pipeline and
+  asserts pixels move (423 px / 828 px at 320×240 after the width fix).
+  Neutered by forcing `debug_line_count` to `0` at the draw call and confirmed
+  red before landing the fix above.
+- **Not built**: the four debug charts, the lightmap blit, vanilla's runtime
+  entry-enable screen and its `debug-profile.json`, and the nine `visualize_*`
+  world overlays. All are additions; none is a gap in what is here. The
+  profiler pie chart **is** now built — see `docs/frame-profiling.md`'s "Pie
+  chart" section — as a deliberate beyond-vanilla addition to the
+  frame-profiling instrument, not a port of `DebugScreenOverlay`'s light-level
+  pie (which vanilla itself removed in 26.2; see the light-level bullet
+  above).
 
 ## Gates
 

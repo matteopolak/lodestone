@@ -591,6 +591,86 @@ pub struct DebugStats {
     /// (nothing to report yet), which draws no extra F3 lines rather than
     /// placeholders.
     pub frame_profile: Vec<String>,
+    /// The F3+Shift profiler pie chart — `None` when the chart is toggled off
+    /// (`app::WindowApp::show_profiler_chart`) or the debug overlay itself is
+    /// closed. Built alongside [`Self::frame_profile`] in `app::redraw` from
+    /// the same [`crate::app::frame_profile::FrameProfiler::summary`]/GPU
+    /// report, so the text lines and the chart can never disagree about a
+    /// frame's numbers. See `docs/frame-profiling.md`'s "Pie chart" section.
+    pub profiler_chart: Option<ProfilerChart>,
+}
+
+/// Render-ready data for the F3+Shift profiler pie chart — see
+/// [`DebugStats::profiler_chart`]. Vanilla's shape
+/// (`Minecraft.renderFpsMeter`): a filled pie, one wedge per section, with a
+/// legend and a darker lower half; number keys drill into a child section and
+/// `0` returns to the root. Re-derived rather than transliterated — see
+/// `docs/frame-profiling.md` for what is the same shape and what goes beyond
+/// it (GPU segments and skip counts alongside the CPU wedges, which vanilla's
+/// single-threaded profiler has no equivalent of).
+#[derive(Debug, Clone)]
+pub struct ProfilerChart {
+    /// One wedge per CPU frame phase, in
+    /// [`crate::app::frame_profile::FramePhase::ALL`] order — the pie's root
+    /// level. `mean_ms` (not `p99_ms`) sizes the wedges: vanilla's own pie
+    /// sizes by the profiler's accumulated *total* time per section, and mean
+    /// is this instrument's steady-state analogue: see [`ProfilerChartSlice`].
+    pub slices: Vec<ProfilerChartSlice>,
+    /// The drilled-in wedge index (`0..slices.len()`), or `None` at the root.
+    /// Vanilla's number-key/`0` navigation, ported as an F3 chord
+    /// (`app::input::KeyOutcome::ProfilerChartSelect`) rather than a bare
+    /// number press — the number row is already the (rebindable) hotbar
+    /// selector, so vanilla's own un-chorded literal key would collide with
+    /// it constantly instead of only while F3 is held.
+    pub selected: Option<usize>,
+    /// GPU segment name → milliseconds, in
+    /// `gpu::gpu_timing::GpuQueryTimer::results_ms` order. `None` means "no
+    /// reading yet", never a fabricated `0.0` — the same contract that
+    /// method's own doc requires of every caller. Empty when the device lacks
+    /// `Features::TIMESTAMP_QUERY`; [`Self::gpu_unavailable`] tells the two
+    /// cases apart so the chart can say "unavailable" instead of drawing an
+    /// empty legend.
+    pub gpu: Vec<(&'static str, Option<f32>)>,
+    /// Whether GPU timing itself is unavailable on this device (distinct from
+    /// "no reading yet" — see [`Self::gpu`]'s doc).
+    pub gpu_unavailable: bool,
+    /// Frames where a GPU readback slot was still outstanding when due for
+    /// reuse (`gpu::gpu_timing::GpuQueryTimer::stalled_frames`) — real
+    /// GPU/driver backpressure, surfaced next to the chart rather than folded
+    /// into it.
+    pub gpu_stalled_frames: u64,
+}
+
+/// One wedge's worth of data — the pie-chart sibling of
+/// `app::frame_profile::PhaseSummary`, carrying the same fields (this module
+/// cannot depend on `app`'s private `PhaseSummary` type directly, so
+/// `app::redraw` copies the fields across) plus nothing else: no colour here,
+/// because colour is assigned by wedge *position* at draw time
+/// (`hud::PROFILER_CHART_COLORS`), matching vanilla's own `getPreferredColor`
+/// hashing a section's identity rather than storing a colour on the model.
+#[derive(Debug, Clone, Copy)]
+pub struct ProfilerChartSlice {
+    pub name: &'static str,
+    pub mean_ms: f32,
+    pub p95_ms: f32,
+    pub p99_ms: f32,
+    pub samples: usize,
+    pub window: usize,
+    pub skipped: u64,
+}
+
+impl ProfilerChart {
+    /// Sum of every wedge's [`ProfilerChartSlice::mean_ms`] — the pie's whole
+    /// circle. A frame profiler's phases are sequential checkpoints inside one
+    /// `redraw`, not a sampled subset, so this total *is* the frame's own mean
+    /// wall-clock cost (modulo the pacer's wait, exactly as
+    /// `DebugStats::frame_ms`'s own doc already distinguishes from `1000.0 /
+    /// fps`) — never re-derived from `fps`, which would silently disagree the
+    /// moment a frame cap is active.
+    #[must_use]
+    pub fn total_mean_ms(&self) -> f32 {
+        self.slices.iter().map(|s| s.mean_ms).sum()
+    }
 }
 
 /// Display name for a [`lodestone_model::Difficulty`] — vanilla's own
@@ -2350,6 +2430,16 @@ impl HudGeometry {
             }
         }
 
+        // The F3+Shift profiler pie chart — independent of `frame.show_debug`
+        // above only in the sense that its own gate lives on the data, not
+        // the draw: `profiler_chart` is `None` whenever the debug overlay is
+        // closed or the chart itself is toggled off
+        // (`app::redraw`'s own `if self.show_debug && self.show_profiler_chart`
+        // gate), so there is nothing to double-guard here.
+        if let Some(chart) = &frame.stats.profiler_chart {
+            draw_profiler_chart(&mut b, chart);
+        }
+
         // Chat, bottom-left: an optional input line at the very bottom, with the
         // received log stacked above it. Received lines carry legacy `§` colour
         // codes (rendered as coloured runs) and fade out with age like vanilla
@@ -3455,6 +3545,201 @@ fn draw_sound_subtitles(b: &mut Builder, captions: &[crate::audio::subtitles::Su
         }
         let tw = b.text_width(&caption.text, scale);
         b.text(&caption.text, cx - (tw / 2.0).floor(), text_y, scale, ink);
+    }
+}
+
+/// Wedge radius, in logical-canvas pixels — small enough to sit clear of the
+/// F3 text columns at any window size, matching those columns' own `debug_scale
+/// = 1.0` convention (this canvas is already gui-scale-divided; see
+/// `HudGeometry::build_with_gui`'s own note on that).
+const PROFILER_CHART_RADIUS: f32 = 28.0;
+/// Full-circle wedge substep count — the pie is subdivided at this angular
+/// resolution regardless of how many slices there are, so one wide slice and
+/// eight thin ones read equally round. 48 keeps a single-slice detail-view
+/// circle visibly smooth without pushing meaningful vertex counts (at most
+/// `PROFILER_CHART_STEPS` triangles per frame this draws at all).
+const PROFILER_CHART_STEPS: usize = 48;
+/// Multiplier applied to a wedge triangle whose midpoint falls in the lower
+/// half of the circle — vanilla's `Minecraft.renderFpsMeter` shades its own
+/// pie's lower half darker for a pseudo-3D read; re-derived here as a flat
+/// multiplier rather than transliterated, since vanilla's own shading is a
+/// fixed second colour per section rather than one darkening factor.
+const PROFILER_CHART_LOWER_HALF_SHADE: f32 = 0.7;
+
+/// One flat colour per root-level wedge, indexed by
+/// `app::frame_profile::FramePhase`'s own position in `FramePhase::ALL` —
+/// **not** stored on [`ProfilerChartSlice`] (see that type's doc): vanilla
+/// assigns a section's pie colour by hashing its identity
+/// (`ProfileResults.getPreferredColor` in spirit), so a fixed palette keyed by
+/// position is this instrument's equivalent of "a stable colour per section
+/// across frames" without needing a hash at all, since the eight phases are a
+/// fixed, ordered set.
+const PROFILER_CHART_COLORS: [[f32; 4]; 8] = [
+    [0.85, 0.25, 0.25, 0.92], // setup
+    [0.90, 0.55, 0.15, 0.92], // sim_tick
+    [0.90, 0.80, 0.20, 0.92], // mesh_upload
+    [0.35, 0.75, 0.30, 0.92], // acquire
+    [0.20, 0.70, 0.70, 0.92], // prepare
+    [0.25, 0.50, 0.90, 0.92], // world_encode_submit
+    [0.55, 0.35, 0.85, 0.92], // hud_ui_encode_submit
+    [0.85, 0.35, 0.65, 0.92], // present
+];
+/// Neutral grey drawn instead of a wedge fan when the profiler's own total is
+/// `0.0` — the ring buffers have not produced a sample yet (the first frame
+/// or two of a session). Never divides by that zero to fabricate a slice.
+const PROFILER_CHART_EMPTY: [f32; 4] = [0.4, 0.4, 0.4, 0.5];
+
+/// Draws the F3+Shift profiler pie chart: vanilla's shape
+/// (`Minecraft.renderFpsMeter`) — a filled pie with a darker lower half and a
+/// legend — re-derived rather than transliterated, plus this instrument's own
+/// additions (GPU segments, skip counts) noted where they appear. See
+/// `docs/frame-profiling.md`'s "Pie chart" section for the full picture and
+/// [`DebugStats::profiler_chart`] for what feeds this.
+///
+/// Bottom-right corner, clear of the F3 text columns
+/// (`HudGeometry::build_with_gui`'s own debug-line block occupies the top two
+/// corners). `selected` (`ProfilerChart::selected`) switches between the root
+/// 8-wedge pie plus a full legend, and a single-wedge detail view for one
+/// phase plus its own mean/p95/p99/samples/skip readout — vanilla's own
+/// number-key drill/`0`-back navigation, as an F3 chord
+/// (`app::input::KeyOutcome::ProfilerChartSelect`).
+fn draw_profiler_chart(b: &mut Builder, chart: &ProfilerChart) {
+    let r = PROFILER_CHART_RADIUS;
+    let cx = b.w - DEBUG_MARGIN - r - 2.0;
+    let cy = b.h - DEBUG_MARGIN - r - 2.0;
+
+    // A slice's screen offset at angle `a` (0 = straight up, increasing
+    // clockwise — vanilla's own pie starts at 12 o'clock and sweeps
+    // clockwise too).
+    let point = |a: f32| (cx + r * a.sin(), cy - r * a.cos());
+    let shade = |c: [f32; 4], mid_angle: f32| {
+        // Lower half is where the offset's y component is positive, i.e.
+        // `cos(mid_angle) < 0` — see `PROFILER_CHART_LOWER_HALF_SHADE`'s doc.
+        if mid_angle.cos() < 0.0 {
+            [
+                c[0] * PROFILER_CHART_LOWER_HALF_SHADE,
+                c[1] * PROFILER_CHART_LOWER_HALF_SHADE,
+                c[2] * PROFILER_CHART_LOWER_HALF_SHADE,
+                c[3],
+            ]
+        } else {
+            c
+        }
+    };
+    let mut wedge = |a0: f32, a1: f32, c: [f32; 4]| {
+        let span = a1 - a0;
+        if span <= 0.0 {
+            return;
+        }
+        let steps = ((span / std::f32::consts::TAU) * PROFILER_CHART_STEPS as f32)
+            .ceil()
+            .max(1.0) as usize;
+        for i in 0..steps {
+            let t0 = a0 + span * (i as f32 / steps as f32);
+            let t1 = a0 + span * ((i + 1) as f32 / steps as f32);
+            let colour = shade(c, (t0 + t1) * 0.5);
+            b.colour().triangle((cx, cy), point(t0), point(t1), colour);
+        }
+    };
+
+    let legend_right = cx - r - 8.0;
+    let mut row = |b: &mut Builder, i: usize, swatch: [f32; 4], text: &str| {
+        let y = cy - r + i as f32 * DEBUG_LINE_H;
+        let tw = b.text_width(text, 1.0);
+        let x = legend_right - tw;
+        b.rect_px(x - 1.0, y - 1.0, tw + 2.0, DEBUG_LINE_H, DEBUG_LINE_BG);
+        b.rect_px(x - DEBUG_LINE_H, y, DEBUG_LINE_H - 2.0, DEBUG_LINE_H - 2.0, swatch);
+        b.text(text, x, y, 1.0, DEBUG_LINE_INK);
+    };
+
+    match chart.selected {
+        None => {
+            let total = chart.total_mean_ms();
+            if total <= 0.0 {
+                b.colour().triangle(
+                    (cx, cy),
+                    point(0.0),
+                    point(std::f32::consts::TAU * 0.9999),
+                    PROFILER_CHART_EMPTY,
+                );
+            } else {
+                let mut a = 0.0f32;
+                for (i, slice) in chart.slices.iter().enumerate() {
+                    let frac = (slice.mean_ms / total).max(0.0);
+                    let span = frac * std::f32::consts::TAU;
+                    wedge(a, a + span, PROFILER_CHART_COLORS[i % PROFILER_CHART_COLORS.len()]);
+                    a += span;
+                }
+            }
+            let mut i = 0usize;
+            for (idx, slice) in chart.slices.iter().enumerate() {
+                let pct = if total > 0.0 {
+                    slice.mean_ms / total * 100.0
+                } else {
+                    0.0
+                };
+                let text = format!(
+                    "[{}] {}: {pct:4.1}% {:.2} ms",
+                    idx + 1,
+                    slice.name,
+                    slice.mean_ms
+                );
+                row(b, i, PROFILER_CHART_COLORS[idx % PROFILER_CHART_COLORS.len()], &text);
+                i += 1;
+            }
+            if chart.gpu_unavailable {
+                row(b, i, [0.5, 0.5, 0.5, 0.9], "gpu timing: unavailable");
+                i += 1;
+            } else {
+                for &(name, ms) in &chart.gpu {
+                    let text = match ms {
+                        Some(ms) => format!("gpu {name}: {ms:.2} ms"),
+                        None => format!("gpu {name}: <no reading yet>"),
+                    };
+                    row(b, i, [0.7, 0.7, 0.75, 0.9], &text);
+                    i += 1;
+                }
+            }
+            if chart.gpu_stalled_frames > 0 {
+                row(
+                    b,
+                    i,
+                    [0.9, 0.2, 0.2, 0.9],
+                    &format!("gpu timer stalled_frames: {}", chart.gpu_stalled_frames),
+                );
+            }
+        }
+        Some(sel) if sel < chart.slices.len() => {
+            let slice = chart.slices[sel];
+            wedge(
+                0.0,
+                std::f32::consts::TAU * 0.9999,
+                PROFILER_CHART_COLORS[sel % PROFILER_CHART_COLORS.len()],
+            );
+            let lines = [
+                slice.name.to_string(),
+                format!("mean {:.2} ms", slice.mean_ms),
+                format!("p95  {:.2} ms", slice.p95_ms),
+                format!("p99  {:.2} ms", slice.p99_ms),
+                format!("samples {}/{}", slice.samples, slice.window),
+                format!("skipped {}", slice.skipped),
+                "[0] back to overview".to_string(),
+            ];
+            for (i, text) in lines.iter().enumerate() {
+                row(
+                    b,
+                    i,
+                    PROFILER_CHART_COLORS[sel % PROFILER_CHART_COLORS.len()],
+                    text,
+                );
+            }
+        }
+        Some(_) => {
+            // A stale selection past the current slice count (should not
+            // happen — `slices.len()` is fixed at `PHASE_COUNT` — but drawing
+            // nothing rather than panicking on an out-of-range index is the
+            // honest degrade for a debug overlay.
+        }
     }
 }
 

@@ -1009,6 +1009,28 @@ impl ApplicationHandler for WindowApp {
                             now,
                         ));
                     }
+                    Some(KeyOutcome::ToggleProfilerChart) => {
+                        self.debug_chord_used = true;
+                        self.show_profiler_chart = !self.show_profiler_chart;
+                        // Landing on the root every time the chart is shown
+                        // again is the honest default — a stale drill-in from
+                        // a previous session (or from before it was hidden)
+                        // is not a state the player asked to return to.
+                        if self.show_profiler_chart {
+                            self.profiler_chart_selected = None;
+                        }
+                    }
+                    Some(KeyOutcome::ProfilerChartSelect(selection)) => {
+                        self.debug_chord_used = true;
+                        // Only meaningful while the chart is actually shown —
+                        // otherwise this chord falls through with no visible
+                        // effect, matching vanilla's own number-key handling
+                        // (`DebugScreenOverlay.keyPressed` no-ops when the
+                        // profiler chart is not up).
+                        if self.show_profiler_chart {
+                            self.profiler_chart_selected = selection;
+                        }
+                    }
                     Some(KeyOutcome::ToggleSpectator) => {
                         self.debug_chord_used = true;
                         self.toggle_spectator();

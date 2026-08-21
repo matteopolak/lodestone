@@ -29,6 +29,10 @@ the existing engine-internals lines:
   a single `gpu timing: unavailable (device lacks Features::TIMESTAMP_QUERY)`
   line if the adapter/device does not support it — see "GPU timing" below.
 
+Press **Shift+F3** (while F3 is held) for the pie chart described below —
+vanilla's own visual, in the bottom-right corner rather than the text
+columns.
+
 The same two blocks are also emitted once a second as a `tracing` line on the
 `frame_profile` target (the `RUST_LOG` filter above), so a session run
 without a window focused on the overlay (or piped to a log file) still
@@ -149,6 +153,92 @@ measure). If a ring slot's previous readback has not completed by the time
 it comes back around, that is counted in `stalled_frames` (shown in the F3
 overlay and the tracing line whenever non-zero) rather than silently dropped
 or overwritten — real GPU/driver backpressure, not a bug in the timer.
+
+### Pie chart
+
+**What it is.** Vanilla's `Minecraft.renderFpsMeter` draws a filled pie —
+one wedge per profiler section, a legend, a darker lower half for a
+pseudo-3D read — and number keys walk into a child section while `0` walks
+back out. `hud::draw_profiler_chart` (`crates/lodestone-shell/src/hud.rs`) is
+a re-derivation of that shape, not a transliteration, feeding from this same
+instrument rather than a second one: **"build on what just landed, do not
+start a second system"** was the brief this landed under, and the chart's
+root-level wedges are exactly [`FramePhase::ALL`]'s eight CPU phases —
+the same summary the text lines already print, sized by `mean_ms` instead of
+formatted as a string.
+
+**Toggle and navigation.** Shift+F3 (`app::input::KeyOutcome::ToggleProfilerChart`,
+handled in `app/lifecycle.rs`) shows or hides the chart independently of the
+F3 text overlay itself — `WindowApp::show_profiler_chart`, a plain `bool`
+alongside `show_debug` rather than another `Arc<AtomicBool>`, since only
+`redraw` (same struct, same thread) ever reads it. F3+1..F3+8 drill into
+wedge `0..8` (`app::input::KeyOutcome::ProfilerChartSelect(Some(i))`), F3+0
+returns to the root (`ProfilerChartSelect(None)`) — **both are F3 chords, not
+a bare number-key press**, because the number row is already the (rebindable)
+hotbar selector; a bare press would fight it every time the chart is up. The
+selected wedge (`WindowApp::profiler_chart_selected`) persists across frames
+exactly like `show_profiler_chart` and resets to the root every time the
+chart is shown again, so a stale drill-in from a previous session is never
+what greets a fresh Shift+F3.
+
+**What is genuinely flat, and why there is no fabricated hierarchy.**
+`FramePhase`'s eight checkpoints are sequential siblings inside one
+`redraw` call, not a call tree — there is no real child section to drill
+into beneath any of them, so `draw_profiler_chart`'s "detail view" for a
+selected wedge is a focused single-wedge readout (mean/p95/p99/samples/skip)
+rather than a second, invented level of wedges. Fabricating fake children to
+make the navigation feel deeper would be exactly the kind of derived value
+this repo's evidence standard warns against — a number with no outside
+source. If `FramePhase` ever grows real nested checkpoints (a phase measured
+by pushing/popping a sub-timer), that is the natural place to give the chart
+a genuine second level; nothing about today's data model forecloses it.
+
+**Beyond vanilla, deliberately: GPU segments and skip counts, never folded
+into a wedge's own proportion.** `gpu::gpu_timing::GpuQueryTimer` runs on a
+different clock than the CPU phases (a few frames of readback lag; see "GPU
+timing" above), so `draw_profiler_chart` lists `gpu world`/`gpu
+first_person` as their own rows in the root view's side panel — never as a
+child wedge nested under `world_encode_submit`, which would silently claim
+the two clocks agree on when the corresponding work happened. Each phase's
+`skipped` counter (see "How it works" above — an early `return` in `redraw`
+means a phase never got marked this frame, not a fabricated `0.0`) is
+likewise a plain row, never smoothed into a wedge's size. `RenderStats`
+counters (sections drawn, draw calls, quads) are **not** duplicated onto the
+chart — they already have their own F3 text lines (`DebugStats::section_count`/
+`quads`/`draw_calls` and friends), and repeating them here would be a second,
+driftable copy of a number that already has one honest home.
+
+**A `None` GPU reading stays visibly "no reading yet", never a zero-width
+wedge.** This is the one place a zero really would read as "free": a wedge
+sized `0.0` and a wedge that was never measured are visually identical, so
+the GPU rows are text (`gpu world: <no reading yet>` / `gpu world: 1.23 ms`),
+not wedges, precisely so "unmeasured" cannot collapse into "free".
+
+**Colour.** `hud::PROFILER_CHART_COLORS` is a fixed eight-entry palette keyed
+by a phase's position in `FramePhase::ALL`, not stored per-slice
+(`hud::ProfilerChartSlice` carries no colour field) — vanilla assigns a
+section's pie colour by hashing its identity
+(`ProfileResults.getPreferredColor`); a fixed palette over a fixed, ordered
+eight-phase set is this instrument's equivalent of "stable colour per
+section across frames" without needing a hash.
+
+**The draw itself** is `crate::hud::item_icon::ColourStream::triangle` (a
+flat-shaded pixel-space triangle in NDC, alongside that type's existing
+`rect`/`gradient_rect`) fanned out per wedge at a fixed angular resolution
+(`PROFILER_CHART_STEPS`, independent of slice count, so one wide wedge and
+eight thin ones both read as round) — see `hud::draw_profiler_chart`'s own
+doc comment for the exact layout (bottom-right corner, legend to the pie's
+left).
+
+**The one gate that proves this reaches pixels, not just a model:**
+`gpu::pixel_gates::profiler_chart_draws_visible_pixels` — this instrument's
+own dominant-defect class (`CLAUDE.md`'s island rule) is a subsystem that is
+individually correct and reaches zero pixels because nothing calls the draw
+branch, so a gate that only asserts on `ProfilerChart`'s fields cannot see
+that. It renders the real HUD geometry through a headless GPU adapter with
+the chart on and off and requires pixels to move; the neuter (commenting out
+`draw_profiler_chart`'s call site) was run and watched fail before this
+landed, then restored.
 
 ## How to change it
 

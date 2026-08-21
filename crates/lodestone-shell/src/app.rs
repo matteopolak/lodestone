@@ -550,6 +550,21 @@ struct WindowApp {
     /// F3+G — draw the borders of the chunk the player is in. Same `Arc` reason
     /// as [`Self::debug_hitboxes`].
     debug_chunk_borders: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Shift+F3 — the profiler pie chart's own visibility, independent of
+    /// [`Self::show_debug`] (vanilla's F3 text overlay can be up with the
+    /// chart off, and — unlike vanilla — this instrument's chart needs no
+    /// live world to be meaningful, but it is only ever drawn while
+    /// `show_debug` is also true; see `app::redraw`'s gate). A plain `bool`,
+    /// not an `Arc<AtomicBool>` like [`Self::debug_hitboxes`]: nothing but
+    /// `redraw` (same struct, same thread) ever reads this.
+    show_profiler_chart: bool,
+    /// The profiler pie chart's drilled-in wedge, or `None` at the root —
+    /// vanilla's number-key/`0` navigation, as the F3 chord
+    /// [`app::input::KeyOutcome::ProfilerChartSelect`] sets it. Persists
+    /// across frames like [`Self::show_profiler_chart`] and for the same
+    /// reason: `hud::ProfilerChart::selected` is read fresh from here every
+    /// `redraw`, never accumulated in the HUD layer itself.
+    profiler_chart_selected: Option<usize>,
     /// The menu row whose slider the mouse is currently dragging, if any —
     /// vanilla's `AbstractSliderButton.dragging`.
     ///

@@ -2176,10 +2176,7 @@ fn the_profiler_chart_chords_need_the_modifier_held() {
         Some(KeyOutcome::ToggleProfilerChart)
     );
 
-    // Digit1..Digit8 drill into wedges 0..8; Digit0 returns to the root;
-    // Digit9 is not a profiler-chart key (only eight phases exist) and falls
-    // through to whatever it would otherwise resolve to (nothing, in the
-    // default table).
+    // Digit1..Digit8 drill into wedges 0..8; Digit0 returns to the root.
     assert_eq!(
         resolve(held, KeyCode::Digit1, true),
         Some(KeyOutcome::ProfilerChartSelect(Some(0)))
@@ -2192,7 +2189,15 @@ fn the_profiler_chart_chords_need_the_modifier_held() {
         resolve(held, KeyCode::Digit0, true),
         Some(KeyOutcome::ProfilerChartSelect(None))
     );
-    assert_eq!(resolve(held, KeyCode::Digit9, true), None);
+    // Digit9 is not a profiler-chart key (only eight phases exist), so it
+    // falls through to whatever it would otherwise resolve to — here, the
+    // ordinary (default-bound) hotbar slot 9 selection, since F3 held only
+    // intercepts the specific keys it lists, exactly like every other
+    // debug-held chord.
+    assert_eq!(
+        resolve(held, KeyCode::Digit9, true),
+        Some(KeyOutcome::SelectSlot(8))
+    );
 
     // Without the modifier, Shift is sneak (`Movement`) and the digits select
     // hotbar slots — both untouched by this change.

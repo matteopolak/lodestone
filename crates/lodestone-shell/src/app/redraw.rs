@@ -471,6 +471,18 @@ impl WindowApp {
             render.set_beacon_source(f);
         }
 
+        // `Display`-family entities (`text_display`/`item_display`/
+        // `block_display`). Unlike the sources above this is a plain value,
+        // not a closure — `Sim::display_draws` already resolved everything
+        // this frame (`crate::display_entities::extract_display_draws`,
+        // an `Extract`-schedule system, has already run by the time `redraw`
+        // reaches here) — so there is nothing left to poll, only to hand
+        // over. This was the missing hop: `RenderState::set_display_draws`
+        // existed with real consumers below it and nothing above it ever
+        // called it, so no `text_display` could ever draw regardless of how
+        // correctly everything else in the chain was wired.
+        render.set_display_draws(self.sim.display_draws());
+
         // End portals / end gateways. Same per-frame install as the sources
         // above, for uniformity — neither closure actually needs
         // reinstalling every frame (`Sim::end_portal_source`'s doc: no clock
