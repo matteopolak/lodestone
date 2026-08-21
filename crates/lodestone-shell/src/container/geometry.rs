@@ -21,7 +21,9 @@ use super::{
     BG_FLOATS_PER_VERTEX, BLAST_FURNACE_BURN_PROGRESS, BLAST_FURNACE_LIT_PROGRESS,
     BREWING_BREW_PROGRESS, BREWING_BUBBLES, BREWING_FUEL_LENGTH, CELL, FLOATS_PER_VERTEX,
     FURNACE_BURN_PROGRESS, FURNACE_LIT_PROGRESS, HIGHLIGHT, HIGHLIGHT_INSET,
-    MERCHANT_DISCOUNT_STRIKETHROUGH, MERCHANT_OUT_OF_STOCK, MERCHANT_TRADE_ARROW,
+    BEACON_BUTTON, BEACON_BUTTON_DISABLED, BEACON_BUTTON_HIGHLIGHTED, BEACON_BUTTON_SELECTED,
+    BEACON_CANCEL, BEACON_CONFIRM, MERCHANT_DISCOUNT_STRIKETHROUGH, MERCHANT_OUT_OF_STOCK,
+    MERCHANT_TRADE_ARROW,
     MERCHANT_TRADE_ARROW_OUT_OF_STOCK, SLOT, SLOT_HIGHLIGHT_BACK, SLOT_HIGHLIGHT_FRONT,
     SMOKER_BURN_PROGRESS, SMOKER_LIT_PROGRESS,
 };
@@ -588,6 +590,21 @@ impl ContainerGeometry {
                 }
             })
         };
+        // The cursor in the **logical** GUI canvas, which is the space every
+        // widget rect on this screen is stated in. `frame.cursor` is physical
+        // viewport pixels — the space `hit_test` takes — so the two cannot be
+        // compared directly; `hit_test_with_book` does this same division
+        // internally for slots, and a widget doing its own hit test (the
+        // beacon's ten buttons) needs it done once here rather than each
+        // restating the conversion.
+        let hovered_point = if frame.hover_blocked {
+            None
+        } else {
+            frame.cursor.map(|[cx, cy]| {
+                let scale = w / width.max(1) as f32;
+                [cx * scale, cy * scale]
+            })
+        };
         let slot_rect = |menu_index: usize| {
             layout
                 .slots
@@ -729,10 +746,8 @@ impl ContainerGeometry {
         draw_container_costs(&mut b, menu, &layout, frame, x, y);
 
         // The beacon's primary/secondary power buttons and confirm/cancel
-        // controls (issue #613's `SetBeaconEffects` remainder) — see
-        // `crate::container::beacon`'s module doc for why these draw as
-        // tinted swatches rather than real sprites.
-        draw_beacon_panel(&mut b, menu, frame, x, y);
+        // controls.
+        draw_beacon_panel(&mut b, menu, frame, background, hovered_point, x, y);
 
         // Every well first, so the colour stream splits cleanly into "chrome"
         // and "what goes on top of an icon". The icons are drawn between the two
@@ -1243,18 +1258,40 @@ fn draw_enchanting_costs(b: &mut Builder<'_>, menu: &Menu, frame: &ContainerFram
 /// re-expressed as normalised RGBA.
 const BEACON_LABEL_COLOUR: [f32; 4] = [0xf0 as f32 / 255.0, 0xe0 as f32 / 255.0, 0xe0 as f32 / 255.0, 1.0];
 
-/// `BeaconScreen.extractLabels`/`init` (`BeaconScreen.java`): the two
-/// centred "Primary Power"/"Secondary Power" labels, the eight power
-/// buttons and the confirm/cancel controls — see `crate::container::beacon`'s
-/// module doc for why the buttons draw as tinted swatches rather than real
-/// vanilla sprites (no GUI PNGs are bundled in this tree at all; every
-/// container background here is loaded live from the player's own
-/// `client.jar`, and this repo has no potion-effect icon atlas either — the
-/// status-effect HUD chips already establish the same "flat tinted swatch"
-/// simplification `crate::effects::tint_for` exists for).
+/// `BeaconScreen.extractLabels`/`init` (`BeaconScreen.java`): the two centred
+/// "Primary Power"/"Secondary Power" labels, the eight power buttons and the
+/// confirm/cancel controls.
+///
+/// Every button is two blits, exactly as `BeaconScreenButton.extractContents`
+/// does it: a `22x22` state sprite (disabled / selected / highlighted / plain,
+/// chosen in that order) and then an `18x18` icon two pixels in. For a power
+/// button that icon is the effect's own `mob_effect/<id>` sprite; for the last
+/// two it is `container/beacon/confirm`/`cancel`.
+///
+/// These used to draw as hash-derived tinted rectangles, above a comment saying
+/// no potion-effect icon art existed in this tree. That was true when it was
+/// written and is not now — the icons live in a second source directory of the
+/// GUI atlas (`textures/mob_effect/**`, see `ContainerBackground`), which is
+/// why a search for them under `gui/sprites/**` came up empty.
+///
+/// `hovered_point` is the cursor in this panel's own **logical** canvas space,
+/// which is what `isHoveredOrFocused` needs; `None` (no cursor, or the recipe
+/// book owning the pointer) simply never selects the highlighted state.
+///
+/// Without a `background` attached — a jar-less run — the buttons fall back to
+/// the tinted rectangles, the same degradation every other sprite on this
+/// screen takes.
 ///
 /// A no-op for every non-beacon screen.
-fn draw_beacon_panel(b: &mut Builder<'_>, menu: &Menu, frame: &ContainerFrame<'_>, x: f32, y: f32) {
+fn draw_beacon_panel(
+    b: &mut Builder<'_>,
+    menu: &Menu,
+    frame: &ContainerFrame<'_>,
+    background: Option<&ContainerBackground>,
+    hovered_point: Option<[f32; 2]>,
+    x: f32,
+    y: f32,
+) {
     if menu.special_layout() != Some(SpecialLayout::Beacon) {
         return;
     }
@@ -1273,6 +1310,29 @@ fn draw_beacon_panel(b: &mut Builder<'_>, menu: &Menu, frame: &ContainerFrame<'_
         b.shadowed_label(text, x + cx - w / 2.0, y + 10.0, 1.0, BEACON_LABEL_COLOUR);
     }
 
+    let hovers = |bx: f32, by: f32| {
+        hovered_point.is_some_and(|[cx, cy]| {
+            cx >= x + bx
+                && cx < x + bx + super::beacon::BUTTON
+                && cy >= y + by
+                && cy < y + by + super::beacon::BUTTON
+        })
+    };
+
+    // `BeaconScreenButton.extractContents`' own if/else-if chain, in its own
+    // order: inactive wins over selected, which wins over hovered.
+    let state_sprite = |active: bool, selected: bool, hovered: bool| {
+        if !active {
+            BEACON_BUTTON_DISABLED
+        } else if selected {
+            BEACON_BUTTON_SELECTED
+        } else if hovered {
+            BEACON_BUTTON_HIGHLIGHTED
+        } else {
+            BEACON_BUTTON
+        }
+    };
+
     for button in super::beacon::power_buttons()
         .into_iter()
         .chain(super::beacon::upgrade_button(frame.beacon_primary))
@@ -1283,32 +1343,27 @@ fn draw_beacon_panel(b: &mut Builder<'_>, menu: &Menu, frame: &ContainerFrame<'_
         } else {
             frame.beacon_secondary == Some(&button.effect)
         };
-        let tint = crate::effects::tint_for(button.effect.path());
-        // Dimmed to a third brightness when the pyramid has not unlocked
-        // this tier yet (`BUTTON_DISABLED_SPRITE`'s own darker art), lifted
-        // halfway to white when selected (`BUTTON_SELECTED_SPRITE`'s own
-        // brighter highlight) — approximations of those two sprite swaps,
-        // not a transcription of their exact pixels.
-        let mut colour = if unlocked {
-            [tint[0], tint[1], tint[2], 1.0]
-        } else {
-            [tint[0] / 3.0, tint[1] / 3.0, tint[2] / 3.0, 1.0]
-        };
-        if selected {
-            colour = [
-                (colour[0] + 1.0) / 2.0,
-                (colour[1] + 1.0) / 2.0,
-                (colour[2] + 1.0) / 2.0,
-                1.0,
-            ];
+        match background {
+            Some(bg) => {
+                draw_beacon_button(
+                    b,
+                    bg,
+                    state_sprite(unlocked, selected, hovers(button.x, button.y)),
+                    &crate::effects::mob_effect_sprite(button.effect.path()),
+                    x + button.x,
+                    y + button.y,
+                );
+            }
+            None => {
+                b.rect_px(
+                    x + button.x,
+                    y + button.y,
+                    super::beacon::BUTTON,
+                    super::beacon::BUTTON,
+                    beacon_fallback_colour(button.effect.path(), unlocked, selected),
+                );
+            }
         }
-        b.rect_px(
-            x + button.x,
-            y + button.y,
-            super::beacon::BUTTON,
-            super::beacon::BUTTON,
-            colour,
-        );
     }
 
     // `BeaconConfirmButton`/`BeaconCancelButton.updateStatus` — confirm is
@@ -1317,20 +1372,96 @@ fn draw_beacon_panel(b: &mut Builder<'_>, menu: &Menu, frame: &ContainerFrame<'_
     let has_payment = menu.slot_item(0).is_some();
     let can_confirm = frame.beacon_primary.is_some() && has_payment;
     let confirm = super::beacon::confirm_rect();
-    let confirm_colour = if can_confirm {
-        [80.0 / 255.0, 200.0 / 255.0, 80.0 / 255.0, 1.0]
-    } else {
-        [50.0 / 255.0, 90.0 / 255.0, 50.0 / 255.0, 1.0]
-    };
-    b.rect_px(x + confirm.x, y + confirm.y, confirm.w, confirm.h, confirm_colour);
     let cancel = super::beacon::cancel_rect();
-    b.rect_px(
-        x + cancel.x,
-        y + cancel.y,
-        cancel.w,
-        cancel.h,
-        [200.0 / 255.0, 80.0 / 255.0, 80.0 / 255.0, 1.0],
-    );
+    match background {
+        Some(bg) => {
+            for (rect, icon, active) in [
+                (confirm, BEACON_CONFIRM, can_confirm),
+                (cancel, BEACON_CANCEL, true),
+            ] {
+                draw_beacon_button(
+                    b,
+                    bg,
+                    // Neither is ever `selected` — `BeaconSpriteScreenButton`
+                    // does not call `setSelected`.
+                    state_sprite(active, false, hovers(rect.x, rect.y)),
+                    icon,
+                    x + rect.x,
+                    y + rect.y,
+                );
+            }
+        }
+        None => {
+            let confirm_colour = if can_confirm {
+                [80.0 / 255.0, 200.0 / 255.0, 80.0 / 255.0, 1.0]
+            } else {
+                [50.0 / 255.0, 90.0 / 255.0, 50.0 / 255.0, 1.0]
+            };
+            b.rect_px(x + confirm.x, y + confirm.y, confirm.w, confirm.h, confirm_colour);
+            b.rect_px(
+                x + cancel.x,
+                y + cancel.y,
+                cancel.w,
+                cancel.h,
+                [200.0 / 255.0, 80.0 / 255.0, 80.0 / 255.0, 1.0],
+            );
+        }
+    }
+}
+
+/// One `BeaconScreenButton`: its `22x22` state sprite, then its `18x18` icon
+/// inset by `BEACON_ICON_INSET` — `extractContents` followed by `extractIcon`.
+///
+/// The icon is looked up as a GUI sprite first and as a mob-effect icon second,
+/// because those live in two different source directories of the same vanilla
+/// atlas and this client keeps them in two lookups.
+fn draw_beacon_button(
+    b: &mut Builder<'_>,
+    bg: &ContainerBackground,
+    state: &str,
+    icon: &str,
+    x: f32,
+    y: f32,
+) {
+    if let Some(q) = bg.sprite_quad(state, x, y, super::beacon::BUTTON, super::beacon::BUTTON) {
+        b.bg_sprite(q);
+    }
+    let (ix, iy) = (x + BEACON_ICON_INSET, y + BEACON_ICON_INSET);
+    let size = crate::effects::INV_ICON_SIZE;
+    let quad = bg
+        .sprite_quad(icon, ix, iy, size, size)
+        .or_else(|| bg.mob_effect_icon_quad(icon, ix, iy, size, size));
+    if let Some(q) = quad {
+        b.bg_sprite(q);
+    }
+}
+
+/// `extractIcon`'s `getX() + 2, getY() + 2` — an `18x18` icon centred in a
+/// `22x22` button.
+const BEACON_ICON_INSET: f32 = 2.0;
+
+/// The jar-less stand-in a beacon button falls back to: the same hash-derived
+/// swatch every atlas-less icon in this crate uses, dimmed to a third when the
+/// pyramid has not unlocked the tier and lifted halfway to white when selected.
+///
+/// Approximations of `BUTTON_DISABLED_SPRITE`/`BUTTON_SELECTED_SPRITE`, not
+/// transcriptions — and only ever seen on a run with no resource pack at all.
+fn beacon_fallback_colour(path: &str, unlocked: bool, selected: bool) -> [f32; 4] {
+    let tint = crate::effects::tint_for(path);
+    let mut colour = if unlocked {
+        [tint[0], tint[1], tint[2], 1.0]
+    } else {
+        [tint[0] / 3.0, tint[1] / 3.0, tint[2] / 3.0, 1.0]
+    };
+    if selected {
+        colour = [
+            (colour[0] + 1.0) / 2.0,
+            (colour[1] + 1.0) / 2.0,
+            (colour[2] + 1.0) / 2.0,
+            1.0,
+        ];
+    }
+    colour
 }
 
 /// Everything one frame's drag preview needs, resolved once (part 2).
@@ -1561,7 +1692,7 @@ mod effect_column_tests {
     };
     use lodestone_assets::{Language, ResourceLocation, ResourceManager};
     use lodestone_game::effect::{ActiveEffects, StatusEffect};
-    use lodestone_model::Identifier;
+    use lodestone_model::{Identifier, ResourceKey};
 
     fn pack() -> ResourceManager {
         crate::resources::open_vanilla_pack_stack().expect(
@@ -1634,6 +1765,97 @@ mod effect_column_tests {
                 .expect("the pack must carry effect.duration.infinite"),
             "an infinite effect shows the pack's own infinity string, not a clock"
         );
+    }
+
+    /// Every beacon button must blit real pack art, not the jar-less tint
+    /// fallback: a `22x22` state sprite plus an `18x18` icon each.
+    ///
+    /// The expected quad count is **derived** from the button producers rather
+    /// than predicted — the first version of this gate guessed "ten buttons"
+    /// and the real number is six power buttons plus confirm and cancel, with
+    /// the ninth (`BeaconUpgradePowerButton`) appearing only once a primary is
+    /// chosen. That second arm is the discriminating one: it moves the count
+    /// by exactly two, which a per-button single blit could not produce.
+    ///
+    /// The negative control is the same screen with **no** background attached,
+    /// which must add no background-stream vertices at all — counting only
+    /// "more than zero" would pass on the panel sheet alone.
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn the_beacon_buttons_blit_a_state_sprite_and_a_real_effect_icon() {
+        let manager = pack();
+        let background = ContainerBackground::build(&manager).expect("the container atlas builds");
+        let menu = Menu::beacon();
+        // Tier 4, so every power button is unlocked — the state where they all
+        // draw their live sprite rather than the disabled one.
+        let data = [(0i32, 4i32)];
+        let (width, height) = (960u32, 540u32);
+
+        let build = |bg: Option<&ContainerBackground>, primary: Option<&ResourceKey>| {
+            ContainerGeometry::build_inner(
+                &ContainerFrame::new(Some(&menu), "Beacon")
+                    .with_cost_context(&data, false, 0)
+                    .with_beacon_selection(primary, None),
+                width,
+                height,
+                2,
+                &IconAssets {
+                    items: None,
+                    models: None,
+                },
+                None,
+                bg,
+            )
+        };
+        let quads = |geo: &ContainerGeometry| geo.bg_verts.len() / (BG_FLOATS_PER_VERTEX * 6);
+
+        assert_eq!(
+            build(None, None).bg_verts.len(),
+            0,
+            "the negative control has no atlas at all, so nothing may reach the \
+             background stream — otherwise the deltas below are not the buttons"
+        );
+
+        // `BeaconSpriteScreenButton`'s two: confirm and cancel.
+        const SPRITE_BUTTONS: usize = 2;
+        /// One whole-panel blit — `BeaconScreen`'s `230x219` sheet.
+        const PANEL_QUADS: usize = 1;
+        let per_button = 2; // extractContents + extractIcon
+
+        let unselected = crate::container::beacon::power_buttons().len() + SPRITE_BUTTONS;
+        assert_eq!(
+            quads(&build(Some(&background), None)),
+            PANEL_QUADS + unselected * per_button,
+            "with no primary chosen there are {unselected} buttons, each two blits, \
+             over one panel blit"
+        );
+
+        let primary: ResourceKey = "minecraft:speed".parse().expect("valid effect id");
+        assert!(
+            crate::container::beacon::upgrade_button(Some(&primary)).is_some(),
+            "choosing a primary must make the upgrade slot appear, or the arm below \
+             measures the same thing twice"
+        );
+        assert_eq!(
+            quads(&build(Some(&background), Some(&primary))),
+            PANEL_QUADS + (unselected + 1) * per_button,
+            "choosing a primary adds the BeaconUpgradePowerButton — two more blits, \
+             not one"
+        );
+
+        // And the effect icons specifically: each power button's own
+        // `mob_effect/<id>` sprite, resolved from the atlas independently.
+        let atlas = background.atlas();
+        for button in crate::container::beacon::power_buttons() {
+            let path = button.effect.path();
+            let loc = ResourceLocation::new("minecraft", format!("mob_effect/{path}"))
+                .expect("valid location");
+            assert!(
+                atlas.sprite(&loc).is_some(),
+                "the container atlas carries no mob_effect/{path} sprite, so that \
+                 beacon button has no icon to blit"
+            );
+        }
     }
 
     /// The icon and the background must be **real sprites out of the pack**,

@@ -63,7 +63,9 @@ Ported from `EffectsInInventory.extractEffects`/`getEffectName` and
   source directory finds none of the 41 vanilla icons, and a widget that blits
   one draws nothing. `ContainerBackground::build` enumerates that directory
   itself (fail-open per file) and `mob_effect_icon_quad` looks the result up by
-  sprite id.
+  sprite id. The beacon screen's eight power buttons are the second consumer of
+  that enumeration — they drew hash-derived tint swatches for the same reason,
+  above a comment saying the art did not exist.
 
 ### Layout: real 26.2 constants
 

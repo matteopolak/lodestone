@@ -156,6 +156,19 @@ const BLAST_FURNACE_BURN_PROGRESS: &str = "container/blast_furnace/burn_progress
 const SMOKER_LIT_PROGRESS: &str = "container/smoker/lit_progress";
 const SMOKER_BURN_PROGRESS: &str = "container/smoker/burn_progress";
 
+/// The beacon screen's own sprites (`BeaconScreen.java`): the four
+/// button states every one of its ten buttons blits behind its icon, plus the
+/// confirm/cancel glyphs the last two blit in front. The eight *power* buttons'
+/// front icon is the effect's own `mob_effect/<id>` sprite instead, which is
+/// not a `gui/sprites/**` entry and rides `ContainerBackground`'s separate
+/// `textures/mob_effect/**` enumeration.
+const BEACON_BUTTON: &str = "container/beacon/button";
+const BEACON_BUTTON_SELECTED: &str = "container/beacon/button_selected";
+const BEACON_BUTTON_HIGHLIGHTED: &str = "container/beacon/button_highlighted";
+const BEACON_BUTTON_DISABLED: &str = "container/beacon/button_disabled";
+const BEACON_CONFIRM: &str = "container/beacon/confirm";
+const BEACON_CANCEL: &str = "container/beacon/cancel";
+
 /// The brewing stand's three progress sprites,
 /// `BrewingStandScreen.java`.
 const BREWING_FUEL_LENGTH: &str = "container/brewing_stand/fuel_length";
@@ -211,6 +224,12 @@ const GUI_SPRITES: &[&str] = &[
     // separately (see `ContainerBackground::mob_effect_icons`).
     crate::effects::EFFECT_BACKGROUND_SPRITE,
     crate::effects::EFFECT_BACKGROUND_AMBIENT_SPRITE,
+    BEACON_BUTTON,
+    BEACON_BUTTON_SELECTED,
+    BEACON_BUTTON_HIGHLIGHTED,
+    BEACON_BUTTON_DISABLED,
+    BEACON_CONFIRM,
+    BEACON_CANCEL,
 ];
 
 /// [`GUI_SPRITES`] plus the creative screen's 28 tab buttons and 2 scroller

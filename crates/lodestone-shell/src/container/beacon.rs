@@ -44,14 +44,18 @@
 //! `base_name` copies). If the two ever disagree, the server's copy is
 //! authoritative; re-derive this one from `BeaconBlockEntity.java` again.
 //!
-//! No real button/effect sprite exists in this tree (no GUI PNGs are bundled
-//! anywhere in this crate — see `lodestone-assets`), so
-//! `container::geometry`'s draw side renders each button as a solid tint
-//! swatch keyed by effect id (`crate::effects::tint_for`, the same
-//! hash-derived colour the status-effect HUD chips already use), brightened
-//! when selected and dimmed when the pyramid has not unlocked that tier —
-//! the same "flat tinted rect" simplification this repo's boss-bar overlay
-//! already established, not a placeholder left unfinished.
+//! `container::geometry`'s draw side blits the real vanilla art for these:
+//! a `22x22` `container/beacon/button*` state sprite per button, then the
+//! effect's own `mob_effect/<id>` icon `18x18` two pixels in — the two blits
+//! `BeaconScreenButton.extractContents`/`extractIcon` make.
+//!
+//! It used to draw a hash-derived tint swatch instead, above a note saying no
+//! effect-icon art existed in this tree. That was written from a search of
+//! `gui/sprites/**`, which is genuinely where the button states live and
+//! genuinely *not* where the effect icons do: `atlases/gui.json` gives the GUI
+//! atlas a second source directory, `textures/mob_effect/**`, under a
+//! `mob_effect/` prefix. `ContainerBackground` enumerates both. The swatch
+//! survives only as the jar-less fallback.
 //!
 //! ## Dependencies
 //!
