@@ -118,9 +118,12 @@ impl WindowApp {
         // has *already* been re-meshed against the new atlas (its own doc);
         // this block only has to catch the GPU up: swap the terrain atlas's
         // bind groups in place (never a fifth bind group — see
-        // `RenderState::reload_block_atlas`'s doc) and reattach the HUD's and
-        // menu's own GUI atlases, which are separate stitches with their own
-        // owners.
+        // `RenderState::reload_block_atlas`'s doc) and reattach every surface
+        // that is a *separate* stitch with its own owner — the HUD's and menu's
+        // GUI atlases, the flat item atlas and its glint sheet, and the 3-D
+        // block-item pass, which is the one that merely *borrows* the world
+        // renderer's atlas/palette/anim objects and is therefore left holding
+        // dropped ones. Each of the four blocks below carries its own reason.
         if let Some(atlas) = self.sim.reload_resource_pack_atlas() {
             if let Some(gpu) = self.gpu.as_ref()
                 && let Some(render) = self.render.as_mut()
@@ -140,6 +143,72 @@ impl WindowApp {
                     && let Some(gui) = crate::resources::load_menu_gui_atlas()
                 {
                     menu.attach_gui(gpu.device(), gpu.queue(), gui);
+                }
+                // The flat item sprites are their own stitch with their own
+                // owner, exactly like the two GUI atlases above — so a pack's
+                // `textures/item/*.png` never reached a slot without this.
+                // Rebuilt rather than cloned: `load_item_atlas` reads the
+                // current pack stack on every call (there is no cache), which
+                // is what makes the icons and the world agree about which pack
+                // won. The glint sheet rides along, as at bring-up.
+                let item_atlas = crate::resources::load_item_atlas();
+                let glint_sheet = item_atlas
+                    .as_ref()
+                    .and_then(|_| crate::resources::load_glint_texture());
+                if let Some(gpu) = self.gpu.as_ref()
+                    && let Some(items) = item_atlas.clone()
+                {
+                    if let Some(hud) = self.hud.as_mut() {
+                        hud.attach_items(gpu.device(), gpu.queue(), format, items.clone());
+                        if let Some(img) = &glint_sheet {
+                            hud.attach_glint(gpu.device(), gpu.queue(), format, img);
+                        }
+                    }
+                    if let Some(container) = self.container.as_mut() {
+                        container.attach_items(gpu.device(), gpu.queue(), format, items);
+                        if let Some(img) = &glint_sheet {
+                            container.attach_glint(gpu.device(), gpu.queue(), format, img);
+                        }
+                    }
+                }
+                // The 3-D block-item pass is the one surface that borrows the
+                // *world* renderer's GPU objects rather than owning them: its
+                // atlas view, tint palette and animation buffers all come from
+                // `RenderState`'s `ModelRenderer`, and `reload_block_atlas`
+                // above replaced all three with new objects while re-baking
+                // every sprite's UVs. A bind group built at bring-up keeps the
+                // *old* texture alive (wgpu resources are `Arc`-backed), so
+                // nothing errors: the hotbar and every container slot go on
+                // sampling a dropped atlas with freshly repacked coordinates,
+                // which reads as block items rendering wrong — or, wherever the
+                // new UVs land on atlas padding, as not rendering at all —
+                // while the flat sprites above stay right because their atlas
+                // and their UVs are replaced together. `attach_item_models`
+                // rebuilds the whole `ModelIcons`, the same "rebuild the GPU
+                // object, overwrite the field" shape `reload_block_atlas` uses
+                // for its own bind groups.
+                if let Some(gpu) = self.gpu.as_ref()
+                    && let Some(render) = self.render.as_ref()
+                    && let (Some(view), Some(sampler), Some(palette), Some(anim)) = (
+                        render.model_atlas_view(),
+                        render.model_atlas_sampler(),
+                        render.model_palette_buffer(),
+                        render.model_anim_buffer(),
+                    )
+                {
+                    if let Some(hud) = self.hud.as_mut() {
+                        hud.attach_item_models(gpu.device(), format, view, sampler, palette, anim);
+                    }
+                    if let Some(container) = self.container.as_mut() {
+                        container.attach_item_models(
+                            gpu.device(),
+                            format,
+                            view,
+                            sampler,
+                            palette,
+                            anim,
+                        );
+                    }
                 }
             }
         }
