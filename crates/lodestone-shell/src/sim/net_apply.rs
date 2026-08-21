@@ -195,10 +195,18 @@ impl Sim {
                     // screen, once per frame.
                     let text = self.sign_text_at(pos);
                     let side = if is_front_text { text.front } else { text.back };
+                    // Plain text, not styled spans: opening the editor always
+                    // shows (and re-committing always overwrites with) a
+                    // plain literal per line, the same as vanilla's
+                    // `SignEditScreen` reading `getMessage(idx, false).getString()`
+                    // — editing discards formatting rather than round-tripping it.
+                    let lines = std::array::from_fn(|i| {
+                        side.lines[i].iter().map(|span| span.text.as_str()).collect::<String>()
+                    });
                     self.pending_sign_edit = Some(PendingSignEdit {
                         pos,
                         is_front_text,
-                        lines: side.lines,
+                        lines,
                     });
                 }
                 NetUpdate::ItemPickup(event) => {

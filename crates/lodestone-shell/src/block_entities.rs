@@ -4565,10 +4565,13 @@ mod sign_tests {
             .find(|id| lodestone_data::block_states::block_name(*id) == Some("minecraft:oak_sign"))
             .expect("oak_sign must be in the 26.2 state table");
         let mut text = SignText::default();
-        text.front.lines[0] = "LODESTONE PROBE".to_owned();
+        text.front.lines[0] = vec![lodestone_world::SignTextSpan {
+            text: "LODESTONE PROBE".to_owned(),
+            ..Default::default()
+        }];
         let spawn = sign_spawn([0, 64, 0], id, text, lodestone_render::ENTITY_FULLBRIGHT)
             .expect("a real oak_sign state must resolve to a spawn");
-        assert_eq!(spawn.front.lines[0], "LODESTONE PROBE");
+        assert_eq!(spawn.front.lines[0][0].text, "LODESTONE PROBE");
         assert!(matches!(spawn.orientation, SignOrientation::Ground { .. }));
     }
 

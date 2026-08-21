@@ -33,13 +33,34 @@
 //! `"` are part of the payload, not Rust's `Debug` escaping) — i.e. the JSON
 //! text a bare string component serializes to, stored as-is inside an NBT
 //! string rather than unwrapped into one. `resolve_message` parses that JSON
-//! and extracts plain text the same shape
-//! [`lodestone_core::plain_text_from_nbt_component`] uses for the
-//! NBT-structural form: a bare JSON string is its own text; an object's
-//! `"text"` field plus its `"extra"` array, recursively. Formatting (colour,
-//! bold, click events) is discarded — this port draws sign text in the
-//! side's own dye colour, not per-run formatting, matching what
-//! `docs/block-entity-renderers.md` scoped in.
+//! into [`SignTextSpan`]s: colour (named or `#rrggbb` hex), bold, italic,
+//! underline and strikethrough, inherited from an enclosing node down through
+//! its `extra` children the same way vanilla's `Style.inherit` resolves a
+//! component tree — a bare JSON string is its own (unstyled) text; an
+//! object's own `"text"` plus its `"extra"` array recursively, each level's
+//! own style fields winning over whatever it inherited.
+//!
+//! # Why this is not `lodestone_model::text::Text`
+//!
+//! Every other styled-text surface in this codebase (entity nametags,
+//! `text_display`) carries a real [`lodestone_model::text::Text`] from
+//! packet decode to draw. A sign's text cannot use that type:
+//! `lodestone-model` depends on `lodestone-world` itself (`pub use
+//! lodestone_world::{LoadedChunk, WorldSink}` in its `adapter` module, and
+//! `event.rs`'s `WorldSink`-driven `ClientEvent` handlers apply decoded
+//! packets straight into a live [`crate::World`]), so a
+//! `lodestone-world -> lodestone-model` edge back the other way would be a
+//! dependency cycle. [`SignTextSpan`] is this crate's own minimal analogue —
+//! same shape as [`lodestone_model::text::TextSpan`], already flattened and
+//! fully inherited rather than a tree, since sign text has no click/hover
+//! events or translation keys to preserve — and
+//! `lodestone-shell`'s `gpu/sign_text.rs` (which already depends on both
+//! crates) converts one into a real `lodestone_model::text::TextSpan` on its
+//! way into `gpu::nametag::layout_styled_ink_runs`, the same world-space
+//! styled-glyph layout the other two surfaces use. No second styled-text
+//! *layout* implementation exists because of this; only the JSON-to-spans
+//! *parse* is duplicated, and only because the crate graph leaves no other
+//! path.
 //!
 //! # Where this parse belongs, and why not a version crate
 //!
@@ -124,14 +145,50 @@ impl SignDyeColor {
     }
 }
 
+/// One already-flattened, fully-inherited styled run of one sign line's
+/// text — this crate's own minimal analogue of
+/// `lodestone_model::text::TextSpan`; see the module doc for why that real
+/// type cannot be used here.
+///
+/// `color` is `None` when neither this JSON node nor any of its ancestors up
+/// to the message root specified a colour. **`None` means "draw in the
+/// side's own dye colour", not "draw black" or "draw white" — the dye colour
+/// is a run's *default*, not an override.** This is
+/// `AbstractSignRenderer.submitSignText` passing the side's resolved colour
+/// as `Font`'s own default-colour argument, and `Font.java::getTextColor`
+/// only substituting a glyph's own `Style` colour when that style actually
+/// carries one — the identical "child wins when specified, otherwise inherit
+/// the surface's own base" rule [`lodestone_model::text`]'s `resolved_rgb`
+/// already applies for nametags and `text_display`. A run whose own colour
+/// *is* specified always wins over the dye, at any brightness.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SignTextSpan {
+    /// This run's plain text. Never empty — a JSON node whose own text is
+    /// empty contributes no span at all, the same "never emits an
+    /// empty-text span" contract `Text::to_spans` has.
+    pub text: String,
+    /// This run's own explicit colour (`0x00rrggbb`), resolved from a named
+    /// colour or a `#rrggbb` hex literal. `None` means unspecified — see the
+    /// type doc.
+    pub color: Option<u32>,
+    /// Bold, fully resolved (defaults to `false` at the message root, same
+    /// as vanilla's `Style.EMPTY`).
+    pub bold: bool,
+    /// Italic, fully resolved.
+    pub italic: bool,
+    /// Underlined, fully resolved.
+    pub underlined: bool,
+    /// Struck through, fully resolved.
+    pub strikethrough: bool,
+}
+
 /// One face's text — `SignText`'s `messages`, `color` and `hasGlowingText`
 /// fields, minus `filteredMessages` (see the module doc).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignSide {
-    /// Resolved plain text, one entry per line, top to bottom. Always four —
-    /// vanilla's `SignText.LINES = 4`. An empty string is a blank line, not
-    /// "no line".
-    pub lines: [String; 4],
+    /// One entry per line, top to bottom. Always four — vanilla's
+    /// `SignText.LINES = 4`. An empty `Vec` is a blank line, not "no line".
+    pub lines: [Vec<SignTextSpan>; 4],
     /// `has_glowing_text` (`SignText.hasGlowingText`) — full-bright dye
     /// colour instead of the darkened default when set.
     pub glowing: bool,
@@ -205,7 +262,7 @@ fn parse_side(nbt: &Nbt) -> SignSide {
     let glowing = find(fields, "has_glowing_text")
         .and_then(as_bool)
         .unwrap_or(false);
-    let mut lines: [String; 4] = Default::default();
+    let mut lines: [Vec<SignTextSpan>; 4] = Default::default();
     if let Some(Nbt::List { elements, .. }) = find(fields, "messages") {
         for (slot, element) in lines.iter_mut().zip(elements.iter()) {
             if let Nbt::String(raw) = element {
@@ -220,45 +277,158 @@ fn parse_side(nbt: &Nbt) -> SignSide {
     }
 }
 
-/// Resolves one `messages` element's JSON-text content into plain text — see
-/// the module doc for why this is JSON, not the NBT-structural component
-/// shape [`lodestone_core::plain_text_from_nbt_component`] handles.
-/// Malformed JSON degrades to the raw string verbatim (fail open, matching
-/// the rest of this parse) rather than losing the line entirely.
-fn resolve_message(raw: &str) -> String {
-    match serde_json::from_str::<serde_json::Value>(raw) {
-        Ok(value) => {
-            let mut out = String::new();
-            append_json_component_text(&value, &mut out);
-            out
+/// Maximum component nesting depth explored while parsing one `messages`
+/// element — matches [`lodestone_model::text`]'s own `MAX_DEPTH`, the same
+/// guard against hostile/malformed network input for the same reason (see
+/// the module doc for why this crate cannot simply depend on that one).
+const MAX_DEPTH: usize = 64;
+
+/// Style attributes accumulated while walking one JSON component tree —
+/// every field `None`/unset until a node along the walk specifies it, then
+/// carried down to that node's `extra` children by [`ResolvedStyle::inherit`]
+/// exactly as `Style.inherit` (child wins when specified, otherwise the
+/// parent's value survives).
+#[derive(Debug, Clone, Copy, Default)]
+struct ResolvedStyle {
+    color: Option<u32>,
+    bold: Option<bool>,
+    italic: Option<bool>,
+    underlined: Option<bool>,
+    strikethrough: Option<bool>,
+}
+
+impl ResolvedStyle {
+    fn own_from_object(map: &serde_json::Map<String, serde_json::Value>) -> Self {
+        ResolvedStyle {
+            color: map
+                .get("color")
+                .and_then(serde_json::Value::as_str)
+                .and_then(parse_text_color_name),
+            bold: map.get("bold").and_then(serde_json::Value::as_bool),
+            italic: map.get("italic").and_then(serde_json::Value::as_bool),
+            underlined: map.get("underlined").and_then(serde_json::Value::as_bool),
+            strikethrough: map.get("strikethrough").and_then(serde_json::Value::as_bool),
         }
-        Err(_) => raw.to_owned(),
+    }
+
+    fn inherit(self, parent: ResolvedStyle) -> Self {
+        ResolvedStyle {
+            color: self.color.or(parent.color),
+            bold: self.bold.or(parent.bold),
+            italic: self.italic.or(parent.italic),
+            underlined: self.underlined.or(parent.underlined),
+            strikethrough: self.strikethrough.or(parent.strikethrough),
+        }
+    }
+
+    /// Pushes a non-empty `text` node as one [`SignTextSpan`], resolving
+    /// every `Option<bool>` flag to `false` (the message-root default) if
+    /// still unset at this point in the walk.
+    fn push_text(self, text: &str, out: &mut Vec<SignTextSpan>) {
+        if text.is_empty() {
+            return;
+        }
+        out.push(SignTextSpan {
+            text: text.to_owned(),
+            color: self.color,
+            bold: self.bold.unwrap_or(false),
+            italic: self.italic.unwrap_or(false),
+            underlined: self.underlined.unwrap_or(false),
+            strikethrough: self.strikethrough.unwrap_or(false),
+        });
     }
 }
 
-/// Same recursive shape as
-/// [`lodestone_core::plain_text_from_nbt_component`]'s NBT walk
-/// (`text` + `extra`), over a parsed [`serde_json::Value`] instead of
-/// [`Nbt`] — a bare JSON string is its own text, an array concatenates its
-/// elements, and an object contributes its `"text"` field plus its
-/// `"extra"` array, recursively.
-fn append_json_component_text(value: &serde_json::Value, out: &mut String) {
+/// The sixteen legacy chat-colour names' RGB values
+/// (`0x00rrggbb`), transcribed from `ChatFormatting.java`'s constructor
+/// arguments — the same table `lodestone_model::text::TextColor::rgb`
+/// carries, duplicated here rather than depended on (see the module doc) —
+/// plus `#rrggbb` hex, `TextColor.java`'s modern colour form. `None` for
+/// anything else, including the pseudo-colour `"reset"` (a style reset, not
+/// a colour — sign text has nothing above the message root to reset to, so
+/// this parse has no use for it).
+fn parse_text_color_name(name: &str) -> Option<u32> {
+    if let Some(hex) = name.strip_prefix('#') {
+        return (hex.len() == 6)
+            .then(|| u32::from_str_radix(hex, 16).ok())
+            .flatten();
+    }
+    Some(match name {
+        "black" => 0x0000_0000,
+        "dark_blue" => 0x0000_00aa,
+        "dark_green" => 0x0000_aa00,
+        "dark_aqua" => 0x0000_aaaa,
+        "dark_red" => 0x00aa_0000,
+        "dark_purple" => 0x00aa_00aa,
+        "gold" => 0x00ff_aa00,
+        "gray" => 0x00aa_aaaa,
+        "dark_gray" => 0x0055_5555,
+        "blue" => 0x0055_55ff,
+        "green" => 0x0055_ff55,
+        "aqua" => 0x0055_ffff,
+        "red" => 0x00ff_5555,
+        "light_purple" => 0x00ff_55ff,
+        "yellow" => 0x00ff_ff55,
+        "white" => 0x00ff_ffff,
+        _ => return None,
+    })
+}
+
+/// Recursively walks one parsed JSON component value, appending flattened
+/// [`SignTextSpan`]s onto `out` — the styled sibling of the plain-text
+/// `text`/`extra` recursion every other resolved text in this codebase uses
+/// ([`lodestone_core::plain_text_from_nbt_component`]), over a
+/// [`serde_json::Value`] instead of an [`Nbt`]: a bare JSON string is its
+/// own (unstyled, inherited-only) text; an array concatenates its elements;
+/// an object contributes its own `"text"` (styled by its own fields plus
+/// whatever it inherited) then recurses into `"extra"` with its own
+/// style now the parent for that subtree.
+fn append_json_component_spans(
+    value: &serde_json::Value,
+    parent: ResolvedStyle,
+    depth: usize,
+    out: &mut Vec<SignTextSpan>,
+) {
+    if depth > MAX_DEPTH {
+        return;
+    }
     match value {
-        serde_json::Value::String(s) => out.push_str(s),
+        serde_json::Value::String(s) => parent.push_text(s, out),
         serde_json::Value::Array(items) => {
             for item in items {
-                append_json_component_text(item, out);
+                append_json_component_spans(item, parent, depth + 1, out);
             }
         }
         serde_json::Value::Object(map) => {
+            let resolved = ResolvedStyle::own_from_object(map).inherit(parent);
             if let Some(serde_json::Value::String(text)) = map.get("text") {
-                out.push_str(text);
+                resolved.push_text(text, out);
             }
             if let Some(extra) = map.get("extra") {
-                append_json_component_text(extra, out);
+                append_json_component_spans(extra, resolved, depth + 1, out);
             }
         }
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+/// Resolves one `messages` element's JSON-text content into styled spans —
+/// see the module doc for why this is JSON, not the NBT-structural component
+/// shape [`lodestone_core::plain_text_from_nbt_component`] handles.
+/// Malformed JSON degrades to one unstyled span carrying the raw string
+/// verbatim (fail open, matching the rest of this parse) rather than losing
+/// the line entirely.
+fn resolve_message(raw: &str) -> Vec<SignTextSpan> {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(value) => {
+            let mut out = Vec::new();
+            append_json_component_spans(&value, ResolvedStyle::default(), 0, &mut out);
+            out
+        }
+        Err(_) => vec![SignTextSpan {
+            text: raw.to_owned(),
+            ..Default::default()
+        }],
     }
 }
 
@@ -284,6 +454,13 @@ fn as_string(nbt: &Nbt) -> Option<&str> {
 mod tests {
     use super::*;
     use lodestone_core::NbtTag;
+
+    fn plain(text: &str) -> SignTextSpan {
+        SignTextSpan {
+            text: text.to_owned(),
+            ..Default::default()
+        }
+    }
 
     /// Builds the exact NBT `docs/block-entity-renderers.md`'s live probe
     /// captured for a real `oak_sign` with `front_text`/`back_text` set over
@@ -325,11 +502,11 @@ mod tests {
     #[test]
     fn parses_the_real_probe_capture() {
         let text = SignText::parse(&probe_nbt());
-        assert_eq!(text.front.lines[0], "LODESTONE PROBE");
-        assert_eq!(text.front.lines[1], "");
+        assert_eq!(text.front.lines[0], vec![plain("LODESTONE PROBE")]);
+        assert!(text.front.lines[1].is_empty());
         assert_eq!(text.front.color, SignDyeColor::Red);
         assert!(!text.front.glowing);
-        assert_eq!(text.back.lines, ["", "", "", ""]);
+        assert!(text.back.lines.iter().all(Vec::is_empty));
         assert_eq!(text.back.color, SignDyeColor::Black);
         assert!(!text.waxed);
     }
@@ -338,7 +515,7 @@ mod tests {
     fn end_nbt_degrades_to_the_default_blank_sign() {
         let text = SignText::parse(&Nbt::End);
         assert_eq!(text, SignText::default());
-        assert_eq!(text.front.lines, ["", "", "", ""]);
+        assert!(text.front.lines.iter().all(Vec::is_empty));
         assert_eq!(text.front.color, SignDyeColor::Black);
     }
 
@@ -361,7 +538,7 @@ mod tests {
         )]);
         let text = SignText::parse(&nbt);
         assert_eq!(text.front.color, SignDyeColor::Black);
-        assert_eq!(text.front.lines[0], "hi");
+        assert_eq!(text.front.lines[0], vec![plain("hi")]);
     }
 
     /// A rich (object-shaped) component with `extra` runs must concatenate,
@@ -371,12 +548,73 @@ mod tests {
     #[test]
     fn a_rich_component_concatenates_text_and_extra() {
         let raw = r#"{"text":"hello ","extra":[{"text":"world"},"!"]}"#;
-        assert_eq!(resolve_message(raw), "hello world!");
+        let spans = resolve_message(raw);
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, "hello world!");
     }
 
     #[test]
     fn malformed_json_degrades_to_the_raw_string_rather_than_losing_the_line() {
-        assert_eq!(resolve_message("not json"), "not json");
+        assert_eq!(resolve_message("not json"), vec![plain("not json")]);
+    }
+
+    /// The central control: an explicit **hex** colour on one run must
+    /// survive as `Some`, and a sibling run with no colour of its own must
+    /// come back `None` — never coerced to black, white, or the sibling's
+    /// colour. Hex, not one of the sixteen legacy colours, because a lossy
+    /// path (e.g. accidentally rounding to the nearest legacy colour) could
+    /// still happen to survive a legacy-colour fixture.
+    #[test]
+    fn an_explicit_hex_colour_survives_and_an_unset_sibling_has_none() {
+        let raw = r##"{"text":"a","color":"#123456","extra":[{"text":"b"}]}"##;
+        let spans = resolve_message(raw);
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert_eq!(spans[0].text, "a");
+        assert_eq!(spans[0].color, Some(0x0012_3456));
+        assert_eq!(spans[1].text, "b");
+        // Not `None`-coerced-to-something and not silently dropped: "b" has
+        // no colour of its own, so it *inherits* "a"'s explicit colour, the
+        // same way a real nested extra component would — see the type doc's
+        // "child wins when specified, otherwise inherit" rule.
+        assert_eq!(spans[1].color, Some(0x0012_3456));
+    }
+
+    /// The other half of inheritance: a child that *does* specify its own
+    /// colour overrides the parent's, rather than the parent always winning.
+    #[test]
+    fn a_child_can_override_the_parents_colour() {
+        let raw = r##"{"text":"a","color":"red","extra":[{"text":"b","color":"#00ff00"}]}"##;
+        let spans = resolve_message(raw);
+        assert_eq!(spans[0].color, Some(0x00ff_5555));
+        assert_eq!(spans[1].color, Some(0x0000_ff00));
+    }
+
+    /// A truly colour-less message (no node anywhere specifies one) must
+    /// resolve to `None`, not some fallback colour baked in at parse time —
+    /// the dye-colour fallback is the *draw site*'s job, not this parser's.
+    #[test]
+    fn a_message_with_no_colour_anywhere_resolves_to_none() {
+        let spans = resolve_message(r#"{"text":"plain"}"#);
+        assert_eq!(spans, vec![plain("plain")]);
+        assert_eq!(spans[0].color, None);
+    }
+
+    /// Bold set on the parent is inherited by a child that does not mention
+    /// it, and a child can explicitly turn a flag back off.
+    #[test]
+    fn style_flags_inherit_and_can_be_explicitly_cleared() {
+        let raw = r#"{"text":"a","bold":true,"underlined":true,"extra":[
+            {"text":"b"},
+            {"text":"c","underlined":false}
+        ]}"#;
+        let spans = resolve_message(raw);
+        assert_eq!(spans.len(), 3, "{spans:?}");
+        assert!(spans[0].bold && spans[0].underlined, "{:?}", spans[0]);
+        // Inherits both flags from "a".
+        assert!(spans[1].bold && spans[1].underlined, "{:?}", spans[1]);
+        // Inherits bold, explicitly clears underline.
+        assert!(spans[2].bold, "{:?}", spans[2]);
+        assert!(!spans[2].underlined, "{:?}", spans[2]);
     }
 
     #[test]

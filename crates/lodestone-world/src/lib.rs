@@ -101,7 +101,7 @@ pub use lighting::{
 pub use packed::PackedArray;
 pub use relight::Relit;
 pub use section::ChunkSection;
-pub use sign_text::{SignDyeColor, SignSide, SignText};
+pub use sign_text::{SignDyeColor, SignSide, SignText, SignTextSpan};
 pub use world::{
     BiomePatch, BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk,
     PENDING_RELIGHT_CAP, World, WorldSink,

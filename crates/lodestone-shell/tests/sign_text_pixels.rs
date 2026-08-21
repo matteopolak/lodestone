@@ -42,7 +42,7 @@ use lodestone::gpu::{RenderState, SKY_COLOR};
 use lodestone_render::{
     Camera, GpuContext, HeadlessTarget, RenderTarget, SignKind, SignOrientation, SignSpawn,
 };
-use lodestone_world::SignSide;
+use lodestone_world::{SignSide, SignTextSpan};
 
 const W: u32 = 320;
 const H: u32 = 240;
@@ -255,7 +255,10 @@ fn gpu() -> GpuContext {
 /// `dark_scaling_truncates_like_the_real_jar` unit test's job).
 fn sign_with_text() -> SignSpawn {
     let mut front = SignSide::default();
-    front.lines[0] = "LODESTONE".to_owned();
+    front.lines[0] = vec![SignTextSpan {
+        text: "LODESTONE".to_owned(),
+        ..Default::default()
+    }];
     front.glowing = true;
     SignSpawn {
         pos: SIGN,
@@ -380,7 +383,10 @@ fn front_and_back_text_project_to_different_areas() {
         let mut target = HeadlessTarget::new(device, W, H, format);
         let mut state = RenderState::new(device, queue, format, W, H, None);
         let mut side = SignSide::default();
-        side.lines[0] = "LODESTONE".to_owned();
+        side.lines[0] = vec![SignTextSpan {
+            text: "LODESTONE".to_owned(),
+            ..Default::default()
+        }];
         side.glowing = true;
         let spawn = if front_text {
             SignSpawn {

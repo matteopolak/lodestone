@@ -506,7 +506,7 @@ session built is the text.
 `crates/lodestone-world/src/sign_text.rs`. Parses `front_text`/`back_text`/`is_waxed` out of the
 `BlockEntity.nbt` compound `chest`/skull already proved generic (the shape this doc's earlier probe
 captured, quoted above) into `SignText { front: SignSide, back: SignSide, waxed: bool }`, where
-`SignSide` is `{ lines: [String; 4], glowing: bool, color: SignDyeColor }`.
+`SignSide` is `{ lines: [Vec<SignTextSpan>; 4], glowing: bool, color: SignDyeColor }`.
 
 **The one real surprise: `messages` elements are JSON text, not the NBT-structural component shape**
 `lodestone_core::plain_text_from_nbt_component` already handles (the one every other resolved text in
@@ -515,12 +515,34 @@ arrives as the *18-character NBT string* `"LODESTONE PROBE"` — opening and clo
 payload bytes, not `Debug` escaping, i.e. the JSON serialization of the component stored verbatim
 inside an `Nbt::String` rather than unwrapped into one. `sign_text.rs`'s `resolve_message` parses that
 JSON (via `serde_json`, promoted from a dev-dependency to a real one in `lodestone-world`'s
-`Cargo.toml` for this) and walks it with the same `text`/`extra` recursion
-`plain_text_from_nbt_component` uses, just over a `serde_json::Value` instead of an `Nbt`. This was
+`Cargo.toml` for this) and walks it into a `Vec<SignTextSpan>` — one already-flattened, fully-inherited
+run per `text`/`extra` node, carrying its own resolved colour (named or `#rrggbb` hex) plus
+bold/italic/underline/strikethrough, the styled sibling of the plain `text`/`extra` recursion
+`plain_text_from_nbt_component` uses, over a `serde_json::Value` instead of an `Nbt`. This was
 re-confirmed live rather than trusted from the original probe alone: placing a fresh `oak_sign` on the
 creative oracle and reading it back with `/data get block` returned
 `front_text: {has_glowing_text: 1b, color: "blue", messages: ['"LODESTONE LIVE TEST"', '""', '""', '""']}`
 — the same quoted-JSON-inside-a-string shape, on a second, independent capture.
+
+**Why `SignTextSpan` and not a real `lodestone_model::text::Text`**, the type every other styled-text
+surface (nametags, `text_display`) threads from packet decode to draw: `lodestone-model` depends on
+`lodestone-world` itself (`WorldSink`/`LoadedChunk`, `event.rs`'s `ClientEvent` handlers writing into a
+live `World`), so the reverse edge this parse would otherwise want is a dependency cycle, not a missing
+`Cargo.toml` line. `SignTextSpan` is this crate's own minimal analogue of
+`lodestone_model::text::TextSpan` — same shape, already flattened rather than a tree, since sign text
+has no click/hover events or translation keys worth preserving. `gpu/sign_text.rs` (which already
+depends on both crates) converts one into a real `TextSpan` on its way into
+`gpu::nametag::layout_styled_ink_runs`, so there is exactly one styled-glyph-layout implementation, not
+two — only the JSON-to-spans *parse* is duplicated, and only because the crate graph leaves no other
+path.
+
+**The side's own dye colour is a run's *default*, not an override.** A `SignTextSpan::color` of `None`
+means "no node from this run up to the message root specified a colour" — the draw site
+(`gpu/sign_text.rs`) fills it with the side's own resolved colour (full dye when glowing,
+`ARGB.scaleRGB(dye, 0.4)` otherwise) only for runs that leave it unset; a run whose colour *is*
+specified always wins, at any brightness. This is `AbstractSignRenderer.submitSignText` passing the
+side's resolved colour as `Font`'s own default-colour argument, and `Font.java::getTextColor`
+substituting it only when a glyph's own `Style` carries no colour at all.
 
 `filtered_messages` (the server's profanity-filter shadow copy) is not parsed — this port has no
 client-side text-filtering setting, and vanilla's own default is off, so `SignSide::lines` always
@@ -585,12 +607,19 @@ gamma-space, matching every other tint/shade in this codebase.
 - Line wrapping past `MAX_TEXT_LINE_WIDTH` (90 px). The four stored lines are trusted to already fit,
   which the vanilla sign-edit screen enforces at typing time; only a modded server or a hand-edited
   NBT payload could send an over-width line.
-- Rich per-run formatting (colour/bold/italic/click events) inside one line. `resolve_message`
-  extracts plain text only; the whole line draws in the side's own dye colour.
+- Click/hover events and translation keys inside one line's JSON component. `resolve_message` flattens
+  `text`/`extra` into styled runs (colour, bold, italic, underline, strikethrough — see the typed-parse
+  section above) but carries no interactivity and does not resolve `translate` keys, the same scope
+  `SignTextSpan`'s own doc names.
 **No longer deferred: hanging signs — see [Hanging signs](#hanging-signs-the-same-renderer-four-numbers-apart)
 below.** The bullet that used to sit here said they needed "a different model set again (chains, a
 bar, its own text transform)" and cost the next reader a wrong estimate: that is **1.20's** shape.
 In 26.2 there is no rig to port.
+**Also no longer deferred: rich per-run formatting (colour — including hex — bold, italic, underline,
+strikethrough) inside one line.** `SignSide::lines` now carries `Vec<SignTextSpan>` per line rather than
+a flat `String`, and `gpu/sign_text.rs` draws through `gpu::nametag::layout_styled_ink_runs` — the same
+styled world-space glyph layout nametags and `text_display` use — instead of the old unstyled
+`layout_ink_runs`. See the typed-parse section above for the dye-as-default rule.
 
 ### Hanging signs: the same renderer, four numbers apart
 
@@ -655,8 +684,8 @@ and not the other's. Two things made it worth building rather than trusting a ve
 
 ### The GPU pass — `gpu/sign_text.rs`, beside `gpu/nametag.rs`, not inside it
 
-`gpu/nametag.rs` was extended rather than sat beside for its *font loading and ink-run layout*
-(`layout_ink_runs`/`load_font`, now `pub(super)` so `gpu/sign_text.rs` can call them directly instead
+`gpu/nametag.rs` was extended rather than sat beside for its *font loading and styled ink-run layout*
+(`layout_styled_ink_runs`/`load_font`, `pub(super)` so `gpu/sign_text.rs` can call them directly instead
 of duplicating a third jar-discovery snippet — that module's own doc already explains why *it*
 duplicates `hud/vanilla_font.rs`'s, and the reasoning does not extend to a sibling file this task
 owns outright). The **pass itself is a new, separate module**, not an extension of

@@ -1,13 +1,37 @@
-//! World-space sign text (that fix's sign scope): coloured quads placed by
+//! World-space sign text: coloured quads placed by
 //! [`lodestone_render::sign_text_transform`], reusing `gpu/nametag.rs`'s
-//! jar-sourced font loader and ink-run layout rather than reinventing either
-//! — [`super::nametag::layout_ink_runs`]/[`super::nametag::load_font`] are
-//! `pub(super)` for exactly this, since both files are submodules of
-//! `crate::gpu`. The shader is the identical file too
-//! (`shaders/nametag.wgsl`: one `view_proj` uniform, a flat vertex colour, no
-//! texture) — a coloured-quad-from-a-raster-font pass is the same shape here
-//! as it is there, so a second `.wgsl` would be a copy with nothing to
-//! diverge.
+//! jar-sourced font loader and *styled* ink-run layout rather than
+//! reinventing either — [`super::nametag::layout_styled_ink_runs`]/
+//! [`super::nametag::load_font`] are `pub(super)` for exactly this, since
+//! both files are submodules of `crate::gpu`. The shader is the identical
+//! file too (`shaders/nametag.wgsl`: one `view_proj` uniform, a flat vertex
+//! colour, no texture) — a coloured-quad-from-a-raster-font pass is the same
+//! shape here as it is there, so a second `.wgsl` would be a copy with
+//! nothing to diverge.
+//!
+//! # Per-run styling, and the dye colour as a *default*
+//!
+//! [`lodestone_world::SignSide::lines`] carries real
+//! [`lodestone_world::SignTextSpan`]s now (colour — including hex — bold,
+//! italic, underline, strikethrough, inherited through nested JSON `extra`
+//! components at parse time; see that type's module doc for why it is not
+//! literally `lodestone_model::text::Text`). [`push_side_quads`] converts
+//! each line's spans into real `lodestone_model::text::TextSpan`s and hands
+//! them to [`super::nametag::layout_styled_ink_runs`] — the same styled
+//! world-space glyph layout nametags and `text_display` already use, so
+//! there is exactly one implementation of "turn styled spans into ink",
+//! never a second.
+//!
+//! **The side's own dye colour is the default a run falls back to, not an
+//! override**: `AbstractSignRenderer.submitSignText` passes the side's
+//! resolved colour (full dye when glowing, `ARGB.scaleRGB(dye, 0.4)`
+//! otherwise) as `Font`'s own default-colour argument, and
+//! `Font.java::getTextColor` only substitutes it when a glyph's own `Style`
+//! carries no colour at all — a run that *does* specify one always wins,
+//! at any brightness. [`default_run_color`] resolves that default (via
+//! [`sign_side_color`], the existing glow/dark-scale logic, unchanged), and
+//! [`styled_spans`] fills it in only for runs whose own
+//! [`lodestone_world::SignTextSpan::color`] is `None`.
 //!
 //! # Depth: vanilla's `TEXT_POLYGON_OFFSET` pipeline, ported
 //!
@@ -47,14 +71,18 @@
 //! real gaps this pass inherits (the black-dye-glowing outline, and
 //! per-glyph world-light modulation) — both documented there rather than
 //! here because they are properties of the *colour this pass is handed*, not
-//! of how this pass draws it.
+//! of how this pass draws it. Neither is affected by per-run styling: an
+//! explicit run colour is used verbatim, the same way the pre-existing dye
+//! default was, so this change closes the "no per-run formatting" gap
+//! without touching either of those two.
 
 use glam::Vec3;
 use lodestone_assets::font::RasterFont;
+use lodestone_model::text::{TextColor, TextSpan, TextStyle};
 use lodestone_render::{
     DEPTH_FORMAT, SignKind, SignOrientation, SignSpawn, sign_side_color, sign_text_transform,
 };
-use lodestone_world::SignSide;
+use lodestone_world::{SignSide, SignTextSpan};
 
 /// Same vertex shape as `gpu/nametag.rs`'s own `NameTagVertex` — kept as its
 /// own type rather than shared, matching this crate's established
@@ -84,11 +112,11 @@ pub(super) struct SignTextRenderer {
     /// `None` off a jar-less run — same fail-open contract as
     /// [`super::nametag::NameTagRenderer::font`].
     font: Option<RasterFont>,
-    /// Ink-run layouts, persisted across frames — sign text
+    /// Styled ink-run layouts, persisted across frames — sign text
     /// changes only on a block-entity update, so the texel walk must not run
-    /// per frame either. Shares [`super::nametag::InkLayoutCache`] for the same
-    /// reason this file already shares `layout_ink_runs`.
-    ink: super::nametag::InkLayoutCache,
+    /// per frame either. Shares [`super::nametag::StyledInkLayoutCache`] for
+    /// the same reason this file already shares `layout_styled_ink_runs`.
+    ink: super::nametag::StyledInkLayoutCache,
 }
 
 impl SignTextRenderer {
@@ -198,7 +226,7 @@ impl SignTextRenderer {
             uniform,
             vertices,
             font: super::nametag::load_font(),
-            ink: super::nametag::InkLayoutCache::default(),
+            ink: super::nametag::StyledInkLayoutCache::default(),
         }
     }
 
@@ -261,6 +289,43 @@ impl SignTextRenderer {
     }
 }
 
+/// This side's resolved default run colour, packed `0x00rrggbb` — the exact
+/// value [`sign_side_color`] already computes (full dye when glowing,
+/// `ARGB.scaleRGB(dye, 0.4)` otherwise), just converted back from its `0..=1`
+/// float form into the integer form [`lodestone_world::SignTextSpan::color`]
+/// and [`lodestone_model::text::TextColor::Rgb`] both use. A pure unit
+/// conversion of an already-correct value, not a re-derivation of the
+/// vanilla dark-scale formula (which stays the crate that already owns it) —
+/// exact for every `0..=255` channel value `scale_rgb`'s own integer
+/// truncation can produce.
+fn default_run_color(side: &SignSide) -> u32 {
+    let [r, g, b, _] = sign_side_color(side);
+    let ch = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (ch(r) << 16) | (ch(g) << 8) | ch(b)
+}
+
+/// Converts one line's already-flattened, already-inherited
+/// [`SignTextSpan`]s into real `lodestone_model::text::TextSpan`s, filling
+/// `default_rgb` in for any run whose own colour is `None` — see the module
+/// doc's "Per-run styling, and the dye colour as a *default*" section for
+/// why this is a fill-in-the-default rather than a flat override.
+fn styled_spans(line: &[SignTextSpan], default_rgb: u32) -> Vec<TextSpan> {
+    line.iter()
+        .map(|span| TextSpan {
+            text: span.text.clone(),
+            style: TextStyle {
+                color: Some(TextColor::Rgb(span.color.unwrap_or(default_rgb))),
+                bold: Some(span.bold),
+                italic: Some(span.italic),
+                underlined: Some(span.underlined),
+                strikethrough: Some(span.strikethrough),
+                obfuscated: None,
+                font: None,
+            },
+        })
+        .collect()
+}
+
 /// Lowers one text side into world-space quads, appended onto `out`. A no-op
 /// for a side whose four lines are all empty — vanilla's own font-split of
 /// an empty string contributes no ink either, so this is an optimisation,
@@ -268,7 +333,7 @@ impl SignTextRenderer {
 #[allow(clippy::too_many_arguments)]
 fn push_side_quads(
     raster: &RasterFont,
-    ink: &super::nametag::InkLayoutCache,
+    ink: &super::nametag::StyledInkLayoutCache,
     side: &SignSide,
     pos: [i32; 3],
     kind: SignKind,
@@ -276,11 +341,11 @@ fn push_side_quads(
     is_front: bool,
     out: &mut Vec<SignTextVertex>,
 ) {
-    if side.lines.iter().all(String::is_empty) {
+    if side.lines.iter().all(Vec::is_empty) {
         return;
     }
     let matrix = sign_text_transform(pos, kind, orientation, is_front);
-    let color = sign_side_color(side);
+    let default_rgb = default_run_color(side);
     // `AbstractSignRenderer.submitSignText`: `signMidpoint = 4 *
     // textLineHeight / 2`, i.e. two full lines — line `i`'s top sits at
     // `i * textLineHeight - signMidpoint`. The height is the **block
@@ -291,10 +356,14 @@ fn push_side_quads(
         if line.is_empty() {
             continue;
         }
-        let layout = ink.layout(raster, line);
+        let spans = styled_spans(line, default_rgb);
+        let layout = ink.layout(raster, &spans);
         let (rects, total_width) = (&layout.0, layout.1);
         // Each line is centred independently, matching `x1 =
         // -font.width(line) / 2` — not all four lines sharing one width.
+        // `total_width` already accounts for bold's widened advance (see
+        // `layout_styled_ink_runs`'s doc), so a bold line still centres
+        // correctly against its own (wider) measured width.
         let x1 = -total_width / 2.0;
         let y_off = i as f32 * line_height - sign_midpoint;
         for rect in rects {
@@ -313,6 +382,7 @@ fn push_side_quads(
             let br = matrix
                 .transform_point3(Vec3::new(lx + rect.w, ly + rect.h, 0.0))
                 .to_array();
+            let color = rect.color;
             out.extend([
                 SignTextVertex { position: tl, color },
                 SignTextVertex { position: bl, color },
@@ -328,10 +398,18 @@ fn push_side_quads(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_world::SignDyeColor;
+
+    fn plain_span(text: &str) -> SignTextSpan {
+        SignTextSpan {
+            text: text.to_owned(),
+            ..Default::default()
+        }
+    }
 
     fn sign_with_front_text(text: &str) -> SignSpawn {
         let mut spawn = SignSpawn::at([0, 0, 0]);
-        spawn.front.lines[0] = text.to_owned();
+        spawn.front.lines[0] = vec![plain_span(text)];
         spawn
     }
 
@@ -343,7 +421,7 @@ mod tests {
         let Some(raster) = super::super::nametag::load_font() else {
             return;
         };
-        let ink = super::super::nametag::InkLayoutCache::default();
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
         let mut out = Vec::new();
         let spawn = SignSpawn::at([0, 0, 0]);
         push_side_quads(
@@ -377,7 +455,7 @@ mod tests {
         let Some(raster) = super::super::nametag::load_font() else {
             return;
         };
-        let ink = super::super::nametag::InkLayoutCache::default();
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
         let spawn = sign_with_front_text("LODESTONE");
         let mut front = Vec::new();
         push_side_quads(
@@ -404,5 +482,74 @@ mod tests {
             &mut back,
         );
         assert!(back.is_empty(), "an untouched back side must contribute nothing");
+    }
+
+    /// The central control: one line with no colour of its own must draw in
+    /// the sign's own dye colour, and a *sibling* line carrying an explicit
+    /// **hex** colour (not one of the sixteen legacy colours, so a lossy
+    /// legacy-only path could not accidentally survive this) must draw in
+    /// its own colour instead — never the dye's, and never the other way
+    /// round. One fixture, both arms, so a fix that simply ignores the dye
+    /// (every vertex the hex colour) or one that simply ignores per-run
+    /// colour (every vertex the dye) both fail this.
+    #[test]
+    fn an_explicit_run_colour_wins_and_an_unset_run_falls_back_to_the_dye() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
+        let mut side = SignSide::default();
+        side.color = SignDyeColor::Red;
+        side.lines[0] = vec![plain_span("A")];
+        side.lines[1] = vec![SignTextSpan {
+            text: "B".to_owned(),
+            color: Some(0x0012_3456),
+            ..Default::default()
+        }];
+
+        let mut out = Vec::new();
+        push_side_quads(
+            &raster,
+            &ink,
+            &side,
+            [0, 0, 0],
+            SignKind::Plain,
+            SignOrientation::Ground { rotation_segment: 0 },
+            true,
+            &mut out,
+        );
+        assert!(!out.is_empty(), "the fixture must contribute ink to test anything");
+
+        let unpack = |rgb: u32| {
+            [
+                ((rgb >> 16) & 0xFF) as f32 / 255.0,
+                ((rgb >> 8) & 0xFF) as f32 / 255.0,
+                (rgb & 0xFF) as f32 / 255.0,
+            ]
+        };
+        let close = |a: [f32; 4], b: [f32; 3]| {
+            (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3 && (a[2] - b[2]).abs() < 1e-3
+        };
+        let dye_rgb = unpack(default_run_color(&side));
+        let hex_rgb = unpack(0x0012_3456);
+
+        assert!(
+            out.iter().any(|v| close(v.color, dye_rgb)),
+            "no vertex drew in the sign's own dye colour {dye_rgb:?} — the \
+             colour-less run's default fallback is broken"
+        );
+        assert!(
+            out.iter().any(|v| close(v.color, hex_rgb)),
+            "no vertex drew in the explicit hex colour {hex_rgb:?} — an \
+             explicit run colour did not survive to the draw"
+        );
+        for v in &out {
+            assert!(
+                close(v.color, dye_rgb) || close(v.color, hex_rgb),
+                "unexpected vertex colour {:?} — neither the dye {dye_rgb:?} \
+                 nor the explicit hex colour {hex_rgb:?}",
+                v.color
+            );
+        }
     }
 }
