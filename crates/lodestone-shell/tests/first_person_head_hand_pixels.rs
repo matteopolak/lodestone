@@ -115,6 +115,7 @@ fn a_held_player_head_reaches_pixels_and_a_held_chest_still_does_too() {
                 potion_color: None,
                 banner_patterns: Vec::new(),
                 base_color: None,
+                skin: None,
             })
         });
         let frame = target.acquire().expect("headless acquire");
@@ -152,5 +153,154 @@ fn a_held_player_head_reaches_pixels_and_a_held_chest_still_does_too() {
         head_n > 30,
         "a held player_head reached only {head_n} non-sky pixels (chest control reached \
          {chest_n}) — near-zero means a degenerate draw, not merely dim"
+    );
+}
+
+
+/// A **custom head** held in hand draws its own fetched sheet, not the default
+/// Steve one.
+///
+/// # Why the hand needs its own gate
+///
+/// The same loss existed at three surfaces and was fixed at the world one
+/// first, so "the head is correct when placed" was true while the same stack
+/// drew a plain face in a slot *and* in your hand. The GUI half has its own
+/// gate (`container_item_pixels.rs`); this is the hand's, because
+/// `RenderState::prepare_special_hand` is a **different draw site with its own
+/// resolver** — the point this file's module doc already makes for the plain
+/// head.
+///
+/// # The arms
+///
+/// | arm | bind group for the url | expected |
+/// |---|---|---|
+/// | before | none installed | byte-identical to a plain head |
+/// | after | installed | differs |
+///
+/// The *before* arm is the executed control: it proves the difference comes
+/// from the installed sheet and not from `MainHandItem::skin` being `Some` at
+/// all, and it pins the documented fallback (a head whose fetch has not landed
+/// draws the default sheet rather than nothing).
+///
+/// # What this does not cover
+///
+/// It installs its own `MainHandItem`, so it proves the *draw* and says nothing
+/// about the producer. That half is `container::builder`'s own
+/// `icon_record_carries_a_custom_heads_profile_skin_and_starts_its_fetch`: the
+/// hand's record is a clone of the hotbar record `icon_record`'s sibling in
+/// `app::redraw` builds, so the two together cover the chain.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_held_custom_head_draws_its_own_skin_rather_than_the_default_sheet() {
+    // No fetch is started on this path (nothing calls `stack_skin_url` here),
+    // but an RFC 2606 `.invalid` host keeps that true by construction.
+    const SKIN_URL: &str = "https://textures.minecraft.net.invalid/texture/lodestone-hand-head-gate";
+
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!(
+            "GPU gate opted in but the vanilla pack did not load; set LODESTONE_ASSETS \
+             to a pack root with client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        )
+    });
+
+    let cam = camera();
+
+    // A fresh `RenderState` per shot, mirroring this file's other gate:
+    // `HeldItemEquip`'s swap animation only adopts a new item instantly on a
+    // state's very first observation. `install` drains whatever
+    // `remote_skins::publish` has queued into *this* state's url-keyed cache —
+    // the same call `app::redraw` makes once per frame.
+    let mut shoot = |skin: Option<&str>, install: bool| -> Vec<u8> {
+        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        state.set_entity_light_source(|_| Some(SKY_LIT));
+        state.set_sky_darken_source(|| Some(1.0));
+        if install {
+            state.install_pending_player_skins(device, queue);
+        }
+        let item: ResourceLocation = "minecraft:player_head".parse().expect("valid item id");
+        let skin = skin.map(std::sync::Arc::<str>::from);
+        state.set_main_hand_source(move || {
+            Some(MainHandItem {
+                item: item.clone(),
+                foil: false,
+                dyed_color: None,
+                potion_color: None,
+                banner_patterns: Vec::new(),
+                base_color: None,
+                skin: skin.clone(),
+            })
+        });
+        let frame = target.acquire().expect("headless acquire");
+        let _ = state.render(device, queue, frame.view(), &cam, None, &[]);
+        target.read_texels(device, queue)
+    };
+
+    let plain = shoot(None, false);
+    let before = shoot(Some(SKIN_URL), false);
+
+    // The install, through the seam the real fetch publishes into. A flat,
+    // saturated sheet rather than a recoloured Steve: every face of the skull
+    // rig samples it, so any face reaching pixels registers.
+    lodestone::remote_skins::publish(
+        SKIN_URL.to_owned(),
+        lodestone_assets::Image {
+            width: 64,
+            height: 64,
+            rgba: [255u8, 0, 255, 255]
+                .iter()
+                .copied()
+                .cycle()
+                .take(64 * 64 * 4)
+                .collect(),
+        },
+    );
+    let after = shoot(Some(SKIN_URL), true);
+
+    let differ = |a: &[u8], b: &[u8]| -> usize {
+        a.chunks_exact(4)
+            .zip(b.chunks_exact(4))
+            .filter(|(p, q)| p[..3] != q[..3])
+            .count()
+    };
+    let sky = sky_bytes();
+    let plain_n = hand_non_sky_count(&plain, sky);
+    let before_vs_plain = differ(&before, &plain);
+    let after_vs_plain = differ(&after, &plain);
+
+    eprintln!("=== a held custom head's own skin ===");
+    eprintln!("plain head non-sky px            = {plain_n}");
+    eprintln!("custom vs plain, before install  = {before_vs_plain}");
+    eprintln!("custom vs plain, after install   = {after_vs_plain}");
+
+    assert!(
+        plain_n > 30,
+        "control failed: a plain held head did not reach pixels ({plain_n}), so this \
+         gate has no baseline face and its other counts mean nothing"
+    );
+    assert_eq!(
+        before_vs_plain, 0,
+        "control failed: with no bind group for its url, a custom head must draw the \
+         DEFAULT skull sheet — byte-identical to a plain one. {before_vs_plain} px \
+         differ, so the difference asserted below cannot be attributed to the \
+         installed skin"
+    );
+    assert!(
+        after_vs_plain > 0,
+        "a held custom head is still pixel-identical to a plain one with its own sheet \
+         bound. The url is not reaching the hand pass: check that MainHandItem::skin \
+         survives HeldItemEquip::visible_skin, that prepare_special_hand turns it into \
+         BlockEntityTexture::PlayerSkin, and that build_special_hand_draw resolves it \
+         through EntityRenderer::player_skins"
     );
 }

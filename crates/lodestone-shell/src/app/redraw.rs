@@ -545,6 +545,11 @@ impl WindowApp {
                 // combined with a banner drew no base tint even though the
                 // identical stack's hotbar icon now does.
                 base_color: record.base_color.clone(),
+                // And the same again for a held custom head's own skin. Cloned
+                // off the record rather than re-resolved from the stack, so the
+                // hand and the hotbar icon cannot disagree about which head this
+                // is — and so `stack_skin_url`'s fetch is requested once.
+                skin: record.skin.clone(),
             });
         // The item id, re-derived rather than cloned: issue #154's spyglass
         // FOV/vignette needs the bare location further down in this function
