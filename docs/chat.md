@@ -19,10 +19,14 @@ module docs cover composing an outbound line) or the log itself
 chat box is open. The draw (`hud.rs`, just after the `chat_open` local) emits
 a translucent background strip sized to the chat box, then the typed text
 with a trailing `_` standing in for vanilla's append-caret
-(`TextCursorUtils.extractAppendCursor`
-— the shell's `ChatInput` only ever edits at the end of the line, which is
-vanilla's "cursor at end" case). There is **no leading `>`** — vanilla's
-`ChatScreen`/`EditBox` never draws one.
+(`TextCursorUtils.extractAppendCursor`, vanilla's "cursor at end" case). There
+is **no leading `>`** — vanilla's `ChatScreen`/`EditBox` never draws one.
+
+**The append-caret is now a rendering gap, not a description of the model.**
+`ChatInput` is an `EditBox` and its caret really does move — Left/Right,
+Home/End, word skip, a selection — but `HudFrame` carries no caret position, so
+this draw still puts the `_` after the whole line whatever the caret is doing.
+`docs/chat-input-editing.md`'s "Open" section carries the patch.
 
 The caret blinks at vanilla's real rate: `TextCursorUtils.CURSOR_BLINK_INTERVAL_MS`
 is `300`, and `isCursorVisible(millis) == (millis / 300) % 2 == 0`
@@ -51,11 +55,12 @@ field. Three things port from that method, in the order that matters:
    Drawing `{input}{caret}` as one string before the suggestion gets this
    backwards.
 3. **Gated on `!insert`**, where vanilla's `insert = cursorPos <
-   value.length() || value.length() >= maxLength`. This shell's `ChatInput`
-   only ever edits at the end of the line (the append-caret convention
-   above), so the first disjunct never applies here; the second does —
-   `ChatInput::push_char` caps a line at 256 — so a full line suppresses the
-   suggestion.
+   value.length() || value.length() >= maxLength`. Only the second disjunct is
+   implemented here — `ChatInput` caps a line at `MAX_CHAT_LENGTH`, so a full
+   line suppresses the suggestion. The **first** used to be unreachable,
+   because the line had no caret to put anywhere but the end; it is reachable
+   now and is not yet wired, which is the same rendering gap the caret has —
+   see `docs/chat-input-editing.md`.
 
 The colour is vanilla's literal `0x808080` (`SUGGESTION_GHOST`); the draw
 itself takes no font-shadow parameter here (`Builder::text`'s fixed-advance

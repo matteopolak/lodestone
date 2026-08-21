@@ -526,11 +526,34 @@ impl WindowApp {
     /// `lifecycle.rs` intercepts them one layer up, and it consults the popup
     /// first for the same reason.
     pub(super) fn handle_chat_key(&mut self, event: &winit::event::KeyEvent) {
+        self.handle_chat_key_parts(event.physical_key, event.text.as_deref(), self.modifiers);
+    }
+
+    /// The testable half of [`Self::handle_chat_key`].
+    ///
+    /// Destructured at the boundary for exactly the reason
+    /// [`Self::menu_key_for`] is: `winit::event::KeyEvent`'s
+    /// `platform_specific` field is `pub(crate)` to winit, so nothing outside
+    /// winit can construct one and a version taking the struct could only ever
+    /// be driven by a real window. `apply_key_outcome`'s split gets a test as
+    /// far as `KeyOutcome::Chat`; this one is what gets it the rest of the way,
+    /// to the effect on the line.
+    ///
+    /// `modifiers` is `self.modifiers`, tracked from
+    /// `WindowEvent::ModifiersChanged` — a real key event carries no modifier
+    /// state of its own, which is why every chord here reads it from the
+    /// window rather than from the press.
+    pub(super) fn handle_chat_key_parts(
+        &mut self,
+        physical_key: PhysicalKey,
+        text: Option<&str>,
+        modifiers: ModifiersState,
+    ) {
         // Land any `command_suggestion` reply that arrived since the last key.
         // See `pump_command_suggestions` for why this is here rather than only
         // in the frame loop.
         self.pump_command_suggestions();
-        if let PhysicalKey::Code(code) = event.physical_key {
+        if let PhysicalKey::Code(code) = physical_key {
             // `CommandSuggestions.keyPressed`'s first refusal, above every arm
             // below. Only Escape has anything to consume here; Tab is handled in
             // its own arm because it also has a job with no popup up.
@@ -549,11 +572,6 @@ impl WindowApp {
                     self.sim.send_chat(&line);
                     self.ui.close_chat();
                     self.set_grab(self.ui.wants_cursor_grab());
-                    return;
-                }
-                KeyCode::Backspace => {
-                    self.chat_input.backspace();
-                    self.refresh_command_suggestions();
                     return;
                 }
                 // The point of the whole chain: the completion is computed
@@ -577,47 +595,41 @@ impl WindowApp {
                     }
                     return;
                 }
-                // Ctrl/Cmd+V — same platform split as `menu_key_for`'s
-                // shortcut detection, and the chat box's own share of the same
-                // bug: before this arm, a paste here fell straight to the
-                // `text` arm below and typed a literal `v`. `ChatInput` has no
-                // selection model (`chat.rs`'s own docs: `highlight`/`complete`
-                // are about the *popup*, not the line), so paste here is a
-                // plain insert at the cursor, matching `ChatInput::push_str`'s
-                // existing typed-text path exactly — there is no selection to
-                // replace.
-                KeyCode::KeyV if self.chat_shortcut_modifier_held() => {
-                    let text = crate::platform::clipboard::get();
-                    if !text.is_empty() {
-                        self.chat_input.push_str(&text);
-                        self.refresh_command_suggestions();
-                    }
-                    return;
-                }
                 _ => {}
             }
         }
-        // The other half of the fix for chat: holding the shortcut modifier
-        // while typing must not insert the letter, whether or not it matched
-        // a shortcut arm above (an unrecognised chord, e.g. Cmd+B, should do
-        // nothing here rather than type `b`).
-        if self.chat_shortcut_modifier_held() {
+        // Ordinary text editing — Backspace and Delete, caret motion (plain,
+        // word-wise under the platform's edit modifier, and extending the
+        // selection under Shift), Home/End, select-all, copy, cut and paste.
+        //
+        // **All of it is `EditBox::handle_key`'s existing port**, not a second
+        // implementation beside it. The chat line used to be a bare `String`
+        // edited only at its end, which is why none of the above worked and
+        // why paste needed a bespoke arm here (deleted with this: `EditBox`
+        // pastes over the selection, which is what the bespoke one could not
+        // do). `ChatInput::handle_key` reports "consumed" and "edited"
+        // separately — a caret that only moved must not fall through to the
+        // text arm below, and must not re-ask the server for suggestions
+        // either, which is `EditBox`'s own `onValueChange`-gated responder.
+        if let Some(key_event) = super::input::text_key_event(physical_key, modifiers) {
+            let result = self.chat_input.handle_key(key_event);
+            if result.edited {
+                self.refresh_command_suggestions();
+            }
+            if result.consumed {
+                return;
+            }
+        }
+        // Holding the shortcut modifier while typing must not insert the
+        // letter, whether or not the box consumed it above: an unrecognised
+        // chord (Cmd+B, say) should do nothing here rather than type `b`.
+        if shortcut_modifier_held(modifiers, cfg!(target_os = "macos")) {
             return;
         }
-        if let Some(text) = &event.text {
-            self.chat_input.push_str(text.as_str());
+        if let Some(text) = text {
+            self.chat_input.push_str(text);
             self.refresh_command_suggestions();
         }
-    }
-
-    /// Whether the platform's edit-shortcut modifier — Cmd on macOS, Ctrl
-    /// elsewhere, matching `focus::EDIT_SHORTCUT_MODIFIER` — is currently
-    /// held. Shared by [`Self::handle_chat_key`]'s paste/suppress arms; the
-    /// menu side of the same check lives in [`Self::menu_key_for`], which is
-    /// a free function rather than a method (it has to stay driveable without
-    /// a window for its own unit tests) and so cannot share this one.
-    fn chat_shortcut_modifier_held(&self) -> bool {
-        shortcut_modifier_held(self.modifiers, cfg!(target_os = "macos"))
     }
 
     /// `ChatScreen.onEdited` — the `EditBox` responder, run after every edit to
@@ -873,12 +885,12 @@ impl WindowApp {
         // The signed book's half of the same fork: `WrittenBookItem.use`
         // calls `player.openItemGui(...)` and returns
         // `InteractionResult.SUCCESS`, so vanilla opens `BookViewScreen`
-        // and never reaches the generic use either. Its `InteractionResult`
-        // is `SUCCESS` with a `CLIENT` swing source, and
-        // `sim/actions.rs`'s `generic_use_swings` lists `written_book` for
-        // exactly that reason -- but the return below means the swing is
-        // not reached from here, matching vanilla, whose `startUseItem` for
-        // a book is answered entirely by the screen opening. See
+        // and never reaches the generic use either. Its
+        // `InteractionResult` is `SUCCESS` with a `CLIENT` swing source,
+        // and `generic_use_swings` lists `written_book` for exactly that
+        // reason — but the return below means the swing is not reached from
+        // here, matching vanilla, whose `startUseItem` for a book is
+        // answered entirely by the screen opening. See
         // `crate::menu::book_view`'s module doc.
         if self.ui.screen() == crate::menu::Screen::Playing
             && let Some(open) = self.sim.written_book_in_hand()

@@ -266,6 +266,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   ([`plans/multi-version-protocol.md`](./plans/multi-version-protocol.md)) so that the
   four pre-1.13 families do not each carry a private copy of a 9,000-line generated
   table.
+- [Chat input editing](./chat-input-editing.md) — Ordinary text editing in the chat
+  prompt: a caret you can move, a selection, copy/cut/paste, word-wise motion and
+  deletion, and Home/End. The line is `crate::chat::ChatInput`, and since it became an
+  `EditBox` the editing itself is vanilla's `EditBox` port rather than anything
+  written for chat.
 - [Chat](./chat.md) — The chat box: the outbound input line
   (`crate::chat::ChatInput`), the received scrollback
   (`lodestone_game::chat::ChatLog`, folded into legacy `§`-coded strings at read
