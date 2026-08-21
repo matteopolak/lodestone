@@ -2938,6 +2938,68 @@ fn a_verified_player_message_is_stored_secure_and_an_unverified_one_is_not() {
     );
 }
 
+/// The driver's signature verdict decides a player message's `MessageTrust`,
+/// and both answers are asserted — the discriminating pair, because a stamp
+/// that ignores the flag agrees with one arm by construction.
+///
+/// This is the gate for a defect of the "a correct consumer fed a constant by
+/// its producer" shape: `MessageTrust` had three variants and a real signature
+/// check ran in the client driver, while `net.rs`'s router matched
+/// `ClientEvent::Chat` with `..` and dropped `ack`, so `net_apply` stamped
+/// **every** player message `NotSecure`.
+///
+/// **Watched failing**: with the fold replaced by that literal `NotSecure`, the
+/// `verified = true` arm reports `left: Some(NotSecure), right: Some(Secure)`
+/// and the `false` arm stays green — which is the whole reason both arms are
+/// here rather than one.
+///
+/// It drives the real `NetUpdate::Chat` through the real `Sim::poll_net` and
+/// reads the stored `ChatEntry` back off the real `SessionChat` component, so
+/// it covers the fold rather than a restatement of it. It does **not** cover
+/// `net.rs`'s `forward` — that maps `ClientEvent` to `NetUpdate` one layer up,
+/// and nothing here would notice if it went back to dropping `ack`.
+#[test]
+fn a_verified_player_message_is_stored_secure_and_an_unverified_one_is_not() {
+    use crate::net::NetUpdate;
+    use lodestone_game::chat::{ChatEntry, MessageTrust};
+
+    let mut seen = Vec::new();
+    for (verified, expected) in [(true, MessageTrust::Secure), (false, MessageTrust::NotSecure)] {
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+        feed.send(NetUpdate::Chat {
+            text: lodestone_model::Text::literal("hi"),
+            player: true,
+            sender: None,
+            verified,
+        })
+        .unwrap();
+        sim.poll_net();
+
+        let local = sim.local_entity();
+        let trust = sim.read(|w| {
+            w.get::<lodestone_ecs::session::SessionChat>(local)
+                .and_then(|chat| match chat.0.feed().iter().next_back() {
+                    Some(ChatEntry::Player { trust, .. }) => Some(*trust),
+                    _ => None,
+                })
+        });
+        seen.push((verified, trust));
+        assert_eq!(
+            trust,
+            Some(expected),
+            "verified = {verified} must store {expected:?}"
+        );
+    }
+    // The claim is that the two arms *differ*, which neither arm alone can
+    // express: a fold that ignores the flag satisfies one of them by chance.
+    assert_ne!(
+        seen[0].1, seen[1].1,
+        "the two arms must not coincide, or the flag is being ignored: {seen:?}"
+    );
+}
+
 #[test]
 fn inbound_chat_is_logged_and_typed_lines_route_to_the_action_seam() {
     use crate::net::NetUpdate;
