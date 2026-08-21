@@ -123,6 +123,33 @@ prepends the server pack ahead of the local selection — vanilla's own
 local Resource Packs screen's own list, matching vanilla keeping downloaded
 packs out of `PackRepository`.
 
+**The default font observes it too, and until recently did not.** The owner
+reported *"custom fonts arent fully used. it didnt apply them to the chat"* while
+confirming the same pack's fonts *did* change other text — which is the outside
+view of a very specific defect. `VanillaFont::shared` cached
+`minecraft:default` in a `OnceLock`, so **the first caller in the process decided
+the default font for the whole session**: a pack applied afterwards, whether
+server-pushed or selected on the Resource Packs screen, could never replace it.
+Text drawn with a *custom* font id was unaffected, because the cache described in
+the next paragraph already keys on the generation — hence "some places, but not
+chat", chat being default-font text.
+
+The cache is now keyed on the generation like its custom-font sibling, and the
+three renderers that *hold* a resolved font (`HudRenderer`, `MenuRenderer`,
+`ContainerRenderer`) each carry the generation they resolved against and re-ask
+at the top of their draw, through the single shared
+`hud::vanilla_font::refresh_shared_font`. One implementation rather than three
+copies, deliberately: this repo has twice found the same fix discovered
+independently at two call sites because nothing mechanical connected them. An
+unchanged generation costs a relaxed atomic load and an integer compare.
+
+Two things worth knowing before changing it. **There is no notification** — a
+server pack installs on the network thread and the Resource Packs screen writes
+the selection directly, so a per-draw compare is the seam, not a callback. And a
+new stack resolving to *no* font is assigned rather than ignored: a pack that
+breaks the font must fall back to the fixed-advance debug font, not keep drawing
+the previous pack's glyphs.
+
 The HUD's lazy custom-font cache (`hud::vanilla_font::VanillaFont`) also
 observes this generation. It retains both successful and failed
 `"font": "namespace:name"` lookups while the stack is unchanged, avoiding a

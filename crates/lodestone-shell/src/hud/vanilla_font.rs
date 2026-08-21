@@ -294,9 +294,68 @@ struct CustomFontCache {
     entries: HashMap<FontId, Option<Arc<RasterFont>>>,
 }
 
-/// Process-wide cache. The jar is ~37 MB and the font is tiny; loading it once
-/// keeps `HudRenderer::new` cheap even when a test builds several renderers.
-static SHARED: OnceLock<Option<Arc<VanillaFont>>> = OnceLock::new();
+/// Process-wide cache, **keyed on the pack generation**. The jar is ~37 MB and
+/// the font is tiny; loading it once keeps `HudRenderer::new` cheap even when a
+/// test builds several renderers.
+///
+/// It used to be a `OnceLock`, and that was a real defect rather than a
+/// simplification: the first caller in the process decided the default font for
+/// the whole session, so a pack applied *afterwards* — a server-pushed pack, or
+/// any change made on the Resource Packs screen — could never replace
+/// `minecraft:default`. Custom fonts were unaffected, because
+/// [`CustomFontCache`] right above this already keys on the generation, which is
+/// the shape "the pack's fonts work in some places and not in chat" takes from
+/// the outside.
+///
+/// Holding an `Option` inside an `Option` is deliberate: the outer one is "no
+/// reading for this generation yet" and the inner one is "this generation has no
+/// font", which is a real, cached answer for a jar-less run and must not be
+/// retried every frame.
+static SHARED: Mutex<Option<(u64, Option<Arc<VanillaFont>>)>> = Mutex::new(None);
+
+/// Re-resolve a held default font if the resource-pack stack has changed since
+/// it was resolved, reporting whether it moved.
+///
+/// **One implementation, because there are three holders.** `HudRenderer`,
+/// `MenuRenderer` and `ContainerRenderer` each resolve
+/// [`VanillaFont::shared`] once in their own `new` and each has the same
+/// staleness problem; this repo's record says a fix discovered twice and
+/// written twice is how the second call site keeps the bug, so the compare is
+/// here and the holders keep only the two fields.
+///
+/// `generation` is the caller's stamp and is updated in place. An unchanged
+/// generation costs one relaxed atomic load and an integer compare, which is
+/// why this is safe to call every frame — there is no other seam that runs on a
+/// renderer when a pack lands, because a server-pushed pack installs on the
+/// network thread and the Resource Packs screen writes the selection directly.
+///
+/// A new stack resolving to `None` is assigned, not ignored: a pack that breaks
+/// the font must fall back to the fixed-advance debug font rather than keep
+/// drawing the previous pack's glyphs.
+pub fn refresh_shared_font(font: &mut Option<Arc<VanillaFont>>, generation: &mut u64) -> bool {
+    refresh_shared_font_to(font, generation, crate::resources::pack_generation())
+}
+
+/// [`refresh_shared_font`] against an explicit `current` generation — the
+/// hermetic seam, the same one [`VanillaFont::custom_raster_for_generation`] is
+/// for custom fonts.
+///
+/// It exists because `crate::resources::pack_generation` is **process-wide
+/// mutable state shared with every other test in the binary**: a gate written
+/// against the live counter can be moved under its own feet by a concurrently
+/// running test that selects a pack, which is a flake, not a finding.
+pub fn refresh_shared_font_to(
+    font: &mut Option<Arc<VanillaFont>>,
+    generation: &mut u64,
+    current: u64,
+) -> bool {
+    if current == *generation {
+        return false;
+    }
+    *generation = current;
+    *font = VanillaFont::shared_for_generation(current);
+    true
+}
 
 /// The id [`FontId::name`] returns for the vanilla default font — never
 /// worth a pack-stack lookup of its own since [`VanillaFont`] already carries
@@ -312,7 +371,29 @@ impl VanillaFont {
     /// what makes this module safe to wire in unconditionally.
     #[must_use]
     pub fn shared() -> Option<Arc<VanillaFont>> {
-        SHARED.get_or_init(Self::load).clone()
+        Self::shared_for_generation(crate::resources::pack_generation())
+    }
+
+    /// [`Self::shared`] against an explicit pack generation — the hermetic seam,
+    /// exactly as [`Self::custom_raster_for_generation`] is for custom fonts, so
+    /// the cache policy can be tested without mutating process-wide pack state.
+    ///
+    /// A caller that *holds* the result must record the generation it asked for
+    /// and re-ask when it moves; an `Arc` handed out here is a snapshot, and
+    /// keeping one across a pack change is precisely the bug this replaced.
+    /// [`crate::hud::HudRenderer::refresh_font_for_pack_generation`] is the
+    /// worked example.
+    #[must_use]
+    pub fn shared_for_generation(generation: u64) -> Option<Arc<VanillaFont>> {
+        let mut guard = SHARED.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((cached, font)) = guard.as_ref()
+            && *cached == generation
+        {
+            return font.clone();
+        }
+        let font = Self::load();
+        *guard = Some((generation, font.clone()));
+        font
     }
 
     fn load() -> Option<Arc<VanillaFont>> {
@@ -1344,6 +1425,58 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::mpsc;
     use std::time::Duration;
+
+    /// The default font's staleness compare: [`refresh_shared_font`] re-resolves
+    /// exactly when the caller's stamp is behind the live pack generation, and
+    /// does nothing when it is not.
+    ///
+    /// **This covers the compare, not the reload.** A jar-less run resolves
+    /// `None` for every generation, so the *font* cannot be observed changing
+    /// here; what is asserted is the decision — which is precisely what was
+    /// missing when this was a `OnceLock` and the answer was "never re-resolve",
+    /// and it is the half a gate can reach with no `client.jar` present.
+    ///
+    /// The stamp is moved by hand rather than by calling `set_selected_packs`:
+    /// that is process-wide state shared with every other test in this binary,
+    /// and a gate that mutates it would be changing the pack stack out from
+    /// under whatever else is running.
+    #[test]
+    fn a_stale_stamp_re_resolves_the_default_font_and_a_current_one_does_not() {
+        // Explicit generations, never `pack_generation()`: that counter is
+        // process-wide and a concurrently running pack test moves it, which
+        // made the first version of this gate fail for a reason that had
+        // nothing to do with the code under test.
+        let mut font = None;
+        let mut stamp = 7u64;
+
+        assert!(
+            refresh_shared_font_to(&mut font, &mut stamp, 8),
+            "a stamp behind the current generation must re-resolve"
+        );
+        assert_eq!(
+            stamp, 8,
+            "the stamp must become what was actually resolved against, or every \
+             later frame re-resolves"
+        );
+
+        // The control: called again with nothing changed, it must not. Without
+        // this the assertion above is satisfied by a function that always
+        // reloads — a different bug with the same green.
+        assert!(
+            !refresh_shared_font_to(&mut font, &mut stamp, 8),
+            "an up-to-date stamp must not re-resolve"
+        );
+        assert_eq!(stamp, 8, "and must leave the stamp alone");
+
+        // A generation that went *backwards* still counts as a change. The
+        // counter never decreases in production, so this is only asserting
+        // that the compare is inequality rather than ordering — which is what
+        // `pack_generation`'s own doc promises its value means.
+        assert!(
+            refresh_shared_font_to(&mut font, &mut stamp, 3),
+            "any different generation re-resolves; the compare is not ordered"
+        );
+    }
 
     /// A tiny raster font is enough to exercise the custom-font cache without
     /// requiring a local `client.jar`: this test is about cache invalidation,

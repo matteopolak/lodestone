@@ -334,7 +334,12 @@ impl Sim {
                         "xfer: teleport applied to the simulation"
                     );
                 }
-                NetUpdate::Chat { text, player, sender } => {
+                NetUpdate::Chat {
+                    text,
+                    player,
+                    sender,
+                    verified,
+                } => {
                     // A player hidden on the Social Interactions
                     // screen must not reach the feed. Only a signed v770 player
                     // message carries a sender, so the set is re-read from the
@@ -372,11 +377,28 @@ impl Sim {
                     self.write(|w| {
                         if let Some(mut chat) = w.get_mut::<SessionChat>(local) {
                             if player {
-                                chat.0.push_player(
-                                    text,
-                                    lodestone_game::chat::MessageTrust::NotSecure,
-                                    now,
-                                );
+                                // The one place a trust level is decided. It
+                                // used to be the literal `NotSecure` for every
+                                // player message, which is the shape this repo
+                                // calls a correct consumer fed a constant by
+                                // its producer: `MessageTrust` had three
+                                // variants, a real signature check ran in the
+                                // client driver, and the value it produced was
+                                // discarded one layer up in `net.rs`'s router.
+                                //
+                                // Two variants, not three. `Secure` and
+                                // `NotSecure` are the two states the wire and
+                                // the driver between them can establish;
+                                // `Modified` needs the signed content compared
+                                // against the displayed content, which nothing
+                                // here computes, so it is never produced rather
+                                // than approximated. See `docs/secure-chat.md`.
+                                let trust = if verified {
+                                    lodestone_game::chat::MessageTrust::Secure
+                                } else {
+                                    lodestone_game::chat::MessageTrust::NotSecure
+                                };
+                                chat.0.push_player(text, trust, now);
                             } else {
                                 chat.0.push_system(text, now);
                             }

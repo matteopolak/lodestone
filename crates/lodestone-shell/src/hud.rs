@@ -6238,15 +6238,25 @@ pub struct HudRenderer {
     /// The flat item atlas and the 3-D block-item pass, shared verbatim with the
     /// container screen. Both halves start detached.
     icons: IconRenderer,
-    /// The vanilla proportional font, resolved once per process from the same
-    /// `client.jar` as the other atlases. `None` on a jar-less run, where the
+    /// The vanilla proportional font, resolved from the same resource-pack
+    /// stack as the other atlases. `None` on a jar-less run, where the
     /// fixed-advance debug font draws instead.
     ///
     /// Unlike the atlases this needs **no GPU resources**, so it is resolved in
     /// [`HudRenderer::new`] rather than through an `attach_*` call — there is
     /// nothing for a caller to supply. [`HudRenderer::attach_font`] exists to
     /// override it (a resource pack, or a gate pinning a specific pack).
+    ///
+    /// **Re-resolved when the pack stack changes**, via
+    /// [`Self::refresh_font_for_pack_generation`] at the top of the draw. It is
+    /// a snapshot, not a permanent answer: a font resolved at bring-up and kept
+    /// is one a server-pushed pack can never replace, and nothing goes red when
+    /// that happens.
     font: Option<Arc<VanillaFont>>,
+    /// The `crate::resources::pack_generation` [`Self::font`] was resolved
+    /// against — the only thing that can tell a current font from a stale one,
+    /// since the pack stack is process-wide state with no change notification.
+    font_generation: u64,
     /// The wall-clock origin every vitals animation's tick index is measured
     /// from — see `hud/anim.rs`'s module doc for why a wall clock stands in
     /// for the real 20Hz game tick here. Fixed at construction so a fresh
@@ -6387,6 +6397,10 @@ impl HudRenderer {
             gui: None,
             icons: IconRenderer::new(),
             font: VanillaFont::shared(),
+            // Stamped with the generation the font above was resolved against,
+            // so `refresh_font_for_pack_generation` can tell "still current"
+            // from "a pack landed since".
+            font_generation: crate::resources::pack_generation(),
             anim_start: Instant::now(),
             heart_anim: anim::HeartAnim::new(),
             hotbar_pop: anim::HotbarPop::new(),
@@ -6453,6 +6467,30 @@ impl HudRenderer {
     /// default, so this is only needed to *replace* it.
     pub fn attach_font(&mut self, font: Arc<VanillaFont>) {
         self.font = Some(font);
+        // Stamped as current, so the per-frame refresh below leaves a pinned
+        // font alone until a pack change actually happens. A gate that pins one
+        // pack does not bump the generation, so it keeps what it attached.
+        self.font_generation = crate::resources::pack_generation();
+    }
+
+    /// Re-resolve the default font if the resource-pack stack has changed since
+    /// it was last resolved.
+    ///
+    /// Called at the top of the draw, because there is no other seam that runs
+    /// on this renderer when a pack lands: a server-pushed pack installs on the
+    /// network thread and the Resource Packs screen writes the selection
+    /// directly, and both only bump `crate::resources::pack_generation`. An
+    /// unchanged generation costs one relaxed atomic load and an integer
+    /// compare.
+    ///
+    /// This is the font half of a rule this renderer already needed for its GPU
+    /// atlases: a resource resolved once at bring-up and never re-asked keeps
+    /// serving the pre-pack answer forever, and nothing goes red when it does.
+    /// Text drawn with a *custom* font id was never affected — that path asks
+    /// per generation — which is why the symptom was "the pack's font applies in
+    /// some places but not to chat".
+    pub fn refresh_font_for_pack_generation(&mut self) {
+        vanilla_font::refresh_shared_font(&mut self.font, &mut self.font_generation);
     }
 
     /// Drop back to the fixed-advance debug font. The executed negative control
@@ -6794,6 +6832,10 @@ impl HudRenderer {
         // attached pass or no depth attachment means the vertices could not be
         // rendered, and building them would be pure waste.
         let want_models = self.icons.models_attached() && depth.is_some();
+        // Before the font is read, not after: a pack that landed since the last
+        // frame has to reach *this* frame's glyphs, and this is the only seam
+        // that runs on the renderer when one does.
+        self.refresh_font_for_pack_generation();
         let font = self.font.clone();
         // The vitals-cluster animation phases for this frame — see
         // `hud/anim.rs`. `tick` is the one place a wall clock enters; every

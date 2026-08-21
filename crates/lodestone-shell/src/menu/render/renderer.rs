@@ -53,10 +53,16 @@ pub struct MenuRenderer {
     /// Whether the lazy load has already been tried. Without this a jar-less run
     /// would re-stitch (and fail) an atlas every single frame.
     gui_attempted: bool,
-    /// Vanilla's proportional font, resolved once per process from the same jar.
-    /// Needs no GPU resources, so it is resolved in `new` exactly as
-    /// `HudRenderer` does. `None` on a jar-less run.
+    /// Vanilla's proportional font, resolved from the same resource-pack stack
+    /// as the other atlases. Needs no GPU resources, so it is resolved in `new`
+    /// exactly as `HudRenderer` does. `None` on a jar-less run.
+    ///
+    /// Re-resolved when the pack stack changes — see [`Self::font_generation`].
     font: Option<Arc<VanillaFont>>,
+    /// The `crate::resources::pack_generation` [`Self::font`] was resolved
+    /// against. A font resolved at bring-up and kept is one a pack applied
+    /// later can never replace, and nothing goes red when that happens.
+    font_generation: u64,
     /// The title screen's spinning cubemap, attached lazily on the first draw
     /// (see [`MenuRenderer::ensure_panorama`]). `None` leaves every screen on the
     /// flat [`BG`] backdrop, which is the pre-panorama behaviour.
@@ -150,6 +156,10 @@ impl MenuRenderer {
             sprites: None,
             gui_attempted: false,
             font: VanillaFont::shared(),
+            // The generation the font above was resolved against — see
+            // `hud::vanilla_font::refresh_shared_font`, the one implementation
+            // of the staleness compare all three renderers share.
+            font_generation: crate::resources::pack_generation(),
             panorama: None,
             panorama_attempted: false,
             blur: blur::MenuBlur::new(device, color_format),
@@ -447,6 +457,10 @@ impl MenuRenderer {
         // screen with no wash, which is why the distinction lives here and not in
         // `MenuBackdrop`.
         let panorama_dim = panorama::dim_for_screen(frame.logo);
+        // Before the font is read below: a pack change made on the Resource
+        // Packs screen has to reach the very next frame, and this screen is
+        // drawn over that one.
+        crate::hud::vanilla_font::refresh_shared_font(&mut self.font, &mut self.font_generation);
         if frame.backdrop.wants_panorama() {
             self.ensure_panorama(device, queue);
             if let Some(pano) = self.panorama.as_mut() {
