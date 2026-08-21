@@ -189,9 +189,15 @@ pub enum Nbt {
     ByteArray(Vec<i8>),
     /// Modified UTF-8 string.
     String(String),
-    /// Homogeneous list.
+    /// A list. Usually homogeneous — but see [`unwrap_list_element`]: the wire
+    /// form boxes a mixed list's elements into `{"": element}` under a
+    /// `TAG_Compound` header, and stripping that box is what leaves a decoded
+    /// list holding elements of different tags.
     List {
-        /// Element tag shared by every list item.
+        /// Element tag as it arrived on the wire. Authoritative only for an
+        /// **empty** list; for a non-empty one the encoder re-derives the tag
+        /// from the elements themselves, exactly as vanilla's `ListTag` (which
+        /// stores no tag at all) does.
         element_type: NbtTag,
         /// List element payloads.
         elements: Vec<Nbt>,
@@ -335,13 +341,53 @@ fn read_nbt_list(r: &mut Reader<'_>, depth: usize) -> Result<Nbt> {
 
     let mut elements = Vec::with_capacity(len);
     for _ in 0..len {
-        elements.push(read_nbt_payload(r, element_type, depth + 1)?);
+        elements.push(unwrap_list_element(read_nbt_payload(
+            r,
+            element_type,
+            depth + 1,
+        )?));
     }
 
     Ok(Nbt::List {
         element_type,
         elements,
     })
+}
+
+/// NBT's single-key `""` wrapper, undone — `ListTag.addAndUnwrap`/`tryUnwrap`.
+///
+/// A `TAG_List` carries one element tag id for the whole list, so a
+/// **heterogeneous** list has no honest id to write. Vanilla's answer is to
+/// declare the list `TAG_Compound` and box every element that is not already a
+/// plain compound into `{"": element}` on the way out
+/// (`ListTag.write`/`wrapIfNeeded`), then strip that box on the way back in.
+/// The wrapper is therefore part of the *format*, not of any one schema, and
+/// nothing above this layer should ever see it.
+///
+/// **Not hypothetical, and it silently deleted text.** A sign's `messages` is
+/// `ComponentSerialization.CODEC.listOf()`, whose encoder collapses an unstyled
+/// component to a bare `TAG_String` and emits a `TAG_Compound` for a styled
+/// one. Colour one line of a four-line sign and the list is mixed, so a real
+/// vanilla 26.2 server sends
+/// `[{color:"red",text:"REDLINE"}, {text:"BOLDY",bold:1b}, {"":"plain"}, {"":""}]`
+/// — captured off the wire, not reasoned about. Every consumer looking for a
+/// `text` field found none on the wrapped elements and contributed no spans, so
+/// **the unstyled lines of any styled sign rendered as nothing at all**. The
+/// same shape reaches chat, nametags and `text_display` through a component's
+/// `extra` list whenever one sibling is styled and another is not.
+///
+/// The predicate is exactly vanilla's: size **one** and that one key is the
+/// empty string. A genuine one-field compound whose key is `""` is
+/// indistinguishable and is unwrapped by vanilla too, so matching it is the
+/// compatible behaviour rather than a heuristic.
+fn unwrap_list_element(element: Nbt) -> Nbt {
+    match element {
+        Nbt::Compound(fields) if fields.len() == 1 && fields[0].0.is_empty() => {
+            let mut fields = fields;
+            fields.remove(0).1
+        }
+        other => other,
+    }
 }
 
 fn read_nbt_compound(r: &mut Reader<'_>, depth: usize) -> Result<Nbt> {
@@ -432,22 +478,51 @@ fn write_nbt_list(
         });
     }
 
-    for element in elements {
-        let actual = element.tag();
-        if actual != element_type {
-            return Err(Error::InvalidEnumVariant {
-                name: "nbt list element type",
-                value: i32::from(actual.id()),
-            });
+    // `ListTag.identifyRawElementType`: an empty list keeps whatever tag it
+    // declares (so a round trip cannot lose it), a homogeneous one writes its
+    // elements' shared tag, and a **mixed** one writes `TAG_Compound` and boxes
+    // every element — the format's own answer to a list header that can only
+    // name one type. This used to reject a mixed list outright, which made the
+    // encoder unable to reproduce bytes its own decoder now accepts.
+    let raw_type = match elements.split_first() {
+        None => element_type,
+        Some((first, rest)) => {
+            let head = first.tag();
+            if rest.iter().all(|e| e.tag() == head) {
+                head
+            } else {
+                NbtTag::Compound
+            }
         }
-    }
+    };
 
-    w.u8(element_type.id());
+    w.u8(raw_type.id());
     write_nbt_len(w, elements.len())?;
     for element in elements {
-        write_nbt_payload(w, element, depth + 1)?;
+        match wrap_list_element(raw_type, element) {
+            Some(wrapped) => write_nbt_payload(w, &wrapped, depth + 1)?,
+            None => write_nbt_payload(w, element, depth + 1)?,
+        }
     }
     Ok(())
+}
+
+/// `ListTag.wrapIfNeeded` — the encode half of [`unwrap_list_element`].
+///
+/// `Some(boxed)` when this element has to be written as `{"": element}`,
+/// `None` when it goes out as-is. Only a list whose written element tag is
+/// `TAG_Compound` boxes anything, and inside such a list a compound is left
+/// alone **unless it already looks like a wrapper** — otherwise the decoder's
+/// unconditional unwrap would eat a genuine single-`""`-key compound, and the
+/// round trip would not close.
+fn wrap_list_element(raw_type: NbtTag, element: &Nbt) -> Option<Nbt> {
+    if raw_type != NbtTag::Compound {
+        return None;
+    }
+    match element {
+        Nbt::Compound(fields) if !(fields.len() == 1 && fields[0].0.is_empty()) => None,
+        other => Some(Nbt::Compound(vec![(String::new(), other.clone())])),
+    }
 }
 
 fn write_nbt_len(w: &mut Writer, len: usize) -> Result<()> {
@@ -1764,20 +1839,23 @@ mod tests {
     }
 
     #[test]
-    fn nbt_writer_rejects_mismatched_or_non_empty_end_lists() {
+    fn nbt_writer_rejects_non_empty_end_lists_and_re_derives_a_stale_tag() {
         let mut writer = Writer::default();
-        let mismatched = Nbt::List {
+        // A declared tag that disagrees with the elements is no longer an
+        // error: `ListTag` stores no tag at all, so the elements are the truth
+        // and the header is re-derived from them. Byte-checked, because "it
+        // does not error" would also be satisfied by writing the wrong id.
+        let stale_tag = Nbt::List {
             element_type: NbtTag::Int,
-            elements: vec![Nbt::String("wrong".to_owned())],
+            elements: vec![Nbt::String("right".to_owned())],
         };
-        assert!(matches!(
-            write_network_nbt(&mut writer, &mismatched),
-            Err(Error::InvalidEnumVariant {
-                name: "nbt list element type",
-                value: 8
-            })
-        ));
+        write_network_nbt(&mut writer, &stale_tag).expect("re-derived list encodes");
+        assert_eq!(
+            writer.as_slice(),
+            &[9, 8, 0, 0, 0, 1, 0, 5, b'r', b'i', b'g', b'h', b't'],
+        );
 
+        writer.clear();
         let non_empty_end = Nbt::List {
             element_type: NbtTag::End,
             elements: vec![Nbt::End],
@@ -1789,6 +1867,72 @@ mod tests {
                 value: 0
             })
         ));
+    }
+
+    /// The `{"": element}` box a mixed `TAG_List` is written through, both
+    /// ways — `ListTag.wrapIfNeeded` on the way out and `addAndUnwrap` on the
+    /// way back in.
+    ///
+    /// The expected bytes are **not** produced by this encoder. They are the
+    /// `messages` list a live vanilla 26.2 server sent for a four-line sign
+    /// whose first two lines carry a style and whose third does not, read off
+    /// the wire by `lodestone-shell`'s `live_sign_text_wire` gate and
+    /// independently off that server's own saved region file. That is what
+    /// makes this more than `decode(encode(x)) == x`: an encoder and a decoder
+    /// that share one misunderstanding agree with each other, and this list is
+    /// exactly the shape the previous, wrapper-blind decoder turned into
+    /// missing sign text.
+    #[test]
+    fn nbt_mixed_list_boxes_and_unboxes_its_elements() {
+        // TAG_Compound header, three elements: a real compound, a boxed
+        // string, and a boxed empty string.
+        let wire: &[u8] = &[
+            10, 0, 0, 0, 3, // list of TAG_Compound, len 3
+            8, 0, 4, b't', b'e', b'x', b't', 0, 5, b'B', b'O', b'L', b'D', b'Y', 0, // {text:"BOLDY"}
+            8, 0, 0, 0, 5, b'p', b'l', b'a', b'i', b'n', 0, // {"":"plain"}
+            8, 0, 0, 0, 0, 0, // {"":""}
+        ];
+        let mut reader = Reader::new(wire);
+        let decoded = read_nbt_payload(&mut reader, NbtTag::List, 0).expect("mixed list decodes");
+        assert!(reader.is_empty());
+
+        let Nbt::List { elements, .. } = &decoded else {
+            panic!("expected a list, got {decoded:?}");
+        };
+        assert_eq!(
+            elements,
+            &[
+                Nbt::Compound(vec![("text".to_owned(), Nbt::String("BOLDY".to_owned()))]),
+                // The two boxed elements arrive as bare strings, which is the
+                // whole point: a consumer looking for a `text` field on a
+                // component found nothing on these and dropped the line.
+                Nbt::String("plain".to_owned()),
+                Nbt::String(String::new()),
+            ],
+        );
+
+        let mut writer = Writer::default();
+        write_nbt_payload(&mut writer, &decoded, 0).expect("mixed list encodes");
+        assert_eq!(writer.as_slice(), wire, "re-encode must reproduce the server's bytes");
+    }
+
+    /// A genuine single-`""`-key compound is boxed *again* on the way out, so
+    /// the decoder's unconditional unwrap gives it back unchanged. Without the
+    /// double box this element would come back as a bare string.
+    #[test]
+    fn nbt_wrapper_shaped_compound_survives_a_list_round_trip() {
+        let value = Nbt::List {
+            element_type: NbtTag::Compound,
+            elements: vec![
+                Nbt::Compound(vec![(String::new(), Nbt::String("v".to_owned()))]),
+                Nbt::Compound(vec![("k".to_owned(), Nbt::Byte(1))]),
+            ],
+        };
+        let mut writer = Writer::default();
+        write_nbt_payload(&mut writer, &value, 0).expect("encodes");
+        let mut reader = Reader::new(writer.as_slice());
+        let back = read_nbt_payload(&mut reader, NbtTag::List, 0).expect("decodes");
+        assert_eq!(back, value);
     }
 
     #[test]
