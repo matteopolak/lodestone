@@ -385,38 +385,76 @@ fn readback(
 
 // ------------------------------------------------------------------- the gates
 
-/// The acceptance band for the sky-lit night/day ratio.
+/// The predicted sky-lit night/day ratios, one per hypothesis.
 ///
-/// # Three predictions, named
+/// # Read the channel before reading the arithmetic
 ///
-/// Every number here is arithmetic on `assets/minecraft/shaders/core/lightmap.fsh`
-/// from the real 26.2 `client.jar` and on `Options.java:900`'s default gamma —
-/// **not** read back from this crate. For a sky-15, block-0 mob:
+/// [`mob_mean`] averages the **red** byte, and at midnight the lightmap is not
+/// grey: `SkyLightColor` is `Timelines.NIGHT_SKY_LIGHT_COLOR`,
+/// `ARGB.colorFromFloat(1.0, 0.48, 0.48, 1.0)`, i.e. bytes `(122, 122, 255)`.
+/// `lightmap.fsh` adds `SkyLightColor * sky_brightness`, so red and blue are
+/// genuinely different numbers, and `notGamma` then scales the whole triple by
+/// `maxScaled / maxComponent` — a factor taken from **blue**, applied to red.
+/// A ratio predicted for one channel and measured on another is simply a
+/// different quantity.
 ///
-/// * **correct** (`NIGHT_RATIO`): `get_brightness(15/15)` is `1.0`; `SkyFactor` at
-///   midnight is `0.24`, so the sky contribution is `0.24`; `AmbientColor` seeds the
-///   accumulator with the overworld's `0x0A0A0A` = `0.039216`
-///   (`DimensionTypes.java:36`), giving a combined `0.279216`; then `lightmap.fsh`'s
-///   last line mixes `notGamma` in at the default `BrightnessFactor` of `0.5`,
-///   and for a grey value `notGamma(c) == 1 - (1-c)^4`, giving **0.50465**. Noon is
-///   exactly `1.0` — the ambient term clamps away up there — so that is the ratio.
-/// * **`AmbientColor` dropped** (`AMBIENT_FREE_RATIO`): the same chain believing the
-///   overworld's ambient is black, which is what this gate first asserted:
-///   **0.45319**. It is the closest wrong answer, `0.05` away, and it sets how wide
-///   the band can be.
+/// This is what an earlier version of this block got wrong, and it is worth
+/// leaving on the record because the derivation read as complete: it took the
+/// sky contribution to be the scalar `0.24`, dropping `SkyLightColor` entirely,
+/// and arrived at `0.50465`. That number is exactly right — for **blue**, the
+/// one channel where `SkyLightColor` is `1.0` and the term it omitted happens to
+/// be the identity. Measured against red it was off by a factor of nearly two,
+/// and it read as a shipped bug in the shader for eleven days.
+///
+/// Every number below is arithmetic on `assets/minecraft/shaders/core/
+/// lightmap.fsh` and `Timelines`/`EnvironmentAttributes` out of the real 26.2
+/// `client.jar`, plus `Options.java`'s default gamma — **not** read back from
+/// this crate. For a sky-15, block-0 mob, `get_brightness(15/15) = 1.0` and
+/// `SkyFactor` at midnight is `0.24`, so `sky_brightness = 0.24` and:
+///
+/// * **correct** (`NIGHT_RATIO`): `AmbientColor` seeds the accumulator with the
+///   overworld's `0x0A0A0A` = `0.039216`; adding `SkyLightColor * 0.24` gives
+///   `(0.154039, 0.154039, 0.279216)`. `notGamma` scales by
+///   `(1 - (1 - 0.279216)^4) / 0.279216 = 2.614815`, so red becomes `0.402782`,
+///   and the final `mix(color, notGamma, 0.5)` lands red at **0.278411**. Noon is
+///   exactly `1.0` — up there `SkyLightColor` is white and the sum clamps — so
+///   that is the ratio.
+/// * **`SkyLightColor` dropped** (`SKY_COLOUR_FREE_RATIO`): the same chain with
+///   the sky term treated as a white `0.24`, which is blue's answer:
+///   **0.504652**. This is the mistake this block itself used to make.
+/// * **`AmbientColor` dropped** (`AMBIENT_FREE_RATIO`): the ambient seed believed
+///   black, so `(0.114824, 0.114824, 0.24)` and a `notGamma` factor of
+///   `2.776576`: **0.216817**.
 /// * **the retired linear ramp** (`OLD_RAMP_RATIO`): `0.2 + 0.8 * 0.24` =
-///   **0.392**. This is what shipped before the curve landed, and the band must
-///   exclude it or this gate cannot see the change.
+///   **0.392**. This is what shipped before the curve landed, and the gate must
+///   exclude it or it cannot see the change.
 /// * **the original shipped bug** (`BUG_RATIO`): no time-of-day term at all, so
 ///   both frames render at `1.0` — a ratio of exactly **1.000**.
 ///
-/// The band admits only the first, and every exclusion is asserted in the test body
-/// rather than described here.
-const NIGHT_RATIO: f32 = 0.504_65;
-const AMBIENT_FREE_RATIO: f32 = 0.453_19;
+/// # Why the tolerance is in bytes, not in ratio
+///
+/// The ratio's own slack is quantisation: both frames are read back as 8-bit
+/// sRGB, and at midnight the mob's mean byte is around 25, where half a step is
+/// two percent of the reading. Expressing the tolerance as a band on the ratio
+/// therefore means picking a width that depends on how dark the subject happens
+/// to be, which is how a round number gets chosen. So the assertion is on the
+/// **predicted midnight byte** — `day_mean * ratio` — with [`BYTE_SLACK`] of
+/// room, and every wrong hypothesis has to miss that same target by more than
+/// the same slack.
+const NIGHT_RATIO: f32 = 0.278_411;
+const SKY_COLOUR_FREE_RATIO: f32 = 0.504_652;
+const AMBIENT_FREE_RATIO: f32 = 0.216_817;
 const OLD_RAMP_RATIO: f32 = 0.392;
 const BUG_RATIO: f32 = 1.000;
-const BAND: std::ops::RangeInclusive<f32> = 0.482..=0.528;
+
+/// How far the measured midnight mean may sit from its prediction, in 8-bit
+/// sRGB steps.
+///
+/// One step of rounding in each of the two frames, and the two means are over
+/// thousands of pixels so their own sampling error is far below that. Measured
+/// on this fixture the miss is **0.48 of a byte**, so this is not fitted to the
+/// reading — it is the quantisation floor, and the reading sits inside half of it.
+const BYTE_SLACK: f32 = 2.0;
 
 fn gpu_or_fail() -> Gpu {
     setup().unwrap_or_else(|| {
@@ -450,16 +488,23 @@ fn a_sky_lit_mob_is_darker_at_midnight_than_at_noon() {
     let (control_b, _) = mob_mean(&mob_frame(&gpu, LIGHT_SKY, NOON));
     let control_ratio = control_b / control_a;
 
-    println!("=== MOB SKY-DARKEN GATE (texel {TEXEL}, sRGB target) ===");
+    println!("=== MOB SKY-DARKEN GATE (texel {TEXEL}, sRGB target, RED channel) ===");
     println!("sky_darken at midnight       = {midnight:.4} (vanilla's curve)");
     println!("mob mean, sky 15, noon       = {day:.1} over {day_px}px");
     println!("mob mean, sky 15, midnight   = {night:.1} over {night_px}px");
-    println!("measured ratio               = {ratio:.3}");
-    println!("correct prediction           = {NIGHT_RATIO:.3} (lightmap.fsh, gamma 0.5)");
-    println!("ambient-dropped control      = {AMBIENT_FREE_RATIO:.3} (AmbientColor believed black)");
-    println!("retired-linear-ramp control  = {OLD_RAMP_RATIO:.3} (0.2 + 0.8 * 0.24)");
-    println!("shipped-bug control          = {BUG_RATIO:.3}");
-    println!("negative control (same input) = {control_ratio:.3}, in band = {}", BAND.contains(&control_ratio));
+    println!("measured ratio               = {ratio:.4}");
+    for (label, r) in HYPOTHESES {
+        println!(
+            "  {label:<34} ratio {r:.4} -> midnight byte {:.2}, miss {:.2}",
+            day * r,
+            (night - day * r).abs()
+        );
+    }
+    println!("byte slack                   = {BYTE_SLACK}");
+    println!(
+        "negative control (same input) = {control_ratio:.4}, accepted = {}",
+        (control_a * NIGHT_RATIO - control_b).abs() <= BYTE_SLACK
+    );
 
     // Same input, exactly zero difference — the control has no slack to hide in.
     assert!(
@@ -467,39 +512,52 @@ fn a_sky_lit_mob_is_darker_at_midnight_than_at_noon() {
         "same-input control must be exactly 1.0, got {control_ratio}"
     );
     assert!(
-        !BAND.contains(&control_ratio),
+        (control_a * NIGHT_RATIO - control_b).abs() > BYTE_SLACK,
         "NEGATIVE CONTROL DID NOT FIRE: a mob rendered twice with no time-of-day difference \
-         produced ratio {control_ratio:.3}, which this gate's band {BAND:?} *accepts*. The band \
-         cannot distinguish the fix from the bug and the gate is vacuous."
+         produced ratio {control_ratio:.4}, and this gate's own acceptance test *accepts* it. \
+         The test cannot distinguish the fix from the bug and the gate is vacuous."
     );
 
-    // The band must reject the retired ramp too, or this gate cannot see the
-    // curve change — asserted rather than described, so a widened band is caught
+    // Every wrong hypothesis must miss the measured midnight mean by more than
+    // the slack — asserted rather than described, so a widened slack is caught
     // here and not by a player.
+    for (label, wrong) in HYPOTHESES.iter().skip(1) {
+        assert!(
+            (night - day * wrong).abs() > BYTE_SLACK,
+            "the hypothesis `{label}` predicts a midnight mean of {:.2} against the measured \
+             {night:.2}, inside the {BYTE_SLACK}-byte slack — this fixture cannot tell it apart \
+             from the correct {:.2}, so the assertion below proves nothing",
+            day * wrong,
+            day * NIGHT_RATIO
+        );
+    }
+
     assert!(
-        BAND.contains(&NIGHT_RATIO)
-            && !BAND.contains(&AMBIENT_FREE_RATIO)
-            && !BAND.contains(&OLD_RAMP_RATIO)
-            && !BAND.contains(&BUG_RATIO),
-        "the band {BAND:?} must admit {NIGHT_RATIO:.3} and reject {AMBIENT_FREE_RATIO:.3} \
-         (AmbientColor dropped), {OLD_RAMP_RATIO:.3} (retired ramp) and {BUG_RATIO:.3} \
-         (no time-of-day term)"
-    );
-    assert!(
-        !BAND.contains(&OLD_RAMP_RATIO),
-        "the band {BAND:?} accepts the retired linear ramp's {OLD_RAMP_RATIO:.3}, so it cannot \
-         distinguish vanilla's curve from `0.2 + 0.8 * l`"
-    );
-    assert!(
-        BAND.contains(&ratio),
-        "a sky-lit mob at midnight must render near {NIGHT_RATIO:.3} of its noon brightness, got \
-         {ratio:.3} (noon {day:.1}, midnight {night:.1}). A ratio near \
-         {AMBIENT_FREE_RATIO:.3} means `AmbientColor` was dropped; a ratio near \
-         {OLD_RAMP_RATIO:.3} means \
-         the retired `0.2 + 0.8 * l` ramp is back; a ratio near {BUG_RATIO:.3} means there is \
-         still no time-of-day term and mobs are full-bright at night."
+        (night - day * NIGHT_RATIO).abs() <= BYTE_SLACK,
+        "a sky-lit mob at midnight must render at {NIGHT_RATIO:.4} of its noon mean, i.e. \
+         {:.2} against a noon {day:.2}; got {night:.2} (ratio {ratio:.4}). A midnight mean near \
+         {:.2} means `SkyLightColor` was dropped and the prediction is blue's rather than red's; \
+         near {:.2} means `AmbientColor` was dropped; near {:.2} means the retired \
+         `0.2 + 0.8 * l` ramp is back; near {:.2} means there is still no time-of-day term and \
+         mobs are full-bright at night.",
+        day * NIGHT_RATIO,
+        day * SKY_COLOUR_FREE_RATIO,
+        day * AMBIENT_FREE_RATIO,
+        day * OLD_RAMP_RATIO,
+        day * BUG_RATIO
     );
 }
+
+/// The correct hypothesis first, then every wrong one the assertions must
+/// exclude. Iterated rather than listed twice so a hypothesis cannot be added to
+/// the printout and forgotten in the exclusion loop.
+const HYPOTHESES: [(&str, f32); 5] = [
+    ("correct (lightmap.fsh, red)", NIGHT_RATIO),
+    ("SkyLightColor dropped (blue)", SKY_COLOUR_FREE_RATIO),
+    ("AmbientColor dropped", AMBIENT_FREE_RATIO),
+    ("retired 0.2 + 0.8 * l ramp", OLD_RAMP_RATIO),
+    ("no time-of-day term", BUG_RATIO),
+];
 
 /// A **torch-lit** mob must not dim at night. Vanilla scales only the sky half of
 /// the lightmap (`get_brightness(sky_level) * SkyFactor`, with the block half
