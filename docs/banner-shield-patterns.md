@@ -839,42 +839,62 @@ reported stack, an empty item frame) read exactly `0` lit pixels and `0` for
 the corresponding stat, and the far screen corner opposite the subject never
 moved — the same shape `dropped_item_pixels.rs` already established.
 
-## Shield: the hand path is still broken, and this time it is real
+## Shield: the hand path is not broken — the first-person view shows its back
 
-**`first_person_shield_hand_pixels.rs` is red, on purpose, and that redness
-is the finding, not a broken gate.** A held shield's dye colour and loom
-pattern do not reach the first-person hand at all: a `red`, a `light_blue`
-and a plain (`base_color: None`) shield render **byte-identical** (`red
-r - b = 5.7`, `light_blue b - r = -5.7`, `plain spread = 5.7` — all three the
-same small, neutral-grey magnitude, nowhere near the ~15-70 margins the GUI
-icon and the held-banner gates measure for a real dye).
+**Superseded section.** This heading used to read *"the hand path is still
+broken, and this time it is real"*, and recorded
+`first_person_shield_hand_pixels.rs` as deliberately red: a `red`, a
+`light_blue` and a plain shield render byte-identical in the first-person hand
+(`red r - b = 5.7`, `light_blue b - r = -5.7`, `plain spread = 5.7`), while
+`draw_calls` is 4 against a plain shield's 2. Every one of those numbers is
+still true. The conclusion drawn from them was not.
 
-Every step of the CPU-side pipeline was instrumented live and traced, then
-the instrumentation removed once each step was confirmed correct:
-`form.transformation` carries the real `scale [1, -1, -1]` flip,
-`shield_has_patterns` reports `true` for the dyed cases (`draw_calls` 4
-against the plain case's 2, so the extra translucent pass is genuinely
-issued), the uploaded tint bytes are the real, distinct `[176, 46, 38]`/
-`[58, 179, 218]`, the `"base"` pattern mask resolves in `self.block_entities
-.shield_patterns`, and the draw index ranges are two real, non-degenerate
-36-index parts. So the translucent layer is submitted with entirely correct
-data on entirely correct geometry and still changes nothing on screen.
+**The first-person hand shows the shield's back.** `shield.json`'s
+`firstperson_righthand` display is `rotation [0, 180, 5]`, against its `gui`'s
+`[15, -25, -5]` — about 205 degrees of yaw apart, so the two views cannot be
+showing the same face of a one-texel-thick plate, and the GUI is demonstrably
+the one showing the decorated front (an inventory shield shows its banner).
+`shield_model` says the same thing on its own: the `plate` box's outer face is
+at `z = -2` while the `handle` occupies `z` from `-1` to `+5`, so `+z` is the
+side the wielder's arm is on and `-z` is the decorated face. Every shield
+pattern mask is blank over the grip side, so no dye can reach a pixel there —
+and neither can the 200 texels by which `shield_base` and
+`shield_base_nopattern` differ, which is why a dyed and a plain shield also come
+out byte-identical.
 
-**Unconfirmed leading hypothesis:** the shield rig is a double-sided
-(`cull_mode: None`) thin box, so — unlike a banner's separate `"flag"` quad —
-both the front (masked) and back (blank) faces of the same box rasterise in
-both the opaque base pass and the translucent layer pass, and the depth test
-(`CompareFunction::LessEqual`, zero bias) picks a winner per fragment
-independently in each pass. If the front face ends up farther from the
-camera than the back face specifically under the hand's own placement chain
-(`first_person_item_matrix`/`hand_transform`) — a relationship that is a
-property of the *whole* composed transform, not of the shield's own local
-flip alone — the opaque pass's nearer (back) fragment wins and gets written
-to the depth buffer, and the layer pass's farther (front, masked) fragment
-then loses the depth race against it. This would not contradict the GUI
-icon's own success, since the GUI's "outer" placement (`gui_item_pose`, an
-isometric pose) is an unrelated matrix from the hand's own procedural one.
-**This needs a real GPU frame capture to confirm** (RenderDoc, Xcode's GPU
-frame debugger, or equivalent) — not available in the environment this was
-investigated in — so it is recorded as a hypothesis and flagged for
-follow-up, not fixed.
+The previous section's "unconfirmed leading hypothesis" — double-sided geometry
+plus the depth test — was half right, and the half it got wrong is the half that
+mattered. What the depth test rejects is not the pattern layer; it is the
+pattern layer *on the face that is behind*, which is exactly the face carrying
+the pattern. Located by rebuilding `EntityPipeline::banner_layer_pipeline` at
+four depth comparisons and re-rendering the same three shields:
+
+| `depth_compare` | red vs plain, differing pixels | red mean channels |
+|---|---|---|
+| `Less` | 0 | — |
+| `Equal` | 0 | — |
+| `LessEqual` (shipped) | 0 | `[19.7, 16.0, 14.0]` |
+| `Greater` | 10381 | — |
+| `Always` | 10381 | `[40.1, 12.0, 12.4]` |
+
+So the layer's geometry, its placement, its mask and its tint are all real and
+correct — under `Greater` the red channel doubles and the pattern appears — and
+they sit at strictly greater depth than the base draw wrote. `LessEqual` is
+vanilla's own `DepthStencilState.DEFAULT` (`GREATER_THAN_OR_EQUAL` under this
+engine's `[0, 1]` depth), so rejecting them is what vanilla does too. No GPU
+frame capture was needed; a four-value sweep of one pipeline constant was.
+
+The gate now asserts the identity, and is renamed
+`a_held_shield_shows_its_back_so_every_dye_renders_identically`. Three controls
+keep it from being vacuous, because a byte-identity assertion is satisfied by a
+renderer that draws nothing: the dyed and plain shields resolve to **different**
+base sheets, a dyed shield really does produce the named `base` pattern layer,
+and all three frames carry 16,286 non-sky pixels. The draw-call inequality is
+kept and is now load-bearing rather than supporting — it is the only thing
+separating *"the layer is submitted and lands behind the base"* from *"the layer
+stopped being submitted"*, which these frames cannot tell apart.
+
+Worth keeping for its own sake: the inverted assertion would have **licensed
+removing the un-mirroring fix.** The `scale [1, -1, -1]` flip is precisely what
+puts the decorated face away from the camera here, so "make red beat blue in the
+first-person hand" is satisfied by taking the flip back out.

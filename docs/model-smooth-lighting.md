@@ -490,6 +490,20 @@ each tinted source's *plains* colour — which changes hue, not brightness.
   | --- | --- | --- |
   | `models.rs`'s `ao_reads_the_shade_predicate_and_light_reads_the_culling_one` (hermetic, in the default suite) | `quad_corner_sample` routes each term to the right method | the mirror view, `occludes_at` true / `ao_occludes_at` false |
   | `lodestone-render/tests/model_ao_corner_gate.rs`'s `ao_occluder_predicate_is_shade_brightness_not_face_culling` (GPU) | the **pixel** consequence, against a predicted byte of `round(255 x 0.8) = 204` | `barrier` (vanilla-exempt but a full collision cube) and a culling-only occluder, both of which must stay ≥ 250 |
+
+  **Gotcha, paid for once: that GPU gate's occluder cell depends on which cell
+  `mesh_models` centres the AO ring on, and that is not always the neighbour.**
+  Its `OCCLUDER` was derived against `np = block + face normal`, correct the day
+  it landed; the cross-plant fix three days later ported vanilla's
+  `faceCubic == false` branch, under which an **unculled** quad whose plane is
+  not flush with the cube face, on a block that is not itself a full occluding
+  cube, has both its light ring and its AO ring centred on its **own** cell. The
+  gate's `corner_ao_quad` is exactly that quad — its positions straddle `y = ±1`
+  so they reach the screen corners under the identity camera — so the ring moved
+  to `(0, 0, 0)` and the occluder stopped being anyone's diagonal. Every corner
+  then read 255, which is indistinguishable from a dead AO term, and the gate sat
+  measuring nothing for eighteen days. If you move a quad in these scenes, re-derive
+  `OCCLUDER` from `sample_dir` first.
   | `lodestone-shell/tests/canopy_ao.rs` (real `client.jar` geometry) | the **production** path — `mesh_snapshot_models` over a real `SectionSnapshot`, i.e. that the shell override is not an island | a solid glass section, whose distinct vertex `ao` set must be exactly the four `face_shade` constants |
 
   `canopy_ao.rs` measures a solid oak-leaves section's darkest vertex against
