@@ -52,18 +52,12 @@ use std::sync::Arc;
 
 use lodestone_assets::{ParticleAtlas, ResourceLocation};
 use lodestone_model::event::ParticleOptions;
-use lodestone_particle::{Layer, ParticleEngine, ParticleQuad, Sheet, SpriteSource, emit};
+use lodestone_particle::{
+    DripKind, DripPhase, Layer, ParticleEngine, ParticleQuad, Sheet, SpriteSource, emit,
+};
 use lodestone_physics::{CollisionView, Vec3d};
 use lodestone_render::{BlockModels, Camera};
 use wgpu::util::DeviceExt;
-
-/// `DripParticle.WaterHangProvider`'s tint — vanilla sets water drips to
-/// `0.2F, 0.3F, 1.0F` rather than the biome water colour, so a cave drip reads
-/// blue everywhere including in swamp water.
-const WATER_DRIP_COLOUR: [f32; 3] = [0.2, 0.3, 1.0];
-
-/// `DripParticle.createLavaHang`'s tint, `1.0F, 0.2857F, 0.083F`.
-const LAVA_DRIP_COLOUR: [f32; 3] = [1.0, 0.2857, 0.083];
 
 /// The untinted particle colour.
 ///
@@ -685,32 +679,48 @@ impl Particles {
             "sonic_boom" => emit::animated_ambient(
                 &mut self.engine, x, y, z, 0.0, 0.0, 0.0, Sheet::SonicBoom, 3.0, 16,
             ),
-            // The drip family. Three sheets for three phases, and the fluid's own
-            // colour is the only thing telling a water drip from a lava one —
-            // both use the same sprite. `DripParticle`'s hanging phase has no
-            // gravity at all until it lets go; the falling phase does.
-            "dripping_water" => {
-                emit::drip(&mut self.engine, x, y, z, Sheet::DripHang, WATER_DRIP_COLOUR, 0.0);
+            // The drip family: seventeen registry types over one class, one
+            // `(kind, phase)` table in `emit::drip`, and a chain that continues
+            // **inside** the particle's own tick — a hanging drip spawns the
+            // falling one when it lets go, and that spawns the splash or the
+            // landing phase where it hits.
+            //
+            // Only the five below existed before, all as unchained one-shots
+            // with a hardcoded 64-tick lifetime, so a cave ceiling grew drips
+            // that hung for the wrong length of time and then blinked out
+            // without ever falling.
+            //
+            // These take no velocity from the packet by design: vanilla's
+            // providers all use `DripParticle`'s zero-velocity constructor, and
+            // the only velocity a drip ever has is the one its hanging phase
+            // hands to its falling phase.
+            "dripping_water" => self.drip(DripKind::Water, DripPhase::Hang, pos),
+            "falling_water" => self.drip(DripKind::Water, DripPhase::Fall, pos),
+            "dripping_lava" => self.drip(DripKind::Lava, DripPhase::Hang, pos),
+            "falling_lava" => self.drip(DripKind::Lava, DripPhase::Fall, pos),
+            "landing_lava" => self.drip(DripKind::Lava, DripPhase::Land, pos),
+            "dripping_honey" => self.drip(DripKind::Honey, DripPhase::Hang, pos),
+            "falling_honey" => self.drip(DripKind::Honey, DripPhase::Fall, pos),
+            "landing_honey" => self.drip(DripKind::Honey, DripPhase::Land, pos),
+            "falling_nectar" => self.drip(DripKind::Nectar, DripPhase::Fall, pos),
+            "dripping_obsidian_tear" => self.drip(DripKind::ObsidianTear, DripPhase::Hang, pos),
+            "falling_obsidian_tear" => self.drip(DripKind::ObsidianTear, DripPhase::Fall, pos),
+            "landing_obsidian_tear" => self.drip(DripKind::ObsidianTear, DripPhase::Land, pos),
+            "dripping_dripstone_water" => {
+                self.drip(DripKind::DripstoneWater, DripPhase::Hang, pos);
             }
-            "falling_water" => {
-                emit::drip(&mut self.engine, x, y, z, Sheet::DripFall, WATER_DRIP_COLOUR, 1.0);
+            "falling_dripstone_water" => {
+                self.drip(DripKind::DripstoneWater, DripPhase::Fall, pos);
             }
-            "dripping_lava" => {
-                emit::drip(&mut self.engine, x, y, z, Sheet::DripHang, LAVA_DRIP_COLOUR, 0.0);
-            }
-            "falling_lava" => {
-                emit::drip(&mut self.engine, x, y, z, Sheet::DripFall, LAVA_DRIP_COLOUR, 1.0);
-            }
-            "landing_lava" => {
-                emit::drip(&mut self.engine, x, y, z, Sheet::DripLand, LAVA_DRIP_COLOUR, 0.0);
-            }
+            "dripping_dripstone_lava" => self.drip(DripKind::DripstoneLava, DripPhase::Hang, pos),
+            "falling_dripstone_lava" => self.drip(DripKind::DripstoneLava, DripPhase::Fall, pos),
+            "falling_spore_blossom" => self.drip(DripKind::SporeBlossom, DripPhase::Fall, pos),
             // `spore_blossom_air` used to sit in this drip block, and it is
             // not a `DripParticle` at all — `SuspendedParticle.
             // SporeBlossomAirProvider`, which shares `drip_fall`'s *texture*
             // with `falling_spore_blossom` and nothing else. It hangs rather
             // than falling, and its lifetime is a flat 500..=1000 ticks against
-            // the drip's `64 / nextFloat` draw, so as a drip it vanished about
-            // twenty times too fast.
+            // the drip's own draw, so as a drip it vanished far too fast.
             "spore_blossom_air" => emit::spore_blossom_air(&mut self.engine, x, y, z),
 
             // -- The `SuspendedParticle` biome drift ----------------
@@ -790,6 +800,18 @@ impl Particles {
                 "no emitter wired for particle type {other:?}; dropped"
             ),
         }
+    }
+
+    /// One drip of the hang → fall → land chain, at the packet's position.
+    ///
+    /// A named helper rather than seventeen `emit::drip(&mut self.engine, kind,
+    /// phase, pos, [0.0; 3])` calls: the zero velocity is the *whole* of what
+    /// this adds, and spelling it seventeen times is seventeen chances to pass
+    /// the packet's velocity words instead. Vanilla's providers all use
+    /// `DripParticle`'s zero-velocity constructor; the only velocity a drip ever
+    /// carries is the one its hanging phase hands on when it lets go.
+    fn drip(&mut self, kind: DripKind, phase: DripPhase, pos: [f64; 3]) {
+        emit::drip(&mut self.engine, kind, phase, pos, [0.0; 3]);
     }
 
     /// Vanilla's `ClientLevel.calculateParticleLevel` folded together with
@@ -1610,6 +1632,24 @@ mod tests {
             ("copper_fire_flame", [0.0, 0.0, 0.0]),
             ("small_flame", [0.0, 0.0, 0.0]),
             ("sculk_soul", [0.0, 0.0, 0.0]),
+            // The drip family, all seventeen phases.
+            ("dripping_water", [0.0, 0.0, 0.0]),
+            ("falling_water", [0.0, 0.0, 0.0]),
+            ("dripping_lava", [0.0, 0.0, 0.0]),
+            ("falling_lava", [0.0, 0.0, 0.0]),
+            ("landing_lava", [0.0, 0.0, 0.0]),
+            ("dripping_honey", [0.0, 0.0, 0.0]),
+            ("falling_honey", [0.0, 0.0, 0.0]),
+            ("landing_honey", [0.0, 0.0, 0.0]),
+            ("falling_nectar", [0.0, 0.0, 0.0]),
+            ("dripping_obsidian_tear", [0.0, 0.0, 0.0]),
+            ("falling_obsidian_tear", [0.0, 0.0, 0.0]),
+            ("landing_obsidian_tear", [0.0, 0.0, 0.0]),
+            ("dripping_dripstone_water", [0.0, 0.0, 0.0]),
+            ("falling_dripstone_water", [0.0, 0.0, 0.0]),
+            ("dripping_dripstone_lava", [0.0, 0.0, 0.0]),
+            ("falling_dripstone_lava", [0.0, 0.0, 0.0]),
+            ("falling_spore_blossom", [0.0, 0.0, 0.0]),
         ];
         for &(kind, offset) in cases {
             let mut p = resolvable();

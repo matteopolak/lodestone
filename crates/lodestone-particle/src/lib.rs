@@ -611,6 +611,116 @@ pub enum Behaviour {
     /// thirty-second of its life — visible on a mob-death puff, and invisible to
     /// any test that only asks whether a particle exists.
     Animated,
+    /// `DripParticle` — the seventeen registry types that make up a drip's
+    /// three-phase life: it hangs under a block, lets go and falls, and splashes
+    /// where it lands.
+    ///
+    /// **Those three phases are three separate registry types, and vanilla
+    /// chains them from inside `tick()`** — a `dripping_water` particle spawns a
+    /// `falling_water` one when its 40 ticks are up, and that one spawns a
+    /// `splash` when it hits the ground. Modelling only the phase the server
+    /// asked for gives a cave ceiling where drips appear, hang, and blink out of
+    /// existence without ever falling, which is what this client did.
+    ///
+    /// Not [`Self::WaterDrop`], which is `WaterDropParticle` — a different class
+    /// with a different tick. See [`Particle::tick_drip`].
+    Drip {
+        /// Which fluid's drip this is, which decides the colour, the gravity,
+        /// the lifetime and what the next phase is.
+        kind: DripKind,
+        /// Where in the hang → fall → land chain this particle sits.
+        phase: DripPhase,
+    },
+}
+
+/// Which of vanilla's seven drip fluids a [`Behaviour::Drip`] belongs to.
+///
+/// The fluid is what decides everything about a drip except its sprite: two
+/// drips in the same phase differ only by this. `Dripstone*` are genuinely
+/// separate from their plain siblings — a dripstone drip plays a sound on
+/// landing and a plain one does not — even though `dripping_dripstone_water`
+/// and `dripping_water` are pixel-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DripKind {
+    /// `dripping_water` / `falling_water`. Lands as a `splash`.
+    Water,
+    /// `dripping_lava` / `falling_lava` / `landing_lava`. Its hanging phase
+    /// **cools**: see [`Particle::tick_drip`].
+    Lava,
+    /// `dripping_honey` / `falling_honey` / `landing_honey`.
+    Honey,
+    /// `falling_nectar` — a bee's trail. Falling phase only; it simply vanishes.
+    Nectar,
+    /// `dripping_obsidian_tear` / `falling_obsidian_tear` /
+    /// `landing_obsidian_tear`. The only glowing member.
+    ObsidianTear,
+    /// `dripping_dripstone_water` / `falling_dripstone_water`. Lands as a
+    /// `splash`, like plain water.
+    DripstoneWater,
+    /// `dripping_dripstone_lava` / `falling_dripstone_lava`. Lands as
+    /// `landing_lava` — it borrows plain lava's landing type rather than having
+    /// one of its own.
+    DripstoneLava,
+    /// `falling_spore_blossom`. Falling phase only.
+    ///
+    /// Distinct from `spore_blossom_air`, which is a `SuspendedParticle` and
+    /// merely shares the `drip_fall` texture.
+    SporeBlossom,
+}
+
+/// Where in the hang → fall → land chain a [`Behaviour::Drip`] sits.
+///
+/// Vanilla models these as four `DripParticle` subclasses that differ **only**
+/// in their `preMoveUpdate`/`postMoveUpdate` hooks; everything else is shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DripPhase {
+    /// `DripHangParticle` — clinging under a block. Its velocity is damped to a
+    /// **fiftieth** every tick so it does not drift, and when its lifetime
+    /// expires it spawns the falling phase rather than simply dying.
+    Hang,
+    /// `FallingParticle` / `FallAndLandParticle` — in free fall. Removed on
+    /// contact with the ground, spawning the landing phase if its kind has one.
+    Fall,
+    /// `DripLandParticle` — the splash where it landed. The end of the chain.
+    Land,
+}
+
+/// A follow-up particle a live particle's own `tick` asks the engine to spawn.
+///
+/// Returned from [`Particle::tick`] rather than pushed directly, because a
+/// `for p in &mut self.particles` loop already holds the vector mutably borrowed
+/// and a particle cannot add a sibling to it from inside its own tick.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum Spawn {
+    /// One of the six puffs a [`Behaviour::HugeExplosionSeed`] throws per tick.
+    HugeExplosion {
+        /// Where.
+        pos: [f64; 3],
+        /// `HugeExplosionParticle`'s `size` constructor argument.
+        size: f32,
+    },
+    /// The next phase of a [`Behaviour::Drip`]'s chain.
+    Drip {
+        /// The fluid, carried through unchanged.
+        kind: DripKind,
+        /// The phase to spawn — never the one that asked for it.
+        phase: DripPhase,
+        /// Where.
+        pos: [f64; 3],
+        /// The velocity to inherit. `DripHangParticle` hands its own on;
+        /// `FallAndLandParticle` hands on zero.
+        vel: [f64; 3],
+    },
+    /// A `splash` — what a water drip lands as, instead of a landing phase of
+    /// its own. `SplashParticle` is not a `DripParticle` at all, which is why
+    /// this cannot be a [`Self::Drip`] with a third phase.
+    Splash {
+        /// Where.
+        pos: [f64; 3],
+    },
 }
 
 impl Behaviour {
@@ -666,6 +776,8 @@ impl Behaviour {
             | Self::FlyTowardsPosition
             // `ExplodeParticle.getLayer` is `OPAQUE`.
             | Self::Animated
+            // `DripParticle.getLayer` is `OPAQUE`.
+            | Self::Drip { .. }
             | Self::DustColorTransition { .. } => Layer::Opaque,
         }
     }
@@ -999,8 +1111,9 @@ impl Particle {
     /// lets [`ParticleEngine::tick`] do it: a `for p in &mut self.particles`
     /// loop already holds `self.particles` mutably borrowed, so a particle
     /// cannot push a sibling into that same `Vec` from inside its own `tick`.
-    pub fn tick(&mut self, view: &dyn CollisionView) -> Vec<(f64, f64, f64, f32)> {
+    pub fn tick(&mut self, view: &dyn CollisionView) -> Vec<Spawn> {
         match self.behaviour {
+            Behaviour::Drip { kind, phase } => self.tick_drip(view, kind, phase),
             Behaviour::Portal => {
                 self.tick_portal();
                 Vec::new()
@@ -1267,6 +1380,134 @@ impl Particle {
         }
     }
 
+    /// `DripParticle.tick()` — a full override, and the one tick in this crate
+    /// that **continues into another particle**.
+    ///
+    /// The shape is `preMoveUpdate → gravity → move → postMoveUpdate → damp →
+    /// fluid check`, with the two hooks being the entire difference between
+    /// vanilla's four subclasses:
+    ///
+    /// | phase | `preMoveUpdate` | `postMoveUpdate` |
+    /// |---|---|---|
+    /// | [`DripPhase::Hang`] | expire → remove **and spawn the falling phase** | damp velocity to a fiftieth |
+    /// | [`DripPhase::Fall`] | expire → remove | on ground → remove, and spawn the landing phase if the kind has one |
+    /// | [`DripPhase::Land`] | expire → remove | — |
+    ///
+    /// Three details a literal reading loses:
+    ///
+    /// * **`lifetime--` is a post-decrement tested against zero**, so a drip
+    ///   lives `lifetime + 1` ticks and `lifetime` itself counts *down*. The
+    ///   cooling formula below reads that counter directly, so incrementing an
+    ///   `age` instead silently inverts the colour ramp.
+    /// * **The gravity term is `yd -= gravity`, not `yd -= 0.04 * gravity`.**
+    ///   `DripParticle` applies it raw rather than through the base tick's `0.04`
+    ///   scale, so a drip falls twenty-five times harder than the same `gravity`
+    ///   number means anywhere else in this file. That is why the hanging phase's
+    ///   value looks absurdly small (`0.0012`, or `1.2e-5` for honey).
+    /// * **Lava's hanging phase cools.** `CoolingDripHangParticle` recomputes
+    ///   `g = 16 / (40 - lifetime + 16)` and `b = 4 / (40 - lifetime + 8)` every
+    ///   tick, so a lava drip starts white-hot (`1, 1, 0.5`) and arrives at
+    ///   exactly the lava tint (`1, 0.2857, 0.0833`) as its 40 ticks run out.
+    ///   The two constants are not interchangeable and neither is derivable from
+    ///   the other.
+    fn tick_drip(
+        &mut self,
+        view: &dyn CollisionView,
+        kind: DripKind,
+        phase: DripPhase,
+    ) -> Vec<Spawn> {
+        self.xo = self.x;
+        self.yo = self.y;
+        self.zo = self.z;
+        let mut spawns = Vec::new();
+
+        // `CoolingDripHangParticle.preMoveUpdate`, before the shared body.
+        if phase == DripPhase::Hang && matches!(kind, DripKind::Lava | DripKind::DripstoneLava) {
+            #[expect(clippy::cast_precision_loss, reason = "lifetime counts down from 40")]
+            let elapsed = (40 - self.lifetime) as f32;
+            self.colour = [1.0, 16.0 / (elapsed + 16.0), 4.0 / (elapsed + 8.0)];
+        }
+
+        let expired = self.lifetime <= 0;
+        self.lifetime -= 1;
+        if expired {
+            self.remove();
+            if phase == DripPhase::Hang {
+                spawns.push(Spawn::Drip {
+                    kind,
+                    phase: DripPhase::Fall,
+                    pos: [self.x, self.y, self.z],
+                    vel: [self.xd, self.yd, self.zd],
+                });
+            }
+            return spawns;
+        }
+
+        self.yd -= f64::from(self.gravity);
+        self.move_by(self.xd, self.yd, self.zd, view);
+
+        match phase {
+            DripPhase::Hang => {
+                let damp = 0.02;
+                self.xd *= damp;
+                self.yd *= damp;
+                self.zd *= damp;
+            }
+            DripPhase::Fall if self.on_ground => {
+                self.remove();
+                let pos = [self.x, self.y, self.z];
+                match kind {
+                    // `FallAndLandParticle` with `ParticleTypes.SPLASH` — not a
+                    // drip phase at all.
+                    DripKind::Water | DripKind::DripstoneWater => {
+                        spawns.push(Spawn::Splash { pos });
+                    }
+                    // `DripstoneLava` borrows plain lava's landing type.
+                    DripKind::Lava | DripKind::DripstoneLava => spawns.push(Spawn::Drip {
+                        kind: DripKind::Lava,
+                        phase: DripPhase::Land,
+                        pos,
+                        vel: [0.0; 3],
+                    }),
+                    DripKind::Honey | DripKind::ObsidianTear => spawns.push(Spawn::Drip {
+                        kind,
+                        phase: DripPhase::Land,
+                        pos,
+                        vel: [0.0; 3],
+                    }),
+                    // `FallingParticle`, not `FallAndLandParticle`: these two
+                    // land as nothing at all.
+                    DripKind::Nectar | DripKind::SporeBlossom => {}
+                }
+                return spawns;
+            }
+            DripPhase::Fall | DripPhase::Land => {}
+        }
+
+        let drag = f64::from(0.98_f32);
+        self.xd *= drag;
+        self.yd *= drag;
+        self.zd *= drag;
+
+        // `if (this.type != Fluids.EMPTY)` — a drip dies inside **its own**
+        // fluid, so a water drip vanishes on hitting water and a lava drip does
+        // not. The honey/nectar/obsidian/spore kinds carry `Fluids.EMPTY` and
+        // therefore skip this entirely.
+        let (bx, by, bz) = block_containing(self.x, self.y, self.z);
+        let in_own_fluid = match kind {
+            DripKind::Water | DripKind::DripstoneWater => view.is_water(bx, by, bz),
+            DripKind::Lava | DripKind::DripstoneLava => view.is_lava(bx, by, bz),
+            DripKind::Honey
+            | DripKind::Nectar
+            | DripKind::ObsidianTear
+            | DripKind::SporeBlossom => false,
+        };
+        if in_own_fluid && self.y < f64::from(by) + fluid_height(view, bx, by, bz) {
+            self.remove();
+        }
+        spawns
+    }
+
     /// `WaterDropParticle.tick()` — a full override, not a `super` call.
     ///
     /// Two things differ from the base tick and both are visible: it decrements
@@ -1400,7 +1641,7 @@ impl Particle {
     /// [`ParticleEngine::tick`] to turn into real [`Behaviour::HugeExplosion`]
     /// particles — see that function's own doc for why a spawn cannot happen
     /// directly here.
-    fn tick_huge_explosion_seed(&mut self) -> Vec<(f64, f64, f64, f32)> {
+    fn tick_huge_explosion_seed(&mut self) -> Vec<Spawn> {
         self.xo = self.x;
         self.yo = self.y;
         self.zo = self.z;
@@ -1417,7 +1658,7 @@ impl Particle {
             let xx = self.x + jitter(&mut rng);
             let yy = self.y + jitter(&mut rng);
             let zz = self.z + jitter(&mut rng);
-            spawns.push((xx, yy, zz, size));
+            spawns.push(Spawn::HugeExplosion { pos: [xx, yy, zz], size });
         }
         self.age += 1;
         if self.age == self.lifetime {
@@ -1650,13 +1891,19 @@ impl ParticleEngine {
     /// returns its spawn requests instead, and they are turned into real
     /// particles only once the loop (and the borrow) has ended.
     pub fn tick(&mut self, view: &dyn CollisionView) {
-        let mut spawns: Vec<(f64, f64, f64, f32)> = Vec::new();
+        let mut spawns: Vec<Spawn> = Vec::new();
         for p in &mut self.particles {
             spawns.extend(p.tick(view));
         }
         self.particles.retain(Particle::is_alive);
-        for (x, y, z, size) in spawns {
-            emit::huge_explosion(self, x, y, z, size);
+        for spawn in spawns {
+            match spawn {
+                Spawn::HugeExplosion { pos: [x, y, z], size } => {
+                    emit::huge_explosion(self, x, y, z, size);
+                }
+                Spawn::Drip { kind, phase, pos, vel } => emit::drip(self, kind, phase, pos, vel),
+                Spawn::Splash { pos: [x, y, z] } => emit::splash(self, x, y, z, 0.0, 0.0, 0.0),
+            }
         }
     }
 
