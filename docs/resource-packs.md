@@ -515,6 +515,51 @@ connect.
   `assets/<namespace>/font/<name>.json` and its providers; a rejected,
   corrupt, or genuinely non-providing pack still correctly falls back to the
   default font.
+- **A pack author's JSON is parsed with vanilla's tolerance, not
+  `serde_json`'s.** `GsonHelper.parse` builds a `JsonReader` at
+  `Strictness.STRICT` and then calls the type adapter's `read` on it — a Gson
+  adapter consumes one value and stops, and this hand-rolled path never asserts
+  end-of-document afterwards (`Gson.fromJson(Reader, Class)` would have). So the
+  real client silently ignores anything after the root value, and
+  `serde_json::from_slice` does not: it returns `trailing characters at line N
+  column M`. `lodestone_assets::json::from_slice_lenient` is the port of that
+  behaviour — lenient about *trailing* content only, still strict about the value
+  itself, so a truncated or JSON5-flavoured document is still an error.
+
+  This is not a hypothetical tolerance. Measured on a real, widely-used 16× pack
+  the owner has installed: **23** of its `textures/item/*.png.mcmeta` files carry
+  one closing brace too many. Rejecting the metadata cost the whole *texture*,
+  because `AtlasBuilder::load` treats a metadata failure as a texture failure —
+  so `ItemAtlas` stitched **692** sprites instead of **715**, and 23 items drew
+  as empty wells while every other item in the same pack re-textured correctly.
+  Nothing was red. If you add a parser for anything a pack author writes, reach
+  for `from_slice_lenient`; keep `serde_json::from_slice` for documents we
+  produced ourselves, where trailing bytes really are a bug.
+- **`load_item_atlas` now says whether the pack actually reached it.** The log
+  line carries `from_packs = ItemAtlasReport::layered_sprites` (stitched sprites
+  served by a layer above the built-in pack) beside `pack_layers`, and warns when
+  `pack_layers > 0 && from_packs == 0`. That pair is the only thing that
+  separates "the pack's item art is in the atlas" from "the atlas was rebuilt and
+  nothing changed" — every other counter reads identically in both cases, and on
+  screen they are indistinguishable from a pack that simply overrides no items.
+  A second warning names up to eight `missing_textures`, which was previously a
+  bare count; with the jar alone it is always 0, so any non-zero value is
+  something a pack introduced.
+- **The item atlas's live refresh is coupled to the *block* atlas's.**
+  `app::redraw`'s reload block is one `if let Some(atlas) =
+  sim.reload_resource_pack_atlas()`, and everything inside it — the GUI atlases,
+  the flat `ItemAtlas`, the glint sheet, the 3-D block-item pass, the special-icon
+  latch — only runs when that returns `Some`. `Sim::reload_resource_pack_atlas`
+  advances `last_pack_generation` **before** its own guards and returns `None` on
+  three further conditions (no `net`, no `vanilla_atlas`, or its own
+  `BlockResources::load(true)` falling back to the demo palette). Each of those
+  consumes the generation, so a single such frame strands the item atlas on the
+  previous pack **for the rest of the process** — there is no later retry, because
+  the counter only ever moves forward and the next comparison is already equal.
+  The item atlas neither needs nor reads the block atlas; if you are touching that
+  block, give the icon surfaces their own generation latch so they refresh on the
+  pack change itself rather than on the block reload's success.
+
 - **`decide_resource_pack_push` is a pure function, tested against a full
   truth table.** If vanilla's own condition in
   `ClientCommonPacketListenerImpl.handleResourcePackPush` ever needs

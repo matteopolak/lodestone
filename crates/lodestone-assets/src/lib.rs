@@ -85,6 +85,7 @@ pub mod font;
 pub mod gui;
 pub mod icon;
 pub mod item;
+mod json;
 pub mod item_atlas;
 pub mod item_model;
 pub mod item_tint;

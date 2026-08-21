@@ -15,7 +15,7 @@
 //! shield, banners) are code-driven and have no flat texture, so their absence is
 //! parked and reported separately, not treated as a failure.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::atlas::{Atlas, AtlasBuilder, AtlasSprite};
 use crate::error::{AtlasError, ItemAtlasError};
@@ -49,6 +49,17 @@ pub struct ItemAtlasReport {
     pub missing_special_bases: Vec<String>,
     /// Item ids whose definition failed to parse or resolve (named).
     pub unresolved_items: Vec<String>,
+    /// How many of [`Self::sprites`] were served by a pack layer *above* the
+    /// bottom of the stack rather than by the built-in pack.
+    ///
+    /// This is the one number that separates "the pack's item art is in the
+    /// atlas" from "the atlas was rebuilt and nothing changed", and the two are
+    /// otherwise indistinguishable on screen and in every other counter here: a
+    /// pack whose `textures/item/*.png` never reached the stitch looks exactly
+    /// like a pack that chose not to override any item. `0` with a stack deeper
+    /// than one layer is a defect report, not a status update — see
+    /// `lodestone_shell::resources::load_item_atlas`, which warns on it.
+    pub layered_sprites: usize,
 }
 
 /// The stitched flat item-sprite atlas plus the resolved icon for every item.
@@ -121,9 +132,16 @@ impl ItemAtlas {
         // texture is recorded and skipped rather than aborting the whole atlas.
         let mut atlas_builder = AtlasBuilder::new();
         let mut loaded = 0usize;
+        let layered = layered_texture_paths(manager);
+        let mut layered_sprites = 0usize;
         for loc in &sprite_locs {
             match atlas_builder.load(manager, loc) {
-                Ok(_) => loaded += 1,
+                Ok(_) => {
+                    loaded += 1;
+                    if is_layered(&layered, loc) {
+                        layered_sprites += 1;
+                    }
+                }
                 Err(AtlasError::TextureMissing { location }) => {
                     report.missing_textures.push(location);
                 }
@@ -143,7 +161,12 @@ impl ItemAtlas {
                 continue;
             }
             match atlas_builder.load(manager, loc) {
-                Ok(_) => loaded += 1,
+                Ok(_) => {
+                    loaded += 1;
+                    if is_layered(&layered, loc) {
+                        layered_sprites += 1;
+                    }
+                }
                 Err(AtlasError::TextureMissing { location }) => {
                     report.missing_special_bases.push(location);
                 }
@@ -170,6 +193,7 @@ impl ItemAtlas {
 
         let atlas = atlas_builder.build()?;
         report.sprites = loaded;
+        report.layered_sprites = layered_sprites;
         Ok((Self { atlas, icons }, report))
     }
 
@@ -202,6 +226,33 @@ impl ItemAtlas {
     pub fn is_empty(&self) -> bool {
         self.icons.is_empty()
     }
+}
+
+/// Every in-pack path carried by a layer **above** the bottom of `manager`'s
+/// stack — i.e. by a resource pack rather than by the built-in pack.
+///
+/// One `list` per pack layer, not one `read` per sprite: a `read` on a zip
+/// decompresses the entry, and the question here is only whether the path
+/// exists. With no pack selected the `skip(1)` yields nothing and this costs
+/// nothing at all, which is the common case.
+///
+/// The *bottom* layer is the built-in pack by construction — every stack this
+/// crate is handed is built lowest-priority-first with the vanilla jar at index
+/// 0 (see [`ResourceManager::new`]). A stack assembled the other way round
+/// would make this count the opposite thing, which is why it is derived here
+/// rather than passed in as a flag a caller could get backwards.
+fn layered_texture_paths(manager: &ResourceManager) -> HashSet<String> {
+    let mut paths = HashSet::new();
+    for source in manager.sources().iter().skip(1) {
+        paths.extend(source.list("assets/"));
+    }
+    paths
+}
+
+/// Whether `location`'s PNG is carried by one of the pack layers in `layered`.
+fn is_layered(layered: &HashSet<String>, location: &ResourceLocation) -> bool {
+    !layered.is_empty()
+        && layered.contains(&ResourceManager::asset_path(location, "textures", "png"))
 }
 
 /// Discovers item ids by scanning for `assets/<ns>/items/<path>.json`. Sorted and
