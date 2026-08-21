@@ -530,6 +530,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   [`entity::move_entity`](../crates/lodestone-physics/src/entity.rs) — the shared
   `Entity.move` core — and selected per entity by `MoveContext::edge_back_off:
   EdgeBackOff`.
+- [Elytra rendering](./elytra-rendering.md) — The elytra's two wings as a wearable
+  layer over the humanoid rig: a mesh baked from `ElytraModel.createLayer`, a per-wing
+  transform posed off the wearer's own `body` part matrix, and the three-way
+  glide/crouch/rest pose that `ElytraAnimationState` lerps toward. The geometry and
+  pose half is landed; the GPU draw that consumes it is not, so **an elytra reaches
+  zero pixels today** — see "What is missing" for the exact remaining patch.
 - [Enchantment glint](./enchantment-glint.md) — The shimmering foil overlay an
   enchanted item carries: a scrolling, rotated, additively-blended pass over the
   item's **own geometry**, using vanilla's `enchanted_glint_item.png`. This doc covers
