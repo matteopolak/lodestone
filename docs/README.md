@@ -2026,6 +2026,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   shape, layout, background art, cost-number rendering) — this is the half that was
   still missing: nothing server-side computed a result, charged XP, or consumed an
   input.
+- [World coverage (`cargo xtask world-coverage`)](./world-coverage.md) — A
+  registry-driven census, `cargo xtask world-coverage`
+  (`xtask/src/world_coverage.rs`), that answers one question for every entity type,
+  block-entity type and particle type the game has: **does it reach any geometry?** It
+  exists because the two instruments that came before it are structurally blind to
+  this — `connectedness` asks whether a clientbound *packet* reaches anything, and
+  `islands` asks whether a Rust *symbol* has a caller — while the defect that
+  motivated it is neither. An item frame's packet arrives, its code is called, its
+  counter increments, and no pixel is ever drawn.
 - [World Creation screen](./world-creation-screen.md) — `Screen::CreateWorld` (issue
   #190): vanilla's `CreateWorldScreen`, reached from the world list's "Create New
   World" button (`crates/lodestone-shell/src/menu/world_select.rs`'s
