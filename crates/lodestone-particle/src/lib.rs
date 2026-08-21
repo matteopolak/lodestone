@@ -141,6 +141,25 @@ pub enum Sheet {
     /// so the two spark-ish particles (`firework` and `electric_spark`/`glow`)
     /// share nothing but a name pattern.
     Spark,
+    /// `particle/damage` — `damage_indicator.json`'s single frame.
+    ///
+    /// The damage indicator is a `CritParticle`, but it does **not** share
+    /// [`Self::CriticalHit`]'s sprite: its own definition names `damage`, a
+    /// separate texture. Deriving a sheet from the Java class rather than from
+    /// the pack's `particles/<name>.json` is exactly the mistake
+    /// [`Self::Spell`] documents for the `SpellParticle` family.
+    Damage,
+    /// `particle/infested` — `infested.json`'s single frame.
+    ///
+    /// Another `SpellParticle` over a one-frame sheet rather than an
+    /// eight-frame one, so `setSpriteFromAge` is a no-op for it.
+    Infested,
+    /// `particle/raid_omen` — `raid_omen.json`'s single frame.
+    RaidOmen,
+    /// `particle/trial_omen` — `trial_omen.json`'s single frame.
+    TrialOmen,
+    /// `particle/nautilus` — the conduit's homing mote.
+    Nautilus,
 }
 
 impl Sheet {
@@ -250,6 +269,11 @@ impl Sheet {
                 "spark_7", "spark_6", "spark_5", "spark_4", "spark_3", "spark_2", "spark_1",
                 "spark_0",
             ],
+            Self::Damage => &["damage"],
+            Self::Infested => &["infested"],
+            Self::RaidOmen => &["raid_omen"],
+            Self::TrialOmen => &["trial_omen"],
+            Self::Nautilus => &["nautilus"],
         }
     }
 
@@ -319,6 +343,11 @@ impl Sheet {
             Self::SonicBoom,
             Self::Glow,
             Self::Spark,
+            Self::Damage,
+            Self::Infested,
+            Self::RaidOmen,
+            Self::TrialOmen,
+            Self::Nautilus,
         ]
     }
 
@@ -506,6 +535,26 @@ pub enum Behaviour {
         /// Randomised ending colour.
         to: [f32; 3],
     },
+    /// `FlyTowardsPositionParticle` — the enchanting-table glyphs and the
+    /// conduit's `nautilus` mote.
+    ///
+    /// The second behaviour here whose position is a **closed-form function of
+    /// age** rather than an integration of velocity, and it is *not*
+    /// [`Self::Portal`] with different constants. Two differences that matter:
+    ///
+    /// * `xd/yd/zd` are the offset the mote starts at and converges *from*, so
+    ///   the emitter is given `target + offset` and flies to `target` — the
+    ///   opposite of a velocity, and the reason the constructor immediately
+    ///   sets `x = xStart + xd`.
+    /// * the vertical term is a **quartic** sag (`pp = (1 - pos)⁴`, then
+    ///   `y = yStart + yd*pos - pp*1.2`), not `Portal`'s linear `1 - age/lifetime`
+    ///   rise. Reading it as a rise puts the glyphs above the table instead of
+    ///   dipping into it.
+    ///
+    /// `move()` is overridden to skip collision and nothing integrates, so
+    /// `gravity` and `friction` are never read. See
+    /// [`Particle::tick_fly_towards_position`].
+    FlyTowardsPosition,
 }
 
 impl Behaviour {
@@ -553,6 +602,11 @@ impl Behaviour {
             | Self::HugeExplosion
             | Self::Portal
             | Self::Dust
+            // `LifetimeAlpha.ALWAYS_OPAQUE` for the two types wired to it
+            // (`enchant`, `nautilus`); the translucent-alpha variant of
+            // `FlyTowardsPositionParticle` is `vault_connection`, which has no
+            // emitter here yet.
+            | Self::FlyTowardsPosition
             | Self::DustColorTransition { .. } => Layer::Opaque,
         }
     }
@@ -892,6 +946,10 @@ impl Particle {
                 self.tick_portal();
                 Vec::new()
             }
+            Behaviour::FlyTowardsPosition => {
+                self.tick_fly_towards_position();
+                Vec::new()
+            }
             Behaviour::CampfireSmoke => {
                 self.tick_campfire_smoke(view);
                 Vec::new()
@@ -1056,6 +1114,58 @@ impl Particle {
             self.x + f64::from(self.bb_width) / 2.0,
             self.y + f64::from(self.bb_height),
             self.z + f64::from(self.bb_width) / 2.0,
+        );
+    }
+
+    /// `FlyTowardsPositionParticle.tick()` — a full override, like
+    /// [`Self::tick_portal`]: no `super.tick()`, no `move()`, and the position
+    /// recomputed from [`Self::spawn`] every tick.
+    ///
+    /// Java:
+    ///
+    /// ```text
+    /// if (age++ >= lifetime) { remove(); return; }
+    /// pos = 1.0F - (float) age / lifetime;
+    /// pp = 1.0F - pos; pp *= pp; pp *= pp;      // (1 - pos)^4
+    /// x = xStart + xd * pos;
+    /// y = yStart + yd * pos - pp * 1.2F;
+    /// z = zStart + zd * pos;
+    /// ```
+    ///
+    /// Two things a literal reading gets wrong. `pos` runs from **1 down to 0**,
+    /// so the mote starts at the full offset and converges on the spawn point —
+    /// which is why the emitter's `xd/yd/zd` are an offset rather than a
+    /// velocity. And `pp` is `pos` complemented *and then squared twice*: a
+    /// quartic, dipping the path 1.2 blocks below the straight line at the very
+    /// end of the flight. Both `1 - x` steps read as cancelling and do not.
+    ///
+    /// The removal test is `>=` on the **pre**-increment value, so a particle
+    /// with `lifetime` ticks lives through `age == lifetime - 1` and is removed
+    /// the tick `age` reaches `lifetime`.
+    fn tick_fly_towards_position(&mut self) {
+        self.xo = self.x;
+        self.yo = self.y;
+        self.zo = self.z;
+        let expired = self.age >= self.lifetime;
+        self.age += 1;
+        if expired {
+            self.remove();
+            return;
+        }
+        #[expect(clippy::cast_precision_loss, reason = "Java computes this in f32")]
+        let pos = 1.0 - (self.age as f32 / self.lifetime as f32);
+        let sag = {
+            let mut pp = 1.0 - pos;
+            pp *= pp;
+            pp *= pp;
+            pp
+        };
+        let pos = f64::from(pos);
+        let [sx, sy, sz] = self.spawn;
+        self.set_pos(
+            sx + self.xd * pos,
+            self.yd.mul_add(pos, sy) - f64::from(sag * 1.2),
+            sz + self.zd * pos,
         );
     }
 

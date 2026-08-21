@@ -306,12 +306,64 @@ client-predicted per-block-state emitter.
   gateways, end rods and lit campfires. **None of these is on the wire** — vanilla spawns them from
   `Block.animateTick` — so no dispatch table however complete could have produced them. It rides
   the collision snapshot `Sim::tick_particles` already holds, so it costs no extra lock.
-* **Still not wired:** `enchant` (its motes travel toward a target the enchanting-table block
-  entity supplies, a different wiring shape from everything here). `dust`/`dust_color_transition`
-  are now built — see "Built" above — but the other option-carrying types (`block`,
-  `block_marker`, `falling_dust`, `item`, …) still want their own arm in
+* **`enchant` is wired** — see "The `CritParticle`, `SpellParticle` and
+  `FlyTowardsPositionParticle` families" below. The bullet that stood here said it was blocked
+  because "its motes travel toward a target the enchanting-table block entity supplies, a
+  different wiring shape from everything here", and that was wrong in the way this repo's rules
+  warn a blocker usually is: `enchant` arrives on an ordinary `LEVEL_PARTICLES` packet like
+  every other type, and the "target" is simply the packet's own position, with the three
+  velocity words carrying the *offset* the mote flies in from. No block-entity wiring was
+  involved.
+* **Still not wired:** `dust`/`dust_color_transition` are built, but the other option-carrying
+  types (`block`, `block_marker`, `falling_dust`, `item`, …) still want their own arm in
   `decode_particle_options`; the decoder itself is no longer the blocker, only the per-type
   payload shape.
+
+### The `CritParticle`, `SpellParticle` and `FlyTowardsPositionParticle` families
+
+Eleven types, and the pass that closed the one **stranded** particle
+`cargo xtask world-coverage` reports.
+
+`enchanted_hit` was that finding: `Sheet::EnchantedHit` was declared, listed in `Sheet::all()`
+and therefore *stitched into the particle atlas*, with no emitter anywhere. `Sheet::Effect` and
+`Sheet::Enchant` were the same shape one layer removed — atlas-resident and constructed by
+nothing outside a test — but the census could not see them, because it reports the **subject**
+side and only `enchanted_hit` happened to share a name with a sheet frame stem.
+
+All three are now live, and the reverse query that would have found them is a gate:
+`no_sheet_is_atlas_resident_and_unreachable_from_the_dispatch` drives the **whole 125-entry
+particle registry** through `spawn_particles` and requires every sheet in `Sheet::all()` to come
+back. Observed failing (with `Effect` named) before the fix.
+
+| type | vanilla provider | sheet, per its own `particles/<name>.json` |
+|---|---|---|
+| `enchanted_hit` | `CritParticle.MagicProvider` | `enchanted_hit` |
+| `damage_indicator` | `CritParticle.DamageIndicatorProvider` | `damage` |
+| `effect`, `entity_effect` | `SpellParticle.InstantProvider`/`MobEffectProvider` | `effect_7…0` |
+| `instant_effect` | `SpellParticle.InstantProvider` | `spell_7…0` |
+| `infested`, `raid_omen`, `trial_omen` | `SpellParticle.Provider` | one texture each |
+| `enchant` | `FlyTowardsPositionParticle.EnchantProvider` | `sga_a…sga_z` |
+| `nautilus` | `FlyTowardsPositionParticle.NautilusProvider` | `nautilus` |
+
+Three things this cost, worth carrying:
+
+* **The class does not decide the sheet; the type's own JSON does.** Six registry types share
+  `SpellParticle` across *four* sheets, and the damage indicator is a `CritParticle` that does
+  not share the crit sprite. Every wrong answer here still resolves to a real sprite, so nothing
+  is red — `each_spell_and_crit_type_samples_the_sheet_its_own_definition_names` exists for that,
+  with its expectations read out of the pack rather than out of our `Sheet` enum, and it collects
+  mismatches instead of asserting inside its loop so a neuter reports every wrong arm.
+* **`FlyTowardsPositionParticle`'s `xd/yd/zd` are an offset, not a velocity**, and its vertical
+  term is a **quartic** sag (`(1 - pos)^4 * 1.2`) rather than the linear rise its closed-form
+  sibling `PortalParticle` uses. Both misreadings produce a live, plausibly-moving particle. The
+  flight also *ends* at its deepest point, 1.2 blocks below the target — a glyph dives into the
+  table rather than landing on it, and "it lands on the target" was this gate's first predicted
+  value and was wrong by exactly that 1.2.
+* **`effect`, `entity_effect` and `instant_effect` draw white.** Their real tint rides a
+  `SpellParticleOption` (colour + power) or `ColorParticleOption` (colour + alpha) that no
+  protocol family here decodes, so `spawn_one` passes the module's `WHITE` constant. The emitter
+  takes the colour as a parameter so the gap stays at the decoder; closing it is an arm in
+  `decode_particle_options` plus a `ParticleOptions` variant, exactly as for `dust`.
 
 ## Verification
 
