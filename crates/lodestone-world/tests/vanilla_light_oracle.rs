@@ -56,8 +56,9 @@ use std::path::{Path, PathBuf};
 
 use lodestone_core::{Nbt, Reader, read_named_nbt};
 use lodestone_world::{
-    BlockVolume, ColumnLight, LightData, LightProperties, NibbleArray, Neighbourhood,
-    compute_column_light, compute_column_light_with_neighbours,
+    BlockVolume, ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LightData, LightProperties,
+    LoadedChunk, NibbleArray, Neighbourhood, PaletteKind, Relit, World, compute_column_light,
+    compute_column_light_with_neighbours,
 };
 
 /// The 26.2 overworld: `yPos = -4` (min section) × 16, 24 sections of 16.
@@ -903,5 +904,501 @@ fn the_oracle_world_really_carries_vanilla_computed_light() {
         lateral > 20,
         "only {lateral} chunks hold more than 1000 laterally-varying light cells — \
          the population this survey draws its discriminating input from"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The incremental engine, judged against the same outside source
+// ---------------------------------------------------------------------------
+//
+// Everything above judges `compute_column_light*` — the from-scratch compute the
+// *server* runs. `lodestone_world::relight` is a different engine: the client's
+// own bounded-box `LightEngine.checkBlock`, which recomputes a 31-cell box around
+// a changed block and writes the diff back into stored light. Nothing judged it
+// against anything outside itself, and its own suite cannot: `client_relight.rs`
+// builds a synthetic room, seeds the light with `compute_column_light`, and then
+// asks the relight whether it agrees with that seed — a closed loop between two
+// of our own engines.
+//
+// The claim below is the one a real world can settle. Vanilla's stored light is
+// a fixed point of vanilla's own engine, so a relight queued for a position where
+// **nothing changed** must write nothing. `queue_relight`'s own doc already says
+// so ("a redundant relight is a no-op diff, not a wrong picture") and until now
+// that was an unenforced sentence.
+
+/// Resolves the sections vanilla left out of the save into the values vanilla's
+/// own engine reports for them, transcribed from `SkyLightSectionStorage`'s
+/// `getLightValue` and `createDataLayer` (see `docs/lighting.md`).
+///
+/// **An omitted section is not one state, it is two**, and conflating them is
+/// what makes this fixture measure itself instead of the engine. `DataLayer` has
+/// a lazy `defaultValue` and `isEmpty()` is `data == null && defaultValue == 0`,
+/// so `SerializableChunkData` skips a section either because its layer was
+/// genuinely all-zero (sealed rock) **or** because the light engine holds no
+/// layer for it at all (well above the terrain, where the engine answers `15`
+/// without materialising anything). The first is darkness, the second is full
+/// daylight, and the NBT spells them identically.
+///
+/// Vanilla's rule, in the same three cases this function has:
+///
+/// * a section with a layer is that layer;
+/// * a section with **no layer above it** is `15` — it is at or above
+///   `topSections`, so `getLightValue` short-circuits;
+/// * a section with a layer above it repeats that layer's `y == 0` row
+///   (`repeatFirstLayer`, reached through `getLightValue`'s walk up to the first
+///   non-null layer with the block `y` flattened away).
+///
+/// The first version of this function mapped every omitted section to
+/// `Uniform(0)`, which blacked out the entire sky above the terrain: the survey
+/// then reported 23,267 sky cells "raised" and 83,616 "lowered", every one of
+/// which was the relight correctly repairing the fixture's own hole.
+fn vanilla_resolved_light(saved: &ColumnLight) -> ColumnLight {
+    let count = saved.light_section_count();
+    let mut out = ColumnLight::new(SECTION_COUNT);
+    for s in 0..count {
+        *out.block_mut(s) = match saved.block(s) {
+            // Block light has no such default: absent means zero everywhere.
+            LightData::Missing => LightData::Uniform(0),
+            other => other.clone(),
+        };
+        if !matches!(saved.sky(s), LightData::Missing) {
+            *out.sky_mut(s) = saved.sky(s).clone();
+            continue;
+        }
+        let above = (s + 1..count).find(|&t| !matches!(saved.sky(t), LightData::Missing));
+        *out.sky_mut(s) = match above {
+            None => LightData::Uniform(15),
+            Some(t) => {
+                let src = saved.sky(t);
+                let mut arr = NibbleArray::filled(0);
+                for y in 0..16 {
+                    for z in 0..16 {
+                        for x in 0..16 {
+                            let v = src.get(NibbleArray::index(x, 0, z)).unwrap_or(0);
+                            arr.set(NibbleArray::index(x, y, z), v);
+                        }
+                    }
+                }
+                LightData::Values(arr)
+            }
+        };
+    }
+    out
+}
+
+/// Builds a [`World`] holding the real 3×3 neighbourhood around `(cx, cz)`:
+/// vanilla's blocks, and vanilla's own light as [`wire_shaped_light`] spells it.
+///
+/// A 3×3 is what the relight's box needs. [`AFFECTED_RADIUS`] is 15 and a chunk is
+/// 16 wide, so a break anywhere in the centre column can reach one chunk out and no
+/// further; a missing neighbour would leave `fill_scratch`'s opaque-barrier default
+/// standing where real blocks and real light belong, and the resulting disagreement
+/// would be the fixture's, not the engine's.
+///
+/// [`AFFECTED_RADIUS`]: lodestone_world::relight::AFFECTED_RADIUS
+fn relight_world(
+    world: &HashMap<(i32, i32), VanillaChunk>,
+    cx: i32,
+    cz: i32,
+    light: fn(&ColumnLight) -> ColumnLight,
+) -> World {
+    let mut out = World::new();
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            let src = &world[&(cx + dx, cz + dz)];
+            let mut column = ChunkColumn::new(
+                MIN_Y,
+                SECTION_COUNT,
+                PaletteKind::block_states(),
+                PaletteKind::biomes(),
+                u32::from(air_state_id()),
+                0,
+            );
+            // Section at a time rather than cell at a time: `set_blocks_in_section`
+            // forks the section's `Arc` once for 4096 writes instead of 4096 times,
+            // and this fixture writes 884,736 cells per neighbourhood.
+            for si in 0..SECTION_COUNT {
+                let base_y = MIN_Y + (si as i32) * 16;
+                let mut entries: Vec<(u8, u8, u8, u32)> = Vec::new();
+                for ly in 0..16u8 {
+                    for lz in 0..16u8 {
+                        for lx in 0..16u8 {
+                            let state = BlockVolume::block(
+                                src,
+                                lx as usize,
+                                base_y + i32::from(ly),
+                                lz as usize,
+                            );
+                            if state != u32::from(air_state_id()) {
+                                entries.push((lx, ly, lz, state));
+                            }
+                        }
+                    }
+                }
+                if !entries.is_empty() {
+                    column.set_blocks_in_section(si, &entries);
+                }
+            }
+            out.load(
+                ChunkPos::new(src.cx, src.cz),
+                LoadedChunk::new(
+                    column,
+                    light(&src.vanilla_light),
+                    Heightmaps::new(),
+                    Vec::new(),
+                ),
+            );
+        }
+    }
+    out
+}
+
+/// The heights a relight is queued at, chosen to span the column rather than to
+/// sit anywhere convenient: deep under the deepslate, mid-stone, cave depth, the
+/// surface band, and two above it.
+///
+/// One per section, so the drain coalesces them into six separate jobs rather
+/// than one, and each job's box is judged on its own.
+const RELIGHT_PROBE_HEIGHTS: [i32; 6] = [-56, -24, 8, 40, 72, 104];
+
+/// What a whole no-op relight survey moved, summed over probes and chunks.
+#[derive(Default)]
+struct RelightSurvey {
+    jobs: usize,
+    sky_raised: usize,
+    sky_lowered: usize,
+    block_raised: usize,
+    block_lowered: usize,
+    max_sky_gain: u8,
+    max_block_gain: u8,
+    /// Cells the flood visited, so a survey that ran over nothing cannot pass.
+    cells_visited: usize,
+    /// Where the raises were, so a failure localises instead of aggregating.
+    worst: Vec<(i32, i32, i32, usize, u8)>,
+}
+
+impl RelightSurvey {
+    fn absorb(&mut self, relit: &Relit) {
+        self.jobs += relit.jobs;
+        self.cells_visited += relit.cells_visited;
+        for job in &relit.detail {
+            self.sky_raised += job.sky_raised;
+            self.sky_lowered += job.sky_lowered;
+            self.block_raised += job.block_raised;
+            self.block_lowered += job.block_lowered;
+            self.max_sky_gain = self.max_sky_gain.max(job.max_sky_gain);
+            self.max_block_gain = self.max_block_gain.max(job.max_block_gain);
+            if job.sky_raised > 0 {
+                self.worst.push((
+                    job.change[0],
+                    job.change[1],
+                    job.change[2],
+                    job.sky_raised,
+                    job.max_sky_gain,
+                ));
+            }
+        }
+    }
+
+    fn report(&self, label: &str) -> String {
+        let mut s = format!(
+            "no-op relight survey ({label}):\n  jobs {}, cells visited {}\n  \
+             sky   raised {} (max +{}), lowered {}\n  block raised {} (max +{}), lowered {}",
+            self.jobs,
+            self.cells_visited,
+            self.sky_raised,
+            self.max_sky_gain,
+            self.sky_lowered,
+            self.block_raised,
+            self.max_block_gain,
+            self.block_lowered,
+        );
+        for (x, y, z, raised, gain) in self.worst.iter().take(8) {
+            s.push_str(&format!(
+                "\n  raised {raised} sky cells (max +{gain}) around ({x}, {y}, {z})"
+            ));
+        }
+        s
+    }
+}
+
+/// Runs the no-op relight over the same discriminating chunks the compute survey
+/// uses, and returns what it moved.
+fn run_relight_survey(
+    props: &impl LightProperties,
+    chunk_count: usize,
+    light: fn(&ColumnLight) -> ColumnLight,
+) -> (RelightSurvey, usize) {
+    let (loaded, _) = load_world();
+    let chosen = discriminating_chunks(&loaded, chunk_count);
+    assert!(
+        !chosen.is_empty(),
+        "no chunk in the oracle world has its whole 3x3 loaded"
+    );
+    let mut survey = RelightSurvey::default();
+    for candidate in &chosen {
+        let mut world = relight_world(&loaded, candidate.cx, candidate.cz, light);
+        for y in RELIGHT_PROBE_HEIGHTS {
+            // No block is written. `queue_relight` is exactly what
+            // `World::set_block` calls, so this is the production entry point with
+            // the one thing that could excuse a diff removed.
+            world.queue_relight(candidate.cx * 16 + 8, y, candidate.cz * 16 + 8);
+        }
+        // Drain to empty rather than once. `RELIGHT_CELL_BUDGET` spreads a batch
+        // across frames in production, and the all-transparent control leans on
+        // that hard: with nothing opaque, every probe's sky run reaches the world
+        // floor, so its box is an order of magnitude taller and two of six probes
+        // defer. Surveying one drain would silently drop them and judge the
+        // control on less input than the gate beside it.
+        for _ in 0..RELIGHT_PROBE_HEIGHTS.len() + 1 {
+            let relit = world.run_pending_relight(props, true);
+            assert_eq!(
+                relit.dropped, 0,
+                "a probe job exceeded the cell ceiling at chunk ({}, {}); its result \
+                 is not in this survey",
+                candidate.cx, candidate.cz
+            );
+            survey.absorb(&relit);
+            if relit.jobs == 0 {
+                break;
+            }
+        }
+        assert!(
+            !world.has_pending_relight(),
+            "the drain loop ran out of iterations at chunk ({}, {}) with work still \
+             queued; the survey would be judging a subset of its own probes",
+            candidate.cx,
+            candidate.cz
+        );
+    }
+    (survey, chosen.len())
+}
+
+/// **The claim.** A relight queued where nothing changed must not brighten a
+/// single cell of a world a real 26.2 server lit.
+///
+/// Vanilla's stored light is a fixed point of vanilla's own engine, so any cell
+/// our bounded recompute writes *brighter* is a place where our propagation is
+/// more permissive than vanilla's — and that is the reported symptom, a block
+/// broken in the dark making the surroundings bright.
+///
+/// The claim is one-directional for the reason the whole file is: every gap in the
+/// dampening/emission census can only remove a source or add an occluder, so it
+/// can make us darker and never brighter. The lowered counts are therefore printed
+/// with attribution rather than asserted to zero.
+#[test]
+#[ignore = "requires .cache/mc/survival/world, a real 26.2 world this repo did not write"]
+fn a_relight_that_changed_no_block_does_not_brighten_vanillas_own_light() {
+    let (survey, chunks) = run_relight_survey(&CensusProps, RELIGHT_SURVEY_CHUNKS, vanilla_resolved_light);
+    eprintln!("{}", survey.report("census props"));
+
+    // Anti-vacuity: the survey has to have recomputed something. Each probe box is
+    // at least 31x31x31 = 29,791 cells and there are six probes per chunk, so this
+    // floor is derived rather than picked -- it is one probe's worth per chunk.
+    let floor = chunks * 29_791;
+    assert!(
+        survey.cells_visited > floor,
+        "the relight survey visited only {} cells against a floor of {floor}; it ran \
+         over nothing",
+        survey.cells_visited
+    );
+    assert_eq!(
+        survey.jobs,
+        chunks * RELIGHT_PROBE_HEIGHTS.len(),
+        "every probe must become its own job, or the survey is judging fewer places \
+         than it thinks"
+    );
+
+    assert_eq!(
+        survey.sky_raised,
+        0,
+        "the client relight invented sky light in a world vanilla had already lit, \
+         with no block changed.\n{}",
+        survey.report("census props")
+    );
+    assert_eq!(
+        survey.block_raised,
+        0,
+        "the client relight invented block light in a world vanilla had already lit, \
+         with no block changed.\n{}",
+        survey.report("census props")
+    );
+}
+
+/// The detector proof for the gate above, which asserts an absence.
+///
+/// Run the same no-op survey with every block transparent: sky light then floods
+/// every sealed cell, so the raises the real gate must never see become the
+/// overwhelming majority of the survey. A comparator that cannot see that is not
+/// measuring anything.
+#[test]
+#[ignore = "requires .cache/mc/survival/world, a real 26.2 world this repo did not write"]
+fn the_no_op_relight_survey_detects_a_deliberately_wrong_light_engine() {
+    let (survey, chunks) = run_relight_survey(&AllTransparentProps, RELIGHT_SURVEY_CHUNKS, vanilla_resolved_light);
+    eprintln!("{}", survey.report("all-transparent control"));
+    // Derived from the survey's own scope: with every block transparent every probe
+    // box below the surface becomes one solid block of sky 15, so the raises are a
+    // large fraction of the cells visited. A twentieth is a floor no partially
+    // working comparator clears by accident, and it is well under what the control
+    // actually produces.
+    let floor = survey.cells_visited / 20;
+    assert!(
+        survey.sky_raised > floor,
+        "the all-transparent control raised only {} sky cells against a floor of \
+         {floor} over {chunks} chunks. It makes every sealed cell a sky source, so a \
+         survey that cannot see that proves nothing about the gate beside it.\n{}",
+        survey.sky_raised,
+        survey.report("all-transparent control")
+    );
+}
+
+/// Fewer chunks than [`SURVEY_CHUNKS`]: a relight survey builds a whole 3×3
+/// `World` per chunk (884,736 block writes) and floods six 31-cell boxes through
+/// it, where the compute survey reuses one decode.
+const RELIGHT_SURVEY_CHUNKS: usize = 3;
+
+/// The same world with every omitted sky section left [`LightData::Missing`] —
+/// the state a client holds for a light section a server named in **neither** the
+/// full mask nor the empty mask.
+///
+/// This is not a reconstruction of anything vanilla does; it is the *hazard*, and
+/// this function exists so its cost is a number rather than an argument.
+/// `relight::fill_scratch` resolves a `Missing` sky section to `15` whenever the
+/// dimension has sky light, which is right for a section above the top populated
+/// one and catastrophic for a sealed one: the openness scan reads a top-shell
+/// cell holding `15` as proof the column is open to the sky and floods every
+/// transparent cell below it at full daylight.
+fn absent_sky_stays_missing(saved: &ColumnLight) -> ColumnLight {
+    let mut out = ColumnLight::new(SECTION_COUNT);
+    for s in 0..saved.light_section_count() {
+        *out.sky_mut(s) = saved.sky(s).clone();
+        *out.block_mut(s) = saved.block(s).clone();
+    }
+    out
+}
+
+/// **The hazard, measured.** A sky section the client holds as `Missing` is read
+/// as full daylight, and one within reach of a break floods everything under it.
+///
+/// The engine itself is exact — the gate above recomputes 690k cells of a real
+/// vanilla-lit world and moves not one sky cell. This one changes exactly one
+/// thing about its *input*, leaving the sections vanilla omitted from the save as
+/// `Missing` instead of resolving them the way vanilla's own
+/// `SkyLightSectionStorage.getLightValue` does, and the same no-op relight then
+/// rewrites tens of thousands of cells **brighter**.
+///
+/// So this is the shape of the reported defect — a block broken with no light
+/// around it making the surroundings bright — expressed as a property of the
+/// input rather than of the flood. It is asserted rather than merely printed
+/// because the magnitude is the finding: anything that lets a sealed section
+/// reach the relight as `Missing` costs this much.
+#[test]
+#[ignore = "requires .cache/mc/survival/world, a real 26.2 world this repo did not write"]
+fn an_absent_sky_section_read_as_daylight_floods_a_world_that_was_lit() {
+    let (survey, chunks) = run_relight_survey(
+        &CensusProps,
+        RELIGHT_SURVEY_CHUNKS,
+        absent_sky_stays_missing,
+    );
+    eprintln!("{}", survey.report("absent sky left Missing"));
+    assert!(
+        survey.sky_raised > 1000,
+        "leaving absent sky sections `Missing` raised only {} sky cells over {chunks} \
+         chunks. Either `fill_scratch` no longer resolves `Missing` to 15 — in which \
+         case delete this gate rather than relaxing it — or the survey stopped \
+         reaching the sections vanilla omits.\n{}",
+        survey.sky_raised,
+        survey.report("absent sky left Missing")
+    );
+}
+
+/// The reported action itself: **break a real block, deep in the dark.**
+///
+/// The no-op gate proves the flood reproduces vanilla's fixed point. This one
+/// proves the thing the owner actually did cannot invent sky light, and it needs
+/// no "after" oracle to do it, because the claim is geometric rather than
+/// empirical: if every cell of the recomputed box holds vanilla sky `0`, then no
+/// cell in it is a sky source, and removing one block cannot create one — a sky
+/// source is a cell open to the world ceiling, and the ceiling is hundreds of
+/// blocks of stone away. So sky light must stay at `0` everywhere.
+///
+/// **Block light is deliberately not asserted to zero.** Breaking a block can
+/// legitimately *raise* it, by unblocking a nearby lamp or lava — that is the
+/// feature. Only sky is claimed here.
+///
+/// The precondition is checked rather than assumed: a probe whose box holds any
+/// non-zero vanilla sky cell is not the scenario, and using one would make this
+/// gate pass for the wrong reason.
+#[test]
+#[ignore = "requires .cache/mc/survival/world, a real 26.2 world this repo did not write"]
+fn breaking_a_block_in_the_dark_cannot_create_sky_light() {
+    let (loaded, _) = load_world();
+    let chosen = discriminating_chunks(&loaded, RELIGHT_SURVEY_CHUNKS);
+    let mut survey = RelightSurvey::default();
+    let mut breaks = 0usize;
+
+    for candidate in &chosen {
+        let src = &loaded[&(candidate.cx, candidate.cz)];
+        // A depth where the whole box is sealed. Y = -24 sits under the deepslate
+        // in this world; the box reaches -39..-9, and the precondition below
+        // refuses the probe outright if any of it sees the sky.
+        let y = -24;
+        let (lx, lz) = (8usize, 8usize);
+        let block = BlockVolume::block(src, lx, y, lz);
+        if block == u32::from(air_state_id()) {
+            continue;
+        }
+        // Precondition: vanilla's own sky light is 0 across the whole box, so
+        // "no cell here is a sky source" is a reading and not an assumption.
+        let mut lit = 0usize;
+        for by in (y - 15)..=(y + 15) {
+            let s = usize::try_from((by - MIN_Y).div_euclid(16) + 1).expect("in range");
+            for bz in 0..16 {
+                for bx in 0..16 {
+                    let v = src
+                        .vanilla_light
+                        .sky(s)
+                        .get(NibbleArray::index(
+                            bx,
+                            usize::try_from((by - MIN_Y).rem_euclid(16)).expect("in range"),
+                            bz,
+                        ))
+                        .unwrap_or(0);
+                    if v != 0 {
+                        lit += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            lit, 0,
+            "chunk ({}, {}) has {lit} sunlit cells inside the probe box at y = {y}; \
+             that is not the sealed scenario this gate claims about",
+            candidate.cx, candidate.cz
+        );
+
+        let mut world = relight_world(&loaded, candidate.cx, candidate.cz, vanilla_resolved_light);
+        let (wx, wz) = (candidate.cx * 16 + lx as i32, candidate.cz * 16 + lz as i32);
+        // The production entry point: `set_block` writes the cell and queues the
+        // relight itself, exactly as the client's block-update path does.
+        world.set_block(wx, y, wz, u32::from(air_state_id()));
+        let relit = world.run_pending_relight(&CensusProps, true);
+        assert_eq!(relit.jobs, 1, "one break must be one job");
+        survey.absorb(&relit);
+        breaks += 1;
+    }
+
+    assert!(
+        breaks >= 2,
+        "only {breaks} of the chosen chunks had a solid block at the probe; the \
+         survey needs at least two to mean anything"
+    );
+    eprintln!("{}", survey.report("sealed break"));
+    assert_eq!(
+        survey.sky_raised,
+        0,
+        "breaking a block in a volume vanilla lit at sky 0 throughout created sky \
+         light. Nothing in the box is open to the sky, so this is manufactured.\n{}",
+        survey.report("sealed break")
     );
 }

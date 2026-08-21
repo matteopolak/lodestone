@@ -729,3 +729,119 @@ fn the_pending_queue_is_bounded() {
     empty.extend(relit.dirty_sections.iter().copied());
     assert!(empty.is_empty(), "unloaded chunks dirtied {empty:?}");
 }
+
+// ---------------------------------------------------------------------------
+// The two readings of an absent sky section must be the same reading
+// ---------------------------------------------------------------------------
+
+/// A relight must not black out a sky section it read as daylight.
+///
+/// [`LightData::Missing`] is read and written through two different conventions,
+/// and they disagree. `relight::fill_scratch` resolves an absent sky section to
+/// **15** where the dimension has sky light — vanilla elides every sky section
+/// above the top populated one and answers `15` there, and the mesher's own
+/// `SkyDefault` follows the same rule. But [`LightData::set`] materialises an
+/// absent section from **zero**, because it cannot know the dimension and says so
+/// in its own docs.
+///
+/// So one cell of such a section moving is enough to rewrite the other 4,095 from
+/// daylight to darkness, in a single nibble write, with nothing red anywhere. The
+/// visible form is a 16³ block of sky going black above a build the moment
+/// something in it is broken.
+///
+/// The scene is the minimum that reaches it: an isolated column whose sky is
+/// entirely `Missing` — what a client holds for the sections a server sent in
+/// neither mask — with a solid roof low down, so the cells under the roof
+/// recompute to something other than 15 and force the write.
+#[test]
+fn a_relight_writing_into_an_absent_sky_section_keeps_its_daylight() {
+    let mut world = World::new();
+    for (cx, cz) in NEIGHBOURHOOD {
+        let mut column = ChunkColumn::new(
+            MIN_Y,
+            SECTION_COUNT,
+            PaletteKind::block_states(),
+            PaletteKind::biomes(),
+            AIR,
+            0,
+        );
+        // A sealed roof with no hole at all, so every cell beneath it recomputes
+        // to 0 and every write-back into the section spanning it is a *fall*.
+        for z in 0..16usize {
+            for x in 0..16usize {
+                column.set_block(x, CEILING_Y, z, STONE);
+            }
+        }
+        // The subject: a block under the roof, whose removal queues the relight.
+        column.set_block(4, CEILING_Y - 2, 4, STONE);
+        // Light left entirely `Missing`: `ColumnLight::new` is all-`Missing` and
+        // nothing patches it. That is exactly the state a client holds for a
+        // section named by neither the full mask nor the empty mask.
+        world.load(
+            ChunkPos::new(cx, cz),
+            LoadedChunk::new(column, ColumnLight::new(SECTION_COUNT), Heightmaps::new(), Vec::new()),
+        );
+    }
+
+    // The section holding the roof: every cell of it reads as daylight before the
+    // relight, because the whole layer is `Missing`.
+    let roof_light_section =
+        usize::try_from((CEILING_Y - MIN_Y).div_euclid(EDGE) + 1).expect("in range");
+    let chunk = world.get(ChunkPos::new(0, 0)).expect("loaded");
+    assert!(
+        matches!(chunk.light.sky(roof_light_section), LightData::Missing),
+        "the fixture must start with this section absent, or it is not the case \
+         under test"
+    );
+
+    world.set_block(4, CEILING_Y - 2, 4, AIR);
+    let relit = world.run_pending_relight(&FixtureProps, true);
+    assert!(
+        relit.cells_changed > 0,
+        "the relight wrote nothing, so it never reached the section this gate is \
+         about"
+    );
+
+    // The roof section is the one that gets written: its bottom layer *is* the
+    // roof, which recomputes to 0 against a stored reading of 15. So it must no
+    // longer be absent — and every cell of it above the roof, which the recompute
+    // agrees is open sky, must still read the daylight it read before.
+    //
+    // The section is sampled at a cell the assertion above did not touch and the
+    // break is nowhere near, so a pass cannot come from the write itself.
+    let chunk = world.get(ChunkPos::new(0, 0)).expect("loaded");
+    let roof = chunk.light.sky(roof_light_section);
+    assert!(
+        !matches!(roof, LightData::Missing),
+        "the relight lowered the roof cells but left the section absent, so nothing \
+         about this scene was exercised"
+    );
+    // Section-local `y` of the roof, derived rather than guessed: a light section
+    // does not begin at [`CEILING_Y`], and reading one that happened to sit *under*
+    // the roof measured the sealed room's partial light instead and reported 11.
+    let roof_local_y = usize::try_from((CEILING_Y - MIN_Y).rem_euclid(EDGE)).expect("in range");
+    assert!(
+        roof_local_y + 1 < 16,
+        "the fixture needs at least one cell of open sky above the roof inside the \
+         roof's own light section"
+    );
+    let sky_above_roof = roof
+        .get(NibbleArray::index(15, roof_local_y + 1, 15))
+        .unwrap_or(0);
+    assert_eq!(
+        sky_above_roof, 15,
+        "a cell that read as daylight before the relight now reads \
+         {sky_above_roof}: one nibble write materialised the whole absent section \
+         from zero"
+    );
+    // And the write that materialised it still landed: the roof itself is opaque
+    // and must be dark. Without this the gate would pass on a section left at a
+    // flat `Uniform(15)`, which is the other way to get 15 at the cell above.
+    let roof_cell = roof
+        .get(NibbleArray::index(4, roof_local_y, 4))
+        .unwrap_or(0);
+    assert_eq!(
+        roof_cell, 0,
+        "the roof cell reads {roof_cell}; the recompute's own write was lost"
+    );
+}

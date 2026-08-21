@@ -966,6 +966,18 @@ impl World {
         }
     }
 
+    /// Whether any block change is still waiting for
+    /// [`run_pending_relight`](World::run_pending_relight).
+    ///
+    /// A drain is bounded by [`crate::relight::RELIGHT_CELL_BUDGET`] and requeues
+    /// whatever it could not afford, so a caller that needs the queue *empty* —
+    /// a gate surveying a fixed number of probes, rather than a frame loop — has
+    /// to be able to ask instead of assuming one call was enough.
+    #[must_use]
+    pub fn has_pending_relight(&self) -> bool {
+        !self.pending_relight.is_empty()
+    }
+
     /// Server light corrections applied so far, and queued relights they cancelled.
     ///
     /// Monotonic, so a host reads the **delta** across a window rather than the

@@ -787,6 +787,20 @@ impl World {
                             let nibble = NibbleArray::index(sx, y_in_section, sz);
                             let mut moved = false;
                             if scratch.sky[idx] != scratch.stored_sky[idx] {
+                                // An absent sky section was *read* as full daylight
+                                // above, but `LightData::set` materialises one from
+                                // **zero** — it cannot know the dimension, and says
+                                // so. Poking a single nibble into it therefore
+                                // rewrites the other 4,095 cells from daylight to
+                                // darkness. Establish the section at the value this
+                                // job actually read before writing into it, once:
+                                // after the first write it is no longer absent, and
+                                // re-filling would discard the writes already made.
+                                if scratch.sky_from_missing[idx]
+                                    && matches!(chunk.light.sky(ls), LightData::Missing)
+                                {
+                                    *chunk.light.sky_mut(ls) = LightData::Uniform(MAX_LIGHT);
+                                }
                                 if scratch.sky[idx] > scratch.stored_sky[idx] {
                                     job.sky_raised += 1;
                                     job.max_sky_gain = job
