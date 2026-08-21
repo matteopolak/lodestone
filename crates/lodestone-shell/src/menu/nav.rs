@@ -4617,6 +4617,10 @@ impl MenuNav {
                 self.toggle_entity_shadows();
                 MenuAction::None
             }
+            SettingsOutcome::Cycle(LiveOption::WeatherRadius) => {
+                self.step_weather_radius(1);
+                MenuAction::None
+            }
         }
     }
 
@@ -4838,6 +4842,23 @@ impl MenuNav {
         self.persist_options();
     }
 
+    /// Steps `weatherRadius` by one block and wraps, then persists — the same
+    /// shape and the same wrap reasoning as [`Self::step_render_distance`].
+    ///
+    /// The bounds are `config`'s, which are vanilla's `IntRange(3, 10)`: the
+    /// same pair `menu::options::INT_RANGE_SLIDERS` places the handle with, so
+    /// the value a click can reach and the track it draws on cannot disagree.
+    /// No consumer push is needed — `app::weather::weather_columns_for_frame`
+    /// reads the field off `MenuNav::options` once per presented frame, exactly
+    /// as `cutout_leaves` and `entity_shadows` are polled.
+    fn step_weather_radius(&mut self, delta: i32) {
+        use crate::config::{MAX_WEATHER_RADIUS, MIN_WEATHER_RADIUS};
+        let span = MAX_WEATHER_RADIUS - MIN_WEATHER_RADIUS + 1;
+        let offset = self.options.weather_radius - MIN_WEATHER_RADIUS;
+        self.options.weather_radius = MIN_WEATHER_RADIUS + (offset + delta).rem_euclid(span);
+        self.persist_options();
+    }
+
     /// Steps `renderDistance` by one chunk and wraps, then persists.
     ///
     /// **Wraps rather than saturating**, matching every other live control on
@@ -4930,7 +4951,18 @@ impl MenuNav {
                         as u32;
                     crate::resources::set_mipmap_levels(self.options.mipmap_levels);
                 }
-                // `int_range` only answers for the five above; a sixth would
+                // `weatherRadius`' bucket is the block radius itself
+                // (`INT_RANGE_SLIDERS`'s `IntRange(3, 10)` with no xmap), so
+                // nothing has to be scaled back. Clamped to `config`'s own
+                // bounds rather than `0..`: a zero radius draws no
+                // precipitation at all, which reads as a broken renderer.
+                LiveOption::WeatherRadius => {
+                    self.options.weather_radius = value.clamp(
+                        crate::config::MIN_WEATHER_RADIUS,
+                        crate::config::MAX_WEATHER_RADIUS,
+                    );
+                }
+                // `int_range` only answers for the six above; a seventh would
                 // have to add its own write here, and falling through to
                 // `false` is the honest result until it does.
                 _ => return false,

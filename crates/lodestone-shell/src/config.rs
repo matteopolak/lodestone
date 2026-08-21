@@ -61,6 +61,19 @@ pub const MIN_RENDER_DISTANCE: u32 = 2;
 /// client takes that branch unconditionally — there is no JVM heap cap to ask.
 pub const MAX_RENDER_DISTANCE: u32 = 32;
 
+/// Vanilla's `weatherRadius` bounds and default — `IntRange(3, 10, true)`
+/// defaulting to `10` (`Options.java`). The same pair
+/// `menu::options::INT_RANGE_SLIDERS`' `"weatherRadius"` row places the handle
+/// with, so the value a drag can reach and the track it draws on are one fact.
+///
+/// The default is deliberately named through
+/// [`lodestone_render::DEFAULT_WEATHER_RADIUS`] rather than spelled `10` here:
+/// that constant is what `app::weather::weather_columns_for_frame` used to pass
+/// unconditionally, and a second literal would let the two drift.
+pub const MIN_WEATHER_RADIUS: i32 = 3;
+/// See [`MIN_WEATHER_RADIUS`].
+pub const MAX_WEATHER_RADIUS: i32 = lodestone_render::DEFAULT_WEATHER_RADIUS;
+
 /// Vanilla clamps the auto-picked (and any manual) scale so the resulting
 /// *scaled* GUI resolution never drops below this many logical pixels wide —
 /// `Window.calculateScale`'s `>= 320` check (`Window.java`).
@@ -752,6 +765,22 @@ pub struct Options {
     /// bool write is cheap enough that the equality-guard trick that field's
     /// own doc explains is not needed here.
     pub entity_shadows: bool,
+    /// Vanilla's **Weather Effect Radius** option (`options.weatherRadius`,
+    /// `Options.java`): `IntRange(3, 10)`, default `10`, measured in **blocks**
+    /// (`en_us.json`'s `options.blocks` is `"%s Blocks"`, not `"%s Chunks"` —
+    /// its neighbour `cloudRange` is the chunk-denominated one).
+    ///
+    /// The half-width of the square of columns the rain/snow pass walks around
+    /// the camera. Reaches `lodestone_render::extract_columns` and
+    /// `lodestone_render::column_instance` through
+    /// `app::weather::weather_columns_for_frame`, which took
+    /// [`lodestone_render::DEFAULT_WEATHER_RADIUS`] as a literal at both call
+    /// sites before this field existed — the "correct function fed a constant by
+    /// its producer" shape, not a missing consumer. It reaches both, because the
+    /// second is what fades a column's alpha out toward the radius: passing the
+    /// option to only the extraction would draw fewer columns *and* fade them at
+    /// the wrong distance.
+    pub weather_radius: i32,
 }
 
 impl Default for Options {
@@ -799,6 +828,7 @@ impl Default for Options {
             cutout_leaves: true,
             mipmap_levels: lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS,
             entity_shadows: true,
+            weather_radius: MAX_WEATHER_RADIUS,
         }
     }
 }
@@ -1064,6 +1094,17 @@ impl Options {
             .get("entity_shadows")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
+        // Clamped to vanilla's own `IntRange(3, 10)` — `mipmap_levels`' reason
+        // above. A hand-edited `0` would otherwise reach `extract_columns` and
+        // silently stop all precipitation drawing, which reads as a render bug
+        // rather than as a settings-file mistake.
+        let weather_radius = obj
+            .get("weather_radius")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|v| i32::try_from(v).ok())
+            .map_or(MAX_WEATHER_RADIUS, |v| {
+                v.clamp(MIN_WEATHER_RADIUS, MAX_WEATHER_RADIUS)
+            });
         Self {
             gui_scale,
             keybinds,
@@ -1105,6 +1146,7 @@ impl Options {
             cutout_leaves,
             mipmap_levels,
             entity_shadows,
+            weather_radius,
         }
     }
 
@@ -1297,6 +1339,9 @@ impl Options {
         }
         if !self.entity_shadows {
             obj.insert("entity_shadows".into(), false.into());
+        }
+        if self.weather_radius != default.weather_radius {
+            obj.insert("weather_radius".into(), self.weather_radius.into());
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
             .unwrap_or_else(|_| "{}".to_string());

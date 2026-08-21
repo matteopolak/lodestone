@@ -528,6 +528,7 @@ pub(super) fn weather_columns_for_frame(
     camera: &lodestone_render::Camera,
     tick: u64,
     partial_tick: f32,
+    radius: i32,
     probe: &dyn lodestone_render::WeatherProbe,
 ) -> (Vec<lodestone_render::WeatherInstance>, usize) {
     let camera_pos = [
@@ -552,7 +553,7 @@ pub(super) fn weather_columns_for_frame(
     // small one tick's texel delta is.
     let columns = lodestone_render::extract_columns(
         weather,
-        lodestone_render::DEFAULT_WEATHER_RADIUS,
+        radius,
         tick as i64,
         partial_tick,
         camera_pos,
@@ -567,7 +568,7 @@ pub(super) fn weather_columns_for_frame(
                 c,
                 camera_pos,
                 &offsets,
-                lodestone_render::DEFAULT_WEATHER_RADIUS,
+                radius,
                 weather.rain_level(),
             )
         })
@@ -731,6 +732,7 @@ mod tests {
                 &camera(cam, 64.5, cam),
                 0,
                 0.0,
+                DEFAULT_WEATHER_RADIUS,
                 &world,
             );
             assert_eq!(
@@ -811,6 +813,7 @@ mod tests {
             &camera(0.5, 64.5, 0.5),
             0,
             0.0,
+            DEFAULT_WEATHER_RADIUS,
             &world,
         );
         assert!(instances.is_empty() && rain == 0);

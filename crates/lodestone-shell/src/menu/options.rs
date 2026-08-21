@@ -482,6 +482,25 @@ pub enum LiveOption {
     /// consumer — `RenderState::set_entity_shadows_enabled`, which gates
     /// `RenderState::prepare_shadows`.
     EntityShadows,
+    /// `options.weatherRadius` → [`crate::config::Options::weather_radius`].
+    ///
+    /// An **`IntRange(3, 10)`** (`Options.java`) like [`Self::RenderDistance`],
+    /// so its handle comes from [`SliderRange`] and [`Self::unit_double`]
+    /// answers `None` for it.
+    ///
+    /// Its consumer was already correct and already parameterised:
+    /// `lodestone_render::extract_columns` and
+    /// `lodestone_render::column_instance` both take a `radius`, and
+    /// `app::weather::weather_columns_for_frame` handed each of them
+    /// `lodestone_render::DEFAULT_WEATHER_RADIUS` — a correct function fed a
+    /// constant by its producer, not a missing consumer. That function now takes
+    /// the radius from here.
+    ///
+    /// It reaches **both** of those, and that is load-bearing rather than
+    /// thorough: `column_instance` fades a column's alpha out toward the radius,
+    /// so wiring only the extraction would draw a smaller square of rain still
+    /// faded for a 10-block one — visible as an abrupt edge instead of a falloff.
+    WeatherRadius,
 }
 
 impl LiveOption {
@@ -555,7 +574,11 @@ impl LiveOption {
             // reason again: its stored value is 0..=4 mip levels, so
             // returning it here would pin every handle near the far left.
             | LiveOption::MipmapLevels
-            | LiveOption::EntityShadows => None,
+            | LiveOption::EntityShadows
+            // `WeatherRadius` is the fifth `IntRange`, `RenderDistance`'s
+            // reason again: its stored value is 3..=10 blocks, so returning it
+            // here would pin every handle to the far right.
+            | LiveOption::WeatherRadius => None,
         }
     }
 
@@ -613,7 +636,11 @@ impl LiveOption {
             // reason again: its stored value is 0..=4 mip levels, so
             // returning it here would pin every handle near the far left.
             | LiveOption::MipmapLevels
-            | LiveOption::EntityShadows => None,
+            | LiveOption::EntityShadows
+            // `WeatherRadius` is the fifth `IntRange`, `RenderDistance`'s
+            // reason again: its stored value is 3..=10 blocks, so returning it
+            // here would pin every handle to the far right.
+            | LiveOption::WeatherRadius => None,
         }
     }
 
@@ -654,6 +681,7 @@ impl LiveOption {
             LiveOption::Fov => "fov",
             LiveOption::FramerateLimit => "framerateLimit",
             LiveOption::MipmapLevels => "mipmapLevels",
+            LiveOption::WeatherRadius => "weatherRadius",
             _ => return None,
         };
         INT_RANGE_SLIDERS
@@ -898,6 +926,11 @@ impl Cell {
         // other three IntRange rows told before their own arm existed.
         if spec.live == Some(LiveOption::MipmapLevels) {
             return Some(mipmap_levels_slider_fraction(options.mipmap_levels));
+        }
+        // `weatherRadius`' `IntRange(3, 10)` — the fifth of the identical
+        // family, same reason as the four above.
+        if spec.live == Some(LiveOption::WeatherRadius) {
+            return Some(weather_radius_slider_fraction(options.weather_radius));
         }
         // A **live** `UnitDouble` option reads its handle position from the
         // real, persisted value; only an inactive one falls through to the
@@ -1398,6 +1431,20 @@ pub fn mipmap_levels_slider_fraction(levels: u32) -> f32 {
     range.to_slider_value(i32::try_from(levels).unwrap_or(range.min))
 }
 
+/// `weatherRadius`' slider fraction from the real, persisted block radius.
+///
+/// The fifth of the identical family (see [`mipmap_levels_slider_fraction`]),
+/// reading the same [`INT_RANGE_SLIDERS`] row the inactive handle used so that
+/// making the row live does not move a handle a player was already looking at.
+#[must_use]
+pub fn weather_radius_slider_fraction(radius: i32) -> f32 {
+    let range = INT_RANGE_SLIDERS
+        .iter()
+        .find(|(a, _, _)| *a == "weatherRadius")
+        .map_or(SliderRange { min: 3, max: 10 }, |(_, r, _)| *r);
+    range.to_slider_value(radius)
+}
+
 /// `fov`'s slider fraction from the real, persisted degree count.
 ///
 /// The third of the identical trio (see [`render_distance_slider_fraction`] and
@@ -1770,6 +1817,12 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         LiveOption::EntityShadows => {
             if options.entity_shadows { "ON" } else { "OFF" }.to_string()
         }
+        // `genericValueLabel(caption, translatable("options.blocks", value))`
+        // (`Options.java`). `en_us.json`'s pattern is `"%s Blocks"` — a
+        // **capital** B, and **Blocks** rather than `RenderDistance`'s Chunks:
+        // this slider is denominated in blocks and its Video-page neighbour
+        // `cloudRange` is the chunk-denominated one.
+        LiveOption::WeatherRadius => format!("{} Blocks", options.weather_radius),
     }
 }
 
@@ -1972,7 +2025,14 @@ static VIDEO: &[Entry] = &[
         cycle("textureFiltering", "Texture Filtering"),
         slider("maxAnisotropyBit", "Anisotropic Filtering"),
     ),
-    lone(slider("weatherRadius", "Weather Effect Radius")),
+    // Live: the rain/snow column walk already took a radius parameter and was
+    // handed `lodestone_render::DEFAULT_WEATHER_RADIUS` at both call sites. See
+    // `LiveOption::WeatherRadius`.
+    lone(live_slider(
+        "weatherRadius",
+        "Weather Effect Radius",
+        LiveOption::WeatherRadius,
+    )),
     head("Preferences"),
     pair(
         cycle("showAutosaveIndicator", "Autosave Indicator"),
@@ -3953,7 +4013,7 @@ mod tests {
                 // pairs it can write three of — see `MenuNav::apply_graphics_preset`.
                 LiveOption::GraphicsPreset,
                 // Video page, on the Quality & Performance grid, next to the
-                // (still inactive) Biome Blend — issue #443.
+                // (still inactive) Biome Blend.
                 LiveOption::RenderDistance,
                 // Also Video, in the `(ambientOcclusion, cloudStatus)` pair: the
                 // three-state Clouds cycle, whose `SkyFrame::with_cloud_status`
@@ -3971,6 +4031,10 @@ mod tests {
                 // The `(cutoutLeaves, improvedTransparency)` pair's first half —
                 // the leaves-render-pass fix's own row.
                 LiveOption::CutoutLeaves,
+                // The Quality & Performance grid's last row, a `lone`: the
+                // rain/snow column radius, whose consumer already took one and
+                // was handed `DEFAULT_WEATHER_RADIUS`.
+                LiveOption::WeatherRadius,
                 LiveOption::ToggleSneak,
                 LiveOption::ToggleSprint,
                 LiveOption::ToggleAttack,
@@ -4039,8 +4103,9 @@ mod tests {
                 LiveOption::GlintStrength,
                 LiveOption::PanoramaSpeed,
             ],
-            "FOV on the root; GUI Scale, Render Distance, Clouds, Mipmap Levels and \
-             Entity Shadows on Video; the four toggle rows and Auto-Jump/Sprint \
+            "FOV on the root; GUI Scale, Render Distance, Clouds, Mipmap Levels, \
+             Entity Shadows and Weather Effect Radius on Video; the four toggle \
+             rows and Auto-Jump/Sprint \
              Window on Controls; look sensitivity, scroll sensitivity and both \
              inverts on Mouse; the eleven volume buses and Closed Captions on \
              Sound; the eight chat options on Chat with three of them repeated on \
@@ -4080,19 +4145,20 @@ mod tests {
             render_distance.is_live(),
             "renderDistance is a persisted `Options` field since #443"
         );
-        // The count itself, not just the ratio's ingredients: 51 live option
-        // *rows* (47 distinct options, four of them placed twice — the three
+        // The count itself, not just the ratio's ingredients: 52 live option
+        // *rows* (48 distinct options, four of them placed twice — the three
         // Chat/Accessibility ones plus `showSubtitles` on Sound and
-        // Accessibility, so 51 - 4 == 47 — the video-settings/leaves session's
+        // Accessibility, so 52 - 4 == 48 — the video-settings/leaves session's
         // five, framerateLimit/enableVsync/inactivityFpsLimit/graphicsPreset/
-        // cutoutLeaves, plus mipmapLevels and entityShadows, are each placed once)
+        // cutoutLeaves, plus mipmapLevels, entityShadows and weatherRadius, are
+        // each placed once)
         // + 9 Done buttons (one per page, always live) + 13 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid,
         // Accessibility -> Controls, Controls -> Mouse, Controls -> Key Binds,
         // and the root's own Online button, live outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 73, "outside a world: {live:?}");
+        assert_eq!(live.len(), 74, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -4121,9 +4187,9 @@ mod tests {
         // leaves session added five more: framerateLimit, enableVsync,
         // inactivityFpsLimit, graphicsPreset, cutoutLeaves — the block-atlas
         // mip-depth session added a sixth: mipmapLevels — and this session added
-        // a seventh: entityShadows.
-        assert_eq!(outside.len(), 73);
-        assert_eq!(inside.len(), 72, "one fewer: the root's Online button");
+        // a seventh: entityShadows, and an eighth: weatherRadius.
+        assert_eq!(outside.len(), 74);
+        assert_eq!(inside.len(), 73, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -5115,6 +5181,10 @@ mod tests {
         // prepare_shadows`'s own gate — its consumer did not exist at all
         // before this session, not merely an unwired row.
         LiveOption::EntityShadows,
+        // The rain/snow column radius: `extract_columns` and `column_instance`
+        // already took one and `weather_columns_for_frame` handed both the
+        // frozen `DEFAULT_WEATHER_RADIUS`.
+        LiveOption::WeatherRadius,
     ];
 
     /// Every [`LiveOption`] must be placed on some page — the island check in
@@ -5185,14 +5255,15 @@ mod tests {
                 | LiveOption::GraphicsPreset
                 | LiveOption::CutoutLeaves
                 | LiveOption::MipmapLevels
-                | LiveOption::EntityShadows => {}
+                | LiveOption::EntityShadows
+                | LiveOption::WeatherRadius => {}
             }
         }
         // 25 before the kind A batch, plus eleven sound buses, FOV, both glint
         // parameters and Clouds, plus the five video-settings/leaves rows that
         // session wired, plus the block-atlas mip-depth row, plus this
-        // session's entity-shadows row.
-        assert_eq!(ALL.len(), 47, "forty-seven distinct live options");
+        // session's entity-shadows row, plus the weather-radius row.
+        assert_eq!(ALL.len(), 48, "forty-eight distinct live options");
         // And the eleven indices are all of them, none repeated: `SoundVolume` is
         // a *payload* variant, so neither the compiler nor the match above can see
         // a missing or duplicated index, and a duplicate would silently leave one
