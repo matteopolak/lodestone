@@ -4613,6 +4613,10 @@ impl MenuNav {
                 self.step_mipmap_levels(1);
                 MenuAction::None
             }
+            SettingsOutcome::Cycle(LiveOption::EntityShadows) => {
+                self.toggle_entity_shadows();
+                MenuAction::None
+            }
         }
     }
 
@@ -4821,6 +4825,16 @@ impl MenuNav {
     /// consumer and why toggling it forces a remesh.
     fn toggle_cutout_leaves(&mut self) {
         self.options.cutout_leaves = !self.options.cutout_leaves;
+        self.persist_options();
+    }
+
+    /// Flips `options.entityShadows` (owner report: "entity shadows are
+    /// missing") and saves immediately, same eager-persistence rule as
+    /// [`MenuNav::toggle_cutout_leaves`]. `app/redraw.rs` reads it into
+    /// `RenderState::set_entity_shadows_enabled` every presented frame, so no
+    /// further threading is needed beyond the mutation here.
+    fn toggle_entity_shadows(&mut self) {
+        self.options.entity_shadows = !self.options.entity_shadows;
         self.persist_options();
     }
 

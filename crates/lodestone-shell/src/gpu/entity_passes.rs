@@ -42,7 +42,7 @@ use super::block_entities::{BannerLayerDrawBatch, BlockEntityDrawBatch};
 use super::terrain::ModelRenderer;
 use super::{
     ArmourAccum, ArmourDrawBatch, ArmourPartAccum, ArmourTextureKey, CapeDrawBatch, EntityDrawBatch,
-    FlameBatch, OrbBatch, RenderState, RenderStats, WoolPartAccum, humanoid_armour_slot,
+    FlameBatch, OrbBatch, RenderState, RenderStats, ShadowBatch, WoolPartAccum, humanoid_armour_slot,
 };
 
 /// One entity's own hitbox width in blocks — its type's base width times its age
@@ -351,6 +351,103 @@ const EYE_HEIGHTS: &[(&str, f32)] = &[
     ("zombie_villager", 1.74),
     ("zombified_piglin", 1.79),
 ];
+
+/// The flat shadow radius [`RenderState::prepare_shadows`] gives every entity,
+/// in blocks — vanilla's own `LivingEntityRenderer(context, model, 0.5F)`,
+/// the constructor argument the player and the large majority of humanoid and
+/// quadruped mobs pass.
+///
+/// **A disclosed simplification.** Vanilla actually registers a *different*
+/// radius per species in `EntityRenderers.java` (chickens `0.15F`, an
+/// experience orb or dropped item `0.15F`, a cow/wolf/horse up to `0.7F`, a
+/// boat `0.8F`, a minecart `0.7F`, an ender dragon `0.5F`…) — roughly ninety
+/// individual registrations this port does not carry. Every entity here casts
+/// a shadow sized for a player-ish mob rather than its own species; a chicken
+/// casts a slightly oversized shadow and a cow a slightly undersized one,
+/// never a missing or a wildly wrong one.
+const SHADOW_RADIUS: f32 = 0.5;
+
+/// Vanilla's own default `shadowStrength` — `EntityRenderer.shadowStrength =
+/// 1.0F`, overridden by only a handful of renderers this port does not carry
+/// per-species (the same disclosed simplification as [`SHADOW_RADIUS`]).
+const SHADOW_STRENGTH: f32 = 1.0;
+
+/// Whether block-state `id`'s collision shape fills the entire cell —
+/// vanilla's `Block.isShapeFullBlock`/`BlockState.isCollisionShapeFullBlock`,
+/// the gate `EntityRenderer.extractShadowPiece` puts on the block a shadow
+/// piece sits on.
+///
+/// Approximated as "at least one of the state's collision boxes spans the
+/// full unit cube on every axis" rather than vanilla's exact "the shape
+/// occludes every face" predicate — the two agree for the overwhelming
+/// majority of real ground (stone, dirt, planks, wool, glass…) and both
+/// reject every partial shape (slabs, stairs, fences, carpets, pressure
+/// plates), which is the property [`RenderState::prepare_shadows`]'s own doc
+/// depends on. `None` (an id outside the collision table) reads as "not
+/// ground", never as a guess.
+#[must_use]
+fn is_full_solid_ground(id: u32) -> bool {
+    const EPS: f32 = 1e-4;
+    lodestone_data::collision_shapes::collision_boxes(id).is_some_and(|boxes| {
+        boxes.iter().any(|b| {
+            b.min[0] <= EPS
+                && b.max[0] >= 1.0 - EPS
+                && b.min[1] <= EPS
+                && b.max[1] >= 1.0 - EPS
+                && b.min[2] <= EPS
+                && b.max[2] >= 1.0 - EPS
+        })
+    })
+}
+
+/// Push one shadow piece — a flat, `y`-level quad from `(x0, z0)` to `(x1,
+/// z1)`, its four corners' UVs interpolated from `(u0, v0)`..`(u1, v1)`, all
+/// four vertices carrying the same per-piece `alpha` — as two triangles (six
+/// [`lodestone_render::entity_pipeline::ShadowVertex`]).
+///
+/// Winding is not load-bearing here: [`EntityPipeline::shadow_pipeline`]
+/// draws with `cull_mode: None`, the same double-sided choice this crate's
+/// entity meshes already make while per-model winding parity is unverified —
+/// see that pipeline's own module docs.
+///
+/// [`EntityPipeline::shadow_pipeline`]: lodestone_render::entity_pipeline::EntityPipeline::shadow_pipeline
+#[allow(clippy::too_many_arguments)]
+fn push_shadow_quad(
+    out: &mut Vec<lodestone_render::entity_pipeline::ShadowVertex>,
+    y: f32,
+    x0: f32,
+    x1: f32,
+    z0: f32,
+    z1: f32,
+    u0: f32,
+    u1: f32,
+    v0: f32,
+    v1: f32,
+    alpha: f32,
+) {
+    use lodestone_render::entity_pipeline::ShadowVertex;
+    let a = ShadowVertex {
+        position: [x0, y, z0],
+        uv: [u0, v0],
+        alpha,
+    };
+    let b = ShadowVertex {
+        position: [x0, y, z1],
+        uv: [u0, v1],
+        alpha,
+    };
+    let c = ShadowVertex {
+        position: [x1, y, z1],
+        uv: [u1, v1],
+        alpha,
+    };
+    let d = ShadowVertex {
+        position: [x1, y, z0],
+        uv: [u1, v0],
+        alpha,
+    };
+    out.extend_from_slice(&[a, b, c, a, c, d]);
+}
 
 /// How far above its feet this entity type's **light probe** sits, in blocks.
 ///
@@ -1070,6 +1167,142 @@ impl RenderState {
                     .map(|buffer| FlameBatch { model, buffer, count })
             })
             .collect()
+    }
+
+    /// Resolve this frame's entity ground shadows (owner report: "entity
+    /// shadows are missing") into one vertex buffer — `EntityRenderer.
+    /// extractShadow`/`extractShadowPiece`
+    /// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/entity/
+    /// EntityRenderer.java`), transcribed as a formula rather than a
+    /// per-species table; see `SHADOW_RADIUS`/`SHADOW_STRENGTH` for the
+    /// disclosed simplification.
+    ///
+    /// # The ground scan, and what it does about slabs/stairs/edges
+    ///
+    /// For each candidate cell `pos` from `floor(feet - depth)` up to
+    /// `floor(feet)` in Y (vanilla's own range — `depth` shrinks as the
+    /// entity's own light-derived `pow` shrinks, capped at the shadow
+    /// radius), this asks the installed `ShadowGroundSource` for the block
+    /// **below** `pos` and treats it as shadow-catching ground only when
+    /// `is_full_solid_ground` says its collision shape fills the whole cell.
+    ///
+    /// That is where this port departs from vanilla on purpose. Vanilla asks
+    /// for `belowState.getShape(..)`'s real `VoxelShape` and paints a piece
+    /// shaped exactly like it — so a shadow on a slab is a half-height piece
+    /// and a shadow at a stair's edge follows the step. This scan instead
+    /// gates on "is the block below a full cube" and draws nothing at all for
+    /// a non-full block (a slab, a stair, a fence, a carpet…) — the loop then
+    /// simply continues scanning **downward** through the rest of `y0..=y1`,
+    /// so a mob standing on a slab or a stair gets its shadow one cell lower,
+    /// on the next full block underneath (or no shadow at all if none is
+    /// within `depth`), rather than a shadow shaped like the slab or stair
+    /// itself. An edge — the entity standing half over open air — behaves the
+    /// same way per column: the columns with ground under them draw a piece,
+    /// the columns without draw nothing, exactly matching vanilla's per-column
+    /// independence; only the *shape* of an individual non-full piece is
+    /// approximated away.
+    pub(super) fn prepare_shadows(
+        &self,
+        device: &wgpu::Device,
+        camera: &Camera,
+        entities: &[EntityDraw],
+        stats: &mut RenderStats,
+    ) -> Option<ShadowBatch> {
+        if !self.entity_shadows_enabled {
+            return None;
+        }
+        let Some(_shadow_texture) = &self.entities.shadow_texture else {
+            return None;
+        };
+        let frustum = camera.frustum();
+        let mut vertices: Vec<lodestone_render::entity_pipeline::ShadowVertex> = Vec::new();
+
+        for draw in entities {
+            // Vanilla's own gate — `minecraft.options.entityShadows().get() &&
+            // !state.isInvisible`; the option half is checked once, above.
+            if draw.invisible {
+                continue;
+            }
+            let radius = (SHADOW_RADIUS * draw.scale).min(32.0);
+            if radius <= 0.0 {
+                continue;
+            }
+            let feet = draw.feet;
+            if !frustum.intersects_aabb(
+                feet - glam::Vec3::new(radius, 0.0, radius),
+                feet + glam::Vec3::new(radius, 1.0, radius),
+            ) {
+                continue;
+            }
+            let dist_sq = camera.position.distance_squared(feet);
+            let pow = (1.0 - dist_sq / 256.0) * SHADOW_STRENGTH;
+            if pow <= 0.0 {
+                continue;
+            }
+            let depth = (pow / 0.5 - 1.0).min(radius);
+            let x0 = (feet.x - radius).floor() as i32;
+            let x1 = (feet.x + radius).floor() as i32;
+            let z0 = (feet.z - radius).floor() as i32;
+            let z1 = (feet.z + radius).floor() as i32;
+            let y0 = (feet.y - depth).floor() as i32;
+            let y1 = feet.y.floor() as i32;
+
+            for z in z0..=z1 {
+                for x in x0..=x1 {
+                    for y in y0..=y1 {
+                        let Some(below_id) = self.shadow_ground.sample([x, y - 1, z]) else {
+                            continue;
+                        };
+                        if !is_full_solid_ground(below_id) {
+                            continue;
+                        }
+                        // Vanilla samples brightness at `pos` itself (the open
+                        // cell above the ground), not at the ground below it —
+                        // `EntityRenderer.extractShadowPiece`'s own `pos`.
+                        let probe = glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                        let packed = self.entity_light.sample(probe);
+                        let raw = ((packed >> 4) & 0x0F).max(packed & 0x0F);
+                        // `level.getMaxLocalRawBrightness(pos) > 3` — vanilla's own
+                        // floor before a piece is added at all.
+                        if raw <= 3 {
+                            continue;
+                        }
+                        let power_at_depth = pow - (feet.y - y as f32) * 0.5;
+                        let curve = lodestone_render::light::brightness(f32::from(raw) / 15.0);
+                        let alpha = (power_at_depth * 0.5 * curve).clamp(0.0, 1.0);
+                        if alpha <= 0.0 {
+                            continue;
+                        }
+                        let rel_x = x as f32 - feet.x;
+                        let rel_z = z as f32 - feet.z;
+                        // `ShadowFeatureRenderer.prepare`'s own UV formula —
+                        // `-x / 2.0 / radius + 0.5`, and the `z` sibling.
+                        let u0 = -rel_x / (2.0 * radius) + 0.5;
+                        let u1 = -(rel_x + 1.0) / (2.0 * radius) + 0.5;
+                        let v0 = -rel_z / (2.0 * radius) + 0.5;
+                        let v1 = -(rel_z + 1.0) / (2.0 * radius) + 0.5;
+                        push_shadow_quad(
+                            &mut vertices,
+                            y as f32,
+                            feet.x + rel_x,
+                            feet.x + rel_x + 1.0,
+                            feet.z + rel_z,
+                            feet.z + rel_z + 1.0,
+                            u0,
+                            u1,
+                            v0,
+                            v1,
+                            alpha,
+                        );
+                        stats.shadow_pieces_drawn += 1;
+                    }
+                }
+            }
+        }
+
+        let count = u32::try_from(vertices.len()).unwrap_or(u32::MAX);
+        lodestone_render::entity_pipeline::upload_shadow_vertices(device, &vertices)
+            .map(|buffer| ShadowBatch { buffer, count })
     }
 
     /// Resolve this frame's experience orbs into per-sprite-cell instance

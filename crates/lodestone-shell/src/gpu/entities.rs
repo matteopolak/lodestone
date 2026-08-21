@@ -156,6 +156,18 @@ pub(super) struct EntityRenderer {
     /// per-boat instance is built, and `gpu/frame.rs` for the draw-loop arm
     /// that selects this pipeline by `batch.model == "boat_water_patch"`.
     pub(super) water_mask_pipeline: wgpu::RenderPipeline,
+    /// The entity ground-shadow decal (owner report: "entity shadows are
+    /// missing"): a seventh pipeline ([`EntityPipeline::shadow_pipeline`]),
+    /// one texture bind group for `textures/misc/shadow.png`, and — unlike
+    /// every sibling pipeline above — **no** stored geometry at all, because
+    /// every shadow piece is unique, plain (non-instanced) vertex data built
+    /// fresh each frame by `RenderState::prepare_shadows`.
+    ///
+    /// `shadow_texture` is `None` without a vanilla pack, and shadows then
+    /// draw nothing — the same asymmetry [`Self::flame_texture`]/
+    /// [`Self::orb_texture`] document.
+    pub(super) shadow_pipeline: wgpu::RenderPipeline,
+    pub(super) shadow_texture: Option<wgpu::BindGroup>,
     /// Remote players' fetched skins: one texture bind group per **texture
     /// URL**, filled in at runtime by
     /// [`RenderState::install_pending_player_skins`](super::RenderState::install_pending_player_skins).
@@ -367,6 +379,16 @@ impl EntityRenderer {
         // other rig, so `gpu_models`/`textures` already carry it.
         let water_mask_pipeline = pipeline.water_mask_pipeline(device, color_format);
 
+        // The entity ground-shadow decal. A seventh pipeline over this
+        // pipeline's own two bind-group layouts — see
+        // `EntityPipeline::shadow_pipeline`'s doc for why it does not go
+        // through `build_entity_pipeline` the way its siblings above do.
+        let shadow_pipeline = pipeline.shadow_pipeline(device, color_format);
+        let shadow_texture = load_shadow_texture().map(|img| {
+            let view = entity_texture_from_image(device, queue, &img);
+            pipeline.texture_bind_group(device, &view, &sampler)
+        });
+
         // A persistent group-0 uniform, rewritten every frame before the pass.
         // Sized for camera **plus fog**: the entity shader reads both out of one
         // binding, so a buffer sized for the camera alone would leave the fog
@@ -432,6 +454,8 @@ impl EntityRenderer {
             orb_gpu_model,
             orb_texture,
             water_mask_pipeline,
+            shadow_pipeline,
+            shadow_texture,
             // Nothing until a skin is fetched; see `player_skins`' doc for why a
             // miss falls back rather than failing.
             player_skins: HashMap::new(),
@@ -661,6 +685,29 @@ fn load_experience_orb_texture() -> Option<lodestone_assets::Image> {
     let path = lodestone_render::EXPERIENCE_ORB_TEXTURE;
     let Some(png) = manager.read(path) else {
         tracing::warn!(target: "assets", "missing experience orb sheet {path}");
+        return None;
+    };
+    match Image::decode_png(&png) {
+        Ok(img) => Some(img),
+        Err(e) => {
+            tracing::warn!(target: "assets", "decode {path}: {e}");
+            None
+        }
+    }
+}
+
+/// Decode the entity ground-shadow sprite from the vanilla `client.jar`, or
+/// `None` if no pack is found — the shadow equivalent of
+/// [`load_experience_orb_texture`], reaching the jar the same way through
+/// [`crate::resources::vanilla_manager`].
+fn load_shadow_texture() -> Option<lodestone_assets::Image> {
+    use lodestone_assets::Image;
+
+    // `crate::resources::vanilla_manager` — see `load_humanoid_armour_textures`.
+    let manager = crate::resources::vanilla_manager()?;
+    let path = lodestone_render::SHADOW_TEXTURE;
+    let Some(png) = manager.read(path) else {
+        tracing::warn!(target: "assets", "missing entity shadow sprite {path}");
         return None;
     };
     match Image::decode_png(&png) {

@@ -743,6 +743,15 @@ pub struct Options {
     /// second one. See `crate::resources::mipmap_levels`'s doc for the read
     /// side.
     pub mipmap_levels: u32,
+    /// Vanilla's **Entity Shadows** option (`options.entityShadows`,
+    /// `Options.java`), default `true`.
+    ///
+    /// Reaches `RenderState::set_entity_shadows_enabled`, polled every frame
+    /// exactly like [`Self::cutout_leaves`] (`app/redraw.rs`, beside
+    /// `Sim::set_cutout_leaves`) rather than fired only on toggle — a plain
+    /// bool write is cheap enough that the equality-guard trick that field's
+    /// own doc explains is not needed here.
+    pub entity_shadows: bool,
 }
 
 impl Default for Options {
@@ -789,6 +798,7 @@ impl Default for Options {
             graphics_preset: GraphicsPreset::default(),
             cutout_leaves: true,
             mipmap_levels: lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS,
+            entity_shadows: true,
         }
     }
 }
@@ -1047,6 +1057,13 @@ impl Options {
             .and_then(|v| u32::try_from(v).ok())
             .filter(|v| *v <= lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS)
             .unwrap_or(lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS);
+        // Absent or malformed is **on** — vanilla's own default
+        // (`Options.java`), `cutout_leaves`'s reason again: a mangled file
+        // must not silently hide every mob's shadow.
+        let entity_shadows = obj
+            .get("entity_shadows")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
         Self {
             gui_scale,
             keybinds,
@@ -1087,6 +1104,7 @@ impl Options {
             graphics_preset,
             cutout_leaves,
             mipmap_levels,
+            entity_shadows,
         }
     }
 
@@ -1276,6 +1294,9 @@ impl Options {
         }
         if self.mipmap_levels != default.mipmap_levels {
             obj.insert("mipmap_levels".into(), self.mipmap_levels.into());
+        }
+        if !self.entity_shadows {
+            obj.insert("entity_shadows".into(), false.into());
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
             .unwrap_or_else(|_| "{}".to_string());

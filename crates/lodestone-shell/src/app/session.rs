@@ -546,6 +546,31 @@ impl WindowApp {
         }
     }
 
+    /// Install the entity-shadow ground sampler (owner report: "entity
+    /// shadows are missing"), which needs a live net client — the render
+    /// half of `RenderState::prepare_shadows`'s block query.
+    ///
+    /// Unlike [`install_outline_source`](Self::install_outline_source), this
+    /// needs no `Sim`-side factory method: `NetClient::block_at` is already a
+    /// cheap one-position read (the same one the live dig loop uses), so the
+    /// closure calls it directly through a cloned [`crate::net::SharedHandle`]
+    /// — the same "hand out a cheap, `'static` handle rather than a `NetClient`
+    /// borrow" shape [`crate::net::entity_light_at`] already uses for
+    /// [`RenderState::set_entity_light_source`]. Must run *after*
+    /// `attach_net`, for [`install_outline_source`]'s own reason: `NetClient`
+    /// itself is not `'static`.
+    pub(super) fn install_shadow_ground_source(&mut self) {
+        let (Some(render), Some(net)) = (self.render.as_mut(), self.sim.net()) else {
+            return;
+        };
+        let handle = net.shared_handle();
+        render.set_shadow_ground_source(move |[x, y, z]| {
+            handle
+                .get()?
+                .block_at(lodestone_client::BlockPos::new(x, y, z))
+        });
+    }
+
     /// Install the debug-lines source: the render half of `ExtractSet::Debug`
     /// (`docs/plugin-api.md`), the channel a plugin (e.g. a navigator) uses to
     /// push world-space line geometry onto screen via
@@ -1234,6 +1259,7 @@ impl WindowApp {
             }
         }
         self.install_outline_source();
+        self.install_shadow_ground_source();
         self.install_debug_lines_source();
         self.install_plugin_billboards_source();
     }

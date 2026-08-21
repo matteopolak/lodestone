@@ -420,6 +420,40 @@ impl OutlineShapeSource {
     }
 }
 
+/// Polled source for the **raw block-state id** at an arbitrary world block
+/// position — the entity-shadow pass's ground query
+/// (`entity_passes::prepare_shadows`), which needs to know what, if anything,
+/// sits under each candidate ground cell it scans.
+///
+/// Deliberately the raw id rather than a pre-digested "is this solid"
+/// bool: whether a state counts as shadow-catching ground is
+/// [`lodestone_data::collision_shapes::collision_boxes`]'s job (pure data, no
+/// world access needed), so the seam here only has to answer "what block is
+/// this", exactly the shape [`NetClient::block_at`] already answers for the
+/// live dig loop. Unset, or a position outside loaded chunks, samples `None`
+/// — no ground, no shadow piece, never a synthesized floor.
+///
+/// [`NetClient::block_at`]: crate::net::NetClient::block_at
+#[derive(Default)]
+pub struct ShadowGroundSource(
+    pub(super) Option<Box<dyn Fn([i32; 3]) -> Option<u32> + Send + Sync>>,
+);
+
+impl ShadowGroundSource {
+    #[must_use]
+    pub(super) fn sample(&self, block: [i32; 3]) -> Option<u32> {
+        self.0.as_ref().and_then(|f| f(block))
+    }
+}
+
+impl std::fmt::Debug for ShadowGroundSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ShadowGroundSource")
+            .field(&if self.0.is_some() { "set" } else { "no ground" })
+            .finish()
+    }
+}
+
 #[derive(Default)]
 pub struct ThirdPersonBodySource(
     pub(super) Option<Box<dyn Fn() -> Option<ThirdPersonBodyState> + Send + Sync>>,

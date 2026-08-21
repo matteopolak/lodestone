@@ -102,6 +102,13 @@ impl WindowApp {
         // Bobbing above, but `Sim::set_cutout_leaves`'s own equality guard is
         // what keeps this affordable — see that method's doc.
         self.sim.set_cutout_leaves(self.nav.options().cutout_leaves);
+        // Vanilla's Entity Shadows option (owner report: "entity shadows are
+        // missing"). Polled per frame like the options above; a plain bool
+        // write, so no equality guard is needed the way `set_cutout_leaves`'s
+        // own doc explains one is for a remesh-triggering setter.
+        if let Some(render) = self.render.as_mut() {
+            render.set_entity_shadows_enabled(self.nav.options().entity_shadows);
+        }
         // Live resource-pack reload. Polled every frame like the options
         // above, but the equality guard here is
         // `crate::resources::pack_generation` rather than a value comparison

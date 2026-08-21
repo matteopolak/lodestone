@@ -86,7 +86,8 @@ pub use sources::{
     ConduitSource, CopperGolemStatueSource, DecoratedPotSource, EnchantingTableSource,
     EndGatewayBeamSource, EndGatewaySource, EndPortalSource,
     EntityLightSource, HandSwingSource, ItemUseSource, LecternSource, MainHandItem,
-    MainHandSource, MapSource, MovingPistonSource, OutlineShapeSource, ShelfSource, ShulkerSource,
+    MainHandSource, MapSource, MovingPistonSource, OutlineShapeSource, ShadowGroundSource,
+    ShelfSource, ShulkerSource,
     SignSource, SkullSource, SkyDarkenSource, SpawnerSource, ThirdPersonBodySource,
     ThirdPersonBodyState, VaultSource,
 };
@@ -390,6 +391,16 @@ pub struct RenderState {
     /// How each mob's world light is sampled. Full-bright until the shell wires
     /// a real world in via [`RenderState::set_entity_light_source`].
     entity_light: EntityLightSource,
+    /// The raw block-state id at a world block position, for the entity-shadow
+    /// pass's ground scan (`entity_passes::prepare_shadows`). `None`/unset
+    /// samples as "no ground here", the same "never invent geometry" default
+    /// every other polled source in this struct takes — see
+    /// [`RenderState::set_shadow_ground_source`].
+    shadow_ground: ShadowGroundSource,
+    /// Vanilla's `entityShadows` video option (`Options.entityShadows`).
+    /// `true` — vanilla's own default — until the menu tree drives it; see
+    /// [`RenderState::set_entity_shadows_enabled`].
+    entity_shadows_enabled: bool,
     /// How bright the sky is *right now*. Permanent noon until the shell wires a
     /// world clock in via [`RenderState::set_sky_darken_source`].
     sky_darken: SkyDarkenSource,
@@ -704,6 +715,18 @@ struct FlameBatch {
     /// (`EntityRenderer::flame_gpu_models`) is keyed by.
     model: String,
     buffer: wgpu::Buffer,
+    count: u32,
+}
+
+/// This frame's uploaded entity-shadow vertex buffer — simpler than every
+/// sibling batch above, because every shadow piece shares the one
+/// `textures/misc/shadow.png` sprite and none of them are instanced (see
+/// `lodestone_render::entity_pipeline::ShadowVertex`'s doc), so a frame's
+/// worth of shadows is exactly one buffer and one draw call.
+struct ShadowBatch {
+    buffer: wgpu::Buffer,
+    /// Vertex count, not instance count — six [`lodestone_render::entity_pipeline::ShadowVertex`]
+    /// per piece (two triangles), drawn with `draw(0..count, 0..1)`.
     count: u32,
 }
 
