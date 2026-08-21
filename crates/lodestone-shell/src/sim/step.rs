@@ -331,6 +331,38 @@ impl Sim {
             self.swing_hand();
         }
         if let Some(net) = &self.net {
+            // The `transfer` target's producer-side hop: the pose this tick's
+            // `Move` actually claims, and how many server teleports the
+            // simulation had adopted when it built that claim. Pair it with the
+            // v770 adapter's `xfer: move packet` line (the same movement, one
+            // channel hop later, on the wire) and with `xfer: teleport applied
+            // to the simulation` above it: a `Move` logged here with a
+            // `teleport_count` lower than the teleport the driver has already
+            // acknowledged is a claim built from a pose the server has already
+            // overruled. See the `xfer` module in the v770 adapter.
+            if tracing::enabled!(target: "transfer", tracing::Level::DEBUG) {
+                for action in &actions {
+                    if let ClientAction::Move {
+                        pos,
+                        rotation,
+                        on_ground,
+                        ..
+                    } = action
+                    {
+                        tracing::debug!(
+                            target: "transfer",
+                            teleport_count = self.teleport_count,
+                            x = pos.x,
+                            y = pos.y,
+                            z = pos.z,
+                            yaw = rotation.yaw,
+                            pitch = rotation.pitch,
+                            on_ground,
+                            "xfer: Move queued for the socket"
+                        );
+                    }
+                }
+            }
             for action in actions {
                 // Best-effort — a closed session just drops it.
                 net.send_action(action);

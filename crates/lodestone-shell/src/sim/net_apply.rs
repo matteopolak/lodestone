@@ -267,10 +267,37 @@ impl Sim {
                         // accumulated distance behind to feed `maybeBackOffFromEdge`
                         // (and, later, fall damage) as though the fall continued.
                         player.reset_fall_distance();
-                        player.position
+                        (base, player.position)
                     });
+                    let (was, placed) = placed;
                     self.set_prev_position(placed);
                     self.teleport_count += 1;
+                    // The `transfer` target's simulation-side hop, and the one
+                    // that dates the window: the driver wrote
+                    // `ACCEPT_TELEPORTATION` when the packet decoded, but the
+                    // pose only becomes ours *here*, a channel hop and up to a
+                    // frame later. Every `Move` the tick loop queued in between
+                    // claims `was`, not `placed`. `moved` is what makes the two
+                    // ends of that window comparable in the log — the v770
+                    // adapter's own `xfer: move packet` line reports the same
+                    // distance from the other side of the channel. See the
+                    // `xfer` module in that crate for the whole chain.
+                    tracing::debug!(
+                        target: "transfer",
+                        teleport_count = self.teleport_count,
+                        from_x = was.x,
+                        from_y = was.y,
+                        from_z = was.z,
+                        x = placed.x,
+                        y = placed.y,
+                        z = placed.z,
+                        moved = {
+                            let (dx, dy, dz) =
+                                (placed.x - was.x, placed.y - was.y, placed.z - was.z);
+                            (dx * dx + dy * dy + dz * dz).sqrt()
+                        },
+                        "xfer: teleport applied to the simulation"
+                    );
                 }
                 NetUpdate::Chat { text, player, sender } => {
                     // A player hidden on the Social Interactions

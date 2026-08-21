@@ -24,6 +24,14 @@ impl V770Adapter {
             // play protocol, then switch state so subsequent packets decode as
             // configuration. The packet body is empty.
             Reader::new(payload).ensure_empty().map_err(dec_err)?;
+            // A proxy backend switch looks exactly like this from here — see
+            // the `xfer` module's doc for the whole chain this target records.
+            tracing::debug!(
+                target: "transfer",
+                seq = super::xfer::next_seq(),
+                "xfer: state -- START_CONFIGURATION; leaving Play for Configuration \
+                 (a mid-session reconfigure, or a proxy moving us to another backend)"
+            );
             return Ok(vec![
                 send(
                     play::serverbound::CONFIGURATION_ACKNOWLEDGED,
@@ -40,6 +48,14 @@ impl V770Adapter {
             let host = reader.string(32767).map_err(dec_err)?;
             let port = reader.var_i32().map_err(dec_err)?;
             reader.ensure_empty().map_err(dec_err)?;
+            tracing::debug!(
+                target: "transfer",
+                seq = super::xfer::next_seq(),
+                host = %host,
+                port,
+                state = "Play",
+                "xfer: state -- TRANSFER"
+            );
             return Ok(vec![Directive::Emit(ClientEvent::TransferRequested {
                 host,
                 port,
@@ -409,6 +425,11 @@ impl V770Adapter {
             return Ok(Vec::new());
         }
         if packet_id == configuration::clientbound::FINISH_CONFIGURATION {
+            tracing::debug!(
+                target: "transfer",
+                seq = super::xfer::next_seq(),
+                "xfer: state -- FINISH_CONFIGURATION; returning to Play"
+            );
             return Ok(vec![
                 send(
                     configuration::serverbound::FINISH_CONFIGURATION,
@@ -514,6 +535,14 @@ impl V770Adapter {
             let host = reader.string(32767).map_err(dec_err)?;
             let port = reader.var_i32().map_err(dec_err)?;
             reader.ensure_empty().map_err(dec_err)?;
+            tracing::debug!(
+                target: "transfer",
+                seq = super::xfer::next_seq(),
+                host = %host,
+                port,
+                state = "Configuration",
+                "xfer: state -- TRANSFER"
+            );
             return Ok(vec![Directive::Emit(ClientEvent::TransferRequested {
                 host,
                 port,

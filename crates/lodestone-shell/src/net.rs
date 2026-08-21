@@ -4558,11 +4558,32 @@ fn forward(
             pos,
             rotation,
             flags,
-        } => NetUpdate::Teleport {
-            pos,
-            rotation,
-            flags,
-        },
+        } => {
+            // The `transfer` target's middle hop: the moment the teleport left
+            // the driver and entered the sim's channel. Between the driver
+            // having already written `ACCEPT_TELEPORTATION` and `poll_net`
+            // adopting this pose, the sim is still queueing outbound `Move`
+            // actions from the *old* pose — see `crate::sim::net_apply`'s
+            // `NetUpdate::Teleport` arm and, for the whole chain, the `xfer`
+            // module in the v770 adapter.
+            tracing::debug!(
+                target: "transfer",
+                x = pos.x,
+                y = pos.y,
+                z = pos.z,
+                yaw = rotation.yaw,
+                pitch = rotation.pitch,
+                relative_x = flags.relative_x,
+                relative_y = flags.relative_y,
+                relative_z = flags.relative_z,
+                "xfer: teleport forwarded to the sim channel"
+            );
+            NetUpdate::Teleport {
+                pos,
+                rotation,
+                flags,
+            }
+        }
         // World weather (`GAME_EVENT` codes 1, 2, 7, 8). Folded into the shared
         // [`WeatherCell`] and **deliberately not** forwarded: the levels change
         // every tick while the server ramps them and only the newest value
