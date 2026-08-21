@@ -2139,8 +2139,9 @@ pub enum CopperGolemOxidation {
 /// `CopperGolemOxidationLevels.getOxidationLevel(state).texture()` — the
 /// sheet stem for each oxidation level. Waxing does not change the texture
 /// (it only halts further weathering), so there is no fifth stem for a waxed
-/// variant — [`copper_golem_statue_oxidation_from_block_name`] already folds
-/// `waxed_` away before this ever runs.
+/// variant — both callers fold `waxed_` away before this ever runs
+/// ([`copper_golem_statue_oxidation_from_item_path`] for an item stack, and the
+/// shell's own block-state-keyed resolver for a placed statue).
 #[must_use]
 pub const fn copper_golem_statue_texture_stem(oxidation: CopperGolemOxidation) -> &'static str {
     match oxidation {
@@ -3485,18 +3486,39 @@ pub struct MovingPistonSpawn {
 /// # Which kinds resolve today
 ///
 /// `chest` (13 item definitions), `shulker_box` (17), `head` (6),
-/// `player_head` (1) and `shield` (2, undyed/pattern-less only — see below) —
-/// every `kind` whose rig `BLOCK_ENTITY_MODELS` already holds. The other five
-/// return `None` and draw nothing, which is the behaviour before this
-/// existed:
+/// `player_head` (1), `shield` (2, undyed/pattern-less only — see below),
+/// `conduit` (1) and `copper_golem_statue` (8) — every `kind` whose rig is one
+/// mesh and one sheet. The rest need more than a single pair and so have their
+/// own entry points rather than an arm here:
 ///
-/// | kind | items | why not yet |
+/// | kind | items | why not a `(model, sheet)` pair |
 /// |---|---|---|
-/// | `banner` | 16 | needs the ordered translucent pattern-mask pass, not one rig |
-/// | `conduit` | 1 | rig unported (`ConduitRenderer` calls `bakeLayer` four times) |
-/// | `copper_golem_statue` | 32 | rig unported |
-/// | `decorated_pot` | 1 | needs up to four independently textured sprites per instance |
-/// | `trident` | 2 | rig unported |
+/// | `banner` | 16 | the ordered translucent pattern-mask pass — [`banner_item_rig`] plus `crate::banner_pattern::banner_pattern_layers` |
+/// | `decorated_pot` | 1 | five independently textured parts per instance — [`decorated_pot_item_rig`] |
+/// | `trident` | 2 | its mesh is in the **entity** model set, not [`BLOCK_ENTITY_MODELS`] — [`trident_item_rig`] |
+///
+/// # The conduit item is one layer, not four
+///
+/// The obvious reading of `ConduitRenderer` is that a conduit needs four
+/// (`bakeLayer` is called for shell, cage, wind and eye), and an earlier
+/// version of this doc said exactly that. That is the **block entity**.
+/// `ConduitSpecialRenderer.bake` bakes `ModelLayers.CONDUIT_SHELL` alone and
+/// its `submit` issues one `submitModelPart` against
+/// `ConduitRenderer.SHELL_TEXTURE` — no cage, no wind, no eye, because an item
+/// conduit is never *active*. So it is a plain pair, and it always was.
+///
+/// # A copper golem statue item is always the **standing** pose
+///
+/// `copper_golem_statue.json` is a `select` on `minecraft:block_state`'s
+/// `copper_golem_pose` property with a `standing` fallback, and an ordinary
+/// stack carries no such property — so standing is what vanilla itself draws
+/// for one in a hand or a slot. The eight item paths differ only in oxidation,
+/// which is exactly what [`copper_golem_statue_oxidation_from_item_path`]
+/// reads, so the two-level key lands the same way it does for a chest: the
+/// `kind` picks the rig, the path picks the sheet. A stack that really does
+/// carry a `minecraft:block_state` component naming another pose is the same
+/// bounded shortfall `shield` records below — this signature has no room for
+/// per-stack state.
 ///
 /// **`shield` also resolves here now, but only ever as the undyed,
 /// pattern-less rig.** The first-person hand and the GUI icon both bypass
@@ -3559,8 +3581,53 @@ pub fn special_item_rig(kind: &str, item_path: &str) -> Option<(&'static str, &'
         // a dyed or patterned shield still only reaches pixels through the
         // hand/GUI call sites that bypass this resolver entirely.
         "minecraft:shield" => Some((SHIELD, SHIELD_BASE_NO_PATTERN_TEXTURE_STEM)),
+        // One layer, not four — `ConduitSpecialRenderer.bake` takes
+        // `CONDUIT_SHELL` alone. See this function's own doc for why the
+        // four-layer reading is about the block entity instead.
+        "minecraft:conduit" if item_path == "conduit" => {
+            Some((CONDUIT_SHELL, CONDUIT_SHELL_TEXTURE_STEM))
+        }
+        // Always the standing pose: an item stack has no `copper_golem_pose`
+        // block-state property, so vanilla's own `select` takes its fallback.
+        "minecraft:copper_golem_statue" => {
+            let oxidation = copper_golem_statue_oxidation_from_item_path(item_path)?;
+            Some((
+                CopperGolemPose::Standing.model_name(),
+                copper_golem_statue_texture_stem(oxidation),
+            ))
+        }
         _ => None,
     }
+}
+
+/// A copper golem statue **item**'s oxidation level, from its own registry
+/// path — the item-side twin of the block-state-keyed resolver the shell's
+/// placed-statue pass uses, and the reason [`special_item_rig`] can pick a
+/// sheet for all eight paths without a block state.
+///
+/// `waxed_` is stripped first: waxing halts further weathering but does not
+/// change which of the four sheets a statue draws, and
+/// `CopperGolemOxidationLevels` has no fifth, waxed-specific entry. That makes
+/// the eight item paths four sheets, which is exactly what the eight item
+/// definitions in the 26.2 jar name — `waxed_oxidized_copper_golem_statue.json`
+/// and `oxidized_copper_golem_statue.json` both carry
+/// `entity/copper_golem/copper_golem_oxidized`.
+///
+/// `None` for any other path, so a datapack item declaring
+/// `minecraft:copper_golem_statue` over something that is not one draws nothing
+/// rather than an unaffected-copper statue.
+#[must_use]
+pub fn copper_golem_statue_oxidation_from_item_path(
+    item_path: &str,
+) -> Option<CopperGolemOxidation> {
+    let path = item_path.strip_prefix("waxed_").unwrap_or(item_path);
+    Some(match path {
+        "copper_golem_statue" => CopperGolemOxidation::Unaffected,
+        "exposed_copper_golem_statue" => CopperGolemOxidation::Exposed,
+        "weathered_copper_golem_statue" => CopperGolemOxidation::Weathered,
+        "oxidized_copper_golem_statue" => CopperGolemOxidation::Oxidized,
+        _ => return None,
+    })
 }
 
 /// The `minecraft:banner` item rig — [`special_item_rig`]'s own doc table lists
@@ -5810,6 +5877,16 @@ mod special_item_tests {
             ("minecraft:head", "zombie_head"),
             ("minecraft:player_head", "player_head"),
             ("minecraft:shield", "shield"),
+            ("minecraft:conduit", "conduit"),
+            // Both ends of the statue oxidation range plus a waxed path, so an
+            // arm that dropped the `waxed_` strip cannot pass by covering only
+            // the four unwaxed names.
+            ("minecraft:copper_golem_statue", "copper_golem_statue"),
+            ("minecraft:copper_golem_statue", "oxidized_copper_golem_statue"),
+            (
+                "minecraft:copper_golem_statue",
+                "waxed_weathered_copper_golem_statue",
+            ),
         ] {
             let Some((model, stem)) = special_item_rig(kind, path) else {
                 wrong.push(format!("{kind}/{path}: resolved to nothing"));
@@ -5905,11 +5982,140 @@ mod special_item_tests {
         );
     }
 
-    /// The five unported `kind`s, and the item paths a `kind` must decline, resolve to
-    /// nothing rather than to a plausible wrong rig. `shield` is deliberately **not**
-    /// in this list any more — see [`special_item_rig`]'s own doc for why it now
-    /// resolves here too (always undyed/pattern-less), and
-    /// [`shield_resolves_to_the_no_pattern_rig_and_sheet`] for its own positive gate.
+    /// A conduit item resolves to the **shell** layer specifically, and the shell is
+    /// six model units across rather than a full block.
+    ///
+    /// The quad count cannot carry this one, and that is the whole reason this gate
+    /// measures a size instead. `conduit_shell_model` is a single
+    /// `addBox(-3, -3, -3, 6, 6, 6)`, so it bakes to **6** quads — exactly what a
+    /// plain block-item cube bakes to. A `== 6` assertion would therefore pass for
+    /// the wrong hypothesis it exists to exclude, the coincident-input trap in the
+    /// evidence rules. The *extent* separates them cleanly:
+    ///
+    /// | hypothesis | span, block units |
+    /// |---|---|
+    /// | the flat `base` sprite fallback | `0` (no `elements`) |
+    /// | a plain block-item cube | `1.0` |
+    /// | **the conduit shell** | **`0.375`** (`6 / 16`) |
+    ///
+    /// The cage is the other thing this could wrongly resolve to, and it is the
+    /// plausible wrong pick rather than a strawman: it is the same one-box shape
+    /// under a different name, so it passes any count *and* any "did it resolve"
+    /// check, and differs only in being `8` units (`0.5`) on the `entity/conduit/cage`
+    /// sheet. An item conduit is never active, so the shell is the only right answer.
+    #[test]
+    fn a_conduit_item_is_the_inactive_shell_layer_at_six_model_units() {
+        let (model, stem) =
+            special_item_rig("minecraft:conduit", "conduit").expect("a conduit item");
+        assert_eq!(model, CONDUIT_SHELL);
+        assert_eq!(stem, CONDUIT_SHELL_TEXTURE_STEM);
+        assert_ne!(
+            model, CONDUIT_CAGE,
+            "the cage is the active shell; an item conduit is never active, and the \
+             two bake to the same quad count so only the name and size tell them apart"
+        );
+
+        let models = BlockEntityModelSet::load();
+        let mesh = models.get(model).expect("the conduit shell mesh");
+        let span = mesh.local_max - mesh.local_min;
+        for (axis, value) in [("x", span.x), ("y", span.y), ("z", span.z)] {
+            assert!(
+                (value - 0.375).abs() < 1e-5,
+                "conduit shell {axis} span was {value}, not the 6/16 blocks \
+                 `createShellLayer`'s addBox(-3, -3, -3, 6, 6, 6) gives — 1.0 would \
+                 mean a plain block cube and 0.5 would mean the cage"
+            );
+        }
+
+        // The name assertion above fires *before* the size loop if the arm is
+        // repointed, so on its own the size loop is an argument rather than an
+        // observation. This measures the cage directly, which is what makes the
+        // 0.375 predicate discriminating rather than merely true: the two meshes
+        // bake to the same 6 quads and differ only here.
+        let cage = models.get(CONDUIT_CAGE).expect("the conduit cage mesh");
+        let cage_span = cage.local_max - cage.local_min;
+        assert!(
+            (cage_span.x - 0.5).abs() < 1e-5,
+            "the cage measured {cage_span:?}, not the 8/16 blocks \
+             `createCageLayer`'s addBox(-4, -4, -4, 8, 8, 8) gives — if the two \
+             layers ever share a span, the size predicate above stops separating them"
+        );
+        assert_ne!(
+            mesh.quad_count(),
+            0,
+            "the vacuous base-sprite fallback"
+        );
+        assert_eq!(
+            mesh.quad_count(),
+            cage.quad_count(),
+            "shell and cage are both one box, so a quad count cannot tell them \
+             apart — this is why the assertion above is a span"
+        );
+    }
+
+    /// Every copper golem statue item path resolves to the **standing** rig, and the
+    /// eight paths collapse onto exactly four sheets.
+    ///
+    /// Two wrong hypotheses are named rather than described. Keying the sheet on the
+    /// `kind` alone draws all eight unaffected-copper, so the four unwaxed paths must
+    /// produce four *distinct* stems. Forgetting the `waxed_` strip makes the four
+    /// waxed paths resolve to nothing — a statue that vanishes for half the family —
+    /// so each waxed path must equal its unwaxed twin exactly.
+    ///
+    /// The pose is asserted as standing for all eight because an item stack carries
+    /// no `copper_golem_pose` property, which is what vanilla's own `select`
+    /// fallback does; picking any other pose would still resolve and still draw a
+    /// statue, so this is checked by name.
+    #[test]
+    fn a_statue_item_is_always_standing_and_its_eight_paths_are_four_sheets() {
+        let mut stems = Vec::new();
+        for path in [
+            "copper_golem_statue",
+            "exposed_copper_golem_statue",
+            "weathered_copper_golem_statue",
+            "oxidized_copper_golem_statue",
+        ] {
+            let (model, stem) = special_item_rig("minecraft:copper_golem_statue", path)
+                .unwrap_or_else(|| panic!("{path} must resolve"));
+            assert_eq!(
+                model,
+                CopperGolemPose::Standing.model_name(),
+                "{path} took a pose no item stack can ask for"
+            );
+
+            let waxed = format!("waxed_{path}");
+            assert_eq!(
+                special_item_rig("minecraft:copper_golem_statue", &waxed),
+                Some((model, stem)),
+                "{waxed} must fold onto {path} — waxing halts weathering but changes \
+                 no sheet, and dropping the strip makes four of the eight draw nothing"
+            );
+            stems.push(stem);
+        }
+
+        let mut distinct = stems.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            4,
+            "the four oxidation levels collapsed to {distinct:?} — keying the sheet on \
+             the `kind` alone draws every statue unaffected-copper"
+        );
+    }
+
+    /// The `kind`s that need more than one `(model, sheet)` pair, and the item paths a
+    /// `kind` must decline, resolve to nothing rather than to a plausible wrong rig.
+    /// `shield` is deliberately **not** in this list any more — see
+    /// [`special_item_rig`]'s own doc for why it resolves here too (always
+    /// undyed/pattern-less), and [`shield_resolves_to_the_no_pattern_rig_and_sheet`]
+    /// for its own positive gate.
+    ///
+    /// **`conduit` and `copper_golem_statue` are no longer in it either**, and their
+    /// removal is the point of this edit rather than a side effect: both are a plain
+    /// pair and always were, so their `None` was a resolver gap and not an unported
+    /// rig. Only the *undeclared-path* arms for those two `kind`s stay, which is what
+    /// keeps a datapack item from quietly becoming an unaffected-copper statue.
     ///
     /// The `dragon_head`/`piglin_head` arm is the sharp one: both are real
     /// `minecraft:head` items in 26.2, so the `kind` matches and only
@@ -5921,10 +6127,12 @@ mod special_item_tests {
         let mut wrong: Vec<String> = Vec::new();
         for (kind, path) in [
             ("minecraft:banner", "white_banner"),
-            ("minecraft:conduit", "conduit"),
-            ("minecraft:copper_golem_statue", "copper_golem_statue"),
             ("minecraft:decorated_pot", "decorated_pot"),
             ("minecraft:trident", "trident"),
+            // A datapack item declaring one of the two `kind`s that *do* resolve
+            // here now, over something that is not one of their real paths.
+            ("minecraft:conduit", "not_a_conduit"),
+            ("minecraft:copper_golem_statue", "iron_golem_statue"),
             // Real `minecraft:head` items whose rigs are unrelated multi-part ones.
             ("minecraft:head", "dragon_head"),
             ("minecraft:head", "piglin_head"),
@@ -6094,11 +6302,15 @@ mod special_item_tests {
                 chest.texture
             ));
         }
-        // And the negative control that must fire: an unported `kind` yields
-        // nothing rather than a default oak chest.
+        // And the negative control that must fire: a `kind` this entry point
+        // cannot express, or a path its `kind` declines, yields nothing rather
+        // than a default oak chest. `conduit` is deliberately *not* here any
+        // more — it is a plain one-mesh pair and resolves through this path now;
+        // its undeclared-path arm below is what still has to decline.
         for (kind, path) in [
-            ("minecraft:conduit", "conduit"),
             ("minecraft:trident", "trident"),
+            ("minecraft:decorated_pot", "decorated_pot"),
+            ("minecraft:conduit", "not_a_conduit"),
             ("minecraft:chest", "diamond_pickaxe"),
             ("mypack:teapot", "teapot"),
         ] {
