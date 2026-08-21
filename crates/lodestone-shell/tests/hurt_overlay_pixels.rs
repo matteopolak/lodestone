@@ -344,6 +344,7 @@ fn a_hurt_remote_entity_reddens_and_an_undamaged_one_does_not() {
         EntityDraw {
             hurt: subject_rest.hurt,
             block_state: None,
+            item_frame_rotation: 0,
             ..subject_hurt.clone()
         },
         subject_rest,
@@ -372,6 +373,7 @@ fn a_hurt_remote_entity_reddens_and_an_undamaged_one_does_not() {
     let forced_off = EntityDraw {
         hurt: false,
         block_state: None,
+        item_frame_rotation: 0,
         ..subject_hurt.clone()
     };
     let (forced_off_px, n5) = shoot(std::slice::from_ref(&forced_off));
@@ -379,6 +381,7 @@ fn a_hurt_remote_entity_reddens_and_an_undamaged_one_does_not() {
     let forced_on = EntityDraw {
         hurt: true,
         block_state: None,
+        item_frame_rotation: 0,
         ..control_hurt.clone()
     };
     let (forced_on_px, n6) = shoot(std::slice::from_ref(&forced_on));

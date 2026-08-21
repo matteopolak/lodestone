@@ -805,6 +805,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   contract a caller must honour when a component it does not model ends a packet
   early. All of it lives in `read_component_patch` / `read_item_stack` in
   `crates/protocol/v770/src/adapter/inventory.rs`.
+- [Item frame rendering](./item-frame-rendering.md) — How `minecraft:item_frame` and
+  `minecraft:glow_item_frame` reach the screen: the frame's own wooden body, and
+  whatever hangs in it — an ordinary item, a `minecraft:special` rig, or a filled
+  map. Four producers in four files, sharing one pose chain.
 - [Item GUI geometry (3-D block items in a slot)](./item-gui-geometry.md) — The
   **geometry half** of drawing a block item as an isometric mini-block in a
   hotbar/inventory slot. It bakes every item whose inventory icon is a 3-D model into

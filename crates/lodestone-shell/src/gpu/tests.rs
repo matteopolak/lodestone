@@ -456,6 +456,7 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         },
         wool: None,
         block_state: None,
+        item_frame_rotation: 0,
         count: 1,
         foil: false,
         item_dyed_color: None,

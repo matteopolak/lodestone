@@ -116,6 +116,7 @@ fn entity_shadows_draw_a_ring_the_bare_silhouette_does_not() {
     let subject = EntityDraw {
         hurt: false,
         block_state: None,
+        item_frame_rotation: 0,
         id: 1,
         type_path: std::sync::Arc::from("zombie"),
         item: None,

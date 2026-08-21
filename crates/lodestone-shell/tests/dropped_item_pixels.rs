@@ -107,6 +107,7 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         // through the model pipeline instead.
         hurt: false,
         block_state: None,
+        item_frame_rotation: 0,
         id: DROP_ID,
         type_path: std::sync::Arc::from(ITEM_ENTITY_TYPE_PATH),
         item,
@@ -467,6 +468,7 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
     let projectile = |type_path: &str| EntityDraw {
         hurt: false,
         block_state: None,
+        item_frame_rotation: 0,
         id: DROP_ID + 1,
         type_path: std::sync::Arc::from(type_path),
         // Exactly what `extract_entity_draws` produces for a non-`item` entity.

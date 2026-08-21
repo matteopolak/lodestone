@@ -84,6 +84,7 @@ fn blank_draw(id: i32, type_path: &str) -> EntityDraw {
     EntityDraw {
         hurt: false,
         block_state: None,
+        item_frame_rotation: 0,
         id,
         type_path: std::sync::Arc::from(type_path),
         item: None,
@@ -306,16 +307,34 @@ fn a_framed_shield_reaches_pixels() {
     // Control: a real `item_frame` entity, empty (no item hung in it) — the
     // same "entity present, nothing to draw" shape as the dropped gate's own
     // no-stack control.
+    //
+    // **Yaw 180, not the template's 0.** Yaw 0 is a *south*-facing frame, i.e.
+    // one whose front points away from a camera sitting at `z = 0` and looking
+    // along `+z`: what that camera sees is the back plate, with the shield
+    // occluded behind it. Measured — with the frame body drawing, a framed
+    // shield and an empty frame came out at **6320 px each**, identical, because
+    // the only thing on screen was the body. Yaw 180 turns the frame's front
+    // toward the camera, which is the state the feature is actually for.
     let mut empty_frame = blank_draw(SUBJECT_ID, "item_frame");
     empty_frame.item = None;
+    empty_frame.yaw = 180.0;
     let (empty_frame_px, empty_frame_count) = shoot(&[empty_frame]);
 
     let mut subject = blank_draw(SUBJECT_ID, "item_frame");
     subject.item = Some(item.clone());
+    subject.yaw = 180.0;
     let (subject_px, subject_count) = shoot(&[subject]);
 
     let d_subject = diff(&subject_px, &empty);
     let d_empty_frame = diff(&empty_frame_px, &empty);
+    // The shield against the **empty frame**, not against the empty scene. Both
+    // of the two above are "differs from the background", and the frame's body
+    // already fills its own silhouette — so a shield drawn inside that
+    // silhouette changes which colour a pixel is without changing whether it
+    // differs from the background at all. Measured: with the body drawing, both
+    // counts above came out at 6320, identical, for a shield that was really
+    // there. This is the comparison that can see it.
+    let d_shield_vs_frame = diff(&subject_px, &empty_frame_px);
     let corner = diff_in_far_corner(&subject_px, &empty);
 
     eprintln!("=== framed shield pixel gate ===");
@@ -325,6 +344,14 @@ fn a_framed_shield_reaches_pixels() {
         d_subject.count, d_subject.min_x, d_subject.max_x, d_subject.min_y, d_subject.max_y
     );
     eprintln!("lit px, empty-frame control = {}", d_empty_frame.count);
+    eprintln!(
+        "lit px, shield vs empty frame = {} (bbox x {}..{}, y {}..{})",
+        d_shield_vs_frame.count,
+        d_shield_vs_frame.min_x,
+        d_shield_vs_frame.max_x,
+        d_shield_vs_frame.min_y,
+        d_shield_vs_frame.max_y
+    );
     eprintln!("lit px, far corner          = {corner}");
 
     assert_eq!(
@@ -351,11 +378,27 @@ fn a_framed_shield_reaches_pixels() {
         empty_frame_count, 0,
         "an item_frame entity with no item hung in it must not draw a shield"
     );
-    assert_eq!(
-        d_empty_frame.count, 0,
-        "an empty item frame must be pixel-identical to no entity at all through this \
-         pass (the frame's own block-entity mesh, if any, is a different pipeline); {} \
-         px says something drew for an item that was never there",
-        d_empty_frame.count
+    // An empty frame is **not** pixel-identical to an empty scene any more: the
+    // frame's own body now has a producer (`moving_blocks.rs`'s
+    // `merge_item_frames`), so the border and back plate draw whether or not
+    // anything hangs in them — which is what vanilla does and what this
+    // assertion used to encode the absence of. The claim this arm actually needs
+    // is narrower and survives that: the *shield* must not be among those pixels,
+    // which `empty_frame_count == 0` above already establishes at the counter
+    // level. What is left for the pixels to say is that the two subjects differ,
+    // i.e. that the shield adds something on top of the body rather than being
+    // the body.
+    assert!(
+        d_shield_vs_frame.count > 30,
+        "a framed shield must change pixels *on top of* the frame that was already \
+         there; only {} differ from the same frame standing empty, which is the state \
+         where the frame draws and its contents do not",
+        d_shield_vs_frame.count
+    );
+    assert!(
+        d_shield_vs_frame.min_x > W / 4 && d_shield_vs_frame.max_x < 3 * W / 4,
+        "the shield must sit inside the frame, not beside it: x {}..{} of {W}",
+        d_shield_vs_frame.min_x,
+        d_shield_vs_frame.max_x
     );
 }

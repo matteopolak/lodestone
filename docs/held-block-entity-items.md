@@ -165,7 +165,7 @@ All five of vanilla's surfaces are now wired:
 | inventory / hotbar slot | `hud/item_icon.rs`'s `SpecialIcons` | `gui_item_pose` |
 | dropped stack in the world | `entity_passes.rs`'s `dropped_special_item` | `dropped_item_matrix` + `special_item_hover_lift` |
 | another entity's hand | `entity_passes.rs`'s `held_special_item` | `held_item_matrix` off the holder's arm |
-| item frame | `entity_passes.rs`'s `framed_special_item` | `framed_item_matrix` |
+| item frame | `entity_passes.rs`'s `framed_special_item` | `framed_item_matrix` (one of four framed-item producers — see `docs/item-frame-rendering.md`) |
 
 The three world surfaces share one shape, and the shared part is a function rather
 than a convention: `ItemVariants::resolve_special` finds the form, `special_item_rig`
@@ -208,12 +208,13 @@ island the seven existing terms each record.
   `submitMultipleFromCount` picks between a 3-axis jitter and a `z` fan using the
   *posed model's own depth*, which is the quad-list measurement a rig cannot supply —
   and the wrong branch would fan a chest along `z` like a sprite.
-* **An item frame's eight-step `rotation` is undecoded**, so every framed item hangs
-  upright, and a **glow** frame's `getBlockLightLevel` floor of `5` is not applied.
-* **An ordinary item in an item frame still draws nothing.** Only a filled map does
-  (`prepare_framed_maps`) and now the special items. So a framed chest draws and a
-  framed sword does not — a real gap, in a different path (the baked one), stated
-  here because this is the doc a reader of the frame surface will find.
+
+Both of the item-frame gaps this section used to list — the undecoded eight-step
+`rotation`, and an ordinary framed item drawing nothing — are **closed**, along with
+the frame's own body, which had no producer at all. `docs/item-frame-rendering.md`
+carries that surface now; `framed_item_matrix` takes a `rotation` and an `invisible`
+flag, and its lift is the one this section's third bullet above still describes
+correctly.
 
 ### Gotcha — a presence assertion cannot see this bug
 

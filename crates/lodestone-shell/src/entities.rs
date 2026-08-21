@@ -141,7 +141,7 @@ use lodestone_assets::ResourceLocation;
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::entity::{
     AttackSwing, DeathTime, EntityFlags, EntityIndex, ExperienceOrbValue, FallingBlockState,
-    HurtTime, ItemUse, MinecraftEntityId, MobState, OnGround, Pose,
+    HurtTime, ItemFrameRotation, ItemUse, MinecraftEntityId, MobState, OnGround, Pose,
 };
 use lodestone_ecs::player::{
     CollisionSource, LocalPlayer, PhysicsState, PlayerCollision, Profile,
@@ -735,6 +735,18 @@ pub struct EntityDraw {
     /// folded through `EntityFacts` — see [`Self::hurt`] for why that hop is
     /// avoided.
     pub block_state: Option<u32>,
+    /// Which of the eight 45° steps the stack in an item frame is turned to —
+    /// `ItemFrame.getRotation()`, `0..8`.
+    ///
+    /// `0` for everything that is not an item frame, and for a frame whose
+    /// rotation has not been reported: that is vanilla's own accessor default
+    /// (an upright item), so unlike [`Self::block_state`] there is nothing an
+    /// `Option` would distinguish. A frame *always* draws its contents; only
+    /// their in-plane angle is at stake.
+    ///
+    /// Bridged off the *ingest* entity through [`EntityIndex`] in
+    /// [`extract_entity_draws`], like [`Self::block_state`] above.
+    pub item_frame_rotation: u8,
     /// This entity's resolved nametag (issue #100), narrowed from
     /// [`RenderNameTag`]. `None` draws nothing — the common case for every
     /// entity with no visible custom name.
@@ -1781,6 +1793,7 @@ pub fn extract_pickup_draws(
             // and never an experience orb — the XP an orb pays goes straight to
             // the bar, so there is no flight animation for one to reuse.
             block_state: None,
+            item_frame_rotation: 0,
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
             feet,
@@ -2425,10 +2438,19 @@ pub fn extract_entity_draws(
     // it), bridged the same way `tameds`/`vehicles` are — nested into this
     // tuple rather than added as a seventeenth top-level parameter, for the
     // same `SystemParam`-arity reason `vehicles` was.
-    (tameds, vehicles, armor_stands): (
+    // `ItemFrameRotation` lives on the ingest entity too (`ingest::
+    // apply_entity_metadata` folds index 10's `INT` into it, gated on the adapter
+    // having established the entity is a frame), bridged the same way
+    // `tameds`/`vehicles`/`armor_stands` are — and nested into this same tuple
+    // rather than added as a seventeenth top-level parameter, for the identical
+    // `SystemParam`-arity reason. Adding it at the top level really does fail to
+    // compile, with an `in_set` "method not found" error a hundred lines away
+    // from the parameter that caused it.
+    (tameds, vehicles, armor_stands, item_frame_rotations): (
         Query<&lodestone_ecs::entity::Tamed>,
         Query<&lodestone_ecs::entity::Vehicle>,
         Query<&lodestone_ecs::entity::ArmorStandFlags>,
+        Query<&ItemFrameRotation>,
     ),
     tracks: Query<(
         &MinecraftEntityId,
@@ -2663,6 +2685,15 @@ pub fn extract_entity_draws(
         } else {
             None
         };
+        // An item frame's in-plane rotation, bridged off the ingest entity like
+        // `block_state` and `experience_orb_value` above. `0` — vanilla's own
+        // accessor default — for every entity that is not a frame and for a frame
+        // that has not reported one, because unlike a block state there is no
+        // "absent" case a consumer would draw differently.
+        let item_frame_rotation = index
+            .get(id.0)
+            .and_then(|entity| item_frame_rotations.get(entity).ok())
+            .map_or(0, |rotation| rotation.0);
         // The variant sheet, bridged off the ingest entity's `Variant` exactly as
         // `block_state` and `experience_orb_value` above are, and for their reason:
         // `lodestone_ecs::ingest::apply_entity_metadata` inserts `Variant` *there*,
@@ -2699,6 +2730,7 @@ pub fn extract_entity_draws(
             equipment_trim: equipment_trim.0.clone(),
             wool: wool.0,
             block_state,
+            item_frame_rotation,
             feet: render_feet(from, to, clock),
             yaw: render_yaw(from, to, clock),
             head_yaw: render_head_yaw(from, to, clock),
@@ -4748,6 +4780,7 @@ mod tests {
                 equipment_trim: Vec::new(),
                 wool: None,
                 block_state: None,
+            item_frame_rotation: 0,
                 count: 1,
                 foil: false,
                 item_dyed_color: None,

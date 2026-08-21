@@ -124,6 +124,7 @@ fn base_draw(id: i32, type_path: &str, feet: glam::Vec3, scale: f32) -> EntityDr
     EntityDraw {
         hurt: false,
         block_state: None,
+        item_frame_rotation: 0,
         id,
         type_path: std::sync::Arc::from(type_path),
         item: None,

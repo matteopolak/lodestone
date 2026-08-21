@@ -19,9 +19,10 @@ use lodestone_render::{
     Camera, ENTITY_FULLBRIGHT, GpuModelMesh, ItemStateContext, ModelMesh,
     entity::{
         Arm, FLAT_ITEM_DEPTH_THRESHOLD, brushable_item_mesh, camera_orientation,
-        campfire_item_mesh, dropped_item_mesh, ground_transform, hand_transform, held_item_mesh,
-        item_bob_offset, item_cluster_jitter, posed_item_z_extent, rendered_amount,
-        shelf_item_mesh, thrown_item_for, thrown_item_mesh,
+        campfire_item_mesh, dropped_item_mesh, framed_item_mesh, ground_transform,
+        hand_transform, held_item_mesh, item_bob_offset, item_cluster_jitter,
+        posed_item_z_extent, rendered_amount, shelf_item_mesh, thrown_item_for,
+        thrown_item_mesh,
     },
 };
 
@@ -29,7 +30,7 @@ use lodestone_model::event::EquipmentSlot;
 
 use crate::entities::{EntityDraw, ITEM_ENTITY_TYPE_PATH};
 
-use super::entity_passes::entity_light;
+use super::entity_passes::{entity_light, framed_content_light, item_frame_light};
 use super::terrain::ModelRenderer;
 use super::{RenderState, RenderStats};
 
@@ -216,6 +217,14 @@ impl RenderState {
         // board/back/sides are all real block-model geometry, and
         // `ShelfRenderer` draws only up to three item models on top of it.
         self.merge_shelf_items(model, camera, &frustum, &mut combined, stats);
+        // Items hanging in item frames. Same reason again: the frame's border and
+        // back plate are a block model (`gpu/moving_blocks.rs` draws them), and
+        // `ItemFrameRenderer`'s item branch is one `ItemStackRenderState.submit`
+        // on top. This is the *ordinary*-item half — a sword, an ingot, a block
+        // item; a chest or a skull is `minecraft:special` and goes through the
+        // block-entity rig in `entity_passes.rs` instead, exactly as it does when
+        // dropped or held.
+        self.merge_framed_items(model, entities, &frustum, &mut combined, &mut foil, stats);
         let Some(mesh) = GpuModelMesh::upload(device, &combined) else {
             return (None, None);
         };
@@ -224,6 +233,104 @@ impl RenderState {
         // the same shared view_proj+fog buffer every section uses, written once
         // per frame at the top of `render_inner` — not a buffer of their own.
         (mesh.into(), GpuModelMesh::upload(device, &foil))
+    }
+
+    /// Merge every ordinary item hanging in an item frame into `combined` —
+    /// vanilla's `ItemFrameRenderer.submit` item branch.
+    ///
+    /// # What this closes
+    ///
+    /// Three surfaces draw a framed stack and until this existed only two of them
+    /// did anything: `prepare_framed_maps` for a `filled_map`, and
+    /// `special_item_instances` for the handful of items whose model is
+    /// `minecraft:special` (chest, shulker box, skull, conduit). Everything else
+    /// — which is the whole of the rest of the item registry — resolved fine,
+    /// reached no producer, and drew nothing. `entity_passes.rs`'s own doc
+    /// comment stated that shortfall in plain words, which is exactly the shape
+    /// `CLAUDE.md` says to read as a defect report rather than as scope.
+    ///
+    /// # `DisplaySlot::Fixed`, not `Ground`
+    ///
+    /// `ItemFrameRenderer.extractRenderState` resolves the stack in
+    /// `ItemDisplayContext.FIXED`, the same context the campfire path uses and
+    /// the single easiest thing to get wrong here, because the *drop* on this
+    /// same path is `Ground`. Reusing `Ground` lays a framed sword flat.
+    ///
+    /// # Named deviations
+    ///
+    /// * **No `submitMultipleFromCount`.** A frame holds one stack and vanilla's
+    ///   item branch draws it once whatever its count, unlike a drop.
+    /// * **A framed `filled_map` is skipped**, because `prepare_framed_maps`
+    ///   already draws its picture through the map-texture pipeline — vanilla
+    ///   takes the same either/or (`state.mapId != null` selects the map branch
+    ///   and returns).
+    fn merge_framed_items(
+        &self,
+        model: &ModelRenderer,
+        entities: &[EntityDraw],
+        frustum: &lodestone_render::Frustum,
+        combined: &mut ModelMesh,
+        foil: &mut ModelMesh,
+        stats: &mut RenderStats,
+    ) {
+        let ctx = ItemStateContext::new(DisplaySlot::Fixed);
+        for draw in entities {
+            let type_path = draw.type_path.as_ref();
+            if !super::maps::ITEM_FRAME_TYPES.contains(&type_path) {
+                continue;
+            }
+            let Some(item) = draw.item.as_ref() else {
+                continue;
+            };
+            if item.path() == super::maps::FILLED_MAP_ITEM {
+                continue;
+            }
+            // A framed item is half a block across at most, centred within one
+            // block of the entity however the frame is turned.
+            if !frustum.intersects_aabb(
+                draw.feet - glam::Vec3::splat(1.0),
+                draw.feet + glam::Vec3::splat(1.0),
+            ) {
+                continue;
+            }
+            let Some(geometry) = model.items.get(item).and_then(|v| v.resolve(&ctx)) else {
+                continue;
+            };
+            let glow = type_path == super::maps::GLOW_ITEM_FRAME_TYPE_PATH;
+            let light = framed_content_light(
+                item_frame_light(&self.entity_light, draw, glow),
+                glow,
+            );
+            let mut mesh = framed_item_mesh(
+                &geometry.quads,
+                geometry.gui_light,
+                &geometry.display.get(DisplaySlot::Fixed),
+                draw.feet,
+                draw.yaw,
+                draw.pitch,
+                draw.item_frame_rotation,
+                draw.invisible,
+                light,
+            );
+            // The same live-component tint a drop gets: a dyed leather cap in a
+            // frame is the case that separates this from drawing the item
+            // definition's plain default.
+            lodestone_render::stamp_live_item_tint(
+                &mut mesh,
+                &geometry.quads,
+                &geometry.live_tints,
+                &lodestone_model::item::ItemComponents {
+                    dyed_color: draw.item_dyed_color,
+                    potion_color: draw.item_potion_color,
+                    ..Default::default()
+                },
+            );
+            if draw.foil {
+                foil.merge(&mesh);
+            }
+            combined.merge(&mesh);
+            stats.item_frame_items_drawn += 1;
+        }
     }
 
     /// Merge every campfire's cooking items into `combined` — vanilla's
