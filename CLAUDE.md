@@ -1089,7 +1089,7 @@ returned green by measuring nothing. So:
 The general rule: the transform that makes output readable is also the transform that can invent a green.
 When a conclusion depends on what was *not* in the output, re-run without the filter.
 
-**Five species of vacuous test.** Two cannot be found by reading the test — the source is exemplary and
+**Six species of vacuous test.** Three cannot be found by reading the test — the source is exemplary and
 the flaw is a property of what it was pointed at:
 
 | species | flaw lives in | readable? |
@@ -1099,7 +1099,25 @@ the flaw is a property of what it was pointed at:
 | **magnitude** | the assert's *predicate*, not its subject | yes, if you ask "how much?" |
 | duration | test lifetime vs system counters | **no** |
 | **world** | **the input data** | **no** |
+| **unattributed** | **the missing `#[test]`** | **no** |
 | **self-reference** | the gate's *own* text satisfying the pattern it searches for | **no** |
+
+*unattributed* is the cheapest to have and the cheapest to find: a function in a test module with no
+`#[test]` on it is not a test, and libtest reports nothing missing. Its body can be exemplary, its
+assertions correct, its name a full behavioural sentence, and it has never executed once — the only
+tell is that the suite's total is one lower than anyone counted. `UiState::quit_to_title`'s gate sat
+that way from the day it landed, between two siblings that *did* carry the attribute.
+
+The sweep is mechanical and worth re-running after any large test move: **a no-argument function in a
+test-bearing file, with a multi-word name, carrying no test attribute in its own contiguous attribute
+block, that nothing calls.** Run over 1,278 test-bearing files it found **exactly one** real instance,
+which is the useful part — the class is real and it is not widespread. Four false-positive sources will
+swamp it if you do not handle them, and each cost a look: a **function-pointer or serde string
+reference** is a use with no `(` after the name, a **multi-line `#[cfg_attr(...)]`** breaks a naive
+backward walk over the attribute block, **`#[tokio::test]`** does not match a `#[test]` pattern, and a
+**fixed-line lookback** both invents findings and hides them (an unrelated `#[test]` two lines up reads
+as this function's own). Match the *contiguous* attribute block, and precompute call counts in one pass
+— a per-candidate scan of the corpus is quadratic and will not finish.
 
 *self-reference* is the newest and the sneakiest, because the gate is a good idea implemented into a
 circle. Several gates here defend a wiring line by grepping a file's **literal source text** — the

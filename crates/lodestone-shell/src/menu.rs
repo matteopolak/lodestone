@@ -2224,6 +2224,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn quit_to_title_only_leaves_from_pause_and_clears_session_state() {
         let mut ui = UiState::new();
         ui.begin(SessionKind::Multiplayer);
