@@ -104,6 +104,49 @@ floor.
   the entity's **feet** (`EntityRenderer.java:246`/`:252`), not the tag
   anchor.
 
+### Style: colour, bold, italic, underline, strikethrough
+
+`gpu/nametag.rs::layout_styled_ink_runs` is the styled sibling of
+`layout_ink_runs`: it walks a fully-inherited `Vec<lodestone_model::text::TextSpan>`
+(built from `crate::entities::NameTag::text` via `Text::from_legacy(...)
+.to_spans()`) instead of a bare string, and every emitted `StyledRect` carries
+its own resolved RGBA colour — matching `Font.java::getTextColor`, which uses
+a span's own `TextColor` when set and falls back to the pass's own base tint
+(opaque white for both nametag passes) otherwise. Bold draws each ink run
+twice, offset by `Font::bold_offset` — the same "redraw the glyph shifted"
+technique `Font.java`/`BakedSheetGlyph.renderChar` use, not a font-weight
+variant — and widens the *advance* too (`GlyphInfo.getAdvance(bold)`), which
+matters for centring multi-line blocks (see `docs/display-entity-orientation.md`,
+where this bites `text_display`, the pass that shares this walk). Italic
+shears each texel row by `ITALIC_SHEAR - ITALIC_SHEAR_SLOPE * v`; underline/
+strikethrough are emitted per glyph, matching `Font.java::accept`'s own
+unconditional per-glyph effect bar.
+
+The shadow copy is a quarter-brightness version of the **glyph's own**
+resolved colour (`Font.java::getShadowColor`'s no-explicit-colour branch,
+`ARGB.scaleRGB(textColor, 0.25F)`), not a flat grey constant — a coloured
+name's shadow is a dim version of that same colour.
+
+**`§k` (obfuscated) is not implemented.** It needs per-frame resampling state
+neither this renderer nor `gpu/display_text.rs` keeps (unlike
+`hud/vanilla_font.rs`, which has one for the 2-D HUD path) — a disclosed gap,
+not a silent one.
+
+**The upstream gap this closes only half of.** `NameTag::text` is still a
+plain `String`: `entities.rs::resolve_entity_facts` resolves a player's tag
+via `TabListEntry::effective_name().to_plain_string()`, and a mob's via the
+metadata-decoded `CustomName`, itself built in
+`crates/protocol/v770/src/packets/metadata.rs` from
+`lodestone_core::plain_text_from_nbt_component` — both flatten the source
+`Text` component to plain text, discarding every colour/bold/italic/
+underline/strikethrough before this module ever sees it. `layout_styled_ink_runs`
+still runs `Text::from_legacy` unconditionally (rather than assuming plain
+input) so a name that already contains legacy `§` codes styles correctly
+today, and so that the moment either upstream flatten is switched to a
+style-preserving one (e.g. `Text::to_legacy_string`, or carrying `TextSpan`s
+through directly), every named entity's colour/bold/italic/underline/
+strikethrough starts rendering with no further change in this file.
+
 ### The two depth passes
 
 Reconciled against `.cache/mc/26.2/client-src`'s
@@ -177,15 +220,26 @@ already wrote this frame — see `RenderState::render_inner`.
   jar-derived census cannot resolve (an unregistered/synthetic type path,
   or the rare `0`-height marker types) — not a crash, not a `0`-height tag
   glued to the entity's feet.
-- **`layout_ink_runs` is cached, and per-frame callers must go through
-  `InkLayoutCache`** (issue #527 (b)). The ink walk probes
-  `cell_width * cell_height` texels per character and its output is pure local
-  space, so it depends only on `(text, RasterFont)` — the anchor and the
-  billboard basis are applied afterwards. `NameTagRenderer` and
-  `SignTextRenderer` each own one cache. **The font is not part of the key**:
-  each renderer owns one `RasterFont` for its whole lifetime, so if a renderer
+- **`layout_ink_runs`/`layout_styled_ink_runs` are cached, and per-frame
+  callers must go through `InkLayoutCache`/`StyledInkLayoutCache`
+  respectively** (issue #527 (b)). The ink walk probes `cell_width *
+  cell_height` texels per character and its output is pure local space, so
+  the unstyled cache depends only on `(text, RasterFont)` and the styled one
+  only on `(spans, RasterFont)` — the anchor and the billboard basis are
+  applied afterwards. `NameTagRenderer` (styled) and `SignTextRenderer`
+  (unstyled — sign lines have no per-run style to carry) each own one cache
+  of the kind they need; `gpu/display_text.rs::DisplayTextRenderer` also owns
+  a `StyledInkLayoutCache`. **The font is not part of either key**: each
+  renderer owns one `RasterFont` for its whole lifetime, so if a renderer
   ever swaps fonts in place, its cache must be cleared at that point or it
   will keep serving the old font's rects.
+- **A `StyledRect`'s colour is always opaque (`alpha == 1.0`).** Alpha is
+  deliberately not baked into the cached geometry — the normal pass, the
+  shadow copy and the see-through pass all draw the *same* cached layout at
+  three different alphas, and `gpu/display_text.rs` draws it at a
+  per-entity `textOpacity`-derived alpha. Every caller multiplies its own
+  alpha onto the rect's existing `1.0` when building vertices; do not bake a
+  pass-specific alpha into `layout_styled_ink_runs` itself.
 
 ## Configuration
 
@@ -206,6 +260,9 @@ module's doc).
   per-entity-type hitbox census used for the tag's vertical anchor.
 - `lodestone-render` (`Camera`, `DEPTH_FORMAT`, `entity::camera_orientation`)
   — the camera math and the shared depth format.
+- `lodestone-model` (`text::{Text, TextColor, TextSpan}`) — the version-free
+  chat-component model `layout_styled_ink_runs` resolves style from; see the
+  "Style" section above.
 - `lodestone-game::tablist::TabList` — already-folded tab-list state, for
   player names.
 - `crate::remote_skins` — `remember_name`/`last_known_name`, the per-uuid
@@ -234,6 +291,13 @@ module's doc).
 - **The local third-person body's own nametag.** `ThirdPersonBodyState::
   into_draw` always sets `name_tag: None` — the camera never needs to read
   its own name off its own head.
+- **`§k` (obfuscated) styling** — see the "Style" section above.
+- **Colour/bold/italic/underline/strikethrough reaching a *player's* or a
+  *mob's* actual on-screen tag** — the draw pass is ready
+  (`layout_styled_ink_runs`), but `entities.rs::resolve_entity_facts` and
+  `crates/protocol/v770`'s metadata decode both still flatten the source
+  `Text` component to plain text before this module ever sees it. See the
+  "Style" section's own doc for the exact symbols.
 
 ## Verification
 

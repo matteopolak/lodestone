@@ -103,8 +103,9 @@
 use std::path::{Path, PathBuf};
 
 use glam::Vec3;
-use lodestone_assets::font::{FontLoader, FontOptions, MISSING_ADVANCE, RasterFont, metrics};
+use lodestone_assets::font::{FontLoader, FontOptions, GlyphRaster, MISSING_ADVANCE, RasterFont, metrics};
 use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
+use lodestone_model::text::{Text, TextColor, TextSpan};
 use lodestone_render::entity::camera_orientation;
 use lodestone_render::{Camera, DEPTH_FORMAT};
 
@@ -140,17 +141,15 @@ const ATTACHMENT_PADDING: f32 = 0.5;
 const FALLBACK_HEIGHT: f32 = 1.8;
 
 /// Opaque white — the normal pass's colour (`-1` in `SubmitNodeCollection.java`).
+/// Only its alpha (`1.0`) is read now: the RGB half of a `StyledRect` is
+/// already resolved (white when a span's own colour is unspecified, real
+/// per-span colour otherwise) by [`layout_styled_ink_runs`] — see
+/// [`push_entity_quads`]'s doc for the per-pass alpha/colour split this and
+/// [`SEE_THROUGH_COLOR`] now supply.
 const NORMAL_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-/// The drop shadow: the same 25%-brightness quarter
-/// `hud/vanilla_font.rs::shadow_of` applies, at the normal pass's full alpha.
-const SHADOW_COLOR: [f32; 4] = [
-    metrics::SHADOW_BRIGHTNESS,
-    metrics::SHADOW_BRIGHTNESS,
-    metrics::SHADOW_BRIGHTNESS,
-    1.0,
-];
 /// White at `129/255`, vanilla's `-2130706433` (`0x81_FFFFFF`) — the
-/// see-through pass's colour (`SubmitNodeCollection.java`).
+/// see-through pass's colour (`SubmitNodeCollection.java`). Same "alpha
+/// only" reading as [`NORMAL_COLOR`].
 const SEE_THROUGH_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 129.0 / 255.0];
 
 /// Fixed vertex capacity per pass (six vertices per glyph-row ink run). Same
@@ -309,6 +308,229 @@ pub(super) fn layout_ink_runs(raster: &RasterFont, text: &str) -> (Vec<LocalRect
     (rects, cursor)
 }
 
+/// [`LocalRect`]'s styled sibling: the same local "logical pixel" rect, plus
+/// this run's own resolved RGBA colour (opaque, `alpha` always `1.0` — see
+/// [`layout_styled_ink_runs`]'s doc for why alpha is deliberately not baked
+/// in here). A world-space equivalent of `hud/vanilla_font.rs::ResolvedGlyph`
+/// flattened straight to draw-ready geometry, the way [`LocalRect`] already
+/// is for the unstyled path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct StyledRect {
+    pub(super) x: f32,
+    pub(super) y: f32,
+    pub(super) w: f32,
+    pub(super) h: f32,
+    pub(super) color: [f32; 4],
+}
+
+/// One string's finished *styled* ink-run layout — the spanned sibling of
+/// [`InkLayout`].
+pub(super) type StyledInkLayout = std::sync::Arc<(Vec<StyledRect>, f32)>;
+
+/// Persisted [`layout_styled_ink_runs`] results, keyed by the resolved span
+/// list rather than a bare string — [`TextSpan`] already derives `Hash`/`Eq`
+/// for exactly this (see its own doc: "what lets a `Vec<TextSpan>` key a wrap
+/// cache the way a plain `String` already keys `hud::ChatWrapCache`"). Same
+/// shape and same reasoning as [`InkLayoutCache`] otherwise; kept as a
+/// separate type rather than a generic cache because the two key types don't
+/// share a cheap `Borrow` conversion worth building for two call sites.
+#[derive(Debug, Default)]
+pub(super) struct StyledInkLayoutCache {
+    inner: std::sync::Mutex<std::collections::HashMap<Vec<TextSpan>, StyledInkLayout>>,
+}
+
+impl StyledInkLayoutCache {
+    /// Cleared wholesale past this many distinct span lists — same policy as
+    /// [`InkLayoutCache::MAX_ENTRIES`].
+    const MAX_ENTRIES: usize = 512;
+
+    /// This span list's styled ink-run layout, walking the texels only on a
+    /// miss.
+    pub(super) fn layout(&self, raster: &RasterFont, spans: &[TextSpan]) -> StyledInkLayout {
+        let mut map = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(hit) = map.get(spans) {
+            return std::sync::Arc::clone(hit);
+        }
+        if map.len() >= Self::MAX_ENTRIES {
+            map.clear();
+        }
+        let layout: StyledInkLayout = std::sync::Arc::new(layout_styled_ink_runs(raster, spans));
+        map.insert(spans.to_vec(), std::sync::Arc::clone(&layout));
+        layout
+    }
+}
+
+/// [`TextColor::rgb`] as an sRGB `0..1` triple, falling back to `base` for an
+/// unspecified (`None`) colour — [`TextStyle::color`](lodestone_model::text::TextStyle::color)'s
+/// own "inherit reaches the root, the *surface* decides" contract (see
+/// `hud/vanilla_font.rs::resolve_spans`'s identical fallback, for the
+/// screen-space path). Duplicated rather than calling
+/// `hud::vanilla_font::text_color_rgb` directly — this module already
+/// duplicates that file's font-discovery snippet for the same "small,
+/// self-contained, not worth a cross-module dependency" reasoning; see the
+/// module doc.
+fn resolved_rgb(color: Option<TextColor>, base: [f32; 3]) -> [f32; 3] {
+    let Some(color) = color else { return base };
+    let hex = color.rgb();
+    [
+        ((hex >> 16) & 0xff) as f32 / 255.0,
+        ((hex >> 8) & 0xff) as f32 / 255.0,
+        (hex & 0xff) as f32 / 255.0,
+    ]
+}
+
+/// The styled sibling of [`layout_ink_runs`]: walks a fully-inherited span
+/// list (`Text::to_spans`'s own output — see [`Text::from_legacy`] for the
+/// bridge every current caller here needs, since [`crate::entities::NameTag::text`]/
+/// `crate::display_entities::DisplayDraw::text` are still plain `String`s)
+/// instead of a bare string, so a coloured/bold/italic/underlined/struck-through
+/// run reaches world-space geometry with its own style intact.
+///
+/// This is the fix for the gap [`layout_ink_runs`]'s own doc discloses:
+/// *"both callers here paint every rect in one uniform colour ... a dropped
+/// colour reads as plain text"*. That was true when this function did not
+/// exist; every [`StyledRect`] this one emits carries its **own** resolved
+/// colour, so a caller no longer supplies one flat colour for the whole
+/// string — it supplies one only as the *fallback* for a span whose colour is
+/// unspecified (`base_rgb`, always opaque white for both of today's callers:
+/// vanilla hardcodes white as the base tint for both nametags
+/// (`SubmitNodeCollection.java`) and `text_display` (`TextDisplayRenderer.submitInner`'s
+/// `textOpacity << 24 | 16777215`), and only a real per-span [`TextColor`]
+/// overrides it — see `Font.java::getTextColor`, which is exactly this
+/// function's `resolved_rgb`).
+///
+/// Alpha is deliberately **not** threaded through here (every [`StyledRect`]
+/// is opaque, alpha `1.0`): nametags draw the *same* cached layout at three
+/// different alphas (shadow at the normal pass's alpha, normal pass at
+/// `1.0`, the see-through pass at `129/255`), and `text_display` draws it at
+/// a per-entity `textOpacity`-derived alpha — baking any one of those into
+/// the cached geometry would make the cache wrong for every other consumer
+/// of the same span list. Callers multiply their own alpha onto
+/// [`StyledRect::color`]'s existing `1.0` when building vertices.
+///
+/// Bold widens the **advance** (`GlyphInfo.getAdvance(bold)`, `Font.java`),
+/// which is why a styled line's width cannot be measured by
+/// [`layout_ink_runs`]'s plain per-codepoint advance: a bold run measures
+/// wider than the same codepoints unstyled, and a caller that centres a
+/// multi-line block against an *unstyled* per-line width mis-centres exactly
+/// the line carrying the wider bold run — see `gpu/display_text.rs`'s module
+/// doc for the alignment defect this was written to close.
+///
+/// Underline/strikethrough are emitted **per glyph**, matching
+/// `Font.java::accept`'s own unconditional per-glyph effect bar (including
+/// for whitespace) rather than one bar merged across a run — simpler to keep
+/// obviously correct against the source, at the cost of more (touching,
+/// visually identical) rects. `§k` obfuscation is not implemented: it needs
+/// per-frame resampling state neither caller here keeps, and is disclosed as
+/// a real gap rather than half-built.
+pub(super) fn layout_styled_ink_runs(raster: &RasterFont, spans: &[TextSpan]) -> (Vec<StyledRect>, f32) {
+    const BASE_RGB: [f32; 3] = [1.0, 1.0, 1.0];
+
+    let mut cursor = 0.0f32;
+    let mut rects = Vec::new();
+    let mut position = 0usize;
+    for span in spans {
+        let rgb = resolved_rgb(span.style.color, BASE_RGB);
+        let color = [rgb[0], rgb[1], rgb[2], 1.0];
+        let bold = span.style.bold.unwrap_or(false);
+        let italic = span.style.italic.unwrap_or(false);
+        let underlined = span.style.underlined.unwrap_or(false);
+        let strikethrough = span.style.strikethrough.unwrap_or(false);
+
+        for ch in span.text.chars() {
+            let cp = ch as u32;
+            let x0 = cursor;
+            let glyph_raster = raster.raster(cp);
+            let base_advance = glyph_raster
+                .as_ref()
+                .map_or_else(|| raster.advance(cp).unwrap_or(MISSING_ADVANCE), GlyphRaster::advance);
+            let bold_extra = raster.font().bold_offset(cp);
+            let advance = if bold { base_advance + bold_extra } else { base_advance };
+
+            if let Some(r) = &glyph_raster {
+                let texel = r.texel_size();
+                let top = r.top();
+                let left = r.left();
+                for ty in 0..r.cell_height() {
+                    let mut tx = 0;
+                    while tx < r.cell_width() {
+                        if !r.is_ink(tx, ty) {
+                            tx += 1;
+                            continue;
+                        }
+                        let run_start = tx;
+                        while tx < r.cell_width() && r.is_ink(tx, ty) {
+                            tx += 1;
+                        }
+                        let shear = if italic {
+                            let v = top + (ty as f32 + 0.5) * texel;
+                            font_shear(v)
+                        } else {
+                            0.0
+                        };
+                        let rx = x0 + left + shear + run_start as f32 * texel;
+                        let ry = top + ty as f32 * texel;
+                        let rw = (tx - run_start) as f32 * texel;
+                        rects.push(StyledRect { x: rx, y: ry, w: rw, h: texel, color });
+                        if bold {
+                            rects.push(StyledRect { x: rx + bold_extra, y: ry, w: rw, h: texel, color });
+                        }
+                    }
+                }
+            }
+
+            if underlined || strikethrough {
+                // `Font.java`: `effectX0 = position == 0 ? x - 1.0F : x` —
+                // `position` counts glyphs across the *whole* line, not per
+                // span, so this must survive the span boundary above.
+                let effect_x0 = if position == 0 {
+                    x0 - metrics::EFFECT_LEAD_IN
+                } else {
+                    x0
+                };
+                let effect_x1 = x0 + advance;
+                let thickness = metrics::EFFECT_THICKNESS;
+                if strikethrough {
+                    let bottom = metrics::STRIKETHROUGH_Y;
+                    rects.push(StyledRect {
+                        x: effect_x0,
+                        y: bottom - thickness,
+                        w: effect_x1 - effect_x0,
+                        h: thickness,
+                        color,
+                    });
+                }
+                if underlined {
+                    let bottom = metrics::UNDERLINE_Y;
+                    rects.push(StyledRect {
+                        x: effect_x0,
+                        y: bottom - thickness,
+                        w: effect_x1 - effect_x0,
+                        h: thickness,
+                        color,
+                    });
+                }
+            }
+
+            cursor += advance;
+            position += 1;
+        }
+    }
+    (rects, cursor)
+}
+
+/// `BakedSheetGlyph.shearTop`/`shearBottom` (`BakedSheetGlyph.java`, both
+/// `1.0F - 0.25F * v`) evaluated at one texel row's own local `v` — the same
+/// per-row shear `hud/vanilla_font.rs::draw_ink` already applies, transcribed
+/// here rather than called cross-module for the same "small, self-contained"
+/// reasoning as [`resolved_rgb`].
+fn font_shear(v: f32) -> f32 {
+    metrics::ITALIC_SHEAR - metrics::ITALIC_SHEAR_SLOPE * v
+}
+
 /// This type path's base hitbox height (`lodestone_data::entity_dimensions`),
 /// scaled by nothing yet — the caller multiplies by [`EntityDraw::scale`].
 /// Falls back to [`FALLBACK_HEIGHT`] for a type path the census cannot
@@ -340,7 +562,7 @@ fn entity_base_height(type_path: &str) -> f32 {
 /// `docs/gpu-module-layout.md`'s GUI-winding invariant, a billboard that only
 /// the camera it faces ever sees needs no back face at all.
 fn quad_vertices(
-    rect: LocalRect,
+    rect: StyledRect,
     half_width: f32,
     anchor: Vec3,
     right: Vec3,
@@ -389,7 +611,7 @@ fn quad_vertices(
 /// tag, or one further than [`MAX_DISTANCE`] from the camera.
 fn push_entity_quads(
     raster: &RasterFont,
-    ink: &InkLayoutCache,
+    ink: &StyledInkLayoutCache,
     draw: &EntityDraw,
     camera_position: Vec3,
     right: Vec3,
@@ -410,9 +632,20 @@ fn push_entity_quads(
     let height = entity_base_height(&draw.type_path) * draw.scale;
     let anchor = draw.feet + Vec3::new(0.0, height + ATTACHMENT_PADDING, 0.0);
 
-    // Cached: the walk depends only on `(text, font)`, and this is called once
-    // per visible named entity per frame.
-    let layout = ink.layout(raster, &tag.text);
+    // `NameTag::text` is a plain `String`, but the resolution that produces
+    // it (`crate::entities`' tab-list/custom-name lookup) flattens through
+    // `Text::to_plain_string`/`plain_text_from_nbt_component`, which drops
+    // every `§` code and every component-tree colour before this module ever
+    // sees it — see this crate's own report on that gap. `Text::from_legacy`
+    // still runs here (rather than assuming plain text) so the moment that
+    // upstream flatten is switched to a style-preserving one (e.g.
+    // `to_legacy_string`), colour/bold/italic/underline/strikethrough start
+    // rendering with no further change on this side.
+    let spans = Text::from_legacy(&tag.text).to_spans();
+
+    // Cached: the walk depends only on `(spans, font)`, and this is called
+    // once per visible named entity per frame.
+    let layout = ink.layout(raster, &spans);
     let (rects, total_width) = (&layout.0, layout.1);
     if rects.is_empty() {
         return;
@@ -422,43 +655,36 @@ fn push_entity_quads(
     // The shadow copy first (whole string), then the text — same order
     // `VanillaFont::draw` uses, for the same reason (a later glyph's ink
     // must sit on top of an earlier glyph's shadow, not the other way
-    // round).
+    // round). The shadow's own colour follows the glyph's resolved colour
+    // scaled to a quarter (`Font.java::getShadowColor`'s no-explicit-colour
+    // branch, `ARGB.scaleRGB(textColor, 0.25F)`), not a flat grey — so a
+    // coloured name's shadow is a dim version of *that* colour.
     let shadow_offset = metrics::SHADOW_OFFSET;
     for rect in rects {
-        let shadow_rect = LocalRect {
+        let shadow_rect = StyledRect {
             x: rect.x + shadow_offset,
             y: rect.y + shadow_offset,
             ..*rect
         };
-        normal_out.extend(quad_vertices(
-            shadow_rect,
-            half_width,
-            anchor,
-            right,
-            up,
-            SHADOW_COLOR,
-        ));
+        let color = [
+            rect.color[0] * metrics::SHADOW_BRIGHTNESS,
+            rect.color[1] * metrics::SHADOW_BRIGHTNESS,
+            rect.color[2] * metrics::SHADOW_BRIGHTNESS,
+            NORMAL_COLOR[3],
+        ];
+        normal_out.extend(quad_vertices(shadow_rect, half_width, anchor, right, up, color));
     }
     for rect in rects {
-        normal_out.extend(quad_vertices(
-            *rect,
-            half_width,
-            anchor,
-            right,
-            up,
-            NORMAL_COLOR,
-        ));
+        // The normal pass's own alpha is `1.0` and every `StyledRect` is
+        // already opaque, so the pass contributes nothing beyond the
+        // resolved colour itself — unlike the see-through pass below, which
+        // overrides alpha but keeps the same resolved colour.
+        normal_out.extend(quad_vertices(*rect, half_width, anchor, right, up, rect.color));
     }
     if tag.see_through {
         for rect in rects {
-            see_through_out.extend(quad_vertices(
-                *rect,
-                half_width,
-                anchor,
-                right,
-                up,
-                SEE_THROUGH_COLOR,
-            ));
+            let color = [rect.color[0], rect.color[1], rect.color[2], SEE_THROUGH_COLOR[3]];
+            see_through_out.extend(quad_vertices(*rect, half_width, anchor, right, up, color));
         }
     }
 }
@@ -480,7 +706,7 @@ pub(super) struct NameTagRenderer {
     /// than panicking.
     font: Option<RasterFont>,
     /// Ink-run layouts, persisted across frames.
-    ink: InkLayoutCache,
+    ink: StyledInkLayoutCache,
 }
 
 impl NameTagRenderer {
@@ -629,7 +855,7 @@ impl NameTagRenderer {
             normal_vertices,
             see_through_vertices,
             font: load_font(),
-            ink: InkLayoutCache::default(),
+            ink: StyledInkLayoutCache::default(),
         }
     }
 
@@ -845,7 +1071,7 @@ mod tests {
         };
         push_entity_quads(
             &raster,
-            &InkLayoutCache::default(),
+            &StyledInkLayoutCache::default(),
             &draw,
             Vec3::ZERO,
             Vec3::X,
@@ -918,7 +1144,7 @@ mod tests {
         };
         push_entity_quads(
             &raster,
-            &InkLayoutCache::default(),
+            &StyledInkLayoutCache::default(),
             &draw,
             Vec3::ZERO,
             Vec3::X,
@@ -948,7 +1174,7 @@ mod tests {
         };
         push_entity_quads(
             &raster,
-            &InkLayoutCache::default(),
+            &StyledInkLayoutCache::default(),
             &sneaking,
             Vec3::ZERO,
             Vec3::X,
@@ -1023,7 +1249,7 @@ mod tests {
         };
         push_entity_quads(
             &raster,
-            &InkLayoutCache::default(),
+            &StyledInkLayoutCache::default(),
             &draw,
             Vec3::ZERO,
             Vec3::X,
@@ -1146,5 +1372,173 @@ mod tests {
              not just the advance)"
         );
         assert!((total_advance - 42.0).abs() < 0.01);
+    }
+
+    /// **The colour control**, at [`layout_styled_ink_runs`] directly, using
+    /// the same synthetic (jar-free) fixture as
+    /// `layout_ink_runs_respects_pixel_scale_not_just_advance` so this runs
+    /// deterministically in CI regardless of whether a real jar is present.
+    ///
+    /// A `§c`-coloured span must produce rects whose colour is red; the same
+    /// codepoint with no colour code must produce rects at the plain white
+    /// fallback, not red — the discriminating pair. Before this function
+    /// existed, [`layout_ink_runs`]'s own callers ("both callers here paint
+    /// every rect in one uniform colour ... a dropped colour reads as plain
+    /// text", per its doc) had no way to make this assertion fail
+    /// differently for coloured vs uncoloured input at all.
+    #[test]
+    fn layout_styled_ink_runs_resolves_a_spans_own_colour() {
+        let opaque_cell = vec![255u8; 32 * 32 * 4];
+        let mut rgba = Vec::with_capacity(opaque_cell.len() * 2);
+        rgba.extend_from_slice(&opaque_cell);
+        rgba.extend_from_slice(&opaque_cell);
+        let raster = scaled_raster("AB", 32, 20, &rgba);
+
+        let red_spans = Text::from_legacy("\u{a7}cA").to_spans();
+        let (red_rects, _) = layout_styled_ink_runs(&raster, &red_spans);
+        assert!(!red_rects.is_empty(), "an opaque glyph must still produce ink rects when coloured");
+        let hex = TextColor::Red.rgb();
+        let want_red = [
+            ((hex >> 16) & 0xff) as f32 / 255.0,
+            ((hex >> 8) & 0xff) as f32 / 255.0,
+            (hex & 0xff) as f32 / 255.0,
+            1.0,
+        ];
+        assert!(
+            red_rects.iter().all(|r| r.color == want_red),
+            "every rect from a §c span must resolve to red: {:?}",
+            red_rects.iter().map(|r| r.color).collect::<Vec<_>>()
+        );
+
+        let plain_spans = Text::from_legacy("A").to_spans();
+        let (plain_rects, _) = layout_styled_ink_runs(&raster, &plain_spans);
+        assert!(
+            plain_rects.iter().all(|r| r.color == [1.0, 1.0, 1.0, 1.0]),
+            "uncoloured text must fall back to the base white, not red — the \
+             fixture must be able to tell coloured from uncoloured: {:?}",
+            plain_rects.iter().map(|r| r.color).collect::<Vec<_>>()
+        );
+    }
+
+    /// **The bold control**, same fixture: a bold run must draw its ink
+    /// *twice* (`BakedSheetGlyph.renderChar`'s second, offset pass — see
+    /// [`layout_styled_ink_runs`]'s doc) and must measure a wider advance
+    /// (`GlyphInfo.getAdvance(bold)`) than the identical codepoint unstyled —
+    /// the exact width difference `gpu/display_text.rs`'s alignment fix
+    /// depends on.
+    #[test]
+    fn layout_styled_ink_runs_doubles_ink_and_widens_advance_for_bold() {
+        let opaque_cell = vec![255u8; 32 * 32 * 4];
+        let mut rgba = Vec::with_capacity(opaque_cell.len() * 2);
+        rgba.extend_from_slice(&opaque_cell);
+        rgba.extend_from_slice(&opaque_cell);
+        let raster = scaled_raster("AB", 32, 20, &rgba);
+
+        let plain_spans = Text::from_legacy("A").to_spans();
+        let (plain_rects, plain_width) = layout_styled_ink_runs(&raster, &plain_spans);
+
+        let bold_spans = Text::from_legacy("\u{a7}lA").to_spans();
+        let (bold_rects, bold_width) = layout_styled_ink_runs(&raster, &bold_spans);
+
+        assert_eq!(
+            bold_rects.len(),
+            plain_rects.len() * 2,
+            "bold must draw the glyph's ink twice: plain={}, bold={}",
+            plain_rects.len(),
+            bold_rects.len()
+        );
+        assert!(
+            bold_width > plain_width,
+            "bold must widen the measured advance: plain={plain_width}, bold={bold_width}"
+        );
+    }
+
+    /// End-to-end colour control at [`push_entity_quads`] itself (not just
+    /// the layout helper): a player/mob nametag carrying a `§c`-coloured
+    /// span must reach the normal-pass vertex buffer with red, and its
+    /// shadow copy must be a quarter-brightness *red* (`Font.java`'s
+    /// `getShadowColor`'s `ARGB.scaleRGB(textColor, 0.25F)`), not the flat
+    /// grey `SHADOW_COLOR` this pass drew for every name before this fix —
+    /// see the module's `push_entity_quads` doc.
+    #[test]
+    fn push_entity_quads_resolves_a_coloured_nametag_span_and_its_shadow() {
+        let opaque_cell = vec![255u8; 32 * 32 * 4];
+        let mut rgba = Vec::with_capacity(opaque_cell.len() * 2);
+        rgba.extend_from_slice(&opaque_cell);
+        rgba.extend_from_slice(&opaque_cell);
+        let raster = scaled_raster("AB", 32, 20, &rgba);
+        let ink = StyledInkLayoutCache::default();
+
+        let draw = EntityDraw {
+            hurt: false,
+            id: 1,
+            type_path: std::sync::Arc::from("pig"),
+            item: None,
+            main_arm_left: false,
+            equipment: Vec::new(),
+            equipment_dye: Vec::new(),
+            equipment_trim: Vec::new(),
+            feet: Vec3::ZERO,
+            yaw: 0.0,
+            head_yaw: 0.0,
+            pitch: 0.0,
+            scale: 1.0,
+            anim: lodestone_render::AnimInput::REST,
+            wool: None,
+            block_state: None,
+            count: 1,
+            foil: false,
+            item_dyed_color: None,
+            item_potion_color: None,
+            name_tag: Some(crate::entities::NameTag {
+                text: "\u{a7}cA".to_owned(),
+                see_through: false,
+            }),
+            item_use: None,
+            creeper_swelling: 0.0,
+            swim_amount: 0.0,
+            death_time: 0.0,
+            on_fire: false,
+            invisible: false,
+            armor_stand: None,
+            player_skin: None,
+            variant_sheet: None,
+            experience_orb_value: None,
+            cape_sway: (0.0, 0.0, 0.0),
+        };
+        let mut normal = Vec::new();
+        let mut see_through = Vec::new();
+        push_entity_quads(&raster, &ink, &draw, Vec3::ZERO, Vec3::X, Vec3::Y, &mut normal, &mut see_through);
+        assert!(!normal.is_empty(), "a coloured, in-range named entity must still contribute normal-pass ink");
+
+        let hex = TextColor::Red.rgb();
+        let red_rgb = [
+            ((hex >> 16) & 0xff) as f32 / 255.0,
+            ((hex >> 8) & 0xff) as f32 / 255.0,
+            (hex & 0xff) as f32 / 255.0,
+        ];
+        let is_close = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        let has_red_at_alpha_one = normal
+            .iter()
+            .any(|v| is_close(v.color[0], red_rgb[0]) && is_close(v.color[1], red_rgb[1]) && is_close(v.color[2], red_rgb[2]) && is_close(v.color[3], 1.0));
+        assert!(
+            has_red_at_alpha_one,
+            "the normal pass must draw the §c span in full-brightness red: {:?}",
+            normal.iter().map(|v| v.color).collect::<Vec<_>>()
+        );
+        let shadow_rgb = [
+            red_rgb[0] * metrics::SHADOW_BRIGHTNESS,
+            red_rgb[1] * metrics::SHADOW_BRIGHTNESS,
+            red_rgb[2] * metrics::SHADOW_BRIGHTNESS,
+        ];
+        let has_red_shadow = normal
+            .iter()
+            .any(|v| is_close(v.color[0], shadow_rgb[0]) && is_close(v.color[1], shadow_rgb[1]) && is_close(v.color[2], shadow_rgb[2]));
+        assert!(
+            has_red_shadow,
+            "the shadow copy must be a quarter-brightness *red*, not flat \
+             grey: wanted {shadow_rgb:?}, got {:?}",
+            normal.iter().map(|v| v.color).collect::<Vec<_>>()
+        );
     }
 }
