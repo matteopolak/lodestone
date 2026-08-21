@@ -1339,6 +1339,19 @@ feature that happens to use it.
   passed every assertion **except** the mid-alpha anchor distance, measuring `d_mid_to_src == 0` exactly.
   The monotonic inequalities alone are satisfied by a hard discard-then-overwrite, so a gate without the
   mid-anchor check proves nothing about blending.
+- **`PrimitiveTopology::LineList` rasterises at exactly one *physical* pixel, so on a HiDPI display it is
+  effectively invisible — and that presents as "the feature does nothing", not as "the line is thin".**
+  Measured: F3+B (entity hitboxes) and F3+G (chunk borders) were reported as not working at all, and the
+  owner separately recalled the chunk borders once being "too thin". One cause, both symptoms. The geometry,
+  the toggles and the pipeline were all innocent — proven by feeding the real production vertex builders
+  through a headless gate, which passed. The fix is a screen-space ribbon, which `OutlineRenderer` **already
+  implemented for the identical problem**, documenting it in its own module doc.
+
+  So this is a second instance of the shape `std::thread::scope` already records here: **the same fix
+  discovered twice, unshared, because nothing mechanical connected the two call sites.** When you solve a
+  rasterisation-visibility problem, grep for other users of the same primitive before considering it done —
+  and note the diagnostic that worked, since reading did not: build a gate that drives the *real* producer
+  through the *real* pipeline, and when it passes, the defect is below the layer you were reading.
 - **Shaders live in `.wgsl` files. Never inline one in Rust again** —
   `crates/lodestone-render/src/shaders/` and `crates/lodestone-shell/src/shaders/`, via `include_str!`,
   still compile-time. See [`docs/shaders.md`](./docs/shaders.md). "Just for a quick test" is not an
