@@ -216,6 +216,26 @@ pub(crate) struct FrameProfiler {
     /// whatever `last_log`'s stdout print happens to use; see that field's
     /// doc in `app.rs`.
     last_report: Instant,
+    /// Rolling windows for `world_encode_submit`'s own internal breakdown —
+    /// see `gpu::gpu_timing::WorldSubphase`'s doc for what each covers and
+    /// why this data arrives through a thread-local rather than as a new
+    /// `FramePhase` variant (these are *nested inside* one phase's span, not
+    /// additional sequential siblings of it, so they cannot share
+    /// `FrameProfiler`'s single "elapsed since previous mark" cursor).
+    world_subphase_windows: [PhaseWindow; crate::gpu::gpu_timing::WORLD_SUBPHASE_COUNT],
+    /// The last frame's `WorldSubphaseCounts`, alongside the timings above —
+    /// not windowed, mirroring how `RenderStats` itself is a last-frame-only
+    /// snapshot everywhere else in this shell.
+    world_subphase_counts: Option<crate::gpu::gpu_timing::WorldSubphaseCounts>,
+    /// Frames where `FramePhase::WorldEncodeSubmit` itself got a real sample
+    /// but `gpu::gpu_timing::take_world_subphases` returned `None` for one of
+    /// the four slots. This is a **health check on the bridge**, not an
+    /// ordinary "early return" skip: every real call to `render_inner`
+    /// records all four sub-phases unconditionally, so a nonzero count here
+    /// means this struct's draining logic and `gpu/frame.rs`'s checkpoints
+    /// have drifted apart (a renamed/added `WorldSubphase` variant on one
+    /// side only, for instance) — never expected to move on a healthy build.
+    world_subphase_bridge_misses: u64,
 }
 
 impl FrameProfiler {
@@ -231,6 +251,10 @@ impl FrameProfiler {
             frame_count: 0,
             dump: dump_path.map(super::frame_profile_dump::DumpWriter::open),
             last_report: now,
+            world_subphase_windows: [const { PhaseWindow::new() };
+                crate::gpu::gpu_timing::WORLD_SUBPHASE_COUNT],
+            world_subphase_counts: None,
+            world_subphase_bridge_misses: 0,
         }
     }
 
@@ -271,6 +295,33 @@ impl FrameProfiler {
         let ms = now.saturating_duration_since(self.cursor).as_secs_f32() * 1000.0;
         self.pending[phase.index()] = Some(ms);
         self.cursor = now;
+        // Drain the world-encode sub-phase bridge (`gpu::gpu_timing`) right
+        // here, at the exact point the data is freshest — `render_inner`
+        // (`gpu/frame.rs`) has just returned, so whatever it recorded this
+        // call is still sitting in the thread-local untouched. See that
+        // module's doc for why this cannot instead ride in through
+        // `RenderStats`/a `RenderState` field.
+        if phase == FramePhase::WorldEncodeSubmit {
+            self.drain_world_subphases();
+        }
+    }
+
+    fn drain_world_subphases(&mut self) {
+        let (timings, counts) = crate::gpu::gpu_timing::take_world_subphases();
+        for (i, sample) in timings.into_iter().enumerate() {
+            match sample {
+                Some(ms) => self.world_subphase_windows[i].push(ms),
+                None => self.world_subphase_bridge_misses += 1,
+            }
+        }
+        // Only overwrite the last-known counts when this call actually had
+        // fresh ones — a frame where `gpu/frame.rs`'s counts checkpoint was
+        // somehow skipped should keep showing the last real reading, not
+        // fall back to a fabricated default (all-zero would read as "zero
+        // sections visited", which is never true once a world exists).
+        if counts.is_some() {
+            self.world_subphase_counts = counts;
+        }
     }
 
     fn finalise(&mut self) {
@@ -284,10 +335,16 @@ impl FrameProfiler {
             return;
         }
         self.frame_count += 1;
+        let mut world_encode_ran_this_frame = false;
         for phase in FramePhase::ALL {
             let i = phase.index();
             match self.pending[i].take() {
-                Some(ms) => self.windows[i].push(ms),
+                Some(ms) => {
+                    self.windows[i].push(ms);
+                    if phase == FramePhase::WorldEncodeSubmit {
+                        world_encode_ran_this_frame = true;
+                    }
+                }
                 None => self.windows[i].skipped += 1,
             }
         }
@@ -299,7 +356,21 @@ impl FrameProfiler {
                 self.windows[i].samples[(self.windows[i].next + WINDOW - 1) % WINDOW]
                     .into()
             });
-            dump.write_row(self.frame_count, row);
+            // Only the frame that actually ran `render_inner` gets a real
+            // world-subphase row — `world_subphase_windows` otherwise still
+            // holds the *previous* real frame's values (see
+            // `drain_world_subphases`'s doc), and stamping those onto a
+            // skipped frame's row would misattribute them.
+            let world_row: [Option<f32>; crate::gpu::gpu_timing::WORLD_SUBPHASE_COUNT] =
+                if world_encode_ran_this_frame {
+                    std::array::from_fn(|i| {
+                        let w = &self.world_subphase_windows[i];
+                        (w.len > 0).then(|| w.samples[(w.next + WINDOW - 1) % WINDOW])
+                    })
+                } else {
+                    [None; crate::gpu::gpu_timing::WORLD_SUBPHASE_COUNT]
+                };
+            dump.write_row(self.frame_count, row, world_row);
         }
     }
 
@@ -309,7 +380,7 @@ impl FrameProfiler {
     /// must show that ratio rather than presenting an early percentile with
     /// the same confidence as one over a full window.
     pub(crate) fn summary(&self) -> impl Iterator<Item = PhaseSummary> + '_ {
-        FramePhase::ALL.into_iter().map(|phase| {
+        FramePhase::ALL.into_iter().map(move |phase| {
             let w = &self.windows[phase.index()];
             PhaseSummary {
                 phase,
@@ -319,13 +390,68 @@ impl FrameProfiler {
                 samples: w.len,
                 window: WINDOW,
                 skipped: w.skipped,
+                // `world_encode_submit`'s own internal breakdown, appended
+                // to its line by `PhaseSummary::line`. `None` for every
+                // other phase, and `None` here too until the bridge has a
+                // real reading (never a fabricated empty bracket) — see
+                // `world_subphase_detail`'s doc.
+                detail: (phase == FramePhase::WorldEncodeSubmit)
+                    .then(|| self.world_subphase_detail())
+                    .flatten(),
             }
         })
+    }
+
+    /// `"world.prepare_buffers: mean/p95/p99 ms, ... | sections visited: N
+    /// packed + M model"` — the sub-phase breakdown for
+    /// [`FramePhase::WorldEncodeSubmit`]'s own F3/tracing line. `None` until
+    /// at least one sub-phase window has a real sample (the first
+    /// `WorldEncodeSubmit` mark of a session, or a build where
+    /// `gpu/frame.rs`'s checkpoints were never reached), matching every
+    /// other "no reading yet" case this instrument reports — never a
+    /// fabricated `0.00`.
+    fn world_subphase_detail(&self) -> Option<String> {
+        if self.world_subphase_windows.iter().all(|w| w.len == 0) {
+            return None;
+        }
+        let mut parts: Vec<String> = crate::gpu::gpu_timing::WorldSubphase::ALL
+            .into_iter()
+            .zip(&self.world_subphase_windows)
+            .map(|(sp, w)| {
+                // A sub-phase with zero samples so far (the other three, on
+                // the very first frame that ever recorded any of them) must
+                // read as "no reading yet", never a fabricated `0.00/0.00/0.00`
+                // sitting next to a sub-phase with a real one — the same
+                // "zero looks free" trap `gpu::gpu_timing::GpuQueryTimer`'s
+                // own `have_result` flag exists to avoid.
+                if w.len == 0 {
+                    format!("{}: <no reading yet>", sp.name())
+                } else {
+                    format!(
+                        "{}: {:.2}/{:.2}/{:.2} ms",
+                        sp.name(),
+                        w.mean(),
+                        w.percentile(0.95),
+                        w.percentile(0.99)
+                    )
+                }
+            })
+            .collect();
+        if let Some(counts) = &self.world_subphase_counts {
+            parts.push(format!(
+                "sections visited: {} packed + {} model",
+                counts.packed_sections_visited, counts.model_sections_visited
+            ));
+        }
+        if self.world_subphase_bridge_misses > 0 {
+            parts.push(format!("bridge_misses: {}", self.world_subphase_bridge_misses));
+        }
+        Some(parts.join(", "))
     }
 }
 
 /// One phase's summary statistics, as returned by [`FrameProfiler::summary`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct PhaseSummary {
     pub phase: FramePhase,
     pub mean_ms: f32,
@@ -337,13 +463,24 @@ pub(crate) struct PhaseSummary {
     /// site never has to import the constant to say "12/240".
     pub window: usize,
     pub skipped: u64,
+    /// A sub-phase breakdown for this phase, if one exists — today only
+    /// [`FramePhase::WorldEncodeSubmit`] carries one (`world_subphase_detail`),
+    /// sourced from `gpu::gpu_timing`'s thread-local bridge. `None` for
+    /// every other phase, including `HudUiEncodeSubmit`: that bucket's own
+    /// internal calls (`HudRenderer::render_with_item_models`,
+    /// `EffectsRenderer::render`, the container/menu draws) live in files
+    /// outside this instrument's edit scope today, so it is not broken down
+    /// further — see `docs/frame-profiling.md`'s "How to change it" section
+    /// for where the next checkpoint would go.
+    pub detail: Option<String>,
 }
 
 impl PhaseSummary {
-    /// One F3-line-shaped string: `"setup: 0.12/0.30/0.41 ms (240/240, 0 skip)"`.
+    /// One F3-line-shaped string: `"setup: 0.12/0.30/0.41 ms (240/240, 0 skip)"`,
+    /// with `" [detail]"` appended when [`Self::detail`] is `Some`.
     #[must_use]
     pub(crate) fn line(&self) -> String {
-        format!(
+        let base = format!(
             "{}: {:.2}/{:.2}/{:.2} ms ({}/{}, {} skip)",
             self.phase.name(),
             self.mean_ms,
@@ -352,7 +489,11 @@ impl PhaseSummary {
             self.samples,
             self.window,
             self.skipped
-        )
+        );
+        match &self.detail {
+            Some(detail) => format!("{base} [{detail}]"),
+            None => base,
+        }
     }
 }
 
@@ -445,5 +586,78 @@ mod tests {
         assert!(p50 <= p95, "p50 {p50} should be <= p95 {p95}");
         assert!(p95 <= p99, "p95 {p95} should be <= p99 {p99}");
         assert_ne!(p95, w.mean(), "chosen fixture must discriminate percentile from mean");
+    }
+
+    /// The end-to-end magnitude control for the `world_encode_submit`
+    /// sub-phase bridge: record a *real*, non-round sleep through
+    /// `gpu::gpu_timing::record_world_subphase` (exactly as `gpu/frame.rs`
+    /// does), mark `WorldEncodeSubmit` (exactly as `app/redraw.rs` does, with
+    /// no changes needed there), and require the resulting F3/tracing detail
+    /// string to name the right sub-phase and land on the slept duration —
+    /// not merely be present.
+    ///
+    /// **Watched failing**: commenting out `drain_world_subphases`'s call
+    /// site inside `mark` (so the bridge is never drained) makes
+    /// `world_subphase_detail` return `None` and this test's
+    /// `.expect("...")` panic immediately — confirmed by hand before this
+    /// landed, then restored. A version of this test that only asserted
+    /// `detail.is_some()` would have passed against a bridge that drained
+    /// garbage just as easily as against a real measurement, which is the
+    /// "merely positive" failure mode this repo's evidence standard warns
+    /// against.
+    #[test]
+    fn world_encode_submit_detail_reports_the_real_sub_phase_time() {
+        // Defensive drain: this thread may have run an earlier test that left
+        // the (thread-local) bridge non-empty.
+        let _ = crate::gpu::gpu_timing::take_world_subphases();
+
+        let t0 = Instant::now();
+        std::thread::sleep(Duration::from_millis(27));
+        let elapsed_ms = t0.elapsed().as_secs_f32() * 1000.0;
+        crate::gpu::gpu_timing::record_world_subphase(
+            crate::gpu::gpu_timing::WorldSubphase::TerrainCullAndDraw,
+            elapsed_ms,
+        );
+        crate::gpu::gpu_timing::record_world_subphase_counts(
+            crate::gpu::gpu_timing::WorldSubphaseCounts {
+                packed_sections_visited: 613,
+                model_sections_visited: 208,
+            },
+        );
+
+        let now = Instant::now();
+        let mut p = FrameProfiler::new(now, None);
+        p.begin_frame(now);
+        p.mark(FramePhase::WorldEncodeSubmit, Instant::now());
+
+        let world = p
+            .summary()
+            .find(|s| s.phase == FramePhase::WorldEncodeSubmit)
+            .unwrap();
+        let detail = world.detail.expect(
+            "WorldEncodeSubmit must carry a sub-phase detail once the bridge has a real reading",
+        );
+        assert!(
+            detail.contains("world.terrain_cull_draw"),
+            "detail must name the sub-phase that was actually recorded: {detail}"
+        );
+        assert!(
+            detail.contains("613 packed + 208 model"),
+            "detail must carry the exact counts recorded, pairwise-distinct so a \
+             transposition cannot survive: {detail}"
+        );
+        // Pull `world.terrain_cull_draw`'s mean back out of the formatted
+        // string and check it against the real slept duration — the
+        // magnitude check itself, not just "some text appeared".
+        let mean_str = detail
+            .split("world.terrain_cull_draw: ")
+            .nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .expect("detail must contain a mean figure for the recorded sub-phase");
+        let mean: f32 = mean_str.parse().expect("mean figure must be a valid float");
+        assert!(
+            (18.0..=80.0).contains(&mean),
+            "expected ~27ms (wide tolerance for scheduler jitter), got {mean} from {detail}"
+        );
     }
 }

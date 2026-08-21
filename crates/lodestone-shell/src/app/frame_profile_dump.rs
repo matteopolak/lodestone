@@ -28,6 +28,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use super::frame_profile::{FramePhase, PHASE_COUNT};
+use crate::gpu::gpu_timing::{WORLD_SUBPHASE_COUNT, WorldSubphase};
 
 #[derive(Debug)]
 pub(crate) struct DumpWriter {
@@ -65,6 +66,16 @@ impl DumpWriter {
             header.push(',');
             header.push_str(phase.name());
         }
+        // `world_encode_submit`'s own internal breakdown — see
+        // `gpu::gpu_timing::WorldSubphase`'s doc. Always present in the
+        // header even on a session where the bridge never has data (e.g. no
+        // frame ever reaches `render_inner`), matching every other column
+        // here: the header names every phase this instrument *can* report,
+        // not only the ones a given session happened to exercise.
+        for subphase in WorldSubphase::ALL {
+            header.push(',');
+            header.push_str(subphase.name());
+        }
         if let Err(e) = writeln!(w, "{header}") {
             tracing::warn!(target: "frame_profile", "failed writing dump header: {e}");
             self.file = None;
@@ -74,11 +85,19 @@ impl DumpWriter {
     /// Write one frame's row. `values[i]` is `None` for a phase that was
     /// skipped this frame (see `FrameProfiler`'s module doc) — written as an
     /// empty CSV field, never `0`, so a spreadsheet does not average a skip
-    /// into a real cost.
-    pub(crate) fn write_row(&mut self, frame: u64, values: [Option<f32>; PHASE_COUNT]) {
+    /// into a real cost. `world_subphases[i]` is likewise `None` whenever
+    /// `world_encode_submit` itself did not run this frame, or the bridge
+    /// had nothing recorded for that slot — see
+    /// `FrameProfiler::drain_world_subphases`'s doc.
+    pub(crate) fn write_row(
+        &mut self,
+        frame: u64,
+        values: [Option<f32>; PHASE_COUNT],
+        world_subphases: [Option<f32>; WORLD_SUBPHASE_COUNT],
+    ) {
         let Some(w) = &mut self.file else { return };
         let mut line = frame.to_string();
-        for v in values {
+        for v in values.into_iter().chain(world_subphases) {
             line.push(',');
             if let Some(ms) = v {
                 line.push_str(&format!("{ms:.4}"));

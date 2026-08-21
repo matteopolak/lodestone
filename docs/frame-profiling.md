@@ -49,10 +49,12 @@ LODESTONE_FRAME_PROFILE_DUMP=/tmp/lodestone-frames.csv \
   RUST_LOG=frame_profile=info,warn cargo run --release -p lodestone-shell --bin lodestone
 ```
 
-That writes one CSV row per frame (`frame,setup,sim_tick,mesh_upload,acquire,prepare,world_encode_submit,hud_ui_encode_submit,present`,
-milliseconds, one column per [`FramePhase`](../crates/lodestone-shell/src/app/frame_profile.rs)),
-with an empty field for a phase that was skipped that frame — never a `0`,
-which would read as free rather than "did not run".
+That writes one CSV row per frame (`frame,setup,sim_tick,mesh_upload,acquire,prepare,world_encode_submit,hud_ui_encode_submit,present,world.prepare_buffers,world.terrain_cull_draw,world.other_draws,world.submit`,
+milliseconds, one column per [`FramePhase`](../crates/lodestone-shell/src/app/frame_profile.rs)
+plus the four [`WorldSubphase`](../crates/lodestone-shell/src/gpu/gpu_timing.rs)
+columns appended after them — see "World sub-phases (CPU)" below),
+with an empty field for a phase (or sub-phase) that was skipped that frame —
+never a `0`, which would read as free rather than "did not run".
 
 **Always run `--release`.** Cranelift is this repo's debug-build backend and
 a debug binary's numbers say almost nothing about what the owner will
@@ -100,6 +102,80 @@ call left pending: every phase that was marked gets a real sample, and every
 phase that was not gets its `skipped` counter incremented — visible in both
 the F3 line's `(samples/window, N skip)` suffix and the CSV dump's empty
 field, never a fabricated `0.0`.
+
+### World sub-phases (CPU)
+
+`world_encode_submit` is the single largest CPU phase on a real server
+(measured by the owner running this instrument against a live session), and
+until now it was one number covering all of `RenderState::render_inner`
+(`gpu/frame.rs`) — command recording *and* `queue.submit`, fused, per the
+"Record and submit are fused" note above. `gpu::gpu_timing::WorldSubphase`
+breaks that one number into four, each timed with its own
+`crate::platform::Instant` inside `render_inner`:
+
+- **`world.prepare_buffers`** — every `prepare_*` call, the sky pass, and
+  every camera/outline/debug-line/plugin-billboard/crack uniform write:
+  everything that must run before `begin_render_pass`, because a render pass
+  cannot itself create or write a buffer (see `gpu/frame.rs`'s own module
+  doc, "Submission order is load-bearing").
+- **`world.terrain_cull_draw`** — opaque terrain only: the packed-table
+  loop's per-section `visible()` check plus its draw, and the model-arena
+  loop's `TerrainCull::classify` plus its draw. This is the sub-phase the
+  owner's "maybe cull more, or use better data structures" question is
+  actually about, and it is reported alongside **sections visited**
+  (`packed_sections_visited`/`model_sections_visited` — the packed loop has
+  no cull counters of its own, so its own section count is its whole
+  "visited" figure; compare the model side against
+  `RenderStats::sections_drawn` plus its three `sections_culled_*` fields,
+  already on the F3 overlay) — count and timing together, because "3 ms
+  across 60 draws" and "3 ms across 6000" are different problems.
+- **`world.other_draws`** — everything else this pass records: entities,
+  block entities, particles, weather, water, translucent geometry, the
+  outline, debug lines, nametags, the first-person hand's own pass, and the
+  seven screen overlays. Not split further, for the same reason
+  `app::frame_profile` itself gives for folding HUD/effects/container into
+  one `hud_ui_encode_submit` bucket: none of these individually costs enough
+  to be worth its own checkpoint on a healthy frame, and each lives in a
+  different subsystem's file.
+- **`world.submit`** — `CommandEncoder::finish` + `Queue::submit` themselves,
+  plus this instrument's own GPU-query resolve/`after_submit` bookkeeping
+  immediately around them. `queue.submit` only *enqueues* work (see the CPU
+  phases section above), so a healthy frame should show this as the smallest
+  of the four; a large reading here points at driver/queue contention, not
+  at command-recording cost.
+
+These four appear as a bracketed detail on `world_encode_submit`'s own F3
+and tracing line — e.g. `world_encode_submit: 3.10/4.20/5.00 ms (240/240, 0
+skip) [world.prepare_buffers: 0.42/0.90/1.10 ms, world.terrain_cull_draw:
+1.85/2.60/3.40 ms, world.other_draws: 0.65/1.10/1.50 ms, world.submit:
+0.18/0.30/0.40 ms, sections visited: 3880 packed + 612 model]` — not as
+separate F3 lines or a new pie-chart wedge, and that is a scope decision, not
+an oversight: **nested** checkpoints inside one already-sequential
+`FramePhase` cannot share `FrameProfiler`'s single "elapsed since previous
+mark" cursor (see `frame_profile.rs`'s own module doc for why `FramePhase`
+entries must be chronologically disjoint), so they are windowed
+independently and drained through a `gpu::gpu_timing` thread-local rather
+than riding through a new `FramePhase` variant or a `RenderStats`/
+`RenderState` field — both of those files were under concurrent edit by
+other work at the time this landed. A sub-phase with no sample yet reads
+`<no reading yet>`, never a fabricated `0.00`, exactly like the GPU segments
+below.
+
+**`hud_ui_encode_submit` is not broken down the same way.** Its internal
+calls (`HudRenderer::render_with_item_models`, `EffectsRenderer::render`,
+the container/menu draws) live in files outside this landing's edit scope
+(`app/redraw.rs`, `hud.rs`, the container/menu renderers). The next
+checkpoint there would be a one-line `Instant::now()` capture between each
+of those calls in `app/redraw.rs`, feeding a second small thread-local
+bridge shaped like `WorldSubphase`'s — nothing about today's design
+forecloses it, it is simply unmeasured today.
+
+The raw CSV dump (`LODESTONE_FRAME_PROFILE_DUMP`) gains four more columns,
+`world.prepare_buffers,world.terrain_cull_draw,world.other_draws,world.submit`,
+appended after the eight base phase columns — empty, never `0`, for a frame
+where `world_encode_submit` itself did not run (see
+`FrameProfiler::drain_world_subphases`'s doc for why a skipped frame must
+not inherit the *previous* real frame's sub-phase values).
 
 ### GPU timing
 
@@ -266,6 +342,17 @@ landed, then restored.
 - **Change the CSV dump's columns**: `frame_profile_dump::DumpWriter::write_header`/
   `write_row` — both read `FramePhase::ALL`, so a new phase appears in the
   header automatically; you do not need to touch this file for that case.
+- **Add a `WorldSubphase`**: add a variant to `gpu::gpu_timing::WorldSubphase`,
+  add it to `WorldSubphase::ALL` and `WorldSubphase::name` (bump
+  `WORLD_SUBPHASE_COUNT`), then call
+  `crate::gpu::gpu_timing::record_world_subphase(YourVariant, ms)` at the new
+  checkpoint in `gpu/frame.rs::render_inner` — a single `Instant::now()` local
+  plus one call at the boundary, following the existing four checkpoints'
+  shape. Nothing on the `app::frame_profile` side needs to change: `mark`
+  already drains every slot `take_world_subphases` returns by iterating
+  `WorldSubphase::ALL`. Add a matching `HudSubphase`-shaped bridge the same
+  way if `hud_ui_encode_submit` ever gets its own breakdown — see "World
+  sub-phases (CPU)" above for why that one is not wired yet.
 
 ### Gotchas
 
@@ -351,3 +438,19 @@ was the bug. Before trusting any number this instrument reports:
   before the ring buffer has filled (`samples < window` in the F3 line) is
   real data, just over fewer than 240 frames; do not treat it with the same
   confidence as a settled window, and the line says so on every read.
+  `record_and_take_round_trip_the_real_elapsed_time_not_a_placeholder`
+  (`gpu/gpu_timing.rs`) and
+  `world_encode_submit_detail_reports_the_real_sub_phase_time`
+  (`app/frame_profile.rs`) are the same control for the world-sub-phase
+  bridge: a real, non-round sleep (23 ms and 27 ms) through the exact
+  `record_world_subphase`/`mark` path production uses, with the reported
+  figure parsed back out of the F3/tracing detail string rather than merely
+  asserted present.
+- **A high draw-call count is not automatically the answer to "why is
+  `world_encode_submit` slow"** — `world.terrain_cull_draw`'s own count
+  (`sections visited: N packed + M model`, alongside its timing) is what
+  settles whether the cost is proportional to draw-call volume before
+  reaching for `crates/lodestone-render/src/strategy.rs`'s unused
+  multi-draw-indirect path (`select_strategy`/`build_strategy`) as a fix.
+  If `world.terrain_cull_draw` is small relative to `world.other_draws` on a
+  real session, the batching question is pointed at the wrong sub-phase.
