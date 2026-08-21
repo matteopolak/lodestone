@@ -522,6 +522,26 @@ pub enum LiveOption {
     /// `genericValueOrOffLabel`, so zero reads OFF, and
     /// `Screen.extractBlurredBackground` runs the pass only at `>= 1.0`.
     MenuBackgroundBlurriness,
+    /// `options.attackIndicator` →
+    /// [`crate::config::Options::attack_indicator`].
+    ///
+    /// Three states, not a boolean: `AttackIndicatorStatus` is
+    /// `OFF, CROSSHAIR, HOTBAR` (`AttackIndicatorStatus.java`) and the cycle
+    /// visits them in that declaration order, `CloudStatus`'s shape.
+    ///
+    /// **Another whole-label option** — its stringifier is
+    /// `(caption, value) -> ((AttackIndicatorStatus)value).caption()`
+    /// (`Options.java`), which discards the caption exactly as
+    /// `cloudStatus`' and `inactivityFpsLimit`' do. See
+    /// [`Self::value_is_the_whole_label`].
+    ///
+    /// The consumer existed and was pinned to `CROSSHAIR`: `hud.rs`'s crosshair
+    /// draw site drew the 16x4 strength bar unconditionally, above a comment
+    /// saying so and naming the missing toggle. `Off` now hides it and `Hotbar`
+    /// moves it to vanilla's 18x18 gauge beside the hotbar, which is a real new
+    /// draw rather than a re-anchoring of the same one — the two sprites, the
+    /// two sizes and the fill *direction* all differ.
+    AttackIndicator,
 }
 
 impl LiveOption {
@@ -601,7 +621,9 @@ impl LiveOption {
             // here would pin every handle to the far right.
             | LiveOption::WeatherRadius
             // The sixth `IntRange`, `RenderDistance`'s reason again.
-            | LiveOption::MenuBackgroundBlurriness => None,
+            | LiveOption::MenuBackgroundBlurriness
+            // A three-state cycle, not a slider at all — `CloudStatus`'s shape.
+            | LiveOption::AttackIndicator => None,
         }
     }
 
@@ -665,14 +687,16 @@ impl LiveOption {
             // here would pin every handle to the far right.
             | LiveOption::WeatherRadius
             // The sixth `IntRange`, `RenderDistance`'s reason again.
-            | LiveOption::MenuBackgroundBlurriness => None,
+            | LiveOption::MenuBackgroundBlurriness
+            // A three-state cycle, not a slider at all — `CloudStatus`'s shape.
+            | LiveOption::AttackIndicator => None,
         }
     }
 
     /// Whether this option's vanilla stringifier **discards the caption** it is
     /// handed, so [`Cell::label`] must not compose one in front of the value.
     ///
-    /// True for exactly one option on the tree, and it is not a stylistic
+    /// True for three options on the tree, and it is not a stylistic
     /// choice: `cloudStatus`' stringifier is `(caption, value) ->
     /// value.caption()` (the `cloudStatus` field in `Options.java`), which throws
     /// its `caption` argument away and returns `CloudStatus.caption()` alone — so
@@ -684,12 +708,22 @@ impl LiveOption {
     /// `InactivityFpsLimit`'s stringifier is the identical shape
     /// (`(caption, value) -> value.caption()`, `Options.java`), so it joins
     /// `CloudStatus` here — vanilla's "Reduce FPS when" button reads "AFK" or
-    /// "Minimized" alone.
+    /// "Minimized" alone. `attackIndicator`'s is the same again
+    /// (`(caption, value) -> ((AttackIndicatorStatus)value).caption()`), so
+    /// vanilla's Attack Indicator button reads "Crosshair", never
+    /// "Attack Indicator: Crosshair".
+    ///
+    /// These are the only three, and the sweep
+    /// `every_live_row_carries_both_its_name_and_its_value_or_is_a_named_exception`
+    /// asserts the **count** rather than merely tolerating them — a fourth row
+    /// falling into this branch has to be justified here first.
     #[must_use]
     fn value_is_the_whole_label(self) -> bool {
         matches!(
             self,
-            LiveOption::CloudStatus | LiveOption::InactivityFpsLimit
+            LiveOption::CloudStatus
+                | LiveOption::InactivityFpsLimit
+                | LiveOption::AttackIndicator
         )
     }
 
@@ -1879,6 +1913,18 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
                 options.menu_background_blurriness.to_string()
             }
         }
+        // `AttackIndicatorStatus.caption()` — the enum's own component, keyed
+        // `options.off`/`options.attack.crosshair`/`options.attack.hotbar`
+        // (`AttackIndicatorStatus.java`), i.e. "OFF"/"Crosshair"/"Hotbar" in
+        // `en_us.json`.
+        //
+        // The whole label, not a value half: see
+        // [`LiveOption::value_is_the_whole_label`].
+        LiveOption::AttackIndicator => match options.attack_indicator {
+            crate::config::AttackIndicator::Off => "OFF".to_string(),
+            crate::config::AttackIndicator::Crosshair => "Crosshair".to_string(),
+            crate::config::AttackIndicator::Hotbar => "Hotbar".to_string(),
+        },
     }
 }
 
@@ -2103,7 +2149,13 @@ static VIDEO: &[Entry] = &[
         cycle("vignette", "Show Vignette"),
     ),
     pair(
-        cycle("attackIndicator", "Attack Indicator"),
+        // Live: the crosshair strength bar already drew, pinned to vanilla's
+        // CROSSHAIR. See `LiveOption::AttackIndicator`.
+        live_cycle(
+            "attackIndicator",
+            "Attack Indicator",
+            LiveOption::AttackIndicator,
+        ),
         slider("chunkSectionFadeInTime", "Chunk Fade Time"),
     ),
 ];
@@ -4111,6 +4163,11 @@ mod tests {
                 // rain/snow column radius, whose consumer already took one and
                 // was handed `DEFAULT_WEATHER_RADIUS`.
                 LiveOption::WeatherRadius,
+                // The Video page's Preferences header block, in the
+                // `(attackIndicator, chunkSectionFadeInTime)` pair: the
+                // three-state indicator cycle, whose crosshair half already drew
+                // pinned to vanilla's CROSSHAIR.
+                LiveOption::AttackIndicator,
                 LiveOption::ToggleSneak,
                 LiveOption::ToggleSprint,
                 LiveOption::ToggleAttack,
@@ -4184,7 +4241,8 @@ mod tests {
                 LiveOption::PanoramaSpeed,
             ],
             "FOV on the root; GUI Scale, Render Distance, Clouds, Mipmap Levels, \
-             Entity Shadows, Menu Background Blur and Weather Effect Radius on Video; \
+             Entity Shadows, Menu Background Blur, Weather Effect Radius and Attack \
+             Indicator on Video; \
              the four toggle \
              rows and Auto-Jump/Sprint \
              Window on Controls; look sensitivity, scroll sensitivity and both \
@@ -4226,21 +4284,21 @@ mod tests {
             render_distance.is_live(),
             "renderDistance is a persisted `Options` field since #443"
         );
-        // The count itself, not just the ratio's ingredients: 54 live option
-        // *rows* (49 distinct options, **five** of them placed twice — the three
+        // The count itself, not just the ratio's ingredients: 55 live option
+        // *rows* (50 distinct options, **five** of them placed twice — the three
         // Chat/Accessibility sliders, `showSubtitles` on Sound and
         // Accessibility, and now `menuBackgroundBlurriness` on Video and
-        // Accessibility, so 54 - 5 == 49 — the video-settings/leaves session's
+        // Accessibility, so 55 - 5 == 50 — the video-settings/leaves session's
         // five, framerateLimit/enableVsync/inactivityFpsLimit/graphicsPreset/
-        // cutoutLeaves, plus mipmapLevels, entityShadows and weatherRadius, are
-        // each placed once)
+        // cutoutLeaves, plus mipmapLevels, entityShadows, weatherRadius and
+        // attackIndicator, are each placed once)
         // + 9 Done buttons (one per page, always live) + 13 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid,
         // Accessibility -> Controls, Controls -> Mouse, Controls -> Key Binds,
         // and the root's own Online button, live outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 76, "outside a world: {live:?}");
+        assert_eq!(live.len(), 77, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -4269,11 +4327,12 @@ mod tests {
         // leaves session added five more: framerateLimit, enableVsync,
         // inactivityFpsLimit, graphicsPreset, cutoutLeaves — the block-atlas
         // mip-depth session added a sixth: mipmapLevels — and this session added
-        // a seventh: entityShadows, an eighth: weatherRadius, and
+        // a seventh: entityShadows, an eighth: weatherRadius, a ninth:
+        // attackIndicator, and
         // `menuBackgroundBlurriness`, which is **two** rows (Video and
         // Accessibility) for one option.
-        assert_eq!(outside.len(), 76);
-        assert_eq!(inside.len(), 75, "one fewer: the root's Online button");
+        assert_eq!(outside.len(), 77);
+        assert_eq!(inside.len(), 76, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -4381,9 +4440,10 @@ mod tests {
         // exercised rows of both shapes, or a change that made every row
         // fall into one branch would pass vacuously.
         assert_eq!(
-            bare_rows_checked, 2,
-            "expected exactly the two named whole-label exceptions (CloudStatus, \
-             InactivityFpsLimit), each placed once on the Video page; got {bare_rows_checked}"
+            bare_rows_checked, 3,
+            "expected exactly the three named whole-label exceptions (CloudStatus, \
+             InactivityFpsLimit, AttackIndicator), each placed once on the Video page; \
+             got {bare_rows_checked}"
         );
         assert!(
             composing_rows_checked >= 40,
@@ -5272,6 +5332,9 @@ mod tests {
         // The menu background-blur radius: the pass existed and ran at the
         // frozen `menu::render::blur::BLUR_RADIUS`. Placed on two pages.
         LiveOption::MenuBackgroundBlurriness,
+        // The attack-strength indicator's three states: the crosshair bar
+        // already drew, pinned to CROSSHAIR, and HOTBAR is a real second draw.
+        LiveOption::AttackIndicator,
     ];
 
     /// Every [`LiveOption`] must be placed on some page — the island check in
@@ -5344,15 +5407,16 @@ mod tests {
                 | LiveOption::MipmapLevels
                 | LiveOption::EntityShadows
                 | LiveOption::WeatherRadius
-                | LiveOption::MenuBackgroundBlurriness => {}
+                | LiveOption::MenuBackgroundBlurriness
+                | LiveOption::AttackIndicator => {}
             }
         }
         // 25 before the kind A batch, plus eleven sound buses, FOV, both glint
         // parameters and Clouds, plus the five video-settings/leaves rows that
         // session wired, plus the block-atlas mip-depth row, plus this
-        // session's entity-shadows row, plus the weather-radius and
-        // menu-background-blur rows.
-        assert_eq!(ALL.len(), 49, "forty-nine distinct live options");
+        // session's entity-shadows row, plus the weather-radius,
+        // menu-background-blur and attack-indicator rows.
+        assert_eq!(ALL.len(), 50, "fifty distinct live options");
         // And the eleven indices are all of them, none repeated: `SoundVolume` is
         // a *payload* variant, so neither the compiler nor the match above can see
         // a missing or duplicated index, and a duplicate would silently leave one

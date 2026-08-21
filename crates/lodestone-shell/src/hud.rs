@@ -1584,6 +1584,17 @@ pub struct HudFrame<'a> {
     /// icon; `docs/combat.md` names the cut). `None` draws nothing, the
     /// pre-#121 behaviour.
     pub attack_cooldown: Option<f32>,
+    /// Which of vanilla's three `AttackIndicatorStatus` placements the
+    /// attack-strength value from [`Self::attack_cooldown`] is drawn in —
+    /// `options.attackIndicator`, copied here per frame by `app/redraw.rs`.
+    ///
+    /// This used to be pinned to `Crosshair`: the crosshair draw site drew the
+    /// 16x4 bar whenever [`Self::crosshair`] and `attack_cooldown` were both
+    /// set, with a comment saying it was scoped to that variant because no
+    /// options row existed. Both draw sites now gate on this, exactly as
+    /// vanilla's two `if`s do — and `Hotbar` is a *different* draw (an 18x18
+    /// gauge filling bottom-up beside the hotbar), not the same bar moved.
+    pub attack_indicator: crate::config::AttackIndicator,
     /// The recipe-unlock toast to draw top-right, `Some` only while
     /// [`lodestone_game::recipe::RecipeToastQueue`] has a live entry (issue
     /// #163). See [`RecipeToastView`] for the geometry and its vanilla
@@ -1646,6 +1657,9 @@ impl<'a> HudFrame<'a> {
             spawn_debug: None,
             map_debug: None,
             attack_cooldown: None,
+            // Vanilla's own default, and the behaviour every build before this
+            // field had: the strength bar under the crosshair.
+            attack_indicator: crate::config::AttackIndicator::Crosshair,
             recipe_toast: None,
             advancement_toast: None,
         }
@@ -2866,6 +2880,13 @@ impl HudGeometry {
             // second procedural implementation — the same choice already made
             // for the underwater bubble row (`bubble_row`, below).
             //
+            // **Gated on `AttackIndicator::Crosshair`**, which is vanilla's own
+            // `if (options.attackIndicator().get() == CROSSHAIR)` around this
+            // whole block. `Off` draws nothing; `Hotbar` draws a different
+            // gauge beside the hotbar instead (see the `hotbar_attack_indicator`
+            // block further down) — never both, which is why each site tests for
+            // its own variant rather than for "not off".
+            //
             // Vanilla hides this entirely once `attackStrengthScale >= 1.0`
             // *unless* a slow weapon (delay > 5 ticks) is aimed at a living,
             // in-range target, in which case a distinct "ready" icon
@@ -2875,7 +2896,9 @@ impl HudGeometry {
             // `HudFrame` carries — deliberately out of scope per
             // `docs/combat.md`'s crits/sweep cut for the same issue. At full
             // charge this draws nothing, matching vanilla's non-"ready" case.
-            if let Some(raw_scale) = frame.attack_cooldown {
+            if let (Some(raw_scale), crate::config::AttackIndicator::Crosshair) =
+                (frame.attack_cooldown, frame.attack_indicator)
+            {
                 let scale = raw_scale.clamp(0.0, 1.0);
                 if scale < 1.0 {
                     let iw = 16.0;
@@ -3061,6 +3084,79 @@ impl HudGeometry {
         // Item icons sit inside the hotbar cells, drawn over whichever hotbar
         // frame (real atlas or procedural) was emitted above.
         draw_hotbar_items(&mut b, frame, &anim);
+
+        // The **hotbar-anchored** attack-strength gauge — vanilla's
+        // `AttackIndicatorStatus::HOTBAR` branch, which sits in `Hud`'s hotbar
+        // section rather than beside the crosshair one, and is a genuinely
+        // different draw from the crosshair variant: an 18x18 sprite pair
+        // filling **bottom-up**, against the crosshair's 16x4 pair filling
+        // left-to-right. The two are mutually exclusive by construction — each
+        // site tests for its own variant, never for "not off" — which is
+        // vanilla's own shape and the reason `Off` needs no third branch.
+        //
+        // Gated on `frame.hotbar` because vanilla draws it inside the block that
+        // draws the hotbar itself, so a spectator or a hidden HUD gets neither.
+        //
+        // Anchored at vanilla's own `(guiWidth / 2 + 91 + 6, guiHeight - 20)`,
+        // absolute against this canvas exactly as the action bar's
+        // `guiHeight - 72` below already is. Vanilla mirrors that x to
+        // `guiWidth / 2 - 91 - 22` when the **offhand** arm is the right one,
+        // i.e. for a left-handed player; `mainHand` is an inactive row on this
+        // client's settings tree and nothing else models a main arm for the local
+        // player, so this takes the right-handed branch — vanilla's default —
+        // rather than inventing a source for the fork.
+        //
+        // `b.sprite`/`b.gui_geometry` are no-op-safe with no atlas attached, the
+        // same property the crosshair variant above relies on, so a jar-less or
+        // headless run draws nothing here rather than needing a procedural
+        // fallback.
+        if let (Some(_), Some(raw_scale), crate::config::AttackIndicator::Hotbar) = (
+            frame.hotbar,
+            frame.attack_cooldown,
+            frame.attack_indicator,
+        ) {
+            let scale = raw_scale.clamp(0.0, 1.0);
+            if scale < 1.0 {
+                let size = 18.0;
+                let ix = b.w * 0.5 + 91.0 + 6.0;
+                let iy = b.h - 20.0;
+                let white = [1.0, 1.0, 1.0, 1.0];
+                b.sprite(
+                    "hud/hotbar_attack_indicator_background",
+                    ix,
+                    iy,
+                    size,
+                    size,
+                    white,
+                );
+                // `(int)(attackStrengthScale * 19.0F)` — **19**, not 18, and
+                // vanilla's own literal. With `scale < 1.0` already established
+                // above it cannot exceed 18, so no clamp is needed; transcribing
+                // it as 18 would leave the gauge one pixel short of full at every
+                // value.
+                let progress = (scale * 19.0).floor();
+                if progress > 0.0 {
+                    // Vanilla's blit is
+                    // `(texW 18, texH 18, u 0, v 18 - progress, x, y + 18 -
+                    // progress, w 18, h progress)` — it samples the **bottom**
+                    // `progress` rows and lands them at the bottom of the box, so
+                    // the gauge fills upward. Cropping the v span and the
+                    // destination y together is `sprite_vitals`' XP-bar idiom
+                    // rotated a quarter turn; shrinking only the height would
+                    // squash the whole sprite instead of revealing part of it.
+                    for mut q in
+                        b.gui_geometry("hud/hotbar_attack_indicator_progress", ix, iy, size, size)
+                    {
+                        let span = q.uv_max[1] - q.uv_min[1];
+                        let fraction = progress / size;
+                        q.uv_min[1] = q.uv_max[1] - span * fraction;
+                        q.dst[1] += size - progress;
+                        q.dst[3] = progress;
+                        b.push_sprite_quad(q, white);
+                    }
+                }
+            }
+        }
 
         // Action bar: a single centred line above the vitals cluster, fading with
         // the server-driven alpha. Legacy `§` colour codes render.

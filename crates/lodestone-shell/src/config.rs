@@ -166,6 +166,55 @@ pub fn cloud_status_from_name(name: &str) -> Option<lodestone_render::CloudStatu
     }
 }
 
+/// Vanilla's `AttackIndicatorStatus` (`AttackIndicatorStatus.java`), the
+/// `options.attackIndicator` cycle.
+///
+/// Three states in **declaration order**, which is also `CycleButton`'s visiting
+/// order and the order of the enum's own ids `0, 1, 2`:
+/// `OFF`, `CROSSHAIR`, `HOTBAR`. `CROSSHAIR` is vanilla's default and is what
+/// this client drew unconditionally before the row went live.
+///
+/// The two live states draw the **same** attack-strength value in two different
+/// places, never both: `Hud.extractCrosshair` gates its 16x4 bar under the
+/// crosshair on `CROSSHAIR`, and the hotbar section gates its 18x18 gauge beside
+/// the hotbar on `HOTBAR`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AttackIndicator {
+    /// `options.off` — no indicator anywhere.
+    Off,
+    /// `options.attack.crosshair` — vanilla's default: the bar under the
+    /// crosshair.
+    #[default]
+    Crosshair,
+    /// `options.attack.hotbar` — the gauge beside the hotbar.
+    Hotbar,
+}
+
+/// Vanilla's `AttackIndicatorStatus` serialized name — the string
+/// `options.json` stores [`Options::attack_indicator`] as. A name rather than
+/// vanilla's own integer id, [`cloud_status_name`]'s reasoning: the file stays
+/// hand-editable and a future variant insertion cannot silently renumber it.
+#[must_use]
+pub fn attack_indicator_name(value: AttackIndicator) -> &'static str {
+    match value {
+        AttackIndicator::Off => "off",
+        AttackIndicator::Crosshair => "crosshair",
+        AttackIndicator::Hotbar => "hotbar",
+    }
+}
+
+/// The inverse of [`attack_indicator_name`]. `None` for anything else, which
+/// [`Options::from_json`] turns into vanilla's `Crosshair` default.
+#[must_use]
+pub fn attack_indicator_from_name(name: &str) -> Option<AttackIndicator> {
+    match name {
+        "off" => Some(AttackIndicator::Off),
+        "crosshair" => Some(AttackIndicator::Crosshair),
+        "hotbar" => Some(AttackIndicator::Hotbar),
+        _ => None,
+    }
+}
+
 /// Vanilla's `InactivityFpsLimit` (`InactivityFpsLimit.java`), the `options.
 /// inactivityFpsLimit` cycle — "Reduce FPS when" `Minimized`/`AFK`.
 ///
@@ -811,6 +860,16 @@ pub struct Options {
     /// whose own module doc said wiring the option was "a matter of threading a
     /// radius into `config_h`/`config_v`" — this is that.
     pub menu_background_blurriness: u32,
+    /// Vanilla's **Attack Indicator** option (`options.attackIndicator`,
+    /// `Options.java`), default [`AttackIndicator::Crosshair`].
+    ///
+    /// Reaches `hud::HudFrame::attack_indicator`, which the crosshair and hotbar
+    /// draw sites in `hud::HudGeometry::build_inner` each gate on — vanilla's own
+    /// two `if` in `Hud.extractCrosshair` and the hotbar section. Before this
+    /// field the crosshair bar drew unconditionally, i.e. the client behaved as
+    /// though the option were pinned to `Crosshair`, which the draw site's own
+    /// comment said in as many words.
+    pub attack_indicator: AttackIndicator,
 }
 
 impl Default for Options {
@@ -860,6 +919,7 @@ impl Default for Options {
             entity_shadows: true,
             weather_radius: MAX_WEATHER_RADIUS,
             menu_background_blurriness: DEFAULT_MENU_BACKGROUND_BLURRINESS,
+            attack_indicator: AttackIndicator::default(),
         }
     }
 }
@@ -1149,6 +1209,13 @@ impl Options {
                     MAX_MENU_BACKGROUND_BLURRINESS,
                 )
             });
+        // Absent or unrecognised is vanilla's own `CROSSHAIR`, which is also the
+        // behaviour every build before this field had.
+        let attack_indicator = obj
+            .get("attack_indicator")
+            .and_then(serde_json::Value::as_str)
+            .and_then(attack_indicator_from_name)
+            .unwrap_or_default();
         Self {
             gui_scale,
             keybinds,
@@ -1192,6 +1259,7 @@ impl Options {
             entity_shadows,
             weather_radius,
             menu_background_blurriness,
+            attack_indicator,
         }
     }
 
@@ -1387,6 +1455,12 @@ impl Options {
         }
         if self.weather_radius != default.weather_radius {
             obj.insert("weather_radius".into(), self.weather_radius.into());
+        }
+        if self.attack_indicator != default.attack_indicator {
+            obj.insert(
+                "attack_indicator".into(),
+                attack_indicator_name(self.attack_indicator).into(),
+            );
         }
         if self.menu_background_blurriness != default.menu_background_blurriness {
             obj.insert(

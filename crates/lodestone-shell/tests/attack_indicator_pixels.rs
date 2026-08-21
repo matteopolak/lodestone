@@ -54,6 +54,19 @@
 //!    `frame.crosshair`'s own gate (that fix's lesson: two questions must
 //!    not share one boolean, and here the indicator answers only one of
 //!    them).
+//! 5. **`Some(0.5)`, crosshair on, `AttackIndicator::Off`** — the settings
+//!    row's own control. Zero px in the crosshair rect.
+//! 6. **`Some(0.5)`, crosshair on, `AttackIndicator::Hotbar`** — zero px in
+//!    the crosshair rect *and* non-zero in the hotbar rect, which is the
+//!    only pair that distinguishes "the option moved the draw" from "the
+//!    option turned the draw off". Measured separately by
+//!    [`hotbar_indicator_rect`], derived from `hud.rs`'s own hotbar block the
+//!    way [`indicator_rect`] is derived from its crosshair one.
+//!
+//! Arms 5 and 6 exist because `AttackIndicator::Hotbar` is a **new draw**,
+//! not the crosshair bar re-anchored: different sprites, an 18x18 box instead
+//! of 16x4, and a fill that runs bottom-up rather than left-to-right. Nothing
+//! in the model layer can tell whether it reaches the atlas.
 //!
 //! Fail-closed like its siblings: a missing GPU or a missing `client.jar` is
 //! a failure, never a skip.
@@ -62,6 +75,7 @@
 //! cargo test -p lodestone-shell --test attack_indicator_pixels -- --ignored --nocapture
 //! ```
 
+use lodestone::config::AttackIndicator;
 use lodestone::hud::{DebugStats, HudFrame, HudRenderer};
 use lodestone_render::{HeadlessTarget, RenderTarget};
 use std::sync::Arc;
@@ -124,6 +138,29 @@ fn indicator_rect(width: u32, height: u32, scale: f32) -> (u32, u32, u32, u32) {
     let y0 = (iy * scale) as u32;
     let x1 = (((ix + iw) + slack) * scale).min(width as f32) as u32;
     let y1 = (((iy + ih) + slack) * scale).min(height as f32) as u32;
+    (x0, y0, x1, y1)
+}
+
+/// The **hotbar** variant's screen rect, derived from the same expression
+/// `hud.rs`'s hotbar block uses: an 18x18 box at
+/// `(cx + 91 + 6, h - 20)` in logical pixels, which is vanilla's own
+/// `(guiWidth / 2 + 91 + 6, guiHeight - 20)`.
+///
+/// The slack is deliberately asymmetric and small. The hotbar itself ends at
+/// `cx + 91`, so the six-pixel gap vanilla leaves is the only separation there
+/// is; padding leftward would pull the hotbar's own frame art into the count
+/// and make every measurement below unattributable — the identical hazard
+/// [`indicator_rect`]'s top edge documents for the crosshair's arm.
+fn hotbar_indicator_rect(width: u32, height: u32, scale: f32) -> (u32, u32, u32, u32) {
+    let lw = width as f32 / scale;
+    let lh = height as f32 / scale;
+    let ix = lw * 0.5 + 91.0 + 6.0;
+    let iy = lh - 20.0;
+    let size = 18.0;
+    let x0 = (ix * scale).max(0.0) as u32;
+    let y0 = (iy * scale).max(0.0) as u32;
+    let x1 = ((ix + size) * scale).min(width as f32) as u32;
+    let y1 = ((iy + size) * scale).min(height as f32) as u32;
     (x0, y0, x1, y1)
 }
 
@@ -194,6 +231,8 @@ fn the_attack_indicator_reaches_the_screen_through_the_real_hud_path() {
     for id in [
         "hud/crosshair_attack_indicator_background",
         "hud/crosshair_attack_indicator_progress",
+        "hud/hotbar_attack_indicator_background",
+        "hud/hotbar_attack_indicator_progress",
     ] {
         assert!(
             atlas.contains(id),
@@ -231,6 +270,30 @@ fn the_attack_indicator_reaches_the_screen_through_the_real_hud_path() {
         attack_cooldown,
         ..HudFrame::new(&stats)
     };
+    // The hotbar variant needs `hotbar` set, because `hud.rs` draws its gauge
+    // inside the block that draws the hotbar — vanilla's own nesting. That
+    // means this frame paints the hotbar too, which is exactly why the hotbar
+    // rect below is measured **against a matching hotbar-on control** rather
+    // than against the crosshair-only frames above: the hotbar's own art would
+    // otherwise be counted as the indicator.
+    let hotbar_frame_with = |indicator: AttackIndicator, attack_cooldown: Option<f32>| HudFrame {
+        show_debug: false,
+        crosshair: true,
+        hotbar: Some(0),
+        hotbar_items: None,
+        attack_cooldown,
+        attack_indicator: indicator,
+        ..HudFrame::new(&stats)
+    };
+    let indicator_frame_with = |indicator: AttackIndicator| HudFrame {
+        show_debug: false,
+        crosshair: true,
+        hotbar: None,
+        hotbar_items: None,
+        attack_cooldown: Some(0.5),
+        attack_indicator: indicator,
+        ..HudFrame::new(&stats)
+    };
 
     let mut hud = HudRenderer::new(device, format);
     hud.attach_gui(device, queue, format, Arc::clone(&atlas));
@@ -258,6 +321,40 @@ fn the_attack_indicator_reaches_the_screen_through_the_real_hud_path() {
     // indicator is nested inside `frame.crosshair`'s own gate rather than
     // answering a question of its own.
     let hidden_px = painted_in_rect(&shoot(&frame_with(false, Some(0.5))), W, rect, backdrop);
+
+    // Control 4, EXECUTED: the settings row set to OFF. Same frame as the
+    // subject in every other respect.
+    let off_px = painted_in_rect(
+        &shoot(&indicator_frame_with(AttackIndicator::Off)),
+        W,
+        rect,
+        backdrop,
+    );
+
+    // Control 5, EXECUTED: the settings row set to HOTBAR. The crosshair rect
+    // must go empty — proving the option *moved* the draw rather than merely
+    // being read.
+    let moved_px = painted_in_rect(
+        &shoot(&indicator_frame_with(AttackIndicator::Hotbar)),
+        W,
+        rect,
+        backdrop,
+    );
+
+    // And the other half of that pair, in the hotbar rect. Both arms carry a
+    // hotbar, so the difference between them is the gauge and nothing else:
+    // measuring HOTBAR against a crosshair-only frame would credit the hotbar's
+    // own art to the indicator.
+    let hotbar_rect = hotbar_indicator_rect(W, H, scale as f32);
+    let gauge_frame = shoot(&hotbar_frame_with(AttackIndicator::Hotbar, Some(0.5)));
+    let gauge_px = painted_in_rect(&gauge_frame, W, hotbar_rect, backdrop);
+    let gauge_where = painted_bbox(&gauge_frame, W, backdrop);
+    let gauge_control_px = painted_in_rect(
+        &shoot(&hotbar_frame_with(AttackIndicator::Crosshair, Some(0.5))),
+        W,
+        hotbar_rect,
+        backdrop,
+    );
 
     eprintln!("=== attack indicator pixel gate (through HudRenderer::render) ===");
     eprintln!("gui scale {scale}, indicator rect {rect:?}");
@@ -290,5 +387,39 @@ fn the_attack_indicator_reaches_the_screen_through_the_real_hud_path() {
         hidden_px, 0,
         "control failed to fail: {hidden_px} px drew with crosshair = false, so the indicator \
          is not actually nested inside the crosshair's own visibility gate"
+    );
+
+    eprintln!("--- options.attackIndicator ---");
+    eprintln!("control, AttackIndicator::Off:     {off_px} px in the crosshair rect");
+    eprintln!("control, AttackIndicator::Hotbar:  {moved_px} px in the crosshair rect");
+    eprintln!("hotbar rect {hotbar_rect:?}");
+    eprintln!("subject, Hotbar + hotbar on:       {gauge_px} px in the hotbar rect ({gauge_where})");
+    eprintln!("control, Crosshair + hotbar on:    {gauge_control_px} px in the hotbar rect");
+
+    assert_eq!(
+        off_px, 0,
+        "control failed to fail: {off_px} px drew with AttackIndicator::Off, so the settings \
+         row does not reach the crosshair draw site at all"
+    );
+    assert_eq!(
+        moved_px, 0,
+        "control failed to fail: {moved_px} px drew in the CROSSHAIR rect with \
+         AttackIndicator::Hotbar — the two placements are mutually exclusive in vanilla and \
+         each draw site must test for its own variant, not for 'not off'"
+    );
+    // The gauge is 18x18 native with a partial fill; the background sprite alone
+    // clears this comfortably at any supported GUI scale.
+    assert!(
+        gauge_px > 20,
+        "expected AttackIndicator::Hotbar to paint its gauge beside the hotbar, got \
+         {gauge_px} px — the option reaches `HudFrame` but the hotbar draw site is an \
+         island (whole-frame bbox: {gauge_where})"
+    );
+    assert_eq!(
+        gauge_control_px, 0,
+        "control failed to fail: {gauge_control_px} px drew in the hotbar-gauge rect with \
+         AttackIndicator::Crosshair. Either the hotbar's own art reaches into this rect — in \
+         which case the subject's count above is not attributable to the gauge — or the \
+         gauge ignores the option"
     );
 }

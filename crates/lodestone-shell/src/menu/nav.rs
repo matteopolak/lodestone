@@ -4625,6 +4625,10 @@ impl MenuNav {
                 self.step_menu_background_blurriness(1);
                 MenuAction::None
             }
+            SettingsOutcome::Cycle(LiveOption::AttackIndicator) => {
+                self.cycle_attack_indicator(1);
+                MenuAction::None
+            }
         }
     }
 
@@ -4690,6 +4694,30 @@ impl MenuNav {
             .unwrap_or(0) as i32;
         let next = (index + delta).rem_euclid(ORDER.len() as i32) as usize;
         self.options.cloud_status = ORDER[next];
+        self.persist_options();
+    }
+
+    /// Cycles `attackIndicator` through its three declared states
+    /// (`Off`, `Crosshair`, `Hotbar`) and wraps, then persists —
+    /// [`Self::cycle_cloud_status`]'s shape, and vanilla's own `CycleButton`
+    /// order, which is the enum's declaration order.
+    ///
+    /// No consumer push: `app/redraw.rs` copies the field onto
+    /// `HudFrame::attack_indicator` every frame, the same way it already copies
+    /// the eight chat options.
+    fn cycle_attack_indicator(&mut self, delta: i32) {
+        use crate::config::AttackIndicator;
+        const ORDER: [AttackIndicator; 3] = [
+            AttackIndicator::Off,
+            AttackIndicator::Crosshair,
+            AttackIndicator::Hotbar,
+        ];
+        let index = ORDER
+            .iter()
+            .position(|s| *s == self.options.attack_indicator)
+            .unwrap_or(0) as i32;
+        let next = (index + delta).rem_euclid(ORDER.len() as i32) as usize;
+        self.options.attack_indicator = ORDER[next];
         self.persist_options();
     }
 

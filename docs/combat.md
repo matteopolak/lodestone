@@ -491,14 +491,33 @@ underwater bubble row. The progress bar is cropped by shrinking both the
 destination width and the sampled UV span to the cooldown fraction, the exact
 idiom `sprite_vitals` already uses for the XP-bar progress fill.
 
-**Scope cuts, both deliberate:**
+**All three `AttackIndicatorStatus` variants are live**, and one scope cut
+remains.
 
-- **Only `AttackIndicatorStatus::CROSSHAIR`.** Vanilla's real enum
-  (`AttackIndicatorStatus.java`) has three variants — `OFF`, `CROSSHAIR`,
-  `HOTBAR` — and this shell was explicitly scoped to ship the default
-  (crosshair) only, noting the options-menu toggle as future work (owned by
-  the options-menu work). There is no `Options::attack_indicator` read anywhere; the
-  indicator always draws whenever the crosshair does.
+- **`OFF`, `CROSSHAIR`, `HOTBAR`** (`AttackIndicatorStatus.java`) all reach
+  pixels. `config::Options::attack_indicator` is copied onto
+  `hud::HudFrame::attack_indicator` every frame by `app/redraw.rs`, and each of
+  the two draw sites in `hud::HudGeometry::build_inner` tests for **its own**
+  variant rather than for "not off" — vanilla's own shape, since its two `if`s
+  are in different sections of `Hud` and are mutually exclusive by
+  construction.
+
+  `HOTBAR` is a genuinely different draw, not the crosshair bar re-anchored:
+  an 18x18 sprite pair at `(guiWidth / 2 + 91 + 6, guiHeight - 20)` filling
+  **bottom-up** by `(int)(scale * 19.0F)` rows, against the crosshair's 16x4
+  pair filling left-to-right. Vanilla mirrors the x to
+  `guiWidth / 2 - 91 - 22` when the offhand arm is the right one; `mainHand` is
+  an inactive settings row here and nothing else models a main arm for the
+  local player, so this takes vanilla's right-handed default rather than
+  inventing a source for the fork.
+
+  The pixel gate below carries the controls: `Off` and `Hotbar` must each paint
+  **zero** px in the crosshair rect, and `Hotbar` must paint in the hotbar rect
+  while `Crosshair` paints zero there — the pair is what distinguishes "the
+  option moved the draw" from "the option turned the draw off". Measured:
+  128 px crosshair / 0 / 0, and 136 px hotbar / 0.
+
+**The remaining scope cut:**
 - **No full-charge "ready" icon.** Vanilla replaces the fill bar with a
   distinct `CROSSHAIR_ATTACK_INDICATOR_FULL_SPRITE` circle when the scale
   reaches `1.0` *and* the crosshair is over a living, in-range target *and*
@@ -1277,11 +1296,9 @@ death tip-over visible rather than one tick long.
   becomes a real value driven by the local player's own `HurtTime`/
   `EntityHurtAnimation` yaw, and `ViewBob::hurt` already has everything else
   it needs.
-- Adding the hotbar-style attack indicator or the `AttackIndicatorStatus`
-  options toggle: `HudFrame::attack_cooldown` already carries the fraction;
-  the missing half is an `Options`-driven read gating which of
-  `hud.rs`'s crosshair-block draw (already built) vs. a new hotbar-adjacent
-  draw (not built) runs, mirroring vanilla's `extractItemHotbar`.
+- ~~Adding the hotbar-style attack indicator or the `AttackIndicatorStatus`
+  options toggle~~ — **landed**. Both draws exist and the settings row drives
+  them; see the three-variant section above.
 - Adding the full-charge "ready" icon: needs the crosshair's live entity
   target's liveness/range plus the held weapon's delay compared against `5`
   ticks (`Hud.extractCrosshair`) threaded into `HudFrame`, then a third sprite
