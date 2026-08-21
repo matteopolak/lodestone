@@ -8977,12 +8977,17 @@ the recorded stack as
 `(kind.0.as_ref() == ITEM_ENTITY_TYPE_PATH).then(|| stacks.0.get(&id.0)).flatten()`. `ItemStacks` is
 only ever written for an entity whose metadata actually carried the `ITEM_STACK` serializer, so the
 type test added nothing and answered `None` for every other claimant of that serializer:
-`ItemFrame.DATA_ITEM`, a framed `filled_map`, and a projectile's real stack. All three consumers are
-written, tested and reached from the real frame path — `merge_framed_items`, `prepare_framed_maps` and
+`ItemFrame.DATA_ITEM`, a framed `filled_map`, a framed `minecraft:special` item, and a projectile's
+real stack. **Four** consumers, all written, tested and reached from the real frame path —
+`merge_framed_items`, `prepare_framed_maps`, `entity_passes.rs`'s `framed_special_item`, and
 `merge_thrown_item`'s "the wire is preferred over the table" arm, whose own doc comment asserted the
-value "is already populated … with no new plumbing". It was not, and had never been. **`prepare_framed_maps`
-had never once run**, which means the framed-map pose correction that landed the same day was fixing
-geometry no player had ever seen.
+value "is already populated … with no new plumbing". It was not, and had never been.
+**`prepare_framed_maps` had never once run**, which means the framed-map pose correction that landed
+the same day was fixing geometry no player had ever seen.
+
+The item frame has **four** producers and exactly one of them — `merge_item_frames`, the body — does
+not read `EntityDraw::item`. That is the whole shape of the owner's report: the body drew, so the
+build was current and the entity was tracked, and everything hanging in it was invisible.
 
 The metadata half was innocent and was checked first: the decode keys the stack on the **serializer**
 rather than the index, `ingest::apply_entity_metadata` inserts `DisplayItem` for any entity type, and
@@ -9051,7 +9056,7 @@ because in none of the three was it in the layer that was reported:
 
 | reported | actually |
 |---|---|
-| the framed item does not draw | the draw site is correct; **one clause in `extract_entity_draws`** never gave it an item |
+| the framed item does not draw | all four draw sites are correct; **one clause in `extract_entity_draws`** never gave any of them an item |
 | the sign parser mishandles styled lines | the parser is right; the **NBT layer below the codec** never unwrapped the box |
 | the glyph pipeline needs a depth bias | it did — and two **style-flag bits** upstream were choosing the wrong pipeline entirely |
 
