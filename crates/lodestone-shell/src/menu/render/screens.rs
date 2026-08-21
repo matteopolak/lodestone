@@ -689,6 +689,116 @@ pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
     }
 }
 
+/// Builds the signed-book reading screen's overlay frame — vanilla's
+/// `BookViewScreen`, the read-only sibling of [`book_edit_frame`]'s page
+/// layout.
+///
+/// Deliberately the *same* page geometry as [`book_edit_frame`]'s
+/// non-signing layout: the two screens draw the same book and vanilla gives
+/// them the same `TEXT_WIDTH`, so a reader who signs a draft should see the
+/// text land where it already was. The differences are all removals — no
+/// Sign button, no caret, and `>` is disabled on the last page rather than
+/// appending one, because a signed book is immutable.
+///
+/// Row indices match [`book_view::page_row`]. The page text is one
+/// [`MenuLabel`] per wrapped line, informational only and outside `rows`'
+/// click system, exactly as [`book_edit_frame`]'s is.
+pub fn book_view_frame(state: &book_view::BookViewState) -> MenuFrame<'static> {
+    const PAGE_DX: f32 = -100.0;
+    const PAGE_Y: f32 = 40.0;
+    const PAGE_LINE_H: f32 = 9.0;
+
+    let dim = widget::argb_to_rgba(widget::INACTIVE_MESSAGE_ARGB);
+    let (current, total) = state.page_indicator();
+
+    // The book's own title, not the item's -- `ItemStack.getCustomName()`
+    // falls back to `written_book_content.title`, so this is the same string
+    // the tooltip and the held-item highlight show. Vanilla's own
+    // `BookViewScreen` has no header at all (see `book_view`'s module doc);
+    // this one line stands in for the window title every other overlay in
+    // this shell draws, so the screen is not anonymous.
+    let mut labels = vec![MenuLabel {
+        text: state.title.clone(),
+        origin: Origin::ScreenTop,
+        dx: 0.0,
+        dy: 20.0,
+        align: Align::Centre,
+        colour: LABEL,
+        scale: 1.0,
+    }];
+    for (i, line) in state.visible_lines().into_iter().enumerate() {
+        labels.push(MenuLabel {
+            text: line,
+            origin: Origin::ScreenTop,
+            dx: PAGE_DX,
+            dy: PAGE_Y + i as f32 * PAGE_LINE_H,
+            align: Align::Left,
+            colour: LABEL,
+            scale: 1.0,
+        });
+    }
+    labels.push(MenuLabel {
+        text: format!("Page {current} of {total}"),
+        origin: Origin::ScreenTop,
+        dx: 100.0,
+        dy: PAGE_Y + book_edit::PAGE_LINE_LIMIT as f32 * PAGE_LINE_H + 8.0,
+        align: Align::Right,
+        colour: dim,
+        scale: 1.0,
+    });
+
+    let footer_y = PAGE_Y + book_edit::PAGE_LINE_LIMIT as f32 * PAGE_LINE_H + 20.0;
+    let rows = vec![
+        MenuRow {
+            label: "<".to_string(),
+            enabled: state.can_page_back(),
+            slot: Some(Slot {
+                origin: Origin::ScreenTop,
+                dx: -43.0,
+                dy: footer_y,
+                w: 20.0,
+                h: 20.0,
+            }),
+            ..Default::default()
+        },
+        MenuRow {
+            label: ">".to_string(),
+            enabled: state.can_page_forward(),
+            slot: Some(Slot {
+                origin: Origin::ScreenTop,
+                dx: 23.0,
+                dy: footer_y,
+                w: 20.0,
+                h: 20.0,
+            }),
+            ..Default::default()
+        },
+        MenuRow {
+            label: "Done".to_string(),
+            enabled: true,
+            slot: Some(Slot {
+                origin: Origin::ScreenTop,
+                dx: -100.0,
+                dy: footer_y + 28.0,
+                w: 200.0,
+                h: 20.0,
+            }),
+            ..Default::default()
+        },
+    ];
+    debug_assert_eq!(rows.len(), book_view::page_row::DONE + 1);
+
+    MenuFrame {
+        rows,
+        selected: usize::MAX,
+        hovered: state.hovered,
+        backdrop: MenuBackdrop::Dim,
+        vanilla: true,
+        labels,
+        ..Default::default()
+    }
+}
+
 /// Builds the Spectator Menu's overlay frame (issue #613's
 /// `TeleportToEntity` remainder — see [`spectator_menu`]'s module doc for
 /// what the vertical-list layout deliberately simplifies against vanilla's

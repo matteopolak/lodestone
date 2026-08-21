@@ -1400,6 +1400,45 @@ impl Sim {
         Some(crate::menu::book_edit::BookEditOpen { slot, pages, author })
     }
 
+    /// The currently held `minecraft:written_book`'s reading-screen seed,
+    /// or `None` if neither hand holds a **signed** book —
+    /// [`Self::writable_book_in_hand`]'s read-only sibling, and the other
+    /// branch of `WindowApp::try_use`'s book fork.
+    ///
+    /// Main hand first, for the same reason that method gives. Two
+    /// differences from it, both because a signed book is immutable:
+    ///
+    /// * **No slot.** Nothing this screen does reaches the wire, so there is
+    ///   no `ServerboundEditBookPacket` addressing to compute.
+    /// * **The `written_book_content` component is required, not
+    ///   defaulted.** A book with no component is a freshly crafted draft
+    ///   that `writable_book_in_hand` handles; a `minecraft:written_book`
+    ///   *cannot* exist without one, since signing is what creates both. So
+    ///   `None` here is genuinely "not holding a signed book", never "holding
+    ///   an empty one".
+    ///
+    /// This is the first production reader `ItemStack::written_book_content`
+    /// has outside its own round trip back to the model — before it, the
+    /// component decoded off the wire, folded into the menu, and reached
+    /// nothing.
+    #[must_use]
+    pub fn written_book_in_hand(&self) -> Option<crate::menu::book_view::BookViewOpen> {
+        const WRITTEN_BOOK: &str = "minecraft:written_book";
+        let menu = self.player_menu();
+        fn signed(stack: Option<&lodestone_game::item::ItemStack>) -> Option<&lodestone_game::item::ItemStack> {
+            stack.filter(|stack| stack.item().to_string() == WRITTEN_BOOK)
+        }
+        let stack = signed(menu.player_native(self.selected_slot()))
+            .or_else(|| signed(menu.player_native(lodestone_game::menu::OFFHAND_NATIVE)))?;
+        let content = stack.written_book_content()?;
+        Some(crate::menu::book_view::BookViewOpen::from_pages(
+            content.title.clone(),
+            content.author.clone(),
+            content.generation,
+            &content.pages,
+        ))
+    }
+
     /// The local player's in-progress eat or drink, or `None`.
     ///
     /// The same [`ConsumeState::resolve`](crate::consume::ConsumeState::resolve) join

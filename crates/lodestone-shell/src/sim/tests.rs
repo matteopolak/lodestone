@@ -2879,6 +2879,65 @@ fn end_session_tears_down_and_a_fresh_connect_afterward_starts_clean() {
     );
 }
 
+/// The driver's signature verdict decides a player message's `MessageTrust`,
+/// and both answers are asserted — the discriminating pair, because a stamp
+/// that ignores the flag agrees with one arm by construction.
+///
+/// This is the gate for a defect of the "a correct consumer fed a constant by
+/// its producer" shape: `MessageTrust` had three variants and a real signature
+/// check ran in the client driver, while `net.rs`'s router matched
+/// `ClientEvent::Chat` with `..` and dropped `ack`, so `net_apply` stamped
+/// **every** player message `NotSecure`. Under that code the `verified: true`
+/// arm below reads `NotSecure` and fails; nothing about the `false` arm would
+/// have noticed.
+///
+/// It drives the real `NetUpdate::Chat` through the real `Sim::poll_net` and
+/// reads the stored `ChatEntry` back off the real `SessionChat` component, so
+/// it covers the fold rather than a restatement of it. It does **not** cover
+/// `net.rs`'s `forward` — that maps `ClientEvent` to `NetUpdate` one layer up.
+#[test]
+fn a_verified_player_message_is_stored_secure_and_an_unverified_one_is_not() {
+    use crate::net::NetUpdate;
+    use lodestone_game::chat::{ChatEntry, MessageTrust};
+
+    let mut seen = Vec::new();
+    for (verified, expected) in [(true, MessageTrust::Secure), (false, MessageTrust::NotSecure)] {
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+        feed.send(NetUpdate::Chat {
+            text: lodestone_model::Text::literal("hi"),
+            player: true,
+            sender: None,
+            verified,
+        })
+        .unwrap();
+        sim.poll_net();
+
+        let local = sim.local_entity();
+        let trust = sim.read(|w| {
+            w.get::<lodestone_ecs::session::SessionChat>(local)
+                .and_then(|chat| match chat.0.feed().iter().next_back() {
+                    Some(ChatEntry::Player { trust, .. }) => Some(*trust),
+                    _ => None,
+                })
+        });
+        seen.push((verified, trust));
+        assert_eq!(
+            trust,
+            Some(expected),
+            "verified = {verified} must store {expected:?}"
+        );
+    }
+    // Collected and asserted on the collection so a regression reports both
+    // arms rather than aborting on the first: the claim is that the two
+    // *differ*, which one arm alone cannot express.
+    assert_ne!(
+        seen[0].1, seen[1].1,
+        "the two arms must not coincide, or the flag is being ignored: {seen:?}"
+    );
+}
+
 #[test]
 fn inbound_chat_is_logged_and_typed_lines_route_to_the_action_seam() {
     use crate::net::NetUpdate;
@@ -4870,6 +4929,108 @@ fn give_main_hand_item(sim: &mut Sim, item: &str) {
             });
         }
     });
+}
+
+/// Same idiom as [`give_main_hand_item`], carrying a real
+/// `minecraft:written_book_content` — the component
+/// `crates/protocol/v770/src/adapter/inventory.rs`'s
+/// `read_written_book_content` populates off the wire, folded in through the
+/// same `ClientEvent` production uses rather than written into the menu by
+/// hand.
+fn give_main_hand_written_book(sim: &mut Sim, title: &str, author: &str, generation: u8, pages: &[&str]) {
+    let local = sim.local;
+    let mut stack = lodestone_model::ItemStack::new(
+        "minecraft:written_book".parse().expect("valid item id"),
+        1,
+    );
+    stack.components.written_book_content = Some(lodestone_model::WrittenBookContent {
+        title: title.to_owned(),
+        author: author.to_owned(),
+        generation,
+        pages: pages.iter().map(|p| lodestone_model::Text::literal(*p)).collect(),
+        resolved: true,
+    });
+    sim.write(|w| {
+        if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
+            menus.0.apply(&lodestone_model::ClientEvent::InventorySlotChanged {
+                slot: 0,
+                item: Some(stack.clone()),
+            });
+        }
+    });
+}
+
+/// The book-reading screen's producer: a signed book in the main hand must
+/// be reported with the title, author, generation and pages the wire
+/// carried.
+///
+/// **This is the link that was missing**, not the decode: v770 has decoded
+/// `minecraft:written_book_content` into `ItemComponents` for as long as
+/// `book_content_wiring.rs` has existed, and
+/// `lodestone_game::item::ItemStack::written_book_content` had **zero**
+/// production readers — so a signed book folded into the menu correctly and
+/// reached nothing at all. Right-clicking it did nothing and its tooltip
+/// said "Written Book".
+///
+/// Fields are pairwise distinct (a title and an author that are different
+/// words, generation `2` rather than the `0` a fresh signature carries, two
+/// differing pages) so a transposition of the two adjacent strings cannot
+/// survive.
+#[test]
+fn a_signed_book_in_hand_is_reported_with_its_own_metadata_and_pages() {
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    assert!(
+        sim.written_book_in_hand().is_none(),
+        "precondition: an empty hand holds no book"
+    );
+
+    give_main_hand_written_book(&mut sim, "Wandering Notes", "Steve", 2, &["First page", "Second page"]);
+
+    let open = sim
+        .written_book_in_hand()
+        .expect("a signed book in the main hand must open the reading screen");
+    assert_eq!(
+        open,
+        crate::menu::book_view::BookViewOpen {
+            title: "Wandering Notes".to_owned(),
+            author: "Steve".to_owned(),
+            generation: 2,
+            pages: vec!["First page".to_owned(), "Second page".to_owned()],
+        }
+    );
+}
+
+/// The two book screens must not answer for each other's item. Without this,
+/// `try_use`'s fork could route a signed book into the *editor* (which would
+/// then send an `EditBook` for an immutable book) or a draft into the reader.
+///
+/// Both directions, collected rather than asserted in the loop.
+#[test]
+fn the_two_book_screens_do_not_claim_each_others_item() {
+    let mut failures = Vec::new();
+
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    give_main_hand_written_book(&mut sim, "T", "A", 0, &["p"]);
+    if sim.writable_book_in_hand().is_some() {
+        failures.push("a signed book was claimed by the editor's producer");
+    }
+    if sim.written_book_in_hand().is_none() {
+        failures.push("control: a signed book was not claimed by the reader's producer");
+    }
+
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    give_main_hand_item(&mut sim, "minecraft:writable_book");
+    if sim.written_book_in_hand().is_some() {
+        failures.push("an unsigned draft was claimed by the reader's producer");
+    }
+    if sim.writable_book_in_hand().is_none() {
+        failures.push("control: an unsigned draft was not claimed by the editor's producer");
+    }
+
+    assert!(failures.is_empty(), "{failures:?}");
 }
 
 /// Same idiom as [`give_main_hand_item`], carrying a real `minecraft:

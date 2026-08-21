@@ -1406,8 +1406,26 @@ fn styled_hover_text(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<Strin
         Some(ComponentValue::Text(text)) => Some(text.clone()),
         _ => None,
     };
+    // A signed book's own title stands in for the display name, so a written
+    // book reads as its title and not as "Written Book". This is vanilla's
+    // `ItemStack.getCustomName()`, which checks `DataComponents.CUSTOM_NAME`
+    // and then falls back to `written_book_content`'s `title().raw()` when
+    // that title is non-blank.
+    //
+    // **Deliberately not folded into the `custom.is_some()` italic test
+    // below**, which is a separate question with a separate vanilla answer:
+    // `getStyledHoverName` italicises on `has(DataComponents.CUSTOM_NAME)`,
+    // the *component*, not on whatever `getCustomName()` returned. A written
+    // book carries no custom name, so its title is upright — an anvil-renamed
+    // one is italic, because then the component really is present.
+    let book_title = stack
+        .written_book_content()
+        .map(|content| content.title.trim())
+        .filter(|title| !title.is_empty())
+        .map(|title| Text::literal(title.to_owned()));
     let hover = custom
         .clone()
+        .or(book_title)
         .unwrap_or_else(|| Text::literal(base_display_name(stack.item(), translate)));
     let mut root = Text::literal(String::new());
     if custom.is_some() {
