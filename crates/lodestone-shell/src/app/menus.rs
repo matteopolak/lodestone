@@ -870,6 +870,25 @@ impl WindowApp {
             self.set_grab(false);
             return;
         }
+        // The signed book's half of the same fork: `WrittenBookItem.use`
+        // calls `player.openItemGui(...)` and returns
+        // `InteractionResult.SUCCESS`, so vanilla opens `BookViewScreen`
+        // and never reaches the generic use either. Its `InteractionResult`
+        // is `SUCCESS` with a `CLIENT` swing source, and
+        // `sim/actions.rs`'s `generic_use_swings` lists `written_book` for
+        // exactly that reason -- but the return below means the swing is
+        // not reached from here, matching vanilla, whose `startUseItem` for
+        // a book is answered entirely by the screen opening. See
+        // `crate::menu::book_view`'s module doc.
+        if self.ui.screen() == crate::menu::Screen::Playing
+            && let Some(open) = self.sim.written_book_in_hand()
+        {
+            self.sim.input_mut(InputState::release_all);
+            self.nav.open_book_view(&mut self.ui, open);
+            self.tab_held = false;
+            self.set_grab(false);
+            return;
+        }
         self.sim.use_item();
     }
 }
