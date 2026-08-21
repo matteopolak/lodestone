@@ -1240,14 +1240,25 @@ impl Sim {
     /// counter rather than a second, independent one — see
     /// [`Placement::take_use_sequence`]'s docs for why that matches vanilla's
     /// own single shared counter.
+    ///
+    /// # Armour equip prediction
+    ///
+    /// This is also the one place [`Self::predict_equip_swap`] can fire: an
+    /// armour piece right-clicked from the hotbar has no block or entity
+    /// target and no special-cased use of its own, so vanilla's
+    /// `Minecraft.startUseItem` falls all the way through to `gameMode.
+    /// useItem` — this method's send — exactly like a shield raise or a bow
+    /// draw. See that method's own doc for why the equip write belongs here
+    /// rather than in [`Self::use_item_live`].
     fn use_item_generic(&mut self) {
-        let has_item = self
+        let held = self
             .player_menu()
             .player_native(self.selected_slot())
-            .is_some_and(|stack| !stack.is_empty());
-        if !has_item {
+            .cloned();
+        let Some(held) = held.filter(|stack| !stack.is_empty()) else {
             return;
-        }
+        };
+        self.predict_equip_swap(&held);
         let rotation = Rotation::new(self.player().yaw, self.player().pitch);
         let sequence =
             self.write(|w| w.resource_mut::<PlacementPredictor>().0.take_use_sequence());
@@ -1262,6 +1273,88 @@ impl Sim {
         // Client-side animation, so it runs with or without a socket — the
         // same split every other swing site in this method makes.
         self.swing_hand();
+    }
+
+    /// Predicts vanilla's `Item.use()` → `Equippable.swapWithEquipmentSlot`
+    /// (`Item.java`, `Equippable.java`) — the branch that actually equips a
+    /// helmet/chestplate/leggings/boots right-clicked from the hotbar with no
+    /// block or entity under the crosshair (or one whose own interaction
+    /// declined). Before this, [`Self::use_item_generic`] sent
+    /// [`ClientAction::UseItem`] and wrote nothing locally, so armour only
+    /// appeared once the server's own `SET_SLOT` pair came back — the round
+    /// trip the "missing client prediction" report was about.
+    ///
+    /// # Reconciliation is the same fold a real `SET_SLOT` takes
+    ///
+    /// The write goes in as two synthesized [`ClientEvent::ContainerSlot`]s —
+    /// the same idiom [`Self::apply_creative_slot`] uses for `SET_CREATIVE_
+    /// MODE_SLOT` — against the **same menu-slot indices** the wire uses:
+    /// the armour slot's [`EquipmentSlot::player_menu_index`] (`5..=8`) and
+    /// the hotbar's `36 + selected_slot`. `ServerPlayerGameMode.useItem`
+    /// mutates `player.inventoryMenu` (window 0) directly, and that menu's
+    /// `broadcastChanges` diff runs every tick regardless of which action
+    /// changed it, so the exact same `ContainerSlot` event — this time
+    /// server-authoritative — arrives again for both slots shortly after.
+    /// `Menu::reconcile` (`lodestone_game::reconcile`, reached through
+    /// `Menus::apply`) is what corrects a wrong guess: it always overwrites
+    /// both the confirmed and (where they differ) the predicted contents, so
+    /// a matching echo is a silent no-op and a disagreeing one snaps the
+    /// slot to the truth. There is nothing bespoke to add for the
+    /// disagreement case — it is the same path a chest's shift-click already
+    /// exercises.
+    ///
+    /// # Scope
+    ///
+    /// * Only the four `HUMANOID_ARMOR` positions predict — see
+    ///   [`EquipmentSlot::player_menu_index`]'s own doc for why the off-hand
+    ///   slot is excluded (no real item swaps into it this way).
+    /// * Only a `count <= 1` held stack predicts, matching `Equippable.
+    ///   swapWithEquipmentSlot`'s own `inHand.getCount() <= 1` branch — every
+    ///   shipped armour item has a max stack size of 1, so this covers
+    ///   ordinary play; a hypothetical equippable item with a larger cap
+    ///   falls back to send-and-wait rather than modelling vanilla's partial-
+    ///   consume branch (`inHand.consumeAndReturn(1, player)`).
+    /// * Not modelled: `swappable == false` items and a target slot carrying
+    ///   a `minecraft:prevent_armor_change`-effect enchantment — vanilla's
+    ///   own `Equippable` record and [`lodestone_model::ItemComponents`]
+    ///   both carry only the *slot*, per that type's own doc ("Only the slot
+    ///   is carried"), so there is no flag here to gate on. A server that
+    ///   refuses for either reason is corrected by the same reconcile path
+    ///   above, at the cost of one visible snap-back instead of silence.
+    fn predict_equip_swap(&mut self, held: &lodestone_game::item::ItemStack) {
+        if held.count() > 1 {
+            return;
+        }
+        let Some(target) = lodestone_game::container::equippable_slot(held) else {
+            return;
+        };
+        let Some(armor_menu_slot) = target.player_menu_index() else {
+            return;
+        };
+        let previous = self.player_menu().slot_item(armor_menu_slot).cloned();
+        let hotbar_menu_slot = 36 + self.selected_slot();
+        let held_model = lodestone_model::ItemStack::from(held);
+        let previous_model = previous.as_ref().map(lodestone_model::ItemStack::from);
+        self.write_local(|w, local| {
+            if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
+                // The current state id, unchanged — same reasoning as
+                // `apply_creative_slot`: nothing about this write advances the
+                // container's synchronisation counter.
+                let state_id = menus.0.player().state_id() as i32;
+                menus.0.apply(&lodestone_model::ClientEvent::ContainerSlot {
+                    window_id: 0,
+                    state_id,
+                    slot: i32::try_from(armor_menu_slot).unwrap_or(0),
+                    item: Some(held_model),
+                });
+                menus.0.apply(&lodestone_model::ClientEvent::ContainerSlot {
+                    window_id: 0,
+                    state_id,
+                    slot: i32::try_from(hotbar_menu_slot).unwrap_or(0),
+                    item: previous_model,
+                });
+            }
+        });
     }
 
     /// Apply a locally predicted block state to the one chunk store and re-mesh.

@@ -1314,31 +1314,30 @@ impl Menu {
     /// `8 - eqSlot.getIndex()` — head 3 → 5, chest 2 → 6, legs 1 → 7, feet 0 → 8
     /// — with the off-hand at 45. That is the mapping below.
     ///
-    /// One caveat for whoever wires the census: vanilla gates branch 4 on
+    /// One thing this deliberately does **not** do: vanilla gates branch 4 on
     /// `eqSlot.getType() == EquipmentSlot.Type.HUMANOID_ARMOR`
     /// (`InventoryMenu.java:120`), which excludes `BODY` — wolf and horse
-    /// armour. [`crate::container::EquipmentSlot::from_name`] currently folds
-    /// `"body"` into [`Chest`](EquipmentSlot::Chest), so once the component is
-    /// populated a wolf-armour shift-click would try to equip a chestplate slot.
-    /// `"body"` needs its own variant (or to map to `None`) before that happens.
+    /// armour. [`crate::container::EquipmentSlot::from_name`] deliberately
+    /// leaves `"body"` unmatched (falling through to `None`) rather than
+    /// folding it into [`Chest`](EquipmentSlot::Chest), so a wolf/horse-armour
+    /// item never resolves an `eq` here and this function correctly declines
+    /// to auto-equip it into a player's chestplate slot.
     ///
-    /// # This is currently unreachable in live play
+    /// # Reachable in live play
     ///
     /// `minecraft:equippable` is a **prototype** component: like
     /// `minecraft:tool` (see [`lodestone_model::ToolPatch`]'s docs and
-    /// `docs/tool-mining.md`), vanilla puts it in the item's built-in component
-    /// map, so a clientbound stack — which carries only the *patch* — never
-    /// mentions it. Nothing in the tree writes it, so
-    /// [`crate::container::equippable_slot`] returns `None` for every stack that
-    /// came off the wire and this function always returns `None`.
-    ///
-    /// The same absence disables [`Slot::may_place`] for an
-    /// [`Armor`](SlotKind::Armor) slot outright, so no click of any kind can
-    /// currently put armour on. The fix is an item→equippable census in the
-    /// version crate, exactly like `generated/tools.rs`; it is not a change to
-    /// the wire decoder, because the wire never carries the component. Until it
-    /// lands, both this branch and armour placement are dead code and the
-    /// tests below build the component by hand to exercise them.
+    /// `docs/tool-mining.md`), vanilla puts it in the item's built-in
+    /// component map, so a clientbound stack — which carries only the
+    /// *patch* — never mentions it on its own. `crates/protocol/v770/src/
+    /// adapter/inventory.rs`'s `read_component_patch` seeds
+    /// [`lodestone_model::ItemComponents::equippable`] from
+    /// [`lodestone_data::item_prototypes::prototype`] before the patch is
+    /// read, the same way it seeds `max_stack_size`/`max_damage`, so a real
+    /// stack off the wire does carry it and
+    /// [`crate::container::equippable_slot`] returns `Some` for every one of
+    /// the census's 84 equippable items. [`Slot::may_place`] for an
+    /// [`Armor`](SlotKind::Armor) slot and this function are both live.
     fn empty_equip_target(&self, stack: &ItemStack) -> Option<usize> {
         let eq = crate::container::equippable_slot(stack)?;
         let menu_index = match eq {
