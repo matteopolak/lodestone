@@ -642,12 +642,44 @@ impl<T: Transport> Driver<T> {
         if !changed {
             return false;
         }
-        // Enumerated then unloaded, rather than through a `World::clear`, so this
-        // stays inside `lodestone-world`'s existing public surface. Once per
-        // dimension change, so the extra `Vec` is not worth a new API.
+        let dropped = self.clear_decoded_chunks();
+        tracing::debug!(
+            dimension = %dimension,
+            dropped,
+            "dimension changed: cleared the decoded chunk store"
+        );
+        true
+    }
+
+    /// Drops every decoded chunk, the way vanilla's own transitions do by
+    /// constructing a fresh `ClientLevel`.
+    ///
+    /// Called from [`Self::forget_previous_dimension`] (a respawn into another
+    /// dimension) and from `emit`'s `Login` arm (a join, including a **second**
+    /// join on a connection that was never torn down).
+    ///
+    /// Safe here and nowhere else, for an ordering reason rather than a
+    /// tidiness one: this runs on the net thread between two packet decodes,
+    /// after the current packet's world-write guard has been dropped, so the
+    /// only chunks in the store are ones that arrived *before* the transition.
+    /// The same clear run from the render thread — where the shell drains its
+    /// update channel — could delete columns the new epoch has already streamed
+    /// and no server will resend, which is a permanent hole rather than
+    /// leftover geometry. See `lodestone_shell::sim::dimension`'s own note on
+    /// why the mesh-side drop can live there and this cannot.
+    ///
+    /// Enumerated then unloaded, rather than through a `World::clear`, so this
+    /// stays inside `lodestone-world`'s existing public surface. Rare enough
+    /// that the extra `Vec` is not worth a new API.
+    ///
+    /// Returns how many columns it dropped, so a caller can say whether there
+    /// was anything to drop rather than only that it tried.
+    fn clear_decoded_chunks(&mut self) -> usize {
+        let dropped;
         {
             let mut world = self.read_model.world_write();
             let loaded: Vec<_> = world.iter().map(|(pos, _)| *pos).collect();
+            dropped = loaded.len();
             for pos in loaded {
                 world.unload(pos);
             }
@@ -656,11 +688,7 @@ impl<T: Transport> Driver<T> {
         // woken — the same reason the per-packet path wakes unconditionally rather
         // than relying on the adapter to emit a notification directive.
         self.read_model.wake();
-        tracing::debug!(
-            dimension = %dimension,
-            "dimension changed: cleared the decoded chunk store"
-        );
-        true
+        dropped
     }
 
     fn absorb_bundle(&mut self, directives: Vec<Directive>) -> Vec<Directive> {
@@ -1120,10 +1148,37 @@ impl<T: Transport> Driver<T> {
                 // placement teleport that follows zeroes the server's
                 // load-timeout timer so our movement stops being ignored.
                 self.awaiting_player_load = true;
-                // The baseline for the `Respawned` arm's comparison, recorded
-                // without clearing anything: a fresh session has nothing of a
-                // previous dimension in the store. Without it the first portal trip
-                // of a session would compare against `None` and skip its clear.
+                // Vanilla's `handleLogin` assigns a **new `ClientLevel`**,
+                // unconditionally, so every chunk of whatever came before is
+                // gone by the time the first packet of the new epoch decodes.
+                // This used to record the dimension and clear nothing, reasoning
+                // that "a fresh session has nothing of a previous dimension in
+                // the store" — true of a fresh session, and false of the case
+                // that matters: a Velocity/BungeeCord proxy swapping the backend
+                // behind one socket sends `START_CONFIGURATION`, a configuration
+                // round and a **second `LOGIN`**, with no reconnect and no
+                // `Respawned` to trigger the clear. The old backend's terrain
+                // then sat in the store at the new backend's coordinates, where
+                // the shell's own physics collides against it — a client
+                // predicting from terrain the server does not have is a client
+                // the server corrects.
+                //
+                // Unconditional rather than gated on the dimension changing,
+                // matching vanilla: a backend swap usually lands in
+                // `minecraft:overworld` again, so a comparison against the
+                // recorded dimension would answer "unchanged" and skip precisely
+                // the case this exists for. On a first login the store is empty
+                // and this is a no-op.
+                let dropped = self.clear_decoded_chunks();
+                tracing::debug!(
+                    target: "transfer",
+                    dimension = %dimension,
+                    dropped,
+                    "xfer: cleared the decoded chunk store for a new login epoch"
+                );
+                // The baseline for the `Respawned` arm's comparison. Without it
+                // the first portal trip of a session would compare against
+                // `None` and skip its clear.
                 self.dimension = Some(dimension.clone());
 
                 // Secure chat: fetch this account's Mojang-issued signing key

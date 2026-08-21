@@ -83,6 +83,34 @@ impl Sim {
                     self.set_connect_phase(phase);
                 }
                 NetUpdate::LoggedIn { entity_id } => {
+                    // A `LoggedIn` while already connected is a **second login
+                    // on one connection** — what a Velocity/BungeeCord proxy
+                    // does when it swaps the backend behind an unbroken socket
+                    // (`START_CONFIGURATION`, a configuration round, then a
+                    // second `LOGIN`), with no reconnect and no `Respawned`.
+                    // Vanilla's `handleLogin` assigns a whole new `ClientLevel`
+                    // for exactly this, dropping every entity and every chunk of
+                    // what came before; the client's decoded store is cleared on
+                    // the net thread (`lodestone_client`'s own `Login` arm, the
+                    // only place the ordering is safe) and this is the
+                    // render-side half of the same drop. Without it the previous
+                    // backend's meshed columns stay uploaded over terrain the
+                    // store no longer holds — geometry with nothing behind it,
+                    // which is the "standing on invisible blocks" shape.
+                    //
+                    // The phase is the test because it is the only local fact
+                    // that separates the two cases: a fresh join arrives here
+                    // while still `Connecting`, and nothing but a second login
+                    // can arrive while `Connected`.
+                    if self.session_phase() == SessionPhase::Connected {
+                        tracing::info!(
+                            target: "transfer",
+                            entity_id,
+                            "xfer: second LOGIN while connected -- dropping the \
+                             previous backend's meshes and entity tracks"
+                        );
+                        self.reset_for_dimension_change();
+                    }
                     // The id is *not* recorded here. `ClientEvent::Login` folds it
                     // into the `ServerEntityId` component (and into
                     // `EntityIndex`) on the net thread, in the same `World` this
@@ -272,6 +300,13 @@ impl Sim {
                     let (was, placed) = placed;
                     self.set_prev_position(placed);
                     self.teleport_count += 1;
+                    // The simulation is now level with the server, so the net
+                    // thread can stop overriding the pose our outbound `Move`s
+                    // claim. Published here — after the pose is actually
+                    // adopted, never before — because that is precisely the
+                    // edge the override exists to bridge. See
+                    // `crate::net::with_authorised_pose`.
+                    crate::net::note_teleport_applied();
                     // The `transfer` target's simulation-side hop, and the one
                     // that dates the window: the driver wrote
                     // `ACCEPT_TELEPORTATION` when the packet decoded, but the
