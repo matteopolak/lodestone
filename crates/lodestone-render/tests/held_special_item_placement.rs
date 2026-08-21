@@ -58,7 +58,7 @@
 use glam::{Mat4, Vec3};
 use lodestone_assets::item_model::ItemNodeTransform;
 use lodestone_assets::{DisplaySlot, DisplayTransform, DisplayTransforms};
-use lodestone_render::block_entity::{BlockEntityModelSet, CHEST_SINGLE, SKULL_HUMANOID};
+use lodestone_render::block_entity::{BlockEntityModelSet, CHEST_SINGLE, SKULL_HUMANOID, SKULL_MOB};
 use lodestone_render::compose_special_node_transform;
 use lodestone_render::entity::{Arm, first_person_item_matrix, hand_transform};
 
@@ -175,6 +175,28 @@ fn mesh_aabb(name: &str) -> (Vec3, Vec3) {
 /// that makes this a magnitude assertion rather than a direction check.
 const TOL: f32 = 1e-4;
 
+/// The base head box, `SkullModel.createHeadModel`'s
+/// `addBox(-4, -8, -4, 8, 8, 8)` at `PartPose.ZERO`, in blocks.
+const SKULL_HEAD_LO: Vec3 = Vec3::new(-0.25, -0.5, -0.25);
+/// The other corner of [`SKULL_HEAD_LO`]'s box.
+const SKULL_HEAD_HI: Vec3 = Vec3::new(0.25, 0.0, 0.25);
+
+/// `SkullModel.createHumanoidHeadLayer`'s `"hat"` overlay is the same box
+/// under `new CubeDeformation(0.25F)`, which inflates symmetrically — so it
+/// widens the model's extent by a quarter texel on each of the six faces.
+///
+/// `0.25 / 16.0`, spelled out because it is the difference between the two
+/// hypotheses in every assertion below.
+const SKULL_HAT_INFLATION_BLOCKS: f32 = 0.25 / 16.0;
+
+fn hat_lo() -> Vec3 {
+    SKULL_HEAD_LO - Vec3::splat(SKULL_HAT_INFLATION_BLOCKS)
+}
+
+fn hat_hi() -> Vec3 {
+    SKULL_HEAD_HI + Vec3::splat(SKULL_HAT_INFLATION_BLOCKS)
+}
+
 #[test]
 fn the_skull_rig_is_authored_y_down_exactly_as_vanilla_authors_it() {
     // `SkullModel.createHeadModel`: `addBox(-4, -8, -4, 8, 8, 8)`, `PartPose.ZERO`,
@@ -182,13 +204,35 @@ fn the_skull_rig_is_authored_y_down_exactly_as_vanilla_authors_it() {
     // block-space-up instead would make the node transformation's 180°-about-X
     // flip push the head *down* rather than up — the same half-block error, from
     // the other end of the chain.
-    let (lo, hi) = mesh_aabb(SKULL_HUMANOID);
-    assert!(
-        (lo - Vec3::new(-0.25, -0.5, -0.25)).abs().max_element() < TOL
-            && (hi - Vec3::new(0.25, 0.0, 0.25)).abs().max_element() < TOL,
-        "skull_humanoid is baked at {lo:?}..{hi:?}, not vanilla's Y-down \
-         (-0.25, -0.5, -0.25)..(0.25, 0, 0.25)"
-    );
+    //
+    // # The two canvases differ by more than their canvas
+    //
+    // This gate once asserted the bare head box for **both** models, which was
+    // right for `skull_mob` and stale for `skull_humanoid`:
+    // `createHumanoidHeadLayer` adds a `"hat"` child inflated `0.25`, and the
+    // item path bakes the very same layer the block-entity path does
+    // (`SkullBlockRenderer.createModel` → `ModelLayers.PLAYER_HEAD` →
+    // `humanoidHeadLayer`), with vanilla's own `getExtentsForGui` walking the
+    // whole root. So the hatted extent is the one vanilla measures for a held
+    // head too, and asserting the bare box here was asserting the absence of a
+    // layer rather than the authoring convention this gate is named for.
+    //
+    // Both models are checked, against *different* expectations, which is what
+    // makes the pair discriminating: a hat wrongly added to the mob rig, or
+    // wrongly dropped from the humanoid one, fails exactly one of them.
+    let mut failures = Vec::new();
+    for (name, want_lo, want_hi) in [
+        (SKULL_MOB, SKULL_HEAD_LO, SKULL_HEAD_HI),
+        (SKULL_HUMANOID, hat_lo(), hat_hi()),
+    ] {
+        let (lo, hi) = mesh_aabb(name);
+        if (lo - want_lo).abs().max_element() >= TOL || (hi - want_hi).abs().max_element() >= TOL {
+            failures.push(format!(
+                "{name} is baked at {lo:?}..{hi:?}, not vanilla's Y-down {want_lo:?}..{want_hi:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
 }
 
 #[test]
@@ -218,9 +262,37 @@ fn a_held_player_head_lands_where_the_jar_says_and_nowhere_near_the_alternatives
     // Hand-derived from the jar, not read off this pipeline:
     //   T(0.56, -0.52, -0.72) · T(-0.5, -0.5, -0.5) · T(0.5, 0, 0.5) · Rx(180°)
     // folds to T(0.56, -1.02, -0.72) · Rx(180°); Rx(180°) sends the mesh's
-    // y ∈ [-0.5, 0] to [0, 0.5] and leaves |x|, |z| ≤ 0.25.
-    let want_min = Vec3::new(0.31, -1.02, -0.97);
-    let want_max = Vec3::new(0.81, -0.52, -0.47);
+    // y ∈ [-0.515625, 0.015625] to [-0.015625, 0.515625] and leaves
+    // |x|, |z| ≤ 0.265625.
+    //
+    // The half-extent is `4 + 0.25` texels, not `4`: `ModelLayers.PLAYER_HEAD`
+    // is `createHumanoidHeadLayer`, whose `"hat"` child is inflated `0.25`,
+    // and the held-item path bakes that same layer
+    // (`SkullBlockRenderer.createModel`, shared with the block-entity path)
+    // while `SkullSpecialRenderer.getExtents` measures the whole root through
+    // `getExtentsForGui`. The bare-head numbers this gate carried before are
+    // the *un-hatted* hypothesis, and they are computed below so the
+    // assertion says which one it landed on.
+    let fold = Vec3::new(0.56, -1.02, -0.72);
+    let half = 0.25 + SKULL_HAT_INFLATION_BLOCKS;
+    let want_min = Vec3::new(fold.x - half, fold.y - SKULL_HAT_INFLATION_BLOCKS, fold.z - half);
+    let want_max = Vec3::new(
+        fold.x + half,
+        fold.y + 0.5 + SKULL_HAT_INFLATION_BLOCKS,
+        fold.z + half,
+    );
+    let unhatted_min = Vec3::new(fold.x - 0.25, fold.y, fold.z - 0.25);
+    let unhatted_max = Vec3::new(fold.x + 0.25, fold.y + 0.5, fold.z + 0.25);
+    assert!(
+        (want_min - unhatted_min).abs().max_element() > 1e-3,
+        "the hatted and un-hatted hypotheses coincide, so this gate cannot tell them apart"
+    );
+    assert!(
+        (min - unhatted_min).abs().max_element() > 1e-3
+            || (max - unhatted_max).abs().max_element() > 1e-3,
+        "held player head landed on the un-hatted hypothesis {unhatted_min:?}..{unhatted_max:?}, \
+         which means the skull model lost its hat overlay"
+    );
     assert!(
         (min - want_min).abs().max_element() < 1e-3 && (max - want_max).abs().max_element() < 1e-3,
         "held player head lands at {min:?}..{max:?}, jar-derived expectation is \
