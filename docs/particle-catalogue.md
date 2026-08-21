@@ -365,6 +365,51 @@ Three things this cost, worth carrying:
   takes the colour as a parameter so the gap stays at the decoder; closing it is an arm in
   `decode_particle_options` plus a `ParticleOptions` variant, exactly as for `dust`.
 
+### The ambient and biome family
+
+Thirteen types, chosen by how often a player actually sees them rather than by
+registry order. `poof` — the puff every mob death, every breeding and every spawner
+spawn produces — is the headline: it had no arm at all and hit the catch-all.
+
+| class | types |
+|---|---|
+| `ExplodeParticle` | `poof`, `spit` |
+| `BaseAshSmokeParticle` | `ash`, `white_ash`, `white_smoke` (joining `smoke`/`large_smoke`) |
+| `SuspendedParticle` | `underwater`, `crimson_spore`, `warped_spore`, `spore_blossom_air` |
+| `SuspendedTownParticle` | `mycelium`, `composter`, `egg_crack`, `dolphin` (joining `happy_villager`) |
+
+Four things this found or fixed:
+
+* **`spore_blossom_air` was wired as a `DripParticle` and is a `SuspendedParticle`.**
+  It shares `drip_fall`'s *texture* with `falling_spore_blossom` and nothing else,
+  and the sheet stem is exactly why the misreading is plausible. The lifetimes do not
+  overlap: `SporeBlossomAirProvider` draws a flat `500..=1000` ticks while a drip's is
+  `(int)(64 / (nextFloat() * 0.8 + 0.2))`, whose **maximum** is 320 — so a single
+  sample separates the hypotheses, which is what
+  `spore_blossom_air_outlives_every_possible_drip` asserts. As a drip it vanished
+  roughly twenty times too fast.
+* **`ExplodeParticle` needed a new `Behaviour`, and reusing `AshSmoke` would have been
+  invisible.** Both animate their sheet by age, but `BaseAshSmokeParticle` *also*
+  overrides `getQuadSize` with `clamp(age / lifetime * 32, 0, 1)` and `ExplodeParticle`
+  does not — so borrowing it makes every poof start at **exactly zero size** and swell
+  in over its first thirty-second. Nothing about the particle count, its sprite or its
+  physics would show that. `Behaviour::Animated` is the split;
+  `a_poof_is_full_size_on_its_first_frame_and_a_smoke_puff_is_not` computes both
+  hypotheses and was observed landing on the wrong one's predicted `0.0` under a neuter.
+* **A one-frame sheet is not a frame of an eight-frame one.** Eight types name
+  `generic_0` alone in their own JSON, and reusing `Sheet::Generic` for them would
+  animate a still particle. `Sheet::Generic0` exists for the same reason
+  `Sheet::PortalGeneric` does: a sheet's identity is its frame *sequence*.
+* **`BaseAshSmokeParticle`'s eight positional parameters became `AshSmokeParams`.**
+  `smoke` and `ash` differ by the sign of `dirY`, the sign and magnitude of `gravity`,
+  one `colorRandom` and one `maxLifetime` — four lone numbers in a row of bare floats,
+  which is the transposition shape this repo's evidence rules warn about. Naming them
+  makes the swap unspellable rather than merely unlikely.
+
+Four of these (`underwater`, `crimson_spore`, `warped_spore`, `ash`) deliberately ignore
+the packet's three velocity words: their vanilla providers *draw* the velocity rather
+than taking it from the caller, so that is the class's shape and not a dropped field.
+
 ## Verification
 
 - `crates/lodestone-particle/src/emit.rs`: one test per new emitter asserting an **exact**

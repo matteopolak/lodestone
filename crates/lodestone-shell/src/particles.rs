@@ -682,9 +682,47 @@ impl Particles {
             "landing_lava" => {
                 emit::drip(&mut self.engine, x, y, z, Sheet::DripLand, LAVA_DRIP_COLOUR, 0.0);
             }
-            "spore_blossom_air" => {
-                emit::drip(&mut self.engine, x, y, z, Sheet::DripFall, [0.32, 0.5, 0.22], 0.0);
-            }
+            // `spore_blossom_air` used to sit in this drip block, and it is
+            // not a `DripParticle` at all — `SuspendedParticle.
+            // SporeBlossomAirProvider`, which shares `drip_fall`'s *texture*
+            // with `falling_spore_blossom` and nothing else. It hangs rather
+            // than falling, and its lifetime is a flat 500..=1000 ticks against
+            // the drip's `64 / nextFloat` draw, so as a drip it vanished about
+            // twenty times too fast.
+            "spore_blossom_air" => emit::spore_blossom_air(&mut self.engine, x, y, z),
+
+            // -- The `SuspendedParticle` biome drift ----------------
+            //
+            // Four types over one class. Each supplies its own velocity inside
+            // the emitter (vanilla's providers draw it, rather than taking it
+            // from the packet), so the wire's three velocity words are
+            // deliberately unused here — that is the class's shape, not a
+            // dropped field.
+            "underwater" => emit::underwater(&mut self.engine, x, y, z),
+            "crimson_spore" => emit::crimson_spore(&mut self.engine, x, y, z),
+            "warped_spore" => emit::warped_spore(&mut self.engine, x, y, z),
+
+            // -- The `SuspendedTownParticle` ambient specks ----------------
+            "mycelium" => emit::mycelium(&mut self.engine, x, y, z, xa, ya, za),
+            "composter" => emit::composter(&mut self.engine, x, y, z, xa, ya, za),
+            "egg_crack" => emit::egg_crack(&mut self.engine, x, y, z, xa, ya, za),
+            "dolphin" => emit::dolphin(&mut self.engine, x, y, z, xa, ya, za),
+
+            // -- `BaseAshSmokeParticle`'s other three subclasses ----------------
+            //
+            // `ash` and `white_ash` take no velocity from the packet either;
+            // `white_ash` draws its own and `ash` has none.
+            "ash" => emit::ash(&mut self.engine, x, y, z),
+            "white_ash" => emit::white_ash(&mut self.engine, x, y, z),
+            "white_smoke" => emit::white_smoke(&mut self.engine, x, y, z, xa, ya, za),
+
+            // -- `ExplodeParticle` ----------------
+            //
+            // `poof` is the mob-death, breeding and spawner puff — among the
+            // most frequently spawned particles in the game, and until this arm
+            // existed every one of them hit the catch-all below.
+            "poof" => emit::poof(&mut self.engine, x, y, z, xa, ya, za),
+            "spit" => emit::spit(&mut self.engine, x, y, z, xa, ya, za),
             // The two `ParticleOptions`-carrying types this shell decodes a
             // payload for today (`decode_particle_options` in the v770
             // adapter). `kind` and `options` both come from the same
@@ -1525,6 +1563,22 @@ mod tests {
             ("trial_omen", [0.0, 0.0, 0.0]),
             ("enchant", [0.4, 0.7, -0.3]),
             ("nautilus", [0.4, 0.7, -0.3]),
+            // The ambient/biome family: `SuspendedParticle`,
+            // `SuspendedTownParticle`, the rest of `BaseAshSmokeParticle`, and
+            // `ExplodeParticle`.
+            ("spore_blossom_air", [0.0, 0.0, 0.0]),
+            ("underwater", [0.0, 0.0, 0.0]),
+            ("crimson_spore", [0.0, 0.0, 0.0]),
+            ("warped_spore", [0.0, 0.0, 0.0]),
+            ("mycelium", [0.0, 0.0, 0.0]),
+            ("composter", [0.0, 0.0, 0.0]),
+            ("egg_crack", [0.0, 0.0, 0.0]),
+            ("dolphin", [0.0, 0.0, 0.0]),
+            ("ash", [0.0, 0.0, 0.0]),
+            ("white_ash", [0.0, 0.0, 0.0]),
+            ("white_smoke", [0.0, 0.0, 0.0]),
+            ("poof", [0.0, 0.0, 0.0]),
+            ("spit", [0.0, 0.0, 0.0]),
         ];
         for &(kind, offset) in cases {
             let mut p = resolvable();

@@ -445,6 +445,74 @@ fn crit_particle(
     p
 }
 
+/// The parameters `BaseAshSmokeParticle`'s constructor takes, which is what
+/// separates its five subclasses from one another.
+///
+/// Vanilla's base takes eight of these positionally after the coordinates, so a
+/// caller reads as a wall of bare floats in which two adjacent same-typed
+/// arguments transpose without a trace. Naming them is not decoration: `smoke`
+/// and `ash` differ only in `dir.1`'s **sign**, `colour_random`, `max_lifetime`
+/// and `gravity`'s sign, and every one of those is a lone number.
+#[derive(Debug, Clone, Copy)]
+pub struct AshSmokeParams {
+    /// `dirX/dirY/dirZ` — per-axis damping applied to the *scattered* velocity
+    /// before the caller's own is added. Negative flips that axis.
+    pub dir: [f32; 3],
+    /// `colorRandom` — the greyscale tint is `nextFloat() * colorRandom`, so
+    /// `0.0` means black before any `setColor` the subclass applies.
+    pub colour_random: f32,
+    /// `maxLifetime` — the numerator of `(int)(maxLifetime / (nextFloat() * 0.8
+    /// + 0.2) * scale)`.
+    pub max_lifetime: i32,
+    /// `gravity`. Negative rises.
+    pub gravity: f32,
+    /// `hasPhysics` — smoke collides, ash does not.
+    pub has_physics: bool,
+}
+
+/// `BaseAshSmokeParticle`'s constructor, shared by `smoke`, `large_smoke`,
+/// `ash`, `white_ash` and `white_smoke`.
+///
+/// `setSpriteFromAge` runs at the end of the constructor, before the first
+/// tick, which is why the sprite is re-stamped here rather than left on frame
+/// zero.
+pub fn base_ash_smoke(
+    engine: &mut ParticleEngine,
+    (x, y, z): (f64, f64, f64),
+    (xa, ya, za): (f64, f64, f64),
+    sheet: Sheet,
+    scale: f32,
+    params: AshSmokeParams,
+) -> Particle {
+    let rng = engine.rng();
+    let mut p =
+        Particle::with_velocity(x, y, z, 0.0, 0.0, 0.0, SpriteSource::Sheet { sheet, frame: 0 }, rng);
+    p.friction = 0.96;
+    p.gravity = params.gravity;
+    // Smoke that hits a ceiling spreads sideways instead of piling up.
+    p.speed_up_when_y_blocked = true;
+    p.xd = p.xd.mul_add(f64::from(params.dir[0]), xa);
+    p.yd = p.yd.mul_add(f64::from(params.dir[1]), ya);
+    p.zd = p.zd.mul_add(f64::from(params.dir[2]), za);
+    let col = rng_next(engine) * params.colour_random;
+    p.colour = [col, col, col];
+    p.quad_size *= 0.75 * scale;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Java's `(int)` cast truncates; the value is small"
+    )]
+    let lifetime = (f64::from(params.max_lifetime) / f64::from(rng_next(engine)).mul_add(0.8, 0.2)
+        * f64::from(scale)) as i32;
+    p.lifetime = lifetime.max(1);
+    p.has_physics = params.has_physics;
+    p.behaviour = Behaviour::AshSmoke;
+    p.sprite = SpriteSource::Sheet {
+        sheet,
+        frame: sheet.frame_for_age(0, p.lifetime),
+    };
+    p
+}
+
 /// `SmokeParticle` — `BaseAshSmokeParticle` with smoke's parameters
 /// (`0.3` colour jitter, 8-tick base lifetime, `-0.1` gravity so it rises).
 #[expect(
@@ -461,47 +529,107 @@ pub fn smoke(
     za: f64,
     scale: f32,
 ) {
-    let rng = engine.rng();
-    let mut p = Particle::with_velocity(
-        x,
-        y,
-        z,
-        0.0,
-        0.0,
-        0.0,
-        SpriteSource::Sheet {
-            sheet: Sheet::Generic,
-            frame: 0,
+    let p = base_ash_smoke(
+        engine,
+        (x, y, z),
+        (xa, ya, za),
+        Sheet::Generic,
+        scale,
+        AshSmokeParams {
+            dir: [0.1, 0.1, 0.1],
+            colour_random: 0.3,
+            max_lifetime: 8,
+            gravity: -0.1,
+            has_physics: true,
         },
-        rng,
     );
-    p.friction = 0.96;
-    p.gravity = -0.1;
-    // Smoke that hits a ceiling spreads sideways instead of piling up.
-    p.speed_up_when_y_blocked = true;
-    // Smoke's direction scale is 0.1 on every axis.
-    let dir = f64::from(0.1_f32);
-    p.xd = p.xd.mul_add(dir, xa);
-    p.yd = p.yd.mul_add(dir, ya);
-    p.zd = p.zd.mul_add(dir, za);
-    let col = rng_next(engine) * 0.3;
-    p.colour = [col, col, col];
-    p.quad_size *= 0.75 * scale;
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "Java's `(int)` cast truncates; the value is small"
-    )]
-    let lifetime = (f64::from(8.0_f32) / f64::from(rng_next(engine)).mul_add(0.8, 0.2)
-        * f64::from(scale)) as i32;
-    p.lifetime = lifetime.max(1);
-    p.behaviour = Behaviour::AshSmoke;
-    // `setSpriteFromAge` runs in the constructor, before the first tick.
-    p.sprite = SpriteSource::Sheet {
-        sheet: Sheet::Generic,
-        frame: Sheet::Generic.frame_for_age(0, p.lifetime),
-    };
     engine.add(p);
 }
+
+/// `WhiteSmokeParticle` — smoke's parameters exactly, over a fixed lilac-grey
+/// tint (`0xBAB1C2`) rather than the greyscale draw.
+///
+/// The `colorRandom` draw still happens (it is inside the base constructor) and
+/// is then overwritten, so the RNG stream length matches vanilla's.
+pub fn white_smoke(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let mut p = base_ash_smoke(
+        engine,
+        (x, y, z),
+        (xa, ya, za),
+        Sheet::Generic,
+        1.0,
+        AshSmokeParams {
+            dir: [0.1, 0.1, 0.1],
+            colour_random: 0.3,
+            max_lifetime: 8,
+            gravity: -0.1,
+            has_physics: true,
+        },
+    );
+    p.colour = ASH_WHITE;
+    engine.add(p);
+}
+
+/// `AshParticle` — the black flakes drifting down through the soul sand valley.
+///
+/// Three sign-level differences from [`smoke`], each a lone number in vanilla's
+/// positional argument list: `dirY` is **negative** (the scattered vertical
+/// component is inverted), `gravity` is **positive** `0.1` so it falls rather
+/// than rises, and `hasPhysics` is **false** so it drifts through the terrain.
+/// Its sheet is [`Sheet::Generic0`], a single frame — `ash.json` names one
+/// texture, so ash does not animate at all.
+pub fn ash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
+    let p = base_ash_smoke(
+        engine,
+        (x, y, z),
+        (0.0, 0.0, 0.0),
+        Sheet::Generic0,
+        1.0,
+        AshSmokeParams {
+            dir: [0.1, -0.1, 0.1],
+            colour_random: 0.5,
+            max_lifetime: 20,
+            gravity: 0.1,
+            has_physics: false,
+        },
+    );
+    engine.add(p);
+}
+
+/// `WhiteAshParticle` — the basalt delta's pale drift.
+///
+/// `AshParticle`'s shape with a far gentler `0.0125` gravity, a `colorRandom`
+/// of **zero** (so the greyscale draw yields black and the fixed tint below is
+/// the whole colour), and a provider-supplied initial velocity: three products
+/// of two `nextFloat()`s each, all negative, so the flakes always drift down
+/// and toward `-x`/`-z`.
+pub fn white_ash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
+    let rng = engine.rng();
+    let xa = f64::from(rng.next_float()) * -1.9 * f64::from(rng.next_float()) * 0.1;
+    let ya = f64::from(rng.next_float()) * -0.5 * f64::from(rng.next_float()) * 0.1 * 5.0;
+    let za = f64::from(rng.next_float()) * -1.9 * f64::from(rng.next_float()) * 0.1;
+    let mut p = base_ash_smoke(
+        engine,
+        (x, y, z),
+        (xa, ya, za),
+        Sheet::Generic0,
+        1.0,
+        AshSmokeParams {
+            dir: [0.1, -0.1, 0.1],
+            colour_random: 0.0,
+            max_lifetime: 20,
+            gravity: 0.0125,
+            has_physics: false,
+        },
+    );
+    p.colour = ASH_WHITE;
+    engine.add(p);
+}
+
+/// `0xBAB1C2` as `[f32; 3]` — the tint `WhiteAshParticle` and
+/// `WhiteSmokeParticle` both declare as `COLOR_RGB24 = 12235202` and then
+/// unpack channel by channel (`186, 177, 194`).
+const ASH_WHITE: [f32; 3] = [186.0 / 255.0, 177.0 / 255.0, 194.0 / 255.0];
 
 /// `FlameParticle` — a `RisingParticle` that ignores collision.
 pub fn flame(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f64, zd: f64) {
@@ -757,6 +885,33 @@ pub fn angry_villager(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
 /// `HappyVillagerProvider` itself then calls `setColor(1, 1, 1)`, which is
 /// redundant here since white is this crate's own particle default.
 pub fn happy_villager(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let p = suspended_town(engine, x, y, z, xa, ya, za, Sheet::Glint);
+    engine.add(p);
+}
+
+/// `SuspendedTownParticle` — the ambient-speck family: the villager mood icons,
+/// `mycelium`'s brown motes, a composter's white puff, an `egg_crack`, and a
+/// dolphin's speed trail.
+///
+/// Returned rather than added so each provider can apply its own tint, alpha
+/// and lifetime override first. Five registry types reach this over **two**
+/// sheets — `glint` for the ones that read as a sparkle, `generic_0` for the
+/// ones that read as dust — so the sheet is a parameter, as always.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the `SuspendedTownParticle` constructor argument for argument, plus \
+              the sheet its provider supplies"
+)]
+pub fn suspended_town(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    sheet: Sheet,
+) -> Particle {
     let rng = engine.rng();
     let mut p = Particle::with_velocity(
         x,
@@ -765,10 +920,7 @@ pub fn happy_villager(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f
         xa,
         ya,
         za,
-        SpriteSource::Sheet {
-            sheet: Sheet::Glint,
-            frame: 0,
-        },
+        SpriteSource::Sheet { sheet, frame: 0 },
         rng,
     );
     let br = rng_next(engine).mul_add(0.1, 0.2);
@@ -786,7 +938,220 @@ pub fn happy_villager(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f
     let lifetime = (20.0 / f64::from(rng_next(engine).mul_add(0.8, 0.2))) as i32;
     p.lifetime = lifetime;
     p.behaviour = Behaviour::Suspended;
+    p
+}
+
+/// `SuspendedTownParticle.Provider` (`ParticleTypes.MYCELIUM`) — the brown
+/// motes drifting off a mycelium block. No tint override, so the constructor's
+/// own dim grey (`nextFloat() * 0.1 + 0.2`) stands.
+pub fn mycelium(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let p = suspended_town(engine, x, y, z, xa, ya, za, Sheet::Generic0);
     engine.add(p);
+}
+
+/// `SuspendedTownParticle.ComposterFillProvider` — the puff when a composter
+/// takes an item. White, and far shorter-lived than its siblings:
+/// `3 + nextInt(5)` ticks against the constructor's ~20–100.
+pub fn composter(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let mut p = suspended_town(engine, x, y, z, xa, ya, za, Sheet::Glint);
+    p.colour = [1.0, 1.0, 1.0];
+    p.lifetime = 3 + engine.rng().next_int_bound(5);
+    engine.add(p);
+}
+
+/// `SuspendedTownParticle.EggCrackProvider` — the flecks off a hatching turtle
+/// egg. The constructor's grey replaced by white, and nothing else.
+pub fn egg_crack(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let mut p = suspended_town(engine, x, y, z, xa, ya, za, Sheet::Glint);
+    p.colour = [1.0, 1.0, 1.0];
+    engine.add(p);
+}
+
+/// `SuspendedTownParticle.DolphinSpeedProvider` — the blue trail behind a
+/// player riding Dolphin's Grace.
+///
+/// A per-particle **alpha** draw (`1 - nextFloat() * 0.7`) as well as a tint, so
+/// the trail is a spread of translucencies rather than a uniform ribbon, and
+/// half the constructor's lifetime.
+pub fn dolphin(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let mut p = suspended_town(engine, x, y, z, xa, ya, za, Sheet::Generic0);
+    p.colour = [0.3, 0.5, 1.0];
+    p.alpha = rng_next(engine).mul_add(-0.7, 1.0);
+    p.lifetime /= 2;
+    engine.add(p);
+}
+
+/// `SuspendedParticle` — the *other* ambient-speck class, and not a variant of
+/// [`suspended_town`] despite the name.
+///
+/// Four differences that matter: it is spawned **`0.125` blocks below** the
+/// requested `y`, it has no tick override at all (ordinary physics, with
+/// `friction = 1.0` and `gravity = 0.0` so it neither slows nor falls), its
+/// lifetime numerator is `16` rather than `20`, and its quad-size jitter
+/// depends on **which constructor** ran: `nextFloat() * 0.6 + 0.2` for the
+/// zero-velocity one and `+ 0.6` for the one taking a velocity. `velocity` is
+/// `None` to select the former.
+pub fn suspended(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    velocity: Option<(f64, f64, f64)>,
+    sheet: Sheet,
+) -> Particle {
+    let y = y - 0.125;
+    let rng = engine.rng();
+    let sprite = SpriteSource::Sheet { sheet, frame: 0 };
+    let (mut p, quad_bias) = match velocity {
+        Some((xd, yd, zd)) => (
+            Particle::with_velocity(x, y, z, xd, yd, zd, sprite, rng),
+            0.6,
+        ),
+        None => (Particle::new(x, y, z, sprite, rng), 0.2),
+    };
+    p.set_size(0.01, 0.01);
+    p.quad_size *= rng_next(engine).mul_add(0.6, quad_bias);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Java's `(int)` cast truncates; the value is small"
+    )]
+    let lifetime = (16.0 / f64::from(rng_next(engine)).mul_add(0.8, 0.2)) as i32;
+    p.lifetime = lifetime.max(1);
+    p.has_physics = false;
+    p.friction = 1.0;
+    p.gravity = 0.0;
+    p.behaviour = Behaviour::Plain;
+    p
+}
+
+/// `SuspendedParticle.UnderwaterProvider` — the pale motes suspended in ocean
+/// water. The **zero-velocity** constructor, so it hangs exactly where it
+/// spawned.
+pub fn underwater(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
+    let mut p = suspended(engine, x, y, z, None, Sheet::Generic0);
+    p.colour = [0.4, 0.4, 0.7];
+    engine.add(p);
+}
+
+/// `SuspendedParticle.CrimsonSporeProvider` — the pink drift of a crimson
+/// forest. Its velocity is three gaussians at wildly different scales: `1e-6`
+/// horizontally against `1e-4` vertically, i.e. essentially a slow vertical
+/// wander with no lateral motion at all.
+pub fn crimson_spore(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
+    let (xa, za) = (gaussian(engine) * 1e-6, gaussian(engine) * 1e-6);
+    let ya = gaussian(engine) * 1e-4;
+    let mut p = suspended(engine, x, y, z, Some((xa, ya, za)), Sheet::Generic0);
+    p.colour = [0.9, 0.4, 0.5];
+    engine.add(p);
+}
+
+/// `SuspendedParticle.WarpedSporeProvider` — the blue drift of a warped forest.
+/// Purely vertical (`nextFloat() * -1.9 * nextFloat() * 0.1`, always downward)
+/// and a tenth of a crimson spore's collision box.
+pub fn warped_spore(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
+    let rng = engine.rng();
+    let ya = f64::from(rng.next_float()) * -1.9 * f64::from(rng.next_float()) * 0.1;
+    let mut p = suspended(engine, x, y, z, Some((0.0, ya, 0.0)), Sheet::Generic0);
+    p.colour = [0.1, 0.1, 0.3];
+    p.set_size(0.001, 0.001);
+    engine.add(p);
+}
+
+/// `SuspendedParticle.SporeBlossomAirProvider` — the green motes hanging under
+/// a spore blossom.
+///
+/// **This is a `SuspendedParticle`, not a `DripParticle`.** It shares
+/// `drip_fall`'s *texture* with `falling_spore_blossom` and nothing else: it
+/// hangs in the air rather than falling to a splash, its lifetime is a flat
+/// `500..=1000` ticks rather than a `64 / nextFloat` draw, and it carries a
+/// `0.01` gravity of its own. The sheet stem is what makes the two look
+/// interchangeable, which is the same trap `Sheet::Spell` documents one level
+/// up.
+pub fn spore_blossom_air(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
+    let mut p = suspended(engine, x, y, z, Some((0.0, -0.8, 0.0)), Sheet::DripFall);
+    p.lifetime = 500 + engine.rng().next_int_bound(501);
+    p.gravity = 0.01;
+    p.colour = [0.32, 0.5, 0.22];
+    engine.add(p);
+}
+
+/// `ExplodeParticle` — the puff a mob leaves when it dies, a spawner throws
+/// when it spawns, and an animal throws when it breeds (`poof`); and a llama's
+/// `spit`.
+///
+/// [`Behaviour::Animated`] rather than [`Behaviour::AshSmoke`]: this class
+/// advances its sheet by age like the ash-smoke family but does **not**
+/// override `getQuadSize`, so a puff is full size from its first frame.
+///
+/// Its quad size is `0.1 * (nextFloat() * nextFloat() * 6 + 1)` — a *product*
+/// of two draws, which biases the distribution hard towards small puffs with an
+/// occasional large one, unlike the uniform jitters elsewhere in this file.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the `ExplodeParticle` constructor argument for argument, plus its sheet"
+)]
+pub fn explode(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    sheet: Sheet,
+) -> Particle {
+    let rng = engine.rng();
+    let mut p = Particle::new(x, y, z, SpriteSource::Sheet { sheet, frame: 0 }, rng);
+    p.gravity = -0.1;
+    p.friction = 0.9;
+    let scatter = |e: &mut ParticleEngine| f64::from(rng_next(e).mul_add(2.0, -1.0) * 0.05);
+    p.xd = xa + scatter(engine);
+    p.yd = ya + scatter(engine);
+    p.zd = za + scatter(engine);
+    let col = rng_next(engine).mul_add(0.3, 0.7);
+    p.colour = [col, col, col];
+    p.quad_size = 0.1 * (rng_next(engine) * rng_next(engine)).mul_add(6.0, 1.0);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Java's `(int)` cast truncates; the value is small"
+    )]
+    let lifetime = (16.0 / f64::from(rng_next(engine)).mul_add(0.8, 0.2)) as i32 + 2;
+    p.lifetime = lifetime;
+    p.behaviour = Behaviour::Animated;
+    p.sprite = SpriteSource::Sheet {
+        sheet,
+        frame: sheet.frame_for_age(0, p.lifetime),
+    };
+    p
+}
+
+/// `ExplodeParticle.Provider` (`ParticleTypes.POOF`) — the death, breeding and
+/// spawn puff, and one of the most frequently spawned particles in the game.
+pub fn poof(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let p = explode(engine, x, y, z, xa, ya, za, Sheet::Generic);
+    engine.add(p);
+}
+
+/// `SpitParticle` — `ExplodeParticle` with `gravity = 0.5F` instead of `-0.1F`,
+/// so a llama's spit arcs down rather than drifting up. One number, opposite
+/// sign, six times the magnitude.
+pub fn spit(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let mut p = explode(engine, x, y, z, xa, ya, za, Sheet::Generic);
+    p.gravity = 0.5;
+    engine.add(p);
+}
+
+/// One standard-normal draw, for the providers whose velocity vanilla takes
+/// from `RandomSource.nextGaussian()`.
+///
+/// A Box–Muller transform over the engine's own stream rather than a second
+/// `java.util.Random` reimplementation, for the reason this crate's `JavaRandom`
+/// docs already give: nothing observes particle randomness across the wire.
+fn gaussian(engine: &mut ParticleEngine) -> f64 {
+    let rng = engine.rng();
+    let u1 = rng.next_double().max(1e-12);
+    let u2 = rng.next_double();
+    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }
 
 /// `SpellParticle.WitchProvider` — the purple motes above a drinking witch
@@ -1062,8 +1427,9 @@ pub fn huge_explosion(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, size:
 mod tests {
     use super::{
         FULL_CUBE, Face, angry_villager, breaking_block_effect, bubble, crit, destroy_block_effect,
-        explosion_emitter, firework, flame, fly_towards_position, happy_villager, heart,
-        huge_explosion, note, smoke, splash, sweep_attack, totem_of_undying, witch,
+        ash, explosion_emitter, firework, flame, fly_towards_position, happy_villager, heart,
+        huge_explosion, note, poof, smoke, splash, spore_blossom_air, sweep_attack,
+        totem_of_undying, white_smoke, witch,
     };
     use crate::{Behaviour, ParticleEngine, Sheet, SpriteSource};
     use lodestone_physics::{Aabb, CollisionView};
@@ -1786,6 +2152,107 @@ mod tests {
         };
         assert_eq!(run(500), run(500));
         assert_ne!(run(500), run(501));
+    }
+
+    /// A mob-death puff must be full size on its very first frame.
+    ///
+    /// This is the whole of the `Animated` vs `AshSmoke` distinction, and the
+    /// two hypotheses are computed here rather than asserted as a direction:
+    /// `ExplodeParticle` has no `getQuadSize` override, so its size at age 0 is
+    /// the constructor's own draw, while `BaseAshSmokeParticle`'s override
+    /// multiplies by `clamp(age / lifetime * 32, 0, 1)` — which at age 0 is
+    /// exactly **zero**. Borrowing the wrong behaviour therefore makes every
+    /// poof invisible on spawn and swell in over its first thirty-second, and
+    /// nothing about the particle count or its sprite would show it.
+    #[test]
+    fn a_poof_is_full_size_on_its_first_frame_and_a_smoke_puff_is_not() {
+        let mut e = ParticleEngine::seeded(3);
+        poof(&mut e, 0.0, 64.0, 0.0, 0.0, 0.0, 0.0);
+        let p = &e.particles()[0];
+        // The measurement comes before any assertion about *which* behaviour is
+        // set: reading the behaviour first aborts on a restatement of the
+        // implementation and never prints the number the test exists for.
+        let constructed = p.quad_size;
+        let drawn = p.quad_size(0.0);
+        assert!(constructed > 0.0, "the constructor must draw a real size");
+        assert!(
+            (drawn - constructed).abs() < 1e-9,
+            "a poof must draw at its constructed size ({constructed}); got {drawn}, and the \
+             ash-smoke fade-in hypothesis predicts exactly 0.0 (behaviour: {:?})",
+            p.behaviour
+        );
+
+        // The positive control: the class that *does* have the override still
+        // gets it, so this test is measuring the split and not the absence of
+        // any override at all.
+        let mut e = ParticleEngine::seeded(3);
+        smoke(&mut e, 0.0, 64.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+        let s = &e.particles()[0];
+        assert!(
+            s.quad_size(0.0).abs() < 1e-9,
+            "smoke must fade in from zero, got {} (behaviour: {:?})",
+            s.quad_size(0.0),
+            s.behaviour
+        );
+    }
+
+    /// `ash` falls and `white_smoke` rises, and both come out of the same
+    /// parameterised base constructor.
+    ///
+    /// The two differ by the sign of one number in vanilla's positional
+    /// argument list (`gravity` `0.1F` against `-0.1F`) plus the sign of a
+    /// second (`dirY`), which is exactly the transposition-shaped mistake
+    /// `AshSmokeParams` exists to make unspellable. Asserting the sign of
+    /// `gravity` rather than an observed drift keeps this independent of how
+    /// many ticks a fixture happens to run.
+    #[test]
+    fn ash_falls_through_terrain_and_white_smoke_rises_and_collides() {
+        let mut e = ParticleEngine::seeded(11);
+        ash(&mut e, 0.0, 64.0, 0.0);
+        white_smoke(&mut e, 0.0, 64.0, 0.0, 0.0, 0.0, 0.0);
+        let (a, w) = (&e.particles()[0], &e.particles()[1]);
+        assert!(a.gravity > 0.0 && !a.has_physics, "ash: {} {}", a.gravity, a.has_physics);
+        assert!(w.gravity < 0.0 && w.has_physics, "white smoke: {} {}", w.gravity, w.has_physics);
+        // `colorRandom` is 0.5 for ash and the fixed `0xBAB1C2` for white
+        // smoke, so the two are never the same grey by accident.
+        assert_eq!(w.colour, [186.0 / 255.0, 177.0 / 255.0, 194.0 / 255.0]);
+        assert!(a.colour[0] < 0.5, "ash tint is `nextFloat() * 0.5`: {:?}", a.colour);
+        assert_eq!(
+            a.sprite,
+            SpriteSource::Sheet { sheet: Sheet::Generic0, frame: 0 },
+            "`ash.json` names one texture, so ash must not animate"
+        );
+    }
+
+    /// `spore_blossom_air` hangs for hundreds of ticks; it is not a drip.
+    ///
+    /// It shares `drip_fall`'s texture with `falling_spore_blossom` and was
+    /// wired as a `DripParticle` on the strength of that. The discriminating
+    /// measurement is the lifetime: `SuspendedParticle.SporeBlossomAirProvider`
+    /// draws a flat `500..=1000`, while `DripParticle`'s is
+    /// `(int)(64 / (nextFloat() * 0.8 + 0.2))`, whose **maximum** is 320 — so
+    /// the two ranges do not overlap at all and a single sample separates them.
+    #[test]
+    fn spore_blossom_air_outlives_every_possible_drip() {
+        const DRIP_LIFETIME_CEILING: i32 = 320; // 64 / 0.2
+        let mut e = ParticleEngine::seeded(7);
+        for _ in 0..16 {
+            spore_blossom_air(&mut e, 0.0, 64.0, 0.0);
+        }
+        let mut out_of_range: Vec<i32> = Vec::new();
+        for p in e.particles() {
+            if !(500..=1000).contains(&p.lifetime) {
+                out_of_range.push(p.lifetime);
+            }
+        }
+        assert!(
+            out_of_range.is_empty(),
+            "lifetimes outside 500..=1000 (a drip tops out at {DRIP_LIFETIME_CEILING}): \
+             {out_of_range:?}"
+        );
+        let p = &e.particles()[0];
+        assert!(p.gravity > 0.0 && !p.has_physics, "it drifts down without colliding");
+        assert_eq!(p.colour, [0.32, 0.5, 0.22]);
     }
 
     /// `fly_towards_position`'s three velocity words are an **offset**, and the
