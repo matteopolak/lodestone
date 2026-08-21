@@ -501,6 +501,27 @@ pub enum LiveOption {
     /// so wiring only the extraction would draw a smaller square of rain still
     /// faded for a 10-block one — visible as an abrupt edge instead of a falloff.
     WeatherRadius,
+    /// `options.menuBackgroundBlurriness` →
+    /// [`crate::config::Options::menu_background_blurriness`].
+    ///
+    /// An **`IntRange(0, 10)`** (`Options.java`) like [`Self::RenderDistance`],
+    /// so its handle comes from [`SliderRange`] and [`Self::unit_double`]
+    /// answers `None` for it.
+    ///
+    /// Appears on **two** pages — Video and Accessibility — as it does in
+    /// vanilla, like [`Self::TextBackgroundOpacity`]; both rows drive this one
+    /// field, which is why liveness is a property of the accessor rather than of
+    /// the page.
+    ///
+    /// Its consumer was the frozen `menu::render::blur::BLUR_RADIUS`, whose own
+    /// module doc named this row as the wiring it was waiting for and gave the
+    /// reason it had not happened — that `config::Options` was outside its
+    /// ownership boundary. Both are in `lodestone-shell`.
+    ///
+    /// **`0` is a real value, not an unset one**: vanilla's stringifier here is
+    /// `genericValueOrOffLabel`, so zero reads OFF, and
+    /// `Screen.extractBlurredBackground` runs the pass only at `>= 1.0`.
+    MenuBackgroundBlurriness,
 }
 
 impl LiveOption {
@@ -578,7 +599,9 @@ impl LiveOption {
             // `WeatherRadius` is the fifth `IntRange`, `RenderDistance`'s
             // reason again: its stored value is 3..=10 blocks, so returning it
             // here would pin every handle to the far right.
-            | LiveOption::WeatherRadius => None,
+            | LiveOption::WeatherRadius
+            // The sixth `IntRange`, `RenderDistance`'s reason again.
+            | LiveOption::MenuBackgroundBlurriness => None,
         }
     }
 
@@ -640,7 +663,9 @@ impl LiveOption {
             // `WeatherRadius` is the fifth `IntRange`, `RenderDistance`'s
             // reason again: its stored value is 3..=10 blocks, so returning it
             // here would pin every handle to the far right.
-            | LiveOption::WeatherRadius => None,
+            | LiveOption::WeatherRadius
+            // The sixth `IntRange`, `RenderDistance`'s reason again.
+            | LiveOption::MenuBackgroundBlurriness => None,
         }
     }
 
@@ -682,6 +707,7 @@ impl LiveOption {
             LiveOption::FramerateLimit => "framerateLimit",
             LiveOption::MipmapLevels => "mipmapLevels",
             LiveOption::WeatherRadius => "weatherRadius",
+            LiveOption::MenuBackgroundBlurriness => "menuBackgroundBlurriness",
             _ => return None,
         };
         INT_RANGE_SLIDERS
@@ -931,6 +957,13 @@ impl Cell {
         // family, same reason as the four above.
         if spec.live == Some(LiveOption::WeatherRadius) {
             return Some(weather_radius_slider_fraction(options.weather_radius));
+        }
+        // `menuBackgroundBlurriness`' `IntRange(0, 10)` — the sixth of the
+        // family, same reason again.
+        if spec.live == Some(LiveOption::MenuBackgroundBlurriness) {
+            return Some(menu_background_blurriness_slider_fraction(
+                options.menu_background_blurriness,
+            ));
         }
         // A **live** `UnitDouble` option reads its handle position from the
         // real, persisted value; only an inactive one falls through to the
@@ -1431,6 +1464,17 @@ pub fn mipmap_levels_slider_fraction(levels: u32) -> f32 {
     range.to_slider_value(i32::try_from(levels).unwrap_or(range.min))
 }
 
+/// `menuBackgroundBlurriness`' slider fraction from the real, persisted
+/// blurriness. The sixth of the family — see [`mipmap_levels_slider_fraction`].
+#[must_use]
+pub fn menu_background_blurriness_slider_fraction(blurriness: u32) -> f32 {
+    let range = INT_RANGE_SLIDERS
+        .iter()
+        .find(|(a, _, _)| *a == "menuBackgroundBlurriness")
+        .map_or(SliderRange { min: 0, max: 10 }, |(_, r, _)| *r);
+    range.to_slider_value(i32::try_from(blurriness).unwrap_or(range.max))
+}
+
 /// `weatherRadius`' slider fraction from the real, persisted block radius.
 ///
 /// The fifth of the identical family (see [`mipmap_levels_slider_fraction`]),
@@ -1823,6 +1867,18 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         // this slider is denominated in blocks and its Video-page neighbour
         // `cloudRange` is the chunk-denominated one.
         LiveOption::WeatherRadius => format!("{} Blocks", options.weather_radius),
+        // `Options::genericValueOrOffLabel`: `value == 0 ?
+        // genericValueLabel(caption, OPTION_OFF) : genericValueLabel(caption,
+        // value)` (`Options.java`) — the **integer** sibling of the
+        // `percentValueOrOffLabel` the glint and volume sliders use, so a zero
+        // reads OFF and every other value is the bare number with no unit.
+        LiveOption::MenuBackgroundBlurriness => {
+            if options.menu_background_blurriness == 0 {
+                "OFF".to_string()
+            } else {
+                options.menu_background_blurriness.to_string()
+            }
+        }
     }
 }
 
@@ -2014,7 +2070,15 @@ static VIDEO: &[Entry] = &[
         slider("entityDistanceScaling", "Entity Distance"),
     ),
     pair(
-        slider("menuBackgroundBlurriness", "Menu Background Blur"),
+        // Live: the menu background-blur pass existed and ran at the frozen
+        // `menu::render::blur::BLUR_RADIUS`. See
+        // `LiveOption::MenuBackgroundBlurriness`. The Accessibility page carries
+        // the same option, as vanilla does — both rows drive one field.
+        live_slider(
+            "menuBackgroundBlurriness",
+            "Menu Background Blur",
+            LiveOption::MenuBackgroundBlurriness,
+        ),
         slider("cloudRange", "Cloud Distance"),
     ),
     pair(
@@ -2268,7 +2332,14 @@ static ACCESSIBILITY: &[Entry] = &[
         cycle("highContrast", "High Contrast"),
     ),
     pair(
-        slider("menuBackgroundBlurriness", "Menu Background Blur"),
+        // The Video page's own row for the same `OptionInstance` — vanilla
+        // places this option on both screens, like the three chat sliders
+        // below. Editing either moves the other's label.
+        live_slider(
+            "menuBackgroundBlurriness",
+            "Menu Background Blur",
+            LiveOption::MenuBackgroundBlurriness,
+        ),
         live_slider(
             "textBackgroundOpacity",
             "Text Background Opacity",
@@ -4025,9 +4096,14 @@ mod tests {
                 // `BLOCK_ATLAS_MIP_LEVELS` constant.
                 LiveOption::MipmapLevels,
                 // Also Video, the `(entityShadows, entityDistanceScaling)` pair's
-                // first half, sorting between Mipmap Levels and Menu Background
-                // Blur — owner report: "entity shadows are missing".
+                // first half — owner report: "entity shadows are missing".
                 LiveOption::EntityShadows,
+                // The `(menuBackgroundBlurriness, cloudRange)` pair's first
+                // half, which is the row **after** Entity Shadows: the blur
+                // radius, whose pass ran at a frozen `BLUR_RADIUS`. It appears a
+                // second time further down, on Accessibility, exactly as vanilla
+                // places it.
+                LiveOption::MenuBackgroundBlurriness,
                 // The `(cutoutLeaves, improvedTransparency)` pair's first half —
                 // the leaves-render-pass fix's own row.
                 LiveOption::CutoutLeaves,
@@ -4087,6 +4163,10 @@ mod tests {
                 // Accessibility page: Closed Captions (again), the three shared
                 // with Chat, then View Bobbing.
                 LiveOption::ShowSubtitles,
+                // The Accessibility page's own copy of the Video row above —
+                // one `OptionInstance`, two placements, like the three chat
+                // sliders that follow it here.
+                LiveOption::MenuBackgroundBlurriness,
                 LiveOption::TextBackgroundOpacity,
                 LiveOption::ChatOpacity,
                 LiveOption::ChatLineSpacing,
@@ -4104,7 +4184,8 @@ mod tests {
                 LiveOption::PanoramaSpeed,
             ],
             "FOV on the root; GUI Scale, Render Distance, Clouds, Mipmap Levels, \
-             Entity Shadows and Weather Effect Radius on Video; the four toggle \
+             Entity Shadows, Menu Background Blur and Weather Effect Radius on Video; \
+             the four toggle \
              rows and Auto-Jump/Sprint \
              Window on Controls; look sensitivity, scroll sensitivity and both \
              inverts on Mouse; the eleven volume buses and Closed Captions on \
@@ -4145,10 +4226,11 @@ mod tests {
             render_distance.is_live(),
             "renderDistance is a persisted `Options` field since #443"
         );
-        // The count itself, not just the ratio's ingredients: 52 live option
-        // *rows* (48 distinct options, four of them placed twice — the three
-        // Chat/Accessibility ones plus `showSubtitles` on Sound and
-        // Accessibility, so 52 - 4 == 48 — the video-settings/leaves session's
+        // The count itself, not just the ratio's ingredients: 54 live option
+        // *rows* (49 distinct options, **five** of them placed twice — the three
+        // Chat/Accessibility sliders, `showSubtitles` on Sound and
+        // Accessibility, and now `menuBackgroundBlurriness` on Video and
+        // Accessibility, so 54 - 5 == 49 — the video-settings/leaves session's
         // five, framerateLimit/enableVsync/inactivityFpsLimit/graphicsPreset/
         // cutoutLeaves, plus mipmapLevels, entityShadows and weatherRadius, are
         // each placed once)
@@ -4158,7 +4240,7 @@ mod tests {
         // Accessibility -> Controls, Controls -> Mouse, Controls -> Key Binds,
         // and the root's own Online button, live outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 74, "outside a world: {live:?}");
+        assert_eq!(live.len(), 76, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -4187,9 +4269,11 @@ mod tests {
         // leaves session added five more: framerateLimit, enableVsync,
         // inactivityFpsLimit, graphicsPreset, cutoutLeaves — the block-atlas
         // mip-depth session added a sixth: mipmapLevels — and this session added
-        // a seventh: entityShadows, and an eighth: weatherRadius.
-        assert_eq!(outside.len(), 74);
-        assert_eq!(inside.len(), 73, "one fewer: the root's Online button");
+        // a seventh: entityShadows, an eighth: weatherRadius, and
+        // `menuBackgroundBlurriness`, which is **two** rows (Video and
+        // Accessibility) for one option.
+        assert_eq!(outside.len(), 76);
+        assert_eq!(inside.len(), 75, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -5185,6 +5269,9 @@ mod tests {
         // already took one and `weather_columns_for_frame` handed both the
         // frozen `DEFAULT_WEATHER_RADIUS`.
         LiveOption::WeatherRadius,
+        // The menu background-blur radius: the pass existed and ran at the
+        // frozen `menu::render::blur::BLUR_RADIUS`. Placed on two pages.
+        LiveOption::MenuBackgroundBlurriness,
     ];
 
     /// Every [`LiveOption`] must be placed on some page — the island check in
@@ -5256,14 +5343,16 @@ mod tests {
                 | LiveOption::CutoutLeaves
                 | LiveOption::MipmapLevels
                 | LiveOption::EntityShadows
-                | LiveOption::WeatherRadius => {}
+                | LiveOption::WeatherRadius
+                | LiveOption::MenuBackgroundBlurriness => {}
             }
         }
         // 25 before the kind A batch, plus eleven sound buses, FOV, both glint
         // parameters and Clouds, plus the five video-settings/leaves rows that
         // session wired, plus the block-atlas mip-depth row, plus this
-        // session's entity-shadows row, plus the weather-radius row.
-        assert_eq!(ALL.len(), 48, "forty-eight distinct live options");
+        // session's entity-shadows row, plus the weather-radius and
+        // menu-background-blur rows.
+        assert_eq!(ALL.len(), 49, "forty-nine distinct live options");
         // And the eleven indices are all of them, none repeated: `SoundVolume` is
         // a *payload* variant, so neither the compiler nor the match above can see
         // a missing or duplicated index, and a duplicate would silently leave one

@@ -4621,6 +4621,10 @@ impl MenuNav {
                 self.step_weather_radius(1);
                 MenuAction::None
             }
+            SettingsOutcome::Cycle(LiveOption::MenuBackgroundBlurriness) => {
+                self.step_menu_background_blurriness(1);
+                MenuAction::None
+            }
         }
     }
 
@@ -4859,6 +4863,21 @@ impl MenuNav {
         self.persist_options();
     }
 
+    /// Steps `menuBackgroundBlurriness` by one and wraps, then persists —
+    /// [`Self::step_weather_radius`]'s shape, over vanilla's `IntRange(0, 10)`.
+    ///
+    /// The wrap is what makes `0` (OFF) reachable again after a click walks the
+    /// value up to 10, which matters more here than on most rows: the two ends
+    /// of this slider are the only two states most players will want.
+    fn step_menu_background_blurriness(&mut self, delta: i32) {
+        use crate::config::{MAX_MENU_BACKGROUND_BLURRINESS, MIN_MENU_BACKGROUND_BLURRINESS};
+        let min = MIN_MENU_BACKGROUND_BLURRINESS as i32;
+        let span = MAX_MENU_BACKGROUND_BLURRINESS as i32 - min + 1;
+        let offset = self.options.menu_background_blurriness as i32 - min;
+        self.options.menu_background_blurriness = (min + (offset + delta).rem_euclid(span)) as u32;
+        self.persist_options();
+    }
+
     /// Steps `renderDistance` by one chunk and wraps, then persists.
     ///
     /// **Wraps rather than saturating**, matching every other live control on
@@ -4962,7 +4981,17 @@ impl MenuNav {
                         crate::config::MAX_WEATHER_RADIUS,
                     );
                 }
-                // `int_range` only answers for the six above; a seventh would
+                // `menuBackgroundBlurriness`' bucket is the blurriness itself
+                // (`IntRange(0, 10)`, no xmap). Clamped to `config`'s own
+                // bounds; `0` is a legitimate value here (vanilla's OFF), so
+                // unlike `weatherRadius` the low end is not a degenerate state.
+                LiveOption::MenuBackgroundBlurriness => {
+                    self.options.menu_background_blurriness = value.clamp(
+                        crate::config::MIN_MENU_BACKGROUND_BLURRINESS as i32,
+                        crate::config::MAX_MENU_BACKGROUND_BLURRINESS as i32,
+                    ) as u32;
+                }
+                // `int_range` only answers for the seven above; an eighth would
                 // have to add its own write here, and falling through to
                 // `false` is the honest result until it does.
                 _ => return false,

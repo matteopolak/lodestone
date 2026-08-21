@@ -38,10 +38,18 @@ The box filter itself (`menu_blur.wgsl`) is hand-expanded from
 `assets/minecraft/shaders/post/box_blur.fsh`, not transliterated: bilinear
 sampling lets one tap cover two texels, so the loop advances in steps of two
 starting half a texel off-centre, with the leftover odd tap folded back in at
-half weight. The radius (`BLUR_RADIUS = 5.0`) is vanilla's own
-`Options.BLURRINESS_DEFAULT_VALUE`, `0..=10`, default `5`. Vanilla animates
+half weight. The radius is the **live** `options.menuBackgroundBlurriness`
+(`IntRange(0, 10)`, default `5` — vanilla's `Options.BLURRINESS_DEFAULT_VALUE`,
+which `BLUR_RADIUS = 5.0` still supplies as the boot value). Vanilla animates
 nothing here — `extractBlurredBackground` applies the option's raw value
 every frame with no fade-in — so neither does this port.
+
+**Radius `0` skips the pass entirely**, which is vanilla's own gate rather than
+an optimisation bolted on top: `Screen.extractBlurredBackground` calls
+`blurBeforeThisStratum()` only at `blurRadius >= 1.0F`, and a zero-radius box
+filter is an identity convolution — running it would be six full-screen passes
+that reproduce the source. The option's stringifier agrees: it is
+`genericValueOrOffLabel`, so `0` reads **OFF**, not `0`.
 
 **`MenuFrame::blur` is a separate axis from `MenuBackdrop`, not implied by
 `Dim`.** Vanilla's real fork is `Screen::isInGameUi()`: `false` for
@@ -54,11 +62,18 @@ sets `backdrop` by hand.
 
 ## How to change it
 
-- The radius is a constant (`menu/render/blur.rs::BLUR_RADIUS`), not a live
-  setting — `crate::config::Options` is outside this feature's file ownership
-  boundary for the session that built it. Wiring a real
-  `menuBackgroundBlurriness`-equivalent option is a matter of threading a
-  radius into `MenuBlur::config_h`/`config_v` instead of the constant.
+- The radius is live. `app/redraw.rs` polls
+  `MenuNav::options().menu_background_blurriness` once per presented frame,
+  beside `MenuRenderer::begin_frame`, and forwards it through
+  `MenuRenderer::set_blur_radius` → `MenuBlur::set_radius`. The two config bind
+  groups (`MenuBlur::config_h`/`config_v`) are rebuilt lazily inside
+  `MenuBlur::run` when the value has actually moved, so the per-frame poll costs
+  one float comparison rather than two buffer allocations. `BLUR_RADIUS` is now
+  only the boot value.
+
+  A poll, not a push, for the reason `Sim::set_cutout_leaves` is: the setting is
+  written from two different settings pages (Video and Accessibility, both of
+  which vanilla also carries), and a poll cannot forget one of them.
 - To add blur to a new overlay screen, set `frame.blur = true` in that
   screen's `*_overlay_frame` builder (`menu/nav.rs`), the same place its
   `backdrop` is already set to `Dim`. To keep a new overlay screen *without*
@@ -73,7 +88,10 @@ sets `backdrop` by hand.
 
 ## Configuration
 
-None exposed to players yet — see "How to change it" above.
+`options.menuBackgroundBlurriness`, persisted as
+`crate::config::Options::menu_background_blurriness` (`IntRange(0, 10)`,
+default `5`, `0` = OFF). Two rows drive it — Video and Accessibility — as in
+vanilla.
 
 ## Dependencies
 

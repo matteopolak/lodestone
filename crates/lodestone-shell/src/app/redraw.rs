@@ -327,8 +327,14 @@ impl WindowApp {
         // `render_overlay` sites below. Without this call `MenuRenderer`'s own
         // frame texture stays `None` forever and the whole blur pass is a silent
         // no-op: built, tested, reaching no pixels.
+        // The live `options.menuBackgroundBlurriness`, read before the borrow
+        // below rather than inside it. Polled per presented frame beside
+        // `begin_frame` — one site covers every `render_overlay` call in this
+        // function, the same reason `begin_frame` itself is one call.
+        let blur_radius = self.nav.options().menu_background_blurriness as f32;
         if let Some(menu) = self.menu.as_mut() {
             menu.begin_frame(frame.colour_texture().clone());
+            menu.set_blur_radius(blur_radius);
         }
 
         // A second, non-colour-managed view of the same swapchain texture —

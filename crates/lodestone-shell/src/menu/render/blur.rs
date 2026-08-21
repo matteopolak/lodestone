@@ -25,12 +25,19 @@
 //! ## How to change it
 //!
 //! [`BLUR_RADIUS`] is vanilla's own default (`Options.BLURRINESS_DEFAULT_VALUE
-//! = 5`, range `0..=10`); this port hardcodes it rather than wiring a
-//! `menuBackgroundBlurriness`-equivalent settings row (`crate::config::Options`
-//! is outside this crate's file ownership boundary — see the citation in
-//! `menu_blur.wgsl`). Wiring a real option later is a matter of threading a
-//! radius into [`MenuBlur::config_h`]/[`MenuBlur::config_v`] instead of the
-//! constant.
+//! = 5`, range `0..=10`) and is now only the **boot** value:
+//! [`MenuBlur::set_radius`] takes the live `options.menuBackgroundBlurriness`,
+//! polled once per presented frame in `app/redraw.rs` beside
+//! [`super::MenuRenderer::begin_frame`]. The two config bind groups are rebuilt
+//! lazily inside [`MenuBlur::run`] when the radius has actually moved, so an
+//! unchanged setting costs one float comparison a frame rather than two buffer
+//! allocations.
+//!
+//! **Radius `0` skips the pass entirely**, which is vanilla's own gate:
+//! `Screen.extractBlurredBackground` calls `blurBeforeThisStratum()` only when
+//! `blurRadius >= 1.0F`. A zero-radius box filter is an identity convolution, so
+//! running it would be six full-screen passes to reproduce the source — the skip
+//! is the behaviour, not an optimisation on top of it.
 //!
 //! Only [`super::MenuRenderer::render_overlay`] callers that set
 //! [`super::MenuFrame::blur`] pay for this pass — `draw` below skips it
@@ -42,7 +49,9 @@
 //!
 //! ## Configuration
 //!
-//! None yet — see "How to change it" above.
+//! `options.menuBackgroundBlurriness` (`crate::config::Options::
+//! menu_background_blurriness`), an `IntRange(0, 10)` defaulting to 5, reaching
+//! [`MenuBlur::set_radius`]. [`BLUR_RADIUS`] is the boot value only.
 //!
 //! ## Dependencies
 //!
@@ -53,9 +62,13 @@
 use bytemuck::{Pod, Zeroable};
 
 /// Vanilla's `Options.BLURRINESS_DEFAULT_VALUE` — the accessibility option's
-/// default, `0..=10`. See this module's own doc for why it is a constant
-/// here rather than a live setting.
+/// default, `0..=10`. The **boot** radius; [`MenuBlur::set_radius`] carries the
+/// live value from there on.
 const BLUR_RADIUS: f32 = 5.0;
+
+/// Vanilla's own "is there a blur at all" threshold — `Screen`'s
+/// `extractBlurredBackground` runs the pass only when `blurRadius >= 1.0F`.
+const MIN_EFFECTIVE_BLUR_RADIUS: f32 = 1.0;
 
 /// Mirrors `box_blur.fsh`'s `BlurConfig` uniform block: a sample-step
 /// direction plus the box half-width. `_pad` keeps the struct's WGSL layout
@@ -112,8 +125,17 @@ pub struct MenuBlur {
     /// reinterpreted read view in this pass uses this one value, never a
     /// second derivation. See [`Scratch`]'s own doc.
     color_format: wgpu::TextureFormat,
+    /// Kept so [`Self::run`] can rebuild the two config bind groups when the
+    /// live radius moves — they are the only per-setting GPU state in the pass.
+    config_bgl: wgpu::BindGroupLayout,
     config_h: wgpu::BindGroup,
     config_v: wgpu::BindGroup,
+    /// The radius the caller last asked for ([`Self::set_radius`]).
+    radius: f32,
+    /// The radius [`Self::config_h`]/[`Self::config_v`] were actually built at.
+    /// Kept separately so the rebuild is driven by a real difference rather than
+    /// by every `set_radius` call — the setter is polled per frame.
+    built_radius: f32,
     scratch: Option<Scratch>,
 }
 
@@ -219,31 +241,48 @@ impl MenuBlur {
             ..Default::default()
         });
 
-        let config_h = Self::make_config(device, &config_bgl, [1.0, 0.0]);
-        let config_v = Self::make_config(device, &config_bgl, [0.0, 1.0]);
+        let config_h = Self::make_config(device, &config_bgl, [1.0, 0.0], BLUR_RADIUS);
+        let config_v = Self::make_config(device, &config_bgl, [0.0, 1.0], BLUR_RADIUS);
 
         Self {
             pipeline,
             texture_bgl,
             sampler,
             color_format,
+            config_bgl,
             config_h,
             config_v,
+            radius: BLUR_RADIUS,
+            built_radius: BLUR_RADIUS,
             scratch: None,
         }
+    }
+
+    /// The live `options.menuBackgroundBlurriness`, in vanilla's own units
+    /// (`IntRange(0, 10)`).
+    ///
+    /// Cheap and idempotent by design — `app/redraw.rs` calls it once per
+    /// presented frame beside [`super::MenuRenderer::begin_frame`] rather than
+    /// on the settings-row write, the same poll shape
+    /// `Sim::set_cutout_leaves` and `RenderState::set_entity_shadows_enabled`
+    /// already use. The two GPU buffers behind it are only rebuilt when
+    /// [`Self::run`] sees the value has actually moved.
+    pub fn set_radius(&mut self, radius: f32) {
+        self.radius = radius;
     }
 
     fn make_config(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
         dir: [f32; 2],
+        radius: f32,
     ) -> wgpu::BindGroup {
         use wgpu::util::DeviceExt;
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("menu-blur-config"),
             contents: bytemuck::bytes_of(&BlurConfig {
                 dir,
-                radius: BLUR_RADIUS,
+                radius,
                 _pad: 0.0,
             }),
             usage: wgpu::BufferUsages::UNIFORM,
@@ -390,6 +429,24 @@ impl MenuBlur {
     ) {
         if width == 0 || height == 0 {
             return;
+        }
+        // Vanilla's own gate, not a shortcut: `Screen.extractBlurredBackground`
+        // only asks for the blur at `blurRadius >= 1.0F`, and a zero-radius box
+        // filter is the identity — six full-screen passes to reproduce the
+        // source exactly. Skipping leaves the sharp background the caller
+        // already drew, which is what a player who set the slider to OFF asked
+        // for.
+        if self.radius < MIN_EFFECTIVE_BLUR_RADIUS {
+            return;
+        }
+        // The only per-setting GPU state in the pass. Rebuilt here rather than in
+        // `set_radius` because that is the call with a `device` in hand, and
+        // because the setter is polled every frame — keying the rebuild on a real
+        // change is what keeps that poll free.
+        if (self.radius - self.built_radius).abs() > f32::EPSILON {
+            self.config_h = Self::make_config(device, &self.config_bgl, [1.0, 0.0], self.radius);
+            self.config_v = Self::make_config(device, &self.config_bgl, [0.0, 1.0], self.radius);
+            self.built_radius = self.radius;
         }
         self.ensure_scratch(device, width, height, source.format());
         let Some(scratch) = self.scratch.as_ref() else {
