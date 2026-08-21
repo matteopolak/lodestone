@@ -385,6 +385,34 @@ pub fn no_shuffle(len: usize) -> Vec<usize> {
     (0..len).collect()
 }
 
+/// A real `sort=random` permutation, Fisher-Yates over `0..len` seeded from
+/// `seed`. [`crate::mob_spawn::SpawnRng`] rather than `rand::thread_rng()`
+/// because this crate must stay wasm-safe (`docs/browser-shell-port.md`'s
+/// clock-hazard census: nothing here may reach for a wall clock), and a fresh
+/// `SpawnRng` per call is exactly the "no persistent RNG state threaded
+/// through the command dispatch surface" shape [`no_shuffle`]'s own doc
+/// describes — the caller supplies a seed that varies per call instead.
+///
+/// `crate::commands::registrar::Ctx::resolve` is the one production caller,
+/// seeding from `WorldTime::game_time` — see its own call site for why that
+/// is "changes every real tick" rather than "changes every call", and what
+/// that does and does not guarantee.
+#[must_use]
+pub fn seeded_shuffle(seed: u64) -> impl Fn(usize) -> Vec<usize> {
+    move |len| {
+        let mut permutation: Vec<usize> = (0..len).collect();
+        let mut rng = crate::mob_spawn::SpawnRng::new(seed);
+        // Fisher-Yates, back to front: for each index from the end, swap in a
+        // uniformly-chosen element from the still-unshuffled prefix (inclusive
+        // of itself), matching `java.util.Collections.shuffle`'s own algorithm.
+        for i in (1..permutation.len()).rev() {
+            let j = rng.next_int(i as i32 + 1) as usize;
+            permutation.swap(i, j);
+        }
+        permutation
+    }
+}
+
 /// No scoreboard at all — every `scores=` lookup misses, matching an unknown
 /// objective. For a caller (or a test) with no scores to offer.
 #[must_use]
@@ -397,4 +425,40 @@ pub fn no_scores(_holder: &str, _objective: &str) -> Option<i32> {
 #[must_use]
 pub fn no_team(_holder: &str) -> String {
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A permutation, not a partial or repeating draw — the property Fisher-
+    /// Yates guarantees regardless of seed, and the one a broken swap range
+    /// (an off-by-one on the `1..len` bound, say) would violate first.
+    #[test]
+    fn seeded_shuffle_always_returns_a_real_permutation() {
+        for seed in [0u64, 1, 42, u64::MAX] {
+            let mut permutation = seeded_shuffle(seed)(20);
+            permutation.sort_unstable();
+            assert_eq!(permutation, (0..20).collect::<Vec<usize>>(), "seed {seed}");
+        }
+    }
+
+    /// The actual bug this replaces: `Ctx::resolve` used to pass `no_shuffle`
+    /// in production, so `sort=random` was the identity permutation forever,
+    /// not merely within one tick. At `len = 20`, a real shuffle landing on
+    /// the identity by chance is astronomically unlikely (`1/20!`), so
+    /// disagreeing with `no_shuffle` here is a real, discriminating check —
+    /// not a coin flip that could pass for the wrong reason.
+    #[test]
+    fn seeded_shuffle_is_not_the_identity_permutation() {
+        assert_ne!(seeded_shuffle(1)(20), no_shuffle(20));
+    }
+
+    /// Different seeds must draw different permutations — the property that
+    /// makes `game_time`-seeding at the call site actually vary the result
+    /// tick to tick, rather than every seed collapsing onto one fixed order.
+    #[test]
+    fn different_seeds_draw_different_permutations() {
+        assert_ne!(seeded_shuffle(1)(20), seeded_shuffle(2)(20));
+    }
 }
