@@ -1,8 +1,16 @@
-//! Ten mob types had a row in the client's hitbox table and no rig, so a player
+//! Thirteen mob types were named across the client's draw surface — a hitbox row,
+//! an arm-pose classifier, a bow-pose set — and resolved no rig, so a player
 //! walked into something that drew nothing. This gate is the *placement* half of
-//! closing that: it asserts each newly ported rig, resolved from its **registry
-//! type path** through the same `EntityModelSet` the frame path uses, lands with
-//! its geometry inside the volume the player collides with.
+//! closing that: it asserts each newly reachable rig, resolved from its
+//! **registry type path** through the same `EntityModelSet` the frame path uses,
+//! lands with its geometry inside the volume the player collides with.
+//!
+//! Ten needed a new mesh. The other three needed only routing — an elder guardian
+//! is the guardian mesh at 2.35×, a parched is a skeleton with a second overlay
+//! box on every part, and a mannequin is drawn by the *player's own* renderer —
+//! and they are in the same list on purpose: "the rig exists and nothing reaches
+//! it" and "no rig exists" produce the identical symptom on screen, so one gate
+//! should be able to fail for either.
 //!
 //! # Why an AABB gate rather than a mesh assertion
 //!
@@ -40,7 +48,7 @@
 //! | the leash knot through the **mob** placement | routing a non-living rig through the 1.501 feet lift | 0.00 |
 //! | the sulfur cube with its root pose reset | dropping the renderer constant folded into the mesh | ~0.04 |
 //!
-//! Measured, the ten subjects run 0.619 to 1.000 and the three controls 0.000 to
+//! Measured, the thirteen subjects run 0.619 to 1.000 and the three controls 0.000 to
 //! 0.169, so the threshold sits in a 3.7× gap rather than between two adjacent
 //! numbers. Every measured value is printed on failure, and the loop collects
 //! mismatches rather than asserting inside itself, so a run reports *all* the
@@ -64,7 +72,9 @@ use lodestone_data::entity_type::EntityType;
 use lodestone_render::entity::{EntityInstance, EntityMesh, EntityModelSet};
 use lodestone_render::entity_anim::AnimInput;
 
-/// The ten registry types this pass gave a rig, by the path the wire carries.
+/// The registry types this pass made drawable, by the path the wire carries. The
+/// first ten got a new mesh; the last three got a route to one that already
+/// existed.
 const NEWLY_RIGGED: &[&str] = &[
     "breeze",
     "camel_husk",
@@ -76,6 +86,9 @@ const NEWLY_RIGGED: &[&str] = &[
     "nautilus",
     "sulfur_cube",
     "zombie_nautilus",
+    "elder_guardian",
+    "mannequin",
+    "parched",
 ];
 
 /// The fraction of `[0, height]` that `[lo, hi]` covers.

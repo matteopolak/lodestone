@@ -23,6 +23,7 @@ Only types whose registry path differs from a model name are listed explicitly:
 | type path | model    | why |
 |-----------|----------|-----|
 | `player`  | `player_wide` | `PlayerRenderer` picks a skin model; wide is the default |
+| `mannequin` | `player_wide` | `EntityRenderDispatcher.getRenderer` routes `ClientMannequin` into the *same* avatar renderer as a player, choosing the rig from the entity's skin and defaulting to `WIDE` |
 | `bogged`  | `skeleton`    | `BoggedModel` is not ported; nearest ported mesh |
 
 > **Gotcha, learned the hard way.** This used to be an explicit table listing
@@ -35,13 +36,15 @@ Only types whose registry path differs from a model name are listed explicitly:
 > the day its mesh lands, and any wrong-mesh substitution has to be *written
 > down* rather than left behind.
 
-### The "invisible but solid" rigs, and where each was transcribed from
+### The "named everywhere, draws nothing" set, and where each came from
 
 `cargo xtask world-coverage` names a class this document had no section for: a
 type with a row in the client's hitbox table (`gpu/entity_passes.rs`'s
 `EYE_HEIGHTS`, generated from the registry and therefore complete) and no entry
 in the hand-ported rig corpus. In play that is a mob you collide with and cannot
-see, which reads as a bug rather than as unported work. Ten types were in it.
+see, which reads as a bug rather than as unported work. Ten types were in it, and
+three more had the same symptom for the opposite reason — the rig existed and
+nothing routed to it.
 
 Source citations live here rather than in `entity_models.rs`, per the repo rule
 that vanilla record definitions are named in `docs/` only. All paths are relative
@@ -59,6 +62,9 @@ bakes is registered in `model/geom/LayerDefinitions.java`.
 | `happy_ghast` | `model/animal/ghast/HappyGhastModel.createBodyLayer(false, CubeDeformation.NONE)` at `scaling(4.0F)` | `HappyGhastRenderer` | tentacle lengths are authored, unlike `GhastModel`'s seeded ones |
 | `nautilus`, `zombie_nautilus` | `model/animal/nautilus/NautilusModel.createBodyLayer` | `NautilusRenderer`, `ZombieNautilusRenderer` | one layer, two sheets; the zombie's coral crust is `ZombieNautilusCoralModel`, a separate layer |
 | `camel_husk` | `AdultCamelModel.createBodyLayer` (the same layer `camel` uses) | `CamelHuskRenderer` | one rig, its own sheet |
+| `elder_guardian` | `GuardianModel.createElderGuardianLayer` — the guardian layer at `ELDER_GUARDIAN_SCALE`, `scaling(2.35F)` | `ElderGuardianRenderer` | same geometry, own sheet, so a corpus entry rather than a name alias |
+| `parched` | `SkeletonModel.createSingleModelDualBodyLayer` | `ParchedRenderer` | **not** the skeleton layer: every part carries a second, larger overlay box |
+| `mannequin` | none of its own — `player_wide` | the player's avatar renderer, via `EntityRenderDispatcher.getRenderer`'s type switch | a name alias, listed in the table above |
 
 **What is deliberately absent, and why it is not an oversight.** Every emissive
 eyes layer (`breeze`, `creaking`, `copper_golem`), the breeze's translucent wind
@@ -70,7 +76,7 @@ layer's UVs. They are second-pass work of the same shape as the sheep's wool
 layer, which this document already describes.
 
 `crates/lodestone-render/tests/invisible_but_solid_rigs.rs` is the gate: it
-resolves each of the ten from its registry path and asserts the drawn world AABB
+resolves each of the thirteen from its registry path and asserts the drawn world AABB
 covers the collision box the registry declares, with three controls reproducing
 the specific ways it could have gone wrong. It also records the breeze's known
 0.619 shortfall, which is the missing wind funnel and nothing else.
