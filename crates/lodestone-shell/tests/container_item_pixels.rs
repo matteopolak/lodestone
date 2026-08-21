@@ -1039,41 +1039,62 @@ fn every_special_icon_kind_stands_or_falls_with_the_pass() {
 }
 
 /// A **custom head skin** — a `minecraft:player_head` whose `minecraft:profile`
-/// carries a `textures` property — draws the *default* skull sheet in a
-/// container slot, not its own texture and not nothing.
+/// carries a `textures` property — draws **its own** sheet in a container slot,
+/// not the default skull one.
 ///
-/// # What this establishes and why it matters which
+/// # What this pins, and why it is an A/B rather than a count
 ///
 /// "Custom heads don't render" has two shapes that point at different hops: the
 /// slot could be **empty** (the icon never reached the pass) or it could hold a
 /// **plain Steve head** (the icon reached the pass and lost its texture on the
-/// way). This gate measures which, so nobody has to infer it from a screenshot.
+/// way). It was the second: `container::builder::icon_record` carried every
+/// other per-stack component a slot icon needs — `dyed_color`, `potion_color`,
+/// `banner_patterns`, `base_color` — and not `minecraft:profile`, so
+/// `lodestone_render::special_item_rig` resolved every head to
+/// `skull_texture_stem(SkullType::Player)`.
 ///
-/// The answer is the second: `container::builder::icon_record` builds the slot
-/// record from the stack and carries every other per-stack component a slot
-/// icon needs — `dyed_color`, `potion_color`, `banner_patterns`, `base_color` —
-/// and does not carry `minecraft:profile`. `ItemIcon` has no field for it. So
-/// `lodestone_render::special_item_rig` resolves the head to
-/// `skull_texture_stem(SkullType::Player)`, the default sheet, and a custom head
-/// is drawn as a plain one.
+/// This gate was originally written the other way round: it asserted the two
+/// cells were **byte-identical**, deliberately pinning the bug, with a note
+/// saying to invert rather than relax it when the profile was threaded through.
+/// This is that inversion. A count would not do — two different faces cover the
+/// same number of pixels just as easily — so the subject is a **cell-against-cell
+/// comparison**, and the assertion is *where* the two differ, not how many.
 ///
-/// The world and first-person surfaces do not share the gap — a placed head
-/// resolves its profile through `BlockEntityTexture::PlayerSkin` — so the same
-/// head is correct when placed and plain in an inventory.
+/// # The three arms, and why the middle one is the control
 ///
-/// # The pinned equality is the defect, not the contract
+/// | arm | the head's skin | expected |
+/// |---|---|---|
+/// | before | fetched: **no** | identical to a plain head |
+/// | after | fetched: **yes** | differs, inside its own cell |
+/// | plain | none declared | lit, and unchanged between the two frames |
 ///
-/// The second assertion below requires the custom head to be **byte-identical**
-/// to a plain one. That is a bug pinned deliberately, and it is written to fail
-/// the moment someone threads the profile through: when the GUI path learns to
-/// resolve a head's own texture, this assertion must be **inverted** to require
-/// a difference. Do not relax it to a range — the point is that today the
-/// difference is exactly zero.
+/// The *before* arm is not scene-setting: it is the executed proof that the
+/// difference in the *after* arm comes from the installed sheet and not from
+/// the fixture merely having a profile at all. It also pins the documented
+/// fallback — a head whose fetch has not landed draws the default sheet rather
+/// than nothing — which is the behaviour the whole pass leans on while a real
+/// texture is in flight. The *plain* arm is the negative control on the other
+/// axis: installing a skin must not repaint an unrelated slot.
+///
+/// # No network, in either direction
+///
+/// `icon_record` starts a fetch for whatever URL the profile declares, which for
+/// an integration test means the **real** `remote_skins::spawn_fetch` (a test
+/// binary compiles the library without `cfg(test)`). The fixture's host is
+/// therefore an RFC 2606 `.invalid` one, which
+/// `lodestone_auth::texture::is_allowed_texture_domain` refuses **before a
+/// socket is opened** — exact-match on the whole host against
+/// `textures.minecraft.net`. The sheet itself is handed straight to
+/// `remote_skins::publish`, the same seam the fetch delivers through, so this
+/// exercises the production install path without an HTTP GET.
 #[test]
 #[ignore = "requires a GPU adapter and the vanilla client.jar"]
-fn a_custom_head_skin_draws_the_default_sheet_in_a_container_slot() {
+fn a_custom_head_skin_draws_its_own_sheet_in_a_container_slot() {
     const PLAIN_SLOT: usize = 36;
     const CUSTOM_SLOT: usize = 37;
+    // Refused by the texture allow list before a socket opens — see the doc.
+    const SKIN_URL: &str =
+        "https://textures.minecraft.net.invalid/texture/lodestone-container-head-gate";
 
     let ctx = GpuContext::new_headless_blocking().expect(
         "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
@@ -1096,14 +1117,17 @@ fn a_custom_head_skin_draws_the_default_sheet_in_a_container_slot() {
     // server-placed decorative head. `lodestone-v770`'s own
     // `decodes_a_full_profile_with_signed_textures` pins that this is what
     // arrives off the wire, so the fixture is the wire's shape rather than one
-    // invented here.
+    // invented here — and the payload declares a real `SKIN` entry, because a
+    // property that decodes to *no* skin is a different (and separately warned)
+    // case that would leave this gate comparing two plain heads.
+    let payload = base64(format!(r#"{{"textures":{{"SKIN":{{"url":"{SKIN_URL}"}}}}}}"#).as_bytes());
     let mut custom = ItemStack::new(id("minecraft:player_head"), 1);
     custom.set_profile(Some(lodestone_model::ItemProfile {
         name: Some("Notch".to_owned()),
         id: Some(uuid::Uuid::from_u128(0x0699_a79f_444e_9472_6a5b_efca_90e3_8aaf)),
         properties: vec![lodestone_model::ProfileProperty {
             name: "textures".to_owned(),
-            value: "eyJ0ZXh0dXJlcyI6e319".to_owned(),
+            value: payload,
             signature: Some("sig-bytes".to_owned()),
         }],
     }));
@@ -1158,24 +1182,59 @@ fn a_custom_head_skin_draws_the_default_sheet_in_a_container_slot() {
         render.model_anim_buffer().expect("animation slots"),
     );
     let chrome = shoot(&mut lit, &base_frame);
-    let subject = shoot(&mut lit, &frame);
 
-    let plain_lit = diff_in(&subject, &chrome, plain_rect);
-    let custom_lit = diff_in(&subject, &chrome, custom_rect);
+    // Arm 1 — the fetch has not landed. The documented fallback: the default
+    // skull sheet, so this head is pixel-identical to the plain one beside it.
+    let before = shoot(&mut lit, &frame);
 
+    // The install, through the seam the real fetch publishes into. A flat,
+    // saturated sheet rather than a recoloured Steve: every face of the skull
+    // rig samples it, so *any* face reaching pixels registers, and a mistake
+    // that binds only part of the sheet cannot hide in a similar-looking
+    // texture.
+    lodestone::remote_skins::publish(SKIN_URL.to_owned(), flat_sheet(64, 64, [255, 0, 255, 255]));
+
+    // Arm 2 — same menu, same renderer, same frame. Only the bound sheet moved.
+    let after = shoot(&mut lit, &frame);
+
+    let cell_diff = |a: &[u8], b: &[u8], ra: [u32; 4], rb: [u32; 4]| -> usize {
+        let [ax, ay, w, h] = ra;
+        let [bx, by, ..] = rb;
+        let mut n = 0usize;
+        for dy in 0..h {
+            for dx in 0..w {
+                let ia = (((ay + dy) * W + ax + dx) * 4) as usize;
+                let ib = (((by + dy) * W + bx + dx) * 4) as usize;
+                if a[ia..ia + 3] != b[ib..ib + 3] {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+
+    let plain_lit = cell_diff(&after, &chrome, plain_rect, plain_rect);
+    let custom_lit = cell_diff(&after, &chrome, custom_rect, custom_rect);
     // Cell-against-cell, so "the same picture" is checked directly rather than
     // inferred from two equal counts — two different faces can easily cover the
     // same number of pixels, which is exactly the coincidence a count-only
     // comparison would miss.
-    let [px, py, pw, ph] = plain_rect;
-    let [cx, cy, ..] = custom_rect;
-    let mut differing = 0usize;
-    for dy in 0..ph {
-        for dx in 0..pw {
-            let a = (((py + dy) * W + px + dx) * 4) as usize;
-            let b = (((cy + dy) * W + cx + dx) * 4) as usize;
-            if subject[a..a + 3] != subject[b..b + 3] {
-                differing += 1;
+    let differing_before = cell_diff(&before, &before, plain_rect, custom_rect);
+    let differing_after = cell_diff(&after, &after, plain_rect, custom_rect);
+    // Where the installed sheet actually changed the frame, over the whole
+    // canvas rather than inside a rect — a skin that repainted something *else*
+    // must not read as success.
+    let mut moved = 0usize;
+    let mut bbox = [u32::MAX, u32::MAX, 0u32, 0u32];
+    for y in 0..H {
+        for x in 0..W {
+            let i = ((y * W + x) * 4) as usize;
+            if before[i..i + 3] != after[i..i + 3] {
+                moved += 1;
+                bbox[0] = bbox[0].min(x);
+                bbox[1] = bbox[1].min(y);
+                bbox[2] = bbox[2].max(x);
+                bbox[3] = bbox[3].max(y);
             }
         }
     }
@@ -1183,7 +1242,9 @@ fn a_custom_head_skin_draws_the_default_sheet_in_a_container_slot() {
     eprintln!("=== a custom head skin in a container slot ===");
     eprintln!("plain  head slot {PLAIN_SLOT}  lit = {plain_lit} of 256");
     eprintln!("custom head slot {CUSTOM_SLOT}  lit = {custom_lit} of 256");
-    eprintln!("pixels where the two cells differ = {differing}");
+    eprintln!("plain vs custom, before the skin is bound = {differing_before} px");
+    eprintln!("plain vs custom, after                    = {differing_after} px");
+    eprintln!("pixels the install moved = {moved}, bbox = {bbox:?}");
 
     assert!(
         custom_lit > 0,
@@ -1191,11 +1252,73 @@ fn a_custom_head_skin_draws_the_default_sheet_in_a_container_slot() {
          never reached the special pass — a different and worse defect than losing \
          its texture, and it would move the search upstream of the draw"
     );
-    assert_eq!(
-        differing, 0,
-        "a custom head is no longer pixel-identical to a plain one ({differing} px \
-         differ). If you have just threaded minecraft:profile through to the GUI \
-         icon path, this is the assertion that was pinning the bug: INVERT it to \
-         require a difference rather than relaxing it"
+    assert!(
+        plain_lit > 0,
+        "the plain head drew nothing, so this gate has no baseline face to \
+         compare against and its other counts mean nothing"
     );
+    assert_eq!(
+        differing_before, 0,
+        "control failed: before its sheet was installed, a custom head must draw \
+         the DEFAULT skull sheet — pixel-identical to the plain head beside it. \
+         {differing_before} px differ, so the difference asserted below cannot be \
+         attributed to the installed skin"
+    );
+    assert!(
+        differing_after > 0,
+        "a custom head is still pixel-identical to a plain one with its own sheet \
+         bound. The profile is not reaching the GUI icon pass: check \
+         container::builder::icon_record fills ItemIcon::skin, that \
+         push_special_icon turns it into BlockEntityTexture::PlayerSkin, and that \
+         SpecialIcons::install_ready_player_skins found the sheet"
+    );
+    assert!(
+        moved > 0 && bbox[0] >= custom_rect[0] && bbox[1] >= custom_rect[1],
+        "installing one head's skin repainted pixels outside its own cell \
+         (moved = {moved}, bbox = {bbox:?}, cell = {custom_rect:?}), so the \
+         difference above is not localised to the head that declared it"
+    );
+    assert!(
+        bbox[2] < custom_rect[0] + custom_rect[2] && bbox[3] < custom_rect[1] + custom_rect[3],
+        "the same, on the far edges: bbox = {bbox:?} runs past cell {custom_rect:?}"
+    );
+}
+
+/// A solid `width` x `height` RGBA sheet, for a fixture that wants *any* sampled
+/// texel to be unmistakable rather than a plausible-looking skin.
+fn flat_sheet(width: u32, height: u32, rgba: [u8; 4]) -> lodestone_assets::Image {
+    lodestone_assets::Image {
+        width,
+        height,
+        rgba: rgba
+            .iter()
+            .copied()
+            .cycle()
+            .take((width * height * 4) as usize)
+            .collect(),
+    }
+}
+
+/// A local base64 encoder, so the fixture does not depend on which base64 crate
+/// the workspace happens to expose — the same reason `remote_skins`' own tests
+/// carry one.
+fn base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(TABLE[((n >> (18 - 6 * i)) & 0x3f) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
