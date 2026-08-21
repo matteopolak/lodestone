@@ -1544,15 +1544,61 @@ pub fn load_item_atlas() -> Option<Arc<ItemAtlas>> {
             return None;
         }
     };
+    let pack_layers = manager.len().saturating_sub(1);
     tracing::info!(
         target: "assets",
         items = report.items,
         drawable = report.drawable,
         sprites = report.sprites,
+        from_packs = report.layered_sprites,
+        pack_layers,
         missing_textures = report.missing_textures.len(),
         parked_special = report.missing_special_bases.len(),
         "loaded vanilla item-sprite atlas for the HUD"
     );
+    // The line that makes a silent fallback audible. A pack whose
+    // `textures/item/*.png` never reached the stitch is pixel-identical to a
+    // pack that overrides no item at all, and every other counter above agrees
+    // in both cases — `sprites` counts what was stitched, not where it came
+    // from. `from_packs = 0` with a pack on the stack is the whole symptom of
+    // "the server's pack does not change any item art", stated once, at the
+    // moment it happens, instead of costing an investigation.
+    // A `Sprite`-layer texture an item definition references and the stack
+    // cannot serve is a real failure by `ItemAtlasReport`'s own definition — a
+    // generated item with no art, which draws as an empty well. It was counted
+    // and never named, and a count cannot be acted on: with the vanilla jar
+    // alone it is always 0, so any non-zero value here is something a *pack*
+    // introduced, and the fix is always in that pack's own file tree. Measured:
+    // one real third-party pack takes 714 stitched sprites down to 692 this way.
+    if !report.missing_textures.is_empty() {
+        let named: Vec<&str> = report
+            .missing_textures
+            .iter()
+            .take(8)
+            .map(String::as_str)
+            .collect();
+        tracing::warn!(
+            target: "assets",
+            missing = report.missing_textures.len(),
+            pack_layers,
+            "{} item sprite(s) an item definition references are absent from the \
+             whole pack stack and were skipped; those items draw as empty wells. \
+             First: {named:?}",
+            report.missing_textures.len()
+        );
+    }
+    if pack_layers > 0 && report.layered_sprites == 0 {
+        tracing::warn!(
+            target: "assets",
+            pack_layers,
+            sprites = report.sprites,
+            "every item sprite in the atlas came from the built-in pack: the \
+             resource pack layer(s) above it override no `textures/item/*.png` \
+             that any item definition references, so item art is unchanged. If a \
+             pack *is* installed and its item art should be showing, the stack \
+             this atlas was built over is the stale half — not the stitch"
+        );
+    }
     if atlas.is_empty() {
         tracing::warn!(target: "assets", "item atlas is empty; drawing empty wells");
         return None;
@@ -1981,6 +2027,136 @@ mod tests {
 
         clear_server_pack(None);
         set_selected_packs(vec![]);
+    }
+
+    /// The pixels of one stitched sprite, for comparing two sprites in the same
+    /// atlas without needing a PNG decoder or a hand-written expected image.
+    fn sprite_pixels(atlas: &ItemAtlas, id: &str) -> (u32, u32, Vec<u8>) {
+        let loc = lodestone_assets::ResourceLocation::parse(id).expect("valid location");
+        let sprite = atlas
+            .sprite(&loc)
+            .unwrap_or_else(|| panic!("{id} is not in the stitched item atlas"));
+        let img = atlas.atlas();
+        let mut out = Vec::with_capacity((sprite.width * sprite.height * 4) as usize);
+        for row in 0..sprite.height {
+            let start = (((sprite.y + row) * img.width + sprite.x) * 4) as usize;
+            out.extend_from_slice(&img.rgba[start..start + (sprite.width * 4) as usize]);
+        }
+        (sprite.width, sprite.height, out)
+    }
+
+    /// **The acceptance condition for "a server-pushed pack re-textures items".**
+    ///
+    /// `a_set_server_pack_reaches_selected_pack_sources_and_outranks_local_selection`
+    /// above proves the pack reaches the *source list*; it says nothing about
+    /// whether the item atlas — a separate stitch with its own owner, built by
+    /// [`load_item_atlas`] rather than by the block-atlas loader — reads through
+    /// that list. This closes the rest of the chain, through the production
+    /// functions rather than a reassembled equivalent: `set_server_pack` (what
+    /// `net.rs`'s downloader calls) then `load_item_atlas` (what both the HUD
+    /// bring-up and the live-reload block call), with nothing in between.
+    ///
+    /// # The expected value comes from outside this code
+    ///
+    /// The pack serves the jar's **own `item/stick.png` bytes** as
+    /// `item/diamond.png`. So the assertion is that two sprites vanilla ships as
+    /// different art become byte-identical, which no encode/decode symmetry of
+    /// ours can satisfy by accident, and which needs no PNG writer. The control
+    /// is the same comparison with no pack installed: it must differ, or the
+    /// post-install equality would prove nothing.
+    ///
+    /// `#[ignore]`d for the reason every vanilla gate here is: it needs a real
+    /// `client.jar`, which is not repo state, and a missing one must fail loud
+    /// rather than pass vacuously. It also mutates the process-global
+    /// `SERVER_PACK`, so run it single-threaded alongside its siblings.
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn a_server_pushed_pack_retextures_the_item_atlas() {
+        const DIAMOND_PNG: &str = "assets/minecraft/textures/item/diamond.png";
+        const STICK_PNG: &str = "assets/minecraft/textures/item/stick.png";
+
+        clear_server_pack(None);
+        set_selected_packs(Vec::new());
+
+        let manager = open_vanilla_pack_stack().expect(
+            "no vanilla pack found; set LODESTONE_ASSETS to a root with client.jar",
+        );
+        let stick_bytes = manager
+            .read(STICK_PNG)
+            .expect("the jar must carry item/stick.png");
+
+        // Control: without a pack the two are different art, so the equality
+        // asserted below is a real observation rather than a tautology.
+        let plain = load_item_atlas().expect("the item atlas must build from client.jar");
+        let plain_diamond = sprite_pixels(&plain, "minecraft:item/diamond");
+        let plain_stick = sprite_pixels(&plain, "minecraft:item/stick");
+        assert_ne!(
+            plain_diamond, plain_stick,
+            "control failed: the jar's diamond and stick sprites are already \
+             identical, so this gate could not tell an override from a no-op"
+        );
+
+        assert!(
+            set_server_pack(
+                Uuid::from_u128(0x17E_D1A),
+                build_test_pack_zip(DIAMOND_PNG, &stick_bytes)
+            ),
+            "a real, valid zip must be accepted"
+        );
+
+        let packed = load_item_atlas().expect("the item atlas must still build with a pack");
+        let packed_diamond = sprite_pixels(&packed, "minecraft:item/diamond");
+        let packed_stick = sprite_pixels(&packed, "minecraft:item/stick");
+        clear_server_pack(None);
+
+        assert_eq!(
+            packed_diamond, packed_stick,
+            "the server pack's textures/item/diamond.png did not reach the item \
+             atlas: the diamond sprite still differs from the stick art the pack \
+             served for it, so load_item_atlas built over a stack without the pack"
+        );
+        assert_ne!(
+            packed_diamond, plain_diamond,
+            "the diamond sprite is unchanged from the pack-free build"
+        );
+    }
+
+    /// `ItemAtlasReport::layered_sprites` is what `load_item_atlas` warns on, so
+    /// it has to move with reality rather than being a field nobody computes:
+    /// zero with no pack, non-zero the moment a pack carries an item texture an
+    /// item definition references. Without this the warning could be silently
+    /// permanent (always zero) or silently vacuous (never zero) and the log line
+    /// would be worse than none.
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn the_item_atlas_reports_how_many_sprites_a_pack_layer_served() {
+        const DIAMOND_PNG: &str = "assets/minecraft/textures/item/diamond.png";
+
+        clear_server_pack(None);
+        set_selected_packs(Vec::new());
+
+        let manager = open_vanilla_pack_stack().expect("no vanilla pack found");
+        let stick_bytes = manager
+            .read("assets/minecraft/textures/item/stick.png")
+            .expect("the jar must carry item/stick.png");
+        let (_, bare) = ItemAtlas::build_reported(&manager).expect("build");
+        assert_eq!(
+            bare.layered_sprites, 0,
+            "with only the built-in pack on the stack nothing can have come from a layer above it"
+        );
+
+        assert!(set_server_pack(
+            Uuid::from_u128(0x17E_D1B),
+            build_test_pack_zip(DIAMOND_PNG, &stick_bytes)
+        ));
+        let manager = open_vanilla_pack_stack().expect("no vanilla pack found");
+        let (_, layered) = ItemAtlas::build_reported(&manager).expect("build");
+        clear_server_pack(None);
+        assert_eq!(
+            layered.layered_sprites, 1,
+            "the pack carries exactly one referenced item texture, so exactly one \
+             stitched sprite must be attributed to it"
+        );
     }
 
     /// A corrupt/truncated download must not be installed — `set_server_pack`

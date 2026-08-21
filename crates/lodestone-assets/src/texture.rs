@@ -160,7 +160,14 @@ impl TextureMeta {
     /// [`TextureError::MetaMalformed`] only when the bytes are not valid JSON or
     /// the `animation` section has an invalid shape.
     pub fn parse(bytes: &[u8]) -> Result<Self, TextureError> {
-        let value: Value = serde_json::from_slice(bytes)
+        // Lenient about *trailing* content, strict about the value — vanilla's
+        // `GsonHelper.parse` reads one value off a `JsonReader` and never
+        // asserts end-of-document, so a pack whose `.mcmeta` carries a stray
+        // extra closing brace renders normally in the real client. Rejecting it
+        // here costs the whole texture, not just its animation, because
+        // `AtlasBuilder::load` treats a metadata failure as a texture failure.
+        // See `crate::json`.
+        let value: Value = crate::json::from_slice_lenient(bytes)
             .map_err(|e| TextureError::MetaMalformed(e.to_string()))?;
         let obj = value
             .as_object()
