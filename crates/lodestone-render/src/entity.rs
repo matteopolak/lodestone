@@ -2470,6 +2470,278 @@ pub fn cape_local_rotation(lean: f32, lean2: f32, flap: f32) -> Mat4 {
     translate * rotate
 }
 
+// ---------------------------------------------------------------------------
+// The elytra (`ElytraModel`/`WingsLayer`)
+// ---------------------------------------------------------------------------
+//
+// The same "second mesh posed off the wearer's already-animated
+// `part_transforms`" discipline as armour, wool and the cape above. It sits
+// closest to the cape: both hang off the wearer's `"body"` part and both need
+// an **extra** local transform the caller composes in per frame.
+//
+// It differs from the cape in three ways that each cost something to get
+// wrong, so they are named here rather than left to be rediscovered:
+//
+//  * **Two parts, not one**, and their transforms are not equal — the right
+//    wing negates the left's Y and Z rotation. A single shared matrix draws
+//    both wings folded the same way, which reads as "one wing is inside out".
+//  * **The draw gate is the chest equipment slot**, not a texture URL. An
+//    elytra is worn where a chestplate goes, and vanilla's real gate is that
+//    the piece's `equipment/<asset>.json` declares a `wings` layer at all —
+//    which is why a diamond chestplate, whose asset declares `humanoid` and
+//    `humanoid_leggings` and no `wings`, draws nothing here.
+//  * **`WingsLayer.submit` translates the whole layer `+0.125` on Z** before
+//    anything else, to clear the wearer's own body. That is 0.125 *blocks*
+//    (the pose stack is in blocks at layer level; `ModelPart.render` is what
+//    divides texels by 16), i.e. 2 texels — numerically the same as the cape's
+//    `z = 2` pivot, and a different quantity with a different origin.
+
+/// The elytra's baked mesh: two parts, `"left_wing"` and `"right_wing"`, in
+/// the wearer's **body-pivot-local** space.
+///
+/// See [`lodestone_assets::entity::elytra_model`] for why neither the static
+/// pose rotation nor the crouch `y` is baked in, and
+/// [`elytra_wing_transform`] for what the caller must compose per wing.
+#[derive(Debug, Clone)]
+pub struct ElytraMesh {
+    /// Four vertices per quad, part-local.
+    pub vertices: Vec<ModelVertex>,
+    /// Six indices per quad.
+    pub indices: Vec<u32>,
+    /// One entry per wing, in `("left_wing", _), ("right_wing", _)` order —
+    /// a list rather than a fixed pair for the same reason
+    /// [`CapeMesh::parts`] is one: a bake that produced no quads yields an
+    /// empty list rather than a range into nothing.
+    pub parts: Vec<(ElytraWing, PartRange)>,
+}
+
+/// Which wing a [`ElytraMesh::parts`] range belongs to.
+///
+/// A named side rather than a `&'static str`, because the side is not just a
+/// label here — it *selects* the sign of two of the three rotation terms in
+/// [`elytra_wing_transform`], and a stringly-typed version invites the
+/// silently-symmetric bug where both wings get the left one's matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElytraWing {
+    /// `left_wing` — pivot `x = +5`, rotations used as given.
+    Left,
+    /// `right_wing` — pivot `x = -5`, Y and Z rotations negated.
+    Right,
+}
+
+impl ElytraWing {
+    /// The part name in [`lodestone_assets::entity::elytra_model`].
+    #[must_use]
+    pub const fn part_name(self) -> &'static str {
+        match self {
+            ElytraWing::Left => "left_wing",
+            ElytraWing::Right => "right_wing",
+        }
+    }
+
+    /// The wing pivot's X in **model texels** (`ElytraModel.createLayer`'s
+    /// `PartPose.offsetAndRotation(±5, 0, 0, …)`).
+    #[must_use]
+    pub const fn pivot_x(self) -> f32 {
+        match self {
+            ElytraWing::Left => 5.0,
+            ElytraWing::Right => -5.0,
+        }
+    }
+}
+
+impl ElytraMesh {
+    /// Bake the elytra mesh.
+    #[must_use]
+    pub fn load() -> Self {
+        let def = lodestone_assets::entity::elytra_model();
+        let baked = lodestone_assets::entity::bake_entity_parts(&def);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut parts = Vec::new();
+        for wing in [ElytraWing::Left, ElytraWing::Right] {
+            let Some(part) = baked
+                .iter()
+                .find(|p| p.name.as_str() == wing.part_name() && !p.quads.is_empty())
+            else {
+                continue;
+            };
+            let index_start = indices.len() as u32;
+            let vertex_start = vertices.len() as u32;
+            push_part_quads(&part.quads, &mut vertices, &mut indices);
+            parts.push((
+                wing,
+                PartRange {
+                    index_start,
+                    index_count: indices.len() as u32 - index_start,
+                    vertex_start,
+                    vertex_count: vertices.len() as u32 - vertex_start,
+                },
+            ));
+        }
+        ElytraMesh {
+            vertices,
+            indices,
+            parts,
+        }
+    }
+
+    /// Pair both wings with the wearer's `"body"` part, dropping them
+    /// entirely for a non-humanoid rig — the same gate [`CapeMesh::attach`]
+    /// and [`wearer_carries_armour`] use, and for the same reason: a rig with
+    /// no `body` pivot has nothing for the wings to hang off, and attaching
+    /// by part name alone would strap an elytra to a pig.
+    pub fn attach<'a>(
+        &'a self,
+        wearer: &'a Skeleton,
+    ) -> impl Iterator<Item = (ElytraWing, PartRange, usize)> + 'a {
+        let humanoid = wearer_carries_armour(wearer);
+        let body = wearer.index_of("body");
+        self.parts
+            .iter()
+            .filter(move |_| humanoid)
+            .filter_map(move |(wing, range)| body.map(|i| (*wing, *range, i)))
+    }
+}
+
+/// `ElytraAnimationState`'s resting rotation triple `(x_rot, y_rot, z_rot)`
+/// in radians — the target it lerps toward when the wearer is neither
+/// fall-flying nor crouching, `(PI/12, 0, -PI/12)`.
+///
+/// This is also `ElytraModel.createLayer`'s authored pose, which is why it is
+/// what a standing player's wings look like. A caller that keeps no animation
+/// state at all can pass this straight to [`elytra_wing_transform`] and get
+/// the correct wings for every wearer who is standing, walking or running —
+/// everything except a glide and a crouch.
+#[must_use]
+pub fn elytra_rest_rotations() -> (f32, f32, f32) {
+    (
+        std::f32::consts::PI / 12.0,
+        0.0,
+        -std::f32::consts::PI / 12.0,
+    )
+}
+
+/// The per-tick *target* `(x_rot, y_rot, z_rot)` an elytra's animation state
+/// lerps toward — `ElytraAnimationState.tick`'s three-way branch, in radians.
+///
+/// `motion` is the wearer's delta movement in blocks per tick. Only its
+/// **normalised Y** is read, and only when it is negative: a steeper dive
+/// folds the wings back further, which is the whole visual point of the
+/// gliding pose.
+///
+/// This is the pure half of `ElytraAnimationState`. The impure half is two
+/// lerped triples (`rot*` and `rot*Old`) advanced once per game tick by
+/// `current += (target - current) * ` [`ELYTRA_ROTATION_LERP`] and read back
+/// interpolated by partial ticks — that state belongs wherever entity ticks
+/// live, not here, exactly as `cape_sway`'s lagged cloak position does.
+///
+/// # Precedence
+///
+/// Fall-flying wins over crouching, not the other way round: vanilla's
+/// `isFallFlying()` is the first branch, and a player can be both.
+#[must_use]
+pub fn elytra_target_rotations(fall_flying: bool, crouching: bool, motion: Vec3) -> (f32, f32, f32) {
+    use std::f32::consts::PI;
+    if fall_flying {
+        // `ratio = 1 - (-normalize(motion).y)^1.5` while descending, else 1.
+        // Computed in f64 because vanilla's is: `Vec3` is a double vector and
+        // `Math.pow` is a double call, and the exponent is fractional, so the
+        // f32 round trip is not free.
+        let ratio = if motion.y < 0.0 {
+            let len = f64::from(motion.x).hypot(f64::from(motion.y)).hypot(f64::from(motion.z));
+            // `Vec3.normalize` returns ZERO for a zero-length vector, whose
+            // `y` is 0 and so leaves `ratio` at 1 — matching the guard rather
+            // than dividing by zero.
+            let ny = if len < 1.0e-4 { 0.0 } else { f64::from(motion.y) / len };
+            1.0 - (-ny).max(0.0).powf(1.5)
+        } else {
+            1.0
+        };
+        let ratio = ratio as f32;
+        // `Mth.lerp(delta, start, end)` is `start + delta * (end - start)`.
+        let lerp = |start: f32, end: f32| start + ratio * (end - start);
+        (
+            lerp(PI / 12.0, PI / 9.0),
+            0.0,
+            lerp(-PI / 12.0, -PI / 2.0),
+        )
+    } else if crouching {
+        // Transcribed from the branch, not derived: the Y term is vanilla's
+        // own float literal `0.08726646F` (5 degrees), and it is the only one
+        // of the nine constants in this function that is not a fraction of PI.
+        (PI * 2.0 / 9.0, 0.08726646, -PI / 4.0)
+    } else {
+        elytra_rest_rotations()
+    }
+}
+
+/// The per-tick approach rate in `ElytraAnimationState.tick`
+/// (`rot += (target - rot) * 0.3`).
+pub const ELYTRA_ROTATION_LERP: f32 = 0.3;
+
+/// The wearer's crouching wing `y` offset in **model texels** —
+/// `ElytraModel.setupAnim`'s `state.isCrouching ? 3.0F : 0.0F`, which it
+/// assigns to *both* wings.
+#[must_use]
+pub const fn elytra_wing_y(crouching: bool) -> f32 {
+    if crouching { 3.0 } else { 0.0 }
+}
+
+/// The per-frame placement of one wing, relative to the wearer's **body**
+/// part transform.
+///
+/// `x_rot`/`y_rot`/`z_rot` are the *left* wing's angles in radians — the
+/// triple [`elytra_target_rotations`] produces, after the caller's own
+/// lerping. The right wing's negations are applied here rather than by the
+/// caller so there is exactly one place that knows the sign convention.
+///
+/// # The composition
+///
+/// ```text
+/// T(0, 0, 0.125) * T(pivot_x/16, y/16, 0) * Rz(z) * Ry(y) * Rx(x)
+/// ```
+///
+/// * The leading translate is `WingsLayer.submit`'s
+///   `poseStack.translate(0, 0, 0.125)`, applied to the layer as a whole and
+///   therefore **outside** the wing's own pivot. In blocks.
+/// * `T(pivot_x/16, y/16, 0)` is the wing's pivot: `x` is authored and
+///   constant (`±5` texels), `y` is assigned per frame by `setupAnim` and is
+///   `3` texels only while crouching. `z` is `0`.
+/// * The rotation order is `Rz * Ry * Rx`, matching JOML's
+///   `rotationZYX(zRot, yRot, xRot)` that `ModelPart.translateAndRotate`
+///   uses — not the `Rx * Rz * Ry` the cape ends up with, which is a
+///   *composed* quaternion chain rather than a part pose.
+///
+/// # The right wing
+///
+/// `setupAnim` gives it `yRot = -left.yRot` and `zRot = -left.zRot`, and
+/// leaves `xRot` and `y` shared. Two of three negated, and it is the two that
+/// are *not* negated that make a "just mirror everything" version wrong: a
+/// mirrored `xRot` pitches one wing up and the other down.
+#[must_use]
+pub fn elytra_wing_transform(
+    wing: ElytraWing,
+    x_rot: f32,
+    y_rot: f32,
+    z_rot: f32,
+    crouching: bool,
+) -> Mat4 {
+    let (y_rot, z_rot) = match wing {
+        ElytraWing::Left => (y_rot, z_rot),
+        ElytraWing::Right => (-y_rot, -z_rot),
+    };
+    let layer = Mat4::from_translation(Vec3::new(0.0, 0.0, 0.125));
+    let pivot = Mat4::from_translation(Vec3::new(
+        wing.pivot_x() / 16.0,
+        elytra_wing_y(crouching) / 16.0,
+        0.0,
+    ));
+    let rotate =
+        Mat4::from_rotation_z(z_rot) * Mat4::from_rotation_y(y_rot) * Mat4::from_rotation_x(x_rot);
+    layer * pivot * rotate
+}
+
 /// The texture layers to draw for an item sitting in `slot`, in draw order —
 /// empty when this item is not humanoid armour, or is armour for a *different*
 /// slot, or its material declares no layers for this slot's layer type.

@@ -980,6 +980,79 @@ pub fn player_cape_model() -> EntityModelDef {
     }
 }
 
+/// In-pack path of the elytra's own wing texture — the `wings` layer of
+/// `assets/minecraft/equipment/elytra.json`, whose sole entry is
+/// `{"texture": "minecraft:elytra", "use_player_texture": true}`.
+///
+/// This is a bare constant rather than an [`crate::equipment::ArmourLayerType`]
+/// variant on purpose. `wings` is a real `EquipmentClientInfo.LayerType`, but
+/// adding it to that enum would widen the *armour* layer-type space that
+/// `armour_layers` and the trim sprite id are keyed on, and an elytra has
+/// neither armour layers nor a trim. One texture, one constant.
+///
+/// `use_player_texture` is what lets a player's own cape (or a dedicated
+/// elytra texture) replace this — `WingsLayer.getPlayerElytraTexture` prefers
+/// `skin.elytra()`, then `skin.cape()` when the cape is shown, and falls back
+/// to this. [`crate::skin::ProfileTextures`] already parses both URLs.
+pub const ELYTRA_TEXTURE_PATH: &str =
+    "assets/minecraft/textures/entity/equipment/wings/elytra.png";
+
+/// The elytra's wings (`ElytraModel.createLayer`, 26.2): two 10x20x2 boxes
+/// inflated by 1.0, sharing one `(22, 0)` unwrap on a **64x32** sheet, hung
+/// off the wearer's **body** pivot.
+///
+/// Structured exactly as [`player_cape_model`] is, and for the same reason —
+/// a bare identity `"body"` part so a caller can pair the wing parts against
+/// the wearer's own `"body"` transform. The mirrored right wing is what makes
+/// one unwrap serve both sides.
+///
+/// # Why no rotation is baked, and why that is *not* the cape's reason
+///
+/// `createLayer` gives each wing a static
+/// `PartPose.offsetAndRotation(±5, 0, 0, PI/12, 0, ∓PI/12)`, and only the
+/// **offset** is reproduced here. The cape drops its static rotation because
+/// `setupAnim` *composes* an inverse onto it and the two cancel; this model
+/// drops its static rotation for the opposite mechanical reason —
+/// `ElytraModel.setupAnim` **assigns** `xRot`/`yRot`/`zRot` outright
+/// (`this.leftWing.xRot = state.elytraRotX;`), so the authored rotation is
+/// overwritten on every frame that runs and is never composed with anything.
+///
+/// The two conclusions coincide and the reasons do not, which is worth
+/// stating: a reader who ports this by analogy with the cape gets the right
+/// answer for the wrong reason, and would then get `y` wrong — `setupAnim`
+/// also assigns `y` (3.0 when crouching, 0.0 otherwise) while leaving `x` and
+/// `z` alone, so the `±5` **must** be baked and the `y` **must not** be.
+///
+/// The rest-pose angles are not lost either: `ElytraAnimationState`'s
+/// not-flying, not-crouching target is `(PI/12, 0, -PI/12)`, the same triple,
+/// which is why a standing player's wings look like the authored pose. See
+/// `lodestone_render::entity::elytra_rest_rotations`.
+#[must_use]
+pub fn elytra_model() -> EntityModelDef {
+    // One `texOffs(22, 0)` box per wing. The right wing is the mirrored copy,
+    // and its origin is `0` where the left's is `-10`: mirroring flips the X
+    // extent, so both describe the same 10-wide box on opposite sides of
+    // their own pivot.
+    let wing_grow = 1.0;
+    let left_wing = PartDef::new(PartPose::offset(5.0, 0.0, 0.0)).with_cube(
+        CubeDef::new([-10.0, 0.0, 0.0], [10.0, 20.0, 2.0], [22.0, 0.0]).grown(wing_grow),
+    );
+    let right_wing = PartDef::new(PartPose::offset(-5.0, 0.0, 0.0)).with_cube(
+        CubeDef::new([0.0, 0.0, 0.0], [10.0, 20.0, 2.0], [22.0, 0.0])
+            .grown(wing_grow)
+            .mirrored(),
+    );
+    let body = PartDef::new(PartPose::ZERO)
+        .with_child("left_wing", left_wing)
+        .with_child("right_wing", right_wing);
+    let root = PartDef::new(PartPose::ZERO).with_child("body", body);
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 32,
+        root,
+    }
+}
+
 #[cfg(test)]
 mod player_model_tests {
     use super::*;
