@@ -81,6 +81,56 @@ covers the collision box the registry declares, with three controls reproducing
 the specific ways it could have gone wrong. It also records the breeze's known
 0.619 shortfall, which is the missing wind funnel and nothing else.
 
+### The projectiles and effects with a cuboid rig, and the six that need a draw path
+
+The census's other entity bucket — *absent*, nothing draws it and nothing names
+it — split cleanly in two, and the split is the useful part of this section.
+
+Six had a real cuboid rig or reused one, and are now corpus entries or aliases.
+Sources under `.cache/mc/26.2/client-src/net/minecraft/client`:
+
+| corpus entry | vanilla layer | renderer | placement |
+|---|---|---|---|
+| `evoker_fangs` | `model/effects/EvokerFangsModel.createBodyLayer` | `EvokerFangsRenderer` | the mob placement — it really does flip and lift — with the renderer's `Ry(90 - yRot)` reached by a `π/2` root `y_rot` |
+| `shulker_bullet` | `ShulkerBulletModel.createBodyLayer` | `ShulkerBulletRenderer` | `non_living_vehicle_placement`, bob `0.15` |
+| `wither_skull` | declared inline in `WitherSkullRenderer.createSkullLayer` | `WitherSkullRenderer` | `non_living_vehicle_placement`, bob `0`, extra spin `180°` |
+| `llama_spit` | `LlamaSpitModel.createBodyLayer` | `LlamaSpitRenderer` | `projectile_pitch_offset_deg`, offset `0` |
+| `spawner_minecart`, `command_block_minecart` | the shared `MinecartModel` frame | `MinecartRenderer` | the minecart alias, as for the other four cart types |
+
+**The deviations, each one named rather than left to be discovered.** A fang
+draws in the layer's authored pose, which is the bite at full open with the base
+still buried — vanilla raises it out of the ground over the bite and shrinks it
+away at the end, both from a per-entity progress value. A shulker bullet tumbles
+on three axes at three rates in vanilla and gets a fixed orientation here,
+tolerable only because its three slabs are symmetric under a quarter turn; its
+1.5× translucent halo is a second pass and is absent. A wither skull loses the
+head *pitch* (this placement has no pitch term) and always draws the harmless
+sheet rather than `wither_invulnerable`. A llama spit draws `0.15` blocks low:
+vanilla lifts it in world space *before* its two rotations, and neither the
+projectile matrix nor a mesh offset can express that — a mesh offset would tilt
+with the shot.
+
+**The six that are left need a draw path, not a rig**, which is why none of them
+is a corpus entry away and why they were not attempted here:
+
+| subject | what vanilla draws |
+|---|---|
+| `painting` | a quad textured from the painting variant, sized by the variant |
+| `lightning_bolt` | procedural geometry rebuilt per frame from a seeded random walk |
+| `fishing_bobber` | a camera-facing billboard plus a line back to the caster's hand |
+| `dragon_fireball` | one camera-facing quad assembled vertex by vertex |
+| `firework_rocket` | an item model, billboarded — see below |
+| `ominous_item_spawner` | the carried item, spun and scaled in over 50 ticks |
+
+The last two are worth separating from the first four, because "not a
+`ThrownItemRenderer` registration" and "not drawn as an item" are two different
+claims and `thrown_item_for`'s doc used to run them together. A firework rocket
+*is* drawn exactly the way that table's members are drawn. What keeps it out is
+its inputs: its stack comes from the entity rather than from a default, and a
+crossbow-fired rocket is spun onto its flight axis by a metadata bit the draw
+record does not carry. Adding it to that table would change what the table means
+and take its parity gate's premise with it.
+
 ### Model name → texture
 
 `entity_texture_candidates(model_name)` returns in-jar paths in priority order.

@@ -268,17 +268,26 @@ fn canonical_model_name_for_type(entity_type: EntityType) -> Option<&'static str
         // createBodyLayer`) — the subclasses differ only in the block state
         // vanilla displays *inside* the cart, which `gpu/moving_blocks.rs`'s
         // `merge_minecart_contents` draws as a second, independent block-model
-        // pass, not a second corpus rig. Limited to the four entity types
-        // `lodestone_server::mobs::minecart::MinecartKind` actually spawns:
-        // `spawner_minecart` and `command_block_minecart` are real registry
-        // types this server never produces, and aliasing them ahead of that
-        // work would be an untested alias exactly like the ones
-        // `boat_model_name`'s own doc warns against — both are exhaustively
-        // *not* matched below, on purpose, rather than falling into a `_ =>`.
+        // pass, not a second corpus rig.
+        //
+        // All six subclasses, not the four this repo's own server spawns. The
+        // arm used to stop at four, on the reasoning that `spawner_minecart`
+        // and `command_block_minecart` are types "this server never produces"
+        // and aliasing them would be untested. Both halves were wrong as a
+        // reason to leave them out: the client joins *other people's* servers,
+        // where a spawner minecart is an ordinary thing to meet, and an alias is
+        // untested only until something tests it —
+        // `tests/invisible_but_solid_rigs.rs` now resolves every one of the six
+        // from its registry path and measures the drawn box against the
+        // registry's own. Vanilla registers both of them through the same
+        // minecart renderer as the other four, differing only in the layer that
+        // supplies the *contents*, which is not this table's business.
         EntityType::ChestMinecart
         | EntityType::FurnaceMinecart
         | EntityType::TntMinecart
-        | EntityType::HopperMinecart => {
+        | EntityType::HopperMinecart
+        | EntityType::SpawnerMinecart
+        | EntityType::CommandBlockMinecart => {
             return Some("minecart");
         }
         _ => {}
@@ -1156,6 +1165,21 @@ pub fn non_living_vehicle_placement(model_name: &str) -> Option<(f32, f32)> {
         // entity's yaw is always zero and the knot is a 6×6 box centred on its
         // own pivot, so the half-turn only mirrors the sheet across X.
         "leash_knot" => Some((0.0, 0.0)),
+        // A wither skull's renderer applies the flip and *nothing else*: the
+        // skull's facing comes from its model's own head rotation, set from the
+        // entity's yaw. Composed under the flip that is `Ry(-yaw)`, and this
+        // placement's `Ry(180 - yaw)` reaches it exactly at an extra spin of
+        // 180° — an identity, not a fitted number. The head's matching *pitch*
+        // is dropped: this placement has no pitch term, so a skull climbing or
+        // diving stays level.
+        "wither_skull" => Some((0.0, 180.0)),
+        // A shulker bullet is lifted `0.15` and then tumbled on all three axes
+        // at three rates off its own age, over which a second translucent copy
+        // is drawn at 1.5×. Neither the tumble nor the halo is available to a
+        // rig with one mesh, one sheet and no clock, so the bullet gets a fixed
+        // orientation — tolerable only because its three slabs make it symmetric
+        // under any quarter turn. The bob is real and is kept.
+        "shulker_bullet" => Some((0.15, 0.0)),
         _ => None,
     }
 }
@@ -1211,6 +1235,18 @@ pub fn projectile_pitch_offset_deg(model_name: &str) -> Option<f32> {
     match model_name {
         "arrow" | "spectral_arrow" => Some(0.0),
         "trident" => Some(90.0),
+        // A llama spit's renderer is this placement term for term —
+        // `Ry(yRot - 90°)` then `Rz(xRot)`, no flip and no feet lift — so it
+        // belongs here rather than on the mob path, with no offset for the same
+        // reason as the arrow: its cluster is authored around the shot axis.
+        //
+        // One deviation, and it is not expressible here: vanilla lifts the spit
+        // `0.15` blocks in **world** space *before* the two rotations. A mesh
+        // offset would rotate with the spit instead of staying vertical, and
+        // this matrix has no pre-rotation translation, so the spit draws 0.15
+        // blocks low. Fixing it means a bob term on this placement, which every
+        // other user would pass zero for.
+        "llama_spit" => Some(0.0),
         _ => None,
     }
 }
@@ -3100,9 +3136,35 @@ pub struct ThrownItem {
 ///   existing `yaw`/`pitch` **are** those velocity-derived angles, so no velocity
 ///   plumbing was needed.
 ///
+/// # "Not a `ThrownItemRenderer` entry" and "not drawn as an item" are two claims
+///
+/// The note this paragraph replaced ran them together, listing
 /// `dragon_fireball`, `wither_skull`, `llama_spit`, `shulker_bullet`,
-/// `fishing_bobber`, `firework_rocket` and `end_crystal` all have their own
-/// dedicated renderers too, and are likewise absent.
+/// `fishing_bobber`, `firework_rocket` and `end_crystal` as "dedicated renderers
+/// too, and likewise absent". The first claim is true of all seven and this
+/// table's membership is exactly that set — a parity gate in
+/// `tests/thrown_and_held_item_pixels.rs` checks it against the vanilla
+/// registration list, so widening the table is widening what the table *means*.
+///
+/// The second claim is false of one, and knowing which matters to whoever picks
+/// the rest up. `FireworkEntityRenderer` **does** draw an item model billboarded
+/// on `camera.orientation`, exactly the way these entries are drawn. What keeps
+/// it out is not its geometry but its inputs: the stack comes from the entity
+/// rather than from a default, and a rocket fired from a crossbow is spun onto
+/// its flight axis by a metadata bit the draw record does not carry. Adding it
+/// here would make the table mean "types drawn as a billboarded item", which is
+/// a *different* table and would take the parity gate's premise with it.
+///
+/// Four of the other six now have corpus rigs of their own — `wither_skull`,
+/// `llama_spit`, `shulker_bullet` and `evoker_fangs` — placed by
+/// [`non_living_vehicle_matrix`] or [`projectile_model_matrix`]. They stay out of
+/// this table for the same reason the arrows do: an item sprite drawn over a mesh
+/// is two wrong things at once.
+///
+/// `dragon_fireball` and `fishing_bobber` are still absent and neither is an
+/// item: the first is a single camera-facing quad built vertex by vertex from a
+/// texture, the second a billboard plus a line back to the caster. Both need a
+/// draw path this crate does not have.
 #[must_use]
 pub fn thrown_item_for(type_path: &str) -> Option<ThrownItem> {
     // `(entity type, default item, scale, full_bright)`.
@@ -5028,12 +5090,13 @@ mod tests {
     /// `"minecart"` rig, matching vanilla's `AbstractMinecartRenderer` reusing
     /// one `MinecartModel` for every subclass.
     ///
-    /// `spawner_minecart`/`command_block_minecart` are the negative control:
-    /// real registry types, deliberately **not** aliased because
-    /// `lodestone_server::mobs::minecart::MinecartKind` never spawns them — if
-    /// this assertion started passing for those two, either the server grew a
-    /// producer this render-side alias table does not know about, or the alias
-    /// match arm above was widened past what it documents.
+    /// All six subclasses, including `spawner_minecart` and
+    /// `command_block_minecart`. Those two used to be a negative control here,
+    /// asserted to resolve `None` on the grounds that this repo's own server
+    /// never spawns them — a claim about the *server* standing in for a claim
+    /// about the *client*, which meets them on anyone else's. The control that
+    /// replaces it is the one that was always the real risk: a *non*-minecart
+    /// type must not pick up the rig by name.
     #[test]
     fn minecart_subclasses_share_the_plain_carts_frame() {
         for entity_type in [
@@ -5042,6 +5105,8 @@ mod tests {
             EntityType::FurnaceMinecart,
             EntityType::TntMinecart,
             EntityType::HopperMinecart,
+            EntityType::SpawnerMinecart,
+            EntityType::CommandBlockMinecart,
         ] {
             let ty = entity_type.path();
             let model = model_for_type(entity_type)
@@ -5052,13 +5117,15 @@ mod tests {
                 model.name
             );
         }
-        for entity_type in [EntityType::SpawnerMinecart, EntityType::CommandBlockMinecart] {
-            let ty = entity_type.path();
+        // The control the roster above needs: the alias is an enum match, so a
+        // type whose *path* merely ends in `minecart` must not reach the rig,
+        // and a real mob must not either. `minecart` is not a suffix rule and
+        // this is what says so.
+        for absent in ["boat_minecart", "minecart_of_holding", "pig", "chest"] {
             assert!(
-                model_for_type(entity_type).is_none(),
-                "{ty} unexpectedly has a corpus model — this repo's server never spawns \
-                 it, so this control should still be None; if the server grew a producer, \
-                 add the alias and update this test's roster rather than deleting the control"
+                canonical_model_name(absent) != Some("minecart"),
+                "`{absent}` resolved to the minecart rig — the alias is an enum match on \
+                 six real registry types, not a name rule"
             );
         }
     }
@@ -5225,7 +5292,12 @@ mod tests {
             match type_path {
                 "player" | "mannequin" => return Some("player_wide"),
                 "bogged" => return Some("skeleton"),
-                "chest_minecart" | "furnace_minecart" | "tnt_minecart" | "hopper_minecart" => {
+                "chest_minecart"
+                | "furnace_minecart"
+                | "tnt_minecart"
+                | "hopper_minecart"
+                | "spawner_minecart"
+                | "command_block_minecart" => {
                     return Some("minecart");
                 }
                 _ => {}
@@ -5375,7 +5447,12 @@ mod tests {
                 projectiles.push(entry.name);
             }
         }
-        assert_eq!(projectiles, ["arrow", "spectral_arrow", "trident"]);
+        // Corpus order, not alphabetical — this is the sweep's own iteration
+        // order, so a rig moving in the corpus is visible here too.
+        assert_eq!(
+            projectiles,
+            ["llama_spit", "arrow", "spectral_arrow", "trident"]
+        );
         // A spot-check of the negative direction that names real mobs rather than
         // relying on the sweep above: these are the two families whose renderer is
         // most often assumed to be an `EntityRenderer`.
