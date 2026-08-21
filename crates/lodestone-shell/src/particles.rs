@@ -930,9 +930,19 @@ impl Particles {
 
         let mut unresolved = 0usize;
         let mut sheet_drawn = 0usize;
+        // The first sprite that failed to resolve this frame, so the debug line
+        // below can *name* it. An `unresolved` count alone says a particle was
+        // discarded and not which sheet or block state did it, and those have
+        // completely different causes: a `Sheet` miss means the atlas was never
+        // installed or the frame names a texture the pack lacks, while a
+        // `BlockState` miss means the model set has no `#particle` for that id.
+        let mut first_unresolved: Option<SpriteSource> = None;
         for q in &self.quads {
             let Some((rect, atlas)) = self.sprite_rect(q.sprite) else {
                 unresolved += 1;
+                if first_unresolved.is_none() {
+                    first_unresolved = Some(q.sprite);
+                }
                 continue;
             };
             if atlas == SpriteAtlas::Sheet {
@@ -983,6 +993,25 @@ impl Particles {
             unresolved,
             sheet_drawn,
         };
+        // Whatever declines to draw a particle says why. A discarded particle
+        // and one that never spawned look identical from outside, and the only
+        // thing that separates them is a line like this — the counter alone
+        // reads as health right up until you notice the screen is empty.
+        //
+        // Logged only when something was actually dropped, and naming the
+        // *first* offending sprite rather than every one: this runs once per
+        // frame, and a burst that fails to resolve fails identically 64 times.
+        if unresolved > 0 {
+            tracing::debug!(
+                target: "particles",
+                unresolved,
+                total = frame.drawn + unresolved,
+                sprite = ?first_unresolved,
+                sheet_uv_entries = self.sheet_uv.len(),
+                state_uv_entries = self.state_uv.len(),
+                "particles simulated but not drawn: their sprite resolved to no atlas rect"
+            );
+        }
         self.last = frame;
         frame
     }
