@@ -205,6 +205,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   book-content fields at all — a written or writable book anywhere in an inventory
   silently truncated the rest of whatever packet carried it, the same decode-cliff
   class as `trim`/`map_id`/`pot_decorations`/`profile`.
+- [Written books](./book-reading.md) — Reading a signed `minecraft:written_book`:
+  its title, author and copy generation on the item itself, and the screen that opens
+  when you right-click one. Vanilla's `WrittenBookContent` component plus
+  `BookViewScreen`, the read-only counterpart of [book-and-quill
+  editing](./book-editing.md).
 - [Brain target acquisition: nearby-entity perception and OR-gated activities](./brain-target-acquisition.md) —
   Two small additions to `lodestone_entity::brain` that a previous investigation
   identified as the actual blocker for goat ram and villager panic — not a missing

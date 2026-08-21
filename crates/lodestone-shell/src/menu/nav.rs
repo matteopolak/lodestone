@@ -31,6 +31,7 @@
 //! that silently loses the entry the player just added.
 
 use super::book_edit;
+use super::book_view;
 use super::command_block;
 use super::edit_box::EditBox;
 use super::sign_edit;
@@ -1419,6 +1420,12 @@ pub struct MenuNav {
     /// unlike [`Self::sign_edit`], so there is equally no non-empty default
     /// to construct eagerly.
     book_edit: Option<book_edit::BookEditState>,
+    /// The signed-book reading screen's page state, held for exactly the
+    /// same reason [`Self::book_edit`] is, and `None` whenever
+    /// [`Screen::BookView`](super::Screen::BookView) is not showing. A stack
+    /// is either writable or written, so this and [`Self::book_edit`] are
+    /// never both `Some`.
+    book_view: Option<book_view::BookViewState>,
     /// The Spectator Menu's roster and expand/hover state (issue #613's
     /// `TeleportToEntity` remainder). **Not** an `Option` like
     /// [`Self::book_edit`] above — this screen's roster is live-refreshed
@@ -1572,6 +1579,7 @@ impl MenuNav {
             command_block: None,
             sign_edit: None,
             book_edit: None,
+            book_view: None,
             spectator_menu: spectator_menu::SpectatorMenuState::default(),
             resource_pack_prompt: None,
             resource_pack_answered_id: None,
@@ -2408,6 +2416,14 @@ impl MenuNav {
         self.book_edit.as_ref()
     }
 
+    /// The signed-book reading screen's state, or `None` when
+    /// [`Screen::BookView`] is not showing — see [`Self::book_view`]'s own
+    /// field doc.
+    #[must_use]
+    pub fn book_view(&self) -> Option<&book_view::BookViewState> {
+        self.book_view.as_ref()
+    }
+
     /// The Spectator Menu's live state — never `None` (see
     /// [`Self::spectator_menu`]'s own field doc), drawn only while
     /// [`Screen::SpectatorMenu`] is up.
@@ -2578,6 +2594,25 @@ impl MenuNav {
     pub fn close_book_edit(&mut self, ui: &mut UiState) {
         self.book_edit = None;
         ui.close_book_edit();
+    }
+
+    /// Opens the signed-book reading screen with `open`'s pages, read off
+    /// the `minecraft:written_book` in hand. Only from [`Screen::Playing`],
+    /// matching [`Self::open_book_edit`]'s own guard: this screen is
+    /// client-local too, and reached by the other branch of the same fork.
+    pub fn open_book_view(&mut self, ui: &mut UiState, open: book_view::BookViewOpen) {
+        if ui.screen() == Screen::Playing {
+            self.book_view = Some(book_view::BookViewState::new(open));
+            ui.open_book_view();
+        }
+    }
+
+    /// Closes the signed-book reading screen. Unlike
+    /// [`Self::close_book_edit`] there is nothing for a caller to take
+    /// first: no exit from this screen sends anything.
+    pub fn close_book_view(&mut self, ui: &mut UiState) {
+        self.book_view = None;
+        ui.close_book_view();
     }
 
     /// Opens the Spectator Menu at its root view. Only from
@@ -2782,6 +2817,12 @@ impl MenuNav {
             // above: plain mouse-highlight tracking, no keyboard row cursor.
             Screen::BookEdit => {
                 if let Some(state) = self.book_edit.as_mut() {
+                    state.hovered = Some(row);
+                }
+            }
+            // The reading screen — same shape as `BookEdit` above.
+            Screen::BookView => {
+                if let Some(state) = self.book_view.as_mut() {
                     state.hovered = Some(row);
                 }
             }
@@ -2994,6 +3035,11 @@ impl MenuNav {
         // click on any other row is a button press.
         if ui.screen() == Screen::BookEdit {
             return self.activate_book_edit_row(ui, row);
+        }
+        // The reading screen — every row is a button (page back, page
+        // forward, Done); there is no field on it at all.
+        if ui.screen() == Screen::BookView {
+            return self.activate_book_view_row(ui, row);
         }
         // The Spectator Menu (issue #613's `TeleportToEntity` remainder) —
         // same #391 shape: every row is a button (a team category, a
@@ -3305,6 +3351,10 @@ impl MenuNav {
             // the title field, which the catch-all below (Escape only)
             // cannot do.
             Screen::BookEdit => self.key_book_edit(ui, key),
+            // The reading screen — its own arm because it binds two keys to
+            // page turns, which the catch-all below, being Escape-only,
+            // would drop.
+            Screen::BookView => self.key_book_view(ui, key),
             // The Spectator Menu (issue #613's `TeleportToEntity`
             // remainder) — its own arm for the same reason as its siblings
             // above: the catch-all's `UiState::on_escape` would work too
@@ -3880,6 +3930,62 @@ impl MenuNav {
                 _ => MenuAction::None,
             }
         }
+    }
+
+    /// Keys on the signed-book reading screen. Escape and Done are the same
+    /// thing here (nothing is ever sent), and Up/Down turn the page. Every
+    /// other key is inert: there is no field on this screen to type into.
+    ///
+    /// **Up/Down are an approximation, and the divergence is named rather
+    /// than hidden**: `BookViewScreen.keyPressed` binds GLFW `266`/`267` —
+    /// Page Up and Page Down — to the back and forward buttons, and
+    /// [`MenuKey`] carries no variant for either, the same gap
+    /// [`super::sign_edit`]'s own module doc records for Left/Right/Home/End.
+    /// The arrow keys are the nearest thing this shell can express and are
+    /// otherwise unused on this screen, so nothing is shadowed by taking
+    /// them. Wiring the real pair means adding them to [`MenuKey`], which is
+    /// a keyboard-layer change and not this screen's to make.
+    fn key_book_view(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        match key {
+            MenuKey::Escape => {
+                self.close_book_view(ui);
+                MenuAction::None
+            }
+            MenuKey::Up => {
+                if let Some(state) = self.book_view.as_mut() {
+                    state.page_back();
+                }
+                MenuAction::None
+            }
+            MenuKey::Down => {
+                if let Some(state) = self.book_view.as_mut() {
+                    state.page_forward();
+                }
+                MenuAction::None
+            }
+            _ => MenuAction::None,
+        }
+    }
+
+    /// What clicking a row on the signed-book reading screen does. Shared by
+    /// [`Self::click`]'s `BookView` arm.
+    ///
+    /// The two page rows are guarded on the state's own
+    /// `can_page_back`/`can_page_forward` rather than only on the frame's
+    /// `enabled` flag, so a click that arrives against a stale frame cannot
+    /// walk off either end — `BookViewScreen` achieves the same by hiding
+    /// the buttons outright (`updateButtonVisibility`).
+    fn activate_book_view_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+        let Some(state) = self.book_view.as_mut() else {
+            return MenuAction::None;
+        };
+        match row {
+            book_view::page_row::PREVIOUS => state.page_back(),
+            book_view::page_row::NEXT => state.page_forward(),
+            book_view::page_row::DONE => self.close_book_view(ui),
+            _ => {}
+        }
+        MenuAction::None
     }
 
     /// What clicking a row on the Spectator Menu does (issue #613's
@@ -5760,6 +5866,18 @@ pub fn sign_edit_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super:
 /// to disagree with it.
 #[must_use]
 pub fn book_edit_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super::render::MenuFrame<'a>> {
+    // **Both book screens, one function.** `app/redraw.rs`'s overlay block
+    // calls this once by name, and the read-only `Screen::BookView` needs a
+    // draw for exactly the same reason `Screen::BookEdit` does
+    // (`menu::render::frame_for` has no arm for an overlay). Folding the
+    // second screen in here rather than adding a ninth overlay block keeps
+    // the "one construction, two consumers" property this function exists
+    // for — `on_screen_frame` hit-tests clicks against whatever this
+    // returns — and the two screens are mutually exclusive by construction,
+    // since a stack is either writable or written.
+    if ui.is_book_view_open() {
+        return nav.book_view().map(super::render::book_view_frame);
+    }
     if !ui.is_book_edit_open() {
         return None;
     }

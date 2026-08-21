@@ -194,6 +194,7 @@ pub(super) fn tooltip_lines(stack: &ItemStack, advanced: bool) -> Vec<TooltipLin
     // one of the two `extend`s below is ever non-empty.
     lines.extend(potion_lore_lines(stack));
     lines.extend(enchantment_lore_lines(stack));
+    lines.extend(book_lore_lines(stack));
     if !advanced {
         return lines;
     }
@@ -379,6 +380,70 @@ fn potency_numeral(amplifier: u8) -> &'static str {
         4 => "V",
         5 => "VI",
         _ => "",
+    }
+}
+
+/// `WrittenBookContent.addToTooltip` for a signed
+/// `minecraft:written_book` — the author and copy-generation lines. Empty for
+/// every other stack, including a `minecraft:writable_book`
+/// (`WritableBookContent` is not a `TooltipProvider` at all: an unsigned book
+/// has no author and no generation).
+///
+/// Two lines, in the method's own order, both `ChatFormatting.GRAY`:
+///
+/// 1. `book.byAuthor` — `"by %1$s"` — **skipped when the author is blank**
+///    (`StringUtil.isBlank`), which is what an unattributed `/give`-built
+///    book carries.
+/// 2. `book.generation.<n>` — `"Original"` / `"Copy of original"` /
+///    `"Copy of a copy"` / `"Tattered"`, unconditional. Vanilla's own
+///    `WrittenBookContent` constructor rejects anything outside `0..=3`, and
+///    [`lodestone_model::WrittenBookContent::generation`] is a `u8`, so an
+///    out-of-range value can only reach here from a non-vanilla server; it
+///    falls back to `"Original"` rather than printing a raw key.
+///
+/// The strings are English literals for the same reason every other line in
+/// this module is one — no language table reaches here; see
+/// [`tooltip_lines`]'s own note.
+///
+/// The book's **title** is not a line here: it is the item's display *name*,
+/// resolved by `lodestone_game::item::styled_hover_name` through vanilla's
+/// `ItemStack.getCustomName()` fallback, so it is already the tooltip's first
+/// line via [`title_line`].
+fn book_lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
+    let Some(content) = stack.written_book_content() else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    let author = content.author.trim();
+    if !author.is_empty() {
+        lines.push(TooltipLine {
+            text: format!("by {author}"),
+            colour: GRAY,
+            spans: None,
+        });
+    }
+    lines.push(TooltipLine {
+        text: book_generation_name(content.generation).to_string(),
+        colour: GRAY,
+        spans: None,
+    });
+    lines
+}
+
+/// `book.generation.<n>`'s four `en_us.json` strings, in
+/// [`lodestone_model::WrittenBookContent::generation`]'s own order.
+///
+/// Shared with the book-view screen's header
+/// (`crate::menu::book_view`), which draws the identical
+/// line — one table, so the tooltip and the open book can never disagree
+/// about what a copy of a copy is called.
+#[must_use]
+pub(crate) fn book_generation_name(generation: u8) -> &'static str {
+    match generation {
+        1 => "Copy of original",
+        2 => "Copy of a copy",
+        3 => "Tattered",
+        _ => "Original",
     }
 }
 
@@ -1292,5 +1357,180 @@ mod tests {
             !has_alpha(&b2.verts, BUNDLE_SLOT_HIGHLIGHT[3]),
             "control: a selection for a different slot must not highlight this one"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Written books: name and tooltip, from the wire
+    // -------------------------------------------------------------------
+
+    /// A `minecraft:written_book`'s title, author and copy generation, taken
+    /// **through the producer** rather than through a hand-built stack.
+    ///
+    /// This is the discipline CLAUDE.md's evidence section requires and the
+    /// reason this gate is longer than the two assertions at the end of it: a
+    /// tooltip fed a `lodestone_game::item::ItemStack` this test constructed
+    /// would prove the tooltip and nothing about whether a real book ever
+    /// reaches it. The chain here is production's, end to end:
+    ///
+    /// 1. `CONTAINER_SET_SLOT` bytes, transcribed from
+    ///    `ClientboundContainerSetSlotPacket`'s and
+    ///    `WrittenBookContent.STREAM_CODEC`'s wire order — **not** produced by
+    ///    any encoder in this workspace, so a symmetric misunderstanding in
+    ///    our own writer cannot make this pass.
+    /// 2. The adapter `lodestone_registry::adapter_for_protocol(776)` returns
+    ///    — the same call `net.rs`'s `run()` makes.
+    /// 3. `lodestone_game::menus::Menus::apply`, the same fold `SessionMenus`
+    ///    runs for every real `SET_SLOT`.
+    /// 4. `styled_hover_name` and [`tooltip_lines`], read off the slot the
+    ///    fold wrote.
+    ///
+    /// The `written_book_content` component was decodable before this and
+    /// reached nowhere: `ItemStack::written_book_content` had **zero**
+    /// production readers, so a signed book showed as "Written Book" with no
+    /// author and no generation, which is what the report was.
+    ///
+    /// Fixture values are pairwise distinct on purpose — generation `2`
+    /// (neither the `0` a fresh signature carries nor a value shared with any
+    /// count in the frame), a title and author that are different words, and
+    /// two differing pages — so a transposition of the two adjacent strings
+    /// cannot survive.
+    #[cfg(feature = "live")]
+    #[test]
+    fn a_written_book_off_the_wire_shows_its_title_author_and_generation() {
+        use lodestone_model::{ClientEvent, ConnectionState, Directive};
+
+        /// VarInt, 7 payload bits per byte with the MSB as continuation.
+        fn varint(mut value: i32, out: &mut Vec<u8>) {
+            loop {
+                let byte = (value & 0x7F) as u8;
+                value = ((value as u32) >> 7) as i32;
+                if value == 0 {
+                    out.push(byte);
+                    return;
+                }
+                out.push(byte | 0x80);
+            }
+        }
+        /// A protocol string: VarInt byte length, then UTF-8.
+        fn string(value: &str, out: &mut Vec<u8>) {
+            varint(i32::try_from(value.len()).expect("short fixture"), out);
+            out.extend_from_slice(value.as_bytes());
+        }
+        /// A chat component in network NBT: the root tag id followed
+        /// immediately by its payload, with no name — a plain-literal page is
+        /// `TAG_String` (id 8), whose payload is a big-endian `u16` length
+        /// then the bytes.
+        fn nbt_string_component(value: &str, out: &mut Vec<u8>) {
+            out.push(0x08);
+            out.extend_from_slice(
+                &u16::try_from(value.len()).expect("short fixture").to_be_bytes(),
+            );
+            out.extend_from_slice(value.as_bytes());
+        }
+
+        // The slot in `Menu`'s index space that is hotbar slot 0.
+        const HOTBAR_0_MENU_SLOT: i16 = 36;
+        // `minecraft:container_set_slot`'s protocol-776 clientbound id, from
+        // Mojang's own `packets.json` (the same table
+        // `lodestone_v770::packet_ids` is generated from). Written here
+        // rather than imported because the shell must not name a protocol
+        // family directly -- that is the version seam `just check-seam`
+        // guards.
+        const CONTAINER_SET_SLOT: i32 = 20;
+        // `minecraft:written_book_content`'s data-component-type id,
+        // resolved by searching the committed generated table through its own
+        // public accessor rather than written as a literal, so a registry
+        // reorder fails here instead of silently decoding as a neighbouring
+        // component. The bound is generous -- the table is far shorter.
+        let component_id = (0..1024)
+            .find(|id| {
+                lodestone_data::data_component_types::component_type_name(*id)
+                    == Some("minecraft:written_book_content")
+            })
+            .expect("written_book_content is a real data component type");
+
+        let mut payload = Vec::new();
+        varint(0, &mut payload); // container id 0 -- the player inventory
+        varint(0, &mut payload); // state id
+        payload.extend_from_slice(&HOTBAR_0_MENU_SLOT.to_be_bytes());
+        varint(1, &mut payload); // stack count
+        varint(
+            lodestone_data::items::item_id("minecraft:written_book")
+                .expect("written_book is a real item"),
+            &mut payload,
+        );
+        varint(1, &mut payload); // one added component
+        varint(0, &mut payload); // no removed components
+        varint(component_id, &mut payload);
+        string("Wandering Notes", &mut payload); // title
+        payload.push(0x00); // ...with no filtered alternate
+        string("Steve", &mut payload); // author
+        varint(2, &mut payload); // generation: a copy of a copy
+        varint(2, &mut payload); // two pages
+        nbt_string_component("First page", &mut payload);
+        payload.push(0x00); // no filtered alternate
+        nbt_string_component("Second page", &mut payload);
+        payload.push(0x00);
+        payload.push(0x01); // resolved
+
+        let adapter = lodestone_registry::adapter_for_protocol(776)
+            .expect("the `live` feature compiles a family in for protocol 776");
+        let mut world = lodestone_world::World::new();
+        let directives = adapter
+            .handle_packet(
+                &mut world,
+                ConnectionState::Play,
+                CONTAINER_SET_SLOT,
+                &payload,
+            )
+            .expect("a byte-accurate SET_SLOT payload must decode");
+        let Some(Directive::Emit(event @ ClientEvent::ContainerSlot { .. })) =
+            directives.into_iter().next()
+        else {
+            panic!("expected a single ContainerSlot emit");
+        };
+
+        let mut menus = lodestone_game::menus::Menus::new();
+        assert!(
+            menus.apply(&event),
+            "control: the fold must accept the event, or everything below reads \
+             an untouched inventory"
+        );
+        let stack = menus
+            .player_native(0)
+            .expect("control: the book must land in hotbar slot 0")
+            .clone();
+
+        assert_eq!(
+            lodestone_game::item::styled_hover_name(&stack, &|_| None),
+            "Wandering Notes",
+            "a signed book's display name is its own title -- vanilla's \
+             `ItemStack.getCustomName()` falls back to \
+             `written_book_content.title` -- not the item's \"Written Book\""
+        );
+
+        let lines = tooltip_lines(&stack, false);
+        let lines: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(
+            lines,
+            vec!["Wandering Notes", "by Steve", "Copy of a copy"],
+            "`WrittenBookContent.addToTooltip` adds `book.byAuthor` then \
+             `book.generation.<n>`, under the title line"
+        );
+    }
+
+    /// The negative half, and the control that the three lines above are the
+    /// book's and not something every stack gets: an **unsigned**
+    /// `minecraft:writable_book` is not a `TooltipProvider` in vanilla at all,
+    /// so it keeps its plain item name and gains no author or generation line.
+    #[test]
+    fn an_unsigned_book_gains_no_author_or_generation_line() {
+        let stack = ItemStack::new(
+            "minecraft:writable_book".parse().expect("valid id"),
+            1,
+        );
+        let lines = tooltip_lines(&stack, false);
+        let lines: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(lines, vec!["Writable Book"]);
     }
 }

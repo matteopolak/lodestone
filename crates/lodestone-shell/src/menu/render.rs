@@ -64,6 +64,7 @@ use crate::hud::VanillaFont;
 use crate::hud::glyph_rows;
 use crate::hud::item_icon::{ColourStream, push_sprite_quad};
 use crate::menu::book_edit;
+use crate::menu::book_view;
 use crate::menu::command_block;
 use crate::menu::edit_box::{self, EditBox};
 use crate::menu::layout;
@@ -117,7 +118,8 @@ pub use measure::{
 pub use origin::{Origin, Slot};
 pub use renderer::MenuRenderer;
 pub use screens::{
-    book_edit_frame, chunk_grid_dy, command_block_frame, death_frame, loading_frame,
+    book_edit_frame, book_view_frame, chunk_grid_dy, command_block_frame, death_frame,
+    loading_frame,
     loading_frame_with_progress, loading_frame_with_progress_and_grid, pause_frame,
     sign_edit_frame, spectator_menu_frame,
 };

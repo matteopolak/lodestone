@@ -50,6 +50,7 @@ pub mod advancement_data;
 pub mod advancement_tree;
 pub mod advancements;
 pub mod book_edit;
+pub mod book_view;
 pub mod command_block;
 pub mod confirm;
 pub mod create_world;
@@ -228,6 +229,22 @@ pub enum Screen {
     /// [`crate::menu::book_edit::BookEditState::to_save_action`]/
     /// [`to_sign_action`](crate::menu::book_edit::BookEditState::to_sign_action).
     BookEdit,
+    /// The signed-book reading screen: vanilla's `BookViewScreen`, opened by
+    /// using a `minecraft:written_book` in hand — see
+    /// [`crate::menu::book_view`]'s module doc.
+    ///
+    /// [`Screen::BookEdit`]'s read-only sibling and the same overlay shape in
+    /// every respect (client-local, no server round trip to open, pointer
+    /// released, world kept rendering behind it), with one simplification: it
+    /// has no wire traffic at all, so **every** exit — Done or Escape —
+    /// sends nothing, and there is no Cancel-versus-Done distinction to make.
+    ///
+    /// A stack is either writable or written, never both, so this screen and
+    /// [`Screen::BookEdit`] can never be reachable from the same click.
+    ///
+    /// Opened by [`open_book_view`](Self::open_book_view); closed by
+    /// [`close_book_view`](Self::close_book_view).
+    BookView,
     /// The Spectator Menu — vanilla's `SpectatorMenu`/`SpectatorGui`, opened
     /// by a hotbar-number key while in spectator mode. Issue #613's
     /// `TeleportToEntity` remainder — see
@@ -451,7 +468,7 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 25] = [
+    pub const ALL: [Screen; 26] = [
         Screen::MainMenu,
         Screen::ServerList,
         Screen::ServerEdit,
@@ -465,6 +482,7 @@ impl Screen {
         Screen::CommandBlockEdit,
         Screen::SignEdit,
         Screen::BookEdit,
+        Screen::BookView,
         Screen::SpectatorMenu,
         Screen::Paused,
         Screen::Death,
@@ -633,6 +651,12 @@ impl UiState {
     #[must_use]
     pub fn is_book_edit_open(&self) -> bool {
         self.screen == Screen::BookEdit
+    }
+
+    /// Whether the signed-book reading screen is open over the world.
+    #[must_use]
+    pub fn is_book_view_open(&self) -> bool {
+        self.screen == Screen::BookView
     }
 
     /// Whether the Spectator Menu is open over the world.
@@ -841,6 +865,8 @@ impl UiState {
                     | Screen::SignEdit
                     // Same reasoning as `Screen::SignEdit` immediately above.
                     | Screen::BookEdit
+                    // And for its read-only sibling.
+                    | Screen::BookView
                     | Screen::Paused
                     | Screen::Death
                     | Screen::Error
@@ -1329,6 +1355,25 @@ impl UiState {
         }
     }
 
+    /// Open the signed-book reading screen over the world. Only from
+    /// [`Screen::Playing`], matching [`open_book_edit`](Self::open_book_edit)'s
+    /// own guard — the two are reached by the same client-local fork on the
+    /// held item (see [`Screen::BookView`]'s own doc).
+    pub fn open_book_view(&mut self) {
+        if self.screen == Screen::Playing {
+            self.screen = Screen::BookView;
+        }
+    }
+
+    /// Close the signed-book reading screen back to the world — Done or
+    /// Escape, which are the same thing here: this screen sends nothing on
+    /// either.
+    pub fn close_book_view(&mut self) {
+        if self.screen == Screen::BookView {
+            self.screen = Screen::Playing;
+        }
+    }
+
     /// Open the Spectator Menu over the world. Only from [`Screen::Playing`],
     /// matching [`open_book_edit`](Self::open_book_edit)'s own guard — this
     /// screen is reached the same client-local way (see
@@ -1388,6 +1433,11 @@ impl UiState {
             // vanilla's un-overridden `Screen.onClose` for both screens it
             // folds), so this bare `close_book_edit()` never sends either.
             Screen::BookEdit => self.close_book_edit(),
+            // The reading screen has no send on any path at all (see
+            // `Screen::BookView`'s own doc), so unlike the two arms above
+            // this one is not a belt-and-braces stand-in for a sending
+            // interceptor -- it is the whole behaviour.
+            Screen::BookView => self.close_book_view(),
             // Belt-and-braces, matching `Screen::BookEdit`'s own reasoning
             // immediately above: `MenuNav::key_spectator_menu` intercepts
             // Escape first in production and sends nothing.
@@ -1542,6 +1592,7 @@ impl UiState {
                 | Screen::CommandBlockEdit
                 | Screen::SignEdit
                 | Screen::BookEdit
+                | Screen::BookView
                 | Screen::Paused
         ) {
             self.screen = Screen::Credits;
@@ -1571,6 +1622,7 @@ impl UiState {
                 | Screen::CommandBlockEdit
                 | Screen::SignEdit
                 | Screen::BookEdit
+                | Screen::BookView
                 | Screen::Paused
         ) {
             self.death_message = message;
