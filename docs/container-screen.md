@@ -119,19 +119,23 @@ wrong-shaped chest panel — exactly the "plausible but transposed" defect
 class this whole family of code exists to avoid, just discovered by writing
 the documentation rather than by looking at a screenshot.
 
-**Three of the six #28 screens knowingly draw fewer slots than vanilla's real
-UI**, because the missing piece is a whole button-driven sub-feature this
-tree has no data for, not a slot position: the loom's banner-pattern
-selection grid, the stonecutter's recipe-selection scroll list (both need a
-registry this tree does not decode, plus a `ContainerButtonClick` producer
-that does not exist yet), and — a gap #28 did **not** close — the beacon and
-the villager's trade screen are not modelled at all (different `imageWidth`,
-no slot layout, and for the villager an entire undecoded trade-offer packet
-family). See `SpecialLayout::Loom`/`SpecialLayout::Stonecutter`'s doc
-comments for the specifics. This is a deliberate, honest degrade: the three
-core slots each screen *does* draw are fully functional (place an item, take
-the result once the server computes and sends it), and nothing is drawn that
-looks clickable but silently does nothing.
+**The status annotation this paragraph used to carry has expired, and it is
+worth recording that it did.** It said the beacon and the villager's trade
+screen "are not modelled at all". Both now are — `SpecialLayout::Beacon` and
+`SpecialLayout::Merchant` each carry their own sheet, layout, widgets and
+`docs/` page, and the beacon's ten buttons blit their real
+`container/beacon/button*` state sprites with the effect's own
+`mob_effect/<id>` icon in front. Check the tree before quoting a "not
+modelled" line from any doc, this one included.
+
+What remains genuinely unmodelled is the loom's banner-pattern selection grid
+and the stonecutter's recipe-selection scroll list, where the missing piece is
+a whole button-driven sub-feature rather than a slot position; see
+`SpecialLayout::Loom`/`SpecialLayout::Stonecutter`'s own doc comments for what
+each still needs. That degrade is honest in the same way: the core slots each
+screen *does* draw are fully functional (place an item, take the result once
+the server computes and sends it), and nothing is drawn that looks clickable
+but silently does nothing.
 
 **The furnace family and the brewing stand draw real, live progress
 bars — not a degrade.** `AbstractFurnaceMenu`'s `litTime`/`litDuration`/
