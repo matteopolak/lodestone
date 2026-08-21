@@ -87,7 +87,7 @@
 //! left out of the *canonical fold* because raising them would mean
 //! inventing a mapping this module has no evidence for.
 
-use lodestone_model::{EntityMetadataUpdate, EntityVariant, Reported};
+use lodestone_model::{EntityMetadataUpdate, EntityVariant, Reported, Text};
 
 use crate::packets::metadata::{EntityMetadata, MetadataEntry, MetadataValue};
 
@@ -333,10 +333,19 @@ pub fn fold(mob_type: Option<&str>, metadata: &EntityMetadata) -> EntityMetadata
     }
 
     if let Some(name) = find_string(entries, IDX_CUSTOM_NAME) {
+        // `Text::literal` rather than `Text::from_legacy`: this family is out
+        // of scope for the styled-nametag fix (`v770` is the target; see
+        // `EntityMetadataUpdate::custom_name`'s doc), so this keeps the exact
+        // prior plain-text behaviour, just wrapped in the new `Text` shape
+        // rather than a bare `String`, to keep this crate compiling against
+        // that shared field's new type. `from_legacy` would additionally
+        // parse `§`-codes 1.8 lets a player type directly into a nametag, but
+        // that widens this family's own behaviour and is left for a change
+        // that actually owns `v47`.
         update.custom_name = Reported::Reported(if name.is_empty() {
             None
         } else {
-            Some(name.to_owned())
+            Some(Text::literal(name))
         });
     }
 
@@ -589,7 +598,7 @@ mod tests {
         assert_eq!(update.health, Some(11.5));
         assert_eq!(
             update.custom_name,
-            Reported::Reported(Some("Bob".to_owned()))
+            Reported::Reported(Some(Text::literal("Bob")))
         );
         assert_eq!(update.custom_name_visible, Some(true));
         assert_eq!(update.air_supply, Some(200));

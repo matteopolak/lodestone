@@ -72,12 +72,10 @@
 //! item identity that was already decoded, which is precisely the fail-closed
 //! behaviour this seam exists to remove.
 
-use lodestone_core::{
-    Error, Reader, Result, Writer, plain_text_from_nbt_component, read_network_nbt,
-};
+use lodestone_core::{Error, Reader, Result, Writer, read_network_nbt};
 use lodestone_model::{
     BlockPos, EntityAttributeModifier, EntityAttributeSnapshot, EntityMetadataUpdate, EntityPose,
-    EntityVariant, Identifier, ItemStack, Quat, Reported, Vec3f,
+    EntityVariant, Identifier, ItemStack, Quat, Reported, Text, Vec3f,
 };
 
 use lodestone_data::attribute_types::{attribute_id, attribute_name};
@@ -545,7 +543,11 @@ enum Value {
     Float(f32),
     Bool(bool),
     /// An optional text component (used by custom name). Inner `None` = cleared.
-    OptText(Option<String>),
+    ///
+    /// Carries the full styled component tree — see
+    /// [`EntityMetadataUpdate::custom_name`]'s doc for why this is `Text`
+    /// rather than a flattened plain string.
+    OptText(Option<Text>),
     /// A pose enum id.
     Pose(u32),
     /// A decoded `OPTIONAL_BLOCK_POS` value — `None` for vanilla's own
@@ -566,12 +568,12 @@ enum Value {
     /// [`IDX_DISPLAY_LEFT_ROTATION`]/[`IDX_DISPLAY_RIGHT_ROTATION`].
     Quaternion(Quat),
     /// A decoded `COMPONENT` (not the `OPTIONAL_COMPONENT` [`OptText`](Self::OptText)
-    /// already carries), reduced to plain text the same way `OptText` is.
-    /// Surfaced for `Display.TextDisplay.DATA_TEXT_ID` alone; the other
-    /// `COMPONENT` claimant in the jar dump (`MinecartCommandBlock.DATA_ID_LAST_OUTPUT`,
+    /// already carries), styled the same way `OptText` is. Surfaced for
+    /// `Display.TextDisplay.DATA_TEXT_ID` alone; the other `COMPONENT`
+    /// claimant in the jar dump (`MinecartCommandBlock.DATA_ID_LAST_OUTPUT`,
     /// a different index) is filtered out by index at the call site, not
     /// here — same pattern as [`OptBlockPos`](Self::OptBlockPos).
-    Text(String),
+    Text(Text),
     /// A resolved villager type/profession/level composite.
     Villager {
         kind: Identifier,
@@ -669,18 +671,22 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
             reader.string(MAX_STRING)?;
             Value::Consumed
         }
-        // Surfaced as plain text for `Display.TextDisplay.DATA_TEXT_ID` —
-        // every other `COMPONENT` claimant (`MinecartCommandBlock`'s last
+        // Surfaced as a styled component for `Display.TextDisplay.DATA_TEXT_ID`
+        // — every other `COMPONENT` claimant (`MinecartCommandBlock`'s last
         // output) is filtered out by index at the call site, matching
         // `OPTIONAL_BLOCK_POS`'s pattern. See [`Value::Text`].
+        //
+        // `Text::from_nbt` rather than `plain_text_from_nbt_component`: the
+        // latter flattens colour/bold/italic/underline/strikethrough away at
+        // decode time, before anything downstream ever sees them.
         SER_COMPONENT => {
             let component = read_network_nbt(reader)?;
-            Value::Text(plain_text_from_nbt_component(&component))
+            Value::Text(Text::from_nbt(&component))
         }
         SER_OPTIONAL_COMPONENT => {
             if reader.bool()? {
                 let component = read_network_nbt(reader)?;
-                Value::OptText(Some(plain_text_from_nbt_component(&component)))
+                Value::OptText(Some(Text::from_nbt(&component)))
             } else {
                 Value::OptText(None)
             }
@@ -1332,7 +1338,7 @@ mod tests {
         assert_eq!(md.flags, Some(0x01));
         assert_eq!(
             md.custom_name,
-            Reported::Reported(Some("Hoglet".to_string()))
+            Reported::Reported(Some(Text::literal("Hoglet")))
         );
         assert_eq!(md.custom_name_visible, Some(true));
         assert_eq!(md.pose, Some(EntityPose::Crouching));
@@ -1342,6 +1348,109 @@ mod tests {
             md.variant,
             Some(EntityVariant::Keyed("minecraft:cold".parse().unwrap()))
         );
+    }
+
+    /// The control this module's style fix exists to satisfy: a nested,
+    /// styled `text_display` component must survive decode with its colour
+    /// and formatting intact, not flattened to plain text.
+    ///
+    /// Before `SER_COMPONENT`/`SER_OPTIONAL_COMPONENT` were switched from
+    /// `plain_text_from_nbt_component` to `Text::from_nbt`, this assertion
+    /// failed: `md.display_text` held `Reported(Some(Text::literal("RBL")))`
+    /// — every colour and the bold flag silently dropped, exactly the report
+    /// this module exists to fix. Watched failing that way before this fix
+    /// landed.
+    ///
+    /// The fixture is deliberately discriminating, not a flat coloured
+    /// string: a root styled `red`, one `extra` child that is `bold` and
+    /// inherits the root's colour (no colour of its own), and a second
+    /// `extra` child that overrides the colour to `blue` and stays
+    /// non-bold. A single flat string cannot distinguish "style threaded
+    /// through" from "style discarded then re-applied uniformly" — this can.
+    #[test]
+    fn decodes_styled_nested_text_display_component_with_inheritance() {
+        use lodestone_core::{Nbt, NbtTag, write_network_nbt};
+        use lodestone_model::{TextColor, TextContent};
+
+        let component = Nbt::Compound(vec![
+            ("color".to_owned(), Nbt::String("red".to_owned())),
+            ("text".to_owned(), Nbt::String("R".to_owned())),
+            (
+                "extra".to_owned(),
+                Nbt::List {
+                    element_type: NbtTag::Compound,
+                    elements: vec![
+                        Nbt::Compound(vec![
+                            ("bold".to_owned(), Nbt::Byte(1)),
+                            ("text".to_owned(), Nbt::String("B".to_owned())),
+                        ]),
+                        Nbt::Compound(vec![
+                            ("color".to_owned(), Nbt::String("blue".to_owned())),
+                            ("text".to_owned(), Nbt::String("L".to_owned())),
+                        ]),
+                    ],
+                },
+            ),
+        ]);
+        let mut nbt_writer = Writer::default();
+        write_network_nbt(&mut nbt_writer, &component).expect("encode succeeds");
+
+        let mut bytes = Vec::new();
+        bytes.push(IDX_DISPLAY_VARIANT_PAYLOAD);
+        bytes.extend(varint(SER_COMPONENT));
+        bytes.extend(nbt_writer.into_vec());
+        bytes.push(EOF_MARKER);
+
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(
+            &mut reader,
+            TrackedEntity {
+                class: Some(MetadataClass::TextDisplay),
+                living: false,
+                mob: false,
+            },
+        )
+        .expect("decode")
+        .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+
+        let Reported::Reported(Some(text)) = md.display_text else {
+            panic!("text_display component was not surfaced: {:?}", md.display_text);
+        };
+
+        // The tree itself, not a flattened string: the root carries its own
+        // colour and no bold, and the two `extra` children are still two
+        // distinct nodes rather than concatenated text.
+        assert_eq!(text.content, TextContent::Literal("R".to_owned()));
+        assert_eq!(text.style.color, Some(TextColor::Red));
+        assert_eq!(text.style.bold, None);
+        assert_eq!(text.extra.len(), 2);
+        assert_eq!(text.extra[0].content, TextContent::Literal("B".to_owned()));
+        assert_eq!(text.extra[0].style.bold, Some(true));
+        assert_eq!(
+            text.extra[1].content,
+            TextContent::Literal("L".to_owned())
+        );
+        assert_eq!(text.extra[1].style.color, Some(TextColor::Blue));
+
+        // `to_spans` resolves inheritance down the tree: the bold child has
+        // no colour of its own and must inherit the root's red, while the
+        // second child's own blue overrides it. This is the shape a plain
+        // `String` could never have carried.
+        let spans = text.to_spans();
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].text, "R");
+        assert_eq!(spans[0].style.color, Some(TextColor::Red));
+        assert_eq!(spans[1].text, "B");
+        assert_eq!(
+            spans[1].style.color,
+            Some(TextColor::Red),
+            "a child with no colour of its own must inherit the parent's"
+        );
+        assert_eq!(spans[1].style.bold, Some(true));
+        assert_eq!(spans[2].text, "L");
+        assert_eq!(spans[2].style.color, Some(TextColor::Blue));
+        assert_eq!(spans[2].style.bold, None);
     }
 
     /// Index 1, `INT`, decodes to `air_supply` — the field this seam exists to

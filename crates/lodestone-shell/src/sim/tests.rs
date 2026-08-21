@@ -6815,7 +6815,9 @@ fn a_real_text_display_folded_through_ingest_and_extract_reaches_sim_display_dra
         lodestone_client::ClientEvent::EntityMetadataUpdated {
             entity_id: 9,
             metadata: lodestone_model::EntityMetadataUpdate {
-                display_text: lodestone_client::Reported::Reported(Some("hello".to_string())),
+                display_text: lodestone_client::Reported::Reported(Some(
+                    lodestone_model::Text::literal("hello"),
+                )),
                 ..Default::default()
             },
         },

@@ -153,6 +153,7 @@ use lodestone_entity::pose::{
     clamp_head_to_body, walk_target_speed,
 };
 use lodestone_model::event::{EntityVariant, EquipmentSlot, Reported};
+use lodestone_model::Text;
 use lodestone_physics::{
     CollisionView, EntityDimensions, EntityMotion, MoveContext, PhysicsProfile, Vec3d, mth,
     move_entity,
@@ -340,10 +341,15 @@ const YAW_EPS: f32 = 1.0e-2;
 /// file:line) and `docs/entity-nametags.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameTag {
-    /// The plain string to draw (already flattened through
-    /// [`lodestone_model::Text::to_plain_string`] — a translation-key custom
-    /// name, the rare case, draws its raw key rather than resolving through
-    /// the shell's chat language table; see `docs/entity-nametags.md`).
+    /// The string to draw, legacy-`§`-coded through
+    /// [`lodestone_model::Text::to_legacy_string`] — colour, bold, italic,
+    /// underline and strikethrough survive that encoding; a *hex* colour does
+    /// not (`to_legacy_string`'s own doc — legacy codes have no hex form),
+    /// the one documented gap left by carrying [`lodestone_model::Text`] this
+    /// far and then bridging into `gpu/nametag.rs`'s existing
+    /// `Text::from_legacy(&tag.text).to_spans()` draw path. A translation-key
+    /// custom name, the rare case, draws its raw key rather than resolving
+    /// through the shell's chat language table; see `docs/entity-nametags.md`.
     pub text: String,
     /// Whether the depth-testless, faded pass draws in addition to the normal
     /// depth-tested one — `false` while the entity is sneaking
@@ -3113,11 +3119,17 @@ fn resolve_entity_facts(
         .get::<CustomName>()
         .map_or(Reported::Unreported, |name| Reported::Reported(name.0.clone()));
     let custom_name_visible = entity.get::<CustomNameVisible>().map(|visible| visible.0);
-    let name_tag = if is_player {
+    // Resolved as a styled `Text`, not a flattened plain string — a player's
+    // tab-list `effective_name()` and a mob's `custom_name` metadata both
+    // carry colour/bold/italic/underline/strikethrough now (the fix this
+    // block exists for: nametags used to lose all of that at this exact
+    // resolution point via `to_plain_string`/`plain_text_from_nbt_component`).
+    let name_tag: Option<Text> = if is_player {
         uuid.and_then(|id| match tab_list.get(&id) {
             Some(entry) => {
-                let name = entry.effective_name().to_plain_string();
-                if is_blank_name_tag(&name) {
+                let styled = entry.effective_name();
+                let plain = styled.to_plain_string();
+                if is_blank_name_tag(&plain) {
                     None
                 } else {
                     // Same fallback the skin lookup two fields down already
@@ -3126,28 +3138,47 @@ fn resolve_entity_facts(
                     // `player_info_remove`, or a plugin NPC that adds then
                     // removes its entry while the entity stays spawned) can
                     // still recover the name instead of silently dropping
-                    // the tag.
-                    crate::remote_skins::remember_name(id, &name);
-                    Some(name)
+                    // the tag. The remembered fallback is plain text — see
+                    // the `None` arm below for why that is an acceptable,
+                    // disclosed narrowing rather than a silent one.
+                    crate::remote_skins::remember_name(id, &plain);
+                    Some(styled)
                 }
             }
             // No tab-list entry for this uuid *this frame* -- not the same
             // thing as "this player has no name". Prefer whatever name was
             // last resolved for this uuid over drawing no tag at all.
-            None => crate::remote_skins::last_known_name(&id),
+            //
+            // Only the plain string survives into `remember_name`'s cache
+            // (a small, uuid-keyed fallback used by more than just this
+            // call site), so a name recovered this way draws unstyled. This
+            // is narrower than the metadata-flattening bug this fix closes:
+            // it only degrades a tag on the specific frame a tab-list entry
+            // is transiently missing, not on every frame for every entity.
+            None => crate::remote_skins::last_known_name(&id).map(Text::literal),
         })
     } else {
         match &custom_name {
-            Reported::Reported(Some(name))
-                if custom_name_visible == Some(true) && !is_blank_name_tag(name) =>
+            Reported::Reported(Some(text))
+                if custom_name_visible == Some(true)
+                    && !is_blank_name_tag(&text.to_plain_string()) =>
             {
-                Some(name.clone())
+                Some(text.clone())
             }
             _ => None,
         }
-    }
-    .map(|text| NameTag {
-        text,
+    };
+    let name_tag = name_tag.map(|text| NameTag {
+        // `NameTag::text` stays a plain `String`: `gpu/nametag.rs`'s existing
+        // styled-draw bridge is `Text::from_legacy(&tag.text).to_spans()`,
+        // fixed at that call site (out of scope for this change — see its
+        // own module doc). `to_legacy_string` is the only encoding that
+        // bridge can read, and it carries colour/bold/italic/underline/
+        // strikethrough through intact; the one documented gap is a *hex*
+        // colour (`to_legacy_string` drops one, since legacy `§` codes have
+        // no hex form), which only a full `Text`-typed `NameTag::text` could
+        // close.
+        text: text.to_legacy_string(),
         // `Entity.isDiscrete()`'s shift-key bit (`0x02`) — unknown (no
         // metadata yet) defaults open, matching every other not-yet-reported
         // boolean here.
@@ -4844,7 +4875,7 @@ mod tests {
             let mut world = World::new();
             let entity = bare_entity(&mut world);
             world.entity_mut(entity).insert((
-                CustomName(Some("Babe".to_string())),
+                CustomName(Some(Text::literal("Babe"))),
                 CustomNameVisible(true),
             ));
             let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
@@ -4859,7 +4890,7 @@ mod tests {
             let mut world = World::new();
             let entity = bare_entity(&mut world);
             world.entity_mut(entity).insert((
-                CustomName(Some("Babe".to_string())),
+                CustomName(Some(Text::literal("Babe"))),
                 CustomNameVisible(false),
             ));
             let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
@@ -4887,7 +4918,7 @@ mod tests {
             let mut world = World::new();
             let entity = bare_entity(&mut world);
             world.entity_mut(entity).insert((
-                CustomName(Some(String::new())),
+                CustomName(Some(Text::literal(""))),
                 CustomNameVisible(true),
             ));
             let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
@@ -4904,7 +4935,7 @@ mod tests {
             let mut world = World::new();
             let entity = bare_entity(&mut world);
             world.entity_mut(entity).insert((
-                CustomName(Some("<empty>".to_string())),
+                CustomName(Some(Text::literal("<empty>"))),
                 CustomNameVisible(true),
             ));
             let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
@@ -4918,7 +4949,7 @@ mod tests {
             let mut real_world = World::new();
             let real_entity = bare_entity(&mut real_world);
             real_world.entity_mut(real_entity).insert((
-                CustomName(Some("<empty> the Cow".to_string())),
+                CustomName(Some(Text::literal("<empty> the Cow"))),
                 CustomNameVisible(true),
             ));
             let real_facts = facts_for(
@@ -4942,7 +4973,7 @@ mod tests {
             let mut world = World::new();
             let entity = bare_entity(&mut world);
             world.entity_mut(entity).insert((
-                CustomName(Some("Babe".to_string())),
+                CustomName(Some(Text::literal("Babe"))),
                 CustomNameVisible(true),
                 EntityFlags(0x02), // FLAG_SHIFT_KEY_DOWN
             ));
@@ -4959,7 +4990,7 @@ mod tests {
             let mut world = World::new();
             let entity = bare_entity(&mut world);
             world.entity_mut(entity).insert((
-                CustomName(Some("Babe".to_string())),
+                CustomName(Some(Text::literal("Babe"))),
                 CustomNameVisible(true),
             ));
             assert!(

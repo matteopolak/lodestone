@@ -1222,7 +1222,7 @@ async fn entity_metadata_and_attributes_merge_incrementally() {
                 Directive::Emit(ClientEvent::EntityMetadataUpdated {
                     entity_id: 10,
                     metadata: EntityMetadataUpdate {
-                        custom_name: Reported::Reported(Some("Babe".to_string())),
+                        custom_name: Reported::Reported(Some(Text::literal("Babe"))),
                         health: Some(6.0),
                         item: Reported::Reported(Some(ItemStack::new(dim("diamond"), 12))),
                         ..Default::default()
@@ -1278,7 +1278,7 @@ async fn entity_metadata_and_attributes_merge_incrementally() {
 
     let pig = handle.entity(10).expect("entity 10 present");
     // Incremental merge: every field from both packets survives.
-    assert_eq!(pig.custom_name, Reported::Reported(Some("Babe".to_string())));
+    assert_eq!(pig.custom_name, Reported::Reported(Some(Text::literal("Babe"))));
     assert_eq!(pig.health, Some(6.0));
     assert_eq!(pig.pose, Some(EntityPose::Standing));
     assert_eq!(pig.baby, Some(true));

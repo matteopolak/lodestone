@@ -1407,7 +1407,8 @@ mod tests {
     // `Rotation` into scope, and the two must stay distinguishable here.
     use lodestone_model::Rotation as ReportedRotation;
     use lodestone_model::{
-        EntityEquipment, EntityMetadataUpdate, EquipmentSlot, ItemComponents, ItemStack, Vec3,
+        EntityEquipment, EntityMetadataUpdate, EquipmentSlot, ItemComponents, ItemStack, Text,
+        Vec3,
     };
 
     use super::*;
@@ -1623,7 +1624,7 @@ mod tests {
             &mut world,
             metadata(
                 EntityMetadataUpdate {
-                    custom_name: Reported::Reported(Some("Lodestar".to_owned())),
+                    custom_name: Reported::Reported(Some(Text::literal("Lodestar"))),
                     ..EntityMetadataUpdate::default()
                 },
                 1,
@@ -1633,7 +1634,7 @@ mod tests {
             entity_for(&world, 1)
                 .get::<CustomName>()
                 .map(|n| n.0.clone()),
-            Some(Some("Lodestar".to_owned()))
+            Some(Some(Text::literal("Lodestar")))
         );
 
         feed(
@@ -1650,7 +1651,7 @@ mod tests {
             entity_for(&world, 1)
                 .get::<CustomName>()
                 .map(|n| n.0.clone()),
-            Some(Some("Lodestar".to_owned())),
+            Some(Some(Text::literal("Lodestar"))),
             "a silent update must not clear the name"
         );
 
@@ -2881,7 +2882,7 @@ mod tests {
             &mut world,
             metadata(
                 EntityMetadataUpdate {
-                    custom_name: Reported::Reported(Some("Lodestar".to_owned())),
+                    custom_name: Reported::Reported(Some(Text::literal("Lodestar"))),
                     ..EntityMetadataUpdate::default()
                 },
                 7,

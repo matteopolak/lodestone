@@ -456,7 +456,16 @@ pub struct EntityMetadataUpdate {
     /// mention it; [`Reported::Reported(None)`](Reported::Reported) is an
     /// explicit clear; [`Reported::Reported(Some(name))`](Reported::Reported)
     /// is the name it now holds.
-    pub custom_name: Reported<String>,
+    ///
+    /// Carries the full styled component tree (colour, bold, italic,
+    /// underline, strikethrough, inheritance down `extra` children) rather
+    /// than a flattened plain string — a version adapter decodes the wire's
+    /// NBT/JSON component with [`Text::from_nbt`]/[`Text::from_json`] rather
+    /// than reducing it to text at decode time. Flattening early is exactly
+    /// what used to make every custom name and every player nametag render
+    /// white with no formatting: nothing downstream of a plain `String` can
+    /// recover a colour that was never carried past this field.
+    pub custom_name: Reported<Text>,
     /// Whether the custom name renders above the entity, when present.
     pub custom_name_visible: Option<bool>,
     /// The entity pose, when present.
@@ -647,15 +656,21 @@ pub struct EntityMetadataUpdate {
     /// never reports the inner `None` here — vanilla's own accessor default
     /// is the empty string, not an absent component — so a consumer only
     /// ever sees `Unreported` or `Reported(Some(_))` in practice, but the
-    /// shape stays `Reported<String>` (not a bespoke wrapper) for the same
+    /// shape stays `Reported<Text>` (not a bespoke wrapper) for the same
     /// "did this packet mention it" contract every other field here uses.
+    ///
+    /// Styled, like [`custom_name`](Self::custom_name): the wire's `COMPONENT`
+    /// serializer decodes through [`Text::from_nbt`] rather than being
+    /// flattened to plain text, so colour/bold/italic/underline/strikethrough
+    /// (and inheritance from a parent node down to its `extra` children)
+    /// survive to whatever draws this `text_display`.
     ///
     /// Present only when the entity is known to be a `text_display` — index
     /// 23's `COMPONENT` serializer is also `MinecartCommandBlock`'s last
     /// command output at index 14 (a different index, no collision), but the
     /// class guard is kept anyway for the same defence-in-depth every other
     /// `Display` field in this struct uses.
-    pub display_text: Reported<String>,
+    pub display_text: Reported<Text>,
     /// `Display.TextDisplay.DATA_LINE_WIDTH_ID`, vanilla's own wrap width in
     /// pixels (`Display.TextDisplay`'s accessor default is `200`). Present
     /// only for a `text_display` that has reported it.
