@@ -166,6 +166,58 @@ pub fn cloud_status_from_name(name: &str) -> Option<lodestone_render::CloudStatu
     }
 }
 
+/// Vanilla's `ParticleStatus` (`ParticleStatus.java`), the
+/// `options.particles` cycle.
+///
+/// Three states in declaration order, which is `CycleButton`'s visiting order
+/// and the order of the enum's ids `0, 1, 2`: `ALL`, `DECREASED`, `MINIMAL`.
+/// `ALL` is vanilla's default and is what this client did unconditionally
+/// before the row went live.
+///
+/// **This is a probabilistic filter, not three fixed budgets.**
+/// `ClientLevel.calculateParticleLevel` folds the option down per spawn:
+/// `DECREASED` becomes `MINIMAL` one time in three, and `MINIMAL` is lifted
+/// back to `DECREASED` one time in ten *for an always-show particle*.
+/// `ClientLevel.doAddParticle` then drops the spawn whenever the folded level
+/// is `MINIMAL`. So `DECREASED` keeps roughly two thirds of eligible spawns and
+/// `MINIMAL` keeps roughly none. See
+/// `crate::particles::Particles::particle_level_permits`, which is where that
+/// fold lives here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParticleLevel {
+    /// `options.particles.all` — vanilla's default: every eligible spawn.
+    #[default]
+    All,
+    /// `options.particles.decreased` — roughly two spawns in three.
+    Decreased,
+    /// `options.particles.minimal` — effectively none.
+    Minimal,
+}
+
+/// Vanilla's `ParticleStatus` serialized name — the string `options.json`
+/// stores [`Options::particles`] as. A name rather than vanilla's integer id,
+/// [`cloud_status_name`]'s reasoning.
+#[must_use]
+pub fn particle_level_name(value: ParticleLevel) -> &'static str {
+    match value {
+        ParticleLevel::All => "all",
+        ParticleLevel::Decreased => "decreased",
+        ParticleLevel::Minimal => "minimal",
+    }
+}
+
+/// The inverse of [`particle_level_name`]. `None` for anything else, which
+/// [`Options::from_json`] turns into vanilla's `All` default.
+#[must_use]
+pub fn particle_level_from_name(name: &str) -> Option<ParticleLevel> {
+    match name {
+        "all" => Some(ParticleLevel::All),
+        "decreased" => Some(ParticleLevel::Decreased),
+        "minimal" => Some(ParticleLevel::Minimal),
+        _ => None,
+    }
+}
+
 /// Vanilla's `AttackIndicatorStatus` (`AttackIndicatorStatus.java`), the
 /// `options.attackIndicator` cycle.
 ///
@@ -870,6 +922,15 @@ pub struct Options {
     /// though the option were pinned to `Crosshair`, which the draw site's own
     /// comment said in as many words.
     pub attack_indicator: AttackIndicator,
+    /// Vanilla's **Particles** option (`options.particles`, `Options.java`),
+    /// default [`ParticleLevel::All`].
+    ///
+    /// Pushed into the sim by `Sim::set_particle_level` once per presented
+    /// frame and read at the one place vanilla reads it —
+    /// `ClientLevel.doAddParticle`'s equivalent in `sim::net_apply`, which
+    /// already transcribed that function's *other* half (the 32-block cutoff
+    /// and its `overrideLimiter` bypass) and was missing only the level test.
+    pub particles: ParticleLevel,
 }
 
 impl Default for Options {
@@ -920,6 +981,7 @@ impl Default for Options {
             weather_radius: MAX_WEATHER_RADIUS,
             menu_background_blurriness: DEFAULT_MENU_BACKGROUND_BLURRINESS,
             attack_indicator: AttackIndicator::default(),
+            particles: ParticleLevel::default(),
         }
     }
 }
@@ -1216,6 +1278,13 @@ impl Options {
             .and_then(serde_json::Value::as_str)
             .and_then(attack_indicator_from_name)
             .unwrap_or_default();
+        // Absent or unrecognised is vanilla's own `ALL`, which is also the
+        // behaviour every build before this field had.
+        let particles = obj
+            .get("particles")
+            .and_then(serde_json::Value::as_str)
+            .and_then(particle_level_from_name)
+            .unwrap_or_default();
         Self {
             gui_scale,
             keybinds,
@@ -1260,6 +1329,7 @@ impl Options {
             weather_radius,
             menu_background_blurriness,
             attack_indicator,
+            particles,
         }
     }
 
@@ -1455,6 +1525,9 @@ impl Options {
         }
         if self.weather_radius != default.weather_radius {
             obj.insert("weather_radius".into(), self.weather_radius.into());
+        }
+        if self.particles != default.particles {
+            obj.insert("particles".into(), particle_level_name(self.particles).into());
         }
         if self.attack_indicator != default.attack_indicator {
             obj.insert(

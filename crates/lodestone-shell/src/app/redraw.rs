@@ -102,6 +102,11 @@ impl WindowApp {
         // Bobbing above, but `Sim::set_cutout_leaves`'s own equality guard is
         // what keeps this affordable — see that method's doc.
         self.sim.set_cutout_leaves(self.nav.options().cutout_leaves);
+        // Vanilla's Particles option. Polled per frame beside See-Through
+        // Leaves rather than pushed on the settings write, because `Sim` is
+        // rebuilt on every session start and a one-shot push would be lost
+        // across a reconnect. A plain enum write, so no equality guard.
+        self.sim.set_particle_level(self.nav.options().particles);
         // Vanilla's Entity Shadows option (owner report: "entity shadows are
         // missing"). Polled per frame like the options above; a plain bool
         // write, so no equality guard is needed the way `set_cutout_leaves`'s

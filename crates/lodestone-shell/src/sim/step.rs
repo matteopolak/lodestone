@@ -220,6 +220,19 @@ impl Sim {
         self.auto_jump = auto_jump;
     }
 
+    /// Push vanilla's `options.particles` down from the menu layer — the
+    /// particle-density filter, stored here and read by the
+    /// `NetUpdate::Particles` arm in `crate::sim::net_apply`, which is this
+    /// client's `ClientLevel.doAddParticle`.
+    ///
+    /// A push polled per presented frame like [`Self::set_auto_jump`], not a
+    /// one-shot on the settings write: `Sim` is rebuilt on every session start
+    /// and a value pushed only when the row is clicked would be lost across a
+    /// reconnect.
+    pub fn set_particle_level(&mut self, level: crate::config::ParticleLevel) {
+        self.particle_level = level;
+    }
+
     /// Push vanilla's `options.sprintWindow` down from the menu layer (issue
     /// That fix) — the double-tap-forward window in 20 Hz ticks. `0` disables
     /// double-tap sprint. Pushed once per `step` by the shell, so a mid-session

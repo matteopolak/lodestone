@@ -463,6 +463,7 @@ impl Sim {
             toggle_use: false,
             auto_jump: false,
             sprint_window_ticks: lodestone_controller::SPRINT_TRIGGER_WINDOW_TICKS,
+            particle_level: crate::config::ParticleLevel::default(),
             first_chunk_at: None,
             chest_lids: crate::block_entities::ChestLids::new(),
             bell_shakes: crate::block_entities::BellShakes::new(),

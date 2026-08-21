@@ -680,6 +680,56 @@ impl Particles {
         }
     }
 
+    /// Vanilla's `ClientLevel.calculateParticleLevel` folded together with
+    /// `doAddParticle`'s `particleLevel != MINIMAL` test — `true` to spawn.
+    ///
+    /// Transcribed rather than approximated, because the two halves are not
+    /// separable: the fold is what makes `DECREASED` a *probability* rather
+    /// than a second fixed budget.
+    ///
+    /// ```text
+    /// level = options.particles
+    /// if always_show && level == MINIMAL && rand(10) == 0 { level = DECREASED }
+    /// if level == DECREASED && rand(3) == 0 { level = MINIMAL }
+    /// spawn if level != MINIMAL
+    /// ```
+    ///
+    /// So `All` always spawns, `Decreased` spawns two times in three, and
+    /// `Minimal` spawns only via the always-show reprieve — `(1/10) x (2/3)`,
+    /// i.e. one time in fifteen.
+    ///
+    /// **`always_show` is always `false` at this client's only caller**, and
+    /// that is an honest gap rather than a simplification of the rule: the flag
+    /// is a real wire field (`v770`'s `LevelParticles::always_show`, decoded)
+    /// that `ClientEvent::Particles` does not carry, so the shell has no way to
+    /// know it. The parameter exists so the transcription is complete and so
+    /// the day that field is threaded through, this function needs no change.
+    /// Until then `Minimal` drops every packet particle that does not set
+    /// `overrideLimiter` — slightly stronger than vanilla, in the direction the
+    /// option exists for.
+    ///
+    /// Draws from the particle engine's own `JavaRandom`, which is
+    /// `java.util.Random`-compatible, so `next_int_bound` is vanilla's
+    /// `nextInt` exactly. Not the same *stream* as vanilla's `level.random`,
+    /// which does not matter: nothing observes particle randomness across the
+    /// wire.
+    pub fn particle_level_permits(
+        &mut self,
+        level: crate::config::ParticleLevel,
+        always_show: bool,
+    ) -> bool {
+        use crate::config::ParticleLevel;
+        let mut level = level;
+        if always_show && level == ParticleLevel::Minimal && self.engine.rng().next_int_bound(10) == 0
+        {
+            level = ParticleLevel::Decreased;
+        }
+        if level == ParticleLevel::Decreased && self.engine.rng().next_int_bound(3) == 0 {
+            level = ParticleLevel::Minimal;
+        }
+        level != ParticleLevel::Minimal
+    }
+
     /// One standard-normal draw (Box-Muller), for the positional/velocity
     /// jitter [`Self::spawn_particles`] needs. See that method's docs for why
     /// this does not need to match `java.util.Random.nextGaussian()`

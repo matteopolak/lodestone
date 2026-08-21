@@ -542,6 +542,21 @@ pub enum LiveOption {
     /// draw rather than a re-anchoring of the same one — the two sprites, the
     /// two sizes and the fill *direction* all differ.
     AttackIndicator,
+    /// `options.particles` → [`crate::config::Options::particles`].
+    ///
+    /// Three states, `CloudStatus`'s shape: `ParticleStatus` is
+    /// `ALL, DECREASED, MINIMAL` (`ParticleStatus.java`) and the cycle visits
+    /// them in that declaration order. **Another whole-label option** — its
+    /// stringifier is `(caption, value) -> value.caption()` (`Options.java`),
+    /// which discards the caption. See [`Self::value_is_the_whole_label`].
+    ///
+    /// Its consumer is the `NetUpdate::Particles` arm in `crate::sim::net_apply`,
+    /// which is this client's `ClientLevel.doAddParticle` and had already
+    /// transcribed that function's *other* half — the 32-block cutoff and its
+    /// `overrideLimiter` bypass — leaving only the level test. The fold itself
+    /// lives in `crate::particles::Particles::particle_level_permits`, because
+    /// `calculateParticleLevel` is probabilistic and needs an RNG.
+    Particles,
 }
 
 impl LiveOption {
@@ -623,7 +638,9 @@ impl LiveOption {
             // The sixth `IntRange`, `RenderDistance`'s reason again.
             | LiveOption::MenuBackgroundBlurriness
             // A three-state cycle, not a slider at all — `CloudStatus`'s shape.
-            | LiveOption::AttackIndicator => None,
+            | LiveOption::AttackIndicator
+            // A three-state cycle, not a slider at all.
+            | LiveOption::Particles => None,
         }
     }
 
@@ -689,14 +706,16 @@ impl LiveOption {
             // The sixth `IntRange`, `RenderDistance`'s reason again.
             | LiveOption::MenuBackgroundBlurriness
             // A three-state cycle, not a slider at all — `CloudStatus`'s shape.
-            | LiveOption::AttackIndicator => None,
+            | LiveOption::AttackIndicator
+            // A three-state cycle, not a slider at all.
+            | LiveOption::Particles => None,
         }
     }
 
     /// Whether this option's vanilla stringifier **discards the caption** it is
     /// handed, so [`Cell::label`] must not compose one in front of the value.
     ///
-    /// True for three options on the tree, and it is not a stylistic
+    /// True for four options on the tree, and it is not a stylistic
     /// choice: `cloudStatus`' stringifier is `(caption, value) ->
     /// value.caption()` (the `cloudStatus` field in `Options.java`), which throws
     /// its `caption` argument away and returns `CloudStatus.caption()` alone — so
@@ -713,9 +732,12 @@ impl LiveOption {
     /// vanilla's Attack Indicator button reads "Crosshair", never
     /// "Attack Indicator: Crosshair".
     ///
-    /// These are the only three, and the sweep
+    /// `particles`' is the same shape again (`ParticleStatus.caption()`), so
+    /// vanilla's Particles button reads "Decreased" alone.
+    ///
+    /// These are the only four, and the sweep
     /// `every_live_row_carries_both_its_name_and_its_value_or_is_a_named_exception`
-    /// asserts the **count** rather than merely tolerating them — a fourth row
+    /// asserts the **count** rather than merely tolerating them — a fifth row
     /// falling into this branch has to be justified here first.
     #[must_use]
     fn value_is_the_whole_label(self) -> bool {
@@ -724,6 +746,7 @@ impl LiveOption {
             LiveOption::CloudStatus
                 | LiveOption::InactivityFpsLimit
                 | LiveOption::AttackIndicator
+                | LiveOption::Particles
         )
     }
 
@@ -1925,6 +1948,20 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
             crate::config::AttackIndicator::Crosshair => "Crosshair".to_string(),
             crate::config::AttackIndicator::Hotbar => "Hotbar".to_string(),
         },
+        // `ParticleStatus.caption()` — the enum's own component, keyed
+        // `options.particles.all`/`.decreased`/`.minimal`
+        // (`ParticleStatus.java`), i.e. "All"/"Decreased"/"Minimal" in
+        // `en_us.json`. Note these are **not** OFF/ON-shaped: even `Minimal`
+        // is a level rather than an off state, which is why none of the three
+        // reads "OFF".
+        //
+        // The whole label, not a value half: see
+        // [`LiveOption::value_is_the_whole_label`].
+        LiveOption::Particles => match options.particles {
+            crate::config::ParticleLevel::All => "All".to_string(),
+            crate::config::ParticleLevel::Decreased => "Decreased".to_string(),
+            crate::config::ParticleLevel::Minimal => "Minimal".to_string(),
+        },
     }
 }
 
@@ -2104,7 +2141,10 @@ static VIDEO: &[Entry] = &[
         live_cycle("cloudStatus", "Clouds", LiveOption::CloudStatus),
     ),
     pair(
-        cycle("particles", "Particles"),
+        // Live: `sim::net_apply`'s `NetUpdate::Particles` arm already
+        // transcribed `ClientLevel.doAddParticle`'s distance half. See
+        // `LiveOption::Particles`.
+        live_cycle("particles", "Particles", LiveOption::Particles),
         // Live: the block-atlas island `BLOCK_ATLAS_MIP_LEVELS`'s own doc used
         // to name. See `LiveOption::MipmapLevels`.
         live_slider("mipmapLevels", "Mipmap Levels", LiveOption::MipmapLevels),
@@ -4142,10 +4182,12 @@ mod tests {
                 // three-state Clouds cycle, whose `SkyFrame::with_cloud_status`
                 // consumer had zero production callers.
                 LiveOption::CloudStatus,
-                // Also Video, in the `(particles, mipmapLevels)` pair, sorting
-                // between Clouds and See-Through Leaves: the block-atlas
-                // mip-depth slider, whose consumer used to be the frozen
-                // `BLOCK_ATLAS_MIP_LEVELS` constant.
+                // Also Video, the `(particles, mipmapLevels)` pair, in that
+                // order: the particle-density filter, whose consumer had
+                // transcribed `doAddParticle`'s distance half and not its level
+                // test, then the block-atlas mip-depth slider, whose consumer
+                // used to be the frozen `BLOCK_ATLAS_MIP_LEVELS` constant.
+                LiveOption::Particles,
                 LiveOption::MipmapLevels,
                 // Also Video, the `(entityShadows, entityDistanceScaling)` pair's
                 // first half — owner report: "entity shadows are missing".
@@ -4241,8 +4283,8 @@ mod tests {
                 LiveOption::PanoramaSpeed,
             ],
             "FOV on the root; GUI Scale, Render Distance, Clouds, Mipmap Levels, \
-             Entity Shadows, Menu Background Blur, Weather Effect Radius and Attack \
-             Indicator on Video; \
+             Entity Shadows, Menu Background Blur, Weather Effect Radius, Attack \
+             Indicator and Particles on Video; \
              the four toggle \
              rows and Auto-Jump/Sprint \
              Window on Controls; look sensitivity, scroll sensitivity and both \
@@ -4284,21 +4326,21 @@ mod tests {
             render_distance.is_live(),
             "renderDistance is a persisted `Options` field since #443"
         );
-        // The count itself, not just the ratio's ingredients: 55 live option
-        // *rows* (50 distinct options, **five** of them placed twice — the three
+        // The count itself, not just the ratio's ingredients: 56 live option
+        // *rows* (51 distinct options, **five** of them placed twice — the three
         // Chat/Accessibility sliders, `showSubtitles` on Sound and
         // Accessibility, and now `menuBackgroundBlurriness` on Video and
-        // Accessibility, so 55 - 5 == 50 — the video-settings/leaves session's
+        // Accessibility, so 56 - 5 == 51 — the video-settings/leaves session's
         // five, framerateLimit/enableVsync/inactivityFpsLimit/graphicsPreset/
-        // cutoutLeaves, plus mipmapLevels, entityShadows, weatherRadius and
-        // attackIndicator, are each placed once)
+        // cutoutLeaves, plus mipmapLevels, entityShadows, weatherRadius,
+        // attackIndicator and particles, are each placed once)
         // + 9 Done buttons (one per page, always live) + 13 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid,
         // Accessibility -> Controls, Controls -> Mouse, Controls -> Key Binds,
         // and the root's own Online button, live outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 77, "outside a world: {live:?}");
+        assert_eq!(live.len(), 78, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -4328,11 +4370,11 @@ mod tests {
         // inactivityFpsLimit, graphicsPreset, cutoutLeaves — the block-atlas
         // mip-depth session added a sixth: mipmapLevels — and this session added
         // a seventh: entityShadows, an eighth: weatherRadius, a ninth:
-        // attackIndicator, and
+        // attackIndicator, a tenth: particles, and
         // `menuBackgroundBlurriness`, which is **two** rows (Video and
         // Accessibility) for one option.
-        assert_eq!(outside.len(), 77);
-        assert_eq!(inside.len(), 76, "one fewer: the root's Online button");
+        assert_eq!(outside.len(), 78);
+        assert_eq!(inside.len(), 77, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -4360,10 +4402,16 @@ mod tests {
         // An option we hold no value for shows the caption alone — the module
         // docs' departure (1). The control is the live row above, which does
         // carry a value, so this is not simply "labels never have colons".
-        // `particles` is still genuinely inactive on this tree (unlike
-        // `entityShadows`, which used to be the example here before it went
-        // live — see `LiveOption::EntityShadows`).
-        assert_eq!(cycle("particles", "Particles").label(&options), "Particles");
+        // `improvedTransparency` is still genuinely inactive on this tree —
+        // it needs a screen-shader pass for weather/clouds/particles behind
+        // translucent geometry that this client does not have. `particles`
+        // used to be the example here and `entityShadows` before that; both
+        // went live, which is the hazard this comment exists to flag for
+        // whoever replaces it next.
+        assert_eq!(
+            cycle("improvedTransparency", "Improved Transparency").label(&options),
+            "Improved Transparency"
+        );
     }
 
     /// Owner report: a settings row showing the value with no name at all —
@@ -4440,10 +4488,10 @@ mod tests {
         // exercised rows of both shapes, or a change that made every row
         // fall into one branch would pass vacuously.
         assert_eq!(
-            bare_rows_checked, 3,
-            "expected exactly the three named whole-label exceptions (CloudStatus, \
-             InactivityFpsLimit, AttackIndicator), each placed once on the Video page; \
-             got {bare_rows_checked}"
+            bare_rows_checked, 4,
+            "expected exactly the four named whole-label exceptions (CloudStatus, \
+             InactivityFpsLimit, AttackIndicator, Particles), each placed once on the \
+             Video page; got {bare_rows_checked}"
         );
         assert!(
             composing_rows_checked >= 40,
@@ -5335,6 +5383,9 @@ mod tests {
         // The attack-strength indicator's three states: the crosshair bar
         // already drew, pinned to CROSSHAIR, and HOTBAR is a real second draw.
         LiveOption::AttackIndicator,
+        // The particle-density filter: `doAddParticle`'s distance half was
+        // already transcribed and only its level test was missing.
+        LiveOption::Particles,
     ];
 
     /// Every [`LiveOption`] must be placed on some page — the island check in
@@ -5408,15 +5459,16 @@ mod tests {
                 | LiveOption::EntityShadows
                 | LiveOption::WeatherRadius
                 | LiveOption::MenuBackgroundBlurriness
-                | LiveOption::AttackIndicator => {}
+                | LiveOption::AttackIndicator
+                | LiveOption::Particles => {}
             }
         }
         // 25 before the kind A batch, plus eleven sound buses, FOV, both glint
         // parameters and Clouds, plus the five video-settings/leaves rows that
         // session wired, plus the block-atlas mip-depth row, plus this
         // session's entity-shadows row, plus the weather-radius,
-        // menu-background-blur and attack-indicator rows.
-        assert_eq!(ALL.len(), 50, "fifty distinct live options");
+        // menu-background-blur, attack-indicator and particles rows.
+        assert_eq!(ALL.len(), 51, "fifty-one distinct live options");
         // And the eleven indices are all of them, none repeated: `SoundVolume` is
         // a *payload* variant, so neither the compiler nor the match above can see
         // a missing or duplicated index, and a duplicate would silently leave one

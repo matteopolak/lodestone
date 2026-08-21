@@ -739,6 +739,12 @@ pub struct Sim {
     /// by [`Self::set_sprint_window_ticks`] and forwarded to the live
     /// [`InputState`] once per frame at the top of [`Self::step`].
     sprint_window_ticks: u8,
+    /// Vanilla's `options.particles`
+    /// ([`crate::config::Options::particles`]), pushed down by
+    /// [`Self::set_particle_level`]. Read at the one place vanilla reads it —
+    /// the `NetUpdate::Particles` arm in `sim::net_apply`, this client's
+    /// `ClientLevel.doAddParticle`.
+    particle_level: crate::config::ParticleLevel,
     /// Wall-clock instant the first chunk arrived at this client, for join-latency
     /// measurement. `None` until the first `NetUpdate::Chunk` is processed.
     /// `crate::platform::Instant`, not `std::time::Instant`, for the same reason

@@ -2382,6 +2382,74 @@ fn a_frame_takes_many_short_world_guards_and_no_long_one() {
     );
 }
 
+/// The other half of `ClientLevel.doAddParticle`'s filter: `options.particles`.
+///
+/// The pair is chosen so both arms are **deterministic**.
+/// `Particles::particle_level_permits` transcribes
+/// `calculateParticleLevel`, which is probabilistic for `DECREASED` (one spawn
+/// in three is folded down to `MINIMAL`) but not for the other two: `ALL` never
+/// folds and `MINIMAL` cannot be lifted without the always-show flag, which
+/// `ClientEvent::Particles` does not carry. So `All` -> 9 and `Minimal` -> 0 are
+/// exact counts, and a `Decreased` arm would need a statistical bound to say
+/// anything — deliberately not asserted here rather than asserted loosely.
+///
+/// Both arms feed the **same** event to the **same** `Sim`, differing only in
+/// the pushed level, so the second arm is the control for the first: it proves
+/// the count is attributable to the option rather than to anything else about
+/// the fixture.
+#[test]
+fn the_particles_option_gates_the_spawn_and_all_is_not_a_no_op() {
+    use crate::net::NetUpdate;
+    use lodestone_client::Vec3;
+    use lodestone_particle::Sheet;
+
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    sim.poll_net();
+    sim.particles_mut(|p| {
+        p.install_test_sheet_uv(HashMap::from([(
+            (Sheet::Flame, 0u16),
+            [0.0f32, 0.0, 0.0625, 0.0625],
+        )]));
+    });
+
+    let origin = sim.player().position;
+    let burst = |feed: &std::sync::mpsc::SyncSender<NetUpdate>| {
+        feed.send(NetUpdate::Particles {
+            kind: "flame".into(),
+            long_distance: false,
+            pos: Vec3::new(origin.x, origin.y, origin.z),
+            offset: Vec3f::new(0.1, 0.1, 0.1),
+            max_speed: 0.02,
+            count: 9,
+            options: lodestone_model::event::ParticleOptions::None,
+        })
+        .unwrap();
+    };
+
+    sim.set_particle_level(crate::config::ParticleLevel::Minimal);
+    burst(&feed);
+    sim.poll_net();
+    assert_eq!(
+        sim.particles_mut(|p| p.engine_mut().particles().len()),
+        0,
+        "Minimal must drop a nearby, non-override burst entirely — \
+         `doAddParticle` spawns only when the folded level is not MINIMAL"
+    );
+
+    sim.set_particle_level(crate::config::ParticleLevel::All);
+    burst(&feed);
+    sim.poll_net();
+    assert_eq!(
+        sim.particles_mut(|p| p.engine_mut().particles().len()),
+        9,
+        "control failed to fail: All must spawn the same burst the Minimal arm \
+         dropped, or the zero above says nothing about the option"
+    );
+}
+
 /// Vanilla's render cutoff (`ClientLevel.doAddParticle`): a particle
 /// farther than 32 blocks from the viewer is dropped unless the packet
 /// sets `long_distance`. Two events at the same far-away position, one
