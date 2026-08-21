@@ -232,6 +232,83 @@ pub fn display_placement_matrix(anchor: Vec3, orientation: Quat, transform: &Dis
     Mat4::from_translation(anchor) * Mat4::from_quat(orientation) * transform.to_matrix()
 }
 
+/// `TextDisplayRenderer.submitInner`'s local-glyph-space-to-entity-space
+/// matrix (`26.2`), composed **on top of** [`display_placement_matrix`]'s own
+/// `base` (this function's `base` parameter *is* that matrix's result — the
+/// billboard orientation and the synced `Transformation` are both already
+/// folded in by the time text placement runs).
+///
+/// Vanilla builds this as:
+///
+/// ```text
+/// pose = base
+/// pose.rotate(PI, Y)
+/// pose.scale(-0.025, -0.025, -0.025)
+/// pose.translate(1 - width/2, -height, 0)
+/// ```
+///
+/// A local glyph or background-panel corner is then fed to `pose` **directly
+/// unoffset** (`buffer.addVertex(pose, -1, -1, -0.01)`,
+/// `textCollector.submitText(pose, offset, y, …)` — `submitText`'s own
+/// internal push is equivalent to translating by `(offset, y, 0)` before
+/// drawing each glyph at its own local pixel rect), so every caller of this
+/// function's result multiplies a **raw, un-offset** local point (a glyph's
+/// font-pixel rect, or the background panel's `(-1,-1)`/`(width,height)`
+/// corners) straight through.
+///
+/// # Why this collapses to one matrix multiply rather than three
+///
+/// `rotate(PI, Y)` then `scale(-0.025, -0.025, -0.025)` composed **in that
+/// order** and applied to a point is algebraically a single diagonal scale:
+/// rotating 180° about Y flips the sign of `x` and `z` only, so composed with
+/// a uniform negative scale on all three axes the two sign flips cancel on
+/// `x`/`z` and stack on `y`. The net linear map is
+/// `(x, y, z) -> (0.025x, -0.025y, 0.025z)` — verified by
+/// [`text_glyph_transform_matches_the_three_step_vanilla_composition`] against
+/// the naive three-matrix product, so this is a derivation checked against
+/// its own source, not merely asserted.
+#[must_use]
+pub fn text_glyph_transform(base: Mat4, total_width: f32, total_height: f32) -> Mat4 {
+    base * Mat4::from_scale(Vec3::new(0.025, -0.025, 0.025))
+        * Mat4::from_translation(Vec3::new(1.0 - total_width / 2.0, -total_height, 0.0))
+}
+
+/// A `text_display`'s glyph colour: vanilla's `textOpacity << 24 | 0xFFFFFF`
+/// (`TextDisplayRenderer.submitInner`) — the RGB channels are hardcoded
+/// white regardless of the text's own component colour (a real
+/// simplification vanilla itself makes for this render type, not one this
+/// port adds), and only the alpha channel is driven by `opacity`.
+///
+/// `opacity` is a signed byte; vanilla's own default is `-1`, which read as
+/// the top byte of an unsigned colour is `0xFF` (fully opaque) — the
+/// `as u8` cast below reproduces that reinterpretation rather than clamping
+/// a negative number to zero.
+#[must_use]
+pub fn text_glyph_color(opacity: i8) -> [f32; 4] {
+    [1.0, 1.0, 1.0, (opacity as u8) as f32 / 255.0]
+}
+
+/// A `text_display`'s background-panel colour, unpacked from vanilla's
+/// packed ARGB `Display.TextDisplay.DATA_BACKGROUND_COLOR_ID` int the same
+/// way [`crate::sign::sign_side_color`] unpacks a sign's dye colour.
+///
+/// Callers must still gate on `argb != 0` before drawing anything — vanilla's
+/// own `if (backgroundColor != 0)` (`TextDisplayRenderer.submitInner`) treats
+/// exactly `0` as "no panel at all", a real reachable value rather than a
+/// sentinel this function could absorb, since a *fully transparent but
+/// non-black* colour (alpha `0`, RGB non-zero) is a different, legal state
+/// that still draws (invisibly).
+#[must_use]
+pub fn text_background_color(argb: i32) -> [f32; 4] {
+    let bits = argb as u32;
+    [
+        ((bits >> 16) & 0xFF) as f32 / 255.0,
+        ((bits >> 8) & 0xFF) as f32 / 255.0,
+        (bits & 0xFF) as f32 / 255.0,
+        ((bits >> 24) & 0xFF) as f32 / 255.0,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,5 +478,104 @@ mod tests {
         let placement = display_placement_matrix(anchor, Quat::IDENTITY, &DisplayTransformation::default());
         let world = placement.transform_point3(Vec3::new(0.5, 0.5, 0.5));
         assert!(world.abs_diff_eq(anchor + Vec3::splat(0.5), 1e-5));
+    }
+
+    /// [`text_glyph_transform`]'s claimed collapse (a single diagonal scale)
+    /// checked against the literal three-matrix product `rotate(PI, Y) *
+    /// scale(-0.025, -0.025, -0.025) * translate(offset)` vanilla's own
+    /// source performs, for several points including an asymmetric one (`x
+    /// != y != z`) that a swapped axis or a dropped sign would move
+    /// differently on each component.
+    #[test]
+    fn text_glyph_transform_matches_the_three_step_vanilla_composition() {
+        let base = Mat4::from_translation(Vec3::new(10.0, 20.0, 30.0))
+            * Mat4::from_rotation_y(0.7)
+            * Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0));
+        let width = 84.0_f32;
+        let height = 19.0_f32;
+        let offset = Vec3::new(1.0 - width / 2.0, -height, 0.0);
+        let naive = base
+            * Mat4::from_rotation_y(std::f32::consts::PI)
+            * Mat4::from_scale(Vec3::new(-0.025, -0.025, -0.025))
+            * Mat4::from_translation(offset);
+        let derived = text_glyph_transform(base, width, height);
+        for local in [
+            Vec3::new(-1.0, -1.0, -0.01),
+            Vec3::new(width, height, -0.01),
+            Vec3::new(7.0, 3.0, 0.0),
+            Vec3::new(-1.0, height, -0.01),
+        ] {
+            let expected = naive.transform_point3(local);
+            let got = derived.transform_point3(local);
+            assert!(
+                got.abs_diff_eq(expected, 1e-3),
+                "text_glyph_transform diverged from the literal vanilla \
+                 composition at local {local:?}: got {got:?}, expected {expected:?}"
+            );
+        }
+    }
+
+    /// A background-panel corner at local `(-1, -1)` must land at a
+    /// **different** world point than one at `(width, height)` — the
+    /// discriminating check that the panel actually spans the text block
+    /// rather than collapsing to a single point (which a dropped `width`/
+    /// `height` term, or an accidentally-zeroed scale, would produce and
+    /// this assertion would catch).
+    #[test]
+    fn background_panel_corners_span_the_full_text_block() {
+        let base = Mat4::IDENTITY;
+        let transform = text_glyph_transform(base, 84.0, 19.0);
+        // Local `y` is font-pixel space, **down**-positive (row 0 at the
+        // text block's visual top — the same convention
+        // `gpu/nametag.rs::layout_ink_runs` returns rects in). So local
+        // `(-1, -1)` (just above the first line) is the panel's visual
+        // *top* edge, and local `(width, height)` (just past the last
+        // line) is its visual *bottom* edge — named that way here rather
+        // than "bottom_left"/"top_right", which the local coordinates
+        // alone would suggest backwards.
+        let panel_top = transform.transform_point3(Vec3::new(-1.0, -1.0, -0.01));
+        let panel_bottom = transform.transform_point3(Vec3::new(84.0, 19.0, -0.01));
+        assert!(
+            !panel_top.abs_diff_eq(panel_bottom, 1e-3),
+            "the panel's two opposite corners must not coincide: {panel_top:?} == {panel_bottom:?}"
+        );
+        // The `-Y` scale is the entire flip: a *smaller* local y (nearer the
+        // visual top, in down-positive pixel space) must land at a *larger*
+        // world y (physically higher) — the same convention
+        // `sign_text_transform`'s own doc pins for its local space.
+        assert!(
+            panel_top.y > panel_bottom.y,
+            "the panel's visual top (smaller local y) must land higher in \
+             world space than its visual bottom after the -Y scale: \
+             panel_top={panel_top:?}, panel_bottom={panel_bottom:?}"
+        );
+    }
+
+    /// Vanilla's accessor default (`-1`) must reproduce full opacity, and a
+    /// genuinely partial value must land at the fraction it names — two
+    /// points chosen to disagree, not one round number that could coincide
+    /// with a wrong sign-handling hypothesis.
+    #[test]
+    fn text_glyph_color_reads_opacity_as_an_unsigned_byte_fraction() {
+        assert_eq!(text_glyph_color(-1), [1.0, 1.0, 1.0, 1.0]);
+        let quarter = text_glyph_color(64);
+        assert!(
+            (quarter[3] - 64.0 / 255.0).abs() < 1e-6,
+            "opacity 64 should read as 64/255 alpha, got {quarter:?}"
+        );
+    }
+
+    /// Pairwise-distinct channel bytes (never `0x11223344`-style repeats),
+    /// so a channel transposition cannot survive this test byte-perfect.
+    #[test]
+    fn text_background_color_unpacks_argb_channels_in_order() {
+        // 0xAARRGGBB, each byte distinct so a channel transposition cannot
+        // survive: alpha=0x11, red=0x22, green=0x33, blue=0x44.
+        let packed = 0x11_22_33_44_u32 as i32;
+        let unpacked = text_background_color(packed);
+        assert!((unpacked[0] - 0x22 as f32 / 255.0).abs() < 1e-6, "red channel: {unpacked:?}");
+        assert!((unpacked[1] - 0x33 as f32 / 255.0).abs() < 1e-6, "green channel: {unpacked:?}");
+        assert!((unpacked[2] - 0x44 as f32 / 255.0).abs() < 1e-6, "blue channel: {unpacked:?}");
+        assert!((unpacked[3] - 0x11 as f32 / 255.0).abs() < 1e-6, "alpha channel: {unpacked:?}");
     }
 }
