@@ -5259,12 +5259,14 @@ fn a_disagreeing_server_set_slot_overwrites_the_predicted_equip() {
 // (`InteractionResult.java`) — vanilla's `Minecraft.startUseItem` swings on
 // exactly that condition. `use_item_generic` is the shell's landing site for
 // all four (none of them is a block or an `EntityRayTarget` hit in the common
-// case), and it already calls `swing_hand()` unconditionally whenever the main
-// hand is non-empty — these gates exist because the discriminating check is
+// case). It used to call `swing_hand()` unconditionally whenever the main
+// hand was non-empty; it now asks `generic_use_swings` first, so these gates
+// are also the positive half of that table — the discriminating check is
 // whether the swing actually **reaches the arm pose**, not merely whether
 // `use_item_generic` was reached (`peak_swing_over` is `hand_swing_progress`
 // wired the same way `a_queued_main_hand_swing_reaches_the_arm_pose` proves
-// for a mining swing).
+// for a mining swing). The negative half is
+// `a_use_that_vanilla_does_not_swing_for_leaves_the_arm_still`.
 
 /// The common case: aiming at open air (or space, past reach) while throwing.
 /// Vanilla's `hitResult == null` path skips the block/entity switch and still
@@ -5376,6 +5378,218 @@ fn use_item_live_with_an_empty_hand_does_not_swing() {
     assert_eq!(
         peak, 0.0,
         "an empty main hand has nothing to throw and must not swing, got {peak}"
+    );
+}
+
+// -----------------------------------------------------------------------
+// ... and a use vanilla is silent for must not swing
+// -----------------------------------------------------------------------
+//
+// The owner's report: *"right clicking with (i think) any item makes me swing
+// my arm, which is wrong."* It did — `use_item_generic` swung for every
+// non-empty main hand, and `use_item_live`'s block path swung for every
+// click that reached it.
+//
+// Vanilla's rule is one condition, applied identically at all three of
+// `Minecraft.startUseItem`'s call sites: swing only when the result is an
+// `InteractionResult.Success` whose `swingSource()` is `CLIENT`.
+// `InteractionResult.CONSUME` is `SwingSource.NONE`, and it is what a drawn
+// bow, a raised shield, a spyglass and a bite of food all return; `PASS` is
+// what an idle sword or pickaxe returns. All five were swinging here.
+
+/// The negative half of the throwable table above, and the report itself.
+///
+/// Each item is paired with the vanilla method and result that decides it, so
+/// a failure names *why* the expectation is what it is rather than only that
+/// it was missed. Mismatches are collected rather than asserted inside the
+/// loop — an `assert!` in the body would stop at the first item and leave the
+/// rest as arguments instead of observations.
+///
+/// The `use_item_sent` column is the control: without it "no swing" is
+/// satisfied by a `Sim` that never reached `use_item_generic` at all, which
+/// would make the whole gate vacuous. Vanilla sends the `USE_ITEM` packet for
+/// every non-empty hand regardless of what the result turns out to be — the
+/// swing is the only thing gated.
+#[test]
+fn a_use_that_vanilla_does_not_swing_for_leaves_the_arm_still() {
+    let silent = [
+        ("minecraft:bow", "BowItem.use -> CONSUME (SwingSource::NONE)"),
+        ("minecraft:crossbow", "CrossbowItem.use -> CONSUME"),
+        ("minecraft:trident", "TridentItem.use -> CONSUME"),
+        (
+            "minecraft:spyglass",
+            "SpyglassItem.use -> ItemUtils.startUsingInstantly -> CONSUME",
+        ),
+        (
+            "minecraft:shield",
+            "Item.use's minecraft:blocks_attacks arm -> CONSUME",
+        ),
+        (
+            "minecraft:bread",
+            "Item.use -> Consumable.startConsuming -> CONSUME",
+        ),
+        ("minecraft:diamond_sword", "Item.use -> PASS"),
+        ("minecraft:diamond_pickaxe", "Item.use -> PASS"),
+    ];
+    let mut failures = Vec::new();
+    for (item, vanilla) in silent {
+        let (net, actions, _feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        sim.attach_net(net);
+        give_main_hand_item(&mut sim, item);
+
+        sim.use_item_live();
+
+        let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+        let wire_swing = sent
+            .iter()
+            .any(|a| matches!(a, ClientAction::SwingArm { .. }));
+        let use_item_sent = sent
+            .iter()
+            .any(|a| matches!(a, ClientAction::UseItem { hand: Hand::Main, .. }));
+        let peak = peak_swing_over(&mut sim, 10);
+        if wire_swing || peak > 0.0 || !use_item_sent {
+            failures.push(format!(
+                "{item} ({vanilla}): wire_swing={wire_swing} arm_peak={peak} \
+                 use_item_sent={use_item_sent}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "these uses must reach the wire without swinging the arm — a swing here \
+         is both a wrong local animation and a SwingArm every other player sees: \
+         {failures:?}"
+    );
+}
+
+/// The same rule on the **block** path, which has its own swing site.
+///
+/// `MultiPlayerGameMode.performUseItemOn` returns the base `Item.useOn`'s
+/// `PASS` for a sword against plain stone, so `Minecraft.startUseItem`'s
+/// `case BLOCK` swings nothing and falls through to the generic use — which,
+/// for a sword, is also `PASS`. Before the fix this swung twice over: once
+/// unconditionally after the `USE_ITEM_ON` send and once in the fall-through.
+///
+/// The `UseItemOn` assertion is the control — the click must genuinely have
+/// taken the block branch, or the absent swing proves only that nothing ran.
+#[test]
+fn right_clicking_a_plain_block_with_a_sword_does_not_swing() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, "minecraft:diamond_sword");
+    sim.set_ray_target_for_test(Some(RayHit::face_center([4, 64, 4], [0, 1, 0])));
+    assert!(sim.target().is_some(), "precondition: a block is targeted");
+
+    sim.use_item_live();
+
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert!(
+        sent.iter()
+            .any(|a| matches!(a, ClientAction::UseItemOn { .. })),
+        "control: the block branch must have been taken, got {sent:?}"
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|a| matches!(a, ClientAction::SwingArm { .. })),
+        "a sword against plain stone is vanilla's PASS at both the block and \
+         the generic step, so no SwingArm may reach the wire — got {sent:?}"
+    );
+    let peak = peak_swing_over(&mut sim, 10);
+    assert_eq!(
+        peak, 0.0,
+        "...and the local arm must stay at rest too, got {peak}"
+    );
+}
+
+/// The discriminating positive for the block path's `Nothing` arm, and the
+/// reason it is not simply "never swing on `Nothing`".
+///
+/// `UseOnDecision::Nothing` collapses two vanilla outcomes: the base
+/// `Item.useOn`'s `PASS` (the sword above) and the overrides that act on the
+/// block. `FlintAndSteelItem.useOn` returns `InteractionResult.SUCCESS`, so
+/// vanilla swings **and returns** — it never reaches `gameMode.useItem`. Both
+/// halves are asserted here, because a gate that only checked the swing would
+/// pass against a version that also sent a spurious generic use.
+#[test]
+fn flint_and_steel_on_a_block_swings_and_stops_there() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, "minecraft:flint_and_steel");
+    sim.set_ray_target_for_test(Some(RayHit::face_center([4, 64, 4], [0, 1, 0])));
+
+    sim.use_item_live();
+
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert!(
+        sent.iter()
+            .any(|a| matches!(a, ClientAction::UseItemOn { .. })),
+        "control: the block branch must have been taken, got {sent:?}"
+    );
+    assert!(
+        sent.iter()
+            .any(|a| matches!(a, ClientAction::SwingArm { hand: Hand::Main })),
+        "flint and steel lights the block — vanilla's SUCCESS — so it must \
+         swing, got {sent:?}"
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|a| matches!(a, ClientAction::UseItem { .. })),
+        "vanilla's `case BLOCK` returns on SUCCESS and never reaches \
+         `gameMode.useItem`, so no generic use may follow — got {sent:?}"
+    );
+    let peak = peak_swing_over(&mut sim, 10);
+    assert!(
+        peak > 0.4,
+        "the local arm must swing too, progress peaked at {peak}"
+    );
+}
+
+/// One swing per click, on the entity path.
+///
+/// `Sim::interact_entity` swings unconditionally (see its doc: this client
+/// models no `Entity.interact`, so there is no local result to gate on), and
+/// the fall-through to `use_item_generic` used to swing again — two
+/// `SwingArm` packets for one right-click, where vanilla's `case ENTITY`
+/// swings at most once because it *returns* when it swings.
+///
+/// A snowball is the subject deliberately: it is the one item whose generic
+/// use really is `SUCCESS`, so it would swing a second time on its own merits
+/// if `already_swung` were not threaded through. With any silent item the
+/// gate would pass for the wrong reason.
+#[test]
+fn an_entity_right_click_swings_exactly_once() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, "minecraft:snowball");
+    sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = Some(42));
+
+    sim.use_item_live();
+
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    let swings = sent
+        .iter()
+        .filter(|a| matches!(a, ClientAction::SwingArm { .. }))
+        .count();
+    assert_eq!(
+        swings, 1,
+        "one right-click on an entity must put exactly one SwingArm on the \
+         wire, got {swings} in {sent:?}"
+    );
+    assert!(
+        sent.iter()
+            .any(|a| matches!(a, ClientAction::UseItem { hand: Hand::Main, .. })),
+        "control: the generic use must still follow the interact, or the count \
+         above is one only because the fall-through never happened — got {sent:?}"
     );
 }
 

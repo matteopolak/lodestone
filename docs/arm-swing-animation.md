@@ -55,12 +55,15 @@ measure 2716 px).
 
 ### Who starts a swing
 
-`Sim::swing_hand` (`crates/lodestone-shell/src/sim.rs`), from four places:
+`Sim::swing_hand` (`crates/lodestone-shell/src/sim/step.rs`), from these places:
 
 | site | path |
 |---|---|
 | `drain_action_queue` | any queued `SwingArm { Main }` — **this is the mining case** |
+| `swing_main_hand_live` | left-click on a live server: `begin_attack_live`'s `ENTITY` and `MISS` arms |
 | `use_item_live` | right-click on a live server (bypasses the queue for wire order) |
+| `use_item_generic` | the right-click fall-through — `Item.use` |
+| `interact_entity` | right-click on an entity |
 | `break_block` | demo world |
 | `place_block` | demo world |
 
@@ -69,8 +72,50 @@ swings animates for free. It matches `Hand::Main` specifically — an off-hand
 swing animates the *left* arm, which neither consumer draws, so it is ignored
 rather than approximated onto the right one.
 
-All four are unconditional, not gated on a live socket: the animation is
-client-side, exactly as the demo world's swings prove.
+None of them is gated on a live socket: the animation is client-side, exactly
+as the demo world's swings prove.
+
+### Which right-clicks swing, and which do not
+
+The left-click side really is unconditional — `Minecraft.startAttack` swings on
+every arm including a miss. **The right-click side is not**, and treating it as
+if it were is what produced the report *"right clicking with (i think) any item
+makes me swing my arm"*.
+
+`Minecraft.startUseItem` applies one condition at all three of its call sites:
+swing only when the result is an `InteractionResult.Success` whose
+`swingSource()` is `CLIENT`. `InteractionResult.CONSUME` is `SwingSource.NONE`,
+and `SUCCESS_SERVER` is `SwingSource.SERVER` — neither swings the client's arm.
+`MultiPlayerGameMode` computes all three results **locally** (`performUseItemOn`
+and `useItem` both run the real item logic on the client), so this is a decision
+a client owns rather than one it waits a round trip for.
+
+Three sites in `sim/actions.rs`, each with a different amount of local
+knowledge:
+
+| site | vanilla | gated on |
+|---|---|---|
+| `use_item_live`'s block path | `gameMode.useItemOn` | `UseOnDecision::Interact`/`Place` (both `SUCCESS`); for `Nothing`, the `use_on_block_swings` item table |
+| `use_item_generic` | `gameMode.useItem` | the `generic_use_swings` item table, plus `predict_equip_swap` for the base `Item.use`'s equippable arm |
+| `interact_entity` | `gameMode.interact` | **nothing — still unconditional** |
+
+The two item tables are ported from the jar's `use()`/`useOn()` overrides and
+carry their own doc comments naming the case each over-approximates. In short:
+a drawn bow, a raised shield, a spyglass, food and an idle sword or pickaxe are
+all silent; a snowball, ender pearl, fishing rod, book, bucket and boat swing.
+
+`interact_entity` is the one that is still unconditional, and deliberately so:
+closing it needs a client-side `Entity.interact` (an animal's breeding item, a
+boat's `outOfControlTicks`, a horse's saddle), none of which this shell carries.
+The case it gets wrong is right-clicking a mob with **no** interaction — a
+zombie, a creeper — where vanilla stays still. Every deliberate entity
+right-click (boarding, mounting, feeding, shearing, trading) is a `SUCCESS` with
+a `CLIENT` swing source, so it gets those right.
+
+One swing per click: because `interact_entity` always swings and the entity
+branch deliberately falls through to `use_item_generic` (vanilla's `case ENTITY`
+`break`), the fall-through is passed `already_swung` so a snowball thrown at a
+mob does not put two `SwingArm` packets on the wire.
 
 ### The frame read
 
