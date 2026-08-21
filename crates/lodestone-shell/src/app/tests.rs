@@ -2146,6 +2146,66 @@ fn the_debug_chords_need_the_modifier_held() {
     assert_eq!(resolve(playing(), KeyCode::KeyG, true), None);
 }
 
+/// Shift+F3 (the profiler pie chart toggle) and its own F3+number navigation
+/// resolve only while the modifier is held — the same shape
+/// [`the_debug_chords_need_the_modifier_held`] checks for F3+B/F3+G, and for
+/// the same reason: the number row is the (rebindable) hotbar selector, so a
+/// chord arm that ignored `debug_held` would fire on every ordinary hotbar
+/// press and the negative half below would catch it.
+#[test]
+fn the_profiler_chart_chords_need_the_modifier_held() {
+    let held = KeyGate {
+        gameplay: true,
+        debug_held: true,
+        ..KeyGate::default()
+    };
+    assert_eq!(
+        resolve(held, KeyCode::ShiftLeft, true),
+        Some(KeyOutcome::ToggleProfilerChart)
+    );
+    assert_eq!(
+        resolve(held, KeyCode::ShiftRight, true),
+        Some(KeyOutcome::ToggleProfilerChart)
+    );
+    // Release is not a chord, matching every other F3 chord — unlike B/G
+    // (unbound by default), Shift is also `key.sneak`, so its release still
+    // falls through to an ordinary (harmless, since sneak was never pressed
+    // through this path) `Movement` release rather than to `None`.
+    assert_ne!(
+        resolve(held, KeyCode::ShiftLeft, false),
+        Some(KeyOutcome::ToggleProfilerChart)
+    );
+
+    // Digit1..Digit8 drill into wedges 0..8; Digit0 returns to the root;
+    // Digit9 is not a profiler-chart key (only eight phases exist) and falls
+    // through to whatever it would otherwise resolve to (nothing, in the
+    // default table).
+    assert_eq!(
+        resolve(held, KeyCode::Digit1, true),
+        Some(KeyOutcome::ProfilerChartSelect(Some(0)))
+    );
+    assert_eq!(
+        resolve(held, KeyCode::Digit8, true),
+        Some(KeyOutcome::ProfilerChartSelect(Some(7)))
+    );
+    assert_eq!(
+        resolve(held, KeyCode::Digit0, true),
+        Some(KeyOutcome::ProfilerChartSelect(None))
+    );
+    assert_eq!(resolve(held, KeyCode::Digit9, true), None);
+
+    // Without the modifier, Shift is sneak (`Movement`) and the digits select
+    // hotbar slots — both untouched by this change.
+    assert_ne!(
+        resolve(playing(), KeyCode::ShiftLeft, true),
+        Some(KeyOutcome::ToggleProfilerChart)
+    );
+    assert_ne!(
+        resolve(playing(), KeyCode::Digit1, true),
+        Some(KeyOutcome::ProfilerChartSelect(Some(0)))
+    );
+}
+
 /// F3+P (pause on lost focus) and F3+C (copy location) — the same
 /// modifier-gated shape [`the_debug_chords_need_the_modifier_held`] checks
 /// for F3+B/F3+G, extended to the two chords this change adds. `P` and `C`
@@ -3019,7 +3079,6 @@ async fn live_precipitation_matches_vanillas_own_threshold_for_real_biomes() {
     let handle = Arc::new(handle);
     let probe = ShellWeatherProbe {
         light: 1.0,
-        sky_visible: true,
         handle: Some(Arc::clone(&handle)),
         biome_climates: Some(Arc::clone(&climates)),
         // One `section_at` per distinct chunk column rather than per call — this
