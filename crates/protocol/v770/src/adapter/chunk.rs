@@ -10,14 +10,22 @@ impl V770Adapter {
     pub(super) fn handle_play_chunk(&self, world: &mut dyn WorldSink, packet_id: i32, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
         if packet_id == play::clientbound::LOGIN {
             let body: GameLogin = decode_body(payload)?;
-            // A *second* `LOGIN` on a live connection is the other shape a
-            // proxy backend switch takes, and the shell's movement state does
-            // not reset with it. See the `xfer` module's doc.
+            // The two server-switch paths are distinguished here, and this is
+            // the one to read first: `login_ordinal > 1` is a **second login on
+            // one socket**, which is what a Velocity/BungeeCord backend switch
+            // looks like — the client never reconnects and never sees a
+            // `minecraft:transfer` packet at all. `TRANSFER` is the other path
+            // (a reconnect to a new address, which starts a fresh adapter whose
+            // ordinal is `1` again), logged by `handle_play_connection`. See
+            // the `xfer` module's doc.
+            let login_ordinal = self.note_login();
             tracing::debug!(
                 target: "transfer",
                 seq = super::xfer::next_seq(),
+                login_ordinal,
                 entity_id = body.entity_id,
                 dimension = %body.dimension,
+                path = if login_ordinal > 1 { "backend-swap" } else { "fresh-join" },
                 "xfer: LOGIN (join game) received"
             );
             // `dimension_type` is the registry holder id; `dimension` is the

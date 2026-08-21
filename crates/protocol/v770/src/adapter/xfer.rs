@@ -11,8 +11,27 @@
 //! |---|---|---|
 //! | `xfer: PLAYER_POSITION` | [`super::player`]'s `handle_player_position` | a teleport arrived, with its id, target and `relatives` mask, and that `ACCEPT_TELEPORTATION` is going out with the same id |
 //! | `xfer: move packet` | [`super::V770Adapter::select_move_packet`] | an outbound `move_player_*` reached the wire, the position it claims, and how far that is from the last teleport target we accepted |
-//! | `xfer: state` | [`super::connection`] | `START_CONFIGURATION` / `FINISH_CONFIGURATION` / `TRANSFER` — the connection crossing Play ↔ Configuration, which is what a proxy backend switch looks like from here |
-//! | `xfer: LOGIN` | [`super::chunk`] | a *second* join packet on a live connection: the other shape of the same switch |
+//! | `xfer: state` | [`super::connection`] | `START_CONFIGURATION` / `FINISH_CONFIGURATION` / `TRANSFER`, each labelled with the `path` it belongs to |
+//! | `xfer: LOGIN` | [`super::chunk`] | a join packet, with its **ordinal on this connection** — the single field that says which path is in play |
+//!
+//! # Two paths, and they are not the same thing
+//!
+//! "Being moved to another server" has two mechanisms with almost nothing in
+//! common, and every line here carries a `path` field naming which one fired:
+//!
+//! * **`path = "reconnect"`** — the `minecraft:transfer` packet. The server
+//!   asks the client to disconnect and dial a *new address*. Everything
+//!   per-connection is rebuilt, this adapter included, so a fresh adapter's
+//!   `login_ordinal` is `1` again.
+//! * **`path = "backend-swap"`** — a Velocity/BungeeCord proxy keeping **one**
+//!   socket and swapping the backend behind it. No `TRANSFER` packet is ever
+//!   sent: the client sees `START_CONFIGURATION`, a configuration round, and
+//!   then a **second `LOGIN`** on the connection it already had. Every piece of
+//!   per-connection state that a reconnect would rebuild is instead carried
+//!   over, which is why `login_ordinal > 1` is the field to grep for first.
+//!
+//! A log with no `TRANSFER` line and a `login_ordinal` of `2` is a backend
+//! swap, and settles which of the two the player is actually exercising.
 //!
 //! The shell emits its own `transfer` lines for the frames either side of the
 //! wire (`crate`-external: `lodestone_shell`'s `net.rs`, `sim/net_apply.rs` and

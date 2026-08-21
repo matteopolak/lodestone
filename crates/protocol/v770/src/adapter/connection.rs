@@ -29,8 +29,10 @@ impl V770Adapter {
             tracing::debug!(
                 target: "transfer",
                 seq = super::xfer::next_seq(),
+                path = "backend-swap",
                 "xfer: state -- START_CONFIGURATION; leaving Play for Configuration \
-                 (a mid-session reconfigure, or a proxy moving us to another backend)"
+                 (a mid-session reconfigure, or a proxy moving us to another backend \
+                 on this same socket -- the second LOGIN that follows is the tell)"
             );
             return Ok(vec![
                 send(
@@ -54,7 +56,10 @@ impl V770Adapter {
                 host = %host,
                 port,
                 state = "Play",
-                "xfer: state -- TRANSFER"
+                path = "reconnect",
+                "xfer: state -- TRANSFER; the server is sending us to a new address, \
+                 which is a different thing from a proxy backend swap: this ends the \
+                 session and starts a new connection"
             );
             return Ok(vec![Directive::Emit(ClientEvent::TransferRequested {
                 host,
@@ -541,7 +546,10 @@ impl V770Adapter {
                 host = %host,
                 port,
                 state = "Configuration",
-                "xfer: state -- TRANSFER"
+                path = "reconnect",
+                "xfer: state -- TRANSFER; the server is sending us to a new address, \
+                 which is a different thing from a proxy backend swap: this ends the \
+                 session and starts a new connection"
             );
             return Ok(vec![Directive::Emit(ClientEvent::TransferRequested {
                 host,

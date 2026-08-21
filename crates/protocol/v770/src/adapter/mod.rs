@@ -1,6 +1,7 @@
 //! [`VersionAdapter`] implementation driving the protocol 776 join flow.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -146,6 +147,11 @@ pub struct V770Adapter {
     shape: Arc<Mutex<ChunkShape>>,
     batch: Arc<Mutex<ChunkBatchState>>,
     movement: Arc<Mutex<MovementSendState>>,
+    /// Diagnostic only — `LOGIN` packets seen on this connection, so the
+    /// `transfer` target can say whether a join is the first (a fresh session)
+    /// or a later one (a proxy swapping the backend underneath one socket).
+    /// See [`xfer`]'s module doc; nothing in the decode path reads it.
+    logins_seen: Arc<AtomicU64>,
     /// Tracks the concrete type of spawned entities whose cosmetic variant lives
     /// at a metadata index that other mobs reuse (sheep wool @ 17, horse variant
     /// @ 18). Only these ambiguous classes are stored, bounding the map to the
@@ -340,6 +346,7 @@ impl V770Adapter {
                 batch_start: batch_now(),
             })),
             movement: Arc::new(Mutex::new(MovementSendState::default())),
+            logins_seen: Arc::new(AtomicU64::new(0)),
             variants: Arc::new(Mutex::new(HashMap::new())),
             clock: Arc::new(Mutex::new(DayClock::default())),
             registries: Arc::new(Mutex::new(ClientRegistries::default())),
@@ -639,6 +646,17 @@ impl V770Adapter {
         state.last_horizontal_collision = horizontal_collision;
 
         Ok(packet)
+    }
+
+    /// Counts a `LOGIN` packet and returns its ordinal on this connection.
+    ///
+    /// `1` is a fresh join. Anything higher is a **second login on one socket**
+    /// — the shape a Velocity/BungeeCord backend switch takes, as distinct from
+    /// the `minecraft:transfer` packet, which asks the client to reconnect to a
+    /// new address and so starts a whole new connection (and a whole new
+    /// adapter, whose count would be `1` again). Diagnostic only.
+    pub(super) fn note_login(&self) -> u64 {
+        self.logins_seen.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// Records the teleport `handle_player_position` just answered with
