@@ -240,6 +240,49 @@ fn font_metrics_debug_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("LODESTONE_FONT_METRICS").is_some())
 }
 
+/// The codepoints `LODESTONE_FONT_TRACE` names (comma/whitespace-separated;
+/// each token `0x7532`, `U+7532`, or a bare decimal). Empty when the env var
+/// is unset or unparseable.
+///
+/// This is the direct answer to "which provider actually supplies this
+/// codepoint, and what did each candidate compute for its advance": every
+/// provider that reaches a traced codepoint, in the *same* priority order
+/// [`FontLoader::flatten`] produced, prints one line -- WINS for the one
+/// [`Font::advance`] actually returns, "shadowed" for every other provider
+/// that also declares the codepoint but lost. Two providers can each be
+/// individually correct (a pack's own bitmap panel *and* vanilla's own
+/// unihex CJK fallback both computing the textbook-correct advance for their
+/// own cell) and still produce the wrong glyph on screen if the wrong one
+/// wins the precedence race -- this is the tool for reading that race
+/// directly, rather than inferring it from a metrics dump that only shows
+/// one provider's own numbers in isolation.
+fn font_trace_codepoints() -> &'static HashSet<u32> {
+    static TRACE: std::sync::OnceLock<HashSet<u32>> = std::sync::OnceLock::new();
+    TRACE.get_or_init(|| {
+        let Some(raw) = std::env::var_os("LODESTONE_FONT_TRACE") else {
+            return HashSet::new();
+        };
+        let raw = raw.to_string_lossy();
+        raw.split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|s| !s.is_empty())
+            .filter_map(|token| {
+                let hex = token
+                    .strip_prefix("0x")
+                    .or_else(|| token.strip_prefix("0X"))
+                    .or_else(|| token.strip_prefix("U+"))
+                    .or_else(|| token.strip_prefix("u+"));
+                match hex {
+                    Some(h) => u32::from_str_radix(h, 16).ok(),
+                    None => token
+                        .parse::<u32>()
+                        .ok()
+                        .or_else(|| u32::from_str_radix(token, 16).ok()),
+                }
+            })
+            .collect()
+    })
+}
+
 /// Number of bitmap rows in every unihex glyph (`UnihexProvider.GLYPH_HEIGHT`).
 /// Fixed: the HEX line's digit count varies the *width*, never the height.
 pub const UNIHEX_GLYPH_HEIGHT: u32 = 16;
@@ -1016,16 +1059,30 @@ impl<'a> FontLoader<'a> {
         let mut glyphs: HashMap<u32, Glyph> = HashMap::new();
         let mut unihex_count = 0usize;
         let mut ttf_count = 0usize;
-        for def in &active {
+        let traced = font_trace_codepoints();
+        for (provider_index, def) in active.iter().enumerate() {
             match def {
                 ProviderDef::Unihex {
                     hex_file,
                     size_overrides,
                 } => {
-                    unihex_count += self.load_unihex(hex_file, size_overrides, &mut glyphs)?;
+                    unihex_count +=
+                        self.load_unihex(hex_file, size_overrides, &mut glyphs, provider_index, traced)?;
                 }
                 ProviderDef::Space { advances } => {
                     for (cp, adv) in advances {
+                        let already = glyphs.contains_key(cp);
+                        if traced.contains(cp) {
+                            eprintln!(
+                                "lodestone-assets: TRACE U+{cp:04X} provider[{provider_index}] \
+                                 space advance={adv} -> {}",
+                                if already {
+                                    "shadowed (an earlier-declared provider already won this codepoint)"
+                                } else {
+                                    "WINS"
+                                }
+                            );
+                        }
                         glyphs.entry(*cp).or_insert(Glyph::Space { advance: *adv });
                     }
                 }
@@ -1035,7 +1092,7 @@ impl<'a> FontLoader<'a> {
                     ascent,
                     chars,
                 } => {
-                    self.load_bitmap(file, *height, *ascent, chars, &mut glyphs)?;
+                    self.load_bitmap(file, *height, *ascent, chars, &mut glyphs, provider_index, traced)?;
                 }
                 ProviderDef::Ttf {
                     file,
@@ -1044,8 +1101,16 @@ impl<'a> FontLoader<'a> {
                     shift,
                     skip,
                 } => {
-                    ttf_count +=
-                        self.load_ttf(file, *size, *oversample, *shift, skip, &mut glyphs)?;
+                    ttf_count += self.load_ttf(
+                        file,
+                        *size,
+                        *oversample,
+                        *shift,
+                        skip,
+                        &mut glyphs,
+                        provider_index,
+                        traced,
+                    )?;
                 }
                 ProviderDef::Reference { .. } => {}
             }
@@ -1080,6 +1145,8 @@ impl<'a> FontLoader<'a> {
         hex_file: &ResourceLocation,
         size_overrides: &[UnihexOverride],
         glyphs: &mut HashMap<u32, Glyph>,
+        provider_index: usize,
+        traced: &HashSet<u32>,
     ) -> Result<usize, FontError> {
         let path = format!("assets/{}/{}", hex_file.namespace(), hex_file.path());
         let Some(bytes) = self.manager.read(&path) else {
@@ -1132,7 +1199,19 @@ impl<'a> FontLoader<'a> {
 
         let mut inserted = 0usize;
         let mut insert = |cp: u32, glyph: UnihexGlyph, inserted: &mut usize| {
-            if glyphs.contains_key(&cp) {
+            let already = glyphs.contains_key(&cp);
+            if traced.contains(&cp) {
+                eprintln!(
+                    "lodestone-assets: TRACE U+{cp:04X} provider[{provider_index}] unihex                      hex_file={hex_file} advance={:.3} -> {}",
+                    glyph.advance(),
+                    if already {
+                        "shadowed (an earlier-declared provider already won this codepoint)"
+                    } else {
+                        "WINS"
+                    }
+                );
+            }
+            if already {
                 return; // first-declared provider wins
             }
             glyphs.insert(cp, Glyph::Unihex(glyph));
@@ -1187,6 +1266,8 @@ impl<'a> FontLoader<'a> {
         shift: [f32; 2],
         skip: &[u32],
         glyphs: &mut HashMap<u32, Glyph>,
+        provider_index: usize,
+        traced: &HashSet<u32>,
     ) -> Result<usize, FontError> {
         // `TrueTypeGlyphProviderDefinition.load`: `resourceManager.open(this.location.withPrefix("font/"))`.
         let path = format!("assets/{}/font/{}", file.namespace(), file.path());
@@ -1215,7 +1296,21 @@ impl<'a> FontLoader<'a> {
         let mut inserted = 0usize;
         for (&ch, &glyph_id) in face.chars() {
             let cp = ch as u32;
-            if skip_set.contains(&cp) || glyphs.contains_key(&cp) {
+            let skip_cp = skip_set.contains(&cp);
+            let already = glyphs.contains_key(&cp);
+            if traced.contains(&cp) {
+                let reason = if skip_cp {
+                    "skipped (this provider's own \"skip\" list)"
+                } else if already {
+                    "shadowed (an earlier-declared provider already won this codepoint)"
+                } else {
+                    "WINS"
+                };
+                eprintln!(
+                    "lodestone-assets: TRACE U+{cp:04X} provider[{provider_index}] ttf                      file={file} -> {reason}"
+                );
+            }
+            if skip_cp || already {
                 continue; // pack-declared skip, or an earlier provider already won it
             }
             let metrics = face.metrics_indexed(glyph_id.get(), pixels_per_em);
@@ -1256,21 +1351,44 @@ impl<'a> FontLoader<'a> {
         if stack.contains(id) {
             return Err(FontError::ReferenceCycle { id: id.to_string() });
         }
-        let bytes = self
-            .manager
-            .read_asset(id, "font", "json")
-            .ok_or_else(|| FontError::NotFound { id: id.to_string() })?;
-        let def = FontDefinition::parse(&bytes)?;
+        // Vanilla stacks every active pack's own copy of a font definition
+        // file for this id -- it is not a single-winner override the way an
+        // ordinary texture reference is. `FontManager.prepare` reads via
+        // `FONT_DEFINITIONS.listMatchingResourceStacks`, one entry per pack
+        // that carries the path, and `loadResourceStack` (reverse per file)
+        // plus `apply`'s final `Lists.reverse` combine to lay the merged
+        // list out **highest-priority pack first, each pack's own JSON
+        // order preserved** -- the exact shape `ResourceManager::read_stack`
+        // already documents for language files ("a pack that ships its own
+        // lang/en_us.json must not blank out the ~7,000 vanilla keys
+        // underneath it"). A font id is the same shape: a pack that ships
+        // its own `font/<id>.json` to add a handful of custom bitmap
+        // providers must not silently delete every lower-priority pack's
+        // (including the jar's) own providers for that id -- which is
+        // exactly what a single-winner `read_asset` did here before this
+        // fix, discarding the jar's `minecraft:default.json` outright
+        // whenever a pack shipped its own file at the same path.
+        let path = crate::manager::ResourceManager::asset_path(id, "font", "json");
+        let layers = self.manager.read_stack(&path);
+        if layers.is_empty() {
+            return Err(FontError::NotFound { id: id.to_string() });
+        }
         stack.push(id.clone());
-        for provider in def.providers {
-            let effective = provider.filter.with_override(inherited);
-            match provider.def {
-                ProviderDef::Reference { id: ref_id } => {
-                    self.flatten(&ref_id, &effective, options, stack, out)?;
-                }
-                other => {
-                    if effective.passes(options) {
-                        out.push(other);
+        // `read_stack` returns lowest priority first; the higher-priority
+        // pack's own providers must come first in the flattened,
+        // priority-ordered list, so walk it highest-first.
+        for bytes in layers.iter().rev() {
+            let def = FontDefinition::parse(bytes)?;
+            for provider in def.providers {
+                let effective = provider.filter.with_override(inherited);
+                match provider.def {
+                    ProviderDef::Reference { id: ref_id } => {
+                        self.flatten(&ref_id, &effective, options, stack, out)?;
+                    }
+                    other => {
+                        if effective.passes(options) {
+                            out.push(other);
+                        }
                     }
                 }
             }
@@ -1286,6 +1404,8 @@ impl<'a> FontLoader<'a> {
         ascent: i32,
         chars: &[Vec<u32>],
         glyphs: &mut HashMap<u32, Glyph>,
+        provider_index: usize,
+        traced: &HashSet<u32>,
     ) -> Result<(), FontError> {
         let rows = chars.len();
         if rows == 0 || chars[0].is_empty() {
@@ -1346,16 +1466,15 @@ impl<'a> FontLoader<'a> {
                 if cp == 0 {
                     continue; // null padding
                 }
-                if glyphs.contains_key(&cp) && !declared_here.contains(&cp) {
+                let shadowed_by_earlier = glyphs.contains_key(&cp) && !declared_here.contains(&cp);
+                let want_trace = traced.contains(&cp);
+                if shadowed_by_earlier && !want_trace {
                     continue; // an earlier-declared provider already won this codepoint
                 }
-                if !declared_here.insert(cp) {
-                    eprintln!(
-                        "lodestone-assets: codepoint U+{cp:04X} declared multiple times in \
-                         {file} -- the later cell wins, matching \
-                         BitmapProvider.Definition.load's charMap.put"
-                    );
-                }
+                // Computed for any *live* candidate, and also for a shadowed
+                // one that is explicitly traced -- LODESTONE_FONT_TRACE's
+                // whole point is showing what a losing provider *would have*
+                // computed, not just the winner's own number.
                 let actual = actual_glyph_width(
                     &img,
                     glyph_width,
@@ -1364,6 +1483,27 @@ impl<'a> FontLoader<'a> {
                     slot_y as u32,
                 );
                 let advance = (0.5 + actual as f32 * pixel_scale) as i32 + 1;
+                if want_trace {
+                    eprintln!(
+                        "lodestone-assets: TRACE U+{cp:04X} provider[{provider_index}] bitmap \
+                         file={file} cell_pos=({slot_x},{slot_y}) advance={advance} -> {}",
+                        if shadowed_by_earlier {
+                            "shadowed (an earlier-declared provider already won this codepoint)"
+                        } else {
+                            "WINS"
+                        }
+                    );
+                }
+                if shadowed_by_earlier {
+                    continue;
+                }
+                if !declared_here.insert(cp) {
+                    eprintln!(
+                        "lodestone-assets: codepoint U+{cp:04X} declared multiple times in \
+                         {file} -- the later cell wins, matching \
+                         BitmapProvider.Definition.load's charMap.put"
+                    );
+                }
                 if debug {
                     // Everything a spacing bug needs to be diagnosed from one
                     // line: the declared metrics, the measured ink extent
