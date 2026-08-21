@@ -1352,6 +1352,24 @@ feature that happens to use it.
   rasterisation-visibility problem, grep for other users of the same primitive before considering it done —
   and note the diagnostic that worked, since reading did not: build a gate that drives the *real* producer
   through the *real* pipeline, and when it passes, the defect is below the layer you were reading.
+- **A GPU pass that *borrows* another renderer's atlas or buffer must be re-attached wherever that
+  resource is replaced — and nothing will go red if it is not.** Measured, and confirmed by the owner as a
+  live shipped bug: the resource-pack reload path replaces the model atlas view, the tint palette and the
+  animation buffer with new GPU objects and re-bakes every sprite's UVs, while the 3-D block-item pass
+  (`HudRenderer`/`ContainerRenderer`) borrows all three and built its bind groups once at bring-up. wgpu
+  resources are `Arc`-backed and a bind group holds a strong reference, so the pass stays **valid** and
+  simply keeps sampling the *dropped* atlas while drawing geometry baked against the new packing: stale
+  palette, frozen animated icons, and nothing at all drawn wherever a new UV lands on padding.
+
+  Three things generalise. **The borrow is the right call** — a second copy of the block atlas to draw
+  16 px icons costs tens of MB — so the fix is re-attachment, not ownership. **The asymmetry is the
+  diagnostic**: the flat sprite stream was immune because its atlas *and* its UVs come from one
+  `ItemAtlas` object, so "flat icons fine, block icons gone" localises the bug to a borrowed-resource
+  reload before any code is read. And **no hermetic gate can see this**, because every gate builds its
+  renderer once and never reloads — the trigger is a pack generation bump (a server-pushed pack, the
+  Resource Packs screen, the `mipmapLevels` slider). So when you add a borrow, add its re-attach to the
+  reload block **in the same commit**; there is no test that will remind you.
+
 - **Shaders live in `.wgsl` files. Never inline one in Rust again** —
   `crates/lodestone-render/src/shaders/` and `crates/lodestone-shell/src/shaders/`, via `include_str!`,
   still compile-time. See [`docs/shaders.md`](./docs/shaders.md). "Just for a quick test" is not an
