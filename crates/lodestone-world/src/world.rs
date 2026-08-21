@@ -414,6 +414,25 @@ pub struct World {
     /// deferral, bounded by [`PENDING_PHYSICS_CAP`] for the same reason —  a
     /// host that never drains it must not grow a list for the whole session.
     pub(crate) pending_physics_updates: Vec<[i32; 3]>,
+    /// Monotonic count of [`merge_light`](World::merge_light) calls that reached a
+    /// loaded column, i.e. server light corrections actually applied.
+    ///
+    /// Diagnostic. It exists because "the server sent a light update for the block
+    /// you broke" and "the client relit it itself and nothing corrected it" produce
+    /// the same stored light and the same pixels, and a host cannot otherwise tell
+    /// which one it is looking at. Vanilla's `ChunkHolder.broadcastChanges` sends
+    /// the light packet only to players for whom the chunk is on the *outer ring*
+    /// of their loaded area, so for the breaker this is expected to stay flat —
+    /// and a reading where it does **not** means the correction arrived and the
+    /// client still shows the wrong light, which is a different bug entirely.
+    pub(crate) light_merges: u64,
+    /// Monotonic count of queued relight positions dropped because a server light
+    /// patch for their column arrived first.
+    ///
+    /// Non-zero means the server won the race for those cells; zero alongside a
+    /// large relight means our own recomputation is the only thing that has
+    /// touched that light.
+    pub(crate) relights_cancelled: u64,
 }
 
 /// Ceiling on [`World`]'s pending-relight queue. A host that writes blocks and
@@ -925,12 +944,15 @@ impl World {
         // bug in a subtler form than the darkness it fixes, so drop the queue for
         // this column instead. See [`crate::relight`].
         if !self.pending_relight.is_empty() {
+            let before = self.pending_relight.len();
             self.pending_relight
                 .retain(|p| ChunkPos::from_block(p[0], p[2]) != pos);
+            self.relights_cancelled += (before - self.pending_relight.len()) as u64;
         }
         let Some(chunk) = self.chunks.get_mut(&pos) else {
             return;
         };
+        self.light_merges += 1;
         let count = chunk.light.light_section_count();
         for (i, data) in patch.sky {
             if i < count {
@@ -942,6 +964,17 @@ impl World {
                 *chunk.light.block_mut(i) = data;
             }
         }
+    }
+
+    /// Server light corrections applied so far, and queued relights they cancelled.
+    ///
+    /// Monotonic, so a host reads the **delta** across a window rather than the
+    /// absolute value. See the fields' own docs for what each answers; together
+    /// they are the only way to tell a client-side relight nobody corrected from
+    /// one the server overruled, because both end with light in storage.
+    #[must_use]
+    pub fn light_correction_counts(&self) -> (u64, u64) {
+        (self.light_merges, self.relights_cancelled)
     }
 
     /// Applies a sparse [`BiomePatch`] to the chunk at `pos`, replacing only the
