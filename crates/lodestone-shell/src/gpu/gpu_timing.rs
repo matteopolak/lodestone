@@ -349,7 +349,7 @@ impl GpuQueryTimer {
     /// [`Self::stalled_frames`] rather than mapping on top of the old one.
     /// The two halves must agree: mapping a slot this frame's encoder never
     /// copied into would report the *previous* occupant's timings as fresh.
-    pub(crate) fn after_submit(&mut self, device: &wgpu::Device) {
+    pub(crate) fn after_submit(&mut self) {
         let idx = (self.frame as usize) % FRAMES_IN_FLIGHT;
         if self.skipped_resolve {
             self.stalled_frames += 1;
@@ -361,7 +361,6 @@ impl GpuQueryTimer {
             "resolve() copied into slot {idx} but it is still mapped — the two halves have \
              drifted apart and this submission is about to be rejected"
         );
-        let _ = device;
         let (tx, rx) = std::sync::mpsc::channel();
         self.slots[idx]
             .readback
