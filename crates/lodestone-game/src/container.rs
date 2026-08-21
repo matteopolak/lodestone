@@ -100,6 +100,30 @@ impl EquipmentSlot {
             _ => None,
         }
     }
+
+    /// This slot's index in the player's own inventory screen (window 0),
+    /// matching [`crate::menu::Menu::player`]'s layout — `5..=8` for the four
+    /// humanoid-armour positions, `None` for [`Offhand`](Self::Offhand).
+    ///
+    /// Restricted to `HUMANOID_ARMOR` the same way [`Self::from_name`] already
+    /// excludes `"body"`: vanilla's `Item.use()` → `Equippable.
+    /// swapWithEquipmentSlot` reaches any [`Self`] the component names, but the
+    /// only slot a *player's own hotbar* right-click can land in is one of
+    /// these four — `Offhand` has no real item that declares it (the shield
+    /// mechanic goes through `minecraft:blocks_attacks`, not a swap), and
+    /// `Offhand`'s own menu index (`45`) is intentionally not returned here so
+    /// a caller cannot accidentally wire the F-key swap-to-offhand action
+    /// through this method instead of its own.
+    #[must_use]
+    pub fn player_menu_index(self) -> Option<usize> {
+        match self {
+            Self::Head => Some(5),
+            Self::Chest => Some(6),
+            Self::Legs => Some(7),
+            Self::Feet => Some(8),
+            Self::Offhand => None,
+        }
+    }
 }
 
 /// The behavioural category of a slot.

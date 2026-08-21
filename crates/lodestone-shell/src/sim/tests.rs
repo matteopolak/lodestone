@@ -4657,6 +4657,28 @@ fn give_main_hand_item(sim: &mut Sim, item: &str) {
     });
 }
 
+/// Same idiom as [`give_main_hand_item`], carrying a real `minecraft:
+/// equippable` component so `Sim::predict_equip_swap` has something to find
+/// — matching what `crates/protocol/v770/src/adapter/inventory.rs`'s
+/// `read_component_patch` really populates for an armour item off the wire
+/// (`ItemComponents::equippable`, seeded from `lodestone_data::
+/// item_prototypes`), not the bare `ItemStack::new` [`give_main_hand_item`]
+/// builds.
+fn give_main_hand_equippable_item(sim: &mut Sim, item: &str, slot: EquipmentSlot) {
+    let local = sim.local;
+    let mut stack =
+        lodestone_model::ItemStack::new(item.parse().expect("valid item id"), 1);
+    stack.components.equippable = Some(slot);
+    sim.write(|w| {
+        if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
+            menus.0.apply(&lodestone_model::ClientEvent::InventorySlotChanged {
+                slot: 0,
+                item: Some(stack),
+            });
+        }
+    });
+}
+
 /// Issue #613: `ClientAction::Stab` had zero producers. `Minecraft.startAttack`
 /// checks the held item for `DataComponents.PIERCING_WEAPON` *before* the
 /// normal ENTITY/BLOCK/MISS switch and takes it unconditionally — proved here
@@ -4914,6 +4936,113 @@ fn a_placeable_item_on_a_block_does_not_also_send_the_generic_use() {
             .any(|a| matches!(a, ClientAction::UseItem { .. })),
         "a block item answered the click itself, so the generic use must not \
          follow it — got {sent:?}"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Armour equip prediction (`Sim::predict_equip_swap`)
+// -----------------------------------------------------------------------
+//
+// Right-clicking an armour piece from the hotbar with nothing under the
+// crosshair lands in `use_item_generic` — vanilla's `Item.use()` →
+// `Equippable.swapWithEquipmentSlot` — the same landing site
+// `use_item_live_sends_generic_use_with_no_target_at_all` already proves for
+// a bow. Before `predict_equip_swap` existed that method sent `UseItem` and
+// wrote nothing locally, so the helmet only appeared once the server's own
+// `SET_SLOT` pair for the head and hotbar slots came back: the round trip
+// the "missing client prediction" report was about.
+
+/// The control: without the prediction, the head slot (menu index 5) starts
+/// and stays empty across the call — this is the assertion that fails on the
+/// pre-fix `use_item_generic`, which only sent `UseItem` and touched no menu
+/// state at all.
+#[test]
+fn use_item_generic_predicts_the_armour_equip_swap_locally() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_equippable_item(&mut sim, "minecraft:diamond_helmet", EquipmentSlot::Head);
+    assert!(sim.target().is_none(), "precondition: no block targeted");
+    assert!(sim.entity_target().is_none(), "precondition: no entity targeted");
+    assert!(
+        sim.player_menu().slot_item(5).is_none(),
+        "precondition: the head slot must start empty"
+    );
+
+    sim.use_item_live();
+
+    // The prediction itself: the head slot shows the helmet *before* any
+    // server acknowledgement — nothing here drains a socket or applies a
+    // `ClientEvent` from the wire.
+    let head = sim.player_menu().slot_item(5).cloned();
+    assert!(
+        head.as_ref()
+            .is_some_and(|s| s.item().to_string() == "minecraft:diamond_helmet"),
+        "the helmet must be predicted into the head slot locally, with no \
+         server round trip — got {head:?}"
+    );
+    // A straight swap: nothing was worn before, so the hotbar slot the
+    // helmet came from must be predicted empty, not still holding it.
+    assert!(
+        sim.player_menu().player_native(0).is_none(),
+        "the hotbar slot the helmet was drawn from must be predicted empty \
+         after the swap, got {:?}",
+        sim.player_menu().player_native(0)
+    );
+    // The server is still authoritative and must hear the click — the
+    // prediction is additive, not a replacement for the send.
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert!(
+        sent.iter()
+            .any(|a| matches!(a, ClientAction::UseItem { hand: Hand::Main, .. })),
+        "the swap must not skip the wire send — got {sent:?}"
+    );
+}
+
+/// The reconciliation arm: a server that disagrees with the local guess must
+/// win. Simulates the authoritative `SET_SLOT` pair a real server sends after
+/// `broadcastChanges` diffs `player.inventoryMenu` — here, one that names a
+/// *different* helmet than the one predicted (standing in for any server
+/// refusal or race), which must overwrite the predicted contents rather than
+/// leave them standing.
+#[test]
+fn a_disagreeing_server_set_slot_overwrites_the_predicted_equip() {
+    let (net, _actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_equippable_item(&mut sim, "minecraft:diamond_helmet", EquipmentSlot::Head);
+
+    sim.use_item_live();
+    assert_eq!(
+        sim.player_menu()
+            .slot_item(5)
+            .map(|s| s.item().to_string()),
+        Some("minecraft:diamond_helmet".to_string()),
+        "precondition: the prediction landed the diamond helmet"
+    );
+
+    // The server's own truth disagrees — e.g. the swap never actually
+    // happened server-side (enchantment/creative gating this client cannot
+    // model, per `Sim::predict_equip_swap`'s own doc) and the head slot is
+    // really still empty.
+    let local = sim.local;
+    sim.write(|w| {
+        if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
+            menus.0.apply(&lodestone_model::ClientEvent::ContainerSlot {
+                window_id: 0,
+                state_id: 1,
+                slot: 5,
+                item: None,
+            });
+        }
+    });
+
+    assert!(
+        sim.player_menu().slot_item(5).is_none(),
+        "a disagreeing server SET_SLOT must overwrite the prediction, got {:?}",
+        sim.player_menu().slot_item(5)
     );
 }
 
