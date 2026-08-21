@@ -35,13 +35,37 @@
 //! - **`seeThrough`/`shadow` style-flag bits are decoded and not consumed**
 //!   here — same simplification `gpu/nametag.rs`'s own module doc already
 //!   makes for its background plate and per-glyph shadow.
-//! - **Per-run text colour is not modelled.** Vanilla itself hardcodes
-//!   glyph RGB to white for this render type (`textOpacity << 24 |
-//!   0xFFFFFF`, see [`lodestone_render::display::text_glyph_color`]'s doc) —
-//!   this is not a simplification this port makes, it is what vanilla does.
+//! - **Wrapping aside, per-run style now IS modelled** (colour, bold,
+//!   italic, underline, strikethrough), via `gpu/nametag.rs::layout_styled_ink_runs`
+//!   — the same styled ink-run walk `gpu/nametag.rs`'s own player/mob
+//!   nametags now use. `textOpacity << 24 | 0xFFFFFF`
+//!   (`TextDisplayRenderer.submitInner`, see
+//!   [`lodestone_render::display::text_glyph_color`]'s doc) is real, but it
+//!   is the **fallback** tint fed to `Font.java::getTextColor` for a span
+//!   whose own colour is unspecified — not, as this file's doc previously
+//!   and incorrectly claimed, a hardcode that discards a styled component's
+//!   colour outright. A colour/bold/italic/underline/strikethrough-bearing
+//!   `text_display` still needs the upstream flatten
+//!   (`crates/protocol/v770`'s `Value::Text` decode, which currently reduces
+//!   the NBT component to plain text via `plain_text_from_nbt_component`
+//!   before this crate ever sees it) to stop discarding style before this
+//!   pass can draw it — see this module's `push_text_display_quads` for the
+//!   `Text::from_legacy` bridge that makes this pass style-ready the moment
+//!   that upstream flatten changes.
+//! - **A per-line width computed from *unstyled* advances mis-centres a
+//!   line whose real (styled) content is wider — e.g. a bold run.** This was
+//!   the file's own alignment defect: centring used
+//!   `gpu/nametag.rs::layout_ink_runs`'s plain-codepoint width, which cannot
+//!   see a bold run's extra advance (`GlyphInfo.getAdvance(bold)`,
+//!   `Font.java`), so a two-line block whose second line carried a wider
+//!   (bold, once style survives the upstream flatten above) run centred
+//!   against too-small a width and read as shifted right. Switching to
+//!   [`super::nametag::layout_styled_ink_runs`] for width too closes this,
+//!   because that function's own advance accounts for bold.
 
 use glam::{Mat4, Vec3};
 use lodestone_assets::font::RasterFont;
+use lodestone_model::text::Text;
 use lodestone_render::display::{
     BillboardMode, DisplayTransformation, display_orientation, display_placement_matrix,
     text_background_color, text_glyph_color, text_glyph_transform,
@@ -77,9 +101,11 @@ pub(super) struct DisplayTextRenderer {
     /// `None` off a jar-less run — same fail-open contract as
     /// [`super::nametag::NameTagRenderer::font`].
     font: Option<RasterFont>,
-    /// Ink-run layouts, persisted across frames for the same reason
-    /// `gpu/sign_text.rs::SignTextRenderer::ink` is.
-    ink: super::nametag::InkLayoutCache,
+    /// Styled ink-run layouts, persisted across frames for the same reason
+    /// `gpu/sign_text.rs::SignTextRenderer::ink` is. `Styled` (not
+    /// `gpu/nametag.rs::InkLayoutCache`) so a coloured/bold/italic/underlined/
+    /// struck-through span reaches this pass's geometry — see the module doc.
+    ink: super::nametag::StyledInkLayoutCache,
 }
 
 impl DisplayTextRenderer {
@@ -188,7 +214,7 @@ impl DisplayTextRenderer {
             uniform,
             vertices,
             font: super::nametag::load_font(),
-            ink: super::nametag::InkLayoutCache::default(),
+            ink: super::nametag::StyledInkLayoutCache::default(),
         }
     }
 
@@ -246,18 +272,30 @@ impl DisplayTextRenderer {
 /// appended onto `out`.
 fn push_text_display_quads(
     raster: &RasterFont,
-    ink: &super::nametag::InkLayoutCache,
+    ink: &super::nametag::StyledInkLayoutCache,
     draw: &DisplayDraw,
     text: &str,
     camera: &Camera,
     out: &mut Vec<DisplayTextVertex>,
 ) {
     let lines: Vec<&str> = text.split('\n').collect();
+    // `text` is still plain today (the protocol-layer flatten this pass
+    // receives it from currently discards style before this crate ever sees
+    // it — see the module doc), but `Text::from_legacy` is run unconditionally
+    // rather than assuming plain text, so a `§`-coded line already draws
+    // correctly and the moment the upstream flatten preserves style (as a
+    // legacy-coded string, the same bridge `gpu/nametag.rs::push_entity_quads`
+    // now uses) this pass needs no further change.
+    //
     // Per-line layout up front: needed both to size the background panel
     // (vanilla's own `cachedInfo.width()`/`height()`, computed once before
     // any quad is emitted) and to lay out each line's glyphs afterwards —
-    // computed once here rather than twice.
-    let layouts: Vec<_> = lines.iter().map(|line| ink.layout(raster, line)).collect();
+    // computed once here rather than twice. Styled (not
+    // `super::nametag::layout_ink_runs`'s plain width) so a bold run's real,
+    // wider advance is what centring measures — see the module doc for the
+    // alignment defect an unstyled width caused.
+    let line_spans: Vec<_> = lines.iter().map(|line| Text::from_legacy(line).to_spans()).collect();
+    let layouts: Vec<_> = line_spans.iter().map(|spans| ink.layout(raster, spans)).collect();
     let total_width = layouts.iter().map(|l| l.1).fold(0.0_f32, f32::max);
     let total_height = (lines.len() as f32).mul_add(TEXT_LINE_HEIGHT, -1.0);
     if total_width <= 0.0 {
@@ -287,7 +325,11 @@ fn push_text_display_quads(
         push_background_quad(matrix, total_width, total_height, draw.text_background_color, out);
     }
 
-    let glyph_color = text_glyph_color(draw.text_opacity);
+    // `text_glyph_color`'s alpha is `textOpacity`'s own fraction — the real
+    // per-frame value; its RGB (always white) is only the *fallback* a
+    // `StyledRect` already carries for a colourless span, so only the alpha
+    // channel is read here (see the module doc).
+    let alpha = text_glyph_color(draw.text_opacity)[3];
     for (i, layout) in layouts.iter().enumerate() {
         let (rects, line_width) = (&layout.0, layout.1);
         if rects.is_empty() {
@@ -302,6 +344,7 @@ fn push_text_display_quads(
         };
         let y_line = i as f32 * TEXT_LINE_HEIGHT;
         for rect in rects {
+            let color = [rect.color[0], rect.color[1], rect.color[2], rect.color[3] * alpha];
             let lx = rect.x + offset;
             let ly = rect.y + y_line;
             let tl = matrix.transform_point3(Vec3::new(lx, ly, 0.0)).to_array();
@@ -315,12 +358,12 @@ fn push_text_display_quads(
                 .transform_point3(Vec3::new(lx + rect.w, ly + rect.h, 0.0))
                 .to_array();
             out.extend([
-                DisplayTextVertex { position: tl, color: glyph_color },
-                DisplayTextVertex { position: bl, color: glyph_color },
-                DisplayTextVertex { position: tr, color: glyph_color },
-                DisplayTextVertex { position: tr, color: glyph_color },
-                DisplayTextVertex { position: bl, color: glyph_color },
-                DisplayTextVertex { position: br, color: glyph_color },
+                DisplayTextVertex { position: tl, color },
+                DisplayTextVertex { position: bl, color },
+                DisplayTextVertex { position: tr, color },
+                DisplayTextVertex { position: tr, color },
+                DisplayTextVertex { position: bl, color },
+                DisplayTextVertex { position: br, color },
             ]);
         }
     }
@@ -383,7 +426,7 @@ mod tests {
         let Some(raster) = super::super::nametag::load_font() else {
             return;
         };
-        let ink = super::super::nametag::InkLayoutCache::default();
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
         let mut out = Vec::new();
         push_text_display_quads(&raster, &ink, &draw_with_text(""), "", &Camera::default(), &mut out);
         assert!(out.is_empty());
@@ -396,7 +439,7 @@ mod tests {
         let Some(raster) = super::super::nametag::load_font() else {
             return;
         };
-        let ink = super::super::nametag::InkLayoutCache::default();
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
         let draw = draw_with_text("LODESTONE");
         let mut out = Vec::new();
         push_text_display_quads(&raster, &ink, &draw, "LODESTONE", &Camera::default(), &mut out);
@@ -412,7 +455,7 @@ mod tests {
         let Some(raster) = super::super::nametag::load_font() else {
             return;
         };
-        let ink = super::super::nametag::InkLayoutCache::default();
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
         let mut without_bg = draw_with_text("A");
         without_bg.text_background_color = 0;
         let mut no_bg_out = Vec::new();
@@ -444,7 +487,7 @@ mod tests {
         let Some(raster) = super::super::nametag::load_font() else {
             return;
         };
-        let ink = super::super::nametag::InkLayoutCache::default();
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
         let mut camera_a = Camera::default();
         camera_a.position = Vec3::new(5.0, 0.0, 0.0);
         camera_a.yaw = 10.0;
@@ -474,6 +517,123 @@ mod tests {
             center_a, center_b,
             "Center billboard text must move when the camera rotates — \
              fixture cannot discriminate the two modes otherwise"
+        );
+    }
+
+    /// **The colour control.** A `§c` (red) span must reach the draw with a
+    /// real red vertex colour, and the same text with no colour code must
+    /// not — the discriminating pair, not just "some colour appears",
+    /// because a hardcoded non-white constant would pass a looser assertion.
+    /// This is the control the module doc's alignment/colour fix claims to
+    /// close: before `push_text_display_quads` read [`Text::from_legacy`]
+    /// spans, every rect drew flat white (`text_glyph_color`) regardless of
+    /// input, so this assertion would have failed against the pre-fix code.
+    #[test]
+    fn a_coloured_span_reaches_the_draw_with_its_colour_intact() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
+        let red = lodestone_model::text::TextColor::Red.rgb();
+        let want_red = [
+            ((red >> 16) & 0xff) as f32 / 255.0,
+            ((red >> 8) & 0xff) as f32 / 255.0,
+            (red & 0xff) as f32 / 255.0,
+        ];
+        let is_red =
+            |c: [f32; 4]| (c[0] - want_red[0]).abs() < 1e-3 && (c[1] - want_red[1]).abs() < 1e-3 && (c[2] - want_red[2]).abs() < 1e-3;
+
+        let coloured = draw_with_text("\u{a7}cRED");
+        let mut coloured_out = Vec::new();
+        push_text_display_quads(&raster, &ink, &coloured, "\u{a7}cRED", &Camera::default(), &mut coloured_out);
+        assert!(
+            coloured_out.iter().any(|v| is_red(v.color)),
+            "a §c-coloured span must reach the draw with red vertex colour, got: {:?}",
+            coloured_out.iter().map(|v| v.color).collect::<Vec<_>>()
+        );
+
+        let plain = draw_with_text("RED");
+        let mut plain_out = Vec::new();
+        push_text_display_quads(&raster, &ink, &plain, "RED", &Camera::default(), &mut plain_out);
+        assert!(
+            !plain_out.iter().any(|v| is_red(v.color)),
+            "plain (uncoloured) text must not draw red — the fixture must be \
+             able to discriminate coloured from uncoloured, not merely see \
+             \"some colour\""
+        );
+    }
+
+    /// **The alignment control.** Bold widens a glyph's *advance*
+    /// (`GlyphInfo.getAdvance(bold)`), so a bold run must measure wider than
+    /// the identical codepoints unstyled — checked against
+    /// [`super::super::nametag::layout_styled_ink_runs`], the exact
+    /// expression `push_text_display_quads` itself calls through
+    /// `StyledInkLayoutCache::layout`, not a restated constant. Two lines of
+    /// deliberately different content (a short line and a long one) so the
+    /// two hypotheses (bold-aware vs bold-blind width) cannot coincide.
+    ///
+    /// Before this file read styled spans, no input could make this
+    /// assertion fail differently for bold vs plain — every line's width
+    /// came from `gpu/nametag.rs::layout_ink_runs`'s plain per-codepoint
+    /// advance, which cannot see `style.bold` at all — so this is the
+    /// control that would have failed against the pre-fix code, and it is
+    /// exactly the shape of defect the owner reported: a row whose real
+    /// (styled) width is wider than what centring measured reads as shifted
+    /// off-centre.
+    #[test]
+    fn a_bold_run_measures_wider_than_the_same_codepoints_unstyled() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let plain_spans = Text::from_legacy("WWWWWW").to_spans();
+        let (_, plain_width) = super::super::nametag::layout_styled_ink_runs(&raster, &plain_spans);
+        let bold_spans = Text::from_legacy("\u{a7}lWWWWWW").to_spans();
+        let (_, bold_width) = super::super::nametag::layout_styled_ink_runs(&raster, &bold_spans);
+        assert!(
+            bold_width > plain_width,
+            "a bold run must measure wider than the same codepoints unstyled: \
+             plain={plain_width}, bold={bold_width}"
+        );
+
+        // And the effect reaches the actual centring offset a shorter,
+        // unstyled sibling line would be drawn at: this is precisely
+        // `push_text_display_quads`'s own `(total_width - line_width) / 2.0`
+        // formula, evaluated here against the two hypotheses for the width
+        // of the *other* line in the block.
+        let short_spans = Text::from_legacy("Hi").to_spans();
+        let (_, short_width) = super::super::nametag::layout_styled_ink_runs(&raster, &short_spans);
+        let plain_block_offset = (plain_width - short_width) / 2.0;
+        let bold_block_offset = (bold_width - short_width) / 2.0;
+        assert!(
+            (bold_block_offset - plain_block_offset).abs() > 1e-3,
+            "widening one line with bold must move the other line's centring \
+             offset (both derived from the same shared block width): \
+             plain_offset={plain_block_offset}, bold_offset={bold_block_offset}"
+        );
+
+        // End-to-end: the same effect must be visible in the actual vertex
+        // output of a two-line block whose second line is bold — the
+        // block's total measured extent (max minus min world-space x, after
+        // the full billboard/glyph transform) must grow.
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
+        let plain_draw = draw_with_text("Hi\nWWWWWW");
+        let mut plain_out = Vec::new();
+        push_text_display_quads(&raster, &ink, &plain_draw, "Hi\nWWWWWW", &Camera::default(), &mut plain_out);
+        let bold_draw = draw_with_text("Hi\n\u{a7}lWWWWWW");
+        let mut bold_out = Vec::new();
+        push_text_display_quads(&raster, &ink, &bold_draw, "Hi\n\u{a7}lWWWWWW", &Camera::default(), &mut bold_out);
+        let extent = |verts: &[DisplayTextVertex]| -> f32 {
+            let xs = verts.iter().map(|v| v.position[0]);
+            let max = xs.clone().fold(f32::MIN, f32::max);
+            let min = xs.fold(f32::MAX, f32::min);
+            max - min
+        };
+        assert!(
+            extent(&bold_out) > extent(&plain_out),
+            "a bold second line must widen the drawn block's measured extent: \
+             plain={:.4}, bold={:.4}",
+            extent(&plain_out),
+            extent(&bold_out)
         );
     }
 }

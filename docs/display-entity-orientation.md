@@ -91,6 +91,42 @@ scaling". `to_matrix` composes them in vanilla's own order — translate, then
 left-rotate, then scale, then right-rotate — pinned by a test that would
 fail if scale and the left rotation were accidentally swapped.
 
+### `text_display` style and multi-line centring
+
+`gpu/display_text.rs::push_text_display_quads` lays out each `\n`-split line
+with `gpu/nametag.rs::layout_styled_ink_runs` (via a `StyledInkLayoutCache`),
+the same styled ink-run walk `gpu/nametag.rs`'s own player/mob nametags use —
+see `docs/entity-nametags.md`'s "Style" section for the walk itself
+(colour, bold, italic, underline, strikethrough; `§k` not implemented).
+Two things specific to this pass:
+
+- **Centring must measure the *styled* width, not the plain one.** Vanilla
+  centres each line independently against the block's own max line width
+  (`Display.TextDisplay.getAlign`/`TextDisplayRenderer.submitInner`:
+  `offset = width / 2.0F - line.width() / 2.0F` for `CENTER`), and
+  `line.width()` is `Font.width()` on the *styled* `FormattedCharSequence` —
+  bold widens the measured advance (`GlyphInfo.getAdvance(bold)`). Measuring
+  width from an unstyled walk instead under-reports a bold line's real
+  width, so that line's centring offset comes out too large and the line
+  reads as shifted toward one side — this was a real, reported defect here,
+  fixed by switching the width computation (not just the glyph colour) to
+  `layout_styled_ink_runs`.
+- **`DisplayDraw::text` is still a plain `String`.** `push_text_display_quads`
+  runs `Text::from_legacy(line).to_spans()` unconditionally per line before
+  laying it out, so a line that already contains legacy `§` codes styles
+  correctly today — but the upstream decode
+  (`crates/protocol/v770/src/packets/metadata.rs`'s `Value::Text` arm, built
+  from `lodestone_core::plain_text_from_nbt_component`) flattens the source
+  NBT component to plain text first, discarding every colour/bold/italic/
+  underline/strikethrough the component actually carried. Until that decode
+  preserves style (e.g. by emitting a legacy-coded string via
+  `Text::to_legacy_string`, or by threading `TextSpan`s through `DisplayDraw`
+  directly), a real server's styled `text_display` still renders in the
+  fallback white this file's own `text_glyph_color` supplies. That function's
+  doc previously (incorrectly) described the white as an unconditional
+  vanilla hardcode; it is only the *fallback* `Font.java::getTextColor` uses
+  when a span's own colour is unset.
+
 ## How to change it
 
 `display_orientation` is a direct transcription of
