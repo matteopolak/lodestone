@@ -180,8 +180,8 @@ pub struct ItemIcon {
 /// enchantment content to the stack could have fixed it. `has_foil_for_item`
 /// checks the item id against the baked census first and only falls back to
 /// the enchantments list when the census has no opinion — see its doc, and
-/// [`lodestone_render::glint::has_foil`]'s, for the full rule and the
-/// remaining live per-stack-override gap.
+/// [`lodestone_render::glint::has_foil_enchantments`]'s, for the full rule and
+/// the remaining live per-stack-override gap.
 ///
 /// # The invariant the enchantments half leans on
 ///
