@@ -762,6 +762,21 @@ pub enum NetUpdate {
         /// carries one; system, disguised, action-bar and every legacy-family
         /// message are `None` (`None` must be shown, never hidden).
         sender: Option<Uuid>,
+        /// Whether this message's signature was checked against the sender's
+        /// announced public key and found valid — [`lodestone_model::event::
+        /// ChatAckInfo::verified`], raised by the client driver and never by a
+        /// wire decoder.
+        ///
+        /// **`false` is not "forged", it is "unproven".** It covers a system
+        /// message (which carries no `ack` at all), a player message with no
+        /// signature, a sender whose public key we never saw, and — because the
+        /// driver's verification is compiled out for `wasm32` — every message
+        /// in a browser session. A consumer must read it as vanilla reads
+        /// `ChatTrustLevel`: verified, or not verified, with no third state
+        /// claimed. In particular it cannot express vanilla's `MODIFIED`, which
+        /// needs the signed content compared against the displayed content and
+        /// is not computed anywhere here.
+        verified: bool,
     },
     /// A chunk became dirty at this position: the server sent (and the client
     /// applied to its world) chunk data here, so any mesh covering this column
@@ -4489,7 +4504,7 @@ fn forward(
             text,
             kind,
             sender,
-            ..
+            ack,
         } => match kind {
             // GameInfo is the action bar (SystemChat overlay), not the chat feed:
             // route it to the ActionBar overlay so it draws above the hotbar and
@@ -4503,6 +4518,12 @@ fn forward(
                 // router keeps its one-job shape and the reader sees *every* chat
                 // event routed, filtered or not.
                 sender,
+                // The driver's own signature verdict, which this arm used to
+                // drop on the floor with the rest of `ack`. It is the only
+                // thing downstream can use to tell a verified player message
+                // from an unverified one, and without it every player message
+                // reached the chat feed stamped with a hardcoded "not secure".
+                verified: ack.is_some_and(|info| info.verified),
             },
         },
         // 2001 is the only level event the shell acts on today; the rest are

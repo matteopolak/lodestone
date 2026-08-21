@@ -401,6 +401,18 @@ impl ChatLog {
         Self::default()
     }
 
+    /// The entries themselves, oldest-first — the only way to reach a
+    /// [`ChatEntry`]'s own fields (its [`MessageTrust`], or whether it is a
+    /// system message at all) from outside this module.
+    ///
+    /// Every `recent_*` projection above flattens an entry to text and drops
+    /// that classification, which is why a caller wanting to *badge* a line —
+    /// vanilla's `GuiMessageTag` — cannot be served by them.
+    #[must_use]
+    pub fn feed(&self) -> &ChatFeed {
+        &self.feed
+    }
+
     /// Record the entry's arrival time, evicting the oldest in lockstep with the
     /// feed so the two stay index-aligned.
     fn stamp(&mut self, at: f64) {

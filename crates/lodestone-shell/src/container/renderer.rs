@@ -31,6 +31,10 @@ pub struct ContainerRenderer {
     /// [`HudRenderer`](crate::hud::HudRenderer)'s. `None` on a jar-less run,
     /// where stack counts draw with the fixed-advance debug font.
     font: Option<Arc<VanillaFont>>,
+    /// The `crate::resources::pack_generation` `font` was resolved against. A
+    /// font resolved at bring-up and kept is one a server-pushed pack can never
+    /// replace, and nothing goes red when that happens.
+    font_generation: u64,
     /// Vanilla's real `container/*.png` panel art. Starts detached,
     /// so [`render`](Self::render)/[`render_with_icons`](Self::render_with_icons)
     /// alone keep the pre-texture flat-fill behaviour — the jar-less path and
@@ -132,6 +136,10 @@ impl ContainerRenderer {
             capacity_floats,
             icons: IconRenderer::new(),
             font: VanillaFont::shared(),
+            // The generation the font above was resolved against — see
+            // `hud::vanilla_font::refresh_shared_font`, the one implementation
+            // of the staleness compare all three renderers share.
+            font_generation: crate::resources::pack_generation(),
             background: None,
             player_preview: None,
         }
@@ -606,6 +614,9 @@ impl ContainerRenderer {
         // Only ask for model geometry when there is somewhere to draw it.
         let want_models = self.icons.models_attached() && depth.is_some();
         let item_atlas = self.icons.item_atlas();
+        // Before the font is read: a pack that landed since the last frame has
+        // to reach this frame's glyphs.
+        crate::hud::vanilla_font::refresh_shared_font(&mut self.font, &mut self.font_generation);
         let geo = ContainerGeometry::build_inner(
             frame,
             width,

@@ -227,10 +227,45 @@ separate indicator sprite drawn *beside* the line with its own hover text,
 never spliced into the message body. Splicing it in corrupted the `Text`
 every downstream reader sees — the chat feed, and any future logging or
 moderation surface. A consumer that wants the indicator should read
-`info.verified` directly, or `lodestone_game::chat::MessageTrust::is_not_secure`
-once something folds the bool into that enum, and render its own badge.
-Rendering the badge properly (a sprite plus hover text, matching
-`GuiMessageTag`) is not built — this only removes the wrong stand-in.
+`info.verified` directly, or `lodestone_game::chat::MessageTrust::is_not_secure`,
+and render its own badge.
+
+**The bool now reaches `MessageTrust`, and that fold used to be a hardcoded
+constant.** `lodestone_shell::net`'s `forward` matched `ClientEvent::Chat` with
+`..` and dropped `ack` entirely, so `NetUpdate::Chat` never carried the driver's
+verdict; `sim/net_apply.rs` then stamped **every** player message
+`MessageTrust::NotSecure`. Three variants existed, a real signature check ran,
+and the value it produced was discarded one layer above the only consumer — a
+correct enum fed a constant by its producer. `NetUpdate::Chat::verified` carries
+it now and `net_apply` picks `Secure` or `NotSecure` from it.
+
+Two limits that must not be read past:
+
+- **Only two of the three variants are ever produced.** `MessageTrust::Modified`
+  needs the signed content compared against the *displayed* content (vanilla's
+  `ChatTrustLevel.isModified`), which nothing here computes. It is never
+  produced rather than approximated, so a consumer must not read "not
+  `Modified`" as "not modified".
+
+  **The inputs for it do exist**, which is the useful half: `ChatAckInfo::
+  raw_content` is the signed string verbatim, and v770's `player_chat` decode
+  fills it *regardless* of which arm supplied the displayed text — so when the
+  server sends a decorated `unsigned` component, the shell holds both the
+  original and the rewritten form. `net.rs`'s `forward` currently drops it with
+  the rest of `ack`, the same `..` that used to drop `verified`. Vanilla's own
+  rule is a disjunction of two clauses and **both** are implementable here:
+  the displayed text not containing the signed string, and any span of the
+  decorated content carrying a non-default `font` id (`TextStyle` already
+  models one). Implement both or say which one you did — implementing the first
+  alone is correct in most scenes, which is exactly how a half-ported
+  conjunction survives review.
+- **`false` means unproven, not forged**, and it covers more than a failed
+  check: a message with no signature, a sender whose public key we never saw,
+  and every message in a **browser** session, because the driver's verification
+  block is `#[cfg(not(target_arch = "wasm32"))]`.
+
+Rendering the badge itself (`GuiMessageTag`'s indicator bar plus its hover text)
+is **not built**. What it needs is recorded under "How to change it".
 
 ### Wire shapes — `crates/protocol/v770/src/packets/game.rs` and `player_info.rs`
 
@@ -314,6 +349,46 @@ than a bullet.
 ## How to change it
 
 **What is still not built**, for whoever picks this up next:
+
+- **The `GuiMessageTag` indicator and its tooltip.** The trust level is now real
+  in the model (see above) and nothing draws it. Vanilla fills a bar from local
+  `-4` to `-2` in the chat component's scaled/translated space — screen `x` `0`
+  to `2 * chatScale`, spanning the entry's full height — coloured `0xD0D0D0` for
+  a system or not-secure message and `0x606060` for a modified one, and shows a
+  tooltip while the pointer is inside that rect. The English strings are
+  `chat.tag.system` *"Server message. Cannot be reported."*,
+  `chat.tag.system_single_player` *"Server message."*, `chat.tag.not_secure`
+  *"Unverified message. Cannot be reported."*, `chat.tag.modified` *"Message
+  modified by the server. Original:"* and `chat.tag.error` *"Server sent invalid
+  message."*.
+
+  The two halves have different blockers, which is the useful part:
+
+  - The **tooltip** needs no new plumbing. `hud::chat_interaction_at` already
+    receives the cursor and `Sim::recent_chat_interactive`'s entries, and
+    `app/redraw.rs` already feeds its result into `HudFrame::chat_hover_tooltip`
+    — so widening that function's left bound to include the tag strip and having
+    it return the tag's text as a synthetic hover is enough. The element type of
+    `recent_chat_interactive` can grow a tag without touching `redraw.rs`, which
+    only binds and forwards it.
+  - The **bar** does need one line in `app/redraw.rs`. It draws from
+    `HudFrame::chat_spans`, whose rows are built there as
+    `(&[TextSpan], f32)` out of `Sim::recent_chat_spans`; the tag has to reach
+    the frame alongside them, either as a third tuple element or as a parallel
+    field the same slice-and-window step fills.
+
+  The `modified` tag's tooltip is **the original message**, not a generic label
+  — `GuiMessageTag.chatModified` builds it as the `chat.tag.modified` line, a
+  newline, and the signed content in grey. So the tag type needs a payload: an
+  enum of kinds with no field cannot express it, and finding that out after the
+  type is written is a rewrite. The payload is available (see above); it has to
+  reach `ChatEntry::Player` alongside its `MessageTrust`, because every
+  `recent_*` projection flattens an entry to text and drops everything else.
+
+  Do not tag a player message from anything other than the real trust level.
+  With `Modified` never produced and `verified` false for every browser session,
+  a badge derived from anything else would be claiming a verification state that
+  was not established.
 
 - `ClientAction::SendCommand` stays unsigned — there is no `ChatCommandSigned`
   producer. That packet needs per-argument signing against a command tree the
