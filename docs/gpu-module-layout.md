@@ -100,7 +100,7 @@ the same file; the nine that a sibling calls are `pub(super)`.
   pipeline on purpose rather than adding a fifth bind group — see its module
   doc and the 4-group note below.
 - `gpu/sign_text.rs` — `SignTextRenderer`: world-space sign text, reusing
-  `gpu/nametag.rs`'s `layout_ink_runs`/`load_font` and the same
+  `gpu/nametag.rs`'s `layout_styled_ink_runs`/`load_font` and the same
   `shaders/nametag.wgsl`. A sign's *board* is real terrain and draws through
   the ordinary terrain pass; this only paints the text on it.
 - `gpu/screen_effects.rs` — `ScreenEffects`, the per-frame underwater/fire/

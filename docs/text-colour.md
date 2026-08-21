@@ -123,8 +123,8 @@ The full census. "raw `§`" means the two characters reached a quad as glyphs.
 | **tab list entry names** | `Vec<TextSpan>` (`to_spans`) | spans, but unexpanded → **raw `§`** | expanded at the seam |
 | **kick / disconnect reason** | `Vec<TextSpan>` (`to_spans`) | spans, but unexpanded → **raw `§`** | expanded at the seam |
 | server-list MOTD | `Vec<TextSpan>` | already opted in | unchanged, new name |
-| **entity nametags** | `Text` (`NameTag::text`) | `layout_ink_runs` → **raw `§`** | `layout_styled_ink_runs` via `to_spans()`; per-run colour (hex included), bold, italic, underline, strikethrough |
-| **sign text** | `String` (`SignText::parse`) | `layout_ink_runs` → **raw `§`** | pair consumed; colour still uniform, see below |
+| **entity nametags** | `Text` (`NameTag::text`) | `layout_styled_ink_runs` → **raw `§`** | `layout_styled_ink_runs` via `to_spans()`; per-run colour (hex included), bold, italic, underline, strikethrough |
+| **sign text** | `String` (`SignText::parse`) | `layout_styled_ink_runs` → **raw `§`** | pair consumed; colour still uniform, see below |
 | death screen message | `String` (`to_plain_string`) | `Builder::text` → **raw `§`** | decomposed |
 | menus, toasts, advancement titles, sound subtitles | `&str` (local corpus) | plain `run` | decomposed; no `§` in practice, but no longer a trap |
 | debug overlay | `String` (ours) | plain `run` | decomposed; unaffected in practice |
@@ -132,7 +132,7 @@ The full census. "raw `§`" means the two characters reached a quad as glyphs.
 Ten of those seventeen were wrong, and only two — item names and the scoreboard — were in the
 original report. Every one of the ten was fixed by one of three seam changes, not by seventeen
 call-site edits: `VanillaFont::draw`/`draw_plain`/`width` decomposing, `Text::to_spans`
-expanding, and `nametag::layout_ink_runs` consuming pairs.
+expanding, and `nametag::layout_styled_ink_runs` consuming pairs.
 
 **The jar-less path was fixed alongside each.** `hud::item_icon::ColourStream::text` and
 `text_w` (the fixed-advance 5×7 debug font, used when there is no `client.jar`) now consume
@@ -141,7 +141,7 @@ measure and draw cannot disagree. Without that, a jar-less run would show `§7` 
 font shows grey.
 
 **Nametags and `text_display` now apply per-run colour (hex included); sign text still does
-not.** `gpu/nametag.rs::layout_styled_ink_runs` is the styled sibling of `layout_ink_runs`:
+not.** `gpu/nametag.rs::layout_styled_ink_runs` is the styled sibling of `layout_styled_ink_runs`:
 `StyledRect` carries its own resolved colour, so `push_entity_quads` (nametags) and
 `push_text_display_quads` (`text_display`, `gpu/display_text.rs`) draw a real per-run colour —
 and, because `NameTag::text`/`DisplayDraw::text` are `lodestone_model::Text` carried through

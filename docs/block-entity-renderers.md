@@ -574,7 +574,7 @@ result.scale(0.010416667F, -0.010416667F, 0.010416667F);
 Fed a local point in font-pixel space (`x` right, `y` down from the text block's own top, `z = 0`),
 the result is that point's world position — the `-Y` scale is the *entire* y-flip, with no separate
 step, because font-pixel space is already row-down (the same convention
-`gpu/nametag.rs::layout_ink_runs` returns) and folding the flip into the matrix is what
+`gpu/nametag.rs::layout_styled_ink_runs` returns) and folding the flip into the matrix is what
 `textTransformation` itself does.
 
 **Front and back text are not mirror images through the same origin — they sit on the two opposite
@@ -619,7 +619,7 @@ In 26.2 there is no rig to port.
 strikethrough) inside one line.** `SignSide::lines` now carries `Vec<SignTextSpan>` per line rather than
 a flat `String`, and `gpu/sign_text.rs` draws through `gpu::nametag::layout_styled_ink_runs` — the same
 styled world-space glyph layout nametags and `text_display` use — instead of the old unstyled
-`layout_ink_runs`. See the typed-parse section above for the dye-as-default rule.
+`layout_styled_ink_runs`. See the typed-parse section above for the dye-as-default rule.
 
 ### Hanging signs: the same renderer, four numbers apart
 
@@ -3001,7 +3001,7 @@ share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behin
   dye_text_color_rgb, sign_side_color, sign_text_transform}`, itself depending on `lodestone-world`
   for `SignSide`/`SignDyeColor` (already a real, non-optional dependency of this crate).
 - `lodestone-shell` — `net::{SharedHandle, entity_light_at}`, `resources::asset_root`, and (for sign
-  text) `gpu/nametag.rs`'s `pub(super) layout_ink_runs`/`load_font`, reused rather than duplicated a
+  text) `gpu/nametag.rs`'s `pub(super) layout_styled_ink_runs`/`load_font`, reused rather than duplicated a
   third time by `gpu/sign_text.rs`.
 - `lodestone-render` (for the mob spawner/trial spawner) — `spawner::{SpawnerMobSpawn,
   spawner_display_outer_matrix, spawner_display_scale, spawner_spin_degrees}`, `EntityModelSet::resolve_at`

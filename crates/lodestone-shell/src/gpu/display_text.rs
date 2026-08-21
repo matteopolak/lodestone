@@ -52,7 +52,7 @@
 //! - **A per-line width computed from *unstyled* advances mis-centres a
 //!   line whose real (styled) content is wider — e.g. a bold run.** This was
 //!   the file's own alignment defect: centring used
-//!   `gpu/nametag.rs::layout_ink_runs`'s plain-codepoint width, which cannot
+//!   `gpu/nametag.rs::layout_styled_ink_runs`'s plain-codepoint width, which cannot
 //!   see a bold run's extra advance (`GlyphInfo.getAdvance(bold)`,
 //!   `Font.java`), so a two-line block whose second line carried a wider
 //!   (bold, once style survives the upstream flatten above) run centred
@@ -324,7 +324,7 @@ fn push_text_display_quads(
     // (vanilla's own `cachedInfo.width()`/`height()`, computed once before
     // any quad is emitted) and to lay out each line's glyphs afterwards —
     // computed once here rather than twice. Styled (not
-    // `super::nametag::layout_ink_runs`'s plain width) so a bold run's real,
+    // `super::nametag::layout_styled_ink_runs`'s plain width) so a bold run's real,
     // wider advance is what centring measures — see the module doc for the
     // alignment defect an unstyled width caused.
     let layouts: Vec<_> = lines.iter().map(|spans| ink.layout(raster, spans)).collect();
@@ -650,7 +650,7 @@ mod tests {
     ///
     /// Before this file read styled spans, no input could make this
     /// assertion fail differently for bold vs plain — every line's width
-    /// came from `gpu/nametag.rs::layout_ink_runs`'s plain per-codepoint
+    /// came from `gpu/nametag.rs::layout_styled_ink_runs`'s plain per-codepoint
     /// advance, which cannot see `style.bold` at all — so this is the
     /// control that would have failed against the pre-fix code, and it is
     /// exactly the shape of defect the owner reported: a row whose real
