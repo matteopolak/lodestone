@@ -36,10 +36,10 @@ Reading down is reading the chain, in the order a teleport travels it.
 
 | line | emitted by | says |
 |---|---|---|
-| `xfer: state -- TRANSFER` | `lodestone_v770`'s `handle_play_connection` / `handle_configuration` | the server asked us to move to another host, in Play or in Configuration |
-| `xfer: state -- START_CONFIGURATION` / `FINISH_CONFIGURATION` | the same | the connection crossing Play ↔ Configuration — what a proxy backend switch looks like from here |
+| `xfer: state -- TRANSFER` | `lodestone_v770`'s `handle_play_connection` / `handle_configuration` | `path = "reconnect"` — the server asked us to dial another address |
+| `xfer: state -- START_CONFIGURATION` / `FINISH_CONFIGURATION` | the same | `path = "backend-swap"` — the connection crossing Play ↔ Configuration on one socket |
 | `xfer: state -- connection state transition` | `lodestone_client`'s `Driver::execute` | the same edge as the driver sees it, which is where `in_play` (and so the shell's movement gate) flips |
-| `xfer: LOGIN (join game) received` | `lodestone_v770`'s `handle_play_chunk` | a *second* join packet on a live connection: the other shape of a backend switch |
+| `xfer: LOGIN (join game) received` | `lodestone_v770`'s `handle_play_chunk` | a join packet and its `login_ordinal` on this connection — `1` is a fresh join, anything higher is a backend swap |
 | `xfer: PLAYER_POSITION received; ACCEPT_TELEPORTATION echoed with the same id` | `lodestone_v770`'s `handle_player_position` | a teleport arrived, with id, target, and `relatives` mask; the confirmation goes out on this same call |
 | `xfer: teleport forwarded to the sim channel` | `lodestone_shell`'s `net.rs` `forward` | the teleport left the driver for the simulation's channel |
 | `xfer: teleport applied to the simulation` | `lodestone_shell`'s `sim/net_apply.rs` | the pose is finally ours — `from_*` is where we were, `moved` is how far the correction was |
@@ -51,6 +51,23 @@ are strictly ordered even when the driver task and the shell's frame thread
 interleave — and a gap in `seq` is a line the subscriber dropped rather than an
 event that did not happen. Wall-clock timestamps cannot do that job: the window
 this instrument exists to resolve is a fraction of one frame.
+
+## Two paths, and they are not the same thing
+
+"Being moved to another server" has two mechanisms with almost nothing in common.
+Every line above carries a `path` field naming which one fired.
+
+| | `path = "reconnect"` | `path = "backend-swap"` |
+|---|---|---|
+| what the server sends | `minecraft:transfer` (a new host and port) | `START_CONFIGURATION`, a configuration round, then a second `LOGIN` |
+| the socket | torn down; a new one is dialled | **the same one throughout** |
+| per-connection state | rebuilt from nothing — new adapter, new driver, new counters | **carried over**, including everything the adapter holds |
+| `login_ordinal` | `1` again, on the new connection | `2`, `3`, … |
+
+Velocity and BungeeCord use the **second**. They never send `minecraft:transfer`
+at all, so a log with no `TRANSFER` line and `login_ordinal = 2` is a backend
+swap — and that is the case where stale state, rather than absent state, is the
+hazard. Grep `login_ordinal` first.
 
 ## The window it measures
 
