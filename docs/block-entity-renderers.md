@@ -414,8 +414,7 @@ elements, a hole in the world. Every visible triangle comes from `SkullBlockRend
 **Geometry is shared and trivial: one 8×8×8 box.** `SkullModel.createHeadModel()` is a single `"head"`
 part at `PartPose.ZERO`. What differs across vanilla's seven types is the *canvas*: skeleton, wither
 skeleton and creeper skins are 64×32 (`createMobHeadLayer`), zombie and player are 64×64
-(`createHumanoidHeadLayer`, base head only — the `"hat"` overlay child is not ported; see
-`lodestone_assets::block_entity_models::skull_humanoid_model`'s doc for why). Baking the same box
+(`createHumanoidHeadLayer`). Baking the same box
 twice, once per canvas, is the whole model corpus — `skull_mob_model()`/`skull_humanoid_model()` in
 `crates/lodestone-assets/src/block_entity_models.rs`. **Two of vanilla's seven skull types are not
 ported: dragon and piglin.** Both use their own multi-part rigs (`DragonHeadModel`/`PiglinHeadModel`)
@@ -438,6 +437,28 @@ file) and the wall case's outward `0.25`-block offset from `Direction.getStepX()
 `skull_placement_preserves_orientation` measures `det == +1` for both (same sign as the entity path,
 not a mirror), and `wall_offset_moves_toward_the_named_direction` pins the offset against a
 hand-verified `Direction` table rather than the function under test.
+
+**The `"hat"` overlay is now ported, and the comment that said it was pointless is worth keeping as a
+correction.** `createHumanoidHeadLayer` adds a `"hat"` child *of* `head` — the same `-4, -8, -4` box at
+`texOffs(32, 0)`, inflated `0.25` — and it is the only part of the model whose texels come from the
+right-hand half of the sheet. It is what draws a skin's second layer: hair, a helmet, a pumpkin. It was
+omitted, with a comment reasoning that "every ported skull type here draws with a fixed skin the hat layer
+would just double-draw against". That was true when written and stopped being true the moment a placed
+player head began resolving its owner's real skin — so the layer the comment dismissed was exactly the
+layer a placed player head was missing, which is how it was reported. It was never right for the *zombie*
+head either, whose jar sheet carries a real overlay at `(32, 0)`.
+
+Two details are load-bearing. The `0.25` inflation is what keeps the two coincident boxes from z-fighting;
+a hat part without it is worse than no hat part. And the hat is a **child of `head`**, not a sibling, so it
+inherits the skull's own yaw — nothing in the rest pose distinguishes the two, since both are
+`PartPose.ZERO`, so only the parent link says which it is. `crates/lodestone-render/tests/skull_hat_overlay.rs`
+pins all four facts; its controls were observed, including the pre-fix state failing all four.
+
+One thing is **not** ported and is a separate question: vanilla picks a different render type for a player
+skin than for a fixed one — `SkullBlockRenderer.getPlayerSkinRenderType` is `entityTranslucent` where
+`getSkullRenderType` is `entityCutoutZOffset`. This pass draws every skull through the one cutout path, so a
+skin whose hat layer uses *partial* alpha will harden to a 0.5 threshold. Binary-alpha hat layers (the
+common case, and every jar sheet) are unaffected.
 
 Player skulls read the modern block-entity `profile.properties` list and pass its `textures` value
 through the existing remote-profile decoder. The resolved identity is either a static jar texture
