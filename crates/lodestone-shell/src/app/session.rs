@@ -57,6 +57,19 @@ impl WindowApp {
             scroll_accum: 0.0,
             last_menu_click: None,
             last_log: Instant::now(),
+            // `LODESTONE_FRAME_PROFILE_DUMP`, named in `docs/frame-profiling.md`
+            // — unset (the ordinary case) means no dump file, not an error.
+            // `frame_profile::DumpWriter::open` is what logs a warning (once,
+            // via `tracing`) if the path is set but cannot actually be opened,
+            // per this repo's "never silently skipped" rule.
+            frame_profile: FrameProfiler::new(
+                Instant::now(),
+                std::env::var(crate::app::frame_profile::DUMP_ENV_VAR)
+                    .ok()
+                    .filter(|p| !p.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .as_deref(),
+            ),
             applied_fog,
             recipe_book: None,
             recipe_book_revision: 0,

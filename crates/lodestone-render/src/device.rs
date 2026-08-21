@@ -76,15 +76,35 @@ impl GpuContext {
 
         let caps = GpuCapabilities::probe(&adapter);
 
-        // We request no optional features yet — the scaffold only needs the
-        // core pipeline. Capabilities are probed from the *adapter*, so
-        // downstream code still sees everything the hardware can do even though
-        // the device is minimal. We take the adapter's limits so large arena
-        // buffers are permitted.
+        // We request no optional features beyond `TIMESTAMP_QUERY` — the
+        // scaffold only needs the core pipeline. Capabilities are probed from
+        // the *adapter*, so downstream code still sees everything the
+        // hardware can do even though the device is minimal. We take the
+        // adapter's limits so large arena buffers are permitted.
+        //
+        // `TIMESTAMP_QUERY` is requested whenever the adapter advertises it,
+        // for `gpu::gpu_timing::GpuQueryTimer`'s per-pass frame profiling.
+        // This is the other half of that module's "gated twice" note: the
+        // adapter advertising a feature is not enough, the *device* must have
+        // asked for it at creation, or every `timestamp_writes` write is
+        // invalid — checking `caps.timestamp_query` (read off the adapter,
+        // just above) is what makes the request conditional rather than an
+        // unconditional ask that would fail device creation on an adapter
+        // that lacks it. Deliberately **not** requesting
+        // `TIMESTAMP_QUERY_INSIDE_ENCODERS`/`_INSIDE_PASSES` even where
+        // `caps` shows them: both explicitly exclude Apple GPUs on Metal in
+        // their own wgpu doc ("not Apple GPUs"), so requesting them
+        // unconditionally on this workstation's adapter would either fail
+        // outright or silently buy nothing — pass-level `timestamp_writes`
+        // (this feature alone) is the finest grain Metal actually offers.
+        let mut required_features = wgpu::Features::empty();
+        if caps.timestamp_query {
+            required_features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("lodestone-render device"),
-                required_features: wgpu::Features::empty(),
+                required_features,
                 required_limits: adapter.limits(),
                 ..Default::default()
             })

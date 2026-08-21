@@ -1261,7 +1261,11 @@ impl RenderState {
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes: None,
+            // GPU frame profiling (`gpu::gpu_timing`) — see the identical
+            // pattern's comment at the "block pass" descriptor in `frame.rs`
+            // for why this temporary borrow cannot collide with the
+            // `resolve`/`after_submit` calls `render_inner` makes later.
+            timestamp_writes: self.gpu_timer.borrow().as_ref().and_then(|t| t.writes("first_person")),
             occlusion_query_set: None,
             multiview_mask: None,
         });

@@ -585,6 +585,12 @@ pub struct DebugStats {
     /// Whether the F3+G chunk-border overlay is on. See
     /// [`Self::hitboxes_shown`].
     pub chunk_borders_shown: bool,
+    /// Per-phase CPU frame-timing lines (`app::frame_profile::PhaseSummary::line`)
+    /// plus the GPU-timing line, both formatted by `app::redraw` — see
+    /// `docs/frame-profiling.md`. Empty until the first frame has run once
+    /// (nothing to report yet), which draws no extra F3 lines rather than
+    /// placeholders.
+    pub frame_profile: Vec<String>,
 }
 
 /// Display name for a [`lodestone_model::Difficulty`] — vanilla's own
@@ -962,6 +968,14 @@ impl DebugStats {
                 self.vram_reserved_bytes / 1024
             ),
         ]);
+        if !self.frame_profile.is_empty() {
+            // The per-phase CPU/GPU frame-profiling lines
+            // (`app::frame_profile`, `gpu::gpu_timing`) — see
+            // `docs/frame-profiling.md`. Its own group, own spacer, same
+            // convention as every engine-internal block above.
+            out.push(String::new());
+            out.extend(self.frame_profile.iter().cloned());
+        }
         if !self.adapter.is_empty() {
             // Vanilla's `system` group — `DebugEntrySystemSpecs` — is `Java:`,
             // `CPU:`, `Display:`, the device name and the backend/driver pair.
