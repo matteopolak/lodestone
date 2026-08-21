@@ -433,9 +433,9 @@ Issue #15 landed. `crates/lodestone-shell/src/menu/key_binds.rs` is the screen;
 `SettingsPage::KeyBinds` (`crates/lodestone-shell/src/menu/options.rs`) is
 where it slots into the settings tree, reached from the Controls page's own
 "Key Binds..." button. Per-row Reset, the footer's Reset Keys, viewing every
-one of `InputAction::ALL`'s actions (29 as of issue #16's `PickItem`/
-`Screenshot`; check `InputAction::ALL`'s own length rather than trusting this
-number, which has already gone stale twice) grouped by category in vanilla's
+one of `InputAction::ALL`'s actions (36 once the seven F3 chords joined the
+table — see "F3 debug chords" below; check `InputAction::ALL`'s own length
+rather than trusting this number, which has now gone stale three times) grouped by category in vanilla's
 registration order (`Category::SORT_ORDER`, not `InputAction::ALL`'s
 declaration order — see that module's own tests for the trap), and starting a
 rebind are all wired and persist immediately, the same eager-persistence rule
@@ -644,10 +644,37 @@ through `app.rs`'s dispatch, never a raw key or button of their own.
 ## F3 debug chords: dispatch, chat feedback, and what is not ported
 
 `KeyGate::debug_held` (set by `KeyOutcome::DebugModifier`, F3's own press/release)
-gates a fixed set of literal `KeyCode` arms in `resolve_key`
-(`app/input.rs`) — B, G, N, F4, H, P, C today — rather than a second table of
-rebindable `KeyMapping`s, matching the reasoning `KeyGate::debug_held`'s own
-doc gives. Each arm's *effect* (the atomic flip, the option toggle, the
+gates seven chord arms in `resolve_key` (`app/input.rs`) — B, G, H, N, F4, P, C
+by default.
+
+**They are rebindable, and this doc used to say the opposite.** The claim that
+vanilla hardcodes its debug chords is true of older versions and false of 26.2:
+`Options.java` declares `keyDebugShowHitboxes`, `keyDebugShowChunkBorders`,
+`keyDebugShowAdvancedTooltips`, `keyDebugSpectate`, `keyDebugSwitchGameMode`,
+`keyDebugFocusPause` and `keyDebugCopyLocation` as `Category.DEBUG`
+`KeyMapping`s, collects them in `debugKeys`, and folds that array into
+`keyMappings` — the array vanilla persists and the Controls screen lists. Then
+`KeyboardHandler.handleDebugKeys` asks each of them `matches(event)` rather than
+comparing a keysym. So all seven live in `Keybinds` as `InputAction::Debug*` and
+appear on the Key Binds screen under Debug, and each arm reads
+`binds.is(InputAction::Debug…, code)`.
+
+The `gate.debug_held` conjunct stays on every arm: the F3 **modifier** is a gate
+flag here rather than an eighth bindable action, for the reason
+`KeyGate::debug_held`'s own doc gives (vanilla models it as a second
+`KeyMapping`, `keyDebugModifier`, bound to the same keysym as `keyDebugOverlay`,
+plus `modifierAndOverlayIsSame` bookkeeping in `KeyboardHandler`). Rebinding a
+chord therefore changes only the second key of the pair.
+
+Two chords stay literal and both are Lodestone-only rather than ports:
+`Shift+F3` (the profiler pie chart's visibility, which vanilla has no mapping
+for at all) and the chart's number-row navigation. Vanilla's own four chart
+chords *are* `KeyMapping`s — but each carries a `clashContext` int, a concept
+`Keybinds` has no equivalent of, and without one nine digit actions would report
+a permanent conflict against the nine hotbar keys they share a keysym with.
+Adding `clashContext` is the prerequisite for porting those, not more arms.
+
+Each arm's *effect* (the atomic flip, the option toggle, the
 clipboard write) lives in `window_event`'s match in `app/lifecycle.rs`, whose
 only test coverage is the compiler — see the "`window_event`'s effects match"
 gotcha below — so every effect that has a predictable, testable shape is
@@ -685,6 +712,9 @@ regardless of whether the top-level `Text` was built via `literal` or
 
 | chord | vanilla name | status |
 |---|---|---|
+Every row below marked *implemented* is also **rebindable** on the Key Binds
+screen's Debug group, defaults as listed.
+
 | F3+B | `key.debug.showHitboxes` | implemented, now with chat feedback |
 | F3+G | `key.debug.showChunkBorders` | implemented, now with chat feedback |
 | F3+H | `key.debug.showAdvancedTooltips` | implemented, now with chat feedback (the owner's reported gap) |

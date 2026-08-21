@@ -43,6 +43,22 @@
 //!    (`KeyboardHandler.java`). So routing F3 through this table is
 //!    vanilla-*correct*, not a divergence. [`Category::Debug`] exists for it.
 //!
+//!    **And so are the F3 *chords*, which is the opposite of what this file
+//!    used to assume.** `Options.java` declares `keyDebugShowHitboxes`,
+//!    `keyDebugShowChunkBorders`, `keyDebugShowAdvancedTooltips`,
+//!    `keyDebugSpectate`, `keyDebugSwitchGameMode`, `keyDebugFocusPause` and
+//!    `keyDebugCopyLocation` as `Category.DEBUG` `KeyMapping`s, collects them
+//!    in `debugKeys`, and folds that array into `keyMappings` — the one
+//!    vanilla persists and the Controls screen lists. `KeyboardHandler.
+//!    handleDebugKeys` then asks each of them `matches(event)`. All seven are
+//!    in this table for that reason. Two chords are **not**, and both are
+//!    Lodestone-only rather than ports: `Shift+F3` (the profiler pie chart's
+//!    visibility, which vanilla has no mapping for) and the chart's number-row
+//!    navigation — vanilla's own four chart chords are `KeyMapping`s with a
+//!    `clashContext`, a concept this table has no equivalent of, and without
+//!    one nine digit actions would report a permanent conflict against the
+//!    nine hotbar keys they share a keysym with.
+//!
 //! 2. **Escape is genuinely not a `KeyMapping`.** Vanilla handles it in
 //!    `Screen`/`KeyboardHandler` directly, so it cannot be rebound there. We
 //!    route it through the table as [`InputAction::Pause`] because the user
@@ -333,6 +349,32 @@ pub enum InputAction {
     /// The F3 overlay. A genuine vanilla `KeyMapping` in 26.2 — see the module
     /// docs, which is not what older versions did.
     DebugOverlay,
+    /// F3+B — `key.debug.showHitboxes`, GLFW 66.
+    ///
+    /// **The seven chords below are `KeyMapping`s in 26.2, checked in the jar
+    /// rather than assumed.** `Options.java` declares each one with a
+    /// `Category.DEBUG` and puts them in `debugKeys`, which is folded into
+    /// `keyMappings` — the array vanilla persists and the Controls screen
+    /// lists — and `KeyboardHandler.handleDebugKeys` dispatches every one
+    /// through `KeyMapping::matches(event)`, not through a literal keysym.
+    /// So a rebindable F3+B is vanilla-*correct*; hardcoding it was the
+    /// divergence. See [`crate::app::KeyGate::debug_held`] for why the F3
+    /// *modifier* itself stays a gate flag rather than becoming an eighth
+    /// action here.
+    DebugShowHitboxes,
+    /// F3+G — `key.debug.showChunkBorders`, GLFW 71.
+    DebugShowChunkBorders,
+    /// F3+H — `key.debug.showAdvancedTooltips`, GLFW 72. Note the vanilla
+    /// name carries `show`; `key.debug.advancedTooltips` is not a real key.
+    DebugShowAdvancedTooltips,
+    /// F3+N — `key.debug.spectate`, GLFW 78.
+    DebugSpectate,
+    /// F3+F4 — `key.debug.switchGameMode`, GLFW 293.
+    DebugSwitchGameMode,
+    /// F3+P — `key.debug.focusPause`, GLFW 80.
+    DebugFocusPause,
+    /// F3+C — `key.debug.copyLocation`, GLFW 67.
+    DebugCopyLocation,
 }
 
 impl InputAction {
@@ -340,7 +382,7 @@ impl InputAction {
     /// category and, within a category, follows `Options.java`'s own
     /// declaration order — so walking `ALL` filtered by [`Category::SORT_ORDER`]
     /// reproduces vanilla's Controls-screen ordering without a sort.
-    pub const ALL: [InputAction; 29] = [
+    pub const ALL: [InputAction; 36] = [
         InputAction::Forward,
         InputAction::Back,
         InputAction::Left,
@@ -370,6 +412,13 @@ impl InputAction {
         InputAction::TogglePerspective,
         InputAction::Pause,
         InputAction::DebugOverlay,
+        InputAction::DebugShowHitboxes,
+        InputAction::DebugShowChunkBorders,
+        InputAction::DebugShowAdvancedTooltips,
+        InputAction::DebugSpectate,
+        InputAction::DebugSwitchGameMode,
+        InputAction::DebugFocusPause,
+        InputAction::DebugCopyLocation,
     ];
 
     /// The stable identifier used in `options.json` and as the translation key,
@@ -409,6 +458,13 @@ impl InputAction {
             InputAction::TogglePerspective => "key.togglePerspective",
             InputAction::Pause => "key.lodestone.pause",
             InputAction::DebugOverlay => "key.debug.overlay",
+            InputAction::DebugShowHitboxes => "key.debug.showHitboxes",
+            InputAction::DebugShowChunkBorders => "key.debug.showChunkBorders",
+            InputAction::DebugShowAdvancedTooltips => "key.debug.showAdvancedTooltips",
+            InputAction::DebugSpectate => "key.debug.spectate",
+            InputAction::DebugSwitchGameMode => "key.debug.switchGameMode",
+            InputAction::DebugFocusPause => "key.debug.focusPause",
+            InputAction::DebugCopyLocation => "key.debug.copyLocation",
         }
     }
 
@@ -451,7 +507,14 @@ impl InputAction {
             InputAction::Screenshot | InputAction::TogglePerspective | InputAction::Pause => {
                 Category::Misc
             }
-            InputAction::DebugOverlay => Category::Debug,
+            InputAction::DebugOverlay
+            | InputAction::DebugShowHitboxes
+            | InputAction::DebugShowChunkBorders
+            | InputAction::DebugShowAdvancedTooltips
+            | InputAction::DebugSpectate
+            | InputAction::DebugSwitchGameMode
+            | InputAction::DebugFocusPause
+            | InputAction::DebugCopyLocation => Category::Debug,
         }
     }
 
@@ -505,6 +568,14 @@ impl InputAction {
             InputAction::Pause => Binding::Key(KeyCode::Escape),
             // `Options.java` — 292.
             InputAction::DebugOverlay => Binding::Key(KeyCode::F3),
+            // `Options.java`'s `debugKeys` — 66/71/72/78/293/80/67.
+            InputAction::DebugShowHitboxes => Binding::Key(KeyCode::KeyB),
+            InputAction::DebugShowChunkBorders => Binding::Key(KeyCode::KeyG),
+            InputAction::DebugShowAdvancedTooltips => Binding::Key(KeyCode::KeyH),
+            InputAction::DebugSpectate => Binding::Key(KeyCode::KeyN),
+            InputAction::DebugSwitchGameMode => Binding::Key(KeyCode::F4),
+            InputAction::DebugFocusPause => Binding::Key(KeyCode::KeyP),
+            InputAction::DebugCopyLocation => Binding::Key(KeyCode::KeyC),
         }
     }
 
@@ -1130,7 +1201,15 @@ mod tests {
             258 => KeyCode::Tab,
             291 => KeyCode::F2,
             292 => KeyCode::F3,
+            293 => KeyCode::F4,
             294 => KeyCode::F5,
+            // The seven `debugKeys` chords.
+            66 => KeyCode::KeyB,
+            67 => KeyCode::KeyC,
+            71 => KeyCode::KeyG,
+            72 => KeyCode::KeyH,
+            78 => KeyCode::KeyN,
+            80 => KeyCode::KeyP,
             340 => KeyCode::ShiftLeft,
             341 => KeyCode::ControlLeft,
             other => panic!("no winit mapping recorded for GLFW keysym {other}"),
@@ -1167,6 +1246,18 @@ mod tests {
             (InputAction::Hotbar9, 57, Category::Inventory),
             // `Options.java` — a real `KeyMapping` in 26.2, category DEBUG.
             (InputAction::DebugOverlay, 292, Category::Debug),
+            // `Options.java`'s `debugKeys`, every one a `Category.DEBUG`
+            // `KeyMapping` folded into `keyMappings` and dispatched through
+            // `KeyMapping::matches` by `KeyboardHandler.handleDebugKeys` —
+            // which is why they are in this table rather than literal
+            // `KeyCode`s in `resolve_key`.
+            (InputAction::DebugShowHitboxes, 66, Category::Debug),
+            (InputAction::DebugShowChunkBorders, 71, Category::Debug),
+            (InputAction::DebugShowAdvancedTooltips, 72, Category::Debug),
+            (InputAction::DebugSpectate, 78, Category::Debug),
+            (InputAction::DebugSwitchGameMode, 293, Category::Debug),
+            (InputAction::DebugFocusPause, 80, Category::Debug),
+            (InputAction::DebugCopyLocation, 67, Category::Debug),
         ];
         for &(action, keysym, category) in vanilla {
             assert_eq!(
