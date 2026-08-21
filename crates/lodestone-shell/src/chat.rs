@@ -25,10 +25,13 @@
 //! doc for the wire shape; that decode landed in `090f2ff`/that fix and the fold
 //! into `net::CommandTreeCell` in `8b0aede`/that fix, so this doc's old "still
 //! has to be brokered into a protocol-crate decode arm" is done) against the
-//! *current* input line, which
-//! [`ChatInput`]'s own doc already establishes is always edited at its end —
-//! so there is no separate cursor position to track here, only "the line so
-//! far".
+//! *current* input line **up to the caret** — vanilla's own
+//! `value.substring(0, cursorPosition)`, which
+//! [`ChatInput::recompute_suggestions`] is what supplies. So there is still no
+//! separate cursor position to track in here: the string these are handed
+//! always ends at the caret, by construction at the call site. That used to be
+//! true because the line had no caret to be anywhere but the end; it is now
+//! true because the caller slices.
 //!
 //! Both functions share one internal walker ([`parse_line`]) that consumes
 //! tokens left to right: a literal child matches by exact text; an argument
@@ -59,8 +62,8 @@
 //! boundary.
 //!
 //! **That failure is only sometimes fatal to [`complete`], and getting this
-//! wrong was this module's own first bug.** Since the cursor is always at
-//! the end of the line, a failing token that is *also the last thing
+//! wrong was this module's own first bug.** Since the text these are handed
+//! always ends at the caret, a failing token that is *also the last thing
 //! typed* is still being typed — vanilla's own `CommandSuggestions` colours
 //! it `UNPARSED_STYLE` and offers suggestions for it **in the same pass**
 //! (`updateCommandInfo`/`formatText` both read the same `currentParse`;
@@ -168,6 +171,8 @@
 //! wrong for the same reason a character-count word-wrap would be, since
 //! Minecraft's font is proportional.
 
+use crate::menu::edit_box::EditBox;
+use crate::menu::focus::KeyEvent;
 use lodestone_client::ClientAction;
 use lodestone_command::{
     ArgumentType, BoolArgument, DoubleArgument, FloatArgument, IntegerArgument, LongArgument,
@@ -180,6 +185,21 @@ use lodestone_model::command_tree::{
 /// Vanilla's cap on the recent-chat store — `new ArrayListDeque<>(100)` plus the
 /// `size() >= 100 → removeFirst()` guard in `ChatComponent.addRecentChat`.
 pub const RECENT_CHAT_MAX: usize = 100;
+
+/// `ChatScreen.init`'s `this.input.setMaxLength(256)`, in `char`s.
+pub const MAX_CHAT_LENGTH: usize = 256;
+
+/// What one key press did to the chat line — [`ChatInput::handle_key`]'s answer.
+///
+/// Two independent bits, not one: see that method's own doc for why a consumed
+/// key and an edited line are different questions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatKeyResult {
+    /// The box acted on the key, so the caller must not also treat it as text.
+    pub consumed: bool,
+    /// The line's *value* changed, so the command-suggestion responder is due.
+    pub edited: bool,
+}
 
 /// The lines the player has **sent**, oldest first, for the Up/Down arrows.
 ///
@@ -268,9 +288,21 @@ fn normalize_space(text: &str) -> String {
 
 /// The line currently being typed. Kept separate from the log so opening the
 /// chat box, editing, and cancelling never touch the received history.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ChatInput {
-    buf: String,
+    /// The line itself — vanilla's `ChatScreen.input`, an
+    /// [`EditBox`], not a bare `String`.
+    ///
+    /// This used to be a `String` edited only at its end, and the whole of
+    /// ordinary text editing was missing as a result: no caret to move, so no
+    /// Left/Right, no Home/End, no shift-selection, no word skip, no
+    /// select-all, and copy/cut had nothing to read. `ChatScreen.init` builds
+    /// a real `EditBox` (`setMaxLength(256)`, `setBordered(false)`,
+    /// `setCanLoseFocus(false)`, focused on init), and every one of those
+    /// behaviours is already ported on this type — routing the chat line
+    /// through it is therefore reuse, not a second implementation. See
+    /// [`Self::new_box`] for the construction and for what geometry means here.
+    buf: EditBox,
     /// Tab-completion state for **this** line — see [`ChatCompletion`] for why
     /// it lives inside the input rather than beside it.
     completion: ChatCompletion,
@@ -302,6 +334,20 @@ pub struct ChatInput {
     scroll: ChatScroll,
 }
 
+impl Default for ChatInput {
+    fn default() -> Self {
+        Self {
+            buf: Self::new_box(),
+            completion: ChatCompletion::default(),
+            online_players: Vec::new(),
+            history_pos: 0,
+            history_buffer: String::new(),
+            history: ChatHistory::default(),
+            scroll: ChatScroll::default(),
+        }
+    }
+}
+
 impl ChatInput {
     /// An empty input.
     #[must_use]
@@ -309,44 +355,121 @@ impl ChatInput {
         Self::default()
     }
 
+    /// The chat box's own [`EditBox`], configured as `ChatScreen.init`
+    /// configures vanilla's.
+    ///
+    /// Three of the four settings are vanilla's literally: `setMaxLength(256)`,
+    /// `setBordered(false)`, `setCanLoseFocus(false)`. The fourth —
+    /// `widget.focused` — stands for `setInitialFocus(this.input)`, and it has
+    /// to be set here rather than on open because this shell has no `Screen`
+    /// focus layer around the chat prompt: `EditBox::handle_key` declines
+    /// every key on an unfocused box, so an unfocused chat line would accept
+    /// nothing at all.
+    ///
+    /// **The geometry is deliberately not vanilla's**, and the reason is worth
+    /// stating because a reader will otherwise "fix" it. Vanilla's box is
+    /// `(4, height - 12, width - 4, 12)`, and the only thing those numbers feed
+    /// is `EditBox::display_pos` — the horizontal scroll of a box narrower than
+    /// its contents — plus `text_x`/`text_y`, none of which the chat HUD reads:
+    /// it draws the whole line itself at its own anchor. A width narrower than
+    /// the value would therefore leave `display_pos` scrolled to a window
+    /// nothing consults, which is state that disagrees with the screen. Sizing
+    /// the box so the full 256-character budget always fits keeps `display_pos`
+    /// pinned at `0`, which is what the draw actually does.
+    fn new_box() -> EditBox {
+        let mut b = EditBox::new(0.0, 0.0, 0.0, 0.0, "chat.editBox");
+        b.set_max_length(MAX_CHAT_LENGTH);
+        b.bordered = false;
+        b.can_lose_focus = false;
+        b.widget.focused = true;
+        b.widget.width = b.advance * MAX_CHAT_LENGTH as f32;
+        b
+    }
+
     /// Seed the buffer (e.g. a leading `/` when chat is opened with the command
-    /// key). Replaces any current contents.
+    /// key). Replaces any current contents, leaving the caret at the end —
+    /// `EditBox.setValue`'s own `moveCursorToEnd`.
     pub fn set(&mut self, text: impl Into<String>) {
-        self.buf = text.into();
+        self.buf.set_value(text.into());
         // A wholesale replacement is a different line, so any list and any
         // in-flight request are about text that no longer exists.
         self.completion.reset();
     }
 
-    /// Append typed text. Control characters (newlines, the section sign used by
-    /// legacy colour codes) are filtered so a paste or an IME can't inject them.
+    /// Insert typed or pasted text **at the caret**, replacing any selection —
+    /// `EditBox.insertText`. Characters vanilla's chat filter rejects (the C0
+    /// controls, DEL, and the `§` used by legacy colour codes) are dropped, and
+    /// the whole insertion is truncated to what [`MAX_CHAT_LENGTH`] still
+    /// allows, so a paste or an IME cannot inject either.
     pub fn push_str(&mut self, text: &str) {
-        for ch in text.chars() {
-            self.push_char(ch);
-        }
+        self.buf.insert_text(text);
     }
 
-    /// Append a single character if it is printable and the line has room.
-    /// Vanilla caps a chat line at 256 characters.
+    /// One typed character — `EditBox.charTyped`. Same filter and same cap as
+    /// [`Self::push_str`], which this now shares rather than restates.
     pub fn push_char(&mut self, ch: char) {
-        if ch.is_control() || ch == '\u{00a7}' {
-            return;
-        }
-        if self.buf.chars().count() >= 256 {
-            return;
-        }
-        self.buf.push(ch);
-    }
-
-    /// Delete the last character (char-boundary safe). No-op when empty.
-    pub fn backspace(&mut self) {
-        self.buf.pop();
+        self.buf.handle_char(ch);
     }
 
     /// The current text.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.buf
+        self.buf.value()
+    }
+
+    /// The caret's position, as a **`char`** index — `EditBox.getCursorPosition`.
+    #[must_use]
+    pub fn cursor_position(&self) -> usize {
+        self.buf.cursor_position()
+    }
+
+    /// The selection as a `char` range, or `None` when the caret is a plain
+    /// insertion point. Ordered — `EditBox.highlightPos` may sit either side of
+    /// the caret, depending on which way the selection was dragged.
+    #[must_use]
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        let (cursor, highlight) = (self.buf.cursor_position(), self.buf.highlight_position());
+        (cursor != highlight).then(|| (cursor.min(highlight), cursor.max(highlight)))
+    }
+
+    /// The caret's position as a **byte** offset into [`Self::as_str`] — what a
+    /// draw or a splice needs, since every span in this module is a byte offset.
+    #[must_use]
+    fn cursor_byte(&self) -> usize {
+        let cursor = self.buf.cursor_position();
+        self.buf
+            .value()
+            .char_indices()
+            .nth(cursor)
+            .map_or_else(|| self.buf.value().len(), |(i, _)| i)
+    }
+
+    /// The line up to the caret — vanilla's
+    /// `input.getValue().substring(0, input.getCursorPosition())`, which is what
+    /// `CommandSuggestions` completes against rather than the whole value.
+    #[must_use]
+    fn partial(&self) -> &str {
+        &self.buf.value()[..self.cursor_byte()]
+    }
+
+    /// Route one key through the box — the whole of copy/cut/paste, select-all,
+    /// word-wise motion and deletion, shift-selection and Home/End, all of it
+    /// [`EditBox::handle_key`]'s existing port rather than a second one here.
+    ///
+    /// Returns whether the key was **consumed** and whether the *value* changed,
+    /// separately, because the caller needs both and they are different
+    /// questions: a consumed key that only moved the caret must not fall
+    /// through to the text-insertion path, and must not re-request suggestions
+    /// either. Vanilla splits them the same way — `EditBox.keyPressed` returns
+    /// the first, and the `setResponder` callback that drives
+    /// `updateCommandInfo` fires only on the second (`onValueChange`).
+    pub fn handle_key(&mut self, event: KeyEvent) -> ChatKeyResult {
+        let before = self.buf.value().to_owned();
+        let consumed = self.buf.handle_key(event);
+        ChatKeyResult {
+            consumed,
+            edited: self.buf.value() != before,
+        }
     }
 
     /// Whether nothing has been typed.
@@ -367,7 +490,13 @@ impl ChatInput {
         self.completion.reset();
         self.history_pos = usize::MAX;
         self.history_buffer.clear();
-        std::mem::take(&mut self.buf)
+        let line = self.buf.value().to_owned();
+        // `setValue("")` rather than a `mem::take` of a bare `String`: the caret
+        // and the selection are part of the line's state now, and leaving them
+        // pointing into text that no longer exists is the trap `on_value_change`
+        // exists to close.
+        self.buf.set_value("");
+        line
     }
 
     /// The player names Tab offers when the line is not a command.
@@ -439,13 +568,13 @@ impl ChatInput {
         }
         if new_pos == max {
             self.history_pos = max;
-            self.buf.clone_from(&self.history_buffer);
+            self.buf.set_value(self.history_buffer.clone());
         } else {
             if pos == max {
-                self.history_buffer = self.buf.clone();
+                self.history_buffer = self.buf.value().to_owned();
             }
             let recalled = self.history.entries()[new_pos].clone();
-            self.buf = recalled;
+            self.buf.set_value(recalled);
             self.completion.reset();
             self.history_pos = new_pos;
         }
@@ -865,8 +994,8 @@ fn parse_line(tree: &CommandTree, line: &str) -> Option<ParseWalk> {
         // Nothing matched this token — either no child's name/grammar
         // accepted it, or the sole argument candidate rejected it.
         //
-        // **This is not always a hard failure.** `line`'s cursor is always
-        // at the end (`ChatInput`'s own invariant), so when this failing
+        // **This is not always a hard failure.** `line` always ends at the
+        // caret (the caller slices it there), so when this failing
         // token is *also the last thing typed* (`unparsed_end == len`),
         // vanilla's own dispatcher is in exactly this state too — Brigadier
         // tries to match/parse it, throws, and leaves the reader's cursor
@@ -1189,12 +1318,19 @@ pub const SUGGESTION_LINE_START_OFFSET: usize = 1;
 /// which is what lets Tab cycle: the second Tab replaces the first Tab's text
 /// rather than appending to it. Brigadier's `Suggestion.apply` splices over the
 /// suggestion's own range, and in the chat box that range always ends at the
-/// cursor, which [`ChatInput`] keeps at the end of the line — so the splice is
-/// `original[..start] + text`.
+/// caret — [`Self::end`] — so the splice is
+/// `original[..start] + text + original[end..]`. That tail is a no-op whenever
+/// the caret is at the end of the line, which is the only case this type used
+/// to have.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuggestionsList {
     /// Byte offset into [`Self::original`] the candidate text replaces from.
     start: usize,
+    /// Byte offset into [`Self::original`] the candidate text replaces **to** —
+    /// the caret at the moment the list was built, which is where brigadier's
+    /// `StringRange` ends. Equal to `original.len()` whenever the caret is at
+    /// the end of the line, which is the only case this type used to have.
+    end: usize,
     /// The line as it was when this list was built — `originalContents`.
     original: String,
     candidates: Vec<Candidate>,
@@ -1282,12 +1418,29 @@ impl SuggestionsList {
     /// `Suggestion.apply(originalContents)`. See the struct doc for why this is
     /// computed from `original` rather than from the line on screen.
     fn applied(&self) -> String {
-        let mut s = String::with_capacity(self.start + 16);
+        let mut s = String::with_capacity(self.original.len() + 16);
         s.push_str(&self.original[..self.start]);
         if let Some(c) = self.candidates.get(self.current) {
             s.push_str(&c.text);
         }
+        // Brigadier's `Suggestion.apply` splices over `[start, end)` and keeps
+        // whatever follows. `end` is the caret at the moment the list was built,
+        // so this is a plain append while the caret is at the end of the line
+        // (the only case that used to exist) and a real splice otherwise.
+        s.push_str(&self.original[self.end..]);
         s
+    }
+
+    /// Where the caret lands once [`Self::applied`] is committed —
+    /// `SuggestionsList.useSuggestion`'s `setCursorPosition(end)`, in `char`s,
+    /// i.e. just past the text this splices in rather than at the end of the
+    /// whole line.
+    fn applied_cursor(&self) -> usize {
+        let inserted = self
+            .candidates
+            .get(self.current)
+            .map_or(0, |c| c.text.chars().count());
+        self.original[..self.start].chars().count() + inserted
     }
 
     /// The grey preview drawn after the caret — vanilla's
@@ -1435,12 +1588,18 @@ impl ChatCompletion {
     /// previews the highlighted one as grey ghost text, and only
     /// `useSuggestion` — Tab, or a click — actually edits. Browsing with the
     /// arrows therefore never rewrites what you typed.
-    fn show(&mut self, start: usize, line: &str, candidates: Vec<Candidate>) {
-        if candidates.is_empty() || start > line.len() || !line.is_char_boundary(start) {
+    fn show(&mut self, start: usize, end: usize, line: &str, candidates: Vec<Candidate>) {
+        if candidates.is_empty()
+            || start > end
+            || end > line.len()
+            || !line.is_char_boundary(start)
+            || !line.is_char_boundary(end)
+        {
             return;
         }
         self.list = Some(SuggestionsList {
             start,
+            end,
             original: line.to_owned(),
             candidates,
             offset: 0,
@@ -1493,32 +1652,46 @@ impl ChatInput {
     /// server round trip at all. So that path needs no command tree and works
     /// against any server — including one that has sent us no
     /// `minecraft:commands`.
+    /// # It completes the line **up to the caret**, not the whole line
+    ///
+    /// `updateCommandInfo` reads `int cursorPosition = this.input.
+    /// getCursorPosition()` and hands *that* to `getCompletionSuggestions`;
+    /// the player-name branch is explicit about it —
+    /// `command.substring(0, cursorPosition)` — and `sortSuggestions` ranks
+    /// against the same prefix. While the caret sat permanently at the end of
+    /// the line the two were the same string, which is why this used to read
+    /// the whole value; with a caret that moves they are not, and completing
+    /// the whole line would offer candidates for a word the player is not in.
     fn recompute_suggestions(&mut self, tree: Option<&CommandTree>) -> Option<ClientAction> {
         if !self.completion.allow_suggestions {
             return None;
         }
-        if !self.buf.starts_with('/') {
-            if self.buf.trim().is_empty() {
+        let end = self.cursor_byte();
+        let partial = self.partial().to_owned();
+        if !partial.starts_with('/') {
+            if partial.trim().is_empty() {
                 return None;
             }
-            let start = last_word_index(&self.buf);
-            let candidates = player_name_candidates(&self.online_players, &self.buf[start..]);
-            let line = std::mem::take(&mut self.buf);
-            self.completion.show(start, &line, candidates);
-            self.buf = line;
+            let start = last_word_index(&partial);
+            let candidates = player_name_candidates(&self.online_players, &partial[start..]);
+            let line = self.buf.value().to_owned();
+            self.completion.show(start, end, &line, candidates);
             return None;
         }
         let tree = tree?;
-        match complete(tree, &self.buf) {
+        match complete(tree, &partial) {
             Completion::Local { start, candidates } => {
-                let line = std::mem::take(&mut self.buf);
-                self.completion.show(start, &line, candidates);
-                self.buf = line;
+                let line = self.buf.value().to_owned();
+                self.completion.show(start, end, &line, candidates);
                 None
             }
             Completion::NeedsServer { .. } => {
-                self.completion.pending_line = Some(self.buf.clone());
-                Some(self.completion.requests.request(&self.buf))
+                // The prefix, not the whole line: the reply's `start` is a byte
+                // offset into whatever text we asked about, so asking about one
+                // string and splicing into another is how an offset stops
+                // meaning anything.
+                self.completion.pending_line = Some(partial.clone());
+                Some(self.completion.requests.request(&partial))
             }
             Completion::None => None,
         }
@@ -1573,8 +1746,14 @@ impl ChatInput {
         let Some(list) = self.completion.list.as_mut() else {
             return;
         };
-        self.buf = list.applied();
+        let (applied, cursor) = (list.applied(), list.applied_cursor());
         list.tab_cycles = true;
+        self.buf.set_value(applied);
+        // `setValue` leaves the caret at the end of the whole line; vanilla
+        // follows it with `setCursorPosition(end)`/`setHighlightPos(end)`, which
+        // is only the same place when the completion was an append.
+        self.buf.set_cursor_position(cursor);
+        self.buf.set_highlight_pos(cursor);
     }
 
     /// Up in the popup — `SuggestionsList.keyPressed`'s `event.isUp()` arm:
@@ -1659,7 +1838,7 @@ impl ChatInput {
     /// The grey preview drawn after the caret — see [`SuggestionsList::ghost`].
     #[must_use]
     pub fn suggestion_ghost(&self) -> Option<String> {
-        self.completion.list.as_ref()?.ghost(&self.buf)
+        self.completion.list.as_ref()?.ghost(self.buf.value())
     }
 
     /// The dropdown to draw, when there is one.
@@ -1696,21 +1875,24 @@ impl ChatInput {
         let Some(asked) = self.completion.pending_line.take() else {
             return false;
         };
-        if asked != self.buf {
+        // Against the **prefix** we asked about, not the whole line: a caret in
+        // the middle means the tail was never part of the question, and it can
+        // change without invalidating the answer.
+        if asked != self.partial() {
             return false;
         }
         let Ok(start) = usize::try_from(response.start) else {
             return false;
         };
-        if start > self.buf.len() || !self.buf.is_char_boundary(start) {
+        let end = self.cursor_byte();
+        if start > end || !self.buf.value().is_char_boundary(start) {
             return false;
         }
         if candidates.is_empty() {
             return false;
         }
-        let line = std::mem::take(&mut self.buf);
-        self.completion.show(start, &line, candidates);
-        self.buf = line;
+        let line = self.buf.value().to_owned();
+        self.completion.show(start, end, &line, candidates);
         true
     }
 
@@ -2105,15 +2287,19 @@ mod tests {
         }
     }
 
+    /// Backspace goes through [`ChatInput::handle_key`] rather than a
+    /// `backspace()` helper, because that helper had no production caller once
+    /// the line became an `EditBox` — every real Backspace arrives as a key.
     #[test]
     fn input_edits_are_char_boundary_safe() {
+        let backspace = KeyEvent::new(crate::menu::focus::KEY_BACKSPACE);
         let mut input = ChatInput::new();
         input.push_str("héllo"); // multi-byte é
-        input.backspace(); // removes 'o'
-        input.backspace(); // removes 'l'
+        input.handle_key(backspace); // removes 'o'
+        input.handle_key(backspace); // removes 'l'
         assert_eq!(input.as_str(), "hél");
-        input.backspace();
-        input.backspace(); // removes é (2 bytes) as one char
+        input.handle_key(backspace);
+        input.handle_key(backspace); // removes é (2 bytes) as one char
         assert_eq!(input.as_str(), "h");
     }
 

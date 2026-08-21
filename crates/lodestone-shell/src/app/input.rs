@@ -836,3 +836,548 @@ impl WindowApp {
         self.nav.options().keybinds
     }
 }
+
+/// Translate one winit key press into the [`crate::menu::focus::KeyEvent`]
+/// every ported text field speaks — the GLFW key code plus the GLFW modifier
+/// bitmask vanilla's `InputWithModifiers` predicates test.
+///
+/// # Why this exists rather than a second edit implementation
+///
+/// The chat prompt had no text editing at all: no caret, so no Left/Right,
+/// Home/End, shift-selection, word skip or select-all, and copy/cut with
+/// nothing to read. All of that is already ported, once, on
+/// [`crate::menu::edit_box::EditBox`] — the missing piece was a *producer*, a
+/// way to get a real `KeyEvent` out of a winit event. `menu_key_for` is not it:
+/// it targets [`crate::menu::nav::MenuKey`], whose vocabulary has no
+/// Left/Right/Home/End at all (`KeyEvent::from_menu_key`'s own doc says so),
+/// so routing chat through it could never have carried caret motion.
+///
+/// # The modifier mapping is faithful, not platform-folded
+///
+/// Each winit modifier maps to the GLFW bit that literally means it —
+/// Shift→`MOD_SHIFT`, Ctrl→`MOD_CONTROL`, Alt→`MOD_ALT`, Cmd→`MOD_SUPER`. The
+/// Mac-versus-elsewhere split the owner asked about is **not** applied here on
+/// purpose: it lives once, in
+/// [`crate::menu::focus::EDIT_SHORTCUT_MODIFIER`], which is what
+/// `has_control_down_with_quirk`/`is_copy`/`is_cut`/`is_paste`/`is_select_all`
+/// test. Folding Cmd onto `MOD_CONTROL` here would work for the shortcuts and
+/// then be wrong for the reverse case — a Mac user pressing *Ctrl*+Left, which
+/// vanilla treats as a plain caret step, would get a word skip.
+///
+/// Returns `None` for any key no text field acts on, which is the caller's
+/// signal to fall through to its own text-insertion path.
+#[must_use]
+pub(crate) fn text_key_event(
+    physical_key: PhysicalKey,
+    modifiers: ModifiersState,
+) -> Option<crate::menu::focus::KeyEvent> {
+    use crate::menu::focus;
+    let PhysicalKey::Code(code) = physical_key else {
+        return None;
+    };
+    let key = match code {
+        KeyCode::Backspace => focus::KEY_BACKSPACE,
+        KeyCode::Delete => focus::KEY_DELETE,
+        KeyCode::ArrowLeft => focus::KEY_LEFT,
+        KeyCode::ArrowRight => focus::KEY_RIGHT,
+        KeyCode::Home => focus::KEY_HOME,
+        KeyCode::End => focus::KEY_END,
+        // The four `EditBox` reads through `isSelectAll`/`isCopy`/`isCut`/
+        // `isPaste`. Passed through unconditionally rather than gated on the
+        // modifier here: the predicates do that themselves, and gating twice
+        // is how the two conditions drift apart.
+        KeyCode::KeyA => focus::KEY_A,
+        KeyCode::KeyC => focus::KEY_C,
+        KeyCode::KeyV => focus::KEY_V,
+        KeyCode::KeyX => focus::KEY_X,
+        _ => return None,
+    };
+    Some(crate::menu::focus::KeyEvent::with_modifiers(
+        key,
+        glfw_modifiers(modifiers),
+    ))
+}
+
+/// The GLFW modifier bitmask winit's tracked [`ModifiersState`] stands for.
+///
+/// `modifiers` is `WindowApp::modifiers`, tracked from
+/// `WindowEvent::ModifiersChanged` — winit reports modifier state as its own
+/// event rather than on the key press, so reading it off the `KeyEvent` gives
+/// zero for every chord.
+#[must_use]
+pub(crate) fn glfw_modifiers(modifiers: ModifiersState) -> i32 {
+    use crate::menu::focus::{MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_SUPER};
+    let mut bits = 0;
+    if modifiers.shift_key() {
+        bits |= MOD_SHIFT;
+    }
+    if modifiers.control_key() {
+        bits |= MOD_CONTROL;
+    }
+    if modifiers.alt_key() {
+        bits |= MOD_ALT;
+    }
+    if modifiers.super_key() {
+        bits |= MOD_SUPER;
+    }
+    bits
+}
+
+/// Chat text editing.
+///
+/// # Which half each gate covers, and why the split is not laziness
+///
+/// The chat line had no caret at all, so two things needed proving and they are
+/// not the same claim: that [`crate::chat::ChatInput`] *does* the editing, and
+/// that a real key press *reaches* it. The second is the one a gate calling an
+/// editing helper directly cannot make, and it is the half that was broken.
+///
+/// So the routing gates below go in through [`WindowApp::handle_chat_key_parts`]
+/// — the exact function `apply_key_outcome`'s `KeyOutcome::Chat` arm calls,
+/// minus only the `winit::event::KeyEvent` wrapper nothing outside winit can
+/// construct. They are deliberately few: `WindowApp::new` costs tens of seconds
+/// even headless, and once the dispatch is proven, the behaviour gates below
+/// them run through [`text_key_event`] — the real translator, the piece that
+/// actually had to be written — into a bare `ChatInput`, in microseconds.
+#[cfg(test)]
+mod chat_editing {
+    use super::*;
+    use crate::chat::ChatInput;
+    use crate::menu::focus::{EDIT_SHORTCUT_MODIFIER, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_SUPER};
+
+    /// The platform's edit-shortcut modifier as winit reports it — Cmd on a
+    /// Mac, Ctrl elsewhere. Derived from `cfg!` rather than hard-coded so these
+    /// gates assert vanilla's behaviour on whichever machine runs them; the
+    /// mapping *itself* is asserted, on both platforms at once, by
+    /// [`the_edit_modifier_is_cmd_on_a_mac_and_ctrl_elsewhere`] below.
+    fn edit_mod() -> ModifiersState {
+        if cfg!(target_os = "macos") {
+            ModifiersState::SUPER
+        } else {
+            ModifiersState::CONTROL
+        }
+    }
+
+    /// A chat line, driven through [`text_key_event`] exactly as
+    /// `handle_chat_key_parts` drives it.
+    struct Line(ChatInput);
+
+    impl Line {
+        fn new(text: &str) -> Self {
+            let mut input = ChatInput::new();
+            input.set(text);
+            Self(input)
+        }
+
+        fn press(&mut self, code: KeyCode, modifiers: ModifiersState) {
+            let event = text_key_event(PhysicalKey::Code(code), modifiers)
+                .expect("this gate presses a text-editing key");
+            self.0.handle_key(event);
+        }
+
+        fn text(&self) -> &str {
+            self.0.as_str()
+        }
+
+        fn cursor(&self) -> usize {
+            self.0.cursor_position()
+        }
+    }
+
+    // ---- the routing: a real key press reaches the box ----------------------
+
+    /// Every routing claim, on **one** `WindowApp`, because building a headless
+    /// one measures ~73 seconds against ~0.00 for every behaviour gate below —
+    /// four separate gates put five minutes on `cargo test -p lodestone-shell
+    /// --lib` to re-prove the same dispatch four times.
+    ///
+    /// The claims are collected rather than asserted in place, for the reason
+    /// `CLAUDE.md` gives about an `assert!` inside a loop: a gate that stops at
+    /// the first failure turns every later claim into an argument instead of an
+    /// observation. This one always reports all six.
+    #[test]
+    fn a_real_key_press_reaches_the_chat_box() {
+        let mut app = WindowApp::new(Config {
+            mode: Mode::Headless,
+            ..Config::default()
+        });
+        let mut seen: Vec<(&str, String, String)> = Vec::new();
+        let mut claim = |label: &'static str, actual: &str, expected: &str| {
+            if actual != expected {
+                seen.push((label, actual.to_owned(), expected.to_owned()));
+            }
+        };
+
+        // Caret motion, and typing where the caret is rather than at the end —
+        // the whole point of the line having one.
+        app.chat_input.set("hello");
+        app.handle_chat_key_parts(
+            PhysicalKey::Code(KeyCode::Home),
+            None,
+            ModifiersState::empty(),
+        );
+        claim(
+            "Home moves the caret",
+            &app.chat_input.cursor_position().to_string(),
+            "0",
+        );
+        app.handle_chat_key_parts(
+            PhysicalKey::Code(KeyCode::KeyX),
+            Some("X"),
+            ModifiersState::empty(),
+        );
+        claim("typing lands at the caret", app.chat_input.as_str(), "Xhello");
+
+        // The fall-through, which no behaviour gate can see: a letter the box
+        // declines must still type, a key it consumes must not type as well,
+        // and an unrecognised chord must do neither.
+        app.chat_input.set("");
+        app.handle_chat_key_parts(
+            PhysicalKey::Code(KeyCode::KeyA),
+            Some("a"),
+            ModifiersState::empty(),
+        );
+        claim("a declined shortcut key still types", app.chat_input.as_str(), "a");
+        crate::menu::edit_box::clipboard_seam::set("Z");
+        app.handle_chat_key_parts(PhysicalKey::Code(KeyCode::KeyV), Some("v"), edit_mod());
+        claim(
+            "a consumed shortcut does not also type its letter",
+            app.chat_input.as_str(),
+            "aZ",
+        );
+        app.handle_chat_key_parts(PhysicalKey::Code(KeyCode::KeyB), Some("b"), edit_mod());
+        claim("an unrecognised chord does nothing", app.chat_input.as_str(), "aZ");
+
+        // Delete had no arm at all before the box was wired in: it fell through
+        // to the text path, where a key with no composed `text` reaches nothing.
+        app.chat_input.set("abc");
+        app.handle_chat_key_parts(
+            PhysicalKey::Code(KeyCode::Home),
+            None,
+            ModifiersState::empty(),
+        );
+        app.handle_chat_key_parts(
+            PhysicalKey::Code(KeyCode::Delete),
+            None,
+            ModifiersState::empty(),
+        );
+        claim("Delete reaches the box", app.chat_input.as_str(), "bc");
+
+        // The headline behaviour the bespoke paste arm this replaced could not
+        // have had: it appended, because the line had no selection to replace.
+        crate::menu::edit_box::clipboard_seam::set("goodbye");
+        app.chat_input.set("hello world");
+        app.handle_chat_key_parts(
+            PhysicalKey::Code(KeyCode::Home),
+            None,
+            ModifiersState::empty(),
+        );
+        for _ in 0..5 {
+            app.handle_chat_key_parts(
+                PhysicalKey::Code(KeyCode::ArrowRight),
+                None,
+                ModifiersState::SHIFT,
+            );
+        }
+        app.handle_chat_key_parts(PhysicalKey::Code(KeyCode::KeyV), Some("v"), edit_mod());
+        claim(
+            "paste replaces the selection",
+            app.chat_input.as_str(),
+            "goodbye world",
+        );
+
+        assert!(seen.is_empty(), "chat key routing: {seen:#?}");
+    }
+
+    // ---- word boundaries ----------------------------------------------------
+    //
+    // `EditBox.getWordPosition` breaks on **space and nothing else**, and it
+    // strips runs of spaces on the far side of the jump. Each gate below is
+    // chosen so a plausible wrong implementation lands on a *different* number
+    // — the assertion messages name the one it would land on, because a fixture
+    // where both answers coincide is not a test.
+
+    /// Punctuation is not a word break. A "skip to the previous alphanumeric
+    /// run" implementation — the obvious one, and what most editors do — stops
+    /// at the colon.
+    #[test]
+    fn word_skip_back_crosses_punctuation_because_only_a_space_breaks_a_word() {
+        let mut line = Line::new("say hi:there");
+        line.press(KeyCode::ArrowLeft, edit_mod());
+        assert_eq!(
+            line.cursor(),
+            4,
+            "vanilla skips back to `hi:there`'s start; a punctuation-aware \
+             implementation would stop at 7, just past the colon"
+        );
+    }
+
+    /// A run of spaces is stripped *and* the word beyond it is crossed, in one
+    /// press. Stopping at the near edge of the run is the naive answer.
+    #[test]
+    fn word_skip_back_strips_the_whole_space_run_and_the_word_before_it() {
+        let mut line = Line::new("hi   there");
+        line.press(KeyCode::ArrowLeft, edit_mod());
+        assert_eq!(line.cursor(), 5, "first press lands at the start of `there`");
+        line.press(KeyCode::ArrowLeft, edit_mod());
+        assert_eq!(
+            line.cursor(),
+            0,
+            "the second press strips all three spaces and then crosses `hi`; \
+             stopping at the run's near edge would give 2, and stopping at the \
+             first space would give 4"
+        );
+    }
+
+    /// Forwards, the strip happens on the far side too: the caret lands at the
+    /// start of the next word, not on the first space of the run.
+    #[test]
+    fn word_skip_forward_lands_past_the_space_run_not_on_it() {
+        let mut line = Line::new("hi   there");
+        line.press(KeyCode::Home, ModifiersState::empty());
+        line.press(KeyCode::ArrowRight, edit_mod());
+        assert_eq!(
+            line.cursor(),
+            5,
+            "vanilla strips the spaces after the break; stopping at the first \
+             space would give 2"
+        );
+    }
+
+    /// Trailing spaces are stripped before the word is crossed, so one press
+    /// from the very end of `"hi there   "` goes past `there` as well.
+    #[test]
+    fn word_skip_back_from_trailing_spaces_strips_them_and_then_the_word() {
+        let mut line = Line::new("hi there   ");
+        line.press(KeyCode::ArrowLeft, edit_mod());
+        assert_eq!(
+            line.cursor(),
+            3,
+            "the trailing run is stripped and `there` crossed in one press; an \
+             implementation that only strips would stop at 8"
+        );
+    }
+
+    /// Forwards with no further space runs to the end rather than staying put —
+    /// vanilla's `indexOf` returning `-1` becomes the length.
+    #[test]
+    fn word_skip_forward_with_no_further_space_runs_to_the_end() {
+        let mut line = Line::new("hi there");
+        line.press(KeyCode::Home, ModifiersState::empty());
+        line.press(KeyCode::ArrowRight, edit_mod());
+        line.press(KeyCode::ArrowRight, edit_mod());
+        assert_eq!(line.cursor(), 8, "the last word ends at the end of the line");
+    }
+
+    /// Both ends clamp rather than wrapping or panicking.
+    #[test]
+    fn word_skip_clamps_at_the_start_and_the_end_of_the_line() {
+        let mut line = Line::new("hi there");
+        line.press(KeyCode::Home, ModifiersState::empty());
+        line.press(KeyCode::ArrowLeft, edit_mod());
+        assert_eq!(line.cursor(), 0);
+        line.press(KeyCode::End, ModifiersState::empty());
+        line.press(KeyCode::ArrowRight, edit_mod());
+        assert_eq!(line.cursor(), 8);
+    }
+
+    /// The empty line is the degenerate case both directions have to survive.
+    #[test]
+    fn word_skip_on_an_empty_line_does_nothing() {
+        let mut line = Line::new("");
+        line.press(KeyCode::ArrowLeft, edit_mod());
+        line.press(KeyCode::ArrowRight, edit_mod());
+        assert_eq!(line.cursor(), 0);
+        assert_eq!(line.text(), "");
+    }
+
+    /// Word motion extends a selection under Shift exactly as a plain arrow
+    /// does — `moveCursorTo(pos, event.hasShiftDown())`, one shared argument.
+    #[test]
+    fn shift_with_the_edit_modifier_selects_a_whole_word() {
+        let mut line = Line::new("hello world");
+        line.press(KeyCode::ArrowLeft, edit_mod() | ModifiersState::SHIFT);
+        assert_eq!(line.0.selection(), Some((6, 11)));
+    }
+
+    // ---- word deletion ------------------------------------------------------
+
+    #[test]
+    fn the_edit_modifier_with_backspace_deletes_a_whole_word() {
+        let mut line = Line::new("hi   there");
+        line.press(KeyCode::Backspace, edit_mod());
+        assert_eq!(line.text(), "hi   ");
+        line.press(KeyCode::Backspace, edit_mod());
+        assert_eq!(line.text(), "");
+    }
+
+    /// `EditBox.deleteWords` checks for a selection **first**, so a word-delete
+    /// over a selection removes the selection only — it does not also eat the
+    /// word in front of it.
+    #[test]
+    fn a_live_selection_wins_over_the_word_delete() {
+        let mut line = Line::new("hello world");
+        line.press(KeyCode::ArrowLeft, ModifiersState::SHIFT);
+        line.press(KeyCode::ArrowLeft, ModifiersState::SHIFT);
+        assert_eq!(line.0.selection(), Some((9, 11)));
+        line.press(KeyCode::Backspace, edit_mod());
+        assert_eq!(
+            line.text(),
+            "hello wor",
+            "the selection alone goes; eating `world` too would leave `hello `"
+        );
+    }
+
+    #[test]
+    fn plain_backspace_still_deletes_one_character_at_the_caret() {
+        let mut line = Line::new("abc");
+        line.press(KeyCode::ArrowLeft, ModifiersState::empty());
+        line.press(KeyCode::Backspace, ModifiersState::empty());
+        assert_eq!(line.text(), "ac");
+        assert_eq!(line.cursor(), 1);
+    }
+
+    // ---- caret and selection ------------------------------------------------
+
+    #[test]
+    fn shift_extends_the_selection_and_a_plain_arrow_collapses_it() {
+        let mut line = Line::new("abcd");
+        line.press(KeyCode::ArrowLeft, ModifiersState::SHIFT);
+        line.press(KeyCode::ArrowLeft, ModifiersState::SHIFT);
+        assert_eq!(line.0.selection(), Some((2, 4)));
+        line.press(KeyCode::ArrowLeft, ModifiersState::empty());
+        assert_eq!(line.0.selection(), None);
+    }
+
+    #[test]
+    fn home_and_end_move_the_caret_to_the_ends_and_shift_selects_to_them() {
+        let mut line = Line::new("abcd");
+        line.press(KeyCode::Home, ModifiersState::empty());
+        assert_eq!(line.cursor(), 0);
+        line.press(KeyCode::End, ModifiersState::SHIFT);
+        assert_eq!(line.0.selection(), Some((0, 4)));
+    }
+
+    #[test]
+    fn select_all_covers_the_whole_line_and_the_next_insert_replaces_it() {
+        let mut line = Line::new("hello world");
+        line.press(KeyCode::KeyA, edit_mod());
+        assert_eq!(line.0.selection(), Some((0, 11)));
+        line.0.push_char('x');
+        assert_eq!(line.text(), "x");
+    }
+
+    /// `isSelectAll` and friends require the quirked modifier and *neither*
+    /// Shift nor Alt, so Cmd+Shift+A must not select all.
+    #[test]
+    fn the_shortcuts_refuse_an_extra_modifier() {
+        let mut line = Line::new("hello");
+        line.press(KeyCode::KeyA, edit_mod() | ModifiersState::SHIFT);
+        assert_eq!(line.0.selection(), None);
+    }
+
+    // ---- clipboard ----------------------------------------------------------
+
+    #[test]
+    fn copy_writes_the_selection_to_the_clipboard_and_leaves_the_line_alone() {
+        let mut line = Line::new("hello world");
+        line.press(KeyCode::Home, ModifiersState::empty());
+        for _ in 0..5 {
+            line.press(KeyCode::ArrowRight, ModifiersState::SHIFT);
+        }
+        line.press(KeyCode::KeyC, edit_mod());
+        assert_eq!(crate::menu::edit_box::clipboard_seam::get(), "hello");
+        assert_eq!(line.text(), "hello world");
+    }
+
+    #[test]
+    fn cut_removes_the_selection_and_leaves_it_on_the_clipboard() {
+        let mut line = Line::new("hello world");
+        line.press(KeyCode::Home, ModifiersState::empty());
+        for _ in 0..6 {
+            line.press(KeyCode::ArrowRight, ModifiersState::SHIFT);
+        }
+        line.press(KeyCode::KeyX, edit_mod());
+        assert_eq!(crate::menu::edit_box::clipboard_seam::get(), "hello ");
+        assert_eq!(line.text(), "world");
+    }
+
+    #[test]
+    fn paste_lands_at_the_caret_when_nothing_is_selected() {
+        crate::menu::edit_box::clipboard_seam::set("XY");
+        let mut line = Line::new("ab");
+        line.press(KeyCode::Home, ModifiersState::empty());
+        line.press(KeyCode::KeyV, edit_mod());
+        assert_eq!(line.text(), "XYab");
+    }
+
+    /// `StringUtil.filterText` is what a paste goes through, so a multi-line
+    /// clipboard cannot inject a newline into a chat line, and the 256-char cap
+    /// still holds.
+    #[test]
+    fn a_paste_is_filtered_and_capped_like_typed_text() {
+        crate::menu::edit_box::clipboard_seam::set("a\nb\u{a7}c");
+        let mut line = Line::new("");
+        line.press(KeyCode::KeyV, edit_mod());
+        assert_eq!(line.text(), "abc");
+
+        crate::menu::edit_box::clipboard_seam::set(&"z".repeat(300));
+        let mut line = Line::new("");
+        line.press(KeyCode::KeyV, edit_mod());
+        assert_eq!(line.text().chars().count(), crate::chat::MAX_CHAT_LENGTH);
+    }
+
+    // ---- the platform modifier itself ---------------------------------------
+
+    /// The owner's own question, and the half a `cfg!`-free assertion can make
+    /// on any machine: the quirked modifier is Cmd on a Mac and Ctrl elsewhere,
+    /// and — the part that is easy to get wrong by folding one onto the other —
+    /// the *other* one must not also work.
+    #[test]
+    fn the_edit_modifier_is_cmd_on_a_mac_and_ctrl_elsewhere() {
+        let cmd = text_key_event(PhysicalKey::Code(KeyCode::ArrowLeft), ModifiersState::SUPER)
+            .expect("ArrowLeft is a text key");
+        let ctrl = text_key_event(PhysicalKey::Code(KeyCode::ArrowLeft), ModifiersState::CONTROL)
+            .expect("ArrowLeft is a text key");
+        assert_eq!(cmd.has_control_down_with_quirk(), cfg!(target_os = "macos"));
+        assert_eq!(ctrl.has_control_down_with_quirk(), !cfg!(target_os = "macos"));
+        assert_ne!(
+            cmd.has_control_down_with_quirk(),
+            ctrl.has_control_down_with_quirk(),
+            "exactly one of the two is the edit modifier — never both, which is \
+             what folding Cmd onto MOD_CONTROL in the translation would give"
+        );
+        assert_eq!(
+            EDIT_SHORTCUT_MODIFIER & cmd.modifiers != 0,
+            cfg!(target_os = "macos")
+        );
+    }
+
+    /// Each winit modifier reaches its own GLFW bit. Asserted one at a time and
+    /// then combined: two adjacent flags folded into one mask transpose without
+    /// a trace if every fixture sets them together.
+    #[test]
+    fn glfw_modifiers_maps_each_winit_modifier_to_its_own_bit() {
+        assert_eq!(glfw_modifiers(ModifiersState::empty()), 0);
+        assert_eq!(glfw_modifiers(ModifiersState::SHIFT), MOD_SHIFT);
+        assert_eq!(glfw_modifiers(ModifiersState::CONTROL), MOD_CONTROL);
+        assert_eq!(glfw_modifiers(ModifiersState::ALT), MOD_ALT);
+        assert_eq!(glfw_modifiers(ModifiersState::SUPER), MOD_SUPER);
+        assert_eq!(
+            glfw_modifiers(ModifiersState::SHIFT | ModifiersState::SUPER),
+            MOD_SHIFT | MOD_SUPER
+        );
+    }
+
+    /// A key no text field acts on declines, which is the caller's signal to
+    /// fall through to its own text path.
+    #[test]
+    fn text_key_event_declines_keys_no_text_field_acts_on() {
+        for code in [KeyCode::KeyB, KeyCode::F5, KeyCode::Enter, KeyCode::Escape] {
+            assert!(
+                text_key_event(PhysicalKey::Code(code), ModifiersState::empty()).is_none(),
+                "{code:?} is not a text-editing key"
+            );
+        }
+    }
+}
