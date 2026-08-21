@@ -1804,6 +1804,29 @@ impl BlockModels {
         manager: &ResourceManager,
         registry: &dyn BlockStateRegistry,
     ) -> Result<Self, BlockModelsError> {
+        Self::build_with_mip_levels(manager, registry, crate::texture::BLOCK_ATLAS_MIP_LEVELS)
+    }
+
+    /// [`Self::build`] at an explicit mip depth.
+    ///
+    /// **This is the atlas terrain is actually sampled from.** A live session
+    /// draws every section through the model pass, which binds
+    /// [`Self::atlas`] — not the [`BlockAtlas`](crate::BlockAtlas) the packed
+    /// cube pipeline uses — so a `mipmapLevels` setting that only reaches
+    /// `BlockAtlas::build_with_mip_levels` moves nothing on screen. The depth
+    /// also sets the stitcher's gutter (`1 << levels`, vanilla's
+    /// `Stitcher.padding` with no anisotropic filtering), so it changes the
+    /// packing and every baked UV with it, which is why it has to be chosen
+    /// here rather than adjusted afterwards.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::build`].
+    pub fn build_with_mip_levels(
+        manager: &ResourceManager,
+        registry: &dyn BlockStateRegistry,
+        mip_levels: u32,
+    ) -> Result<Self, BlockModelsError> {
         let resolver = ModelResolver::new(manager);
         // Item models are discovered before the atlas is stitched so their
         // textures can be seeded into it (see `build_complete_atlas`), and
@@ -1820,7 +1843,8 @@ impl BlockModels {
             specials: item_specials,
             notes: mut item_bake_misses,
         } = collect_item_variants(manager);
-        let atlas = build_complete_atlas(manager, &resolver, &item_parts, &sprite_parts)?;
+        let atlas =
+            build_complete_atlas(manager, &resolver, &item_parts, &sprite_parts, mip_levels)?;
 
         // Precompute each atlas sprite's render layer once, indexed the same
         // way `atlas.sprites()` is — a baked quad's own `sprite` field (an
@@ -2574,6 +2598,7 @@ fn build_complete_atlas(
     resolver: &ModelResolver,
     item_parts: &[ItemModelPart],
     sprite_parts: &[ItemSpritePart],
+    mip_levels: u32,
 ) -> Result<Atlas, AtlasError> {
     let mut textures: BTreeSet<ResourceLocation> = BTreeSet::new();
     for path in manager.list("assets/minecraft/blockstates/") {
@@ -2620,8 +2645,8 @@ fn build_complete_atlas(
     // `min_filter: Linear`, which reads across a zero-gutter sprite boundary
     // at minifying distances regardless of how the mip chain was built.
     let mut builder = AtlasBuilder::new()
-        .with_mip_levels(crate::texture::BLOCK_ATLAS_MIP_LEVELS)
-        .with_padding(1 << crate::texture::BLOCK_ATLAS_MIP_LEVELS);
+        .with_mip_levels(mip_levels)
+        .with_padding(1 << mip_levels);
     for loc in &textures {
         // A missing texture is tolerated: the quad's UVs fall on whatever the
         // atlas packed, and a hard fault (below) aborts. Vanilla likewise renders

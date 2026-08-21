@@ -164,7 +164,14 @@ impl BlockResources {
         // Bake the per-state model geometry (cross-plants, slabs, stairs,
         // translucency) against the same registry and attach it, so the model
         // render path resolves state ids to real quads instead of full cubes.
-        let models = BlockModels::build(&manager, &registry)
+        //
+        // At the **same** mip depth as the atlas above, and that is not a
+        // tidiness point: a live session draws terrain through the model pass,
+        // which binds this object's own atlas rather than the `BlockAtlas`
+        // stitched above, so a `mipmapLevels` change that reached only the
+        // latter rebuilt an atlas nothing sampled and moved no pixels. See
+        // `BlockModels::build_with_mip_levels`.
+        let models = BlockModels::build_with_mip_levels(&manager, &registry, mipmap_levels())
             .map_err(|e| format!("build models from the vanilla pack: {e}"))?;
         tracing::info!(
             target: "assets",
