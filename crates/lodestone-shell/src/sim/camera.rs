@@ -698,19 +698,40 @@ impl Sim {
             );
             return None;
         };
-        let skin = crate::entities::player_skin_for_uuid(id, &self.tab_list());
+        let mut skin = crate::entities::player_skin_for_uuid(id, &self.tab_list());
         if skin.url.is_empty() {
-            // Not a failure and not rare — every offline-mode server sends no
-            // `textures` property at all. Logged at debug because it is the
-            // normal path against our own oracles, but logged, because "drew a
-            // default" and "declined to resolve" are indistinguishable on
-            // screen and only one of them is a bug.
-            tracing::debug!(
-                target: "assets",
-                player = %id,
-                sheet = skin.default_sheet,
-                "our own profile declares no skin texture; drawing the uuid-hash identity"
-            );
+            // The tab list declared nothing, which is not a failure and not
+            // rare: every offline-mode server and every singleplayer world
+            // sends no `textures` property at all.
+            //
+            // Our own cached profile sheet is the one thing that can still be
+            // right here, and it is the *only* rung of this ladder that is
+            // ours alone — a remote player has no equivalent, which is why it
+            // lives here rather than in the shared resolver. Without it the
+            // inventory avatar drew the owner's real skin and the body beside
+            // it drew a uuid-hash identity, for the same person, in the same
+            // frame.
+            match crate::skin_fetch::local_profile_sheet_key() {
+                Some(key) => {
+                    key.clone_into(&mut skin.url);
+                    // The rig has to move with the sheet or the arms sit a
+                    // texel out, and `skin_fetch` owns the rig that sheet was
+                    // authored for.
+                    skin.model = crate::skin_fetch::current_model();
+                }
+                None => {
+                    // Logged because "drew a default" and "declined to
+                    // resolve" are indistinguishable on screen, and only one
+                    // of them is a bug.
+                    tracing::debug!(
+                        target: "assets",
+                        player = %id,
+                        sheet = skin.default_sheet,
+                        "no declared skin and no cached profile sheet; drawing the \
+                         uuid-hash identity"
+                    );
+                }
+            }
         } else {
             crate::remote_skins::request(&skin.url);
         }
