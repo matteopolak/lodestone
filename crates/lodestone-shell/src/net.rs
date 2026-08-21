@@ -2587,6 +2587,20 @@ pub fn entity_light_at(
 /// clicks, resource-pack policy, …) still reaches the driver exactly as
 /// before, and the driver's own "no packet in current state" drop-and-log
 /// remains the backstop for anything this does not name.
+/// Resolves once `stop` is set, so a dial can be raced against cancellation.
+///
+/// Polls rather than waiting on a notification because `stop` is the plain
+/// `AtomicBool` [`NetClient`]'s `Drop` already sets; giving cancellation a
+/// second signalling mechanism would mean two things to keep in step. 25 ms is
+/// well under the threshold at which a person reads a UI as unresponsive, and
+/// it costs 40 wakeups a second on one thread only while a dial is outstanding.
+#[cfg(not(target_arch = "wasm32"))]
+async fn wait_for_stop(stop: &AtomicBool) {
+    while !stop.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 fn should_forward_action(action: &ClientAction, in_play: bool) -> bool {
     !matches!(action, ClientAction::Move { .. }) || in_play
 }
@@ -3215,11 +3229,31 @@ async fn run_async(
                     };
                     builder.connect_with(transport)
                 }
+                // Escape on the loading screen must cancel *now*, not in ten
+                // seconds. `NetClient::drop` sets `stop` and then **joins** this
+                // thread, so a dial left to run out its own `connect_timeout`
+                // would block the joiner — the UI thread — for the remainder of
+                // that budget, turning "cancel" into a freeze that is worse than
+                // the wait it was meant to replace. Racing the dial against the
+                // flag is what makes that join prompt.
+                //
+                // Native only: `tokio::time::sleep` has no timer driver on
+                // wasm32 and hangs on its first poll, which is why the browser
+                // arm above races `crate::platform::relay::sleep` instead.
                 #[cfg(not(target_arch = "wasm32"))]
-                match builder.connect().await {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        let _ = tx.try_send(NetUpdate::Error(format!("connect: {e}")));
+                tokio::select! {
+                    result = builder.connect() => match result {
+                        Ok(pair) => pair,
+                        Err(e) => {
+                            let _ = tx.try_send(NetUpdate::Error(format!("connect: {e}")));
+                            return;
+                        }
+                    },
+                    () = wait_for_stop(&stop) => {
+                        tracing::info!(
+                            target: "net",
+                            "connect cancelled before the handshake completed"
+                        );
                         return;
                     }
                 }

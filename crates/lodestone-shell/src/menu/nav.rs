@@ -183,6 +183,12 @@ pub enum MenuAction {
     /// ordinary disconnect — nothing here does that on its own, since
     /// `MenuNav` holds no session state to tear down.
     QuitToTitle,
+    /// Escape on [`Screen::Connecting`]: abandon a session that is still
+    /// being established. Distinct from [`Self::QuitToTitle`], which leaves a
+    /// session that is fully up — the screen each unwinds to differs, and this
+    /// one can fire while the net thread is still inside its dial, so the app's
+    /// teardown is what actually interrupts it.
+    CancelConnect,
     /// The death screen's Respawn button was activated (issue #103): the app
     /// must call `Sim::respawn` to submit the manual `ClientAction::Respawn`
     /// — `MenuNav` holds no `Sim` to send it through. [`UiState`] stays on
@@ -3273,9 +3279,20 @@ impl MenuNav {
             // loading screens, and `UiState` already owns it.
             _ => {
                 if key == MenuKey::Escape {
+                    // Sampled *before* `on_escape`, which is what moves the
+                    // screen: afterwards there is no way to tell a cancelled
+                    // connect from any other unwind, and only that one leaves a
+                    // half-open session for the app to tear down.
+                    let was_connecting = ui.screen() == Screen::Connecting;
                     ui.on_escape();
                     if ui.quit_requested() {
                         return MenuAction::Quit;
+                    }
+                    // Guarded on the screen having actually moved, so a future
+                    // `cancel_connect` guard that declines cannot make the app
+                    // tear down a session that is still live.
+                    if was_connecting && ui.screen() != Screen::Connecting {
+                        return MenuAction::CancelConnect;
                     }
                 }
                 MenuAction::None
