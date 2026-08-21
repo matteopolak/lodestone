@@ -136,17 +136,61 @@ impl AtlasDefinition {
     /// `paletted_permutations` is skipped here — its sprites are generated at
     /// bake time; use [`AtlasSource::derived_sprite_ids`] to enumerate the ids
     /// it will produce. `unknown` sources contribute nothing.
+    ///
+    /// When two sources name the same sprite id, the **later** source wins —
+    /// `SpriteSourceList.list`'s own `Output.add` is a plain
+    /// `Map<Identifier, …>.put`, so a source later in [`Self::sources`]
+    /// (whether a second entry in one file, or a higher-priority pack's
+    /// descriptor appended by [`Self::load_stacked`]) silently replaces an
+    /// earlier source's entry for that id rather than being shadowed by it.
     pub fn resolve(&self, manager: &ResourceManager) -> Vec<AtlasSpriteEntry> {
-        let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut out: Vec<AtlasSpriteEntry> = Vec::new();
+        let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for source in &self.sources {
             for entry in source.resolve(manager) {
-                if seen.insert(entry.sprite.to_string()) {
+                let key = entry.sprite.to_string();
+                if let Some(&i) = index.get(&key) {
+                    out[i] = entry;
+                } else {
+                    index.insert(key, out.len());
                     out.push(entry);
                 }
             }
         }
         out
+    }
+
+    /// Loads and merges **every pack layer's own copy** of an
+    /// `atlases/<id>.json` descriptor at `atlas_path`, the shape
+    /// `SpriteSourceList.load` requires: it iterates
+    /// `resourceManager.getResourceStack(resourceId)` — every pack that
+    /// carries the path, lowest priority first — parsing each layer and
+    /// accumulating their sources into one combined list, rather than
+    /// `ResourceManager.getResource`'s single winner. A pack that ships its
+    /// own `atlases/armor_trims.json` (or `banner_patterns.json`,
+    /// `shield_patterns.json`, …) therefore **extends** the source list
+    /// underneath it — most commonly the jar's own `directory`/
+    /// `paletted_permutations` source — rather than replacing it outright.
+    ///
+    /// A layer that fails to parse is skipped rather than failing the whole
+    /// load, matching vanilla's own `catch (Exception e) { LOGGER.error(...);
+    /// }` per entry. Returns `None` only when [`ResourceManager::read_stack`]
+    /// finds the path in **no** layer at all — the caller's existing
+    /// "descriptor missing" error, unchanged from the single-winner form this
+    /// replaces.
+    #[must_use]
+    pub fn load_stacked(manager: &ResourceManager, atlas_path: &str) -> Option<Self> {
+        let layers = manager.read_stack(atlas_path);
+        if layers.is_empty() {
+            return None;
+        }
+        let mut sources = Vec::new();
+        for bytes in layers {
+            if let Ok(def) = Self::parse(&bytes) {
+                sources.extend(def.sources);
+            }
+        }
+        Some(Self { sources })
     }
 }
 

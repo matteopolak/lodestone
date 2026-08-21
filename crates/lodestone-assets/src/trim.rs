@@ -278,12 +278,14 @@ impl TrimAtlas {
     pub fn load_reported(
         manager: &ResourceManager,
     ) -> Result<(Self, TrimAtlasReport), TrimAtlasError> {
-        let bytes = manager
-            .read(ARMOR_TRIMS_ATLAS_PATH)
+        // Stacked, not single-winner: a server pack shipping its own
+        // `armor_trims.json` must extend the jar's `paletted_permutations`
+        // source, not replace it outright (`AtlasDefinition::load_stacked`'s
+        // own doc — `SpriteSourceList.load`'s `getResourceStack`).
+        let definition = AtlasDefinition::load_stacked(manager, ARMOR_TRIMS_ATLAS_PATH)
             .ok_or_else(|| TrimAtlasError::DescriptorMissing {
                 path: ARMOR_TRIMS_ATLAS_PATH.to_string(),
             })?;
-        let definition = AtlasDefinition::parse(&bytes)?;
 
         let mut sprites = HashMap::new();
         let mut bake_report = PaletteBakeReport::default();
