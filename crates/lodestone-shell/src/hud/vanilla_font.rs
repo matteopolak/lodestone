@@ -1818,6 +1818,96 @@ mod tests {
              or at 67.0 for a MISSING_ADVANCE substitution)"
         );
     }
+
+    /// The coordinator's specific hypothesis: **two different fonts
+    /// disagreeing** about which one supplies a codepoint, where measuring
+    /// (`spans_width`) and drawing (`draw_spans`) each independently call
+    /// [`VanillaFont::select_font`] -- if they ever resolved to different
+    /// fonts for the *same* glyph, the pen would advance by one font's
+    /// number while the ink came from the other's cell, which is exactly
+    /// "renders correctly, overlaps, gap completely missing": a large
+    /// low-advance glyph's ink bleeding into the next glyph's territory
+    /// while the *measured* string width still (correctly) reflects the
+    /// small advance.
+    ///
+    /// The default font declares codepoint 'C' as an 8px-wide fully opaque
+    /// cell (advance 9 -- standing in for the real report's unihex glyph at
+    /// advance 9.000 for U+753C). The custom font *also* declares 'C', as a
+    /// 1px-wide fully opaque cell (advance 2 -- standing in for the real
+    /// report's `backgrounds/b1.png` at advance 2). Both `spans_width` and
+    /// the drawn ink must agree on the **custom** font's numbers throughout,
+    /// never mixing the two.
+    #[test]
+    fn measuring_and_drawing_a_custom_font_glyph_resolve_the_same_font_not_the_default() {
+        // Default font: 'C' is an 8px fully-opaque cell -> actual=8 ->
+        // advance=(0.5+8) as i32 + 1 = 9.
+        let default_raster = bitmap_raster("C", 8, &vec![255u8; 8 * 4]);
+        let font = font_with_raster(default_raster);
+        assert_eq!(
+            font.raster.advance('C' as u32),
+            Some(9.0),
+            "fixture sanity: the default font's own 'C' must be advance 9"
+        );
+
+        // Custom font: 'C' is a 1px fully-opaque cell -> actual=1 ->
+        // advance=(0.5+1) as i32 + 1 = 2.
+        let custom_raster = bitmap_raster("C", 1, &[255, 255, 255, 255]);
+        assert_eq!(
+            custom_raster.advance('C' as u32),
+            Some(2.0),
+            "fixture sanity: the custom font's own 'C' must be advance 2"
+        );
+        let custom_id = FontId::intern("nameplates:default");
+        {
+            let mut cache = font.custom.lock().expect("custom cache lock");
+            cache.generation = Some(crate::resources::pack_generation());
+            cache
+                .entries
+                .insert(custom_id, Some(std::sync::Arc::new(custom_raster)));
+        }
+
+        let spans = [span("C", Some(custom_id))];
+
+        // Measurement must be the custom font's 2, never the default's 9.
+        let measured = font.spans_width(&spans, 1.0);
+        assert_eq!(
+            measured, 2.0,
+            "spans_width must resolve 'C' through the custom font (2), not the \
+             default font (9) -- got {measured}"
+        );
+
+        // Draw must also be the custom font's 1px cell, never the default's
+        // 8px one -- checked by the drawn ink's own extent, not just the pen
+        // advance, so a "correct advance, wrong ink" split would still be
+        // caught.
+        let mut verts = Vec::new();
+        {
+            let mut cs = ColourStream {
+                verts: &mut verts,
+                w: 400.0,
+                h: 400.0,
+            };
+            font.draw_spans(&mut cs, &spans, 50.0, 50.0, 1.0, [1.0, 1.0, 1.0], 1.0);
+        }
+        let xs: Vec<f32> = verts
+            .chunks_exact(6)
+            .filter(|v| {
+                (v[2] - 1.0).abs() < 1e-4 && (v[3] - 1.0).abs() < 1e-4 && (v[4] - 1.0).abs() < 1e-4
+            })
+            .map(|v| (v[0] + 1.0) * 400.0 * 0.5)
+            .collect();
+        assert!(!xs.is_empty(), "'C' must draw real ink");
+        let max_x = xs.iter().copied().fold(f32::MIN, f32::max);
+        let min_x = xs.iter().copied().fold(f32::MAX, f32::min);
+        assert!((min_x - 50.0).abs() < 0.01, "got min_x={min_x}, want 50.0");
+        assert!(
+            (max_x - 51.0).abs() < 0.01,
+            "got max_x={max_x}, want 51.0 (the custom font's own 1px cell) -- 58.0 \
+             would mean the ink was drawn from the *default* font's 8px cell while \
+             the pen advanced by the custom font's 2px, exactly the measure/draw \
+             font-mismatch hypothesis"
+        );
+    }
 }
 
 /// Pixel-geometry gates for issue #117: bold, italic, underline, strikethrough
