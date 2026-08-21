@@ -49,7 +49,7 @@ use super::{
     MovingPistonSource,
     NameTagRenderer, OutlineRenderer, OutlineShapeSource,
     PluginBillboardInstance, PluginBillboardRenderer, PluginBillboardsSource,
-    RenderState, SKY_COLOR, SignSource, SignTextRenderer, SkullSource, SkyDarkenSource,
+    RenderState, SKY_COLOR, ShadowGroundSource, SignSource, SignTextRenderer, SkullSource, SkyDarkenSource,
     SpawnerSource, ThirdPersonBodySource, ThirdPersonBodyState, TimeOfDaySource, VaultSource,
     transparent_placeholder_atlas,
 };
@@ -306,6 +306,11 @@ impl RenderState {
             // Full-bright until the shell installs a world sampler; see
             // `set_entity_light_source`.
             entity_light: EntityLightSource::default(),
+            // No ground until the shell installs a world sampler; see
+            // `set_shadow_ground_source`.
+            shadow_ground: ShadowGroundSource::default(),
+            // Vanilla's own default; see `set_entity_shadows_enabled`.
+            entity_shadows_enabled: true,
             // Permanent noon until the shell installs a world clock; see
             // `set_sky_darken_source`.
             sky_darken: SkyDarkenSource::default(),
@@ -607,6 +612,33 @@ impl RenderState {
         f: impl Fn(Vec3) -> Option<u8> + Send + Sync + 'static,
     ) {
         self.entity_light = EntityLightSource(Some(Box::new(f)));
+    }
+
+    /// Install the world block sampler the entity-shadow pass scans the
+    /// ground with (see [`ShadowGroundSource`]). Call once, after a world
+    /// exists; without it no entity ever casts a shadow, the same "unset
+    /// reproduces the pre-feature behaviour" every other polled source here
+    /// documents.
+    ///
+    /// `f` receives a world block position and returns the raw block-state id
+    /// there, or `None` outside loaded chunks — exactly [`NetClient::block_at`]'s
+    /// own shape.
+    ///
+    /// [`NetClient::block_at`]: crate::net::NetClient::block_at
+    pub fn set_shadow_ground_source(
+        &mut self,
+        f: impl Fn([i32; 3]) -> Option<u32> + Send + Sync + 'static,
+    ) {
+        self.shadow_ground = ShadowGroundSource(Some(Box::new(f)));
+    }
+
+    /// Push vanilla's `entityShadows` video option down into the renderer.
+    /// Cheap to call every frame — a plain bool write — so the shell's usual
+    /// per-frame options sync (`app/redraw.rs`, beside
+    /// `Sim::set_cutout_leaves`) can poll it exactly like every other live
+    /// option rather than firing it only on toggle.
+    pub fn set_entity_shadows_enabled(&mut self, enabled: bool) {
+        self.entity_shadows_enabled = enabled;
     }
 
     /// This frame's fog uniform with the sky-darken factor folded into its spare

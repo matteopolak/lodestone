@@ -233,6 +233,15 @@ pub struct RenderStats {
     /// why there is no synthetic-texture fallback here, mirroring
     /// `armour_layers_drawn`/`wool_layers_drawn`.
     pub flame_billboards_drawn: usize,
+    /// Entity ground-shadow **pieces** (quads) drawn this frame — one per
+    /// scanned ground cell that resolved to a full solid block under a
+    /// frustum-visible, non-invisible, `entityShadows`-eligible entity. Zero
+    /// with no vanilla pack (no `shadow.png`), zero with the option off
+    /// (`RenderState::set_entity_shadows_enabled`), and zero for a frame with
+    /// no shadow-casting entity in view — see `RenderState::prepare_shadows`
+    /// for why there is no synthetic-texture fallback, mirroring
+    /// `flame_billboards_drawn`.
+    pub shadow_pieces_drawn: usize,
     /// Experience-orb billboards drawn this frame — one per frustum-visible orb.
     /// Zero with no vanilla pack (no orb sheet), and zero when no orb is on
     /// screen; see `RenderState::prepare_orbs` for why there is no

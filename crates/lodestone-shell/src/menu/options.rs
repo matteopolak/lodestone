@@ -476,6 +476,12 @@ pub enum LiveOption {
     /// the same `pack_generation` counter a resource-pack selection change
     /// does — one live-reload path, not two, for both triggers.
     MipmapLevels,
+    /// `options.entityShadows` → [`crate::config::Options::entity_shadows`]. A
+    /// plain boolean (composes with its caption, unlike
+    /// [`Self::CloudStatus`]); see that field's doc for the render-side
+    /// consumer — `RenderState::set_entity_shadows_enabled`, which gates
+    /// `RenderState::prepare_shadows`.
+    EntityShadows,
 }
 
 impl LiveOption {
@@ -548,7 +554,8 @@ impl LiveOption {
             // `MipmapLevels` is the fourth `IntRange`, `RenderDistance`'s
             // reason again: its stored value is 0..=4 mip levels, so
             // returning it here would pin every handle near the far left.
-            | LiveOption::MipmapLevels => None,
+            | LiveOption::MipmapLevels
+            | LiveOption::EntityShadows => None,
         }
     }
 
@@ -605,7 +612,8 @@ impl LiveOption {
             // `MipmapLevels` is the fourth `IntRange`, `RenderDistance`'s
             // reason again: its stored value is 0..=4 mip levels, so
             // returning it here would pin every handle near the far left.
-            | LiveOption::MipmapLevels => None,
+            | LiveOption::MipmapLevels
+            | LiveOption::EntityShadows => None,
         }
     }
 
@@ -1759,6 +1767,9 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         // unlike `Fov`'s "Normal"/"Quake Pro" pair, vanilla's mipmap slider has
         // no named values, so the plain depth is the whole value half.
         LiveOption::MipmapLevels => options.mipmap_levels.to_string(),
+        LiveOption::EntityShadows => {
+            if options.entity_shadows { "ON" } else { "OFF" }.to_string()
+        }
     }
 }
 
@@ -1944,7 +1955,9 @@ static VIDEO: &[Entry] = &[
         live_slider("mipmapLevels", "Mipmap Levels", LiveOption::MipmapLevels),
     ),
     pair(
-        cycle("entityShadows", "Entity Shadows"),
+        // Live (owner report: "entity shadows are missing"). See
+        // `LiveOption::EntityShadows`.
+        live_cycle("entityShadows", "Entity Shadows", LiveOption::EntityShadows),
         slider("entityDistanceScaling", "Entity Distance"),
     ),
     pair(
@@ -3951,6 +3964,10 @@ mod tests {
                 // mip-depth slider, whose consumer used to be the frozen
                 // `BLOCK_ATLAS_MIP_LEVELS` constant.
                 LiveOption::MipmapLevels,
+                // Also Video, the `(entityShadows, entityDistanceScaling)` pair's
+                // first half, sorting between Mipmap Levels and Menu Background
+                // Blur — owner report: "entity shadows are missing".
+                LiveOption::EntityShadows,
                 // The `(cutoutLeaves, improvedTransparency)` pair's first half —
                 // the leaves-render-pass fix's own row.
                 LiveOption::CutoutLeaves,
@@ -4022,11 +4039,11 @@ mod tests {
                 LiveOption::GlintStrength,
                 LiveOption::PanoramaSpeed,
             ],
-            "FOV on the root; GUI Scale, Render Distance, Clouds and Mipmap Levels \
-             on Video; the four toggle rows and Auto-Jump/Sprint Window on \
-             Controls; look sensitivity, scroll sensitivity and both inverts on \
-             Mouse; the eleven volume buses and Closed Captions on Sound; the \
-             eight chat options on Chat with three of them repeated on \
+            "FOV on the root; GUI Scale, Render Distance, Clouds, Mipmap Levels and \
+             Entity Shadows on Video; the four toggle rows and Auto-Jump/Sprint \
+             Window on Controls; look sensitivity, scroll sensitivity and both \
+             inverts on Mouse; the eleven volume buses and Closed Captions on \
+             Sound; the eight chat options on Chat with three of them repeated on \
              Accessibility; Closed Captions again, View Bobbing, Damage Tilt, \
              both glint sliders and Panorama Scroll Speed on Accessibility — and \
              nothing else"
@@ -4063,19 +4080,19 @@ mod tests {
             render_distance.is_live(),
             "renderDistance is a persisted `Options` field since #443"
         );
-        // The count itself, not just the ratio's ingredients: 50 live option
-        // *rows* (46 distinct options, four of them placed twice — the three
+        // The count itself, not just the ratio's ingredients: 51 live option
+        // *rows* (47 distinct options, four of them placed twice — the three
         // Chat/Accessibility ones plus `showSubtitles` on Sound and
-        // Accessibility, so 50 - 4 == 46 — the video-settings/leaves session's
+        // Accessibility, so 51 - 4 == 47 — the video-settings/leaves session's
         // five, framerateLimit/enableVsync/inactivityFpsLimit/graphicsPreset/
-        // cutoutLeaves, plus mipmapLevels, are each placed once)
+        // cutoutLeaves, plus mipmapLevels and entityShadows, are each placed once)
         // + 9 Done buttons (one per page, always live) + 13 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid,
         // Accessibility -> Controls, Controls -> Mouse, Controls -> Key Binds,
         // and the root's own Online button, live outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 72, "outside a world: {live:?}");
+        assert_eq!(live.len(), 73, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -4097,15 +4114,16 @@ mod tests {
             .flat_map(|&p| all_controls(p, true))
             .filter(|c| c.is_live())
             .collect();
-        // 72, not 62: `showSubtitles` is live on **both** the pages vanilla places
+        // 73, not 62: `showSubtitles` is live on **both** the pages vanilla places
         // it on (Sound and Accessibility), and three chat options are on two pages
         // each. The kind A batch added fifteen — the eleven volume buses, the
         // root's FOV, both glint sliders and Clouds — the video-settings/
         // leaves session added five more: framerateLimit, enableVsync,
-        // inactivityFpsLimit, graphicsPreset, cutoutLeaves — and the block-atlas
-        // mip-depth session added a sixth: mipmapLevels.
-        assert_eq!(outside.len(), 72);
-        assert_eq!(inside.len(), 71, "one fewer: the root's Online button");
+        // inactivityFpsLimit, graphicsPreset, cutoutLeaves — the block-atlas
+        // mip-depth session added a sixth: mipmapLevels — and this session added
+        // a seventh: entityShadows.
+        assert_eq!(outside.len(), 73);
+        assert_eq!(inside.len(), 72, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -4133,10 +4151,10 @@ mod tests {
         // An option we hold no value for shows the caption alone — the module
         // docs' departure (1). The control is the live row above, which does
         // carry a value, so this is not simply "labels never have colons".
-        assert_eq!(
-            cycle("entityShadows", "Entity Shadows").label(&options),
-            "Entity Shadows"
-        );
+        // `particles` is still genuinely inactive on this tree (unlike
+        // `entityShadows`, which used to be the example here before it went
+        // live — see `LiveOption::EntityShadows`).
+        assert_eq!(cycle("particles", "Particles").label(&options), "Particles");
     }
 
     /// Every chat option's label, predicted from vanilla's own stringifier and
@@ -5008,6 +5026,10 @@ mod tests {
         // `BLOCK_ATLAS_MIP_LEVELS` constant, so this handle moved and nothing
         // downstream ever read the new value.
         LiveOption::MipmapLevels,
+        // Owner report: "entity shadows are missing". `RenderState::
+        // prepare_shadows`'s own gate — its consumer did not exist at all
+        // before this session, not merely an unwired row.
+        LiveOption::EntityShadows,
     ];
 
     /// Every [`LiveOption`] must be placed on some page — the island check in
@@ -5077,13 +5099,15 @@ mod tests {
                 | LiveOption::InactivityFpsLimit
                 | LiveOption::GraphicsPreset
                 | LiveOption::CutoutLeaves
-                | LiveOption::MipmapLevels => {}
+                | LiveOption::MipmapLevels
+                | LiveOption::EntityShadows => {}
             }
         }
         // 25 before the kind A batch, plus eleven sound buses, FOV, both glint
         // parameters and Clouds, plus the five video-settings/leaves rows that
-        // session wired, plus the block-atlas mip-depth row this one added.
-        assert_eq!(ALL.len(), 46, "forty-six distinct live options");
+        // session wired, plus the block-atlas mip-depth row, plus this
+        // session's entity-shadows row.
+        assert_eq!(ALL.len(), 47, "forty-seven distinct live options");
         // And the eleven indices are all of them, none repeated: `SoundVolume` is
         // a *payload* variant, so neither the compiler nor the match above can see
         // a missing or duplicated index, and a duplicate would silently leave one
