@@ -17,8 +17,11 @@
 //! reader who arrives through that file is not misled, and in
 //! `docs/sim-dissolution.md`, which carries the authoritative seam list.
 //!
-//! [`Sim::step`] is the fixed-timestep loop: one `Update` schedule, then N
-//! catch-up `GameTick` schedules, then `poll_net`/`fold_entities`/`Extract`.
+//! [`Sim::step`] is the fixed-timestep loop: one `Update` schedule, an early
+//! `poll_net` (so a queued server teleport reaches `PhysicsState` before this
+//! frame's own `TickSet::Send` — see that call's own comment for the loop it
+//! closes), then N catch-up `GameTick` schedules, then a second, trailing
+//! `poll_net`/`fold_entities`/`Extract`.
 //! Around it sit the things that must happen once per *frame* rather than
 //! once per tick and so cannot be systems -- `apply_mouse` (vanilla's
 //! `MouseHandler.turnPlayer` is off the render loop too), `update_target` and
@@ -430,7 +433,8 @@ impl Sim {
 
         // The derived egress gate. Refreshed once per frame because both of its
         // inputs are frame-stable: `poll_net` is the only thing that changes the
-        // phase and it runs after the loop.
+        // phase, and this snapshot is taken before either of this frame's own
+        // calls to it (see the one just before the tick loop, below).
         let egress = Egress {
             in_world: self.session_phase() == SessionPhase::Connected,
             live: self.is_live(),
@@ -455,6 +459,28 @@ impl Sim {
             w.insert_resource(crate::entities::FrameDelta(frame_dt));
             w.run_schedule(Update);
         });
+
+        // A second, early drain of the network channel, *before* this frame's
+        // own tick loop — not a duplicate of the one at the tail of this
+        // function, which stays exactly where it is for `fold_entities`'s and
+        // `heal_dirty_columns`'s sake (see their own comments).
+        //
+        // Without this, a `NetUpdate::Teleport` already sitting in the
+        // channel when `step` is called would not reach `PhysicsState` until
+        // *after* `TickSet::Send` below has already queued this tick's
+        // outbound `Move` from the **pre-teleport** position — a claim the
+        // real server has every reason to reject, since it just told us we
+        // are somewhere else. That is the live-server "yanked back on every
+        // move" loop: our own `ACCEPT_TELEPORTATION` echo lands fine (see
+        // `handle_player_position`'s own doc), but the very next `Move`
+        // contradicts it, so the server re-teleports with a fresh id and the
+        // cycle repeats. `poll_net` is safe to call twice a frame — it is a
+        // non-blocking drain of whatever is currently queued, every arm
+        // processes each event exactly once regardless of which call sees
+        // it, and `adopt_live_world`/`refresh_mesh_policy` are documented
+        // idempotent. Anything that arrives *during* this frame's tick loop
+        // still waits for the trailing call, same as before this existed.
+        self.poll_net();
 
         loop {
             if !self.clock_mut(FrameClock::take_tick) {
@@ -692,6 +718,10 @@ impl Sim {
         // where they used to read two accumulators' residuals.
         self.clock_mut(FrameClock::end_frame);
 
+        // The trailing drain — catches whatever arrived *during* this frame's
+        // tick loop (the early call above already applied anything queued
+        // beforehand, in particular a `NetUpdate::Teleport`, before
+        // `TickSet::Send` ran).
         self.poll_net();
         // Fold this frame's server report into the render-side tracks, then extract.
         // Still after the tick loop and after ingest, which is the order the ~25

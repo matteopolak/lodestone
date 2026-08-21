@@ -376,9 +376,16 @@ fn teleport_flags(value: i32) -> TeleportFlags {
 /// Wire layout (`ClientboundPlayerPositionPacket`): VarInt teleport id, a
 /// `PositionMoveRotation` (position `f64`×3, delta-movement `f64`×3, yaw `f32`,
 /// pitch `f32`), then a big-endian `i32` `Relative` bit set. The delta-movement
-/// is consumed for alignment but not surfaced here — player velocity is owned by
-/// the physics layer, which applies it from the same packet. Zero trailing
-/// bytes is the misparse detector.
+/// is decoded for alignment (the trailing-bytes misparse detector below needs
+/// it consumed) and then discarded — **not** applied anywhere. `TeleportFlags`
+/// only carries the X/Y/Z/Y_ROT/X_ROT bits (`Relative`'s bits 0-4); the three
+/// `DELTA_*` bits and `ROTATE_DELTA` (bits 5-8, `PositionMoveRotation.
+/// calculateAbsolute` in the decompile) are not decoded either, so a server
+/// that sends a *relative* delta-movement is silently treated the same as one
+/// that does not. `net_apply.rs`'s `NetUpdate::Teleport` arm zeroes
+/// `player.velocity` unconditionally on every teleport, which is the vanilla
+/// behaviour only for the common all-absolute-delta case. Zero trailing bytes
+/// is the misparse detector.
 fn handle_player_position(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let id = reader.var_i32().map_err(dec_err)?;
