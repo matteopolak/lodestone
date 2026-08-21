@@ -1539,10 +1539,7 @@ pub fn load_recipe_book() -> Option<lodestone_game::recipe::RecipeBook> {
                 builder.push_recipe(id, &text);
             }
         } else if let Some(id) = recipe_entry_id(&path, "tags/item") {
-            if let Some(text) = manager
-                .read(&path)
-                .and_then(|bytes| String::from_utf8(bytes).ok())
-            {
+            if let Some(text) = merged_tag_json(&manager, &path) {
                 builder.push_tag(id, &text);
             }
         }
@@ -1577,6 +1574,53 @@ fn recipe_entry_id(path: &str, kind: &str) -> Option<lodestone_model::Identifier
     let rest = rest.strip_prefix(kind)?.strip_prefix('/')?;
     let rest = rest.strip_suffix(".json")?;
     lodestone_model::Identifier::new(namespace, rest).ok()
+}
+
+/// Merges **every pack layer's own copy** of an item-tag document at `path`
+/// into one synthesized `{"values": [...]}` document, the shape
+/// `TagLoader.load` requires: it iterates
+/// `lister.listMatchingResourceStacks(resourceManager)` — every layer that
+/// carries the path, lowest priority first — accumulating each layer's
+/// `values` and honouring its own `"replace"` flag (`true` resets the
+/// accumulated list before appending that layer's own entries; the default,
+/// `false`, appends to what came before). A single-winner `manager.read()`
+/// (what this replaced) discarded every lower-priority layer outright, so a
+/// server pack shipping its own `data/minecraft/tags/item/planks.json` with
+/// `"replace": false` and one custom entry would have **dropped every
+/// vanilla plank** from the tag instead of adding to it.
+///
+/// A layer whose bytes are not valid UTF-8/JSON, or whose document has no
+/// `values` array, is skipped — matching `TagLoader.load`'s own
+/// `catch (Exception e) { LOGGER.error(...); }` per-entry tolerance — so one
+/// malformed layer never blanks out the layers around it. Returns `None`
+/// only when no layer at all could be read.
+fn merged_tag_json(manager: &ResourceManager, path: &str) -> Option<String> {
+    let mut values: Vec<serde_json::Value> = Vec::new();
+    let mut any = false;
+    for bytes in manager.read_stack(path) {
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(layer_values) = doc.get("values").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        any = true;
+        let replace = doc
+            .get("replace")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if replace {
+            values.clear();
+        }
+        values.extend(layer_values.iter().cloned());
+    }
+    if !any {
+        return None;
+    }
+    Some(serde_json::json!({ "values": values }).to_string())
 }
 
 /// Open the vanilla `client.jar` as a [`ResourceManager`], version-free, using
@@ -1664,6 +1708,92 @@ fn best_pack_in(cache_dir: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_assets::MemorySource;
+
+    /// The bug this reproduces: a server pack ships its own
+    /// `data/minecraft/tags/item/planks.json` with `"replace": false` (the
+    /// default) and one custom entry. A single-winner `manager.read()` load
+    /// (what [`merged_tag_json`] replaced) discarded the jar's own layer
+    /// outright, so the correct rule (merge, honouring `replace`) must yield
+    /// a *different* result from the wrong one — two packs whose tag
+    /// documents are the same would not distinguish them.
+    #[test]
+    fn merged_tag_json_appends_a_non_replacing_overlay_to_the_base_layer() {
+        const PATH: &str = "data/minecraft/tags/item/planks.json";
+        let mut vanilla = MemorySource::new("vanilla");
+        vanilla.insert(PATH, br#"{"values":["minecraft:oak_planks","minecraft:spruce_planks"]}"#.to_vec());
+        let mut server_pack = MemorySource::new("server");
+        server_pack.insert(PATH, br#"{"replace":false,"values":["mymod:custom_planks"]}"#.to_vec());
+        let manager = ResourceManager::new(vec![Box::new(vanilla), Box::new(server_pack)]);
+
+        let merged = merged_tag_json(&manager, PATH).expect("at least one layer present");
+        let parsed: serde_json::Value = serde_json::from_str(&merged).expect("valid json");
+        let values: Vec<&str> = parsed["values"]
+            .as_array()
+            .expect("values array")
+            .iter()
+            .map(|v| v.as_str().expect("string entry"))
+            .collect();
+        assert_eq!(
+            values,
+            vec!["minecraft:oak_planks", "minecraft:spruce_planks", "mymod:custom_planks"],
+            "a non-replacing overlay must append to, not discard, the base layer's entries"
+        );
+
+        // The control: a naive single-winner read (what this replaced) sees
+        // only the highest-priority layer and loses every vanilla entry.
+        let winner_only = manager.read(PATH).and_then(|b| String::from_utf8(b).ok()).unwrap();
+        let winner_parsed: serde_json::Value = serde_json::from_str(&winner_only).unwrap();
+        let winner_values: Vec<&str> = winner_parsed["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            winner_values,
+            vec!["mymod:custom_planks"],
+            "control: single-winner read must NOT see the vanilla layer's entries \
+             (this is the exact bug `merged_tag_json` fixes) — got {winner_values:?}"
+        );
+    }
+
+    /// `"replace": true` on the higher-priority layer must reset the
+    /// accumulated list rather than append to it — the other half of
+    /// `TagFile.replace()`'s contract, and the case a pure-append
+    /// implementation would get backwards.
+    #[test]
+    fn merged_tag_json_honours_a_replacing_overlay() {
+        const PATH: &str = "data/minecraft/tags/item/planks.json";
+        let mut vanilla = MemorySource::new("vanilla");
+        vanilla.insert(PATH, br#"{"values":["minecraft:oak_planks"]}"#.to_vec());
+        let mut server_pack = MemorySource::new("server");
+        server_pack.insert(
+            PATH,
+            br#"{"replace":true,"values":["mymod:only_plank"]}"#.to_vec(),
+        );
+        let manager = ResourceManager::new(vec![Box::new(vanilla), Box::new(server_pack)]);
+
+        let merged = merged_tag_json(&manager, PATH).expect("at least one layer present");
+        let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        let values: Vec<&str> = parsed["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            values,
+            vec!["mymod:only_plank"],
+            "a replacing overlay must reset the accumulated list, not append to it"
+        );
+    }
+
+    #[test]
+    fn merged_tag_json_returns_none_when_no_layer_has_the_path() {
+        let manager = ResourceManager::new(vec![Box::new(MemorySource::new("empty"))]);
+        assert!(merged_tag_json(&manager, "data/minecraft/tags/item/planks.json").is_none());
+    }
 
     /// [`pack_generation`] is the equality guard `Sim::reload_resource_pack_atlas`
     /// polls every frame, so it must actually move on every
