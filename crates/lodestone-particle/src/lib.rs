@@ -160,6 +160,17 @@ pub enum Sheet {
     TrialOmen,
     /// `particle/nautilus` — the conduit's homing mote.
     Nautilus,
+    /// `particle/generic_0` **alone** — a one-frame sheet, not a frame of
+    /// [`Self::Generic`].
+    ///
+    /// Eight registry types (`ash`, `white_ash`, `crimson_spore`,
+    /// `warped_spore`, `mycelium`, `underwater`, `dolphin`, `trail`) name
+    /// exactly one texture in their own `particles/<name>.json`, and it happens
+    /// to be the same PNG [`Self::Generic`]'s last frame uses. Reusing
+    /// `Generic` for them would animate a still particle through eight frames,
+    /// so — as with [`Self::PortalGeneric`] — a sheet's identity here is its
+    /// **frame sequence**, not its pixels.
+    Generic0,
 }
 
 impl Sheet {
@@ -274,6 +285,7 @@ impl Sheet {
             Self::RaidOmen => &["raid_omen"],
             Self::TrialOmen => &["trial_omen"],
             Self::Nautilus => &["nautilus"],
+            Self::Generic0 => &["generic_0"],
         }
     }
 
@@ -348,6 +360,7 @@ impl Sheet {
             Self::RaidOmen,
             Self::TrialOmen,
             Self::Nautilus,
+            Self::Generic0,
         ]
     }
 
@@ -555,6 +568,17 @@ pub enum Behaviour {
     /// `gravity` and `friction` are never read. See
     /// [`Particle::tick_fly_towards_position`].
     FlyTowardsPosition,
+    /// Ordinary physics plus `setSpriteFromAge`, and **nothing else** —
+    /// `ExplodeParticle` (`poof`, `spit`) and its siblings.
+    ///
+    /// Distinct from [`Self::AshSmoke`], which looks like the same thing and is
+    /// not: `BaseAshSmokeParticle` additionally overrides `getQuadSize` with the
+    /// `clamp((age + a) / lifetime * 32, 0, 1)` fade-*in*, and `ExplodeParticle`
+    /// does not. Borrowing `AshSmoke` for a class without that override makes
+    /// every one of its particles start at zero size and swell over the first
+    /// thirty-second of its life — visible on a mob-death puff, and invisible to
+    /// any test that only asks whether a particle exists.
+    Animated,
 }
 
 impl Behaviour {
@@ -568,6 +592,7 @@ impl Behaviour {
                 | Self::Spell
                 | Self::HugeExplosion
                 | Self::Dust
+                | Self::Animated
                 | Self::DustColorTransition { .. },
                 SpriteSource::Sheet { sheet, .. },
             ) => Some(sheet),
@@ -607,6 +632,8 @@ impl Behaviour {
             // `FlyTowardsPositionParticle` is `vault_connection`, which has no
             // emitter here yet.
             | Self::FlyTowardsPosition
+            // `ExplodeParticle.getLayer` is `OPAQUE`.
+            | Self::Animated
             | Self::DustColorTransition { .. } => Layer::Opaque,
         }
     }
@@ -1017,7 +1044,11 @@ impl Particle {
                 self.colour[1] *= 0.96;
                 self.colour[2] *= 0.9;
             }
-            Behaviour::AshSmoke | Behaviour::Spell | Behaviour::HugeExplosion | Behaviour::Dust => {
+            Behaviour::AshSmoke
+            | Behaviour::Spell
+            | Behaviour::HugeExplosion
+            | Behaviour::Dust
+            | Behaviour::Animated => {
                 self.set_sprite_from_age();
             }
             // `DustColorTransitionParticle` additionally lerps its colour —
