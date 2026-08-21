@@ -201,13 +201,43 @@ impl FontFilter {
         let mut conditions = BTreeMap::new();
         if let Some(Value::Object(map)) = value {
             for (k, v) in map {
-                if let (Some(opt), Some(b)) = (FontOption::from_key(k), v.as_bool()) {
-                    conditions.insert(opt, b);
+                match (FontOption::from_key(k), v.as_bool()) {
+                    (Some(opt), Some(b)) => {
+                        conditions.insert(opt, b);
+                    }
+                    _ => {
+                        // Never silently drop a filter condition: an
+                        // unrecognised key (a `FontOption` this client does
+                        // not know) or a non-boolean value both currently
+                        // vanished with no trace, and a provider gated on
+                        // one would then be silently treated as
+                        // always-active instead of correctly conditional.
+                        eprintln!(
+                            "lodestone-assets: font filter condition {k:?}={v:?} is not \
+                             a recognised option (or not a boolean) -- ignoring it, so \
+                             this provider may be active when it should not be"
+                        );
+                    }
                 }
             }
         }
         FontFilter { conditions }
     }
+}
+
+/// Whether the per-glyph bitmap-font metrics dump is enabled
+/// (`LODESTONE_FONT_METRICS`, any value turns it on). See
+/// [`FontLoader::load_bitmap`] for what it prints and why: this is the tool
+/// for "the spacing between some glyphs is wrong and I can't tell why" —
+/// every bitmap glyph's declared `height`/`ascent`, its sheet cell, the
+/// derived `pixel_scale`, the measured ink width and the resulting
+/// advance/drawn extent, all on one stderr line, so a pack-font spacing bug
+/// is a `grep` of captured output rather than a source-diving exercise.
+/// Checked once and cached: this can fire thousands of times for a large
+/// sheet, so it must not cost a syscall per glyph.
+fn font_metrics_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("LODESTONE_FONT_METRICS").is_some())
 }
 
 /// Number of bitmap rows in every unihex glyph (`UnihexProvider.GLYPH_HEIGHT`).
@@ -1053,6 +1083,14 @@ impl<'a> FontLoader<'a> {
     ) -> Result<usize, FontError> {
         let path = format!("assets/{}/{}", hex_file.namespace(), hex_file.path());
         let Some(bytes) = self.manager.read(&path) else {
+            // A deliberate soft skip (see this method's own doc), but never
+            // a *silent* one: without this the CJK/Thai/Arabic fallback
+            // vanishing looks identical to it never having been declared.
+            eprintln!(
+                "lodestone-assets: unihex hex_file {path:?} not found -- skipping this \
+                 provider (0 codepoints from it; its glyphs fall through to the next \
+                 provider or the missing-glyph box)"
+            );
             return Ok(0);
         };
 
@@ -1153,6 +1191,14 @@ impl<'a> FontLoader<'a> {
         // `TrueTypeGlyphProviderDefinition.load`: `resourceManager.open(this.location.withPrefix("font/"))`.
         let path = format!("assets/{}/font/{}", file.namespace(), file.path());
         let Some(bytes) = self.manager.read(&path) else {
+            // Soft skip, deliberately (see this method's own doc) -- but
+            // never silent: a pack referencing a `ttf` file that is not
+            // actually present should be visible in the log, not just as
+            // "those codepoints fell back to something else".
+            eprintln!(
+                "lodestone-assets: ttf file {path:?} not found -- skipping this provider \
+                 (0 codepoints from it)"
+            );
             return Ok(0);
         };
         let face = fontdue::Font::from_bytes(bytes.as_slice(), fontdue::FontSettings::default())
@@ -1274,14 +1320,41 @@ impl<'a> FontLoader<'a> {
             });
         }
         let pixel_scale = height as f32 / glyph_height as f32;
+        let debug = font_metrics_debug_enabled();
+        if debug {
+            eprintln!(
+                "lodestone-assets: bitmap provider file={file} sheet={}x{} grid={cols}x{rows} \
+                 cell={glyph_width}x{glyph_height}px declared_height={height} ascent={ascent} \
+                 pixel_scale={pixel_scale}",
+                img.width, img.height,
+            );
+        }
 
+        // Codepoints this *provider's own* grid has already placed, tracked
+        // separately from `glyphs` (which also carries every earlier
+        // provider's winners). The two duplicate cases are opposite:
+        // `BitmapProvider.Definition.load`'s `charMap.put` is a plain
+        // overwrite within one provider's grid (the *last* declaration wins,
+        // with a logged warning), but a codepoint an earlier provider in the
+        // font's own priority list already won must never be reclaimed by a
+        // later one. Checking `glyphs.contains_key` alone conflates the two
+        // and made the *first* cell in this grid win a same-provider
+        // collision instead of the last.
+        let mut declared_here: HashSet<u32> = HashSet::new();
         for (slot_y, row) in chars.iter().enumerate() {
             for (slot_x, &cp) in row.iter().enumerate() {
                 if cp == 0 {
                     continue; // null padding
                 }
-                if glyphs.contains_key(&cp) {
-                    continue; // first-declared provider wins
+                if glyphs.contains_key(&cp) && !declared_here.contains(&cp) {
+                    continue; // an earlier-declared provider already won this codepoint
+                }
+                if !declared_here.insert(cp) {
+                    eprintln!(
+                        "lodestone-assets: codepoint U+{cp:04X} declared multiple times in \
+                         {file} -- the later cell wins, matching \
+                         BitmapProvider.Definition.load's charMap.put"
+                    );
                 }
                 let actual = actual_glyph_width(
                     &img,
@@ -1291,6 +1364,22 @@ impl<'a> FontLoader<'a> {
                     slot_y as u32,
                 );
                 let advance = (0.5 + actual as f32 * pixel_scale) as i32 + 1;
+                if debug {
+                    // Everything a spacing bug needs to be diagnosed from one
+                    // line: the declared metrics, the measured ink extent
+                    // (`actual`, in the sheet's own physical texels), the
+                    // advance that formula produces, and the *drawn* extent
+                    // (`actual * pixel_scale`) -- the two a caller expects to
+                    // agree modulo the vanilla "+1" gap. If `drawn_w` is
+                    // ever close to or past `advance` for consecutive
+                    // glyphs, that pair is the overlap.
+                    eprintln!(
+                        "lodestone-assets:   codepoint=U+{cp:04X} {:?} cell_pos=({slot_x},{slot_y}) \
+                         ink_w={actual}px drawn_w={:.3} advance={advance}",
+                        char::from_u32(cp),
+                        actual as f32 * pixel_scale,
+                    );
+                }
                 glyphs.insert(
                     cp,
                     Glyph::Bitmap(BitmapGlyph {

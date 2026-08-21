@@ -158,6 +158,32 @@ fn height_override_scales_advance() {
 }
 
 #[test]
+fn duplicate_codepoint_within_one_providers_grid_uses_the_last_cell() {
+    // 'A' declared twice in the same grid: slot 0 (rightmost col 1 -> actual
+    // 2 -> advance 3) and slot 1 (rightmost col 6 -> actual 7 -> advance 8).
+    // `BitmapProvider.Definition.load`'s `charMap.put` is a plain overwrite
+    // as it walks the grid, so the *last* declaration must win, not the
+    // first.
+    let png = sheet(8, &[Some(1), Some(6)]);
+    let json = br#"{"providers":[{"type":"bitmap","file":"minecraft:font/t.png",
+        "ascent":7,"height":8,"chars":["AA"]}]}"#;
+    let mgr = manager(vec![
+        ("assets/minecraft/textures/font/t.png", png),
+        ("assets/minecraft/font/default.json", json.to_vec()),
+    ]);
+    let font = FontLoader::new(&mgr)
+        .load(&loc("minecraft:default"), &FontOptions::none())
+        .unwrap();
+    assert_eq!(
+        font.advance(b'A' as u32),
+        Some(8.0),
+        "the second (slot 1) declaration of 'A' must win, matching vanilla's plain-overwrite Map.put"
+    );
+    let g = font.bitmap_glyph(b'A' as u32).unwrap();
+    assert_eq!(g.cell, [8, 0, 8, 8], "must carry slot 1's cell, not slot 0's");
+}
+
+#[test]
 fn bitmap_glyph_carries_cell_rect() {
     // Two cells; 'B' is slot 1 -> cell x=8.
     let png = sheet(8, &[Some(4), Some(2)]);

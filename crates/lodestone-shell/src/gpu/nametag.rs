@@ -1062,4 +1062,89 @@ mod tests {
         assert!((entity_base_height("chicken") - 0.7).abs() < 1e-3);
         assert!((entity_base_height("enderman") - 2.9).abs() < 1e-3);
     }
+
+    /// A hermetic bitmap-font fixture with an explicit declared `height`
+    /// independent of the source image's row height -- the only way to get
+    /// `pixel_scale != 1.0`. No fixture elsewhere in this file exercises
+    /// that (every one goes through the real jar via [`load_font`], whose
+    /// own three sheets are all `pixel_scale == 1.0`), which is exactly the
+    /// coincidence `hud::vanilla_font`'s
+    /// `bitmap_draw_extent_respects_pixel_scale_not_just_advance` test
+    /// documents: at `pixel_scale == 1.0`, "multiply the cell's texel walk
+    /// by `pixel_scale`" and "don't" are indistinguishable.
+    fn scaled_raster(chars: &str, cell: u32, declared_height: u32, rgba: &[u8]) -> RasterFont {
+        let width = cell * chars.chars().count() as u32;
+        let mut png = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut png, width, cell);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header()
+                .unwrap()
+                .write_image_data(rgba)
+                .unwrap();
+        }
+        let mut source = lodestone_assets::MemorySource::new("nametag-scaled-fixture");
+        source.insert("assets/minecraft/textures/font/t.png", png);
+        source.insert(
+            "assets/minecraft/font/default.json",
+            format!(
+                r#"{{"providers":[{{"type":"bitmap","file":"minecraft:font/t.png","ascent":1,"height":{declared_height},"chars":["{chars}"]}}]}}"#
+            )
+            .into_bytes(),
+        );
+        let manager = ResourceManager::new(vec![Box::new(source)]);
+        let id: lodestone_assets::ResourceLocation =
+            "minecraft:default".parse().expect("valid fixture id");
+        FontLoader::new(&manager)
+            .load_raster(&id, &FontOptions::none())
+            .expect("scaled bitmap fixture font loads")
+    }
+
+    /// The nametag/sign-text ink walk ([`layout_ink_runs`]) is a *second*,
+    /// independent implementation of the same "cell texels scaled by
+    /// `pixel_scale`" logic `hud::vanilla_font::draw_ink` has -- CLAUDE.md's
+    /// own point about a hazard fixed once and not shared: nothing
+    /// mechanical connects the two, so this needs its own control rather
+    /// than inheriting the HUD path's. Same discriminating input: two
+    /// fully-opaque glyphs at a non-integer `pixel_scale` (0.625); if the
+    /// cell's texel walk here ever used the raw physical cell width instead
+    /// of `cell_width * pixel_scale`, the rects for 'B' would start well
+    /// inside 'A''s own (wrongly large) rects.
+    #[test]
+    fn layout_ink_runs_respects_pixel_scale_not_just_advance() {
+        let opaque_cell = vec![255u8; 32 * 32 * 4];
+        let mut rgba = Vec::with_capacity(opaque_cell.len() * 2);
+        rgba.extend_from_slice(&opaque_cell);
+        rgba.extend_from_slice(&opaque_cell);
+        let raster = scaled_raster("AB", 32, 20, &rgba);
+
+        let (rects, total_advance) = layout_ink_runs(&raster, "AB");
+        assert!(!rects.is_empty(), "the opaque cells must produce ink rects");
+        // Same arithmetic as the HUD-path control: advance(A) = (int)(0.5 +
+        // 32*0.625) + 1 = 21; each glyph's own drawn extent is 32*0.625=20.
+        assert_eq!(
+            raster.advance('A' as u32),
+            Some(21.0),
+            "advance itself must already reflect pixel_scale"
+        );
+        let max_x = rects
+            .iter()
+            .map(|r| r.x + r.w)
+            .fold(f32::MIN, f32::max);
+        let min_x = rects.iter().map(|r| r.x).fold(f32::MAX, f32::min);
+        assert!((min_x - 0.0).abs() < 0.01, "got min_x={min_x}, want 0.0");
+        // Correct total extent: A's [0,20] then B's pen at 21, drawing its
+        // own [0,20] local -> screen [21,41] -> overall max 41. The wrong
+        // hypothesis (raw 32px cell instead of the scaled 20px one) would
+        // give 21+32=53, and A's own wrongly-large [0,32] would overlap B's
+        // [21,53] from x=21 to x=32.
+        assert!(
+            (max_x - 41.0).abs() < 0.01,
+            "got max_x={max_x}, want 41.0 (32px raw cell would give 53.0 -- \
+             layout_ink_runs must scale the cell's texel walk by pixel_scale, \
+             not just the advance)"
+        );
+        assert!((total_advance - 42.0).abs() < 0.01);
+    }
 }

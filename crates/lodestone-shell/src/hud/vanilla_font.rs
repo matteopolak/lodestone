@@ -1604,6 +1604,118 @@ mod tests {
             "the trailing Hebrew run must reverse in place after the LTR run"
         );
     }
+
+    /// Same fixture shape as [`bitmap_raster`], but with an explicit declared
+    /// `height` independent of the source image's row height — the only way
+    /// to get `pixel_scale != 1.0`. Every existing bitmap fixture in this
+    /// module (and in `lodestone-assets/tests/font.rs`'s own draw-adjacent
+    /// corpus) fixes `height` equal to the image's row height, which pins
+    /// `pixel_scale` at exactly `1.0`: the one value where "the draw path
+    /// multiplies by `pixel_scale`" and "it doesn't" are indistinguishable.
+    fn bitmap_raster_scaled(
+        chars: &str,
+        cell: u32,
+        declared_height: u32,
+        rgba: &[u8],
+    ) -> RasterFont {
+        let width = cell * chars.chars().count() as u32;
+        let png = encode_png(width, cell, rgba);
+        let mut source = lodestone_assets::MemorySource::new("font-scaled-fixture");
+        source.insert("assets/minecraft/textures/font/t.png", png);
+        source.insert(
+            "assets/minecraft/font/default.json",
+            format!(
+                r#"{{"providers":[{{"type":"bitmap","file":"minecraft:font/t.png","ascent":1,"height":{declared_height},"chars":["{chars}"]}}]}}"#
+            )
+            .into_bytes(),
+        );
+        let manager = ResourceManager::new(vec![Box::new(source)]);
+        let id: ResourceLocation = "minecraft:default".parse().expect("valid fixture id");
+        FontLoader::new(&manager)
+            .load_raster(&id, &FontOptions::none())
+            .expect("scaled bitmap fixture font loads")
+    }
+
+    /// The corpus-wide coincidence this repo's evidence standards warn about:
+    /// every other bitmap fixture here declares `height` equal to its
+    /// image's row height, which pins `pixel_scale` at `1.0` — the one value
+    /// at which a `draw_ink` that forgot to multiply the cell's own texel
+    /// walk by `pixel_scale` (while still applying it correctly to
+    /// `advance`, which is exercised elsewhere) would be indistinguishable
+    /// from a correct one. A server-provided background-panel font is
+    /// exactly the shape that breaks the coincidence: a physically large
+    /// sheet cell scaled down to a modest logical size.
+    ///
+    /// Two fully-opaque, back-to-back glyphs at a non-integer `pixel_scale`
+    /// (0.625) are the discriminating input: if the cell's drawn extent used
+    /// the raw physical cell width instead of `cell_width * pixel_scale`,
+    /// the second glyph's ink would start well *before* the first glyph's
+    /// own (wrongly-large) drawn extent ends — the "background block
+    /// swallowing the next glyph" the bug report describes.
+    #[test]
+    fn bitmap_draw_extent_respects_pixel_scale_not_just_advance() {
+        // 32x32 physical cell, declared height 20 -> pixel_scale = 20/32 =
+        // 0.625, deliberately non-integer. 'A' and 'B' are both fully opaque
+        // squares (a stand-in for an opaque background-panel sprite).
+        let opaque_cell = vec![255u8; 32 * 32 * 4];
+        let mut rgba = Vec::with_capacity(opaque_cell.len() * 2);
+        rgba.extend_from_slice(&opaque_cell);
+        rgba.extend_from_slice(&opaque_cell);
+        let raster = bitmap_raster_scaled("AB", 32, 20, &rgba);
+        let font = font_with_raster(raster);
+
+        // Vanilla's own formula (`BitmapProvider.Definition.load`): actual=32
+        // (fully opaque, rightmost column has ink), pixel_scale=0.625 ->
+        // `(int)(0.5 + 32*0.625) + 1` = `(int)(20.5) + 1` = 21.
+        let a_advance = font.raster.advance('A' as u32).expect("A resolves");
+        assert_eq!(
+            a_advance, 21.0,
+            "advance itself must already reflect pixel_scale"
+        );
+
+        let mut verts = Vec::new();
+        {
+            let mut cs = ColourStream {
+                verts: &mut verts,
+                w: 400.0,
+                h: 400.0,
+            };
+            font.draw(&mut cs, "AB", 50.0, 50.0, 1.0, [1.0, 1.0, 1.0, 1.0]);
+        }
+        // Isolate the main pass (drop the shadow copy, which draws at 0.25
+        // brightness) by colour, the same trick this module's other
+        // pixel-geometry tests use.
+        let xs: Vec<f32> = verts
+            .chunks_exact(6)
+            .filter(|v| {
+                (v[2] - 1.0).abs() < 1e-4 && (v[3] - 1.0).abs() < 1e-4 && (v[4] - 1.0).abs() < 1e-4
+            })
+            .map(|v| (v[0] + 1.0) * 400.0 * 0.5)
+            .collect();
+        assert!(!xs.is_empty(), "the opaque cells must draw real ink");
+        let max_x = xs.iter().copied().fold(f32::MIN, f32::max);
+        let min_x = xs.iter().copied().fold(f32::MAX, f32::min);
+        // Correct: 'A' draws local x in [0, 32*0.625] = [0, 20] -> screen
+        // [50, 70]. 'B's pen starts at 50 + 21 = 71 and draws local [0, 20]
+        // of its own -> screen [71, 91]. Total extent: [50, 91].
+        //
+        // The wrong hypothesis (pixel_scale dropped from the cell's texel
+        // walk, raw 32px cell drawn instead of the scaled 20px one): 'A'
+        // would draw screen [50, 82] and 'B' screen [71, 103] — the two
+        // glyphs' own ink would overlap from x=71 to x=82, and the total
+        // extent would read 103, not 91. The two hypotheses differ by 12px,
+        // well outside float slop.
+        assert!(
+            (min_x - 50.0).abs() < 0.01,
+            "got min_x={min_x}, want 50.0"
+        );
+        assert!(
+            (max_x - 91.0).abs() < 0.01,
+            "got max_x={max_x}, want 91.0 (32px raw cell would give 103.0 -- \
+             draw_ink must scale the cell's texel walk by pixel_scale, not \
+             just the advance)"
+        );
+    }
 }
 
 /// Pixel-geometry gates for issue #117: bold, italic, underline, strikethrough

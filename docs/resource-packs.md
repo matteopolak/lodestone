@@ -147,6 +147,45 @@ horizontal merged run whenever adjacent final RGBA differs. This permits pack
 authors to use coloured or translucent font pixels. Unihex remains binary
 white/transparent and TTF keeps its existing thresholded binary rasterisation.
 
+### Diagnosing a pack font's spacing (`LODESTONE_FONT_METRICS`)
+
+`FontLoader::load_bitmap` (`lodestone_assets::font`) can dump, to stderr, every
+bitmap glyph it loads — declared `height`/`ascent`, the sheet's grid and
+per-cell pixel size, the derived `pixel_scale`, each codepoint's measured ink
+width (`actual_glyph_width`'s result, in the sheet's own physical texels), the
+resulting `advance`, and the *drawn* extent (`ink_w * pixel_scale`, the
+logical-pixel width `draw_ink` actually paints). Set `LODESTONE_FONT_METRICS`
+to any value and run the client; this fires for **every** font loaded through
+`FontLoader::load`/`load_raster`, `minecraft:default` included, so grep the
+output for the pack's own bitmap `file` (a custom font's sheet is always
+under its own namespace, never `minecraft:font/`) to isolate it.
+
+This exists because two glyphs can each measure correctly in isolation and
+still overlap on screen: the discriminating case is a `pixel_scale` other
+than `1.0` (a sheet cell physically larger or smaller than the font's
+declared `height`), which every one of vanilla's own three bitmap sheets
+happens to avoid (all `height: 8`/`ascent: 7`, cell `8×8` or `16×16` — always
+an *integer* scale) but which a server-provided background-panel font
+commonly is not. Read two consecutive glyphs' lines together: if one
+codepoint's `drawn_w` is greater than or close to its own `advance`, that
+glyph's ink extends into the next glyph's pen position — the "background
+block that swallows the next glyph" shape. If `drawn_w` stays comfortably
+under `advance` for every glyph and the overlap is still visible, the sheet's
+own metrics are not the cause and the next place to look is which draw path
+actually consumed this font (`hud::vanilla_font` for chat/HUD text,
+`gpu::nametag`/`gpu::sign_text` for nameplates and sign text — each is a
+distinct implementation of the same `pixel_scale`-aware texel walk, so a
+regression in one does not imply a regression in the others).
+
+The same env var also makes two previously-silent soft skips speak: a
+`unihex`/`ttf` provider whose `hex_file`/`file` is not present in the active
+pack stack now prints one line either way (see `FontLoader::load_unihex`/
+`load_ttf`'s own doc for why the skip itself is intentional — an absent
+optional file must degrade the font, not fail it outright). An unrecognised
+`filter` condition key (or a non-boolean value) also always prints, since a
+misgated provider silently landing as always-active is a correctness bug in
+the pack, not something worth hiding behind the metrics flag.
+
 ### The per-server policy (`menu::servers::ServerPackPolicy`)
 
 `Enabled`/`Disabled`/`Prompt`, matching vanilla's `ServerData.ServerPackStatus`
@@ -210,6 +249,8 @@ connect.
   `servers_path`).
 - `net::MAX_PACK_SIZE_BYTES` (native only) — the 250 MiB download cap.
   Vanilla's own constant; change it only with a reason as good as vanilla's.
+- `LODESTONE_FONT_METRICS` (any value) — per-glyph bitmap-font metrics dump
+  to stderr; see "Diagnosing a pack font's spacing" above.
 
 ## Dependencies
 
