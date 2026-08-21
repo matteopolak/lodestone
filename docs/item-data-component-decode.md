@@ -58,15 +58,13 @@ Two mechanical backstops sit behind the type:
 
 ## The census
 
-51 of 111 component types are consumed (drifted upward from an earlier count of 46 —
-`charged_projectiles`, `attack_range`, `repairable`, and `equippable` were modeled after they
-surfaced as live truncations, and a scan of the match arms directly turned up one more
-already-modeled arm this doc's own count had lost track of; re-verified by scanning the
-`read_component_patch` source rather than carrying the figure forward). A loaded crossbow, a
-spear-family item, repairable apple, and horse armour were each ending the packet at that slot,
-the same shape `bundle_contents` fixed earlier. The 60 that are not consumed are each still a
-truncation point. Regenerate the list with a scan of
-the added-component match arms against
+109 of 111 component types are consumed (drifted upward from an earlier count of 51 — a sweep
+closed a backlog of 60 unmodelled components down to 2, dispatched by what a real server was
+observed sending live: `death_protection`, `block_entity_data` and `consumable` were the
+proven-live three, each caught mid-session — `item="minecraft:spawner"
+component="minecraft:block_entity_data"` and siblings. Re-verified by scanning the
+`read_component_patch` source rather than carrying any figure forward; regenerate the list with
+a scan of the added-component match arms against
 `lodestone_data::data_component_types::DATA_COMPONENT_TYPE_NAMES`.
 
 Consumed, grouped by the wire shape they share — each group is one rule, not one arm per id:
@@ -76,11 +74,18 @@ Consumed, grouped by the wire shape they share — each group is one rule, not o
 | derived NBT | one `FriendlyByteBuf.writeNbt` tag | `custom_data`, `intangible_projectile`, `map_decorations`, `debug_stick_state`, `recipes`, `lock`, `container_loot` |
 | unit | **zero bytes** (`StreamCodec.unit`) | `unbreakable`, `creative_slot_lock`, `glider` |
 | VarInt | one VarInt | `max_stack_size`, `max_damage`, `damage`, `rarity`, `repair_cost`, `additional_trade_cost`, `ominous_bottle_amplifier`, `enchantable`, `dye`, `base_color`, `map_post_processing`, `map_id` |
+| bare `Holder`/enum VarInt | one VarInt, no offset — either `holderRegistry` (synced-registry `Holder<T>`) or `idMapper` (`StringRepresentable` enum ordinal); indistinguishable on the wire, so one arm covers both | `damage_type` and 27 mob/fish/bucket-item fields: `villager/variant`, `wolf/variant`, `wolf/sound_variant`, `wolf/collar`, `fox/variant`, `salmon/size`, `parrot/variant`, `tropical_fish/pattern`, `tropical_fish/base_color`, `tropical_fish/pattern_color`, `mooshroom/variant`, `rabbit/variant`, `pig/variant`, `pig/sound_variant`, `cow/variant`, `cow/sound_variant`, `chicken/variant`, `chicken/sound_variant`, `zombie_nautilus/variant`, `frog/variant`, `horse/variant`, `llama/variant`, `axolotl/variant`, `cat/variant`, `cat/sound_variant`, `cat/collar`, `sheep/color`, `shulker/color` |
 | fixed-width | `INT` / `FLOAT` / `BOOL` | `dyed_color`, `map_color`, `minimum_attack_charge`, `potion_duration_scale`, `enchantment_glint_override` |
 | six floats | `FLOAT` × 6, no length prefix | `attack_range` |
 | identifier | one UTF-8 string | `item_model`, `tooltip_style`, `note_block_sound` |
 | chat component | network NBT | `custom_name`, `item_name` |
-| composite | see the reader | `enchantments`, `stored_enchantments`, `tool`, `trim`, `pot_decorations`, `lore`, `custom_model_data`, `tooltip_display`, `attribute_modifiers`, `potion_contents`, `profile`, `writable_book_content`, `written_book_content`, `bundle_contents`, `charged_projectiles`, `repairable`, `equippable` |
+| `TypedEntityData` | registry-scoped VarInt then network NBT ([`read_typed_entity_data`]) | `entity_data`, `block_entity_data` |
+| `CustomData.STREAM_CODEC` | network NBT only, no leading id (unlike plain `custom_data`, which has no `networkSynchronized` at all) | `bucket_entity_data` |
+| `ByteBufCodecs.holder` (`0` inline / `id + 1` reference) | see the reader for each inline body | `instrument`, `provides_trim_material`, `jukebox_playable`, `painting/variant`, plus the pre-existing `trim`, `equippable`'s two sound fields |
+| `HolderSet<T>` | [`read_holder_set`] | `damage_resistant`, `provides_banner_patterns`, plus the pre-existing `repairable` |
+| `List<ConsumeEffect>` | [`read_consume_effects`] — dispatches through the 5-entry `consume_effect_type` registry | `death_protection`, and the tail of `consumable` |
+| `ItemStackTemplate`, truncation-tolerant | [`read_item_stack_template_tolerant`] | `use_remainder`, `sulfur_cube_content`, each entry of `container` |
+| composite | see the reader | `enchantments`, `stored_enchantments`, `tool`, `pot_decorations`, `lore`, `custom_model_data`, `tooltip_display`, `attribute_modifiers`, `potion_contents`, `profile`, `writable_book_content`, `written_book_content`, `bundle_contents`, `charged_projectiles`, `use_effects`, `food`, `consumable`, `use_cooldown`, `weapon`, `blocks_attacks`, `piercing_weapon`, `kinetic_weapon`, `swing_animation`, `suspicious_stew_effects`, `lodestone_tracker`, `firework_explosion`, `fireworks`, `container`, `block_state`, `bees`, `break_sound` |
 
 `custom_name`, `damage`, `enchantments`, `dyed_color`, `trim`, `map_id`, `pot_decorations`,
 `profile`, `writable_book_content`, `written_book_content`, `bundle_contents`,
@@ -88,9 +93,35 @@ Consumed, grouped by the wire shape they share — each group is one rule, not o
 `potion_contents` is surfaced already mixed into an opaque colour (`potion_color`), and
 `tool`/`max_stack_size`/`max_damage`/`equippable` as prototype-folded **effective** values
 (see that type's own doc for the patch-vs-effective split). `custom_data` is carried as an
-opaque byte blob. The rest are consumed for alignment and thrown away, which is the entire
-point — the value is worthless and consuming the right number of bytes is worth a whole
-packet.
+opaque byte blob. **Every component in the batch that closed the 60-unmodelled backlog is
+consumed for alignment only** — none gained an `ItemComponents` field, matching the majority
+of the pre-existing census. The value being worthless and consuming the right number of bytes
+being worth a whole packet is the entire point; add a field only when a consumer needs one.
+
+### The batch that closed the backlog, and the two that are left
+
+`death_protection`, `block_entity_data` and `consumable` were caught live and modeled first;
+the remaining 55 were worked through the full enumeration afterward. Four small shared readers
+carry most of it rather than one arm per id: [`read_consume_effects`] (the `ConsumeEffect`
+dispatch `consumable`/`death_protection` share), [`read_typed_entity_data`] (the
+registry-VarInt-then-NBT shape `entity_data`/`block_entity_data`/each `bees` occupant share),
+[`read_item_stack_template_tolerant`] (a nested stack that degrades the same way
+`bundle_contents`/`charged_projectiles` already do, rather than the hard-failing
+[`read_item_stack_template`] the advancement-icon path uses), and [`read_firework_explosion`]
+(shared by the top-level `firework_explosion` component and each entry of `fireworks`' list).
+
+`can_place_on`/`can_break` are the two still deferred, deliberately. `AdventureModePredicate`'s
+`BlockPredicate` carries a `DataComponentMatchers`, whose `partial` half dispatches through a
+*second*, independent registry (`data_component_predicate_type`, 15 entries) — several of which
+(`container`, `bundle_contents`) embed an item/collection predicate that recurses back into
+another `DataComponentMatchers`. That is not "one more component reader"; it is a
+general-purpose predicate interpreter with no length prefix anywhere in the chain to fall back
+on if one of its own sub-types is itself unrecognised — the same class of cliff `explode`'s
+unmodelled `explosionParticle` registry ids are (see `docs/particle-catalogue.md` and
+`lodestone_data::particle_types::is_simple_particle_type`, which exists for exactly that
+sibling problem). `UNMODELED_COMPONENT` in `crates/protocol/v770/tests/item_components.rs` and
+`crates/protocol/v770/tests/item_entity_metadata.rs` now names `minecraft:can_place_on` for
+this reason — durable, not merely unfinished.
 
 ### `charged_projectiles` shares `bundle_contents`' reader, not its own
 
@@ -153,15 +184,11 @@ instead is a trap: that field is `@Deprecated` and is what `bucket_entity_data` 
 `custom_data`. Reading the family as a bare *compound* is also wrong — `recipes` encodes to a
 list tag and the `Unit`-valued members to an empty compound.
 
-### Deferred, highest value first
+### Deferred
 
 | component | cost |
 |---|---|
-| `can_place_on` / `can_break` | `AdventureModePredicate`: a list of `BlockPredicate`s, each with state/NBT matchers. Adventure-mode servers send them |
-| `container` | a list of whole `ItemStack`s — recursive through this same decoder, the same shape `bundle_contents`/`charged_projectiles` (both now modeled, see the composite row above) already occupy here |
-| `food` / `consumable` / `use_cooldown` / `use_remainder` / `weapon` / `blocks_attacks` | multi-field records with nested effect lists |
-| `entity_data` / `block_entity_data` / `bucket_entity_data` | `TypedEntityData`: a registry id then NBT. Cheap, but each uses a *different* registry codec |
-| the 29 `*/variant`, `*/collar`, `*/color`, `salmon/size` ids | individually trivial (holder VarInt or enum VarInt) but each needs its registry checked for static vs dynamic, since a dynamic-registry `Holder` uses the inline-`0` sentinel and a static one does not. Only mob buckets and spawn eggs carry them |
+| `can_place_on` / `can_break` | `AdventureModePredicate`'s `BlockPredicate` carries a `DataComponentMatchers`, whose `partial` half is a second, independently-registered predicate-type dispatch that can recurse into another `DataComponentMatchers` through an item/collection predicate. A general-purpose predicate interpreter, not one more component reader — see the "batch that closed the backlog" section above |
 
 ## How to change it
 

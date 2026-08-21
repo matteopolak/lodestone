@@ -186,6 +186,20 @@ blocked on the shared `ParticleOptions` codec. `crates/protocol/v770/src/adapter
 payload — typically a block state for the flying debris — which is not decoded at all and is
 the accurate target for that blocker.)
 
+**Second correction: distinguishing exactly those two registry ids was never the right fix,
+and it dropped a live packet.** `SimpleParticleType` is 103 of the registry's 125 entries, not
+2 — the 29/30 allowlist just happened to cover the two ids `Level.explode`'s own convenience
+helpers pass, and missed every other producer. A real server sent id 34
+(`minecraft:gust_emitter_small`, `WindCharge.explode`'s own explosion — see
+`world/entity/projectile/hurtingprojectile/windcharge/WindCharge.java`), which is exactly as
+argument-less as `explosion_emitter`/`explosion`, and `decode_explode` rejected the whole
+packet on it. `lodestone_data::particle_types::is_simple_particle_type` (added alongside the
+item-component-decode sweep this doc's sibling, `docs/item-data-component-decode.md`,
+describes) is the general census this should have been from the start — derived from
+`ParticleTypes.java`'s two `register()` overloads rather than from which two ids one call site
+happened to use. Wiring it into `decode_explode` in place of the 29/30 check is tracked
+separately; until then the allowlist is known-too-narrow, not merely historical.
+
 **Built.** `explosion_emitter` (`ParticleTypes.EXPLOSION_EMITTER`, the id
 `decode_explode` actually sees on the wire — see below) and `explosion` (`EXPLOSION`) both now
 have a `Behaviour`, an `emit::` function and a `spawn_one` dispatch arm:
