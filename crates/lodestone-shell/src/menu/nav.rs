@@ -1378,12 +1378,19 @@ pub struct MenuNav {
     /// "still the prompt I already answered" apart from "a new one", without
     /// changing which thread clears the shared cell or when.
     resource_pack_answered_id: Option<uuid::Uuid>,
-    /// A double-click on a server row joins it — vanilla's
-    /// `ServerSelectionList.java`, `if (doubleClick) join()`,
-    /// unconditional on where in the row the click landed. The primitive is
-    /// [`super::focus::DoubleClickTracker`]; this is `click_list`'s only
-    /// caller of it.
-    double_click: super::focus::DoubleClickTracker<usize>,
+    /// A double-click on a **selection-list row** activates it: a server row
+    /// joins (vanilla's `ServerSelectionList.java`, `if (doubleClick) join()`,
+    /// unconditional on where in the row the click landed), an account row
+    /// selects that account. The primitive is
+    /// [`super::focus::DoubleClickTracker`].
+    ///
+    /// **Keyed by `(Screen, usize)` rather than by the row alone**, because it
+    /// is shared by more than one screen and a bare row index is not a unique
+    /// target across them: with a `usize` key, clicking server row 0 and then
+    /// account row 0 inside the 250 ms threshold reads as a double-click on
+    /// one row and fires an activation nobody asked for. The screen is part of
+    /// what "the same thing was clicked twice" means.
+    double_click: super::focus::DoubleClickTracker<(super::Screen, usize)>,
     /// The monotonic clock [`Self::double_click`] measures against. An
     /// `Instant` fixed at construction rather than reset per click — only
     /// the *differences* `DoubleClickTracker` computes matter, so nothing
@@ -3023,8 +3030,37 @@ impl MenuNav {
             }
             return MenuAction::None;
         }
+        if ui.screen() == Screen::Accounts {
+            return self.click_accounts(ui, row);
+        }
         self.hover(ui, row);
         self.key(ui, MenuKey::Enter)
+    }
+
+    /// [`Self::click`]'s accounts arm: **a single click focuses a row, a double
+    /// click selects it** — the server list's model, reached through the same
+    /// [`Self::double_click`] tracker rather than a second one.
+    ///
+    /// Before this, `Screen::Accounts` had no arm at all and fell through to
+    /// `hover` + `Enter`, so one click ran `select` — committing the account
+    /// switch and writing `profiles.json` on a click that may only have been
+    /// aiming Remove at a row. Focus and activation were the same event, which
+    /// is exactly what the server list and the world list both avoid.
+    ///
+    /// Button rows keep single-click activation, matching the server list's
+    /// footer: `click_row` returns `false` for them (and for the sign-in and
+    /// name-editor frames, which draw no list), and the fall-through below is
+    /// the unchanged path.
+    fn click_accounts(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+        if !self.accounts.click_row(row) {
+            self.hover(ui, row);
+            return self.key(ui, MenuKey::Enter);
+        }
+        let now_ms = self.click_clock.elapsed().as_millis() as u64;
+        if self.double_click.click(now_ms, (Screen::Accounts, row)) {
+            self.accounts.select_focused();
+        }
+        MenuAction::None
     }
 
     /// [`Self::hover`]'s multiplayer arm. A footer row moves the button
@@ -3064,10 +3100,11 @@ impl MenuNav {
     /// quadrant first, then the two move quadrants with their index guards, and
     /// **selection last** — a plain click selects and does not join.
     ///
-    /// The one piece of vanilla's ordering that is missing is the double-click
-    /// (`if (doubleClick) this.join()`), because `app.rs` reports one click at a
-    /// time with no interval. Joining is still one click away on the icon's right
-    /// half, and one keypress away with Enter or the Join Server button.
+    /// The double-click (`if (doubleClick) this.join()`) is implemented, last in
+    /// that order and ungated by the icon quadrants. This doc used to say it was
+    /// missing "because `app.rs` reports one click at a time with no interval";
+    /// [`super::focus::DoubleClickTracker`] supplies the interval, and the claim
+    /// outlived the gap by longer than it was true.
     fn click_list(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
         if row < self.list.len() {
             self.server = row;
@@ -3103,7 +3140,7 @@ impl MenuNav {
             // click landed, icon or not. `entry_icon_cursor` played no part
             // in reaching this before, and must not gate it now either.
             let now_ms = self.click_clock.elapsed().as_millis() as u64;
-            if self.double_click.click(now_ms, row) {
+            if self.double_click.click(now_ms, (Screen::ServerList, row)) {
                 return match self.list.get(row) {
                     Some(entry) => {
                         let entry = entry.clone();
@@ -7124,6 +7161,15 @@ mod tests {
         // The box width the HUD really draws, read back out of the vertex
         // buffer: row 0's background starts at `x == 0`, so its second vertex's
         // NDC x is `2 * w / b.w - 1` (`verts[6]`, as the `hud.rs` gate does).
+        //
+        // That rect is the chat *plate*, which is wider than the text column by
+        // a fixed padding (`hud::CHAT_PLATE_PAD_PX`, scaled by the chat pose
+        // scale) so a full-width wrapped line cannot overhang its own
+        // background. Subtracting it here recovers the column width this gate
+        // is actually about; the `pct * 280 + 40` slope above stays derived
+        // independently of `chat_width_px`.
+        let plate_pad =
+            crate::hud::CHAT_PLATE_PAD_PX * crate::hud::chat_pose_scale(ChatDisplayOptions::default());
         let drawn_px = |opts: &Options| {
             let geo = HudGeometry::build(
                 &HudFrame {
@@ -7139,7 +7185,7 @@ mod tests {
                 640,
                 480,
             );
-            (geo.verts[6] + 1.0) * CANVAS_W / 2.0
+            (geo.verts[6] + 1.0) * CANVAS_W / 2.0 - plate_pad
         };
 
         let (mut nav, _path) = self::nav("settings-chat-width-consumed");
@@ -10915,6 +10961,83 @@ mod tests {
             usize::MAX,
             "a fresh entry must focus nothing again"
         );
+    }
+
+    /// **The island gate for `click`'s account-row arm**, and the discriminator
+    /// for the interaction change: driven through `click` — the function
+    /// `app.rs`'s mouse handler actually calls — because `AccountsNav::click_row`
+    /// and `select_focused` being unit-tested proves nothing about whether
+    /// anything calls them.
+    ///
+    /// Without the arm, `click` falls through to `hover` + `Enter`, and `Enter`
+    /// on a list row **selects**. So the assertion that carries the whole change
+    /// is the negative one after the first click: under the old behaviour that
+    /// account was already selected and `profiles.json` already written.
+    #[test]
+    fn a_single_click_on_an_account_focuses_it_and_a_second_selects_it() {
+        use crate::menu::accounts::AccountRow;
+        use lodestone_auth::metadata::{AccountProfile, AccountsMetadata};
+
+        let (mut nav, path) = nav("accounts-dblclick");
+        let dir = path.parent().expect("the temp path has a parent");
+        let profiles = dir.join("profiles.json");
+        // Seed three real accounts *before* the nav reads them, so the list has
+        // more than the lone offline row — with one row, "the cursor moved to
+        // the row I clicked" is true of every implementation, including one that
+        // never moved it at all.
+        std::fs::create_dir_all(dir).expect("temp dir");
+        let mut meta = AccountsMetadata::default();
+        for i in 0..3u64 {
+            meta.upsert(AccountProfile {
+                profile_id: uuid::Uuid::from_u128(u128::from(i) + 1),
+                username: format!("p{i}"),
+                skin_url: None,
+                last_used: i,
+            });
+        }
+        meta.save_to(&profiles).expect("seed profiles.json");
+        let mut nav = MenuNav::with_paths(path.clone(), dir.join("options.json"), profiles.clone());
+        let mut ui = UiState::new();
+        ui.open_accounts();
+
+        let target = match nav.accounts().rows().get(2) {
+            Some(AccountRow::Account(p)) => p.profile_id,
+            other => panic!("row 2 of 3 accounts + offline must be an account: {other:?}"),
+        };
+        assert_eq!(nav.accounts().highlighted(), 0, "precondition: cursor at 0");
+        assert!(!nav.accounts().is_selected(target), "precondition: nothing selected");
+
+        assert_eq!(nav.click(&mut ui, 2), MenuAction::None);
+        assert_eq!(
+            nav.accounts().highlighted(),
+            2,
+            "the click must aim Select/Remove/Delete at the row it landed on"
+        );
+        assert!(
+            !nav.accounts().is_selected(target),
+            "a single click selected the account -- `click`'s account-row arm is \
+             missing, so the click was translated into hover + Enter"
+        );
+
+        assert_eq!(nav.click(&mut ui, 2), MenuAction::None);
+        assert!(
+            nav.accounts().is_selected(target),
+            "the control failed: a second click did not select the focused row, \
+             so the negative assertion above proves nothing"
+        );
+        assert_eq!(ui.screen(), Screen::Accounts, "neither click leaves the screen");
+
+        // The pair must be genuinely consecutive *on this row*, and the tracker
+        // is now keyed by screen as well, so a stray click elsewhere in the list
+        // resets it rather than arming the next one.
+        assert_eq!(nav.click(&mut ui, 0), MenuAction::None);
+        assert_eq!(nav.click(&mut ui, 2), MenuAction::None);
+        assert_eq!(
+            nav.accounts().highlighted(),
+            2,
+            "row 2 is focused again, but not by a consecutive pair"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// **The island gate for `click`'s `Screen::Accounts` arm.**

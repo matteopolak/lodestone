@@ -636,6 +636,76 @@ impl AccountsNav {
         }
     }
 
+    /// A **single** mouse click on rendered row `rendered_row`: move the
+    /// cursor, and nothing else. Returns whether that row was a list row, so
+    /// the caller knows whether a double-click is even meaningful for it.
+    ///
+    /// This is the "focus" half of the server list's interaction model, which
+    /// this screen now shares: a click aims Select/Remove/Delete at the row you
+    /// clicked, and **committing** the account switch takes a second click.
+    /// Before this, `MenuNav::click` fell through to `hover` + `Enter` for this
+    /// screen, so one click both moved the cursor *and* ran [`select`] —
+    /// writing `profiles.json` on every stray click, and switching account on a
+    /// click that was only meant to aim Remove.
+    ///
+    /// # Why it writes `highlighted` where [`Self::hover`] deliberately does not
+    ///
+    /// They are different events answering different questions. Hover must not
+    /// touch `highlighted`, because moving the mouse across the list would
+    /// silently re-aim Select and Remove at whatever the cursor last passed
+    /// over — the reported bug that `hovering_an_account_does_not_change_what_select_acts_on`
+    /// guards. A click is the opposite: vanilla's
+    /// `AbstractSelectionList.mouseClicked` ends in `setSelected`, so a click
+    /// *is* how the cursor moves. Leaving `highlighted` behind here would aim
+    /// Remove at the keyboard's last row while the click visibly moved the
+    /// highlight somewhere else.
+    ///
+    /// `false` for a button row and for the sign-in and name-editor frames,
+    /// which draw no list at all — the caller keeps single-click activation for
+    /// those, exactly as the server list's footer does.
+    pub fn click_row(&self, rendered_row: usize) -> bool {
+        let mut st = self.state.borrow_mut();
+        // The same two guards [`Self::hover`] applies, for the same reason: the
+        // sign-in, failure and name-editor frames draw one wide button and no
+        // list rows, so a row index means nothing to the mapping below.
+        if !matches!(st.sign_in, SignIn::Idle) || st.name_edit.is_some() {
+            return false;
+        }
+        let list_len = list_len(&st);
+        if rendered_row < list_len {
+            st.focus = rendered_row;
+            st.highlighted = rendered_row;
+            return true;
+        }
+        let button = rendered_row - list_len;
+        if button < BUTTON_COUNT {
+            st.focus = list_len + button;
+        }
+        false
+    }
+
+    /// The **double**-click action: commit the focused row as the selected
+    /// account and persist `profiles.json`.
+    ///
+    /// The same [`select`] the Enter key and the Select button reach, so the
+    /// three cannot disagree about what selecting means or about which row it
+    /// acts on. Silently does nothing for a non-list row, which cannot happen
+    /// through the caller ([`Self::click_row`] returns `false` there) but keeps
+    /// this safe to call on its own.
+    pub fn select_focused(&self) {
+        let mut st = self.state.borrow_mut();
+        if !matches!(st.sign_in, SignIn::Idle) || st.name_edit.is_some() {
+            return;
+        }
+        let list_len = list_len(&st);
+        if st.focus >= list_len {
+            return;
+        }
+        let logical = st.focus;
+        st.highlighted = logical;
+        select(&mut st, logical, &self.path);
+    }
+
     /// Handles one key with a real worker spawn (a genuine background thread
     /// against live Microsoft endpoints). See [`Self::handle_key_with`] for
     /// the seam tests use instead.
@@ -1780,10 +1850,15 @@ mod tests {
     #[test]
     fn clicking_an_account_selects_it_and_moves_what_remove_acts_on() {
         // The other direction of the hover fix, and the reason it is not just a
-        // deleted line. `MenuNav::click` reaches this screen as `hover` + `Enter`;
-        // now that `hover` no longer writes `highlighted`,
-        // `Enter` must, or Remove and Delete stay aimed at a row the player is no
-        // longer looking at.
+        // deleted line: now that `hover` no longer writes `highlighted`, `Enter`
+        // must, or Remove and Delete stay aimed at a row the player is no longer
+        // looking at.
+        //
+        // This is the **keyboard** path. `MenuNav::click` used to reach a list
+        // row this same way — `hover` then `Enter` — which is why the two were
+        // once one test; a click now goes through `click_row`/`select_focused`
+        // instead, and is covered by
+        // `a_single_click_focuses_an_account_and_a_second_click_selects_it`.
         let path = temp_path("click-selects");
         let mut meta = AccountsMetadata::default();
         for i in 0..3u64 {
@@ -1811,6 +1886,69 @@ mod tests {
         } else {
             panic!("row 2 of 3 accounts + offline should be an account: {ordered:?}");
         }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The interaction model this screen now shares with the server list and
+    /// the world list: **one click focuses, two clicks select**.
+    ///
+    /// The discriminating assertion is the *negative* one in the middle — after
+    /// the first click the row must be highlighted and **not** selected. A gate
+    /// that only checked the end state would pass under the old behaviour too,
+    /// because the old single click also ended with row 2 highlighted and
+    /// selected; the whole change is that those two stopped happening together.
+    ///
+    /// It matters beyond tidiness: `select` writes `profiles.json`, so under
+    /// the old model every stray click on the list committed an account switch
+    /// to disk — including a click that was only aiming Remove at a row.
+    #[test]
+    fn a_single_click_focuses_an_account_and_a_second_click_selects_it() {
+        let path = temp_path("click-focus-then-select");
+        let mut meta = AccountsMetadata::default();
+        for i in 0..3u64 {
+            meta.upsert(profile(&format!("p{i}"), i));
+        }
+        meta.save_to(&path).unwrap();
+        let nav = AccountsNav::with_path(path.clone());
+
+        let target = match nav.rows().get(2) {
+            Some(AccountRow::Account(p)) => p.profile_id,
+            other => panic!("row 2 of 3 accounts + offline must be an account: {other:?}"),
+        };
+        assert!(!nav.is_selected(target), "nothing is selected to begin with");
+
+        assert!(nav.click_row(2), "row 2 is a list row");
+        assert_eq!(nav.focus(), 2);
+        assert_eq!(
+            nav.highlighted(),
+            2,
+            "a click aims Select/Remove/Delete at the row it landed on"
+        );
+        assert!(
+            !nav.is_selected(target),
+            "a single click must NOT commit the account switch -- that is the \
+             whole difference from the old hover-plus-Enter fall-through"
+        );
+
+        nav.select_focused();
+        assert!(
+            nav.is_selected(target),
+            "the second click selects the focused row"
+        );
+
+        // A button row is not a list row: `click_row` says so, which is what
+        // keeps single-click activation on the footer (the server list's rule
+        // too), and it must not disturb the account cursor on its way past.
+        let buttons_start = nav.rows().len();
+        assert!(
+            !nav.click_row(buttons_start),
+            "a button row must report itself as not a list row"
+        );
+        assert_eq!(
+            nav.highlighted(),
+            2,
+            "focusing a button must not re-aim Remove"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
