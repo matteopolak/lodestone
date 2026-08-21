@@ -557,6 +557,27 @@ pub enum LiveOption {
     /// lives in `crate::particles::Particles::particle_level_permits`, because
     /// `calculateParticleLevel` is probabilistic and needs an RNG.
     Particles,
+    /// `options.biomeBlendRadius` →
+    /// [`crate::config::Options::biome_blend_radius`].
+    ///
+    /// An **`IntRange(0, 7)`** (`Options.java`) like [`Self::RenderDistance`],
+    /// so its handle comes from [`SliderRange`] and [`Self::unit_double`]
+    /// answers `None` for it.
+    ///
+    /// **The stored value is the window radius and the label is the window
+    /// width.** Vanilla's stringifier is
+    /// `genericValueLabel(caption, translatable("options.biomeBlendRadius." +
+    /// (value * 2 + 1)))`, so a stored `2` reads "5x5 (Normal)" and a stored
+    /// `0` reads "OFF (Fastest)". Transcribing the radius into the label
+    /// directly would name a different setting at every value but the endpoints
+    /// it does not have.
+    ///
+    /// Its consumer was `lodestone_render::biome_tint::BlendedTintCursor`, fed
+    /// the frozen `BLEND_RADIUS` at all three of `mesher`'s view constructors —
+    /// and that constant's own doc in the render crate already described itself
+    /// as the value used "unless a caller has an actual video-settings" one. No
+    /// caller did.
+    BiomeBlendRadius,
 }
 
 impl LiveOption {
@@ -640,7 +661,9 @@ impl LiveOption {
             // A three-state cycle, not a slider at all — `CloudStatus`'s shape.
             | LiveOption::AttackIndicator
             // A three-state cycle, not a slider at all.
-            | LiveOption::Particles => None,
+            | LiveOption::Particles
+            // The seventh `IntRange`, `RenderDistance`'s reason again.
+            | LiveOption::BiomeBlendRadius => None,
         }
     }
 
@@ -708,7 +731,9 @@ impl LiveOption {
             // A three-state cycle, not a slider at all — `CloudStatus`'s shape.
             | LiveOption::AttackIndicator
             // A three-state cycle, not a slider at all.
-            | LiveOption::Particles => None,
+            | LiveOption::Particles
+            // The seventh `IntRange`, `RenderDistance`'s reason again.
+            | LiveOption::BiomeBlendRadius => None,
         }
     }
 
@@ -765,6 +790,7 @@ impl LiveOption {
             LiveOption::MipmapLevels => "mipmapLevels",
             LiveOption::WeatherRadius => "weatherRadius",
             LiveOption::MenuBackgroundBlurriness => "menuBackgroundBlurriness",
+            LiveOption::BiomeBlendRadius => "biomeBlendRadius",
             _ => return None,
         };
         INT_RANGE_SLIDERS
@@ -1020,6 +1046,14 @@ impl Cell {
         if spec.live == Some(LiveOption::MenuBackgroundBlurriness) {
             return Some(menu_background_blurriness_slider_fraction(
                 options.menu_background_blurriness,
+            ));
+        }
+        // `biomeBlendRadius`' `IntRange(0, 7)` — the seventh of the family. The
+        // fraction is placed by the **radius**, which is what the value set
+        // ranges over; only the label shows the width.
+        if spec.live == Some(LiveOption::BiomeBlendRadius) {
+            return Some(biome_blend_radius_slider_fraction(
+                options.biome_blend_radius,
             ));
         }
         // A **live** `UnitDouble` option reads its handle position from the
@@ -1521,6 +1555,20 @@ pub fn mipmap_levels_slider_fraction(levels: u32) -> f32 {
     range.to_slider_value(i32::try_from(levels).unwrap_or(range.min))
 }
 
+/// `biomeBlendRadius`' slider fraction from the real, persisted **radius**.
+///
+/// The seventh of the family — see [`mipmap_levels_slider_fraction`]. The
+/// radius, not the width: `IntRange(0, 7)` ranges over the radius and the width
+/// only ever appears in the label.
+#[must_use]
+pub fn biome_blend_radius_slider_fraction(radius: i32) -> f32 {
+    let range = INT_RANGE_SLIDERS
+        .iter()
+        .find(|(a, _, _)| *a == "biomeBlendRadius")
+        .map_or(SliderRange { min: 0, max: 7 }, |(_, r, _)| *r);
+    range.to_slider_value(radius)
+}
+
 /// `menuBackgroundBlurriness`' slider fraction from the real, persisted
 /// blurriness. The sixth of the family — see [`mipmap_levels_slider_fraction`].
 #[must_use]
@@ -1962,6 +2010,40 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
             crate::config::ParticleLevel::Decreased => "Decreased".to_string(),
             crate::config::ParticleLevel::Minimal => "Minimal".to_string(),
         },
+        // `genericValueLabel(caption, translatable("options.biomeBlendRadius."
+        // + (value * 2 + 1)))` (`Options.java`) — the key is the window
+        // **width**, not the stored radius, and `en_us.json` gives each width
+        // its own hand-written name rather than a format pattern.
+        LiveOption::BiomeBlendRadius => biome_blend_caption(options.biome_blend_radius),
+    }
+}
+
+/// The value half of `biomeBlendRadius`' label — `en_us.json`'s
+/// `options.biomeBlendRadius.<width>` for `width = 2 * radius + 1`.
+///
+/// A table rather than a format pattern because vanilla's language file gives
+/// each width its own text, and the qualifiers are not derivable from the
+/// number: `1` is "OFF (Fastest)" and `15` is "15x15 (Maximum)". Transcribed
+/// verbatim from the eight `options.biomeBlendRadius.*` keys, which cover
+/// exactly the widths `IntRange(0, 7)` can produce.
+///
+/// An out-of-range radius falls back to the bare `NxN` form rather than
+/// panicking — the same reasoning `LiveOption::SoundVolume`'s index gives: the
+/// value is clamped on both the config and the drag side, so reaching here is a
+/// hand-edited file, and a settings screen is the wrong place to abort.
+#[must_use]
+fn biome_blend_caption(radius: i32) -> String {
+    let width = radius * 2 + 1;
+    match width {
+        1 => "OFF (Fastest)".to_string(),
+        3 => "3x3 (Fast)".to_string(),
+        5 => "5x5 (Normal)".to_string(),
+        7 => "7x7 (High)".to_string(),
+        9 => "9x9 (Very High)".to_string(),
+        11 => "11x11 (Extreme)".to_string(),
+        13 => "13x13 (Showoff)".to_string(),
+        15 => "15x15 (Maximum)".to_string(),
+        other => format!("{other}x{other}"),
     }
 }
 
@@ -2119,7 +2201,10 @@ static VIDEO: &[Entry] = &[
     head("Quality & Performance"),
     big(live_slider("graphicsPreset", "Preset", LiveOption::GraphicsPreset)),
     pair(
-        slider("biomeBlendRadius", "Biome Blend"),
+        // Live: `BlendedTintCursor` already took a radius and every one of
+        // `mesher`'s three view constructors handed it the frozen
+        // `BLEND_RADIUS`. See `LiveOption::BiomeBlendRadius`.
+        live_slider("biomeBlendRadius", "Biome Blend", LiveOption::BiomeBlendRadius),
         // Live since issue #443 — see `LiveOption::RenderDistance`. Its
         // neighbour `simulationDistance` below is deliberately *not*: this
         // client has no simulation-distance consumer at all, so wiring it would
@@ -4175,8 +4260,11 @@ mod tests {
                 // The Quality & Performance grid's own `big` row, before the
                 // pairs it can write three of — see `MenuNav::apply_graphics_preset`.
                 LiveOption::GraphicsPreset,
-                // Video page, on the Quality & Performance grid, next to the
-                // (still inactive) Biome Blend.
+                // Video page, on the Quality & Performance grid: Biome Blend
+                // and Render Distance are one `pair`, in that order, so the
+                // blend radius sorts first. Its consumer was
+                // `BlendedTintCursor`, fed the frozen `BLEND_RADIUS`.
+                LiveOption::BiomeBlendRadius,
                 LiveOption::RenderDistance,
                 // Also Video, in the `(ambientOcclusion, cloudStatus)` pair: the
                 // three-state Clouds cycle, whose `SkyFrame::with_cloud_status`
@@ -4282,7 +4370,8 @@ mod tests {
                 LiveOption::GlintStrength,
                 LiveOption::PanoramaSpeed,
             ],
-            "FOV on the root; GUI Scale, Render Distance, Clouds, Mipmap Levels, \
+            "FOV on the root; GUI Scale, Biome Blend, Render Distance, Clouds, \
+             Mipmap Levels, \
              Entity Shadows, Menu Background Blur, Weather Effect Radius, Attack \
              Indicator and Particles on Video; \
              the four toggle \
@@ -4326,21 +4415,22 @@ mod tests {
             render_distance.is_live(),
             "renderDistance is a persisted `Options` field since #443"
         );
-        // The count itself, not just the ratio's ingredients: 56 live option
-        // *rows* (51 distinct options, **five** of them placed twice — the three
+        // The count itself, not just the ratio's ingredients: 57 live option
+        // *rows* (52 distinct options, **five** of them placed twice — the three
         // Chat/Accessibility sliders, `showSubtitles` on Sound and
         // Accessibility, and now `menuBackgroundBlurriness` on Video and
-        // Accessibility, so 56 - 5 == 51 — the video-settings/leaves session's
+        // Accessibility, so 57 - 5 == 52 — the video-settings/leaves session's
         // five, framerateLimit/enableVsync/inactivityFpsLimit/graphicsPreset/
         // cutoutLeaves, plus mipmapLevels, entityShadows, weatherRadius,
-        // attackIndicator and particles, are each placed once)
+        // attackIndicator, particles and biomeBlendRadius, are each placed
+        // once)
         // + 9 Done buttons (one per page, always live) + 13 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid,
         // Accessibility -> Controls, Controls -> Mouse, Controls -> Key Binds,
         // and the root's own Online button, live outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 78, "outside a world: {live:?}");
+        assert_eq!(live.len(), 79, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -4370,11 +4460,12 @@ mod tests {
         // inactivityFpsLimit, graphicsPreset, cutoutLeaves — the block-atlas
         // mip-depth session added a sixth: mipmapLevels — and this session added
         // a seventh: entityShadows, an eighth: weatherRadius, a ninth:
-        // attackIndicator, a tenth: particles, and
+        // attackIndicator, a tenth: particles, an eleventh: biomeBlendRadius,
+        // and
         // `menuBackgroundBlurriness`, which is **two** rows (Video and
         // Accessibility) for one option.
-        assert_eq!(outside.len(), 78);
-        assert_eq!(inside.len(), 77, "one fewer: the root's Online button");
+        assert_eq!(outside.len(), 79);
+        assert_eq!(inside.len(), 78, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -5386,6 +5477,9 @@ mod tests {
         // The particle-density filter: `doAddParticle`'s distance half was
         // already transcribed and only its level test was missing.
         LiveOption::Particles,
+        // The biome tint blend window: `BlendedTintCursor` already took a
+        // radius and every caller handed it the frozen `BLEND_RADIUS`.
+        LiveOption::BiomeBlendRadius,
     ];
 
     /// Every [`LiveOption`] must be placed on some page — the island check in
@@ -5460,15 +5554,17 @@ mod tests {
                 | LiveOption::WeatherRadius
                 | LiveOption::MenuBackgroundBlurriness
                 | LiveOption::AttackIndicator
-                | LiveOption::Particles => {}
+                | LiveOption::Particles
+                | LiveOption::BiomeBlendRadius => {}
             }
         }
         // 25 before the kind A batch, plus eleven sound buses, FOV, both glint
         // parameters and Clouds, plus the five video-settings/leaves rows that
         // session wired, plus the block-atlas mip-depth row, plus this
         // session's entity-shadows row, plus the weather-radius,
-        // menu-background-blur, attack-indicator and particles rows.
-        assert_eq!(ALL.len(), 51, "fifty-one distinct live options");
+        // menu-background-blur, attack-indicator, particles and biome-blend
+        // rows.
+        assert_eq!(ALL.len(), 52, "fifty-two distinct live options");
         // And the eleven indices are all of them, none repeated: `SoundVolume` is
         // a *payload* variant, so neither the compiler nor the match above can see
         // a missing or duplicated index, and a duplicate would silently leave one

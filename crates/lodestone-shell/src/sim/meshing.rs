@@ -185,6 +185,15 @@ impl Sim {
         self.terrain_and_world(|store, terrain| terrain.set_cutout_leaves(cutout_leaves, store));
     }
 
+    /// Push vanilla's `options.biomeBlendRadius` down to the mesh layer, the
+    /// same shape as [`Self::set_cutout_leaves`] just above and with the same
+    /// per-frame-poll contract: `TerrainMesh::set_blend_radius`'s own equality
+    /// guard is what keeps this affordable, because a real change re-meshes
+    /// every loaded column.
+    pub fn set_blend_radius(&mut self, radius: i32) {
+        self.terrain_and_world(|store, terrain| terrain.set_blend_radius(radius, store));
+    }
+
     /// Reloads the block/model atlas and the classifier the mesh workers use
     /// from whatever resource packs are currently selected
     /// (`crate::resources::selected_packs`), respawning the worker pool and

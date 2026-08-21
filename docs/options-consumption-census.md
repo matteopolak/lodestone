@@ -130,7 +130,39 @@ consumer rather than inferred from the group it sits in:
 **`entityShadows` and `weatherRadius` have both left kind C** and they left it for
 opposite reasons, which is why they are named here rather than quietly deleted from
 the row above. `entityShadows`' consumer genuinely did not exist and was built
-(`RenderState::prepare_shadows`). `particles` was another mis-filed kind A: `sim::net_apply`'s `NetUpdate::Particles`
+(`RenderState::prepare_shadows`). `biomeBlendRadius` was mis-filed the same way, and its consumer said so in
+writing: `lodestone_render::biome_tint`'s doc for `DEFAULT_BLEND_RADIUS`
+described it as the value used *"unless a caller has an actual video-settings"*
+one — and no caller did. All three of `mesher`'s view constructors passed the
+frozen `BLEND_RADIUS`. `mesh_one` now takes the radius and threads it to the
+block **and fluid** paths (water is biome-tinted like foliage; wiring only the
+blocks would leave a lake blending at the default while the grass around it
+followed the slider — a shoreline mismatch more visible than either setting
+alone), stamped onto each `Job::Mesh` beside `cutoutLeaves` and remeshing every
+loaded column on a real change, which is vanilla's own
+`operateOnLevelExtractor(LevelExtractor::allChanged)`.
+
+The public `mesh_snapshot_models`/`mesh_snapshot_fluids` keep their old
+signatures and delegate at the default, so the many pixel gates calling them
+positionally still measure the geometry they always did; production goes through
+`mesh_one`.
+
+**The stored value is the radius and the label is the width.** Vanilla's
+stringifier keys `options.biomeBlendRadius.<2r + 1>`, so `2` reads "5x5
+(Normal)" and `0` reads "OFF (Fastest)" — eight hand-written names in
+`en_us.json`, not a format pattern.
+
+**Five rows left kind C in one session** — `weatherRadius`,
+`menuBackgroundBlurriness`, `attackIndicator`, `particles` and
+`biomeBlendRadius` — and **four of the five were never kind C at all**. The
+2026-08-08 sweep that built the table above sorted by "is there a settings-row
+read?" and answered "no" for rows whose consumer was already correct, already
+parameterised, and already being handed a constant by its producer. That is
+kind A's definition, and it is why this doc's own opening warns that "blocked
+on a missing subsystem" is the minority case. Before filing a row as kind C,
+grep for the hardcoded constant.
+
+`particles` was another mis-filed kind A: `sim::net_apply`'s `NetUpdate::Particles`
 arm had already transcribed `ClientLevel.doAddParticle`'s 32-block cutoff *and* its
 `overrideLimiter` bypass, and was missing only the sibling `particleLevel != MINIMAL`
 test three lines away. See `docs/particle-catalogue.md` for the fold's probabilistic
@@ -218,7 +250,7 @@ groupings are still the right map of *which* subsystem each row belongs to.
 |---|---|---|
 | **Audio** | ~~all 11 `soundSource.*`~~, `soundDevice`, `directionalAudio`, `musicFrequency`, `musicToast` | **superseded — see kind A above.** The eleven volume sliders are **fully live since 2026-08-09**, `CategoryVolumes::set_user` through to the row. `soundDevice` (device enumeration) and `musicFrequency`/`musicToast` are separate and smaller |
 | **Window / display** | `fullscreen`, `exclusiveFullscreen`, `fullscreenResolution`, ~~`enableVsync`~~, ~~`framerateLimit`~~, ~~`inactivityFpsLimit`~~, `preferredGraphicsBackend` | `enableVsync`/`framerateLimit`/`inactivityFpsLimit` are **fully live** — see [`docs/frame-pacing.md`](./frame-pacing.md). `fullscreen`/`exclusiveFullscreen`/`fullscreenResolution` are deliberately **not**: this client has no exclusive-fullscreen support at all (no winit `Fullscreen::Exclusive` call anywhere), and `fullscreenResolution`'s own vanilla value set — a lazily-populated list of the monitor's real video modes — has nothing to attach to without it. Wiring the resolution row alone, with no fullscreen mode for it to apply *in*, would be exactly the half-fix `CLAUDE.md` warns against; `preferredGraphicsBackend` needs a restart-time backend choice this client's `wgpu` init does not expose yet |
-| **Renderer quality** | ~~`graphicsPreset`~~, `gamma`, ~~`mipmapLevels`~~, `ambientOcclusion`, `biomeBlendRadius`, ~~`particles`~~, ~~`cloudStatus`~~, `cloudRange`, `entityShadows`, `entityDistanceScaling`, `improvedTransparency`, `textureFiltering`, `maxAnisotropyBit`, ~~`weatherRadius`~~, `chunkSectionFadeInTime`, `vignette`, ~~`cutoutLeaves`~~ | `cloudStatus` is **fully live since 2026-08-09**, all three states; `graphicsPreset` and `cutoutLeaves` are **fully live** — `MenuNav::apply_graphics_preset` writes `renderDistance`/`cloudStatus`/`cutoutLeaves` (the three of vanilla's seventeen preset fields this client has consumers for) and leaves `CUSTOM` alone, matching vanilla's own `switch`; `mipmapLevels` is **fully live** — see kind A/C above for `BlockAtlas::build_with_mip_levels`/`resources::set_mipmap_levels`; `weatherRadius` is **fully live** — `app::weather::weather_columns_for_frame` takes the radius from `MenuNav::options` and passes it to both `extract_columns` and `column_instance`; the rest each need their own renderer knob, and several are whole features |
+| **Renderer quality** | ~~`graphicsPreset`~~, `gamma`, ~~`mipmapLevels`~~, `ambientOcclusion`, ~~`biomeBlendRadius`~~, ~~`particles`~~, ~~`cloudStatus`~~, `cloudRange`, ~~`entityShadows`~~, `entityDistanceScaling`, `improvedTransparency`, `textureFiltering`, `maxAnisotropyBit`, ~~`weatherRadius`~~, `chunkSectionFadeInTime`, `vignette`, ~~`cutoutLeaves`~~ | `cloudStatus` is **fully live since 2026-08-09**, all three states; `graphicsPreset` and `cutoutLeaves` are **fully live** — `MenuNav::apply_graphics_preset` writes `renderDistance`/`cloudStatus`/`cutoutLeaves` (the three of vanilla's seventeen preset fields this client has consumers for) and leaves `CUSTOM` alone, matching vanilla's own `switch`; `mipmapLevels` is **fully live** — see kind A/C above for `BlockAtlas::build_with_mip_levels`/`resources::set_mipmap_levels`; `weatherRadius` is **fully live** — `app::weather::weather_columns_for_frame` takes the radius from `MenuNav::options` and passes it to both `extract_columns` and `column_instance`; the rest each need their own renderer knob, and several are whole features |
 | **Post-process / screen effects** | `screenEffectScale`, `fovEffectScale`, `darknessEffectScale`, ~~`damageTiltStrength`~~, ~~`glintSpeed`~~, ~~`glintStrength`~~ | `damageTiltStrength` is **live** — its consumer had been honoured all along; the two glint rows are **fully live since 2026-08-09** at all three glint sites; the three `*EffectScale` rows are kind **B** (the effect they scale is itself an island) and are the group's whole remainder |
 | **Distances** | ~~`renderDistance`~~, `simulationDistance`, ~~`fov`~~, ~~`sensitivity`~~ | `renderDistance`, `sensitivity` and `fov` are all live — `fov` **fully since 2026-08-09** (`camera_rig::build_camera` takes the degrees instead of pinning `FOV_Y_DEGREES`, and the row is on the **root** page); `simulationDistance` is kind **C** and the group's only remainder |
 | **Chat behaviour** | `chatVisibility`, `chatLinks`, `chatLinksPrompt`, `chatDelay`, `autoSuggestions`, `hideMatchedNames`, `onlyShowSecureChat`, `saveChatDrafts`, `reducedDebugInfo` | chat *behaviour* rather than chat *appearance*; the appearance half is now wired |

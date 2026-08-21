@@ -1176,11 +1176,34 @@ pub fn mesh_snapshot_models(
     models: &BlockModels,
     cutout_leaves: bool,
 ) -> ModelMesh {
+    mesh_snapshot_models_at(snapshot, models, cutout_leaves, BLEND_RADIUS)
+}
+
+/// [`mesh_snapshot_models`] at an explicit biome-blend radius — vanilla's
+/// `options.biomeBlendRadius`, an `IntRange(0, 7)` whose displayed value is the
+/// window *width* `2r + 1` (`0` is `en_us.json`'s "OFF (Fastest)", i.e. no
+/// blending at all).
+///
+/// The three-argument form above is kept, delegating at
+/// [`BLEND_RADIUS`] — vanilla's own default — so the many gates that call it
+/// positionally keep compiling and keep measuring the same geometry they always
+/// did. Production goes through [`mesh_one`], which takes the live value.
+///
+/// `BlendedTintCursor::new` clamps to `0..=MAX_BLEND_RADIUS` itself, so an
+/// out-of-range radius here is a wider window rather than a panic — see that
+/// constructor.
+#[must_use]
+pub fn mesh_snapshot_models_at(
+    snapshot: &SectionSnapshot,
+    models: &BlockModels,
+    cutout_leaves: bool,
+    blend_radius: i32,
+) -> ModelMesh {
     let view = SnapshotModelView {
         snapshot,
         models,
         light: SnapshotLight::new(snapshot),
-        tint: RefCell::new(BlendedTintCursor::new(BLEND_RADIUS)),
+        tint: RefCell::new(BlendedTintCursor::new(blend_radius)),
         cutout_leaves,
     };
     mesh_models(&view)
@@ -1199,12 +1222,13 @@ fn mesh_snapshot_models_layers(
     snapshot: &SectionSnapshot,
     models: &BlockModels,
     cutout_leaves: bool,
+    blend_radius: i32,
 ) -> (ModelMesh, ModelMesh) {
     let view = SnapshotModelView {
         snapshot,
         models,
         light: SnapshotLight::new(snapshot),
-        tint: RefCell::new(BlendedTintCursor::new(BLEND_RADIUS)),
+        tint: RefCell::new(BlendedTintCursor::new(blend_radius)),
         cutout_leaves,
     };
     lodestone_render::mesh_models_layers(&view)
@@ -1441,11 +1465,27 @@ impl FluidSectionView for SnapshotFluidView<'_> {
 /// two halves.
 #[must_use]
 pub fn mesh_snapshot_fluids(snapshot: &SectionSnapshot, models: &BlockModels) -> FluidMeshes {
+    mesh_snapshot_fluids_at(snapshot, models, BLEND_RADIUS)
+}
+
+/// [`mesh_snapshot_fluids`] at an explicit biome-blend radius.
+///
+/// **Water is tinted per biome exactly as foliage is**, so this has to take the
+/// option too — wiring only the block path would leave a lake's colour blending
+/// at vanilla's default while the grass around it followed the slider, a
+/// mismatch at the shoreline that is more visible than either setting alone.
+/// Same delegating shape as [`mesh_snapshot_models_at`], for the same reason.
+#[must_use]
+pub fn mesh_snapshot_fluids_at(
+    snapshot: &SectionSnapshot,
+    models: &BlockModels,
+    blend_radius: i32,
+) -> FluidMeshes {
     let view = SnapshotFluidView {
         snapshot,
         models,
         light: SnapshotLight::new(snapshot),
-        tint: RefCell::new(BlendedTintCursor::new(BLEND_RADIUS)),
+        tint: RefCell::new(BlendedTintCursor::new(blend_radius)),
     };
     mesh_fluids(&view)
 }
@@ -1520,14 +1560,14 @@ pub struct Meshed {
 
 #[cfg(not(target_arch = "wasm32"))]
 enum Job {
-    /// A snapshot plus the `options.cutoutLeaves` value it was submitted
-    /// under — see [`MeshScheduler::submit`]'s doc for why the value travels
-    /// with the job rather than being read by the worker from shared state.
-    /// The trailing `u64` is the generation [`MeshScheduler::submit`] stamped
-    /// it with, echoed back on the result channel so a stale completion can
-    /// be told from the current one — see
-    /// [`MeshScheduler::latest_generation`]'s doc.
-    Mesh(SectionSnapshot, bool, u64),
+    /// A snapshot plus the two `Options` values it was submitted under —
+    /// `options.cutoutLeaves` and `options.biomeBlendRadius`. See
+    /// [`MeshScheduler::submit`]'s doc for why they travel with the job rather
+    /// than being read by the worker from shared state. The trailing `u64` is
+    /// the generation [`MeshScheduler::submit`] stamped it with, echoed back on
+    /// the result channel so a stale completion can be told from the current
+    /// one — see [`MeshScheduler::latest_generation`]'s doc.
+    Mesh(SectionSnapshot, bool, i32, u64),
 }
 
 /// Mesh one snapshot. **The single meshing body, shared by both schedulers.**
@@ -1537,7 +1577,12 @@ enum Job {
 /// thread and the browser's in-frame drain must not be able to produce *different
 /// geometry*. A forked copy is a defect that shows up as a browser world that is
 /// subtly wrong rather than as a build failure, and no `cargo check` could see it.
-fn mesh_one(snap: SectionSnapshot, classifier: &ShellClassifier, cutout_leaves: bool) -> Meshed {
+fn mesh_one(
+    snap: SectionSnapshot,
+    classifier: &ShellClassifier,
+    cutout_leaves: bool,
+    blend_radius: i32,
+) -> Meshed {
     let _span = tracing::info_span!(
         "mesh_section",
         cx = snap.key.cx, cz = snap.key.cz, si = snap.key.si,
@@ -1547,8 +1592,8 @@ fn mesh_one(snap: SectionSnapshot, classifier: &ShellClassifier, cutout_leaves: 
     let mesh = match classifier.models() {
         Some(models) => {
             let (mut opaque, translucent_blocks) =
-                mesh_snapshot_models_layers(&snap, models, cutout_leaves);
-            let fluids = mesh_snapshot_fluids(&snap, models);
+                mesh_snapshot_models_layers(&snap, models, cutout_leaves, blend_radius);
+            let fluids = mesh_snapshot_fluids_at(&snap, models, blend_radius);
             // Lava is opaque and full-bright: fold it into the opaque pass. Water
             // and translucent blocks (glass, ice, the nether portal swirl) are
             // translucent and drawn separately, each through its own pipeline.
@@ -1616,6 +1661,9 @@ pub struct MeshScheduler {
     /// already needs `&mut self`, and a worker thread never reads this field
     /// at all — only the value its own job carried).
     cutout_leaves: bool,
+    /// The live `options.biomeBlendRadius` value, stamped onto each
+    /// [`Job::Mesh`] beside [`Self::cutout_leaves`] and for the same reason.
+    blend_radius: i32,
     /// The generation number [`Self::submit`] most recently stamped a job
     /// for this key with — the defence against a **stale mesh silently
     /// overwriting a fresher one**, which the pool's own doc already admits
@@ -1686,14 +1734,17 @@ impl MeshScheduler {
             let classifier = classifier.clone();
             workers.push(thread::spawn(move || {
                 loop {
-                    let (snap, cutout_leaves, generation) = match rx.recv() {
-                        Ok(Job::Mesh(snap, cutout_leaves, generation)) => {
-                            (snap, cutout_leaves, generation)
+                    let (snap, cutout_leaves, blend_radius, generation) = match rx.recv() {
+                        Ok(Job::Mesh(snap, cutout_leaves, blend_radius, generation)) => {
+                            (snap, cutout_leaves, blend_radius, generation)
                         }
                         Err(_) => break,
                     };
                     if result_tx
-                        .send((mesh_one(snap, &classifier, cutout_leaves), generation))
+                        .send((
+                            mesh_one(snap, &classifier, cutout_leaves, blend_radius),
+                            generation,
+                        ))
                         .is_err()
                     {
                         break;
@@ -1709,6 +1760,7 @@ impl MeshScheduler {
             pending: 0,
             column_source,
             cutout_leaves: true,
+            blend_radius: BLEND_RADIUS,
             latest_generation: HashMap::new(),
             next_generation: 0,
         }
@@ -1727,6 +1779,20 @@ impl MeshScheduler {
     #[must_use]
     pub fn cutout_leaves(&self) -> bool {
         self.cutout_leaves
+    }
+
+    /// Sets the `options.biomeBlendRadius` value future [`Self::submit`] calls
+    /// stamp onto their jobs. Same shape and same caveat as
+    /// [`Self::set_cutout_leaves`]: it does not itself re-mesh anything, which
+    /// is `TerrainMesh::set_blend_radius`'s job.
+    pub fn set_blend_radius(&mut self, value: i32) {
+        self.blend_radius = value;
+    }
+
+    /// The `options.biomeBlendRadius` value new jobs are currently stamped with.
+    #[must_use]
+    pub fn blend_radius(&self) -> i32 {
+        self.blend_radius
     }
 
     /// Whether the world this pool meshes has all its columns already. See
@@ -1756,7 +1822,12 @@ impl MeshScheduler {
         // finishes its current job first (true work-stealing).
         if self
             .job_tx
-            .send(Job::Mesh(snapshot, self.cutout_leaves, generation))
+            .send(Job::Mesh(
+                snapshot,
+                self.cutout_leaves,
+                self.blend_radius,
+                generation,
+            ))
             .is_err()
         {
             self.pending -= 1;
@@ -1923,6 +1994,9 @@ pub struct MeshScheduler {
     /// thread here, so nothing can race a queued snapshot's meshing against a
     /// toggle the way the native pool's workers could.
     cutout_leaves: bool,
+    /// The live `options.biomeBlendRadius` value, read at mesh time beside
+    /// [`Self::cutout_leaves`] and for the same reason.
+    blend_radius: i32,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1953,6 +2027,7 @@ impl MeshScheduler {
             classifier,
             column_source,
             cutout_leaves: true,
+            blend_radius: BLEND_RADIUS,
         }
     }
 
@@ -1971,6 +2046,17 @@ impl MeshScheduler {
     #[must_use]
     pub fn cutout_leaves(&self) -> bool {
         self.cutout_leaves
+    }
+
+    /// See the native scheduler's method of the same name.
+    pub fn set_blend_radius(&mut self, value: i32) {
+        self.blend_radius = value;
+    }
+
+    /// See the native scheduler's method of the same name.
+    #[must_use]
+    pub fn blend_radius(&self) -> i32 {
+        self.blend_radius
     }
 
     /// Queue a snapshot for meshing. O(1) — no meshing happens here.
@@ -2003,7 +2089,12 @@ impl MeshScheduler {
         let mut out = std::mem::take(&mut self.ready);
         let deadline = crate::platform::Instant::now() + BROWSER_MESH_BUDGET;
         while let Some(snap) = self.queue.pop_front() {
-            out.push(mesh_one(snap, &self.classifier, self.cutout_leaves));
+            out.push(mesh_one(
+                snap,
+                &self.classifier,
+                self.cutout_leaves,
+                self.blend_radius,
+            ));
             if crate::platform::Instant::now() >= deadline {
                 break;
             }
@@ -2025,7 +2116,12 @@ impl MeshScheduler {
             let Some(snap) = self.queue.pop_front() else {
                 break;
             };
-            let meshed = mesh_one(snap, &self.classifier, self.cutout_leaves);
+            let meshed = mesh_one(
+                snap,
+                &self.classifier,
+                self.cutout_leaves,
+                self.blend_radius,
+            );
             self.ready.push(meshed);
         }
         std::mem::take(&mut self.ready)
@@ -2583,6 +2679,38 @@ impl TerrainMesh {
             return;
         }
         self.scheduler.set_cutout_leaves(value);
+        self.remesh_every_loaded_column(store);
+    }
+
+    /// Sets `options.biomeBlendRadius` and, only on a real change, re-meshes
+    /// every currently-loaded column — vanilla's own
+    /// `operateOnLevelExtractor(LevelExtractor::allChanged)` for this option
+    /// too, and the same equality-guard reasoning as
+    /// [`Self::set_cutout_leaves`]: this is polled every frame, so without the
+    /// guard every frame would re-mesh the world.
+    ///
+    /// The blend window is per-*vertex* tint state baked into the mesh, so
+    /// unlike a uniform there is no way to apply a new radius to geometry
+    /// already uploaded — a remesh is the mechanism, not a heavy-handed
+    /// version of one.
+    pub fn set_blend_radius(&mut self, value: i32, store: &ChunkWorld) {
+        if self.scheduler.blend_radius() == value {
+            return;
+        }
+        self.scheduler.set_blend_radius(value);
+        self.remesh_every_loaded_column(store);
+    }
+
+    /// Force-remesh every column this session currently has uploaded.
+    ///
+    /// Extracted because three callers now want exactly this — the two option
+    /// setters above and [`Self::reload_classifier`] — and a fourth copy of the
+    /// "derive the loaded set from `uploaded_sections`" walk would be one more
+    /// thing that could drift from the others. `uploaded_sections` is every
+    /// `SectionKey` this session has handed out for GPU upload and not yet had
+    /// removed (its own doc), so it is the loaded set rather than a second
+    /// list tracking it.
+    fn remesh_every_loaded_column(&mut self, store: &ChunkWorld) {
         let columns: std::collections::BTreeSet<(i32, i32)> = self
             .uploaded_sections
             .iter()
@@ -2615,9 +2743,10 @@ impl TerrainMesh {
     /// job still queued or in flight for the *old* atlas is simply abandoned;
     /// every section it would have produced is re-submitted below against the
     /// *new* one, so nothing is lost, only redone. `cutout_leaves` is read
-    /// off the outgoing scheduler and carried onto the new one so a live
-    /// pack reload cannot silently reset the user's FAST-leaves setting back
-    /// to vanilla's `true` default (`MeshScheduler::new`'s own).
+    /// and `blend_radius` are read off the outgoing scheduler and carried onto
+    /// the new one so a live pack reload cannot silently reset the user's
+    /// FAST-leaves or Biome Blend settings back to `MeshScheduler::new`'s
+    /// defaults.
     pub fn reload_classifier(
         &mut self,
         store: &ChunkWorld,
@@ -2625,18 +2754,13 @@ impl TerrainMesh {
         classifier: ShellClassifier,
     ) {
         let cutout_leaves = self.scheduler.cutout_leaves();
+        let blend_radius = self.scheduler.blend_radius();
         let mut scheduler = MeshScheduler::new(worker_count, classifier);
         scheduler.set_cutout_leaves(cutout_leaves);
+        scheduler.set_blend_radius(blend_radius);
         self.column_source = scheduler.column_source();
         self.scheduler = scheduler;
-        let columns: std::collections::BTreeSet<(i32, i32)> = self
-            .uploaded_sections
-            .iter()
-            .map(|key| (key.cx, key.cz))
-            .collect();
-        for (cx, cz) in columns {
-            self.mesh_column_forced(store, cx, cz);
-        }
+        self.remesh_every_loaded_column(store);
     }
 
     fn mesh_column_inner(&mut self, store: &ChunkWorld, cx: i32, cz: i32, force: bool) {
@@ -3850,10 +3974,11 @@ mod tests {
 
         // Ground truth, meshed directly with no scheduler involved, so the
         // assertion below is a prediction rather than a tautology.
-        let expected_stale = mesh_one(platform_snapshot(None), &classifier, true)
+        let expected_stale = mesh_one(platform_snapshot(None), &classifier, true, BLEND_RADIUS)
             .mesh
             .quad_count();
-        let expected_fresh = mesh_one(platform_snapshot(Some([12, 7, 12])), &classifier, true)
+        let expected_fresh =
+            mesh_one(platform_snapshot(Some([12, 7, 12])), &classifier, true, BLEND_RADIUS)
             .mesh
             .quad_count();
         assert_ne!(
