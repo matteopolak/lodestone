@@ -160,159 +160,11 @@ const SEE_THROUGH_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 129.0 / 255.0];
 /// glyphs' worth of ink in one frame.
 const MAX_NAME_TAG_VERTICES: usize = 60_000;
 
-/// One glyph row's ink run, in local "logical pixel" space: `x` measured from
-/// the start of the string (before centring), `y` measured down from the
-/// string's top.
-///
-/// `pub(super)` (visible to the rest of `crate::gpu`, not beyond): `gpu/
-/// sign_text.rs` reuses this shape and [`layout_ink_runs`] directly rather
-/// than duplicating the ink-run walk a second time — see that module's doc.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct LocalRect {
-    pub(super) x: f32,
-    pub(super) y: f32,
-    pub(super) w: f32,
-    pub(super) h: f32,
-}
-
-/// One string's finished ink-run layout: the rects and the total advance
-/// [`layout_ink_runs`] returns, behind an `Arc` so a cache hit is a refcount
-/// bump rather than a `Vec` clone.
-pub(super) type InkLayout = std::sync::Arc<(Vec<LocalRect>, f32)>;
-
-/// Persisted [`layout_ink_runs`] results, keyed by the string alone.
-///
-/// ## What it is
-///
-/// The ink-run walk probes `is_ink` for every texel of every glyph cell of the
-/// string — `cell_width * cell_height` per character. Its output is pure
-/// local space with an accumulating cursor, so it depends on nothing that
-/// changes per frame: only `(text, RasterFont)`. The anchor and the billboard
-/// basis are applied *after* it, by the caller. Without this cache every
-/// visible nametag and every sign line re-walked its texels every frame — issue
-/// That fix (b).
-///
-/// ## How to change it
-///
-/// The font is not part of the key because each renderer owns exactly one
-/// `RasterFont` for its whole lifetime (a resource reload rebuilds the GPU
-/// state). **If a renderer ever swaps fonts in place, this cache must be
-/// cleared at that point** or it will serve the old font's rects. Entries are
-/// dropped wholesale past [`Self::MAX_ENTRIES`] rather than by age: names and
-/// sign lines are a small, slowly-changing set, and a wholesale clear keeps
-/// this type free of ordering state.
-///
-/// `Mutex` rather than `RefCell` so the owning renderer stays `Send`/`Sync`
-/// like every other field around it; the lock is uncontended (one render
-/// thread) and taken once per string per frame.
-#[derive(Debug, Default)]
-pub(super) struct InkLayoutCache {
-    inner: std::sync::Mutex<std::collections::HashMap<String, InkLayout>>,
-}
-
-impl InkLayoutCache {
-    /// Cleared wholesale past this many distinct strings.
-    const MAX_ENTRIES: usize = 512;
-
-    /// This string's ink-run layout, walking the texels only on a miss.
-    pub(super) fn layout(&self, raster: &RasterFont, text: &str) -> InkLayout {
-        let mut map = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(hit) = map.get(text) {
-            return std::sync::Arc::clone(hit);
-        }
-        if map.len() >= Self::MAX_ENTRIES {
-            map.clear();
-        }
-        let layout: InkLayout = std::sync::Arc::new(layout_ink_runs(raster, text));
-        map.insert(text.to_string(), std::sync::Arc::clone(&layout));
-        layout
-    }
-}
-
-/// Walks `text` through `raster` exactly as `VanillaFont::glyph` does (same
-/// per-row run-length merge over ink texels), but returns the local rects
-/// instead of emitting to a 2-D `ColourStream` — see the module doc for why
-/// this cannot just call that method. Returns the rects and the string's
-/// total advance (for horizontal centring).
-///
-/// **Per-frame callers should go through [`InkLayoutCache`] rather than calling
-/// this directly** — the walk is `O(chars * cell_width * cell_height)` and its
-/// result changes only when the string does.
-///
-/// A codepoint the font does not cover at all (not even as whitespace)
-/// contributes no rect and [`MISSING_ADVANCE`] of blank space — the hollow
-/// missing-glyph box `VanillaFont` draws is not reproduced here, a minor,
-/// deliberate fidelity loss for a case ordinary custom names/usernames don't
-/// hit (missing-glyph codepoints are rare in practice).
-///
-/// # Legacy `§` codes are consumed, and their colour is not applied
-///
-/// A `§`+code pair contributes no rect and no advance, matching
-/// `StringDecomposer.iterateFormatted` and `VanillaFont::legacy_run`. This is the
-/// path a plugin server's `§7`-prefixed mob name and a `§`-coded sign line both
-/// take, and before this they drew the two characters as glyphs.
-///
-/// The *effect* is dropped rather than applied, which is a real gap and a
-/// different one from the shape of this walk: both callers here paint every rect
-/// in one uniform colour supplied by the draw site (nametags white, sign lines the
-/// sign's dye), so there is nowhere for a per-run colour to go without giving
-/// [`LocalRect`] a colour and splitting the vertex buffers per run. Consuming the
-/// pair is the part that has to be right either way — a dropped colour reads as
-/// plain text, whereas an emitted pair reads as a bug.
-pub(super) fn layout_ink_runs(raster: &RasterFont, text: &str) -> (Vec<LocalRect>, f32) {
-    let mut cursor = 0.0f32;
-    let mut rects = Vec::new();
-    let mut chars = text.chars();
-    while let Some(ch) = chars.next() {
-        if ch == lodestone_model::text::LEGACY_PREFIX {
-            // A dangling `§` is dropped too; vanilla `break`s on it.
-            if chars.next().is_none() {
-                break;
-            }
-            continue;
-        }
-        let cp = ch as u32;
-        match raster.raster(cp) {
-            Some(r) => {
-                let texel = r.texel_size();
-                let top = r.top();
-                for ty in 0..r.cell_height() {
-                    let mut tx = 0;
-                    while tx < r.cell_width() {
-                        if !r.is_ink(tx, ty) {
-                            tx += 1;
-                            continue;
-                        }
-                        let start = tx;
-                        while tx < r.cell_width() && r.is_ink(tx, ty) {
-                            tx += 1;
-                        }
-                        rects.push(LocalRect {
-                            x: cursor + start as f32 * texel,
-                            y: top + ty as f32 * texel,
-                            w: (tx - start) as f32 * texel,
-                            h: texel,
-                        });
-                    }
-                }
-                cursor += r.advance();
-            }
-            None => {
-                cursor += raster.advance(cp).unwrap_or(MISSING_ADVANCE);
-            }
-        }
-    }
-    (rects, cursor)
-}
-
-/// [`LocalRect`]'s styled sibling: the same local "logical pixel" rect, plus
+/// A local "logical pixel" rect of ink, plus
 /// this run's own resolved RGBA colour (opaque, `alpha` always `1.0` — see
 /// [`layout_styled_ink_runs`]'s doc for why alpha is deliberately not baked
 /// in here). A world-space equivalent of `hud/vanilla_font.rs::ResolvedGlyph`
-/// flattened straight to draw-ready geometry, the way [`LocalRect`] already
+/// flattened straight to draw-ready geometry, the way this layout already
 /// is for the unstyled path.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct StyledRect {
@@ -324,14 +176,14 @@ pub(super) struct StyledRect {
 }
 
 /// One string's finished *styled* ink-run layout — the spanned sibling of
-/// [`InkLayout`].
+/// the cache below.
 pub(super) type StyledInkLayout = std::sync::Arc<(Vec<StyledRect>, f32)>;
 
 /// Persisted [`layout_styled_ink_runs`] results, keyed by the resolved span
 /// list rather than a bare string — [`TextSpan`] already derives `Hash`/`Eq`
 /// for exactly this (see its own doc: "what lets a `Vec<TextSpan>` key a wrap
 /// cache the way a plain `String` already keys `hud::ChatWrapCache`"). Same
-/// shape and same reasoning as [`InkLayoutCache`] otherwise; kept as a
+/// shape and reasoning as the nametag layout it serves; kept as a
 /// separate type rather than a generic cache because the two key types don't
 /// share a cheap `Borrow` conversion worth building for two call sites.
 #[derive(Debug, Default)]
@@ -341,7 +193,7 @@ pub(super) struct StyledInkLayoutCache {
 
 impl StyledInkLayoutCache {
     /// Cleared wholesale past this many distinct span lists — same policy as
-    /// [`InkLayoutCache::MAX_ENTRIES`].
+    /// [`Self::MAX_ENTRIES`].
     const MAX_ENTRIES: usize = 512;
 
     /// This span list's styled ink-run layout, walking the texels only on a
