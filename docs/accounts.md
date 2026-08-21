@@ -590,17 +590,61 @@ the connect path does, so it uses the shipped registration unless
 Its failure renders as an ordinary typed-error message on the sign-in screen
 ([`accounts::describe_auth_error`]), not a panic or a silent no-op.
 
+### Row interaction: click focuses, double-click selects
+
+The same model as the server list and the world list. A single click moves the
+cursor — `AccountsNav::click_row` writes both `focus` (what draws highlighted)
+and `highlighted` (what Select/Remove/Delete act on) — and a second click
+within the double-click threshold runs `select_focused`, which commits the
+account switch and persists `profiles.json`. `MenuNav::click_accounts` routes
+it, through the same `DoubleClickTracker` the server list uses.
+
+This screen previously had no arm in `MenuNav::click` at all and fell through
+to `hover` + `Enter`, and Enter on an account row selects — so one click both
+moved the cursor *and* switched account, writing `profiles.json` on a click
+that may only have been aiming Remove at a row.
+
+Note `hover` deliberately does **not** write `highlighted` and a click does.
+They are not in tension: hover must not re-aim Select/Remove at whatever the
+cursor last passed over, while a click *is* how the cursor moves. Both
+directions have gates.
+
+The tracker is keyed by `(Screen, usize)` rather than by the row alone,
+because two screens share it and a bare row index is not a unique target
+across them.
+
+### Row avatars
+
+Each row draws its **own** account's skin: `account_screen::account_head`
+reads `AccountProfile::skin_url` and resolves it through `crate::remote_skins`
+— the same URL-keyed fetch and decode cache a player's body in the world
+fills, so an account's sheet is one more entry rather than a second pipeline.
+`favicon::face_mosaic` takes the 8×8 face at `(8, 8)` with the **hat** layer
+at `(40, 8)` composited over it, matching `PlayerFaceRenderer`; a skin whose
+character is its helmet or hair is unrecognisable from the base layer alone.
+
+Every row drew `render::default_head_icon` — one hand-authored 8×8 square —
+until this landed, so the list showed the same face beside every name. The
+field had zero production sites assigning it anything else, which is why it
+looked deliberate rather than broken, and `skin_url` had been persisted per
+account the whole time with no reader.
+
+The placeholder is still the fallback, for an account with no stored URL, a
+fetch still in flight, and a sheet too small to hold a face. **Each of those
+logs its reason**: a default head looks like a head, so the fallback is
+otherwise invisible, and the three are very different bugs behind one
+identical pixel.
+
 ### What isn't built
 
-No skin fetch yet — every row's head icon is
-[`render::default_head_icon`], a hand-authored placeholder pixel grid, not a
-downloaded texture. It is deliberately written so the swap is a data change:
-[`render::head_mosaic`] takes raw RGBA bytes and dimensions, exactly the shape
-a decoded skin PNG would be in, so nothing about the row, the draw call, or
-the geometry builder needs to change once a real fetch lands. No mouse
-wheel scrolling (keyboard Up/Down only, matching every other row-stack screen
-in this menu). No credential form of any kind, by design — see the module's
-own doc comment.
+No mouse wheel scrolling (keyboard Up/Down only, matching every other
+row-stack screen in this menu). No credential form of any kind, by design —
+see the module's own doc comment.
+
+The offline row keeps the placeholder head. It is not a Microsoft account and
+carries no `skin_url`; drawing the locally cached `skin.png` there would be a
+different claim (that sheet belongs to whichever account last signed in, not
+to the offline identity).
 
 ## Configuration
 
