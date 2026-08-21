@@ -4157,6 +4157,91 @@ mod tests {
         assert_eq!(cycle("particles", "Particles").label(&options), "Particles");
     }
 
+    /// Owner report: a settings row showing the value with no name at all —
+    /// "Fancy" where vanilla shows a composed "`<name>`: Fancy", "AFK" where
+    /// vanilla shows the full label. Swept over **every** live row on the
+    /// real tree rather than the two named examples, because the report
+    /// describes a *class* of bug (a value-only format string covering a
+    /// whole family of rows), and a fixture that only checks the two
+    /// examples named in the report cannot see a sibling instance.
+    ///
+    /// A fixture whose option name is empty or equals its own value cannot
+    /// see this bug either — `assert_ne!(spec.caption, value, ..)` below is
+    /// exactly that guard, checked on every row this sweep exercises rather
+    /// than trusted once.
+    #[test]
+    fn every_live_row_carries_both_its_name_and_its_value_or_is_a_named_exception() {
+        let options = crate::config::Options::default();
+        let mut composing_rows_checked = 0;
+        let mut bare_rows_checked = 0;
+        for page in PAGES {
+            for cell in all_controls(page, OUTSIDE_A_WORLD) {
+                let Cell::Option(spec) = cell else { continue };
+                let Some(live) = spec.live else { continue };
+                let label = cell.label(&options);
+                let value = live_value(live, &options);
+                if live.value_is_the_whole_label() {
+                    // The two named vanilla exceptions
+                    // (`LiveOption::value_is_the_whole_label`'s own doc):
+                    // the row's *entire* label is the value, and that is
+                    // vanilla's own stringifier, not a bug — but it must
+                    // still equal the real value, not a caption left over
+                    // from a composing code path.
+                    assert_eq!(
+                        label, value,
+                        "{live:?}: the whole-label exception must still show the real \
+                         value, not a stale caption"
+                    );
+                    bare_rows_checked += 1;
+                } else {
+                    // The guard the report's own two examples would have
+                    // passed without: a caption that is empty, or that
+                    // happens to equal its own value, cannot distinguish
+                    // "composed correctly" from "value only".
+                    assert!(
+                        !spec.caption.is_empty(),
+                        "{live:?}: empty caption — this row cannot prove anything about \
+                         name+value composition"
+                    );
+                    assert_ne!(
+                        spec.caption, value,
+                        "{live:?}: caption and value coincide ({value:?}) — this fixture \
+                         cannot see a value-only regression here; pick a state where they differ"
+                    );
+                    assert!(
+                        label.starts_with(spec.caption),
+                        "{live:?}: label {label:?} does not start with its own caption \
+                         {:?} — a value-only row, exactly the reported bug",
+                        spec.caption
+                    );
+                    assert!(
+                        label.ends_with(value.as_str()),
+                        "{live:?}: label {label:?} does not end with its own value {value:?}"
+                    );
+                    assert!(
+                        label.contains(": "),
+                        "{live:?}: label {label:?} does not compose \"name: value\" — \
+                         a value-only row, exactly the reported bug"
+                    );
+                    composing_rows_checked += 1;
+                }
+            }
+        }
+        // The control this sweep's own coverage needs: it must actually have
+        // exercised rows of both shapes, or a change that made every row
+        // fall into one branch would pass vacuously.
+        assert_eq!(
+            bare_rows_checked, 2,
+            "expected exactly the two named whole-label exceptions (CloudStatus, \
+             InactivityFpsLimit), each placed once on the Video page; got {bare_rows_checked}"
+        );
+        assert!(
+            composing_rows_checked >= 40,
+            "expected most live rows to compose name+value; only {composing_rows_checked} did, \
+             which is too few to be a meaningful sweep"
+        );
+    }
+
     /// Every chat option's label, predicted from vanilla's own stringifier and
     /// asserted as an exact string.
     ///
