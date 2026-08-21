@@ -418,12 +418,6 @@ fn bench_frame_profile(c: &mut Criterion) {
                 gpu_total.median(),
                 gpu_block.median(),
             );
-            println!(
-                "   gpu  bracket fit  {:.0}% of readbacks had summed pass time above the span, \
-                 {:.0}% had a single pass above it (pipelining + readback staleness, not a fault)",
-                100.0 * f64::from(span_shorter_than_the_sum as u32) / ITERS as f64,
-                100.0 * f64::from(span_shorter_than_a_pass as u32) / ITERS as f64,
-            );
         }
 
         let cpu_ms = cpu_world.median();
@@ -452,6 +446,8 @@ fn bench_frame_profile(c: &mut Criterion) {
              \x20  gpu  world (block){:>8.3} ms\n\
              \x20  gpu  first_person {:>8.3} ms\n\
              \x20  gpu  hud_total    {:>8.3} ms   <- no HUD in this harness; see the module doc\n\
+             \x20  gpu  bracket fit  {:>7.0}% of readbacks summed above the span, {:.0}% had one \
+             pass above it\n\
              \x20  cnt  sections     {} drawn / {} visited packed + {} model\n\
              \x20  cnt  culled       {} distance, {} frustum, {} occlusion\n\
              \x20  cnt  draw_calls   {}, quads {}, entities {}\n\
@@ -472,6 +468,8 @@ fn bench_frame_profile(c: &mut Criterion) {
             gpu_block.median(),
             gpu_hand.median(),
             gpu_hud.median(),
+            100.0 * span_shorter_than_the_sum as f64 / ITERS as f64,
+            100.0 * span_shorter_than_a_pass as f64 / ITERS as f64,
             stats.sections_drawn,
             packed_visited,
             model_visited,
@@ -594,11 +592,18 @@ fn submit_cost_versus_residency(
     );
 
     for &(radius, meshed, drawn, encode_ms, submit_ms) in &rows {
+        // The two normalisations side by side are the discriminator: whichever
+        // one stays **flat** across the sweep is the quantity the cost is
+        // actually proportional to. Reading the raw ratios instead cannot
+        // separate them, because the demo world grows resident and drawn
+        // together.
         println!(
-            "   radius={radius}  resident {meshed:>5} sections, drawn {drawn:>5}  |  \
-             cpu world encode {encode_ms:>7.3} ms, of which submit {submit_ms:>7.3} ms \
-             ({:.0}%)",
+            "   radius={radius}  resident {meshed:>5}, drawn {drawn:>5}  |  encode \
+             {encode_ms:>7.3} ms (submit {submit_ms:>7.3} ms, {:>3.0}%)  |  per drawn \
+             {:>6.2} us, per resident {:>6.2} us",
             100.0 * submit_ms / encode_ms.max(1e-9),
+            1000.0 * encode_ms / drawn.max(1) as f64,
+            1000.0 * encode_ms / meshed.max(1) as f64,
         );
         let scene = format!("demo radius={radius} {WIDTH}x{HEIGHT} residency-sweep");
         for (metric, value, unit) in [
@@ -623,12 +628,18 @@ fn submit_cost_versus_residency(
     // work is proportional to the world being held, not the world being
     // looked at.
     let (first, last) = (rows[0], rows[rows.len() - 1]);
+    let per_drawn = |r: (i32, usize, usize, f64, f64)| r.3 / r.2.max(1) as f64;
+    let per_resident = |r: (i32, usize, usize, f64, f64)| r.3 / r.1.max(1) as f64;
     println!(
-        "   scaling: resident x{:.2}, drawn x{:.2}  ->  encode x{:.2}, submit x{:.2}\n",
+        "   scaling: resident x{:.2}, drawn x{:.2}  ->  encode x{:.2}, submit x{:.2}\n   \
+         per-section drift across the sweep: per drawn x{:.2}, per resident x{:.2} \
+         (whichever is nearer 1.00 is what the cost tracks)\n",
         last.1 as f64 / first.1 as f64,
         last.2 as f64 / first.2.max(1) as f64,
         last.3 / first.3.max(1e-9),
         last.4 / first.4.max(1e-9),
+        per_drawn(last) / per_drawn(first).max(1e-9),
+        per_resident(last) / per_resident(first).max(1e-9),
     );
 }
 
