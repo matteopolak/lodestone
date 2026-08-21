@@ -990,6 +990,28 @@ impl RenderState {
             return Some((vec![base_draw], layers));
         }
 
+        // The trident is the one special rig whose mesh lives in the **entity**
+        // corpus rather than in `BLOCK_ENTITY_MODELS` — it is the same
+        // `"trident"` entry `ThrownTridentRenderer` draws a thrown one with, and
+        // vanilla bakes it the same way (`TridentSpecialRenderer.bake` takes
+        // `ModelLayers.TRIDENT` out of `context.entityModelSet()`). So it cannot
+        // go through `special_item_rig`, whose `&'static str` is a
+        // `BLOCK_ENTITY_MODELS` key; see `lodestone_render::trident_item_rig`.
+        //
+        // The `scale [1, -1, -1]` flip that stands a held trident the right way
+        // up is **not** applied here. It rides `form.transformation`, because
+        // `trident.json` declares it on the enclosing `minecraft:condition`
+        // node rather than on either `special` node underneath — the same
+        // inherited-`transformation` shape the shield's own flip has, already
+        // composed by `compose_special_node_transform` above. Re-applying it
+        // here would square the flip and land the trident upright but mirrored.
+        if form.kind == "minecraft:trident"
+            && let Some(entry) = lodestone_render::trident_item_rig(item.path())
+        {
+            let draw = self.build_entity_rig_hand_draw(device, entry, placement, light)?;
+            return Some((vec![draw], Vec::new()));
+        }
+
         let (model_name, texture_stem) = lodestone_render::special_item_rig(&form.kind, item.path())?;
         let draw = self.build_special_hand_draw(
             device,
@@ -999,6 +1021,71 @@ impl RenderState {
             light,
         )?;
         Some((vec![draw], Vec::new()))
+    }
+
+    /// Build one [`SpecialHandDraw`] for a rig held in the **entity** corpus
+    /// (`self.entities`) rather than the block-entity one — today that is the
+    /// trident and only the trident.
+    ///
+    /// It is a sibling of [`Self::build_special_hand_draw`] rather than a
+    /// parameter on it because the two corpora key their textures differently,
+    /// and that difference is the whole reason this exists: a block-entity rig
+    /// names a *sheet stem* that `block_entities.textures` is keyed on, while an
+    /// entity rig's texture is bound to the corpus **entry name**
+    /// (`EntityTexture::Fixed`). Threading a bool through one function would put
+    /// two meanings on one `&str` argument, which is exactly how a rig ends up
+    /// looked up in the corpus that does not hold it and silently draws nothing.
+    ///
+    /// The upload shape is otherwise identical, deliberately: same
+    /// `part_transforms(placement, &[])` with no pose overrides, same untinted
+    /// instance, same "a missing part range is skipped, an empty result is
+    /// `None`" fail-open. A trident has no animated part — `TridentModel` is a
+    /// static rig and `TridentSpecialRenderer.submit` calls no `setupAnim` — so
+    /// the empty override list is the rest pose *and* the right pose, not a
+    /// simplification.
+    fn build_entity_rig_hand_draw<'a>(
+        &'a self,
+        device: &wgpu::Device,
+        entry: &str,
+        placement: glam::Mat4,
+        light: u32,
+    ) -> Option<SpecialHandDraw<'a>> {
+        let mesh = self.entities.models.get(entry)?;
+        let gpu = self.entities.gpu_models.get(entry)?;
+        let texture = self.entities.textures.get(entry)?;
+
+        // The entity corpus keeps vertices **part-local**, so each part's own
+        // rest matrix has to be composed back in — `Skeleton::rest_pose` is the
+        // exact inverse of that split (`part_bake_recomposes_to_the_whole_model_
+        // bake` asserts it over the whole corpus). The block-entity corpus'
+        // `part_transforms` does the same job on its side; skipping it here and
+        // uploading `placement` for every part collapses the whole trident onto
+        // the root and draws a heap at the origin rather than nothing, which is
+        // the failure that would look like a pose bug instead of a lookup one.
+        let transforms = mesh.skeleton.rest_pose();
+        let instance_tint = lodestone_render::InstanceTint::rgb([255, 255, 255]);
+        let parts: Vec<(lodestone_render::entity::PartRange, wgpu::Buffer)> = transforms
+            .iter()
+            .enumerate()
+            .filter_map(|(index, local)| {
+                let matrix = placement * *local;
+                let range = *gpu.parts.get(index)?;
+                if range.index_count == 0 {
+                    return None;
+                }
+                let buffer =
+                    upload_instances_tinted(device, &[matrix], &[light], &[instance_tint])?;
+                Some((range, buffer))
+            })
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        Some(SpecialHandDraw {
+            model: gpu,
+            texture,
+            parts,
+        })
     }
 
     /// Build one [`SpecialHandDraw`] for `(model_name, texture_stem)`, tinted by

@@ -148,8 +148,8 @@ pub use block_entity::{
     conduit_active_axis_rotation_radians, conduit_active_rotation_value, conduit_advance,
     conduit_anim_time, conduit_animation_phase, conduit_bob, conduit_frame_scan,
     conduit_inactive_y_rot_radians, conduit_texture_stems,
-    copper_golem_statue_placement_matrix, copper_golem_statue_texture_stem,
-    copper_golem_statue_texture_stems,
+    copper_golem_statue_oxidation_from_item_path, copper_golem_statue_placement_matrix,
+    copper_golem_statue_texture_stem, copper_golem_statue_texture_stems,
     decorated_pot_pattern_texture_stem, decorated_pot_placement_matrix,
     decorated_pot_texture_stems,
     enchanting_table_book_hover, enchanting_table_book_openness,
@@ -159,7 +159,7 @@ pub use block_entity::{
     shulker_placement_matrix, special_item_rig,
     shulker_texture_stem,
     shulker_texture_stems, skull_ground_placement_matrix, skull_texture_stem,
-    skull_texture_stems, skull_wall_placement_matrix,
+    skull_texture_stems, skull_wall_placement_matrix, trident_item_rig, TRIDENT_ENTITY_MODEL,
 };
 pub use block_models::{
     BlockModels, BlockModelsError, CRACK_STAGE_COUNT, DRY_FOLIAGE_TINT_SLOT, FOLIAGE_TINT_SLOT,
