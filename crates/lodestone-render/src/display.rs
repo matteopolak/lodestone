@@ -73,9 +73,16 @@ pub enum BillboardMode {
     /// camera. Wire id `0`, the accessor's own default.
     #[default]
     Fixed,
-    /// Yaw from the entity's own rotation, pitch from the camera. Wire id `1`.
+    /// Yaw from the **camera**, pitch from the entity's own rotation — the
+    /// display spins about its own vertical axis to face the viewer and
+    /// never tilts. Wire id `1`.
     Vertical,
-    /// Yaw from the camera, pitch from the entity's own rotation. Wire id `2`.
+    /// Yaw from the entity's own rotation, pitch from the **camera**. Wire
+    /// id `2`. Wrong way round in this doc until now: these two variants'
+    /// comments had each other's text, while the module table and
+    /// [`display_orientation`] both matched `DisplayRenderer.
+    /// calculateOrientation`, which is `VERTICAL -> transformYRot(cameraYRot)
+    /// , entityXRot` and `HORIZONTAL -> entityYRot, transformXRot(cameraXRot)`.
     Horizontal,
     /// Both axes from the camera — a full billboard. Wire id `3`.
     Center,
