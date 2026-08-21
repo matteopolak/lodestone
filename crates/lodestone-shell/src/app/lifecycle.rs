@@ -1531,12 +1531,23 @@ impl WindowApp {
         if let Some(sheet) = crate::resources::load_particle_atlas() {
             render.install_particle_sheet_atlas(gpu.device(), gpu.queue(), sheet.atlas());
         }
-        // Back on the target's own (sRGB) format, matching `attach_items`/
-        // `attach_glint`/`attach_item_models` below. Building this pipeline for
-        // the raw format instead made the item pipelines format-incompatible
-        // with the pass they draw into, which is why inventory icons and air
-        // bubbles stopped rendering — see the note in `app/redraw.rs`.
-        let mut hud = HudRenderer::new(gpu.device(), format);
+        // The **raw** (non-sRGB) sibling of `format`, and only for this one
+        // pipeline: `HudRenderer::new` builds nothing but the flat-colour
+        // stream (`hud.wgsl` — text, stack counts, durability bars, the
+        // chat/tab-list/scoreboard plates), which draws into its own pass on a
+        // raw view of the same swapchain texture. Vanilla's 2-D GUI blending is
+        // not colour-managed — it composites straight on gamma bytes — so a
+        // low-alpha white plate blended in linear light comes out far too
+        // light. See `docs/tab-list.md` for the measured sweep.
+        //
+        // The `attach_*` calls below deliberately keep `format`: their
+        // pipelines draw into `view`, not the raw view. An earlier attempt at
+        // this changed `new` while those passes were still *shared*, so the
+        // item pipelines could not draw into the pass at all and inventory
+        // icons and air bubbles vanished. `HudRenderer` now runs the
+        // flat-colour draws as their own passes, which is what makes the two
+        // formats able to coexist — see `render_with_item_models`' pass list.
+        let mut hud = HudRenderer::new(gpu.device(), target.raw_view_format());
         // Attach the vanilla GUI sprite atlas so the survival vitals draw from
         // real textures; on a jar-less run this is `None` and the HUD keeps its
         // procedural fallback.
