@@ -1341,6 +1341,17 @@ on every `cargo test -p lodestone-shell`. **Fork on `#[cfg(test)]` rather than e
 not the feature** (`Command::new("open")` / `xdg-open` / `cmd /C start`) — which found a second latent
 instance. Fixtures should use RFC 2606 `.invalid` hostnames as a second layer. (§12.44)
 
+**And the third form is the quietest: a test that *reads* real user state and passes because of it.**
+Measured — a skin-resolution gate passed with its fix fully removed, because the code under test read the
+owner's actual `~/Library/Application Support/lodestone/skin.png`. The user's own filesystem satisfied the
+assertion, so the gate proved nothing about the code and would have kept proving nothing on any machine
+where that file happened to exist. Note what caught it: **the neuter**. Nothing about the test's source
+suggests the problem, which makes this the *world* species with the real home directory as the hidden
+input. So the grep is for the **path**, not the feature — any `home_dir`, `dirs::`, `~` expansion or
+absolute user path reachable from a test — and the fix is to fork on `#[cfg(test)]` so the interception is
+assertable rather than a silent skip. A gate over anything user-scoped (skins, accounts, options, caches,
+saved worlds) is worth neutering once for exactly this reason.
+
 **And the effect class is wider than launching a UI: a test can *destroy* state that lives outside the
 repo, and that one has no visible symptom at all.** Caught mid-change rather than after: wiring
 account resolution into the shell's join meant an **existing** `net.rs` unit test that called the
