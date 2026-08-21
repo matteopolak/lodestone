@@ -873,3 +873,167 @@ fn a_resource_pack_reload_does_not_blank_a_container_special_icon() {
          than it was before"
     );
 }
+
+/// **The whole `IconPart::Special` family shares one pass, and therefore one
+/// fate.** Chest, shulker box, banner, shield and player head all draw in a
+/// container slot, and all five go dark together when that pass is absent.
+///
+/// # The question this answers
+///
+/// A player head vanishing from inventory slots has two shapes, and they need
+/// different fixes: either the whole special stream is dark (its lazy build
+/// declined, so every kind is blank) or something is wrong with the head in
+/// particular (its rig, its sheet, its pose). Those are distinguishable without
+/// asking anyone to look at a screen — render all five and see whether they
+/// stand or fall together.
+///
+/// The negative arm is the discriminating half and it is executed, not argued:
+/// with the 3-D pass detached, `IconRenderer::prepare_special` declines, and all
+/// five must read **exactly 0**. If a future change ever lets one of them draw
+/// through that control, "the special pass is dark" has stopped being a
+/// sufficient explanation for a blank slot and this gate says so by failing.
+///
+/// Note what the positive arm is *not* evidence of: it proves the renderer draws
+/// these five given a real `ItemStack`, and says nothing about whether the
+/// shipped client's build of that pass succeeds. A gate installs its own input.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn every_special_icon_kind_stands_or_falls_with_the_pass() {
+    /// One slot each, on the inventory screen's hotbar row — real `menu_index`
+    /// values. Pairwise-distinct items across the five `kind`s the resolver
+    /// serves, so no two arms can coincide.
+    const SUBJECTS: &[(usize, &str)] = &[
+        (36, "minecraft:chest"),
+        (37, "minecraft:red_shulker_box"),
+        (38, "minecraft:white_banner"),
+        (39, "minecraft:shield"),
+        (40, "minecraft:player_head"),
+    ];
+    /// Left empty, as the localisation control.
+    const BLANK_SLOT: usize = 43;
+
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!(
+            "GPU gate opted in but the vanilla pack did not load; set LODESTONE_ASSETS \
+             to a pack root with client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        )
+    });
+    let models: &BlockModels = atlas
+        .models()
+        .expect("the vanilla load must attach baked block models");
+    let item_atlas =
+        load_item_atlas().expect("the item atlas must build from the same client.jar");
+
+    let empty_menu = Menu::player();
+    let mut menu = Menu::player();
+    for (slot, item) in SUBJECTS {
+        // The precondition: each subject must really reach the special stream.
+        // Without this the gate could pass by measuring five flat sprites.
+        let loc: ResourceLocation = item.parse().expect("valid item id");
+        let icon = item_atlas
+            .icon(&loc)
+            .unwrap_or_else(|| panic!("{item} must resolve to an icon in the item atlas"));
+        assert!(
+            icon.parts
+                .iter()
+                .any(|p| matches!(p, lodestone_assets::IconPart::Special { .. })),
+            "{item} must carry an IconPart::Special — if it has become a flat sprite \
+             this gate is no longer measuring the special pass for it"
+        );
+        menu.set_slot_item(*slot, Some(ItemStack::new(id(item), 1)));
+    }
+
+    let frame = ContainerFrame::new(Some(&menu), "Inventory");
+    let base_frame = ContainerFrame::new(Some(&empty_menu), "Inventory");
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+
+    let mut shoot = |r: &mut ContainerRenderer, f: &ContainerFrame<'_>| -> Vec<u8> {
+        let acquired = target.acquire().expect("headless acquire");
+        clear_view(device, queue, acquired.view());
+        r.render_with_icons(
+            device,
+            queue,
+            acquired.view(),
+            Some(render.depth_view()),
+            f,
+            Some(models),
+            W,
+            H,
+        );
+        target.read_texels(device, queue)
+    };
+
+    let mut lit = ContainerRenderer::new(device, format);
+    lit.attach_items(device, queue, format, item_atlas.clone());
+    lit.attach_item_models(
+        device,
+        format,
+        render.model_atlas_view().expect("a model atlas"),
+        render.model_atlas_sampler().expect("a model atlas sampler"),
+        render.model_palette_buffer().expect("a tint palette"),
+        render.model_anim_buffer().expect("animation slots"),
+    );
+    let chrome = shoot(&mut lit, &base_frame);
+    let subject = shoot(&mut lit, &frame);
+
+    // The pass declines when the 3-D stream is not attached, which is the same
+    // gate a failed lazy build falls through — so this arm is what a dark
+    // special stream looks like on this screen.
+    let mut dark = ContainerRenderer::new(device, format);
+    dark.attach_items(device, queue, format, item_atlas.clone());
+    let control = shoot(&mut dark, &frame);
+
+    let blank_rect = slot_rect(&menu, &frame, BLANK_SLOT);
+    let mut drew = Vec::new();
+    let mut leaked = Vec::new();
+    eprintln!("=== every special icon kind, one pass ===");
+    eprintln!("sheets loaded by the pass = {}", lit.special_icon_sheets());
+    for (slot, item) in SUBJECTS {
+        let rect = slot_rect(&menu, &frame, *slot);
+        let lit_px = diff_in(&subject, &chrome, rect);
+        let dark_px = diff_in(&control, &chrome, rect);
+        eprintln!("  {item:<28} slot {slot}  lit = {lit_px:<4} dark = {dark_px}");
+        if lit_px == 0 {
+            drew.push(*item);
+        }
+        if dark_px != 0 {
+            leaked.push((*item, dark_px));
+        }
+    }
+    let blank_px = diff_in(&subject, &chrome, blank_rect);
+    eprintln!("  (empty slot {BLANK_SLOT})                  lit = {blank_px}");
+
+    // Collected, not asserted inside the loop: an `assert!` per iteration stops
+    // at the first failure, which would report one kind and leave the other four
+    // as arguments rather than observations — and "which of the five drew" is
+    // the entire content of this gate.
+    assert!(
+        drew.is_empty(),
+        "these special-renderer kinds drew nothing in a container slot while their \
+         siblings did: {drew:?}. They share one pass, so a subset failing is NOT \
+         'the special stream is dark' — it is something specific to those kinds"
+    );
+    assert!(
+        leaked.is_empty(),
+        "with the special pass declined, these kinds still painted: {leaked:?}. \
+         Every one must read exactly 0, or a blank slot can no longer be \
+         attributed to the pass being dark"
+    );
+    assert_eq!(
+        blank_px, 0,
+        "an empty slot must match the chrome baseline; {blank_px} changed pixels \
+         means the five counts above are not localised to their own cells"
+    );
+}
