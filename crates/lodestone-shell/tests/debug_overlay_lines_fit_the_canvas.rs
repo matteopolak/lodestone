@@ -88,6 +88,16 @@ fn realistic_stats() -> DebugStats {
         mesh_drops: 0,
         section_count: 412,
         quads: 1_204_996,
+        // Pairwise-distinct and none of them round, so a transposition of two
+        // adjacent same-typed fields cannot survive a width measurement that
+        // formats them: `draw_calls` sits a little above `section_count`
+        // (terrain plus the frame-constant first-person arm), the two cull
+        // buckets differ from each other and from every other count here, and
+        // the bind-group figure is the 1 a healthy frame reports.
+        draw_calls: 414,
+        sections_culled_distance: 1_083,
+        sections_culled_frustum: 284,
+        terrain_camera_bind_group_switches: 1,
         vram_bytes: 67_108_864,
         vram_reserved_bytes: 75_497_472,
         rss_bytes: 2_147_483_648,

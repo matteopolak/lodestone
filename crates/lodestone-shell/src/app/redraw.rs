@@ -144,6 +144,75 @@ impl WindowApp {
             {
                 render.reload_block_atlas(gpu.device(), gpu.queue(), &atlas);
             }
+            // The 3-D block-item pass is the one surface that borrows the
+            // *world* renderer's GPU objects rather than owning them: its
+            // atlas view, tint palette and animation buffers all come from
+            // `RenderState`'s `ModelRenderer`, and `reload_block_atlas`
+            // above replaced all three with new objects while re-baking
+            // every sprite's UVs. A bind group built at bring-up keeps the
+            // *old* texture alive (wgpu resources are `Arc`-backed), so
+            // nothing errors: the hotbar and every container slot go on
+            // sampling a dropped atlas with freshly repacked coordinates,
+            // which reads as block items rendering wrong — or, wherever the
+            // new UVs land on atlas padding, as not rendering at all —
+            // while the flat sprites below stay right because their atlas
+            // and their UVs are replaced together. `attach_item_models`
+            // rebuilds the whole `ModelIcons`, the same "rebuild the GPU
+            // object, overwrite the field" shape `reload_block_atlas` uses
+            // for its own bind groups.
+            //
+            // This is the **only** icon surface that belongs inside this
+            // `if let`, and that is the whole point of the split below it:
+            // it re-binds objects `reload_block_atlas` has just replaced, so
+            // it is meaningless on a frame where that did not run.
+            let format = self.target.as_ref().map(lodestone_render::SurfaceTarget::format);
+            if let Some(format) = format
+                && let Some(gpu) = self.gpu.as_ref()
+                && let Some(render) = self.render.as_ref()
+                && let (Some(view), Some(sampler), Some(palette), Some(anim)) = (
+                    render.model_atlas_view(),
+                    render.model_atlas_sampler(),
+                    render.model_palette_buffer(),
+                    render.model_anim_buffer(),
+                )
+            {
+                if let Some(hud) = self.hud.as_mut() {
+                    hud.attach_item_models(gpu.device(), format, view, sampler, palette, anim);
+                }
+                if let Some(container) = self.container.as_mut() {
+                    container.attach_item_models(
+                        gpu.device(),
+                        format,
+                        view,
+                        sampler,
+                        palette,
+                        anim,
+                    );
+                }
+            }
+        }
+        // Every icon surface that is its **own** stitch gets its **own**
+        // generation latch, deliberately outside the block-atlas reload above.
+        //
+        // These were inside it, and that stranded them for the whole process.
+        // `Sim::reload_resource_pack_atlas` advances its own
+        // `last_pack_generation` *before* its remaining guards and then returns
+        // `None` on three of them — no `net` (the demo world), no vanilla atlas
+        // (a jar-less run), or its own `BlockResources::load(true)` falling back
+        // to the demo palette. Each of those consumes the generation, the
+        // counter only moves forward, and nothing retries: one such frame and
+        // the flat item sprites, the two GUI atlases and the special-renderer
+        // icon sheets keep the *previous* pack until the process exits. That is
+        // the reported "the server's texture pack applied to fonts but not to
+        // my items — held, slot, or on the ground": `vanilla_font` re-resolves
+        // lazily per generation and so is immune, while every surface here is
+        // pushed exactly once from a consumed edge.
+        //
+        // None of these reads the block atlas, so gating them on a *block*
+        // reload was never right on its own terms either.
+        let icon_pack_generation = crate::resources::pack_generation();
+        if icon_pack_generation != self.last_icon_pack_generation {
+            self.last_icon_pack_generation = icon_pack_generation;
             let format = self.target.as_ref().map(lodestone_render::SurfaceTarget::format);
             if let Some(format) = format {
                 if let Some(gpu) = self.gpu.as_ref()
@@ -185,49 +254,10 @@ impl WindowApp {
                         }
                     }
                 }
-                // The 3-D block-item pass is the one surface that borrows the
-                // *world* renderer's GPU objects rather than owning them: its
-                // atlas view, tint palette and animation buffers all come from
-                // `RenderState`'s `ModelRenderer`, and `reload_block_atlas`
-                // above replaced all three with new objects while re-baking
-                // every sprite's UVs. A bind group built at bring-up keeps the
-                // *old* texture alive (wgpu resources are `Arc`-backed), so
-                // nothing errors: the hotbar and every container slot go on
-                // sampling a dropped atlas with freshly repacked coordinates,
-                // which reads as block items rendering wrong — or, wherever the
-                // new UVs land on atlas padding, as not rendering at all —
-                // while the flat sprites above stay right because their atlas
-                // and their UVs are replaced together. `attach_item_models`
-                // rebuilds the whole `ModelIcons`, the same "rebuild the GPU
-                // object, overwrite the field" shape `reload_block_atlas` uses
-                // for its own bind groups.
-                if let Some(gpu) = self.gpu.as_ref()
-                    && let Some(render) = self.render.as_ref()
-                    && let (Some(view), Some(sampler), Some(palette), Some(anim)) = (
-                        render.model_atlas_view(),
-                        render.model_atlas_sampler(),
-                        render.model_palette_buffer(),
-                        render.model_anim_buffer(),
-                    )
-                {
-                    if let Some(hud) = self.hud.as_mut() {
-                        hud.attach_item_models(gpu.device(), format, view, sampler, palette, anim);
-                    }
-                    if let Some(container) = self.container.as_mut() {
-                        container.attach_item_models(
-                            gpu.device(),
-                            format,
-                            view,
-                            sampler,
-                            palette,
-                            anim,
-                        );
-                    }
-                }
             }
             // The **special-renderer** icon pass (chest, shulker box, banner,
             // shield, skull, player head) — the third icon stream, and the one
-            // the four blocks above do not reach. It is not re-attached, it is
+            // the blocks above do not reach. It is not re-attached, it is
             // *dropped*: unlike the flat and 3-D streams it borrows nothing and
             // owns its own block-entity sheets, decoded from the pack stack that
             // was live on the frame it first built itself. So the failure here is
@@ -1153,6 +1183,16 @@ impl WindowApp {
         self.pacer.record_presented_frame(frame_start);
         self.sim.stats.section_count = stats.sections_drawn;
         self.sim.stats.quads = stats.total_quads;
+        // Four counters that reached `RenderStats` and stopped there — the
+        // draw-call total and two of the three cull buckets (the occlusion one
+        // was already copied below), plus the terrain camera bind-group count.
+        // Every copy between the two structs happens here, so a field the
+        // overlay cannot reach is always a missing line in this block.
+        self.sim.stats.draw_calls = stats.draw_calls;
+        self.sim.stats.sections_culled_distance = stats.sections_culled_distance;
+        self.sim.stats.sections_culled_frustum = stats.sections_culled_frustum;
+        self.sim.stats.terrain_camera_bind_group_switches =
+            stats.terrain_camera_bind_group_switches;
         self.sim.stats.vram_bytes = stats.vram_bytes;
         self.sim.stats.vram_reserved_bytes = stats.vram_reserved_bytes;
         self.sim.stats.entities_drawn = stats.entities_drawn;
@@ -1363,8 +1403,18 @@ impl WindowApp {
         // still exists for the other, untouched draw path); borrow them into
         // the `&[TextSpan]` slice the HUD frame takes, keeping both locals
         // alive for the frame's scope.
+        // One binding for the line count, used by BOTH reads below. The two
+        // must ask for the same `n` or the parallel trust list stops being
+        // index-aligned with the spans — a misalignment that would badge the
+        // wrong message and could not be caught by anything downstream, since
+        // both lists are the right length and the wrong pairing is invisible.
+        let chat_line_count = if chat_open { 100 } else { 10 };
         let chat_spans_owned: Vec<(Vec<lodestone_model::text::TextSpan>, f32)> =
-            self.sim.recent_chat_spans(if chat_open { 100 } else { 10 });
+            self.sim.recent_chat_spans(chat_line_count);
+        // The message-trust badge's source, walked over the same feed with the
+        // same `n` (see above) and windowed by the same slice below.
+        let chat_trust_owned: Vec<Option<lodestone_game::chat::MessageTrust>> =
+            self.sim.recent_chat_trust(chat_line_count);
         // `ChatScroll::sync` only reads `history` on the open branch, so
         // building this unconditionally (rather than gating the clone on
         // `chat_open`) costs nothing extra on the closed path (10 short
@@ -1395,6 +1445,19 @@ impl WindowApp {
             .iter()
             .map(|(spans, age)| (spans.as_slice(), *age))
             .collect();
+        // Windowed by the *same* range as the spans above. Clamped rather than
+        // indexed blind: the two lists come from two reads of the feed, and a
+        // message arriving between them would make the trust list one longer,
+        // which would panic here on the closed path where the window is the
+        // whole list. An empty slice is the honest fallback — the frame's own
+        // doc requires a consumer to draw nothing for a row it does not cover,
+        // never a fabricated verdict.
+        let chat_trust_lines: &[Option<lodestone_game::chat::MessageTrust>] =
+            if chat_win_end <= chat_trust_owned.len() {
+                &chat_trust_owned[chat_win_start..chat_win_end]
+            } else {
+                &[]
+            };
         // `None` while closed — vanilla's own scrollbar draws only in the
         // `isForeground` (open) display mode.
         let chat_scrollbar_view = chat_open.then(|| crate::hud::ChatScrollbar {
@@ -1523,6 +1586,7 @@ impl WindowApp {
         // exactly as the legacy path was before issue #527 (a); `chat_wrap`
         // below still caches nothing for it since it caches `&str`, not spans.
         hud_frame.chat_spans = &chat_spans_lines;
+        hud_frame.chat_trust = chat_trust_lines;
         hud_frame.sound_subtitles = &sound_subtitles;
         // Persisted wrap results (issue #527 (a)): without this the whole
         // visible log is re-wrapped, quadratically, every frame. Retained for

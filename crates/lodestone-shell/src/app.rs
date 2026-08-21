@@ -602,6 +602,21 @@ struct WindowApp {
     /// immediately before `AcquiredFrame::present`, once world, HUD and every
     /// menu overlay have already written into `frame.view()`.
     pending_screenshot: bool,
+    /// Resource-pack generation the **icon** surfaces were last rebuilt for —
+    /// the flat item atlas and its glint sheet, the HUD and menu GUI atlases,
+    /// and the special-renderer icon sheets.
+    ///
+    /// Deliberately a second latch rather than a reuse of `Sim`'s own
+    /// `last_pack_generation`. That one is consumed by
+    /// `Sim::reload_resource_pack_atlas` *before* its remaining guards, which
+    /// then return `None` for the demo world, a jar-less run, or a pack whose
+    /// own load falls back to the demo palette — so a caller that keyed icon
+    /// refreshes off that method's `Some` lost the generation on any of those
+    /// frames and, since the counter only moves forward, stranded every icon
+    /// surface on the previous pack for the rest of the process. None of these
+    /// surfaces reads the block atlas, so they were never the block reload's
+    /// to gate. See `docs/resource-packs.md`.
+    last_icon_pack_generation: u64,
     /// Editable buffer for the chat prompt; only consumed while chat is open.
     chat_input: ChatInput,
     /// Wrapped chat rows, persisted across frames — see

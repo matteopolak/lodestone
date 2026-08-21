@@ -497,6 +497,33 @@ impl ChatLog {
             .collect()
     }
 
+    /// The most recent `n` lines' trust level, oldest-first — **element-for-
+    /// element aligned** with [`recent_spans`](Self::recent_spans) and
+    /// [`recent_ages_spans`](Self::recent_ages_spans), because it walks the
+    /// same `skip(len - n)` window over the same feed.
+    ///
+    /// `None` for a system entry, which has no signature and therefore no
+    /// verdict to badge — deliberately not `Some(MessageTrust::NotSecure)`,
+    /// which would tag every server broadcast as unverified rather than as
+    /// "not a player message at all". A caller drawing an indicator must show
+    /// nothing for `None`, not the not-secure badge.
+    ///
+    /// Returned as a parallel list rather than folded into `recent_spans`'
+    /// tuple so that the existing span readers, and every test asserting on
+    /// their exact tuple shape, are untouched.
+    #[must_use]
+    pub fn recent_trust(&self, n: usize) -> Vec<Option<MessageTrust>> {
+        let start = self.feed.len().saturating_sub(n);
+        self.feed
+            .iter()
+            .skip(start)
+            .map(|entry| match entry {
+                ChatEntry::Player { trust, .. } => Some(*trust),
+                ChatEntry::System { .. } => None,
+            })
+            .collect()
+    }
+
     /// The most recent `n` lines' [`crate::text::InteractiveSpan`]s — the
     /// `click`/`hover`-carrying sibling of [`recent_spans`](Self::recent_spans),
     /// paired with each entry's arrival timestamp.
