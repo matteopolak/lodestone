@@ -182,11 +182,16 @@ fn darkened_alpha_blend(luts: &Luts, texels: [[u8; 4]; 4]) -> [u8; 4] {
     for v in &mut acc {
         *v /= 4.0;
     }
+    // `acc` is indexed R, G, B, A -- the same order the `[u8; 4]` texels are.
+    // Vanilla's own line reads `ARGB.color(aTotal, rTotal, gTotal, bTotal)`,
+    // which is that same tuple written in *its* channel order, not a rotation
+    // of it; transcribing the argument order literally rotates every channel
+    // by one and paints the alpha into blue.
     [
+        luts.encode_srgb(acc[0] as u32),
         luts.encode_srgb(acc[1] as u32),
         luts.encode_srgb(acc[2] as u32),
         luts.encode_srgb(acc[3] as u32),
-        luts.encode_srgb(acc[0] as u32),
     ]
 }
 
