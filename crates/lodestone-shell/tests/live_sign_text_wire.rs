@@ -35,8 +35,24 @@ const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25570;
 const PROTOCOL: i32 = 776;
 
-/// Where `scripts/live-oracles/creative.sh`'s flat world puts the two probe
-/// signs this gate reads. Both are placed by the shell fixture below.
+/// The two probe signs this gate reads.
+///
+/// **Nothing in this repository places them** — this doc used to claim "both
+/// are placed by the shell fixture below" and there is no such fixture, which
+/// cost an agent a confused run. `scripts/live-oracles/creative.sh` does not
+/// mention signs either. Put them there over RCON on `:25571` (password
+/// `lodestone`) before running:
+///
+/// ```text
+/// setblock 3 -59 3 minecraft:oak_sign[rotation=0]{front_text:{messages:[{text:"REDLINE",color:"red"},{text:"BOLDY",bold:1b},"plain",""]}} replace
+/// setblock 5 -59 3 minecraft:oak_sign[rotation=0]{front_text:{messages:["allplain","second","",""]}} replace
+/// ```
+///
+/// The SNBT above is the *author's* shape; what this gate reads is whatever
+/// `SignText.DIRECT_CODEC` re-encodes onto the wire, which is the outside
+/// source. Note in particular that the mixed sign's four `messages` go out as
+/// a `TAG_Compound` list with the two unstyled elements boxed as
+/// `{"": "plain"}` / `{"": ""}` — not as the four elements written here.
 const MIXED: [i32; 3] = [3, -59, 3];
 const PLAIN: [i32; 3] = [5, -59, 3];
 

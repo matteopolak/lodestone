@@ -436,6 +436,217 @@ fn env_u64(name: &str, default: u64) -> u64 {
 mod tests {
     use super::*;
     use lodestone_core::NbtTag;
+    use lodestone_world::{ChunkColumn, ColumnLight, Heightmaps, LoadedChunk, PaletteKind};
+
+    /// The **verbatim** `front_text`/`back_text` compound a real vanilla 26.2
+    /// server put on the wire for a mixed-style sign, read out of a live
+    /// `World` by `tests/live_sign_text_wire.rs` and pasted here so this gate
+    /// keeps working with no container running.
+    ///
+    /// Note the shape the two prior fixes were about: `messages` declares
+    /// `element_type: Compound` because two of its four elements are styled,
+    /// and the two unstyled ones arrive as bare strings only because
+    /// `lodestone_core`'s reader already stripped their `{"": …}` box.
+    fn live_sign_nbt() -> Nbt {
+        let side = |messages: Vec<Nbt>, element_type: NbtTag| {
+            Nbt::Compound(vec![
+                ("has_glowing_text".to_owned(), Nbt::Byte(0)),
+                ("color".to_owned(), nbt_string("black")),
+                (
+                    "messages".to_owned(),
+                    Nbt::List {
+                        element_type,
+                        elements: messages,
+                    },
+                ),
+            ])
+        };
+        Nbt::Compound(vec![
+            (
+                "back_text".to_owned(),
+                side(
+                    vec![
+                        nbt_string(""),
+                        nbt_string(""),
+                        nbt_string(""),
+                        nbt_string(""),
+                    ],
+                    NbtTag::String,
+                ),
+            ),
+            ("is_waxed".to_owned(), Nbt::Byte(0)),
+            (
+                "front_text".to_owned(),
+                side(
+                    vec![
+                        Nbt::Compound(vec![
+                            ("color".to_owned(), nbt_string("red")),
+                            ("text".to_owned(), nbt_string("REDLINE")),
+                        ]),
+                        Nbt::Compound(vec![
+                            ("text".to_owned(), nbt_string("BOLDY")),
+                            ("bold".to_owned(), Nbt::Byte(1)),
+                        ]),
+                        nbt_string("plain"),
+                        nbt_string(""),
+                    ],
+                    NbtTag::Compound,
+                ),
+            ),
+        ])
+    }
+
+    const SIGN_BLOCK: [i32; 3] = [3, 65, 9];
+
+    fn oak_sign_state() -> u32 {
+        lodestone_data::block_states::state_id("minecraft:oak_sign")
+            .expect("26.2 has minecraft:oak_sign")
+    }
+
+    /// A world holding one chunk whose block at [`SIGN_BLOCK`] is a standing
+    /// oak sign, with whatever block-entity records the caller supplies.
+    fn world_with(records: Vec<lodestone_world::BlockEntity>) -> World {
+        let mut column = ChunkColumn::new(
+            -64,
+            24,
+            PaletteKind::block_states(),
+            PaletteKind::biomes(),
+            0,
+            0,
+        );
+        let [x, y, z] = SIGN_BLOCK;
+        column.set_block((x & 15) as usize, y, (z & 15) as usize, oak_sign_state());
+        let mut world = World::default();
+        world.load(
+            ChunkPos::from_block(x, z),
+            LoadedChunk::new(column, ColumnLight::new(24), Heightmaps::new(), records),
+        );
+        world
+    }
+
+    fn record(nbt: Nbt) -> lodestone_world::BlockEntity {
+        let [x, y, z] = SIGN_BLOCK;
+        lodestone_world::BlockEntity {
+            rel_x: (x & 15) as u8,
+            rel_z: (z & 15) as u8,
+            y: y as i16,
+            type_id: lodestone_data::block_entity_types::block_entity_type(oak_sign_state())
+                .expect("a sign state owns a block-entity type"),
+            nbt,
+        }
+    }
+
+    /// **The verdict the whole instrument exists for.** A sign block state
+    /// whose chunk carried no block-entity record at all is the one
+    /// hypothesis two prior fixes could not exclude, and it is invisible to
+    /// any walk over `chunk.block_entities`.
+    #[test]
+    fn a_sign_state_with_no_record_reports_no_record() {
+        let world = world_with(Vec::new());
+        assert_eq!(
+            classify(&world, SIGN_BLOCK, oak_sign_state()),
+            Verdict::NoRecord
+        );
+    }
+
+    /// The record `World::sync_block_entity` synthesizes from a bare state
+    /// write. It is a *different* bug from a missing record — the chunk
+    /// payload had nothing to say versus the client inventing the entry — and
+    /// the log line has to separate them.
+    #[test]
+    fn a_record_carrying_tag_end_reports_empty_nbt() {
+        let world = world_with(vec![record(Nbt::End)]);
+        assert_eq!(
+            classify(&world, SIGN_BLOCK, oak_sign_state()),
+            Verdict::EmptyNbt
+        );
+    }
+
+    /// A type id that is not the one the state owns — a stale record left by
+    /// some other block — must not be read as this sign's text.
+    #[test]
+    fn a_foreign_type_id_reports_a_mismatch() {
+        let mut stale = record(live_sign_nbt());
+        let expected = stale.type_id;
+        stale.type_id = expected.wrapping_add(1);
+        let world = world_with(vec![stale]);
+        assert_eq!(
+            classify(&world, SIGN_BLOCK, oak_sign_state()),
+            Verdict::TypeMismatch {
+                found: expected.wrapping_add(1),
+                expected: Some(expected),
+            }
+        );
+    }
+
+    /// A component kind this parse does not model (`translatable`) yields no
+    /// spans, which is the *other* remaining hypothesis for the owner's
+    /// signs. It has to be distinguishable from a missing record, not folded
+    /// into one "no text" outcome.
+    #[test]
+    fn an_unmodelled_component_reports_zero_spans() {
+        let messages = Nbt::List {
+            element_type: NbtTag::Compound,
+            elements: vec![
+                Nbt::Compound(vec![(
+                    "translate".to_owned(),
+                    nbt_string("block.minecraft.stone"),
+                )]),
+                nbt_string(""),
+                nbt_string(""),
+                nbt_string(""),
+            ],
+        };
+        let nbt = Nbt::Compound(vec![(
+            "front_text".to_owned(),
+            Nbt::Compound(vec![("messages".to_owned(), messages)]),
+        )]);
+        let world = world_with(vec![record(nbt)]);
+        assert_eq!(
+            classify(&world, SIGN_BLOCK, oak_sign_state()),
+            Verdict::NoSpans
+        );
+    }
+
+    /// The healthy arm, against bytes a **real vanilla server** produced: the
+    /// mixed-style sign resolves to three front spans and no back spans. This
+    /// is the arm that makes a green run informative rather than vacuous — if
+    /// the owner's log says `ok front 3`, the defect is below the supply.
+    #[test]
+    fn the_live_captured_sign_classifies_as_ok_with_real_span_counts() {
+        let world = world_with(vec![record(live_sign_nbt())]);
+        assert_eq!(
+            classify(&world, SIGN_BLOCK, oak_sign_state()),
+            Verdict::Ok { front: 3, back: 0 }
+        );
+    }
+
+    /// The scan is what finds a sign the record-walk cannot see, so it has to
+    /// be exercised in its own right: it must locate the state by position
+    /// and hand back the same verdict [`classify`] would.
+    #[test]
+    fn the_scan_finds_a_recordless_sign_by_its_block_state() {
+        let world = world_with(Vec::new());
+        let [x, y, z] = SIGN_BLOCK;
+        let eye = Vec3::new(x as f32, y as f32, z as f32);
+        let found = scan(&world, eye, 4);
+        assert_eq!(
+            found,
+            vec![(SIGN_BLOCK, oak_sign_state(), Verdict::NoRecord)],
+            "the scan must see a sign whose record is absent"
+        );
+    }
+
+    /// The negative control for the scan: move the eye out of range and the
+    /// same world yields nothing, so a finding is a real locate rather than
+    /// the scan reporting whatever it was handed.
+    #[test]
+    fn the_scan_reports_nothing_when_the_sign_is_out_of_range() {
+        let world = world_with(Vec::new());
+        let [x, y, z] = SIGN_BLOCK;
+        let far = Vec3::new(x as f32, (y + 40) as f32, z as f32);
+        assert!(scan(&world, far, 4).is_empty());
+    }
 
     fn nbt_string(v: &str) -> Nbt {
         Nbt::String(v.to_owned())
@@ -467,6 +678,79 @@ mod tests {
             rendered.contains("translate"),
             "an unmodelled kind must be visible: {rendered}"
         );
+    }
+
+    /// A `tracing` writer that keeps everything in a buffer, so a gate can
+    /// assert on the **line the owner will actually see** rather than on the
+    /// state that would have produced it.
+    #[derive(Clone, Default)]
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Capture {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().expect("capture lock")).into_owned()
+        }
+    }
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Capture;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Runs [`report`] under a captured subscriber built from `filter`,
+    /// enough times to clear the call-count rate limit, and returns whatever
+    /// reached the log.
+    fn captured(filter: &str) -> String {
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .finish();
+        let handle: crate::net::SharedHandle = std::sync::Arc::new(std::sync::OnceLock::new());
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..=DEFAULT_REPORT_INTERVAL {
+                report(&handle, Vec3::ZERO, &[]);
+            }
+        });
+        capture.text()
+    }
+
+    /// **The control that this instrument is reachable at all.** Five of
+    /// `wasm-check.sh`'s rules reported PASS for weeks while their detector
+    /// was erroring; the lesson is that a guard nobody has watched fire has
+    /// measured nothing. This drives the real `report` entry point under a
+    /// real subscriber and asserts a line came out.
+    #[test]
+    fn report_emits_a_line_when_the_signs_target_is_enabled() {
+        let out = captured("signs=debug");
+        assert!(
+            out.contains("no client handle yet"),
+            "RUST_LOG=signs=debug must produce a line, got: {out:?}"
+        );
+    }
+
+    /// The other half, and the reason the first half is not vacuous: with the
+    /// target off, the identical call sequence must emit nothing. Without
+    /// this, a subscriber that logged unconditionally would satisfy the gate
+    /// above.
+    #[test]
+    fn report_is_silent_when_the_signs_target_is_off() {
+        let out = captured("signs=off");
+        assert!(out.is_empty(), "expected silence, got: {out:?}");
     }
 
     /// The bound is on the *rendering*, not on the input, so a shulker box's
