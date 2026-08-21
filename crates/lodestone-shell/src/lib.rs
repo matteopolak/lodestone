@@ -35,6 +35,7 @@ pub mod command_block_source;
 pub mod config;
 pub mod consume;
 pub mod container;
+pub mod display_entities;
 pub mod effects;
 pub mod entities;
 pub mod gpu;
