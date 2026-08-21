@@ -53,12 +53,14 @@
 //! `open_in_memory_with_entities`/`MobSim::new` outside this crate's own
 //! tests, was **not** a missing encoder — it was that nothing in production
 //! ever constructed a [`MobSim`] or ticked it. [`LiveMobSource`] and
-//! [`run_mob_tick_loop`] below close that: a background task owns a
+//! [`crate::tick::run_tick_loop`] close that: a background task owns a
 //! [`ChunkWorld`] snapshot and a seeded [`MobSim`] for its lifetime, ticks it
 //! once per server tick, and republishes snapshots into a shared
 //! `EntitySource` the same [`serve_connection`](crate::serve_connection)
 //! streaming pass `entity_streaming_live.rs` already exercises picks up
-//! reactively on the connection's own inbound-packet cadence. See
+//! reactively on the connection's own inbound-packet cadence. (A standalone
+//! `run_mob_tick_loop` used to own this before issue #284 folded mob and
+//! block-entity ticking into the one loop; it no longer exists.) See
 //! [`crate::IntegratedServer::open_in_memory_with_mobs`] for the production
 //! wiring and `docs/live-mob-sim.md` for the full writeup, including what is
 //! deliberately still not built (natural terrain/biome-aware spawning).
