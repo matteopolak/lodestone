@@ -557,6 +557,39 @@ of the hop — persistence (asserting the exact persisted string, e.g.
 side; it only had to *call* the method, which `capture_key_for`'s own tests
 (`app::tests::capture_key_for_*`) confirm it does for each physical-key case.
 
+### A rebind used to need a restart, and the reason is worth keeping
+
+That last sentence — "nothing left to get wrong; it only had to *call* the
+method" — was wrong, and it is exactly the shape that hid the defect. Calling
+the method is not the whole hop: something has to *read* what it wrote.
+
+`WindowApp` held its own `keybinds: Keybinds` field, copied out of
+`Options::load()` in the constructor, and `resolve_key`/`mouse_action_for` read
+that copy. The Key Binds screen writes the *other* `Options`, the one `MenuNav`
+owns, and persists it eagerly. So a rebind reached the file and the screen's own
+labels, and never reached the resolver: the owner bound Toggle Perspective to
+`G` and `F5` kept cycling the camera while `G` did nothing — until the next
+launch, when the constructor re-read the file.
+
+The fix is `WindowApp::keybinds()`, a read of `self.nav.options().keybinds`
+rather than a second copy. There is no cache left to invalidate, so the class
+cannot recur by someone forgetting an invalidation step; `Keybinds` is `Copy`,
+so the read is by value and the borrow ends at the call, which is what the two
+call sites needed from the field in the first place.
+
+**Both existing corpora were individually complete and structurally blind to
+this.** `nav.rs`'s Key Binds tests drive `MenuNav` with no `WindowApp` at all —
+their own helper doc says they call `capture_binding` as "the same call
+`app.rs`'s patch is specified to make". `app::tests`'s resolver tests each build
+a fresh `Keybinds::new()` and hand it to `resolve_key`. One proves the producer,
+the other proves the consumer, and neither can see the two reading different
+tables. `app::tests::rebinding_toggle_perspective_in_the_controls_screen_takes_effect_without_a_restart`
+is the gate that spans them: real menu navigation to the Key Binds page, a real
+capture, then the app's *own* table through `resolve_key` and
+`apply_key_outcome` to a camera that actually moves. Neutering
+`WindowApp::keybinds` back to a startup snapshot reproduces the owner's report
+exactly (`left: Key(F5)`), which is the control.
+
 The menu's own needs beyond that were already queries, unchanged from this
 section's original sketch:
 

@@ -803,3 +803,30 @@ pub(crate) fn drop_selected_action(
         lodestone_model::ClientAction::DropSelectedItem
     })
 }
+
+impl WindowApp {
+    /// The live action → input table every key and mouse event resolves
+    /// against (`docs/keybindings.md`).
+    ///
+    /// **A read, not a copy, and that is the whole point of it existing.**
+    /// `WindowApp` used to hold its own `keybinds: Keybinds` field, seeded from
+    /// [`crate::config::Options::load`] in the constructor. The Controls
+    /// screen's Key Binds page writes the *other* copy — `MenuNav` owns the
+    /// loaded [`crate::config::Options`] and persists them eagerly
+    /// ([`crate::menu::nav::MenuNav::capture_binding`] and the two reset arms)
+    /// — so a rebind reached the file and the menu's own labels while the
+    /// resolver kept answering from the table it had read at startup. Every
+    /// rebind therefore took effect only on the *next* launch: the owner bound
+    /// Toggle Perspective to `G`, and `F5` kept cycling the camera while `G`
+    /// did nothing.
+    ///
+    /// Reading through [`MenuNav`] here means there is no second copy to keep
+    /// in step and so no invalidation to forget. [`Keybinds`] is `Copy`, so
+    /// this returns by value: the immutable borrow of `self` ends at the call,
+    /// which is what lets `handle_keyboard_input` hold the table across the
+    /// `&mut self` effect calls that follow it.
+    #[must_use]
+    pub(crate) fn keybinds(&self) -> Keybinds {
+        self.nav.options().keybinds
+    }
+}

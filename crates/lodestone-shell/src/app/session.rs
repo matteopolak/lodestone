@@ -46,10 +46,6 @@ impl WindowApp {
             render_distance_apply_at: None,
             tab_held: false,
             pending_screenshot: false,
-            // Read from `options.json` via the same loader the menu uses.
-            // Missing, partial or corrupt is vanilla's defaults, never an error
-            // — see `Keybinds::from_json_value`.
-            keybinds: persisted.keybinds,
             chat_input: ChatInput::new(),
             chat_wrap: crate::hud::ChatWrapCache::default(),
             menu_input: MenuInput::new(),

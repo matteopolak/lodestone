@@ -4820,3 +4820,145 @@ fn dpr_scaled_size_matches_predicted_physical_pixels() {
         mismatches.join("\n")
     );
 }
+
+/// **The bug the owner reported: rebinding Toggle Perspective to `G` left
+/// `F5` cycling the camera and `G` doing nothing until the next launch.**
+///
+/// Two very different faults produce that symptom and only a test spanning
+/// both halves can tell them apart. `resolve_key` was never the problem — it
+/// asks `binds.is(InputAction::TogglePerspective, code)` and always has, so
+/// no literal `F5` was ever in the chain. The producer was: `WindowApp` held
+/// its own `keybinds: Keybinds`, copied out of `Options::load()` in the
+/// constructor, while the Key Binds screen writes `MenuNav`'s `Options` and
+/// persists them. The write reached the file (`nav.rs`'s
+/// `clicking_a_bind_button_then_capturing_a_key_rebinds_and_persists` proves
+/// that end of it) and never reached the resolver, so the rebind applied on
+/// the *next* launch only.
+///
+/// **Why no gate saw it, and what this one does differently.** The whole
+/// Key Binds corpus lives in `nav.rs` and drives `MenuNav` with no
+/// `WindowApp` at all — its own helper doc says so, calling `capture_binding`
+/// "the same call `app.rs`'s patch is specified to make". The resolver corpus
+/// in this file is the mirror image: every one of its cases builds its own
+/// `Keybinds::new()` and hands it to `resolve_key`. Both corpora are correct
+/// and neither can see a consumer reading a *different table* from the one
+/// the menu writes — `CLAUDE.md`'s "a gate that installs its own input proves
+/// the consumer and nothing about the producer". So this drives the real
+/// screen into the real `WindowApp` and asks the app for its own table:
+/// menu click → `capture_binding` → `WindowApp::keybinds` → `resolve_key` →
+/// `apply_key_outcome` → the camera actually moving off first person.
+///
+/// The one hop it cannot take is the raw `winit::event::KeyEvent`
+/// (unconstructable outside winit), so the capture is fed the `Binding` that
+/// `handle_keyboard_input`'s `CaptureKey::Bind(code)` arm forwards verbatim —
+/// and `capture_key_for` is asserted here too, so the substitution is checked
+/// rather than assumed.
+#[test]
+fn rebinding_toggle_perspective_in_the_controls_screen_takes_effect_without_a_restart() {
+    use crate::keybinds::{Binding, InputAction};
+    use crate::menu::key_binds::KeyControl;
+    use crate::menu::options::{Cell, SettingsPage};
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    // A `MenuNav` on a scratch path, because finishing a capture *persists*:
+    // with the production `MenuNav::new()` this test would rewrite the
+    // developer's real `options.json` (`CLAUDE.md`'s OS-side-effect rule).
+    let dir = std::env::temp_dir().join(format!(
+        "lodestone-rebind-perspective-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    app.nav = MenuNav::with_path(dir.join("servers.json"));
+
+    // Vanilla's own default, and the control for the second half below.
+    assert_eq!(
+        app.keybinds().binding(InputAction::TogglePerspective),
+        Binding::Key(KeyCode::F5),
+        "precondition: the app starts on vanilla's F5"
+    );
+
+    // --- the producer: the real Controls screen, driven by real menu input.
+    app.ui.open_settings();
+    for page in [SettingsPage::Controls, SettingsPage::KeyBinds] {
+        // `in_world: false` — this app reached Settings through
+        // `ui.open_settings()`, never through the pause menu, so
+        // `SettingsNav::in_world` is still its default.
+        let cells = crate::menu::options::all_controls(app.nav.settings().page(), false);
+        let target = cells
+            .iter()
+            .position(|c| matches!(c, Cell::Nav { page: Some(p), .. } if *p == page))
+            .expect("the settings tree must offer this page");
+        for _ in 0..=cells.len() {
+            if app.nav.settings().cursor() == target {
+                break;
+            }
+            app.nav.key(&mut app.ui, MenuKey::Down);
+        }
+        app.nav.key(&mut app.ui, MenuKey::Enter);
+        assert_eq!(app.nav.settings().page(), page);
+    }
+
+    let controls = crate::menu::key_binds::all_controls();
+    let target = controls
+        .iter()
+        .position(|c| *c == KeyControl::Bind(InputAction::TogglePerspective))
+        .expect("Toggle Perspective must have a bind button on the Key Binds screen");
+    for _ in 0..=controls.len() {
+        if app.nav.settings().key_binds().cursor() == target {
+            break;
+        }
+        app.nav.key(&mut app.ui, MenuKey::Down);
+    }
+    app.nav.key(&mut app.ui, MenuKey::Enter);
+    assert!(
+        app.nav.awaiting_key_capture(),
+        "Enter on the bind button must start a capture"
+    );
+
+    // The substitution for the raw `KeyEvent`: this is exactly what
+    // `handle_keyboard_input` computes and forwards for a `G` keydown.
+    assert_eq!(
+        capture_key_for(winit::keyboard::PhysicalKey::Code(KeyCode::KeyG)),
+        Some(CaptureKey::Bind(KeyCode::KeyG)),
+        "a G keydown must forward as CaptureKey::Bind(KeyG)"
+    );
+    app.nav.capture_binding(Binding::Key(KeyCode::KeyG));
+
+    // --- the consumer: the app's own table, with no restart in between.
+    assert_eq!(
+        app.keybinds().binding(InputAction::TogglePerspective),
+        Binding::Key(KeyCode::KeyG),
+        "the rebind must reach the table the resolver reads, not just the file"
+    );
+
+    let binds = app.keybinds();
+    assert_eq!(
+        resolve_key(&binds, playing(), Some(KeyCode::KeyG), true, false, None),
+        Some(KeyOutcome::TogglePerspective),
+        "G must now cycle the perspective"
+    );
+    assert_ne!(
+        resolve_key(&binds, playing(), Some(KeyCode::F5), true, false, None),
+        Some(KeyOutcome::TogglePerspective),
+        "and F5 must stop — a rebind that only *adds* a key is the same bug wearing a hat"
+    );
+
+    // --- the effect, through the real driver rather than the resolver's word.
+    let before = app.sim.camera_type();
+    app.apply_key_outcome(
+        Some(KeyOutcome::TogglePerspective),
+        true,
+        Some(KeyCode::KeyG),
+        None,
+    );
+    assert_ne!(
+        app.sim.camera_type(),
+        before,
+        "the outcome must actually move the camera off first person"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
