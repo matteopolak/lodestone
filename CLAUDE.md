@@ -318,6 +318,18 @@ step**, use **a literal nonce** rather than `$$` or `$RANDOM`, **sanity-check th
 file-count floor before moving the ref**, and run `update-ref` **first** — a refresh before it stages a
 reversal of the commit you just made. (§12.27–§12.28 carry the exact sequence.)
 
+**Sanity-check the CONTENT you are about to commit, not only the tree's file count.** The file-count
+floor above catches a tree that lost paths; it cannot catch a path that was *replaced* with the wrong
+bytes, because the count is unchanged. Measured: a shell expansion of `"$PARENT:crates/…"` had zsh read
+`:c` as a parameter-expansion modifier, `git show` failed, `set -e` did not fire (its status was
+consumed), and `hash-object` cheerfully hashed the empty redirect target to the well-known empty blob —
+committing **8,013 deletions** of `sim/tests.rs` while every guard passed. It was caught only by
+`git show --stat` after the fact and restored minutes later by a follow-up commit. So: after
+`commit-tree`, **read the diffstat and check the insertion/deletion magnitudes are what you intended**
+before you believe it, and treat a lone large deletion count as a failure regardless of what the file
+count says. This is the same class as `git write-tree` against a missing index writing the empty tree —
+a silent success producing a destructive commit.
+
 **And clean up after it, because the route leaves the SHARED index staging the exact inverse of what you just
 committed — which means the next agent's plain `git commit` deletes your work.** Reported independently by two
 agents in one session; one measured `git diff --cached --stat` at **68 insertions, 1,250 deletions**, precisely
