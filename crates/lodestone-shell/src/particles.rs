@@ -653,6 +653,19 @@ impl Particles {
             }
             "small_flame" => emit::small_flame(&mut self.engine, x, y, z, xa, ya, za),
             "sculk_soul" => emit::sculk_soul(&mut self.engine, x, y, z, xa, ya, za),
+            "sculk_charge_pop" => emit::sculk_charge_pop(&mut self.engine, x, y, z, xa, ya, za),
+            // `PlayerCloudParticle`'s two providers. An area-effect cloud's
+            // puff and a panda's sneeze.
+            "cloud" => emit::cloud(&mut self.engine, x, y, z, xa, ya, za),
+            "sneeze" => emit::sneeze(&mut self.engine, x, y, z, xa, ya, za),
+            // `LavaParticle` reads none of the three velocity words: its
+            // constructor damps them to 0.8 and then overwrites `yd` outright,
+            // so every pop launches upward whatever the packet said. It is also
+            // the only particle here that spawns a *different* type as it
+            // lives — see `Behaviour::Lava`'s trailing-smoke roll.
+            "lava" => emit::lava(&mut self.engine, x, y, z),
+            "squid_ink" => emit::squid_ink(&mut self.engine, x, y, z, xa, ya, za),
+            "glow_squid_ink" => emit::glow_squid_ink(&mut self.engine, x, y, z, xa, ya, za),
             // `FireworkParticles.SparkParticle` via `SparkProvider` -- the plain
             // wire particle a `LEVEL_PARTICLES` packet can name directly, not the
             // rocket-explosion burst a `Starter`/`NoRenderParticle` spawns
@@ -1650,6 +1663,14 @@ mod tests {
             ("dripping_dripstone_lava", [0.0, 0.0, 0.0]),
             ("falling_dripstone_lava", [0.0, 0.0, 0.0]),
             ("falling_spore_blossom", [0.0, 0.0, 0.0]),
+            // `PlayerCloudParticle`, `LavaParticle`, `SquidInkParticle` and the
+            // sculk-charge burst.
+            ("cloud", [0.0, 0.0, 0.0]),
+            ("sneeze", [0.0, 0.0, 0.0]),
+            ("lava", [0.0, 0.0, 0.0]),
+            ("squid_ink", [0.0, 0.0, 0.0]),
+            ("glow_squid_ink", [0.0, 0.0, 0.0]),
+            ("sculk_charge_pop", [0.0, 0.0, 0.0]),
         ];
         for &(kind, offset) in cases {
             let mut p = resolvable();

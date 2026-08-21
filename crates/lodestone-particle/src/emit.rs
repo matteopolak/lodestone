@@ -20,7 +20,9 @@
 //! dependency on any particular world representation.
 
 use crate::rng::JavaRandom;
-use crate::{Behaviour, DripKind, DripPhase, Particle, ParticleEngine, Sheet, SpriteSource};
+use crate::{
+    Behaviour, DripKind, DripPhase, Layer, Particle, ParticleEngine, Sheet, SpriteSource,
+};
 use lodestone_physics::Aabb;
 
 /// A face of a block, for the mining-hit emitter.
@@ -1117,7 +1119,7 @@ pub fn explode(
     )]
     let lifetime = (16.0 / f64::from(rng_next(engine)).mul_add(0.8, 0.2)) as i32 + 2;
     p.lifetime = lifetime;
-    p.behaviour = Behaviour::Animated;
+    p.behaviour = Behaviour::Animated { layer: Layer::Opaque };
     p.sprite = SpriteSource::Sheet {
         sheet,
         frame: sheet.frame_for_age(0, p.lifetime),
@@ -1138,6 +1140,223 @@ pub fn poof(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f6
 pub fn spit(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let mut p = explode(engine, x, y, z, xa, ya, za, Sheet::Generic);
     p.gravity = 0.5;
+    engine.add(p);
+}
+
+/// `PlayerCloudParticle` — the `cloud` puff (an area-effect cloud, a dolphin's
+/// wake, a thrown potion's burst) and, tinted green, a panda's `sneeze`.
+///
+/// Two numbers set it apart from the smoke family it superficially resembles:
+/// the quad is **grown** by `1.875` rather than shrunk by `0.75`, and the
+/// lifetime is the usual draw *multiplied by `2.5`* — a cloud is both bigger and
+/// far longer-lived than a puff of smoke. Its colour draw also runs the other
+/// way (`1 - nextFloat() * 0.3`, so near-white) against smoke's
+/// `nextFloat() * 0.3` (so near-black).
+fn player_cloud(
+    engine: &mut ParticleEngine,
+    (x, y, z): (f64, f64, f64),
+    (xa, ya, za): (f64, f64, f64),
+) -> Particle {
+    let rng = engine.rng();
+    let mut p = Particle::with_velocity(
+        x,
+        y,
+        z,
+        0.0,
+        0.0,
+        0.0,
+        SpriteSource::Sheet {
+            sheet: Sheet::Generic,
+            frame: 0,
+        },
+        rng,
+    );
+    p.friction = 0.96;
+    let damp = f64::from(0.1_f32);
+    p.xd = p.xd.mul_add(damp, xa);
+    p.yd = p.yd.mul_add(damp, ya);
+    p.zd = p.zd.mul_add(damp, za);
+    let col = rng_next(engine).mul_add(-0.3, 1.0);
+    p.colour = [col, col, col];
+    p.quad_size *= 1.875;
+    #[expect(clippy::cast_possible_truncation, reason = "Java's `(int)` cast; small")]
+    let base = (8.0 / f64::from(rng_next(engine)).mul_add(0.8, 0.3)) as i32;
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        reason = "mirrors `(int) Math.max(baseLifetime * 2.5F, 1.0F)` exactly"
+    )]
+    {
+        p.lifetime = (base as f32 * 2.5).max(1.0) as i32;
+    }
+    p.has_physics = false;
+    p.behaviour = Behaviour::Cloud;
+    p.sprite = SpriteSource::Sheet {
+        sheet: Sheet::Generic,
+        frame: Sheet::Generic.frame_for_age(0, p.lifetime),
+    };
+    p
+}
+
+/// `PlayerCloudParticle.Provider` (`ParticleTypes.CLOUD`).
+pub fn cloud(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let p = player_cloud(engine, (x, y, z), (xa, ya, za));
+    engine.add(p);
+}
+
+/// `PlayerCloudParticle.SneezeProvider` — a baby panda's sneeze. The same puff
+/// tinted green and dropped to `0.4` alpha.
+pub fn sneeze(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let mut p = player_cloud(engine, (x, y, z), (xa, ya, za));
+    p.colour = [0.22, 1.0, 0.53];
+    p.alpha = 0.4;
+    engine.add(p);
+}
+
+/// `LavaParticle` — the popping embers over a lava surface.
+///
+/// Its **vertical velocity is not the caller's**: the constructor damps all
+/// three axes to `0.8` and then overwrites `yd` outright with
+/// `nextFloat() * 0.4 + 0.05`, so every pop launches upward regardless of what
+/// the packet asked for. The quad-size jitter is also unusually wide
+/// (`nextFloat() * 2.0 + 0.2`, i.e. up to eleven times the smallest), which is
+/// why a lava lake throws a mix of specks and fat blobs.
+///
+/// [`Behaviour::Lava`] carries the trailing-smoke roll; see there.
+pub fn lava(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
+    let rng = engine.rng();
+    let mut p = Particle::with_velocity(
+        x,
+        y,
+        z,
+        0.0,
+        0.0,
+        0.0,
+        SpriteSource::Sheet {
+            sheet: Sheet::Lava,
+            frame: 0,
+        },
+        rng,
+    );
+    p.gravity = 0.75;
+    p.friction = 0.999;
+    let damp = f64::from(0.8_f32);
+    p.xd *= damp;
+    p.zd *= damp;
+    p.yd = f64::from(rng_next(engine).mul_add(0.4, 0.05));
+    p.quad_size *= rng_next(engine).mul_add(2.0, 0.2);
+    #[expect(clippy::cast_possible_truncation, reason = "Java's `(int)` cast; small")]
+    let lifetime = (16.0 / f64::from(rng_next(engine)).mul_add(0.8, 0.2)) as i32;
+    p.lifetime = lifetime.max(1);
+    p.behaviour = Behaviour::Lava;
+    engine.add(p);
+}
+
+/// `SquidInkParticle` — a squid's ink cloud (`squid_ink`) and a glow squid's
+/// (`glow_squid_ink`).
+///
+/// Note the lifetime: `(int)(quadSize * 12.0F / (nextFloat() * 0.8F + 0.2F))`
+/// with `quadSize` **already fixed at `0.5`**, so the numerator is `6.0` and no
+/// random size draw feeds it — unlike every other lifetime in this file, this
+/// one is not scaled by a jittered size. `glow_squid_ink`'s only difference is
+/// the tint, and it is a translucent one (`alpha 0.6` in the packed colour)
+/// applied on top of a constructor that has just set alpha to `1.0`; the
+/// **later** call wins, so the alpha is the packed value.
+fn squid_ink_particle(
+    engine: &mut ParticleEngine,
+    (x, y, z): (f64, f64, f64),
+    (xa, ya, za): (f64, f64, f64),
+    colour: [f32; 3],
+    alpha: f32,
+) {
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet {
+            sheet: Sheet::Generic,
+            frame: 0,
+        },
+        rng,
+    );
+    p.friction = 0.92;
+    p.quad_size = 0.5;
+    p.alpha = alpha;
+    p.colour = colour;
+    #[expect(clippy::cast_possible_truncation, reason = "Java's `(int)` cast; small")]
+    let lifetime = (f64::from(0.5_f32 * 12.0) / f64::from(rng_next(engine)).mul_add(0.8, 0.2)) as i32;
+    p.lifetime = lifetime.max(1);
+    p.has_physics = false;
+    p.xd = xa;
+    p.yd = ya;
+    p.zd = za;
+    p.behaviour = Behaviour::SquidInk;
+    p.sprite = SpriteSource::Sheet {
+        sheet: Sheet::Generic,
+        frame: Sheet::Generic.frame_for_age(0, p.lifetime),
+    };
+    engine.add(p);
+}
+
+/// `SquidInkParticle.Provider` — plain black ink (`0xFF000000`).
+pub fn squid_ink(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    squid_ink_particle(engine, (x, y, z), (xa, ya, za), [0.0, 0.0, 0.0], 1.0);
+}
+
+/// `SquidInkParticle.GlowInkProvider` — `ARGB.colorFromFloat(1.0F, 0.2F, 0.8F,
+/// 0.6F)`, i.e. **alpha 1.0** with an `(0.2, 0.8, 0.6)` teal, not the
+/// alpha-0.6 reading the argument order invites. `colorFromFloat` takes
+/// `(alpha, red, green, blue)`.
+pub fn glow_squid_ink(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    squid_ink_particle(engine, (x, y, z), (xa, ya, za), [0.2, 0.8, 0.6], 1.0);
+}
+
+/// `SculkChargePopParticle` — the burst when a sculk charge finishes spreading.
+///
+/// `ExplodeParticle`'s tick shape ([`Behaviour::Animated`]) over its own
+/// four-frame sheet, but **translucent** rather than opaque — which is the whole
+/// reason that behaviour carries its layer as a field. `scale(1.0F)` is a no-op
+/// on the quad and resets the collision box to the default `0.2`, and the
+/// provider then assigns the packet's velocity outright over the constructor's.
+pub fn sculk_charge_pop(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+) {
+    let rng = engine.rng();
+    let mut p = Particle::with_velocity(
+        x,
+        y,
+        z,
+        xa,
+        ya,
+        za,
+        SpriteSource::Sheet {
+            sheet: Sheet::SculkChargePop,
+            frame: 0,
+        },
+        rng,
+    );
+    p.friction = 0.96;
+    p.scale(1.0);
+    p.has_physics = false;
+    p.alpha = 1.0;
+    p.xd = xa;
+    p.yd = ya;
+    p.zd = za;
+    p.lifetime = 6 + engine.rng().next_int_bound(4);
+    p.behaviour = Behaviour::Animated {
+        layer: Layer::Translucent,
+    };
+    p.sprite = SpriteSource::Sheet {
+        sheet: Sheet::SculkChargePop,
+        frame: Sheet::SculkChargePop.frame_for_age(0, p.lifetime),
+    };
     engine.add(p);
 }
 
@@ -1428,7 +1647,7 @@ mod tests {
     use super::{
         FULL_CUBE, Face, angry_villager, breaking_block_effect, bubble, crit, destroy_block_effect,
         ash, drip, explosion_emitter, firework, flame, fly_towards_position, happy_villager,
-        heart, huge_explosion, note, poof, smoke, splash, spore_blossom_air, sweep_attack,
+        heart, huge_explosion, lava, note, poof, smoke, splash, spore_blossom_air, sweep_attack,
         totem_of_undying, white_smoke, witch,
     };
     use crate::{Behaviour, DripKind, DripPhase, ParticleEngine, Sheet, SpriteSource};
@@ -2154,6 +2373,64 @@ mod tests {
         assert_ne!(run(500), run(501));
     }
 
+    /// A lava pop trails smoke, and the odds of doing so fall to zero over its
+    /// life.
+    ///
+    /// This is the second particle in the crate whose own tick spawns another,
+    /// and unlike a drip's hand-off it is **probabilistic** — the roll is
+    /// `nextFloat() > age / lifetime`, so a fresh pop trails almost every tick
+    /// and an old one almost never does. Dropping the roll entirely leaves a
+    /// bare orange dot where vanilla has a smoking ember, and the particle count
+    /// is the only thing that shows it.
+    ///
+    /// Measured across the pop's whole life rather than tick by tick, because a
+    /// single tick's roll is a coin flip: the discriminating claim is that the
+    /// *early* half of the life produces strictly more smoke than the late half,
+    /// which no constant-probability implementation (and certainly no absent
+    /// one) satisfies.
+    #[test]
+    fn a_lava_pop_trails_smoke_and_stops_as_it_ages() {
+        struct Empty;
+        impl CollisionView for Empty {
+            fn collision_boxes(&self, _: i32, _: i32, _: i32, _: &mut Vec<Aabb>) {}
+        }
+        let smoke_count = |e: &ParticleEngine| {
+            e.particles()
+                .iter()
+                .filter(|p| p.behaviour == Behaviour::AshSmoke)
+                .count()
+        };
+
+        let mut e = ParticleEngine::seeded(31);
+        lava(&mut e, 0.5, 65.0, 0.5);
+        let lifetime = e.particles()[0].lifetime;
+        assert!(lifetime > 8, "need a long enough pop to split in half: {lifetime}");
+
+        let mut early = 0usize;
+        for _ in 0..lifetime / 2 {
+            let before = smoke_count(&e);
+            e.tick(&Empty);
+            early += smoke_count(&e).saturating_sub(before);
+        }
+        let mut late = 0usize;
+        for _ in lifetime / 2..lifetime {
+            let before = smoke_count(&e);
+            e.tick(&Empty);
+            late += smoke_count(&e).saturating_sub(before);
+        }
+        assert!(
+            early > 0,
+            "a fresh lava pop must trail smoke at all; got {early} in its first \
+             {} ticks",
+            lifetime / 2
+        );
+        assert!(
+            early > late,
+            "the trail must thin as the pop ages: {early} early vs {late} late over a \
+             {lifetime}-tick life"
+        );
+    }
+
     /// A hanging drip must let go and become a falling one, and the falling one
     /// must land as a splash.
     ///
@@ -2765,7 +3042,7 @@ pub fn glow_particle(
     // `particle/glow` is a single frame, so `setSpriteFromAge` is a no-op —
     // the behaviour is still `Animated` because the *class* advances its sheet,
     // and a resource pack is free to give `glow.json` more than one frame.
-    p.behaviour = Behaviour::Animated;
+    p.behaviour = Behaviour::Animated { layer: Layer::Opaque };
     p
 }
 

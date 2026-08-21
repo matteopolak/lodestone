@@ -185,6 +185,11 @@ pub enum Sheet {
     /// pointed at `Gust` samples the wrong texture *and* runs off the end of a
     /// sequence it does not have.
     SmallGust,
+    /// `particle/lava` — its own single texture.
+    Lava,
+    /// `particle/sculk_charge_pop_0` … `sculk_charge_pop_3` — four frames,
+    /// ascending. A different sheet from [`Self::SculkCharge`]'s seven.
+    SculkChargePop,
     /// `particle/sculk_soul_0` … `sculk_soul_10` — eleven frames, ascending.
     ///
     /// Its own sheet, not [`Self::Soul`]'s: `sculk_soul.json` names
@@ -310,6 +315,11 @@ impl Sheet {
                 "small_gust_0", "small_gust_1", "small_gust_2", "small_gust_3", "small_gust_4",
                 "small_gust_5", "small_gust_6",
             ],
+            Self::Lava => &["lava"],
+            Self::SculkChargePop => &[
+                "sculk_charge_pop_0", "sculk_charge_pop_1", "sculk_charge_pop_2",
+                "sculk_charge_pop_3",
+            ],
             Self::SculkSoul => &[
                 "sculk_soul_0", "sculk_soul_1", "sculk_soul_2", "sculk_soul_3", "sculk_soul_4",
                 "sculk_soul_5", "sculk_soul_6", "sculk_soul_7", "sculk_soul_8", "sculk_soul_9",
@@ -393,6 +403,8 @@ impl Sheet {
             Self::CopperFireFlame,
             Self::SmallGust,
             Self::SculkSoul,
+            Self::Lava,
+            Self::SculkChargePop,
         ]
     }
 
@@ -610,7 +622,45 @@ pub enum Behaviour {
     /// every one of its particles start at zero size and swell over the first
     /// thirty-second of its life — visible on a mob-death puff, and invisible to
     /// any test that only asks whether a particle exists.
-    Animated,
+    ///
+    /// The layer is a field because the classes in this shape do not agree on
+    /// it: `ExplodeParticle` is `OPAQUE` and `SculkChargePopParticle` is
+    /// `TRANSLUCENT`, and there is nothing else to tell them apart.
+    Animated {
+        /// `getLayer()`.
+        layer: Layer,
+    },
+    /// `PlayerCloudParticle` — the `cloud` puff and a panda's `sneeze`.
+    ///
+    /// Ordinary physics plus `setSpriteFromAge`, the same `* 32` fade-in
+    /// [`Self::AshSmoke`] has, and a **translucent** layer — the one combination
+    /// no existing variant offers.
+    ///
+    /// One thing is deliberately not ported: vanilla's `tick` also drags the
+    /// puff down toward the nearest player within two blocks
+    /// (`level.getNearestPlayer(x, y, z, 2.0, false)`), which is what makes an
+    /// area-effect cloud settle around your feet. That needs a player position
+    /// this crate has no access to, and it is a *drift*, not a lifetime or a
+    /// colour, so its absence reads as a slightly less clingy cloud rather than
+    /// a missing particle.
+    Cloud,
+    /// `LavaParticle` — the pops off a lava surface, and the only particle in
+    /// this crate that spawns a **different type** as it lives.
+    ///
+    /// Its quad shrinks quadratically (`quadSize * (1 - s²)`, not
+    /// [`Self::Flame`]'s `1 - s²/2`), and every tick it rolls
+    /// `nextFloat() > age / lifetime` and emits a smoke particle at its own
+    /// position and velocity if it passes — so a fresh pop trails smoke almost
+    /// every tick and an old one almost never does. Dropping that roll leaves a
+    /// bare orange dot where vanilla has a smoking ember.
+    Lava,
+    /// `SquidInkParticle` — a squid's ink cloud and a glow squid's.
+    ///
+    /// [`Self::SimpleAnimated`] exactly (its alpha-fade formula is the same
+    /// expression, and both are full-bright and translucent) **plus** a
+    /// `yd -= 0.0074` sink whenever the cloud is in air rather than water, which
+    /// is what makes ink released above the surface fall instead of hanging.
+    SquidInk,
     /// `DripParticle` — the seventeen registry types that make up a drip's
     /// three-phase life: it hangs under a block, lets go and falls, and splashes
     /// where it lands.
@@ -714,6 +764,14 @@ pub enum Spawn {
         /// `FallAndLandParticle` hands on zero.
         vel: [f64; 3],
     },
+    /// The trail a [`Behaviour::Lava`] pop throws, at its own position and
+    /// velocity.
+    Smoke {
+        /// Where.
+        pos: [f64; 3],
+        /// The pop's own velocity, handed on unchanged.
+        vel: [f64; 3],
+    },
     /// A `splash` — what a water drip lands as, instead of a landing phase of
     /// its own. `SplashParticle` is not a `DripParticle` at all, which is why
     /// this cannot be a [`Self::Drip`] with a third phase.
@@ -734,7 +792,9 @@ impl Behaviour {
                 | Self::Spell
                 | Self::HugeExplosion
                 | Self::Dust
-                | Self::Animated
+                | Self::Animated { .. }
+                | Self::Cloud
+                | Self::SquidInk
                 | Self::DustColorTransition { .. },
                 SpriteSource::Sheet { sheet, .. },
             ) => Some(sheet),
@@ -753,7 +813,12 @@ impl Behaviour {
     #[must_use]
     pub const fn layer(self) -> Layer {
         match self {
-            Self::SimpleAnimated { .. } | Self::Spell | Self::CampfireSmoke => Layer::Translucent,
+            Self::SimpleAnimated { .. }
+            | Self::Spell
+            | Self::CampfireSmoke
+            | Self::Cloud
+            | Self::SquidInk => Layer::Translucent,
+            Self::Animated { layer } => layer,
             Self::Plain
             | Self::Terrain { .. }
             | Self::AshSmoke
@@ -775,7 +840,8 @@ impl Behaviour {
             // emitter here yet.
             | Self::FlyTowardsPosition
             // `ExplodeParticle.getLayer` is `OPAQUE`.
-            | Self::Animated
+            // `LavaParticle.getLayer` is `OPAQUE`.
+            | Self::Lava
             // `DripParticle.getLayer` is `OPAQUE`.
             | Self::Drip { .. }
             | Self::DustColorTransition { .. } => Layer::Opaque,
@@ -1058,8 +1124,16 @@ impl Particle {
             | Behaviour::Note
             | Behaviour::Heart
             | Behaviour::Dust
+            | Behaviour::Cloud
             | Behaviour::DustColorTransition { .. } => {
                 self.quad_size * (normalised() * 32.0).clamp(0.0, 1.0)
+            }
+            // `LavaParticle.getQuadSize`: `quadSize * (1 - s * s)`. Note the
+            // missing `* 0.5F` that `Behaviour::Flame` has — a lava pop shrinks
+            // to nothing over its life where a flame only halves.
+            Behaviour::Lava => {
+                let s = normalised();
+                self.quad_size * s.mul_add(-s, 1.0)
             }
             // `quadSize * (1 - s * s * 0.5)`.
             Behaviour::Flame => {
@@ -1143,6 +1217,37 @@ impl Particle {
                 Vec::new()
             }
             Behaviour::HugeExplosionSeed => self.tick_huge_explosion_seed(),
+            Behaviour::Lava => {
+                self.tick_base(view);
+                if self.removed {
+                    return Vec::new();
+                }
+                // `if (random.nextFloat() > (float) age / lifetime)` — the odds
+                // of trailing smoke fall linearly to zero over the pop's life.
+                #[expect(clippy::cast_precision_loss, reason = "Java computes this in f32")]
+                let odds = self.age as f32 / self.lifetime as f32;
+                if self.rng_probe() > odds {
+                    return vec![Spawn::Smoke {
+                        pos: [self.x, self.y, self.z],
+                        vel: [self.xd, self.yd, self.zd],
+                    }];
+                }
+                Vec::new()
+            }
+            Behaviour::SquidInk => {
+                self.tick_base(view);
+                self.tick_overrides();
+                if !self.removed {
+                    // `if (level.getBlockState(...).isAir()) yd -= 0.0074F` —
+                    // approximated as "not in water", which is the distinction
+                    // the sink exists to make and the one this view can answer.
+                    let (bx, by, bz) = block_containing(self.x, self.y, self.z);
+                    if !view.is_water(bx, by, bz) {
+                        self.yd -= f64::from(0.0074_f32);
+                    }
+                }
+                Vec::new()
+            }
             _ => {
                 self.tick_base(view);
                 self.tick_overrides();
@@ -1193,7 +1298,8 @@ impl Particle {
             | Behaviour::Spell
             | Behaviour::HugeExplosion
             | Behaviour::Dust
-            | Behaviour::Animated => {
+            | Behaviour::Animated { .. }
+            | Behaviour::Cloud => {
                 self.set_sprite_from_age();
             }
             // `DustColorTransitionParticle` additionally lerps its colour —
@@ -1903,6 +2009,9 @@ impl ParticleEngine {
                 }
                 Spawn::Drip { kind, phase, pos, vel } => emit::drip(self, kind, phase, pos, vel),
                 Spawn::Splash { pos: [x, y, z] } => emit::splash(self, x, y, z, 0.0, 0.0, 0.0),
+                Spawn::Smoke { pos: [x, y, z], vel: [xd, yd, zd] } => {
+                    emit::smoke(self, x, y, z, xd, yd, zd, 1.0);
+                }
             }
         }
     }

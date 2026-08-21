@@ -498,6 +498,36 @@ Things the transcription turned on:
 `a_hanging_water_drip_falls_and_the_falling_drip_splashes` is the gate, observed
 failing under a neuter that removes the hand-off (`left: []`).
 
+### Clouds, lava and ink
+
+Six more, taken in the order a player meets them: `cloud`, `sneeze`, `lava`,
+`squid_ink`, `glow_squid_ink`, `sculk_charge_pop`.
+
+* **`Behaviour::Animated` gained a `layer` field** rather than a second
+  near-identical variant. `ExplodeParticle` is `OPAQUE` and
+  `SculkChargePopParticle` is `TRANSLUCENT`, and there is genuinely nothing else
+  to tell them apart — the layer *is* the difference.
+* **`LavaParticle` is the second particle whose own tick spawns another**, and
+  unlike a drip's hand-off it is probabilistic: `nextFloat() > age / lifetime`,
+  rolled every tick, so a fresh pop trails smoke almost continuously and an old
+  one almost never does. `a_lava_pop_trails_smoke_and_stops_as_it_ages` measures
+  early-half against late-half rather than a single tick — one tick's roll is a
+  coin flip and proves nothing — and the neuter reported `0` trails in the first
+  25 ticks. It also reads **none** of the packet's velocity words: the
+  constructor damps them to `0.8` and then overwrites `yd` outright with
+  `nextFloat() * 0.4 + 0.05`, so every pop launches upward.
+* **`PlayerCloudParticle`'s numbers run opposite to the smoke family it
+  resembles.** The quad is *grown* `1.875×` rather than shrunk `0.75×`, the
+  lifetime is the usual draw *multiplied by 2.5*, and the colour draw is
+  `1 - nextFloat() * 0.3` (near-white) against smoke's `nextFloat() * 0.3`
+  (near-black). One thing is not ported and is named at the behaviour: vanilla's
+  tick also drags the puff toward a player within two blocks, which needs a
+  player position this crate has no access to.
+* **`ARGB.colorFromFloat` takes `(alpha, red, green, blue)`.** A glow squid's ink
+  is `colorFromFloat(1.0F, 0.2F, 0.8F, 0.6F)` — alpha **1.0** over a
+  `(0.2, 0.8, 0.6)` teal, not the alpha-0.6 reading the leading `1.0F` invites.
+  Four same-typed arguments in a row, which is the transposition shape again.
+
 ## Verification
 
 - `crates/lodestone-particle/src/emit.rs`: one test per new emitter asserting an **exact**
