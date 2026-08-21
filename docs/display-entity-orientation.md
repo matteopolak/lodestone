@@ -8,14 +8,31 @@ that decides which way it faces, and the `translation`/`left_rotation`/
 `scale`/`right_rotation` transformation on top of it. A faithful port of
 `DisplayRenderer.calculateOrientation` and `Transformation.compose` (`26.2`).
 
-**This module has no producer yet, and that is deliberate, not an
-oversight.** `crates/protocol/v770` has no clientbound metadata decode for
-the `Display` entity family at all — no `MetadataField` variant, no adapter
-arm — so nothing anywhere in this codebase currently constructs a
-`text_display`/`item_display`/`block_display` entity outside this module's
-own unit tests. There is, right now, no way for a `text_display` entity to
-exist client-side, let alone reach this geometry. See "What would need to
-exist for this to go live" below.
+**`text_display` is live end to end; `item_display`/`block_display` are
+decoded and extracted but not yet drawn.** The full chain is:
+`crates/protocol/v770/src/packets/metadata.rs` decodes billboard/
+translation/scale/rotation/text/block-state/item-context off
+`set_entity_data` → `lodestone_ecs::ingest::apply_display_metadata` folds
+them into `Display*` components → `lodestone_shell::display_entities`
+extracts a `DisplayDraw` per tracked entity, every field defaulted to
+vanilla's own accessor default when unreported → `gpu/display_text.rs`
+reads the `text_display` ones and draws glyphs and a background panel
+through the real `RenderState::render` path. `crates/lodestone-shell/tests/
+text_display_pixels.rs` is the pixel gate proving that last hop: it renders
+through the entire chain and reads back real pixels, with a
+no-draws-installed control that must paint nothing in the entity's screen
+rect — watched to fail with the draw call itself commented out, restored
+from an md5-checked backup.
+
+`item_display`/`block_display` reach `DisplayDraw` (their block state / item
+stack and `ItemDisplayContext` ordinal are decoded and carried all the way
+through) but no GPU pass reads them yet — the same disclosed, "extracted but
+not drawn" state this repo's `EntityDraw::wool` field already documents for
+sheep wool, not a silent gap. `gpu/moving_blocks.rs`'s existing
+`(state id, transform, light) → merge_moving_block` seam is the intended
+`block_display` consumer (posing its transform via `display_placement_matrix`
+instead of `falling_block_pose`); `gpu/world_items.rs`'s
+`mesh_item_quads_with_light` is the intended `item_display` one.
 
 ## How it works
 
@@ -88,28 +105,35 @@ head-tilt tracking, while still looking plausible in a screenshot taken from
 directly in front of the entity. That is exactly the kind of defect a
 screenshot cannot catch and a unit test can.
 
-### What would need to exist for this to go live
+### What would need to exist for `item_display`/`block_display` to draw
 
-Three things, none of which live in this session's writable crates:
+Both already reach `DisplayDraw` (`lodestone_shell::display_entities`) with
+every field decoded — nothing left to add in the protocol or ECS layers for
+either. What is missing is purely a render-side consumer, one per subtype:
 
-1. A `MetadataField` variant (or several) for the `Display` family's synced
-   entity-data indices — billboard mode, the four transformation fields,
-   view-range/shadow-radius/shadow-strength, etc. — in `crates/protocol/`.
-2. An adapter arm in `crates/protocol/v770` that decodes those indices off
-   `SET_ENTITY_DATA` into the new field(s).
-3. A shell-side consumer that reads the decoded fields, calls
-   `display_orientation`/`display_placement_matrix`, and feeds the result
-   into an `EntityDraw`/GPU pass — the same shape `entities.rs`'s existing
-   `extract_entity_draws` already gives every other entity kind.
+1. **`block_display`**: a producer for `gpu/moving_blocks.rs`'s existing
+   `(state id, transform, light)` seam, reading `DisplayDraw::block_state`
+   and posing it with `display_placement_matrix(draw.position,
+   display_orientation(draw.billboard, …), &draw.transform)` in place of
+   `falling_block_pose`. `merge_moving_block` is already generic over the
+   producer — see that file's module doc for the falling-block/piston/TNT
+   precedent this would be a fourth instance of.
+2. **`item_display`**: a producer alongside `gpu/world_items.rs`'s dropped-item
+   path, reading `DisplayDraw::item`/`item_display_context` and calling
+   `mesh_item_quads_with_light(quads, display_placement_matrix(…), gui_light,
+   light)` — the same primitive `vault_display_item_mesh` already wraps for a
+   vault's floating reward, which is the closest existing precedent (an item
+   posed by an arbitrary transform matrix, not a dropped-item bob/spin).
+3. Wiring either into `gpu/state.rs`/`gpu/frame.rs` reads `RenderState::
+   display_draws` (installed by `set_display_draws`, already wired for the
+   text pass) — no new per-frame plumbing needed, only a new merge call
+   alongside the existing falling-block/dropped-item ones.
 
-**Do not wire an inert field to this module in the meantime.** A struct or
-component that exists but that nothing constructs outside a test is exactly
-the island shape CLAUDE.md's evidence standards call out repeatedly — the
-correct state until the protocol half lands is "real, tested geometry with a
-named, disclosed absence of a producer", not a half-wired field that looks
-connected but never receives real data. Do not delete this module either:
-the geometry is real, tested, and will not need re-deriving once the
-protocol half exists.
+**Do not wire an inert field in the meantime.** Both fields already carry
+real, decoded data all the way to `DisplayDraw` — the remaining gap is
+narrowly "no GPU pass reads this yet", which is the same disclosed state
+`EntityDraw::wool` already documents, not something to paper over with a
+placeholder consumer.
 
 ## Configuration
 
@@ -117,12 +141,21 @@ None — every input is a per-frame value a caller already holds.
 
 ## Dependencies
 
-`glam` only. No GPU device, no asset manager — see "How it works" above for
-why that is deliberate; a wire producer is the missing dependency, tracked
-above rather than pretended-around.
+`glam` for the geometry (`lodestone-render`, no GPU device, no asset
+manager); `lodestone-model`'s own `Vec3f`/`Quat` types carry the same values
+version-free through `crates/protocol/v770` and `lodestone-ecs`, converted to
+`glam` only at the `lodestone-shell::display_entities` extract boundary — see
+that module's own doc for why it needs no render-side interpolation track
+the way `lodestone_shell::entities::extract_entity_draws` does for every
+other entity kind.
 
 ## Verification
 
 ```bash
 cargo test -p lodestone-render --lib --no-fail-fast -- display::
+cargo test -p lodestone-v770 --lib --no-fail-fast -- packets::metadata::
+cargo test -p lodestone-ecs --lib --no-fail-fast -- ingest::
+cargo test -p lodestone-shell --lib --no-fail-fast -- display_entities:: gpu::display_text::
+# GPU pixel gate (needs a real adapter and the vanilla client.jar):
+cargo test -p lodestone-shell --test text_display_pixels -- --ignored --nocapture
 ```
