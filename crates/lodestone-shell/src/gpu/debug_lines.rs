@@ -227,6 +227,40 @@ pub fn chunk_border_vertices(
     out
 }
 
+/// The two F3 sub-modes' own contribution to the debug-line channel, each
+/// gated on its **own** flag.
+///
+/// A named function rather than two `if`s inlined in
+/// `app::session::WindowApp::install_debug_lines_source`'s closure, because the
+/// flag-to-producer mapping is the part of this feature that can cross without
+/// leaving a trace: the two flags are adjacent `bool`s, and a fixture that sets
+/// them to the same value cannot see a transposition at all. Pulling the mapping
+/// out gives it a subject a gate can drive with the two flags at *different*
+/// values, with no window, no GPU and no `World` —
+/// `tests/debug_line_f3_overlay.rs`.
+///
+/// The caller resolves `draws` and `player` from the `World`; both are ignored
+/// when the corresponding flag is off, so it is free to pass empty/dummy values
+/// rather than pay for a read it will not use.
+#[must_use]
+pub fn f3_overlay_vertices(
+    draws: &[crate::entities::EntityDraw],
+    player: [f64; 3],
+    min_y: i32,
+    height: u32,
+    hitboxes: bool,
+    chunk_borders: bool,
+) -> Vec<DebugLineVertex> {
+    let mut out = Vec::new();
+    if hitboxes {
+        out.extend(entity_hitbox_vertices(draws));
+    }
+    if chunk_borders {
+        out.extend(chunk_border_vertices(player, min_y, height));
+    }
+    out
+}
+
 /// Fixed capacity for the debug-line pass, in line segments (two
 /// [`DebugLineVertex`] inputs each — the wire shape callers still build). A
 /// debug overlay does not need to grow without bound the way
@@ -466,19 +500,33 @@ impl DebugLineRenderer {
         for s in 0..segment_count {
             let a = vertices[s * 2];
             let b = vertices[s * 2 + 1];
-            // Two triangles covering the quad: (A-, A+, B-) and (A+, B+,
-            // B-) — the same winding `OutlineRenderer::prepare` uses for its
-            // own edge-to-quad expansion. Both input vertices of a debug-line
-            // segment always carry the same colour (every producer in this
-            // module sets it once per segment), so using `a.color` for the
-            // whole ribbon is not an approximation.
+            // Two triangles covering the quad: (A-, A+, B-) and (A+, B+, B-),
+            // where `X-`/`X+` mean endpoint `X` pushed to the two sides of
+            // **one** screen-space normal shared by the whole segment.
+            //
+            // The stored `side` is not that sign directly. The shader derives
+            // the normal from `screen(other) - screen(this)`, which points the
+            // *opposite* way at B, so B's normal is `-n` and B's stored `side`
+            // has to be negated to land on the same edge of the ribbon as A's:
+            // `B-` is `(b, a, +1.0)` and `B+` is `(b, a, -1.0)`. Emitting the
+            // same sign at both endpoints makes the two triangles pick
+            // *opposite* diagonals of the quad, which is a bow-tie rather than
+            // a ribbon: measured at a 6.4 px line width, the drawn segment was
+            // 6 px at both endpoints and 3 px at its midpoint, and biased to
+            // one side rather than centred on the line. See
+            // `tests/debug_line_ribbon_width_pixels.rs`, which measures the
+            // profile and fails on that taper.
+            //
+            // Both input vertices of a debug-line segment always carry the same
+            // colour (every producer in this module sets it once per segment),
+            // so using `a.color` for the whole ribbon is not an approximation.
             let quad: [([f32; 3], [f32; 3], f32); VERTS_PER_SEGMENT] = [
                 (a.position, b.position, -1.0),
                 (a.position, b.position, 1.0),
-                (b.position, a.position, -1.0),
-                (a.position, b.position, 1.0),
                 (b.position, a.position, 1.0),
+                (a.position, b.position, 1.0),
                 (b.position, a.position, -1.0),
+                (b.position, a.position, 1.0),
             ];
             let base = s * VERTS_PER_SEGMENT * FLOATS_PER_RIBBON_VERT;
             for (i, (pos, other, side)) in quad.into_iter().enumerate() {

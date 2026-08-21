@@ -74,6 +74,7 @@ mod tests;
 
 pub use debug_lines::{
     DebugLineVertex, chunk_border_vertices, debug_line_vertices, entity_hitbox_vertices,
+    f3_overlay_vertices,
 };
 pub(crate) use debug_lines::push_box;
 pub use occlusion::TerrainOcclusion;

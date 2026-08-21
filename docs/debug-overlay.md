@@ -371,6 +371,55 @@ Toggles are `Arc<AtomicBool>` because the source closure is
   survive the expansion. `MIN_LINE_WIDTH_PX = 1.5` is deliberately thinner
   than the outline pass's `2.5`: a diagnostic wireframe should read as a
   *line*, not a highlighted edge.
+- **The ribbon that replaced the `LineList` was a bow-tie, and the owner's
+  follow-up report ("the chunk border lines are the wrong thickness, too thick
+  on the sides") is that defect.** `DebugLineRenderer::prepare` stores a `side`
+  (-1/+1) per corner and `debug_lines.wgsl` offsets along the segment's
+  screen-space normal — but that normal is derived from
+  `screen(other) - screen(this)`, which points the *opposite* way at the
+  segment's far endpoint. So the far endpoint's normal is `-n`, and its stored
+  `side` has to be negated to land on the same edge of the ribbon as the near
+  endpoint's. It was not, so the two triangles picked **opposite diagonals** of
+  the quad: the shape drawn was full width at both endpoints, pinched to half
+  width at the midpoint, and biased to one side instead of centred on the line.
+  Measured by readback at an 8192 px viewport (a 6.4 px line width): the width
+  profile along one segment ran `6 6 6 5 5 5 4 4 4 3 3 3 4 4 4 5 5 5 6 6 6`
+  before the fix and a flat `6` after, identically for a screen-vertical and a
+  screen-horizontal segment. At 1920x1080 the same change moved total coverage
+  from 3,564 px to 6,234 px for a chunk-border column and 1,307 px to 1,952 px
+  for a zombie hitbox. `tests/debug_line_ribbon_width_pixels.rs` is the gate;
+  it must be a **pixel** gate, because the CPU-side vertex list is equally
+  plausible either way and the whole defect lives in what the rasteriser does
+  with it. The control is the pre-fix run above, observed red.
+
+  **`gpu/outline.rs`'s `OutlineRenderer::prepare` carries the identical defect**
+  — the same six-entry quad list, the same shader convention in
+  `outline.wgsl` — so the block-highlight box pinches the same way at its own
+  2.5 px width. It was left alone here only because it sits outside this pass's
+  assigned files; it is the same one-line change (negate `side` on the two
+  `(cb, ca, ...)` corners) and wants the same gate.
+- **The reported "F3+B and F3+G both toggle chunk borders" crossing does not
+  exist in the tree, and the whole flag path is now gated to keep it that way.**
+  Every hop was read at the reporting sha and is correct: `resolve_key`'s two
+  chord arms, `apply_key_outcome`'s two stores, the two `Arc::clone`s in
+  `install_debug_lines_source`, and `RenderState::set_debug_lines_source`'s
+  single assignment. Both producers were also confirmed to reach real pixels
+  from the same camera (1,110 px hitbox / 31,172 px chunk border). What *was*
+  missing is that nothing reached the flag-to-producer mapping at all, so a
+  transposition there would have been invisible: the mapping now lives in
+  `gpu::f3_overlay_vertices`, and `tests/debug_line_f3_overlay.rs` drives it
+  with the two flags at **different** values (a fixture that sets two adjacent
+  `bool`s equal cannot see a transposition), with the mob twelve chunks from
+  the player so a swapped producer cannot land on coincidentally similar
+  geometry. Neutered by swapping the two `if`s: red, naming the crossing.
+
+  Worth carrying for whoever reads the report next: this client's
+  `extracted_entity_draws` excludes the local player, so in a quiet area F3+B
+  legitimately draws nothing at all, which is indistinguishable in play from
+  the overlay being broken. Vanilla has the same first-person behaviour, but if
+  the owner's session was somewhere with no nearby mobs, "F3+B does nothing and
+  the only overlay I ever get is the chunk grid" is the expected observation
+  rather than a defect.
 - **No existing pixel gate exercised `entity_hitbox_vertices`/
   `chunk_border_vertices` specifically.** Every debug-line gate in
   `gpu/pixel_gates.rs` installed a synthetic closure

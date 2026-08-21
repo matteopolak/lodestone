@@ -618,19 +618,37 @@ impl WindowApp {
                 let mut out = crate::gpu::debug_line_vertices(
                     &world.resource::<lodestone_ecs::DebugLines>().0,
                 );
-                if hitboxes.load(Ordering::Relaxed) {
-                    out.extend(crate::gpu::entity_hitbox_vertices(
-                        &crate::entities::extracted_entity_draws(world),
-                    ));
-                }
-                if borders.load(Ordering::Relaxed) {
-                    let p = world
+                // Both flags read *before* either producer runs, and the two
+                // sub-modes selected in one place — `crate::gpu::f3_overlay_vertices`
+                // — so the flag-to-producer mapping has a subject a gate can drive
+                // with the two flags at different values. The two `World` reads stay
+                // lazy (each is a clone or a component lookup nobody wants on a frame
+                // where its overlay is off), which is the only reason they are still
+                // spelled out here rather than hidden behind that call.
+                let hitboxes_on = hitboxes.load(Ordering::Relaxed);
+                let borders_on = borders.load(Ordering::Relaxed);
+                let draws = if hitboxes_on {
+                    crate::entities::extracted_entity_draws(world)
+                } else {
+                    Vec::new()
+                };
+                let player = if borders_on {
+                    world
                         .get::<lodestone_ecs::player::PhysicsState>(local)
                         .map_or([0.0, 0.0, 0.0], |s| {
                             [s.0.position.x, s.0.position.y, s.0.position.z]
-                    });
-                    out.extend(crate::gpu::chunk_border_vertices(p, min_y, height));
-                }
+                        })
+                } else {
+                    [0.0, 0.0, 0.0]
+                };
+                out.extend(crate::gpu::f3_overlay_vertices(
+                    &draws,
+                    player,
+                    min_y,
+                    height,
+                    hitboxes_on,
+                    borders_on,
+                ));
                 let permission_level = world
                     .get::<lodestone_ecs::session::ServerPermissionLevel>(local)
                     .map_or(0, |level| level.0);
