@@ -81,7 +81,7 @@
 //! * `lodestone-game` — `tablist::GameProfile::skin_texture`.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use lodestone_assets::{Image, PlayerModelType};
 
@@ -167,6 +167,27 @@ static FETCHED: Mutex<Option<HashMap<String, FetchState>>> = Mutex::new(None);
 
 /// Sheets waiting for a frame to upload them, as `(url, decoded PNG)`.
 static READY: Mutex<Vec<(String, Image)>> = Mutex::new(Vec::new());
+
+/// Every sheet a fetch has decoded this session, **retained** and keyed by the
+/// same texture URL [`READY`] uses.
+///
+/// [`READY`] is a *drain*, and a drain has exactly one consumer: whoever calls
+/// [`drain_ready`] first takes the sheet and every other consumer never sees it.
+/// The world entity pass (`RenderState::install_pending_player_skins`) is that
+/// consumer. A placed head and a head in an inventory slot are drawn by
+/// two *different* passes owning two different bind-group caches — see
+/// `hud::item_icon`'s `SpecialIcons`, which owns everything it draws with — so a
+/// second drain would not have given the GUI pass a sheet, it would have stolen
+/// one from the world.
+///
+/// So the GUI side **pulls** instead: it asks [`sheet`] for a URL it has no bind
+/// group for, on every frame that draws one, and uploads on the first frame the
+/// answer is `Some`. That also removes the ordering hazard outright — a record
+/// built before the fetch lands simply resolves on a later frame, where a
+/// one-shot drain would have had to arrive on exactly the right one.
+///
+/// `Arc<Image>` so two readers share one 16 KB decode rather than copying it.
+static SHEETS: Mutex<Option<HashMap<String, Arc<Image>>>> = Mutex::new(None);
 
 /// Test-only record of every URL [`request`] routed to a fetch, in place of the
 /// fetch itself.
@@ -312,12 +333,34 @@ fn finish(url: &str, state: FetchState) {
     });
 }
 
-/// Hand a decoded sheet to the renderer.
-fn publish(url: String, image: Image) {
+/// Hand a decoded sheet to the renderers: onto the world pass's one-shot queue
+/// ([`READY`]) *and* into the retained by-URL store ([`SHEETS`]) the GUI icon
+/// pass pulls from. Both, because they are two consumers and a drain only ever
+/// serves one — see [`SHEETS`]'s doc.
+///
+/// `pub` for a second reason beyond the fetch: it is the seam a headless gate
+/// installs a sheet through. A pixel gate for a custom head must not perform an
+/// HTTP GET as a side effect of `cargo test`, and it cannot reach the private
+/// fetch fork an integration test compiles the library without.
+pub fn publish(url: String, image: Image) {
+    let shared = Arc::new(image.clone());
+    with_map(&SHEETS, |map| {
+        map.insert(url.clone(), shared);
+    });
     match READY.lock() {
         Ok(mut ready) => ready.push((url, image)),
         Err(poisoned) => poisoned.into_inner().push((url, image)),
     }
+}
+
+/// The decoded sheet for `url`, if a fetch has finished it this session.
+///
+/// Unlike [`drain_ready`] this does **not** consume: it is the pull half of
+/// [`SHEETS`]'s doc, for a consumer that builds its own bind groups and needs to
+/// keep asking until the fetch lands.
+#[must_use]
+pub fn sheet(url: &str) -> Option<Arc<Image>> {
+    with_map(&SHEETS, |map| map.get(url).cloned())
 }
 
 /// Take every sheet that has landed since the last call, for the renderer to
@@ -450,6 +493,16 @@ pub(crate) fn requested_urls() -> Vec<String> {
 mod tests {
     use super::*;
     use lodestone_game::tablist::{GameProfile, ProfileProperty};
+
+    /// A blank decoded sheet of the given size, for the queue/store tests that
+    /// care about routing rather than about pixels.
+    fn sheet_image(width: u32, height: u32) -> Image {
+        Image {
+            width,
+            height,
+            rgba: vec![0u8; (width * height * 4) as usize],
+        }
+    }
 
     fn profile_with(value: &str) -> GameProfile {
         let mut profile = GameProfile::new(uuid::Uuid::nil(), "Tester");
@@ -602,5 +655,48 @@ mod tests {
         assert_eq!(drained.len(), 1);
         assert_eq!((drained[0].1.width, drained[0].1.height), (64, 64));
         assert!(drain_ready().is_empty());
+    }
+
+    /// The **pull** half, and the discriminator against the drain: the world
+    /// pass taking a sheet off [`READY`] must not blind the GUI icon pass, which
+    /// asks [`sheet`] for the same URL on every frame it draws that head.
+    ///
+    /// A gate that only checked `sheet(url).is_some()` would pass with `SHEETS`
+    /// filled and `drain_ready` never called, so the drain here is the point of
+    /// the test rather than setup — before this store existed, a second consumer
+    /// would have seen exactly `None` at this line.
+    #[test]
+    fn a_retained_sheet_survives_the_world_passs_drain() {
+        let url = "https://textures.minecraft.net/texture/retained-not-drained";
+        assert!(
+            sheet(url).is_none(),
+            "sanity: this url must be unknown before the publish, or the \
+             assertion below cannot attribute the hit to it"
+        );
+        publish(url.to_owned(), sheet_image(64, 64));
+
+        // The world entity pass's once-per-frame drain.
+        let drained = drain_ready();
+        assert!(
+            drained.iter().any(|(u, _)| u == url),
+            "sanity: the publish must have reached the drain queue too"
+        );
+        assert!(drain_ready().is_empty(), "the drain stays one-shot");
+
+        let retained = sheet(url).expect(
+            "the GUI icon pass must still be able to pull a sheet the world \
+             pass already drained — two consumers, one fetch",
+        );
+        assert_eq!((retained.width, retained.height), (64, 64));
+        assert!(
+            sheet(url).is_some(),
+            "the retained store must not consume either: the pull is retried \
+             every frame until a bind group exists"
+        );
+        assert!(
+            sheet("https://textures.minecraft.net/texture/never-published").is_none(),
+            "control: an unpublished url must miss, or the hit above says \
+             nothing about the key"
+        );
     }
 }
