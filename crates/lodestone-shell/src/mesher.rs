@@ -1217,8 +1217,14 @@ pub fn mesh_snapshot_models_at(
 /// `mesh_one` is this function's only production caller; the merged
 /// [`mesh_snapshot_models`] above stays as-is for existing test/bench callers
 /// that only want the combined geometry.
+///
+/// `pub` because **every** pixel gate in `tests/` was passing
+/// `translucent_blocks: ModelMesh::default()` — the whole corpus had never
+/// once rendered a translucent block, which is why a display panel deleting
+/// the stained glass behind it reached the owner. A gate that wants real
+/// translucent terrain must reach the production split, not re-derive one.
 #[must_use]
-fn mesh_snapshot_models_layers(
+pub fn mesh_snapshot_models_layers(
     snapshot: &SectionSnapshot,
     models: &BlockModels,
     cutout_leaves: bool,
@@ -3224,6 +3230,7 @@ pub fn relight_changed_blocks(
     write: Option<Res<ChunkWorldWrite>>,
     store: Res<ChunkWorld>,
     mut terrain: ResMut<TerrainMesh>,
+    mut last_corrections: bevy_ecs::system::Local<(u64, u64)>,
 ) {
     let Some(write) = write else {
         return;
@@ -3239,17 +3246,22 @@ pub fn relight_changed_blocks(
     // this rule and the mesher renders it through the same one.
     let has_skylight = matches!(terrain.policy.sky_default, SkyDefault::Full);
 
-    let relit = {
+    let (relit, corrections) = {
         // The write guard is held for the relight and dropped before anything
         // reaches for the read handle — `mesh_section` takes a read lock, and the
         // store is one `RwLock`.
         let mut world = write.write();
-        if vanilla_ids {
+        let relit = if vanilla_ids {
             world.run_pending_relight(&VanillaLightProps, has_skylight)
         } else {
             world.run_pending_relight(&crate::blocks::DemoLightProps, has_skylight)
-        }
+        };
+        // Read under the same guard as the drain, so the pair describes one moment.
+        (relit, world.light_correction_counts())
     };
+    let merged = corrections.0.saturating_sub(last_corrections.0);
+    let cancelled = corrections.1.saturating_sub(last_corrections.1);
+    *last_corrections = corrections;
 
     if relit.dropped > 0 {
         tracing::warn!(
@@ -3267,8 +3279,47 @@ pub fn relight_changed_blocks(
             cells_changed = relit.cells_changed,
             sections = relit.dirty_sections.len(),
             deferred = relit.deferred,
+            // Which props table the recompute read. A live session that reports
+            // `false` here is lighting 26.2 block-state ids from the offline demo
+            // table, which is a whole-world wrong answer rather than a small one.
+            vanilla_ids,
+            has_skylight,
+            // Server light corrections applied since the previous drain, and queued
+            // relights they cancelled. Vanilla sends the breaker no light packet for
+            // their own break (`ChunkHolder.broadcastChanges` restricts it to players
+            // for whom the chunk is on the outer ring of their loaded area), so
+            // `merged = 0` beside a relight is the expected reading — and a non-zero
+            // one means the server *did* correct us and the result is still wrong,
+            // which is a different defect.
+            merged,
+            cancelled,
             "client relight"
         );
+        // One line per job, because the aggregate above cannot distinguish a
+        // recompute that correctly darkened a hole from one that flooded an enclosed
+        // room with daylight: `cells_changed` is the same number either way. The
+        // signed split and the sky-source provenance are the discriminators.
+        for job in &relit.detail {
+            tracing::debug!(
+                target: "light",
+                at = ?job.change,
+                changes = job.changes,
+                region_min = ?job.region_min,
+                region_max = ?job.region_max,
+                sky_raised = job.sky_raised,
+                sky_lowered = job.sky_lowered,
+                max_sky_gain = job.max_sky_gain,
+                block_raised = job.block_raised,
+                block_lowered = job.block_lowered,
+                max_block_gain = job.max_block_gain,
+                sky_source_columns = job.sky_source_columns,
+                // Sky sources this engine invented out of an absent section rather
+                // than reading out of data the server sent. Non-zero underground,
+                // beside a large `sky_raised`, is the flood.
+                sky_sources_from_missing = job.sky_source_columns_from_missing,
+                "client relight job"
+            );
+        }
     }
     terrain.light_dirty_sections.extend(relit.dirty_sections);
 

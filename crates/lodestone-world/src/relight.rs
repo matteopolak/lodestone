@@ -144,6 +144,65 @@ pub const RELIGHT_JOB_CEILING: usize = 1_200_000;
 /// queue an unbounded re-mesh.
 const DIRTY_SECTION_CAP: usize = 512;
 
+/// How many per-job [`RelitJob`] records one drain keeps.
+///
+/// A bulk edit can produce hundreds of jobs and the host logs these one line each,
+/// so the record is a **sample**, not a census — [`Relit::jobs`] stays the count.
+/// Eight is enough to cover every job a hand-broken block produces.
+pub const RELIT_DETAIL_CAP: usize = 8;
+
+/// One job's diagnostic record: what it recomputed, and **which direction** it
+/// moved the light.
+///
+/// This exists because the two failure modes of an incremental relight are
+/// indistinguishable from their aggregate counters. [`Relit::cells_changed`] is the
+/// same number whether the recompute darkened a hole correctly or flooded an
+/// enclosed room with daylight; only the signed split separates them, and only
+/// [`Self::sky_source_columns_from_missing`] says whether a flood was seeded from
+/// data the server actually sent or from a [`LightData::Missing`] section this
+/// engine resolves to `15` on its own authority.
+///
+/// Every field is a count or a level — never a duration — for the reason the module
+/// docs give: a wall-clock figure taken on a loaded machine is attributed to the
+/// wrong cause, while these are identical every run for the same input.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelitJob {
+    /// Inclusive world-space corners of the recomputed box.
+    pub region_min: [i32; 3],
+    /// Inclusive world-space corners of the recomputed box.
+    pub region_max: [i32; 3],
+    /// One representative changed block position from this job, so a log line
+    /// points at a place in the world rather than only at a box.
+    pub change: [i32; 3],
+    /// Block changes coalesced into this job.
+    pub changes: usize,
+    /// Columns of the box whose **top shell** cell held sky light `15` and so was
+    /// accepted as a sky source by the openness scan.
+    pub sky_source_columns: usize,
+    /// Of [`Self::sky_source_columns`], how many took their `15` from a
+    /// [`LightData::Missing`] sky section rather than from a value the server sent.
+    ///
+    /// **This is the discriminator.** A `Missing` sky section legitimately means
+    /// "above the top populated section, therefore full daylight"; if this is
+    /// non-zero for a job deep underground, the engine is manufacturing sky sources
+    /// out of absent data, and a large [`Self::sky_raised`] beside it is that
+    /// fiction reaching storage.
+    pub sky_source_columns_from_missing: usize,
+    /// Interior cells whose sky light the write-back **raised**, and by how much at
+    /// most.
+    pub sky_raised: usize,
+    /// Interior cells whose sky light the write-back **lowered**.
+    pub sky_lowered: usize,
+    /// Largest single-cell sky increase this job wrote, `0..=15`.
+    pub max_sky_gain: u8,
+    /// Interior cells whose block light the write-back **raised**.
+    pub block_raised: usize,
+    /// Interior cells whose block light the write-back **lowered**.
+    pub block_lowered: usize,
+    /// Largest single-cell block-light increase this job wrote, `0..=15`.
+    pub max_block_gain: u8,
+}
+
 /// What one [`World::run_pending_relight`] drain did.
 ///
 /// Counters rather than timings, deliberately — see the module docs.
@@ -165,6 +224,11 @@ pub struct Relit {
     /// Includes the neighbour a changed cell on a section boundary also dirties,
     /// because smooth light and ambient occlusion sample across the seam.
     pub dirty_sections: BTreeSet<(i32, i32, i32)>,
+    /// Per-job diagnostics for the first [`RELIT_DETAIL_CAP`] jobs of this drain.
+    ///
+    /// A sample rather than a census — see [`RelitJob`] for why the aggregate
+    /// counters above cannot answer the question this one exists for.
+    pub detail: Vec<RelitJob>,
 }
 
 /// The lowest `y` whose sky-source status a change at `(x, y, z)` can flip.
@@ -226,6 +290,13 @@ struct Scratch {
     /// Light as the world currently stores it, for the write-back diff.
     stored_sky: Vec<u8>,
     stored_block: Vec<u8>,
+    /// Whether `stored_sky` at this cell came from a [`LightData::Missing`]
+    /// section — i.e. is this engine's own `15`, not a value the server sent.
+    ///
+    /// Diagnostic only: nothing in the flood or the write-back reads it. It is a
+    /// plane rather than a per-section flag because a job's box straddles sections
+    /// and chunks, and the question is asked per top-shell cell.
+    sky_from_missing: Vec<bool>,
     /// Light as recomputed.
     sky: Vec<u8>,
     block: Vec<u8>,
@@ -244,6 +315,7 @@ impl Scratch {
             emission: vec![0; n],
             stored_sky: vec![0; n],
             stored_block: vec![0; n],
+            sky_from_missing: vec![false; n],
             sky: vec![0; n],
             block: vec![0; n],
             fixed: vec![true; n],
@@ -398,8 +470,10 @@ fn mark_dirty_sections(x: i32, y: i32, z: i32, out: &mut BTreeSet<(i32, i32, i32
     }
 }
 
-/// Seed and flood both layers over one job's scratch.
-fn flood(scratch: &mut Scratch, has_skylight: bool) {
+/// Seed and flood both layers over one job's scratch, recording into `job` how many
+/// top-shell columns the openness scan accepted as sky sources and how many of those
+/// were seeded from absent rather than sent data.
+fn flood(scratch: &mut Scratch, has_skylight: bool, job: &mut RelitJob) {
     let dims = scratch.dims;
     let n = scratch.fixed.len();
 
@@ -430,6 +504,10 @@ fn flood(scratch: &mut Scratch, has_skylight: bool) {
                 let top = index(dims, lx, dims[1] - 1, lz);
                 if scratch.sky[top] != MAX_LIGHT {
                     continue;
+                }
+                job.sky_source_columns += 1;
+                if scratch.sky_from_missing[top] {
+                    job.sky_source_columns_from_missing += 1;
                 }
                 for ly in (0..dims[1] - 1).rev() {
                     let idx = index(dims, lx, ly, lz);
@@ -522,10 +600,20 @@ impl World {
             out.jobs += 1;
             out.cells_visited += cells;
 
+            let mut job = RelitJob {
+                region_min: region.min,
+                region_max: region.max,
+                change: *changes.first().expect("region_for returned Some"),
+                changes: changes.len(),
+                ..RelitJob::default()
+            };
             let mut scratch = Scratch::new(&region);
             self.fill_scratch(&region, props, has_skylight, &mut scratch);
-            flood(&mut scratch, has_skylight);
-            self.write_back(&region, &scratch, &mut out);
+            flood(&mut scratch, has_skylight, &mut job);
+            self.write_back(&region, &scratch, &mut out, &mut job);
+            if out.detail.len() < RELIT_DETAIL_CAP {
+                out.detail.push(job);
+            }
         }
         out
     }
@@ -633,7 +721,10 @@ impl World {
                             // module docs. This must agree with the mesher's
                             // `SkyDefault`, or the two disagree about the same cell.
                             scratch.stored_sky[idx] = match chunk.light.sky(ls) {
-                                LightData::Missing if has_skylight => MAX_LIGHT,
+                                LightData::Missing if has_skylight => {
+                                    scratch.sky_from_missing[idx] = true;
+                                    MAX_LIGHT
+                                }
                                 other => other.get(nibble).unwrap_or(0),
                             };
                             scratch.stored_block[idx] =
@@ -651,7 +742,18 @@ impl World {
 
     /// Diff the recomputed light against what was stored, write only the cells that
     /// moved, and record the sections whose mesh that invalidates.
-    fn write_back(&mut self, region: &Region, scratch: &Scratch, out: &mut Relit) {
+    ///
+    /// `job` collects the **signed** split of that diff. It is deliberately taken
+    /// alongside `out` rather than derived from it afterwards: once the values are
+    /// written, storage no longer holds what they replaced, so the direction each
+    /// cell moved is only observable here.
+    fn write_back(
+        &mut self,
+        region: &Region,
+        scratch: &Scratch,
+        out: &mut Relit,
+        job: &mut RelitJob,
+    ) {
         let dims = scratch.dims;
         for cz in region.min[2].div_euclid(EDGE)..=region.max[2].div_euclid(EDGE) {
             for cx in region.min[0].div_euclid(EDGE)..=region.max[0].div_euclid(EDGE) {
@@ -685,10 +787,26 @@ impl World {
                             let nibble = NibbleArray::index(sx, y_in_section, sz);
                             let mut moved = false;
                             if scratch.sky[idx] != scratch.stored_sky[idx] {
+                                if scratch.sky[idx] > scratch.stored_sky[idx] {
+                                    job.sky_raised += 1;
+                                    job.max_sky_gain = job
+                                        .max_sky_gain
+                                        .max(scratch.sky[idx] - scratch.stored_sky[idx]);
+                                } else {
+                                    job.sky_lowered += 1;
+                                }
                                 chunk.light.set_sky_light(ls, nibble, scratch.sky[idx]);
                                 moved = true;
                             }
                             if scratch.block[idx] != scratch.stored_block[idx] {
+                                if scratch.block[idx] > scratch.stored_block[idx] {
+                                    job.block_raised += 1;
+                                    job.max_block_gain = job
+                                        .max_block_gain
+                                        .max(scratch.block[idx] - scratch.stored_block[idx]);
+                                } else {
+                                    job.block_lowered += 1;
+                                }
                                 chunk.light.set_block_light(ls, nibble, scratch.block[idx]);
                                 moved = true;
                             }

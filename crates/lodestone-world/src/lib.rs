@@ -99,7 +99,7 @@ pub use lighting::{
     light_exercises_propagation,
 };
 pub use packed::PackedArray;
-pub use relight::Relit;
+pub use relight::{Relit, RelitJob};
 pub use section::ChunkSection;
 pub use sign_text::{SignDyeColor, SignSide, SignText, SignTextSpan};
 pub use world::{
