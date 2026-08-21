@@ -466,26 +466,59 @@ pub fn skull_mob_model() -> EntityModelDef {
     }
 }
 
-/// The 64×64-canvas skull head — `SkullModel.createHumanoidHeadLayer()`
-/// (base head only). Used by zombie (whose skin moved to 64×64) and player
-/// (always 64×64). See [`skull_mob_model`] for why the canvas size is a
-/// second model rather than a parameter.
+/// The 64×64-canvas skull head — `SkullModel.createHumanoidHeadLayer()`.
+/// Used by zombie (whose skin moved to 64×64) and player (always 64×64). See
+/// [`skull_mob_model`] for why the canvas size is a second model rather than
+/// a parameter.
 ///
-/// The real `createHumanoidHeadLayer` also adds a `"hat"` overlay child
-/// (`texOffs(32, 0)`, inflated `0.25`) — not ported. It is per-player
-/// cosmetic geometry (usually empty/transparent) layered *outside* the base
-/// head, and every ported skull type here draws with a fixed skin the hat
-/// layer would just double-draw against; see the module's block-entity-renderers
-/// doc for the tracked gap.
+/// # The `"hat"` overlay, and the comment that used to say it was pointless
+///
+/// `createHumanoidHeadLayer` adds a `"hat"` child *of* `head` — the same
+/// `-4, -8, -4` box, at `texOffs(32, 0)`, inflated `0.25` — and it is what
+/// draws a skin's second layer: the hair, the helmet, the pumpkin. It is the
+/// **only** part of this model whose texels come from the right-hand half of
+/// the sheet.
+///
+/// It was previously omitted, with a comment reasoning that "every ported
+/// skull type here draws with a fixed skin the hat layer would just
+/// double-draw against". That was true when written and is not any more: a
+/// placed player head now resolves its owner's real skin
+/// (`BlockEntityTexture::PlayerSkin`), so the layer that comment dismissed is
+/// exactly the layer a player's head is missing — and it was never right for
+/// the *zombie* head either, whose jar sheet carries a real overlay at
+/// `(32, 0)` and which vanilla draws through this same layer.
+///
+/// The inflation is what keeps the two boxes from z-fighting: `0.25` texels
+/// puts the overlay strictly outside the base head on every face. Dropping it
+/// while keeping the part is worse than not having the part at all.
+///
+/// `skull_mob_model` correctly has no hat — `createMobHeadLayer` adds none,
+/// and a skeleton sheet has nothing at `(32, 0)` to draw.
 #[must_use]
 pub fn skull_humanoid_model() -> EntityModelDef {
-    let root = PartDef::new(PartPose::ZERO).with_child("head", skull_head_part());
+    let head = skull_head_part().with_child(
+        "hat",
+        PartDef::new(PartPose::ZERO).with_cube(
+            CubeDef::new([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [32.0, 0.0])
+                .grown(SKULL_HAT_INFLATION),
+        ),
+    );
+    let root = PartDef::new(PartPose::ZERO).with_child("head", head);
     EntityModelDef {
         texture_width: 64,
         texture_height: 64,
         root,
     }
 }
+
+/// `SkullModel.createHumanoidHeadLayer`'s `new CubeDeformation(0.25F)` on the
+/// `"hat"` overlay, in model texels.
+///
+/// Named because it is load-bearing twice over: it is what separates the two
+/// coincident boxes, and it is what widens the model's baked AABB from 8 to
+/// 8.5 texels on every axis — which any gate deriving a screen extent from
+/// that AABB will see.
+pub const SKULL_HAT_INFLATION: f32 = 0.25;
 
 /// A bell's swinging body and its flared bottom rim —
 /// `BellModel.createBodyLayer()`:
