@@ -506,6 +506,23 @@ impl ClientHandle {
         self.state.sections_and_light_at(requests)
     }
 
+    /// Returns a clone of chunk `pos`'s `MOTION_BLOCKING` heightmap, or `None`
+    /// if the chunk is not loaded or carries no such map.
+    ///
+    /// This is the `y` rain lands at (`Heightmap.getFirstAvailable`, i.e. the
+    /// first non-passable-or-fluid position above the ground) — see
+    /// `lodestone_render::WeatherProbe::column_top` for the consumer this
+    /// exists for. Hands back the whole 16×16 map rather than one column's
+    /// height so a caller sampling many blocks in the same chunk pays the
+    /// world lock once per chunk; a caller wanting one column's absolute
+    /// height reads `.get(x.rem_euclid(16) as usize, z.rem_euclid(16) as usize)`
+    /// off the result and adds [`WorldDimensions::min_y`] back — the stored
+    /// value is height-above-`min_y`, not an absolute world-`y`.
+    #[must_use]
+    pub fn column_heightmap(&self, pos: ChunkPos) -> Option<lodestone_world::Heightmap> {
+        self.state.column_heightmap(pos)
+    }
+
     /// Returns the connected dimension's vertical extent, or `None` before the
     /// dimension's terrain is known (pre-login / pre-first-chunk).
     ///

@@ -109,8 +109,9 @@ impl WeatherTracker {
 }
 
 /// The world knowledge [`lodestone_render::extract_columns`] needs: **one** light
-/// sample per frame, and a per-column biome answered through a per-frame memo
-/// ([`ProbeMemo`]) so the square costs a handful of world locks rather than ~1300.
+/// sample per frame, and a per-column heightmap and biome, each answered through
+/// a per-frame memo ([`ProbeMemo`]) so the square costs a handful of world locks
+/// rather than ~1300.
 ///
 /// # What each answer costs, and what this doc used to claim
 ///
@@ -121,7 +122,10 @@ impl WeatherTracker {
 /// which takes the client's world lock **per call**.
 ///
 /// * **Light: one sample per frame**, at the eye, reused for every column — the
-///   third divergence below.
+///   one divergence left; see below.
+/// * **Height: one `column_heightmap` per distinct chunk column**, through
+///   [`ProbeMemo`]. Same key shape as biome, below — a height does not vary per
+///   block, only per chunk.
 /// * **Biome: one `section_at` per distinct chunk column**, through
 ///   [`ProbeMemo`]. The 21×21 *block* square covers **4, 6 or 9 chunk columns**
 ///   (21 consecutive blocks straddle two chunk boundaries whenever the camera sits
@@ -137,22 +141,32 @@ impl WeatherTracker {
 /// none, because it stops the next reader looking (`DESIGN.md` §12.114). The memo
 /// is what makes the claim true again.
 ///
-/// The three divergences from vanilla, in order of how visible they are:
+/// **This doc also used to list "no per-column terrain height" and "sky
+/// visibility is the camera's, not the column's" as two separate divergences,
+/// and that was wrong too — they were one bug wearing two descriptions.**
+/// `WeatherEffectRenderer.extractRenderState` has no `canSeeSky` check at all;
+/// the *only* thing that keeps rain out of a room or a cave is the
+/// `MOTION_BLOCKING` heightmap clamp on the column's own `y0`/`y1`
+/// (`max(camera_y ± radius, terrainHeight)`), because a column clamped to the
+/// roof or the surface draws nothing below it, and the pass is depth-tested
+/// against terrain for the rest. A probe that hardcodes `column_top` to `None`
+/// therefore has no floor at all — every column spans the full
+/// `camera_y ± radius` span regardless of what is overhead, which is what put
+/// visible rain inside a room with a roof above the player (the depth test only
+/// occludes the portion literally behind solid geometry; the open air *inside*
+/// a room is not occluded). The camera-level `sky_visible` flag this struct
+/// used to carry was this client's own invention, not a vanilla behaviour: it
+/// gated **every** column in the square off the camera's own sky light, which
+/// is why a chunk raining nearby went dark the moment the player stepped under
+/// any cover at all, open or not. Both are fixed together by
+/// [`Self::column_top`] — a real per-column `column_heightmap` read — with no
+/// separate visibility flag needed, exactly as vanilla has none.
 ///
-/// * **No per-column terrain height.** `column_top` is `None`, so every column
-///   spans `camera_y ± radius` instead of stopping at the ground. Invisible — the
-///   pass is depth-tested, so sub-surface fragments are occluded — but it costs
-///   vertices that vanilla would not draw. Closing it needs a `column_height`
-///   accessor on `ClientHandle`; the heightmaps are already decoded into
-///   `lodestone_world::LoadedChunk::heightmaps` and nothing reads them yet.
-/// * **Sky visibility is the camera's, not the column's.** In a cave the camera's
-///   own sky light is 0 and the whole pass draws nothing, which is right; standing
-///   at a cave *mouth* it draws rain across the cavern, which is wrong. Vanilla's
-///   per-column `canSeeSky` is what fixes it, and it needs the same heightmap
-///   accessor.
-/// * **One light level for the whole square.** Rain seen through a shaded gully is
-///   as bright as rain in the open. Barely visible in practice: rain is drawn
-///   outdoors, where sky light is uniform.
+/// **One light level for the whole square** remains: rain seen through a
+/// shaded gully is as bright as rain in the open. Barely visible in practice —
+/// rain is drawn outdoors, where sky light is uniform — and unrelated to the
+/// height/visibility bug above, so it is left as its own known gap rather than
+/// folded into this fix.
 ///
 /// Rain-versus-snow is **not** in that list, because it is not an approximation
 /// here — it is missing data. See
@@ -160,9 +174,6 @@ impl WeatherTracker {
 pub(super) struct ShellWeatherProbe {
     /// The already-resolved lightmap term at the camera, weather included.
     pub(super) light: f32,
-    /// Whether any sky light reaches the camera. `false` draws no precipitation at
-    /// all, which is the cave case.
-    pub(super) sky_visible: bool,
     /// The client-owned world, resolved once per frame the same way `packed`
     /// above is (a plain `Arc` clone out of the `SharedHandle`'s `OnceLock`,
     /// not a lock held across the frame) — needed for the per-column biome
@@ -217,6 +228,10 @@ pub(super) struct ProbeMemo {
     sections: std::sync::Mutex<Vec<((i32, i32, usize), Option<Arc<lodestone_client::ChunkSection>>)>>,
     /// Keyed by biome holder id.
     climates: std::sync::Mutex<Vec<(u32, Option<crate::net::BiomeClimateEntry>)>>,
+    /// Keyed `(chunk x, chunk z)`. Whole-chunk `MOTION_BLOCKING` heightmaps,
+    /// fetched once per distinct chunk column the same way `sections` is —
+    /// see [`Self::with_heightmap`].
+    heightmaps: std::sync::Mutex<Vec<((i32, i32), Option<lodestone_world::Heightmap>)>>,
 }
 
 impl ProbeMemo {
@@ -273,6 +288,57 @@ impl ProbeMemo {
                 entry
             }
         }
+    }
+
+    /// Read something out of the `MOTION_BLOCKING` heightmap for chunk `key`,
+    /// fetching it at most once per chunk — the height-side twin of
+    /// [`Self::with_section`], for the same reason: a column's height does not
+    /// vary per block, only per chunk.
+    fn with_heightmap<R>(
+        &self,
+        key: (i32, i32),
+        fetch: impl FnOnce() -> Option<lodestone_world::Heightmap>,
+        read: impl FnOnce(&lodestone_world::Heightmap) -> R,
+    ) -> Option<R> {
+        let mut table = self
+            .heightmaps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let index = match table.iter().position(|(k, _)| *k == key) {
+            Some(index) => index,
+            None => {
+                table.push((key, fetch()));
+                table.len() - 1
+            }
+        };
+        table[index].1.as_ref().map(read)
+    }
+
+    /// `(x, z)`'s `MOTION_BLOCKING` height — vanilla's `Level.getHeight`, the
+    /// world-`y` of the first non-passable-or-fluid position above the ground,
+    /// i.e. where rain lands — with the world-dimensions and heightmap reads
+    /// memoised. `None` at either hop is "the server has not told us yet",
+    /// exactly like [`Self::precipitation_at`]'s `None`; the caller decides
+    /// the fallback.
+    ///
+    /// The stored heightmap value is `topMatchingY + 1 - min_y`
+    /// (`docs/motion-blocking-heightmap.md`), so `min_y` is added back here to
+    /// return an absolute world-`y`.
+    fn column_top_at(
+        &self,
+        x: i32,
+        z: i32,
+        dimensions: impl FnOnce() -> Option<lodestone_client::WorldDimensions>,
+        heightmap: impl FnOnce(lodestone_client::ChunkPos) -> Option<lodestone_world::Heightmap>,
+    ) -> Option<i32> {
+        let dims = self.dimensions(dimensions)?;
+        let chunk = lodestone_client::ChunkPos {
+            x: x.div_euclid(16),
+            z: z.div_euclid(16),
+        };
+        self.with_heightmap((chunk.x, chunk.z), || heightmap(chunk), |map| {
+            map.get(x.rem_euclid(16) as usize, z.rem_euclid(16) as usize) as i32 + dims.min_y
+        })
     }
 
     /// The whole per-column resolve: `(x, y, z)`'s standing biome translated to
@@ -336,6 +402,16 @@ impl ProbeMemo {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
     }
+
+    /// How many `column_heightmap` fetches this memo has performed — the
+    /// height-side twin of [`Self::section_fetches`].
+    #[cfg(test)]
+    fn heightmap_fetches(&self) -> usize {
+        self.heightmaps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
 }
 
 /// The `(chunk, section index)` a block position resolves to, or `None` when it
@@ -392,24 +468,41 @@ impl ShellWeatherProbe {
             |biome| climates.get(usize::try_from(biome).ok()?),
         )
     }
+
+    /// `(x, z)`'s real `MOTION_BLOCKING` height, memoised per chunk column.
+    /// `None` is "the server has not told us yet" (unloaded chunk, or an
+    /// offline/local-gen chunk with no heightmap) — the caller's fallback is
+    /// the unclamped `camera_y ± radius` span, same as vanilla's own
+    /// `getHeight` never returning null.
+    fn resolved_column_top(&self, x: i32, z: i32) -> Option<i32> {
+        let handle = self.handle.as_ref()?;
+        self.memo.column_top_at(
+            x,
+            z,
+            || handle.world_dimensions(),
+            |chunk| handle.column_heightmap(chunk),
+        )
+    }
 }
 
 impl lodestone_render::WeatherProbe for ShellWeatherProbe {
-    fn column_top(&self, _x: i32, _z: i32) -> Option<i32> {
-        None
+    fn column_top(&self, x: i32, z: i32) -> Option<i32> {
+        self.resolved_column_top(x, z)
     }
 
     fn precipitation(&self, x: i32, y: i32, z: i32) -> lodestone_render::Precipitation {
-        if !self.sky_visible {
-            return lodestone_render::Precipitation::None;
-        }
+        // No camera-level "can I see the sky" gate here, deliberately: vanilla's
+        // `WeatherEffectRenderer.extractRenderState` has none either. The
+        // per-column `column_top` clamp above is what keeps rain out of a room
+        // or a cave — see the struct doc for the incident this replaced.
+        //
         // The biome climate lane now reaches the client
         // (`ClientEvent::BiomeClimates`, decoded and folded via
         // `net::BiomeClimateCell`), so this resolves a real per-column
         // answer instead of hardcoding `Rain`. Every unresolved hop still
-        // falls back to `Rain` — matching `sky_visible`'s own "absent data
-        // reads as open sky" rule: an unlit fallback here would make the
-        // first rainy frame after joining silently show nothing.
+        // falls back to `Rain`: an unlit fallback here would make the first
+        // rainy frame after joining silently show nothing, indistinguishable
+        // from the pass being unwired.
         self.biome_precipitation(x, y, z)
             .unwrap_or(lodestone_render::Precipitation::Rain)
     }
@@ -434,6 +527,7 @@ pub(super) fn weather_columns_for_frame(
     weather: &lodestone_render::WeatherState,
     camera: &lodestone_render::Camera,
     tick: u64,
+    partial_tick: f32,
     probe: &dyn lodestone_render::WeatherProbe,
 ) -> (Vec<lodestone_render::WeatherInstance>, usize) {
     let camera_pos = [
@@ -446,14 +540,21 @@ pub(super) fn weather_columns_for_frame(
     // feeding it a frame counter makes the fall speed frame-rate dependent — the
     // defect `entities.rs`'s
     // `limb_swing_tracks_per_tick_travel_not_the_interpolation_gap` records for the
-    // walk cycle. `partial_ticks` is 0.0 rather than the real sub-tick alpha: at
-    // 3-4 texture tiles per tick the sub-tick smoothing is below one texel, and
-    // `Sim` exposes no partial tick to this layer.
+    // walk cycle. `partial_tick` is the caller's real sub-tick alpha
+    // (`Sim::interp_alpha`, the same `FrameClock` residual every other
+    // extraction in this crate reads) — **not** a literal `0.0` as this used to
+    // read. That literal was reasoned to be inaudible ("3-4 texture tiles per
+    // tick, sub-tick smoothing below one texel"), and the owner's own report of
+    // visibly choppy rain is the falsification: dropping the sub-tick term makes
+    // every rain frame between two ticks render at the *same* scroll offset, so
+    // the fall only advances once per 50 ms tick rather than once per frame —
+    // exactly "frames of rain" rather than a continuous fall, regardless of how
+    // small one tick's texel delta is.
     let columns = lodestone_render::extract_columns(
         weather,
         lodestone_render::DEFAULT_WEATHER_RADIUS,
         tick as i64,
-        0.0,
+        partial_tick,
         camera_pos,
         probe,
     );
@@ -513,8 +614,8 @@ mod tests {
     /// is no hermetic way to build a `ClientHandle` — it only comes out of
     /// `ClientBuilder::connect`, so the alternative to this is a live oracle. The
     /// key derivation ([`section_key`]), the memo and the climate maths are all
-    /// the real thing; only `ShellWeatherProbe`'s `sky_visible` early-out and its
-    /// two `?`s on absent wiring are outside the gate.
+    /// the real thing; only `ShellWeatherProbe::biome_precipitation`'s two `?`s
+    /// on absent wiring are outside the gate.
     ///
     /// `ClientHandle::section_at`/`ClientHandle::sections_at` are documented as taking the
     /// internal world lock **exactly once**, which is what makes
@@ -629,6 +730,7 @@ mod tests {
                 &rainy(),
                 &camera(cam, 64.5, cam),
                 0,
+                0.0,
                 &world,
             );
             assert_eq!(
@@ -708,10 +810,107 @@ mod tests {
             &WeatherState::clear(),
             &camera(0.5, 64.5, 0.5),
             0,
+            0.0,
             &world,
         );
         assert!(instances.is_empty() && rain == 0);
         assert_eq!(world.section_fetches.load(Ordering::Relaxed), 0);
         assert_eq!(world.dim_fetches.load(Ordering::Relaxed), 0);
+    }
+
+    /// A second world double, isolated to [`ProbeMemo::column_top_at`] — the
+    /// height half of the probe, orthogonal to `CountingWorld`'s biome memo
+    /// (this one always answers [`Precipitation::Rain`], so nothing here
+    /// depends on the climate lane).
+    struct HeightWorld {
+        /// One 16×16 `MOTION_BLOCKING` map, shared across every requested
+        /// chunk the same way `CountingWorld::section` is: local x/z is what
+        /// varies, not the chunk.
+        heightmap: lodestone_world::Heightmap,
+        heightmap_fetches: AtomicUsize,
+        memo: ProbeMemo,
+    }
+
+    impl HeightWorld {
+        /// Local `(0, 0)` is a roof far above anything the default radius
+        /// reaches: stored height `200` is world-`y` `200 + DIMS.min_y` =
+        /// `136`, comfortably above any `camera_y ± radius` this module's
+        /// tests use. Every other local column is left at the default `0`,
+        /// i.e. world-`y` `-64` — open straight down to bedrock.
+        fn new() -> Self {
+            let mut map = lodestone_world::Heightmap::new(DIMS.height);
+            map.set(0, 0, 200);
+            Self {
+                heightmap: map,
+                heightmap_fetches: AtomicUsize::new(0),
+                memo: ProbeMemo::default(),
+            }
+        }
+    }
+
+    impl WeatherProbe for HeightWorld {
+        fn column_top(&self, x: i32, z: i32) -> Option<i32> {
+            self.memo.column_top_at(
+                x,
+                z,
+                || Some(DIMS),
+                |_chunk| {
+                    self.heightmap_fetches.fetch_add(1, Ordering::Relaxed);
+                    Some(self.heightmap.clone())
+                },
+            )
+        }
+
+        fn precipitation(&self, _x: i32, _y: i32, _z: i32) -> Precipitation {
+            Precipitation::Rain
+        }
+
+        fn light(&self, _x: i32, _y: i32, _z: i32) -> f32 {
+            1.0
+        }
+    }
+
+    /// **The control.** A column with real cover overhead must produce **no**
+    /// rain span at all — not merely a shifted one — while an open column
+    /// right next to it still rains.
+    ///
+    /// Before [`ShellWeatherProbe::column_top`] read a real heightmap this
+    /// failed: `column_top` was hardcoded to `None`, so every column spanned
+    /// the unclamped `camera_y ± radius` regardless of what was overhead, and
+    /// the covered column rained exactly as much as the open one — which is
+    /// the owner's report ("it shows rain even when im under cover")
+    /// reproduced as an assertion rather than described.
+    #[test]
+    fn a_covered_column_produces_no_span_while_its_open_neighbour_rains() {
+        let world = HeightWorld::new();
+        // Block (0, 0) is the covered local cell `HeightWorld::new` set up;
+        // block (1, 0) shares the same chunk (0, 0) but is left open. Both
+        // are inside the default-radius square around this camera.
+        let columns = lodestone_render::extract_columns(
+            &rainy(),
+            DEFAULT_WEATHER_RADIUS,
+            0,
+            0.0,
+            [0.5, 64.5, 0.5],
+            &world,
+        );
+        let covered = columns.iter().find(|c| c.x == 0 && c.z == 0);
+        let open = columns.iter().find(|c| c.x == 1 && c.z == 0);
+        assert!(
+            covered.is_none(),
+            "a column under real cover must produce no rain span at all: {covered:?}"
+        );
+        assert!(
+            open.is_some(),
+            "the control must fire: an open neighbour column must still rain, \
+             or this test proves nothing"
+        );
+        // And the memo did its job: the whole 21×21 square (not just the two
+        // named columns) costs one heightmap fetch per **chunk** it covers,
+        // not one per block. A camera at `x = 0.5` spans 4 chunk columns —
+        // `{-1, 0}` on each axis — the same derivation
+        // `one_section_fetch_per_chunk_column_not_one_per_column` makes for
+        // the identical camera position.
+        assert_eq!(world.heightmap_fetches.load(Ordering::Relaxed), 4);
     }
 }

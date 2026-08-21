@@ -1104,6 +1104,19 @@ impl Sim {
         self.write(|w| f(&mut w.resource_mut::<FrameClock>()))
     }
 
+    /// This frame's sub-tick interpolation alpha — the same partial tick
+    /// every per-frame extraction in this module reads through the private
+    /// [`Self::clock`] above, clamped the same way `entities.rs`'s extract
+    /// systems clamp their own `Res<FrameClock>` read. Exposed `pub(crate)`
+    /// because `crate::app::redraw`'s weather-column extraction needs it and
+    /// lives outside this module — see `lodestone_render::weather`'s
+    /// `rain_column`/`snow_column` doc for why the phase must stay on this
+    /// **tick** clock rather than a frame counter.
+    #[must_use]
+    pub(crate) fn interp_alpha(&self) -> f32 {
+        self.clock().interp_alpha.clamp(0.0, 1.0)
+    }
+
     /// The block the view ray currently points at.
     #[must_use]
     pub fn target(&self) -> Option<RayHit> {

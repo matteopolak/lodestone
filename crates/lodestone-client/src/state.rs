@@ -47,6 +47,13 @@ use lodestone_world::{ChunkPos as WorldChunkPos, ChunkSection, SectionLight, Wor
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+/// `Heightmap.Types.MOTION_BLOCKING`'s registry id on the 1.21.5+ typed-list
+/// wire form (`docs/motion-blocking-heightmap.md`). Duplicated rather than
+/// imported: the crate that owns the canonical constant
+/// (`lodestone_worldgen::overworld::MOTION_BLOCKING_HEIGHTMAP_TYPE_ID`) is
+/// server-only, and this crate must stay reachable from a browser build.
+const MOTION_BLOCKING_HEIGHTMAP_TYPE_ID: u32 = 4;
+
 /// An immutable snapshot of the local player's state.
 ///
 /// Fields are `Option` where the server has not told us yet: `position` and
@@ -893,6 +900,27 @@ impl SharedState {
                 )
             })
             .collect()
+    }
+
+    /// Returns a clone of chunk `pos`'s `MOTION_BLOCKING` heightmap, or `None`
+    /// if the chunk is not loaded or carries no such map — an offline/local-gen
+    /// chunk built with an empty [`Heightmaps`](lodestone_world::Heightmaps)
+    /// (`lodestone_shell::worldgen`'s `LoadedChunk::new(column, light,
+    /// Heightmaps::new(), …)`) has none.
+    ///
+    /// Hands back the whole 16×16 map rather than one column's height so a
+    /// caller sampling many blocks in the same chunk — the weather pass's
+    /// probe, 21 columns deep at the default radius — pays the world lock
+    /// once per chunk rather than once per block, the same shape as
+    /// [`section_at`](Self::section_at)/[`sections_at`](Self::sections_at).
+    #[must_use]
+    pub(crate) fn column_heightmap(&self, pos: ChunkPos) -> Option<lodestone_world::Heightmap> {
+        let world = self.world.read().unwrap_or_else(|e| e.into_inner());
+        world
+            .get(to_world_pos(pos))?
+            .heightmaps
+            .get(MOTION_BLOCKING_HEIGHTMAP_TYPE_ID)
+            .cloned()
     }
 
     /// Returns the connected dimension's vertical extent as `(min_y, height)`,

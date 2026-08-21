@@ -829,12 +829,12 @@ impl WindowApp {
                 .filter(|w| w.any_precipitation())
                 .map(|w| {
                     // ONE light sample per frame, at the eye, reused for every
-                    // column — see `ShellWeatherProbe`'s doc for the three
-                    // divergences that buys. The *biome* half is a real
-                    // per-column lookup (issue #25) and is what used to cost
-                    // 441 × 3 world locks a frame; `ShellWeatherProbe::memo`
-                    // now takes one lock per chunk column instead, which is why
-                    // the probe below **must** stay per-frame. `sky_darken()` is the
+                    // column — see `ShellWeatherProbe`'s doc for the one
+                    // divergence that buys. The *height* and *biome* halves are
+                    // real per-column lookups and are what used to cost 441 × 3
+                    // world locks a frame; `ShellWeatherProbe::memo` now takes
+                    // one lock per chunk column instead, which is why the probe
+                    // below **must** stay per-frame. `sky_darken()` is the
                     // weather-folded factor the terrain and entity passes are
                     // already using this frame, so the rain cannot be lit by a
                     // different sky than the blocks it falls past.
@@ -848,11 +848,6 @@ impl WindowApp {
                                 camera.position.x.floor() as i32,
                                 camera.position.y.floor() as i32,
                                 camera.position.z.floor() as i32,
-                                // Load-bearing for `sky_visible` below, not just for
-                                // brightness: absent sky data used to resolve to 0
-                                // here, so `(p >> 4) & 0x0F > 0` was false and rain
-                                // rendered **nowhere in open sky** — the one place a
-                                // player is guaranteed to be looking at it.
                                 policy.get(),
                             )
                         });
@@ -861,17 +856,17 @@ impl WindowApp {
                             packed.unwrap_or(lodestone_render::ENTITY_FULLBRIGHT),
                             render.sky_darken(),
                         ),
-                        // No sample at all is "world not loaded yet", which must
-                        // read as open sky: a `false` here would make the very
-                        // first rainy frames after a join silently empty, which is
-                        // indistinguishable from the pass being unwired.
-                        sky_visible: packed.is_none_or(|p| ((p >> 4) & 0x0F) > 0),
+                        // The per-column `column_top` heightmap clamp is what
+                        // now keeps rain out of a room or a cave (see
+                        // `ShellWeatherProbe`'s doc) — there is deliberately no
+                        // camera-level "can I see the sky" gate here any more,
+                        // matching vanilla's own `WeatherEffectRenderer`.
                         handle: self.sim.net().and_then(|n| n.shared_handle().get().cloned()),
                         biome_climates: self.sim.net().map(crate::net::NetClient::shared_biome_climates),
                         // Fresh every frame, by construction — see the field doc.
                         memo: Default::default(),
                     };
-                    weather_columns_for_frame(w, &camera, tick, &probe)
+                    weather_columns_for_frame(w, &camera, tick, self.sim.interp_alpha(), &probe)
                 })
                 .unwrap_or_default();
             render.prepare_weather(device, queue, &columns, rain_columns, &camera);
@@ -1052,8 +1047,45 @@ impl WindowApp {
                 lines.push("gpu timing: unavailable (device lacks Features::TIMESTAMP_QUERY)".to_string());
             }
             self.sim.stats.frame_profile = lines;
+
+            // The pie chart's own render-ready snapshot — see
+            // `docs/frame-profiling.md`'s "Pie chart" section. Built from the
+            // exact same `summary()`/GPU report as the text lines just above,
+            // so the two can never disagree about a frame's numbers, and
+            // gated on `show_profiler_chart` (Shift+F3) in addition to
+            // `show_debug`: the F3 text overlay can be up with the chart off.
+            self.sim.stats.profiler_chart = if self.show_profiler_chart {
+                let slices: Vec<crate::hud::ProfilerChartSlice> = self
+                    .frame_profile
+                    .summary()
+                    .map(|s| crate::hud::ProfilerChartSlice {
+                        name: s.phase.name(),
+                        mean_ms: s.mean_ms,
+                        p95_ms: s.p95_ms,
+                        p99_ms: s.p99_ms,
+                        samples: s.samples,
+                        window: s.window,
+                        skipped: s.skipped,
+                    })
+                    .collect();
+                let (gpu, gpu_unavailable) = if render.gpu_timing_available() {
+                    (render.gpu_timing_report(), false)
+                } else {
+                    (Vec::new(), true)
+                };
+                Some(crate::hud::ProfilerChart {
+                    slices,
+                    selected: self.profiler_chart_selected,
+                    gpu,
+                    gpu_unavailable,
+                    gpu_stalled_frames: render.gpu_timing_stalled_frames(),
+                })
+            } else {
+                None
+            };
         } else {
             self.sim.stats.frame_profile.clear();
+            self.sim.stats.profiler_chart = None;
         }
 
         // The baked 3-D item geometry, shared by the container screen below and the
