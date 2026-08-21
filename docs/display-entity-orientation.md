@@ -139,6 +139,38 @@ head-tilt tracking, while still looking plausible in a screenshot taken from
 directly in front of the entity. That is exactly the kind of defect a
 screenshot cannot catch and a unit test can.
 
+### The glyph pipeline's polygon offset is load-bearing — do not merge it away
+
+`gpu/display_text.rs` builds **two** pipelines from one descriptor: the
+background panel through `RenderPipelines.TEXT_BACKGROUND`'s plain
+`DepthStencilState.DEFAULT`, and the glyphs through
+`RenderPipelines.TEXT_POLYGON_OFFSET`
+(`DepthStencilState(GREATER_THAN_OR_EQUAL, true, 1.0F, 10.0F)`, which flips
+to `constant: -10, slope_scale: -1.0` in this project's `[0,1]` depth). They
+look identical apart from that bias, which is exactly why one earlier version
+collapsed them into a single unbiased pipeline with the comment "nothing
+coplanar to fight".
+
+There is something coplanar to fight, and it is the pass's own panel.
+`TextDisplayRenderer.submitInner` puts the panel at `-0.01` in **local glyph
+space**, which the `0.025` text scale reduces to **0.00025 blocks** — a
+couple of `f32` ULP in the depth buffer at any real range. Head-on the glyphs
+still win, because `LessEqual` passes a tie and the glyphs are submitted
+second; but the panel is one large quad and each glyph is a tiny one, so
+their interpolated depth diverges as the plane goes oblique, and a yaw-only
+(`BillboardMode::Vertical`) hologram is oblique whenever the camera is
+pitched. Measured by
+`crates/lodestone-shell/tests/world_text_over_geometry_pixels.rs`, looking up
+at 40°: **389** glyph px with the panel against **438** without, restored to
+**438/438** once the glyphs got their own biased pipeline. The loss is
+per-pixel scatter across the whole block, not a clean edge, which is why it
+reads as "the text is broken at some angles" rather than as a depth bug.
+
+`text_display_pixels.rs` cannot see this and never could: it asserts only
+that more than 100 non-sky pixels land in the entity's rect, which the panel
+alone satisfies. Any gate for this has to measure the **ink** against a
+reference with the panel switched off.
+
 ### What would need to exist for `item_display`/`block_display` to draw
 
 Both already reach `DisplayDraw` (`lodestone_shell::display_entities`) with
@@ -190,6 +222,7 @@ cargo test -p lodestone-render --lib --no-fail-fast -- display::
 cargo test -p lodestone-v770 --lib --no-fail-fast -- packets::metadata::
 cargo test -p lodestone-ecs --lib --no-fail-fast -- ingest::
 cargo test -p lodestone-shell --lib --no-fail-fast -- display_entities:: gpu::display_text::
-# GPU pixel gate (needs a real adapter and the vanilla client.jar):
+# GPU pixel gates (need a real adapter and the vanilla client.jar):
 cargo test -p lodestone-shell --test text_display_pixels -- --ignored --nocapture
+cargo test -p lodestone-shell --test world_text_over_geometry_pixels -- --ignored --nocapture
 ```

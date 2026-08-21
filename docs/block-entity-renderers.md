@@ -228,7 +228,11 @@ nbt = Compound([
 ```
 
 Exactly the shape `SignText.DIRECT_CODEC` implies (per-side `has_glowing_text`/`color`/`messages`,
-plus a sibling `is_waxed`). **So signs are not blocked on wire decode** — the remaining work is a
+plus a sibling `is_waxed`). **Read the `messages` elements above with care**: the literal `\"` bytes
+inside `String("\"LODESTONE PROBE\"")` are an artefact of how this probe *set* the sign — an RCON
+`/setblock` whose SNBT string already contained them — not the encoding vanilla uses. See the typed-parse
+section below for what a real element looks like and what believing this capture cost. **Signs are not
+blocked on wire decode** — the remaining work is a
 small typed parse of this already-arriving `Nbt::Compound` (there is no `SignText` struct yet, only
 the raw payload) and the render pass itself. The render pass is what stayed out of scope this
 session: `gpu/nametag.rs`, the substrate the issue's spec points at for the text quads, was another
@@ -508,21 +512,33 @@ session built is the text.
 captured, quoted above) into `SignText { front: SignSide, back: SignSide, waxed: bool }`, where
 `SignSide` is `{ lines: [Vec<SignTextSpan>; 4], glowing: bool, color: SignDyeColor }`.
 
-**The one real surprise: `messages` elements are JSON text, not the NBT-structural component shape**
-`lodestone_core::plain_text_from_nbt_component` already handles (the one every other resolved text in
-this codebase — chat, player-list names, entity metadata — uses). A plain `"LODESTONE PROBE"` line
-arrives as the *18-character NBT string* `"LODESTONE PROBE"` — opening and closing `"` are literal
-payload bytes, not `Debug` escaping, i.e. the JSON serialization of the component stored verbatim
-inside an `Nbt::String` rather than unwrapped into one. `sign_text.rs`'s `resolve_message` parses that
-JSON (via `serde_json`, promoted from a dev-dependency to a real one in `lodestone-world`'s
-`Cargo.toml` for this) and walks it into a `Vec<SignTextSpan>` — one already-flattened, fully-inherited
-run per `text`/`extra` node, carrying its own resolved colour (named or `#rrggbb` hex) plus
-bold/italic/underline/strikethrough, the styled sibling of the plain `text`/`extra` recursion
-`plain_text_from_nbt_component` uses, over a `serde_json::Value` instead of an `Nbt`. This was
-re-confirmed live rather than trusted from the original probe alone: placing a fresh `oak_sign` on the
-creative oracle and reading it back with `/data get block` returned
-`front_text: {has_glowing_text: 1b, color: "blue", messages: ['"LODESTONE LIVE TEST"', '""', '""', '""']}`
-— the same quoted-JSON-inside-a-string shape, on a second, independent capture.
+**`messages` elements are structural NBT components — and this section said the opposite, twice, with
+a live capture behind each claim.** `SignText.LINES_CODEC` is `ComponentSerialization.CODEC.listOf()`,
+whose encoder is `component -> tryCollapseToString() != null ? Either.left(Either.left(text)) :
+Either.right(component)`. Under `NbtOps` that gives exactly two element shapes: a component that
+collapses (plain text, no siblings, empty style) is an `Nbt::String` holding the text **verbatim** —
+`Hello` is the five-character NBT string `Hello` — and anything carrying a colour, a format flag or an
+`extra` is an `Nbt::Compound` with `text`/`extra` plus its own style fields, the same structural shape
+`lodestone_core::plain_text_from_nbt_component` already walks for chat, the player list and entity
+metadata.
+
+Two probes reported an element arriving as the *18-character* string `"LODESTONE PROBE"`, quotes
+included, and a second live capture agreed
+(`messages: ['"LODESTONE LIVE TEST"', '""', '""', '""']`). Both set the sign through RCON with SNBT
+that already contained those quotes, so the "independent" capture shared the original's producer and
+confirmed nothing. `lodestone-server`'s `block_entity_to_nbt` was then written to emit JSON strings to
+match, closing a `decode(encode(x)) == x` loop that no gate on either side could see through. Against a
+**real** server the cost was total: any coloured or formatted line arrives as a `Compound`, matched no
+arm in the parse, and every such sign drew its board with no text at all.
+
+`sign_text.rs`'s `append_component_spans` now walks the structural form into a `Vec<SignTextSpan>` —
+one already-flattened, fully-inherited run per node, carrying its own resolved colour (named or
+`#rrggbb` hex) plus bold/italic/underline/strikethrough. A `String` element is a literal, never
+re-parsed (the JSON path silently dropped any plain line that happened to be valid JSON: a line reading
+`123` decoded to a number and contributed no span at all). A `List` element is
+`ComponentSerialization::createFromList` — element `0` is the root and the rest are its siblings, so
+they inherit element `0`'s style rather than the enclosing one. `lodestone-world` no longer needs
+`serde_json` as a library dependency; it is dev-only again.
 
 **Why `SignTextSpan` and not a real `lodestone_model::text::Text`**, the type every other styled-text
 surface (nametags, `text_display`) threads from packet decode to draw: `lodestone-model` depends on
@@ -533,8 +549,8 @@ live `World`), so the reverse edge this parse would otherwise want is a dependen
 has no click/hover events or translation keys worth preserving. `gpu/sign_text.rs` (which already
 depends on both crates) converts one into a real `TextSpan` on its way into
 `gpu::nametag::layout_styled_ink_runs`, so there is exactly one styled-glyph-layout implementation, not
-two — only the JSON-to-spans *parse* is duplicated, and only because the crate graph leaves no other
-path.
+two — only the component-to-spans *parse* is duplicated, and only because the crate graph leaves no
+other path.
 
 **The side's own dye colour is a run's *default*, not an override.** A `SignTextSpan::color` of `None`
 means "no node from this run up to the message root specified a colour" — the draw site
@@ -607,10 +623,11 @@ gamma-space, matching every other tint/shade in this codebase.
 - Line wrapping past `MAX_TEXT_LINE_WIDTH` (90 px). The four stored lines are trusted to already fit,
   which the vanilla sign-edit screen enforces at typing time; only a modded server or a hand-edited
   NBT payload could send an over-width line.
-- Click/hover events and translation keys inside one line's JSON component. `resolve_message` flattens
-  `text`/`extra` into styled runs (colour, bold, italic, underline, strikethrough — see the typed-parse
-  section above) but carries no interactivity and does not resolve `translate` keys, the same scope
-  `SignTextSpan`'s own doc names.
+- Click/hover events and translation keys inside one line's component. `append_component_spans`
+  flattens `text`/`extra` into styled runs (colour, bold, italic, underline, strikethrough — see the
+  typed-parse section above) but carries no interactivity and does not resolve `translate` keys (nor
+  `keybind`/`score`/`selector`/`nbt`/`object` contents), the same scope `SignTextSpan`'s own doc
+  names.
 **No longer deferred: hanging signs — see [Hanging signs](#hanging-signs-the-same-renderer-four-numbers-apart)
 below.** The bullet that used to sit here said they needed "a different model set again (chains, a
 bar, its own text transform)" and cost the next reader a wrong estimate: that is **1.20's** shape.
@@ -2991,7 +3008,7 @@ share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behin
   GpuEntityModel, EntityCameraUniform, upload_instances_tinted}`, `camera::Frustum`, `models::ModelVertex`.
 - `lodestone-world` — `BlockEntity`, `LoadedChunk::block_entities`, `ChunkColumn::get_block`,
   `World::sync_block_entity` / `BlockEntitySync`, and (for sign text) `sign_text::{SignText, SignSide,
-  SignDyeColor}` plus a real (non-dev) `serde_json` dependency for the JSON-text message parse.
+  SignDyeColor}`. No JSON parser: the message walk is over `lodestone_core::Nbt` directly.
 - `lodestone-data` — `block_states::{block_name, properties, state_id, STATE_COUNT}` for the material
   and the `facing`/`type` properties; `block_entity_types::block_entity_type` for the state→type census
   the block-update path creates records from; `light_props::dampening` (for the beacon's beam-colour

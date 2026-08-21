@@ -20,25 +20,50 @@
 //! — [`SignSide::lines`] always reads `messages`, matching vanilla's
 //! unfiltered default.
 //!
-//! # Messages are JSON text, not the NBT-structural component shape
+//! # Messages are structural NBT components, not JSON — and this file said
+//! the opposite until a live server proved otherwise
 //!
-//! Every other resolved text in this codebase
-//! ([`lodestone_core::plain_text_from_nbt_component`]) walks a *structural*
-//! NBT encoding of a `Component` (`Compound { text, extra }`, as chat/player
-//! list/entity-metadata components arrive). A sign's `messages` list is
-//! different, and this was the one surprising part of the wire probe: each
-//! element is an `Nbt::String` whose *content* is the **JSON** serialization
-//! of the component, quotes included. A plain "LODESTONE PROBE" line arrived
-//! as the 18-character NBT string `"LODESTONE PROBE"` (opening and closing
-//! `"` are part of the payload, not Rust's `Debug` escaping) — i.e. the JSON
-//! text a bare string component serializes to, stored as-is inside an NBT
-//! string rather than unwrapped into one. `resolve_message` parses that JSON
-//! into [`SignTextSpan`]s: colour (named or `#rrggbb` hex), bold, italic,
-//! underline and strikethrough, inherited from an enclosing node down through
-//! its `extra` children the same way vanilla's `Style.inherit` resolves a
-//! component tree — a bare JSON string is its own (unstyled) text; an
-//! object's own `"text"` plus its `"extra"` array recursively, each level's
-//! own style fields winning over whatever it inherited.
+//! `SignText.LINES_CODEC` is `ComponentSerialization.CODEC.listOf()`, and
+//! that codec's encoder is
+//! `component -> { String text = component.tryCollapseToString(); return
+//! text != null ? Either.left(Either.left(text)) : Either.right(component); }`.
+//! Under `NbtOps` that means exactly two shapes per element:
+//!
+//! * a component that collapses — plain text, no siblings, **empty style** —
+//!   is an `Nbt::String` holding the text **verbatim**. Not JSON: a line
+//!   reading `Hello` is the five-character NBT string `Hello`.
+//! * anything else — any colour, any format flag, any `extra` — is an
+//!   `Nbt::Compound` carrying `text`/`extra` plus its own style fields, the
+//!   *same structural shape*
+//!   [`lodestone_core::plain_text_from_nbt_component`] already walks for
+//!   chat, the player list and entity metadata.
+//!
+//! An earlier version of this module parsed each element as **JSON**, on the
+//! strength of two wire probes that both reported an element arriving as the
+//! 18-character string `"LODESTONE PROBE"` — quotes included. Those quotes
+//! were an artefact of how the probes *set* the sign: an RCON `/setblock`
+//! whose SNBT wrote a string literal that already contained them. The
+//! captures agreed with each other because they shared one producer, and
+//! this crate's own server-side writer (`lodestone_server`'s
+//! `block_entity_to_nbt`) then serialised sign lines back to JSON strings to
+//! match — a closed `decode(encode(x)) == x` loop that could not see the
+//! real wire form. Against a **real** server the consequence was total: a
+//! coloured or formatted line arrives as a `Compound`, matched no arm, and
+//! **every such sign rendered its board with no text at all**.
+//!
+//! [`append_component_spans`] walks the structural form: a `String` is its
+//! own literal, a `Compound` contributes its own `text` styled by its own
+//! fields plus whatever it inherited and then recurses into `extra`, and a
+//! `List` is `ComponentSerialization::createFromList` — element `0` is the
+//! root and the rest are its siblings, so they inherit element `0`'s
+//! resolved style, not the enclosing one. Style inheritance is vanilla's
+//! `Style.inherit`: a child's own value wins where it has one, otherwise the
+//! parent's survives.
+//!
+//! Not modelled: `translatable`, `keybind`, `score`, `selector`, `nbt` and
+//! `object` contents. A `Compound` carrying one of those and no `text` field
+//! contributes nothing rather than a placeholder — a real gap, disclosed
+//! here rather than half-built, and one no sign written by a player can hit.
 //!
 //! # Why this is not `lodestone_model::text::Text`
 //!
@@ -58,7 +83,7 @@
 //! crates) converts one into a real `lodestone_model::text::TextSpan` on its
 //! way into `gpu::nametag::layout_styled_ink_runs`, the same world-space
 //! styled-glyph layout the other two surfaces use. No second styled-text
-//! *layout* implementation exists because of this; only the JSON-to-spans
+//! *layout* implementation exists because of this; only the component-to-spans
 //! *parse* is duplicated, and only because the crate graph leaves no other
 //! path.
 //!
@@ -265,9 +290,7 @@ fn parse_side(nbt: &Nbt) -> SignSide {
     let mut lines: [Vec<SignTextSpan>; 4] = Default::default();
     if let Some(Nbt::List { elements, .. }) = find(fields, "messages") {
         for (slot, element) in lines.iter_mut().zip(elements.iter()) {
-            if let Nbt::String(raw) = element {
-                *slot = resolve_message(raw);
-            }
+            *slot = resolve_message(element);
         }
     }
     SignSide {
@@ -298,16 +321,18 @@ struct ResolvedStyle {
 }
 
 impl ResolvedStyle {
-    fn own_from_object(map: &serde_json::Map<String, serde_json::Value>) -> Self {
+    /// The style fields this `Compound` carries in its own right, before
+    /// inheritance — `Style.Serializer.MAP_CODEC`'s own field names, read
+    /// off an [`Nbt`] compound rather than a JSON object.
+    fn own_from_compound(fields: &[(String, Nbt)]) -> Self {
         ResolvedStyle {
-            color: map
-                .get("color")
-                .and_then(serde_json::Value::as_str)
+            color: find(fields, "color")
+                .and_then(as_string)
                 .and_then(parse_text_color_name),
-            bold: map.get("bold").and_then(serde_json::Value::as_bool),
-            italic: map.get("italic").and_then(serde_json::Value::as_bool),
-            underlined: map.get("underlined").and_then(serde_json::Value::as_bool),
-            strikethrough: map.get("strikethrough").and_then(serde_json::Value::as_bool),
+            bold: find(fields, "bold").and_then(as_bool),
+            italic: find(fields, "italic").and_then(as_bool),
+            underlined: find(fields, "underlined").and_then(as_bool),
+            strikethrough: find(fields, "strikethrough").and_then(as_bool),
         }
     }
 
@@ -374,17 +399,25 @@ fn parse_text_color_name(name: &str) -> Option<u32> {
     })
 }
 
-/// Recursively walks one parsed JSON component value, appending flattened
+/// Recursively walks one structural NBT component, appending flattened
 /// [`SignTextSpan`]s onto `out` — the styled sibling of the plain-text
-/// `text`/`extra` recursion every other resolved text in this codebase uses
-/// ([`lodestone_core::plain_text_from_nbt_component`]), over a
-/// [`serde_json::Value`] instead of an [`Nbt`]: a bare JSON string is its
-/// own (unstyled, inherited-only) text; an array concatenates its elements;
-/// an object contributes its own `"text"` (styled by its own fields plus
-/// whatever it inherited) then recurses into `"extra"` with its own
-/// style now the parent for that subtree.
-fn append_json_component_spans(
-    value: &serde_json::Value,
+/// `text`/`extra` recursion [`lodestone_core::plain_text_from_nbt_component`]
+/// already performs for chat and entity metadata, over the same [`Nbt`].
+///
+/// * [`Nbt::String`] is a **collapsed literal** — the text verbatim, styled
+///   by whatever it inherited. This is `ComponentSerialization.CODEC`'s own
+///   `tryCollapseToString` branch and it is the shape a player-typed sign
+///   line always arrives in.
+/// * [`Nbt::Compound`] contributes its own `text` (styled by its own fields
+///   over the inherited ones) and then recurses into `extra` with that
+///   resolved style as the new parent.
+/// * [`Nbt::List`] is `ComponentSerialization::createFromList`: element `0`
+///   is the root and every later element is *appended to it* as a sibling,
+///   so the rest inherit element `0`'s resolved style rather than the
+///   enclosing one. Getting this wrong is invisible for the common
+///   single-element case and wrong for every styled list.
+fn append_component_spans(
+    nbt: &Nbt,
     parent: ResolvedStyle,
     depth: usize,
     out: &mut Vec<SignTextSpan>,
@@ -392,44 +425,56 @@ fn append_json_component_spans(
     if depth > MAX_DEPTH {
         return;
     }
-    match value {
-        serde_json::Value::String(s) => parent.push_text(s, out),
-        serde_json::Value::Array(items) => {
-            for item in items {
-                append_json_component_spans(item, parent, depth + 1, out);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            let resolved = ResolvedStyle::own_from_object(map).inherit(parent);
-            if let Some(serde_json::Value::String(text)) = map.get("text") {
+    match nbt {
+        Nbt::String(text) => parent.push_text(text, out),
+        Nbt::Compound(fields) => {
+            let resolved = ResolvedStyle::own_from_compound(fields).inherit(parent);
+            if let Some(text) = find(fields, "text").and_then(as_string) {
                 resolved.push_text(text, out);
             }
-            if let Some(extra) = map.get("extra") {
-                append_json_component_spans(extra, resolved, depth + 1, out);
+            if let Some(extra) = find(fields, "extra") {
+                append_component_spans(extra, resolved, depth + 1, out);
             }
         }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+        Nbt::List { elements, .. } => {
+            let Some((root, siblings)) = elements.split_first() else {
+                return;
+            };
+            append_component_spans(root, parent, depth + 1, out);
+            let sibling_parent = resolved_style_of(root, parent, depth + 1);
+            for sibling in siblings {
+                append_component_spans(sibling, sibling_parent, depth + 1, out);
+            }
+        }
+        _ => {}
     }
 }
 
-/// Resolves one `messages` element's JSON-text content into styled spans —
-/// see the module doc for why this is JSON, not the NBT-structural component
-/// shape [`lodestone_core::plain_text_from_nbt_component`] handles.
-/// Malformed JSON degrades to one unstyled span carrying the raw string
-/// verbatim (fail open, matching the rest of this parse) rather than losing
-/// the line entirely.
-fn resolve_message(raw: &str) -> Vec<SignTextSpan> {
-    match serde_json::from_str::<serde_json::Value>(raw) {
-        Ok(value) => {
-            let mut out = Vec::new();
-            append_json_component_spans(&value, ResolvedStyle::default(), 0, &mut out);
-            out
-        }
-        Err(_) => vec![SignTextSpan {
-            text: raw.to_owned(),
-            ..Default::default()
-        }],
+/// The style a node resolves to, for use as the parent of its own siblings —
+/// see [`append_component_spans`]'s [`Nbt::List`] arm. A collapsed literal
+/// carries no style of its own (that is exactly what makes it collapsible),
+/// so only a `Compound` can change anything here.
+fn resolved_style_of(nbt: &Nbt, parent: ResolvedStyle, depth: usize) -> ResolvedStyle {
+    if depth > MAX_DEPTH {
+        return parent;
     }
+    match nbt {
+        Nbt::Compound(fields) => ResolvedStyle::own_from_compound(fields).inherit(parent),
+        // A list's own root decides for the list, recursively.
+        Nbt::List { elements, .. } => elements
+            .first()
+            .map_or(parent, |root| resolved_style_of(root, parent, depth + 1)),
+        _ => parent,
+    }
+}
+
+/// Resolves one `messages` element into styled spans — see the module doc
+/// for why this is structural NBT and **not** JSON, and for the closed
+/// encode/decode loop that hid the difference.
+fn resolve_message(nbt: &Nbt) -> Vec<SignTextSpan> {
+    let mut out = Vec::new();
+    append_component_spans(nbt, ResolvedStyle::default(), 0, &mut out);
+    out
 }
 
 fn find<'a>(fields: &'a [(String, Nbt)], name: &str) -> Option<&'a Nbt> {
@@ -462,46 +507,75 @@ mod tests {
         }
     }
 
-    /// Builds the exact NBT `docs/block-entity-renderers.md`'s live probe
-    /// captured for a real `oak_sign` with `front_text`/`back_text` set over
-    /// RCON — the expected value here is a measurement transcribed from that
-    /// doc, not authored to match this parser.
-    fn probe_nbt() -> Nbt {
-        let side = |messages: [&str; 4], color: &str| {
-            Nbt::Compound(vec![
-                ("has_glowing_text".to_owned(), Nbt::Byte(0)),
-                ("color".to_owned(), Nbt::String(color.to_owned())),
-                (
-                    "messages".to_owned(),
-                    Nbt::List {
-                        element_type: NbtTag::String,
-                        elements: messages
-                            .into_iter()
-                            .map(|m| Nbt::String(m.to_owned()))
-                            .collect(),
-                    },
-                ),
-            ])
-        };
-        Nbt::Compound(vec![
+    /// A `Compound` component node, built from the field names
+    /// `Style.Serializer.MAP_CODEC` and `ComponentSerialization`'s own
+    /// record use.
+    fn compound(fields: Vec<(&str, Nbt)>) -> Nbt {
+        Nbt::Compound(fields.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())
+    }
+
+    fn list(elements: Vec<Nbt>) -> Nbt {
+        Nbt::List {
+            element_type: NbtTag::Compound,
+            elements,
+        }
+    }
+
+    fn boolean(v: bool) -> Nbt {
+        Nbt::Byte(i8::from(v))
+    }
+
+    /// One sign side, `messages` carrying whatever component shapes the
+    /// caller supplies — the real per-element union, not a `String`-only
+    /// list, which is exactly the assumption that broke.
+    fn side(messages: Vec<Nbt>, color: &str) -> Nbt {
+        compound(vec![
+            ("has_glowing_text", Nbt::Byte(0)),
+            ("color", Nbt::String(color.to_owned())),
             (
-                "back_text".to_owned(),
-                side(["\"\"", "\"\"", "\"\"", "\"\""], "black"),
-            ),
-            ("is_waxed".to_owned(), Nbt::Byte(0)),
-            (
-                "front_text".to_owned(),
-                side(
-                    ["\"LODESTONE PROBE\"", "\"\"", "\"\"", "\"\""],
-                    "red",
-                ),
+                "messages",
+                Nbt::List {
+                    element_type: NbtTag::String,
+                    elements: messages,
+                },
             ),
         ])
     }
 
+    /// The shape a **real** server sends for a sign a player typed: every
+    /// line collapses to a bare `Nbt::String` holding the text verbatim
+    /// (`ComponentSerialization.CODEC`'s `tryCollapseToString` branch), with
+    /// no JSON quoting anywhere.
     #[test]
-    fn parses_the_real_probe_capture() {
-        let text = SignText::parse(&probe_nbt());
+    fn a_players_plain_sign_arrives_as_collapsed_string_literals() {
+        let nbt = compound(vec![
+            (
+                "back_text",
+                side(
+                    vec![
+                        Nbt::String(String::new()),
+                        Nbt::String(String::new()),
+                        Nbt::String(String::new()),
+                        Nbt::String(String::new()),
+                    ],
+                    "black",
+                ),
+            ),
+            ("is_waxed", Nbt::Byte(0)),
+            (
+                "front_text",
+                side(
+                    vec![
+                        Nbt::String("LODESTONE PROBE".to_owned()),
+                        Nbt::String(String::new()),
+                        Nbt::String(String::new()),
+                        Nbt::String(String::new()),
+                    ],
+                    "red",
+                ),
+            ),
+        ]);
+        let text = SignText::parse(&nbt);
         assert_eq!(text.front.lines[0], vec![plain("LODESTONE PROBE")]);
         assert!(text.front.lines[1].is_empty());
         assert_eq!(text.front.color, SignDyeColor::Red);
@@ -509,6 +583,112 @@ mod tests {
         assert!(text.back.lines.iter().all(Vec::is_empty));
         assert_eq!(text.back.color, SignDyeColor::Black);
         assert!(!text.waxed);
+    }
+
+    /// **The regression this parse was rewritten for.** A line that carries
+    /// *any* style cannot collapse, so it arrives as a `Compound` — and the
+    /// previous JSON-string-only parse matched no arm and produced an empty
+    /// line, which is why a coloured sign on a real server drew its board
+    /// and no text whatsoever.
+    ///
+    /// Both arms in one fixture: a styled line **and** a plain sibling line,
+    /// so a parse that handled only one shape fails whichever one it
+    /// dropped.
+    #[test]
+    fn a_styled_line_arrives_as_a_compound_and_still_reaches_spans() {
+        let nbt = compound(vec![(
+            "front_text",
+            side(
+                vec![
+                    compound(vec![
+                        ("text", Nbt::String("WELCOME".to_owned())),
+                        ("color", Nbt::String("#12ab56".to_owned())),
+                        ("bold", boolean(true)),
+                    ]),
+                    Nbt::String("to the hospital".to_owned()),
+                    Nbt::String(String::new()),
+                    Nbt::String(String::new()),
+                ],
+                "black",
+            ),
+        )]);
+        let text = SignText::parse(&nbt);
+        assert_eq!(
+            text.front.lines[0],
+            vec![SignTextSpan {
+                text: "WELCOME".to_owned(),
+                color: Some(0x0012_ab56),
+                bold: true,
+                ..Default::default()
+            }],
+            "a styled line must survive as a real styled span, not vanish"
+        );
+        assert_eq!(
+            text.front.lines[1],
+            vec![plain("to the hospital")],
+            "a collapsed plain sibling line must still parse"
+        );
+    }
+
+    /// A rich (compound) component with `extra` runs must concatenate, the
+    /// same recursion `plain_text_from_nbt_component` performs — the control
+    /// that a "only handle bare strings" implementation fails.
+    #[test]
+    fn a_rich_component_concatenates_text_and_extra() {
+        let node = compound(vec![
+            ("text", Nbt::String("hello ".to_owned())),
+            (
+                "extra",
+                list(vec![
+                    compound(vec![("text", Nbt::String("world".to_owned()))]),
+                    Nbt::String("!".to_owned()),
+                ]),
+            ),
+        ]);
+        let spans = resolve_message(&node);
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, "hello world!");
+    }
+
+    /// **A string element is a literal, verbatim — never re-parsed.** The
+    /// old JSON path silently mangled any plain line that happened to be
+    /// valid JSON: `123` decoded to a `Number` and contributed no span at
+    /// all, so the line vanished. Three inputs that JSON would each treat
+    /// differently and vanilla treats identically.
+    #[test]
+    fn a_string_element_is_literal_text_even_when_it_looks_like_json() {
+        for raw in ["123", "true", "{\"text\":\"x\"}"] {
+            assert_eq!(
+                resolve_message(&Nbt::String(raw.to_owned())),
+                vec![plain(raw)],
+                "a collapsed literal must reach the draw verbatim: {raw}"
+            );
+        }
+    }
+
+    /// A `messages` element that is itself a **list** is
+    /// `ComponentSerialization::createFromList`: element `0` is the root and
+    /// the rest are appended to it as siblings, so they inherit element
+    /// `0`'s style — **not** the (empty) enclosing one. The discriminating
+    /// fixture styles only element `0`; a parse that passed the enclosing
+    /// style to every element would leave the sibling unstyled.
+    #[test]
+    fn a_list_message_makes_its_first_element_the_parent_of_the_rest() {
+        let node = list(vec![
+            compound(vec![
+                ("text", Nbt::String("a".to_owned())),
+                ("color", Nbt::String("red".to_owned())),
+            ]),
+            Nbt::String("b".to_owned()),
+        ]);
+        let spans = resolve_message(&node);
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert_eq!(spans[0].color, Some(0x00ff_5555));
+        assert_eq!(
+            spans[1].color,
+            Some(0x00ff_5555),
+            "a later list element is a sibling of element 0 and inherits its style"
+        );
     }
 
     #[test]
@@ -521,17 +701,17 @@ mod tests {
 
     #[test]
     fn missing_color_defaults_to_black_like_the_real_codec() {
-        let nbt = Nbt::Compound(vec![(
-            "front_text".to_owned(),
+        let nbt = compound(vec![(
+            "front_text",
             Nbt::Compound(vec![(
                 "messages".to_owned(),
                 Nbt::List {
                     element_type: NbtTag::String,
                     elements: vec![
-                        Nbt::String("\"hi\"".to_owned()),
-                        Nbt::String("\"\"".to_owned()),
-                        Nbt::String("\"\"".to_owned()),
-                        Nbt::String("\"\"".to_owned()),
+                        Nbt::String("hi".to_owned()),
+                        Nbt::String(String::new()),
+                        Nbt::String(String::new()),
+                        Nbt::String(String::new()),
                     ],
                 },
             )]),
@@ -539,23 +719,6 @@ mod tests {
         let text = SignText::parse(&nbt);
         assert_eq!(text.front.color, SignDyeColor::Black);
         assert_eq!(text.front.lines[0], vec![plain("hi")]);
-    }
-
-    /// A rich (object-shaped) component with `extra` runs must concatenate,
-    /// the same recursion `plain_text_from_nbt_component` performs for the
-    /// NBT-structural form — this is the control that a naive "only handle
-    /// bare JSON strings" implementation would fail.
-    #[test]
-    fn a_rich_component_concatenates_text_and_extra() {
-        let raw = r#"{"text":"hello ","extra":[{"text":"world"},"!"]}"#;
-        let spans = resolve_message(raw);
-        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
-        assert_eq!(joined, "hello world!");
-    }
-
-    #[test]
-    fn malformed_json_degrades_to_the_raw_string_rather_than_losing_the_line() {
-        assert_eq!(resolve_message("not json"), vec![plain("not json")]);
     }
 
     /// The central control: an explicit **hex** colour on one run must
@@ -566,8 +729,15 @@ mod tests {
     /// still happen to survive a legacy-colour fixture.
     #[test]
     fn an_explicit_hex_colour_survives_and_an_unset_sibling_has_none() {
-        let raw = r##"{"text":"a","color":"#123456","extra":[{"text":"b"}]}"##;
-        let spans = resolve_message(raw);
+        let node = compound(vec![
+            ("text", Nbt::String("a".to_owned())),
+            ("color", Nbt::String("#123456".to_owned())),
+            (
+                "extra",
+                list(vec![compound(vec![("text", Nbt::String("b".to_owned()))])]),
+            ),
+        ]);
+        let spans = resolve_message(&node);
         assert_eq!(spans.len(), 2, "{spans:?}");
         assert_eq!(spans[0].text, "a");
         assert_eq!(spans[0].color, Some(0x0012_3456));
@@ -583,8 +753,18 @@ mod tests {
     /// colour overrides the parent's, rather than the parent always winning.
     #[test]
     fn a_child_can_override_the_parents_colour() {
-        let raw = r##"{"text":"a","color":"red","extra":[{"text":"b","color":"#00ff00"}]}"##;
-        let spans = resolve_message(raw);
+        let node = compound(vec![
+            ("text", Nbt::String("a".to_owned())),
+            ("color", Nbt::String("red".to_owned())),
+            (
+                "extra",
+                list(vec![compound(vec![
+                    ("text", Nbt::String("b".to_owned())),
+                    ("color", Nbt::String("#00ff00".to_owned())),
+                ])]),
+            ),
+        ]);
+        let spans = resolve_message(&node);
         assert_eq!(spans[0].color, Some(0x00ff_5555));
         assert_eq!(spans[1].color, Some(0x0000_ff00));
     }
@@ -594,7 +774,10 @@ mod tests {
     /// the dye-colour fallback is the *draw site*'s job, not this parser's.
     #[test]
     fn a_message_with_no_colour_anywhere_resolves_to_none() {
-        let spans = resolve_message(r#"{"text":"plain"}"#);
+        let spans = resolve_message(&compound(vec![(
+            "text",
+            Nbt::String("plain".to_owned()),
+        )]));
         assert_eq!(spans, vec![plain("plain")]);
         assert_eq!(spans[0].color, None);
     }
@@ -603,11 +786,22 @@ mod tests {
     /// it, and a child can explicitly turn a flag back off.
     #[test]
     fn style_flags_inherit_and_can_be_explicitly_cleared() {
-        let raw = r#"{"text":"a","bold":true,"underlined":true,"extra":[
-            {"text":"b"},
-            {"text":"c","underlined":false}
-        ]}"#;
-        let spans = resolve_message(raw);
+        let node = compound(vec![
+            ("text", Nbt::String("a".to_owned())),
+            ("bold", boolean(true)),
+            ("underlined", boolean(true)),
+            (
+                "extra",
+                list(vec![
+                    compound(vec![("text", Nbt::String("b".to_owned()))]),
+                    compound(vec![
+                        ("text", Nbt::String("c".to_owned())),
+                        ("underlined", boolean(false)),
+                    ]),
+                ]),
+            ),
+        ]);
+        let spans = resolve_message(&node);
         assert_eq!(spans.len(), 3, "{spans:?}");
         assert!(spans[0].bold && spans[0].underlined, "{:?}", spans[0]);
         // Inherits both flags from "a".

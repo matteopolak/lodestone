@@ -16,12 +16,35 @@
 //!
 //! # Depth and blending
 //!
-//! No polygon-offset bias: unlike sign text (which shares a face with the
-//! sign board's own terrain-mesh geometry and needs a bias to win the depth
-//! tie), a `text_display`'s glyphs and background panel float in open space
-//! with nothing coplanar to fight. Ordinary `LessEqual` depth compare,
-//! straight alpha blending (`ALPHA_BLENDING`) for the translucent background
-//! panel and partially-transparent glyphs alike.
+//! **Two pipelines, because vanilla submits the panel and the glyphs through
+//! two different ones.** `TextDisplayRenderer.submitInner` hands the
+//! background quad to `RenderTypes.textBackground()` —
+//! `RenderPipelines.TEXT_BACKGROUND`, whose depth state is the plain
+//! `DepthStencilState.DEFAULT` — and every line of text to
+//! `Font.DisplayMode.POLYGON_OFFSET`, which resolves to
+//! `RenderPipelines.TEXT_POLYGON_OFFSET`:
+//! `new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true, 1.0F, 10.0F)`.
+//! The two numeric constants are the same polygon offset `gpu/sign_text.rs`
+//! already ports, and the same sign flip applies (vanilla is reversed-Z,
+//! this project's depth is `[0,1]`), giving `constant: -10,
+//! slope_scale: -1.0` on the **glyph** pipeline and no bias at all on the
+//! background one. Straight alpha blending (`ALPHA_BLENDING`) on both.
+//!
+//! This pass originally drew everything through one unbiased pipeline, on
+//! the reasoning that "a `text_display`'s glyphs and background panel float
+//! in open space with nothing coplanar to fight". That is false, and its own
+//! panel is the thing it fights: vanilla separates the two by `-0.01` in
+//! **local glyph space**, which the `0.025` text scale turns into
+//! **0.00025 blocks** — a couple of `f32` ULP in a `[0,1]` depth buffer at
+//! any real viewing distance. Head-on the glyphs still won (`LessEqual`
+//! passes a tie and the glyphs are submitted second), but the two quads are
+//! *different sizes*, so their interpolated depth diverges as the plane goes
+//! oblique to the view — which is exactly the case a yaw-only
+//! (`BillboardMode::Vertical`) hologram is in whenever the camera is pitched.
+//! Measured through `tests/world_text_over_geometry_pixels.rs`: glyph ink
+//! fell from 438 px to 389 px when the panel was switched on, at a 40°
+//! upward look, and the loss is per-pixel scatter rather than a clean edge.
+//! Do not collapse these back into one pipeline.
 //!
 //! # What is deliberately not built (disclosed, not silent)
 //!
@@ -91,7 +114,14 @@ const MAX_DISPLAY_TEXT_VERTICES: usize = 40_000;
 /// pass, unlike its two nearest relatives.
 #[derive(Debug)]
 pub(super) struct DisplayTextRenderer {
-    pipeline: wgpu::RenderPipeline,
+    /// `RenderPipelines.TEXT_BACKGROUND`'s depth state — plain
+    /// `DepthStencilState.DEFAULT`, no polygon offset.
+    background_pipeline: wgpu::RenderPipeline,
+    /// `RenderPipelines.TEXT_POLYGON_OFFSET` — the same two constants
+    /// `gpu/sign_text.rs` ports, so the glyphs win the tie against the panel
+    /// 0.00025 blocks behind them at every viewing angle. See the module
+    /// doc for the measurement that made this necessary.
+    glyph_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
     vertices: wgpu::Buffer,
@@ -161,52 +191,70 @@ impl DisplayTextRenderer {
             attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
         })];
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("lodestone-display-text-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &vertex_buffers,
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
+        // One descriptor, two depth biases — the *only* thing that differs
+        // between `RenderPipelines.TEXT_BACKGROUND` and
+        // `RenderPipelines.TEXT_POLYGON_OFFSET` on our side of the port, so
+        // building them from one closure keeps that visible rather than
+        // burying it in two near-identical literals.
+        let build = |label: &str, bias: wgpu::DepthBiasState| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &vertex_buffers,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: color_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    // No culling: the background panel and the glyph quads are
+                    // each built with an explicit, consistent winding, but a
+                    // `Center`-billboarded panel viewed from directly behind an
+                    // entity's own `Fixed` orientation has no "back face" concept
+                    // worth culling, matching `gpu/nametag.rs`/`gpu/sign_text.rs`.
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias,
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        let background_pipeline = build(
+            "lodestone-display-text-background-pipeline",
+            wgpu::DepthBiasState::default(),
+        );
+        let glyph_pipeline = build(
+            "lodestone-display-text-glyph-pipeline",
+            wgpu::DepthBiasState {
+                constant: -10,
+                slope_scale: -1.0,
+                clamp: 0.0,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                // No culling: the background panel and the glyph quads are
-                // each built with an explicit, consistent winding, but a
-                // `Center`-billboarded panel viewed from directly behind an
-                // entity's own `Fixed` orientation has no "back face" concept
-                // worth culling, matching `gpu/nametag.rs`/`gpu/sign_text.rs`.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                // No bias — see the module doc's "Depth and blending" section
-                // for why this pass has nothing coplanar to fight, unlike
-                // `gpu/sign_text.rs`.
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         Self {
-            pipeline,
+            background_pipeline,
+            glyph_pipeline,
             bind_group,
             uniform,
             vertices,
@@ -217,47 +265,92 @@ impl DisplayTextRenderer {
 
     /// Uploads this frame's view-projection and `text_display` vertices.
     /// Must run before the render pass opens, same buffer-creation
-    /// constraint as every other pass in this crate. Returns the vertex
-    /// count, capped at [`MAX_DISPLAY_TEXT_VERTICES`] — pass to
-    /// [`draw`](Self::draw).
+    /// constraint as every other pass in this crate.
+    ///
+    /// Returns `(background_count, glyph_count)` — the panels occupy the
+    /// front of the one vertex buffer and the glyphs follow immediately
+    /// after, so the two draws the module doc's two pipelines need are two
+    /// ranges of one buffer rather than two buffers. Both counts are already
+    /// clamped so their **sum** fits [`MAX_DISPLAY_TEXT_VERTICES`]. Pass the
+    /// pair straight to [`draw`](Self::draw).
     pub(super) fn prepare(
         &self,
         queue: &wgpu::Queue,
         view_proj: &[[f32; 4]; 4],
         draws: &[DisplayDraw],
         camera: &Camera,
-    ) -> u32 {
+    ) -> (u32, u32) {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(view_proj));
         let Some(raster) = &self.font else {
-            return 0;
+            return (0, 0);
         };
 
-        let mut vertices = Vec::new();
+        let mut backgrounds = Vec::new();
+        let mut glyphs = Vec::new();
         for draw in draws {
             if draw.type_path != TEXT_DISPLAY_TYPE_PATH {
                 continue;
             }
             let Some(text) = &draw.text else { continue };
-            push_text_display_quads(raster, &self.ink, draw, text, camera, &mut vertices);
+            push_text_display_quads(
+                raster,
+                &self.ink,
+                draw,
+                text,
+                camera,
+                &mut backgrounds,
+                &mut glyphs,
+            );
         }
-        let len = vertices.len().min(MAX_DISPLAY_TEXT_VERTICES);
-        if len > 0 {
-            queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&vertices[..len]));
+        // Panels first, then glyphs, so the two ranges are contiguous. The
+        // cap is applied to the panels first and to whatever room is left
+        // for the glyphs, which is the right way round: a truncated panel
+        // list still leaves readable text, a truncated glyph list does not.
+        let background_len = backgrounds.len().min(MAX_DISPLAY_TEXT_VERTICES);
+        let glyph_len = glyphs
+            .len()
+            .min(MAX_DISPLAY_TEXT_VERTICES - background_len);
+        if background_len > 0 {
+            queue.write_buffer(
+                &self.vertices,
+                0,
+                bytemuck::cast_slice(&backgrounds[..background_len]),
+            );
         }
-        len as u32
+        if glyph_len > 0 {
+            let offset = (background_len * std::mem::size_of::<DisplayTextVertex>()) as u64;
+            queue.write_buffer(
+                &self.vertices,
+                offset,
+                bytemuck::cast_slice(&glyphs[..glyph_len]),
+            );
+        }
+        (background_len as u32, glyph_len as u32)
     }
 
-    /// Records the draw (no-op with zero vertices, including the no-jar
-    /// `font: None` state, since [`prepare`](Self::prepare) always returns
-    /// `0` there).
-    pub(super) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, count: u32) {
-        if count == 0 {
+    /// Records the two draws (a no-op for either range that is empty,
+    /// including the no-jar `font: None` state, since
+    /// [`prepare`](Self::prepare) always returns `(0, 0)` there).
+    ///
+    /// Panels **before** glyphs, matching
+    /// `TextDisplayRenderer.submitInner`'s own
+    /// `submitNodeCollector.order(backgroundColor != 0 ? 1 : 0)` — the text
+    /// is explicitly ordered after the background it sits on.
+    pub(super) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, counts: (u32, u32)) {
+        let (backgrounds, glyphs) = counts;
+        if backgrounds == 0 && glyphs == 0 {
             return;
         }
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
-        pass.draw(0..count, 0..1);
+        if backgrounds > 0 {
+            pass.set_pipeline(&self.background_pipeline);
+            pass.draw(0..backgrounds, 0..1);
+        }
+        if glyphs > 0 {
+            pass.set_pipeline(&self.glyph_pipeline);
+            pass.draw(backgrounds..backgrounds + glyphs, 0..1);
+        }
     }
 }
 
@@ -300,16 +393,23 @@ fn split_spans_into_lines(spans: &[TextSpan]) -> Vec<Vec<TextSpan>> {
     lines
 }
 
-/// Lowers one `text_display`'s current text into world-space quads (the
-/// background panel, when non-transparent, plus every non-empty line),
-/// appended onto `out`.
+/// Lowers one `text_display`'s current text into world-space quads: the
+/// background panel (when non-transparent) onto `background_out`, and every
+/// non-empty line's ink onto `glyph_out`.
+///
+/// The two are kept apart because they are drawn through **two different
+/// pipelines** — vanilla's `RenderPipelines.TEXT_BACKGROUND` and
+/// `RenderPipelines.TEXT_POLYGON_OFFSET` — see the module doc for the
+/// measurement that made that split load-bearing rather than cosmetic.
+#[allow(clippy::too_many_arguments)]
 fn push_text_display_quads(
     raster: &RasterFont,
     ink: &super::nametag::StyledInkLayoutCache,
     draw: &DisplayDraw,
     text: &Text,
     camera: &Camera,
-    out: &mut Vec<DisplayTextVertex>,
+    background_out: &mut Vec<DisplayTextVertex>,
+    glyph_out: &mut Vec<DisplayTextVertex>,
 ) {
     // `text` is a real `Text` (the protocol-layer decode and
     // `crate::display_entities`' extract both carry the full component tree
@@ -355,7 +455,13 @@ fn push_text_display_quads(
     let align_right = draw.text_style_flags & 0x10 != 0;
 
     if draw.text_background_color != 0 {
-        push_background_quad(matrix, total_width, total_height, draw.text_background_color, out);
+        push_background_quad(
+            matrix,
+            total_width,
+            total_height,
+            draw.text_background_color,
+            background_out,
+        );
     }
 
     // `text_glyph_color`'s alpha is `textOpacity`'s own fraction — the real
@@ -390,7 +496,7 @@ fn push_text_display_quads(
             let br = matrix
                 .transform_point3(Vec3::new(lx + rect.w, ly + rect.h, 0.0))
                 .to_array();
-            out.extend([
+            glyph_out.extend([
                 DisplayTextVertex { position: tl, color },
                 DisplayTextVertex { position: bl, color },
                 DisplayTextVertex { position: tr, color },
@@ -431,6 +537,25 @@ fn push_background_quad(
 mod tests {
     use super::*;
 
+    /// Every gate below wants "all the vertices this draw contributes", in
+    /// submission order — panel first, then ink — which is exactly what the
+    /// one buffer holds. `push_text_display_quads` splits them because they
+    /// go through two pipelines (see the module doc); nothing about that
+    /// split changes what any of these assertions are about.
+    fn all_quads(
+        raster: &RasterFont,
+        ink: &super::super::nametag::StyledInkLayoutCache,
+        draw: &DisplayDraw,
+        text: &Text,
+        camera: &Camera,
+    ) -> Vec<DisplayTextVertex> {
+        let mut out = Vec::new();
+        let mut glyphs = Vec::new();
+        push_text_display_quads(raster, ink, draw, text, camera, &mut out, &mut glyphs);
+        out.extend(glyphs);
+        out
+    }
+
     fn draw_with_text(text: &str) -> DisplayDraw {
         DisplayDraw {
             id: 1,
@@ -460,14 +585,12 @@ mod tests {
             return;
         };
         let ink = super::super::nametag::StyledInkLayoutCache::default();
-        let mut out = Vec::new();
-        push_text_display_quads(
+        let out = all_quads(
             &raster,
             &ink,
             &draw_with_text(""),
             &Text::from_legacy(""),
             &Camera::default(),
-            &mut out,
         );
         assert!(out.is_empty());
     }
@@ -481,14 +604,12 @@ mod tests {
         };
         let ink = super::super::nametag::StyledInkLayoutCache::default();
         let draw = draw_with_text("LODESTONE");
-        let mut out = Vec::new();
-        push_text_display_quads(
+        let out = all_quads(
             &raster,
             &ink,
             &draw,
             &Text::from_legacy("LODESTONE"),
             &Camera::default(),
-            &mut out,
         );
         assert!(!out.is_empty(), "real text must contribute vertices");
     }
@@ -505,26 +626,22 @@ mod tests {
         let ink = super::super::nametag::StyledInkLayoutCache::default();
         let mut without_bg = draw_with_text("A");
         without_bg.text_background_color = 0;
-        let mut no_bg_out = Vec::new();
-        push_text_display_quads(
+        let no_bg_out = all_quads(
             &raster,
             &ink,
             &without_bg,
             &Text::from_legacy("A"),
             &Camera::default(),
-            &mut no_bg_out,
         );
 
         let mut with_bg = draw_with_text("A");
         with_bg.text_background_color = 0x4000_0000_u32 as i32;
-        let mut bg_out = Vec::new();
-        push_text_display_quads(
+        let bg_out = all_quads(
             &raster,
             &ink,
             &with_bg,
             &Text::from_legacy("A"),
             &Camera::default(),
-            &mut bg_out,
         );
 
         assert_eq!(
@@ -560,10 +677,8 @@ mod tests {
 
         let hello = Text::from_legacy("HELLO");
         let fixed_draw = draw_with_text("HELLO");
-        let mut fixed_a = Vec::new();
-        push_text_display_quads(&raster, &ink, &fixed_draw, &hello, &camera_a, &mut fixed_a);
-        let mut fixed_b = Vec::new();
-        push_text_display_quads(&raster, &ink, &fixed_draw, &hello, &camera_b, &mut fixed_b);
+        let fixed_a = all_quads(&raster, &ink, &fixed_draw, &hello, &camera_a);
+        let fixed_b = all_quads(&raster, &ink, &fixed_draw, &hello, &camera_b);
         assert_eq!(
             fixed_a, fixed_b,
             "Fixed billboard text must not move when only the camera rotates"
@@ -571,10 +686,8 @@ mod tests {
 
         let mut center_draw = draw_with_text("HELLO");
         center_draw.billboard = BillboardMode::Center;
-        let mut center_a = Vec::new();
-        push_text_display_quads(&raster, &ink, &center_draw, &hello, &camera_a, &mut center_a);
-        let mut center_b = Vec::new();
-        push_text_display_quads(&raster, &ink, &center_draw, &hello, &camera_b, &mut center_b);
+        let center_a = all_quads(&raster, &ink, &center_draw, &hello, &camera_a);
+        let center_b = all_quads(&raster, &ink, &center_draw, &hello, &camera_b);
         assert_ne!(
             center_a, center_b,
             "Center billboard text must move when the camera rotates — \
@@ -606,14 +719,12 @@ mod tests {
             |c: [f32; 4]| (c[0] - want_red[0]).abs() < 1e-3 && (c[1] - want_red[1]).abs() < 1e-3 && (c[2] - want_red[2]).abs() < 1e-3;
 
         let coloured = draw_with_text("\u{a7}cRED");
-        let mut coloured_out = Vec::new();
-        push_text_display_quads(
+        let coloured_out = all_quads(
             &raster,
             &ink,
             &coloured,
             &Text::from_legacy("\u{a7}cRED"),
             &Camera::default(),
-            &mut coloured_out,
         );
         assert!(
             coloured_out.iter().any(|v| is_red(v.color)),
@@ -622,14 +733,12 @@ mod tests {
         );
 
         let plain = draw_with_text("RED");
-        let mut plain_out = Vec::new();
-        push_text_display_quads(
+        let plain_out = all_quads(
             &raster,
             &ink,
             &plain,
             &Text::from_legacy("RED"),
             &Camera::default(),
-            &mut plain_out,
         );
         assert!(
             !plain_out.iter().any(|v| is_red(v.color)),
@@ -693,24 +802,20 @@ mod tests {
         // the full billboard/glyph transform) must grow.
         let ink = super::super::nametag::StyledInkLayoutCache::default();
         let plain_draw = draw_with_text("Hi\nWWWWWW");
-        let mut plain_out = Vec::new();
-        push_text_display_quads(
+        let plain_out = all_quads(
             &raster,
             &ink,
             &plain_draw,
             &Text::from_legacy("Hi\nWWWWWW"),
             &Camera::default(),
-            &mut plain_out,
         );
         let bold_draw = draw_with_text("Hi\n\u{a7}lWWWWWW");
-        let mut bold_out = Vec::new();
-        push_text_display_quads(
+        let bold_out = all_quads(
             &raster,
             &ink,
             &bold_draw,
             &Text::from_legacy("Hi\n\u{a7}lWWWWWW"),
             &Camera::default(),
-            &mut bold_out,
         );
         let extent = |verts: &[DisplayTextVertex]| -> f32 {
             let xs = verts.iter().map(|v| v.position[0]);
@@ -769,8 +874,7 @@ mod tests {
         );
 
         let draw = draw_with_text("HEX");
-        let mut out = Vec::new();
-        push_text_display_quads(&raster, &ink, &draw, &hex_text, &Camera::default(), &mut out);
+        let out = all_quads(&raster, &ink, &draw, &hex_text, &Camera::default());
 
         let want_hex = [
             ((hex >> 16) & 0xff) as f32 / 255.0,
