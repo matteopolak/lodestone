@@ -1211,6 +1211,44 @@ impl WindowApp {
                         None => format!("gpu {name}: <no reading yet>"),
                     });
                 }
+                // The CPU-bound-or-GPU-bound line, and the reason the two
+                // `*_total` spans exist: between them they cover every pass
+                // this shell submits, so their sum against the real presented
+                // frame interval is the whole question. Every other line in
+                // this block is *recording* cost — `queue.submit` only
+                // enqueues — and cannot answer it.
+                //
+                // Denominator is the pacer's counted frame rate, not the
+                // `frame_ms` figure a few lines above: that one is measured
+                // from `frame_start` to just after the world render, so it
+                // stops before the HUD and before `present` and would
+                // overstate the GPU's share of the frame.
+                let report = render.gpu_timing_report();
+                let span = |name: &str| {
+                    report.iter().find(|(n, _)| *n == name).and_then(|(_, ms)| *ms)
+                };
+                if let (Some(world_total), Some(hud_total)) =
+                    (span("world_total"), span("hud_total"))
+                {
+                    let gpu_ms = world_total + hud_total;
+                    let fps = self.pacer.fps() as f32;
+                    // A share is only meaningful once the pacer has actually
+                    // counted a presented frame; before that, report the
+                    // total alone rather than dividing by zero into a
+                    // fabricated percentage.
+                    if fps > 0.0 {
+                        let budget_ms = 1000.0 / fps;
+                        lines.push(format!(
+                            "gpu frame total: {gpu_ms:.2} ms = {:.0}% of the {budget_ms:.2} ms presented \
+                             interval (readback lags a few frames)",
+                            100.0 * gpu_ms / budget_ms,
+                        ));
+                    } else {
+                        lines.push(format!(
+                            "gpu frame total: {gpu_ms:.2} ms (no presented-frame interval yet)"
+                        ));
+                    }
+                }
                 let stalled = render.gpu_timing_stalled_frames();
                 if stalled > 0 {
                     lines.push(format!("gpu timer stalled_frames: {stalled}"));

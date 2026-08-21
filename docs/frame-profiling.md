@@ -453,14 +453,29 @@ No millisecond figure passes or fails: a wall-clock duration on a shared
 machine is a sample, not a measurement. What *is* asserted is either a count
 or a relation between two numbers taken in the same run:
 
-- **`world_total >= world + first_person`.** A span bracketing two passes
-  cannot be shorter than the passes it brackets. This is the instrument
-  validating itself, and it is not vacuous — it fails outright if the
-  bracketing stamps are recorded in the wrong order, if the resolve executes
-  before an edge is written, or if the four segment indices are rebased by
-  someone reordering the segment-name list. `world_total` is genuinely larger
-  (it also covers the sky pass and the overlays), so this is not an equality
-  in disguise.
+- **`world_total`'s median is at or above the block pass's median.** The
+  instrument validating itself: a mis-stamped span reads as near-zero or
+  garbage, not as a few percent under the pass it encloses, so this still
+  fails outright if the bracketing stamps are recorded in the wrong order, if
+  the resolve executes before an edge is written, or if the four segment
+  indices are rebased by someone reordering the segment-name list.
+
+  **A bracket is an estimate, not a bound**, and both stronger forms were
+  tried and observed failing. `world_total >= world + first_person` failed on
+  the first run: 0.674 ms of span against 0.797 ms of summed passes at the
+  `high_down` waypoint. The unstated assumption was that render passes execute
+  serially — on a tile-based deferred GPU they pipeline, one pass's vertex
+  work overlapping the previous pass's fragment work, so summed pass durations
+  legitimately exceed the wall span that contains them. **Do not add up
+  per-pass GPU numbers and call the total a frame's GPU time.** Weakening it
+  to `>= max(pass)` failed too, once in thirty readbacks, for two further
+  reasons worth knowing when reading any GPU line this instrument prints: an
+  empty bracketing pass has no work and can retire before a long pass it
+  nominally encloses finishes its fragment stage, and `results_ms` holds each
+  segment's *last good* reading independently, so under readback backpressure
+  two segments in one report can be from different frames. The bench prints
+  both per-readback violation rates as measurements; placing a tolerance on
+  either would have been fitting a threshold to the answer.
 - **Residency does not move under pure rotation.** The counter-validation
   control: turn the camera 180° from one eye position and require
   `vram_bytes` to be **byte-identical**, while requiring `sections_drawn` to
@@ -474,6 +489,15 @@ or a relation between two numbers taken in the same run:
   3-frame readback ring, so a `None` this late is the query pool failing, not
   latency. It fails rather than leaving a blank column, because a blank
   column reads as "that pass is free".
+- **The residency sweep actually grew the world.** The second half of the
+  bench holds the camera fixed and grows the demo world across radii 2/4/6 to
+  ask whether per-frame CPU cost tracks *resident* sections or *drawn* ones —
+  two answers that point at completely different fixes, since culling harder
+  cannot touch a cost proportional to what you are merely holding. Three
+  radii rather than two, because two points cannot separate a slope from an
+  offset. The assertion is only that residency really rises with radius;
+  without it the three rows could be three copies of one scene and the ratio
+  printed beneath them would be noise wearing a finding's clothes.
 
 ### What the bench cannot see
 

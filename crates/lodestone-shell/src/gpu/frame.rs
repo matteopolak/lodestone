@@ -84,7 +84,7 @@ impl RenderState {
         }
         queue.submit(std::iter::once(encoder.finish()));
         if let Some(timer) = self.gpu_timer.borrow_mut().as_mut() {
-            timer.after_submit(device);
+            timer.after_submit();
         }
     }
 

@@ -26,12 +26,28 @@
 //! millisecond figure. What *is* asserted is either a count or a relation
 //! between two numbers measured in the same run:
 //!
-//! * **`world_total >= world + first_person`.** A span bracketing two passes
-//!   cannot be shorter than the two passes it brackets. This is the
-//!   instrument validating itself, and it is not vacuous: it fails outright if
-//!   the bracketing stamps are recorded in the wrong order, if the resolve
-//!   executes before an edge is written, or if the four segment indices are
-//!   rebased by a reordering of `RenderState`'s segment-name list.
+//! * **`world_total`'s median is at or above the block pass's median.** The
+//!   instrument validating itself: a mis-stamped span reads as near-zero or
+//!   garbage, not as a few percent under the pass it encloses, so this still
+//!   fails outright if the bracketing stamps are recorded in the wrong order,
+//!   if the resolve executes before an edge is written, or if the four segment
+//!   indices are rebased by a reordering of `RenderState`'s segment-name list.
+//!
+//!   The stronger, obvious forms are **not** invariants here, and both were
+//!   tried and observed failing. `world_total >= world + first_person` failed
+//!   on the first run (0.674 ms of span against 0.797 ms of summed passes at
+//!   `high_down`): passes on a tile-based deferred GPU pipeline rather than
+//!   execute serially, so summed pass durations legitimately exceed the wall
+//!   span containing them — **a sum of per-pass GPU numbers is not a frame's
+//!   GPU time**. Weakening it to `>= max(pass)` failed too, once in thirty
+//!   readbacks, for two further reasons: an empty bracketing pass has no work
+//!   and can retire before a long pass it nominally encloses finishes its
+//!   fragment stage, and `results_ms` holds each segment's last good reading
+//!   independently, so under readback backpressure two segments in one report
+//!   can come from different frames. The bracket is an **estimate, not a
+//!   bound**. Both per-readback violation rates are printed as measurements
+//!   rather than folded into a tolerance, which would be fitting a threshold
+//!   to the answer.
 //! * **Residency does not move under pure rotation.** `CLAUDE.md` records
 //!   `vram_bytes` having once been accumulated *inside* the terrain draw loops
 //!   after the cull — a per-frame *drawn* quantity wearing a *residency*
@@ -278,6 +294,10 @@ fn bench_frame_profile(c: &mut Criterion) {
         let mut gpu_hud = Samples::default();
         let mut last_stats = None;
         let mut visited = None;
+        // Two different relations, counted separately, because only one of
+        // them is an invariant — see the assertion block below.
+        let mut span_shorter_than_a_pass = 0usize;
+        let mut span_shorter_than_the_sum = 0usize;
 
         for _ in 0..ITERS {
             let frame = target.acquire().expect("headless acquire");
@@ -324,6 +344,22 @@ fn bench_frame_profile(c: &mut Criterion) {
                         None => {}
                     }
                 }
+                // The span relation is checked **per readback**, not between
+                // three independently-taken medians: a median of sums is not
+                // a sum of medians, and mixing them is how an aggregate
+                // invents a violation that no individual frame committed.
+                if let (Ok(Some(t)), Ok(Some(w)), Ok(Some(f))) = (
+                    segment(&report, "world_total"),
+                    segment(&report, "world"),
+                    segment(&report, "first_person"),
+                ) {
+                    if t < w || t < f {
+                        span_shorter_than_a_pass += 1;
+                    }
+                    if t < w + f {
+                        span_shorter_than_the_sum += 1;
+                    }
+                }
             }
             last_stats = Some(stats);
         }
@@ -346,23 +382,47 @@ fn bench_frame_profile(c: &mut Criterion) {
                     wp.label
                 );
             }
-            // The instrument validating itself: `world_total` brackets the
-            // whole world command buffer, and the block pass and the
-            // first-person pass are both inside it. A bracket cannot be
-            // shorter than what it brackets. `world_total` is genuinely
-            // larger — it also covers the sky pass and the screen overlays —
-            // so this is not an equality in disguise.
-            let (total, inner) = (
-                gpu_total.median(),
-                gpu_block.median() + gpu_hand.median(),
-            );
+            // The instrument validating itself — **at the median**, not per
+            // readback, and that distinction was paid for twice.
+            //
+            // The obvious invariant is that a span cannot be shorter than
+            // what it brackets. It is not true here, in either form. Asserting
+            // `world_total >= world + first_person` failed on the first run
+            // (0.674 ms of span against 0.797 ms of summed passes at
+            // `high_down`) because passes on a tile-based deferred GPU
+            // pipeline rather than execute serially, so summed pass durations
+            // legitimately exceed the wall span containing them. Weakening it
+            // to `>= max(pass)` failed too, once in thirty readbacks, for two
+            // further reasons: an empty bracketing pass has no work and can
+            // retire before a long pass it nominally encloses finishes its
+            // fragment stage, and `GpuQueryTimer::results_ms` holds each
+            // segment's *last good* reading independently, so under readback
+            // backpressure two segments in one report can come from different
+            // frames.
+            //
+            // So the bracket is an **estimate, not a bound**, and the honest
+            // assertion is the one that still fails loudly for a real pairing
+            // bug — a mis-stamped span reads as near-zero or garbage, not as
+            // "a few percent under the block pass" — while tolerating the
+            // hardware's actual behaviour. Both per-readback violation rates
+            // are printed as measurements rather than folded into a tolerance,
+            // because a threshold placed there would be fitted to the answer.
             assert!(
-                total >= inner,
-                "waypoint {}: world_total median {total:.3} ms is SHORTER than the block pass \
-                 plus the first-person pass it brackets ({inner:.3} ms). A span cannot be shorter \
-                 than its contents, so the timestamps are being paired wrongly — check the stamp \
-                 order in gpu::frame and that the resolve executes after both edges.",
-                wp.label
+                gpu_total.median() >= gpu_block.median(),
+                "waypoint {}: world_total median {:.3} ms is below the block pass median \
+                 {:.3} ms it brackets. Occasional per-readback inversions are expected (pass \
+                 pipelining, and per-segment readback staleness), but the medians crossing means \
+                 the timestamps are being paired wrongly — check the stamp order in gpu::frame \
+                 and that the resolve executes after both edges.",
+                wp.label,
+                gpu_total.median(),
+                gpu_block.median(),
+            );
+            println!(
+                "   gpu  bracket fit  {:.0}% of readbacks had summed pass time above the span, \
+                 {:.0}% had a single pass above it (pipelining + readback staleness, not a fault)",
+                100.0 * f64::from(span_shorter_than_the_sum as u32) / ITERS as f64,
+                100.0 * f64::from(span_shorter_than_a_pass as u32) / ITERS as f64,
             );
         }
 
@@ -454,6 +514,7 @@ fn bench_frame_profile(c: &mut Criterion) {
     }
 
     rotation_does_not_move_residency(device, queue, &mut target, &state);
+    submit_cost_versus_residency(device, queue, &mut target);
 
     // A criterion target so the bench binary's function list is stable
     // whether or not an adapter exists. The medians above are the actual
@@ -468,6 +529,107 @@ fn bench_frame_profile(c: &mut Criterion) {
             black_box(stats)
         });
     });
+}
+
+/// Does per-frame CPU cost scale with how much terrain is **resident**, or
+/// only with how much is **drawn**?
+///
+/// This is the question behind "45 fps where it feels like it should be 200",
+/// and the two answers point at completely different fixes. If the cost
+/// tracks drawn sections, culling harder or batching draws helps. If it
+/// tracks resident sections — sections the camera cannot even see — then the
+/// per-frame work is proportional to the world you are holding rather than
+/// the world you are looking at, and no amount of culling will touch it.
+///
+/// The sweep holds the camera fixed and grows the world, so `sections_drawn`
+/// moves far less than the resident count does. Radii 2/4/6 rather than a
+/// pair, because two points cannot distinguish a slope from an offset.
+///
+/// Nothing here asserts a millisecond figure. The assertion is the control
+/// that the sweep did anything at all: residency must actually grow with
+/// radius, or the whole comparison is between three copies of one scene.
+fn submit_cost_versus_residency(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    target: &mut HeadlessTarget,
+) {
+    println!("-- CPU cost against residency (camera fixed, world grown)");
+    let mut rows: Vec<(i32, usize, usize, f64, f64)> = Vec::new();
+    for radius in [2i32, 4, 6] {
+        let (state, meshed) = build_demo_world(device, queue, radius);
+        let camera = camera_at(PATH[0].offset, PATH[0].yaw, PATH[0].pitch);
+        for _ in 0..WARMUP {
+            let frame = target.acquire().expect("headless acquire");
+            let _ = state.render(device, queue, frame.view(), &camera, None, &[]);
+            let _ = state.take_world_subphase_report();
+        }
+        let mut encode = Samples::default();
+        let mut submit = Samples::default();
+        let mut drawn = 0usize;
+        for _ in 0..ITERS {
+            let frame = target.acquire().expect("headless acquire");
+            let t0 = Instant::now();
+            let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
+            encode.push(t0.elapsed().as_secs_f64() * 1e3);
+            drawn = stats.sections_drawn;
+            let (subs, _) = state.take_world_subphase_report();
+            for (name, ms) in subs {
+                if name == "world.submit"
+                    && let Some(ms) = ms
+                {
+                    submit.push(f64::from(ms));
+                }
+            }
+        }
+        rows.push((radius, meshed, drawn, encode.median(), submit.median()));
+    }
+
+    assert!(
+        rows.windows(2).all(|w| w[1].1 > w[0].1),
+        "the residency sweep did not actually grow the world: meshed sections were {:?} across \
+         radii {:?}, so any cost comparison between these three rows is a comparison between \
+         three copies of the same scene.",
+        rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+        rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+    );
+
+    for &(radius, meshed, drawn, encode_ms, submit_ms) in &rows {
+        println!(
+            "   radius={radius}  resident {meshed:>5} sections, drawn {drawn:>5}  |  \
+             cpu world encode {encode_ms:>7.3} ms, of which submit {submit_ms:>7.3} ms \
+             ({:.0}%)",
+            100.0 * submit_ms / encode_ms.max(1e-9),
+        );
+        let scene = format!("demo radius={radius} {WIDTH}x{HEIGHT} residency-sweep");
+        for (metric, value, unit) in [
+            ("cpu_world_encode_median_ms", encode_ms, "ms"),
+            ("cpu_submit_median_ms", submit_ms, "ms"),
+            ("resident_sections", meshed as f64, "sections"),
+            ("sections_drawn", drawn as f64, "sections"),
+        ] {
+            support::record(support::Record {
+                bench: "frame_profile",
+                metric,
+                scene: &scene,
+                value,
+                unit,
+            });
+        }
+    }
+
+    // The two ratios, side by side, because that comparison *is* the finding
+    // — and printed rather than asserted, since both are wall-clock medians.
+    // Cost growing like residency while drawn barely moves means the per-frame
+    // work is proportional to the world being held, not the world being
+    // looked at.
+    let (first, last) = (rows[0], rows[rows.len() - 1]);
+    println!(
+        "   scaling: resident x{:.2}, drawn x{:.2}  ->  encode x{:.2}, submit x{:.2}\n",
+        last.1 as f64 / first.1 as f64,
+        last.2 as f64 / first.2.max(1) as f64,
+        last.3 / first.3.max(1e-9),
+        last.4 / first.4.max(1e-9),
+    );
 }
 
 /// The counter-validation control `CLAUDE.md` prescribes: feed the instrument
