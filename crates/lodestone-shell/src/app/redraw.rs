@@ -387,26 +387,23 @@ impl WindowApp {
         // this instead of `frame.view()`'s (sRGB) one to match it byte-for-byte.
         // Captured once here, the same pattern as `frame.colour_texture()`
         // above, since every HUD draw call this frame wants the identical view.
-        // REVERTED to the sRGB format, deliberately. Drawing the HUD's
-        // flat-colour pass into a raw (non-sRGB) view was an attempt to match
-        // vanilla's gamma-space blending for the tab-list row background, and
-        // it broke far more than it fixed: inventory item icons, air bubbles
-        // and the inventory backdrop all stopped drawing correctly, and the
-        // backdrop came out *lighter* instead of darker — the signature of
-        // gamma bytes reaching a view that applies no conversion.
         //
-        // The mismatch is structural: `HudRenderer::new` took the raw format so
-        // `self.pipeline` was built for it, while `attach_items`/`attach_glint`/
-        // `attach_item_models` kept the sRGB format — and a wgpu pass requires
-        // every pipeline drawn into it to match the attachment's format, so the
-        // item pipelines could not draw into this pass at all.
+        // Asked of the renderer rather than derived from `target`: the view's
+        // format has to agree with the format `HudRenderer::new` compiled its
+        // flat-colour pipeline against, and those two facts used to live in two
+        // files. `flat_colour_view` is that agreement made structural.
         //
-        // `raw_view_format()`/`create_view` stay (they are additive API and the
-        // browser's sRGB-view path depends on the same mechanism); only this
-        // call site goes back to the target's own format, which makes the two
-        // views identical and every pass agree again. Fixing the tab-list
-        // background needs a different approach — see docs/tab-list.md.
-        let hud_raw_view = frame.create_view(target.format());
+        // **This was attempted once before and reverted**, because at the time
+        // `HudRenderer` drew its flat-colour verts in the *same* pass as the
+        // sprite/glint/model pipelines: those keep the corrected (sRGB) format,
+        // a wgpu pass fixes one attachment format for every pipeline drawn into
+        // it, and so the item pipelines could not draw at all — inventory
+        // icons and air bubbles disappeared. The renderer now gives the
+        // flat-colour stream its own pass in both entry points
+        // (`hud-colour-pass`, and the recipe panel's chrome/count passes),
+        // which is precisely what lets the raw view come back without taking
+        // the textured passes with it.
+        let hud_raw_view = hud.flat_colour_view(&frame);
 
         let aspect = w as f32 / h as f32;
         // Recompute the targeted block from the interpolated camera each frame.

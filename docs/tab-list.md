@@ -174,27 +174,54 @@ zero as the background approaches white") — the "fixed point at black and
 white" phrasing describes a different, incorrect shape for this pair and
 should be read as superseded by that clause.
 
-**Re-run, unmodified, while investigating the owner's "background reads too
-light" report.** `hud_flat_colour_blend_matches_vanilla_gamma_on_a_raw_target`
-still passes and the sweep is unchanged in shape: at `bg=0` the RAW target
-matches the predicted vanilla byte exactly (32 vs. predicted 32.00) while the
-CORRECTED (today's production sRGB) target reads 99 — 67/255 too light, the
-same figure recorded above — shrinking to a 1/255 gap at `bg=224` and 0 at
-`bg=255`. The wiring described two paragraphs up (a `raw_view` threaded
-through `render_with_item_models`'s `hud-colour-pass` from
-`app/redraw.rs`, and `HudRenderer::new`'s `color_format` becoming the raw
-format at its `app/lifecycle.rs` call site) is still open — confirmed by
-reading `app/redraw.rs`'s own `hud_raw_view` comment, which documents a prior
-attempt at this that was reverted because it changed `HudRenderer::new`'s
-`color_format` globally rather than only for `self.pipeline`, breaking every
-other pipeline sharing that render pass (item icons, air bubbles, the
-inventory backdrop). **`hud.wgsl` itself needs no change** — the gate builds
-it unmodified and it already reproduces vanilla's blend to the byte once
-given a raw target; the defect is entirely which view/pipeline the flat-colour
-draws land on, which is `app/redraw.rs` + `app/lifecycle.rs` + wherever
-`render_with_item_models` composes the pass (`gpu/frame.rs`/`gpu/state.rs`),
-none of which `tablist.rs`/`hud.wgsl`/the tab-list draw path in `hud.rs` can
-reach without touching a shared pipeline other in-flight agents own.
+**Landed: the flat-colour pass now draws on the raw view.** The wiring the
+paragraphs above described as open is done. Three pieces, and the third is what
+makes it survivable:
+
+- `app/lifecycle.rs` builds the HUD with `HudRenderer::new(device,
+  target.raw_view_format())`. That argument feeds `self.pipeline` and nothing
+  else; the `attach_gui`/`attach_items`/`attach_glint`/`attach_item_models`
+  calls keep taking `target.format()`, because their pipelines draw into `view`.
+- `app/redraw.rs` obtains the pass's attachment from
+  `HudRenderer::flat_colour_view(&frame)`.
+- `HudRenderer` stores the format it compiled that pipeline against and hands
+  out the matching view itself. The previous attempt failed because those two
+  facts lived in two files and drifted apart; `flat_colour_view` is that
+  agreement made structural rather than remembered.
+
+**Why this did not reproduce the earlier revert.** That attempt changed
+`HudRenderer::new` while the flat-colour verts were still drawn in the *same*
+render pass as the sprite/glint/model pipelines. A `wgpu` pass fixes one
+attachment format for every pipeline drawn into it, so the item pipelines could
+not draw at all and inventory icons and air bubbles disappeared. `HudRenderer`
+has since split the flat-colour stream into its own pass in both entry points
+(`hud-colour-pass` in `render_with_item_models`, and the chrome/count passes in
+`render_recipe_book_panel`), which is exactly what lets the two formats coexist.
+The textured passes were re-run after the change and are unmoved:
+`container_item_pixels` 5/5, `container_item_pixels_scaled` 2/2,
+`hotbar_special_item_pixels` 9/9, `hotbar_block_item_pixels` 1/1,
+`air_bubble_pixels` 1/1, `container_background_pixels` 1/1.
+
+**A real `wgpu` validation failure the same wiring closed.**
+`the_recipe_book_draws_under_the_carried_stack` aborted with *"the RenderPass
+uses textures with formats [Some(Rgba8Unorm)] but the RenderPipeline with
+'hud-pipeline' label uses attachments with formats [Some(Rgba8UnormSrgb)]"* —
+a gate that had already threaded a raw view while its renderer was still built
+for the corrected one. Production dodged the identical mismatch only because
+`app/redraw.rs` was passing `target.format()` there, which made the "raw" view a
+second corrected view. That is the drift `flat_colour_view` removes.
+
+**What is verified, and what is not.** The blend itself is measured by
+`hud_flat_colour_blend_matches_vanilla_gamma_on_a_raw_target` (still passing,
+sweep unchanged: at `bg=0` the RAW target reads 32 against a predicted 32.00
+while the corrected target reads 99, 67/255 too light, collapsing to 0 at
+`bg=255`), and the *pairing* by
+`hud::tests::the_flat_colour_pass_blends_on_gamma_bytes_at_the_surface_format`,
+which drives a real `HudRenderer` at native's own `Bgra8UnormSrgb` and carries
+a wrong-wiring control. Both build their own `HeadlessTarget`. **Neither reaches
+a real swapchain**, so what is proven is that the renderer and the wiring rule
+agree; that `SurfaceTarget` reports the format pair those gates assume is a
+separate claim, carried by `target.rs`'s own `view_formats` declaration.
 
 ## How to change it, and the gotchas
 

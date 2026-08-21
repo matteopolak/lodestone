@@ -554,6 +554,11 @@ fn a_chest_item_in_the_hotbar_reaches_pixels() {
     );
 
     let mut target = HeadlessTarget::new(device, W, H, format);
+    // The **raw** (non-sRGB) sibling of `format`, read before anything
+    // borrows `target` for a frame. `HudRenderer::new` builds only the
+    // flat-colour pipeline, and that pass draws into a raw view of this same
+    // texture — production does the identical pairing in `app/lifecycle.rs`.
+    let hud_flat_format = target.raw_view_format();
     let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
 
     // One chest in slot 0, everything else empty. `hotbar: None` suppresses the
@@ -585,7 +590,7 @@ fn a_chest_item_in_the_hotbar_reaches_pixels() {
 
     let mut shoot = |hud: &mut HudRenderer| -> Vec<u8> {
         let frame = target.acquire().expect("headless acquire");
-        let raw_view = frame.create_view(target.raw_view_format());
+        let raw_view = hud.flat_colour_view(&frame);
         clear_view(device, queue, frame.view(), [0, 0, 0]);
         hud.render_with_item_models(
             device,
@@ -603,7 +608,7 @@ fn a_chest_item_in_the_hotbar_reaches_pixels() {
     };
 
     // Subject: the full wiring, exactly as `app.rs` builds it.
-    let mut lit_hud = HudRenderer::new(device, format);
+    let mut lit_hud = HudRenderer::new(device, hud_flat_format);
     lit_hud.attach_items(device, queue, format, item_atlas.clone());
     lit_hud.attach_item_models(
         device,
@@ -626,7 +631,7 @@ fn a_chest_item_in_the_hotbar_reaches_pixels() {
 
     // Control: identical but for `attach_item_models`, which gates both 3-D
     // passes — so the block-entity geometry has nowhere to draw.
-    let mut dark_hud = HudRenderer::new(device, format);
+    let mut dark_hud = HudRenderer::new(device, hud_flat_format);
     dark_hud.attach_items(device, queue, format, item_atlas.clone());
     let control = shoot(&mut dark_hud);
 
@@ -865,6 +870,11 @@ fn a_player_head_item_in_the_hotbar_reaches_pixels() {
     );
 
     let mut target = HeadlessTarget::new(device, W, H, format);
+    // The **raw** (non-sRGB) sibling of `format`, read before anything
+    // borrows `target` for a frame. `HudRenderer::new` builds only the
+    // flat-colour pipeline, and that pass draws into a raw view of this same
+    // texture — production does the identical pairing in `app/lifecycle.rs`.
+    let hud_flat_format = target.raw_view_format();
     let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
 
     let slots: Vec<Option<HotbarSlot>> = std::iter::once(Some(HotbarSlot {
@@ -893,7 +903,7 @@ fn a_player_head_item_in_the_hotbar_reaches_pixels() {
 
     let mut shoot = |hud: &mut HudRenderer| -> Vec<u8> {
         let frame = target.acquire().expect("headless acquire");
-        let raw_view = frame.create_view(target.raw_view_format());
+        let raw_view = hud.flat_colour_view(&frame);
         clear_view(device, queue, frame.view(), [0, 0, 0]);
         hud.render_with_item_models(
             device,
@@ -910,7 +920,7 @@ fn a_player_head_item_in_the_hotbar_reaches_pixels() {
         target.read_texels(device, queue)
     };
 
-    let mut lit_hud = HudRenderer::new(device, format);
+    let mut lit_hud = HudRenderer::new(device, hud_flat_format);
     lit_hud.attach_items(device, queue, format, item_atlas.clone());
     lit_hud.attach_item_models(
         device,
@@ -931,7 +941,7 @@ fn a_player_head_item_in_the_hotbar_reaches_pixels() {
     let subject = shoot(&mut lit_hud);
     let sheets_in_pass = lit_hud.special_icon_sheets();
 
-    let mut dark_hud = HudRenderer::new(device, format);
+    let mut dark_hud = HudRenderer::new(device, hud_flat_format);
     dark_hud.attach_items(device, queue, format, item_atlas.clone());
     let control = shoot(&mut dark_hud);
 
@@ -1130,6 +1140,11 @@ fn two_differently_dyed_banners_in_the_hotbar_draw_different_colours() {
         .expect("the vanilla load must attach baked block models");
 
     let mut target = HeadlessTarget::new(device, W, H, format);
+    // The **raw** (non-sRGB) sibling of `format`, read before anything
+    // borrows `target` for a frame. `HudRenderer::new` builds only the
+    // flat-colour pipeline, and that pass draws into a raw view of this same
+    // texture — production does the identical pairing in `app/lifecycle.rs`.
+    let hud_flat_format = target.raw_view_format();
     let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
 
     let slot = |id: &str| {
@@ -1169,7 +1184,7 @@ fn two_differently_dyed_banners_in_the_hotbar_draw_different_colours() {
 
     let mut shoot = |hud: &mut HudRenderer| -> Vec<u8> {
         let frame = target.acquire().expect("headless acquire");
-        let raw_view = frame.create_view(target.raw_view_format());
+        let raw_view = hud.flat_colour_view(&frame);
         clear_view(device, queue, frame.view(), [0, 0, 0]);
         hud.render_with_item_models(
             device,
@@ -1186,7 +1201,7 @@ fn two_differently_dyed_banners_in_the_hotbar_draw_different_colours() {
         target.read_texels(device, queue)
     };
 
-    let mut lit_hud = HudRenderer::new(device, format);
+    let mut lit_hud = HudRenderer::new(device, hud_flat_format);
     lit_hud.attach_items(device, queue, format, item_atlas.clone());
     lit_hud.attach_item_models(
         device,
@@ -1207,7 +1222,7 @@ fn two_differently_dyed_banners_in_the_hotbar_draw_different_colours() {
     let subject = shoot(&mut lit_hud);
     let sheets_in_pass = lit_hud.special_icon_sheets();
 
-    let mut dark_hud = HudRenderer::new(device, format);
+    let mut dark_hud = HudRenderer::new(device, hud_flat_format);
     dark_hud.attach_items(device, queue, format, item_atlas.clone());
     let control = shoot(&mut dark_hud);
 
@@ -1383,6 +1398,11 @@ fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
         .expect("the vanilla load must attach baked block models");
 
     let mut target = HeadlessTarget::new(device, W, H, format);
+    // The **raw** (non-sRGB) sibling of `format`, read before anything
+    // borrows `target` for a frame. `HudRenderer::new` builds only the
+    // flat-colour pipeline, and that pass draws into a raw view of this same
+    // texture — production does the identical pairing in `app/lifecycle.rs`.
+    let hud_flat_format = target.raw_view_format();
     let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
 
     let slot = |patterns: Vec<lodestone_model::BannerPatternLayer>| {
@@ -1420,7 +1440,7 @@ fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
             hotbar_items: Some(slots),
             ..HudFrame::new(&stats)
         };
-        let mut hud = HudRenderer::new(device, format);
+        let mut hud = HudRenderer::new(device, hud_flat_format);
         hud.attach_items(device, queue, format, item_atlas.clone());
         hud.attach_item_models(
             device,
@@ -1439,7 +1459,7 @@ fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
                 .expect("the vanilla path must expose animation slots"),
         );
         let frame = target.acquire().expect("headless acquire");
-        let raw_view = frame.create_view(target.raw_view_format());
+        let raw_view = hud.flat_colour_view(&frame);
         clear_view(device, queue, frame.view(), [0, 0, 0]);
         hud.render_with_item_models(
             device,
@@ -1604,6 +1624,11 @@ fn shields_with_different_base_colours_draw_different_colours_and_a_plain_one_dr
         .expect("the vanilla load must attach baked block models");
 
     let mut target = HeadlessTarget::new(device, W, H, format);
+    // The **raw** (non-sRGB) sibling of `format`, read before anything
+    // borrows `target` for a frame. `HudRenderer::new` builds only the
+    // flat-colour pipeline, and that pass draws into a raw view of this same
+    // texture — production does the identical pairing in `app/lifecycle.rs`.
+    let hud_flat_format = target.raw_view_format();
     let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
 
     let slot = |base_color: Option<&str>| {
@@ -1643,7 +1668,7 @@ fn shields_with_different_base_colours_draw_different_colours_and_a_plain_one_dr
 
     let mut shoot = |hud: &mut HudRenderer| -> Vec<u8> {
         let frame = target.acquire().expect("headless acquire");
-        let raw_view = frame.create_view(target.raw_view_format());
+        let raw_view = hud.flat_colour_view(&frame);
         clear_view(device, queue, frame.view(), [0, 0, 0]);
         hud.render_with_item_models(
             device,
@@ -1660,7 +1685,7 @@ fn shields_with_different_base_colours_draw_different_colours_and_a_plain_one_dr
         target.read_texels(device, queue)
     };
 
-    let mut lit_hud = HudRenderer::new(device, format);
+    let mut lit_hud = HudRenderer::new(device, hud_flat_format);
     lit_hud.attach_items(device, queue, format, item_atlas.clone());
     lit_hud.attach_item_models(
         device,
@@ -1809,6 +1834,11 @@ fn a_based_shield_with_a_loom_pattern_shows_both_colours_in_one_cell() {
         .expect("the vanilla load must attach baked block models");
 
     let mut target = HeadlessTarget::new(device, W, H, format);
+    // The **raw** (non-sRGB) sibling of `format`, read before anything
+    // borrows `target` for a frame. `HudRenderer::new` builds only the
+    // flat-colour pipeline, and that pass draws into a raw view of this same
+    // texture — production does the identical pairing in `app/lifecycle.rs`.
+    let hud_flat_format = target.raw_view_format();
     let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
 
     let slot = |patterns: Vec<lodestone_model::BannerPatternLayer>| {
@@ -1846,7 +1876,7 @@ fn a_based_shield_with_a_loom_pattern_shows_both_colours_in_one_cell() {
             hotbar_items: Some(slots),
             ..HudFrame::new(&stats)
         };
-        let mut hud = HudRenderer::new(device, format);
+        let mut hud = HudRenderer::new(device, hud_flat_format);
         hud.attach_items(device, queue, format, item_atlas.clone());
         hud.attach_item_models(
             device,
@@ -1865,7 +1895,7 @@ fn a_based_shield_with_a_loom_pattern_shows_both_colours_in_one_cell() {
                 .expect("the vanilla path must expose animation slots"),
         );
         let frame = target.acquire().expect("headless acquire");
-        let raw_view = frame.create_view(target.raw_view_format());
+        let raw_view = hud.flat_colour_view(&frame);
         clear_view(device, queue, frame.view(), [0, 0, 0]);
         hud.render_with_item_models(
             device,

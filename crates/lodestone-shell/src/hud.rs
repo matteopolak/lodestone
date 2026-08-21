@@ -6010,6 +6010,19 @@ impl<'a> Builder<'a> {
 #[derive(Debug)]
 pub struct HudRenderer {
     pipeline: wgpu::RenderPipeline,
+    /// The colour format [`Self::pipeline`] was built against — the *raw*
+    /// (non-sRGB) sibling of the target's own format, since vanilla's 2-D GUI
+    /// blending is not colour-managed.
+    ///
+    /// Stored so [`Self::flat_colour_view`] can hand every caller a view at
+    /// exactly this format instead of each one re-deriving it. A `wgpu` pass
+    /// requires its attachment's format to match every pipeline drawn into it,
+    /// and that check happens at *submit* time on a pass this renderer only
+    /// begins when the colour stream is non-empty — so a call site that derived
+    /// the wrong view produced a validation abort in some frames and nothing at
+    /// all in others. Keeping the format here removes the derivation from the
+    /// call sites entirely.
+    flat_colour_format: wgpu::TextureFormat,
     buffer: wgpu::Buffer,
     capacity_floats: usize,
     gui: Option<GuiHud>,
@@ -6079,9 +6092,23 @@ struct GuiHud {
 }
 
 impl HudRenderer {
-    /// Build the HUD pipeline for a target of `color_format`.
+    /// Build the HUD's **flat-colour** pipeline (`hud.wgsl`: text, stack
+    /// counts, durability bars, the chat/tab-list/scoreboard plates) for a
+    /// target of `flat_colour_format`.
+    ///
+    /// **That argument is the target's *raw* (non-sRGB) format, not
+    /// [`RenderTarget::format`](lodestone_render::target::RenderTarget::format)** —
+    /// see [`Self::render_with_item_models`]'s `raw_view` parameter for why.
+    /// It feeds this one pipeline and nothing else: `attach_gui`,
+    /// `attach_items`, `attach_glint` and `attach_item_models` each take their
+    /// own `color_format` and keep using the *corrected* one, because those
+    /// pipelines draw into `view` rather than `raw_view`. Passing the corrected
+    /// format here instead is not a compile error and not always a runtime one
+    /// either — obtain the matching view from [`Self::flat_colour_view`] rather
+    /// than deriving it at the call site.
     #[must_use]
-    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, flat_colour_format: wgpu::TextureFormat) -> Self {
+        let color_format = flat_colour_format;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("hud-shader"),
             source: wgpu::ShaderSource::Wgsl(HUD_WGSL.into()),
@@ -6145,6 +6172,7 @@ impl HudRenderer {
 
         Self {
             pipeline,
+            flat_colour_format,
             buffer,
             capacity_floats,
             gui: None,
@@ -6159,6 +6187,33 @@ impl HudRenderer {
             recipe_panel_sprite_buffer: None,
             recipe_panel_sprite_capacity_floats: 0,
         }
+    }
+
+    /// The `raw_view` every render entry point on this type wants, built from
+    /// `frame` at exactly the format [`Self::pipeline`] was compiled against.
+    ///
+    /// Both [`Self::render_with_item_models`] and
+    /// [`Self::render_recipe_book_panel`] begin a pass whose attachment must
+    /// match that pipeline's colour target. Deriving the view at the call site
+    /// — `frame.create_view(target.raw_view_format())` — is correct only while
+    /// the renderer was *also* built from `raw_view_format()`, and the two
+    /// facts sat in different files (`app/lifecycle.rs` and `app/redraw.rs`).
+    /// Asking the renderer that already knows the answer removes the chance to
+    /// disagree; `AcquiredFrame`'s own doc records that both target
+    /// implementations declare the sRGB and non-sRGB counterparts of their
+    /// format up front, so this is always a legal view.
+    #[must_use]
+    pub fn flat_colour_view(&self, frame: &lodestone_render::AcquiredFrame) -> wgpu::TextureView {
+        frame.create_view(self.flat_colour_format)
+    }
+
+    /// The colour format [`Self::new`] built the flat-colour pipeline for.
+    /// Exists so a gate constructing its own views can assert it matches rather
+    /// than discover the mismatch as a `wgpu` validation abort in whichever
+    /// frames happen to carry colour vertices.
+    #[must_use]
+    pub fn flat_colour_format(&self) -> wgpu::TextureFormat {
+        self.flat_colour_format
     }
 
     /// Whether vanilla text is in play. `false` means every string on screen is
@@ -10117,6 +10172,168 @@ mod tests {
             text_bright > panel_bright + 150,
             "chat glyphs must reach pixels over the bare panel: text_bright={text_bright}, \
              panel_bright={panel_bright}"
+        );
+    }
+
+    /// The **wiring** half of the tab-list gamma fix, at production's own
+    /// surface format.
+    ///
+    /// `gpu::pixel_gates`' `hud_flat_colour_blend_matches_vanilla_gamma_on_a_raw_target`
+    /// already measured that `hud.wgsl` reproduces vanilla's raw-gamma blend
+    /// when it is given a non-sRGB attachment — but it builds the pipeline by
+    /// hand, so it proves the *shader*, not that `HudRenderer` and its callers
+    /// pair a pipeline with a matching view. That pairing is what was actually
+    /// broken (and what a previous attempt got wrong in the other direction),
+    /// and it lives in two files, so it needs its own subject.
+    ///
+    /// # The fixture, and why it is predictable to the byte
+    ///
+    /// A **black** backdrop and rows whose names are empty spans. The overlay
+    /// then paints exactly two things: `TAB_PLATE` (black at alpha 128), which
+    /// over black is a fixed point of both blend models and contributes
+    /// nothing, and `TAB_ROW_FILL` (white at alpha 32). With no GUI atlas
+    /// attached the ping sprites draw nothing and with empty names no glyph
+    /// does either, so **every non-zero byte in the frame is the row fill** and
+    /// the frame maximum is that one composite — no rect arithmetic, and a zero
+    /// maximum is a failed premise rather than a silent pass.
+    ///
+    /// Raw-byte alpha compositing is plain interpolation, so the subject is
+    /// predicted exactly: `0 * (1 - 32/255) + 255 * (32/255)` = **32**. The
+    /// control is only *bracketed* — this codebase has measured real sRGB
+    /// `ALPHA_BLENDING` as a non-trivial function of the fragment alpha that
+    /// resists a closed form on Metal — but it must land far away, and the
+    /// recorded sweep puts it near 99.
+    ///
+    /// # The format
+    ///
+    /// `Bgra8UnormSrgb`, which is what native `wgpu-core`'s
+    /// `Surface::get_default_config` actually picks — so the two formats this
+    /// gate pairs are the pair production pairs, not a headless-only
+    /// `Rgba8Unorm` where `format()` and `raw_view_format()` coincide and the
+    /// whole question is vacuous. That non-coincidence is asserted rather than
+    /// assumed.
+    ///
+    /// **What this does not prove.** The target is a `HeadlessTarget`, not a
+    /// swapchain. That `SurfaceTarget` reports the same format pair, and
+    /// declares both in `view_formats`, is `lodestone_render::target`'s claim,
+    /// not this gate's.
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn the_flat_colour_pass_blends_on_gamma_bytes_at_the_surface_format() {
+        use crate::tablist::{TabListRow, TabListView};
+        use lodestone_render::{HeadlessTarget, RenderTarget};
+
+        let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+            "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+             run on a host with a GPU (or a software adapter such as \
+             LIBGL_ALWAYS_SOFTWARE=1 / WGPU_BACKEND=gl), don't 'skip' — a silent pass here \
+             would assert nothing",
+        );
+        let device = ctx.device();
+        let queue = ctx.queue();
+        // Native's own swapchain format, so `format()` and `raw_view_format()`
+        // genuinely differ and the comparison below has something to compare.
+        let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+        let (w, h) = (480u32, 320u32);
+        let mut target = HeadlessTarget::new(device, w, h, format);
+        assert_ne!(
+            target.format(),
+            target.raw_view_format(),
+            "this gate is vacuous unless the corrected and raw formats differ — pick a \
+             format whose sRGB and non-sRGB siblings are distinct"
+        );
+
+        let stats = DebugStats::default();
+        // Two rows, no names, no banner: the row fill and nothing else. `spectator`
+        // only chooses an ink colour, and there is no ink to colour.
+        let view = TabListView {
+            rows: vec![
+                TabListRow { name: Vec::new(), ping_sprite: "", spectator: false },
+                TabListRow { name: Vec::new(), ping_sprite: "", spectator: false },
+            ],
+            header: Vec::new(),
+            footer: Vec::new(),
+            show_head: false,
+        };
+
+        // `wiring` picks which `(pipeline format, attachment view)` pair the
+        // flat-colour pass gets. `Correct` is production's; `Corrected` is the
+        // pairing production had before this fix, kept as the control that must
+        // land on the other hypothesis rather than merely "somewhere else".
+        let mut shoot = |raw: bool| -> (u8, usize) {
+            let flat_format = if raw {
+                target.raw_view_format()
+            } else {
+                target.format()
+            };
+            let mut hud = HudRenderer::new(device, flat_format);
+            assert_eq!(hud.flat_colour_format(), flat_format);
+            let frame = target.acquire().expect("headless acquire");
+            clear_view(device, queue, frame.view(), [0, 0, 0]);
+            let attachment = if raw {
+                hud.flat_colour_view(&frame)
+            } else {
+                frame.create_view(target.format())
+            };
+            let hud_frame = HudFrame {
+                show_debug: false,
+                crosshair: false,
+                players: Some(&view),
+                ..HudFrame::new(&stats)
+            };
+            hud.render(device, queue, frame.view(), &attachment, &hud_frame, w, h);
+            drop(frame);
+            let pixels = target.read_texels(device, queue);
+            let mut max = 0u8;
+            let mut lit = 0usize;
+            for px in pixels.chunks_exact(4) {
+                // Channel order is BGRA here; the fill is white over black, so
+                // every colour channel carries the same value and the max is
+                // order-independent.
+                let v = px[0].max(px[1]).max(px[2]);
+                max = max.max(v);
+                if v > 0 {
+                    lit += 1;
+                }
+            }
+            (max, lit)
+        };
+
+        let (raw_max, raw_lit) = shoot(true);
+        let (srgb_max, srgb_lit) = shoot(false);
+
+        // `0x20FFFFFF` over black, composited on raw gamma bytes — the whole
+        // claim, derived from the constants rather than restated.
+        let alpha = f32::from(0x20u8) / 255.0;
+        let predicted = (255.0 * alpha).round() as i32;
+
+        eprintln!("=== hud flat-colour wiring at Bgra8UnormSrgb ===");
+        eprintln!("predicted vanilla gamma byte = {predicted}");
+        eprintln!("raw-view  max = {raw_max}  lit = {raw_lit}");
+        eprintln!("srgb-view max = {srgb_max}  lit = {srgb_lit}");
+
+        // Premise: the overlay drew at all. A zero here means the fixture
+        // produced no row fill and both arms below would agree vacuously.
+        assert!(
+            raw_lit > 0 && srgb_lit > 0,
+            "the tab overlay must paint its row fill in both arms, or neither arm is \
+             measuring a blend: raw_lit={raw_lit}, srgb_lit={srgb_lit}"
+        );
+
+        // 1) Production's pairing reproduces vanilla's own blend to the byte.
+        assert!(
+            (i32::from(raw_max) - predicted).abs() <= 2,
+            "the raw-view pairing must reproduce vanilla's raw-gamma blend of TAB_ROW_FILL \
+             over black: predicted {predicted}, got {raw_max}"
+        );
+        // 2) And the pairing this replaced must be far away — otherwise arm 1
+        // would pass for a pipeline indifferent to its attachment's format, and
+        // the owner-reported "too light" would have had no cause.
+        assert!(
+            i32::from(srgb_max) - predicted > 40,
+            "the corrected-view pairing must still come out markedly lighter than vanilla \
+             (this is the bug being fixed, reproduced live): predicted {predicted}, got \
+             {srgb_max}"
         );
     }
 

@@ -353,7 +353,13 @@ fn the_recipe_book_draws_under_the_carried_stack() {
 
     let mut target = HeadlessTarget::new(device, W, H, format);
     let mut renderer = ContainerRenderer::new(device, format);
-    let mut hud = HudRenderer::new(device, format);
+    // The **raw** sibling of `format`, matching production's `app/lifecycle.rs`:
+    // `HudRenderer::new` builds only the flat-colour pipeline, and that one
+    // draws into `HudRenderer::flat_colour_view`'s non-sRGB view of the same
+    // texture (vanilla's GUI blending is not colour-managed). Building it for
+    // `format` here is what made this gate abort with a wgpu attachment-format
+    // mismatch the moment the panel produced chrome vertices.
+    let mut hud = HudRenderer::new(device, target.raw_view_format());
 
     // The panel rect with the book **open**, from the same layout call the
     // production draw and the click hit-test both go through — nothing here
@@ -408,7 +414,7 @@ fn the_recipe_book_draws_under_the_carried_stack() {
             .with_cursor(Some(cursor))
             .with_book_open(true);
         let acquired = target.acquire().expect("headless acquire");
-        let raw_view = acquired.create_view(target.raw_view_format());
+        let raw_view = hud.flat_colour_view(&acquired);
         clear_view(device, queue, acquired.view());
         renderer.render_with_icons_scaled_between_strata(
             device,

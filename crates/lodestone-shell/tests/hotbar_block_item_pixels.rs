@@ -249,6 +249,11 @@ fn a_block_item_in_the_hotbar_reaches_pixels() {
     );
 
     let mut target = HeadlessTarget::new(device, W, H, format);
+    // The **raw** (non-sRGB) sibling of `format`, read before anything
+    // borrows `target` for a frame. `HudRenderer::new` builds only the
+    // flat-colour pipeline, and that pass draws into a raw view of this same
+    // texture — production does the identical pairing in `app/lifecycle.rs`.
+    let hud_flat_format = target.raw_view_format();
     // The world renderer is here for its *resources*, not its terrain: the HUD's
     // item pass borrows its block atlas, tint palette, animation slots and depth
     // buffer. Nothing is uploaded twice.
@@ -284,7 +289,7 @@ fn a_block_item_in_the_hotbar_reaches_pixels() {
     // Render one frame with `hud` over a black backdrop and read it back.
     let mut shoot = |hud: &mut HudRenderer| -> Vec<u8> {
         let frame = target.acquire().expect("headless acquire");
-        let raw_view = frame.create_view(target.raw_view_format());
+        let raw_view = hud.flat_colour_view(&frame);
         clear_view(device, queue, frame.view(), [0, 0, 0]);
         hud.render_with_item_models(
             device,
@@ -305,7 +310,7 @@ fn a_block_item_in_the_hotbar_reaches_pixels() {
     };
 
     // Subject: the full wiring, exactly as `app.rs` builds it.
-    let mut lit_hud = HudRenderer::new(device, format);
+    let mut lit_hud = HudRenderer::new(device, hud_flat_format);
     lit_hud.attach_items(device, queue, format, item_atlas.clone());
     lit_hud.attach_item_models(
         device,
@@ -327,7 +332,7 @@ fn a_block_item_in_the_hotbar_reaches_pixels() {
 
     // Control: identical in every respect except that the item-model pass was
     // never attached, so the geometry has nowhere to draw.
-    let mut dark_hud = HudRenderer::new(device, format);
+    let mut dark_hud = HudRenderer::new(device, hud_flat_format);
     dark_hud.attach_items(device, queue, format, item_atlas.clone());
     let control = shoot(&mut dark_hud);
 
