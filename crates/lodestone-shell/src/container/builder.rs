@@ -203,6 +203,37 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Pixel width of `s` at `scale` in whichever font
+    /// [`label`](Self::label)/[`shadowed_label`](Self::shadowed_label) will
+    /// actually draw with — the vanilla proportional one when attached, the
+    /// fixed-advance 5x7 debug font otherwise.
+    ///
+    /// Layout that measures with one font and draws with the other is wrong in
+    /// exactly the way that is hardest to see: the words appear, in the wrong
+    /// place, by an amount that depends on the string.
+    pub(crate) fn text_width(&self, s: &str, scale: f32) -> f32 {
+        match self.font {
+            Some(f) => f.width(s, scale),
+            None => item_icon::text_w(s, scale),
+        }
+    }
+
+    /// The longest prefix of `s` that fits in `max_px` at `scale`, measured
+    /// with [`text_width`](Self::text_width)'s font — vanilla's
+    /// `Font.substrByWidth`.
+    pub(crate) fn substr_by_width(&self, s: &str, max_px: f32, scale: f32) -> String {
+        let mut out = String::new();
+        for ch in s.chars() {
+            let mut candidate = out.clone();
+            candidate.push(ch);
+            if self.text_width(&candidate, scale) > max_px {
+                break;
+            }
+            out = candidate;
+        }
+        out
+    }
+
     /// A handle onto the colour stream, for the shared pixel-space primitives.
     fn colour(&mut self) -> ColourStream<'_> {
         ColourStream {

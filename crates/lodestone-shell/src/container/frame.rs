@@ -41,6 +41,22 @@ pub struct ContainerFrame<'a> {
     /// Drawn only when [`LabelLayout::inventory`] is `Some` — the player
     /// inventory screen omits it (`InventoryScreen.extractLabels`).
     pub inventory_label: &'a str,
+    /// The player's active status effects, as
+    /// `EffectsInInventory` would draw them beside the panel — already sorted,
+    /// **translated** and duration-formatted by
+    /// [`crate::effects::inventory_rows`].
+    ///
+    /// Empty (the default) draws no column, which is what every headless
+    /// caller and every hermetic gate sees. Drawn only on
+    /// [`MenuKind::Player`]: vanilla constructs an `EffectsInInventory` in
+    /// `InventoryScreen` and `CreativeModeInventoryScreen` only, and every
+    /// other screen's `Screen.showsActiveEffects()` returns `false`.
+    ///
+    /// The rows are resolved *outside* this crate's draw path because the
+    /// language table lives on `Sim`; passing raw ids here and naming them at
+    /// the draw site is how this widget came to render `speed` instead of
+    /// "Speed" in the first place.
+    pub effects: &'a [crate::effects::InventoryEffectRow],
     /// Viewport-pixel position of the mouse cursor, the same coordinate space
     /// [`hit_test`] takes — **not** local widget coordinates. `None` (the
     /// default from [`new`](Self::new)) draws no carried stack even if
@@ -235,6 +251,7 @@ impl<'a> ContainerFrame<'a> {
             beacon_primary: None,
             beacon_secondary: None,
             bundle_selection: None,
+            effects: &[],
         }
     }
 
@@ -264,7 +281,15 @@ impl<'a> ContainerFrame<'a> {
             beacon_primary: None,
             beacon_secondary: None,
             bundle_selection: None,
+            effects: &[],
         }
+    }
+
+    /// Attach the active-effect column — see [`effects`](Self::effects).
+    #[must_use]
+    pub fn with_effects(mut self, effects: &'a [crate::effects::InventoryEffectRow]) -> Self {
+        self.effects = effects;
+        self
     }
 
     /// Override the player-inventory label with a translated one — see

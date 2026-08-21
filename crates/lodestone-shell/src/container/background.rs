@@ -2,6 +2,7 @@
 //!
 //! Split out of `container.rs` verbatim.
 
+use lodestone_assets::gui::{GuiMeta, GuiScaling};
 use lodestone_assets::{Atlas, AtlasBuilder, AtlasError, ResourceLocation, ResourceManager};
 use lodestone_game::menu::{Menu, MenuKind, SpecialLayout};
 use lodestone_render::GuiSpriteQuad;
@@ -27,6 +28,31 @@ pub(crate) const ADVANCEMENT_TILE_IDS: [&str; 5] = [
 /// so the prefix is applied here.
 fn sprite_location(id: &str) -> Option<ResourceLocation> {
     ResourceLocation::new("minecraft", &format!("gui/sprites/{id}")).ok()
+}
+
+/// The sprite ids whose `gui.scaling` this module records at build time.
+///
+/// Everything else this atlas stitches is blitted at (or sampled from) its
+/// native size, where `Stretch` and the declared mode agree; these two are
+/// drawn at a caller-chosen width and would smear their border without the
+/// real nine-slice decomposition.
+const NINE_SLICE_SPRITES: &[&str] = &[
+    crate::effects::EFFECT_BACKGROUND_SPRITE,
+    crate::effects::EFFECT_BACKGROUND_AMBIENT_SPRITE,
+];
+
+/// `assets/<ns>/textures/mob_effect/<name>.png` → `(ns, name)`.
+///
+/// Anything else — including a `.mcmeta`, or a nested subdirectory vanilla's
+/// own `directory` atlas source would flatten differently — yields `None`.
+fn split_mob_effect_path(path: &str) -> Option<(&str, &str)> {
+    let rest = path.strip_prefix("assets/")?;
+    let (namespace, rest) = rest.split_once('/')?;
+    let name = rest.strip_prefix("textures/mob_effect/")?.strip_suffix(".png")?;
+    if namespace.is_empty() || name.is_empty() || name.contains('/') {
+        return None;
+    }
+    Some((namespace, name))
 }
 
 /// Vanilla's real container-background art (issue #51): `container/inventory`,
@@ -101,6 +127,28 @@ pub struct ContainerBackground {
     /// `16 x 16` texture — measured, not assumed from
     /// `BACKGROUND_TILE_WIDTH`.
     advancements_tiles: Vec<(&'static str, ResourceLocation)>,
+    /// The status-effect icons, keyed by the sprite id
+    /// `Hud.getMobEffectSprite` builds (`mob_effect/<path>`).
+    ///
+    /// These are **not** `gui/sprites/**` art, which is why nothing here found
+    /// them before: `assets/minecraft/atlases/gui.json` declares a *second*
+    /// source directory for the GUI atlas —
+    /// `{"type": "directory", "prefix": "mob_effect/", "source": "mob_effect"}`
+    /// — so the file is `textures/mob_effect/<path>.png` while the sprite id
+    /// still reads like an ordinary atlas entry. Any enumeration that assumes
+    /// one source directory misses all 41 of them, and a widget that blits one
+    /// draws nothing.
+    ///
+    /// Enumerated from the pack rather than transcribed as a list, so a
+    /// resource pack (or a datapack-added effect) contributes its own icon.
+    mob_effect_icons: Vec<(String, ResourceLocation)>,
+    /// The `gui.scaling` mode declared by a stitched `gui/sprites/**` sprite's
+    /// sibling `.png.mcmeta`, keyed by sprite id — only recorded for the ids
+    /// whose draw actually needs it (see [`Self::scaled_sprite_quads`]).
+    ///
+    /// Absent means [`GuiScaling::Stretch`], vanilla's own default for a
+    /// sprite with no `.mcmeta`.
+    sprite_scaling: Vec<(&'static str, GuiScaling)>,
 }
 
 /// Which vanilla `container/*.png` sheet a menu's background draws from, and
@@ -315,6 +363,55 @@ impl ContainerBackground {
             })?;
             builder.load(manager, &loc)?;
         }
+        // The status-effect icons. Enumerated rather than listed: see the
+        // `mob_effect_icons` field's doc for why they are not `gui/sprites/**`
+        // and what that costs anyone who assumes they are.
+        //
+        // Fail-**open**, unlike the sprite loop above: these come from a
+        // directory the pack is free to populate, so an undecodable file must
+        // cost one icon, not the whole container atlas — and vanilla's own
+        // `blitSprite` falls back to the missing-texture sprite per id.
+        let mut mob_effect_icons: Vec<(String, ResourceLocation)> = Vec::new();
+        for path in manager.list("assets/") {
+            let Some((namespace, name)) = split_mob_effect_path(&path) else {
+                continue;
+            };
+            let Ok(loc) = ResourceLocation::new(namespace, format!("mob_effect/{name}")) else {
+                continue;
+            };
+            if mob_effect_icons.iter().any(|(id, _)| id == loc.path()) {
+                continue;
+            }
+            if builder.load(manager, &loc).is_ok() {
+                mob_effect_icons.push((loc.path().to_string(), loc));
+            }
+        }
+        // Deterministic packing, matching `GuiAtlas::build_with_extras`' own
+        // sort: the pack listing order is not guaranteed stable.
+        mob_effect_icons.sort_by(|a, b| a.0.cmp(&b.0));
+        // The two effect-panel backgrounds are `nine_slice` (a `32x32` sprite
+        // with a `4` border, per their `.png.mcmeta`) and get drawn at an
+        // arbitrary width, so — unlike every other sprite in this atlas —
+        // stretching the whole sprite over the target is visibly wrong. Their
+        // declared scaling is read from the pack here rather than transcribed,
+        // for the same reason `GuiAtlas` reads it: a resource pack may change
+        // the border.
+        let mut sprite_scaling: Vec<(&'static str, GuiScaling)> = Vec::new();
+        for id in NINE_SLICE_SPRITES {
+            let Some(loc) = sprite_location(id) else {
+                continue;
+            };
+            let meta_path = format!(
+                "{}.mcmeta",
+                ResourceManager::asset_path(&loc, "textures", "png")
+            );
+            let Some(bytes) = manager.read(&meta_path) else {
+                continue;
+            };
+            if let Ok(meta) = GuiMeta::parse(&bytes) {
+                sprite_scaling.push((id, meta.scaling));
+            }
+        }
         let atlas = builder.build()?;
         Ok(Self {
             atlas,
@@ -341,6 +438,8 @@ impl ContainerBackground {
             creative_inventory,
             advancements_window,
             advancements_tiles,
+            mob_effect_icons,
+            sprite_scaling,
         })
     }
 
@@ -534,6 +633,99 @@ impl ContainerBackground {
             uv_min: sprite.uv_min,
             uv_max: sprite.uv_max,
         })
+    }
+
+    /// One status-effect icon (`mob_effect/<path>`, as
+    /// `Hud.getMobEffectSprite` builds it) as a quad at `(x, y)` sized
+    /// `w`x`h`.
+    ///
+    /// `None` when the pack has no icon for that effect, which is vanilla's
+    /// missing-texture case; the caller draws no icon rather than a stand-in,
+    /// because a stand-in is indistinguishable from art we failed to load.
+    #[must_use]
+    pub(super) fn mob_effect_icon_quad(
+        &self,
+        sprite_id: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Option<GuiSpriteQuad> {
+        let loc = &self
+            .mob_effect_icons
+            .iter()
+            .find(|(id, _)| id == sprite_id)?
+            .1;
+        let sprite = self.atlas.sprite(loc)?;
+        Some(GuiSpriteQuad {
+            dst: [x, y, w, h],
+            uv_min: sprite.uv_min,
+            uv_max: sprite.uv_max,
+        })
+    }
+
+    /// A GUI sprite drawn at an arbitrary target size **through its declared
+    /// `gui.scaling`** — vanilla's `blitSprite` with a width and height that
+    /// are not the sprite's own.
+    ///
+    /// [`sprite_quad`](Self::sprite_quad) stretches the whole sprite over the
+    /// target, which is right for a sprite blitted at its native size and
+    /// wrong for a nine-slice one: the effect panel's background is a `32x32`
+    /// sprite with a `4` px border drawn at up to a few hundred pixels wide,
+    /// and stretching it smears the border across the whole widget.
+    ///
+    /// The decomposition itself is
+    /// [`GuiScaling::geometry`](lodestone_assets::gui::GuiScaling::geometry)'s;
+    /// this only turns each piece's source rect — in **native sprite pixels**,
+    /// which is what `geometry` is handed and therefore returns — into an
+    /// atlas UV window, and translates the destination rects by `(x, y)`.
+    ///
+    /// Returns an empty vector for an unstitched id, so a caller loops over
+    /// nothing rather than drawing a wrong quad.
+    #[must_use]
+    pub(super) fn scaled_sprite_quads(
+        &self,
+        id: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Vec<GuiSpriteQuad> {
+        let Some(loc) = sprite_location(id) else {
+            return Vec::new();
+        };
+        let Some(sprite) = self.atlas.sprite(&loc) else {
+            return Vec::new();
+        };
+        let scaling = self
+            .sprite_scaling
+            .iter()
+            .find(|(k, _)| *k == id)
+            .map_or(&GuiScaling::Stretch, |(_, v)| v);
+        let (aw, ah) = (self.atlas.width as f32, self.atlas.height as f32);
+        let (sx, sy) = (sprite.x as f32, sprite.y as f32);
+        scaling
+            .geometry(
+                sprite.width,
+                sprite.height,
+                w.max(0.0).round() as u32,
+                h.max(0.0).round() as u32,
+            )
+            .into_iter()
+            .map(|q| GuiSpriteQuad {
+                dst: [
+                    x + q.dst[0] as f32,
+                    y + q.dst[1] as f32,
+                    q.dst[2] as f32,
+                    q.dst[3] as f32,
+                ],
+                uv_min: [(sx + q.src[0]) / aw, (sy + q.src[1]) / ah],
+                uv_max: [
+                    (sx + q.src[0] + q.src[2]) / aw,
+                    (sy + q.src[1] + q.src[3]) / ah,
+                ],
+            })
+            .collect()
     }
 
     /// A **sub-rectangle** of a static GUI sprite, sampled at `local`

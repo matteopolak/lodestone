@@ -5,6 +5,8 @@
 use super::*;
 
 impl WindowApp {
+
+
     pub(super) fn redraw(&mut self) {
         // Issue #148: refresh the cached recipe corpus if a plugin registered
         // since the last frame. Revision-gated, so the ordinary frame pays one
@@ -1586,7 +1588,24 @@ impl WindowApp {
             h,
         );
         // Status-effect overlay, composited over the HUD in its own Load pass.
-        if let Some(effects) = self.effects.as_mut() {
+        //
+        // Suppressed while a screen is drawing the effects itself —
+        // `Hud.extractEffects`' own `this.minecraft.gui.screen() == null ||
+        // !screen().showsActiveEffects()` guard. Without it the top-right
+        // chips and the inventory column both paint the same effects at once,
+        // which vanilla never does.
+        let screen_shows_effects = screen_shows_active_effects(
+            &self.sim,
+            self.ui.is_container_open(),
+            creative_open,
+            self.recipe_panel.open,
+            self.nav.gui_scale(),
+            w,
+            h,
+        );
+        if let Some(effects) = self.effects.as_mut()
+            && !screen_shows_effects
+        {
             effects.render(device, queue, frame.view(), &self.sim.active_effects(), w, h);
         }
 
@@ -1775,6 +1794,27 @@ impl WindowApp {
             // in physical pixels — the same space `hit_test` and the menu layout
             // use (see the `cursor` field). Without this the stack is built but
             // never positioned, and nothing draws.
+            // The status-effect column beside the panel (`EffectsInInventory`).
+            // Only the local player's own inventory shows it — vanilla builds
+            // an `EffectsInInventory` in `InventoryScreen` and
+            // `CreativeModeInventoryScreen` only, and every other screen's
+            // `Screen.showsActiveEffects()` is `false`; a chest or furnace
+            // menu resolves a different `MenuKind` and gets an empty slice.
+            //
+            // Resolved **here**, where the language table is, rather than at
+            // the draw site: `Sim::translator` is what turns
+            // `effect.minecraft.speed` into "Speed", and the widget drew the
+            // raw registry path for as long as nothing handed it one.
+            let effect_rows = if container_menu
+                .is_some_and(|menu| menu.kind() == lodestone_game::menu::MenuKind::Player)
+            {
+                crate::effects::inventory_rows(
+                    &self.sim.active_effects(),
+                    self.sim.translator().as_ref(),
+                )
+            } else {
+                Vec::new()
+            };
             // The live drag preview (issue #378 part 2). `drag_paint` is the
             // *same* paint set `MenuInput::release` will turn into the
             // QUICK_CRAFT sequence, and the counts drawn from it come out of
@@ -1782,6 +1822,7 @@ impl WindowApp {
             // preview cannot show a split the release will not produce.
             let container_frame = ContainerFrame::new(container_menu, &container_title)
                 .with_inventory_label(&inventory_label)
+                .with_effects(&effect_rows)
                 // The trade list and which row is selected (issue #245's UI
                 // half) — `Sim::trades` returns an empty (never absent) store
                 // off a non-merchant screen, and `draw_merchant_trades` only
@@ -1973,55 +2014,6 @@ impl WindowApp {
                 },
             );
 
-            // The player-inventory status-effect column (real 26.2 name:
-            // `EffectsInInventory`, not the older `EffectRenderingInventoryScreen`
-            // some descriptions of this still use — that older screen
-            // repositioned the panel to make room; this version does not, it
-            // only draws in whatever space already sits beside it). Only the
-            // local player's own inventory shows this — a chest or furnace
-            // menu resolves a different `MenuKind` and gets none.
-            //
-            // Drawn **after** the whole container/recipe-book call above, in
-            // its own composited pass, the same "self-contained, one render
-            // call, nothing here collides with the container's own tiered
-            // geometry" discipline `crate::effects`' top-right HUD overlay
-            // already uses — see that module's doc.
-            if container_menu.is_some_and(|menu| menu.kind() == lodestone_game::menu::MenuKind::Player)
-                && let Some(effects) = self.effects.as_mut()
-            {
-                let layout = crate::container::slot_layout(
-                    container_menu.expect("checked is_some_and above"),
-                );
-                let (logical_w, logical_h) =
-                    crate::menu::render::logical_canvas(self.nav.gui_scale(), w, h);
-                let (panel_x, panel_y) =
-                    crate::container::panel_origin_with_scale(&layout, self.nav.gui_scale(), w, h);
-                let panel_x = panel_x
-                    + crate::container::recipe_book_panel_shift(
-                        logical_w,
-                        layout.width,
-                        self.recipe_panel.open,
-                    );
-                // `slot_layout`/`panel_origin_with_scale` are entirely in the
-                // *logical* GUI canvas (see their own docs), and NDC is
-                // resolution-independent — `inventory_geometry`'s px→NDC
-                // conversion only needs the coordinate system its inputs are
-                // already expressed in, not the framebuffer's true physical
-                // size, so handing it the *logical* canvas here is what makes
-                // the column scale with the container panel at any GUI scale
-                // or DPI, the same as every slot/label in the panel itself.
-                effects.render_in_inventory(
-                    device,
-                    queue,
-                    frame.view(),
-                    &self.sim.active_effects(),
-                    panel_x,
-                    panel_y,
-                    layout.width,
-                    logical_w as u32,
-                    logical_h as u32,
-                );
-            }
         }
 
         // The pause overlay draws *over* the world/HUD/container passes above
@@ -2456,4 +2448,44 @@ mod ping_request_tests {
             last + std::time::Duration::from_secs(5)
         ));
     }
+}
+
+/// `Screen.showsActiveEffects()` — whether the screen currently open is drawing
+/// the player's status effects itself, in which case `Hud.extractEffects` draws
+/// none.
+///
+/// Only `InventoryScreen` overrides it, and its answer is
+/// `EffectsInInventory.canSeeEffects()`: is there already `>= 32` px of canvas
+/// to the right of the panel? So the same three inputs the column's own draw
+/// uses — the panel origin, its width, and the recipe-book shift — decide this,
+/// and they are read the same way here rather than approximated, because the two
+/// answers disagreeing means either two copies of the effects on screen or none.
+///
+/// The creative screen is excluded: vanilla's `CreativeModeInventoryScreen` does
+/// show the column, but this client does not route that screen through the
+/// container frame yet, so suppressing the overlay there would leave the effects
+/// nowhere.
+///
+/// A free function, not a method, for the reason `recipe_panel_geometry` is one:
+/// the caller is past the field-borrow split and cannot lend out `&self`.
+fn screen_shows_active_effects(
+    sim: &crate::sim::Sim,
+    container_open: bool,
+    creative_open: bool,
+    recipe_open: bool,
+    gui_scale: u32,
+    w: u32,
+    h: u32,
+) -> bool {
+    if creative_open || !container_open || sim.open_menu().is_some() {
+        return false;
+    }
+    let menu = sim.player_menu();
+    let layout = crate::container::slot_layout(&menu);
+    let (canvas_w, _) = crate::menu::render::logical_canvas(gui_scale, w, h);
+    let (panel_x, _) = crate::container::panel_origin_with_scale(&layout, gui_scale, w, h);
+    let panel_x =
+        panel_x + crate::container::recipe_book_panel_shift(canvas_w, layout.width, recipe_open);
+    let x0 = crate::effects::inventory_column_x0(panel_x, layout.width);
+    crate::effects::inventory_can_see_effects(canvas_w - x0)
 }
