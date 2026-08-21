@@ -110,11 +110,50 @@ tree really does contain both nodes so the assertion is not vacuous.
 ### Adding a `kind`
 
 One match arm in `special_item_rig`, and every surface that consumes the seam gets it.
-Which kinds resolve, and why the other six do not, is a table in that function's own
-doc — read it there rather than here, so there is one copy.
+Which kinds resolve there, and which need their own entry point instead, is a table in
+that function's own doc — read it there rather than here, so there is one copy.
+
+**Check for existing geometry before writing any.** Four kinds — `conduit`,
+`decorated_pot`, `copper_golem_statue` and `trident` — resolved to `None` and drew
+nothing in hand, and in every one of the four the rig was **already in the tree**: the
+meshes were baked, registered, and their sheets already in the preload list. The gap
+was the resolver, not the geometry. Writing a second rig beside a working one is worse
+than doing nothing, because both then look plausible to the next reader, so grep for a
+mesh and a sheet stem before adding either.
+
+Two traps that specifically cost time there, both recorded because the wrong answer
+looked authoritative:
+
+* **Read the *special* renderer, not the block-entity one of the same name.** A doc
+  table here once said the conduit rig was unported because `ConduitRenderer` calls
+  `bakeLayer` four times. That is the block entity. `ConduitSpecialRenderer.bake`
+  takes `CONDUIT_SHELL` alone and submits one part — an item conduit is never active,
+  so it is a plain `(model, sheet)` pair and always was.
+* **A `kind` may need more than one pair, or a mesh from the other corpus.** A banner
+  is two meshes plus translucent layers, a decorated pot is five independently sheeted
+  parts, and a trident's mesh lives in the **entity** corpus rather than
+  `BLOCK_ENTITY_MODELS`. Each has its own entry point — `banner_item_rig`,
+  `decorated_pot_item_rig`, `trident_item_rig` — because `special_item_rig`'s
+  `&'static str` return *means* "a key into `BLOCK_ENTITY_MODELS`". Returning an
+  entity-corpus name from it type-checks, resolves to nothing in every caller, and
+  draws exactly the empty hand you were trying to fill.
 
 **Do not add a second copy of the mapping.** If you find yourself writing a chest rig
 twice, that is the defect: it is how the inventory slot and the hand come to disagree.
+
+### Proving a new rig is not an island
+
+A rig keyed on a `kind` nothing produces draws nothing, and every hermetic gate in the
+crate still passes — those supply the `kind` as a literal, which is a closed loop.
+`crates/lodestone-render/tests/special_item_hand_rig_resolution.rs` breaks it: it reads
+the pinned 26.2 jar and asserts the **real** item definition reaches the expected `kind`
+in a first-person hand. Add your subject there.
+
+It also carries the reciprocal for the trident, which is worth copying whenever a
+definition is a `select` on `minecraft:display_context`: `trident.json` sends
+`gui`/`ground`/`fixed`/`on_shelf` to the flat `item/trident` sprite and only the
+fallback to a rig, so drawing a rig in the inventory would be the regression rather
+than the fix.
 
 ### Adding a surface
 
@@ -204,16 +243,20 @@ Degradations, all fail-open:
 |---|---|
 | no vanilla pack / no baked models | nothing draws; the hand falls through to the bare arm |
 | jar has no `entity/chest/*.png` | nothing draws rather than an untextured box — the same asymmetry the world pass uses |
-| an unported `kind` | nothing draws, which is the behaviour before this existed |
+| a `kind` with no rig (a datapack one) | nothing draws, which is the behaviour before this existed |
+| a held **decorated pot** carrying sherds | draws with the four *default* side sprites. `lodestone_model` decodes `minecraft:pot_decorations` into a real `PotDecorations`, but the shell's hotbar record does not carry it through to `MainHandItem`, so it cannot reach the rig — the same one-field-per-layer walk `banner_patterns` and `base_color` already made. An **un**decorated pot is exactly right, not approximate: vanilla's own `submit` uses `PotDecorations.EMPTY` for a stack with no component |
+| a held **copper golem statue** whose stack names a pose | draws **standing**. `special_item_rig`'s `(kind, item_path)` signature has no room for a `minecraft:block_state` component, and standing is what vanilla's own `select` falls back to for an ordinary stack |
 | an enchanted held chest | draws **unglinted**; the glint pipeline rasterises the model shader's vertex layout, and this is instanced entity geometry. Same shortfall as the inventory slot, for the same reason |
 
 ## Dependencies
 
 * `lodestone-assets` — `IconPart::Special`, `ItemIconBuilder::part_for` (the entry
   point that returns a special node's `display` map), `DisplayTransforms`.
-* `lodestone-render` — `special_item_rig`, `SpecialItemForm`,
-  `ItemVariants::resolve_special`, `BlockEntityModelSet`,
-  `BlockEntityMesh::part_transforms`, `EntityPipeline`,
+* `lodestone-render` — `special_item_rig`, `banner_item_rig`,
+  `decorated_pot_item_rig`, `trident_item_rig`, `SpecialItemForm`,
+  `ItemVariants::resolve_special`, `BlockEntityModelSet`, `EntityModelSet` (the
+  trident's own corpus), `BlockEntityMesh::part_transforms`,
+  `Skeleton::rest_pose` (its entity-corpus equivalent), `EntityPipeline`,
   `entity::first_person_item_matrix`.
 * `lodestone-shell` — `gpu/block_entities.rs`'s `BlockEntityRenderer` (rigs, sheets
   and the hand camera), `gpu/first_person.rs`'s `FirstPersonHand`,
