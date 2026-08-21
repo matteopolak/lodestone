@@ -165,15 +165,35 @@ fn corner_ao_quad() -> BakedQuad {
     }
 }
 
-/// The block is at `(0, 0, 0)`; the quad's face opens into `np = (0, 1, 0)`.
-/// Vertex 0 (`su = -1, sv = -1`)'s three AO-corner samples are:
-/// `a = np + su*u = (0,1,-1)`, `b = np + sv*v = (-1,1,0)`,
-/// `d = a + sv*v = (-1,1,-1)` (`u = (0,0,1)`, `v = (1,0,0)` for an `Up` face —
+/// The block is at `(0, 0, 0)`, and the AO ring is centred on **that same
+/// cell**, not on `(0, 1, 0)`.
+///
+/// That is the part worth reading before changing this constant.
+/// `mesh_models` only samples the neighbour cell for a quad it can name a
+/// lighting face for: one carrying a `cullface`, one whose plane is flush with
+/// the cube face (`quad_is_on_face_boundary`), or one belonging to a block that
+/// is itself a full occluding cube. [`corner_ao_quad`] is none of those — it is
+/// an unculled `Up` quad whose four positions straddle `y = ±1` precisely so
+/// they reach the screen corners under the identity camera, so its plane is
+/// nowhere near `y = 1`. Vanilla's `faceCubic == false` branch therefore
+/// applies and both the light ring and the AO ring move back onto the block's
+/// own cell, `np = (0, 0, 0)`.
+///
+/// With that `np`, vertex 0 (`su = -1, sv = -1`) samples
+/// `a = np + su*u = (0,0,-1)`, `b = np + sv*v = (-1,0,0)` and
+/// `d = a + sv*v = (-1,0,-1)` (`u = (0,0,1)`, `v = (1,0,0)` for an `Up` face —
 /// see `face_uv_axes` in `src/models.rs`). Occluding **only** `d` darkens
-/// vertex 0 alone: none of vertices 1-3's own `(a, b, d)` triples contain
-/// `(-1, 1, -1)` (checked by hand against the same `face_uv_axes` derivation;
-/// the executed negative controls below are what actually proves it).
-const OCCLUDER: [i32; 3] = [-1, 1, -1];
+/// vertex 0 alone: vertices 1-3's own triples are
+/// `{(0,0,-1),(1,0,0),(1,0,-1)}`, `{(0,0,1),(1,0,0),(1,0,1)}` and
+/// `{(0,0,1),(-1,0,0),(-1,0,1)}`, none of which contains `(-1, 0, -1)`. The
+/// executed negative controls below are what actually proves it.
+///
+/// This constant read `(-1, 1, -1)` — the same corner one cell higher — from
+/// the day this gate landed, which was correct then and stopped being correct
+/// when the cross-plant fix moved a non-flush quad's ring onto its own cell.
+/// Nothing in the gate could see that: every corner simply read full-bright,
+/// which is also what a genuinely broken AO term looks like.
+const OCCLUDER: [i32; 3] = [-1, 0, -1];
 
 struct OneOccluder;
 impl ModelSectionView for OneOccluder {
