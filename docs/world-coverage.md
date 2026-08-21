@@ -185,6 +185,29 @@ the client, and unlike the entity list it is not disguised — `spawn_one`'s
 catch-all logs and drops. Worth reading as a backlog rather than as a defect
 report.
 
+**Dead sprite sheets, found by hand rather than by the tool.** `Sheet::Effect`,
+`Sheet::Enchant` and `Sheet::EnchantedHit` are declared, are in `Sheet::all()`,
+and are therefore stitched into the particle atlas — and no production code
+constructs any of the three; every reference outside `Sheet::all()` is in a
+test. Atlas-resident and unreachable. The census cannot see this: it reports the
+*subject* side, and only `enchanted_hit` happens to share a name with a sheet
+frame stem. See the gap note below.
+
+## Known gaps in the instrument
+
+* **The reverse direction is only implemented for entities.** "A renderer no
+  subject routes to" is computed against the `entity_models()` corpus and
+  nowhere else, so a dead `BlockEntityModelEntry` or a dead particle `Sheet`
+  goes unreported — as the three sheets above did. Closing this means one
+  reverse query per population, each keyed differently, which is why it is
+  written down here rather than half-built.
+* **Granularity is the registry entry.** A type that draws *something* reads as
+  drawn even if a distinguishing part of it does not: a framed map drawing with
+  no frame border around it would satisfy any per-type check. This is the same
+  blindness `connectedness` has at the packet id, one level up.
+* **A block-entity type is claimed if *any* block owning it matches a
+  predicate.** A type whose blocks are partly covered reads as fully covered.
+
 ## How to change it
 
 * **Adding a renderer** — if it is a table, prefer a mechanical `ClaimRule`
