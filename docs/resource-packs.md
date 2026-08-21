@@ -184,7 +184,57 @@ pack stack now prints one line either way (see `FontLoader::load_unihex`/
 optional file must degrade the font, not fail it outright). An unrecognised
 `filter` condition key (or a non-boolean value) also always prints, since a
 misgated provider silently landing as always-active is a correctness bug in
-the pack, not something worth hiding behind the metrics flag.
+the pack, not something worth hiding behind the metrics flag. All of this is
+plain `eprintln!`, not `tracing`: `lodestone-assets` carries no logging
+dependency, and — unlike `tracing::warn!` elsewhere in this crate's callers —
+none of it needs `RUST_LOG` set to be visible.
+
+If every glyph's own `drawn_w` stays comfortably under its `advance`, the
+sheet's own metrics are not the cause of an overlap. The next-most-likely
+cause is a **precedence race**: two different providers (a pack's own bitmap
+panel and, commonly, vanilla's own `unihex` CJK/Thai/Arabic fallback)
+declaring the *same* codepoint, where whichever one is earlier in the
+font's flattened, priority-ordered provider list wins outright — the other's
+glyph is never even considered, however correct its own metrics are in
+isolation. `LODESTONE_FONT_TRACE` (below) is the direct tool for that case;
+`LODESTONE_FONT_METRICS` alone cannot show it, because it only ever prints
+the *winning* provider's own numbers for a given codepoint.
+
+### Which provider actually wins a codepoint (`LODESTONE_FONT_TRACE`)
+
+Set `LODESTONE_FONT_TRACE` to a comma/whitespace-separated list of codepoints
+(`0x7532`, `U+7532`, or a bare decimal all work) and every provider in the
+font's flattened, priority-ordered list that declares one of those codepoints
+prints one line — its own kind, source file, and (for `bitmap`/`space`/
+`unihex`) the advance it would contribute — tagged `WINS` for the one
+`Font::advance` actually returns and `shadowed` for every
+other provider that also covers the codepoint but lost. This is the direct
+answer to "which provider supplies this codepoint, and what did each one
+compute", rather than inferring the race from a metrics dump that only shows
+the winner. Example, tracing the space character where a `space` provider and
+a blank ascii cell both declare it:
+
+```text
+lodestone-assets: TRACE U+0020 provider[0] space advance=4 -> WINS
+lodestone-assets: TRACE U+0020 provider[1] bitmap file=minecraft:font/ascii.png cell_pos=(0,2) advance=1 -> shadowed (an earlier-declared provider already won this codepoint)
+```
+
+**Provider order across multiple packs is a merge, not an override.**
+`FontLoader::flatten` reads every active pack's own copy of `font/<id>.json`
+for a given id (`ResourceManager::read_stack`) and lays out the merged
+provider list **highest-priority pack first, each pack's own JSON
+declaration order preserved within its own segment** — matching vanilla's
+`FontManager.prepare`, which reads via `FONT_DEFINITIONS.listMatchingResourceStacks`
+rather than a single-winner `getResource`, for the same reason
+`ResourceManager::read_stack`'s own doc already states for language files: a
+pack that ships its own `font/<id>.json` to add a handful of custom bitmap
+providers must not silently delete every lower-priority pack's (including the
+jar's) own providers for that id. Before this was fixed, a pack overriding
+`minecraft:default.json` (rather than declaring its own custom font id) lost
+the jar's entire provider chain outright — every glyph the jar's `default.json`
+would otherwise have supplied for that font, not just the ones the pack's own
+file also names, silently vanished, which is a much bigger blast radius than
+the codepoints the pack actually intended to add.
 
 ### The per-server policy (`menu::servers::ServerPackPolicy`)
 
@@ -251,6 +301,9 @@ connect.
   Vanilla's own constant; change it only with a reason as good as vanilla's.
 - `LODESTONE_FONT_METRICS` (any value) — per-glyph bitmap-font metrics dump
   to stderr; see "Diagnosing a pack font's spacing" above.
+- `LODESTONE_FONT_TRACE` (comma/whitespace-separated codepoints) — per-
+  codepoint provider-precedence trace to stderr; see "Which provider
+  actually wins a codepoint" above.
 
 ## Dependencies
 

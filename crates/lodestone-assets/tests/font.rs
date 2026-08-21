@@ -271,6 +271,57 @@ fn first_declared_provider_wins_on_overlap() {
     assert_eq!(font.advance(b' ' as u32), Some(4.0));
 }
 
+// --- multi-pack font stacking (vanilla merges, never overrides) ----------
+
+/// Two packs, both declaring `assets/minecraft/font/default.json`: the
+/// lower-priority one (stands in for the jar) covers 'A' and 'Z', the
+/// higher-priority one covers only 'A'. Vanilla's `FontManager` stacks every
+/// active pack's own copy of a font id's definition file rather than letting
+/// the top one win outright (`FontManager.prepare` reads via
+/// `listMatchingResourceStacks`, not a single-winner `getResource` -- the
+/// same shape `ResourceManager::read_stack` already documents for language
+/// files). So the higher-priority pack's own 'A' must win, **and** the
+/// lower-priority pack's 'Z' -- which the top pack never mentions -- must
+/// still resolve, proving the bottom layer was merged in rather than
+/// discarded wholesale.
+#[test]
+fn a_higher_priority_packs_font_definition_merges_with_a_lower_ones_rather_than_replacing_it() {
+    let jar_a = sheet(8, &[Some(2), None]); // 'A' col2->advance4, 'Z' blank->advance1
+    let jar_json = br#"{"providers":[{"type":"bitmap","file":"minecraft:font/jar.png",
+        "ascent":7,"height":8,"chars":["AZ"]}]}"#;
+    let pack_a = sheet(8, &[Some(6)]); // 'A' col6->advance8, distinct from the jar's
+    let pack_json = br#"{"providers":[{"type":"bitmap","file":"minecraft:font/pack.png",
+        "ascent":7,"height":8,"chars":["A"]}]}"#;
+
+    let mut jar_source = MemorySource::new("jar");
+    jar_source.insert("assets/minecraft/textures/font/jar.png", jar_a);
+    jar_source.insert("assets/minecraft/font/default.json", jar_json.to_vec());
+
+    let mut pack_source = MemorySource::new("pack");
+    pack_source.insert("assets/minecraft/textures/font/pack.png", pack_a);
+    pack_source.insert("assets/minecraft/font/default.json", pack_json.to_vec());
+
+    // Lowest priority first: jar at the bottom, pack on top.
+    let mgr = ResourceManager::new(vec![Box::new(jar_source), Box::new(pack_source)]);
+    let font = FontLoader::new(&mgr)
+        .load(&loc("minecraft:default"), &FontOptions::none())
+        .expect("load font");
+
+    let a = font.bitmap_glyph(b'A' as u32).expect("A resolves");
+    assert_eq!(
+        a.file,
+        loc("minecraft:font/pack.png"),
+        "the higher-priority pack's own 'A' must win"
+    );
+    assert_eq!(font.advance(b'A' as u32), Some(8.0));
+
+    let z = font
+        .bitmap_glyph(b'Z' as u32)
+        .expect("Z must still resolve from the lower-priority (jar) layer -- it must not be silently discarded because a higher-priority pack also ships a default.json");
+    assert_eq!(z.file, loc("minecraft:font/jar.png"));
+    assert_eq!(font.advance(b'Z' as u32), Some(1.0));
+}
+
 // --- references, filters, cycles -----------------------------------------
 
 #[test]
