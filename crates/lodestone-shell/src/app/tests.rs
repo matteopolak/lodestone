@@ -4962,3 +4962,101 @@ fn rebinding_toggle_perspective_in_the_controls_screen_takes_effect_without_a_re
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The other half of the rebind class: the **F3 chords are rebindable in
+/// vanilla 26.2**, and this client used to hardcode them.
+///
+/// Checked in the jar rather than assumed, because the received wisdom (and
+/// this repo's own comments) said the opposite. `Options.java` declares
+/// `keyDebugShowHitboxes`, `keyDebugShowChunkBorders`,
+/// `keyDebugShowAdvancedTooltips`, `keyDebugSpectate`,
+/// `keyDebugSwitchGameMode`, `keyDebugFocusPause` and `keyDebugCopyLocation`
+/// as `Category.DEBUG` `KeyMapping`s, collects them in `debugKeys` and folds
+/// that array into `keyMappings` — the one vanilla persists and the Controls
+/// screen lists — and `KeyboardHandler.handleDebugKeys` asks every one of them
+/// `matches(event)`. So `code == KeyCode::KeyG` in `resolve_key` was the
+/// divergence, not the table.
+///
+/// Driven exactly like
+/// [`rebinding_toggle_perspective_in_the_controls_screen_takes_effect_without_a_restart`]
+/// — the real screen, the real capture, the app's own table — because the
+/// producer half is what the two existing corpora cannot see. The `F3` gate
+/// flag is asserted on both sides: a chord must still need the modifier held,
+/// so rebinding one onto a bare key does not make it fire during ordinary play.
+#[test]
+fn a_rebound_f3_chord_fires_on_its_new_key_and_stops_on_its_old_one() {
+    use crate::keybinds::{Binding, InputAction};
+    use crate::menu::key_binds::KeyControl;
+    use crate::menu::options::{Cell, SettingsPage};
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    let dir = std::env::temp_dir().join(format!("lodestone-rebind-chord-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    app.nav = MenuNav::with_path(dir.join("servers.json"));
+
+    // Vanilla's `key.debug.showChunkBorders`, GLFW 71.
+    assert_eq!(
+        app.keybinds()
+            .binding(InputAction::DebugShowChunkBorders),
+        Binding::Key(KeyCode::KeyG)
+    );
+
+    app.ui.open_settings();
+    for page in [SettingsPage::Controls, SettingsPage::KeyBinds] {
+        let cells = crate::menu::options::all_controls(app.nav.settings().page(), false);
+        let target = cells
+            .iter()
+            .position(|c| matches!(c, Cell::Nav { page: Some(p), .. } if *p == page))
+            .expect("the settings tree must offer this page");
+        for _ in 0..=cells.len() {
+            if app.nav.settings().cursor() == target {
+                break;
+            }
+            app.nav.key(&mut app.ui, MenuKey::Down);
+        }
+        app.nav.key(&mut app.ui, MenuKey::Enter);
+    }
+
+    // Reaching the row by Down alone is what proves a Debug chord is actually
+    // *listed* on the screen, not merely present in `InputAction::ALL`.
+    let controls = crate::menu::key_binds::all_controls();
+    let target = controls
+        .iter()
+        .position(|c| *c == KeyControl::Bind(InputAction::DebugShowChunkBorders))
+        .expect("Show Chunk Boundaries must have a bind button");
+    for _ in 0..=controls.len() {
+        if app.nav.settings().key_binds().cursor() == target {
+            break;
+        }
+        app.nav.key(&mut app.ui, MenuKey::Down);
+    }
+    app.nav.key(&mut app.ui, MenuKey::Enter);
+    assert!(app.nav.awaiting_key_capture());
+    app.nav.capture_binding(Binding::Key(KeyCode::KeyJ));
+
+    let binds = app.keybinds();
+    let mut chord = playing();
+    chord.debug_held = true;
+    assert_eq!(
+        resolve_key(&binds, chord, Some(KeyCode::KeyJ), true, false, None),
+        Some(KeyOutcome::ToggleChunkBorders),
+        "F3+J must now toggle chunk borders"
+    );
+    assert_ne!(
+        resolve_key(&binds, chord, Some(KeyCode::KeyG), true, false, None),
+        Some(KeyOutcome::ToggleChunkBorders),
+        "and F3+G must stop"
+    );
+    // The modifier is still a gate flag, not an eighth bindable action: a
+    // rebound chord must not fire as a bare key during ordinary play.
+    assert_ne!(
+        resolve_key(&binds, playing(), Some(KeyCode::KeyJ), true, false, None),
+        Some(KeyOutcome::ToggleChunkBorders),
+        "a chord without F3 held is not a chord"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

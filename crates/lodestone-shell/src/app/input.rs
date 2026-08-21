@@ -146,9 +146,11 @@ pub(crate) enum KeyOutcome {
     /// consumed the hold; the driver owns that bookkeeping because it is the
     /// thing that knows whether a chord fired. See [`KeyGate::debug_held`].
     DebugModifier(bool),
-    /// F3+B — vanilla's `key.debug.showHitboxes`.
+    /// F3+B — vanilla's `key.debug.showHitboxes`. Rebindable: see
+    /// [`InputAction::DebugShowHitboxes`].
     ToggleHitboxes,
-    /// F3+G — vanilla's `key.debug.showChunkBorders`.
+    /// F3+G — vanilla's `key.debug.showChunkBorders`. Rebindable: see
+    /// [`InputAction::DebugShowChunkBorders`].
     ToggleChunkBorders,
     /// Shift+F3 — the profiler pie chart's own visibility toggle. Not a
     /// vanilla `KeyMapping` (vanilla has no chart of its own to toggle
@@ -186,7 +188,7 @@ pub(crate) enum KeyOutcome {
     /// F3+F4 — vanilla's `key.debug.switchGameMode` (keysym 293). Cycles rather
     /// than opening the radial picker; see [`WindowApp::cycle_game_mode`].
     CycleGameMode,
-    /// F3+H — vanilla's `key.debug.advancedTooltips`.
+    /// F3+H — vanilla's `key.debug.showAdvancedTooltips`.
     ///
     /// Unlike its two siblings above this does **not** toggle a render flag: it
     /// flips a *persisted option*, `Options.advancedItemTooltips`
@@ -516,11 +518,15 @@ pub(crate) fn resolve_key(
         // hitboxes, which is why the modifier cannot just be a held flag with
         // the old press-toggle left in place.
         Some(KeyOutcome::DebugModifier(pressed))
-    } else if gate.debug_held && pressed && code == KeyCode::KeyB {
-        // `key.debug.showHitboxes`, vanilla keysym 66 (`Options.java`).
+    } else if gate.debug_held && pressed && binds.is(InputAction::DebugShowHitboxes, code) {
+        // `key.debug.showHitboxes`. Table-driven, not a literal `KeyCode::KeyB`:
+        // vanilla declares this a `Category.DEBUG` `KeyMapping` and dispatches
+        // it through `KeyMapping::matches` — see `InputAction::DebugShowHitboxes`.
+        // The `gate.debug_held` conjunct stays, because the F3 *modifier* is a
+        // gate flag here rather than an eighth bindable action.
         Some(KeyOutcome::ToggleHitboxes)
-    } else if gate.debug_held && pressed && code == KeyCode::KeyG {
-        // `key.debug.showChunkBorders`, vanilla keysym 71.
+    } else if gate.debug_held && pressed && binds.is(InputAction::DebugShowChunkBorders, code) {
+        // `key.debug.showChunkBorders` — table-driven, as above.
         Some(KeyOutcome::ToggleChunkBorders)
     } else if gate.debug_held
         && pressed
@@ -537,26 +543,26 @@ pub(crate) fn resolve_key(
         // [`KeyOutcome::ProfilerChartSelect`]'s doc for why this is chorded
         // rather than a bare press.
         Some(KeyOutcome::ProfilerChartSelect(digit))
-    } else if gate.debug_held && pressed && code == KeyCode::KeyN {
-        // `key.debug.spectate`, vanilla keysym 78.
+    } else if gate.debug_held && pressed && binds.is(InputAction::DebugSpectate, code) {
+        // `key.debug.spectate` — table-driven, as above.
         Some(KeyOutcome::ToggleSpectator)
-    } else if gate.debug_held && pressed && code == KeyCode::F4 {
-        // `key.debug.switchGameMode`, vanilla keysym 293 (GLFW's F4).
+    } else if gate.debug_held && pressed && binds.is(InputAction::DebugSwitchGameMode, code) {
+        // `key.debug.switchGameMode` — table-driven, as above.
         Some(KeyOutcome::CycleGameMode)
-    } else if gate.debug_held && pressed && code == KeyCode::KeyH {
-        // `key.debug.advancedTooltips`, vanilla keysym 72. **Not gated on
+    } else if gate.debug_held && pressed && binds.is(InputAction::DebugShowAdvancedTooltips, code) {
+        // `key.debug.showAdvancedTooltips` — table-driven, as above. **Not gated on
         // `gate.gameplay`**, the same as its two siblings: F3 chords are debug
         // instruments and vanilla's `KeyboardHandler.handleDebugKeys` runs
         // regardless of the open screen — which matters more for this one than
         // for the others, because the thing it changes is only *visible* with a
         // container screen open.
         Some(KeyOutcome::ToggleAdvancedTooltips)
-    } else if gate.debug_held && pressed && code == KeyCode::KeyP {
-        // `key.debug.focusPause`, vanilla keysym 80. Same "not gated on
+    } else if gate.debug_held && pressed && binds.is(InputAction::DebugFocusPause, code) {
+        // `key.debug.focusPause` — table-driven, as above. Same "not gated on
         // `gate.gameplay`" reasoning as its siblings above.
         Some(KeyOutcome::TogglePauseOnLostFocus)
-    } else if gate.debug_held && pressed && code == KeyCode::KeyC {
-        // `key.debug.copyLocation`, vanilla keysym 67. Vanilla additionally
+    } else if gate.debug_held && pressed && binds.is(InputAction::DebugCopyLocation, code) {
+        // `key.debug.copyLocation` — table-driven, as above. Vanilla additionally
         // gates this on `!player.isReducedDebugInfo()`, a concept this client
         // does not model yet — see `docs/keybindings.md`'s F3 section.
         Some(KeyOutcome::CopyLocation)
