@@ -716,6 +716,17 @@ impl VanillaFont {
         shadow: bool,
     ) -> f32 {
         let mut cursor = x;
+        // Only the main pass, never the shadow copy: the shadow's positions
+        // are a fixed per-glyph offset from the main pass's own (see the
+        // `off` below), so a second, offset-only line per glyph would only
+        // add noise, not information, to a layout trace.
+        let tracing = !shadow && text_trace_matches(glyphs);
+        if tracing {
+            eprintln!(
+                "lodestone-shell: TEXT_TRACE begin glyphs={} x0={x:.3} y0={y:.3} scale={scale:.3}",
+                glyphs.len()
+            );
+        }
         for (position, g) in glyphs.iter().enumerate() {
             let c = [g.rgb[0], g.rgb[1], g.rgb[2], alpha];
             let c = if shadow { shadow_of(c) } else { c };
@@ -736,9 +747,65 @@ impl VanillaFont {
             } else {
                 (cursor, y)
             };
+            let pen_before = cursor;
             cursor += self.glyph_styled(cs, g.ch, gx, gy, scale, c, g.style, position == 0, font);
+            if tracing {
+                self.trace_glyph_line(font, g, pen_before, cursor);
+            }
+        }
+        if tracing {
+            eprintln!(
+                "lodestone-shell: TEXT_TRACE end total_width={:.3}",
+                cursor - x
+            );
         }
         cursor - x
+    }
+
+    /// One `LODESTONE_TEXT_TRACE` line for a single drawn glyph. `font`,
+    /// `pen_before` and `pen_after` are exactly what
+    /// [`draw_resolved`](Self::draw_resolved) already computed for this
+    /// glyph — nothing here re-derives a number the draw path did not
+    /// already produce, except the provider/raster lookups, which are cheap
+    /// (bitmap/unihex/space) or already paid for either way by TTF's own
+    /// on-demand rasterisation.
+    ///
+    /// `font=` is which font's cell actually supplied this glyph — compared
+    /// by reference against [`VanillaFont::raster`], not by re-deriving
+    /// [`select_font`](Self::select_font)'s condition a second time, so a
+    /// future change to that condition cannot silently desync the trace from
+    /// what was actually drawn. `provider=` and `drawn_w=` are read from
+    /// *that* font, so a measure/draw font mismatch (already ruled out
+    /// elsewhere, but this is the tool that would have caught it directly)
+    /// would show as `drawn_w` disagreeing with `advance` for no fixture
+    /// reason.
+    fn trace_glyph_line(&self, font: &RasterFont, g: &ResolvedGlyph, pen_before: f32, pen_after: f32) {
+        let cp = g.ch as u32;
+        let is_default = std::ptr::eq(font, &self.raster);
+        let font_label = if is_default {
+            DEFAULT_FONT_NAME
+        } else {
+            g.font.map(FontId::name).unwrap_or(DEFAULT_FONT_NAME)
+        };
+        let provider = if let Some(b) = font.font().bitmap_glyph(cp) {
+            format!("bitmap:{}", b.file)
+        } else if font.font().unihex_glyph(cp).is_some() {
+            "unihex".to_string()
+        } else if let Some(t) = font.font().ttf_glyph(cp) {
+            format!("ttf:{}", t.file)
+        } else if font.font().contains(cp) {
+            "space".to_string()
+        } else {
+            "missing".to_string()
+        };
+        let drawn_w = font
+            .raster(cp)
+            .map(|r| r.cell_width() as f32 * r.texel_size())
+            .unwrap_or(0.0);
+        eprintln!(
+            "lodestone-shell: TEXT_TRACE cp=U+{cp:04X} font={font_label} provider={provider} advance={:.3} pen_x_before={pen_before:.3} pen_x_after={pen_after:.3} drawn_w={drawn_w:.3}",
+            pen_after - pen_before
+        );
     }
 
     // There is deliberately no un-styled `glyph` primitive here any more, and no
@@ -970,6 +1037,43 @@ fn glyph_advance(
         } else {
             0.0
         }
+}
+
+/// `LODESTONE_TEXT_TRACE`'s target: unset disables the whole feature, `"all"`
+/// (case-insensitive) fires on every styled draw, anything else is a
+/// substring the drawn text must contain. Checked once per process and
+/// cached, since [`VanillaFont::draw_resolved`] runs at least once per frame
+/// for every visible piece of text.
+///
+/// This is the *sequence* diagnostic CLAUDE.md's own audit habit calls for
+/// once every single-glyph metric has been checked and the symptom is still
+/// unexplained: `LODESTONE_FONT_METRICS`/`LODESTONE_FONT_TRACE` in
+/// `lodestone_assets::font` can each only speak about one codepoint's own
+/// numbers in isolation. Neither can show a codepoint that never reaches
+/// this function at all -- dropped between the packet and the [`TextSpan`]
+/// it should have become -- because there is nothing to print for a glyph
+/// that was never in the list. A gap that vanishes at this layer despite
+/// every provider computing a healthy advance is exactly that case.
+fn text_trace_target() -> Option<&'static str> {
+    static TARGET: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TARGET
+        .get_or_init(|| std::env::var("LODESTONE_TEXT_TRACE").ok())
+        .as_deref()
+}
+
+/// Whether [`VanillaFont::draw_resolved`] should trace this particular
+/// resolved glyph list, per [`text_trace_target`]'s rule.
+fn text_trace_matches(glyphs: &[ResolvedGlyph]) -> bool {
+    let Some(target) = text_trace_target() else {
+        return false;
+    };
+    if target.eq_ignore_ascii_case("all") {
+        return true;
+    }
+    if target.is_empty() {
+        return false;
+    }
+    glyphs.iter().map(|g| g.ch).collect::<String>().contains(target)
 }
 
 /// The final colour a raster texel contributes after the component/text pass

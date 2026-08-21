@@ -1060,6 +1060,7 @@ impl<'a> FontLoader<'a> {
         let mut unihex_count = 0usize;
         let mut ttf_count = 0usize;
         let traced = font_trace_codepoints();
+        let debug = font_metrics_debug_enabled();
         for (provider_index, def) in active.iter().enumerate() {
             match def {
                 ProviderDef::Unihex {
@@ -1076,6 +1077,22 @@ impl<'a> FontLoader<'a> {
                     )?;
                 }
                 ProviderDef::Space { advances } => {
+                    // A `bitmap` provider prints one header line under
+                    // LODESTONE_FONT_METRICS regardless of whether any
+                    // codepoint is traced; a `space` provider never did --
+                    // its only output was a per-codepoint TRACE line gated
+                    // on LODESTONE_FONT_TRACE naming that exact codepoint.
+                    // That made "zero space provider lines in the metrics
+                    // dump" ambiguous between "this pack genuinely has no
+                    // space provider" and "the dump just never prints one" --
+                    // it was always the latter. Print unconditionally under
+                    // the same flag the bitmap header already uses.
+                    if debug {
+                        eprintln!(
+                            "lodestone-assets: space provider font={id} provider[{provider_index}] {} advances",
+                            advances.len()
+                        );
+                    }
                     for (cp, adv) in advances {
                         let already = glyphs.contains_key(cp);
                         if traced.contains(cp) {
