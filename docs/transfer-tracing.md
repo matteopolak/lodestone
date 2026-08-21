@@ -9,7 +9,9 @@ position it claims. It exists to settle, from a real session on a real server,
 whether the client ever tells a server it is somewhere the server has already
 overruled: the "rubberbanded after being transferred to another server" report.
 
-It is an instrument, not a fix. Nothing branches on what it records.
+Nothing on the wire branches on what the target records — the fields it adds to
+the adapter are read by the log and by nothing else. Two defects the trace was
+built to expose are fixed, and both are described below.
 
 ## How to collect it
 
@@ -95,6 +97,47 @@ moves you a world.
 when `moves_since_teleport == 0` and the distance exceeds one block. One tick of
 ordinary movement is well under half a block, so a first post-teleport move
 beyond a block did not come from a simulation that had adopted the teleport.
+
+## What is fixed, and what a run would still show
+
+Two things this window produced are closed. Both keep emitting on the `transfer`
+target, so a log still shows them firing rather than only their absence.
+
+**A `Move` never claims a pose the server has overruled.** `net.rs` counts the
+teleports it has put on the sim's channel against the ones `Sim::poll_net` has
+adopted, and while it is behind it rewrites any outbound `Move` to the pose the
+teleport authorised — position, resolvable rotation, and vanilla's own `false`
+on-ground and horizontal-collision flags. That is the claim vanilla's client
+makes in the same instant. It rewrites rather than drops for two reasons: the
+dirty-tracking that decides whether a `Move` becomes a packet at all lives
+*downstream* in `select_move_packet`, whose 20-tick position reminder only
+advances when it is invoked, so a producer-side drop silently starves the
+periodic resync; and a simulation that somehow never adopted a teleport would
+stop being able to move at all, where a rewrite merely holds it at the pose the
+server chose. A teleport with a relative positional component authorises nothing
+— the net thread cannot resolve a delta against a pose that lives on the frame
+thread — which is the harmless direction, a relative correction being a small
+one. Look for `xfer: outbound Move rewritten`.
+
+**A second `LOGIN` drops the previous backend's world.** Vanilla's `handleLogin`
+assigns a brand-new `ClientLevel` unconditionally, so every chunk and every
+entity of what came before is gone before the next packet decodes. This client
+cleared its decoded chunk store only on `Respawned`, and only when the dimension
+id differed — neither of which a backend swap satisfies, since it emits no
+`Respawned` at all and usually lands in `minecraft:overworld` again. The old
+backend's terrain therefore sat in the store at the new backend's coordinates,
+where the shell's own physics collides against it; a client predicting from
+terrain the server does not have is a client the server corrects. The store is
+now cleared in `Driver::emit`'s `Login` arm — on the net thread, between two
+decodes, which is the only point where the ordering is safe — and the shell
+drops the matching meshes and entity tracks when a `LoggedIn` arrives while
+already `Connected`. Look for `xfer: cleared the decoded chunk store` and
+`xfer: second LOGIN while connected`.
+
+Neither has been observed against a real proxy: they are a divergence from the
+decompiled client and a window the architecture demonstrably has, closed with
+hermetic gates and their neuters. The `warn` line is what a real run has to be
+read for.
 
 ## How to change it
 

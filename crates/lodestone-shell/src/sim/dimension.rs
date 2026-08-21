@@ -301,7 +301,7 @@ impl Sim {
     /// was already emptied in the right order by its `forget_chunk` sweep; that
     /// clear is what makes a **vanilla** server correct too. See
     /// `docs/nether-portals.md`.
-    fn reset_for_dimension_change(&mut self) {
+    pub(crate) fn reset_for_dimension_change(&mut self) {
         // The other entities. Vanilla builds a whole new `ClientLevel` on
         // `handleRespawn`, which drops every entity in the old one; this is the
         // same call `end_session` uses, and it exempts the local player for the
