@@ -64,7 +64,7 @@
 //!
 //! The **`-Y` scale is the entire y-flip**: font-pixel space is row-index-
 //! down (row `0` at the string's top, same convention
-//! `gpu/nametag.rs::layout_ink_runs` already returns), and composing that
+//! `gpu/nametag.rs::layout_styled_ink_runs` already returns), and composing that
 //! through a negative `Y` scale turns "down in pixel space" into "up in
 //! world space" with no separate flip step, unlike
 //! `gpu/nametag.rs::quad_vertices`'s billboard path (which has no matrix to

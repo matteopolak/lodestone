@@ -1699,13 +1699,24 @@ mod sign_nbt_tests {
         };
         let nbt = block_entity_to_nbt(BlockPos::new(1, 65, 1), &BlockEntity::Sign(sign));
 
+        // `SignSide::lines` carries styled spans now, so compare on the
+        // flattened plain text: this gate is about the NBT round trip, not
+        // about span structure.
+        let plain = |line: &[lodestone_world::SignTextSpan]| -> String {
+            line.iter().map(|s| s.text.as_str()).collect()
+        };
+
         let text = SignText::parse(&nbt);
-        assert_eq!(text.front.lines[0], "LODESTONE");
-        assert_eq!(text.front.lines[1], "PROBE");
-        assert_eq!(text.front.lines[2], "");
+        assert_eq!(plain(&text.front.lines[0]), "LODESTONE");
+        assert_eq!(plain(&text.front.lines[1]), "PROBE");
+        assert_eq!(plain(&text.front.lines[2]), "");
         assert_eq!(text.front.color, SignDyeColor::Black);
         assert!(!text.front.glowing);
-        assert_eq!(text.back.lines, ["", "", "", ""], "the back side must stay blank");
+        assert_eq!(
+            text.back.lines.each_ref().map(|l| plain(l)),
+            ["", "", "", ""],
+            "the back side must stay blank"
+        );
         assert!(text.waxed, "the waxed flag must survive the round trip");
 
         // Control: an unwaxed sign must decode as unwaxed — proves the

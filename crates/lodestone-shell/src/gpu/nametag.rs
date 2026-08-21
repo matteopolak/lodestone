@@ -234,7 +234,7 @@ fn resolved_rgb(color: Option<TextColor>, base: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-/// The styled sibling of [`layout_ink_runs`]: walks a fully-inherited span
+/// The world-space ink walk: takes a fully-inherited span
 /// list (`Text::to_spans`'s own output — [`crate::entities::NameTag::text`]/
 /// `crate::display_entities::DisplayDraw::text` are real
 /// [`lodestone_model::text::Text`] values now, so both callers here call
@@ -242,10 +242,9 @@ fn resolved_rgb(color: Option<TextColor>, base: [f32; 3]) -> [f32; 3] {
 /// instead of a bare string, so a coloured/bold/italic/underlined/struck-through
 /// run reaches world-space geometry with its own style intact.
 ///
-/// This is the fix for the gap [`layout_ink_runs`]'s own doc discloses:
-/// *"both callers here paint every rect in one uniform colour ... a dropped
-/// colour reads as plain text"*. That was true when this function did not
-/// exist; every [`StyledRect`] this one emits carries its **own** resolved
+/// This replaced an earlier unstyled walk that painted every rect in one
+/// uniform colour, so a dropped colour read as plain text. Every
+/// [`StyledRect`] this one emits carries its **own** resolved
 /// colour, so a caller no longer supplies one flat colour for the whole
 /// string — it supplies one only as the *fallback* for a span whose colour is
 /// unspecified (`base_rgb`, always opaque white for both of today's callers:
@@ -265,8 +264,8 @@ fn resolved_rgb(color: Option<TextColor>, base: [f32; 3]) -> [f32; 3] {
 /// [`StyledRect::color`]'s existing `1.0` when building vertices.
 ///
 /// Bold widens the **advance** (`GlyphInfo.getAdvance(bold)`, `Font.java`),
-/// which is why a styled line's width cannot be measured by
-/// [`layout_ink_runs`]'s plain per-codepoint advance: a bold run measures
+/// which is why a styled line's width cannot be measured by a plain
+/// per-codepoint advance walk: a bold run measures
 /// wider than the same codepoints unstyled, and a caller that centres a
 /// multi-line block against an *unstyled* per-line width mis-centres exactly
 /// the line carrying the wider bold run — see `gpu/display_text.rs`'s module
@@ -1178,9 +1177,9 @@ mod tests {
             .expect("scaled bitmap fixture font loads")
     }
 
-    /// The nametag/sign-text ink walk ([`layout_ink_runs`]) is a *second*,
-    /// independent implementation of the same "cell texels scaled by
-    /// `pixel_scale`" logic `hud::vanilla_font::draw_ink` has -- CLAUDE.md's
+    /// The nametag/sign-text ink walk ([`layout_styled_ink_runs`]) is a
+    /// *second*, independent implementation of the same "cell texels scaled
+    /// by `pixel_scale`" logic `hud::vanilla_font::draw_ink` has -- CLAUDE.md's
     /// own point about a hazard fixed once and not shared: nothing
     /// mechanical connects the two, so this needs its own control rather
     /// than inheriting the HUD path's. Same discriminating input: two
@@ -1189,14 +1188,15 @@ mod tests {
     /// of `cell_width * pixel_scale`, the rects for 'B' would start well
     /// inside 'A''s own (wrongly large) rects.
     #[test]
-    fn layout_ink_runs_respects_pixel_scale_not_just_advance() {
+    fn layout_styled_ink_runs_respects_pixel_scale_not_just_advance() {
         let opaque_cell = vec![255u8; 32 * 32 * 4];
         let mut rgba = Vec::with_capacity(opaque_cell.len() * 2);
         rgba.extend_from_slice(&opaque_cell);
         rgba.extend_from_slice(&opaque_cell);
         let raster = scaled_raster("AB", 32, 20, &rgba);
 
-        let (rects, total_advance) = layout_ink_runs(&raster, "AB");
+        let spans = Text::from_legacy("AB").to_spans();
+        let (rects, total_advance) = layout_styled_ink_runs(&raster, &spans);
         assert!(!rects.is_empty(), "the opaque cells must produce ink rects");
         // Same arithmetic as the HUD-path control: advance(A) = (int)(0.5 +
         // 32*0.625) + 1 = 21; each glyph's own drawn extent is 32*0.625=20.
@@ -1219,7 +1219,7 @@ mod tests {
         assert!(
             (max_x - 41.0).abs() < 0.01,
             "got max_x={max_x}, want 41.0 (32px raw cell would give 53.0 -- \
-             layout_ink_runs must scale the cell's texel walk by pixel_scale, \
+             layout_styled_ink_runs must scale the cell's texel walk by pixel_scale, \
              not just the advance)"
         );
         assert!((total_advance - 42.0).abs() < 0.01);
@@ -1227,16 +1227,15 @@ mod tests {
 
     /// **The colour control**, at [`layout_styled_ink_runs`] directly, using
     /// the same synthetic (jar-free) fixture as
-    /// `layout_ink_runs_respects_pixel_scale_not_just_advance` so this runs
+    /// `layout_styled_ink_runs_respects_pixel_scale_not_just_advance` so this runs
     /// deterministically in CI regardless of whether a real jar is present.
     ///
     /// A `§c`-coloured span must produce rects whose colour is red; the same
     /// codepoint with no colour code must produce rects at the plain white
     /// fallback, not red — the discriminating pair. Before this function
-    /// existed, [`layout_ink_runs`]'s own callers ("both callers here paint
-    /// every rect in one uniform colour ... a dropped colour reads as plain
-    /// text", per its doc) had no way to make this assertion fail
-    /// differently for coloured vs uncoloured input at all.
+    /// existed, the unstyled ink walk it replaced painted every rect in one
+    /// uniform colour, so a dropped colour read as plain text and no
+    /// assertion could distinguish coloured from uncoloured input at all.
     #[test]
     fn layout_styled_ink_runs_resolves_a_spans_own_colour() {
         let opaque_cell = vec![255u8; 32 * 32 * 4];

@@ -81,9 +81,9 @@ floor.
   `hud/vanilla_font.rs::VanillaFont::load` makes), not `VanillaFont` itself —
   its glyph rasteriser is private and its public draw methods target a 2-D
   screen-space `ColourStream` in `hud/item_icon.rs`; both files belong to a
-  different area of the render stack. `layout_ink_runs` re-derives the same
-  run-length ink walk `VanillaFont::glyph` does, emitting local rects instead
-  of screen quads.
+  different area of the render stack. `layout_styled_ink_runs` re-derives the
+  same run-length ink walk `VanillaFont::glyph` does, emitting local rects
+  instead of screen quads.
 - **Billboarding**: `lodestone_render::entity::camera_orientation(camera.
   view_matrix())`, the same already-verified camera→world rotation
   `thrown_item_matrix` uses for projectiles — not a hand-derived
@@ -106,8 +106,8 @@ floor.
 
 ### Style: colour, bold, italic, underline, strikethrough
 
-`gpu/nametag.rs::layout_styled_ink_runs` is the styled sibling of
-`layout_ink_runs`: it walks a fully-inherited `Vec<lodestone_model::text::TextSpan>`
+`gpu/nametag.rs::layout_styled_ink_runs` is the single world-space ink walk:
+it takes a fully-inherited `Vec<lodestone_model::text::TextSpan>`
 (`crate::entities::NameTag::text.to_spans()` — `NameTag::text` is a real
 `lodestone_model::Text`, read directly with no legacy-string bridge in
 between) instead of a bare string, and every emitted `StyledRect` carries

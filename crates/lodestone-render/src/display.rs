@@ -527,7 +527,7 @@ mod tests {
         let transform = text_glyph_transform(base, 84.0, 19.0);
         // Local `y` is font-pixel space, **down**-positive (row 0 at the
         // text block's visual top — the same convention
-        // `gpu/nametag.rs::layout_ink_runs` returns rects in). So local
+        // `gpu/nametag.rs::layout_styled_ink_runs` returns rects in). So local
         // `(-1, -1)` (just above the first line) is the panel's visual
         // *top* edge, and local `(width, height)` (just past the last
         // line) is its visual *bottom* edge — named that way here rather
