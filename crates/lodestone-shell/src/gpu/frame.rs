@@ -80,7 +80,7 @@ impl RenderState {
             timer.stamp(&mut encoder, None, Some("hud_total"));
         }
         if let Some(timer) = self.gpu_timer.borrow_mut().as_mut() {
-            timer.resolve(&mut encoder);
+            timer.resolve(device, &mut encoder);
         }
         queue.submit(std::iter::once(encoder.finish()));
         if let Some(timer) = self.gpu_timer.borrow_mut().as_mut() {

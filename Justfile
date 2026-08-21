@@ -332,6 +332,21 @@ test-profile-table:
 worldgen-sweep *args:
     ./scripts/worldgen-region-sweep.sh {{args}}
 
+# Where a frame goes, CPU *and* GPU, over a fixed camera path on a fixed demo
+# world. Prints a per-waypoint CPU-vs-GPU verdict from real TIMESTAMP_QUERY
+# pass timings, with the section/draw-call counts beside every duration, and
+# records medians to bench-results/frame_profile.jsonl for a same-machine
+# comparison against the previous run. Needs a GPU adapter; skips loudly
+# without one. See docs/frame-profiling.md.
+#
+# Run it on an otherwise IDLE machine: a duration gathered while other agents
+# build gets attributed to the wrong cause (CLAUDE.md). The bench states its
+# own noise estimate (slowest frame / median) per waypoint so a run taken
+# under load says so rather than being quietly believed.
+[doc("where a frame goes, CPU and GPU, over a fixed camera path (needs a GPU adapter)")]
+bench-frame:
+    cargo bench {{jflag}} --target-dir {{tdir}} -p lodestone-shell --bench frame_profile
+
 # Live-oracle launchers — one recipe per canonical oracle. Each script
 # creates a fresh container and tears it down when it exits. See
 # docs/oracle-runtimes.md and CLAUDE.md for the spawn contracts.

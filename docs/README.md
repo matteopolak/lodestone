@@ -680,14 +680,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   shell's frame clock. Once per event-loop iteration it answers two questions: **how
   much real time to hand the simulation**, and **whether to present a frame at all**.
 - [Frame profiling](./frame-profiling.md) — A live, in-process instrument that
-  answers "where does a frame's time go": a per-phase CPU breakdown of
-  `WindowApp::redraw` (`crates/lodestone-shell/src/app/frame_profile.rs`) and coarse
-  per-pass GPU timing via `wgpu`'s `TIMESTAMP_QUERY` feature
-  (`crates/lodestone-shell/src/gpu/gpu_timing.rs`). It exists to make an optimisation
-  *measured* rather than guessed — this repo's evidence standard forbids fixing what
-  has not been profiled — and it ships live in every build, not behind a feature
-  flag, so it is available on whatever machine and server the owner is actually
-  playing on.
+  answers "where does a frame's time go", on **both** sides of the CPU/GPU divide: a
+  per-phase CPU breakdown of `WindowApp::redraw`
+  (`crates/lodestone-shell/src/app/frame_profile.rs`), each of the two large phases
+  split further into sub-phases with counts, alongside real per-pass and
+  whole-command-buffer GPU timings from `wgpu`'s `TIMESTAMP_QUERY` feature
+  (`crates/lodestone-shell/src/gpu/gpu_timing.rs`) — so "am I CPU-bound or
+  GPU-bound" is answerable rather than guessed at. It ships live in every build, not
+  behind a feature flag, so it is available on whatever machine and server the owner
+  is actually playing on, and `just bench-frame` is its reproducible counterpart for
+  comparing two builds over a fixed camera path.
 - [Fuzz/property-testing harness](./fuzz-harness.md) — `crates/lodestone-fuzz` is a
   property-based fuzzing harness for lodestone's wire decoders — the first one in
   the repo. It exists to check properties that need no expected value at all: a
