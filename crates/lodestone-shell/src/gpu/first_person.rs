@@ -651,8 +651,11 @@ impl RenderState {
     ///   the two smoothed view angles, which the shell does not track. Tracked
     ///   as its own issue rather than folded in here; see `docs/view-bobbing.md`.
     ///
-    /// The rig is `player_wide` unconditionally — the shell has no skin-model
-    /// signal, and `canonical_model_name` already maps `"player"` to it.
+    /// The bare-arm branch draws **our own skin**, on our own rig — see the
+    /// `local_skin` resolve at that branch. It reads
+    /// `remote_skins::local()` rather than `ThirdPersonBodyState` because this
+    /// pass and the third-person body are mutually exclusive: the arm draws
+    /// exactly when that state is `None`.
     pub(super) fn prepare_first_person_hand<'a>(
         &'a self,
         device: &wgpu::Device,
@@ -795,14 +798,45 @@ impl RenderState {
             return Some(FirstPersonHand::Special(draws, layers));
         }
 
-        // The bare arm is always the wide/default player rig — this call site
-        // has no per-player skin signal (see `model_for_type`'s own doc and
-        // `EntityDraw::model_type_path`'s slim-skin case, which this pass
-        // does not reach).
-        let entry = model_for_type(EntityType::Player)?;
-        let mesh = self.entities.models.get(entry.name)?;
-        let gpu = self.entities.gpu_models.get(entry.name)?;
-        let texture = self.entities.textures.get(entry.name)?;
+        // The bare arm wears **our own** skin, resolved by
+        // `Sim::local_player_skin` and published through
+        // `remote_skins::local()`. It cannot come through
+        // `ThirdPersonBodyState` the way every other piece of local-player draw
+        // state does: this pass runs precisely on the frames that state is
+        // `None` (`gpu/frame.rs` gates the arm on `third_person_body_drawn`),
+        // so the two are mutually exclusive by construction.
+        //
+        // This used to be `player_wide` with the pack's own sheet,
+        // unconditionally — "the shell has no skin-model signal" was true when
+        // it was written and stopped being true once the resolution existed.
+        // That is the first-person half of the report *"my own arm renders with
+        // a default skin while other players render their skins correctly"*.
+        let local_skin = crate::remote_skins::local();
+        // Rig first, and it must agree with the sheet: a slim-authored sheet on
+        // the wide rig puts the arm UVs a texel out, which reads as a texture
+        // bug rather than a model one. `model_for_type` is the wide default and
+        // stays the answer when nothing resolved.
+        let rig = local_skin.as_ref().map_or_else(
+            || model_for_type(EntityType::Player).map(|entry| entry.name),
+            |skin| Some(lodestone_render::entity::player_model_name(skin.model.is_slim())),
+        )?;
+        let mesh = self.entities.models.get(rig)?;
+        let gpu = self.entities.gpu_models.get(rig)?;
+        // The same three-rung ladder the world entity pass uses for every other
+        // player (`gpu/frame.rs`'s batch texture resolve): the fetched sheet,
+        // then the uuid-hash built-in identity, then the model's own sheet. A
+        // miss on either of the first two is normal — the fetch is in flight,
+        // or the server is offline-mode and declared no texture at all — and
+        // must never fail the draw.
+        let texture = local_skin
+            .as_ref()
+            .and_then(|skin| self.entities.player_skins.get(&skin.url))
+            .or_else(|| {
+                local_skin
+                    .as_ref()
+                    .and_then(|skin| self.entities.variant_textures.get(skin.default_sheet))
+            })
+            .or_else(|| self.entities.textures.get(rig))?;
         // The bare arm takes the *same* dip: `renderPlayerArm` is called with the
         // very `inverseArmHeight` `submitArmWithItem` computed for the item branch
         // (`ItemInHandRenderer.java`), so swapping an item away for an empty slot

@@ -2734,9 +2734,25 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| tameds.get(entity).ok())
             .is_some_and(|tamed| tamed.0);
-        let variant_sheet = index.get(id.0).and_then(|entity| variants.get(entity).ok()).and_then(
-            |variant| lodestone_render::entity_variant_sheet_for(&kind.0, &variant.0, tamed),
-        );
+        // A player's built-in identity sheet takes this channel first. The two
+        // can never contend — a player has no `Variant`, and nothing with a
+        // variant axis carries a `player_skin` — so the `or_else` is an
+        // ordering statement rather than a precedence rule, and it keeps one
+        // field meaning "the sheet this entity binds instead of its model's".
+        //
+        // This is what makes `DefaultPlayerSkin`'s hash pick visible at all.
+        // Until it existed the pick's `.model` chose the rig and its `.texture`
+        // was dropped, so all eighteen identities drew the pack's two plain
+        // sheets: every skinless player was Steve or Alex.
+        let variant_sheet = player_skin
+            .0
+            .as_ref()
+            .map(|skin| skin.default_sheet)
+            .or_else(|| {
+                index.get(id.0).and_then(|entity| variants.get(entity).ok()).and_then(|variant| {
+                    lodestone_render::entity_variant_sheet_for(&kind.0, &variant.0, tamed)
+                })
+            });
         out.0.push(EntityDraw {
             id: id.0,
             type_path: Arc::clone(&kind.0),
@@ -3261,63 +3277,92 @@ fn resolve_entity_facts(
         // `textures` property to a non-player profile cannot put a skin on a
         // mob's rig.
         player_skin: is_player.then(|| uuid).flatten().map(|id| {
-            let Some(entry) = tab_list.get(&id) else {
-                // No tab-list entry for this uuid *this frame*. This is not
-                // the same thing as "this player has no skin": a
-                // `player_info_remove` clears the entry outright, and a
-                // player-type NPC whose plugin adds a tab-list entry (with
-                // `textures`) and then removes it shortly after — keeping a
-                // fake player out of the visible player list while the
-                // entity stays spawned — makes the lookup miss exactly the
-                // way a real disconnect would. Falling back to the
-                // uuid-hash default here (as this used to, unconditionally)
-                // is what "skin enable[d] for a second... then changed back
-                // to a default alex skin" was: the tab-list entry, and only
-                // the tab-list entry, disappeared, so re-deriving from it
-                // every frame silently discarded an already-resolved skin.
-                // `remote_skins::last_known` is that resolution's memory —
-                // the fetched texture is still sitting in `player_skins`'
-                // GPU cache regardless, so prefer it over the default.
-                return crate::remote_skins::last_known(&id)
-                    .unwrap_or_else(|| default_remote_skin(id));
-            };
-            match crate::remote_skins::skin_for_profile(&entry.profile) {
-                Some(skin) => {
-                    crate::remote_skins::remember(id, &skin);
-                    skin
-                }
-                None => {
-                    // No declared `textures` property reached us: every
-                    // offline-mode server (whose profile carries no property at
-                    // all), and any online-mode account that has never set a skin.
-                    // Vanilla does **not** fall back to a fixed rig here either —
-                    // `SkinManager.registerTextures` still calls
-                    // `DefaultPlayerSkin.get(profileId)`, the uuid-hash pick over
-                    // the 18 built-in identities `lodestone_assets::skin`
-                    // (`default_skin_for_uuid`) now ports. Before this, every such
-                    // player was hardcoded wide (`type_path`, unmodified — see
-                    // `EntityDraw::model_type_path`), which is exactly the
-                    // "other/NPC players show a plain Steve" report: not a fetch
-                    // failure, a resolver that never ran for the common case.
-                    //
-                    // The empty `url` is a sentinel, not a real fetch target: the
-                    // draw's own fallback ("`Some(url)` with no bind group
-                    // installed yet resolves to the default sheet too" —
-                    // `EntityDrawBatch::skin`'s doc) already treats any unknown url
-                    // as "use the model's own sheet", and `remote_skins::request`
-                    // refuses an empty url outright so this can never open a
-                    // doomed HTTP GET. This branch (tab-list entry present, but
-                    // declaring no texture) is left at the plain default rather
-                    // than consulting `last_known`: unlike the missing-entry case
-                    // above, `fold_entry`'s merge rule keeps existing properties
-                    // whenever an update omits them, so an entry that is present
-                    // and genuinely declares no texture is trustworthy evidence
-                    // this player really has none, not a transient gap.
-                    default_remote_skin(id)
-                }
-            }
+            player_skin_for_uuid(id, tab_list)
         }),
     })
+}
+
+/// The skin one player uuid resolves to against `tab_list`, with the whole
+/// fallback ladder vanilla's `SkinManager` has: the declared `textures`
+/// property, then this session's last resolution for that uuid, then the
+/// uuid-hash built-in identity.
+///
+/// # Why this is a named symbol rather than an inline closure
+///
+/// It has **two** production callers, and they are the two halves of one
+/// question. [`resolve_entity_facts`] asks it for every *other* player in view;
+/// `Sim::local_player_skin` asks it for **us**, because the local player has no
+/// tracked entity — `extract_entity_draws` deliberately excludes it — and so
+/// reaches none of this fold. Our own body and arm are drawn by a separate
+/// producer entirely, and for as long as that producer had no skin resolution
+/// of its own, the visible result was exactly the report this closes: every
+/// other player wearing their own skin while our own first-person arm and
+/// third-person body wore the pack default.
+///
+/// Sharing the ladder rather than reimplementing it is the point. A second copy
+/// would be free to drift on any of the three rungs, and two of them
+/// (`last_known`, and the identity pick) exist precisely because a naive
+/// re-derivation looked right and was not.
+#[must_use]
+pub fn player_skin_for_uuid(
+    id: uuid::Uuid,
+    tab_list: &lodestone_game::tablist::TabList,
+) -> crate::remote_skins::RemoteSkin {
+    let Some(entry) = tab_list.get(&id) else {
+        // No tab-list entry for this uuid *this frame*. This is not
+        // the same thing as "this player has no skin": a
+        // `player_info_remove` clears the entry outright, and a
+        // player-type NPC whose plugin adds a tab-list entry (with
+        // `textures`) and then removes it shortly after — keeping a
+        // fake player out of the visible player list while the
+        // entity stays spawned — makes the lookup miss exactly the
+        // way a real disconnect would. Falling back to the
+        // uuid-hash default here (as this used to, unconditionally)
+        // is what "skin enable[d] for a second... then changed back
+        // to a default alex skin" was: the tab-list entry, and only
+        // the tab-list entry, disappeared, so re-deriving from it
+        // every frame silently discarded an already-resolved skin.
+        // `remote_skins::last_known` is that resolution's memory —
+        // the fetched texture is still sitting in `player_skins`'
+        // GPU cache regardless, so prefer it over the default.
+        return crate::remote_skins::last_known(&id)
+            .unwrap_or_else(|| default_remote_skin(id));
+    };
+    match crate::remote_skins::skin_for_profile(&entry.profile) {
+        Some(skin) => {
+            crate::remote_skins::remember(id, &skin);
+            skin
+        }
+        None => {
+            // No declared `textures` property reached us: every
+            // offline-mode server (whose profile carries no property at
+            // all), and any online-mode account that has never set a skin.
+            // Vanilla does **not** fall back to a fixed rig here either —
+            // `SkinManager.registerTextures` still calls
+            // `DefaultPlayerSkin.get(profileId)`, the uuid-hash pick over
+            // the 18 built-in identities `lodestone_assets::skin`
+            // (`default_skin_for_uuid`) now ports. Before this, every such
+            // player was hardcoded wide (`type_path`, unmodified — see
+            // `EntityDraw::model_type_path`), which is exactly the
+            // "other/NPC players show a plain Steve" report: not a fetch
+            // failure, a resolver that never ran for the common case.
+            //
+            // The empty `url` is a sentinel, not a real fetch target: the
+            // draw's own fallback ("`Some(url)` with no bind group
+            // installed yet resolves to the default sheet too" —
+            // `EntityDrawBatch::skin`'s doc) already treats any unknown url
+            // as "use the model's own sheet", and `remote_skins::request`
+            // refuses an empty url outright so this can never open a
+            // doomed HTTP GET. This branch (tab-list entry present, but
+            // declaring no texture) is left at the plain default rather
+            // than consulting `last_known`: unlike the missing-entry case
+            // above, `fold_entry`'s merge rule keeps existing properties
+            // whenever an update omits them, so an entry that is present
+            // and genuinely declares no texture is trustworthy evidence
+            // this player really has none, not a transient gap.
+            default_remote_skin(id)
+        }
+    }
 }
 
 /// [`crate::remote_skins::RemoteSkin`]-shaped default for a player whose
@@ -3337,6 +3382,11 @@ fn default_remote_skin(uuid: uuid::Uuid) -> crate::remote_skins::RemoteSkin {
         // The 18 hash-picked built-in identities carry no cape — vanilla's
         // `DefaultPlayerSkin` has none either.
         cape: None,
+        // The whole point of the pick, and until this field existed it was
+        // thrown away here: only `.model` (the rig) was read, so all eighteen
+        // identities collapsed onto the pack's two plain sheets and every
+        // skinless player was Steve or Alex.
+        default_sheet: skin.texture,
     }
 }
 
@@ -7900,5 +7950,57 @@ mod tests {
              every single tick, got a residual gap of {fixed_gap}"
         );
     }
-}
 
+    /// The **discriminating** gate for "every player without a custom skin is
+    /// Steve or Alex": two uuids that vanilla's hash sends to two *different*
+    /// built-in identities must produce two different sheet references, and
+    /// neither may be one of the two legacy names.
+    ///
+    /// A gate asserting only "a sheet was chosen" cannot see the bug this
+    /// guards. `DefaultPlayerSkin`'s pick was already being made — its `.model`
+    /// (the rig) was read and honoured — and only its `.texture` was dropped,
+    /// so *some* plausible answer came back for every player. The wrong
+    /// hypothesis and the right one agree on the rig and differ only here.
+    ///
+    /// The expected values come from vanilla's own `DEFAULT_SKINS` order and
+    /// `Math.floorMod(profileId.hashCode(), 18)`, hand-evaluated: a uuid built
+    /// from a small `u128` has a zero high half, so its Java `hashCode` is the
+    /// low half itself and the index is simply `n % 18`. Index 1 is
+    /// `slim/ari`, index 11 is `wide/efe` — chosen because they differ in
+    /// *both* the identity and the rig, and because neither is `steve` or
+    /// `alex`, which is exactly the collapse being guarded against.
+    #[test]
+    fn a_skinless_player_draws_its_uuid_hash_identity_not_steve_or_alex() {
+        let tabs = lodestone_game::tablist::TabList::new();
+
+        let ari = player_skin_for_uuid(uuid::Uuid::from_u128(1), &tabs);
+        let efe = player_skin_for_uuid(uuid::Uuid::from_u128(11), &tabs);
+
+        assert_eq!(
+            ari.default_sheet, "entity/player/slim/ari",
+            "uuid 1 hashes to DEFAULT_SKINS[1]"
+        );
+        assert_eq!(
+            efe.default_sheet, "entity/player/wide/efe",
+            "uuid 11 hashes to DEFAULT_SKINS[11]"
+        );
+        assert_ne!(
+            ari.default_sheet, efe.default_sheet,
+            "two uuids landing on two identities must not collapse onto one sheet"
+        );
+        // The collapse itself, named: before the sheet was carried, both of
+        // these drew the pack's plain rig sheet and the other sixteen
+        // identities were unreachable.
+        for skin in [&ari, &efe] {
+            assert!(
+                !skin.default_sheet.ends_with("/steve") && !skin.default_sheet.ends_with("/alex"),
+                "{} is a legacy identity -- the hash pick has collapsed",
+                skin.default_sheet
+            );
+        }
+        // And the rig still tracks the identity's own half of the array.
+        assert!(ari.model.is_slim(), "DEFAULT_SKINS[1] is in the slim half");
+        assert!(!efe.model.is_slim(), "DEFAULT_SKINS[11] is in the wide half");
+    }
+
+}

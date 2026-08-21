@@ -141,6 +141,10 @@ fn state_id(state: &str) -> u32 {
 fn suppress_first_person_arm(state: &mut RenderState) {
     state.set_third_person_body_source(|| {
         Some(ThirdPersonBodyState {
+            // No skin: this fixture installs a body to suppress the first-person
+            // arm, not to assert a sheet. The draw falls back to the model's own
+            // texture, exactly as it did before this field existed.
+            player_skin: None,
             feet: glam::Vec3::new(0.0, -10_000.0, 0.0),
             body_yaw_deg: 0.0,
             anim: AnimInput::default(),

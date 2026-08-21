@@ -106,6 +106,24 @@ pub struct RemoteSkin {
     /// `install_pending_player_skins`) already caches by URL, not by "is this
     /// a skin". Not yet host-checked, same as [`Self::url`].
     pub cape: Option<String>,
+    /// The built-in identity sheet to draw while [`Self::url`] has no bind
+    /// group — a corpus reference like `entity/player/slim/ari`, resolved by
+    /// `DefaultPlayerSkin.get(uuid)`'s hash pick.
+    ///
+    /// **Not a fallback for failure only.** Vanilla's `SkinManager` resolves a
+    /// `PlayerSkin` whose texture is the default one until the fetched sheet
+    /// lands, so this is what a player looks like for the first few frames after
+    /// they come into view, as well as forever on an offline-mode server (which
+    /// sends no `textures` property at all) and for any account that has never
+    /// set a skin.
+    ///
+    /// It is populated **outside** [`skin_for_textures_property`]'s memoised
+    /// decode, and that is load-bearing: the decode is keyed by the raw property
+    /// value so two accounts wearing one skin share an entry, while this field
+    /// is a function of the *uuid* and must differ between them. Setting it
+    /// inside the memoisation would hand the second account the first's
+    /// identity.
+    pub default_sheet: &'static str,
 }
 
 /// What we know about one texture URL.
@@ -161,6 +179,44 @@ static LAST_KNOWN: Mutex<Option<HashMap<uuid::Uuid, RemoteSkin>>> = Mutex::new(N
 /// actually changed — see `entities::resolve_entity_facts`'s use of
 /// [`remember_name`]/[`last_known_name`].
 static NAME_LAST_KNOWN: Mutex<Option<HashMap<uuid::Uuid, String>>> = Mutex::new(None);
+
+/// **Our own** skin, as `Sim::local_player_skin` last resolved it.
+///
+/// The one slot in this module that is not keyed by anything, because there is
+/// exactly one local player. It exists for a single consumer that cannot reach
+/// the value any other way: the **first-person arm**
+/// (`RenderState::prepare_first_person_hand`).
+///
+/// The arm and the third-person body are mutually exclusive by construction —
+/// the arm draws precisely on the frames `Sim::third_person_body_state` returns
+/// `None` — so the arm structurally cannot read the body's `ThirdPersonBodyState`,
+/// which is where every other piece of local-player draw state travels. A slot
+/// here is how the resolution crosses that gate.
+///
+/// A `Mutex<Option<..>>` and not a channel for [`LAST_KNOWN`]'s reasons: the
+/// producer overwrites, the consumer never drains, and poisoning is ignored
+/// because a panicking producer must not stop the renderer from drawing.
+static LOCAL: Mutex<Option<RemoteSkin>> = Mutex::new(None);
+
+/// Publish the local player's resolved skin for the first-person arm to read.
+/// Called every frame by `Sim::local_player_skin`; the newest wins.
+pub fn set_local(skin: &RemoteSkin) {
+    let mut guard = match LOCAL.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *guard = Some(skin.clone());
+}
+
+/// The local player's skin, or `None` before the first resolution (pre-login,
+/// or a server that never told us our own uuid). See [`LOCAL`].
+#[must_use]
+pub fn local() -> Option<RemoteSkin> {
+    match LOCAL.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
 
 /// Every URL we have started, finished or given up on.
 static FETCHED: Mutex<Option<HashMap<String, FetchState>>> = Mutex::new(None);
@@ -221,7 +277,23 @@ fn with_map<K, V, R>(
 #[must_use]
 pub fn skin_for_profile(profile: &lodestone_game::tablist::GameProfile) -> Option<RemoteSkin> {
     let value = profile.skin_texture()?;
-    skin_for_textures_property(value)
+    let mut skin = skin_for_textures_property(value)?;
+    // The uuid-hash identity, stamped here rather than inside the decode: see
+    // [`RemoteSkin::default_sheet`] for why the memoised decode structurally
+    // cannot know it.
+    skin.default_sheet = default_sheet_for_uuid(profile.id);
+    Some(skin)
+}
+
+/// `DefaultPlayerSkin.get(uuid)`'s sheet reference — the identity this account
+/// draws until (or unless) a real texture is bound for it.
+///
+/// The uuid→`i64` pair is `UUID.getMostSignificantBits`/`getLeastSignificantBits`,
+/// which is what vanilla's hash is defined over.
+#[must_use]
+pub fn default_sheet_for_uuid(id: uuid::Uuid) -> &'static str {
+    let (hi, lo) = id.as_u64_pair();
+    lodestone_assets::skin::default_skin_for_uuid(hi as i64, lo as i64).texture
 }
 
 /// The usable skin declared by one raw `textures` profile-property value.
@@ -243,6 +315,14 @@ pub fn skin_for_textures_property(value: &str) -> Option<RemoteSkin> {
                     url: skin.url,
                     model: skin.model,
                     cape: textures.cape,
+                    // `DefaultPlayerSkin.getDefaultSkin()` — vanilla's own
+                    // answer when no uuid is in hand, which is exactly this
+                    // function's situation: it is keyed by the property value
+                    // and shared with placed player heads, which carry a
+                    // texture blob and no account. A caller that *does* know
+                    // the uuid (`skin_for_profile`) overwrites this with the
+                    // hash pick.
+                    default_sheet: lodestone_assets::skin::default_skin().texture,
                 })
             });
         if decoded.is_none() {

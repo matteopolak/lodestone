@@ -547,6 +547,69 @@ fn sky_reference_tracks_the_clear_colour() {
     assert_eq!(sky_clear_bytes(), [62, 118, 211]);
 }
 
+/// The local player's own skin must survive [`ThirdPersonBodyState::into_draw`]
+/// — on **both** channels the world entity pass consults, and it consulted
+/// neither for us before this.
+///
+/// # What this gate covers, and what it deliberately does not
+///
+/// It covers the *plumbing*: `into_draw` hardcoded `player_skin: None` and
+/// `variant_sheet: None` for as long as it existed, so a resolution arriving
+/// on `ThirdPersonBodyState` would have been discarded one line before the
+/// draw. That is a claim about this function and this gate settles it.
+///
+/// It does **not** cover the producer. This fixture installs its own
+/// `ThirdPersonBodyState`, so it proves nothing about whether
+/// `Sim::third_person_body_state` fills that field in a real session — which
+/// is the other half of the same bug and needs a live `NetClient` (the local
+/// uuid and the tab list both come through it) that no hermetic harness here
+/// builds. Stated rather than implied, because a passing gate over an
+/// installed input reads as broader evidence than it is.
+///
+/// The two channels are asserted separately because they fail differently and
+/// a fetched sheet masks the identity one: `player_skin.url` selects a bind
+/// group in `player_skins` once a fetch lands, while `variant_sheet` is the
+/// built-in identity that draws until (or unless) it does. Setting only the
+/// first leaves us on the pack's plain Steve for every offline-mode server.
+#[test]
+fn the_local_bodys_own_skin_reaches_both_draw_channels() {
+    let skin = crate::remote_skins::RemoteSkin {
+        url: "https://textures.minecraft.net/texture/feedface".to_owned(),
+        model: lodestone_assets::PlayerModelType::Slim,
+        cape: None,
+        // A non-legacy identity on purpose: `steve`/`alex` are what the plain
+        // model sheets already look like, so either would pass under the very
+        // collapse this field exists to undo.
+        default_sheet: "entity/player/slim/ari",
+    };
+    let state = ThirdPersonBodyState {
+        player_skin: Some(skin.clone()),
+        feet: Vec3::ZERO,
+        body_yaw_deg: 0.0,
+        anim: AnimInput::REST,
+        scale: 1.0,
+        swim_amount: 0.0,
+        slim: skin.model.is_slim(),
+        equipment: Vec::new(),
+    };
+    let draw = state.into_draw();
+    assert_eq!(
+        draw.player_skin.as_ref().map(|s| s.url.as_str()),
+        Some(skin.url.as_str()),
+        "our own fetched sheet must reach EntityDraw::player_skin, or the batch \
+         key carries no skin and the draw binds the model's own texture"
+    );
+    assert_eq!(
+        draw.variant_sheet,
+        Some("entity/player/slim/ari"),
+        "our own built-in identity must reach EntityDraw::variant_sheet, or we \
+         draw the pack's plain rig sheet whenever the fetch has not landed"
+    );
+    // And the rig still tracks the sheet, which is the pairing that makes a
+    // skin look right rather than a texel out at the shoulder.
+    assert_eq!(draw.type_path.as_ref(), "player_slim");
+}
+
 /// Hermetic (no GPU, no device): [`ThirdPersonBodyState::into_draw`] must
 /// hand back exactly the [`EntityDraw`] shape [`RenderState::render_inner`]
 /// folds into a frame's entity list, and that draw must actually resolve
@@ -559,6 +622,10 @@ fn third_person_body_state_resolves_through_the_real_corpus() {
     let models = EntityModelSet::load();
     for slim in [false, true] {
         let state = ThirdPersonBodyState {
+            // No skin: this fixture installs a body to suppress the first-person
+            // arm, not to assert a sheet. The draw falls back to the model's own
+            // texture, exactly as it did before this field existed.
+            player_skin: None,
             feet: Vec3::new(1.0, 2.0, 3.0),
             body_yaw_deg: 123.0,
             anim: AnimInput {
