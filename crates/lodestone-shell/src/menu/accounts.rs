@@ -186,9 +186,9 @@ enum WorkerMsg {
     },
     /// The full chain completed; the profile is ready to fold into metadata.
     /// The keychain save already happened on the worker thread (see
-    /// [`run_device_code_login`]) — only the metadata write is left, and that
-    /// happens in [`AccountsNav::pump`] on the render thread, so every
-    /// `profiles.json` write goes through one place.
+    /// [`run_browser_login`]/[`finish_ms_token`]) — only the metadata write is
+    /// left, and that happens in [`AccountsNav::pump`] on the render thread,
+    /// so every `profiles.json` write goes through one place.
     SignedIn(AccountProfile),
     /// A step in the chain failed. Already rendered to plain text.
     Failed(String),
@@ -645,11 +645,15 @@ impl AccountsNav {
             let (tx, rx) = channel();
             let cancel = Arc::new(AtomicBool::new(false));
             let worker_cancel = Arc::clone(&cancel);
-            // The **loopback** flow, not the device-code one: it opens the real
-            // Microsoft login in the user's browser and needs no code typed.
-            // `run_device_code_login` is kept beside it and still compiled —
-            // it is the only option on a headless host, and it is the fallback
-            // if the browser cannot be launched.
+            // The **loopback** flow: it opens the real Microsoft login in the
+            // user's browser and needs no code typed. There is no device-code
+            // fallback for a headless host or a failed browser launch — a
+            // prior `run_device_code_login` implemented that chain but had no
+            // caller (its own doc claimed it was "kept as the fallback" while
+            // nothing ever selected it), so it was dead code rather than a
+            // real fallback and was removed. `open_in_browser`'s native arm
+            // also silently discards a failed `spawn`, so wiring a real
+            // fallback needs that failure surfaced first.
             std::thread::spawn(move || run_browser_login(tx, worker_cancel));
             (rx, cancel)
         });
@@ -1188,122 +1192,20 @@ fn describe_finish_interactive_failure(e: &lodestone_auth::AuthError) -> String 
     }
 }
 
-/// Runs the full device-code → Xbox Live → XSTS → Minecraft-services chain on
-/// its own thread with its own single-threaded runtime, mirroring
-/// `menu/status.rs`'s per-probe thread. The keychain save happens here, on
-/// the worker thread, because it is this thread that holds the refresh
-/// token; the metadata write happens back on the render thread inside
-/// [`AccountsNav::pump`], so every `profiles.json` write funnels through one
-/// place rather than racing a foreground Remove.
-#[cfg(not(target_arch = "wasm32"))]
-fn run_device_code_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(e) => {
-            let _ = tx.send(WorkerMsg::Failed(format!("could not start a runtime: {e}")));
-            return;
-        }
-    };
-    rt.block_on(async move {
-        // `resolve_client_id` returns Lodestone's own registered Azure
-        // application id (`login::DEFAULT_CLIENT_ID`), overridable via
-        // `LODESTONE_MS_CLIENT_ID`. It still errors when that variable is set
-        // to a blank value — an explicit "use nothing" is a caller mistake
-        // worth surfacing — so this match arm stays live. It is deliberately
-        // never `flow::MOJANG_CLIENT_ID`, the *official launcher's*
-        // registration: Mojang gates Minecraft API access per Azure
-        // application, so borrowing it would misrepresent this client to
-        // Microsoft. See `docs/accounts.md`'s configuration section.
-        let client_id = match lodestone_auth::login::resolve_client_id() {
-            Ok(id) => id,
-            Err(e) => {
-                let _ = tx.send(WorkerMsg::Failed(describe_auth_error(&e)));
-                return;
-            }
-        };
-        // Reqwest is built with `rustls-no-provider`, so
-        // `Client::new()` panics unless a rustls crypto provider is installed.
-        // Idempotent, and deliberately adjacent to the construction it protects.
-        lodestone_auth::install_crypto_provider();
-        let client = reqwest::Client::new();
-        let mut pending = match lodestone_auth::flow::PendingLogin::begin(&client, &client_id).await {
-            Ok(p) => p,
-            Err(e) => {
-                let _ = tx.send(WorkerMsg::Failed(describe_auth_error(&e)));
-                return;
-            }
-        };
-        let prompt = pending.prompt();
-        let _ = tx.send(WorkerMsg::Prompt {
-            user_code: prompt.user_code.clone(),
-            verification_uri: prompt.verification_uri.clone(),
-        });
-
-        loop {
-            if cancellable_sleep(pending.interval(), &cancel).await {
-                let _ = tx.send(WorkerMsg::Cancelled);
-                return;
-            }
-            match pending.poll_once(&client, &client_id).await {
-                Ok(None) => continue,
-                Ok(Some(ms_token)) => {
-                    // Was two hand-rolled calls (`session_from_ms_token` then
-                    // `secrets.save_refresh_token`) duplicating
-                    // `login::finish_interactive`'s own composition — That fix.
-                    // The `metadata` argument is scratch: this thread's real
-                    // metadata lives on the render thread and is written back
-                    // through `AccountsNav::pump`, not here, so the upsert
-                    // `finish_interactive` performs on it is simply discarded.
-                    let secrets = lodestone_auth::AccountSecrets::open();
-                    let mut scratch = AccountsMetadata::default();
-                    let session = match lodestone_auth::login::finish_interactive(
-                        &client,
-                        &ms_token,
-                        &secrets,
-                        &mut scratch,
-                    )
-                    .await
-                    {
-                        Ok(s) => s,
-                        Err(e) => {
-                            let _ = tx.send(WorkerMsg::Failed(describe_finish_interactive_failure(&e)));
-                            return;
-                        }
-                    };
-                    // The profile now carries its skin, so fetch it
-                    // here — this is the only place in the process with both the
-                    // services profile and an HTTP client. Never fatal: every
-                    // failure inside is a `warn!`, because a dead texture CDN
-                    // must not fail an otherwise successful sign-in.
-                    crate::skin_fetch::fetch_own_skin(&client, &session.profile).await;
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    let profile = AccountProfile {
-                        profile_id: session.profile.id,
-                        username: session.profile.name.clone(),
-                        skin_url: session.profile.skin.as_ref().map(|s| s.url.clone()),
-                        last_used: now,
-                    };
-                    let _ = tx.send(WorkerMsg::SignedIn(profile));
-                    return;
-                }
-                Err(e) => {
-                    let _ = tx.send(WorkerMsg::Failed(describe_auth_error(&e)));
-                    return;
-                }
-            }
-        }
-    });
-}
-
 /// Runs the **loopback** sign-in: the real Microsoft login page in the user's
 /// browser, no code to type. This is what Add Account uses.
 ///
-/// Everything from the `MsToken` onward is identical to
-/// [`run_device_code_login`] — same Xbox Live → XSTS → Minecraft-services chain,
-/// same keychain save here on the worker thread, same `SignedIn` message with the
+/// A device-code → Xbox Live → XSTS → Minecraft-services worker
+/// (`run_device_code_login`) used to live beside this one, sharing everything
+/// from the `MsToken` onward through [`finish_ms_token`]. It was deleted: it
+/// had no caller (`handle_key` only ever spawns this loopback worker) and its
+/// own inline copy of the post-token steps had drifted from
+/// [`finish_ms_token`]'s — it was missing the `tracing::warn!` on a
+/// session-derivation failure. If a real headless/no-browser fallback is
+/// wanted, rebuild it from `lodestone_auth::flow::PendingLogin` and call
+/// [`finish_ms_token`] rather than re-inlining its body.
+///
+/// Same keychain save here on the worker thread, same `SignedIn` message with the
 /// metadata write left to [`AccountsNav::pump`]. Only how the authorization code
 /// arrives differs, which is the whole reason
 /// [`lodestone_auth::browser_login`] was shaped to mirror
@@ -1323,9 +1225,8 @@ fn run_browser_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
         }
     };
     rt.block_on(async move {
-        // Same refusal to fall back to the official launcher's id as the
-        // device-code path — see `run_device_code_login`'s comment and
-        // `lodestone_auth::login`'s docs.
+        // Deliberately never `flow::MOJANG_CLIENT_ID`, the *official
+        // launcher's* registration — see `lodestone_auth::login`'s docs.
         let client_id = match lodestone_auth::login::resolve_client_id() {
             Ok(id) => id,
             Err(e) => {
@@ -1409,9 +1310,8 @@ async fn finish_ms_token(
 ) {
     // Was two hand-rolled calls (`session_from_ms_token` then
     // `secrets.save_refresh_token`) duplicating `login::finish_interactive`'s
-    // own composition — That fix. `scratch` is discarded for the same reason
-    // `run_device_code_login` discards its own: this thread's real metadata
-    // lives on the render thread and is written back through
+    // own composition — That fix. `scratch` is discarded: this thread's real
+    // metadata lives on the render thread and is written back through
     // `AccountsNav::pump`, never here.
     let secrets = lodestone_auth::AccountSecrets::open();
     let mut scratch = AccountsMetadata::default();
@@ -1440,8 +1340,9 @@ async fn finish_ms_token(
                 return;
             }
         };
-    // That fix, as in `run_device_code_login` — both flows reach the same
-    // services profile, so both fetch. Never fatal.
+    // The profile now carries its skin, so fetch it here — this is the only
+    // place in the process with both the services profile and an HTTP
+    // client. Never fatal.
     crate::skin_fetch::fetch_own_skin(client, &session.profile).await;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1455,35 +1356,17 @@ async fn finish_ms_token(
     }));
 }
 
-/// [`cancellable_sleep`] in milliseconds, for the loopback flow's tighter poll.
-///
-/// Separate rather than making the existing function take millis: that one's
-/// `secs` argument comes straight from Microsoft's `interval` field, and widening
-/// it would invite passing a millisecond value where a second value is meant.
+/// Sleeps up to `millis` milliseconds, checking `cancel` every poll so an
+/// interactive Cancel keypress is felt quickly rather than after a whole
+/// sleep. Returns `true` if cancelled mid-sleep. Millis rather than a
+/// `Duration`: the loopback flow's 100ms poll is a literal at the call site,
+/// not a value that flows in from anywhere that would want a richer type.
 #[cfg(not(target_arch = "wasm32"))]
 async fn cancellable_sleep_ms(millis: u64, cancel: &AtomicBool) -> bool {
     if cancel.load(Ordering::Relaxed) {
         return true;
     }
     tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
-    cancel.load(Ordering::Relaxed)
-}
-
-/// Sleeps up to `secs` seconds, checking `cancel` every 100ms so an
-/// interactive Cancel keypress is felt quickly rather than after a whole
-/// multi-second poll interval. Returns `true` if cancelled mid-sleep.
-#[cfg(not(target_arch = "wasm32"))]
-async fn cancellable_sleep(secs: u64, cancel: &AtomicBool) -> bool {
-    let mut remaining = std::time::Duration::from_secs(secs);
-    let step = std::time::Duration::from_millis(100);
-    while remaining > std::time::Duration::ZERO {
-        if cancel.load(Ordering::Relaxed) {
-            return true;
-        }
-        let this_step = remaining.min(step);
-        tokio::time::sleep(this_step).await;
-        remaining -= this_step;
-    }
     cancel.load(Ordering::Relaxed)
 }
 
