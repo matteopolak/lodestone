@@ -450,16 +450,28 @@ impl OutlineRenderer {
             let ca = corner(a);
             let cb = corner(b);
             // Two triangles covering the quad: (A-, A+, B-) and (A+, B+, B-),
-            // where `A-`/`A+` are endpoint A pushed to side -1.0/+1.0 and
-            // likewise for B. See the vertex shader for how `side` is
-            // consumed.
+            // where `A-`/`A+` are endpoint A pushed to the ribbon's minus/plus
+            // edge and likewise for B.
+            //
+            // **The stored `side` is negated for every B vertex, and must be.**
+            // The shader offsets along `perp(screen(other) - screen(this))`, so
+            // at A that vector is B-A and at B it is A-B -- the normal points
+            // the opposite way at the far endpoint. A B vertex therefore needs
+            // the *opposite* stored side to land on the same edge as the A
+            // vertex it pairs with. Storing the edge's own sign at both ends
+            // makes the two triangles pick opposite diagonals: a bow-tie that
+            // pinches to zero width at the segment's midpoint while staying
+            // full width at both endpoints, which reads as "the line is thin
+            // and uneven" rather than as a wrong quad. The debug-line pass had
+            // the identical defect; see `gpu/debug_lines.rs` and
+            // `docs/debug-overlay.md` for the measured width profile.
             let quad: [([f32; 3], [f32; 3], f32); VERTS_PER_EDGE] = [
                 (ca, cb, -1.0),
                 (ca, cb, 1.0),
-                (cb, ca, -1.0),
-                (ca, cb, 1.0),
                 (cb, ca, 1.0),
+                (ca, cb, 1.0),
                 (cb, ca, -1.0),
+                (cb, ca, 1.0),
             ];
             let base = e * VERTS_PER_EDGE * FLOATS_PER_VERT;
             for (i, (pos, other, side)) in quad.into_iter().enumerate() {
