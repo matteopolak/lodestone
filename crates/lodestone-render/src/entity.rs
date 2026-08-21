@@ -1137,6 +1137,16 @@ pub fn non_living_vehicle_placement(model_name: &str) -> Option<(f32, f32)> {
         // no mask at all.
         "boat" | "chest_boat" | "raft" | "chest_raft" | "boat_water_patch" => Some((0.375, 90.0)),
         "minecart" => Some((0.375, 0.0)),
+        // A leash knot's renderer flips the model and submits it, and does
+        // nothing else — no bob, no yaw, and (because it is not a living-entity
+        // renderer) no 1.501 feet lift. So it belongs in this table rather than
+        // on the mob placement, which would bury it 1.501 blocks under the fence
+        // post it is tied to; the bob is a genuine `0.0` rather than a stand-in.
+        //
+        // The `180 - yaw` this placement applies is a harmless surplus here: the
+        // entity's yaw is always zero and the knot is a 6×6 box centred on its
+        // own pivot, so the half-turn only mirrors the sheet across X.
+        "leash_knot" => Some((0.0, 0.0)),
         _ => None,
     }
 }

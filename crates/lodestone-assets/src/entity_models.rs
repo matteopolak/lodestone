@@ -5082,6 +5082,372 @@ pub fn trident_model() -> EntityModelDef {
     }
 }
 
+/// Giant: the plain humanoid mesh baked at a 6× mesh scale, on the zombie sheet.
+///
+/// The 6× is the whole port. This type's registry hitbox is 3.6 × 12.28 and the
+/// humanoid mesh it reuses is two blocks tall, so a 1× rig would stand ankle-deep
+/// inside its own collision box — the "you walk into something you cannot see"
+/// shape this corpus exists to close. There is no per-entity scale attribute
+/// carrying it either: the factor lives in the baked layer, which is why it
+/// belongs here rather than at a draw site. See `docs/entity-rendering.md` for the
+/// vanilla layer and renderer this is transcribed from.
+pub fn giant_model() -> EntityModelDef {
+    scaled(zombie_model(), 6.0)
+}
+
+/// Leash knot: one 6×8×6 box hanging below its pivot, sheet 32×32.
+///
+/// The whole model. Its renderer is **not** a living-entity renderer — it flips
+/// the model and submits, with no feet lift and no yaw — so this rig is routed
+/// through `lodestone_render::entity::non_living_vehicle_placement` with a zero
+/// bob rather than through the mob placement, or the knot would hang 1.501 blocks
+/// under the fence post it is tied to.
+pub fn leash_knot_model() -> EntityModelDef {
+    EntityModelDef {
+        texture_width: 32,
+        texture_height: 32,
+        root: PartDef::new(PartPose::ZERO).with_child(
+            "knot",
+            PartDef::new(PartPose::ZERO).with_cube(cube(
+                [-3.0, -8.0, -3.0],
+                [6.0, 8.0, 6.0],
+                [0.0, 0.0],
+            )),
+        ),
+    }
+}
+
+/// Sulfur cube (adult): the outer 18³ translucent shell, sheet 128×128.
+///
+/// # The root pose is a renderer constant, not part of the baked layer
+///
+/// The layer this transcribes is a bare box centred on its own pivot, which would
+/// draw a metre-and-a-bit cube floating with its centre 1.501 blocks above the
+/// feet. Everything that puts it on the ground lives in the renderer's `scale`
+/// hook, which this corpus has no equivalent of, so the constant part of that hook
+/// is folded into the root pose here. Derived rather than eyeballed, in the order
+/// vanilla composes it (all of it inside the flipped, Y-down model frame, *before*
+/// the 1.501 feet lift):
+///
+/// ```text
+///   S(0.999) · T(0, 0.001, 0)        z-fight mitigation
+///   · S(2)                           the adult's size multiplier
+///   · S(0.5) · T(0, 0.98 - 1/16, 0)  the adult's extra downscale and drop
+/// ```
+///
+/// `S(2) · S(0.5)` is the identity, so the surviving scale is `0.999` and the
+/// surviving translation is `0.9185` blocks. Composing that with the `-1.501` lift
+/// and re-expressing as *translate outside scale* (which is what a `PartPose` is)
+/// gives `T(0, 0.91909, 0) · S(0.999)` — `14.7054` texels of Y offset. The check
+/// that it landed: the box then spans world `y ∈ [0.020, 1.144]`, i.e. sitting on
+/// the ground and overhanging its own 0.98-block hitbox by the same 1.147 ratio at
+/// either size, which is the ratio the size-1 arithmetic gives independently.
+///
+/// **Not modelled**: the inner core (a second, separate layer), the block a cube
+/// may be carrying, the fuse swell, and the per-instance squish — all four are
+/// per-entity state this rig has no channel for. What is here is the shell, which
+/// is what makes the mob visible at all.
+pub fn sulfur_cube_model() -> EntityModelDef {
+    EntityModelDef {
+        texture_width: 128,
+        texture_height: 128,
+        root: PartDef::new(PartPose {
+            y: 14.7054,
+            scale: [0.999, 0.999, 0.999],
+            ..PartPose::ZERO
+        })
+        .with_child(
+            "cube",
+            PartDef::new(PartPose::ZERO).with_cube(cube(
+                [-9.0, -9.0, -9.0],
+                [18.0, 18.0, 18.0],
+                [0.0, 0.0],
+            )),
+        ),
+    }
+}
+
+/// Breeze: a two-box head over three rods on a hexagonal-ish tripod, sheet 32×32.
+///
+/// The rods are the reason the rotations here are not round numbers: each is the
+/// same 2×8×2 box, placed at a ±30° yaw about a shared pivot 3 texels up, then
+/// rolled a half-turn — `2.5981` is `3·√3/2`, the X leg of that placement, and it
+/// must stay paired with its own `∓1.0472` (30°) yaw or the tripod splays.
+///
+/// **The wind is a separate rig and is deliberately absent.** It is a translucent
+/// three-shell funnel on its own 128×128 sheet, drawn as a second pass over the
+/// same entity; a corpus entry has one sheet, so folding it in here would draw the
+/// funnel with the body's UVs. The `eyes` part is absent for a different reason: it
+/// is a texel-for-texel duplicate of `head` that exists only so the emissive pass
+/// has a part to retain, so including it would add coplanar duplicate quads and
+/// change no pixel.
+pub fn breeze_model() -> EntityModelDef {
+    // One shared box; only the pose differs. Written as a whole `PartPose` per rod
+    // rather than as five loose floats through a helper, because every argument
+    // here is an `f32` and two of the three rods differ from each other in exactly
+    // one sign — the shape a transposed pair survives unnoticed.
+    let rod = |pose: PartPose| {
+        PartDef::new(pose).with_cube(cube([-1.0, 0.0, -3.0], [2.0, 8.0, 2.0], [0.0, 17.0]))
+    };
+    let rods = PartDef::new(PartPose::offset(0.0, 8.0, 0.0))
+        .with_child(
+            "rod_1",
+            rod(PartPose::offset_and_rotation(
+                2.5981, -3.0, 1.5, -2.7489, -1.0472, 3.1416,
+            )),
+        )
+        .with_child(
+            "rod_2",
+            rod(PartPose::offset_and_rotation(
+                -2.5981, -3.0, 1.5, -2.7489, 1.0472, 3.1416,
+            )),
+        )
+        .with_child(
+            "rod_3",
+            rod(PartPose::offset_and_rotation(
+                0.0, -3.0, -3.0, 0.3927, 0.0, 0.0,
+            )),
+        );
+    let head = PartDef::new(PartPose::offset(0.0, 4.0, 0.0))
+        .with_cube(cube([-5.0, -5.0, -4.2], [10.0, 3.0, 4.0], [4.0, 24.0]))
+        .with_cube(cube([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0, 0.0]));
+    EntityModelDef {
+        texture_width: 32,
+        texture_height: 32,
+        root: PartDef::new(PartPose::ZERO).with_child(
+            "body",
+            PartDef::new(PartPose::ZERO)
+                .with_child("rods", rods)
+                .with_child("head", head),
+        ),
+    }
+}
+
+/// Creaking: a lopsided wooden biped, sheet 64×64.
+///
+/// Two things about it are unlike every other humanoid-shaped rig here, and both
+/// are load bearing rather than transcription noise:
+///
+/// * **It is deliberately asymmetric.** The left arm is 16 texels long and the
+///   right 21; the legs differ in length, pivot and thickness. A "tidied" mirror
+///   of either side is wrong.
+/// * **Four of its boxes are zero-extent planes** — two 9×14 flags on the head and
+///   a 5×9 sole under each foot. A zero-size axis bakes two coincident faces, which
+///   is how this corpus already draws flat parts elsewhere; do not round them up to
+///   a thin box.
+///
+/// The part names (`head`, `right_arm`, `left_arm`, `right_leg`, `left_leg`) put
+/// this rig in the humanoid animation family, which is an approximation: vanilla
+/// drives it from keyframe clips, not from the humanoid limb swing. The rest pose
+/// is faithful and the swing is not, which is the right way round for a mob whose
+/// defect was being invisible.
+pub fn creaking_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::offset(-3.0, -11.0, 0.0))
+        .with_cube(cube([-3.0, -10.0, -3.0], [6.0, 10.0, 6.0], [0.0, 0.0]))
+        .with_cube(cube([-3.0, -13.0, -3.0], [6.0, 3.0, 6.0], [28.0, 31.0]))
+        .with_cube(cube([3.0, -13.0, 0.0], [9.0, 14.0, 0.0], [12.0, 40.0]))
+        .with_cube(cube([-12.0, -14.0, 0.0], [9.0, 14.0, 0.0], [34.0, 12.0]));
+    let body = PartDef::new(PartPose::offset(0.0, -7.0, 1.0))
+        .with_cube(cube([0.0, -3.0, -3.0], [6.0, 13.0, 5.0], [0.0, 16.0]))
+        .with_cube(cube([-6.0, -4.0, -3.0], [6.0, 7.0, 5.0], [24.0, 0.0]));
+    let right_arm = PartDef::new(PartPose::offset(-7.0, -9.5, 1.5))
+        .with_cube(cube([-2.0, -1.5, -1.5], [3.0, 21.0, 3.0], [22.0, 13.0]))
+        .with_cube(cube([-2.0, 19.5, -1.5], [3.0, 4.0, 3.0], [46.0, 0.0]));
+    let left_arm = PartDef::new(PartPose::offset(6.0, -9.0, 0.5))
+        .with_cube(cube([0.0, -1.0, -1.5], [3.0, 16.0, 3.0], [30.0, 40.0]))
+        .with_cube(cube([0.0, -5.0, -1.5], [3.0, 4.0, 3.0], [52.0, 12.0]))
+        .with_cube(cube([0.0, 15.0, -1.5], [3.0, 4.0, 3.0], [52.0, 19.0]));
+    let upper_body = PartDef::new(PartPose::offset(-1.0, -19.0, 0.0))
+        .with_child("head", head)
+        .with_child("body", body)
+        .with_child("right_arm", right_arm)
+        .with_child("left_arm", left_arm);
+    let left_leg = PartDef::new(PartPose::offset(1.5, -16.0, 0.5))
+        .with_cube(cube([-1.5, 0.0, -1.5], [3.0, 16.0, 3.0], [42.0, 40.0]))
+        .with_cube(cube([-1.5, 15.7, -4.5], [5.0, 0.0, 9.0], [45.0, 55.0]));
+    let right_leg = PartDef::new(PartPose::offset(-1.0, -17.5, 0.5))
+        .with_cube(cube([-3.0, -1.5, -1.5], [3.0, 19.0, 3.0], [0.0, 34.0]))
+        .with_cube(cube([-5.0, 17.2, -4.5], [5.0, 0.0, 9.0], [45.0, 46.0]))
+        .with_cube(cube([-3.0, -4.5, -1.5], [3.0, 3.0, 3.0], [12.0, 34.0]));
+    let root = PartDef::new(PartPose::offset(0.0, 24.0, 0.0))
+        .with_child("upper_body", upper_body)
+        .with_child("left_leg", left_leg)
+        .with_child("right_leg", right_leg);
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root: PartDef::new(PartPose::ZERO).with_child("root", root),
+    }
+}
+
+/// Copper golem: a squat biped with a lightning-rod antenna, sheet 64×64.
+///
+/// The standing pose. Vanilla bakes four more layers off the same texel budget (a
+/// running, sitting and star pose, plus the emissive eyes); those are separate
+/// baked meshes selected per animation state, not parts of this one, and this
+/// corpus resolves one mesh per model name.
+///
+/// Three of the head's four boxes carry a **negative** grow (`-0.015`) and one a
+/// positive one: the antenna stack is shrunk into the skull and the skull itself is
+/// pushed out, which is what stops the four coplanar seams z-fighting. Dropping the
+/// signs — or applying one sign to all four — puts the flicker back.
+///
+/// The oxidation stage is a texture axis (four sheets) driven by per-entity state
+/// this rig has no channel for, so it draws the unoxidised sheet.
+pub fn copper_golem_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::offset(0.0, -6.0, 0.0))
+        .with_cube(cube([-4.0, -5.0, -5.0], [8.0, 5.0, 10.0], [0.0, 0.0]).grown(0.015))
+        .with_cube(cube([-1.0, -2.0, -6.0], [2.0, 3.0, 2.0], [56.0, 0.0]))
+        .with_cube(cube([-1.0, -9.0, -1.0], [2.0, 4.0, 2.0], [37.0, 8.0]).grown(-0.015))
+        .with_cube(cube([-2.0, -13.0, -2.0], [4.0, 4.0, 4.0], [37.0, 0.0]).grown(-0.015));
+    let body = PartDef::new(PartPose::offset(0.0, -5.0, 0.0))
+        .with_cube(cube([-4.0, -6.0, -3.0], [8.0, 6.0, 6.0], [0.0, 15.0]))
+        .with_child("head", head)
+        .with_child(
+            "right_arm",
+            PartDef::new(PartPose::offset(-4.0, -6.0, 0.0)).with_cube(cube(
+                [-3.0, -1.0, -2.0],
+                [3.0, 10.0, 4.0],
+                [36.0, 16.0],
+            )),
+        )
+        .with_child(
+            "left_arm",
+            PartDef::new(PartPose::offset(4.0, -6.0, 0.0)).with_cube(cube(
+                [0.0, -1.0, -2.0],
+                [3.0, 10.0, 4.0],
+                [50.0, 16.0],
+            )),
+        );
+    let root = PartDef::new(PartPose::offset(0.0, 24.0, 0.0))
+        .with_child("body", body)
+        .with_child(
+            "right_leg",
+            PartDef::new(PartPose::offset(0.0, -5.0, 0.0)).with_cube(cube(
+                [-4.0, 0.0, -2.0],
+                [4.0, 5.0, 4.0],
+                [0.0, 27.0],
+            )),
+        )
+        .with_child(
+            "left_leg",
+            PartDef::new(PartPose::offset(0.0, -5.0, 0.0)).with_cube(cube(
+                [0.0, 0.0, -2.0],
+                [4.0, 5.0, 4.0],
+                [16.0, 27.0],
+            )),
+        );
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}
+
+/// Happy ghast (adult): a 16³ body with nine hanging tentacles, sheet 64×64, the
+/// whole mesh baked at a 4× scale.
+///
+/// Unlike its hostile cousin the tentacle lengths are **authored, not seeded** —
+/// 5, 7, 4, 5, 5, 7, 8, 8, 5 in part order — and the X/Z offsets are on a
+/// hand-placed 3×3 grid rather than a computed one. Do not reach for the seeded
+/// generator that builds the other ghast's fringe; it produces different lengths.
+///
+/// The 4× is a mesh-level scale, the same mechanism the hostile ghast uses, and it
+/// is what fills the 4×4 hitbox. The baby is a separate baked layer (a second body
+/// shell, then 0.2375× on top), and the harness and ropes are separate equipment
+/// layers; none of the three is a part of this mesh.
+pub fn happy_ghast_model() -> EntityModelDef {
+    // (x, y, z, length) per tentacle, in part order.
+    const TENTACLES: [(f32, f32, f32, f32); 9] = [
+        (-3.75, 7.0, -5.0, 5.0),
+        (1.25, 7.0, -5.0, 7.0),
+        (6.25, 7.0, -5.0, 4.0),
+        (-6.25, 7.0, 0.0, 5.0),
+        (-1.25, 7.0, 0.0, 5.0),
+        (3.75, 7.0, 0.0, 7.0),
+        (-3.75, 7.0, 5.0, 8.0),
+        (1.25, 7.0, 5.0, 8.0),
+        (6.25, 7.0, 5.0, 5.0),
+    ];
+    let mut body = PartDef::new(PartPose::offset(0.0, 16.0, 0.0)).with_cube(cube(
+        [-8.0, -8.0, -8.0],
+        [16.0, 16.0, 16.0],
+        [0.0, 0.0],
+    ));
+    for (i, (x, y, z, len)) in TENTACLES.iter().enumerate() {
+        body = body.with_child(
+            &format!("tentacle{i}"),
+            PartDef::new(PartPose::offset(*x, *y, *z)).with_cube(cube(
+                [-1.0, 0.0, -1.0],
+                [2.0, *len, 2.0],
+                [0.0, 0.0],
+            )),
+        );
+    }
+    scaled(
+        EntityModelDef {
+            texture_width: 64,
+            texture_height: 64,
+            root: PartDef::new(PartPose::ZERO).with_child("body", body),
+        },
+        4.0,
+    )
+}
+
+/// Nautilus: a spiral shell over a body with a three-part beak, sheet 128×128.
+///
+/// Shared, unmodified, by the zombie variant — that type differs only in its sheet
+/// and in a coral overlay that is its own baked layer, so both corpus entries build
+/// this same mesh.
+///
+/// Two transcription traps live in the fractional offsets, and both are there to
+/// stop coplanar faces flickering rather than to move anything visibly: the body's
+/// two boxes start at `y = -4.51` (not `-4.5`) so they clear the shell, and the
+/// upper and lower beak carry a **negative** grow of `-0.001` while the inner mouth
+/// between them carries none. Rounding any of the three loses the separation.
+///
+/// The shell's third box and the body's second are zero-extent planes — the shell's
+/// rear rim and the body's tail fin — and bake as coincident double faces.
+pub fn nautilus_model() -> EntityModelDef {
+    let shell = PartDef::new(PartPose::offset(0.0, -13.0, 5.0))
+        .with_cube(cube([-7.0, -10.0, -7.0], [14.0, 10.0, 16.0], [0.0, 0.0]))
+        .with_cube(cube([-7.0, 0.0, -7.0], [14.0, 8.0, 20.0], [0.0, 26.0]))
+        .with_cube(cube([-7.0, 0.0, 6.0], [14.0, 8.0, 0.0], [48.0, 26.0]));
+    let body = PartDef::new(PartPose::offset(0.0, -8.5, 12.3))
+        .with_cube(cube([-5.0, -4.51, -3.0], [10.0, 8.0, 14.0], [0.0, 54.0]))
+        .with_cube(cube([-5.0, -4.51, 7.0], [10.0, 8.0, 0.0], [0.0, 76.0]))
+        .with_child(
+            "upper_mouth",
+            PartDef::new(PartPose::offset(0.0, -2.51, 7.0)).with_cube(
+                cube([-5.0, -2.0, 0.0], [10.0, 4.0, 4.0], [54.0, 54.0]).grown(-0.001),
+            ),
+        )
+        .with_child(
+            "inner_mouth",
+            PartDef::new(PartPose::offset(0.0, -0.51, 7.5)).with_cube(cube(
+                [-3.0, -2.0, -0.5],
+                [6.0, 4.0, 4.0],
+                [54.0, 70.0],
+            )),
+        )
+        .with_child(
+            "lower_mouth",
+            PartDef::new(PartPose::offset(0.0, 1.49, 7.0)).with_cube(
+                cube([-5.0, -1.98, 0.0], [10.0, 4.0, 4.0], [54.0, 62.0]).grown(-0.001),
+            ),
+        );
+    EntityModelDef {
+        texture_width: 128,
+        texture_height: 128,
+        root: PartDef::new(PartPose::ZERO).with_child(
+            "root",
+            PartDef::new(PartPose::offset(0.0, 29.0, -6.0))
+                .with_child("shell", shell)
+                .with_child("body", body),
+        ),
+    }
+}
+
 fn mooshroom_color_texture(v: EntityVariant) -> &'static str {
     match v {
         EntityVariant::Mooshroom(MooshroomColor::Red) => "entity/cow/mooshroom_red",
@@ -5601,6 +5967,71 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
                 select: mooshroom_color_texture,
             },
             build: mooshroom_model,
+        },
+        // ---- the "invisible but solid" set: types the hitbox table already
+        // knew about while the rig corpus did not, so a player collided with
+        // something that drew nothing ----
+        EntityModelEntry {
+            name: "giant",
+            // The giant reuses the zombie's sheet outright; only the mesh scale
+            // differs, so there is no `giant.png` to point at.
+            texture: EntityTexture::Fixed("entity/zombie/zombie"),
+            build: giant_model,
+        },
+        EntityModelEntry {
+            name: "leash_knot",
+            texture: EntityTexture::Fixed("entity/lead_knot/lead_knot"),
+            build: leash_knot_model,
+        },
+        EntityModelEntry {
+            name: "sulfur_cube",
+            // The adult shell. The `_small` sheet belongs to the size-1 rig,
+            // which is a separate baked layer this corpus does not carry.
+            texture: EntityTexture::Fixed("entity/sulfur_cube/sulfur_cube_outer"),
+            build: sulfur_cube_model,
+        },
+        EntityModelEntry {
+            name: "breeze",
+            texture: EntityTexture::Fixed("entity/breeze/breeze"),
+            build: breeze_model,
+        },
+        EntityModelEntry {
+            name: "creaking",
+            texture: EntityTexture::Fixed("entity/creaking/creaking"),
+            build: creaking_model,
+        },
+        EntityModelEntry {
+            name: "copper_golem",
+            // The unoxidised sheet; the other three stages are a per-entity
+            // state axis nothing on this side carries yet.
+            texture: EntityTexture::Fixed("entity/copper_golem/copper_golem"),
+            build: copper_golem_model,
+        },
+        EntityModelEntry {
+            name: "happy_ghast",
+            texture: EntityTexture::Fixed("entity/ghast/happy_ghast"),
+            build: happy_ghast_model,
+        },
+        EntityModelEntry {
+            name: "nautilus",
+            texture: EntityTexture::Fixed("entity/nautilus/nautilus"),
+            build: nautilus_model,
+        },
+        EntityModelEntry {
+            name: "zombie_nautilus",
+            // Same rig, own sheet — a sibling of `nautilus`, not a variant of
+            // it, because vanilla picks it by renderer class rather than by
+            // entity state. The coral crust is a second baked layer and is not
+            // part of this mesh.
+            texture: EntityTexture::Fixed("entity/nautilus/zombie_nautilus"),
+            build: nautilus_model,
+        },
+        EntityModelEntry {
+            name: "camel_husk",
+            // The camel rig, unmodified, on its own sheet — the same
+            // one-rig-two-sheets shape as `nautilus`/`zombie_nautilus`.
+            texture: EntityTexture::Fixed("entity/camel/camel_husk"),
+            build: camel_model,
         },
         // ---- projectiles: placed by `projectile_model_matrix`, not by
         // `entity_model_matrix` (see the "Projectiles" section above) ----
