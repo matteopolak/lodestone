@@ -124,7 +124,9 @@ warned about by the driver.
 
 ## Evidence
 
-`crates/lodestone-world/tests/client_relight.rs`, 12 gates.
+`crates/lodestone-world/tests/client_relight.rs`, 13 gates, plus three in
+`crates/lodestone-world/tests/vanilla_light_oracle.rs` that judge this engine directly
+against a real vanilla-lit world (below).
 
 The expected value comes from **outside** the relight: every assertion is judged against
 `compute_column_light_with_neighbours`, the from-scratch 3×3 flood. The two are
@@ -142,6 +144,41 @@ whether you relight properly or merely flood sky light downward. The fixture ass
 own premise (`the_scene_puts_the_break_under_a_ceiling_with_only_lateral_light`) — the
 cell above the break must hold a *partial* value, in `1..=14` — so a scene that drifted
 into being open or sealed fails instead of passing vacuously.
+
+### Judged directly against vanilla, not only through the full flood
+
+The chain above reaches vanilla only via `compute_column_light_with_neighbours`. Three
+gates in `vanilla_light_oracle.rs` now point at *this* engine, over the blocks and light
+a Mojang server wrote into `.cache/mc/survival/world`:
+
+- **`a_relight_that_changed_no_block_does_not_brighten_vanillas_own_light`.** Vanilla's
+  stored light is a fixed point of vanilla's own engine, so a relight queued where
+  nothing changed must write nothing. Measured over **689,998 cells**: sky raised **0**,
+  lowered **0**. Block light is *lowered* in 3,766 cells, which is the known census
+  shortfall (minecraft-data records `glow_lichen`/`cave_vines` at `emitLight=0`) and is
+  one-directional darker, so only the brighter direction is asserted.
+- **`breaking_a_block_in_the_dark_cannot_create_sky_light`.** The reported action, with a
+  geometric expectation rather than an "after" oracle: every cell of the box holds
+  vanilla sky `0`, so nothing in it is a sky source and removing a block cannot create
+  one. Sky raised **0**. Its precondition — that the box really is sunless — is asserted,
+  not assumed.
+- **`the_no_op_relight_survey_detects_a_deliberately_wrong_light_engine`.** The detector
+  proof for both, since both assert an absence. The same survey with every block
+  transparent raises **362,077** sky cells at up to **+15**.
+
+Two traps this fixture paid for, both worth knowing before touching it:
+
+- **An omitted `SkyLight` array in a save is two different states.** `DataLayer` carries a
+  lazy `defaultValue` and `isEmpty()` is `data == null && defaultValue == 0`, so
+  `SerializableChunkData` skips a section either because its layer is genuinely all-zero
+  *or* because the engine holds no layer for it at all — where it answers **15**.
+  Reconstructing both as `Uniform(0)` blacked out the sky above the terrain and the survey
+  reported 23,267 sky cells "raised", every one of which was the relight correctly
+  repairing the fixture's own hole. `vanilla_resolved_light` transcribes
+  `SkyLightSectionStorage.getLightValue` instead.
+- **The survey must drain the queue to empty.** `RELIGHT_CELL_BUDGET` requeues what one
+  drain cannot afford, and the all-transparent control leans on that hard — with nothing
+  opaque, every probe's sky run reaches the world floor and two of six probes defer.
 
 Two negative controls, because one was thin. Skipping the relight after a single break
 disagrees in exactly **one** cell of 18,944 (real, but easy to mistake for noise), so a
@@ -161,6 +198,24 @@ reported symptom.
   as darkness blacks out everything above the terrain. This is the same rule the mesher's
   `SkyDefault` follows and the two must not disagree — the relight reads stored light
   through it and the mesher renders the result through it.
+- **But `LightData::set` materialises an absent section from *zero*, and it is right to.**
+  It cannot know the dimension and says so in its own docs, so the two conventions
+  disagree and the write-back sits on the seam: one nibble written into a section the
+  scratch fill read as daylight used to rewrite the other 4,095 cells from 15 to 0, in a
+  single call, with nothing red. The visible form is a 16³ block of sky going black above
+  a build the moment something in it is broken. `write_back` therefore establishes such a
+  section at `Uniform(15)` *before* the first write into it, guarded on it still being
+  `Missing` so later writes in the same job are not discarded. Gate:
+  `a_relight_writing_into_an_absent_sky_section_keeps_its_daylight`, which also asserts
+  the lowering write still landed — otherwise a flat `Uniform(15)` would pass it.
+- **The instrument is `RUST_LOG=light=debug`.** `Relit::detail` carries one `RelitJob` per
+  job with the **signed** split of the write-back (`sky_raised`/`sky_lowered`/
+  `max_sky_gain`, same for block) and `sky_source_columns_from_missing` — how many of the
+  openness scan's top-shell sky sources took their 15 from an absent section rather than
+  from data the server sent. `cells_changed` alone cannot tell a hole correctly darkened
+  from a sealed room flooded with daylight; the sign can. The shell's line also prints
+  `merged`/`cancelled` from `World::light_correction_counts`, so "the server corrected us"
+  and "nothing corrected us" — which leave identical light in storage — are separable.
 - **The props table must match the store's id space.** `relight_changed_blocks` picks
   `VanillaLightProps` (26.2's `lodestone_data::light_props`) when
   `TerrainMesh::column_source` is `ColumnSource::Streaming`, and the shell's
