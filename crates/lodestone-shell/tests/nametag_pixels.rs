@@ -177,7 +177,7 @@ fn a_named_entity_draws_text_pixels_above_it() {
     let feet = glam::Vec3::new(0.0, 0.0, 6.0);
     let subject = EntityDraw {
         name_tag: Some(NameTag {
-            text: "Babe".to_owned(),
+            text: lodestone_model::text::Text::literal("Babe"),
             see_through: true,
         }),
         ..base_draw(1, "pig", feet, 1.0)
@@ -271,14 +271,14 @@ fn occlusion() {
     let far_feet = glam::Vec3::new(0.0, 0.0, 30.0);
     let standing = EntityDraw {
         name_tag: Some(NameTag {
-            text: "Behind The Wall".to_owned(),
+            text: lodestone_model::text::Text::literal("Behind The Wall"),
             see_through: true,
         }),
         ..base_draw(1, "pig", far_feet, 1.0)
     };
     let sneaking = EntityDraw {
         name_tag: Some(NameTag {
-            text: "Behind The Wall".to_owned(),
+            text: lodestone_model::text::Text::literal("Behind The Wall"),
             see_through: false,
         }),
         ..standing.clone()
