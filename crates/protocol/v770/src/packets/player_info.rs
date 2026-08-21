@@ -11,13 +11,15 @@
 //! (`FriendlyByteBuf.writeFixedBitSet`); with the eight actions below that is a
 //! single byte, bit `i` (LSB-first) selecting action ordinal `i`.
 //!
-//! Fields for unmodelled actions (`UPDATE_LIST_ORDER`, `UPDATE_HAT`) are
-//! decoded and discarded so the buffer stays aligned — a misparse there would
-//! leave trailing bytes, which the adapter rejects. `INITIALIZE_CHAT` is now
-//! kept (see [`RemoteChatSessionData`]) rather than discarded: this is the
-//! other player's announced chat-signing session, and `adapter::player`
-//! carries it into `lodestone_model::event::PlayerListEntry::chat_session`,
-//! where `lodestone_client`'s driver reads it to verify their signed messages.
+//! `UPDATE_LIST_ORDER` and `UPDATE_HAT` are now kept, not discarded: they
+//! carry into `lodestone_model::event::PlayerListEntry::list_order`/
+//! `hat_visible`, and `lodestone_game::tablist` folds them into
+//! `PlayerListEntry::list_order`/`show_hat` — the tab-list sort order and the
+//! second-skin-layer toggle. `INITIALIZE_CHAT` is likewise kept (see
+//! [`RemoteChatSessionData`]) rather than discarded: this is the other
+//! player's announced chat-signing session, and `adapter::player` carries it
+//! into `lodestone_model::event::PlayerListEntry::chat_session`, where
+//! `lodestone_client`'s driver reads it to verify their signed messages.
 
 use lodestone_core::{Ctx, Decode, Error, Reader, Result, read_network_nbt};
 use lodestone_model::Text;
@@ -84,6 +86,12 @@ pub struct PlayerInfoEntry {
     /// no caller here needs to tell "never announced" from "announced empty"
     /// apart.
     pub chat_session: Option<RemoteChatSessionData>,
+    /// Tab-list sort key, from `UPDATE_LIST_ORDER`. Higher orders sort first
+    /// (`lodestone_game::tablist::TabList::ordered_by`).
+    pub list_order: Option<i32>,
+    /// Whether the player's hat (second skin layer) renders in the tab list,
+    /// from `UPDATE_HAT`.
+    pub hat_visible: Option<bool>,
 }
 
 /// One profile property from `ADD_PLAYER`: a name, a value, and an optional
@@ -237,6 +245,8 @@ impl Decode for PlayerInfoUpdate {
                 display_name: None,
                 properties: None,
                 chat_session: None,
+                list_order: None,
+                hat_visible: None,
             };
             // Fields appear in Action ordinal order for whichever bits are set.
             if has(action::ADD_PLAYER) {
@@ -261,10 +271,10 @@ impl Decode for PlayerInfoUpdate {
                 entry.display_name = Some(Text::from_nbt(&component));
             }
             if has(action::UPDATE_LIST_ORDER) {
-                let _list_order = r.var_i32()?;
+                entry.list_order = Some(r.var_i32()?);
             }
             if has(action::UPDATE_HAT) {
-                let _show_hat = r.bool()?;
+                entry.hat_visible = Some(r.bool()?);
             }
             entries.push(entry);
         }
@@ -399,10 +409,12 @@ mod tests {
         // UPDATE_DISPLAY_NAME: present, plain component
         w.bool(true);
         w.bytes(&nbt_text_component("Notch!"));
-        // UPDATE_LIST_ORDER: 0
-        w.var_i32(0);
-        // UPDATE_HAT: true
-        w.bool(true);
+        // UPDATE_LIST_ORDER: a value distinct from every other numeric field
+        // above, so a transposition inside the entry cannot survive.
+        w.var_i32(7);
+        // UPDATE_HAT: false, distinct from UPDATE_LISTED's `true` just above so
+        // the two adjacent-in-spirit bools cannot coincide by chance.
+        w.bool(false);
 
         let update: PlayerInfoUpdate = decode_exact(&w.into_vec());
         assert_eq!(update.entries.len(), 1);
@@ -421,6 +433,16 @@ mod tests {
             e.properties.as_deref(),
             Some(&[][..]),
             "ADD_PLAYER was present with zero properties -- Some(empty), not None"
+        );
+        assert_eq!(
+            e.list_order,
+            Some(7),
+            "UPDATE_LIST_ORDER must be kept, not decoded-and-discarded"
+        );
+        assert_eq!(
+            e.hat_visible,
+            Some(false),
+            "UPDATE_HAT must be kept, not decoded-and-discarded"
         );
     }
 

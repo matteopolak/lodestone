@@ -1627,6 +1627,8 @@ mod tests {
                     listed: Some(true),
                     properties: None,
                     chat_session: None,
+                    list_order: None,
+                    hat_visible: None,
                 }],
             },
         );

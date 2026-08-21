@@ -338,6 +338,12 @@ impl TabList {
                         expires_at: session.expires_at,
                     });
                 }
+                if let Some(list_order) = e.list_order {
+                    existing.list_order = list_order;
+                }
+                if let Some(hat_visible) = e.hat_visible {
+                    existing.show_hat = hat_visible;
+                }
             }
             None => {
                 let name = e.name.clone().unwrap_or_default();
@@ -369,6 +375,12 @@ impl TabList {
                         expires_at: session.expires_at,
                     });
                 }
+                if let Some(list_order) = e.list_order {
+                    entry.list_order = list_order;
+                }
+                if let Some(hat_visible) = e.hat_visible {
+                    entry.show_hat = hat_visible;
+                }
                 self.insert(entry);
             }
         }
@@ -393,6 +405,8 @@ mod fold_tests {
             listed: Some(true),
             properties: None,
             chat_session: None,
+            list_order: None,
+            hat_visible: None,
         }
     }
 
@@ -408,6 +422,54 @@ mod fold_tests {
         assert_eq!(entry.game_mode, GameMode::Creative);
         assert_eq!(entry.latency, 42);
         assert!(entry.listed);
+    }
+
+    /// `UPDATE_LIST_ORDER`/`UPDATE_HAT` used to be decoded and discarded in
+    /// the protocol crate, so `PlayerListEntry::list_order`/`show_hat` here
+    /// never left their constructor defaults (`0`/`true`) no matter what a
+    /// server sent. Distinct, non-default values on both so a coincidental
+    /// pass against the defaults cannot hide a missed wire.
+    #[test]
+    fn list_order_and_hat_visibility_are_folded_in() {
+        let mut tabs = TabList::new();
+        let id = uid(30);
+        tabs.apply(&ClientEvent::PlayerListUpdate {
+            entries: vec![m::PlayerListEntry {
+                uuid: id,
+                name: Some("Frank".into()),
+                game_mode: Some(GameMode::Survival),
+                latency: Some(1),
+                display_name: None,
+                listed: Some(true),
+                properties: None,
+                chat_session: None,
+                list_order: Some(9),
+                hat_visible: Some(false),
+            }],
+        });
+        let entry = tabs.get(&id).expect("entry present");
+        assert_eq!(entry.list_order, 9);
+        assert!(!entry.show_hat);
+
+        // A delta that omits both actions must keep them, not reset to the
+        // constructor defaults -- same merge rule as every other field here.
+        tabs.apply(&ClientEvent::PlayerListUpdate {
+            entries: vec![m::PlayerListEntry {
+                uuid: id,
+                name: None,
+                game_mode: None,
+                latency: Some(2),
+                display_name: None,
+                listed: None,
+                properties: None,
+                chat_session: None,
+                list_order: None,
+                hat_visible: None,
+            }],
+        });
+        let entry = tabs.get(&id).expect("entry present");
+        assert_eq!(entry.list_order, 9, "must survive a delta without UPDATE_LIST_ORDER");
+        assert!(!entry.show_hat, "must survive a delta without UPDATE_HAT");
     }
 
     #[test]
@@ -428,6 +490,8 @@ mod fold_tests {
                 listed: None,
                 properties: None,
                 chat_session: None,
+                list_order: None,
+                hat_visible: None,
             }],
         });
         let entry = tabs.get(&id).expect("entry present");
@@ -459,6 +523,8 @@ mod fold_tests {
                     signature: Some("sig".into()),
                 }]),
                 chat_session: None,
+                list_order: None,
+                hat_visible: None,
             }],
         });
         assert_eq!(
@@ -478,6 +544,8 @@ mod fold_tests {
                 listed: None,
                 properties: None,
                 chat_session: None,
+                list_order: None,
+                hat_visible: None,
             }],
         });
         let entry = tabs.get(&id).expect("entry present");
@@ -500,6 +568,8 @@ mod fold_tests {
                 listed: None,
                 properties: Some(Vec::new()),
                 chat_session: None,
+                list_order: None,
+                hat_visible: None,
             }],
         });
         assert!(
@@ -536,6 +606,8 @@ mod fold_tests {
                     public_key: public_key.clone(),
                     expires_at: 1_700_000_000_000,
                 }),
+                list_order: None,
+                hat_visible: None,
             }],
         });
         let entry = tabs.get(&id).expect("entry present");
@@ -555,6 +627,8 @@ mod fold_tests {
                 listed: None,
                 properties: None,
                 chat_session: None,
+                list_order: None,
+                hat_visible: None,
             }],
         });
         let entry = tabs.get(&id).expect("entry present");
@@ -579,6 +653,8 @@ mod fold_tests {
                 listed: Some(true),
                 properties: None,
                 chat_session: None,
+                list_order: None,
+                hat_visible: None,
             }],
         });
         let entry = tabs.get(&id).expect("entry present");

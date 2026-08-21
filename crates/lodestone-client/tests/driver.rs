@@ -1520,6 +1520,8 @@ async fn incoming_signed_chat_is_verified_against_the_announced_public_key() {
                         public_key: public_key_der.clone(),
                         expires_at: i64::MAX,
                     }),
+                    list_order: None,
+                    hat_visible: None,
                 }],
             })],
         )

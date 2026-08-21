@@ -1058,6 +1058,11 @@ impl SharedState {
                         expires_at: session.expires_at,
                     }
                 }),
+                // Same "always Some" reasoning as the rest of this literal: a
+                // folded entry has a real list-order and hat-visibility value
+                // (defaults `0`/`true` if the server never sent either action).
+                list_order: Some(entry.list_order),
+                hat_visible: Some(entry.show_hat),
             })
             .collect()
     }

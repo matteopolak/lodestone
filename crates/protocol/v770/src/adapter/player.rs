@@ -133,6 +133,10 @@ impl V770Adapter {
                             expires_at: session.expires_at,
                         }
                     }),
+                    // Carried through rather than decoded-and-discarded; see
+                    // `PlayerInfoEntry::list_order`/`hat_visible`'s own docs.
+                    list_order: entry.list_order,
+                    hat_visible: entry.hat_visible,
                 })
                 .collect();
             return Ok(vec![Directive::Emit(ClientEvent::PlayerListUpdate {

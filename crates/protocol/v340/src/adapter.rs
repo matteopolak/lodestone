@@ -1340,6 +1340,10 @@ impl V340Adapter {
                     properties: None,
                     // 1.12.2 predates secure chat sessions entirely.
                     chat_session: None,
+                    // 1.12.2 predates both `UPDATE_LIST_ORDER` and `UPDATE_HAT`
+                    // (added in 1.21.4's action-bitmask packet) entirely.
+                    list_order: None,
+                    hat_visible: None,
                 };
                 match entry.action {
                     PlayerInfoAction::AddPlayer {

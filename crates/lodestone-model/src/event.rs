@@ -979,6 +979,14 @@ pub struct PlayerListEntry {
     /// struct had no field to carry it into, so no consumer could ever look
     /// a sender's key up. See `docs/secure-chat.md`.
     pub chat_session: Option<ChatSessionInfo>,
+    /// Tab-list sort key from `UPDATE_LIST_ORDER`, when present in the
+    /// update. `None` means the update did not carry that action; a fold
+    /// must keep the existing value, exactly like [`Self::properties`].
+    pub list_order: Option<i32>,
+    /// Whether the player's hat (second skin layer) renders in the tab list,
+    /// from `UPDATE_HAT`, when present in the update. Same `None`-means-keep
+    /// merge rule as the other per-action fields on this struct.
+    pub hat_visible: Option<bool>,
 }
 
 /// A player's announced chat-signing session (`RemoteChatSession.Data`):
