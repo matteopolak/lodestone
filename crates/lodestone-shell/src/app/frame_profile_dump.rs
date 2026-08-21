@@ -27,7 +27,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use super::frame_profile::{FramePhase, PHASE_COUNT};
+use super::frame_profile::{FramePhase, HUD_SUBPHASE_COUNT, HudSubphase, PHASE_COUNT};
 use crate::gpu::gpu_timing::{WORLD_SUBPHASE_COUNT, WorldSubphase};
 
 #[derive(Debug)]
@@ -76,6 +76,13 @@ impl DumpWriter {
             header.push(',');
             header.push_str(subphase.name());
         }
+        // `hud_ui_encode_submit`'s own internal breakdown — see
+        // `super::frame_profile::HudSubphase`'s doc. Present in the header on
+        // every session for the same reason as the world columns above.
+        for subphase in HudSubphase::ALL {
+            header.push(',');
+            header.push_str(subphase.name());
+        }
         if let Err(e) = writeln!(w, "{header}") {
             tracing::warn!(target: "frame_profile", "failed writing dump header: {e}");
             self.file = None;
@@ -94,10 +101,11 @@ impl DumpWriter {
         frame: u64,
         values: [Option<f32>; PHASE_COUNT],
         world_subphases: [Option<f32>; WORLD_SUBPHASE_COUNT],
+        hud_subphases: [Option<f32>; HUD_SUBPHASE_COUNT],
     ) {
         let Some(w) = &mut self.file else { return };
         let mut line = frame.to_string();
-        for v in values.into_iter().chain(world_subphases) {
+        for v in values.into_iter().chain(world_subphases).chain(hud_subphases) {
             line.push(',');
             if let Some(ms) = v {
                 line.push_str(&format!("{ms:.4}"));

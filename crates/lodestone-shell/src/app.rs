@@ -110,7 +110,7 @@ pub(crate) use launch::{LaunchError, launch_singleplayer};
 #[allow(unused_imports)]
 pub(crate) use launch::launch_open_to_lan_online;
 #[allow(unused_imports)]
-use frame_profile::{FramePhase, FrameProfiler};
+use frame_profile::{FramePhase, FrameProfiler, HudSubphase};
 #[allow(unused_imports)]
 use launch::{java_string_hash_code, parse_seed, requested_a_connection, resolve_launch_seed};
 #[allow(unused_imports)]

@@ -1132,6 +1132,13 @@ impl WindowApp {
         // Record **and** submit, fused — see `app::frame_profile`'s module
         // doc for why this shell has no seam between them to time separately.
         self.frame_profile.mark(FramePhase::WorldEncodeSubmit, Instant::now());
+        // Counts for the `hud_ui_encode_submit` sub-phase breakdown
+        // (`app::frame_profile::HudSubphaseCounts`), recorded together at the
+        // end of the phase. A count next to each duration, per this repo's
+        // evidence standard: "2 ms of chat gather" means one thing at 10 lines
+        // and another at 100, and the duration alone cannot separate them.
+        let mut menu_overlays_drawn = 0usize;
+        let mut debug_lines_built = 0usize;
 
         // Fold GPU counters + timing into the debug overlay.
         let frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
@@ -1193,6 +1200,7 @@ impl WindowApp {
         // work for a screen nobody is looking at.
         if self.show_debug {
             let mut lines: Vec<String> = self.frame_profile.summary().map(|s| s.line()).collect();
+            debug_lines_built = lines.len();
             // `render` (not `self.render`): the destructure above already
             // holds `&mut RenderState` for the rest of this function, and a
             // fresh `self.render.as_ref()` here would conflict with it.
@@ -1251,6 +1259,10 @@ impl WindowApp {
             self.sim.stats.frame_profile.clear();
             self.sim.stats.profiler_chart = None;
         }
+        // `hud_ui_encode_submit`'s first sub-phase closes here: this
+        // instrument's own cost, and the only one of the six that is zero
+        // whenever F3 is closed. See `HudSubphase::DebugGather`.
+        self.frame_profile.mark_hud(HudSubphase::DebugGather, Instant::now());
 
         // The baked 3-D item geometry, shared by the container screen below and the
         // HUD hotbar further down. It borrows `self.sim`, so it cannot be hoisted
@@ -1595,6 +1607,9 @@ impl WindowApp {
         // The 3-D block-item icons need the baked model set (for geometry) and a
         // depth attachment (so the near faces of the mini-block win over the far
         // ones). Both are `None` on the demo path, which degrades to flat sprites.
+        // Everything from the debug block down to here is pure CPU state
+        // gather — no encoder exists yet. See `HudSubphase::FrameGather`.
+        self.frame_profile.mark_hud(HudSubphase::FrameGather, Instant::now());
         hud.render_with_item_models(
             device,
             queue,
@@ -1607,6 +1622,7 @@ impl WindowApp {
             w,
             h,
         );
+        self.frame_profile.mark_hud(HudSubphase::HudDraw, Instant::now());
         // The container overlay draws **after** the HUD (issue #51/#61): vanilla's
         // `Gui.render` draws the HUD unconditionally behind any world-following
         // screen (`hud_follows_world` above), and the screen then paints its own
@@ -2013,6 +2029,10 @@ impl WindowApp {
             );
 
         }
+        // The creative/container/recipe-book renderers, if one was open. On an
+        // ordinary playing frame this closes immediately — see
+        // `HudSubphase::ContainerDraw`.
+        self.frame_profile.mark_hud(HudSubphase::ContainerDraw, Instant::now());
 
         // The pause overlay draws *over* the world/HUD/container passes above
         // rather than replacing them — see `Screen::Paused`'s doc comment and
@@ -2025,6 +2045,7 @@ impl WindowApp {
         {
             let pause_frame = crate::menu::render::pause_frame(&self.nav);
             menu.render_overlay(device, queue, frame.view(), &pause_frame, w, h);
+            menu_overlays_drawn += 1;
         }
 
         // The Advancements screen (issue #167), drawn over the still-rendering
@@ -2051,6 +2072,7 @@ impl WindowApp {
                 h,
             )
         {
+            menu_overlays_drawn += 1;
             container_renderer.render_geometry_scaled(
                 device,
                 queue,
@@ -2073,6 +2095,7 @@ impl WindowApp {
         {
             let death_frame = crate::menu::render::death_frame(&self.nav, self.sim.death_message());
             menu.render_overlay(device, queue, frame.view(), &death_frame, w, h);
+            menu_overlays_drawn += 1;
         }
 
         // The resource-pack prompt (a server's own `ClientboundResourcePackPushPacket`,
@@ -2090,6 +2113,7 @@ impl WindowApp {
             && let Some(menu) = self.menu.as_mut()
         {
             menu.render_overlay(device, queue, frame.view(), &prompt_frame, w, h);
+            menu_overlays_drawn += 1;
         }
 
         // Issue #449's terrain half. `Screen::Connecting` covers the
@@ -2126,6 +2150,7 @@ impl WindowApp {
                 None => crate::menu::render::loading_frame(label),
             };
             menu.render_overlay(device, queue, frame.view(), &loading_frame, w, h);
+            menu_overlays_drawn += 1;
         }
 
         // In-world Options, from a player report: settings opened mid-game used
@@ -2151,6 +2176,7 @@ impl WindowApp {
             && let Some(menu) = self.menu.as_mut()
         {
             menu.render_overlay(device, queue, frame.view(), &settings_frame, w, h);
+            menu_overlays_drawn += 1;
         }
 
         // Statistics and Server Links are the same shape as the block above, and
@@ -2168,6 +2194,7 @@ impl WindowApp {
             && let Some(menu) = self.menu.as_mut()
         {
             menu.render_overlay(device, queue, frame.view(), &stats_frame, w, h);
+            menu_overlays_drawn += 1;
         }
 
         if let Some(links_frame) =
@@ -2175,6 +2202,7 @@ impl WindowApp {
             && let Some(menu) = self.menu.as_mut()
         {
             menu.render_overlay(device, queue, frame.view(), &links_frame, w, h);
+            menu_overlays_drawn += 1;
         }
 
         // Social Interactions is the third screen of this exact shape, and it
@@ -2184,6 +2212,7 @@ impl WindowApp {
             && let Some(menu) = self.menu.as_mut()
         {
             menu.render_overlay(device, queue, frame.view(), &social_frame, w, h);
+            menu_overlays_drawn += 1;
         }
 
         // Issue #474: the command block edit screen was drawn **nowhere**.
@@ -2214,6 +2243,7 @@ impl WindowApp {
             && let Some(menu) = self.menu.as_mut()
         {
             menu.render_overlay(device, queue, frame.view(), &command_block_frame, w, h);
+            menu_overlays_drawn += 1;
         }
 
         // The sign-editing screen — the fifth overlay, same shape as the
@@ -2226,6 +2256,7 @@ impl WindowApp {
             && let Some(menu) = self.menu.as_mut()
         {
             menu.render_overlay(device, queue, frame.view(), &sign_edit_frame, w, h);
+            menu_overlays_drawn += 1;
         }
 
         // The book-editing screen (issue #613's `EditBook` remainder) — the
@@ -2239,6 +2270,7 @@ impl WindowApp {
             && let Some(menu) = self.menu.as_mut()
         {
             menu.render_overlay(device, queue, frame.view(), &book_edit_frame, w, h);
+            menu_overlays_drawn += 1;
         }
 
         // The Spectator Menu (issue #613's `TeleportToEntity` remainder) —
@@ -2253,6 +2285,7 @@ impl WindowApp {
             && let Some(menu) = self.menu.as_mut()
         {
             menu.render_overlay(device, queue, frame.view(), &spectator_menu_frame, w, h);
+            menu_overlays_drawn += 1;
         }
 
         // `key.screenshot` (issue #16), and **this position is the whole
@@ -2294,10 +2327,25 @@ impl WindowApp {
             }
         }
 
+        self.frame_profile.mark_hud(HudSubphase::MenuOverlays, Instant::now());
+
+        // Close this frame's GPU timing — every encoder of the frame has now
+        // been submitted, which is this call's whole precondition (see
+        // `RenderState::gpu_timing_end_frame`). It costs one small extra
+        // command-buffer submission, and that cost is measured rather than
+        // hidden: it is the `hud.gpu_timing_end` sub-phase immediately below.
+        render.gpu_timing_end_frame(device, queue);
+        self.frame_profile.mark_hud(HudSubphase::GpuTimingEnd, Instant::now());
+        self.frame_profile.record_hud_counts(crate::app::frame_profile::HudSubphaseCounts {
+            chat_lines: chat_spans_lines.len(),
+            debug_lines: debug_lines_built,
+            menu_overlays_drawn,
+        });
+
         // HUD, status effects and the container/menu overlay all drew above
-        // through their own encoder/submit pairs — see `app::frame_profile`'s
-        // module doc for why they share this one bucket rather than each
-        // getting a checkpoint.
+        // through their own encoder/submit pairs. The phase is no longer one
+        // opaque bucket: `HudSubphase` splits it six ways, and the marks for
+        // those sit at the seams above.
         self.frame_profile.mark(FramePhase::HudUiEncodeSubmit, Instant::now());
 
         if let Some(window) = &self.window {
