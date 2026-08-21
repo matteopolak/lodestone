@@ -129,7 +129,7 @@
 //!   not have, unrelated to the session-id problem above. The **glint** is a third, separate
 //!   gap: vanilla's `enchanted_book` foil comes from a baked `ENCHANTMENT_GLINT_OVERRIDE`
 //!   item-prototype flag, not from stack content at all (see
-//!   [`lodestone_render::glint::has_foil`]'s own doc), so attaching enchantment content here
+//!   [`lodestone_render::glint::has_foil_for_item`]'s own doc), so attaching enchantment content here
 //!   would not have fixed it even if the id problem did not exist.
 //! - **Potion icon tinting does not reach the drawn pixel yet**, even though
 //!   [`super::creative::stack_of`] attaches the real, computed `potion_color` component

@@ -248,63 +248,6 @@ pub fn glint_texture_matrix(millis: f64, speed: f64, scale: Scale) -> glam::Mat4
         * glam::Mat4::from_scale(glam::Vec3::splat(scale.factor()))
 }
 
-/// `ItemStack.hasFoil()` (`ItemStack.java:968-971`), as far as this client's
-/// modelled components allow — and the shortfall is the point.
-///
-/// Vanilla is `enchantment_glint_override ?? item.isFoil(stack)`, where the
-/// default `Item.isFoil` is `!ENCHANTMENTS.isEmpty()` (`Item.java:346-348`,
-/// `ItemStack.java:999-1001`). This function models only `enchantments` and
-/// **not** `enchantment_glint_override`, so:
-///
-/// * an ordinary enchanted item glints correctly — the common case, and the one
-///   an inventory is full of;
-/// * a stack that explicitly *suppresses* its glint with
-///   `[minecraft:enchantment_glint_override=false]` glints anyway;
-/// * the seven items whose glint comes only from a baked
-///   `ENCHANTMENT_GLINT_OVERRIDE=true` do **not** glint —
-///   `enchanted_golden_apple`, `experience_bottle`, `written_book`, `nether_star`,
-///   `enchanted_book`, `end_crystal`, `debug_stick` (`Items.java:1122`, `:1471`,
-///   `:1481`, `:1557`, `:1571`, `:1609`, `:1697`).
-///
-/// **[`has_foil_for_item`] closes the baked-override half of this shortfall**
-/// for any caller that has the item's identifier alongside its components — the
-/// override is a *prototype* component baked into `Item.Properties`, so a
-/// clientbound stack carries no mention of it at all, exactly like
-/// `max_stack_size`, and the seven-item set is therefore a hand-authored
-/// census rather than something obtainable by decoding harder. Note also that
-/// `enchanted_book`'s enchantments live in `STORED_ENCHANTMENTS`, which
-/// vanilla's `isEnchanted` deliberately does not read, so it would not glint
-/// even with the override modelled by way of the enchantments list — the baked
-/// census is the *only* thing that makes an unenchanted book glint.
-///
-/// This function itself is unchanged and still enchantments-only, because it is
-/// called from a site that has no item identifier in hand; **use
-/// [`has_foil_for_item`] or [`has_foil_for_stack`] instead whenever the item id
-/// is available** — which is every call site except one bare `ItemComponents`
-/// consumer left to migrate.
-///
-/// The live per-stack component override — the direction that can *suppress* an
-/// enchanted item's glint, or force one onto a plain item a server chose to
-/// mark — is a separate, still-open gap: no vanilla item bakes
-/// `ENCHANTMENT_GLINT_OVERRIDE=false` into its prototype (checked against every
-/// `.component(DataComponents.ENCHANTMENT_GLINT_OVERRIDE, …)` call in
-/// `Items.java`, all seven read `true`), so [`baked_glint_override`] only ever
-/// needs to answer the "on" direction. A *patch*-level override of either
-/// polarity is real (`ItemStack.java:969`'s `this.get(...)` reads the
-/// patch-merged value, not just the prototype default) but is not decoded by
-/// this build's protocol adapter — `lodestone_model::item::ItemComponents` has
-/// no field for it, symmetrically with why `max_stack_size`/`max_damage`/
-/// `equippable` are *effective* fields seeded from the prototype census before
-/// the patch is read rather than patch-only ones.
-///
-/// `minecraft:compass` is the one item with a code-level override —
-/// `LODESTONE_TRACKER` present means foil (`CompassItem.java:29-31`) — and is
-/// likewise out of reach: it depends on a component this build does not decode.
-#[must_use]
-pub fn has_foil(components: &lodestone_model::item::ItemComponents) -> bool {
-    has_foil_enchantments(&components.enchantments)
-}
-
 /// Vanilla's baked `ENCHANTMENT_GLINT_OVERRIDE` item-prototype flag, for the
 /// seven items whose `Item.Properties` sets
 /// `.component(DataComponents.ENCHANTMENT_GLINT_OVERRIDE, true)`
@@ -334,11 +277,11 @@ pub fn baked_glint_override(item: &str) -> Option<bool> {
     BAKED_TRUE.contains(&item).then_some(true)
 }
 
-/// The full [`has_foil`] predicate for a caller that also has the stack's item
-/// identifier: the baked census wins outright when it has an opinion
-/// (`ItemStack.hasFoil`'s short-circuit — see [`has_foil`]'s doc for why a
-/// baked `true` cannot be reached any other way for `enchanted_book`), and
-/// [`has_foil_enchantments`] decides otherwise.
+/// The full `ItemStack.hasFoil()` predicate for a caller that also has the
+/// stack's item identifier: the baked census wins outright when it has an
+/// opinion (`ItemStack.hasFoil`'s short-circuit — see [`has_foil_enchantments`]'s
+/// doc for why a baked `true` cannot be reached any other way for
+/// `enchanted_book`), and [`has_foil_enchantments`] decides otherwise.
 #[must_use]
 pub fn has_foil_for_item(item: &str, enchantments: &[lodestone_model::item::ItemEnchantment]) -> bool {
     baked_glint_override(item).unwrap_or_else(|| has_foil_enchantments(enchantments))
@@ -353,20 +296,32 @@ pub fn has_foil_for_stack(item: &str, components: &lodestone_model::item::ItemCo
     has_foil_for_item(item, &components.enchantments)
 }
 
-/// [`has_foil`] over a borrowed enchantment list, for a caller that holds the
-/// list but not a [`lodestone_model::item::ItemComponents`].
+/// `ItemStack.hasFoil()`'s enchantments-only half (`ItemStack.java:968-971`,
+/// `Item.java:346-348`, `ItemStack.java:999-1001`: default `Item.isFoil` is
+/// `!ENCHANTMENTS.isEmpty()`), over a borrowed enchantment list rather than a
+/// [`lodestone_model::item::ItemComponents`].
 ///
 /// This exists so the predicate has exactly **one** owner. The shell's stacks are
 /// `lodestone_game::item::ItemStack`, whose component set is an opaque
 /// `BTreeMap<Identifier, ComponentValue>` and a genuinely different type from the
-/// model's struct-of-fields — so `has_foil` cannot be called there, and the
-/// tempting alternative is to re-spell `!list.is_empty()` at each shell call site.
-/// That would put the *interesting* half of this module's doc (the seven baked
-/// `ENCHANTMENT_GLINT_OVERRIDE` items, `enchanted_book`'s `STORED_ENCHANTMENTS`,
-/// `compass`'s code-level override) at a distance from the code a reader is
-/// looking at, which is how a known shortfall turns back into a bug report.
+/// model's struct-of-fields, and re-spelling `!list.is_empty()` at each shell
+/// call site would put the *interesting* half of this module's doc (the seven
+/// baked `ENCHANTMENT_GLINT_OVERRIDE` items, `enchanted_book`'s
+/// `STORED_ENCHANTMENTS`, `compass`'s code-level override — see
+/// [`has_foil_for_item`]) at a distance from the code a reader is looking at,
+/// which is how a known shortfall turns back into a bug report.
 ///
-/// Every caveat in [`has_foil`]'s doc applies here unchanged; read it there.
+/// Modelling only `enchantments` and not `enchantment_glint_override` means a
+/// stack that explicitly *suppresses* its glint with
+/// `[minecraft:enchantment_glint_override=false]` glints anyway, and the seven
+/// items whose glint comes only from a baked `ENCHANTMENT_GLINT_OVERRIDE=true`
+/// do **not** glint through this function alone —
+/// `enchanted_golden_apple`, `experience_bottle`, `written_book`, `nether_star`,
+/// `enchanted_book`, `end_crystal`, `debug_stick` (`Items.java:1122`, `:1471`,
+/// `:1481`, `:1557`, `:1571`, `:1609`, `:1697`). **Use [`has_foil_for_item`] or
+/// [`has_foil_for_stack`] whenever the item id is available** — every
+/// production call site has it — since those close the baked-override half of
+/// this shortfall; call this directly only when no item id is in hand.
 #[must_use]
 pub fn has_foil_enchantments(enchantments: &[lodestone_model::item::ItemEnchantment]) -> bool {
     !enchantments.is_empty()
@@ -879,22 +834,12 @@ mod tests {
     /// glint, which is the state every one of the seven baked-override items
     /// arrives in.
     #[test]
-    fn has_foil_reads_the_enchantments_list() {
-        use lodestone_model::item::ItemComponents;
+    fn has_foil_enchantments_reads_the_enchantments_list() {
+        let none: [lodestone_model::item::ItemEnchantment; 0] = [];
+        assert!(!has_foil_enchantments(&none));
 
-        let plain = ItemComponents::default();
-        assert!(!has_foil(&plain));
-
-        // An enchanted stack. Constructed through the public field so this test
-        // fails to compile rather than silently passing if the field moves.
-        let mut enchanted = ItemComponents::default();
-        enchanted
-            .enchantments
-            .push(lodestone_model::item::ItemEnchantment {
-                id: 0,
-                level: 1,
-            });
-        assert!(has_foil(&enchanted));
+        let one = [lodestone_model::item::ItemEnchantment { id: 0, level: 1 }];
+        assert!(has_foil_enchantments(&one));
     }
 
     /// The baked census: `Some(true)` for exactly the seven items, `None`

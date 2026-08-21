@@ -3010,8 +3010,8 @@ fn resolve_entity_facts(
         Reported::Reported(Some(stack)) => stack.count,
         _ => 1,
     };
-    // The glint gate for a dropped stack. `lodestone_render::glint::has_foil` is
-    // the single owner of what foil means (the HUD's own
+    // The glint gate for a dropped stack. `lodestone_render::glint::has_foil_for_item`
+    // is the single owner of what foil means (the HUD's own
     // `item_icon::stack_has_foil` bridges the *other* stack type to the same
     // predicate); nothing here re-spells it.
     // Keyed on the item id as well as the components, because seven vanilla
