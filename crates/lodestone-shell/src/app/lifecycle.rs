@@ -798,441 +798,7 @@ impl ApplicationHandler for WindowApp {
                         .scroll_active_list(&self.ui, dy as f32, canvas_h);
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
-                let pressed = event.state == ElementState::Pressed;
-
-                // Tracked unconditionally (not gated on `accepts_gameplay_input`
-                // like the movement bindings below): a container shift-click is a
-                // `QuickMove`, not movement, and must still work while gameplay
-                // input is not being accepted.
-                //
-                // **Deliberately still a literal key, and vanilla agrees**: it
-                // checks `Screen.hasShiftDown()` — the raw modifier state — not
-                // `options.keyShift`, so rebinding sneak does *not* move
-                // shift-click. Same boundary as `menu_button_for`: container
-                // gestures are UI chrome, not gameplay bindings. Both shifts
-                // count, because this is asking "is a shift modifier down".
-                if let PhysicalKey::Code(code) = event.physical_key
-                    && matches!(code, KeyCode::ShiftLeft | KeyCode::ShiftRight)
-                {
-                    self.shift_held = pressed;
-                }
-                // Same tracking, for Control — `resolve_key`'s `ctrl` parameter.
-                // Deliberately a running flag rather than read off this event:
-                // `key.drop` is a different physical key from Control, so the
-                // modifier's state has to outlive the keypress that changed it.
-                if let PhysicalKey::Code(code) = event.physical_key
-                    && matches!(code, KeyCode::ControlLeft | KeyCode::ControlRight)
-                {
-                    self.ctrl_held = pressed;
-                }
-
-                // Resolve *what this key means* before touching any state, then
-                // perform the one side effect it names. The precedence lives in
-                // [`resolve_key`] — a pure function, so the swallowing order can
-                // be unit-tested without a window (see its docs and the tests at
-                // the bottom of this file). This match is only the effects half.
-                let gate = KeyGate {
-                    // The same predicate the hover and click arms above use
-                    // (#474). It was the same *expression* before, written out
-                    // three times; a screen missing from one copy is a screen
-                    // whose clicks or keys silently vanish, and that is what
-                    // happened to `Screen::CommandBlockEdit` — the command box
-                    // could not be typed into because this copy excluded it too.
-                    menu: crate::menu::nav::routes_menu_input(&self.ui),
-                    chat_open: self.ui.is_chat_open(),
-                    // `active_container_menu`, **not** `ui.is_container_open()`.
-                    // That flag only tracks the *locally* opened player inventory;
-                    // a server-opened menu (crafting table, chest, furnace) lives
-                    // in `sim.open_menu()` and leaves it `false`. Reading the flag
-                    // meant the swallow arm never fired for a server menu, so the
-                    // inventory binding could not close a crafting table and every
-                    // gameplay key stayed live behind it. This is the same
-                    // predicate `redraw` draws from, so hit-testing, drawing and
-                    // key dispatch cannot disagree about what is on screen.
-                    container_open: self.active_container_menu().is_some(),
-                    gameplay: self.ui.accepts_gameplay_input(),
-                    debug_held: self.debug_held,
-                    // The recipe book's search box. **Gated on `open` as well as
-                    // `search_focused`**: the focus flag is only cleared by a
-                    // click, so closing the panel with the box focused would
-                    // otherwise leave every key routed into an invisible field.
-                    recipe_search: self.recipe_panel.open && self.recipe_panel.search_focused,
-                    // Gated on the screen being up as well as the box being
-                    // focused, for the same reason `recipe_search` is: the focus
-                    // flag persists across close, so closing the screen with the
-                    // box focused would otherwise leave every key routed into an
-                    // invisible field.
-                    creative_search: self.creative_search_active(),
-                    anvil_rename_active: self.anvil_rename_active(),
-                    // Issue #613's `TeleportToEntity` remainder — see
-                    // `KeyGate::spectator`'s own doc.
-                    spectator: self.sim.is_spectator(),
-                };
-                let code = match event.physical_key {
-                    PhysicalKey::Code(code) => Some(code),
-                    _ => None,
-                };
-                // Issue #162: a plugin's claim on this physical key, read
-                // once through a short ECS guard before `resolve_key` (a pure
-                // function of plain data — see its own doc) runs its
-                // precedence chain. `None` on the overwhelmingly common path
-                // where no plugin has registered anything at all, without
-                // even taking the guard.
-                let plugin_key = code.map(|c| lodestone_ecs::PhysicalKey::named(format!("{c:?}")));
-                let plugin_mode = plugin_key
-                    .as_ref()
-                    .and_then(|key| self.sim.plugin_key_intercept_mode(key));
-                // Resolved into a local first so the immutable borrow of
-                // `self.keybinds` ends before the `&mut self` calls below.
-                let outcome = resolve_key(
-                    &self.keybinds,
-                    gate,
-                    code,
-                    pressed,
-                    self.ctrl_held,
-                    plugin_mode,
-                );
-                // Deliver the raw transition to the plugin regardless of
-                // which `KeyOutcome` this resolved to — `Observe` mode wants
-                // it exactly as much as `Consume` does; only whether
-                // gameplay *also* sees the key depends on the outcome above.
-                if plugin_mode.is_some()
-                    && let Some(key) = plugin_key.clone()
-                {
-                    self.sim.queue_plugin_key_event(key, pressed);
-                }
-                match outcome {
-                    Some(KeyOutcome::Menu) => {
-                        // Issue #15's last hop: a bind button mid-capture needs the
-                        // *next raw key*, not `menu_key_for`'s translation —
-                        // `menu_key_for` silently drops any physical key with no
-                        // printable `text` (F-keys, modifiers, arrows other than
-                        // Up/Down), which is exactly the common rebind case
-                        // (`docs/keybindings.md`'s "Wiring the Controls menu").
-                        // Checked *before* calling `menu_key_for` at all, not only
-                        // when it returns `None`: a capture target can be a
-                        // printable key too, and `menu_key_for` would otherwise
-                        // consume it as `MenuKey::Char` first.
-                        if pressed && self.nav.awaiting_key_capture() {
-                            match capture_key_for(event.physical_key) {
-                                Some(CaptureKey::Cancel) => {
-                                    self.handle_menu_key(MenuKey::Escape);
-                                }
-                                Some(CaptureKey::Bind(code)) => {
-                                    self.nav.capture_binding(Binding::Key(code));
-                                }
-                                None => {}
-                            }
-                        } else if pressed
-                            && let Some(key) = Self::menu_key_for(
-                                event.physical_key,
-                                event.text.as_deref(),
-                                self.modifiers,
-                            )
-                        {
-                            self.handle_menu_key(key);
-                            // Entering the world grabs; leaving it releases.
-                            let want = self.ui.wants_cursor_grab();
-                            if want != self.grabbed {
-                                self.set_grab(want);
-                            }
-                        }
-                    }
-                    Some(KeyOutcome::Chat) => {
-                        if pressed && !self.handle_chat_history_key(&event) {
-                            self.handle_chat_key(&event);
-                        }
-                    }
-                    Some(KeyOutcome::Pause) => {
-                        // Escape on a container screen **closes the container and
-                        // returns to gameplay** — it does not open the pause menu.
-                        // That is `Screen.onClose()` in vanilla, and it is why this
-                        // is an `else` rather than a close followed by `on_escape`:
-                        // the old form paused *as well*, leaving the pause menu
-                        // drawn over a menu that was still open server-side.
-                        //
-                        // Also note it must clear both halves. `close_open_menu`
-                        // only releases the *server* menu; `close_container` clears
-                        // the local inventory flag. Whichever one was showing, the
-                        // other is already false and clearing it is a no-op.
-                        if self.active_container_menu().is_some() {
-                            self.sim.close_open_menu();
-                            self.ui.close_container();
-                        } else {
-                            // Context-sensitive: Playing↔Paused, Error→menu, etc.
-                            self.ui.on_escape();
-                        }
-                        self.set_grab(self.ui.wants_cursor_grab());
-                    }
-                    Some(KeyOutcome::CloseContainer) => {
-                        self.sim.close_open_menu();
-                        self.ui.close_container();
-                        self.set_grab(self.ui.wants_cursor_grab());
-                    }
-                    Some(KeyOutcome::DebugModifier(down)) => {
-                        // Issue #197. Vanilla's
-                        // `keyDebugModifier.setDown(!didDebugAction)`
-                        // (`KeyboardHandler.java`): the overlay toggles
-                        // on the **release**, and only if no chord consumed the
-                        // hold. Without that, F3+B would both open the overlay
-                        // and toggle hitboxes on one keystroke.
-                        self.debug_held = down;
-                        if down {
-                            self.debug_chord_used = false;
-                        } else if !self.debug_chord_used {
-                            self.show_debug = !self.show_debug;
-                        }
-                    }
-                    Some(KeyOutcome::ToggleHitboxes) => {
-                        use std::sync::atomic::Ordering;
-                        self.debug_chord_used = true;
-                        let was = self.debug_hitboxes.load(Ordering::Relaxed);
-                        let now = !was;
-                        self.debug_hitboxes.store(now, Ordering::Relaxed);
-                        // `debug.show_hitboxes.on`/`.off` — the owner's own
-                        // report: F3+H had this and F3+B/F3+G did not.
-                        self.sim.push_local_chat(debug_shown_feedback(
-                            "Hitboxes",
-                            now,
-                        ));
-                    }
-                    Some(KeyOutcome::ToggleChunkBorders) => {
-                        use std::sync::atomic::Ordering;
-                        self.debug_chord_used = true;
-                        let was = self.debug_chunk_borders.load(Ordering::Relaxed);
-                        let now = !was;
-                        self.debug_chunk_borders.store(now, Ordering::Relaxed);
-                        // `debug.chunk_boundaries.on`/`.off`.
-                        self.sim.push_local_chat(debug_shown_feedback(
-                            "Chunk borders",
-                            now,
-                        ));
-                    }
-                    Some(KeyOutcome::ToggleProfilerChart) => {
-                        self.debug_chord_used = true;
-                        self.show_profiler_chart = !self.show_profiler_chart;
-                        // Landing on the root every time the chart is shown
-                        // again is the honest default — a stale drill-in from
-                        // a previous session (or from before it was hidden)
-                        // is not a state the player asked to return to.
-                        if self.show_profiler_chart {
-                            self.profiler_chart_selected = None;
-                        }
-                    }
-                    Some(KeyOutcome::ProfilerChartSelect(selection)) => {
-                        self.debug_chord_used = true;
-                        // Only meaningful while the chart is actually shown —
-                        // otherwise this chord falls through with no visible
-                        // effect, matching vanilla's own number-key handling
-                        // (`DebugScreenOverlay.keyPressed` no-ops when the
-                        // profiler chart is not up).
-                        if self.show_profiler_chart {
-                            self.profiler_chart_selected = selection;
-                        }
-                    }
-                    Some(KeyOutcome::ToggleSpectator) => {
-                        self.debug_chord_used = true;
-                        self.toggle_spectator();
-                    }
-                    Some(KeyOutcome::CycleGameMode) => {
-                        self.debug_chord_used = true;
-                        self.cycle_game_mode();
-                    }
-                    Some(KeyOutcome::RecipeSearch) => {
-                        // `RecipePanelState::search` had **no writer at all** —
-                        // the field was read by `RecipeBook::browse` and (since
-                        // the search box learned to draw) by the layout, and
-                        // written by nothing. The owner's "I can't type in the
-                        // search bar" is that island, one layer up from the
-                        // missing draw.
-                        //
-                        // `event.text` rather than a `KeyCode` mapping: winit has
-                        // already applied the keyboard layout, which is the same
-                        // reason `menu_key_for` reads it. Control characters are
-                        // filtered out because winit reports Backspace/Enter with
-                        // `text` set on some platforms.
-                        if code == Some(KeyCode::Backspace) {
-                            self.recipe_panel.search.pop();
-                            self.recipe_panel.page = 0;
-                        } else if let Some(text) = event.text.as_deref() {
-                            let mut typed = false;
-                            for ch in text.chars().filter(|c| !c.is_control()) {
-                                // `searchBox.setMaxLength(50)`
-                                // (`RecipeBookComponent.java`).
-                                if self.recipe_panel.search.chars().count() < RECIPE_SEARCH_MAX_LEN {
-                                    self.recipe_panel.search.push(ch);
-                                    typed = true;
-                                }
-                            }
-                            if typed {
-                                self.recipe_panel.page = 0;
-                            }
-                        }
-                        // Back to page 0 on any edit, both branches:
-                        // `checkSearchStringUpdate` calls `updateCollections`,
-                        // which re-pages from the start. Without it, narrowing a
-                        // search while parked on page 3 shows an empty grid —
-                        // `recipe_book_panel_contents` would clamp it, but to the
-                        // *last* page rather than the first, which is not where a
-                        // player expects a fresh search to begin.
-                    }
-                    Some(KeyOutcome::CreativeSearch) => {
-                        // Same shape as the recipe box above, through
-                        // `edit_creative_search` so the max-length rule and the
-                        // scroll reset live with the rest of the screen's state
-                        // rather than in this driver arm.
-                        if code == Some(KeyCode::Backspace) {
-                            self.edit_creative_search(CreativeSearchEdit::Backspace);
-                        } else if let Some(text) = event.text.as_deref() {
-                            for ch in text.chars().filter(|c| !c.is_control()) {
-                                self.edit_creative_search(CreativeSearchEdit::Char(ch));
-                            }
-                        }
-                    }
-                    Some(KeyOutcome::AnvilRename) => {
-                        // Same shape as the two search boxes above, but this one
-                        // also has a *responder*: vanilla calls `onNameChanged`
-                        // after every edit (`EditBox::setResponder`), which is
-                        // what actually produces `ClientAction::RenameItem` —
-                        // this arm is issue #603's whole fix, closing the send
-                        // side of the island the issue names (`RenameItem` was
-                        // modelled, encoded and consumed server-side with zero
-                        // producers anywhere in `lodestone-shell`).
-                        let mut changed = false;
-                        if code == Some(KeyCode::Backspace) {
-                            self.anvil_rename.backspace();
-                            changed = true;
-                        } else if let Some(text) = event.text.as_deref() {
-                            for ch in text.chars().filter(|c| !c.is_control()) {
-                                self.anvil_rename.push_char(ch);
-                                changed = true;
-                            }
-                        }
-                        if changed && let Some(name) = self.anvil_rename.resolve_rename() {
-                            if let Some(net) = self.sim.net() {
-                                net.send_action(lodestone_model::ClientAction::RenameItem { name });
-                            }
-                        }
-                    }
-                    Some(KeyOutcome::ToggleAdvancedTooltips) => {
-                        // A persisted option, not a render flag — see the
-                        // outcome's own doc. `MenuNav` owns `Options` and writes
-                        // `options.json` eagerly on every mutation, so this
-                        // survives a crash the way every settings row does.
-                        self.debug_chord_used = true;
-                        self.nav.toggle_advanced_item_tooltips();
-                        // `debug.advanced_tooltips.on`/`.off` — the owner's
-                        // named gap: the toggle already worked, only this line
-                        // was missing.
-                        let now = self.nav.advanced_item_tooltips();
-                        self.sim.push_local_chat(debug_shown_feedback(
-                            "Advanced tooltips",
-                            now,
-                        ));
-                    }
-                    Some(KeyOutcome::TogglePauseOnLostFocus) => {
-                        // `debug.pause_focus.on`/`.off` — vanilla's
-                        // `keyDebugFocusPause` arm: toggle, persist, then
-                        // feedback, same order as `toggle_advanced_item_tooltips`.
-                        self.debug_chord_used = true;
-                        self.nav.toggle_pause_on_lost_focus();
-                        let now = self.nav.pause_on_lost_focus();
-                        self.sim.push_local_chat(debug_enabled_feedback(
-                            "Pause on lost focus",
-                            now,
-                        ));
-                    }
-                    Some(KeyOutcome::CopyLocation) => {
-                        // `debug.copy_location.message` — vanilla's
-                        // `keyDebugCopyLocation` arm builds `/execute in <dim>
-                        // run tp @s x y z yaw pitch` from the local player's own
-                        // state and writes it to the clipboard, unconditionally
-                        // (no on/off — a location either copies or, off a
-                        // pre-login `dimension`, is a no-op, matching vanilla's
-                        // own `this.minecraft.player != null` guard).
-                        self.debug_chord_used = true;
-                        if let Some(dimension) = self.sim.stats.dimension.clone() {
-                            let command = copy_location_command(
-                                &dimension,
-                                self.sim.stats.position,
-                                self.sim.stats.yaw,
-                                self.sim.stats.pitch,
-                            );
-                            clipboard_seam::set(&command);
-                            self.sim.push_local_chat(debug_feedback(
-                                "Copied location to clipboard",
-                            ));
-                        }
-                    }
-                    Some(KeyOutcome::Screenshot) => {
-                        // Arm it; `redraw()` services it after the frame is
-                        // drawn. Capturing here would read an undrawn (or
-                        // stale) swapchain image — see the field's own doc.
-                        self.pending_screenshot = true;
-                    }
-                    Some(KeyOutcome::PlayerList(held)) => self.tab_held = held,
-                    Some(KeyOutcome::OpenChat { command }) => {
-                        // Release held movement so we don't walk while typing.
-                        self.sim.input_mut(InputState::release_all);
-                        let _ = self.chat_input.take();
-                        if command {
-                            self.chat_input.push_char('/');
-                        }
-                        self.ui.open_chat();
-                        self.tab_held = false;
-                        self.set_grab(false);
-                    }
-                    Some(KeyOutcome::OpenContainer) => {
-                        self.sim.input_mut(InputState::release_all);
-                        self.ui.open_container();
-                        self.tab_held = false;
-                        self.set_grab(false);
-                    }
-                    // Vanilla's own third-/first-person toggle.
-                    Some(KeyOutcome::TogglePerspective) => self.sim.cycle_camera_type(),
-                    Some(KeyOutcome::SelectSlot(slot)) => self.sim.select_slot(slot),
-                    // Issue #613's `TeleportToEntity` remainder — the
-                    // Spectator Menu (`crate::menu::spectator_menu`), same
-                    // release-and-open dance as `OpenContainer` above.
-                    Some(KeyOutcome::OpenSpectatorMenu) => {
-                        self.sim.input_mut(InputState::release_all);
-                        self.nav.open_spectator_menu(&mut self.ui);
-                        self.tab_held = false;
-                        self.set_grab(false);
-                    }
-                    Some(KeyOutcome::ContainerSwap { button }) => {
-                        self.send_container_swap(button);
-                    }
-                    Some(KeyOutcome::ContainerDrop { ctrl }) => {
-                        self.send_container_drop(ctrl);
-                    }
-                    Some(KeyOutcome::ContainerPickItem) => self.send_container_pick_item(),
-                    Some(KeyOutcome::Drop { ctrl }) => self.send_drop_selected(ctrl),
-                    Some(KeyOutcome::PickItem { ctrl }) => self.sim.pick_block_or_entity(ctrl),
-                    // The *other* off-hand route (#385): no screen, no slot, a
-                    // bare `ServerboundPlayerAction`. Sent straight through
-                    // `NetClient` rather than queued into `ActionQueue`, which is
-                    // the sanctioned shape for a per-frame input-driven action —
-                    // see `interact.rs`' module doc on why `end_attack`,
-                    // `use_item_live` and `send_chat` do the same.
-                    Some(KeyOutcome::SwapOffhand) => self.send_offhand_swap(),
-                    Some(KeyOutcome::Attack(true)) => self.sim.begin_attack(),
-                    Some(KeyOutcome::Attack(false)) => self.sim.end_attack(),
-                    Some(KeyOutcome::Use(true)) => self.try_use(),
-                    Some(KeyOutcome::Use(false)) => self.sim.end_use(),
-                    Some(KeyOutcome::Movement(action, held)) => {
-                        self.sim.input_mut(|i| i.set(action, held));
-                    }
-                    // A plugin's `Consume` claim already got the raw event
-                    // above, unconditionally; there is nothing else to do —
-                    // that is the entire point of the outcome existing.
-                    Some(KeyOutcome::PluginConsumed) => {}
-                    // Either nothing is bound to this key, or a screen above
-                    // swallowed it. Both are "do nothing", deliberately.
-                    None => {}
-                }
-            }
+            WindowEvent::KeyboardInput { event, .. } => self.handle_keyboard_input(event),
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
         }
@@ -1318,6 +884,508 @@ impl ApplicationHandler for WindowApp {
             self.pacer
                 .control_flow(now, self.current_target_fps(now)),
         );
+    }
+}
+
+impl WindowApp {
+    /// The physical-key handling body of `window_event`'s
+    /// `WindowEvent::KeyboardInput` arm, factored out so a test can drive it
+    /// directly with no `ActiveEventLoop` involved — this arm never touches
+    /// one (the only `event_loop` use in `window_event` is `CloseRequested`
+    /// and the post-match quit check, both outside this arm). `resolve_key`'s
+    /// own tests are a *pure-function* check of `KeyOutcome` routing; this is
+    /// the layer above it — the atomics, `push_local_chat`, and every other
+    /// side effect a `KeyOutcome` match arm performs — which a resolver-level
+    /// assertion cannot see.
+    fn handle_keyboard_input(&mut self, event: winit::event::KeyEvent) {
+        let pressed = event.state == ElementState::Pressed;
+
+        // Tracked unconditionally (not gated on `accepts_gameplay_input`
+        // like the movement bindings below): a container shift-click is a
+        // `QuickMove`, not movement, and must still work while gameplay
+        // input is not being accepted.
+        //
+        // **Deliberately still a literal key, and vanilla agrees**: it
+        // checks `Screen.hasShiftDown()` — the raw modifier state — not
+        // `options.keyShift`, so rebinding sneak does *not* move
+        // shift-click. Same boundary as `menu_button_for`: container
+        // gestures are UI chrome, not gameplay bindings. Both shifts
+        // count, because this is asking "is a shift modifier down".
+        if let PhysicalKey::Code(code) = event.physical_key
+            && matches!(code, KeyCode::ShiftLeft | KeyCode::ShiftRight)
+        {
+            self.shift_held = pressed;
+        }
+        // Same tracking, for Control — `resolve_key`'s `ctrl` parameter.
+        // Deliberately a running flag rather than read off this event:
+        // `key.drop` is a different physical key from Control, so the
+        // modifier's state has to outlive the keypress that changed it.
+        if let PhysicalKey::Code(code) = event.physical_key
+            && matches!(code, KeyCode::ControlLeft | KeyCode::ControlRight)
+        {
+            self.ctrl_held = pressed;
+        }
+
+        // Resolve *what this key means* before touching any state, then
+        // perform the one side effect it names. The precedence lives in
+        // [`resolve_key`] — a pure function, so the swallowing order can
+        // be unit-tested without a window (see its docs and the tests at
+        // the bottom of this file). This match is only the effects half.
+        let gate = KeyGate {
+            // The same predicate the hover and click arms above use
+            // (#474). It was the same *expression* before, written out
+            // three times; a screen missing from one copy is a screen
+            // whose clicks or keys silently vanish, and that is what
+            // happened to `Screen::CommandBlockEdit` — the command box
+            // could not be typed into because this copy excluded it too.
+            menu: crate::menu::nav::routes_menu_input(&self.ui),
+            chat_open: self.ui.is_chat_open(),
+            // `active_container_menu`, **not** `ui.is_container_open()`.
+            // That flag only tracks the *locally* opened player inventory;
+            // a server-opened menu (crafting table, chest, furnace) lives
+            // in `sim.open_menu()` and leaves it `false`. Reading the flag
+            // meant the swallow arm never fired for a server menu, so the
+            // inventory binding could not close a crafting table and every
+            // gameplay key stayed live behind it. This is the same
+            // predicate `redraw` draws from, so hit-testing, drawing and
+            // key dispatch cannot disagree about what is on screen.
+            container_open: self.active_container_menu().is_some(),
+            gameplay: self.ui.accepts_gameplay_input(),
+            debug_held: self.debug_held,
+            // The recipe book's search box. **Gated on `open` as well as
+            // `search_focused`**: the focus flag is only cleared by a
+            // click, so closing the panel with the box focused would
+            // otherwise leave every key routed into an invisible field.
+            recipe_search: self.recipe_panel.open && self.recipe_panel.search_focused,
+            // Gated on the screen being up as well as the box being
+            // focused, for the same reason `recipe_search` is: the focus
+            // flag persists across close, so closing the screen with the
+            // box focused would otherwise leave every key routed into an
+            // invisible field.
+            creative_search: self.creative_search_active(),
+            anvil_rename_active: self.anvil_rename_active(),
+            // Issue #613's `TeleportToEntity` remainder — see
+            // `KeyGate::spectator`'s own doc.
+            spectator: self.sim.is_spectator(),
+        };
+        let code = match event.physical_key {
+            PhysicalKey::Code(code) => Some(code),
+            _ => None,
+        };
+        // Issue #162: a plugin's claim on this physical key, read
+        // once through a short ECS guard before `resolve_key` (a pure
+        // function of plain data — see its own doc) runs its
+        // precedence chain. `None` on the overwhelmingly common path
+        // where no plugin has registered anything at all, without
+        // even taking the guard.
+        let plugin_key = code.map(|c| lodestone_ecs::PhysicalKey::named(format!("{c:?}")));
+        let plugin_mode = plugin_key
+            .as_ref()
+            .and_then(|key| self.sim.plugin_key_intercept_mode(key));
+        // Resolved into a local first so the immutable borrow of
+        // `self.keybinds` ends before the `&mut self` calls below.
+        let outcome = resolve_key(
+            &self.keybinds,
+            gate,
+            code,
+            pressed,
+            self.ctrl_held,
+            plugin_mode,
+        );
+        // Deliver the raw transition to the plugin regardless of
+        // which `KeyOutcome` this resolved to — `Observe` mode wants
+        // it exactly as much as `Consume` does; only whether
+        // gameplay *also* sees the key depends on the outcome above.
+        if plugin_mode.is_some()
+            && let Some(key) = plugin_key.clone()
+        {
+            self.sim.queue_plugin_key_event(key, pressed);
+        }
+        // Instrumentation for the F3+B/F3+G "no chat feedback at all" report:
+        // `resolve_key`'s own tests already prove `KeyOutcome::ToggleHitboxes`/
+        // `ToggleChunkBorders` are *produced* correctly whenever `code` is
+        // `Some(KeyCode::KeyB/KeyG)` and `gate.debug_held` is true, and
+        // `apply_key_outcome`'s own real-path test proves the effect side
+        // (the atomic store, `Sim::push_local_chat`) runs correctly given
+        // that outcome. Neither of those can see whether the *real* event
+        // ever carries `Some(KeyCode::KeyB)` with `debug_held` true in the
+        // first place — a physical key winit reports as
+        // `PhysicalKey::Unidentified` (an unusual keyboard/driver/locale
+        // combination) collapses `code` to `None`, and `resolve_key` returns
+        // `None` for *everything* once that happens, including a chord that
+        // would otherwise fire. `RUST_LOG=debug_keys=debug` prints this once
+        // per real key event; deliberately not gated on `debug_held` or on
+        // which outcome resulted, so a genuinely unidentified key shows up
+        // here even though nothing downstream could ever have told us about
+        // it.
+        tracing::debug!(
+            target: "debug_keys",
+            physical_key = ?event.physical_key,
+            ?code,
+            pressed,
+            debug_held = gate.debug_held,
+            ?outcome,
+            "key event resolved",
+        );
+        self.apply_key_outcome(outcome, pressed, code, Some(&event));
+    }
+
+    /// The `KeyOutcome` → effect half of `handle_keyboard_input`, split out
+    /// so a test can drive it with a resolved `KeyOutcome` directly — the
+    /// gap the resolver-only tests in `app::tests` cannot see, since those
+    /// only assert which `KeyOutcome` `resolve_key` *returns*, never that its
+    /// side effects (an `Arc<AtomicBool>` store, `Sim::push_local_chat`, …)
+    /// actually ran. `raw` is `Some` for a real keyboard event and carries
+    /// the handful of outcomes (`Menu`/`Chat`/`RecipeSearch`/`CreativeSearch`/
+    /// `AnvilRename`) that need the platform `KeyEvent` for its `text`/
+    /// `physical_key` — winit's `KeyEvent` has a private `platform_specific`
+    /// field, so nothing outside winit can construct one, which is exactly
+    /// why no test before this one reached past `resolve_key`'s pure output.
+    /// `pressed`/`code` are threaded through separately rather than
+    /// re-derived from `raw`, because most of this match's arms (including
+    /// every debug chord) need them and `raw` is exactly the thing a test
+    /// cannot supply. A test driving one of the outcomes that need no raw
+    /// event at all passes `raw: None` and never touches the `expect` calls
+    /// below.
+    pub(super) fn apply_key_outcome(
+        &mut self,
+        outcome: Option<KeyOutcome>,
+        pressed: bool,
+        code: Option<KeyCode>,
+        raw: Option<&winit::event::KeyEvent>,
+    ) {
+        match outcome {
+            Some(KeyOutcome::Menu) => {
+                let key_event = raw.expect("KeyOutcome::Menu needs the raw KeyEvent");
+                // Issue #15's last hop: a bind button mid-capture needs the
+                // *next raw key*, not `menu_key_for`'s translation —
+                // `menu_key_for` silently drops any physical key with no
+                // printable `text` (F-keys, modifiers, arrows other than
+                // Up/Down), which is exactly the common rebind case
+                // (`docs/keybindings.md`'s "Wiring the Controls menu").
+                // Checked *before* calling `menu_key_for` at all, not only
+                // when it returns `None`: a capture target can be a
+                // printable key too, and `menu_key_for` would otherwise
+                // consume it as `MenuKey::Char` first.
+                if pressed && self.nav.awaiting_key_capture() {
+                    match capture_key_for(key_event.physical_key) {
+                        Some(CaptureKey::Cancel) => {
+                            self.handle_menu_key(MenuKey::Escape);
+                        }
+                        Some(CaptureKey::Bind(code)) => {
+                            self.nav.capture_binding(Binding::Key(code));
+                        }
+                        None => {}
+                    }
+                } else if pressed
+                    && let Some(key) = Self::menu_key_for(
+                        key_event.physical_key,
+                        key_event.text.as_deref(),
+                        self.modifiers,
+                    )
+                {
+                    self.handle_menu_key(key);
+                    // Entering the world grabs; leaving it releases.
+                    let want = self.ui.wants_cursor_grab();
+                    if want != self.grabbed {
+                        self.set_grab(want);
+                    }
+                }
+            }
+            Some(KeyOutcome::Chat) => {
+                let key_event = raw.expect("KeyOutcome::Chat needs the raw KeyEvent");
+                if pressed && !self.handle_chat_history_key(key_event) {
+                    self.handle_chat_key(key_event);
+                }
+            }
+            Some(KeyOutcome::Pause) => {
+                // Escape on a container screen **closes the container and
+                // returns to gameplay** — it does not open the pause menu.
+                // That is `Screen.onClose()` in vanilla, and it is why this
+                // is an `else` rather than a close followed by `on_escape`:
+                // the old form paused *as well*, leaving the pause menu
+                // drawn over a menu that was still open server-side.
+                //
+                // Also note it must clear both halves. `close_open_menu`
+                // only releases the *server* menu; `close_container` clears
+                // the local inventory flag. Whichever one was showing, the
+                // other is already false and clearing it is a no-op.
+                if self.active_container_menu().is_some() {
+                    self.sim.close_open_menu();
+                    self.ui.close_container();
+                } else {
+                    // Context-sensitive: Playing↔Paused, Error→menu, etc.
+                    self.ui.on_escape();
+                }
+                self.set_grab(self.ui.wants_cursor_grab());
+            }
+            Some(KeyOutcome::CloseContainer) => {
+                self.sim.close_open_menu();
+                self.ui.close_container();
+                self.set_grab(self.ui.wants_cursor_grab());
+            }
+            Some(KeyOutcome::DebugModifier(down)) => {
+                // Issue #197. Vanilla's
+                // `keyDebugModifier.setDown(!didDebugAction)`
+                // (`KeyboardHandler.java`): the overlay toggles
+                // on the **release**, and only if no chord consumed the
+                // hold. Without that, F3+B would both open the overlay
+                // and toggle hitboxes on one keystroke.
+                self.debug_held = down;
+                if down {
+                    self.debug_chord_used = false;
+                } else if !self.debug_chord_used {
+                    self.show_debug = !self.show_debug;
+                }
+            }
+            Some(KeyOutcome::ToggleHitboxes) => {
+                use std::sync::atomic::Ordering;
+                self.debug_chord_used = true;
+                let was = self.debug_hitboxes.load(Ordering::Relaxed);
+                let now = !was;
+                self.debug_hitboxes.store(now, Ordering::Relaxed);
+                // `debug.show_hitboxes.on`/`.off` — the owner's own
+                // report: F3+H had this and F3+B/F3+G did not.
+                self.sim.push_local_chat(debug_shown_feedback(
+                    "Hitboxes",
+                    now,
+                ));
+            }
+            Some(KeyOutcome::ToggleChunkBorders) => {
+                use std::sync::atomic::Ordering;
+                self.debug_chord_used = true;
+                let was = self.debug_chunk_borders.load(Ordering::Relaxed);
+                let now = !was;
+                self.debug_chunk_borders.store(now, Ordering::Relaxed);
+                // `debug.chunk_boundaries.on`/`.off`.
+                self.sim.push_local_chat(debug_shown_feedback(
+                    "Chunk borders",
+                    now,
+                ));
+            }
+            Some(KeyOutcome::ToggleProfilerChart) => {
+                self.debug_chord_used = true;
+                self.show_profiler_chart = !self.show_profiler_chart;
+                // Landing on the root every time the chart is shown
+                // again is the honest default — a stale drill-in from
+                // a previous session (or from before it was hidden)
+                // is not a state the player asked to return to.
+                if self.show_profiler_chart {
+                    self.profiler_chart_selected = None;
+                }
+            }
+            Some(KeyOutcome::ProfilerChartSelect(selection)) => {
+                self.debug_chord_used = true;
+                // Only meaningful while the chart is actually shown —
+                // otherwise this chord falls through with no visible
+                // effect, matching vanilla's own number-key handling
+                // (`DebugScreenOverlay.keyPressed` no-ops when the
+                // profiler chart is not up).
+                if self.show_profiler_chart {
+                    self.profiler_chart_selected = selection;
+                }
+            }
+            Some(KeyOutcome::ToggleSpectator) => {
+                self.debug_chord_used = true;
+                self.toggle_spectator();
+            }
+            Some(KeyOutcome::CycleGameMode) => {
+                self.debug_chord_used = true;
+                self.cycle_game_mode();
+            }
+            Some(KeyOutcome::RecipeSearch) => {
+                // `RecipePanelState::search` had **no writer at all** —
+                // the field was read by `RecipeBook::browse` and (since
+                // the search box learned to draw) by the layout, and
+                // written by nothing. The owner's "I can't type in the
+                // search bar" is that island, one layer up from the
+                // missing draw.
+                //
+                // `event.text` rather than a `KeyCode` mapping: winit has
+                // already applied the keyboard layout, which is the same
+                // reason `menu_key_for` reads it. Control characters are
+                // filtered out because winit reports Backspace/Enter with
+                // `text` set on some platforms.
+                if code == Some(KeyCode::Backspace) {
+                    self.recipe_panel.search.pop();
+                    self.recipe_panel.page = 0;
+                } else if let Some(text) = raw.expect("KeyOutcome::RecipeSearch needs the raw KeyEvent").text.as_deref() {
+                    let mut typed = false;
+                    for ch in text.chars().filter(|c| !c.is_control()) {
+                        // `searchBox.setMaxLength(50)`
+                        // (`RecipeBookComponent.java`).
+                        if self.recipe_panel.search.chars().count() < RECIPE_SEARCH_MAX_LEN {
+                            self.recipe_panel.search.push(ch);
+                            typed = true;
+                        }
+                    }
+                    if typed {
+                        self.recipe_panel.page = 0;
+                    }
+                }
+                // Back to page 0 on any edit, both branches:
+                // `checkSearchStringUpdate` calls `updateCollections`,
+                // which re-pages from the start. Without it, narrowing a
+                // search while parked on page 3 shows an empty grid —
+                // `recipe_book_panel_contents` would clamp it, but to the
+                // *last* page rather than the first, which is not where a
+                // player expects a fresh search to begin.
+            }
+            Some(KeyOutcome::CreativeSearch) => {
+                // Same shape as the recipe box above, through
+                // `edit_creative_search` so the max-length rule and the
+                // scroll reset live with the rest of the screen's state
+                // rather than in this driver arm.
+                if code == Some(KeyCode::Backspace) {
+                    self.edit_creative_search(CreativeSearchEdit::Backspace);
+                } else if let Some(text) = raw.expect("KeyOutcome::CreativeSearch needs the raw KeyEvent").text.as_deref() {
+                    for ch in text.chars().filter(|c| !c.is_control()) {
+                        self.edit_creative_search(CreativeSearchEdit::Char(ch));
+                    }
+                }
+            }
+            Some(KeyOutcome::AnvilRename) => {
+                // Same shape as the two search boxes above, but this one
+                // also has a *responder*: vanilla calls `onNameChanged`
+                // after every edit (`EditBox::setResponder`), which is
+                // what actually produces `ClientAction::RenameItem` —
+                // this arm is issue #603's whole fix, closing the send
+                // side of the island the issue names (`RenameItem` was
+                // modelled, encoded and consumed server-side with zero
+                // producers anywhere in `lodestone-shell`).
+                let mut changed = false;
+                if code == Some(KeyCode::Backspace) {
+                    self.anvil_rename.backspace();
+                    changed = true;
+                } else if let Some(text) = raw.expect("KeyOutcome::AnvilRename needs the raw KeyEvent").text.as_deref() {
+                    for ch in text.chars().filter(|c| !c.is_control()) {
+                        self.anvil_rename.push_char(ch);
+                        changed = true;
+                    }
+                }
+                if changed && let Some(name) = self.anvil_rename.resolve_rename() {
+                    if let Some(net) = self.sim.net() {
+                        net.send_action(lodestone_model::ClientAction::RenameItem { name });
+                    }
+                }
+            }
+            Some(KeyOutcome::ToggleAdvancedTooltips) => {
+                // A persisted option, not a render flag — see the
+                // outcome's own doc. `MenuNav` owns `Options` and writes
+                // `options.json` eagerly on every mutation, so this
+                // survives a crash the way every settings row does.
+                self.debug_chord_used = true;
+                self.nav.toggle_advanced_item_tooltips();
+                // `debug.advanced_tooltips.on`/`.off` — the owner's
+                // named gap: the toggle already worked, only this line
+                // was missing.
+                let now = self.nav.advanced_item_tooltips();
+                self.sim.push_local_chat(debug_shown_feedback(
+                    "Advanced tooltips",
+                    now,
+                ));
+            }
+            Some(KeyOutcome::TogglePauseOnLostFocus) => {
+                // `debug.pause_focus.on`/`.off` — vanilla's
+                // `keyDebugFocusPause` arm: toggle, persist, then
+                // feedback, same order as `toggle_advanced_item_tooltips`.
+                self.debug_chord_used = true;
+                self.nav.toggle_pause_on_lost_focus();
+                let now = self.nav.pause_on_lost_focus();
+                self.sim.push_local_chat(debug_enabled_feedback(
+                    "Pause on lost focus",
+                    now,
+                ));
+            }
+            Some(KeyOutcome::CopyLocation) => {
+                // `debug.copy_location.message` — vanilla's
+                // `keyDebugCopyLocation` arm builds `/execute in <dim>
+                // run tp @s x y z yaw pitch` from the local player's own
+                // state and writes it to the clipboard, unconditionally
+                // (no on/off — a location either copies or, off a
+                // pre-login `dimension`, is a no-op, matching vanilla's
+                // own `this.minecraft.player != null` guard).
+                self.debug_chord_used = true;
+                if let Some(dimension) = self.sim.stats.dimension.clone() {
+                    let command = copy_location_command(
+                        &dimension,
+                        self.sim.stats.position,
+                        self.sim.stats.yaw,
+                        self.sim.stats.pitch,
+                    );
+                    clipboard_seam::set(&command);
+                    self.sim.push_local_chat(debug_feedback(
+                        "Copied location to clipboard",
+                    ));
+                }
+            }
+            Some(KeyOutcome::Screenshot) => {
+                // Arm it; `redraw()` services it after the frame is
+                // drawn. Capturing here would read an undrawn (or
+                // stale) swapchain image — see the field's own doc.
+                self.pending_screenshot = true;
+            }
+            Some(KeyOutcome::PlayerList(held)) => self.tab_held = held,
+            Some(KeyOutcome::OpenChat { command }) => {
+                // Release held movement so we don't walk while typing.
+                self.sim.input_mut(InputState::release_all);
+                let _ = self.chat_input.take();
+                if command {
+                    self.chat_input.push_char('/');
+                }
+                self.ui.open_chat();
+                self.tab_held = false;
+                self.set_grab(false);
+            }
+            Some(KeyOutcome::OpenContainer) => {
+                self.sim.input_mut(InputState::release_all);
+                self.ui.open_container();
+                self.tab_held = false;
+                self.set_grab(false);
+            }
+            // Vanilla's own third-/first-person toggle.
+            Some(KeyOutcome::TogglePerspective) => self.sim.cycle_camera_type(),
+            Some(KeyOutcome::SelectSlot(slot)) => self.sim.select_slot(slot),
+            // Issue #613's `TeleportToEntity` remainder — the
+            // Spectator Menu (`crate::menu::spectator_menu`), same
+            // release-and-open dance as `OpenContainer` above.
+            Some(KeyOutcome::OpenSpectatorMenu) => {
+                self.sim.input_mut(InputState::release_all);
+                self.nav.open_spectator_menu(&mut self.ui);
+                self.tab_held = false;
+                self.set_grab(false);
+            }
+            Some(KeyOutcome::ContainerSwap { button }) => {
+                self.send_container_swap(button);
+            }
+            Some(KeyOutcome::ContainerDrop { ctrl }) => {
+                self.send_container_drop(ctrl);
+            }
+            Some(KeyOutcome::ContainerPickItem) => self.send_container_pick_item(),
+            Some(KeyOutcome::Drop { ctrl }) => self.send_drop_selected(ctrl),
+            Some(KeyOutcome::PickItem { ctrl }) => self.sim.pick_block_or_entity(ctrl),
+            // The *other* off-hand route (#385): no screen, no slot, a
+            // bare `ServerboundPlayerAction`. Sent straight through
+            // `NetClient` rather than queued into `ActionQueue`, which is
+            // the sanctioned shape for a per-frame input-driven action —
+            // see `interact.rs`' module doc on why `end_attack`,
+            // `use_item_live` and `send_chat` do the same.
+            Some(KeyOutcome::SwapOffhand) => self.send_offhand_swap(),
+            Some(KeyOutcome::Attack(true)) => self.sim.begin_attack(),
+            Some(KeyOutcome::Attack(false)) => self.sim.end_attack(),
+            Some(KeyOutcome::Use(true)) => self.try_use(),
+            Some(KeyOutcome::Use(false)) => self.sim.end_use(),
+            Some(KeyOutcome::Movement(action, held)) => {
+                self.sim.input_mut(|i| i.set(action, held));
+            }
+            // A plugin's `Consume` claim already got the raw event
+            // above, unconditionally; there is nothing else to do —
+            // that is the entire point of the outcome existing.
+            Some(KeyOutcome::PluginConsumed) => {}
+            // Either nothing is bound to this key, or a screen above
+            // swallowed it. Both are "do nothing", deliberately.
+            None => {}
+        }
     }
 }
 
@@ -1644,6 +1712,16 @@ impl WindowApp {
                     // Read per call, not captured: a portal changes this mid-session.
                     light_policy.get(),
                 )
+            });
+            // Same cell as `install_shadow_ground_source`, installed on this
+            // path too for `set_entity_light_source`'s own reason just above:
+            // a `--connect` launch that skipped it would show no entity
+            // shadows at all while a menu-launched session did.
+            let shadow_ground_handle = net.shared_handle();
+            render.set_shadow_ground_source(move |[x, y, z]| {
+                shadow_ground_handle
+                    .get()?
+                    .block_at(lodestone_client::BlockPos::new(x, y, z))
             });
             render.set_time_of_day_source(move || {
                 sky_clock
