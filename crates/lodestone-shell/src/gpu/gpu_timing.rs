@@ -74,8 +74,14 @@
 //!    module originally did it, would pair this frame's `begin` with the
 //!    previous frame's `end`.
 //! 2. [`GpuQueryTimer::after_submit`] — called right after `queue.submit` —
-//!    starts an async `map_async` on that slot's buffer and harvests any
-//!    earlier slot whose mapping has already completed.
+//!    starts an async `map_async` on that slot's buffer.
+//!
+//! The two are **one transaction split across the submit**, and they must
+//! agree about whether this frame's slot was usable at all: `resolve`
+//! harvests first and declines to copy into a slot that is still mapped
+//! (copying into one makes `wgpu` reject the whole submission), and
+//! `after_submit` then counts a stalled frame instead of mapping a slot
+//! nothing wrote to.
 //!
 //! [`GpuQueryTimer::results_ms`] therefore always reports the **last
 //! completed** frame's timings, a few frames behind — exactly the trade this
@@ -124,6 +130,11 @@ pub(crate) struct GpuQueryTimer {
     /// silently swallowed. Surfaced in the debug/tracing output so a real
     /// stall is visible rather than read as "GPU timing is just cheap".
     stalled_frames: u64,
+    /// Whether [`Self::resolve`] declined to copy this frame because the ring
+    /// slot was still mapped — read by [`Self::after_submit`], which must not
+    /// then start a mapping on a slot nothing wrote to. The two calls are one
+    /// transaction split across `queue.submit`.
+    skipped_resolve: bool,
     /// A 1x1 colour target existing only so [`Self::stamp`] has something to
     /// attach an otherwise-empty render pass to — see that method's doc for
     /// why a bracketing pass is the only way to time a *span of passes* on an
@@ -198,6 +209,7 @@ impl GpuQueryTimer {
             results_ms: vec![0.0; segment_count],
             have_result: vec![false; segment_count],
             stalled_frames: 0,
+            skipped_resolve: false,
             stamp_view,
         })
     }
@@ -291,36 +303,65 @@ impl GpuQueryTimer {
     /// Call once, after every pass that might have written into this timer's
     /// query set has been recorded, and **before** `queue.submit`
     /// (`resolve_query_set`/`copy_buffer_to_buffer` are encoder commands).
-    pub(crate) fn resolve(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        let n = (self.segment_names.len() * 2) as u32;
-        encoder.resolve_query_set(&self.query_set, 0..n, &self.resolve_buffer, 0);
-        let slot = &self.slots[(self.frame as usize) % FRAMES_IN_FLIGHT];
-        encoder.copy_buffer_to_buffer(&self.resolve_buffer, 0, &slot.readback, 0, u64::from(n) * 8);
-    }
-
-    /// Start this frame's async readback and harvest any slot whose mapping
-    /// already completed. Call once, right after `queue.submit` for the
-    /// encoder [`Self::resolve`] was called against.
     ///
-    /// **Never silently drops a result.** If the ring slot due for reuse
-    /// still has an unread mapping (the GPU/driver did not finish it within
-    /// `FRAMES_IN_FLIGHT` frames — real backpressure, not a bug in this
-    /// timer), this counts it in [`Self::stalled_frames`] and skips starting
-    /// a new map on top of the old one rather than losing either.
-    pub(crate) fn after_submit(&mut self, device: &wgpu::Device) {
-        // Non-blocking: only makes progress on callbacks already satisfied by
-        // work that has completed, never waits on the GPU. A profiling
-        // feature must not itself become the frame-time cost it exists to
-        // measure.
+    /// # The slot must be free first, and that is not optional
+    ///
+    /// This harvests before deciding, then **skips the copy entirely** when
+    /// the slot due for reuse still has an outstanding mapping. Copying into
+    /// a mapped buffer is not merely wasteful: `wgpu` rejects the whole
+    /// submission with *"Buffer with 'gpu-timer-readback' label is still
+    /// mapped"*, and under this workspace's release profile that error path
+    /// takes the process down.
+    ///
+    /// The check used to live only in [`Self::after_submit`] — after the copy
+    /// had already been recorded — which is too late to prevent it. It never
+    /// fired in ordinary play because presentation paces the frame loop
+    /// slowly enough that a mapping always completed inside three frames; it
+    /// fires immediately in an uncapped headless loop, and would fire in a
+    /// real session on any stall long enough for readback to fall behind.
+    /// Found by `benches/frame_profile.rs` on its first run.
+    pub(crate) fn resolve(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
+        // Non-blocking: makes progress only on callbacks already satisfied by
+        // completed work, so a slot that *can* be freed is freed before the
+        // decision below. A profiling feature must never wait on the GPU.
         let _ = device.poll(wgpu::PollType::Poll);
         self.harvest();
 
         let idx = (self.frame as usize) % FRAMES_IN_FLIGHT;
         if self.slots[idx].pending.is_some() {
+            self.skipped_resolve = true;
+            return;
+        }
+        self.skipped_resolve = false;
+        let n = (self.segment_names.len() * 2) as u32;
+        encoder.resolve_query_set(&self.query_set, 0..n, &self.resolve_buffer, 0);
+        let slot = &self.slots[idx];
+        encoder.copy_buffer_to_buffer(&self.resolve_buffer, 0, &slot.readback, 0, u64::from(n) * 8);
+    }
+
+    /// Start this frame's async readback. Call once, right after
+    /// `queue.submit` for the encoder [`Self::resolve`] was called against.
+    ///
+    /// **Never silently drops a result.** When [`Self::resolve`] declined to
+    /// copy because the ring slot due for reuse still had an unread mapping
+    /// (the GPU/driver did not finish it within `FRAMES_IN_FLIGHT` frames —
+    /// real backpressure, not a bug in this timer), this counts it in
+    /// [`Self::stalled_frames`] rather than mapping on top of the old one.
+    /// The two halves must agree: mapping a slot this frame's encoder never
+    /// copied into would report the *previous* occupant's timings as fresh.
+    pub(crate) fn after_submit(&mut self, device: &wgpu::Device) {
+        let idx = (self.frame as usize) % FRAMES_IN_FLIGHT;
+        if self.skipped_resolve {
             self.stalled_frames += 1;
             self.frame += 1;
             return;
         }
+        debug_assert!(
+            self.slots[idx].pending.is_none(),
+            "resolve() copied into slot {idx} but it is still mapped — the two halves have \
+             drifted apart and this submission is about to be rejected"
+        );
+        let _ = device;
         let (tx, rx) = std::sync::mpsc::channel();
         self.slots[idx]
             .readback
