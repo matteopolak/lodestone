@@ -128,6 +128,12 @@ impl Sim {
             // §4.1(c). The render-side entity interpolation, which used to own a
             // second `World` and therefore a second 20 Hz accumulator.
             crate::entities::EntityInterpPlugin,
+            // The `Display`-family (text_display/item_display/block_display)
+            // extract system — deliberately its own plugin rather than folded
+            // into `EntityInterpPlugin` above, since this family has no
+            // render-side interpolation track to join. See
+            // `crate::display_entities`'s module doc.
+            crate::display_entities::DisplayEntityPlugin,
             // Stage 4: the chunk store and the terrain-mesh queues become
             // resources, and `heal_dirty_columns` becomes an `Update` system in
             // `FrameSet::Terrain`.
