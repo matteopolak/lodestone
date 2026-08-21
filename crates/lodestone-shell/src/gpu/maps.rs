@@ -44,12 +44,29 @@ pub const FILLED_MAP_ITEM: &str = "filled_map";
 /// is the part a player is looking at.
 pub const ITEM_FRAME_TYPES: [&str; 2] = ["item_frame", "glow_item_frame"];
 
+/// `EntityTypes.GLOW_ITEM_FRAME`'s registry path, as [`EntityDraw::type_path`]
+/// carries it. The wire distinguishes the two frame types and three things
+/// downstream depend on which one this is: the `#back` sprite
+/// (`block/glow_item_frame`), the block-light floor of 5 on the frame's own body,
+/// and the full-bright light its contents draw at.
+pub const GLOW_ITEM_FRAME_TYPE_PATH: &str = "glow_item_frame";
+
 /// A map's picture is drawn one block across, matching the item frame it hangs in.
 const FRAMED_MAP_SCALE: f32 = 1.0;
 
-/// How far in front of the frame's own plane the picture sits, so it wins the
-/// depth test against the wall behind it without a bias.
-const FRAMED_MAP_LIFT: f32 = 0.03;
+/// How far in front of the frame's own plane the picture sits, along the frame's
+/// real facing.
+///
+/// **Derived, not tuned.** `ItemFrameRenderer.submit`'s map branch translates
+/// `0.4375` forward, then `-1.0` at the `0.0078125` map scale — a further
+/// `-0.0078125` — putting the picture at local `z = 0.4296875` inside a frame
+/// whose own space starts `0.46875` in front of the entity
+/// (`ITEM_FRAME_WALL_STEP`). The picture therefore sits `0.46875 - 0.4296875`
+/// from the entity's own position, which is also 1/128 of a block *in front of*
+/// the `item_frame_map` model's back plate at local `0.4375`. The previous
+/// hand-picked `0.03` was 1/1000 of a block behind that plate, which was
+/// invisible only for as long as nothing drew the plate.
+const FRAMED_MAP_LIFT: f32 = 0.46875 - 0.429_687_5;
 
 /// Vanilla's `renderMap` scale (`ItemInHandRenderer.renderMap`: `scale(0.38f)`
 /// around a `[-0.5, -0.5]`-centred unit quad).
@@ -145,16 +162,26 @@ fn held_map_pose(inverse_arm_height: f32) -> Mat4 {
 /// The world pose for a map hanging in an item frame at `feet`, facing along the
 /// frame's `yaw`/`pitch`.
 ///
-/// Yaw is vanilla's, so `0` faces **south** (`+z`) and the rotation is about `+y`;
-/// pitch tips the picture for a frame on the floor or ceiling. The quad's own local
-/// `+z` is its front, so the picture faces the way the frame does with no extra
-/// flip — and the lift along that same axis is what keeps it off the wall.
+/// Yaw is vanilla's, so `0` faces **south** (`+z`) and the picture's rotation is
+/// about `+y`; pitch tips it for a frame on a floor or a ceiling.
+///
+/// # The lift is a world-space step, and it is not the picture's own `+z`
+///
+/// `Ry(yaw)` applied to the quad's local `+z` gives `(sin yaw, 0, cos yaw)`; the
+/// frame's real `Direction` is `(-sin yaw, 0, cos yaw)`
+/// ([`lodestone_render::entity::item_frame_facing_step`], derived from
+/// `ItemFrame.setDirection`). The two **agree at yaw 0 and 180 and are opposite
+/// at 90 and 270**, so lifting along the picture's own axis pushed every east-
+/// and west-facing framed map *into* its wall — invisible for as long as no
+/// frame body drew in front of it, and the exact coincidence a gate probing only
+/// a north or a south wall cannot see. The translate is therefore applied on the
+/// left, in world space, and the picture's own orientation is left alone.
 #[must_use]
 fn framed_map_pose(feet: Vec3, yaw: f32, pitch: f32) -> Mat4 {
     let facing = Mat4::from_rotation_y(yaw.to_radians()) * Mat4::from_rotation_x(-pitch.to_radians());
-    Mat4::from_translation(feet)
+    let step = lodestone_render::entity::item_frame_facing_step(yaw, pitch);
+    Mat4::from_translation(feet + step * FRAMED_MAP_LIFT)
         * facing
-        * Mat4::from_translation(Vec3::new(0.0, 0.0, FRAMED_MAP_LIFT))
         * Mat4::from_scale(Vec3::splat(FRAMED_MAP_SCALE))
 }
 
@@ -250,6 +277,37 @@ mod tests {
         let north = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 180.0, 0.0)
             .transform_point3(Vec3::ZERO);
         assert!(north.z < -9.0, "a north-facing frame lifts toward -z");
+
+        // Yaw 90 and 270 are the discriminating inputs, and they are exactly the
+        // two this gate used to omit: `Ry(yaw)`'s local `+z` and the frame's real
+        // `Direction` agree at 0 and 180 and are **opposite** at 90 and 270, so
+        // both arms above pass under either reading. Yaw 90 is west, so the
+        // picture must move to `-x`.
+        let west = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 90.0, 0.0)
+            .transform_point3(Vec3::ZERO);
+        assert!(
+            (west.x - (4.0 - FRAMED_MAP_LIFT)).abs() < 1.0e-5,
+            "yaw 90 is west, so the picture lifts to -x; got x={} (a bare Ry(yaw)              would give {})",
+            west.x,
+            4.0 + FRAMED_MAP_LIFT
+        );
+        let east = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 270.0, 0.0)
+            .transform_point3(Vec3::ZERO);
+        assert!(
+            (east.x - (4.0 + FRAMED_MAP_LIFT)).abs() < 1.0e-5,
+            "yaw 270 is east, so the picture lifts to +x; got x={}",
+            east.x
+        );
+
+        // And the magnitude: the picture has to clear the `item_frame_map` body's
+        // own back plate, which `item_frame_body_matrix` puts at local `0.4375`
+        // — i.e. `0.46875 - 0.4375 = 0.03125` from the entity. A lift shorter
+        // than that is *behind* the plate and draws nothing at all, which is what
+        // the previous hand-picked `0.03` would now do.
+        assert!(
+            FRAMED_MAP_LIFT > 0.031_25,
+            "the picture must clear the frame's back plate at 0.03125, got              {FRAMED_MAP_LIFT}"
+        );
     }
 
     /// The held map sits in front of the camera, not behind it. `-z` is into the

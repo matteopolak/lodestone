@@ -262,6 +262,26 @@ pub struct RenderStats {
     pub special_item_hands_drawn: usize,
     /// `minecraft:special` items drawn in an **item frame** this frame.
     pub special_item_frames_drawn: usize,
+    /// Item-frame **bodies** — the wooden border and back plate — drawn this
+    /// frame, for both `item_frame` and `glow_item_frame`.
+    ///
+    /// Its own counter, separate from
+    /// [`special_item_frames_drawn`](Self::special_item_frames_drawn), because
+    /// the two failed independently and in the direction that looks fine: the
+    /// contents counter could report a chest hanging in mid-air while the frame
+    /// around it drew nothing at all, which is the state this crate shipped
+    /// until the body got a producer. A frame is a *block model* posed by hand
+    /// (`gpu/moving_blocks.rs`), so like a falling block it reaches neither
+    /// `entities_drawn` nor `sections_drawn`.
+    pub item_frame_bodies_drawn: usize,
+    /// Ordinary (non-`minecraft:special`) items drawn hanging in an item frame
+    /// this frame — a sword, an ingot, a block item.
+    ///
+    /// Separate from both counters above for the same independence reason: the
+    /// rig-shaped items go through the block-entity pass and these through the
+    /// baked-quad one, so a frame full of swords and an empty one produced
+    /// byte-identical stats while only the chest path existed.
+    pub item_frame_items_drawn: usize,
     /// Whether the first-person arm was drawn this frame. `false` means the
     /// `player_wide` mesh, its texture, or its arm part was missing — i.e. a
     /// real defect, not a quiet frame, because this pass is unconditional

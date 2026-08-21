@@ -321,6 +321,11 @@ impl ThirdPersonBodyState {
             // `item` is `None`.
             wool: None,
             block_state: None,
+            // The local player is not an item frame either. `0` is vanilla's own
+            // accessor default rather than a sentinel — see
+            // `EntityDraw::item_frame_rotation` for why that field is not an
+            // `Option` the way `block_state` is.
+            item_frame_rotation: 0,
             // Meaningless for the same reason `count` is just above: `item` is
             // always `None` for the local player's own body draw, which never
             // represents a dropped item or a thrown projectile.

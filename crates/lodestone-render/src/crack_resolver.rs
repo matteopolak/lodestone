@@ -16,7 +16,7 @@
 
 use lodestone_assets::BakedQuad;
 
-use crate::block_models::CRACK_STAGE_COUNT;
+use crate::block_models::{CRACK_STAGE_COUNT, ITEM_FRAME_SLOTS, item_frame_slot};
 use crate::crack::{CrackMesh, build_crack_mesh};
 
 /// Turns a target block state + destroy stage into crack-overlay geometry.
@@ -26,14 +26,42 @@ pub struct CrackResolver {
     quads: Vec<Vec<BakedQuad>>,
     /// Normalised atlas rects of the ten `destroy_stage_N` sprites.
     stage_rects: [[f32; 4]; CRACK_STAGE_COUNT],
+    /// The four item-frame body models, indexed by
+    /// [`item_frame_slot`](crate::block_models::item_frame_slot). Carried here
+    /// for the same reason `quads` is — the frame is a block model with no
+    /// state id, and it has to survive [`BlockModels`](crate::BlockModels)
+    /// being dropped. See [`Self::item_frame_quads`].
+    item_frame_quads: [Vec<BakedQuad>; ITEM_FRAME_SLOTS],
 }
 
 impl CrackResolver {
     /// Build a resolver from its parts. `quads[state_id]` is that state's baked
     /// model quads; `stage_rects[s]` is the `destroy_stage_s` atlas rect.
+    ///
+    /// Carries **no** item-frame geometry: a caller that wants it builds
+    /// through [`Self::from_models`], or adds it with
+    /// [`Self::with_item_frame_quads`]. Empty is the honest default, and it is
+    /// what every existing caller of this constructor (all of them tests
+    /// exercising the crack or moving-block paths) already means.
     #[must_use]
     pub fn new(quads: Vec<Vec<BakedQuad>>, stage_rects: [[f32; 4]; CRACK_STAGE_COUNT]) -> Self {
-        Self { quads, stage_rects }
+        Self {
+            quads,
+            stage_rects,
+            item_frame_quads: std::array::from_fn(|_| Vec::new()),
+        }
+    }
+
+    /// Attach the four item-frame body models to a resolver built with
+    /// [`Self::new`], indexed by
+    /// [`item_frame_slot`](crate::block_models::item_frame_slot).
+    #[must_use]
+    pub fn with_item_frame_quads(
+        mut self,
+        item_frame_quads: [Vec<BakedQuad>; ITEM_FRAME_SLOTS],
+    ) -> Self {
+        self.item_frame_quads = item_frame_quads;
+        self
     }
 
     /// Capture the crack inputs from a [`BlockModels`](crate::BlockModels): every
@@ -50,7 +78,22 @@ impl CrackResolver {
                 *rect = uv;
             }
         }
-        Self::new(quads, stage_rects)
+        Self::new(quads, stage_rects).with_item_frame_quads(std::array::from_fn(|slot| {
+            let glow = slot & 0b10 != 0;
+            let map = slot & 0b01 != 0;
+            debug_assert_eq!(item_frame_slot(glow, map), slot);
+            models.item_frame_quads(glow, map).to_vec()
+        }))
+    }
+
+    /// One item-frame body's baked quads, in block-local `0.0..=1.0` space.
+    ///
+    /// Empty when this resolver was built by [`Self::new`] without them, and
+    /// empty for a pack that ships no item-frame blockstate. Callers treat that
+    /// as "draw nothing", exactly as for [`Self::state_quads`].
+    #[must_use]
+    pub fn item_frame_quads(&self, glow: bool, map: bool) -> &[BakedQuad] {
+        self.item_frame_quads[item_frame_slot(glow, map)].as_slice()
     }
 
     /// One block state's baked quads, in block-local `0.0..=1.0` space — the

@@ -607,6 +607,18 @@ pub struct EntityMetadataUpdate {
     /// means "not known to be an end crystal", which a consumer must treat as
     /// "draw the base" (vanilla's own default), never as a cleared flag.
     pub crystal_show_bottom: Option<bool>,
+    /// `ItemFrame.DATA_ROTATION` — which of the eight 45° steps the stack in
+    /// an item frame is turned to (`ItemFrame.getRotation()`, `0..8`).
+    ///
+    /// # Why this can be absent on a packet that carried the int
+    ///
+    /// Index 10's `INT` is also `Display.DATA_POS_ROT_INTERPOLATION_DURATION_ID`
+    /// and `VehicleEntity.DATA_ID_DAMAGE`'s neighbours in the jar dump, so an
+    /// adapter raises this only for an entity it already knows is an item
+    /// frame. `None` is "not known to be a frame's rotation", which a consumer
+    /// treats as vanilla's own default of `0` — an upright item — never as a
+    /// cleared value.
+    pub item_frame_rotation: Option<u8>,
     /// `Display.BillboardConstraints.getId()` (`Display.DATA_BILLBOARD_RENDER_CONSTRAINTS_ID`),
     /// raw wire ordinal (`0`=fixed, `1`=vertical, `2`=horizontal, `3`=center),
     /// when present and the entity is known to be one of the three `Display`
@@ -739,6 +751,7 @@ impl EntityMetadataUpdate {
             && self.dragon_phase.is_none()
             && !self.crystal_beam_target.is_reported()
             && self.crystal_show_bottom.is_none()
+            && self.item_frame_rotation.is_none()
             && self.display_billboard.is_none()
             && self.display_translation.is_none()
             && self.display_scale.is_none()

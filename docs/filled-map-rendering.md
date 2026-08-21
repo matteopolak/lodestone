@@ -56,9 +56,10 @@ invalidation bug. `mip_level_count` is 1 and the sampler is `Nearest`, matching 
   equip dip every other held item does.
 * **In an item frame** — `prepare_framed_maps` walks the `EntityDraw` slice for
   `item_frame`/`glow_item_frame` carrying a `filled_map` and concatenates one quad each into a single
-  world-space mesh. Item frames are `HangingEntity` and have **no renderer of their own** (explicitly
-  out of this work's block-entity scope), so a framed map draws its picture with no frame border. The
-  picture is the part a player is looking at.
+  world-space mesh. The frame's own border and back plate are drawn separately, as a *block model*
+  posed by hand — see `docs/item-frame-rendering.md`, which also explains why `FRAMED_MAP_LIFT` has to
+  clear that back plate and why the lift is applied in world space along the frame's real `Direction`
+  rather than along the picture's own `+z` (the two are opposite on an east- or west-facing wall).
 
 ## How to change it, and the gotchas
 

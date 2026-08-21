@@ -3253,52 +3253,199 @@ pub fn special_item_hover_lift(local_min: Vec3, local_max: Vec3, ground: &Displa
     }
 }
 
-/// The world placement for an item hanging in an item frame, in the same
-/// `(feet, yaw, pitch)` terms the shell already has for a `HangingEntity`:
+// ---------------------------------------------------------------------------
+// Item frames
+// ---------------------------------------------------------------------------
+//
+// `ItemFrameRenderer` — the frame body, and whatever hangs in it. Both are posed
+// out of one shared chain, [`item_frame_space`], for the reason the boat's hull
+// and its water patch share one: two matrices that must agree can only be
+// guaranteed to agree by being the same matrix.
+
+/// `ItemFrame.createBoundingBox`'s `shiftToBlockWall` — how far the entity's own
+/// position sits *behind* the centre of the block it hangs in
+/// (`Vec3.atCenterOf(pos).relative(direction, -0.46875)`), and therefore how far
+/// [`item_frame_space`] steps forward again to recover that centre.
+///
+/// The two are the same number in vanilla and are written once here for that
+/// reason: `ItemFrameRenderer.submit`'s own `poseStack.translate(direction.step *
+/// 0.46875)` exists purely to undo the entity's offset, so a mismatch would put
+/// every frame off its wall by the difference with nothing else looking wrong.
+const ITEM_FRAME_WALL_STEP: f32 = 0.46875;
+
+/// `poseStack.translate(0.0F, 0.0F, 0.4375F)` — how far in front of the frame's
+/// own plane a *visible* frame's contents sit.
+const ITEM_FRAME_CONTENT_LIFT: f32 = 0.4375;
+
+/// The same step for an **invisible** frame, vanilla's `translate(0, 0, 0.5F)`.
+/// A frame with no body to hold it clear needs the extra 1/16 to stay out of the
+/// wall behind it.
+const ITEM_FRAME_INVISIBLE_CONTENT_LIFT: f32 = 0.5;
+
+/// `poseStack.scale(0.5F, 0.5F, 0.5F)` in `ItemFrameRenderer.submit`'s item
+/// branch — the one number here a reader is likely to assume is `1.0` from the
+/// framed *map* path. A map is drawn a full block across by its own separate
+/// branch, and copying that would draw a chest twice the size of the frame
+/// around it.
+const FRAMED_ITEM_SCALE: f32 = 0.5;
+
+/// One eighth turn, `rotation * 360 / 8` from `Axis.ZP.rotationDegrees` in the
+/// item branch.
+const FRAMED_ITEM_ROTATION_STEP_DEG: f32 = 45.0;
+
+/// The frame's own rotation: `Rx(xRot) · Ry(yRot)` exactly as
+/// `ItemFrameRenderer.submit` pushes it, re-expressed in the `(yaw, pitch)` the
+/// wire actually carries.
+///
+/// # Why `180 - yaw`, and why the pitch passes through unchanged
+///
+/// The renderer derives its two angles from the frame's `Direction`, which is not
+/// on the wire; `ItemFrame.setDirection` derives the entity's own `yRot`/`xRot`
+/// from that same `Direction`, and those *are*. Composing the two derivations
+/// eliminates it:
+///
+/// | direction | renderer | entity |
+/// |---|---|---|
+/// | horizontal | `xRot = 0`, `yRot = 180 - dir.toYRot()` | `xRot = 0`, `yRot = dir.get2DDataValue() * 90` |
+/// | vertical | `xRot = -90 * step`, `yRot = 180` | `xRot = -90 * step`, `yRot = 0` |
+///
+/// `Direction.toYRot()` **is** `get2DDataValue() * 90`, so the horizontal row is
+/// `yRot_render = 180 - yRot_entity`; and the vertical row's `yRot_entity` is `0`,
+/// so `180 - yRot_entity` is `180` there too. One expression covers both, and the
+/// pitch is the entity's own in either case.
+///
+/// The `180 -` is the half of this that a reader will want to drop, because
+/// dropping it still produces a frame flat against a wall — just the *wrong* wall,
+/// with its back plate facing the room.
+#[must_use]
+pub fn item_frame_facing(yaw_deg: f32, pitch_deg: f32) -> Mat4 {
+    Mat4::from_rotation_x(pitch_deg.to_radians())
+        * Mat4::from_rotation_y((180.0 - yaw_deg).to_radians())
+}
+
+/// The unit vector along the frame's `Direction` — the way it faces out of its
+/// wall — from the same two angles.
+///
+/// Derived from [`item_frame_facing`] rather than from a `Direction` table, and
+/// the `NEG_Z` is why: the frame's model has its back plate at local `+z` (the
+/// `template_item_frame` element spans `z = 15.5..16`), so after the facing
+/// rotation local `-z` is *by construction* the direction the frame looks. A
+/// separate table would be a second place for the same fact to be wrong, and it
+/// would agree with this one at yaw `0` and `180` — the two inputs a test is most
+/// likely to pick.
+#[must_use]
+pub fn item_frame_facing_step(yaw_deg: f32, pitch_deg: f32) -> Vec3 {
+    item_frame_facing(yaw_deg, pitch_deg).transform_vector3(Vec3::NEG_Z)
+}
+
+/// The frame's own space: origin at the **centre of the block it hangs in**, `+z`
+/// into the wall behind it, in the `(feet, yaw, pitch)` terms the shell has for a
+/// `HangingEntity`.
 ///
 /// ```text
-/// T(feet) · Ry(yaw) · Rx(-pitch) · T(0, 0, lift) · S(0.5) · display_matrix(fixed)
+/// T(feet + dir · 0.46875) · Rx(pitch) · Ry(180 - yaw)
 /// ```
 ///
-/// # What this is and is not
+/// Everything `ItemFrameRenderer.submit` draws is posed relative to this: the
+/// body at `T(-0.5, -0.5, -0.5)` (block models are corner-origin), the contents
+/// at `T(0, 0, 0.4375)`. The dispatcher's `getRenderOffset` and the renderer's own
+/// `translate(-renderOffset)` cancel exactly and are therefore absent here rather
+/// than ported as a pair.
+#[must_use]
+pub fn item_frame_space(feet: Vec3, yaw_deg: f32, pitch_deg: f32) -> Mat4 {
+    let facing = item_frame_facing(yaw_deg, pitch_deg);
+    let step = facing.transform_vector3(Vec3::NEG_Z) * ITEM_FRAME_WALL_STEP;
+    Mat4::from_translation(feet + step) * facing
+}
+
+/// The world placement for the frame **body** — the wooden border and back
+/// plate — as a transform over block-local `0.0..=1.0` model quads.
 ///
-/// `ItemFrameRenderer.submit` builds its pose from the frame's `Direction` plus a
-/// `rotation` in `0..8`, and neither is on the wire in a form this client decodes:
-/// a hanging entity reports a yaw and a pitch, which is what `HangingEntity`
-/// derives its direction *from*. So this takes the same two angles the framed-map
-/// path already takes and reproduces the parts of vanilla's chain that those
-/// angles determine:
+/// `ItemFrameRenderer.submit`'s `pushPose(); translate(-0.5, -0.5, -0.5);
+/// frameModel.submitWithZOffset(...)`. The `-0.5`s are the block model's
+/// corner-origin convention, not a centring fudge — the same pair
+/// `falling_block_pose` applies for the same reason.
+#[must_use]
+pub fn item_frame_body_matrix(feet: Vec3, yaw_deg: f32, pitch_deg: f32) -> Mat4 {
+    item_frame_space(feet, yaw_deg, pitch_deg) * Mat4::from_translation(Vec3::splat(-0.5))
+}
+
+/// How far in front of the frame's plane its contents sit, `invisible` selecting
+/// between vanilla's two `translate` calls.
+#[must_use]
+pub fn item_frame_content_lift(invisible: bool) -> f32 {
+    if invisible {
+        ITEM_FRAME_INVISIBLE_CONTENT_LIFT
+    } else {
+        ITEM_FRAME_CONTENT_LIFT
+    }
+}
+
+/// The world placement for an item hanging in an item frame:
 ///
-/// | vanilla step | here |
-/// |---|---|
-/// | `translate(direction.step * 0.46875)` | the `lift` along the frame's own local `+z` |
-/// | `Rx(xRot) · Ry(yRot)` from the direction | `Ry(yaw) · Rx(-pitch)` |
-/// | `translate(0, 0, 0.4375)` | folded into `lift` |
-/// | `Rz(rotation * 45°)` | **not modelled** — the eight-step in-frame rotation is undecoded, so every framed item hangs upright |
-/// | `scale(0.5)` | `S(0.5)` |
+/// ```text
+/// item_frame_space · T(0, 0, lift) · Rz(rotation · 45°) · S(0.5) · display_matrix(fixed)
+/// ```
 ///
-/// `FRAMED_ITEM_SCALE` is vanilla's `0.5` exactly, and it is the one number here
-/// that a reader is likely to assume is `1.0` from the framed *map* path — a map
-/// is drawn a full block across by its own separate branch, and copying that
-/// would draw a chest twice the size of the frame around it.
+/// `rotation` is `ItemFrame.getRotation()`, `0..8`; `invisible` is
+/// `state.isInvisible`, which swaps the lift (see [`item_frame_content_lift`]).
+///
+/// # The sign trap
+///
+/// The lift is along the frame's own local `+z`, which after
+/// [`item_frame_facing`] points **into** the wall — so the contents end up
+/// `0.46875 - 0.4375 = 0.03125` blocks in front of the entity's position, not
+/// nearly a block out from it. Getting that sign wrong (or dropping the
+/// `180 - yaw`, which has the same effect) floats the item a full block off the
+/// wall in front of the frame, where it reads as an unrelated placement bug
+/// rather than as a rotation one.
 #[must_use]
 pub fn framed_item_matrix(
     feet: Vec3,
     yaw_deg: f32,
     pitch_deg: f32,
+    rotation: u8,
+    invisible: bool,
     fixed: &DisplayTransform,
 ) -> Mat4 {
-    /// `poseStack.scale(0.5F, 0.5F, 0.5F)` in `ItemFrameRenderer.submit`'s item branch.
-    const FRAMED_ITEM_SCALE: f32 = 0.5;
-    /// `0.46875` (the step off the wall) plus `0.4375` (the step in front of the
-    /// frame's own model), the two `translate`s that survive here.
-    const FRAMED_ITEM_LIFT: f32 = 0.46875 + 0.4375;
-    Mat4::from_translation(feet)
-        * Mat4::from_rotation_y(yaw_deg.to_radians())
-        * Mat4::from_rotation_x(-pitch_deg.to_radians())
-        * Mat4::from_translation(Vec3::new(0.0, 0.0, FRAMED_ITEM_LIFT))
+    item_frame_space(feet, yaw_deg, pitch_deg)
+        * Mat4::from_translation(Vec3::new(0.0, 0.0, item_frame_content_lift(invisible)))
+        * Mat4::from_rotation_z(
+            (f32::from(rotation % 8) * FRAMED_ITEM_ROTATION_STEP_DEG).to_radians(),
+        )
         * Mat4::from_scale(Vec3::splat(FRAMED_ITEM_SCALE))
         * display_matrix(fixed)
+}
+
+/// Mesh an ordinary (baked-quad) item hanging in an item frame into a
+/// world-space [`ModelMesh`], for the same model-pipeline draw
+/// [`dropped_item_mesh`] feeds.
+///
+/// The rig-shaped items — a chest, a shulker box, a skull — go through
+/// [`framed_item_matrix`] and the block-entity pass instead; this is the other
+/// 99% of the item registry, and its absence is why a sword in a frame drew
+/// nothing while a chest in one drew fine.
+///
+/// `fixed` is the item's own `display.fixed`, composed on the right for the
+/// identical reason [`campfire_item_mesh`] composes there:
+/// `ItemFrameRenderer.extractRenderState` resolves the stack in
+/// `ItemDisplayContext.FIXED`, and vanilla applies that transform inside
+/// `ItemStackRenderState.submit`, after every pose the renderer itself pushes.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn framed_item_mesh(
+    quads: &[BakedQuad],
+    gui_light: GuiLight,
+    fixed: &DisplayTransform,
+    feet: Vec3,
+    yaw_deg: f32,
+    pitch_deg: f32,
+    rotation: u8,
+    invisible: bool,
+    light: u8,
+) -> ModelMesh {
+    let pose = framed_item_matrix(feet, yaw_deg, pitch_deg, rotation, invisible, fixed);
+    mesh_item_quads_with_light(quads, pose, gui_light, light)
 }
 
 // ---------------------------------------------------------------------------
@@ -5492,16 +5639,31 @@ mod tests {
         );
     }
 
-    /// A framed item stands off the wall along the **frame's own facing** and is
-    /// drawn at vanilla's `0.5`, not the framed *map*'s full block.
+    /// A framed item sits just in front of the frame's plane, on the side the
+    /// frame faces, and is drawn at vanilla's `0.5` rather than the framed
+    /// *map*'s full block.
     ///
-    /// The scale is the discriminating claim: `prepare_framed_maps` draws its
+    /// # The magnitudes, not the signs
+    ///
+    /// A sign-only assertion ("it lifts toward `+z`") is satisfied by both
+    /// candidate readings of this chain, because both put a south-facing frame's
+    /// item somewhere in `+z`. The two disagree about *how far*, and that is the
+    /// whole bug:
+    ///
+    /// | reading | offset from the entity |
+    /// |---|---|
+    /// | lift along the frame's own `+z`, which points **into** the wall | `0.46875 - 0.4375 = 0.03125` — correct |
+    /// | lift along the facing, i.e. the two translates added | `0.46875 + 0.4375 = 0.90625` — a full block out in front |
+    ///
+    /// So each arm predicts the correct value *and* names the wrong one, per
+    /// `CLAUDE.md`'s magnitude rule.
+    ///
+    /// The scale carries the same treatment: `prepare_framed_maps` draws its
     /// picture at `1.0`, and copying that number is the plausible mistake — it
-    /// draws, it faces the right way, and it is twice the size of the frame around
-    /// it. Predicted from the record (`poseStack.scale(0.5F, ...)`), and the wrong
-    /// value is named rather than described.
+    /// draws, it faces the right way, and it is twice the size of the frame
+    /// around it.
     #[test]
-    fn a_framed_item_lifts_along_its_facing_and_is_drawn_half_size() {
+    fn a_framed_item_sits_just_in_front_of_its_frame_and_is_drawn_half_size() {
         use lodestone_assets::DisplayTransform;
         let identity = DisplayTransform::default();
         let feet = Vec3::new(4.0, 65.0, -9.0);
@@ -5512,20 +5674,42 @@ mod tests {
         // **centre**, not its corner — probing `Vec3::ZERO` measures a corner and
         // reports a spurious offset along every axis the rotation touches.
         let centre_of = |m: Mat4| m.transform_point3(Vec3::splat(0.5));
+        /// `0.46875 - 0.4375`: the step off the wall, less the step back toward it.
+        const CORRECT: f32 = 0.031_25;
+        /// The two translates added instead of subtracted.
+        const WRONG: f32 = 0.906_25;
 
-        // Yaw 0 is south (`+z`) in vanilla, so a frame at yaw 0 lifts toward `+z`.
-        // Lifting the other way buries the item in the block behind it, which reads
-        // as "the item does not draw" — the same failure `framed_map_pose`'s own
-        // gate exists for.
-        let pose = framed_item_matrix(feet, 0.0, 0.0, &identity);
+        // Yaw 0 is south (`+z`) in vanilla.
+        let pose = framed_item_matrix(feet, 0.0, 0.0, 0, false, &identity);
         let centre = centre_of(pose);
         assert!(
-            centre.z > -9.0,
-            "a south-facing frame must lift toward +z, got z={}",
+            (centre.z - (-9.0 + CORRECT)).abs() < 1.0e-5,
+            "a south-facing frame's item sits {CORRECT} in front of the entity, \
+             not {WRONG}; got z={} (entity z=-9.0)",
             centre.z
         );
-        let north = centre_of(framed_item_matrix(feet, 180.0, 0.0, &identity));
-        assert!(north.z < -9.0, "a north-facing frame lifts toward -z");
+        let north = centre_of(framed_item_matrix(feet, 180.0, 0.0, 0, false, &identity));
+        assert!(
+            (north.z - (-9.0 - CORRECT)).abs() < 1.0e-5,
+            "a north-facing frame's item mirrors it, got z={}",
+            north.z
+        );
+        // West and east are the arms that separate the frame's real `Direction`
+        // from a bare `Ry(yaw)`: those two agree at yaw 0 and 180 and disagree in
+        // sign at 90 and 270, so a corpus that only ever probes a north/south wall
+        // cannot see the difference at all.
+        let west = centre_of(framed_item_matrix(feet, 90.0, 0.0, 0, false, &identity));
+        assert!(
+            (west.x - (4.0 - CORRECT)).abs() < 1.0e-5,
+            "yaw 90 is west, so the item moves to -x; got x={}",
+            west.x
+        );
+        let east = centre_of(framed_item_matrix(feet, 270.0, 0.0, 0, false, &identity));
+        assert!(
+            (east.x - (4.0 + CORRECT)).abs() < 1.0e-5,
+            "yaw 270 is east, so the item moves to +x; got x={}",
+            east.x
+        );
 
         // The scale: the rig's full `[0,1]` width must come out half a block.
         let left = pose.transform_point3(Vec3::new(0.0, 0.5, 0.5));
@@ -5540,26 +5724,168 @@ mod tests {
             "the framed-map scale of 1.0 would also pass the facing assertions above"
         );
 
-        // A floor-mounted frame (pitch 90) lifts along `+y` instead of along `z`,
-        // which is what the pitch term is for — dropping it would leave a ceiling
-        // and a floor frame indistinguishable.
-        let floor = centre_of(framed_item_matrix(feet, 0.0, 90.0, &identity));
+        // Pitch 90 is a **ceiling** frame, not a floor one: `ItemFrame.setDirection`
+        // writes `xRot = -90 * direction.getAxisDirection().getStep()`, and
+        // `Direction.DOWN`'s step is `-1`. So a pitch-90 frame faces down and its
+        // item hangs *below* the entity. Reading it the other way round is the
+        // mistake this arm exists to name, and it is invisible on a wall frame.
+        let ceiling = centre_of(framed_item_matrix(feet, 0.0, 90.0, 0, false, &identity));
         assert!(
-            floor.y > 65.0,
-            "a frame pitched 90 must lift along +y off the floor, got y={}",
+            (ceiling.y - (65.0 - CORRECT)).abs() < 1.0e-5,
+            "a pitch-90 frame faces DOWN, so its item sits below the entity; got y={}",
+            ceiling.y
+        );
+        let floor = centre_of(framed_item_matrix(feet, 0.0, -90.0, 0, false, &identity));
+        assert!(
+            (floor.y - (65.0 + CORRECT)).abs() < 1.0e-5,
+            "a pitch -90 frame faces UP, so its item sits above the entity; got y={}",
             floor.y
         );
         assert!(
-            (floor.z - (-9.0)).abs() < 1.0e-4,
-            "a pitched frame must not also lift along z, got z={}",
-            floor.z
+            (ceiling.z - (-9.0)).abs() < 1.0e-4,
+            "a pitched frame must not also move along z, got z={}",
+            ceiling.z
         );
-        // And the control on the pitch term itself: a wall frame and a floor frame
-        // must not land in the same place.
+    }
+
+    /// The frame's **body** covers the wall face of the block it hangs in, and its
+    /// back plate is against that wall rather than facing the room.
+    ///
+    /// The discriminating quantity is the back plate's `z`. `template_item_frame`'s
+    /// back element spans `z = 15.5..16` in model units — local `0.96875..1.0` —
+    /// so under [`item_frame_body_matrix`] it must land in the 1/32 of a block
+    /// **behind** the block's centre plane, on the wall side. Dropping the
+    /// `180 - yaw` mirrors it to the front, which still looks like a frame from a
+    /// distance and hides the item behind its own backing.
+    #[test]
+    fn the_item_frame_body_puts_its_back_plate_against_the_wall() {
+        // A south-facing frame in the block whose centre is (4.5, 65.5, -8.5): the
+        // entity therefore sits 0.46875 back along +z from that centre.
+        let centre = Vec3::new(4.5, 65.5, -8.5);
+        let feet = centre - Vec3::new(0.0, 0.0, ITEM_FRAME_WALL_STEP);
+        let pose = item_frame_body_matrix(feet, 0.0, 0.0);
+
+        // Local (0.5, 0.5, 1.0) is the middle of the back plate's outer face.
+        let back = pose.transform_point3(Vec3::new(0.5, 0.5, 1.0));
         assert!(
-            (floor - centre).length() > 0.5,
-            "pitch 0 and pitch 90 gave nearly the same pose ({centre} vs {floor}) — \
-             the pitch term is not being read"
+            (back - (centre - Vec3::new(0.0, 0.0, 0.5))).length() < 1.0e-5,
+            "the back plate's outer face must land on the wall side of the cell \
+             ({}), got {back}",
+            centre - Vec3::new(0.0, 0.0, 0.5)
+        );
+        // And the opposite face is the one the room sees.
+        let front = pose.transform_point3(Vec3::new(0.5, 0.5, 0.0));
+        assert!(
+            front.z > back.z,
+            "the frame is drawn back-to-front: back={back}, front={front}"
+        );
+
+        // The body is a full block across, unrotated in its own plane: a unit-wide
+        // model must measure one block, which is what separates it from the item's
+        // own half scale.
+        let left = pose.transform_point3(Vec3::new(0.0, 0.5, 1.0));
+        let right = pose.transform_point3(Vec3::new(1.0, 0.5, 1.0));
+        assert!(
+            ((right - left).length() - 1.0).abs() < 1.0e-5,
+            "the frame body draws at 1:1, got {}",
+            (right - left).length()
+        );
+    }
+
+    /// [`item_frame_facing_step`] is the frame's real `Direction`, and the four
+    /// horizontal yaws are the inputs that prove it.
+    ///
+    /// The wrong hypothesis is a plain `Ry(yaw)` applied to `+z` — the expression
+    /// the framed-*map* path used to lift by. It agrees with the truth at yaw `0`
+    /// and `180` and is the exact opposite at `90` and `270`, so any gate probing
+    /// only a north or south wall passes under both.
+    #[test]
+    fn the_item_frame_facing_step_is_the_frames_own_direction() {
+        for (yaw, expected) in [
+            (0.0_f32, Vec3::new(0.0, 0.0, 1.0)),
+            (90.0, Vec3::new(-1.0, 0.0, 0.0)),
+            (180.0, Vec3::new(0.0, 0.0, -1.0)),
+            (270.0, Vec3::new(1.0, 0.0, 0.0)),
+        ] {
+            let got = item_frame_facing_step(yaw, 0.0);
+            assert!(
+                (got - expected).length() < 1.0e-5,
+                "yaw {yaw}: expected {expected}, got {got}"
+            );
+        }
+        // `Direction.DOWN` has `getAxisDirection().getStep() == -1`, so its
+        // `xRot` is `+90` — a pitch-90 frame faces down.
+        assert!(
+            (item_frame_facing_step(0.0, 90.0) - Vec3::new(0.0, -1.0, 0.0)).length() < 1.0e-5,
+            "pitch 90 must face DOWN, got {}",
+            item_frame_facing_step(0.0, 90.0)
+        );
+        assert!(
+            (item_frame_facing_step(0.0, -90.0) - Vec3::new(0.0, 1.0, 0.0)).length() < 1.0e-5,
+            "pitch -90 must face UP, got {}",
+            item_frame_facing_step(0.0, -90.0)
+        );
+    }
+
+    /// The eight-step in-frame rotation turns the item about the frame's own
+    /// normal, and a full eight steps is the identity.
+    ///
+    /// A quarter turn is the discriminating input: two steps of `45°` must move a
+    /// point off the frame's centre line by the full radius, which a `rotation`
+    /// that never reaches the matrix (the state before it was decoded) cannot do.
+    #[test]
+    fn the_framed_item_rotation_turns_about_the_frames_normal() {
+        use lodestone_assets::DisplayTransform;
+        let identity = DisplayTransform::default();
+        let feet = Vec3::new(4.0, 65.0, -9.0);
+        // A point one unit up the rig's own +y, so a rotation about z moves it.
+        let probe = Vec3::new(0.5, 1.5, 0.5);
+        let at = |rotation: u8| {
+            framed_item_matrix(feet, 0.0, 0.0, rotation, false, &identity).transform_point3(probe)
+        };
+
+        let up = at(0);
+        let quarter = at(2);
+        let half = at(4);
+        // Two steps = 90°: what was straight up is now straight sideways.
+        assert!(
+            (quarter.y - up.y).abs() > 0.4,
+            "two rotation steps must move the probe off vertical: {up} -> {quarter}"
+        );
+        assert!(
+            (half.y - up.y).abs() > 0.9,
+            "four rotation steps must invert it: {up} -> {half}"
+        );
+        // Eight steps is a full turn, and `% 8` makes 8 and 0 the same pose.
+        assert!(
+            (at(8) - up).length() < 1.0e-5,
+            "rotation 8 must equal rotation 0, got {} vs {up}",
+            at(8)
+        );
+    }
+
+    /// An invisible frame lifts its contents further, because there is no body to
+    /// hold them clear of the wall.
+    ///
+    /// `0.5` against `0.4375` — a 1/16 difference, which is exactly the sort of
+    /// magnitude a direction-only assertion cannot see.
+    #[test]
+    fn an_invisible_frame_lifts_its_contents_the_extra_sixteenth() {
+        assert!((item_frame_content_lift(false) - 0.4375).abs() < 1.0e-6);
+        assert!((item_frame_content_lift(true) - 0.5).abs() < 1.0e-6);
+        // The consequence in world space: an invisible frame's item sits *at* the
+        // entity's own position (0.46875 - 0.5 is 1/32 behind it), not in front.
+        use lodestone_assets::DisplayTransform;
+        let identity = DisplayTransform::default();
+        let feet = Vec3::new(4.0, 65.0, -9.0);
+        let centre_of = |m: Mat4| m.transform_point3(Vec3::splat(0.5));
+        let visible = centre_of(framed_item_matrix(feet, 0.0, 0.0, 0, false, &identity));
+        let invisible = centre_of(framed_item_matrix(feet, 0.0, 0.0, 0, true, &identity));
+        assert!(
+            ((visible.z - invisible.z) - 0.0625).abs() < 1.0e-5,
+            "the two lifts must differ by exactly 1/16, got {} vs {}",
+            visible.z,
+            invisible.z
         );
     }
 

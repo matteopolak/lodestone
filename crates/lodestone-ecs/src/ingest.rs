@@ -53,7 +53,8 @@ use crate::entity::{
     DisplayItem, DisplayItemContext, DisplayLeftRotation, DisplayLineWidth, DisplayRightRotation,
     DisplayScale, DisplayStyleFlags, DisplayText, DisplayTextOpacity, DisplayTranslation,
     EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue,
-    FallingBlockState, HeadYaw, Health, HurtTime, Leashed, MinecraftEntityId, MobState, OnGround,
+    FallingBlockState, HeadYaw, Health, HurtTime, ItemFrameRotation, Leashed, MinecraftEntityId,
+    MobState, OnGround,
     Passengers, Pose, Position, Rotation, Tamed, Variant, Vehicle, Velocity,
 };
 use crate::player::{LocalPlayer, PhysicsState};
@@ -891,6 +892,13 @@ pub fn apply_entity_metadata(
         // metadata. Putting this one in `session` would compile and never run.
         if let Some(value) = metadata.experience_orb_value {
             entity.insert(ExperienceOrbValue(value));
+        }
+        // The eight-step rotation of the stack in an item frame
+        // (`ItemFrame.DATA_ROTATION`). Per-*entity* state, so this system and
+        // not `crate::session` — the fork that has cost work twice: an arm in
+        // the wrong router compiles, its unit test passes, and it never runs.
+        if let Some(rotation) = metadata.item_frame_rotation {
+            entity.insert(ItemFrameRotation(rotation));
         }
         // The *mob* flags byte — a different byte at a different
         // index from the living-entity one [`apply_entity_item_use`] folds, and

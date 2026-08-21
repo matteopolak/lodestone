@@ -529,6 +529,19 @@ pub struct CreeperSwellDir(pub i32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExperienceOrbValue(pub i32);
 
+/// Which of the eight 45° steps the stack in an item frame is turned to —
+/// `ItemFrame.DATA_ROTATION`
+/// ([`lodestone_model::event::EntityMetadataUpdate::item_frame_rotation`]),
+/// already masked to `0..8` by the protocol adapter.
+///
+/// **Absent** until first reported, and absent forever for anything that is not
+/// an item frame, because index 10's `INT` means a `Display`'s interpolation
+/// duration on the other claimant and the adapter withholds it there. Absence is
+/// vanilla's own accessor default of `0` — an upright item — not "draw nothing":
+/// a frame that has never reported a rotation still has to draw its contents.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemFrameRotation(pub u8);
+
 /// The entity's cosmetic variant (sheep colour, villager profession, …).
 ///
 /// **Absent** means the server sent no variant override, and a consumer should

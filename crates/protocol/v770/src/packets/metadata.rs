@@ -261,6 +261,23 @@ const IDX_CRYSTAL_BEAM_TARGET: u8 = 8;
 /// `FishingHook.DATA_BITING` are the other two), hence the
 /// [`MetadataClass::EndCrystal`] guard.
 const IDX_CRYSTAL_SHOW_BOTTOM: u8 = 9;
+/// `ItemFrame.DATA_ROTATION` (`ItemFrame.java`), index 10 — an `INT` carrying
+/// `0..8`, the eighth-turns the framed stack is rotated by.
+///
+/// **Index 10, three `INT` claimants** in the committed jar dump
+/// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`):
+/// `Display.DATA_POS_ROT_INTERPOLATION_DURATION_ID`, `ItemFrame.DATA_ROTATION`
+/// and — under `FLOAT`, so not actually a collision — `VehicleEntity
+/// .DATA_ID_DAMAGE`. No census column separates a frame from a display entity
+/// (neither is living, neither is a mob), so this is gated on
+/// [`MetadataClass::ItemFrame`].
+///
+/// Note the frame's *own* fields start at 9, not 8: `HangingEntity
+/// .DATA_DIRECTION` takes index 8, which this decoder consumes for alignment
+/// (`SER_DIRECTION`) and does not surface — the direction is recoverable from
+/// the yaw/pitch `ItemFrame.setDirection` derives from it and puts on every
+/// spawn and move packet.
+const IDX_ITEM_FRAME_ROTATION: u8 = 10;
 
 /// `Display.DATA_TRANSLATION_ID` (`Display.java`), index 11 — a `VECTOR3`.
 /// Self-identifying: no other claimant at index 11 in the 26.2 jar dump uses
@@ -405,6 +422,15 @@ pub enum MetadataClass {
     /// `Cat.DATA_COLLAR_COLOR`, the other `INT`-shaped claimant at that index
     /// (see [`IDX_DISPLAY_VARIANT_PAYLOAD`]'s doc).
     BlockDisplay,
+    /// `ItemFrame`/`GlowItemFrame` — gates index 10's `INT`
+    /// (`ItemFrame.DATA_ROTATION`) against the other `INT` claimants at that
+    /// index. See [`IDX_ITEM_FRAME_ROTATION`].
+    ///
+    /// A frame's *stack* needs no class: `ItemFrame.DATA_ITEM` is an
+    /// `ITEM_STACK` and is therefore self-identifying by serializer, handled
+    /// before the index match runs — which is why a chest in a frame already
+    /// drew while its rotation did not.
+    ItemFrame,
 }
 
 /// Classifies a resolved entity-type identifier into the [`MetadataClass`] whose
@@ -431,6 +457,7 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
         "minecraft:text_display" => Some(MetadataClass::TextDisplay),
         "minecraft:item_display" => Some(MetadataClass::ItemDisplay),
         "minecraft:block_display" => Some(MetadataClass::BlockDisplay),
+        "minecraft:item_frame" | "minecraft:glow_item_frame" => Some(MetadataClass::ItemFrame),
         _ => None,
     }
 }
@@ -960,6 +987,14 @@ pub fn read_entity_metadata(
             // [`IDX_CRYSTAL_SHOW_BOTTOM`].
             (IDX_CRYSTAL_SHOW_BOTTOM, Value::Bool(b)) if class == Some(MetadataClass::EndCrystal) => {
                 md.crystal_show_bottom = Some(b);
+            }
+            // `ItemFrame.DATA_ROTATION`. Guarded on class: index 10's `INT` is
+            // also a `Display`'s interpolation duration — see
+            // [`IDX_ITEM_FRAME_ROTATION`]. Masked to `0..8` here rather than at
+            // the consumer, matching `ItemFrame.setRotation`'s own `% 8`; a
+            // negative or out-of-range int is a datapack, not a rotation.
+            (IDX_ITEM_FRAME_ROTATION, Value::Int(v)) if class == Some(MetadataClass::ItemFrame) => {
+                md.item_frame_rotation = Some((v.rem_euclid(8)) as u8);
             }
             // `EndCrystal.DATA_BEAM_TARGET`. No class guard: the index already
             // disambiguates (see [`IDX_CRYSTAL_BEAM_TARGET`]'s own doc for why

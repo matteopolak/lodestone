@@ -8876,3 +8876,92 @@ control `removing_the_ground_speed_conversion_reproduces_the_too_fast_bug` pins.
 lodestone-server --lib --no-fail-fast -- --test-threads=2`: 1426 passed, 0 failed at this change (no other
 test in the corpus hardcoded a raw-attribute step_per_tick value, so nothing else needed updating besides the
 one test that asserted the exact zombie/cow numbers by name).
+
+**12.173 Item frames drew nothing because the frame is a block model with no block, and the item in
+one was posed by a chain whose two translates were added instead of subtracted.** The owner reported
+both variants invisible in real play. Three separate defects under one symptom, and none was in the
+layer the report named.
+
+**The body had no producer at all.** `ItemFrameRenderer` has no `bakeLayer` call: its body is
+`state.frameModel`, resolved through `BlockModelResolver.updateForItemFrame` →
+`BlockStateDefinitions.getItemFrameFakeState` — a throwaway `StateDefinition` over `Blocks.AIR`
+carrying only `BlockStateProperties.MAP`. `entity_models.rs` correctly and deliberately omits
+`item_frame` for exactly that reason, saying so in a comment; `model_for_type` therefore answers
+`None`, `resolve_animated` skips any such type path **silently**, and nothing anywhere was the frame's
+producer. The comment documenting the omission is what made it read as finished. Fixed in
+`moving_blocks.rs`, beside the four other block-model-posed-by-hand producers whose module doc already
+described this exact shape.
+
+There is no state id to reach the geometry by, so it does not go through `merge_moving_block`. The jar
+nonetheless ships real `blockstates/item_frame.json` and `glow_item_frame.json` files, so all four
+variants bake through the ordinary `BlockBaker::bake_block` path with no new baking code — a fixed
+four-entry table on `BlockModels`, snapshotted into `CrackResolver::from_models` beside the per-state
+quads.
+
+**The contents were posed 0.90625 blocks out instead of 0.03125 in.** `framed_item_matrix` had
+`FRAMED_ITEM_LIFT = 0.46875 + 0.4375`, along `Ry(yaw)`'s local `+z`. Vanilla's two translates go in
+**opposite** directions in world space: `translate(direction.step * 0.46875)` recovers the block centre
+from an entity position `ItemFrame.createBoundingBox` deliberately put `0.46875` *behind* it, and the
+later `translate(0, 0, 0.4375)` is inside `Rx(xRot) · Ry(180 − yRot)`, whose local `+z` points into the
+wall. Net `0.03125` in front of the entity, not `0.90625`. The old gate asserted only the *sign*
+(`centre.z > -9.0`), which both readings satisfy — §12.160's magnitude rule, in a gate that read as
+rigorous because it named the framed-map scale as its wrong hypothesis and checked that one properly.
+
+**The missing `180 −` is a second sign error at the same site, and it is invisible on two of four
+walls.** The renderer's angles come from the frame's `Direction`; the entity's `yRot`/`xRot` come from
+the same `Direction` via `ItemFrame.setDirection`. Composing the two derivations eliminates it —
+`Direction.toYRot()` *is* `get2DDataValue() * 90`, and a vertical frame's entity `yRot` is `0`, so
+`yRot_render = 180 − yRot_entity` covers both rows and the pitch passes through unchanged. A bare
+`Ry(yaw)` applied to `+z` gives `(sin yaw, 0, cos yaw)` where the truth is `(−sin yaw, 0, cos yaw)`:
+**equal at yaw 0 and 180, opposite at 90 and 270.** Both the old framed-item gate and the framed-*map*
+gate probed only 0 and 180, so both passed under either reading, and every east- or west-facing framed
+map had been lifting *into* its wall — a pre-existing bug found only because the new body would have
+hidden it.
+
+The old gate also encoded a wrong hypothesis in prose: *"A floor-mounted frame (pitch 90) lifts along
+`+y`"*. `ItemFrame.setDirection` writes `xRot = -90 * direction.getAxisDirection().getStep()` and
+`Direction.DOWN`'s step is `-1`, so pitch `+90` is a **ceiling** frame facing down. The comment made
+the assertion read as checked.
+
+**An ordinary item in a frame had no producer either**, and `entity_passes.rs`'s own doc comment said
+so in plain words — *"An ordinary item in an item frame still draws nothing … which is stated rather
+than hidden"*. Accurate, deliberate, tracked by nothing: the `not ported`/`for now` grep this file
+already prescribes. `world_items.rs`'s `merge_framed_items` is the producer; `docs/held-block-entity-
+items.md` carried the same claim and was updated in the same commit.
+
+**The eight-step rotation was a decode-and-discard one index further along than expected.**
+`ItemFrame.DATA_ROTATION` is index **10**, not 8: `HangingEntity.DATA_DIRECTION` takes 8 and
+`ItemFrame.DATA_ITEM` takes 9. Index 10's `INT` is shared with
+`Display.DATA_POS_ROT_INTERPOLATION_DURATION_ID` and **no `entity_census` column separates them** —
+neither a frame nor a display entity is living or a mob — so it needed a new `MetadataClass::ItemFrame`,
+the same conclusion §12's experience-orb entry reached for index 8. The *stack* needed none of this and
+never did: `DATA_ITEM` is an `ITEM_STACK`, self-identifying by serializer and handled before the index
+match runs, which is why a chest in a frame drew years before its rotation could.
+
+**Threading one `u8` to `EntityDraw` hit `bevy_ecs`'s 16-parameter `SystemParam` ceiling**, and the
+error names `in_set` a hundred lines from the parameter that caused it. Nested into the existing
+`(tameds, vehicles, armor_stands)` tuple, which carries a comment recording the same collision twice
+before. About twenty fixture literals across `crates/lodestone-shell/{src,tests}` needed the field.
+
+**Measurements** (`tests/item_frame_pixels.rs`, 320×240, frame two blocks from the camera at yaw 180):
+counters bodies/items/specials — empty scene `0/0/0`, bare frame `1/0/0`, frame holding a diamond
+`1/1/0`, invisible frame holding one `0/1/0`, glow frame `1/0/0`. Bare frame against the empty scene:
+**6400 px** in an 80×80 box at x 120..199, y 80..159 — the model spans `2..14` of 16, i.e. 0.75 blocks,
+and a block subtends `240 / (4 tan 30°) ≈ 104 px` at that distance, so 78 px predicted and the box
+fully filled (the border ring `2..14` and the back plate `3..13` tile without a gap). Diamond against
+the bare frame: **1334 px** at x 140..179, y 100..142. Invisible frame against the empty scene: **1242
+px** — the contents alone. Far corner: **0** in every arm.
+
+The comparison is the part worth carrying. A frame body **fills its own silhouette**, so "differs from
+the empty scene" returns the *same* number for a frame holding a shield and a frame holding nothing:
+`special_item_world_pixels.rs`'s existing gate measured **6320 against 6320** with a real shield on
+screen, and its own pre-existing assertion (`an empty item frame must be pixel-identical to no entity
+at all`) went red the moment the body drew — a *world*-species vacuity whose premise was "the frame has
+no renderer". Diffing the subject against the **empty frame** instead reports the shield at **943 px**
+at x 149..171, inside the frame's own 120..199. Its fixture also had to be turned to yaw 180: at the
+template's yaw 0 the frame's back plate faces the camera and occludes its own contents, which is
+§12.160's "ask what state the feature is for, and check the fixture is actually in it" one more time.
+
+`cargo test -p lodestone-shell --lib --no-fail-fast -- --test-threads=2`: **2085 passed, 0 failed**, 72
+ignored. `cargo check --workspace --all-targets` and `cargo check -p lodestone-shell
+--no-default-features` both clean. `lodestone-v770 --lib` 193/0, `lodestone-render --lib -- frame` 32/0.

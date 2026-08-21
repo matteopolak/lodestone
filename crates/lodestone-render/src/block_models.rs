@@ -491,6 +491,41 @@ fn crack_stage_location(stage: usize) -> ResourceLocation {
         .expect("valid destroy_stage location")
 }
 
+/// How many distinct item-frame body models exist: the plain and glowing
+/// frames, each in its empty and its map-carrying form.
+pub const ITEM_FRAME_SLOTS: usize = 4;
+
+/// Which of [`ITEM_FRAME_SLOTS`] a `(glow, map)` pair names.
+///
+/// Vanilla has no *block* called `item_frame`, so there is no state id to key
+/// this on: `BlockStateDefinitions.getItemFrameFakeState` builds a throwaway
+/// `StateDefinition` carrying only `BlockStateProperties.MAP`, and picks the
+/// plain or glowing definition by entity type. The jar nonetheless ships real
+/// `blockstates/item_frame.json` and `blockstates/glow_item_frame.json` files
+/// (each a two-way `map=false`/`map=true` variant switch), which is what lets
+/// this bake through the ordinary blockstate path rather than needing a
+/// synthetic registry entry.
+#[must_use]
+pub const fn item_frame_slot(glow: bool, map: bool) -> usize {
+    (glow as usize) << 1 | (map as usize)
+}
+
+/// The inverse of [`item_frame_slot`], for iterating the four slots in order.
+const fn item_frame_slot_parts(slot: usize) -> (bool, bool) {
+    (slot & 0b10 != 0, slot & 0b01 != 0)
+}
+
+/// The blockstate location whose `map=` variants carry one item-frame body
+/// model — `minecraft:item_frame` or `minecraft:glow_item_frame`.
+fn item_frame_blockstate(glow: bool) -> ResourceLocation {
+    let id = if glow {
+        "minecraft:glow_item_frame"
+    } else {
+        "minecraft:item_frame"
+    };
+    id.parse().expect("valid item frame blockstate location")
+}
+
 /// The `block/` texture locations of a fluid's still and flow sprites.
 fn fluid_texture_locations(kind: FluidKind) -> [ResourceLocation; 2] {
     let (still, flow) = match kind {
@@ -1724,6 +1759,9 @@ pub struct BlockModels {
     /// crack-overlay sprite, indexed by stage `0..CRACK_STAGE_COUNT`. The
     /// mining crack pass re-draws a block's model geometry sampling these.
     crack_stages: [[f32; 4]; CRACK_STAGE_COUNT],
+    /// Baked geometry for the four item-frame **bodies**, indexed by
+    /// [`item_frame_slot`]. See [`Self::item_frame_quads`].
+    item_frame_quads: [Vec<BakedQuad>; ITEM_FRAME_SLOTS],
     /// Baked geometry for every item that has any, keyed by item id
     /// (`minecraft:stone`) — and, within each, by the **model ref** its definition
     /// tree resolved to. See the [module docs](self) for why it lives on a type
@@ -2043,6 +2081,30 @@ impl BlockModels {
             );
         }
 
+        // The item-frame bodies. Baked here, beside the states, because the
+        // frame is a *block model* with no block: `ItemFrameRenderer.submit`
+        // poses `state.frameModel` — a `BlockStateModel` resolved through
+        // `BlockModelResolver.updateForItemFrame` — exactly the way
+        // `FallingBlockRenderer` poses a real block's, so it wants this atlas,
+        // this palette and these UVs rather than an entity sheet. There is no
+        // state id to reach it by (see `item_frame_slot`), so it is a fixed
+        // four-entry table instead of a row in `models`.
+        //
+        // No tint rewrite: neither `#wood` (`block/birch_planks`) nor `#back`
+        // (`block/item_frame`, `block/glow_item_frame`) carries a `tintindex`,
+        // so there is no raw index for the state loop's `palette_slot_for` pass
+        // to translate. A pack that added one would draw untinted, which is the
+        // same shortfall an untinted moving block already has.
+        let item_frame_quads = std::array::from_fn(|slot| {
+            let (glow, map) = item_frame_slot_parts(slot);
+            let mut properties = BTreeMap::new();
+            properties.insert("map".to_string(), map.to_string());
+            baker
+                .bake_block(&item_frame_blockstate(glow), &properties, &FirstWeight)
+                .map(|baked| baked.quads)
+                .unwrap_or_default()
+        });
+
         let water_sprites = resolve_fluid_sprites(&atlas, FluidKind::Water);
         let lava_sprites = resolve_fluid_sprites(&atlas, FluidKind::Lava);
         let crack_stages = std::array::from_fn(|stage| {
@@ -2083,10 +2145,28 @@ impl BlockModels {
             animations,
             anim_frame_v,
             crack_stages,
+            item_frame_quads,
             items,
             item_bake_misses,
             colormaps,
         })
+    }
+
+    /// One item-frame body's baked quads, in block-local `0.0..=1.0` space —
+    /// the geometry `ItemFrameRenderer.submit` draws around the item.
+    ///
+    /// `glow` picks `glow_item_frame` over `item_frame` (a different `#back`
+    /// sprite, nothing else), and `map` picks the wider `item_frame_map`
+    /// variant, whose border is a full block across and whose back plate sits
+    /// where the map picture will — the same `map=` switch vanilla's
+    /// `updateForItemFrame` makes from `state.mapId != null`.
+    ///
+    /// Empty when the pack ships no such blockstate, which callers must treat
+    /// as "draw nothing" exactly as they do an empty
+    /// [`CrackResolver::state_quads`](crate::CrackResolver::state_quads).
+    #[must_use]
+    pub fn item_frame_quads(&self, glow: bool, map: bool) -> &[BakedQuad] {
+        &self.item_frame_quads[item_frame_slot(glow, map)]
     }
 
     /// The grass/foliage/dry-foliage colormaps, for a mesher that wants a

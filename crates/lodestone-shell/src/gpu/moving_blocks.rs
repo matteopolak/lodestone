@@ -73,6 +73,8 @@ use lodestone_render::{Camera, Frustum, GpuModelMesh, ModelMesh, mesh_moving_blo
 
 use crate::entities::EntityDraw;
 
+use super::entity_passes::item_frame_light;
+use super::maps::GLOW_ITEM_FRAME_TYPE_PATH;
 use super::terrain::ModelRenderer;
 use super::{RenderState, RenderStats};
 
@@ -324,6 +326,11 @@ impl RenderState {
         // shares the item one — the placement is in the vertices, so there is
         // nothing to batch on.
         self.merge_piston_heads(model, camera.position, &frustum, &mut combined, stats);
+        // A fifth producer of the same shape, and the one with no state id: an
+        // item frame's body is a block model reached through
+        // `BlockStateDefinitions.getItemFrameFakeState`, not through the block
+        // registry. See `merge_item_frames`.
+        self.merge_item_frames(model, entities, &frustum, &mut combined, stats);
         if combined.quad_count() == 0 {
             return None;
         }
@@ -659,6 +666,90 @@ impl RenderState {
             ) {
                 stats.moving_blocks_drawn += 1;
             }
+        }
+    }
+
+    /// Merge every item frame on screen — the frame **body**, vanilla's
+    /// `state.frameModel.submitWithZOffset` branch of `ItemFrameRenderer.submit`.
+    ///
+    /// # Why an item frame is in this file and not in the entity pass
+    ///
+    /// It is the same shape as the falling block and the primed TNT above, and
+    /// for a reason that is written down in the asset corpus: `entity_models.rs`
+    /// deliberately has **no** `item_frame` entry, because vanilla resolves the
+    /// frame through `BlockModelResolver`/`BlockStateDefinitions
+    /// .getItemFrameFakeState` — a *block model*, not a `ModelPart`
+    /// `LayerDefinition`. So `model_for_type(EntityType::ItemFrame)` answers
+    /// `None`, `resolve_animated` skips it silently, and until this function
+    /// existed nothing anywhere drew a frame at all: `prepare_framed_maps` drew
+    /// the picture in one and `special_item_instances` drew a chest in one, both
+    /// floating with no border around them, and an empty frame or a frame holding
+    /// an ordinary item reached zero pixels.
+    ///
+    /// # There is no state id, so this does not go through `merge_moving_block`
+    ///
+    /// `minecraft:item_frame` is not a block, so there is no `state_id` to look
+    /// up — the geometry comes from
+    /// [`CrackResolver::item_frame_quads`](lodestone_render::CrackResolver::item_frame_quads),
+    /// a fixed four-entry table baked beside the states. Everything below that
+    /// (the mesher, the buffer, the draw call) is shared.
+    ///
+    /// # Named deviations
+    ///
+    /// * **The `map=true` variant is selected from the held item's id, not from a
+    ///   resolved `MapId`.** Vanilla asks `entity.getFramedMapId(itemStack)` and
+    ///   falls back to the plain frame when the map data has not loaded; this
+    ///   client has no map-id decode (see `Sim::map_source`), so any
+    ///   `minecraft:filled_map` selects the wider border. The two disagree only
+    ///   for a framed map whose data has never arrived.
+    /// * **`submitWithZOffset`'s polygon offset is not applied.** The frame sits
+    ///   1/32 of a block off the wall behind it, which is enough separation for a
+    ///   `[0,1]` depth buffer; the offset exists in vanilla for the same reason
+    ///   its `outlineColor` argument does, and neither is ported here.
+    fn merge_item_frames(
+        &self,
+        model: &ModelRenderer,
+        entities: &[EntityDraw],
+        frustum: &Frustum,
+        combined: &mut ModelMesh,
+        stats: &mut RenderStats,
+    ) {
+        for draw in entities {
+            let type_path = draw.type_path.as_ref();
+            if !super::maps::ITEM_FRAME_TYPES.contains(&type_path) {
+                continue;
+            }
+            // `state.isInvisible` — vanilla clears `frameModel` outright for an
+            // invisible frame, so the border and back plate genuinely do not
+            // draw. Its *contents* still do, one lift further out; that half is
+            // `world_items.rs`'s and `entity_passes.rs`'s.
+            if draw.invisible {
+                continue;
+            }
+            // A frame is at most a block across however it is turned, and its
+            // entity position sits 0.46875 behind the cell it hangs in — so one
+            // block of slack around the entity covers the whole body.
+            if !frustum.intersects_aabb(
+                draw.feet - glam::Vec3::splat(1.0),
+                draw.feet + glam::Vec3::splat(1.0),
+            ) {
+                continue;
+            }
+            let glow = type_path == GLOW_ITEM_FRAME_TYPE_PATH;
+            let map = draw
+                .item
+                .as_ref()
+                .is_some_and(|id| id.path() == super::maps::FILLED_MAP_ITEM);
+            let quads = model.crack_resolver.item_frame_quads(glow, map);
+            if quads.is_empty() {
+                continue;
+            }
+            combined.merge(&mesh_moving_block_quads(
+                quads,
+                lodestone_render::entity::item_frame_body_matrix(draw.feet, draw.yaw, draw.pitch),
+                item_frame_light(&self.entity_light, draw, glow),
+            ));
+            stats.item_frame_bodies_drawn += 1;
         }
     }
 

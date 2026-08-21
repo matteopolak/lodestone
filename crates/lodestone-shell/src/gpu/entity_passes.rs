@@ -502,6 +502,53 @@ pub(super) fn entity_light(source: &super::EntityLightSource, draw: &EntityDraw)
     if draw.on_fire { packed | 0x0F } else { packed }
 }
 
+/// The packed light an item **frame** — its body, and by default its contents —
+/// is drawn at.
+///
+/// `ItemFrameRenderer.getBlockLightLevel` overrides the base renderer's to
+/// `Math.max(5, super…)` for a `glow_item_frame`, so a glowing frame is never
+/// darker than block light 5 however dark the wall behind it. That floor is on
+/// the **block** nibble only; the sky nibble passes through, which is what keeps
+/// a glow frame in daylight looking like every other frame.
+///
+/// The probe is the entity's own position and not an eye-height offset: an item
+/// frame's `EntityDimensions` eye height is `0.0` (see `EYE_HEIGHTS`), and the
+/// entity sits inside the air cell it hangs in rather than in the wall — that is
+/// what `ItemFrame.createBoundingBox`'s `-0.46875` leaves it 1/32 short of.
+#[must_use]
+pub(super) fn item_frame_light(
+    source: &super::EntityLightSource,
+    draw: &EntityDraw,
+    glow: bool,
+) -> u8 {
+    /// `ItemFrameRenderer.GLOW_FRAME_BRIGHTNESS`.
+    const GLOW_FRAME_BRIGHTNESS: u8 = 5;
+    let packed = source.sample(draw.feet);
+    if glow {
+        (packed & 0xF0) | (packed & 0x0F).max(GLOW_FRAME_BRIGHTNESS)
+    } else {
+        packed
+    }
+}
+
+/// The packed light the **contents** of an item frame are drawn at, given the
+/// frame's own [`item_frame_light`].
+///
+/// A glow frame lights what it holds *fully*, not merely to its own floor:
+/// `getLightCoords(state.isGlowFrame, 15728880, state.lightCoords)` substitutes
+/// `15728880` — sky 15, block 15 — for the sampled value in the item branch. So
+/// the body of a glow frame in a dark room is dim-but-visible and the item in it
+/// is at full brightness, which is two different numbers from one sample and the
+/// reason this is a second function rather than a flag on the first.
+#[must_use]
+pub(super) fn framed_content_light(frame_light: u8, glow: bool) -> u8 {
+    if glow {
+        lodestone_render::ENTITY_FULLBRIGHT | 0x0F
+    } else {
+        frame_light
+    }
+}
+
 /// Fold one layer's instances into `accum`, finding-or-creating the
 /// `(slot, texture)` group and, within it, the per-part row.
 ///
@@ -1669,13 +1716,14 @@ impl RenderState {
     /// that made one would draw it twice rather than not at all, which is the
     /// failure that is at least visible.
     ///
-    /// # Item frames are the surface with a real shortfall
+    /// # Item frames: this is one of three producers, not all of them
     ///
-    /// Only the *special* items are covered. An ordinary item in an item frame still
-    /// draws nothing (only a filled map does, through `prepare_framed_maps`), and the
-    /// in-frame `rotation` is undecoded so every framed item hangs upright — see
-    /// `framed_item_matrix`. So a chest in a frame now draws and a sword in a frame
-    /// still does not, which is stated rather than hidden.
+    /// Only the *special* items are here, and that is the split rather than a
+    /// shortfall. A framed `filled_map` draws through `prepare_framed_maps`, every
+    /// **ordinary** framed item through `world_items.rs`'s `merge_framed_items`,
+    /// and the frame's own body through `moving_blocks.rs`'s `merge_item_frames`.
+    /// All four share [`lodestone_render::entity::item_frame_space`], so a chest
+    /// and a sword in adjacent frames cannot hang at two different depths.
     fn special_item_instances(
         &self,
         camera: &Camera,
@@ -1712,7 +1760,16 @@ impl RenderState {
                 continue;
             }
             if super::maps::ITEM_FRAME_TYPES.contains(&draw.type_path.as_ref()) {
-                if let Some(instance) = self.framed_special_item(model, draw, light) {
+                // Not `light`: a frame's own probe is its position rather than an
+                // eye height, and a glow frame lights what it holds *fully* —
+                // `getLightCoords(state.isGlowFrame, 15728880, ..)`. See
+                // `item_frame_light`/`framed_content_light`.
+                let glow = draw.type_path.as_ref() == super::maps::GLOW_ITEM_FRAME_TYPE_PATH;
+                let framed = framed_content_light(
+                    item_frame_light(&self.entity_light, draw, glow),
+                    glow,
+                );
+                if let Some(instance) = self.framed_special_item(model, draw, framed) {
                     out.push(instance);
                     stats.special_item_frames_drawn += 1;
                 }
@@ -1845,11 +1902,10 @@ impl RenderState {
     /// single easiest thing to get wrong here, because every *other* world item
     /// surface is `Ground`. Reusing `Ground` poses a framed chest on its edge.
     ///
-    /// A **glow** item frame's `getBlockLightLevel` floor of 5 is not applied: the
-    /// wire distinguishes the two entity types, but the light source here is the
-    /// shared eye probe and giving one type a floor belongs with the frame's own
-    /// renderer rather than in this one branch. A framed chest in a glow frame is
-    /// therefore as dark as the wall behind it.
+    /// `light` is the frame's own — [`item_frame_light`] through
+    /// [`framed_content_light`], not the generic eye-height probe — so a chest in
+    /// a glow frame is lit the way vanilla lights it rather than as dark as the
+    /// wall behind it.
     fn framed_special_item(
         &self,
         model: &ModelRenderer,
@@ -1863,6 +1919,8 @@ impl RenderState {
             draw.feet,
             draw.yaw,
             draw.pitch,
+            draw.item_frame_rotation,
+            draw.invisible,
             &form.display.get(DisplaySlot::Fixed),
         );
         self.block_entities
@@ -2201,6 +2259,7 @@ mod tests {
             equipment_trim: Vec::new(),
             wool: None,
             block_state: None,
+            item_frame_rotation: 0,
             count: 1,
             foil: false,
             item_dyed_color: None,

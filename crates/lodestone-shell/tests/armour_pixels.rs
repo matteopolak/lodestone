@@ -168,6 +168,7 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
     let subject = EntityDraw {
         hurt: false,
         block_state: None,
+        item_frame_rotation: 0,
         id: 1,
         type_path: std::sync::Arc::from("zombie"),
         item: None,
