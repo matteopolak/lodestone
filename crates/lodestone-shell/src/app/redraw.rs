@@ -502,6 +502,12 @@ impl WindowApp {
                         // for a shield's own dye tint rather than its loom
                         // patterns.
                         base_color: st.base_color().map(str::to_owned),
+                        // And the same again for a custom head's own skin: a
+                        // decorative head carried in the hotbar drew the default
+                        // skull sheet while the identical head placed in the
+                        // world drew its real face. `stack_skin_url` also starts
+                        // the fetch; see its doc.
+                        skin: crate::hud::item_icon::stack_skin_url(st),
                     })
                 })
             })

@@ -154,6 +154,83 @@ pub struct ItemIcon {
     /// [`dyed_color`](Self::dyed_color) documents, fed into
     /// [`push_special_icon`]'s shield base-mask layer.
     pub base_color: Option<String>,
+    /// The texture URL declared by the stack's `minecraft:profile` — a
+    /// **custom** player head, the decorative kind a server places, whose whole
+    /// appearance is that property.
+    ///
+    /// `None` for every other item, for a head carrying no profile (a plain
+    /// `minecraft:player_head`, which really is Steve), and for a producer with
+    /// no live stack — the same "no live stack means the empty/absent state"
+    /// contract [`dyed_color`](Self::dyed_color) documents. Fill it with
+    /// [`stack_skin_url`] rather than by hand: that is also what starts the
+    /// fetch, and a URL that nothing ever requested resolves to the default
+    /// sheet forever.
+    ///
+    /// [`Arc<str>`] rather than `String` for [`lodestone_render::BlockEntityTexture`]'s
+    /// reason: the URL arrives from the server, it is cloned through the record,
+    /// the draw and the batch key, and none of those hops should copy an
+    /// unbounded server-provided string.
+    pub skin: Option<Arc<str>>,
+}
+
+/// Say once, per process, that a head declares a skin we cannot use.
+///
+/// Reached from the per-slot draw loop, so it runs for every head in every open
+/// container on every frame — `Once` is what keeps it a report rather than a
+/// flood, and the message therefore describes the class rather than the one
+/// stack that happened to be first.
+///
+/// This is a warning and not a silent default because the failure is invisible
+/// at the draw site: a plain head *is* a head, so nothing looks broken, nothing
+/// is red, and the only evidence is that it is the wrong face. That is exactly
+/// why a custom head drew Steve in every inventory for as long as it did.
+fn warn_a_head_profile_declares_no_usable_skin() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            target: "assets",
+            "a player head's minecraft:profile carries a `textures` property that \
+             decodes to no usable skin url, so it draws the DEFAULT skull sheet. \
+             Either the base64/JSON is malformed or its payload has no SKIN entry"
+        );
+    });
+}
+
+/// The skin URL a stack's `minecraft:profile` declares, **and the fetch that
+/// makes it drawable**.
+///
+/// The side effect is deliberate and belongs here rather than at the call
+/// sites: every producer of an [`ItemIcon`] needs both halves, and a producer
+/// that resolved the URL without requesting it would draw the default sheet
+/// forever with nothing red — the same island shape this whole path already
+/// cost. `crate::remote_skins::request` owns deduplication and failure
+/// memoisation, so calling it once per head per frame is a hash lookup after
+/// the first, exactly as the placed-head path's own per-frame
+/// `request_player_head_skins` is.
+///
+/// The decode is `crate::remote_skins::skin_for_textures_property`, shared with
+/// the placed-head path rather than re-spelled: both start from the same
+/// base64-JSON Mojang payload, and a second parse beside a working one is worse
+/// than none.
+///
+/// `None` is the normal answer for every non-head item and for a head with no
+/// profile. A profile that carries a `textures` property we cannot use is *not*
+/// normal and says so — see [`warn_a_head_profile_declares_no_usable_skin`].
+#[must_use]
+pub(crate) fn stack_skin_url(stack: &lodestone_game::item::ItemStack) -> Option<Arc<str>> {
+    let profile = stack.profile()?;
+    let value = profile
+        .properties
+        .iter()
+        .find(|p| p.name == "textures")
+        .map(|p| p.value.as_str())?;
+    let Some(skin) = crate::remote_skins::skin_for_textures_property(value) else {
+        warn_a_head_profile_declares_no_usable_skin();
+        return None;
+    };
+    // Idempotent per URL; see this function's doc.
+    crate::remote_skins::request(&skin.url);
+    Some(Arc::<str>::from(skin.url))
 }
 
 /// `ItemStack.hasFoil()` for a shell-side [`lodestone_game::item::ItemStack`],
@@ -263,8 +340,17 @@ pub(crate) enum SpecialIconDraw {
     Mesh {
         /// The [`BlockEntityModelSet`] model name, e.g. [`lodestone_render::CHEST_SINGLE`].
         model: &'static str,
-        /// The jar texture stem, e.g. `entity/chest/normal`.
-        texture: &'static str,
+        /// Which sheet to sample: a jar texture stem (`entity/chest/normal`) for
+        /// every kind whose appearance is fixed by its item id, or a fetched
+        /// **player skin** URL for a custom head.
+        ///
+        /// [`lodestone_render::BlockEntityTexture`] rather than a second,
+        /// GUI-local enum: the world's placed-head pass already solved exactly
+        /// this — a batch key that is `&'static str` for a packaged sheet and an
+        /// [`Arc<str>`] for a server-provided URL — and two spellings of one
+        /// identity is how a head ends up correct in the world and plain in a
+        /// slot, which is the bug this field exists to close.
+        texture: lodestone_render::BlockEntityTexture,
         /// GUI-pixel-space placement, from [`gui_item_pose`].
         placement: Mat4,
         /// Gamma-space `[r, g, b]` multiplied into every texel. `[255, 255,
@@ -434,6 +520,7 @@ pub(crate) fn draw_item_icon_counted(
                         kind,
                         &slot.banner_patterns,
                         slot.base_color.as_deref(),
+                        slot.skin.as_ref(),
                         transformation,
                         &icon.display.get(DisplaySlot::Gui),
                         x,
@@ -603,6 +690,7 @@ pub(crate) fn draw_item_icon_popped(
                         kind,
                         &slot.banner_patterns,
                         slot.base_color.as_deref(),
+                        slot.skin.as_ref(),
                         transformation,
                         &icon.display.get(DisplaySlot::Gui),
                         x,
@@ -759,6 +847,7 @@ fn push_special_icon(
     kind: &str,
     patterns: &[lodestone_model::BannerPatternLayer],
     base_color: Option<&str>,
+    skin: Option<&Arc<str>>,
     node_transform: &[lodestone_assets::ItemNodeTransform],
     transform: &DisplayTransform,
     x: f32,
@@ -780,13 +869,13 @@ fn push_special_icon(
     {
         out.push(SpecialIconDraw::Mesh {
             model: rig.body.0,
-            texture: rig.body.1,
+            texture: lodestone_render::BlockEntityTexture::Static(rig.body.1),
             placement,
             tint: [255, 255, 255],
         });
         out.push(SpecialIconDraw::Mesh {
             model: rig.flag.0,
-            texture: rig.flag.1,
+            texture: lodestone_render::BlockEntityTexture::Static(rig.flag.1),
             placement,
             tint: [255, 255, 255],
         });
@@ -823,7 +912,7 @@ fn push_special_icon(
         let rig = lodestone_render::shield_item_rig(has_patterns);
         out.push(SpecialIconDraw::Mesh {
             model: rig.0,
-            texture: rig.1,
+            texture: lodestone_render::BlockEntityTexture::Static(rig.1),
             placement,
             tint: [255, 255, 255],
         });
@@ -857,6 +946,15 @@ fn push_special_icon(
 
     let Some((model, texture)) = special_icon_geometry(kind, item) else {
         return;
+    };
+    // A custom head's own sheet, replacing the default skull stem
+    // `special_item_rig` resolves. Exactly the substitution the placed-head pass
+    // makes on `SkullSpawn::texture`, and for the same reason: the rig is right,
+    // only the sheet is per-stack. `skin` is `None` for every other kind and for
+    // a plain head, which leaves the resolved stem untouched.
+    let texture = match skin {
+        Some(url) => lodestone_render::BlockEntityTexture::PlayerSkin(Arc::clone(url)),
+        None => lodestone_render::BlockEntityTexture::Static(texture),
     };
     out.push(SpecialIconDraw::Mesh {
         model,
@@ -1282,6 +1380,31 @@ struct SpecialIcons {
     /// trapped chest in plain oak — the same trap `gpu/block_entities.rs`
     /// documents.
     textures: HashMap<&'static str, wgpu::BindGroup>,
+    /// Fetched **player skins**, one bind group per texture URL — the GUI-icon
+    /// sibling of `super::super::gpu::entities::EntityRenderer::player_skins`,
+    /// and the reason a custom head in a slot can now draw its own face.
+    ///
+    /// Separate from [`Self::textures`] and keyed by `String` for that map's
+    /// reason inverted: a fetched skin's identity arrives on the wire, so it
+    /// cannot be a `&'static str` without leaking one string per distinct skin
+    /// per session. It is also the only map here that grows *after* the pass is
+    /// built — filled by [`Self::install_ready_player_skins`] on whichever frame
+    /// `crate::remote_skins` finishes the fetch.
+    ///
+    /// A miss falls back to the default skull sheet **and logs**: a plain head is
+    /// a head, so the wrong face is invisible at the draw site and the only
+    /// evidence is a log line.
+    player_skins: HashMap<String, wgpu::BindGroup>,
+    /// Kept so [`Self::install_ready_player_skins`] can build a bind group after
+    /// bring-up. Every sheet this pass binds — packaged or fetched — must sample
+    /// through the same nearest-filter sampler, or a fetched skin would be the
+    /// one blurry icon on the screen.
+    sampler: wgpu::Sampler,
+    /// How many consecutive frames a head has wanted a skin this pass could not
+    /// bind. Drives the same one-line-per-episode reporting
+    /// [`IconRenderer::special_declines`] does, for the same reason: this runs
+    /// inside the frame loop.
+    skin_declines: u32,
     /// Group 0: `gui_ortho` with fog disabled. Rewritten each frame because the
     /// projection depends on the target size.
     cam_buffer: wgpu::Buffer,
@@ -1325,7 +1448,7 @@ struct SpecialIcons {
 #[derive(Debug)]
 struct SpecialBatch {
     model: &'static str,
-    texture: &'static str,
+    texture: lodestone_render::BlockEntityTexture,
     count: u32,
     parts: Vec<Option<wgpu::Buffer>>,
 }
@@ -1498,6 +1621,11 @@ impl SpecialIcons {
             models,
             gpu_models,
             textures,
+            // Nothing until a head with a profile is drawn *and* its fetch
+            // lands; see the field's own doc for why a miss is not a failure.
+            player_skins: HashMap::new(),
+            sampler,
+            skin_declines: 0,
             cam_buffer,
             cam_bind_group,
             batches: Vec::new(),
@@ -1514,6 +1642,85 @@ impl SpecialIcons {
     /// from "no pack, so nothing can ever draw".
     fn sheet_count(&self) -> usize {
         self.textures.len()
+    }
+
+    /// Give every custom head in this frame's draw list a bind group, if
+    /// `crate::remote_skins` has finished fetching its sheet.
+    ///
+    /// **Pull, not drain.** `remote_skins::drain_ready` is the world entity
+    /// pass's one-shot queue and has exactly one consumer; draining it here
+    /// would steal a placed head's sheet rather than share it. Asking
+    /// `remote_skins::sheet` for a URL we have no bind group for is idempotent,
+    /// costs one hash lookup per unresolved head per frame, and self-heals: a
+    /// record built on the frame the fetch was *started* resolves on whichever
+    /// later frame it lands, with no ordering to get right.
+    ///
+    /// Every head that still cannot be resolved is **reported**. The draw falls
+    /// back to the default skull sheet — a plain head is a head, so nothing looks
+    /// broken and nothing goes red — which is precisely why the decline may not
+    /// be silent.
+    fn install_ready_player_skins(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        special: &[SpecialIconDraw],
+    ) {
+        let mut unresolved = 0usize;
+        let mut installed = 0usize;
+        for draw in special {
+            let SpecialIconDraw::Mesh { texture, .. } = draw else {
+                continue;
+            };
+            let Some(url) = texture.player_skin_url() else {
+                continue;
+            };
+            if self.player_skins.contains_key(url) {
+                continue;
+            }
+            let Some(image) = crate::remote_skins::sheet(url) else {
+                unresolved += 1;
+                continue;
+            };
+            let view = entity_sheet_texture(device, queue, &image);
+            let bind = self
+                .pipeline
+                .texture_bind_group(device, &view, &self.sampler);
+            self.player_skins.insert(url.to_owned(), bind);
+            installed += 1;
+        }
+        if installed > 0 {
+            tracing::debug!(
+                target: "assets",
+                installed,
+                skins = self.player_skins.len(),
+                "bound custom head skins for the GUI icon pass"
+            );
+        }
+        if unresolved == 0 {
+            if self.skin_declines > 0 {
+                tracing::info!(
+                    target: "assets",
+                    frames_default = self.skin_declines,
+                    skins = self.player_skins.len(),
+                    "every custom head in a slot now has its own skin bound"
+                );
+                self.skin_declines = 0;
+            }
+            return;
+        }
+        self.skin_declines = self.skin_declines.saturating_add(1);
+        if self.skin_declines == 1 {
+            // One line per episode, not per frame — the recovery line above
+            // closes it, so an episode's length is readable from the pair.
+            tracing::warn!(
+                target: "assets",
+                heads = unresolved,
+                "custom head skins are drawing the DEFAULT skull sheet in a GUI slot: \
+                 their texture is not fetched yet (normal for the first frames after one \
+                 appears), the fetch failed, or its host is outside the texture allow list. \
+                 The same heads draw correctly once crate::remote_skins finishes"
+            );
+        }
     }
 }
 
@@ -2567,6 +2774,10 @@ impl IconRenderer {
             self.special_declines = 0;
         }
 
+        // Before the batches, because a batch's bind group is looked up at draw
+        // time and a skin that lands this frame should be bound this frame.
+        s.install_ready_player_skins(device, queue, special);
+
         let base = build_special_batches(device, s, &special[..carried_from]);
         let carried = build_special_batches(device, s, &special[carried_from..]);
         s.batches = base;
@@ -2616,7 +2827,7 @@ fn build_special_batches(
         // the same reason: a trapped chest and a plain one share the mesh and
         // differ only in bind group, so keying on the model alone would draw both
         // with whichever sheet happened to be bound.
-        let mut keys: Vec<(&'static str, &'static str)> = Vec::new();
+        let mut keys: Vec<(&'static str, lodestone_render::BlockEntityTexture)> = Vec::new();
         let mut per_key: Vec<Vec<Mat4>> = Vec::new();
         // Parallel to `per_key`, but indexed **per icon** rather than per part —
         // every icon sharing a `(model, texture)` key needs its own tint, since
@@ -2641,17 +2852,25 @@ fn build_special_batches(
             let Some(mesh) = s.models.get(*model) else {
                 continue;
             };
-            if !s.textures.contains_key(*texture) {
+            // A packaged stem with no bind group can never draw, so the batch is
+            // dropped here as it always was. A **fetched** skin is different: its
+            // bind group arrives later by construction, and the draw falls back
+            // to the default skull sheet meanwhile (`draw_models_range`), so
+            // dropping it here would turn "the wrong face for a few frames" into
+            // "an empty slot until the network answers".
+            if let lodestone_render::BlockEntityTexture::Static(stem) = texture
+                && !s.textures.contains_key(stem)
+            {
                 continue;
             }
             let transforms = mesh.part_transforms(*placement, &[]);
-            match keys.iter().position(|k| *k == (*model, *texture)) {
+            match keys.iter().position(|k| k.0 == *model && k.1 == *texture) {
                 Some(i) => {
                     per_key[i].extend(transforms);
                     per_key_tint[i].push(*tint);
                 }
                 None => {
-                    keys.push((*model, *texture));
+                    keys.push((*model, texture.clone()));
                     per_key.push(transforms);
                     per_key_tint.push(vec![*tint]);
                 }
@@ -2921,7 +3140,22 @@ impl IconRenderer {
                 let Some(model) = s.gpu_models.get(batch.model) else {
                     continue;
                 };
-                let Some(texture) = s.textures.get(batch.texture) else {
+                // A fetched custom-head skin, else the packaged stem. A dynamic
+                // miss falls back to the default skull sheet for that frame,
+                // exactly as the world's placed-head pass falls back to Steve —
+                // and `SpecialIcons::install_ready_player_skins` has already
+                // logged that it is happening.
+                let texture = match &batch.texture {
+                    lodestone_render::BlockEntityTexture::Static(stem) => s.textures.get(stem),
+                    lodestone_render::BlockEntityTexture::PlayerSkin(url) => {
+                        s.player_skins.get(url.as_ref()).or_else(|| {
+                            s.textures.get(lodestone_render::skull_texture_stem(
+                                lodestone_render::SkullType::Player,
+                            ))
+                        })
+                    }
+                };
+                let Some(texture) = texture else {
                     continue;
                 };
                 pass.set_bind_group(1, texture, &[]);
@@ -3033,6 +3267,7 @@ mod pop_tests {
             potion_color: None,
             banner_patterns: Vec::new(),
             base_color: None,
+            skin: None,
         }
     }
 
@@ -3339,6 +3574,7 @@ mod tint_wiring_tests {
             potion_color,
             banner_patterns: Vec::new(),
             base_color: None,
+            skin: None,
         }
     }
 

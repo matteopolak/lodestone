@@ -542,6 +542,7 @@ mod tests {
             potion_color: None,
             banner_patterns: Vec::new(),
             base_color: None,
+            skin: None,
         }
     }
 
