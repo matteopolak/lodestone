@@ -271,6 +271,109 @@ fn first_declared_provider_wins_on_overlap() {
     assert_eq!(font.advance(b' ' as u32), Some(4.0));
 }
 
+/// The discriminating arm the previous test cannot provide: **bitmap**
+/// declared first, **space** declared second, for the same codepoint, with
+/// deliberately different advances (bitmap 3, space 40 -- equal advances
+/// cannot distinguish "the right provider won" from "the right *value*
+/// happened to come out"). Declaration order is what vanilla's
+/// `FontManager`'s double-reversal composes down to (the reversal exists to
+/// make cross-*pack* priority work while preserving each pack's own JSON
+/// order, not to bias one provider *type* over another) -- so the earlier
+/// declaration wins here regardless of its kind, exactly as the previous
+/// test's space-before-bitmap arm won regardless of *its* kind. Proves both
+/// that the winner is bitmap's 3, and -- the coordinator's own second arm --
+/// that the loser's value (40) is not what comes out.
+#[test]
+fn bitmap_declared_before_space_wins_over_a_later_space_entry() {
+    let png = sheet(8, &[Some(1)]); // 'C': rightmost col 1 -> actual 2 -> advance 3
+    let json = br#"{"providers":[
+        {"type":"bitmap","file":"minecraft:font/t.png","ascent":7,"height":8,"chars":["C"]},
+        {"type":"space","advances":{"C":40}}
+    ]}"#;
+    let mgr = manager(vec![
+        ("assets/minecraft/textures/font/t.png", png),
+        ("assets/minecraft/font/default.json", json.to_vec()),
+    ]);
+    let font = FontLoader::new(&mgr)
+        .load(&loc("minecraft:default"), &FontOptions::none())
+        .unwrap();
+    assert_eq!(
+        font.advance(b'C' as u32),
+        Some(3.0),
+        "the earlier-declared bitmap provider must win -- got the later space \
+         provider's 40 instead of the bitmap's 3, or something else entirely"
+    );
+    assert!(
+        font.bitmap_glyph(b'C' as u32).is_some(),
+        "the winning glyph must actually be the bitmap one, not merely a \
+         coincidentally-equal advance from the space provider"
+    );
+}
+
+/// The same discriminating shape, but through a `reference` -- the actual
+/// structure a pack like the one that motivated this test uses: a root font
+/// declares a bitmap provider directly, then references a second file that
+/// declares the conflicting space entry, mirroring `nameplates:default.json`
+/// declaring its own `background/space_split.png` bitmap ahead of a
+/// `reference` to a shared "base" font carrying the pack's real gap-width
+/// table. `FontLoader::flatten` recurses into the reference at its declared
+/// position, so this must resolve identically to the flat, single-file case
+/// above: the bitmap (declared first, before the reference) still wins.
+#[test]
+fn bitmap_before_a_referenced_spaces_wins_the_same_way_as_the_flat_case() {
+    let png = sheet(8, &[Some(1)]); // 'C': actual 2 -> advance 3, same as above
+    let base_json = br#"{"providers":[{"type":"space","advances":{"C":40}}]}"#;
+    let root_json = br#"{"providers":[
+        {"type":"bitmap","file":"minecraft:font/t.png","ascent":7,"height":8,"chars":["C"]},
+        {"type":"reference","id":"minecraft:include/base"}
+    ]}"#;
+    let mgr = manager(vec![
+        ("assets/minecraft/textures/font/t.png", png),
+        ("assets/minecraft/font/include/base.json", base_json.to_vec()),
+        ("assets/minecraft/font/default.json", root_json.to_vec()),
+    ]);
+    let font = FontLoader::new(&mgr)
+        .load(&loc("minecraft:default"), &FontOptions::none())
+        .unwrap();
+    assert_eq!(
+        font.advance(b'C' as u32),
+        Some(3.0),
+        "a directly-declared bitmap provider ahead of a `reference` must still \
+         win over that reference's own space entry -- referencing must not \
+         silently promote the referenced font's providers ahead of ones \
+         declared earlier in the referencing file"
+    );
+}
+
+/// And the mirror of the reference case: the `reference` declared **first**,
+/// so the referenced font's space entry should win over a bitmap declared
+/// after it in the referencing file -- proving the reference's expanded
+/// providers really do take the *position* the `reference` line occupies,
+/// not always-first or always-last regardless of where it was written.
+#[test]
+fn a_referenced_space_declared_before_a_local_bitmap_wins() {
+    let png = sheet(8, &[Some(1)]);
+    let base_json = br#"{"providers":[{"type":"space","advances":{"C":40}}]}"#;
+    let root_json = br#"{"providers":[
+        {"type":"reference","id":"minecraft:include/base"},
+        {"type":"bitmap","file":"minecraft:font/t.png","ascent":7,"height":8,"chars":["C"]}
+    ]}"#;
+    let mgr = manager(vec![
+        ("assets/minecraft/textures/font/t.png", png),
+        ("assets/minecraft/font/include/base.json", base_json.to_vec()),
+        ("assets/minecraft/font/default.json", root_json.to_vec()),
+    ]);
+    let font = FontLoader::new(&mgr)
+        .load(&loc("minecraft:default"), &FontOptions::none())
+        .unwrap();
+    assert_eq!(
+        font.advance(b'C' as u32),
+        Some(40.0),
+        "the reference, declared before the bitmap, must expand in place and \
+         win with its space entry's 40 -- got the bitmap's 3 instead"
+    );
+}
+
 // --- multi-pack font stacking (vanilla merges, never overrides) ----------
 
 /// Two packs, both declaring `assets/minecraft/font/default.json`: the

@@ -177,6 +177,16 @@ actually consumed this font (`hud::vanilla_font` for chat/HUD text,
 distinct implementation of the same `pixel_scale`-aware texel walk, so a
 regression in one does not imply a regression in the others).
 
+A `space` provider prints its own header line too, one per provider, listing
+**every** codepoint it declares and the advance each one gets —
+`space provider font=<id> provider[<n>] <count> advances [U+F800:-1,U+F801:-2,...]`
+— not just a count. This is the direct way to answer "does this pack's gap
+table even contain the codepoint I think is the gap, and what did the pack
+author actually ask for": a bitmap provider's own header only shows *that*
+provider's glyphs, so a `space` provider silently losing every codepoint to
+an earlier bitmap provider (see the precedence note below) used to be
+invisible even when the metrics dump was otherwise complete.
+
 The same env var also makes two previously-silent soft skips speak: a
 `unihex`/`ttf` provider whose `hex_file`/`file` is not present in the active
 pack stack now prints one line either way (see `FontLoader::load_unihex`/
@@ -244,6 +254,24 @@ the jar's entire provider chain outright — every glyph the jar's `default.json
 would otherwise have supplied for that font, not just the ones the pack's own
 file also names, silently vanished, which is a much bigger blast radius than
 the codepoints the pack actually intended to add.
+
+**Declaration order decides the winner, with no bias toward any provider
+*type*.** A `space` provider does not implicitly outrank a `bitmap` one, or
+vice versa — whichever provider is earlier in the flattened list wins,
+exactly the same rule `duplicate_codepoint_within_one_providers_grid_uses_the_last_cell`'s
+sibling tests already prove for a *single* provider's own grid. This was
+re-verified by hand against vanilla's real `FontManager.loadResourceStack`/
+`apply`'s double list-reversal (which exists to make cross-*pack* priority
+work while preserving each pack's own JSON order, not to bias one provider
+kind over another) and is pinned down by four tests in `tests/font.rs`:
+space-before-bitmap and bitmap-before-space, each repeated through a
+`reference` indirection, always with deliberately *different* advances on
+each side so a coincidental match cannot hide a wrong winner. If a pack's
+`space` provider seems to be losing a codepoint to a `bitmap` provider it
+should win against, check which one is declared **earlier** in the pack's
+own JSON (following any `reference` chain to its actual position) before
+suspecting this crate's precedence logic — the four tests above are the
+control that rules that logic in or out first.
 
 ### Watching a whole drawn string, not one codepoint at a time (`LODESTONE_TEXT_TRACE`)
 
