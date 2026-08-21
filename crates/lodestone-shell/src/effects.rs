@@ -10,7 +10,7 @@
 //! | shown when | no screen, or a screen whose `showsActiveEffects()` is false | the player's own inventory only |
 //! | filters `show_icon` | **yes** | **no** — `getActiveEffects()` is used whole |
 //! | text | none at all | translated name plus `MobEffectUtil.formatDuration` |
-//! | drawn by | [`EffectsRenderer`], below | `container::geometry`'s `draw_effect_column` |
+//! | drawn by | `hud.rs`'s geometry builder, from [`hud_icons`] | `container::geometry`'s `draw_effect_column` |
 //!
 //! The split of *responsibility* is the part worth knowing: everything from
 //! [`InventoryEffectRow`] down is the inventory column's **model**, resolved
@@ -23,15 +23,28 @@
 //! and the raw registry path where the translated name belongs — because none
 //! of the four assets was reachable from here.
 //!
-//! ## What the overlay below still approximates
+//! ## The HUD overlay
 //!
-//! [`EffectChip`]/[`geometry`]/[`EffectsRenderer`] are **not** a port of
-//! `Hud.extractEffects`: vanilla draws a `24x24` background sprite and an
-//! `18x18` icon per effect, in two rows split beneficial/harmful, with **no
-//! text**. This draws a coloured chip with a name and a timer. It is the same
-//! class of stand-in the inventory column just stopped being, and closing it
-//! needs the same thing — a sprite atlas at the draw site, which this module's
-//! own untextured pipeline does not have.
+//! [`HudEffectIcon`]/[`hud_icons`] are the model for `Hud.extractEffects`, and
+//! it is now a port rather than a stand-in: a `24x24` background sprite and an
+//! `18x18` icon per effect, two rows (beneficial above, harmful below), **no
+//! text at all**, and a flashing icon alpha inside the last 200 ticks.
+//!
+//! It used to draw a hash-tinted chip with a name and a timer, for one reason:
+//! the overlay owned an untextured pipeline of its own, so no sprite was
+//! reachable from its draw site. The fix is the one the inventory column
+//! already took — **draw it where the atlas is**. The geometry is emitted by
+//! `hud.rs`'s own builder, through the same GUI-atlas sprite pipeline the
+//! hearts and the hotbar frame use, so this module went back to being a pure
+//! model and the separate renderer and shader are gone.
+//!
+//! The icons themselves became reachable when `GuiAtlas` started enumerating
+//! **both** directory sources `assets/minecraft/atlases/gui.json` declares
+//! rather than only the first; see [`mob_effect_sprite`].
+//!
+//! A jar-less run draws no overlay at all, deliberately — the same choice the
+//! inventory column makes, and for the same reason: a coloured stand-in is
+//! indistinguishable from art that failed to load.
 //!
 //! ## Layering
 //!
@@ -44,120 +57,196 @@
 
 use lodestone_game::effect::{ActiveEffects, StatusEffect};
 
-use crate::hud::glyph_rows;
+/// `Hud.EFFECT_BACKGROUND_SPRITE` — the overlay's plate behind a non-ambient
+/// effect. **Not** the inventory column's
+/// [`EFFECT_BACKGROUND_SPRITE`]: that one is
+/// `container/inventory/effect_background`, a nine-sliced widget of a
+/// different size. Two widgets, two sprites, and the pack ships both.
+pub const HUD_EFFECT_BACKGROUND_SPRITE: &str = "hud/effect_background";
+/// `Hud.EFFECT_BACKGROUND_AMBIENT_SPRITE` — the beacon/aura plate.
+pub const HUD_EFFECT_BACKGROUND_AMBIENT_SPRITE: &str = "hud/effect_background_ambient";
+/// The side length the background sprite is blitted at (`24, 24`).
+pub const HUD_EFFECT_BACKGROUND_SIZE: f32 = 24.0;
+/// The side length the effect icon is blitted at (`18, 18`).
+pub const HUD_EFFECT_ICON_SIZE: f32 = 18.0;
+/// The icon's inset inside the background, on both axes (`x + 3, y + 3`).
+pub const HUD_EFFECT_ICON_INSET: f32 = 3.0;
+/// The per-icon horizontal pitch: `x -= 25 * n`, counted **per row**, so the
+/// beneficial and harmful rows each start over at the right edge.
+pub const HUD_EFFECT_STRIDE: f32 = 25.0;
+/// The beneficial row's top edge (`int y = 1`).
+pub const HUD_EFFECT_TOP_Y: f32 = 1.0;
+/// How far below the beneficial row the harmful row sits (`y += 26`).
+pub const HUD_EFFECT_ROW_DROP: f32 = 26.0;
+/// `instance.endsWithin(200)` — the window inside which a non-ambient icon
+/// flashes.
+const HUD_EFFECT_FLASH_TICKS: i32 = 200;
 
-/// Bitmap-font cell metrics, matching [`crate::hud`]'s font (`glyph_rows`
-/// returns seven 5-bit rows). Kept as local constants because the HUD's `font`
-/// module is private; the shape of `glyph_rows`' return type pins them.
-const GLYPH_W: usize = 5;
-const GLYPH_H: usize = 7;
-
-/// Render scale for effect text (each font pixel becomes `SCALE`×`SCALE`).
-const SCALE: f32 = 2.0;
-/// Screen-edge margin, in pixels.
-const MARGIN: f32 = 6.0;
-/// Side length of the square colour "icon" swatch, in pixels.
-const ICON: f32 = 20.0;
-/// Padding between the swatch and the text column, in pixels.
-const PAD: f32 = 4.0;
-/// Vertical gap between stacked chips, in pixels.
-const GAP: f32 = 4.0;
-
-/// Per-glyph horizontal advance in pixels at [`SCALE`] (matches the HUD's
-/// fixed-advance layout: cell width plus one spacing column).
-fn advance() -> f32 {
-    (GLYPH_W as f32 + 1.0) * SCALE
-}
-
-/// Pixel width of `s` in the fixed-advance font at [`SCALE`].
-fn text_px(s: &str) -> f32 {
-    s.chars().count() as f32 * advance()
-}
-
-/// A single ready-to-draw status-effect chip.
+/// One icon of `Hud.extractEffects`' top-right overlay, resolved but not yet
+/// positioned — the layout is two counters and a subtraction, and it belongs
+/// where the canvas width is known (`hud.rs`'s geometry builder).
+///
+/// Carries **no** colour and no text, which is the whole difference from what
+/// this used to be: vanilla blits a real background sprite and a real icon,
+/// so a tint derived from the id would be a stand-in for art that exists.
 #[derive(Debug, Clone, PartialEq)]
-pub struct EffectChip {
-    /// Display label, e.g. `"SPEED II"` (level suffix omitted at level I).
-    pub label: String,
-    /// Remaining time as `"M:SS"`, or empty for an infinite effect.
-    pub time: String,
-    /// Swatch tint (RGB in `0..=1`), deterministic per effect id.
-    pub tint: [f32; 3],
-    /// Whether the effect is ambient (beacon/aura): drawn fainter.
-    pub ambient: bool,
+pub struct HudEffectIcon {
+    /// `mob_effect/<path>` — [`mob_effect_sprite`]'s output.
+    pub icon: String,
+    /// [`HUD_EFFECT_BACKGROUND_SPRITE`] or, for an ambient effect,
+    /// [`HUD_EFFECT_BACKGROUND_AMBIENT_SPRITE`].
+    pub background: &'static str,
+    /// The **icon** blit's tint alpha (`ARGB.white(alpha)`); `1.0` except
+    /// while flashing. The background is never tinted — see
+    /// [`hud_icon_alpha`].
+    pub alpha: f32,
+    /// `MobEffect.isBeneficial()`: top row when `true`, bottom row otherwise.
+    pub beneficial: bool,
 }
 
-/// Fold the active effects into drawable chips, preserving the model's stable
-/// insertion order. Effects that ask not to show a HUD icon (`show_icon =
-/// false`) are omitted, matching vanilla.
+/// Fold the active effects into `Hud.extractEffects`' icon list.
+///
+/// Two differences from [`inventory_rows`], both vanilla's:
+///
+/// * `showIcon()` **is** honoured here (the inventory column uses
+///   `getActiveEffects()` whole);
+/// * the order is `Ordering.natural().`**`reverse()`**`.sortedCopy(...)`,
+///   the inventory column's order backwards. That order decides which icon
+///   sits furthest right within each row, so it is not cosmetic.
 #[must_use]
-pub fn chips_from(fx: &ActiveEffects) -> Vec<EffectChip> {
-    fx.iter()
+pub fn hud_icons(fx: &ActiveEffects) -> Vec<HudEffectIcon> {
+    let mut sorted: Vec<&StatusEffect> = fx.iter().collect();
+    // `Ordering.natural().reverse()` — arguments swapped rather than a
+    // `.reverse()` on the result, so a tie stays a tie instead of flipping.
+    sorted.sort_by(|a, b| natural_order(b, a));
+    sorted
+        .into_iter()
         .filter(|e| e.show_icon)
-        .map(|e| EffectChip {
-            label: effect_label(e.id.path(), e.level()),
-            time: time_string(e.duration_ticks),
-            tint: tint_for(e.id.path()),
-            ambient: e.ambient,
+        .map(|e| HudEffectIcon {
+            icon: mob_effect_sprite(e.id.path()),
+            background: if e.ambient {
+                HUD_EFFECT_BACKGROUND_AMBIENT_SPRITE
+            } else {
+                HUD_EFFECT_BACKGROUND_SPRITE
+            },
+            alpha: hud_icon_alpha(e),
+            beneficial: is_beneficial(e.id.path()),
         })
         .collect()
 }
 
-/// Build the display label: the effect path with `_` turned to spaces and a
-/// roman-numeral level suffix for level ≥ 2 (vanilla hides the `I`). The bitmap
-/// font is upper-case only and up-cases internally, so case here is cosmetic.
-fn effect_label(path: &str, level: u32) -> String {
-    let name = path.replace('_', " ");
-    if level >= 2 {
-        format!("{name} {}", roman(level))
-    } else {
-        name
+/// The alpha `Hud.extractEffects` blits an effect's icon with.
+///
+/// `1.0` unless the effect is non-ambient and `endsWithin(200)`, in which case
+/// it is vanilla's flash:
+///
+/// ```text
+/// usedSeconds = 10 - remaining / 20                      (integer division)
+/// alpha = clamp(remaining / 10 / 5 * 0.5, 0, 0.5)
+///       + cos(remaining * PI / 5) * clamp(usedSeconds / 10 * 0.25, 0, 0.25)
+/// ```
+///
+/// clamped into `0..=1`. An **ambient** effect never flashes — vanilla only
+/// evaluates this inside the non-ambient branch — and an infinite one cannot,
+/// because `endsWithin` is `false` for `duration == -1` regardless of the
+/// comparison that follows it. Getting either wrong makes a beacon's icons
+/// strobe forever.
+///
+/// The cosine is the **table**, not `f32::cos`; see `lodestone_physics::mth`.
+/// Ours takes an `f64`, so the index can round one step differently from
+/// vanilla's `float` overload at the boundary between two of the 65,536
+/// entries. That is a sub-frame difference in a decorative fade, recorded
+/// rather than papered over.
+#[must_use]
+pub fn hud_icon_alpha(e: &StatusEffect) -> f32 {
+    if e.ambient || e.is_infinite() || e.duration_ticks > HUD_EFFECT_FLASH_TICKS {
+        return 1.0;
     }
+    let remaining = e.duration_ticks;
+    // Integer division, deliberately: `10 - remainingDuration / 20` in Java is
+    // an int expression, so this counts whole elapsed seconds of the fade.
+    let used_seconds = 10 - remaining / 20;
+    let ramp = (remaining as f32 / 10.0 / 5.0 * 0.5).clamp(0.0, 0.5);
+    let swing = (used_seconds as f32 / 10.0 * 0.25).clamp(0.0, 0.25);
+    let phase = f64::from(remaining as f32 * std::f32::consts::PI / 5.0);
+    (ramp + lodestone_physics::mth::cos(phase) * swing).clamp(0.0, 1.0)
 }
 
-/// Roman numeral for `n` (1..=3999); falls back to the decimal string outside
-/// that range so an absurd amplifier still renders *something* legible rather
-/// than an empty or wrong glyph run.
-fn roman(mut n: u32) -> String {
-    if n == 0 || n > 3999 {
-        return n.to_string();
-    }
-    const TABLE: &[(u32, &str)] = &[
-        (1000, "M"),
-        (900, "CM"),
-        (500, "D"),
-        (400, "CD"),
-        (100, "C"),
-        (90, "XC"),
-        (50, "L"),
-        (40, "XL"),
-        (10, "X"),
-        (9, "IX"),
-        (5, "V"),
-        (4, "IV"),
-        (1, "I"),
-    ];
-    let mut out = String::new();
-    for &(v, s) in TABLE {
-        while n >= v {
-            out.push_str(s);
-            n -= v;
-        }
-    }
-    out
+/// `MobEffect.isBeneficial()` — `category == MobEffectCategory.BENEFICIAL`.
+///
+/// Transcribed from `MobEffects.java`'s own per-effect category argument (see
+/// `docs/inventory-potion-effects.md`), which is the only place it is stated: it is a
+/// constructor argument, so it appears in no generated registry dump. Note
+/// **`NEUTRAL` is not beneficial** — `glowing`, `bad_omen`, `trial_omen` and
+/// `raid_omen` all draw in the lower row, which is what `isBeneficial()`
+/// returning `category == BENEFICIAL` (rather than `!= HARMFUL`) means.
+///
+/// An id this table does not know is treated as not beneficial, so an effect
+/// from a future version lands in the lower row instead of vanishing. The
+/// table's completeness against the shipped registry is asserted by
+/// `every_registry_effect_has_a_category`, not assumed.
+///
+/// The durable home for this is `lodestone_data`, beside
+/// [`mob_effect_color`](lodestone_data::mob_effects::mob_effect_color) —
+/// `lodestone_data::potion` already carries a **potion-scoped** 20-entry
+/// subset of the same fact, and `the_potion_table_agrees_about_harmfulness`
+/// checks the two against each other rather than letting them drift.
+#[must_use]
+pub fn is_beneficial(path: &str) -> bool {
+    MOB_EFFECT_BENEFICIAL
+        .iter()
+        .find(|(name, _)| *name == path)
+        .is_some_and(|(_, beneficial)| *beneficial)
 }
 
-/// Format remaining ticks as `"M:SS"`, rounding up so a nearly-expired effect
-/// still reads at least `0:01`. An infinite effect (`duration < 0`) has no
-/// timer and yields the empty string.
-fn time_string(duration_ticks: i32) -> String {
-    if duration_ticks < 0 {
-        return String::new();
-    }
-    // Round up: 1..=20 ticks → 1 s, so the timer never shows 0:00 while active.
-    let secs = (duration_ticks + 19) / 20;
-    format!("{}:{:02}", secs / 60, secs % 60)
-}
+/// `(registry path, isBeneficial())` for every effect in the 26.2 registry.
+/// See [`is_beneficial`] for provenance and for why `NEUTRAL` reads `false`.
+const MOB_EFFECT_BENEFICIAL: &[(&str, bool)] = &[
+    ("speed", true),
+    ("slowness", false),
+    ("haste", true),
+    ("mining_fatigue", false),
+    ("strength", true),
+    ("instant_health", true),
+    ("instant_damage", false),
+    ("jump_boost", true),
+    ("nausea", false),
+    ("regeneration", true),
+    ("resistance", true),
+    ("fire_resistance", true),
+    ("water_breathing", true),
+    ("invisibility", true),
+    ("blindness", false),
+    ("night_vision", true),
+    ("hunger", false),
+    ("weakness", false),
+    ("poison", false),
+    ("wither", false),
+    ("health_boost", true),
+    ("absorption", true),
+    ("saturation", true),
+    // NEUTRAL
+    ("glowing", false),
+    ("levitation", false),
+    ("luck", true),
+    ("unluck", false),
+    ("slow_falling", true),
+    ("conduit_power", true),
+    ("dolphins_grace", true),
+    // NEUTRAL
+    ("bad_omen", false),
+    ("hero_of_the_village", true),
+    ("darkness", false),
+    // NEUTRAL
+    ("trial_omen", false),
+    // NEUTRAL
+    ("raid_omen", false),
+    ("wind_charged", false),
+    ("weaving", false),
+    ("oozing", false),
+    ("infested", false),
+    ("breath_of_the_nautilus", true),
+];
 
 /// A deterministic, bright RGB tint per effect id. This is a *rendering* choice
 /// (distinguish effects at a glance), not registry knowledge, so it is derived
@@ -177,43 +266,6 @@ pub(crate) fn tint_for(path: &str) -> [f32; 3] {
     // enough to read over the world, and no effect renders near-black.
     let chan = |shift: u32| 0.35 + ((v >> shift) & 0xff) as f32 / 255.0 * 0.65;
     [chan(0), chan(8), chan(16)]
-}
-
-/// Emit the top-right effect stack as coloured triangles in NDC (the same
-/// `[x, y, r, g, b, a]` vertex layout the HUD pipeline consumes). An empty
-/// slice emits nothing, so an effect-free player costs zero vertices.
-#[must_use]
-pub fn geometry(chips: &[EffectChip], width: f32, height: f32) -> Vec<f32> {
-    let mut b = Quads::new(width, height);
-    let chip_h = ICON.max(2.0 * GLYPH_H as f32 * SCALE + 2.0);
-    for (i, chip) in chips.iter().enumerate() {
-        let text_w = text_px(&chip.label).max(text_px(&chip.time));
-        let chip_w = ICON + PAD + text_w;
-        let x = width - MARGIN - chip_w;
-        let y = MARGIN + i as f32 * (chip_h + GAP);
-
-        let alpha = if chip.ambient { 0.55 } else { 0.9 };
-        // Faint chip backdrop so text stays legible over bright terrain.
-        b.rect(
-            x - PAD,
-            y - 2.0,
-            chip_w + PAD * 2.0,
-            chip_h + 4.0,
-            [0.0, 0.0, 0.0, 0.45],
-        );
-        // Colour swatch ("icon" stand-in), left-aligned and vertically centred.
-        let icon_y = y + (chip_h - ICON) * 0.5;
-        let t = chip.tint;
-        b.rect(x, icon_y, ICON, ICON, [t[0], t[1], t[2], alpha]);
-
-        let tx = x + ICON + PAD;
-        b.text(&chip.label, tx, y, [0.95, 0.95, 0.95, 1.0]);
-        if !chip.time.is_empty() {
-            let ty = y + GLYPH_H as f32 * SCALE + 1.0;
-            b.text(&chip.time, tx, ty, [0.75, 0.78, 0.72, 1.0]);
-        }
-    }
-    b.verts
 }
 
 /// `EffectsInInventory.ICON_SIZE` — the effect icon's side length, and the
@@ -475,217 +527,6 @@ pub fn inventory_texture_width(name_px: f32, duration_px: f32, max_texture_width
     max_texture_width.min(name_width.max(duration_width))
 }
 
-/// A minimal pixel-space quad emitter to NDC, mirroring the HUD's builder but
-/// self-contained (this module owns no dependency on the HUD's private types).
-struct Quads {
-    w: f32,
-    h: f32,
-    verts: Vec<f32>,
-}
-
-impl Quads {
-    fn new(w: f32, h: f32) -> Self {
-        Self {
-            w,
-            h,
-            verts: Vec::new(),
-        }
-    }
-
-    /// Emit a pixel-space rectangle as two triangles in NDC.
-    fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, c: [f32; 4]) {
-        let to_ndc = |px: f32, py: f32| (2.0 * px / self.w - 1.0, 1.0 - 2.0 * py / self.h);
-        let (x0, y0) = to_ndc(x, y);
-        let (x1, y1) = to_ndc(x + w, y + h);
-        let mut v = |vx: f32, vy: f32| {
-            self.verts
-                .extend_from_slice(&[vx, vy, c[0], c[1], c[2], c[3]]);
-        };
-        v(x0, y0);
-        v(x1, y0);
-        v(x1, y1);
-        v(x0, y0);
-        v(x1, y1);
-        v(x0, y1);
-    }
-
-    /// Emit a string at pixel `(x, y)` (top-left of the first glyph), one
-    /// `SCALE`×`SCALE` quad per lit font pixel via the HUD's bitmap font.
-    fn text(&mut self, s: &str, x: f32, y: f32, c: [f32; 4]) {
-        let mut cursor = x;
-        for ch in s.chars() {
-            if ch != ' ' {
-                let rows = glyph_rows(ch);
-                for (ry, row) in rows.iter().enumerate() {
-                    for rx in 0..GLYPH_W {
-                        if (row >> (GLYPH_W - 1 - rx)) & 1 == 1 {
-                            self.rect(
-                                cursor + rx as f32 * SCALE,
-                                y + ry as f32 * SCALE,
-                                SCALE,
-                                SCALE,
-                                c,
-                            );
-                        }
-                    }
-                }
-            }
-            cursor += advance();
-        }
-    }
-}
-
-/// Number of `f32`s per vertex (`[x, y, r, g, b, a]`).
-const FLOATS_PER_VERTEX: usize = 6;
-
-/// GPU renderer for the status-effect overlay: a coloured-quad pipeline (same
-/// trivial shader as the HUD's) plus a growable dynamic vertex buffer, drawn in
-/// a `Load` pass so it composites over whatever is already on the frame.
-#[derive(Debug)]
-pub struct EffectsRenderer {
-    pipeline: wgpu::RenderPipeline,
-    buffer: wgpu::Buffer,
-    capacity_floats: usize,
-}
-
-impl EffectsRenderer {
-    /// Build the overlay pipeline for a target of `color_format`.
-    #[must_use]
-    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("effects-shader"),
-            source: wgpu::ShaderSource::Wgsl(EFFECTS_WGSL.into()),
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("effects-layout"),
-            bind_group_layouts: &[],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("effects-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: (FLOATS_PER_VERTEX * 4) as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
-                            offset: 8,
-                            shader_location: 1,
-                        },
-                    ],
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let capacity_floats = 2048;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("effects-verts"),
-            size: (capacity_floats * 4) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        Self {
-            pipeline,
-            buffer,
-            capacity_floats,
-        }
-    }
-
-    /// Draw the active-effects overlay over the current frame contents. Costs
-    /// one buffer write and one draw; a no-op when no effect shows an icon.
-    pub fn render(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        view: &wgpu::TextureView,
-        fx: &ActiveEffects,
-        width: u32,
-        height: u32,
-    ) {
-        let chips = chips_from(fx);
-        let verts = geometry(&chips, width as f32, height as f32);
-        if verts.is_empty() {
-            return;
-        }
-        self.draw_verts(device, queue, view, &verts);
-    }
-}
-
-impl EffectsRenderer {
-    /// Shared upload+draw tail of [`Self::render`]:
-    /// grow the buffer if needed, write it and issue one `Load`-pass draw call.
-    fn draw_verts(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView, verts: &[f32]) {
-        if verts.len() > self.capacity_floats {
-            self.capacity_floats = verts.len().next_power_of_two();
-            self.buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("effects-verts"),
-                size: (self.capacity_floats * 4) as wgpu::BufferAddress,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(verts));
-
-        let vertex_count = (verts.len() / FLOATS_PER_VERTEX) as u32;
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("effects"),
-        });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("effects-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_vertex_buffer(0, self.buffer.slice(..));
-            pass.draw(0..vertex_count, 0..1);
-        }
-        queue.submit(std::iter::once(encoder.finish()));
-    }
-}
-
-const EFFECTS_WGSL: &str = include_str!("shaders/effects.wgsl");
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,44 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn roman_covers_the_common_potion_levels() {
-        assert_eq!(roman(1), "I");
-        assert_eq!(roman(2), "II");
-        assert_eq!(roman(4), "IV");
-        assert_eq!(roman(5), "V");
-        assert_eq!(roman(9), "IX");
-        assert_eq!(roman(10), "X");
-        // Out of the classic range it must still render legibly, not blank.
-        assert_eq!(roman(5000), "5000");
-    }
-
-    #[test]
-    fn time_string_rounds_up_and_marks_infinite() {
-        assert_eq!(time_string(1800), "1:30"); // 90 s
-        assert_eq!(time_string(200), "0:10");
-        assert_eq!(
-            time_string(1),
-            "0:01",
-            "a nearly-expired effect never shows 0:00"
-        );
-        assert_eq!(time_string(-1), "", "an infinite effect has no timer");
-    }
-
-    #[test]
-    fn chips_fold_name_level_and_time_in_order() {
-        let mut fx = ActiveEffects::new();
-        fx.apply(effect("speed", 1, 1800)); // Speed II, 1:30
-        fx.apply(effect("haste", 0, 200)); // Haste (level I → no suffix), 0:10
-        let chips = chips_from(&fx);
-        assert_eq!(chips.len(), 2);
-        assert_eq!(chips[0].label, "speed II");
-        assert_eq!(chips[0].time, "1:30");
-        assert_eq!(chips[1].label, "haste", "level I hides the roman suffix");
-        assert_eq!(chips[1].time, "0:10");
-    }
-
-    #[test]
-    fn chips_omit_hidden_icons_and_mark_ambient() {
+    fn the_hud_overlay_keeps_only_show_icon_effects_and_picks_the_right_plate() {
         let mut fx = ActiveEffects::new();
         fx.apply(StatusEffect {
             id: id("night_vision"),
@@ -754,13 +558,217 @@ mod tests {
             duration_ticks: 100,
             ambient: false,
             show_particles: true,
-            show_icon: false, // must not produce a chip
+            show_icon: false,
         });
-        let chips = chips_from(&fx);
-        assert_eq!(chips.len(), 1, "the show_icon=false effect is dropped");
-        assert_eq!(chips[0].label, "night vision", "underscores become spaces");
-        assert_eq!(chips[0].time, "", "infinite effect: no timer");
-        assert!(chips[0].ambient);
+        let icons = hud_icons(&fx);
+        assert_eq!(icons.len(), 1, "the show_icon=false effect draws no icon");
+        assert_eq!(icons[0].icon, "mob_effect/night_vision");
+        assert_eq!(
+            icons[0].background, HUD_EFFECT_BACKGROUND_AMBIENT_SPRITE,
+            "an ambient effect takes the ambient plate"
+        );
+        assert!(
+            icons[0].beneficial,
+            "night vision is BENEFICIAL, so it belongs in the upper row"
+        );
+        assert!(
+            (icons[0].alpha - 1.0).abs() < f32::EPSILON,
+            "an ambient, infinite effect must never flash: got {}",
+            icons[0].alpha
+        );
+        // Same list, seen by the inventory column: it does *not* filter on
+        // `show_icon`, so it keeps the effect the overlay drops. Both surfaces
+        // reading one state and disagreeing about this is the whole reason
+        // they are separate folds.
+        assert_eq!(inventory_rows(&fx, &|_| None).len(), 2);
+    }
+
+    /// `MobEffectCategory` decides the row, and **`NEUTRAL` is not
+    /// beneficial** — `isBeneficial()` is `category == BENEFICIAL`, not
+    /// `!= HARMFUL`. Reading it the other way puts four effects in the wrong
+    /// row and looks entirely plausible on screen.
+    #[test]
+    fn neutral_effects_draw_in_the_lower_row() {
+        for neutral in ["glowing", "bad_omen", "trial_omen", "raid_omen"] {
+            assert!(
+                !is_beneficial(neutral),
+                "{neutral} is NEUTRAL, which isBeneficial() reports as false"
+            );
+        }
+        for beneficial in ["speed", "regeneration", "breath_of_the_nautilus"] {
+            assert!(is_beneficial(beneficial), "{beneficial} is BENEFICIAL");
+        }
+        for harmful in ["poison", "wither", "infested"] {
+            assert!(!is_beneficial(harmful), "{harmful} is HARMFUL");
+        }
+        assert!(
+            !is_beneficial("a_future_effect"),
+            "an unknown id must fall to the lower row rather than the upper one"
+        );
+    }
+
+    /// The category table must cover the whole shipped registry, or an effect
+    /// silently defaults into the harmful row and nothing is red.
+    ///
+    /// The expected set comes from `lodestone_data`'s generated registry
+    /// names — Mojang's own `registries.json` — not from this file, so the
+    /// two cannot agree by sharing a mistake.
+    #[test]
+    fn every_registry_effect_has_a_category() {
+        let mut missing = Vec::new();
+        for id in 0..lodestone_data::mob_effects::MOB_EFFECT_COUNT {
+            let Some(name) = lodestone_data::mob_effects::mob_effect_name(id as i32) else {
+                continue;
+            };
+            let path = name.strip_prefix("minecraft:").unwrap_or(name);
+            if !MOB_EFFECT_BENEFICIAL.iter().any(|(n, _)| *n == path) {
+                missing.push(path.to_string());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "MOB_EFFECT_BENEFICIAL is missing {} of the registry's effects: {missing:?}",
+            missing.len()
+        );
+        // And the reverse, so a renamed effect leaves a dead row behind rather
+        // than quietly shadowing nothing.
+        let mut unknown = Vec::new();
+        for (path, _) in MOB_EFFECT_BENEFICIAL {
+            let full = format!("minecraft:{path}");
+            if lodestone_data::mob_effects::mob_effect_id(&full).is_none() {
+                unknown.push((*path).to_string());
+            }
+        }
+        assert!(
+            unknown.is_empty(),
+            "MOB_EFFECT_BENEFICIAL names effects the registry does not have: {unknown:?}"
+        );
+    }
+
+    /// `lodestone_data::potion` carries a **potion-scoped** subset of the same
+    /// `MobEffectCategory` fact (`harmful` on each tooltip entry). Two tables
+    /// stating one thing is a drift hazard, so they are checked against each
+    /// other rather than left to agree by luck — and the expectation for each
+    /// is the *other* table, both transcribed from `MobEffects.java`.
+    #[test]
+    fn the_potion_table_agrees_about_harmfulness() {
+        let mut checked = 0usize;
+        let mut wrong: Vec<String> = Vec::new();
+        for potion in 0..lodestone_data::potion::POTION_COUNT {
+            let entries = lodestone_data::potion::potion_effect_entries(potion as i32);
+            let Some(raw) = lodestone_data::potion::potion_built_in_effects(potion as i32) else {
+                continue;
+            };
+            for (entry, (effect_index, _, _)) in entries.iter().zip(raw.iter()) {
+                let Some(name) = lodestone_data::mob_effects::mob_effect_name(*effect_index as i32)
+                else {
+                    continue;
+                };
+                let path = name.strip_prefix("minecraft:").unwrap_or(name);
+                // `harmful` is `category == HARMFUL`; `is_beneficial` is
+                // `category == BENEFICIAL`. NEUTRAL makes both false, so the
+                // check is one-directional: harmful implies not beneficial.
+                checked += 1;
+                if entry.harmful && is_beneficial(path) {
+                    wrong.push(format!("{path}: potion says HARMFUL, this table says BENEFICIAL"));
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "no potion effect was compared — the cross-check measured nothing, which is a \
+             failure to run rather than agreement"
+        );
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// The flash is vanilla's, and its two gates are the ones worth pinning:
+    /// an effect outside the 200-tick window never fades, and an **ambient**
+    /// one never fades even inside it (vanilla evaluates the formula only in
+    /// the non-ambient branch). Getting the second wrong makes a beacon's
+    /// icons strobe permanently.
+    #[test]
+    fn the_icon_flashes_only_inside_the_last_two_hundred_ticks() {
+        let full = effect("speed", 0, 201);
+        assert!(
+            (hud_icon_alpha(&full) - 1.0).abs() < f32::EPSILON,
+            "one tick outside the window is not a flash"
+        );
+        let boundary = effect("speed", 0, 200);
+        assert!(
+            hud_icon_alpha(&boundary) < 1.0,
+            "`endsWithin(200)` is inclusive, so 200 flashes: got {}",
+            hud_icon_alpha(&boundary)
+        );
+
+        let mut ambient = effect("speed", 0, 40);
+        ambient.ambient = true;
+        assert!(
+            (hud_icon_alpha(&ambient) - 1.0).abs() < f32::EPSILON,
+            "an ambient effect must not flash"
+        );
+
+        let infinite = effect("speed", 0, -1);
+        assert!(
+            (hud_icon_alpha(&infinite) - 1.0).abs() < f32::EPSILON,
+            "`endsWithin` is false for an infinite duration whatever the comparison says"
+        );
+
+        // The value itself, predicted from the formula rather than from a
+        // round number. **37 ticks, and the oddness is the point.** A multiple
+        // of ten puts the phase on a whole turn where every cosine agrees and
+        // both clamps saturate, so the first draft of this used 60 and the
+        // discriminating check below caught it. At 37: ramp = 37/50*0.5 =
+        // 0.37 (unsaturated), usedSeconds = 10 - 1 = 9, swing = 9/10*0.25 =
+        // 0.225 (unsaturated), and the phase is 7.4π.
+        const TICKS: i32 = 37;
+        let e = effect("speed", 0, TICKS);
+        let arg = TICKS as f32 * std::f32::consts::PI / 5.0;
+        let want = (0.37 + lodestone_physics::mth::cos(f64::from(arg)) * 0.225).clamp(0.0, 1.0);
+        assert!(
+            (hud_icon_alpha(&e) - want).abs() < 1e-6,
+            "predicted {want}, got {}",
+            hud_icon_alpha(&e)
+        );
+        // And the wrong hypothesis this could plausibly have been written as —
+        // the standard library's cosine instead of vanilla's quantized table —
+        // must give a different answer at this input, or the assertion above
+        // proves nothing about which one is in use.
+        let std_hypothesis = (0.37 + arg.cos() * 0.225).clamp(0.0, 1.0);
+        assert_ne!(
+            want.to_bits(),
+            std_hypothesis.to_bits(),
+            "this input does not separate Mth.cos from f32::cos, so pick another"
+        );
+    }
+
+    /// The overlay's order is `Ordering.natural().reverse()` — the inventory
+    /// column's order backwards. It decides which icon sits furthest right,
+    /// so a gate that only checks membership cannot see it.
+    #[test]
+    fn the_overlay_is_in_reverse_natural_order() {
+        let mut fx = ActiveEffects::new();
+        fx.apply(effect("speed", 0, 300));
+        fx.apply(effect("strength", 0, 100));
+        fx.apply(effect("haste", 0, 600));
+
+        let column: Vec<String> = inventory_rows(&fx, &|_| None)
+            .into_iter()
+            .map(|r| r.sprite)
+            .collect();
+        let overlay: Vec<String> = hud_icons(&fx).into_iter().map(|i| i.icon).collect();
+
+        assert_eq!(column.len(), 3);
+        let mut reversed = column.clone();
+        reversed.reverse();
+        assert_eq!(
+            overlay, reversed,
+            "the overlay must be the column's order reversed, not the same order"
+        );
+        assert_ne!(
+            overlay, column,
+            "this fixture does not separate the two orders — pick durations that do"
+        );
     }
 
     #[test]
@@ -772,75 +780,6 @@ mod tests {
         for ch in a {
             assert!((0.35..=1.0).contains(&ch), "channels stay bright: {ch}");
         }
-    }
-
-    /// Rasterise the emitted quads onto a pixel grid and count coverage inside
-    /// the widget's top-right rect. This is the anti-vacuity control: an empty
-    /// effect set must light **zero** pixels there, while two effects must light
-    /// a substantial run of glyph + swatch pixels. A no-op fold, an off-screen
-    /// layout, or an empty geometry path fails one side.
-    #[test]
-    fn geometry_covers_the_top_right_rect_only_when_effects_are_present() {
-        let (w, h) = (320.0_f32, 240.0_f32);
-        // Widget lives in the top-right corner.
-        let (rx0, ry0, rx1, ry1) = (w * 0.5, 0.0, w, h * 0.5);
-
-        let lit_in_rect = |verts: &[f32]| -> usize {
-            let mut grid = vec![false; (w as usize) * (h as usize)];
-            for quad in verts.chunks_exact(FLOATS_PER_VERTEX * 6) {
-                // Recover the pixel AABB of the axis-aligned quad from its verts.
-                let (mut nx0, mut ny0, mut nx1, mut ny1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-                for v in quad.chunks_exact(FLOATS_PER_VERTEX) {
-                    nx0 = nx0.min(v[0]);
-                    nx1 = nx1.max(v[0]);
-                    ny0 = ny0.min(v[1]);
-                    ny1 = ny1.max(v[1]);
-                }
-                let px0 = ((nx0 + 1.0) * 0.5 * w).round() as i32;
-                let px1 = ((nx1 + 1.0) * 0.5 * w).round() as i32;
-                // NDC y is up; pixel y is down.
-                let py0 = ((1.0 - ny1) * 0.5 * h).round() as i32;
-                let py1 = ((1.0 - ny0) * 0.5 * h).round() as i32;
-                for py in py0..py1 {
-                    for px in px0..px1 {
-                        if px >= 0 && px < w as i32 && py >= 0 && py < h as i32 {
-                            grid[py as usize * w as usize + px as usize] = true;
-                        }
-                    }
-                }
-            }
-            let mut n = 0;
-            for py in 0..h as usize {
-                for px in 0..w as usize {
-                    if grid[py * w as usize + px] {
-                        let (fx, fy) = (px as f32, py as f32);
-                        if fx >= rx0 && fx < rx1 && fy >= ry0 && fy < ry1 {
-                            n += 1;
-                        }
-                    }
-                }
-            }
-            n
-        };
-
-        let empty = geometry(&[], w, h);
-        assert_eq!(
-            lit_in_rect(&empty),
-            0,
-            "an empty effect set must not paint the widget rect"
-        );
-
-        let mut fx = ActiveEffects::new();
-        fx.apply(effect("speed", 1, 1800));
-        fx.apply(effect("strength", 0, 600));
-        let chips = chips_from(&fx);
-        let full = geometry(&chips, w, h);
-        let lit = lit_in_rect(&full);
-        assert!(
-            lit > 300,
-            "two effects must light the swatches + name/timer glyphs in the top-right \
-             rect, only {lit} px covered — the fold or geometry path may be a no-op"
-        );
     }
 
     /// The keys this widget asks the language table for, recorded rather than
@@ -1020,7 +959,7 @@ mod tests {
             "the inventory column shows a show_icon=false effect"
         );
         assert!(
-            chips_from(&fx).is_empty(),
+            hud_icons(&fx).is_empty(),
             "the HUD overlay does not — Hud.extractEffects gates on instance.showIcon()"
         );
     }
@@ -1042,14 +981,33 @@ mod tests {
         assert_eq!(inventory_y_step(7), 132.0 / 6.0);
     }
 
-    /// Headless GPU proof that the real pipeline draws: render the overlay to an
-    /// offscreen target and read pixels back, asserting an empty set stays
-    /// background and a populated set lights the top-right. Mirrors the HUD's
-    /// house style — opted in with `--ignored`, and a **failure** (not a skip)
-    /// when no adapter is present, so a green run is never vacuous.
+    /// Headless GPU proof that the overlay reaches pixels **as vanilla's
+    /// widget**, through the real `HudRenderer` sprite pipeline and the real
+    /// pack's GUI atlas.
+    ///
+    /// Three things this asserts that a coverage count alone cannot, each
+    /// chosen because it is exactly what the previous approximation got wrong:
+    ///
+    /// * **the ink fits inside a 24x24 plate.** The chip widget this replaced
+    ///   was `ICON + PAD + text` wide with two lines of text; a bounding box
+    ///   inside one plate rect is the cheapest thing that cannot be true of it.
+    /// * **the row split is real.** A beneficial effect paints the upper row
+    ///   and *nothing* in the lower one, and a harmful effect the reverse. A
+    ///   single shared position counter, or `isBeneficial` read as
+    ///   `!= HARMFUL`, passes a coverage check and fails this.
+    /// * **an empty effect set paints nothing** — the control, and the reason
+    ///   the two arms above are evidence rather than a description.
+    ///
+    /// Not hermetic on purpose: every input comes from the real pack, because
+    /// the sprite ids are the thing under test. A jar-less run has no atlas and
+    /// the overlay correctly draws nothing, which is indistinguishable from a
+    /// broken draw — so this **fails** rather than skips when the atlas is
+    /// absent.
     #[test]
-    #[ignore = "requires a GPU adapter"]
-    fn overlay_rasterises_to_pixels() {
+    #[ignore = "requires a GPU adapter and the vanilla client.jar"]
+    fn the_overlay_blits_vanillas_own_sprites_in_two_rows() {
+        use crate::config::{AUTO_GUI_SCALE, calculate_gui_scale};
+        use crate::hud::{DebugStats, HudFrame, HudRenderer};
         use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget};
 
         let ctx = GpuContext::new_headless_blocking().expect(
@@ -1061,32 +1019,69 @@ mod tests {
         let device = ctx.device();
         let queue = ctx.queue();
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let (w, h) = (320u32, 240u32);
-        let clear = wgpu::Color {
-            r: 0.04,
-            g: 0.04,
-            b: 0.08,
-            a: 1.0,
-        };
-        let bg = [10i32, 10, 20];
+        let (w, h) = (640u32, 480u32);
+        let mut target = HeadlessTarget::new(device, w, h, format);
+        let mut hud = HudRenderer::new(device, target.raw_view_format());
 
-        // Render one frame and return the RGBA pixel buffer so callers can count
-        // coverage in specific screen rects (not just a whole-frame total).
-        let render_frame = |fx: &ActiveEffects| -> Vec<u8> {
-            let mut target = HeadlessTarget::new(device, w, h, format);
+        let atlas = crate::resources::load_gui_atlas().expect(
+            "this gate needs the vanilla GUI atlas: without it the overlay correctly draws \
+             nothing, which is indistinguishable from the bug. Set LODESTONE_ASSETS to a \
+             pack root with client.jar.",
+        );
+        // The icons live in `atlases/gui.json`'s **second** directory source.
+        // Asserting they are present separates "the atlas loaded" from "the
+        // atlas loaded the half this widget needs" — the state this whole
+        // widget was stuck in before that source was implemented.
+        for id in [
+            HUD_EFFECT_BACKGROUND_SPRITE,
+            HUD_EFFECT_BACKGROUND_AMBIENT_SPRITE,
+            "mob_effect/speed",
+            "mob_effect/poison",
+        ] {
+            assert!(
+                atlas.contains(id),
+                "the GUI atlas must carry `{id}`; without it this gate measures an absent \
+                 sprite rather than an absent draw"
+            );
+        }
+        hud.attach_gui(device, queue, format, atlas);
+
+        let scale = calculate_gui_scale(AUTO_GUI_SCALE, w, h).max(1) as f32;
+        // The two plate rects, in physical pixels, derived from the same
+        // constants the draw uses rather than restated.
+        let plate = |beneficial: bool| -> (u32, u32, u32, u32) {
+            let logical_w = w as f32 / scale;
+            let x0 = (logical_w - HUD_EFFECT_STRIDE) * scale;
+            let y0 = if beneficial {
+                HUD_EFFECT_TOP_Y
+            } else {
+                HUD_EFFECT_TOP_Y + HUD_EFFECT_ROW_DROP
+            } * scale;
+            let side = HUD_EFFECT_BACKGROUND_SIZE * scale;
+            (x0 as u32, y0 as u32, (x0 + side) as u32, (y0 + side) as u32)
+        };
+        let upper = plate(true);
+        let lower = plate(false);
+
+        let stats = DebugStats::default();
+        let shoot = |hud: &mut HudRenderer,
+                     target: &mut HeadlessTarget,
+                     icons: &[HudEffectIcon]|
+         -> Vec<u8> {
             let frame = target.acquire().expect("headless acquire");
+            let raw = hud.flat_colour_view(&frame);
             {
                 let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("clear"),
+                    label: Some("effects-gate-clear"),
                 });
                 enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("effects-clear"),
+                    label: Some("effects-gate-clear-pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: frame.view(),
                         depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(clear),
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -1097,70 +1092,121 @@ mod tests {
                 });
                 queue.submit(std::iter::once(enc.finish()));
             }
-            let mut renderer = EffectsRenderer::new(device, format);
-            renderer.render(device, queue, frame.view(), fx, w, h);
+            let hud_frame = HudFrame {
+                show_debug: false,
+                crosshair: false,
+                effects: Some(icons),
+                ..HudFrame::new(&stats)
+            };
+            hud.render(device, queue, frame.view(), &raw, &hud_frame, w, h);
+            drop(frame);
             target.read_texels(device, queue)
         };
 
-        // Count non-background pixels inside a screen-space rect [x0,x1)×[y0,y1).
-        let lit_in = |pixels: &[u8], x0: u32, y0: u32, x1: u32, y1: u32| -> usize {
+        let lit_in = |px: &[u8], r: (u32, u32, u32, u32)| -> usize {
             let mut n = 0;
-            for py in y0..y1 {
-                for px in x0..x1 {
-                    let i = ((py * w + px) * 4) as usize;
-                    let d = (i32::from(pixels[i]) - bg[0]).abs()
-                        + (i32::from(pixels[i + 1]) - bg[1]).abs()
-                        + (i32::from(pixels[i + 2]) - bg[2]).abs();
-                    if d > 40 {
+            for y in r.1..r.3.min(h) {
+                for x in r.0..r.2.min(w) {
+                    let i = ((y * w + x) * 4) as usize;
+                    if px[i] > 12 || px[i + 1] > 12 || px[i + 2] > 12 {
                         n += 1;
                     }
                 }
             }
             n
         };
+        // Where the ink actually is, over the whole frame — the assertion that
+        // the widget is one small plate rather than a wide chip needs a box,
+        // not a count.
+        let bbox = |px: &[u8]| -> Option<(u32, u32, u32, u32)> {
+            let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+            let mut any = false;
+            for y in 0..h {
+                for x in 0..w {
+                    let i = ((y * w + x) * 4) as usize;
+                    if px[i] > 12 || px[i + 1] > 12 || px[i + 2] > 12 {
+                        any = true;
+                        x0 = x0.min(x);
+                        y0 = y0.min(y);
+                        x1 = x1.max(x);
+                        y1 = y1.max(y);
+                    }
+                }
+            }
+            any.then_some((x0, y0, x1, y1))
+        };
 
-        // The widget lives in the top-right quadrant; the bottom-left quadrant is
-        // the localization control — it must stay background even when populated.
-        let (mx, my) = (w / 2, h / 2);
-        let widget = |p: &[u8]| lit_in(p, mx, 0, w, my);
-        let corner = |p: &[u8]| lit_in(p, 0, my, mx, h);
-        let whole = |p: &[u8]| lit_in(p, 0, 0, w, h);
+        let mut beneficial_fx = ActiveEffects::new();
+        beneficial_fx.apply(effect("speed", 0, 1800));
+        let mut harmful_fx = ActiveEffects::new();
+        harmful_fx.apply(effect("poison", 0, 1800));
 
-        let empty = render_frame(&ActiveEffects::new());
-        let mut fx = ActiveEffects::new();
-        fx.apply(effect("speed", 1, 1800));
-        fx.apply(effect("strength", 0, 600));
-        let full = render_frame(&fx);
+        let empty = shoot(&mut hud, &mut target, &[]);
+        let good = shoot(&mut hud, &mut target, &hud_icons(&beneficial_fx));
+        let bad = shoot(&mut hud, &mut target, &hud_icons(&harmful_fx));
 
-        let empty_lit = whole(&empty);
-        let widget_lit = widget(&full);
-        let corner_lit = corner(&full);
-
-        eprintln!("=== effects overlay rasterisation ===");
-        eprintln!("empty overlay lit px (whole frame) = {empty_lit}");
-        eprintln!("two-effect overlay lit px (top-right widget rect) = {widget_lit}");
-        eprintln!("two-effect overlay lit px (bottom-left corner control) = {corner_lit}");
-
-        // Empty state → nothing drawn anywhere: catches a state-independent fill.
-        assert!(
-            empty_lit < 20,
-            "an empty effect set should read as background, but {empty_lit} px were lit"
+        eprintln!("=== hud status-effect overlay ===");
+        eprintln!("gui scale = {scale}; upper plate = {upper:?}; lower plate = {lower:?}");
+        eprintln!(
+            "empty: upper={} lower={} bbox={:?}",
+            lit_in(&empty, upper),
+            lit_in(&empty, lower),
+            bbox(&empty)
         );
-        // Populated → substantial coverage *inside the widget rect*: proves the
-        // fold + geometry + pipeline path actually paints swatches and glyphs.
-        assert!(
-            widget_lit > 300,
-            "two effects should rasterise swatches + glyphs in the top-right rect, only \
-             {widget_lit} lit — the pipeline or geometry path may be a no-op"
+        eprintln!(
+            "speed (BENEFICIAL): upper={} lower={} bbox={:?}",
+            lit_in(&good, upper),
+            lit_in(&good, lower),
+            bbox(&good)
         );
-        // Populated → the opposite corner stays background: a blanket-fill or
-        // clear-colour bug would light this and fail here even though it lit the
-        // widget rect. This is the load-bearing control (cf. entities' corner=0).
+        eprintln!(
+            "poison (HARMFUL): upper={} lower={} bbox={:?}",
+            lit_in(&bad, upper),
+            lit_in(&bad, lower),
+            bbox(&bad)
+        );
+
+        // Control first: with no effects nothing paints anywhere, so the two
+        // arms below are measuring this widget and not some other HUD element
+        // that happens to live in the corner.
         assert_eq!(
-            corner_lit, 0,
-            "the effects overlay must stay in the top-right; {corner_lit} px leaked into the \
-             bottom-left corner — a blanket fill would pass the widget check but fail here"
+            bbox(&empty),
+            None,
+            "an empty effect set must paint nothing at all"
         );
-    }
 
+        // Both arms collected before asserting, so a run reports every failing
+        // row rather than aborting on the first.
+        let mut wrong: Vec<String> = Vec::new();
+        for (name, px, want, other) in [
+            ("speed (BENEFICIAL)", &good, upper, lower),
+            ("poison (HARMFUL)", &bad, lower, upper),
+        ] {
+            let hit = lit_in(px, want);
+            let leak = lit_in(px, other);
+            // A 24x24 plate at this scale; even a mostly-transparent icon over
+            // it covers far more than a fifth of the rect.
+            let floor = ((HUD_EFFECT_BACKGROUND_SIZE * scale).powi(2) / 5.0) as usize;
+            if hit < floor {
+                wrong.push(format!("{name}: only {hit} px in its own row (want > {floor})"));
+            }
+            if leak != 0 {
+                wrong.push(format!("{name}: {leak} px leaked into the other row"));
+            }
+            // The whole widget is one plate. The chip this replaced was several
+            // times wider and two text lines tall, so this is the assertion it
+            // could not have passed.
+            let Some((x0, y0, x1, y1)) = bbox(px) else {
+                wrong.push(format!("{name}: painted nothing"));
+                continue;
+            };
+            if x0 < want.0 || y0 < want.1 || x1 >= want.2 || y1 >= want.3 {
+                wrong.push(format!(
+                    "{name}: ink at ({x0},{y0})..({x1},{y1}) escapes its own 24x24 plate \
+                     {want:?} — that is a chip, not vanilla's widget"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
 }

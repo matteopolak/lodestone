@@ -42,6 +42,7 @@ use lodestone_model::text::{TextColor, TextSpan, TextStyle};
 
 use item_icon::{ColourStream, IconAssets, IconRenderer, IconSink, SpecialIconDraw};
 
+use crate::effects;
 use crate::overlay::{BossBarView, Sidebar};
 
 /// Padding between a HUD panel's edge and its content.
@@ -1391,6 +1392,17 @@ pub struct HudFrame<'a> {
     /// `"PLAYERS (n)"` caption vanilla has no equivalent of. Carry
     /// [`crate::tablist::TabListView`] and let the draw do vanilla's layout.
     pub players: Option<&'a crate::tablist::TabListView>,
+    /// The top-right status-effect icons — `Hud.extractEffects`' own list,
+    /// already sorted and filtered by [`crate::effects::hud_icons`].
+    ///
+    /// Empty and `None` are the same picture here, but they are not the same
+    /// *claim*: `None` is "this frame must not draw the overlay", which is
+    /// vanilla's `screen() == null || !screen().showsActiveEffects()` gate,
+    /// and the caller owns that decision. The draw takes the list as data and
+    /// has no opinion about which screen is open — the same split
+    /// `container::geometry::draw_effect_column` already uses for the
+    /// inventory column, so the two surfaces can never both paint.
+    pub effects: Option<&'a [crate::effects::HudEffectIcon]>,
     /// The scoreboard sidebar to draw on the right edge, `Some` when displayed.
     pub sidebar: Option<&'a Sidebar>,
     /// Active boss bars, drawn stacked at the top-centre in render order.
@@ -1636,6 +1648,7 @@ impl<'a> HudFrame<'a> {
             chat_wrap: None,
             chat_wrap_spans: None,
             players: None,
+            effects: None,
             sidebar: None,
             boss_bars: &[],
             can_hurt_player: true,
@@ -3402,6 +3415,60 @@ impl HudGeometry {
                 b.text_spans(&l.label, left, y, sscale, [1.0, 1.0, 1.0], 1.0);
                 let score_w = b.spans_width(&l.score, sscale);
                 b.text_spans(&l.score, right - score_w, y, sscale, SIDEBAR_SCORE_DEFAULT, 1.0);
+            }
+        }
+
+        // The top-right status-effect overlay — `Hud.extractEffects`, ported
+        // rather than approximated.
+        //
+        // Two blits per effect, both through the GUI atlas: a 24x24 background
+        // plate and the effect's own 18x18 `mob_effect/<id>` icon three pixels
+        // inside it. **No text at all** — that is the widget, not an omission;
+        // the named, timed version this replaced was a stand-in for art that
+        // could not be reached from the overlay's own untextured pipeline.
+        //
+        // The row split is the interesting half. Each row keeps its *own*
+        // counter and both start from the right edge, so the first beneficial
+        // effect and the first harmful one sit in the same column, one above
+        // the other — a single shared counter would stagger them, and reads as
+        // plausible until two of one kind and one of the other are active.
+        //
+        // With no GUI atlas attached `b.sprite` emits nothing, so a jar-less
+        // run draws no overlay at all. That matches the inventory column's own
+        // choice for the same reason: a coloured rectangle standing in for a
+        // missing icon is indistinguishable from art that failed to load.
+        if let Some(icons) = frame.effects {
+            let mut beneficial = 0u32;
+            let mut harmful = 0u32;
+            for icon in icons {
+                let (n, y) = if icon.beneficial {
+                    beneficial += 1;
+                    (beneficial, effects::HUD_EFFECT_TOP_Y)
+                } else {
+                    harmful += 1;
+                    (harmful, effects::HUD_EFFECT_TOP_Y + effects::HUD_EFFECT_ROW_DROP)
+                };
+                let x = b.w - effects::HUD_EFFECT_STRIDE * n as f32;
+                // The plate is blitted untinted at full alpha in both branches;
+                // only the icon carries `ARGB.white(alpha)`. Fading the plate
+                // too is the obvious-looking mistake and makes the whole widget
+                // blink rather than the icon inside it.
+                b.sprite(
+                    icon.background,
+                    x,
+                    y,
+                    effects::HUD_EFFECT_BACKGROUND_SIZE,
+                    effects::HUD_EFFECT_BACKGROUND_SIZE,
+                    [1.0, 1.0, 1.0, 1.0],
+                );
+                b.sprite(
+                    &icon.icon,
+                    x + effects::HUD_EFFECT_ICON_INSET,
+                    y + effects::HUD_EFFECT_ICON_INSET,
+                    effects::HUD_EFFECT_ICON_SIZE,
+                    effects::HUD_EFFECT_ICON_SIZE,
+                    [1.0, 1.0, 1.0, icon.alpha],
+                );
             }
         }
 

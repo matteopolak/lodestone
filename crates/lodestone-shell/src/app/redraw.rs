@@ -1439,7 +1439,30 @@ impl WindowApp {
             .and_then(|hit| hit.hover)
             .map(|hover| hover.value.to_spans());
 
+        // The top-right status-effect overlay's own list, resolved before the
+        // frame is built because the draw borrows it as a slice.
+        //
+        // `screen_shows_active_effects` is `Hud.extractEffects`' own
+        // `screen() == null || !screen().showsActiveEffects()` guard: with a
+        // screen up that draws the effects itself, the overlay must not paint,
+        // or the top-right icons and the inventory column show the same effects
+        // at once. It is resolved here rather than at the old overlay's call
+        // site further down because the HUD now draws this widget, and the HUD
+        // renders before that point.
+        let hud_effect_icons = crate::effects::hud_icons(&self.sim.active_effects());
+        let screen_shows_effects = screen_shows_active_effects(
+            &self.sim,
+            self.ui.is_container_open(),
+            creative_open,
+            self.recipe_panel.open,
+            self.nav.gui_scale(),
+            w,
+            h,
+        );
+
         let mut hud_frame = HudFrame::new(&self.sim.stats);
+        hud_frame.effects =
+            (!screen_shows_effects && world_hud).then_some(hud_effect_icons.as_slice());
         hud_frame.show_debug = self.show_debug;
         hud_frame.crosshair = crosshair;
         // `chat_spans`, not `chat`: a non-empty `chat_spans` wins outright over
@@ -1584,28 +1607,6 @@ impl WindowApp {
             w,
             h,
         );
-        // Status-effect overlay, composited over the HUD in its own Load pass.
-        //
-        // Suppressed while a screen is drawing the effects itself —
-        // `Hud.extractEffects`' own `this.minecraft.gui.screen() == null ||
-        // !screen().showsActiveEffects()` guard. Without it the top-right
-        // chips and the inventory column both paint the same effects at once,
-        // which vanilla never does.
-        let screen_shows_effects = screen_shows_active_effects(
-            &self.sim,
-            self.ui.is_container_open(),
-            creative_open,
-            self.recipe_panel.open,
-            self.nav.gui_scale(),
-            w,
-            h,
-        );
-        if let Some(effects) = self.effects.as_mut()
-            && !screen_shows_effects
-        {
-            effects.render(device, queue, frame.view(), &self.sim.active_effects(), w, h);
-        }
-
         // The container overlay draws **after** the HUD (issue #51/#61): vanilla's
         // `Gui.render` draws the HUD unconditionally behind any world-following
         // screen (`hud_follows_world` above), and the screen then paints its own

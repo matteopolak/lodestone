@@ -258,7 +258,7 @@ backdrop does nothing — it must not confirm whatever happens to be highlighted
 ### Rendering
 
 `MenuRenderer` owns its own shader, pipeline and vertex buffer, following
-`EffectsRenderer` and `ContainerRenderer`. This is structural, not stylistic:
+`HudRenderer` and `ContainerRenderer`. This is structural, not stylistic:
 `hud.rs` and `container.rs` belong to other agents, and folding a fourth surface
 into the HUD's single geometry pass would mean editing their files. The only thing
 borrowed is the HUD's **public** bitmap font, `hud::glyph_rows`.

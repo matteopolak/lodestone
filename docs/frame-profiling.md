@@ -162,7 +162,7 @@ other work at the time this landed. A sub-phase with no sample yet reads
 below.
 
 **`hud_ui_encode_submit` is not broken down the same way.** Its internal
-calls (`HudRenderer::render_with_item_models`, `EffectsRenderer::render`,
+calls (`HudRenderer::render_with_item_models`,
 the container/menu draws) live in files outside this landing's edit scope
 (`app/redraw.rs`, `hud.rs`, the container/menu renderers). The next
 checkpoint there would be a one-line `Instant::now()` capture between each

@@ -24,7 +24,6 @@ impl WindowApp {
             target: None,
             render: None,
             hud: None,
-            effects: None,
             container: None,
             grabbed: false,
             pacer: FramePacer::new(Instant::now()),
