@@ -999,22 +999,15 @@ fn decode_sound_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     })])
 }
 
-/// The `explosion_emitter`/`explosion` particle registry ids — the two
-/// "simple" (argument-less) particle types every `Level.explode` call site
-/// passes as `explosionParticle` (`Level.java`, all
-/// `ParticleTypes.EXPLOSION_EMITTER`; `ServerExplosion`'s small/large split
-/// can also choose `ParticleTypes.EXPLOSION`).
-/// `ParticleTypes.STREAM_CODEC` dispatches on a registry id
-/// (`ByteBufCodecs.registry(Registries.PARTICLE_TYPE)`, a plain 0-based
-/// VarInt — **not** the `id + 1` "holder" scheme [`read_sound_holder`] and the
-/// villager-data field use), and a `SimpleParticleType`'s own stream codec
-/// reads no further bytes. Recognising just these two ids and rejecting
-/// everything else is therefore sufficient to stay byte-aligned through this
-/// field without modelling the full particle-options codec (dust colour,
-/// block state, item stack, …) that `metadata.rs`'s `SER_PARTICLE`/
-/// `SER_PARTICLES` already reject for the identical reason.
-const PARTICLE_ID_EXPLOSION_EMITTER: i32 = 29;
-const PARTICLE_ID_EXPLOSION: i32 = 30;
+// `explosionParticle` is a registry id: `ParticleTypes.STREAM_CODEC` dispatches
+// through `ByteBufCodecs.registry(Registries.PARTICLE_TYPE)`, a plain 0-based
+// VarInt — **not** the `id + 1` "holder" scheme `read_sound_holder` and the
+// villager-data field use. A `SimpleParticleType`'s own stream codec then reads
+// no further bytes, which is what makes it skippable without modelling the full
+// particle-options codec (dust colour, block state, item stack, …) that
+// `metadata.rs`'s `SER_PARTICLE`/`SER_PARTICLES` reject for the identical
+// reason. `lodestone_data::particle_types::is_simple_particle_type` is the
+// single source of truth for that classification.
 /// Decodes `explode` (protocol id 36): a creeper/TNT/bed/respawn-anchor
 /// detonation, `ClientboundExplodePacket`.
 ///
@@ -1075,10 +1068,24 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
         reader.f64().map_err(dec_err)?;
     }
     let particle_id = reader.var_i32().map_err(dec_err)?;
-    if particle_id != PARTICLE_ID_EXPLOSION_EMITTER && particle_id != PARTICLE_ID_EXPLOSION {
+    // The question this guard has to answer is **"does this particle's stream
+    // codec read any further bytes"**, not "is it one of the two ids we happen
+    // to draw". Every `SimpleParticleType` encodes as the registry id alone, so
+    // any of them is skippable byte-accurately; only the parameterised types
+    // (dust's colour, block/item's state, vibration's path) carry a payload we
+    // would have to consume to stay aligned.
+    //
+    // Keying it on the two drawn ids instead dropped whole packets for particles
+    // that were always safe to skip: a wind charge sends
+    // `minecraft:gust_emitter_small`, which is argument-less, and the session saw
+    // `dropping undecodable packet ... explode: unmodeled explosionParticle
+    // registry id 34`. 103 of the 125 registered types are in that class, so the
+    // old allowlist rejected the large majority of legal packets.
+    if !lodestone_data::particle_types::is_simple_particle_type(particle_id) {
         return Err(AdapterError::Decode(format!(
-            "explode: unmodeled explosionParticle registry id {particle_id} (only \
-             explosion_emitter/explosion are simple enough to skip byte-accurately)"
+            "explode: explosionParticle registry id {particle_id} is a parameterised \
+             particle type, whose trailing arguments this decoder cannot skip \
+             byte-accurately"
         )));
     }
     let (name, fixed_range) = read_sound_holder(&mut reader)?;
