@@ -1006,6 +1006,12 @@ impl WindowApp {
         self.sim.stats.particles_alive = particle_frame.alive;
         self.sim.stats.particles_drawn = stats.particles_drawn;
         self.sim.stats.particles_unresolved = particle_frame.unresolved;
+        // Columns the weather pass uploaded this frame — see
+        // `RenderState::weather_columns`'s own doc for why this is exposed
+        // alongside `sky_darken`: "the rain is not drawing" has the same two
+        // indistinguishable-on-screen causes the sky-darken line exists for.
+        self.sim.stats.weather_columns = render.weather_columns();
+        self.sim.stats.weather_rain_columns = render.weather_rain_columns();
         // The occlusion-cull split (U3/U5). These five `RenderStats` fields were
         // populated and reached the test harness but no pixels — the same island
         // shape `stats.adapter` and `stats.difficulty` were fixed for, one field

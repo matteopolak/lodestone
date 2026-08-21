@@ -523,6 +523,16 @@ pub struct DebugStats {
     /// a non-zero alive count is exactly the "renders nothing, reports fine"
     /// state this counter exists to make visible.
     pub particles_unresolved: usize,
+    /// Columns the weather pass uploaded this frame
+    /// (`RenderState::weather_columns`), i.e. what the next frame will submit.
+    /// `0` in clear weather or with no pass installed.
+    pub weather_columns: usize,
+    /// Of [`Self::weather_columns`], how many are rain rather than snow
+    /// (`RenderState::weather_rain_columns`). Shown beside it for the same
+    /// reason `SECTIONS`/`occlusion_graph_sections` are shown together: "rain
+    /// is not falling" and "no columns were extracted" look identical without
+    /// both numbers on screen.
+    pub weather_rain_columns: usize,
     /// A short connection/status line ("local world", "connecting…", …).
     pub status: String,
     /// The world difficulty and lock state, as the server last reported it
@@ -999,6 +1009,14 @@ impl DebugStats {
             format!(
                 "P: {}/{}, {} unresolved",
                 self.particles_drawn, self.particles_alive, self.particles_unresolved
+            ),
+            // No vanilla counterpart: the weather pass's own instrument, added
+            // for the same reason `Occl`'s `active` flag is — "rain is not
+            // falling" and "no columns reached the pass" are indistinguishable
+            // on screen without both numbers. `0/0` in clear weather is correct.
+            format!(
+                "Weather cols: {}, rain: {}",
+                self.weather_columns, self.weather_rain_columns
             ),
             String::new(),
             // No vanilla counterpart from here to the memory block: these are
@@ -6969,6 +6987,33 @@ mod tests {
             };
             assert_eq!(difficulty_line(&stats), format!("Difficulty: {name}"));
         }
+    }
+
+    /// `RenderState::weather_columns`/`weather_rain_columns` reach the F3
+    /// overlay. Pairwise-distinct values (not e.g. `4, 4`), so a transposed
+    /// assignment at the `app::redraw` call site cannot survive this test.
+    #[test]
+    fn debug_overlay_shows_weather_columns() {
+        fn weather_line(stats: &DebugStats) -> String {
+            stats
+                .lines()
+                .into_iter()
+                .find(|l| l.starts_with("Weather cols:"))
+                .expect("the F3 overlay must always carry a Weather cols line")
+        }
+
+        assert_eq!(
+            weather_line(&DebugStats::default()),
+            "Weather cols: 0, rain: 0",
+            "clear weather (or no pass installed) must read as zero, not absent"
+        );
+
+        let stats = DebugStats {
+            weather_columns: 11,
+            weather_rain_columns: 4,
+            ..Default::default()
+        };
+        assert_eq!(weather_line(&stats), "Weather cols: 11, rain: 4");
     }
 
     /// The F3 overlay's plate, ink and pitch, against the literals in
