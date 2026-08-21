@@ -737,6 +737,36 @@ impl UiState {
         self.connect_phase = loading::ConnectPhase::Connecting;
     }
 
+    /// Abandon a session that is still being established, from
+    /// [`Screen::Connecting`] only — Escape on the loading screen.
+    ///
+    /// The inverse of [`begin`](Self::begin), and it unwinds to wherever that
+    /// session was started from rather than to one fixed screen: a multiplayer
+    /// dial came from the server list, anything else from the title.
+    ///
+    /// Like [`quit_to_title`](Self::quit_to_title) this moves **only** the
+    /// screen — the app owns tearing the half-open session down, in reaction to
+    /// the [`nav::MenuAction`] this produces. That teardown is what makes the
+    /// cancel immediate rather than cosmetic: `NetClient`'s `Drop` joins the net
+    /// thread, and `net.rs` races the dial against its stop flag so the join
+    /// does not wait out the ten-second `connect_timeout`.
+    ///
+    /// No `error` is set. The player asked for this, so the server list must not
+    /// come back wearing a disconnect reason that never happened — the same
+    /// reasoning as `quit_to_title`'s.
+    pub fn cancel_connect(&mut self) {
+        if self.screen != Screen::Connecting {
+            return;
+        }
+        self.screen = match self.kind {
+            Some(SessionKind::Multiplayer) => Screen::ServerList,
+            _ => Screen::MainMenu,
+        };
+        self.kind = None;
+        self.error = None;
+        self.connect_phase = loading::ConnectPhase::Connecting;
+    }
+
     /// Record which connect step the session task has reached, so
     /// [`Screen::Connecting`] can name it. Driven from real
     /// `NetUpdate::ConnectPhase` boundaries — see [`loading::ConnectPhase`] for
@@ -1380,7 +1410,7 @@ impl UiState {
             Screen::Accounts => self.close_accounts(),
             Screen::Settings => self.close_settings(),
             Screen::MainMenu => self.request_quit(),
-            Screen::Connecting => {}
+            Screen::Connecting => self.cancel_connect(),
             // Deliberately a no-op, not "unwind one level" like every screen
             // above: vanilla's `DeathScreen.shouldCloseOnEsc()` returns
             // `false` (`DeathScreen.java`), so Escape does not dismiss
@@ -2132,6 +2162,56 @@ mod tests {
     }
 
     #[test]
+    /// Escape on the loading screen unwinds to wherever the dial started, and
+    /// forgets the session — the owner reported having to wait out the connect
+    /// timeout instead.
+    ///
+    /// The two arms are deliberately different session kinds because
+    /// `cancel_connect` picks its destination from `kind`: a multiplayer dial
+    /// came from the server list, singleplayer from the title. A single-kind
+    /// test would pass against a `cancel_connect` that hardcoded either one.
+    #[test]
+    fn escape_while_connecting_cancels_back_to_where_the_dial_started() {
+        let mut ui = UiState::new();
+        ui.begin(SessionKind::Multiplayer);
+        assert_eq!(ui.screen(), Screen::Connecting);
+
+        ui.on_escape();
+        assert_eq!(ui.screen(), Screen::ServerList);
+        assert!(ui.kind().is_none(), "a cancelled dial is not a session");
+        assert!(
+            ui.error().is_none(),
+            "the player asked for this, so it is not a disconnect reason"
+        );
+
+        let mut ui = UiState::new();
+        ui.begin(SessionKind::Singleplayer);
+        ui.on_escape();
+        assert_eq!(ui.screen(), Screen::MainMenu);
+    }
+
+    /// The control for the gate above: `cancel_connect` must be inert anywhere
+    /// else, because the app tears the live session down in reaction to it.
+    /// Without this, a `cancel_connect` that ignored its screen guard would
+    /// disconnect a player mid-game on any stray call and the test above would
+    /// still pass.
+    #[test]
+    fn cancel_connect_does_nothing_once_a_session_is_up() {
+        let mut ui = UiState::new();
+        ui.begin(SessionKind::Multiplayer);
+        ui.session_ready();
+        let before = ui.screen();
+
+        ui.cancel_connect();
+
+        assert_eq!(ui.screen(), before, "a live session must not be unwound");
+        assert_eq!(
+            ui.kind(),
+            Some(SessionKind::Multiplayer),
+            "and it must still remember what it is connected to"
+        );
+    }
+
     fn quit_to_title_only_leaves_from_pause_and_clears_session_state() {
         let mut ui = UiState::new();
         ui.begin(SessionKind::Multiplayer);

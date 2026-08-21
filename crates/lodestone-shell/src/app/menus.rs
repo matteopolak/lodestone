@@ -176,6 +176,24 @@ impl WindowApp {
                 // now in the list (idempotent, so this costs nothing per frame).
                 self.statuses.refresh(self.nav.list().entries());
             }
+            // Escape on the loading screen. Same teardown as
+            // `MenuAction::QuitToTitle` below and deliberately so — a session
+            // that is still dialling is exactly as much a live session as one
+            // that finished, and `Sim::end_session` is what drops `NetClient`,
+            // whose `Drop` sets the stop flag `net.rs` races the dial against.
+            // Without this the screen would return to the server list while the
+            // net thread carried on connecting behind it and then attached to a
+            // `Sim` nobody was showing.
+            //
+            // `UiState::cancel_connect` has already moved the screen; unlike
+            // `QuitToTitle` there is no pointer to release, because the loading
+            // screen never grabbed it — `set_grab(false)` is kept anyway for the
+            // same belt-and-braces reason that arm gives.
+            MenuAction::CancelConnect => {
+                self.sim.end_session();
+                self.hosted_world = None;
+                self.set_grab(false);
+            }
             MenuAction::QuitToTitle => {
                 // `UiState` has already moved to `MainMenu` — `nav.rs`'s
                 // `key_paused` (and, issue #103, `key_death`) calls
