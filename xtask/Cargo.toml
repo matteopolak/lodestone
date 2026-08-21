@@ -20,6 +20,15 @@ zip.workspace = true
 # than widened workspace-wide.
 syn = { workspace = true, features = ["visit"] }
 proc-macro2.workspace = true
+# `world-coverage` enumerates its three populations from the real 26.2
+# registries rather than from a transcription of them, and resolves the entity
+# rig corpus by asking the corpus. Both crates are leaf-ish and version-free
+# (`lodestone-data` depends only on `lodestone-model`), so this pulls no
+# protocol family and no wgpu into the task runner -- the alternative,
+# re-parsing the generated tables here, would be a second implementation of
+# the registry that could drift from the one production reads.
+lodestone-data.workspace = true
+lodestone-assets.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

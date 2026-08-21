@@ -7109,6 +7109,8 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "lodestone-assets",
+ "lodestone-data",
  "proc-macro2",
  "serde_json",
  "sha1 0.11.0",
