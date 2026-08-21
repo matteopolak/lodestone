@@ -52,6 +52,45 @@
 //! upward look, and the loss is per-pixel scatter rather than a clean edge.
 //! Do not collapse these back into one pipeline.
 //!
+//! # The panel does not write depth, and vanilla's does
+//!
+//! **This is the one place in this file that deliberately diverges from
+//! vanilla, at the owner's request, and it is not a bug fix.**
+//! `RenderPipelines.TEXT_BACKGROUND` is `DepthStencilState.DEFAULT` —
+//! `new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true)` — so
+//! vanilla's own panel writes depth. This one does not.
+//!
+//! The consequence in vanilla is visible and the owner checked it in the real
+//! client before asking for the change: *"it looks like glass doesnt render
+//! behind the billboard in the real vanilla client too, but its definitely a
+//! bug"*. A translucent panel that writes depth rejects translucent terrain
+//! drawn after it, and `gpu/frame.rs` draws this pass before translucent
+//! terrain exactly as `LevelRenderer` draws `executeTranslucent`'s
+//! `translucentCustomGeometry` before `renderGroup(TRANSLUCENT)`. Vanilla
+//! escapes it *only* under the transparency post chain (Fabulous graphics),
+//! where translucent terrain goes to `LevelRenderer`'s separate `translucent`
+//! target whose depth was copied from main **before** the translucent features
+//! ran; with the chain off, `ChunkSectionLayerGroup.TRANSLUCENT.outputTarget()`
+//! falls back to the main target and vanilla has the artefact too. So this is
+//! the Fabulous behaviour, reproduced in a single-target renderer by the one
+//! means available.
+//!
+//! **It is not what fixed the ink fighting the panel, and must not be
+//! described as such.** That was the two-pipeline split above, and the sweep
+//! in `tests/world_text_over_geometry_pixels.rs` measured the polygon offset
+//! holding on its own — 438 of 438 ink px at every row from 6.7 down to
+//! **0.56 ULP** of geometric headroom, a 12× distance range — with the panel
+//! still writing depth. The two symptoms the owner reported are genuinely two
+//! causes, and the tempting "one flag explains both" reading is wrong.
+//!
+//! What the panel keeps: it still **tests** depth, so real geometry in front
+//! of it still occludes it, and it is still drawn before the ink, so
+//! `TextDisplayRenderer.submitInner`'s own
+//! `submitNodeCollector.order(backgroundColor != 0 ? 1 : 0)` still decides
+//! which is on top. What it loses is the ability to occlude anything drawn
+//! later in `gpu/frame.rs` — translucent terrain, particles, weather — which
+//! for a 25%-opaque panel is the point.
+//!
 //! # What is deliberately not built (disclosed, not silent)
 //!
 //! - **Wrapping by [`DisplayDraw::text_line_width`] is not implemented.**
@@ -176,7 +215,10 @@ fn resolved_background_argb(draw: &DisplayDraw) -> i32 {
 #[derive(Debug)]
 pub(super) struct DisplayTextRenderer {
     /// `RenderPipelines.TEXT_BACKGROUND`'s depth state — plain
-    /// `DepthStencilState.DEFAULT`: test, write, no polygon offset.
+    /// `DepthStencilState.DEFAULT`: test, no polygon offset, and **no depth
+    /// write, where vanilla writes**. See the module doc's "The panel does
+    /// not write depth, and vanilla's does" — that flag is a deliberate
+    /// improvement on vanilla, not a port of it.
     background_pipeline: wgpu::RenderPipeline,
     /// `RenderPipelines.TEXT_POLYGON_OFFSET` — the same two constants
     /// `gpu/sign_text.rs` ports, so the glyphs win the tie against the panel
@@ -319,7 +361,11 @@ impl DisplayTextRenderer {
         };
         let background_pipeline = build(
             "lodestone-display-text-background-pipeline",
-            tested(true, wgpu::DepthBiasState::default()),
+            // **Depth write off, where vanilla's `DepthStencilState.DEFAULT`
+            // has it on.** The one deliberate divergence in this file, and it
+            // is a divergence rather than a fix — see the module doc's "The
+            // panel does not write depth, and vanilla's does".
+            tested(false, wgpu::DepthBiasState::default()),
         );
         let glyph_pipeline = build(
             "lodestone-display-text-glyph-pipeline",
@@ -769,6 +815,7 @@ mod tests {
             block_state: None,
             item: None,
             item_display_context: 0,
+            brightness_override: None,
         }
     }
 
