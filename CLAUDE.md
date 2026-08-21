@@ -1349,6 +1349,24 @@ feature that happens to use it.
 - **Depth is `[0,1]` DirectX-style, not vanilla's reversed-Z.** Every ported depth comparison and bias
   flips sign: vanilla's `GREATER_THAN_OR_EQUAL` is our `LessEqual`, and a positive vanilla depth bias is
   negative here.
+
+  **And the sign flip is the easy half — the precision does not survive the change, so any ported
+  sub-millimetre depth separation is simply unresolvable here at ordinary range.** Measured on
+  `text_display`'s panel-versus-glyph offset, which is `0.00025` blocks after the text scale: through
+  `Depth32Float` with this renderer's **forward** `[0,1]` projection that separation is **53 ULPs at 2
+  blocks, 2 at 10, 1 at 14, and 0 — bit-identical — at 64**, against never below 53 anywhere through
+  vanilla's reversed-Z. Reversed-Z is not a stylistic choice on vanilla's part; it is the arrangement
+  that spends float exponent where the depth range needs it, and it is *why* vanilla's constants are the
+  size they are.
+
+  Two consequences. **Porting a small depth bias faithfully and finding it does nothing is the expected
+  result, not a transcription error** — check the ULP separation at the distance you care about before
+  hunting for a mistake, and prefer a mechanism that does not depend on depth (a separate pass, an
+  explicit draw order, a pipeline whose depth state vanilla itself leaves as `Optional.empty()`) over
+  tuning a bias until the artefact goes away at one distance. And **this affects every ported depth
+  constant in the tree, not just this pass**; the durable fix is switching the projection to reversed-Z,
+  which is a real change with its own sign flips and is not something to do incidentally while chasing a
+  symptom.
 - **`Surface::get_default_config` is correct natively and wrong in a browser, and the difference is
   structural rather than a preference.** It takes `get_capabilities().formats[0]`; native `wgpu-core`
   sorts sRGB formats first, so that is already `Bgra8UnormSrgb`, while the WebGPU backend **never lists
