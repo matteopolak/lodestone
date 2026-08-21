@@ -1193,8 +1193,9 @@ fn run_command_block_command(
 /// separate background loops (`mobs::run_mob_tick_loop`,
 /// `block_entities::run_block_entity_tick_loop`) that
 /// [`crate::IntegratedServer::open_in_memory_with_mobs`] used to spawn
-/// side-by-side. Those two functions still exist (their own unit tests still
-/// exercise them directly), but this is what production spawns now.
+/// side-by-side. Both of those functions have since been deleted as dead
+/// code — this is the only loop production spawns now, and the only one
+/// left in the tree.
 ///
 /// # Why one loop instead of two
 ///

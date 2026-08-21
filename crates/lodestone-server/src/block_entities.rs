@@ -1027,34 +1027,6 @@ impl BlockEntityHandle {
 ///
 /// # Superseded as of issue #284 — no longer what production spawns
 ///
-/// Same situation as [`crate::mobs::run_mob_tick_loop`], its analogue: production
-/// (`crate::IntegratedServer::open_in_memory_with_mobs`) used to spawn this
-/// function side-by-side with that one, and now spawns
-/// [`crate::tick::run_tick_loop`] instead — one loop, ticking both, with MSPT/
-/// TPS/overrun accounting (issue #285). This function is unchanged and still
-/// covered by its own test below; see `crate::tick`'s module doc for why one
-/// loop replaced two.
-///
-/// Native only, like `run_mob_tick_loop` — `tokio::time::interval` is
-/// unavailable on `wasm32` (see that function's own doc comment for the
-/// established reasoning this repeats).
-#[cfg(not(target_arch = "wasm32"))]
-// Same reasoning as `run_mob_tick_loop`'s own `#[allow(dead_code)]`: no
-// caller left outside this file's own `#[cfg(test)]` module since #284.
-#[allow(dead_code)]
-pub(crate) async fn run_block_entity_tick_loop(handle: BlockEntityHandle) {
-    // 50ms, matching vanilla's 20 TPS and this crate's other tick intervals
-    // (`server.rs`'s `VITALS_TICK_INTERVAL`, `mobs.rs`'s `MOB_TICK_INTERVAL`) —
-    // kept as a local constant for the same reason those two are: this task
-    // has no reason to share a literal with either.
-    const BLOCK_ENTITY_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
-    let mut tick = tokio::time::interval(BLOCK_ENTITY_TICK_INTERVAL);
-    loop {
-        tick.tick().await;
-        handle.with(BlockEntityRegistry::tick_all);
-    }
-}
-
 /// Renders a canonical block-state string as the `{Name, Properties}` compound
 /// `BlockState.CODEC` reads — the shape any NBT field holding a block state takes.
 ///
@@ -1674,46 +1646,34 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn run_block_entity_tick_loop_actually_advances_a_registered_furnace_over_time() {
-        let handle = BlockEntityHandle::new();
+    /// `run_block_entity_tick_loop` (the standalone background task this test
+    /// used to drive) was deleted as dead code once issue #284 folded block-
+    /// entity ticking into `crate::tick::run_tick_loop`'s own
+    /// `tick_all_with_hopper_lock` call — see that registry method's own doc.
+    /// What this test actually exercises, a furnace advancing correctly over
+    /// 200 real ticks of [`BlockEntityRegistry::tick_all`], is unchanged by
+    /// which loop calls it, so it is driven directly here instead.
+    #[test]
+    fn two_hundred_ticks_of_tick_all_fully_smelts_an_iron_ore() {
+        let mut reg = BlockEntityRegistry::new();
         let pos = BlockPos::new(0, 70, 0);
         let mut furnace = Furnace::new(FurnaceKind::Furnace);
         furnace.set_fuel(Some(stack("minecraft:coal", 1)));
         furnace.set_input(Some(stack("minecraft:iron_ore", 1)));
-        handle.with(|reg| reg.insert(pos, BlockEntity::Furnace(furnace)));
+        reg.insert(pos, BlockEntity::Furnace(furnace));
 
-        // Detached on purpose: the loop never returns, so nothing here should
-        // (or could) join it. It is torn down along with the test's runtime.
-        tokio::spawn(run_block_entity_tick_loop(handle.clone()));
-
-        // Let the spawned task actually run at least once before checking —
-        // `tokio::time::interval`'s first `tick()` resolves immediately, so
-        // this is enough for the loop to have performed its first real tick.
-        tokio::task::yield_now().await;
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        let lit_after_first_tick = handle.with(|reg| match reg.get(pos) {
-            Some(BlockEntity::Furnace(f)) => f.is_lit(),
-            _ => false,
-        });
-        assert!(
-            lit_after_first_tick,
-            "the running background task must have lit the furnace on its first real tick"
-        );
-
-        // 200 ticks * 50ms = 10s of tick-loop time to fully smelt one iron
-        // ore; sleeping past that is only virtual time under the paused
-        // clock, not real wall time.
-        tokio::time::sleep(std::time::Duration::from_millis(10_100)).await;
-        let output = handle.with(|reg| match reg.get(pos) {
+        assert_eq!(reg.tick_all(), vec![(pos, true)], "must light on the first tick");
+        for _ in 1..200 {
+            reg.tick_all();
+        }
+        let output = match reg.get(pos) {
             Some(BlockEntity::Furnace(f)) => f.output().cloned(),
             _ => None,
-        });
+        };
         assert_eq!(
             output,
             Some(stack("minecraft:iron_ingot", 1)),
-            "the background tick loop must have smelted the iron ore into an ingot by \
-             10s of virtual time"
+            "200 ticks must fully smelt the iron ore into an ingot"
         );
     }
 
