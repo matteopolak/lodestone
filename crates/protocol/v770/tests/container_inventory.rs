@@ -139,10 +139,29 @@ fn container_set_slot_decodes_a_dyed_leather_helmet() {
 /// component after it *and* the rest of the packet. The second component and the
 /// clean `ensure_empty` are what prove the cliff is gone.
 ///
-/// The trim payload is two `Holder`s in reference form (`registryId + 1`):
-/// material `3` = index 2 = `netherite`, pattern `14` = index 13 = `silence`
-/// (`TrimMaterials`/`TrimPatterns` bootstrap order — see
-/// `adapter/inventory.rs`'s `TRIM_MATERIAL_IDS`).
+/// The trim payload is two `Holder`s in reference form (`registryId + 1`).
+///
+/// # Why these two ids
+///
+/// A dynamic registry's holder ids are its JSON entries **sorted by resource
+/// id** (`ResourceManagerRegistryLoadTask.load`'s
+/// `.sorted(Entry.comparingByKey())`), which for these all-`minecraft`
+/// registries is alphabetical order of the file stems in
+/// `data/minecraft/trim_material/` and `data/minecraft/trim_pattern/`. This
+/// gate previously carried ids read off the matching `*.bootstrap` *datagen*
+/// routine instead, and so asserted the exact mis-mapping the decoder had:
+/// its expected values were calibrated against the bug.
+///
+/// Both ids are therefore chosen to **discriminate** between the two
+/// hypotheses rather than merely to be valid:
+///
+/// | wire | registry id | correct (sorted) | bootstrap order |
+/// | --- | --- | --- | --- |
+/// | `0x04` | 3 | `emerald` | `redstone` |
+/// | `0x09` | 8 | `sentry` | `snout` |
+///
+/// The material row is the pair the bug was reported as — an emerald trim
+/// rendering as redstone.
 #[test]
 fn container_set_slot_decodes_a_trimmed_chestplate_without_losing_the_rest_of_the_patch() {
     let mut payload = vec![0x01, 0x06, 0x00, 0x25];
@@ -152,8 +171,8 @@ fn container_set_slot_decodes_a_trimmed_chestplate_without_losing_the_rest_of_th
         0x02, // added = 2
         0x00, // removed = 0
         0x38, // component type id 56 = minecraft:trim
-        0x03, // Holder<TrimMaterial>: reference, registry id 2 = netherite
-        0x0E, // Holder<TrimPattern>: reference, registry id 13 = silence
+        0x04, // Holder<TrimMaterial>: reference, registry id 3 = emerald
+        0x09, // Holder<TrimPattern>: reference, registry id 8 = sentry
         0x03, // component type id 3 = minecraft:damage
         0x07, // damage = 7, VarInt
     ]);
@@ -163,8 +182,16 @@ fn container_set_slot_decodes_a_trimmed_chestplate_without_losing_the_rest_of_th
         ] => {
             let item = item.as_ref().expect("a non-empty stack");
             let trim = item.components.trim.as_ref().expect("the trim component");
-            assert_eq!(trim.material, "netherite");
-            assert_eq!(trim.pattern, "silence");
+            assert_eq!(
+                trim.material, "emerald",
+                "registry id 3 is the fourth trim_material sorted by resource id; \
+                 \"redstone\" here means the table is back in bootstrap order"
+            );
+            assert_eq!(
+                trim.pattern, "sentry",
+                "registry id 8 is the ninth trim_pattern sorted by resource id; \
+                 \"snout\" here means the table is back in bootstrap order"
+            );
             // The cliff: this is the component *after* the trim.
             assert_eq!(
                 item.components.damage,

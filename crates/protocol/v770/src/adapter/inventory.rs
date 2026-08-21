@@ -284,62 +284,85 @@ pub(crate) fn read_item_stack(reader: &mut Reader<'_>) -> Result<DecodedStack, A
     })
 }
 
-/// `minecraft:trim_material` registry paths in **vanilla bootstrap order**
-/// (`TrimMaterials.bootstrap`, `TrimMaterials.java`), which is the order a
-/// vanilla server's Configuration-phase registry sync assigns ids in.
+/// `minecraft:trim_material` registry paths in the order a vanilla server
+/// assigns holder ids: **sorted by resource id**, i.e. alphabetical for an
+/// all-`minecraft` registry.
 ///
-/// # Why this table and not a synced registry
+/// # Where the order comes from
 ///
-/// `Registries.TRIM_MATERIAL` is a **dynamic** registry: its ids come from the
-/// `registry_data` packets sent during Configuration, and this client keeps no
-/// dynamic-registry store, so a `Holder::REFERENCE` id has nothing to resolve
-/// against. Bootstrap order is what a vanilla server without a trim datapack
-/// sends, so this is exact for vanilla and **provisional** for a modded server —
-/// the same posture, and the same caveat, as `server_protocol.rs`'s `BIOME_NAMES`.
-/// An id outside the table decodes as the empty string rather than failing: the
-/// bytes are consumed either way, which is the property that keeps the rest of the
-/// packet readable.
+/// `Registries.TRIM_MATERIAL` is a **dynamic** registry — it has no
+/// `Registry.register` call sequence at all. Its entries are the JSON files
+/// under `data/minecraft/trim_material/`, loaded by
+/// `ResourceManagerRegistryLoadTask.load`, which registers them
+/// `.sorted(Entry.comparingByKey())` over the resource `Identifier`.
+/// `Identifier.compareTo` compares **path first**, so for a registry whose
+/// entries are all `minecraft:` the id order is plain alphabetical order of
+/// the file stems.
 ///
-/// Deliberately *not* read from `lodestone_assets::trim::TRIM_MATERIALS`, which
-/// happens to be in this same order today — `TRIM_PATTERNS` beside it is
-/// alphabetical, so "the asset table is in registry order" is a coincidence for
-/// one of the two and cannot be relied on for either.
+/// **`TrimMaterials.bootstrap` is not that order.** It takes a
+/// `net.minecraft.data.worldgen.BootstrapContext` — it is the *datagen*
+/// routine that writes those JSON files, and it runs in no server. This
+/// table was previously transcribed from it, and the resulting mapping was
+/// wrong for eight of the eleven materials: an emerald trim (id 3) drew as
+/// `redstone`, which is the bootstrap list's fourth entry. That is the shape
+/// this repo's evidence standards call an authoritative source answering a
+/// *neighbouring* question.
+///
+/// # Why a table and not the synced registry
+///
+/// The ids arrive in Configuration's `registry_data` and
+/// [`crate::packets::registry::ClientRegistries::entry_names`] does retain
+/// them, but `read_component_patch` and every stack reader above it are free
+/// functions with no connection state, so resolving live would mean
+/// threading a registry reference through the whole stack-decoding tree.
+/// Until that happens this table is exact for any server that does not
+/// redefine the registry, and **provisional** for one that does — the same
+/// posture as `server_protocol.rs`'s `BIOME_NAMES`. An id outside the table
+/// decodes as the empty string rather than failing: the bytes are consumed
+/// either way, which is the property that keeps the rest of the packet
+/// readable.
+///
+/// `lodestone_assets::trim::TRIM_MATERIALS` is *not* read here — that table
+/// answers "which sprite suffix does this material use", and its order is its
+/// own business. `trim_material_ids_are_sorted_by_resource_path` is what
+/// keeps this one honest.
 const TRIM_MATERIAL_IDS: &[&str] = &[
-    "quartz",
-    "iron",
-    "netherite",
-    "redstone",
-    "copper",
-    "gold",
-    "emerald",
-    "diamond",
-    "lapis",
     "amethyst",
+    "copper",
+    "diamond",
+    "emerald",
+    "gold",
+    "iron",
+    "lapis",
+    "netherite",
+    "quartz",
+    "redstone",
     "resin",
 ];
-/// `minecraft:trim_pattern` registry paths in vanilla bootstrap order
-/// (`TrimPatterns.bootstrap`, `TrimPatterns.java`). See
-/// [`TRIM_MATERIAL_IDS`] for the id-space caveat — and note this is **not** the
-/// alphabetical order `lodestone_assets::trim::TRIM_PATTERNS` uses.
+/// `minecraft:trim_pattern` registry paths in the order a vanilla server
+/// assigns holder ids — the `data/minecraft/trim_pattern/` file stems sorted
+/// by resource id. See [`TRIM_MATERIAL_IDS`] for why that, and not
+/// `TrimPatterns.bootstrap`'s datagen call order, is the id order, and for
+/// the id-space caveat this table shares.
 const TRIM_PATTERN_IDS: &[&str] = &[
-    "sentry",
-    "dune",
+    "bolt",
     "coast",
-    "wild",
-    "ward",
+    "dune",
     "eye",
-    "vex",
-    "tide",
-    "snout",
+    "flow",
+    "host",
+    "raiser",
     "rib",
-    "spire",
-    "wayfinder",
+    "sentry",
     "shaper",
     "silence",
-    "raiser",
-    "host",
-    "flow",
-    "bolt",
+    "snout",
+    "spire",
+    "tide",
+    "vex",
+    "ward",
+    "wayfinder",
+    "wild",
 ];
 /// Decodes `minecraft:trim`'s payload — `ArmorTrim.STREAM_CODEC`
 /// (`ArmorTrim.java`), a `Holder<TrimMaterial>` then a
@@ -403,59 +426,66 @@ fn read_armor_trim(reader: &mut Reader<'_>) -> Result<ArmorTrim, AdapterError> {
     Ok(ArmorTrim { material, pattern })
 }
 
-/// `minecraft:banner_pattern` registry paths, in vanilla **bootstrap register-
-/// call order** (`BannerPatterns.bootstrap`, `BannerPatterns.java`) — not the
-/// class's field-declaration order, which disagrees with it for six entries
-/// (`BORDER`/`GRADIENT`/`GRADIENT_UP`/`BRICKS` are declared before
-/// `CURLY_BORDER` but registered after it). See [`TRIM_MATERIAL_IDS`] for the
-/// same caveat this table shares: this client keeps no dynamic-registry
-/// store, so a `Holder::REFERENCE` id has nothing else to resolve against —
-/// exact for a vanilla server, provisional for a datapack that redefines the
-/// registry.
+/// `minecraft:banner_pattern` registry paths in the order a vanilla server
+/// assigns holder ids — the `data/minecraft/banner_pattern/` file stems
+/// sorted by resource id.
+///
+/// `Registries.BANNER_PATTERN` is dynamic exactly as
+/// [`TRIM_MATERIAL_IDS`]' registry is (it appears in
+/// `RegistryDataLoader.SYNCHRONIZED_REGISTRIES` and in no built-in
+/// `registries.json` report), so the same reasoning applies verbatim: the id
+/// order is `ResourceManagerRegistryLoadTask.load`'s
+/// `.sorted(Entry.comparingByKey())`, and `BannerPatterns.bootstrap`'s
+/// register-call order — which this table previously transcribed — is a
+/// datagen routine that runs in no server. Only entry `0` (`base`) happened
+/// to coincide; the other 42 were shifted.
+///
+/// Same id-space caveat, same reason: exact for a server that does not
+/// redefine the registry, provisional for one that does.
 const BANNER_PATTERN_IDS: &[&str] = &[
     "base",
+    "border",
+    "bricks",
+    "circle",
+    "creeper",
+    "cross",
+    "curly_border",
+    "diagonal_left",
+    "diagonal_right",
+    "diagonal_up_left",
+    "diagonal_up_right",
+    "flow",
+    "flower",
+    "globe",
+    "gradient",
+    "gradient_up",
+    "guster",
+    "half_horizontal",
+    "half_horizontal_bottom",
+    "half_vertical",
+    "half_vertical_right",
+    "mojang",
+    "piglin",
+    "rhombus",
+    "skull",
+    "small_stripes",
     "square_bottom_left",
     "square_bottom_right",
     "square_top_left",
     "square_top_right",
-    "stripe_bottom",
-    "stripe_top",
-    "stripe_left",
-    "stripe_right",
-    "stripe_center",
-    "stripe_middle",
-    "stripe_downright",
-    "stripe_downleft",
-    "small_stripes",
-    "cross",
     "straight_cross",
+    "stripe_bottom",
+    "stripe_center",
+    "stripe_downleft",
+    "stripe_downright",
+    "stripe_left",
+    "stripe_middle",
+    "stripe_right",
+    "stripe_top",
     "triangle_bottom",
     "triangle_top",
     "triangles_bottom",
     "triangles_top",
-    "diagonal_left",
-    "diagonal_up_right",
-    "diagonal_up_left",
-    "diagonal_right",
-    "circle",
-    "rhombus",
-    "half_vertical",
-    "half_horizontal",
-    "half_vertical_right",
-    "half_horizontal_bottom",
-    "border",
-    "gradient",
-    "gradient_up",
-    "bricks",
-    "curly_border",
-    "globe",
-    "creeper",
-    "skull",
-    "flower",
-    "mojang",
-    "piglin",
-    "flow",
-    "guster",
 ];
 
 /// Vanilla `DyeColor.STREAM_CODEC` (`ByteBufCodecs.idMapper`) id order —
@@ -3148,4 +3178,79 @@ fn decode_update_advancements(payload: &[u8]) -> Result<Vec<Directive>, AdapterE
 fn read_count(reader: &mut Reader<'_>, what: &str) -> Result<usize, AdapterError> {
     let count = reader.var_i32().map_err(dec_err)?;
     usize::try_from(count).map_err(|_| AdapterError::Decode(format!("invalid {what} count {count}")))
+}
+
+#[cfg(test)]
+mod dynamic_registry_order {
+    //! The three tables in this module that stand in for a **dynamic**
+    //! registry's holder-id space share one ordering rule, and it is a rule
+    //! the type system cannot state: a dynamic registry has no
+    //! `Registry.register` sequence, so its ids come from
+    //! `ResourceManagerRegistryLoadTask.load` registering its JSON entries
+    //! `.sorted(Entry.comparingByKey())` over the resource `Identifier` —
+    //! and `Identifier.compareTo` compares **path first**. Every entry in
+    //! these three registries is `minecraft:`, so that reduces to plain
+    //! ascending order of the file stems.
+    //!
+    //! All three tables were once transcribed from the matching
+    //! `*.bootstrap` datagen routine instead, which is a different order that
+    //! runs in no server. A comment stating the rule is what let that stand;
+    //! these are the mechanical form.
+
+    use super::{BANNER_PATTERN_IDS, TRIM_MATERIAL_IDS, TRIM_PATTERN_IDS};
+
+    /// Collects *every* out-of-order neighbour rather than asserting inside
+    /// the loop — a table transcribed from the wrong source is wrong in many
+    /// places at once, and a gate that aborts at the first one reports a
+    /// single pair where the finding is "this whole table came from
+    /// somewhere else".
+    fn out_of_order(table: &[&str]) -> Vec<String> {
+        table
+            .windows(2)
+            .filter(|w| w[0] >= w[1])
+            .map(|w| format!("{:?} is not before {:?}", w[0], w[1]))
+            .collect()
+    }
+
+    #[test]
+    fn trim_material_ids_are_sorted_by_resource_path() {
+        assert_eq!(
+            TRIM_MATERIAL_IDS.len(),
+            11,
+            "26.2 ships 11 data/minecraft/trim_material/*.json entries"
+        );
+        assert!(
+            out_of_order(TRIM_MATERIAL_IDS).is_empty(),
+            "{:?}",
+            out_of_order(TRIM_MATERIAL_IDS)
+        );
+    }
+
+    #[test]
+    fn trim_pattern_ids_are_sorted_by_resource_path() {
+        assert_eq!(
+            TRIM_PATTERN_IDS.len(),
+            18,
+            "26.2 ships 18 data/minecraft/trim_pattern/*.json entries"
+        );
+        assert!(
+            out_of_order(TRIM_PATTERN_IDS).is_empty(),
+            "{:?}",
+            out_of_order(TRIM_PATTERN_IDS)
+        );
+    }
+
+    #[test]
+    fn banner_pattern_ids_are_sorted_by_resource_path() {
+        assert_eq!(
+            BANNER_PATTERN_IDS.len(),
+            43,
+            "26.2 ships 43 data/minecraft/banner_pattern/*.json entries"
+        );
+        assert!(
+            out_of_order(BANNER_PATTERN_IDS).is_empty(),
+            "{:?}",
+            out_of_order(BANNER_PATTERN_IDS)
+        );
+    }
 }
