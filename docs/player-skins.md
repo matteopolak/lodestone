@@ -331,6 +331,74 @@ perform a real HTTP GET as a side effect of `cargo test` — a defect class no
 health check in this repo can see. See `DESIGN.md` on the unit test that was
 opening a browser on every `cargo test -p lodestone-shell`.
 
+## Custom heads: the same skin at three surfaces
+
+A `minecraft:player_head` carrying a `minecraft:profile` with a `textures`
+property is a **custom head** — the decorative kind a server places, whose whole
+appearance is that one property. It reaches three different draw sites, each with
+its own resolver and its own bind-group cache:
+
+| surface | producer | draw site | texture cache |
+|---|---|---|---|
+| placed in the world | `block_entities::skull_candidates` (NBT) | `gpu/frame.rs`'s block-entity loop | `EntityRenderer::player_skins` |
+| an inventory / hotbar slot | `container::builder::icon_record`, `app::redraw`'s hotbar fold | `hud/item_icon.rs`'s `SpecialIcons` | `SpecialIcons::player_skins` |
+| the first-person hand | `app::redraw`'s `held` (a clone of the hotbar record) | `RenderState::build_special_hand_draw` | `EntityRenderer::player_skins` |
+
+All three end in the same substitution: `special_item_rig`/`skull_spawn` resolves
+the head to `skull_texture_stem(SkullType::Player)` — the default sheet, which is
+the right answer for a *plain* head — and the caller replaces that stem with a
+`BlockEntityTexture::PlayerSkin(Arc<str>)` when the stack declares one. The enum
+is the shared batch key, not three parallel spellings of one identity.
+
+**The world surface landed first and that is exactly what hid the other two.**
+The same head was correct once placed and plain in a slot and in your hand, which
+reads as a GUI bug rather than as a missing field. The field was
+`ItemIcon::skin`/`MainHandItem::skin`, and the loss was the fourth of the same
+family: `dyed_color`, `potion_color`, `banner_patterns` and `base_color` had each
+been threaded through by their own earlier fix, so the record was *almost*
+complete and no assertion anywhere was wrong.
+
+### One decode, one fetch, two ways of getting the sheet
+
+`remote_skins::skin_for_textures_property` is the single decode — the placed head
+reaches it through the block entity's NBT, the item surfaces through
+`hud::item_icon::stack_skin_url`, which also calls `remote_skins::request`. **A
+resolver that returns a URL nobody requested draws the default sheet forever**,
+so the request lives inside that one function rather than at each producer.
+
+Getting the decoded sheet to a bind group forks, and the fork is the interesting
+part:
+
+* the world and hand surfaces share `EntityRenderer::player_skins`, filled by
+  `RenderState::install_pending_player_skins` **draining** `remote_skins::READY`
+  once per frame;
+* the GUI icon pass owns everything it draws with (`SpecialIcons`' own doc says
+  why), so it needs its own bind group — and it cannot drain, because a drain has
+  exactly one consumer and a second `drain_ready()` would *steal* the world's
+  sheet rather than share it.
+
+So `publish` also fills a retained by-URL store (`remote_skins::SHEETS`), and the
+GUI pass **pulls** from it with `remote_skins::sheet(url)` for any head it has no
+binding for, on every frame that draws one. Pulling is also what removes the
+ordering problem: a record built on the frame the fetch *starts* resolves on
+whichever later frame it lands, with no "the drain has to arrive on the right
+frame" hazard to get wrong.
+
+### Nothing declines silently, because a plain head is a head
+
+The failure mode here has no visible signature — a head that lost its texture
+still draws a head, so nothing looks broken, nothing goes red, and the only
+evidence is the wrong face. Every decline therefore logs:
+
+| decline | where | shape |
+|---|---|---|
+| the profile's `textures` decodes to no usable URL | `hud::item_icon::stack_skin_url` | one `warn!` per process |
+| the sheet is not fetched yet, or the fetch failed | `SpecialIcons::install_ready_player_skins` | one `warn!` per **episode**, with a paired recovery `info!` |
+| the URL's host is outside the allow list | `remote_skins::request` | one `warn!`, and the URL is memoised `Failed` |
+
+The draw still falls back to the default sheet in all three cases — the fallback
+is right, the *silence* was the defect.
+
 ## What is missing
 
 Not built, each deliberately:
