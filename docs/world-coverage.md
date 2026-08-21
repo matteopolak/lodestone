@@ -131,35 +131,45 @@ never draw. Currently 24 declared, all installed.
 ## The census, as of this writing
 
 Run it rather than quoting this section — a coverage number recalled from a doc
-has been wrong in this repo four times in four different ways. Findings: 59
+has been wrong in this repo four times in four different ways. Findings: 53
 across 332 subjects at the last run recorded here, down from 118 when this
-document was written; the particle half of that drop is the whole of the
-difference.
+document was written.
 
-### Entity types — 124 drawn, 19 stranded, 12 absent, 3 no-vanilla-rig
+### Entity types — 143 drawn, 6 stranded, 6 absent, 3 no-vanilla-rig
+
+Was 124/19/12 when this instrument first ran. The nineteen entity findings that
+have closed since are written up in `docs/entity-rendering.md`, which carries the
+vanilla source each rig was transcribed from and what each one still leaves out.
+What follows is what is left.
 
 **Stranded** (the finding class):
 
 | subject | what already knows about it |
 |---|---|
-| `item_frame`, `glow_item_frame` | `ITEM_FRAME_TYPES`, `EYE_HEIGHTS`, `item_frame_blockstate`, `framed_item_matrix`, a draw counter |
+| `item_frame`, `glow_item_frame` | `ITEM_FRAME_TYPES`, `EYE_HEIGHTS`, `item_frame_blockstate`, `framed_item_matrix`, a draw counter. These do now draw — through a *block* model rather than a rig, which is the right mechanism for them — so the census still reads them as stranded because its entity detector's subject is the rig corpus. Read this row as a limit of the instrument, not as a hole |
 | `item_display`, `block_display` | their own type-path constants and a full extracted snapshot; `display_entities`'s module doc already says both have no GPU consumer |
-| `mannequin` | `renderer_is_avatar` classifies it as an avatar, and no rig or alias resolves |
-| `parched` | `mob_draws_bow_when_aggressive` groups it with the skeletons; no rig |
-| `elder_guardian` | `EYE_HEIGHTS`; the `guardian` rig exists and nothing aliases the elder onto it |
 | `wind_charge`, `breeze_wind_charge` | `EYE_HEIGHTS`; `thrown_item_for`'s own doc records that these need a cuboid model and must *not* be added to its table |
-| `breeze`, `creaking`, `copper_golem`, `camel_husk`, `happy_ghast`, `nautilus`, `zombie_nautilus`, `sulfur_cube`, `giant`, `leash_knot` | an `EYE_HEIGHTS` row and no rig |
 
-The `EYE_HEIGHTS` cluster is one shape repeated: the hitbox table was populated
-from the registry, so it is complete, while the rig corpus is hand-ported and is
-not. That is honest unported work rather than a bug — but it is worth knowing
-that a mob with a hitbox entry and no rig is *invisible and solid*, which reads
-in play as a bug rather than as a missing feature.
+The `EYE_HEIGHTS` cluster that used to dominate this table was one shape
+repeated: the hitbox table is populated from the registry, so it is complete,
+while the rig corpus is hand-ported and was not. That is honest unported work
+rather than a bug — but a mob with a hitbox row and no rig is *invisible and
+solid*, which reads in play as a bug rather than as a missing feature, and that
+is why the ten in it were the first thing closed.
 
-**Absent** — `painting`, `lightning_bolt`, `fishing_bobber`, `evoker_fangs`,
-`firework_rocket`, `shulker_bullet`, `wither_skull`, `llama_spit`,
-`dragon_fireball`, `ominous_item_spawner`, `spawner_minecart`,
-`command_block_minecart`. Every one of these has a real renderer in vanilla.
+**Absent** — `painting`, `lightning_bolt`, `fishing_bobber`, `firework_rocket`,
+`dragon_fireball`, `ominous_item_spawner`. Every one has a real renderer in
+vanilla, and what unites the remaining six is that **none of them is a cuboid
+rig** — each needs a draw path this engine does not have, so none is a corpus
+entry away. A painting is a quad textured from its variant; a lightning bolt is
+procedural geometry rebuilt per frame; a bobber is a billboard plus a line back
+to the caster; a dragon fireball is a single camera-facing quad assembled vertex
+by vertex; a firework rocket and an ominous item spawner are both item models
+taken from *entity metadata* rather than from a default, which is exactly what
+keeps the rocket out of `thrown_item_for` despite being drawn the same way its
+members are. The ones that *were* rigs — `evoker_fangs`, `shulker_bullet`,
+`wither_skull`, `llama_spit`, `spawner_minecart`, `command_block_minecart` — have
+landed.
 
 **No vanilla rig** — `marker`, `interaction`, `area_effect_cloud`.
 

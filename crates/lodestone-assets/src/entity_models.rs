@@ -5082,6 +5082,142 @@ pub fn trident_model() -> EntityModelDef {
     }
 }
 
+/// Evoker fangs: a buried 10×12×10 base with two 4×14×8 jaws leaning out of the
+/// ground, sheet 64×32.
+///
+/// # The rest pose is the *open* pose, and that is why it is usable static
+///
+/// The two jaws are authored at `zRot` `2.042035` and `4.2411504`, which are
+/// exactly `π ∓ 0.35π` — the values the bite animation reaches at full open. So
+/// the layer as baked is the first frame of the bite rather than an arbitrary
+/// resting shape, which is what makes a rig with no animation channel look right
+/// for the twenty-odd ticks a fang exists.
+///
+/// Two things the animation does that this cannot: it closes the jaws over the
+/// bite, and it scales the whole rig to nothing over the last tenth. Neither is
+/// available without per-entity progress.
+///
+/// # The 90° in the root pose
+///
+/// This rig's renderer yaws by `90 - yRot` where a mob's yaws by `180 - yRot`.
+/// Composed under the model-space flip a `y_rot` of `φ` on the root subtracts `φ`
+/// from that total, so `φ = π/2` turns the mob placement into the fangs' own —
+/// the `S · Ry(φ) = Ry(-φ) · S` identity, not a fudge factor. Fold it here rather
+/// than at a draw site: the draw site has one placement for every mob and the
+/// difference is a property of this rig.
+///
+/// The base box sits at `y ∈ [24, 36]` model texels, i.e. **below** the ground
+/// plane, on purpose — a fang is a pair of jaws rising out of buried gums.
+pub fn evoker_fangs_model() -> EntityModelDef {
+    let jaw = || cube([0.0, 0.0, 0.0], [4.0, 14.0, 8.0], [40.0, 0.0]);
+    let base = PartDef::new(PartPose::offset(-5.0, 24.0, -5.0))
+        .with_cube(cube([0.0, 0.0, 0.0], [10.0, 12.0, 10.0], [0.0, 0.0]))
+        .with_child(
+            "upper_jaw",
+            PartDef::new(PartPose::offset_and_rotation(6.5, 0.0, 1.0, 0.0, 0.0, 2.042_035))
+                .with_cube(jaw()),
+        )
+        .with_child(
+            "lower_jaw",
+            PartDef::new(PartPose::offset_and_rotation(3.5, 0.0, 9.0, 0.0, PI, 4.241_150_4))
+                .with_cube(jaw()),
+        );
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 32,
+        root: PartDef::new(PartPose {
+            y_rot: PI / 2.0,
+            ..PartPose::ZERO
+        })
+        .with_child("base", base),
+    }
+}
+
+/// Shulker bullet: three interpenetrating slabs forming a six-pointed star, sheet
+/// 64×32, baked at half scale.
+///
+/// The three boxes are the same 8×8×2 slab on each axis in turn, so the shape is
+/// symmetric under any 90° turn — which is the reason a static orientation is a
+/// tolerable stand-in here and would not be on an asymmetric rig. Vanilla tumbles
+/// it on all three axes at three different rates off `ageInTicks`, and draws a
+/// second, 1.5× translucent copy over it; neither is available to a corpus entry,
+/// which carries one mesh, one sheet and no clock.
+///
+/// The `0.5` is vanilla's own `scale(-0.5, -0.5, 0.5)`, whose flip half is already
+/// supplied by the placement — only the magnitude belongs in the mesh.
+pub fn shulker_bullet_model() -> EntityModelDef {
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 32,
+        root: PartDef::new(PartPose {
+            scale: [0.5, 0.5, 0.5],
+            ..PartPose::ZERO
+        })
+        .with_child(
+            "main",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-4.0, -4.0, -1.0], [8.0, 8.0, 2.0], [0.0, 0.0]))
+                .with_cube(cube([-1.0, -4.0, -4.0], [2.0, 8.0, 8.0], [0.0, 10.0]))
+                .with_cube(cube([-4.0, -1.0, -4.0], [8.0, 2.0, 8.0], [20.0, 0.0])),
+        ),
+    }
+}
+
+/// Wither skull: one 8×8×8 head, sheet 64×64.
+///
+/// The layer is declared inside the renderer rather than in a model class, and it
+/// is **not** the ordinary skull head: it reads its texels at `(0, 35)` on the
+/// wither's own sheet, not at `(0, 0)`. Transcribing the generic skull layout here
+/// would put the wither's body on the skull's face.
+///
+/// The sheet is the harmless one of the pair. A skull fired by a wither at low
+/// health is drawn from `wither_invulnerable` instead, which is per-entity state
+/// this rig has no channel for.
+pub fn wither_skull_model() -> EntityModelDef {
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root: PartDef::new(PartPose::ZERO).with_child(
+            "head",
+            PartDef::new(PartPose::ZERO).with_cube(cube(
+                [-4.0, -8.0, -4.0],
+                [8.0, 8.0, 8.0],
+                [0.0, 35.0],
+            )),
+        ),
+    }
+}
+
+/// Llama spit: seven 2×2×2 cubes in a plus-sign cluster, sheet 64×32.
+///
+/// All seven share texel offset `(0, 0)` — vanilla chains seven `addBox` calls
+/// after a single `texOffs`, so every cube samples the same 2×2×2 patch. That is
+/// not a transcription slip to be "fixed" by spreading them across the sheet.
+///
+/// The cluster is authored in the octant `x, y, z ∈ [-4, 6]` rather than centred
+/// on the origin, so it hangs off its pivot by design.
+pub fn llama_spit_model() -> EntityModelDef {
+    // (x, y, z) origin of each 2-cube, in the order vanilla adds them.
+    const CUBES: [[f32; 3]; 7] = [
+        [-4.0, 0.0, 0.0],
+        [0.0, -4.0, 0.0],
+        [0.0, 0.0, -4.0],
+        [0.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [0.0, 2.0, 0.0],
+        [0.0, 0.0, 2.0],
+    ];
+    let mut main = PartDef::new(PartPose::ZERO);
+    for origin in CUBES {
+        main = main.with_cube(cube(origin, [2.0, 2.0, 2.0], [0.0, 0.0]));
+    }
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 32,
+        root: PartDef::new(PartPose::ZERO).with_child("main", main),
+    }
+}
+
 /// Elder guardian: the guardian mesh baked at a 2.35× mesh scale, on its own sheet.
 ///
 /// The scale is the only geometric difference — same twelve spikes, same eye, same
@@ -6036,6 +6172,31 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
         // ---- the "invisible but solid" set: types the hitbox table already
         // knew about while the rig corpus did not, so a player collided with
         // something that drew nothing ----
+        // ---- projectiles and effects with a cuboid rig of their own: placed by
+        // `non_living_vehicle_matrix` or `projectile_model_matrix`, never by the
+        // mob placement, because none of their renderers is a living-entity one ----
+        EntityModelEntry {
+            name: "evoker_fangs",
+            texture: EntityTexture::Fixed("entity/illager/evoker_fangs"),
+            build: evoker_fangs_model,
+        },
+        EntityModelEntry {
+            name: "shulker_bullet",
+            texture: EntityTexture::Fixed("entity/shulker/spark"),
+            build: shulker_bullet_model,
+        },
+        EntityModelEntry {
+            name: "wither_skull",
+            // The harmless sheet; `wither_invulnerable` is chosen per entity by
+            // a bit this rig has no channel for.
+            texture: EntityTexture::Fixed("entity/wither/wither"),
+            build: wither_skull_model,
+        },
+        EntityModelEntry {
+            name: "llama_spit",
+            texture: EntityTexture::Fixed("entity/llama/llama_spit"),
+            build: llama_spit_model,
+        },
         EntityModelEntry {
             name: "elder_guardian",
             texture: EntityTexture::Fixed("entity/guardian/guardian_elder"),

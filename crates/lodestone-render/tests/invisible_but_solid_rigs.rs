@@ -5,6 +5,14 @@
 //! **registry type path** through the same `EntityModelSet` the frame path uses,
 //! lands with its geometry inside the volume the player collides with.
 //!
+//! A second population lives at the bottom of this file: six types the census
+//! called *absent* — nothing drew them and nothing named them — whose vanilla
+//! renderer is a cuboid rig or the shared minecart frame. They get their own
+//! gate rather than joining the list above, because the question is different:
+//! a wither skull is not solid, so "how much of the collision box does it fill?"
+//! is not the thing that can go wrong. What can is the *placement*, and each of
+//! those four rigs is on a different matrix from the mob path.
+//!
 //! Ten needed a new mesh. The other three needed only routing — an elder guardian
 //! is the guardian mesh at 2.35×, a parched is a skeleton with a second overlay
 //! box on every part, and a mannequin is drawn by the *player's own* renderer —
@@ -290,5 +298,212 @@ fn the_sulfur_cube_shell_overhangs_its_box_by_the_ratio_its_root_pose_predicts()
         instance.aabb_min.y.abs() < 0.05,
         "the shell's underside sits at y = {:.4} rather than on the ground",
         instance.aabb_min.y
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The projectiles and effects: a different question, so a different gate
+// ---------------------------------------------------------------------------
+
+/// The census's *absent* bucket — nothing drew them and nothing named them —
+/// restricted to the six whose vanilla renderer is a cuboid rig or the shared
+/// minecart frame. The remaining absent types need a **draw path** rather than a
+/// rig (a camera-facing quad built vertex by vertex, a procedural bolt, an item
+/// model taken from entity metadata) and are out of scope for a corpus entry.
+const NEWLY_DRAWN_PROJECTILES: &[&str] = &[
+    "evoker_fangs",
+    "shulker_bullet",
+    "wither_skull",
+    "llama_spit",
+    "spawner_minecart",
+    "command_block_minecart",
+];
+
+/// These are not "invisible while solid" — most of them are not solid at all —
+/// so the hitbox-coverage question the gate above asks is the wrong one. What
+/// they can still get wrong, and what this asserts, is landing somewhere other
+/// than on the entity: every one of the four cuboid rigs is placed by a
+/// *different* matrix from the mob path, and picking the wrong one moves the
+/// draw by the 1.501-block feet lift, which is several times the size of a
+/// wither skull.
+#[test]
+fn every_newly_drawn_projectile_lands_on_its_own_entity() {
+    let models = EntityModelSet::load();
+    let mut report: Vec<String> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+
+    for path in NEWLY_DRAWN_PROJECTILES {
+        let entity_type = EntityType::from_name(path)
+            .unwrap_or_else(|| panic!("{path} is not a registry entity type"));
+        let dims = base_dimensions_for(entity_type);
+        let instance = instance_for(&models, path);
+        let mesh = mesh_named(&models, instance.model);
+
+        report.push(format!(
+            "  {path:<24} rig {:<10} y [{:.3}, {:.3}]  x [{:.3}, {:.3}]  z [{:.3}, {:.3}]  \
+             hitbox {:.3}w x {:.3}h",
+            instance.model,
+            instance.aabb_min.y,
+            instance.aabb_max.y,
+            instance.aabb_min.x,
+            instance.aabb_max.x,
+            instance.aabb_min.z,
+            instance.aabb_max.z,
+            dims.width,
+            dims.height,
+        ));
+
+        if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+            failures.push(format!("{path}: its rig bakes no geometry at all"));
+        }
+        // The drawn box must reach the entity's own cell. Stated as an overlap
+        // with the collision box rather than as a distance, so it cannot be
+        // satisfied by a rig that merely happens to be large.
+        let overlaps = instance.aabb_min.y <= dims.height
+            && instance.aabb_max.y >= 0.0
+            && instance.aabb_min.x <= dims.width / 2.0
+            && instance.aabb_max.x >= -dims.width / 2.0;
+        if !overlaps {
+            failures.push(format!(
+                "{path}: drawn box y [{:.3}, {:.3}] x [{:.3}, {:.3}] misses its own \
+                 {:.3}w x {:.3}h collision box entirely",
+                instance.aabb_min.y,
+                instance.aabb_max.y,
+                instance.aabb_min.x,
+                instance.aabb_max.x,
+                dims.width,
+                dims.height,
+            ));
+        }
+    }
+
+    eprintln!("newly drawn projectiles and effects:\n{}", report.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} of {} are mis-placed:\n{}",
+        failures.len(),
+        NEWLY_DRAWN_PROJECTILES.len(),
+        failures.join("\n")
+    );
+}
+
+/// The control for the gate above: each of the **three** rigs whose renderer is
+/// not a living-entity one, put on the mob placement instead, must be pushed
+/// clear of its entity by the 1.501-block feet lift.
+///
+/// `evoker_fangs` is not in this list, and the first version of it was — the
+/// control ran and reported a shift of exactly `+0.000`, which is the finding
+/// rather than a flaw: a fang's renderer **does** apply the flip and the 1.501
+/// lift, so for that one rig the mob placement is the right placement and the
+/// two hypotheses coincide. Its own control is the next test, on the axis that
+/// actually differs. Left written down because "the control did not move" reads
+/// as a broken control and was, here, a correct measurement.
+///
+/// Collected rather than asserted in the loop, so a run says which of the three
+/// moved rather than only the first.
+#[test]
+fn the_mob_placement_pushes_every_projectile_rig_off_its_own_entity() {
+    let models = EntityModelSet::load();
+    let mut still_overlapping: Vec<String> = Vec::new();
+    let mut measured: Vec<String> = Vec::new();
+
+    for (path, rig) in [
+        ("shulker_bullet", "shulker_bullet"),
+        ("wither_skull", "wither_skull"),
+        ("llama_spit", "llama_spit"),
+    ] {
+        let dims = base_dimensions_for(EntityType::from_name(path).expect("a registry type"));
+        let real = instance_for(&models, path);
+        let wrong = EntityInstance::new(
+            rig,
+            mesh_named(&models, rig),
+            Vec3::ZERO,
+            0.0,
+            1.0,
+            &AnimInput::REST,
+        );
+        let shift = wrong.aabb_min.y - real.aabb_min.y;
+        measured.push(format!(
+            "  {path:<16} own y [{:.3}, {:.3}]  mob-path y [{:.3}, {:.3}]  shift {shift:+.3}",
+            real.aabb_min.y, real.aabb_max.y, wrong.aabb_min.y, wrong.aabb_max.y,
+        ));
+        if wrong.aabb_min.y <= dims.height && wrong.aabb_max.y >= 0.0 {
+            still_overlapping.push(format!(
+                "{path}: the mob placement still leaves the rig on its own entity \
+                 (y [{:.3}, {:.3}] against a {:.3}-block box), so the gate above cannot \
+                 tell the two placements apart",
+                wrong.aabb_min.y, wrong.aabb_max.y, dims.height,
+            ));
+        }
+    }
+
+    eprintln!("wrong-placement control:\n{}", measured.join("\n"));
+    assert!(
+        still_overlapping.is_empty(),
+        "{} control(s) failed to move:\n{}",
+        still_overlapping.len(),
+        still_overlapping.join("\n")
+    );
+}
+
+/// The evoker fangs' own control, on the axis that separates its placement from
+/// a mob's: the 90° its renderer yaws by and a mob's does not, folded into the
+/// rig's root pose.
+///
+/// A pure rotation about Y cannot change a box's height, so the lift-shaped
+/// control cannot see this one. What it *does* change is which horizontal axis
+/// the fang's long side lies along — the jaws lean out along one axis and the
+/// base is square, so dropping the fold swaps the drawn box's x and z spans. The
+/// two hypotheses are therefore separated by a comparison of two numbers that
+/// are both measured, with no threshold to fit.
+#[test]
+fn dropping_the_evoker_fangs_quarter_turn_swaps_the_drawn_box_axes() {
+    let models = EntityModelSet::load();
+    let folded = instance_for(&models, "evoker_fangs");
+
+    let mut unfolded_def = entity_models()
+        .into_iter()
+        .find(|e| e.name == "evoker_fangs")
+        .map(|e| (e.build)())
+        .expect("evoker_fangs is a corpus entry");
+    unfolded_def.root.pose.y_rot = 0.0;
+    let unfolded_mesh = EntityMesh::from_named_model("evoker_fangs", &unfolded_def);
+    let unfolded = EntityInstance::new(
+        "evoker_fangs",
+        &unfolded_mesh,
+        Vec3::ZERO,
+        0.0,
+        1.0,
+        &AnimInput::REST,
+    );
+
+    let span = |lo: f32, hi: f32| hi - lo;
+    let fx = span(folded.aabb_min.x, folded.aabb_max.x);
+    let fz = span(folded.aabb_min.z, folded.aabb_max.z);
+    let ux = span(unfolded.aabb_min.x, unfolded.aabb_max.x);
+    let uz = span(unfolded.aabb_min.z, unfolded.aabb_max.z);
+    eprintln!(
+        "evoker fangs: with the quarter turn x {fx:.3} z {fz:.3}; without it x {ux:.3} z {uz:.3}"
+    );
+
+    // The rig has to be asymmetric for this control to mean anything at all, so
+    // that is asserted before the swap rather than assumed.
+    assert!(
+        (fx - fz).abs() > 0.5,
+        "the fangs' drawn box is near-square (x {fx:.3}, z {fz:.3}), so a quarter turn \
+         would be invisible and this control proves nothing"
+    );
+    assert!(
+        (ux - fz).abs() < 1e-3 && (uz - fx).abs() < 1e-3,
+        "dropping the root quarter turn should swap the drawn box's horizontal spans \
+         (expected x {fz:.3}, z {fx:.3}); got x {ux:.3}, z {uz:.3}"
+    );
+    // And the height is untouched, which is why the lift-shaped control above is
+    // blind to this and had to be separated from it.
+    assert!(
+        (unfolded.aabb_min.y - folded.aabb_min.y).abs() < 1e-4
+            && (unfolded.aabb_max.y - folded.aabb_max.y).abs() < 1e-4,
+        "a rotation about Y changed the drawn height, which means something other \
+         than the fold moved"
     );
 }
