@@ -1267,11 +1267,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   server — including over LAN — were completely invisible to one another.
 - [Player skins](./player-skins.md) — The `textures` profile property — base64 →
   JSON → a URL plus a **wide/slim rig declaration** — the host-restricted fetch
-  that turns it into a sheet, and the render halves that draw the declared rig on the
-  inventory avatar, on other players' bodies in the world, and (rig only, not yet the
-  texture) on the local player's own third-person body. What is left is capes, the
-  first-person arm and the local third-person body's *texture*, named under [What is
-  missing](#what-is-missing).
+  that turns it into a sheet, and the render halves that draw it on the inventory
+  avatar, on other players' bodies in the world, and — rig **and** texture — on
+  the local player's own third-person body and first-person arm. What is left is capes
+  and the Yggdrasil signature, named under [What is missing](#what-is-missing).
 - [The plugin API](./plugin-api.md) — The surface a third-party bevy plugin uses to
   do everything native Lodestone code can do — read world/entity/player state, write
   intent, order systems against internal ones, and observe events — specified

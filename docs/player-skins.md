@@ -4,11 +4,10 @@
 
 The `textures` profile property — base64 → JSON → a URL plus a **wide/slim rig
 declaration** — the host-restricted fetch that turns it into a sheet, and the
-render halves that draw the declared rig on the inventory avatar, on other
-players' bodies in the world, and (rig only, not yet the texture) on the local
-player's own third-person body. What is left is capes, the first-person arm
-and the local third-person body's *texture*, named under
-[What is missing](#what-is-missing).
+render halves that draw it on the inventory avatar, on other players' bodies in
+the world, and — rig **and** texture — on the local player's own third-person
+body and first-person arm. What is left is capes and the Yggdrasil signature,
+named under [What is missing](#what-is-missing).
 
 ## How it works
 
@@ -229,10 +228,13 @@ falls back to the on-disk `skin.model` marker (the same file
 *earlier* session is honoured before this session's sign-in — or a
 signed-out launch — has published anything.
 
-A future URL-threading fix for the local third-person body's texture should
-follow the same shape rather than draining `PENDING` a second time: add the
-image alongside `CURRENT`'s model (or a second small cache) rather than
-routing the body through the inventory avatar's one-shot slot.
+That URL-threading fix has since landed, and it did **not** take this shape:
+the body's skin comes from the **tab list**, through
+`entities::player_skin_for_uuid`, not from the signed-in profile's own fetch.
+The tab-list profile is the one the *server* saw, so our own body resolves
+through the identical ladder every other player's does, and it works on a
+server we are not signed in to. `skin_fetch::current_model` remains the rig
+fallback for a session with no tab-list entry for us yet.
 
 ## Remote players
 
@@ -399,31 +401,52 @@ evidence is the wrong face. Every decline therefore logs:
 The draw still falls back to the default sheet in all three cases — the fallback
 is right, the *silence* was the defect.
 
+## Landed since this doc first said otherwise
+
+Both entries below were in *What is missing* for long enough to be quoted
+forward as blockers. They are recorded here rather than deleted, because the
+shape of each is worth keeping.
+
+* **Our own third-person body's texture, and the first-person arm.** The local
+  player has no tracked entity — `extract_entity_draws` excludes it
+  deliberately — so it reaches none of the fold that resolves a skin, and its
+  own producer had no resolution of its own: `ThirdPersonBodyState::into_draw`
+  hardcoded `player_skin: None` and the arm hardcoded `player_wide` plus the
+  pack's sheet. `entities::player_skin_for_uuid` is now the shared ladder, and
+  `Sim::local_player_skin` asks it for **us** against the same tab list, so our
+  own body and every other player's resolve through one path.
+
+  The arm reads the result through `remote_skins::local()` rather than through
+  `ThirdPersonBodyState`, and that is structural: the arm draws precisely on
+  the frames `third_person_body_state` returns `None`, so it can never see that
+  state. `local_player_skin` is therefore called **above** the camera-mode gate.
+  Moving it below silently unwires the arm and nothing goes red.
+
+* **`DefaultPlayerSkin`'s UUID hash.** The 18-entry table and the hash pick
+  landed in `lodestone_assets::skin`, and then `DefaultSkin::texture` sat with
+  **zero production readers**: the one caller took `.model` (the rig) and
+  dropped `.texture`, so all eighteen identities collapsed onto the pack's two
+  plain sheets and every skinless player was Steve or Alex. `RemoteSkin::default_sheet`
+  carries the identity to `EntityDraw::variant_sheet` — the channel the draw
+  already consults after a fetched url misses — and `load_entity_variant_textures`
+  loads the eighteen sheets by exact path.
+
+  It is stamped **outside** `skin_for_textures_property`'s memoised decode:
+  that cache is keyed by the property value, so two accounts wearing one skin
+  share an entry, while the identity is a function of the uuid and must differ
+  between them.
+
 ## What is missing
 
 Not built, each deliberately:
 
 * **Capes and the elytra texture.** Decoded (`ProfileTextures::cape`/`elytra`)
-  and unconsumed — there is no cape rig in the entity corpus.
-* **Our own third-person body's *texture*, and the first-person arm
-  entirely.** The **rig** is fixed: `sim/camera.rs::third_person_body_state`
-  fills `ThirdPersonBodyState::slim` from `skin_fetch::current_model` (added
-  alongside the existing one-shot `PENDING` slot the inventory avatar
-  drains, because the body needs the same answer on every frame rather than
-  only the one frame after a container last opened), so `type_path` —
-  `player_model_name(self.slim)` — now draws the fetched Alex/Steve rig
-  rather than always Steve. The **sheet** is still the pack's default for
-  that rig: `ThirdPersonBodyState::into_draw` sets `player_skin: None` by
-  construction (see that field's own doc), so what remains is threading the
-  URL the same way, and `EntityDrawBatch::skin` will carry it the rest of
-  the way with no new plumbing. The first-person arm
-  (`RenderState::prepare_first_person_hand`, `gpu/first_person.rs`) is a
-  separate pass with its own instance path and still draws `player_wide`
-  unconditionally — rig and sheet both.
-* **`DefaultPlayerSkin`'s UUID hash.** Vanilla picks one of eight built-in
-  sheets from the profile UUID for a skinless account; this reports "no skin
-  declared" and draws the pack's `steve`. `ProfileTextures::skin` is an `Option`
-  precisely so a caller can tell that case from "a skin declared as wide".
+  and unconsumed — there is no cape rig in the entity corpus. The local body's
+  cape URL now *reaches* its draw (it rides on `player_skin`), but nothing ticks
+  a `CapeLag` for the local player, so `cape_sway` stays `(0, 0, 0)` by
+  construction rather than by omission.
+* **The signature.** `MinecraftProfileTextures.signatureState()` feeds vanilla's
+  `secure()` flag — see the entry below.
 * **The signature.** `MinecraftProfileTextures.signatureState()` feeds vanilla's
   `secure()` flag, which only gates the server-side "require secure profiles"
   option. The signature is a *sibling* of the property value, so this decode
