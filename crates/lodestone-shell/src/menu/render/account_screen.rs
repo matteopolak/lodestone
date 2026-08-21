@@ -483,6 +483,67 @@ fn accounts_hint_label(text: &str) -> MenuLabel {
 /// `the_account_rows_are_in_the_order_click_assumes` is the guard, the same shape
 /// the settings and multiplayer screens carry against the same that fix bug.
 #[must_use]
+/// One account's avatar: its **own** skin's face, or the placeholder head while
+/// there is nothing better to draw.
+///
+/// # What this closes
+///
+/// Every row on this screen drew [`default_head_icon`] — one hand-authored 8×8
+/// square — so the list showed the same face beside every name. Nothing was
+/// failing: the field had **zero production sites assigning it anything but the
+/// constant**, which is why the screen looked deliberate rather than broken.
+/// `AccountProfile::skin_url` has been persisted per account in `profiles.json`
+/// the whole time and no reader ever asked for it.
+///
+/// # The fetch is the same one the world uses
+///
+/// `crate::remote_skins` is keyed by texture **URL** and knows nothing about who
+/// is wearing a skin, so an account's sheet is one more entry in the cache a
+/// player's body already fills — one GET, one decode, shared. `request` is
+/// idempotent, so calling it per frame costs a map lookup after the first, and
+/// `sheet` is the non-consuming *pull* the GUI icon pass already uses (the world
+/// pass's `drain_ready` has exactly one consumer and must not be raced).
+///
+/// # Every decline says why
+///
+/// A default head looks like a head, so a silent fallback here is invisible: the
+/// screen would look exactly as it does when everything works. Each reason is
+/// therefore logged at `trace` — enough to tell "this account has no stored skin
+/// url" from "the fetch is still in flight" from "that sheet has no face in it",
+/// which are three very different bugs behind one identical pixel.
+fn account_head(profile: &lodestone_auth::metadata::AccountProfile) -> FaviconMosaic {
+    let Some(url) = profile.skin_url.as_deref().filter(|u| !u.is_empty()) else {
+        tracing::trace!(
+            target: "assets",
+            account = %profile.username,
+            "no skin url stored for this account; drawing the placeholder head"
+        );
+        return default_head_icon();
+    };
+    crate::remote_skins::request(url);
+    let Some(sheet) = crate::remote_skins::sheet(url) else {
+        tracing::trace!(
+            target: "assets",
+            account = %profile.username,
+            "this account's skin has not finished fetching; drawing the placeholder head"
+        );
+        return default_head_icon();
+    };
+    match super::favicon::face_mosaic(&sheet) {
+        Some(mosaic) => mosaic,
+        None => {
+            tracing::trace!(
+                target: "assets",
+                account = %profile.username,
+                width = sheet.width,
+                height = sheet.height,
+                "this account's skin sheet is too small to contain a face"
+            );
+            default_head_icon()
+        }
+    }
+}
+
 pub(super) fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> MenuFrame<'static> {
     use super::accounts::{
         AccountRow, BUTTON_ADD, BUTTON_CANCEL, BUTTON_COUNT, BUTTON_REMOVE, BUTTON_SELECT,
@@ -524,7 +585,7 @@ pub(super) fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> Me
                     } else {
                         String::new()
                     },
-                    head: Some(default_head_icon()),
+                    head: Some(account_head(p)),
                     enabled: true,
                     account: Some(view),
                     ..Default::default()

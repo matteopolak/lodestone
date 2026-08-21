@@ -247,6 +247,10 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
                 ui.enter_dev_world();
                 ui.open_book_edit();
             }
+            Screen::BookView => {
+                ui.enter_dev_world();
+                ui.open_book_view();
+            }
             Screen::SpectatorMenu => {
                 ui.enter_dev_world();
                 ui.open_spectator_menu();
@@ -2124,6 +2128,156 @@ fn accounts_nav(tag: &str, names: &[&str]) -> MenuNav {
     meta.save_to(&path.parent().unwrap().join("profiles.json"))
         .expect("the temp profiles file must be writable");
     MenuNav::with_path(path)
+}
+
+/// A 64×64 skin sheet whose **face** and **hat** rects are each one flat colour,
+/// so a mosaic built from it is predictable without reproducing the box filter
+/// here. Everything outside those two 8×8 rects is a third colour that must
+/// never reach the avatar.
+fn skin_sheet(face: [u8; 3], hat_alpha: u8, hat: [u8; 3]) -> lodestone_assets::Image {
+    let mut rgba = vec![0u8; 64 * 64 * 4];
+    for y in 0..64usize {
+        for x in 0..64usize {
+            let i = (y * 64 + x) * 4;
+            // The "must never be sampled" filler: a colour that is neither the
+            // face nor the hat, so a wrong crop rect is visible rather than
+            // plausible.
+            let (c, a) = if (8..16).contains(&x) && (8..16).contains(&y) {
+                (face, 255)
+            } else if (40..48).contains(&x) && (8..16).contains(&y) {
+                (hat, hat_alpha)
+            } else {
+                ([0x00, 0xFF, 0x00], 255)
+            };
+            rgba[i] = c[0];
+            rgba[i + 1] = c[1];
+            rgba[i + 2] = c[2];
+            rgba[i + 3] = a;
+        }
+    }
+    lodestone_assets::Image {
+        width: 64,
+        height: 64,
+        rgba,
+    }
+}
+
+/// **Every avatar on the accounts screen was the same hand-authored head.**
+///
+/// The discriminating assertion is that the two rows differ *from each other*:
+/// asserting only "row 0 has a head" passes under the old behaviour, because it
+/// always did — `head` was `Some(default_head_icon())` unconditionally, so the
+/// field was never empty and never right. Each row is additionally pinned to
+/// *its own* sheet's face colour, so two accounts cannot both be resolved
+/// through whichever skin happened to be fetched first.
+///
+/// The sheets are installed through `remote_skins::publish`, the seam that
+/// exists so a headless gate never performs an HTTP GET as a side effect of
+/// `cargo test`.
+#[test]
+fn each_account_row_draws_its_own_skins_face_not_one_shared_head() {
+    const URL_A: &str = "https://textures.minecraft.net/texture/aaaaaaaa";
+    const URL_B: &str = "https://textures.minecraft.net/texture/bbbbbbbb";
+    // Fully transparent hats, so each row's face colour is exactly its own and
+    // the hat's contribution is asserted separately below.
+    crate::remote_skins::publish(URL_A.to_owned(), skin_sheet([0xFF, 0x00, 0x00], 0, [0, 0, 0]));
+    crate::remote_skins::publish(URL_B.to_owned(), skin_sheet([0x00, 0x00, 0xFF], 0, [0, 0, 0]));
+
+    let path = std::env::temp_dir().join(format!(
+        "lodestone-render-accounts-{}-per-account-head/servers.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    let mut meta = lodestone_auth::metadata::AccountsMetadata::default();
+    for (i, url) in [URL_A, URL_B].iter().enumerate() {
+        meta.upsert(lodestone_auth::metadata::AccountProfile {
+            profile_id: uuid::Uuid::from_u128(i as u128 + 1),
+            username: format!("p{i}"),
+            skin_url: Some((*url).to_string()),
+            last_used: (2 - i) as u64,
+        });
+    }
+    meta.save_to(&path.parent().unwrap().join("profiles.json"))
+        .expect("the temp profiles file must be writable");
+    let nav = MenuNav::with_path(path.clone());
+
+    let f = accounts_idle_frame(nav.accounts());
+    let head = |row: usize| -> super::FaviconMosaic {
+        f.rows[row]
+            .head
+            .clone()
+            .unwrap_or_else(|| panic!("row {row} must carry a head icon"))
+    };
+    let (a, b) = (head(0), head(1));
+    let placeholder = super::default_head_icon();
+
+    assert_ne!(
+        a, placeholder,
+        "row 0 still draws the hand-authored placeholder -- its skin url never \
+         reached the frame"
+    );
+    assert_ne!(b, placeholder, "row 1 still draws the hand-authored placeholder");
+    assert_ne!(
+        a, b,
+        "both rows resolved to the same avatar -- the head is not per-account"
+    );
+    assert_eq!(
+        a,
+        super::favicon::face_mosaic(&skin_sheet([0xFF, 0x00, 0x00], 0, [0, 0, 0]))
+            .expect("a 64x64 sheet has a face"),
+        "row 0 must draw its OWN sheet's face"
+    );
+    assert_eq!(
+        b,
+        super::favicon::face_mosaic(&skin_sheet([0x00, 0x00, 0xFF], 0, [0, 0, 0]))
+            .expect("a 64x64 sheet has a face"),
+        "row 1 must draw its OWN sheet's face"
+    );
+    // The offline row has no account and no stored url, so it keeps the
+    // placeholder -- the control proving the assertions above are not passing
+    // because every head changed.
+    assert_eq!(
+        head(2),
+        placeholder,
+        "the offline row is not a Microsoft account and has no skin url"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// The hat layer is half of a Minecraft face: vanilla's `PlayerFaceRenderer`
+/// blits `(8, 8)` and then `(40, 8)` **over** it, so a skin whose character is
+/// its helmet or hair is unrecognisable from the base layer alone.
+///
+/// An opaque hat must therefore win outright, and a fully transparent one must
+/// change nothing — two inputs that give different answers only if the
+/// composite actually runs. A gate with one arm cannot tell "the hat is
+/// composited" from "the hat rect is being read as the face".
+#[test]
+fn the_face_mosaic_composites_the_hat_layer_over_the_base() {
+    let bare = super::favicon::face_mosaic(&skin_sheet([0xFF, 0x00, 0x00], 0, [0x00, 0x00, 0xFF]))
+        .expect("a 64x64 sheet has a face");
+    let hatted = super::favicon::face_mosaic(&skin_sheet([0xFF, 0x00, 0x00], 255, [0x00, 0x00, 0xFF]))
+        .expect("a 64x64 sheet has a face");
+    assert_ne!(
+        bare, hatted,
+        "an opaque hat layer changed nothing -- it is not being composited"
+    );
+    // And an opaque hat is *exactly* a face of the hat's own colour, since both
+    // rects are flat here.
+    let hat_only = super::favicon::face_mosaic(&skin_sheet([0x00, 0x00, 0xFF], 0, [0, 0, 0]))
+        .expect("a 64x64 sheet has a face");
+    assert_eq!(
+        hatted, hat_only,
+        "an opaque hat must fully cover the base face"
+    );
+    // A sheet too small to hold the hat rect declines rather than reading past
+    // the end of the buffer.
+    let tiny = lodestone_assets::Image {
+        width: 8,
+        height: 8,
+        rgba: vec![0u8; 8 * 8 * 4],
+    };
+    assert!(super::favicon::face_mosaic(&tiny).is_none(), "an 8x8 sheet has no face rect");
 }
 
 /// An accounts nav holding `n` generated accounts (so `n + 1` logical rows) with the

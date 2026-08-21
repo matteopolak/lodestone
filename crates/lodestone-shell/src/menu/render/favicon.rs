@@ -39,6 +39,69 @@ pub fn head_mosaic(rgba: &[u8], width: usize, height: usize) -> Option<FaviconMo
     rgba_mosaic(rgba, width, height)
 }
 
+/// The 8×8 **face** of a decoded skin sheet, box-filtered to a mosaic the
+/// account list can draw — the per-account avatar, in place of the one
+/// hand-authored head every row used to share.
+///
+/// # The face is two layers, not one
+///
+/// Vanilla's `PlayerFaceRenderer` blits the head's front face from `(8, 8)`
+/// **and then the hat layer from `(40, 8)` over it**, so a skin whose
+/// character is defined by the hat — a helmet, hair, a mask — is
+/// unrecognisable from the base layer alone. Both are 8×8 and both live in
+/// the top half of the sheet, so this works for a legacy 64×32 sheet as well
+/// as a 64×64 one.
+///
+/// The composite is a plain source-over on straight alpha. The hat layer is
+/// authored as fully opaque or fully transparent in practice, but blending
+/// properly costs nothing and avoids a hard cutoff choosing wrong on a skin
+/// that does use partial alpha.
+///
+/// `None` for a sheet too small to contain the face rect, which is the only
+/// way this can fail — a caller falls back to [`default_head_icon`].
+#[must_use]
+pub fn face_mosaic(sheet: &Image) -> Option<FaviconMosaic> {
+    /// Left edge of both the base face and the hat layer.
+    const BASE_X: usize = 8;
+    /// Top edge of both.
+    const Y: usize = 8;
+    /// Left edge of the hat layer.
+    const HAT_X: usize = 40;
+
+    let (w, h) = (sheet.width as usize, sheet.height as usize);
+    if w < HAT_X + HEAD_SIZE || h < Y + HEAD_SIZE {
+        return None;
+    }
+    let texel = |x: usize, y: usize| -> [u8; 4] {
+        let i = (y * w + x) * 4;
+        [
+            sheet.rgba[i],
+            sheet.rgba[i + 1],
+            sheet.rgba[i + 2],
+            sheet.rgba[i + 3],
+        ]
+    };
+
+    let mut face = [0u8; HEAD_SIZE * HEAD_SIZE * 4];
+    for y in 0..HEAD_SIZE {
+        for x in 0..HEAD_SIZE {
+            let base = texel(BASE_X + x, Y + y);
+            let hat = texel(HAT_X + x, Y + y);
+            let a = f32::from(hat[3]) / 255.0;
+            let out = (y * HEAD_SIZE + x) * 4;
+            for c in 0..3 {
+                let over = f32::from(hat[c]).mul_add(a, f32::from(base[c]) * (1.0 - a));
+                face[out + c] = over.round().clamp(0.0, 255.0) as u8;
+            }
+            // The base face is opaque on every well-formed skin; keeping its
+            // own alpha rather than forcing 255 means a malformed sheet draws
+            // transparent instead of drawing a lie.
+            face[out + 3] = base[3].max(hat[3]);
+        }
+    }
+    head_mosaic(&face, HEAD_SIZE, HEAD_SIZE)
+}
+
 /// A placeholder head icon used until skins are implemented: a
 /// flat skin-tone square with a darker hairline band across the top eighth
 /// and two single-pixel eyes, at [`HEAD_SIZE`]×[`HEAD_SIZE`].
