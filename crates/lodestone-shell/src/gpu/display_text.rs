@@ -61,12 +61,17 @@
 //!   decoded and carried all the way to this draw site (see
 //!   `crate::display_entities::DisplayDraw::text_line_width`'s own doc) — it
 //!   is read, just not yet applied to a wrap algorithm.
-//! - **`shadow` (`FLAG_SHADOW`) is decoded and not consumed** here — same
-//!   simplification `gpu/nametag.rs`'s own module doc already makes for its
-//!   per-glyph shadow. `seeThrough` and `useDefaultBackground` **are**
-//!   consumed now; they were in this list, and being in it is what kept every
-//!   see-through hologram depth-tested against the geometry it was explicitly
-//!   flagged to ignore.
+//! - **`shadow` (`FLAG_SHADOW`) is consumed now** — it was in this list, and
+//!   being in it is why world-space text read as flat and washed out beside
+//!   the identical string in chat: vanilla's glyphs are legible mostly
+//!   *because* of the drop shadow, not because of their own colour. So is
+//!   `seeThrough`, whose absence kept every see-through hologram
+//!   depth-tested against the geometry it was explicitly flagged to ignore,
+//!   and `useDefaultBackground`. Three entries left this list; treat a
+//!   remaining one as a defect report rather than a note.
+//!   `Style::shadow_color` (vanilla's explicit per-style shadow override, the
+//!   *other* branch of `Font.java::getShadowColor`) is genuinely absent —
+//!   this tree's `TextStyle` has no such field, so there is nothing to read.
 //! - **Per-run style is modelled** (colour — hex included, bold, italic,
 //!   underline, strikethrough), via `gpu/nametag.rs::layout_styled_ink_runs`
 //!   — the same styled ink-run walk `gpu/nametag.rs`'s own player/mob
@@ -94,6 +99,7 @@
 
 use glam::{Mat4, Vec3};
 use lodestone_assets::font::RasterFont;
+use lodestone_assets::font::metrics::{SHADOW_BRIGHTNESS, SHADOW_OFFSET};
 use lodestone_model::text::{Text, TextSpan};
 use lodestone_render::display::{
     BillboardMode, DisplayTransformation, display_orientation, display_placement_matrix,
@@ -118,6 +124,10 @@ struct DisplayTextVertex {
 /// [`super::nametag::MAX_NAME_TAG_VERTICES`]/[`super::sign_text::MAX_SIGN_TEXT_VERTICES`].
 const MAX_DISPLAY_TEXT_VERTICES: usize = 40_000;
 
+/// `Display.TextDisplay.FLAG_SHADOW` — draw each ink rect twice, the first
+/// copy offset by one font pixel and dimmed to a quarter, the way vanilla's
+/// `Font` shadows chat and every other piece of text.
+const FLAG_SHADOW: u8 = 1;
 /// `Display.TextDisplay.FLAG_SEE_THROUGH` — draw with no depth test and no
 /// depth write, so the text is readable through the geometry in front of it.
 const FLAG_SEE_THROUGH: u8 = 2;
@@ -166,7 +176,7 @@ fn resolved_background_argb(draw: &DisplayDraw) -> i32 {
 #[derive(Debug)]
 pub(super) struct DisplayTextRenderer {
     /// `RenderPipelines.TEXT_BACKGROUND`'s depth state — plain
-    /// `DepthStencilState.DEFAULT`, no polygon offset.
+    /// `DepthStencilState.DEFAULT`: test, write, no polygon offset.
     background_pipeline: wgpu::RenderPipeline,
     /// `RenderPipelines.TEXT_POLYGON_OFFSET` — the same two constants
     /// `gpu/sign_text.rs` ports, so the glyphs win the tie against the panel
@@ -296,25 +306,31 @@ impl DisplayTextRenderer {
             })
         };
 
-        // `DepthStencilState.DEFAULT` — test, write, no bias.
-        let tested = |bias: wgpu::DepthBiasState| wgpu::DepthStencilState {
+        // Depth-tested, with the write flag and the polygon offset as the two
+        // axes that differ between the panel and the ink. `LessEqual` is
+        // `GREATER_THAN_OR_EQUAL` through this project's forward `[0,1]`
+        // depth.
+        let tested = |write: bool, bias: wgpu::DepthBiasState| wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
+            depth_write_enabled: Some(write),
             depth_compare: Some(wgpu::CompareFunction::LessEqual),
             stencil: wgpu::StencilState::default(),
             bias,
         };
         let background_pipeline = build(
             "lodestone-display-text-background-pipeline",
-            tested(wgpu::DepthBiasState::default()),
+            tested(true, wgpu::DepthBiasState::default()),
         );
         let glyph_pipeline = build(
             "lodestone-display-text-glyph-pipeline",
-            tested(wgpu::DepthBiasState {
-                constant: -10,
-                slope_scale: -1.0,
-                clamp: 0.0,
-            }),
+            tested(
+                true,
+                wgpu::DepthBiasState {
+                    constant: -10,
+                    slope_scale: -1.0,
+                    clamp: 0.0,
+                },
+            ),
         );
         // Vanilla's `Optional.empty()` depth state. wgpu still needs the
         // attachment's format on the pipeline (the render pass has a depth
@@ -589,6 +605,22 @@ fn push_text_display_quads(
     // `StyledRect` already carries for a colourless span, so only the alpha
     // channel is read here (see the module doc).
     let alpha = text_glyph_color(draw.text_opacity)[3];
+    // `Display.TextDisplay.FLAG_SHADOW`, threaded to
+    // `textCollector.submitText(…, shadow, …)` and from there to
+    // `Font.java`'s `drawShadow`. Gated on the flag, unlike a nametag (which
+    // vanilla always shadows) — the accessor's own default is `(byte)0`, so
+    // a display that never reported style flags draws no shadow, exactly as
+    // in vanilla.
+    let shadow = draw.text_style_flags & FLAG_SHADOW != 0;
+    // The whole block's shadow copy is emitted **before** any of its ink, the
+    // same order `gpu/nametag.rs::push_entity_quads` uses and for the same
+    // reason: a later glyph's ink must sit on top of an earlier glyph's
+    // shadow, never the other way round. (Vanilla groups per `submitText`
+    // call, i.e. per line; block-wide grouping differs only where one line's
+    // shadow would overlap the next line's ink, which the `10`-pixel line
+    // height rules out for the default font.)
+    let mut shadow_out: Vec<DisplayTextVertex> = Vec::new();
+    let mut ink_out: Vec<DisplayTextVertex> = Vec::new();
     for (i, layout) in layouts.iter().enumerate() {
         let (rects, line_width) = (&layout.0, layout.1);
         if rects.is_empty() {
@@ -606,26 +638,70 @@ fn push_text_display_quads(
             let color = [rect.color[0], rect.color[1], rect.color[2], rect.color[3] * alpha];
             let lx = rect.x + offset;
             let ly = rect.y + y_line;
-            let tl = matrix.transform_point3(Vec3::new(lx, ly, 0.0)).to_array();
-            let tr = matrix
-                .transform_point3(Vec3::new(lx + rect.w, ly, 0.0))
-                .to_array();
-            let bl = matrix
-                .transform_point3(Vec3::new(lx, ly + rect.h, 0.0))
-                .to_array();
-            let br = matrix
-                .transform_point3(Vec3::new(lx + rect.w, ly + rect.h, 0.0))
-                .to_array();
-            glyph_out.extend([
-                DisplayTextVertex { position: tl, color },
-                DisplayTextVertex { position: bl, color },
-                DisplayTextVertex { position: tr, color },
-                DisplayTextVertex { position: tr, color },
-                DisplayTextVertex { position: bl, color },
-                DisplayTextVertex { position: br, color },
-            ]);
+            if shadow {
+                // `Font.java::getShadowColor`'s no-explicit-colour branch:
+                // `ARGB.scaleRGB(textColor, 0.25F)` — the glyph's **own**
+                // resolved colour at a quarter brightness with its alpha
+                // untouched, so a red run's shadow is dark red rather than
+                // flat grey. `Style::shadow_color` (vanilla's explicit
+                // per-style override) is not modelled by this tree's
+                // `TextStyle`, so only this branch exists to port.
+                let shadow_color = [
+                    color[0] * SHADOW_BRIGHTNESS,
+                    color[1] * SHADOW_BRIGHTNESS,
+                    color[2] * SHADOW_BRIGHTNESS,
+                    color[3],
+                ];
+                push_ink_quad(
+                    matrix,
+                    lx + SHADOW_OFFSET,
+                    ly + SHADOW_OFFSET,
+                    rect.w,
+                    rect.h,
+                    shadow_color,
+                    &mut shadow_out,
+                );
+            }
+            push_ink_quad(matrix, lx, ly, rect.w, rect.h, color, &mut ink_out);
         }
     }
+    // This display's shadows, then this display's ink. Appending both here —
+    // rather than pushing straight to `glyph_out` — is what keeps the
+    // ordering *per display*: `glyph_out` may already hold an earlier
+    // display's quads, and one display's shadow must not be allowed to land
+    // in front of another's ink.
+    glyph_out.append(&mut shadow_out);
+    glyph_out.append(&mut ink_out);
+}
+
+/// One ink rect's two triangles, in local glyph space, through `matrix`.
+///
+/// Free-standing because the shadow copy and the glyph itself are the same
+/// geometry at two offsets and two colours — writing it twice is how the two
+/// drift apart.
+fn push_ink_quad(
+    matrix: Mat4,
+    lx: f32,
+    ly: f32,
+    w: f32,
+    h: f32,
+    color: [f32; 4],
+    out: &mut Vec<DisplayTextVertex>,
+) {
+    let tl = matrix.transform_point3(Vec3::new(lx, ly, 0.0)).to_array();
+    let tr = matrix.transform_point3(Vec3::new(lx + w, ly, 0.0)).to_array();
+    let bl = matrix.transform_point3(Vec3::new(lx, ly + h, 0.0)).to_array();
+    let br = matrix
+        .transform_point3(Vec3::new(lx + w, ly + h, 0.0))
+        .to_array();
+    out.extend([
+        DisplayTextVertex { position: tl, color },
+        DisplayTextVertex { position: bl, color },
+        DisplayTextVertex { position: tr, color },
+        DisplayTextVertex { position: tr, color },
+        DisplayTextVertex { position: bl, color },
+        DisplayTextVertex { position: br, color },
+    ]);
 }
 
 /// The background panel: local `(-1, -1)` to `(width, height)`, vanilla's
@@ -1015,6 +1091,105 @@ mod tests {
              plain={:.4}, bold={:.4}",
             extent(&plain_out),
             extent(&bold_out)
+        );
+    }
+
+    /// **The drop-shadow control.** Owner report: world-space text "seems
+    /// kind of light … and its missing the text shadow (like it does in the
+    /// chat)". `FLAG_SHADOW` was decoded, carried to this draw site and then
+    /// dropped, and this file's own module doc said so in plain words — the
+    /// "not ported, disclosed" species `CLAUDE.md` says to read as a defect
+    /// report rather than as reassurance.
+    ///
+    /// Three claims, and the last two are what make it discriminating rather
+    /// than a smoke test:
+    ///
+    /// * the flag **doubles** the ink (every rect drawn twice), and its
+    ///   absence draws each rect exactly once;
+    /// * the shadow copy is a quarter-brightness **red** for a `§c` run, not
+    ///   a flat grey — `Font.java::getShadowColor`'s
+    ///   `ARGB.scaleRGB(textColor, 0.25F)`, so a hardcoded dark constant
+    ///   fails here;
+    /// * the shadow is emitted **before** the ink, since with `LessEqual` and
+    ///   no separation between the two copies paint order is the only thing
+    ///   deciding which is on top. Reversed, the shadow would sit over the
+    ///   glyph and the text would read as a smear.
+    #[test]
+    fn the_shadow_flag_adds_a_dimmed_offset_copy_of_every_ink_rect_before_the_ink() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
+        let camera = Camera::default();
+        let red = lodestone_model::text::TextColor::Red.rgb();
+        let want_red = [
+            ((red >> 16) & 0xff) as f32 / 255.0,
+            ((red >> 8) & 0xff) as f32 / 255.0,
+            (red & 0xff) as f32 / 255.0,
+        ];
+        let want_shadow = [
+            want_red[0] * SHADOW_BRIGHTNESS,
+            want_red[1] * SHADOW_BRIGHTNESS,
+            want_red[2] * SHADOW_BRIGHTNESS,
+        ];
+        let is_close = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        let matches = |c: [f32; 4], want: [f32; 3]| {
+            is_close(c[0], want[0]) && is_close(c[1], want[1]) && is_close(c[2], want[2])
+        };
+
+        let text = Text::from_legacy("\u{a7}cRED");
+        let plain = draw_with_text("\u{a7}cRED");
+        let mut shadowed = plain.clone();
+        shadowed.text_style_flags |= FLAG_SHADOW;
+
+        let mut run = |draw: &DisplayDraw| {
+            let (mut panel, mut glyphs) = (Vec::new(), Vec::new());
+            push_text_display_quads(
+                &raster, &ink, draw, &text, &camera, &mut panel, &mut glyphs,
+            );
+            glyphs
+        };
+        let without = run(&plain);
+        let with = run(&shadowed);
+
+        assert!(!without.is_empty(), "the fixture must draw real ink");
+        assert_eq!(
+            with.len(),
+            without.len() * 2,
+            "FLAG_SHADOW must draw every ink rect exactly twice: {} vertices \
+             unflagged, {} flagged",
+            without.len(),
+            with.len()
+        );
+        assert!(
+            !without.iter().any(|v| matches(v.color, want_shadow)),
+            "unflagged text must draw no dimmed copy at all — otherwise this \
+             gate cannot tell the flag from the default"
+        );
+
+        // The shadow copy occupies the first half, the ink the second: paint
+        // order is the whole mechanism.
+        let half = without.len();
+        assert!(
+            with[..half].iter().all(|v| matches(v.color, want_shadow)),
+            "every vertex of the first (shadow) half must be quarter-brightness \
+             red {want_shadow:?} — a flat grey or black shadow would fail here, \
+             which is the point: got {:?}",
+            with[..half].iter().map(|v| v.color).take(6).collect::<Vec<_>>()
+        );
+        assert!(
+            with[half..].iter().all(|v| matches(v.color, want_red)),
+            "every vertex of the second (ink) half must be the full-brightness \
+             red the span asked for: got {:?}",
+            with[half..].iter().map(|v| v.color).take(6).collect::<Vec<_>>()
+        );
+
+        // And the copy is genuinely *offset*, not merely dimmed in place —
+        // one font pixel through the glyph transform, on both axes.
+        assert_ne!(
+            with[0].position, with[half].position,
+            "the shadow copy must be offset from the glyph it shadows, not \
+             painted at the same place"
         );
     }
 
