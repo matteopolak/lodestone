@@ -102,6 +102,27 @@ where
         )));
     }
 
+    // `NoteBlock.getStateForPlacement` → `setInstrument`: reads the block
+    // directly above first (a mob head already sitting there), falling back to
+    // the block below. Carries no `Shape` flag of its own, so it is dispatched
+    // by name before the census-driven arms below.
+    //
+    // Not modelled here: vanilla's `NoteBlock.updateShape` re-runs the same
+    // computation whenever the block directly above or below changes *after*
+    // placement (e.g. breaking the block a note block sits on). This crate has
+    // no generic "notify this block when a vertical neighbour changes" seam to
+    // hook that into yet, so an already-placed note block's `instrument` goes
+    // stale in that case — a real, currently-unclosed gap, not a silent one.
+    if base_name(block) == crate::redstone_note_block::NOTE_BLOCK {
+        let above = block_at(Direction::Up.relative(ctx.target));
+        let below = block_at(Direction::Down.relative(ctx.target));
+        let instrument = crate::redstone_note_block::instrument_for_note_block(&above, &below);
+        return Some(Placement::just(format!(
+            "{block}[instrument={}]",
+            instrument.state_name()
+        )));
+    }
+
     let shape = shape_of(block)?;
 
     if shape.pillar_axis {
@@ -913,6 +934,45 @@ mod tests {
         assert!(placement("minecraft:dirt", &ctx(BlockFace::Up, 0.0, 0.0), air).is_none());
     }
 
+    /// `NoteBlock.getStateForPlacement` reads the block below when placed over
+    /// nothing but air above — the ordinary case, and the one every prior
+    /// build got wrong by leaving `instrument` at its bare default (`harp`)
+    /// regardless of what was underneath.
+    #[test]
+    fn a_note_block_placed_on_gold_reads_bell() {
+        let below_gold = |pos: BlockPos| {
+            if pos.y == 63 {
+                "minecraft:gold_block".to_string()
+            } else {
+                "minecraft:air".to_string()
+            }
+        };
+        let placed = placement("minecraft:note_block", &ctx(BlockFace::Up, 0.0, 0.0), below_gold).unwrap();
+        assert_eq!(placed.state, "minecraft:note_block[instrument=bell]");
+    }
+
+    /// A mob head already sitting on top wins over the block underneath —
+    /// `setInstrument`'s `above.worksAboveNoteBlock()` check runs first.
+    #[test]
+    fn a_note_block_placed_under_a_skull_reads_the_skull_not_the_floor() {
+        let skull_above_gold = |pos: BlockPos| {
+            if pos.y == 65 {
+                "minecraft:skeleton_skull".to_string()
+            } else if pos.y == 63 {
+                "minecraft:gold_block".to_string()
+            } else {
+                "minecraft:air".to_string()
+            }
+        };
+        let placed = placement(
+            "minecraft:note_block",
+            &ctx(BlockFace::Up, 0.0, 0.0),
+            skull_above_gold,
+        )
+        .unwrap();
+        assert_eq!(placed.state, "minecraft:note_block[instrument=skeleton]");
+    }
+
     /// Every state this module can emit must resolve to a real state id — the
     /// one thing no coverage tool can see, because a fully-connected wire
     /// carrying a bogus state string still looks connected. The expected value
@@ -941,6 +1001,7 @@ mod tests {
             "minecraft:bell",
             "minecraft:rail",
             "minecraft:white_banner",
+            "minecraft:note_block",
         ];
         let faces = [
             BlockFace::Up,
