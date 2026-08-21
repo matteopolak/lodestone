@@ -160,29 +160,128 @@ fn held_map_pose(inverse_arm_height: f32) -> Mat4 {
 }
 
 /// The world pose for a map hanging in an item frame at `feet`, facing along the
-/// frame's `yaw`/`pitch`.
+/// frame's real `Direction`.
 ///
-/// Yaw is vanilla's, so `0` faces **south** (`+z`) and the picture's rotation is
-/// about `+y`; pitch tips it for a frame on a floor or a ceiling.
+/// ```text
+/// T(feet + dir · FRAMED_MAP_LIFT) · item_frame_facing(yaw, pitch) · Rz(rot · 90°) · Ry(180°) · S
+/// ```
 ///
-/// # The lift is a world-space step, and it is not the picture's own `+z`
+/// # The orientation is the frame's own, not `Ry(yaw)`
 ///
 /// `Ry(yaw)` applied to the quad's local `+z` gives `(sin yaw, 0, cos yaw)`; the
-/// frame's real `Direction` is `(-sin yaw, 0, cos yaw)`
+/// frame's real facing is `(-sin yaw, 0, cos yaw)`
 /// ([`lodestone_render::entity::item_frame_facing_step`], derived from
 /// `ItemFrame.setDirection`). The two **agree at yaw 0 and 180 and are opposite
-/// at 90 and 270**, so lifting along the picture's own axis pushed every east-
-/// and west-facing framed map *into* its wall — invisible for as long as no
-/// frame body drew in front of it, and the exact coincidence a gate probing only
-/// a north or a south wall cannot see. The translate is therefore applied on the
-/// left, in world space, and the picture's own orientation is left alone.
+/// at 90 and 270**, so a pose built from `Ry(yaw)` puts the picture's front face
+/// *into* the wall on every east- and west-facing frame — and the model
+/// pipeline culls back faces, so the picture drew **zero pixels** there while
+/// the wider `item_frame_map` body still drew around the hole. Measured, at
+/// yaw 0/180 11,236 px against yaw 90/270's 0
+/// (`tests/framed_map_pixels.rs`). The same coincidence hid the earlier
+/// translation bug, and fixing the translation left the rotation behind: a gate
+/// that asserts only where the picture's *centre* lands passes under either
+/// reading of the orientation.
+///
+/// So the rotation is [`lodestone_render::entity::item_frame_facing`] — one
+/// owner for "which way does this frame look", shared with the frame body's own
+/// [`lodestone_render::entity::item_frame_body_matrix`] — and the lift is a
+/// world-space step applied on the left, leaving that orientation alone.
+///
+/// # The `Ry(180°)`, and why it is not `Rz(180°)`
+///
+/// `item_frame_facing` maps frame-local `-z` to the direction the frame looks,
+/// so the picture's own `+z` front must be turned to meet it. Vanilla spells the
+/// same turn `Axis.ZP.rotationDegrees(180)` because it draws through a no-cull
+/// render type and only needs the *image* the right way round; it also lays its
+/// quad out with `v` growing **up** where [`map_quad_mesh`] grows it down. Those
+/// two differences compose: on the `z == 0` plane every vertex of this quad
+/// lands, `Rz(180) · diag(1, -1, 1)` and `Ry(180)` are the same map, and only
+/// `Ry(180)` also turns the face outward. Substituting `Rz(180)` here draws the
+/// picture upside-down *and* back-to-front.
+///
+/// # The in-plane rotation is quartered, not eighthed
+///
+/// `ItemFrame.getRotation()` counts eighths and an ordinary framed item is drawn
+/// at `rotation · 45°`, but the map branch is `rotation % 4 * 2` eighths — i.e.
+/// `(rotation % 4) · 90°`. A map only ever hangs at a right angle, and the odd
+/// half-steps fold onto the even ones rather than tilting the picture.
 #[must_use]
-fn framed_map_pose(feet: Vec3, yaw: f32, pitch: f32) -> Mat4 {
-    let facing = Mat4::from_rotation_y(yaw.to_radians()) * Mat4::from_rotation_x(-pitch.to_radians());
+fn framed_map_pose(feet: Vec3, yaw: f32, pitch: f32, rotation: u8) -> Mat4 {
     let step = lodestone_render::entity::item_frame_facing_step(yaw, pitch);
+    let quarter_turns = f32::from(rotation % 4) * 90.0;
     Mat4::from_translation(feet + step * FRAMED_MAP_LIFT)
-        * facing
+        * lodestone_render::entity::item_frame_facing(yaw, pitch)
+        * Mat4::from_rotation_z(quarter_turns.to_radians())
+        * Mat4::from_rotation_y(std::f32::consts::PI)
         * Mat4::from_scale(Vec3::splat(FRAMED_MAP_SCALE))
+}
+
+/// Why a framed or held map declined to draw, for the one-shot diagnostic below.
+///
+/// An empty item frame and a frame holding a map whose contents have not arrived
+/// look **identical** on screen, so a silent skip here is indistinguishable from
+/// a rendering bug — which is exactly how this subsystem was reported. Every
+/// early return in the two `prepare_*` functions names one of these.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum MapSkip {
+    /// The baked model set is absent, so there is no pipeline to draw through.
+    NoModels,
+    /// No [`MapSource`](super::sources::MapSource) has been installed this
+    /// frame. `Sim::map_source` returns `None` off a live server, so this is the
+    /// ordinary state on the demo world and a real defect on a join.
+    NoSource,
+    /// A source is installed and answered nothing: no `MAP_ITEM_DATA` has been
+    /// folded for this map yet. On a vanilla server `ServerEntity.sendChanges`
+    /// pushes a framed map's contents every ten ticks to every player in the
+    /// level, so this should clear within half a second of the frame coming into
+    /// view — and never clearing means the packet is not arriving or not
+    /// folding.
+    NoContents,
+    /// The quad meshed but its vertex/index buffers could not be uploaded.
+    NoUpload,
+}
+
+impl MapSkip {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::NoModels => "no baked model set",
+            Self::NoSource => "no map source installed for this frame",
+            Self::NoContents => "no MAP_ITEM_DATA has arrived for this map yet",
+            Self::NoUpload => "the map quad could not be uploaded",
+        }
+    }
+}
+
+/// One bit per `(site, reason)` already reported, so a per-frame decline logs
+/// once rather than sixty times a second.
+///
+/// Cleared by [`note_map_drawn`] whenever a map actually draws, so a decline
+/// that comes back after a working period is reported again instead of being
+/// swallowed by a latch that never resets.
+static REPORTED_MAP_SKIPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Log, at most once per `(site, reason)` between successful draws, why a map
+/// was not drawn. Always returns `None` so a call site can `return`
+/// `note_map_skip(...)` in place of a bare `?`.
+fn note_map_skip<T>(site: &'static str, skip: MapSkip, id: Option<i32>) -> Option<T> {
+    use std::sync::atomic::Ordering;
+    let bit = 1u32 << (skip as u32 + if site == "item frame" { 0 } else { 16 });
+    let previous = REPORTED_MAP_SKIPS.fetch_or(bit, Ordering::Relaxed);
+    if previous & bit == 0 {
+        tracing::warn!(
+            target: "render",
+            site,
+            map_id = ?id,
+            "not drawing a filled map: {}",
+            skip.reason()
+        );
+    }
+    None
+}
+
+/// Clear the one-shot latch, so the next decline is reported afresh.
+fn note_map_drawn() {
+    REPORTED_MAP_SKIPS.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 impl RenderState {
@@ -199,14 +298,27 @@ impl RenderState {
     ) -> Option<(GpuModelMesh, wgpu::BindGroup)> {
         let (item, _) = self.equip.visible()?;
         if item.path() != FILLED_MAP_ITEM {
+            // Not a decline: the hand is holding something else, which is not a
+            // map that failed to draw.
             return None;
         }
-        let model = self.model.as_ref()?;
-        let colors = self.map_source.picture(None)?;
+        const SITE: &str = "hand";
+        let Some(model) = self.model.as_ref() else {
+            return note_map_skip(SITE, MapSkip::NoModels, None);
+        };
+        if !self.map_source.is_installed() {
+            return note_map_skip(SITE, MapSkip::NoSource, None);
+        }
+        let Some(colors) = self.map_source.picture(None) else {
+            return note_map_skip(SITE, MapSkip::NoContents, None);
+        };
         // Full bright, as the GUI item path nails every vertex: the map is drawn
         // in its own camera-space pass with no world position to sample.
         let mesh = map_quad_mesh(held_map_pose(inverse_arm_height), ENTITY_FULLBRIGHT);
-        let gpu = GpuModelMesh::upload(device, &mesh)?;
+        let Some(gpu) = GpuModelMesh::upload(device, &mesh) else {
+            return note_map_skip(SITE, MapSkip::NoUpload, None);
+        };
+        note_map_drawn();
         Some((
             gpu,
             map_texture_bind_group(device, queue, &model.pipeline, &colors),
@@ -216,11 +328,22 @@ impl RenderState {
     /// Every filled map hanging in an item frame this frame, as one world-space
     /// mesh plus the texture it samples.
     ///
-    /// One mesh rather than one per frame-entity: every framed map resolves to the
-    /// same picture while `minecraft:map_id` is undecoded (see
-    /// `Sim::map_source`), so they share a bind group and concatenate into a single
-    /// draw. When the id lands this becomes a group-by-id and returns one pair per
-    /// distinct map.
+    /// One mesh rather than one per frame-entity: `EntityDraw` carries only the
+    /// item's id and not its `minecraft:map_id` (which v770 *does* decode — see
+    /// `Sim::map_source` for where it is dropped), so every framed map on screen
+    /// resolves to the same picture and they share a bind group and concatenate
+    /// into a single draw. When a draw carries an id this becomes a group-by-id
+    /// and returns one pair per distinct map.
+    ///
+    /// # Every decline is logged
+    ///
+    /// A frame holding a map whose contents have not arrived is pixel-identical
+    /// to a frame holding nothing, so each early return below names its reason
+    /// through [`note_map_skip`] rather than returning a bare `None`. The
+    /// commonest one on this client is [`MapSkip::NoContents`]: the integrated
+    /// `lodestone-server` has no map saved data and no `MAP_ITEM_DATA` producer
+    /// at all, so a singleplayer framed map can never fill in, and the log line
+    /// is the only thing that distinguishes that from a rendering fault.
     pub(super) fn prepare_framed_maps(
         &self,
         device: &wgpu::Device,
@@ -228,9 +351,10 @@ impl RenderState {
         camera: &lodestone_render::Camera,
         entities: &[EntityDraw],
     ) -> Option<(GpuModelMesh, wgpu::BindGroup)> {
-        let model = self.model.as_ref()?;
+        const SITE: &str = "item frame";
         let frustum = camera.frustum();
         let mut combined = ModelMesh::default();
+        let mut wanted = false;
         for draw in entities {
             if !ITEM_FRAME_TYPES.contains(&draw.type_path.as_ref()) {
                 continue;
@@ -243,13 +367,34 @@ impl RenderState {
             if !frustum.intersects_aabb(draw.feet - Vec3::splat(1.0), draw.feet + Vec3::splat(1.0)) {
                 continue;
             }
+            // Set *before* the mesh is built, so the diagnostics below fire for a
+            // frame that is on screen and holding a map even when nothing could
+            // be drawn for it. A counter taken after the fact cannot tell "no
+            // framed maps in view" from "four of them and no picture".
+            wanted = true;
             combined.merge(&map_quad_mesh(
-                framed_map_pose(draw.feet, draw.yaw, draw.pitch),
+                framed_map_pose(draw.feet, draw.yaw, draw.pitch, draw.item_frame_rotation),
                 self.entity_light.sample(draw.feet),
             ));
         }
-        let colors = self.map_source.picture(None)?;
-        let gpu = GpuModelMesh::upload(device, &combined)?;
+        if !wanted {
+            // No framed map is in view. Not a decline, and deliberately silent:
+            // this is every frame of ordinary play.
+            return None;
+        }
+        let Some(model) = self.model.as_ref() else {
+            return note_map_skip(SITE, MapSkip::NoModels, None);
+        };
+        if !self.map_source.is_installed() {
+            return note_map_skip(SITE, MapSkip::NoSource, None);
+        }
+        let Some(colors) = self.map_source.picture(None) else {
+            return note_map_skip(SITE, MapSkip::NoContents, None);
+        };
+        let Some(gpu) = GpuModelMesh::upload(device, &combined) else {
+            return note_map_skip(SITE, MapSkip::NoUpload, None);
+        };
+        note_map_drawn();
         Some((
             gpu,
             map_texture_bind_group(device, queue, &model.pipeline, &colors),
@@ -261,37 +406,41 @@ impl RenderState {
 mod tests {
     use super::*;
 
-    /// A framed map faces the way its frame does and stands off the wall along
-    /// that same axis. Yaw `0` is south (`+z`) in vanilla, so a frame at yaw `0`
-    /// must lift toward `+z` — lifting the other way buries the picture in the
-    /// block behind it, which reads as "the map does not draw".
+    /// A framed map faces the way its frame does, stands off the wall along that
+    /// same axis, and **points its front face out of the wall**.
+    ///
+    /// The last of the three is the one this gate used to omit, and omitting it
+    /// is what let an east- or west-facing framed map draw zero pixels: the model
+    /// pipeline culls back faces, so a picture whose normal points into the wall
+    /// is simply not there. `Ry(yaw)`'s local `+z` and the frame's real
+    /// `Direction` agree at yaw 0 and 180 and are opposite at 90 and 270 —
+    /// exactly the coincidence the translation arms below already had to work
+    /// around — so an orientation assertion at 0 and 180 alone proves nothing.
     #[test]
-    fn a_framed_map_lifts_along_its_own_facing() {
-        let pose = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 0.0, 0.0);
+    fn a_framed_map_lifts_along_its_own_facing_and_faces_out_of_the_wall() {
+        let pose = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 0.0, 0.0, 0);
         let centre = pose.transform_point3(Vec3::ZERO);
         assert!((centre.x - 4.0).abs() < 1.0e-5);
         assert!((centre.y - 65.0).abs() < 1.0e-5);
         assert!((centre.z - (-9.0 + FRAMED_MAP_LIFT)).abs() < 1.0e-5);
 
         // Yaw 180 faces north, so the same lift must move the other way.
-        let north = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 180.0, 0.0)
+        let north = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 180.0, 0.0, 0)
             .transform_point3(Vec3::ZERO);
         assert!(north.z < -9.0, "a north-facing frame lifts toward -z");
 
-        // Yaw 90 and 270 are the discriminating inputs, and they are exactly the
-        // two this gate used to omit: `Ry(yaw)`'s local `+z` and the frame's real
-        // `Direction` agree at 0 and 180 and are **opposite** at 90 and 270, so
-        // both arms above pass under either reading. Yaw 90 is west, so the
+        // Yaw 90 and 270 are the discriminating inputs. Yaw 90 is west, so the
         // picture must move to `-x`.
-        let west = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 90.0, 0.0)
+        let west = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 90.0, 0.0, 0)
             .transform_point3(Vec3::ZERO);
         assert!(
             (west.x - (4.0 - FRAMED_MAP_LIFT)).abs() < 1.0e-5,
-            "yaw 90 is west, so the picture lifts to -x; got x={} (a bare Ry(yaw)              would give {})",
+            "yaw 90 is west, so the picture lifts to -x; got x={} (a bare Ry(yaw) \
+             would give {})",
             west.x,
             4.0 + FRAMED_MAP_LIFT
         );
-        let east = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 270.0, 0.0)
+        let east = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 270.0, 0.0, 0)
             .transform_point3(Vec3::ZERO);
         assert!(
             (east.x - (4.0 + FRAMED_MAP_LIFT)).abs() < 1.0e-5,
@@ -306,7 +455,73 @@ mod tests {
         // the previous hand-picked `0.03` would now do.
         assert!(
             FRAMED_MAP_LIFT > 0.031_25,
-            "the picture must clear the frame's back plate at 0.03125, got              {FRAMED_MAP_LIFT}"
+            "the picture must clear the frame's back plate at 0.03125, got \
+             {FRAMED_MAP_LIFT}"
+        );
+
+        // --- the orientation, at every horizontal facing and both vertical ones
+        //
+        // Collected rather than asserted in the loop: an `assert!` inside it
+        // aborts on the first bad facing and leaves the other five unmeasured,
+        // so a run would prove one arm and argue the rest.
+        let mut wrong: Vec<String> = Vec::new();
+        for (yaw, pitch) in [
+            (0.0f32, 0.0f32),
+            (90.0, 0.0),
+            (180.0, 0.0),
+            (270.0, 0.0),
+            (0.0, -90.0),
+            (0.0, 90.0),
+        ] {
+            let facing = lodestone_render::entity::item_frame_facing_step(yaw, pitch);
+            let normal = framed_map_pose(Vec3::ZERO, yaw, pitch, 0)
+                .transform_vector3(Vec3::Z)
+                .normalize();
+            let dot = normal.dot(facing);
+            if dot < 0.999 {
+                wrong.push(format!(
+                    "(yaw {yaw}, pitch {pitch}): quad normal {normal:?} against the \
+                     frame's facing {facing:?}, dot {dot}"
+                ));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} of 6 facings point the picture's front face into the wall, where \
+             back-face culling discards it:\n  {}",
+            wrong.len(),
+            wrong.join("\n  ")
+        );
+
+        // --- the in-plane quarter turn ---------------------------------------
+        //
+        // `ItemFrameRenderer`'s map branch is `rotation % 4 * 2` eighths, so a
+        // map only ever hangs at a right angle and the odd half-steps fold onto
+        // the even ones. Asserted as a *pair* of claims a wrong reading would
+        // separate: rotation 1 must move the picture's own `+x` corner, and
+        // rotation 4 must land back on rotation 0.
+        let up = |rotation: u8| {
+            framed_map_pose(Vec3::ZERO, 180.0, 0.0, rotation).transform_vector3(Vec3::Y)
+        };
+        assert!(
+            up(0).dot(up(1)).abs() < 1.0e-5,
+            "one step is a quarter turn, so its up vector is perpendicular; got \
+             {:?} against {:?}",
+            up(0),
+            up(1)
+        );
+        assert!(
+            (up(4) - up(0)).length() < 1.0e-5,
+            "four quarter turns is the identity; got {:?} against {:?}",
+            up(4),
+            up(0)
+        );
+        assert!(
+            (up(5) - up(1)).length() < 1.0e-5,
+            "the eighth-steps fold in fours for a map, unlike an ordinary framed \
+             item's 45 degrees; got {:?} against {:?}",
+            up(5),
+            up(1)
         );
     }
 

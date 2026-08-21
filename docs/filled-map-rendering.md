@@ -58,27 +58,89 @@ invalidation bug. `mip_level_count` is 1 and the sampler is `Nearest`, matching 
   `item_frame`/`glow_item_frame` carrying a `filled_map` and concatenates one quad each into a single
   world-space mesh. The frame's own border and back plate are drawn separately, as a *block model*
   posed by hand — see `docs/item-frame-rendering.md`, which also explains why `FRAMED_MAP_LIFT` has to
-  clear that back plate and why the lift is applied in world space along the frame's real `Direction`
-  rather than along the picture's own `+z` (the two are opposite on an east- or west-facing wall).
+  clear that back plate.
+
+### `framed_map_pose` is built from the frame's own facing, and this was wrong twice
+
+```text
+T(feet + dir · FRAMED_MAP_LIFT) · item_frame_facing(yaw, pitch) · Rz(rot · 90°) · Ry(180°) · S
+```
+
+`Ry(yaw)` applied to the quad's local `+z` gives `(sin yaw, 0, cos yaw)`; the frame's real `Direction`
+(`item_frame_facing_step`, from `ItemFrame.setDirection`) is `(-sin yaw, 0, cos yaw)`. **They agree at
+yaw 0 and 180 and are opposite at 90 and 270.** The pose used to be `Ry(yaw) · Rx(-pitch)`, so on every
+east- and west-facing wall the picture's front face pointed *into* the wall, and the model pipeline
+culls back faces — the map drew **zero pixels** while the wider `item_frame_map` body still drew around
+the hole. Measured in `crates/lodestone-shell/tests/framed_map_pixels.rs`: 11,236 differing pixels at
+yaw 0 and 180 against **0** at yaw 90 and 270 before the fix, 11,236 at all four after. The unit
+neuter in `gpu/maps.rs` reports **4 of 6** facings wrong, because the two vertical ones (a frame on a
+floor or a ceiling) were broken by the same expression's pitch sign and composition order.
+
+The lesson generalises past this file. The *translation* had already been corrected for exactly this
+coincidence — the lift is applied on the left, in world space, precisely because the picture's own `+z`
+is the wrong axis — and the gate written alongside that fix asserts only where the picture's **centre**
+lands. A centre passes under either reading of the orientation, so half the fix went in and the other
+half was invisible. When a coincidence is what hid a bug, check every quantity that shares it, not the
+one you were looking at.
+
+`Ry(180°)` is not a transcription of vanilla's `Axis.ZP.rotationDegrees(180)`. Vanilla draws the map
+through a no-cull render type and lays its quad out with `v` growing **up**, where `map_quad_mesh`
+grows it down; on the `z == 0` plane every vertex of this quad lands, `Rz(180) · diag(1, -1, 1)` and
+`Ry(180)` are the same map, and only `Ry(180)` also turns the face outward. Substituting `Rz(180)`
+draws the picture upside-down *and* back-to-front.
+
+The in-plane turn is `(rotation % 4) · 90°`, not `rotation · 45°`: `ItemFrameRenderer`'s map branch is
+`rotation % 4 * 2` eighths, so a map only ever hangs at a right angle and the odd half-steps fold onto
+the even ones. An ordinary framed item does use all eight.
 
 ## How to change it, and the gotchas
 
-**`minecraft:map_id` is not decoded, and that is the one real gap.** `lodestone_model::ItemComponents`
-has no field for it, and `read_component_patch`'s `other =>` arm cannot skip an unmodelled payload — so
-a filled map's `map_id` component actually **truncates the rest of that packet**, exactly the failure
-mode the `minecraft:trim` arm was added to fix. Until it is modelled the same way:
+**`minecraft:map_id` *is* decoded; it is dropped one layer above the wire.** An earlier version of
+this section said the component was unmodelled and truncated the rest of the packet. That was true when
+it was written and is not now — v770's component-patch reader fills `ItemComponents::map_id` from the
+VarInt `MapId`, alongside `minecraft:trim`. What is missing is the *carry*:
+`extract_entity_draws` narrows a frame's `DisplayItem` stack to a bare `ResourceLocation` for
+`EntityDraw::item`, and `HeldItemEquip` narrows the hand's the same way, so neither draw site has an id
+to pass. Consequently:
 
 * `Sim::map_source` takes an `Option<i32>` and `None` means "the lowest-numbered map the server has
-  sent". Right in the overwhelmingly common one-map case, wrong picture when a player carries two.
-* Both call sites pass `None`. When the component lands they pass `Some(id)` and nothing else changes;
-  `prepare_framed_maps` then becomes a group-by-id returning one `(mesh, texture)` pair per map.
+  sent". Right in the overwhelmingly common one-map case, wrong picture when two maps are visible.
+* Both call sites pass `None`. Closing this is a change to `EntityDraw`/`HeldItemEquip` — carry the id
+  beside the item — not to `map_source`, which already takes it; `prepare_framed_maps` then becomes a
+  group-by-id returning one `(mesh, texture)` pair per map.
+
+**The integrated server has no maps at all.** `lodestone-server` contains no `MapItemSavedData`
+equivalent, no map saved-data store, and no `MAP_ITEM_DATA` producer — grep it for `map_id` and the
+only hit is a comment about weather. Vanilla pushes a framed map's contents from
+`ServerEntity.sendChanges` every ten ticks to every player in the level (and a carried one from
+`ServerPlayer`), so against a real server the contents arrive within half a second of the frame coming
+into view. In singleplayer they never arrive, and the frame is drawn wide and empty forever. That is
+a server-side feature gap, not a rendering fault, and the log line below is what tells the two apart.
+
+**Every decline is logged, once per reason.** A frame holding a map whose contents have not arrived is
+pixel-identical to a frame holding nothing, so `prepare_held_map` and `prepare_framed_maps` name their
+reason through `note_map_skip` instead of returning a bare `None`: `NoModels`, `NoSource` (the shell
+pushed no source this frame — `Sim::map_source` answers `None` off a live server), `NoContents` (no
+`MAP_ITEM_DATA` folded for this map yet) and `NoUpload`. The latch is per `(site, reason)` and is
+cleared by `note_map_drawn`, so a decline that returns after a working period is reported again rather
+than swallowed. "No framed map is in view" is deliberately *not* logged — that is every frame of
+ordinary play.
+
+**The wider frame is selected from the item id, and vanilla selects it from the data.**
+`BlockModelResolver.updateForItemFrame(model, isGlowFrame, state.mapId != null)` in vanilla, where
+`state.mapId` is set only once `level.getMapData(id)` returns something. `merge_item_frames` keys the
+`map=true` variant on `minecraft:filled_map` instead, so a framed map whose contents have not arrived
+shows the wide border with nothing inside it — which is exactly what this subsystem was reported as
+doing.
 
 **The source must be re-installed every frame.** It captures a *snapshot* of `SessionMaps`, so one
 installed at login would show a map frozen at whatever the server had sent by then and never fill in.
 
 **`stats.filled_maps_drawn` is the counter that separates the two failure modes.** A map whose grid is
 entirely `MapColor.NONE` draws a fully transparent quad, so "unexplored" and "never reached the
-pipeline" produce the same number of visible pixels.
+pipeline" produce the same number of visible pixels. `tests/framed_map_pixels.rs` uses that as an
+executed negative control: an all-`NONE` grid must land on the no-source frame's pixels **exactly**,
+which is what makes the painted arm's 11,236 px attributable to the picture rather than to the body.
 
 **Not drawn:** the `MapDecoration` icons (the player arrow, banner markers) and vanilla's
 `map_background` frame sprite. `SessionMaps` already carries the decorations, so this is an asset job —
@@ -97,3 +159,7 @@ None. No env vars, no flags. The palette is a `const` table; the sample density 
   quad draws through, and `texture::GpuAtlas` as the shape `atlas_bind_group` accepts.
 * `MAP_ITEM_DATA` decode in `crates/protocol/v770/src/adapter/inventory.rs`, which produces
   `ClientEvent::MapItemData`.
+* `lodestone_render::entity::{item_frame_facing, item_frame_facing_step}` — the single owner of "which
+  way does this frame look", shared with the frame body's own `item_frame_body_matrix` so the picture
+  and the border around it cannot disagree.
+* `tracing`, for the decline diagnostics.

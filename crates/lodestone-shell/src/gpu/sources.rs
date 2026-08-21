@@ -1089,6 +1089,18 @@ impl MapSource {
     pub(super) fn picture(&self, id: Option<i32>) -> Option<Vec<u8>> {
         self.0.as_ref().and_then(|f| f(id))
     }
+
+    /// Whether a closure has been installed at all.
+    ///
+    /// Separate from [`picture`](Self::picture) returning `None` because the two
+    /// are different defects and a map that declines to draw has to say which:
+    /// unset means the *shell* never pushed a source this frame (`Sim::map_source`
+    /// answers `None` off a live server), while installed-and-empty means no
+    /// `MAP_ITEM_DATA` has been folded for that map yet.
+    #[must_use]
+    pub(super) fn is_installed(&self) -> bool {
+        self.0.is_some()
+    }
 }
 
 impl std::fmt::Debug for MapSource {
