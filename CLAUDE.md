@@ -1184,6 +1184,24 @@ Three corollaries, all paid for (§12.160):
   *what constructs this input in production, and does it contain what my fixture contained* has to be
   asked separately, every time.
 
+  **And there is a mechanical form of that question, which is the dual of "what consumes this?":
+  for every field a draw site reads, count the production sites that assign it something *other than
+  the default*, and treat zero as the defect.** All three of those fixes were one such field.
+  `EntityDraw::item` had exactly one production assignment and it was type-gated away, so an item
+  frame's contents, every framed map and every projectile's live tint read `None` forever —
+  `prepare_framed_maps` had **never once run**, which means the framed-map pose correction landing
+  beside it was fixing geometry nobody had seen. Note "is this field ever written?" answers **yes**
+  for all of them (the drop path writes it), so the naive version of the query is the one that lies;
+  it has to be *non-default assignments, counted per production call site*, with test call sites
+  counted separately.
+
+  The other half of the lesson is where to look, because in none of the three was the defect in the
+  layer that was reported: the framed item's draw site was correct and **one clause in
+  `extract_entity_draws`** starved it; the sign parser was a correct port of its codec and the **NBT
+  layer beneath the codec** never unwrapped `TAG_List`'s `{"": element}` box; the glyph pipeline's
+  depth bias was right and two **style-flag bits** upstream were selecting the wrong pipeline
+  entirely. Trace the chain and say which link you verified.
+
   Two habits follow. **Ask what constructs the fixture, not just what is in it** — if every gate in a subsystem
   reaches the subject through one factory, a second caller of that factory's *output type* is unguarded by
   construction. And **when one field of a shared stamp is missing at a second call site, audit every field in
