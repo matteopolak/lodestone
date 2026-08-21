@@ -640,3 +640,236 @@ fn a_player_head_in_a_container_slot_reaches_pixels() {
          reason"
     );
 }
+
+/// A **live resource-pack generation bump** must not blank a container slot's
+/// special-renderer icon.
+///
+/// # Why this gate exists
+///
+/// `WindowApp::redraw`'s reload block replaces the model atlas view, the tint
+/// palette and the animation buffer with new GPU objects and re-bakes every
+/// sprite's UVs, then re-attaches the surfaces that borrow them. A pass left
+/// un-reattached does not error — wgpu resources are `Arc`-backed and a bind
+/// group holds a strong reference — it goes on sampling the dropped atlas, and
+/// wherever a new UV lands on padding it draws nothing at all. That was a real
+/// shipped bug for the flat-sprite and 3-D block-item streams.
+///
+/// No hermetic gate could see it, because every gate in this suite builds its
+/// renderer once and never reloads. This one does reload: it replays the exact
+/// sequence `redraw.rs` performs on a generation bump — `reload_block_atlas`,
+/// then `attach_items`, then `attach_item_models` — around a frame holding all
+/// three icon kinds, and requires the frame after to be **byte-identical** to
+/// the frame before.
+///
+/// # What it can and cannot see
+///
+/// The bump reloads the *same* pack, deliberately: `GpuAtlas::from_atlas` builds
+/// new GPU objects either way, so the objects are genuinely swapped while the
+/// sprite packing is held constant. That isolates the reload wiring from a
+/// repack — any pixel that moves is the wiring. The cost of holding the pack
+/// constant is that this gate cannot see a *stale-but-identical* sheet, so it is
+/// evidence about blanking and displacement, not about which pack's texels won.
+///
+/// The detector is demonstrably able to report a blank: the sibling gate's
+/// detached-pass control reads exactly 0 in this same slot rect while the
+/// attached one reads ~120.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_resource_pack_reload_does_not_blank_a_container_special_icon() {
+    const HEAD_ITEM: &str = "minecraft:player_head";
+    const HEAD_SLOT: usize = 37;
+    const FLAT_SLOT: usize = 36;
+    const CUBE_SLOT: usize = 38;
+
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!(
+            "GPU gate opted in but the vanilla pack did not load; set LODESTONE_ASSETS \
+             to a pack root with client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        )
+    });
+    let models: &BlockModels = atlas
+        .models()
+        .expect("the vanilla load must attach baked block models");
+    let item_atlas =
+        load_item_atlas().expect("the item atlas must build from the same client.jar");
+
+    let empty_menu = Menu::player();
+    let mut menu = Menu::player();
+    menu.set_slot_item(FLAT_SLOT, Some(ItemStack::new(id(SPRITE_ITEM), 1)));
+    menu.set_slot_item(HEAD_SLOT, Some(ItemStack::new(id(HEAD_ITEM), 1)));
+    menu.set_slot_item(CUBE_SLOT, Some(ItemStack::new(id(BLOCK_ITEM), 1)));
+
+    let frame = ContainerFrame::new(Some(&menu), "Inventory");
+    let base_frame = ContainerFrame::new(Some(&empty_menu), "Inventory");
+
+    let head_rect = slot_rect(&menu, &frame, HEAD_SLOT);
+    let flat_rect = slot_rect(&menu, &frame, FLAT_SLOT);
+    let cube_rect = slot_rect(&menu, &frame, CUBE_SLOT);
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let mut render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+
+    let mut renderer = ContainerRenderer::new(device, format);
+
+    // The bring-up wiring `app::lifecycle` performs, in its order.
+    let attach = |r: &mut ContainerRenderer, render: &RenderState| {
+        r.attach_items(device, queue, format, item_atlas.clone());
+        r.attach_item_models(
+            device,
+            format,
+            render
+                .model_atlas_view()
+                .expect("the vanilla path must expose a model atlas"),
+            render
+                .model_atlas_sampler()
+                .expect("the vanilla path must expose a model atlas sampler"),
+            render
+                .model_palette_buffer()
+                .expect("the vanilla path must expose a tint palette"),
+            render
+                .model_anim_buffer()
+                .expect("the vanilla path must expose animation slots"),
+        );
+    };
+    attach(&mut renderer, &render);
+
+    // `shoot` cannot borrow `render` — the reload below needs it mutably — so
+    // the depth view is resolved per call instead.
+    macro_rules! shoot {
+        ($r:expr, $f:expr, $render:expr) => {{
+            let acquired = target.acquire().expect("headless acquire");
+            clear_view(device, queue, acquired.view());
+            $r.render_with_icons(
+                device,
+                queue,
+                acquired.view(),
+                Some($render.depth_view()),
+                $f,
+                Some(models),
+                W,
+                H,
+            );
+            target.read_texels(device, queue)
+        }};
+    }
+
+    let chrome = shoot!(renderer, &base_frame, render);
+    // This frame is what latches the special pass's one lazy build
+    // (`IconRenderer::prepare_special` builds `SpecialIcons` on first use), so
+    // the bump below happens to an already-built pass — the live case.
+    let before = shoot!(renderer, &frame, render);
+
+    let sheets_before = renderer.special_icon_sheets();
+
+    // ---- the generation bump, exactly as `WindowApp::redraw` performs it ----
+    render.reload_block_atlas(device, queue, atlas.as_ref());
+    attach(&mut renderer, &render);
+    renderer.reload_special_icons();
+    let sheets_after_bump = renderer.special_icon_sheets();
+
+    let after = shoot!(renderer, &frame, render);
+    let sheets_after_frame = renderer.special_icon_sheets();
+
+    // The executed control for the sheet-count arm, and the pre-fix path
+    // verbatim: an identical renderer taking an identical bump with
+    // `reload_special_icons` omitted. Its special pass is never dropped, so its
+    // sheets are still the ones decoded before the bump — a perfectly valid map
+    // belonging to the *previous* pack. That is the defect this gate exists for,
+    // exhibited rather than argued, and it is what makes the `== 0` assertion
+    // above discriminating instead of decorative.
+    let mut unreloaded = ContainerRenderer::new(device, format);
+    attach(&mut unreloaded, &render);
+    let _ = shoot!(unreloaded, &frame, render);
+    let stale_before = unreloaded.special_icon_sheets();
+    render.reload_block_atlas(device, queue, atlas.as_ref());
+    attach(&mut unreloaded, &render);
+    let stale_after = unreloaded.special_icon_sheets();
+
+    let head_before = diff_in(&before, &chrome, head_rect);
+    let head_after = diff_in(&after, &chrome, head_rect);
+    let flat_before = diff_in(&before, &chrome, flat_rect);
+    let flat_after = diff_in(&after, &chrome, flat_rect);
+    let cube_before = diff_in(&before, &chrome, cube_rect);
+    let cube_after = diff_in(&after, &chrome, cube_rect);
+    let moved = before
+        .iter()
+        .zip(&after)
+        .filter(|(a, b)| a != b)
+        .count();
+
+    eprintln!("=== container icons across a resource-pack generation bump ===");
+    eprintln!("head slot  {HEAD_SLOT}  before = {head_before}  after = {head_after}");
+    eprintln!("flat slot  {FLAT_SLOT}  before = {flat_before}  after = {flat_after}");
+    eprintln!("cube slot  {CUBE_SLOT}  before = {cube_before}  after = {cube_after}");
+    eprintln!("whole-frame bytes changed by the bump = {moved}");
+    eprintln!("special sheets: before = {sheets_before}, immediately after the bump \
+               = {sheets_after_bump}, after the next frame = {sheets_after_frame}");
+    eprintln!("control (no reload_special_icons): {stale_before} -> {stale_after}");
+
+    assert!(
+        sheets_before > 0,
+        "the special pass must have built itself and decoded sheets on the frame \
+         before the bump, or every sheet assertion below is vacuous"
+    );
+    assert_eq!(
+        sheets_after_bump, 0,
+        "a generation bump must DROP the special pass, so the next frame rebuilds \
+         its block-entity sheets against the current pack stack. It still holds \
+         {sheets_after_bump} sheets, which are the previous pack's — this pass owns \
+         its textures rather than borrowing them, so a re-attach cannot fix it and \
+         nothing else ever clears its one-shot `special_tried` latch"
+    );
+    assert_eq!(
+        sheets_after_frame, sheets_before,
+        "...and the very next frame carrying a special icon must rebuild it. \
+         {sheets_after_frame} against {sheets_before} before the bump means the drop \
+         was not paired with a rebuild, which would leave every special icon blank"
+    );
+    assert_eq!(
+        (stale_before, stale_after),
+        (sheets_before, sheets_before),
+        "the control must exhibit the defect: with `reload_special_icons` omitted, \
+         the bump leaves the pass holding its pre-bump sheets ({stale_before} -> \
+         {stale_after}). If this ever reads 0 the two arms have stopped differing \
+         and the assertion above is no longer evidence of anything"
+    );
+
+    assert!(
+        head_before > 0,
+        "the pre-bump frame must draw the head, or this gate is measuring a blank \
+         against a blank; got {head_before}"
+    );
+    assert!(
+        head_after > 0,
+        "a resource-pack generation bump blanked the container slot holding a player \
+         head: {head_before} px before, {head_after} after. The special stream is not \
+         being re-attached by the reload path"
+    );
+    assert_eq!(
+        head_after, head_before,
+        "the head's icon must be unchanged across a bump that reloads the same pack"
+    );
+    assert_eq!(
+        (flat_after, cube_after),
+        (flat_before, cube_before),
+        "the flat-sprite and 3-D block streams must be unchanged across the bump too \
+         — if one of these moved, the reload wiring regressed for a stream that was \
+         explicitly fixed"
+    );
+    assert_eq!(
+        moved, 0,
+        "a bump that reloads the *same* pack must be a whole-frame no-op; {moved} \
+         bytes changed, which means some pass is drawing from different objects \
+         than it was before"
+    );
+}

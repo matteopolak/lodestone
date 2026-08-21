@@ -438,6 +438,28 @@ impl ContainerRenderer {
         );
     }
 
+    /// Drop the special-renderer icon pass so the next frame rebuilds it against
+    /// the current pack stack — the reload-time counterpart of
+    /// [`Self::attach_items`]/[`Self::attach_item_models`], and the sibling of
+    /// `HudRenderer::reload_special_icons`. Both screens keep their own
+    /// `IconRenderer`, so a reload has to reach both. See
+    /// `crate::hud::item_icon::IconRenderer::reload_special` for why this pass
+    /// needs a rebuild where the other two streams need a re-attach.
+    pub fn reload_special_icons(&mut self) {
+        self.icons.reload_special();
+    }
+
+    /// How many block-entity sheets the special-renderer icon pass has loaded —
+    /// `0` until the first frame containing one (the pass is built lazily) and
+    /// `0` forever on a jar-less run. The container sibling of
+    /// `HudRenderer::special_icon_sheets`, and it exists for the same reason:
+    /// a pixel count alone cannot tell "the pass was rebuilt" from "the pass was
+    /// never dropped", and a reload gate needs exactly that distinction.
+    #[must_use]
+    pub fn special_icon_sheets(&self) -> usize {
+        self.icons.special_sheet_count()
+    }
+
     /// Draws the container overlay over the current frame, with **no** item
     /// icons: slot contents fall back to the colour swatch. The plain entry
     /// point, kept so existing callers and the headless gates are unchanged.

@@ -6429,6 +6429,15 @@ impl HudRenderer {
         self.icons.special_sheet_count()
     }
 
+    /// Drop the special-renderer icon pass so the next frame rebuilds it against
+    /// the current pack stack — the reload-time counterpart of
+    /// [`Self::attach_items`]/[`Self::attach_item_models`], which belongs in the
+    /// same reload block they do. See `item_icon::IconRenderer::reload_special`
+    /// for why this pass needs a *rebuild* where those two need a re-attach.
+    pub fn reload_special_icons(&mut self) {
+        self.icons.reload_special();
+    }
+
     /// Draw the HUD over the current frame contents (a `Load` pass, no depth).
     ///
     /// Convenience wrapper over [`render_with_item_models`](Self::render_with_item_models)

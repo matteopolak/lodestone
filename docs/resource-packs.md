@@ -162,6 +162,48 @@ So: **whenever a GPU pass borrows another renderer's atlas/buffer rather than
 owning it, its re-attach belongs in this block**, and a new borrower must be added
 here in the same commit that adds the borrow. Nothing is red when it is not.
 
+### Owning a resource is not an exemption — it is the *other* failure
+
+The rule above is about borrowers, and reading it as "an owner is fine" is wrong.
+It was: the **special-renderer** icon pass (chest, shulker box, banner, shield,
+skull, player head — `IconPart::Special`, the third GUI icon stream) owns
+everything it draws with, its own struct doc says so, and it was still wrong
+across a reload. It decodes its block-entity sheets through
+`crate::resources::load_block_entity_textures`, which reads the pack stack **live
+at the moment of the call** — and that call happens exactly once, from a lazy
+build on the first frame carrying a special icon.
+
+So the two failures are mirror images, and only one of them is about dropped
+objects:
+
+| the pass | what a bump does to it | the fix |
+|---|---|---|
+| **borrows** (flat sprites, 3-D block items) | keeps sampling a **dropped** atlas with newly-repacked UVs; blank wherever a UV lands on padding | re-attach |
+| **owns** (special-renderer icons) | keeps sampling a perfectly **valid** sheet belonging to the *previous* pack | drop it and let the lazy build re-run |
+
+The owning case has a second, worse mode that the borrowing case does not: the
+lazy build is **latched**. `IconRenderer`'s `special_tried` was set on that one
+attempt and nothing ever cleared it, so if the build returned `None` that once —
+no pack stack, or no sheet decoded — the whole stream stayed dark for the rest of
+the process and no later reload could recover it. `IconRenderer::reload_special`
+clears the latch, which is what makes a failed first build recoverable at all.
+
+**A pass built lazily belongs in the reload block just as much as one built at
+bring-up**, and it will not look like it does: there is no `attach_*` call for it
+to sit beside, which is precisely why it was missed.
+
+`gpu/block_entities.rs`'s **world** block-entity pass reads the same loader and is
+built once in `RenderState::new`, which `reload_block_atlas` does not rebuild — so
+it carries the owning-side defect too. Not yet fixed: it needs its sheets rebound
+rather than a latch cleared.
+
+No hermetic gate can see any of this — every gate builds its renderer once and
+never reloads. `container_item_pixels.rs`'s
+`a_resource_pack_reload_does_not_blank_a_container_special_icon` is the one that
+does, and it carries a control arm that omits the drop so the defect is exhibited
+rather than argued (sheet count `84 -> 84` un-reloaded, against `84 -> 0 -> 84`
+with the fix).
+
 ### Single winner vs. merged stack: which resource types get which
 
 `ResourceManager` offers two lookups (`crates/lodestone-assets/src/manager.rs`):

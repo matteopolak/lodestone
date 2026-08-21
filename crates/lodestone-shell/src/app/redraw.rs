@@ -223,6 +223,36 @@ impl WindowApp {
                     }
                 }
             }
+            // The **special-renderer** icon pass (chest, shulker box, banner,
+            // shield, skull, player head) — the third icon stream, and the one
+            // the four blocks above do not reach. It is not re-attached, it is
+            // *dropped*: unlike the flat and 3-D streams it borrows nothing and
+            // owns its own block-entity sheets, decoded from the pack stack that
+            // was live on the frame it first built itself. So the failure here is
+            // not "sampling a dropped atlas" — it is a perfectly valid sheet that
+            // belongs to the *previous* pack, so a pack restyling a chest, a
+            // shulker box, a banner or a skull never reached an inventory slot.
+            //
+            // The world's own block-entity pass reads the same loader and is
+            // built once in `RenderState::new`, which `reload_block_atlas` does
+            // not rebuild — so it has this defect too. That one is not fixed
+            // here: it is a different owner and needs its sheets rebound rather
+            // than a latch cleared.
+            //
+            // It sits outside the `format`/`gpu` guards above because it needs
+            // neither: the rebuild happens lazily on the next frame carrying a
+            // special icon, and that is also what makes a *failed* first build
+            // recoverable — `special_tried` latched on that one attempt and
+            // nothing else ever cleared it, so a stream that came up dark stayed
+            // dark for the whole process.
+            //
+            // Both screens keep their own `IconRenderer`, so both are reached.
+            if let Some(hud) = self.hud.as_mut() {
+                hud.reload_special_icons();
+            }
+            if let Some(container) = self.container.as_mut() {
+                container.reload_special_icons();
+            }
         }
         // Vanilla's eleven `soundSource.*` sliders, pushed beside View Bobbing and
         // **before** `draw_menu`'s early return on purpose: the sliders live on the

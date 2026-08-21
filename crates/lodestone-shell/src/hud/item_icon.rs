@@ -2090,6 +2090,40 @@ impl IconRenderer {
         self.special.as_ref().map_or(0, SpecialIcons::sheet_count)
     }
 
+    /// Drop the special-renderer pass so the next frame that needs one rebuilds
+    /// it against the **current** pack stack. The reload-time sibling of
+    /// [`Self::attach_items`]/[`Self::attach_item_models`], and it has to exist
+    /// separately from them because this pass is *not* attached — it builds
+    /// itself lazily on first use, off `queue`, which those two do not have.
+    ///
+    /// # Why a reload needs this at all
+    ///
+    /// [`SpecialIcons`] owns everything it draws with (its own doc says so):
+    /// the block-entity sheets come from `crate::resources::load_block_entity_textures`,
+    /// which reads the pack stack *live* at the moment of the call. So unlike
+    /// the flat and 3-D item streams — whose defect on a resource-pack
+    /// generation bump was sampling a **dropped** atlas — this pass keeps
+    /// sampling a perfectly valid one that simply belongs to the *previous*
+    /// pack. A pack that restyles a chest, a shulker box, a banner or a skull
+    /// therefore reached the world's own block-entity pass and never reached a
+    /// GUI slot, with nothing red and nothing dropped.
+    ///
+    /// The second reason is the one that can go dark rather than merely stale.
+    /// The lazy build runs **once** and latches: `special_tried` was set on the
+    /// first frame carrying a special icon and never cleared, so if
+    /// [`SpecialIcons::new`] returned `None` that one time — no pack stack, or
+    /// no sheet decoded — the whole stream stayed dark for the rest of the
+    /// process and no later reload could recover it. Clearing the latch is what
+    /// makes that recoverable.
+    ///
+    /// Cheap for the same reason the lazy build is affordable: nothing is
+    /// rebuilt here, and the next rebuild only happens on a frame that actually
+    /// carries a special icon.
+    pub(crate) fn reload_special(&mut self) {
+        self.special = None;
+        self.special_tried = false;
+    }
+
     /// Attach the flat item-sprite [`ItemAtlas`] so slots draw real item icons.
     /// Uploads the atlas texture, builds a textured pipeline, and binds it.
     pub(crate) fn attach_items(
