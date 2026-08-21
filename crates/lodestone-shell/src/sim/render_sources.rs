@@ -585,15 +585,22 @@ impl Sim {
     ///
     /// # Why the id is optional, and what to change when it stops being
     ///
-    /// **`minecraft:map_id` is not decoded**, so a `filled_map` in hand or in a
-    /// frame carries no id we can read: `ItemComponents` has no field for it and
-    /// `read_component_patch`'s `other =>` arm cannot skip its payload, so the
-    /// component actually truncates the rest of that packet. Until it is modelled
-    /// alongside `minecraft:trim`, `None` means "the lowest-numbered map the
-    /// server has sent" — exactly right in the overwhelmingly common
-    /// one-map-in-inventory case, and the wrong picture when a player carries two.
-    /// The moment the component decodes, callers pass `Some(id)` and this needs no
-    /// change at all.
+    /// `minecraft:map_id` **is** decoded — v770's component-patch reader fills
+    /// `ItemComponents::map_id` from the VarInt `MapId` — but it is dropped
+    /// before it reaches a draw site. `extract_entity_draws` converts a frame's
+    /// `DisplayItem` stack down to a bare `ResourceLocation` for
+    /// `EntityDraw::item`, and `HeldItemEquip` carries the same narrowed id for
+    /// the hand, so neither caller has an id to pass. (An earlier version of this
+    /// doc said the component was undecoded and truncated the packet; that was
+    /// true when it was written and is not now — the decode landed with
+    /// `minecraft:trim`.)
+    ///
+    /// So `None` means "the lowest-numbered map the server has sent" — exactly
+    /// right in the overwhelmingly common one-map case, and the wrong picture
+    /// when two different maps are visible at once. Closing it is a change to
+    /// `EntityDraw`/`HeldItemEquip` (carry the id beside the item), not to this
+    /// function: the moment a caller has one it passes `Some(id)` and this needs
+    /// no change at all.
     #[must_use]
     pub fn map_source(
         &self,
