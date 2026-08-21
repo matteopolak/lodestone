@@ -389,6 +389,23 @@ fn handle_player_position(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
     let relatives = reader.i32().map_err(dec_err)?;
     reader.ensure_empty().map_err(dec_err)?;
 
+    // This echo is unconditional and per-packet — there is no pending/latched
+    // teleport-id state to get stuck here (see this crate's own doc on
+    // `encode_teleport` for why the server side tracks no id either). If the
+    // real server keeps rejecting movement after a transfer/reconfigure, this
+    // line having fired with the same `id` the server just sent rules the
+    // client's half of teleport confirmation out — look at whether the write
+    // actually reached the wire (a `Directive::Send` failure stops the
+    // session; see `Driver::execute`) or at the server's own bookkeeping.
+    tracing::info!(
+        target: "net",
+        id,
+        x, y, z,
+        yaw, pitch,
+        relatives,
+        "PLAYER_POSITION received; echoing ACCEPT_TELEPORTATION with the same id"
+    );
+
     Ok(vec![
         send(
             play::serverbound::ACCEPT_TELEPORTATION,
