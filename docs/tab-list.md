@@ -174,6 +174,28 @@ zero as the background approaches white") — the "fixed point at black and
 white" phrasing describes a different, incorrect shape for this pair and
 should be read as superseded by that clause.
 
+**Re-run, unmodified, while investigating the owner's "background reads too
+light" report.** `hud_flat_colour_blend_matches_vanilla_gamma_on_a_raw_target`
+still passes and the sweep is unchanged in shape: at `bg=0` the RAW target
+matches the predicted vanilla byte exactly (32 vs. predicted 32.00) while the
+CORRECTED (today's production sRGB) target reads 99 — 67/255 too light, the
+same figure recorded above — shrinking to a 1/255 gap at `bg=224` and 0 at
+`bg=255`. The wiring described two paragraphs up (a `raw_view` threaded
+through `render_with_item_models`'s `hud-colour-pass` from
+`app/redraw.rs`, and `HudRenderer::new`'s `color_format` becoming the raw
+format at its `app/lifecycle.rs` call site) is still open — confirmed by
+reading `app/redraw.rs`'s own `hud_raw_view` comment, which documents a prior
+attempt at this that was reverted because it changed `HudRenderer::new`'s
+`color_format` globally rather than only for `self.pipeline`, breaking every
+other pipeline sharing that render pass (item icons, air bubbles, the
+inventory backdrop). **`hud.wgsl` itself needs no change** — the gate builds
+it unmodified and it already reproduces vanilla's blend to the byte once
+given a raw target; the defect is entirely which view/pipeline the flat-colour
+draws land on, which is `app/redraw.rs` + `app/lifecycle.rs` + wherever
+`render_with_item_models` composes the pass (`gpu/frame.rs`/`gpu/state.rs`),
+none of which `tablist.rs`/`hud.wgsl`/the tab-list draw path in `hud.rs` can
+reach without touching a shared pipeline other in-flight agents own.
+
 ## How to change it, and the gotchas
 
 **There is no player head, and on every server we can host that is vanilla's own
