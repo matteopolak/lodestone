@@ -824,6 +824,89 @@ front-only and back-only text produced pixel-identical frames
 kept passing, confirming the failure was specific to the neutered line and not a broken harness. The
 line was restored and the suite re-run green before anything was committed.
 
+### Proven again, end to end, against a real server — and what that gate can see that no other can
+
+`sign_text_pixels.rs` above is hermetic: it builds its own `SignSpawn` and renders it against an
+empty world. Both halves of that are blind spots, and each one hid a different thing.
+
+`crates/lodestone-shell/tests/live_sign_text_wire.rs` closes the first half — it joins the creative
+oracle, reads the sign block entities out of the wire-decoded `World`, and requires
+`block_entities::sign_spawns` to produce real spans. `crates/lodestone-shell/tests/live_sign_text_pixels.rs`
+closes the seam between the two: it installs the **unmodified** `SignSpawn` values that gather
+returned and renders them through the real `RenderState::render`. Its control is not "no source
+installed" — that only proves `RenderState` has no default sign source — but the *same live spawn
+with only its words removed*, so what survives the subtraction is the text the server actually sent.
+
+Measured on 26.2, all four sign families placed over RCON with one red line, one bold line, one
+collapsed-string line and one empty:
+
+| family | block | result |
+|---|---|---|
+| standing | `oak_sign[rotation=0]` | 3 front spans, red `0xff5555` + bold + plain |
+| wall | `oak_wall_sign[facing=south]` | 3 front spans |
+| hanging | `oak_hanging_sign[attached=false,rotation=0]` | 3 front spans |
+| wall hanging | `oak_wall_hanging_sign[facing=south]` | 3 front spans |
+
+and through the renderer: 1,236 sign-text vertices, 221 changed px, bbox `x142..176 y108..132`,
+inside the projected text plane `x120..200 y107..144`.
+
+**The second arm is the one that matters, and it is new.** A sign's board is not drawn by the sign
+pass at all — `StandingSignRenderer` and `HangingSignRenderer` declare no model, so the board is
+ordinary block-model geometry the terrain mesher produces. "The board draws, the text does not" is
+therefore a claim about the text losing to the board, and **no gate here had ever put a board in the
+depth buffer underneath its text**. The separation is small enough to be worth measuring rather than
+assuming: `template_sign_rot_0`'s board spans `z ∈ [7.33333, 8.66667]/16` and
+`StandingSignRenderer.TEXT_OFFSET` puts the text plane at `0.5 + 0.046666667`, i.e. **0.005 blocks —
+5 mm** — outside the front face, and this project's depth is forward `[0, 1]` rather than vanilla's
+reversed-Z. So `a_live_signs_text_survives_its_own_board_in_the_depth_buffer` meshes and uploads the
+live world's own sections around the sign first. Result: 38,528 px of board, and the text survives
+at 221 px.
+
+Two things that gate measured on the way there, both of which read as product bugs and were not:
+
+* **It reproduced the owner's exact symptom** — 38,528 px of board, 1,236 vertices submitted, **0 px
+  of text surviving** — with the camera on the sign's *back* side. That is correct behaviour seen
+  from the wrong place: `RotationSegment` 0 is angle 0, so `textTransformation` applies no rotation
+  and `TEXT_OFFSET`'s `+z` puts the **front** text plane on the `+Z` (south) face, while `Camera`'s
+  yaw 0 faces `+Z` — a camera north of the sign is looking at its back. The reason this is worth
+  writing down is that **the sky-only arm passes from either side**: with no board there is nothing
+  for far-side text to hide behind. A hermetic sign gate structurally cannot tell "the text draws"
+  from "the text draws where the board would have eaten it".
+* A freshly uploaded section starts mid-fade, so 41 live sections uploaded and painted **0 px**
+  until `update_animation` advanced past the fade. The premise check ("the board must actually be in
+  the frame") is what caught it; without that check the gate would have been a second copy of the
+  sky-only one and green.
+
+### When a sign is blank in real play: `RUST_LOG=info,signs=debug`
+
+`crates/lodestone-shell/src/sign_diagnostics.rs` makes a blank sign say why, per block position,
+instead of drawing an empty board. It is off unless the `signs` target is enabled, and rate-limited
+by a call counter (not a clock — this crate links into the wasm bundle, where `Instant::now()`
+traps).
+
+It scans a small box around the eye for sign block **states**, deliberately state-first rather than
+record-first: the hypothesis a record-walk structurally cannot see is *"the block-entity record never
+arrived"*, and `chunk.block_entities` has nothing to iterate in that case. The verdicts:
+
+| line | means |
+|---|---|
+| `no-block-entity-record` | the state is a sign and the chunk carried no record for it |
+| `block-entity-type-mismatch` | a record exists carrying some other block's type id |
+| `record-nbt-is-TAG_End` | the record is the one `World::sync_block_entity` synthesizes from a bare state write |
+| `no-front_text-or-back_text` | a real compound with neither key, dumped verbatim |
+| `parsed-zero-spans` | the parse produced nothing; the line carries a bounded rendering of the real NBT, so an unmodelled component kind (`translatable`, `selector`, `score`, `keybind`, `nbt`, `object`) is legible in the line itself |
+| `no-sign-kind-or-orientation` | text parsed but the block state resolves to no renderer or placement |
+| `ok front N back M` | spans exist — the defect is below the supply |
+
+A decode error is deliberately not a verdict: `LevelChunkWithLight` runs `ensure_empty` over the
+whole packet, so malformed sign NBT rejects the entire chunk and presents as missing terrain.
+
+`LODESTONE_SIGN_DIAG_RADIUS` (default 24 blocks) and `LODESTONE_SIGN_DIAG_INTERVAL` (default 120
+calls, one per frame) tune it. The instrument has its own emission control — one gate drives the real
+`report` entry point under a captured subscriber and requires a line, a second requires silence with
+the target off — because a guard nobody has watched fire has measured nothing.
+
+
 ## Bell
 
 Bell is the **partial**-hole case, unlike chest/skull's total one. `assets/minecraft/models/block/bell.json`
