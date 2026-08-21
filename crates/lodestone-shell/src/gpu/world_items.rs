@@ -602,11 +602,19 @@ impl RenderState {
     /// # Which item id, and why the wire is preferred over the table
     ///
     /// `ThrowableItemProjectile`, `Fireball` and `EyeOfEnder` all sync their stack
-    /// through `DATA_ITEM_STACK` — the **same** `ITEM_STACK` serializer at the same
-    /// metadata index a dropped item uses, so `EntityDraw::item` is already
-    /// populated for a projectile with no new plumbing (`apply_entity_metadata`
-    /// inserts `DisplayItem` for any entity type, not just `item`). That value is
+    /// through `DATA_ITEM_STACK` — the **same** `ITEM_STACK` serializer a dropped
+    /// item uses (the decode keys on the serializer, not the index, and
+    /// `apply_entity_metadata` inserts `DisplayItem` for any entity type), so
+    /// `EntityDraw::item` carries a projectile's real stack. That value is
     /// authoritative and takes precedence.
+    ///
+    /// **It did not, for as long as this comment claimed it did.**
+    /// `extract_entity_draws` narrowed the recorded stack to
+    /// `ITEM_ENTITY_TYPE_PATH`, so this arm never once matched in production and
+    /// every projectile fell through to the table default below — which is why
+    /// a splash potion drew the item definition's plain colour rather than its
+    /// own mix. The fallback is what made that invisible: the draw was never
+    /// missing, only wrong.
     ///
     /// [`ThrownItem::item`] is the fallback for the case the wire cannot cover:
     /// vanilla only marks the field dirty when a constructor *sets* it, so a

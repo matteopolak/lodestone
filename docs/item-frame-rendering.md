@@ -147,12 +147,14 @@ frame drew long before its rotation did.
   plane's own local `z` (`translate(0, 0, 0.4375)` then `translate(0, 0, −1)` at the `0.0078125`
   map scale). The previous hand-picked `0.03` was 1/1000 of a block *behind* the `item_frame_map`
   model's back plate — harmless for exactly as long as nothing drew that plate.
-* **Three of the four producers read `EntityDraw::item`, and for their whole existence that field
-  was `None` for an item frame.** `extract_entity_draws` narrowed the recorded stack with
+* **Three of the four producers above read `EntityDraw::item`, and for their whole existence that
+  field was `None` for an item frame.** `extract_entity_draws` narrowed the recorded stack with
   `(kind.0.as_ref() == ITEM_ENTITY_TYPE_PATH).then(..)`, so `merge_framed_items`,
-  `prepare_framed_maps` and `merge_thrown_item`'s wire-preferred arm all read `None` forever —
-  `prepare_framed_maps` had **never once run**, which means the `framed_map_pose` correction that
-  landed with it was fixing geometry no player had seen. `ItemStacks` is only written for an entity
+  `prepare_framed_maps`, `framed_special_item` and (outside this family)
+  `merge_thrown_item`'s wire-preferred arm all read `None` forever. The one producer that does **not**
+  read it is `merge_item_frames`, the body — which is exactly why the symptom was reported as "the
+  frame draws and its contents do not". `prepare_framed_maps` had **never once run**, which means the
+  `framed_map_pose` correction that landed with it was fixing geometry no player had seen. `ItemStacks` is only written for an entity
   whose metadata carried the `ITEM_STACK` serializer, so the type test bought nothing; every draw
   site gates on its own type anyway. **If you add a fifth producer, check what supplies its input
   and count the production sites that assign that input a non-default value** — the pixel gates
