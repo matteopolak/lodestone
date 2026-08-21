@@ -106,6 +106,12 @@ All four *checks* are required, and each catches a class the others structurally
   on by default nothing else proves the shell compiles with **no** version family — the entire point of
   the version seam, and the only thing stopping a hardcoded `v770` dependency creeping into shell code.
   Its failure mode is architectural rather than a broken test, so nothing else will catch it.
+- **`just wasm-check` needs LLVM, and under this workspace's default backend it fails in a way that reads
+  as a real break.** Cranelift is the debug backend here and **cannot target `wasm32`**, so it reports the
+  refusal as a per-dependency compile error — a wall of errors naming crates you did not touch. Run it as
+  `CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm just wasm-check`, which reports PASS with all confinement rules
+  green. A wasm-check failure is therefore two claims, not one: check the backend before believing the
+  browser is broken.
 - **There is a fifth class, and none of the four sees it: `just wasm-check`.** It lives in CI rather than in
   `just health` (a full workspace build is too slow to fold into the command everyone runs), so **all four
   above can be green while `wasm32-unknown-unknown` is broken** — measured: a shutdown-signal fix gated a
