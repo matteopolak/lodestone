@@ -599,11 +599,18 @@ and nothing draws.
 
 Hermetic:
 
-* `lodestone-assets` `equipment` module (11 tests) — the two inflations, the
+* `lodestone-assets` `equipment` module (12 tests) — the two inflations, the
   `-0.1` leg override on baked geometry, leggings-inside-chestplate, per-slot
   part retention, hat retention only on the helmet, the 64×32 sheet, the item
   table's closure and its slot/suffix agreement, the nine non-armour head items,
-  leather-only dyeability, and texture paths.
+  leather-only dyeability, texture paths, and — closing an owner report of
+  z-fighting between worn armour and the skin's own second layer —
+  `player_overlay_and_armour_inflations_differ`: the player skin's own
+  overlay-layer constants (`crate::entity::PLAYER_OVERLAY_INFLATION`/
+  `PLAYER_HAT_OVERLAY_INFLATION`, transcribed from `HumanoidModel.OVERLAY_SCALE`/
+  `HAT_OVERLAY_SCALE`) can never numerically coincide with either armour
+  inflation, each side named independently from its own vanilla class rather
+  than derived from the other.
 * `lodestone-render` `entity` — every slot attaches to every armour-wearing
   corpus rig; a pig attaches nothing *with* the control that its `body`/`head`
   lookup would have succeeded; every armour matrix is a positive-determinant
