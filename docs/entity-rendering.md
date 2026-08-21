@@ -943,6 +943,90 @@ current animation frame — no light/tint/overlay word, since vanilla's flame
 never varies any of those), is why it needs its own vertex entry point
 (`vs_main_flame`) rather than sharing `vs_main`'s.
 
+### Entity shadows
+
+Owner report: "entity shadows are missing" (also filed as the video option
+appearing unimplemented). There was no shadow machinery anywhere on this
+tree before this landed — no `EntityShadow` type, no quad/decal geometry, no
+shader — confirmed by a search across `lodestone-shell`/`lodestone-render`
+before writing any of it, per this repo's "check for existing machinery
+first" rule.
+
+**The algorithm**, transcribed from `EntityRenderer.extractShadow`/
+`extractShadowPiece` (`.cache/mc/26.2/client-src`): for each shadow-casting
+entity, scan the block column(s) under it out to its shadow radius, and for
+every candidate Y layer from `floor(feet.y - depth)` up to `floor(feet.y)`
+(`depth` shrinking with distance-to-camera and light, capped at the radius),
+ask whether the block *below* that layer is solid ground. If so, emit a flat
+quad at that layer's floor, sized to the block, textured with
+`textures/misc/shadow.png` (a radial gradient) at a UV computed from the
+piece's offset from the entity and the entity's own radius — so a wide
+shadow radius spreads one gradient sprite across several quads rather than
+tiling it. Alpha comes from `powerAtDepth * 0.5 * Lightmap.getBrightness(..)`,
+clamped to `[0, 1]`, and a piece is skipped outright if the local raw
+brightness is `<= 3`. `RenderState::prepare_shadows`
+(`gpu/entity_passes.rs`) is the whole implementation; `push_shadow_quad`
+builds the two triangles.
+
+**Two disclosed simplifications**, both because a byte-perfect port needs
+data this pass does not have cheap access to:
+
+* **One flat shadow radius (`0.5`) and strength (`1.0`) for every entity**,
+  rather than vanilla's ~90 individual per-species registrations
+  (`EntityRenderers.java`: a chicken is `0.15`, a cow `0.7`, a boat `0.8`…).
+  Every entity casts a shadow sized for a roughly player-sized mob.
+* **Ground detection is "does the collision shape fill the whole cell",
+  not the block's real sub-shape.** Vanilla paints a shadow shaped like the
+  slab or stair it sits on; this pass gates on
+  `lodestone_data::collision_shapes::collision_boxes` covering the full unit
+  cube and, for a slab/stair/fence/carpet/etc., draws **nothing at that
+  layer** — the per-column scan then keeps going downward through the rest
+  of its Y range, so the entity's shadow either lands one cell lower on the
+  next full block underneath, or is absent if none is within `depth`. An
+  edge (the entity standing half over open air) is unaffected: each column
+  is independent, so the columns with ground still draw and the columns
+  without still do not — only an individual non-full piece's *shape* is
+  approximated away, not the coverage pattern.
+
+**The ground and light queries** reuse existing seams rather than adding new
+world-crossing plumbing beyond one: `RenderState::set_entity_light_source`
+(already installed for mob lighting) is reused as-is to sample brightness at
+each candidate cell, and a new, matching `ShadowGroundSource`
+(`gpu/sources.rs`) — `Fn([i32; 3]) -> Option<u32>`, a raw block-state id —
+is installed the same way, at connect time, on **both** independent connect
+paths (`app/session.rs::install_shadow_ground_source`, called from
+`connect_to`, and `app/lifecycle.rs`'s own `--connect` path, which already
+duplicates `set_entity_light_source`/`set_sky_darken_source` for the same
+structural reason). The closure is just `NetClient::block_at` through a
+cloned `SharedHandle`, the same "hand out a cheap `'static` handle" shape
+`entity_light_at` already uses.
+
+**The pipeline** does *not* go through `build_entity_pipeline` the way the
+mob/armour/banner/flame/orb/water-mask pipelines do: every one of those
+shares a static `ModelVertex` mesh plus a per-instance transform buffer, and
+a shadow piece has no shared mesh to instance — each one is unique,
+positioned and sized fresh every frame. `EntityPipeline::shadow_pipeline`
+instead takes a single plain (non-instanced) `ShadowVertex` buffer (position,
+UV, per-piece alpha), rebuilt and re-uploaded whole each frame — the same
+shape a debug-line or block-outline draw already uses elsewhere in this
+engine. It still reuses the entity pipeline's own camera/texture bind-group
+layouts, so the pass spends the same two groups every other entity pass
+does. State is vanilla's own `RenderPipelines.ENTITY_SHADOW`
+(`ColorTargetState(TRANSLUCENT)`, `DepthStencilState(GREATER_THAN_OR_EQUAL,
+writeDepth = false)`), translated through this engine's `[0,1]` depth the
+same way every other entity pipeline here does (`GREATER_THAN_OR_EQUAL` →
+`LessEqual`). Fog is **not** applied (vanilla's shadow render type inherits
+it) — a shadow piece sits within a few blocks of its casting entity and the
+radius is capped at 32, so the visible cost is a shadow that stays a hair
+too dark at the extreme edge of render distance, never a wrong one up close.
+
+The `entityShadows` video option (`menu/options.rs`'s `LiveOption::
+EntityShadows`) gates the whole pass — `RenderState::
+set_entity_shadows_enabled`, polled every frame in `app/redraw.rs` beside
+`Sim::set_cutout_leaves` — and, like every other pipeline here, `shadow_texture`
+is `None` without a vanilla pack, in which case the pass draws nothing rather
+than a synthetic placeholder.
+
 ## How to change it
 
 * **New mob ported.** Add the `EntityModelEntry` to
