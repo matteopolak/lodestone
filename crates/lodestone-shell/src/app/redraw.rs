@@ -1512,6 +1512,11 @@ impl WindowApp {
         // `frame.crosshair` — see that field's doc for why the crosshair
         // hides behind an open screen but the hotbar does not (issue #61).
         hud_frame.attack_cooldown = Some(self.sim.attack_strength_scale());
+        // Which of vanilla's three placements draws that value — `options.
+        // attackIndicator`. Copied per frame off `MenuNav::options`, the same
+        // poll shape the eight chat options use, so the two `hud.rs` draw sites
+        // pick it up the frame after the settings row is cycled.
+        hud_frame.attack_indicator = self.nav.options().attack_indicator;
         // The 3-D block-item icons need the baked model set (for geometry) and a
         // depth attachment (so the near faces of the mini-block win over the far
         // ones). Both are `None` on the demo path, which degrades to flat sprites.

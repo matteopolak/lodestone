@@ -130,7 +130,17 @@ consumer rather than inferred from the group it sits in:
 **`entityShadows` and `weatherRadius` have both left kind C** and they left it for
 opposite reasons, which is why they are named here rather than quietly deleted from
 the row above. `entityShadows`' consumer genuinely did not exist and was built
-(`RenderState::prepare_shadows`). `menuBackgroundBlurriness` left it the same way `weatherRadius` did: the blur
+(`RenderState::prepare_shadows`). `attackIndicator` is a third shape again, and the one worth reading: **two of
+its three states already had a consumer and the third did not.** The crosshair
+strength bar drew unconditionally, i.e. the client behaved as though the option
+were pinned to `CROSSHAIR` — and the draw site's own comment said exactly that,
+naming the missing toggle. Wiring the row therefore closed `OFF` and `CROSSHAIR`
+for free and needed a **new** draw for `HOTBAR` (18x18, bottom-up fill, beside
+the hotbar; the crosshair's is 16x4 left-to-right). Both draw sites test for
+their own variant rather than for "not off", which is vanilla's shape and what
+`attack_indicator_pixels.rs`' new controls assert.
+
+`menuBackgroundBlurriness` left it the same way `weatherRadius` did: the blur
 pass was built, pixel-gated end to end, and ran at the frozen
 `menu::render::blur::BLUR_RADIUS`, whose own module doc named this row as the
 wiring it was waiting for and gave a reason that had already expired
