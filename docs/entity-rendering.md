@@ -1433,6 +1433,77 @@ nothing consumes them.
   `left: 6, right: 0` for both animals, since every quadruped shares the exact
   part names wool looks up.
 
+## The reconstructed normal is model-local, and why that matters
+
+`entity.wgsl`'s `shade_entity` has no per-vertex normal to work from, so it
+rebuilds one from the screen-space derivatives of a position varying. That
+varying is `VsOut::local` — the vertex's offset from its own instance's
+model-matrix translation — and **not** `VsOut::world`, which exists only for
+the distance-fog term.
+
+A derivative is translation-invariant, so both give mathematically the same
+normal. What differs is the precision the interpolator has to spend. Fed
+absolute world coordinates the varying quantises to the `f32` ULP at the
+player's distance from the origin — 0.00195 blocks at 30,000 — against a
+per-pixel step across a half-block skull of about 0.005. The interpolated value
+then climbs in a staircase, and the derivative of a staircase is either zero or
+one whole step, chosen per 2×2 quad. The normal is noise, and the two-light
+diffuse term paints that noise as dense per-pixel speckle over every entity and
+block entity: mobs, players, banners, skulls, armour.
+
+The signature is what identifies it, and it is what an owner report described:
+an **axis-aligned** face holds two of its three world components exactly
+constant, so those derivatives are exactly zero and nothing can cancel, while
+an off-axis face varies in all three. "Static only when the head is not at
+0/90/180/270." Measured on the real skull rig with a uniform texture, so any
+spatial variation at all is geometry or shading and never texel data
+(speckle / roughness, `crates/lodestone-render/tests/block_entity_rotation_noise_pixels.rs`):
+
+| world origin | 0°/90°/180°/270° | 22.5° | 45° | 67.5° |
+|---|---|---|---|---|
+| 0 … 8,000 | 0 / 0 | 0 / 0 | 0 / 0–1 | 0 / 0 |
+| 30,000 | 0 / 0 | 8 / 24 | 4 / 8 | 0 / 38 |
+| 100,000 | 0 | 8 | 3 | 175 |
+
+All zero after the change; putting the one line back to `dpdx(in.world)` fails
+that gate and only that gate, which is the control.
+
+**Two things this does not fix.** The subtraction has to happen in the vertex
+stage — differencing two already-quantised large numbers in the fragment
+recovers nothing, which is why `fog_amount`'s own `in.world - camera.fog_eye.xyz`
+is not a precedent to copy. And `world = model * position` / `clip = view_proj *
+world` are still absolute, so the *vertex positions* still quantise: at 100,000
+one ULP is 0.0078 blocks against a banner flag box only 0.0625 blocks deep, and
+its 1-texel side faces collapse toward degenerate (3 interior pixels, measured).
+Removing that needs the instance matrices built camera-relative on the CPU, in
+`entity_pipeline.rs` and its callers, not a shader change.
+
+## Mip depth, per texture — the census
+
+Asked while chasing the same report, because "an allocated-but-unwritten mip
+level" is exactly 50/50 noise and would have explained it. It is not what is
+happening here, and the answer is worth keeping so nobody re-derives it:
+
+| texture | levels | every level written? |
+|---|---|---|
+| every stitched atlas (block, model, GUI, item, particle, container, crack) — `GpuAtlas::upload_mips` | `mips.len()`, from `atlas_mip_levels` | yes, by construction |
+| entity + block-entity sheets, player/remote skins, banner and shield masks — `entity_texture_from_image` | 1 | yes |
+| glint sheet, map textures, panorama, menu blur, HUD icon sheets, sky, weather, screen effects, GPU-timing scratch, render target, depth buffer | 1 | yes |
+
+`GpuAtlas::upload_mips` sets `mip_level_count = mips.len()` and then writes
+exactly `mips.len()` levels, so the two cannot disagree; `Atlas::mip_count` is
+`1 + mips.len()` and `Atlas::mip` covers every index in that range, so
+`atlas_mip_levels`' `filter_map` never silently drops one. **Nothing in the tree
+allocates a mip level it does not write.**
+
+Two corollaries. `model.wgsl`'s `sample_rgss` — the supersampling that fixed
+minified terrain cutouts — is in the *terrain* shader only; `entity.wgsl` takes
+a single plain `textureSample` and its sheets carry one level, so narrowing
+RGSS would change nothing about entities. And `dpdx`/`dpdy` appear in exactly
+three shaders: `block.wgsl` and `model.wgsl` differentiate *UVs*, which are
+small and well conditioned, and `entity.wgsl` differentiates a *position*,
+which is the case above.
+
 ## Dependencies
 
 `lodestone-assets` (`entity_models` corpus, `bake_entity_parts`, `ZipSource`,
