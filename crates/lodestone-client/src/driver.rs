@@ -700,7 +700,22 @@ impl<T: Transport> Driver<T> {
                     }
                 }
                 Directive::SetState(next) => {
-                    tracing::debug!(?next, "state transition");
+                    // `info`, not `debug`: a state transition is rare (once at
+                    // login, then only for a reconfigure/transfer's second
+                    // login on this connection) and is exactly the boundary
+                    // the "movement stops reaching the server after a
+                    // transfer" class of bug lives on — see net.rs's
+                    // `should_forward_action` gate, which reads
+                    // `self.read_model.in_play()` set two lines below. A
+                    // build that only shows `warn`/`error` by default still
+                    // would not see this; document the `RUST_LOG` needed in
+                    // the caller's brief rather than silently downgrading it.
+                    tracing::info!(
+                        target: "net",
+                        from = ?self.state,
+                        to = ?next,
+                        "connection state transition"
+                    );
                     let entering_configuration = next == ConnectionState::Configuration;
                     self.state = next;
                     // A mid-session reconfigure (dimension change, resource-pack
@@ -1067,7 +1082,28 @@ impl<T: Transport> Driver<T> {
                     response: ResourcePackResponseKind::FailedDownload,
                 });
             }
-            ClientEvent::Login { dimension, .. } => {
+            ClientEvent::Login {
+                entity_id,
+                dimension,
+                ..
+            } => {
+                // `info`: every `Login` after the first is a "second login on
+                // this connection" — a mid-session reconfigure or the far side
+                // of a transfer that stayed on one TCP connection — which is
+                // exactly the shape the owner described ("transferred to
+                // another world"). `awaiting_player_load_was_already_armed`
+                // catches the case that would matter most: a second `Login`
+                // arriving before the first placement teleport ever cleared
+                // the latch, which would mean the *previous* load-epoch never
+                // got its `player_loaded` and the server may still be timing
+                // that one out.
+                tracing::info!(
+                    target: "net",
+                    entity_id,
+                    dimension = %dimension,
+                    awaiting_player_load_was_already_armed = self.awaiting_player_load,
+                    "Login (join or second login on this connection)"
+                );
                 // Entering the world arms the client-loaded signal; the first
                 // placement teleport that follows zeroes the server's
                 // load-timeout timer so our movement stops being ignored.
@@ -1122,7 +1158,26 @@ impl<T: Transport> Driver<T> {
                     }
                 }
             }
-            ClientEvent::TeleportPlayer { .. } if self.awaiting_player_load => {
+            ClientEvent::TeleportPlayer { pos, .. } if self.awaiting_player_load => {
+                // `info`: this is the placement teleport for the current
+                // load-epoch (join, respawn, or a reconfigure/transfer's
+                // second login) — the one the server is waiting on
+                // `player_loaded` for. If the server keeps ignoring our
+                // movement after this line appears with
+                // `sending_player_loaded = true`, the gap is not here: the
+                // packet went out, so look at `select_move_packet` (does the
+                // first post-teleport `Move` actually carry the new
+                // position?) or at the real server's own teleport-id
+                // bookkeeping, not at this latch.
+                let sending_player_loaded = self.player_loaded.is_automatic();
+                tracing::info!(
+                    target: "net",
+                    pos_x = pos.x,
+                    pos_y = pos.y,
+                    pos_z = pos.z,
+                    sending_player_loaded,
+                    "placement TeleportPlayer for this load-epoch; clearing awaiting_player_load"
+                );
                 // The first teleport after entering the world (or after a
                 // respawn) is the server placing us — the moment vanilla is
                 // genuinely ready to be moved and sends `player_loaded`. Consume
@@ -1131,9 +1186,23 @@ impl<T: Transport> Driver<T> {
                 // later teleport in the same epoch finds the latch disarmed and
                 // falls through untouched.
                 self.awaiting_player_load = false;
-                if self.player_loaded.is_automatic() {
+                if sending_player_loaded {
                     auto_actions.push(ClientAction::PlayerLoaded);
                 }
+            }
+            // The ordinary case: a mid-epoch server correction, not a
+            // placement. Logged at `debug` (these are routine — every anti-
+            // cheat nudge is one) so `RUST_LOG=lodestone_client=debug` shows
+            // every teleport this session received, in order, alongside the
+            // `Login`/state-transition `info` lines above.
+            ClientEvent::TeleportPlayer { pos, .. } => {
+                tracing::debug!(
+                    target: "net",
+                    pos_x = pos.x,
+                    pos_y = pos.y,
+                    pos_z = pos.z,
+                    "mid-epoch TeleportPlayer (server correction)"
+                );
             }
             ClientEvent::Death { .. } => {
                 // The server re-seeds its load-timeout timer on respawn, so
@@ -1215,6 +1284,16 @@ impl<T: Transport> Driver<T> {
             // the session with everything the caller needs to reconnect: the
             // target address and this session's collected cookies.
             ClientEvent::TransferRequested { host, port } => {
+                tracing::warn!(
+                    target: "net",
+                    host = %host,
+                    port,
+                    cookies = self.cookies.len(),
+                    "TRANSFER received; this driver cannot open the reconnect leg \
+                     itself (see this arm's own doc) — ending the session as \
+                     SessionOutcome::Transferred and forwarding the raw event so \
+                     a caller with reconnect logic can act on it"
+                );
                 transfer = Some(SessionOutcome::Transferred {
                     host: host.clone(),
                     port: *port,

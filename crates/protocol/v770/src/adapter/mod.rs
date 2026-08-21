@@ -495,9 +495,33 @@ impl V770Adapter {
         let delta_pitch = f64::from(rotation.pitch) - f64::from(state.last_pitch);
 
         state.position_reminder += 1;
-        let moved = delta_x * delta_x + delta_y * delta_y + delta_z * delta_z > 4.0e-8
-            || state.position_reminder >= 20;
+        let distance_sq = delta_x * delta_x + delta_y * delta_y + delta_z * delta_z;
+        let moved = distance_sq > 4.0e-8 || state.position_reminder >= 20;
         let rotated = delta_yaw != 0.0 || delta_pitch != 0.0;
+
+        // A jump this large in one tick is a teleport (ours or the server's),
+        // never real movement — sprint-jumping tops out well under one block
+        // per tick. Logged so a build can show, in order: the placement
+        // `TeleportPlayer` (`Driver::emit`'s `info` line), then this — the
+        // first outbound movement packet *after* it, carrying the position it
+        // actually claims. If this line is missing or still reports the old
+        // world's coordinates after a transfer/reconfigure, the gap is here
+        // (or upstream in whatever feeds `pos`) rather than in teleport
+        // confirmation, which this crate already answers per-packet in
+        // `handle_player_position`.
+        if distance_sq > 64.0 {
+            tracing::info!(
+                target: "net",
+                from_x = state.last_pos.x,
+                from_y = state.last_pos.y,
+                from_z = state.last_pos.z,
+                to_x = pos.x,
+                to_y = pos.y,
+                to_z = pos.z,
+                distance = distance_sq.sqrt(),
+                "outbound movement jumped >8 blocks in one tick (teleport echo)"
+            );
+        }
 
         let flags = (if on_ground { MOVE_FLAG_ON_GROUND } else { 0 })
             | (if horizontal_collision {

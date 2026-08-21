@@ -1101,13 +1101,15 @@ pub enum NetUpdate {
     /// are resolved through `Sim::translator()` at the read boundary
     /// ([`Sim::poll_net`]'s `Disconnected` arm), so a kick reason like
     /// `multiplayer.disconnect.kicked` reaches `Screen::Error` as English
-    /// rather than the raw key (issue #68). The two synthetic senders in
-    /// this module (`"stream closed"`, and `sim.rs`'s test-only
-    /// `"Server closed"`) use [`lodestone_model::Text::literal`]: they are
-    /// not vanilla translation keys, so wrapping them in a `Text` that
-    /// merely carries their literal English through the same pipe is
-    /// correct — the translator is a no-op on a `Literal` node, it only
-    /// rewrites `Translate` nodes.
+    /// rather than the raw key (issue #68). The synthetic senders in this
+    /// module (`"stream closed"`, the `TransferRequested`-derived "server
+    /// transferred you to …" message `run_async` builds when the stream
+    /// closes right after a transfer, and `sim.rs`'s test-only `"Server
+    /// closed"`) use [`lodestone_model::Text::literal`]: they are not
+    /// vanilla translation keys, so wrapping them in a `Text` that merely
+    /// carries their literal English through the same pipe is correct —
+    /// the translator is a no-op on a `Literal` node, it only rewrites
+    /// `Translate` nodes.
     Disconnected(Box<lodestone_model::Text>),
     /// A transport or setup error. **Always ends the session** —
     /// `Sim::poll_net`'s arm for this variant moves `SessionPhase` to
@@ -3280,6 +3282,24 @@ async fn run_async(
         ));
 
         let mut handed_actions: u64 = 0;
+        // Diagnostic-only tracking for the "movement stops reaching the server
+        // after a transfer/reconfigure" class of bug: `should_forward_action`
+        // silently drops every `ClientAction::Move` while the connection is
+        // outside `ConnectionState::Play` (a mid-session reconfigure or a
+        // pending transfer both leave it there), and until now that drop left
+        // no trace at all — the queue-liveness counter just below counts
+        // *handed* actions, which a suppressed `Move` never becomes. These two
+        // locals turn the silent drop into an edge-triggered log line: one at
+        // the moment forwarding stops, one (with the drop count) at the moment
+        // it resumes, so a log without `RUST_LOG=debug` still shows exactly
+        // how long the server ignored us and why.
+        let mut in_play_tracked = handle.is_in_play_state();
+        let mut suppressed_moves_since_edge: u64 = 0;
+        // Set when a `ClientEvent::TransferRequested` is observed below, and
+        // consumed by the `Ok(None)` arm (stream closed) so a transfer's
+        // silent session-death reports an honest reason instead of the
+        // generic "stream closed" every other disconnect also produces.
+        let mut pending_transfer: Option<(String, i32)> = None;
         'session: loop {
             // Flush queued outbound actions first so player movement (queued at
             // 20 Hz) reaches the client promptly rather than waiting on the next
@@ -3293,8 +3313,33 @@ async fn run_async(
             // by the driver. This counter is a queue-liveness signal, never proof
             // of wire delivery — that lives in `impl-physics`'s live gate.
             while let Ok(action) = action_rx.try_recv() {
+                let in_play_now = handle.is_in_play_state();
+                if in_play_now != in_play_tracked {
+                    tracing::info!(
+                        target: "net",
+                        was_in_play = in_play_tracked,
+                        now_in_play = in_play_now,
+                        moves_suppressed_while_out_of_play = suppressed_moves_since_edge,
+                        "movement gate changed: connection state crossed Play <-> \
+                         Configuration (login, reconfigure, or a transfer's second \
+                         login on this connection)"
+                    );
+                    in_play_tracked = in_play_now;
+                    suppressed_moves_since_edge = 0;
+                }
                 // See `should_forward_action`'s own doc.
-                if !should_forward_action(&action, handle.is_in_play_state()) {
+                if !should_forward_action(&action, in_play_now) {
+                    suppressed_moves_since_edge += 1;
+                    if suppressed_moves_since_edge == 1
+                        || suppressed_moves_since_edge.is_multiple_of(20)
+                    {
+                        tracing::info!(
+                            target: "net",
+                            suppressed_moves_since_edge,
+                            "dropping ClientAction::Move: connection is not in Play \
+                             state, so the server would ignore it anyway"
+                        );
+                    }
                     continue;
                 }
                 let _ = handle.send_action(action);
@@ -3469,6 +3514,33 @@ async fn run_async(
                             }
                             None => pack_prompt.clear_all(),
                         }
+                    } else if let ClientEvent::TransferRequested { ref host, port } = event {
+                        // `lodestone_model::event::route` files this event
+                        // `Route::NOWHERE` ("consumed nowhere") and `forward`
+                        // below has no arm for it either — this crate does not
+                        // yet open the reconnect leg vanilla's own client does
+                        // (`ClientPacketListener.handleTransfer`: tear the
+                        // connection down, open a new one to `host:port`,
+                        // replaying the cookie store `SessionOutcome::Transferred`
+                        // already carries for exactly this). Until that exists,
+                        // the driver still ends the session right after this
+                        // event (see `Driver::emit`'s own `TransferRequested`
+                        // arm), so record the target here so the `Ok(None)`
+                        // arm below can report *why* the stream closed instead
+                        // of the generic "stream closed" every other end-of-
+                        // session produces — and log it now, since a build
+                        // that never reconnects is otherwise indistinguishable
+                        // from one that silently drops movement for some other
+                        // reason.
+                        tracing::warn!(
+                            target: "net",
+                            host = %host,
+                            port,
+                            "server sent TRANSFER to another backend; lodestone \
+                             does not reconnect automatically yet, so this \
+                             session is about to end"
+                        );
+                        pending_transfer = Some((host.clone(), port));
                     }
                     if forward(
                         &tx,
@@ -3484,8 +3556,24 @@ async fn run_async(
                     }
                 }
                 Ok(None) => {
+                    let reason = match pending_transfer.take() {
+                        Some((host, port)) => {
+                            tracing::warn!(
+                                target: "net",
+                                host = %host,
+                                port,
+                                "session ended: server transferred us to {host}:{port} \
+                                 and lodestone does not reconnect there automatically"
+                            );
+                            format!(
+                                "server transferred you to {host}:{port}; \
+                                 automatic reconnect is not supported yet — rejoin manually"
+                            )
+                        }
+                        None => "stream closed".to_string(),
+                    };
                     let _ = tx.try_send(NetUpdate::Disconnected(Box::new(
-                        lodestone_model::Text::literal("stream closed"),
+                        lodestone_model::Text::literal(reason),
                     )));
                     break;
                 }
