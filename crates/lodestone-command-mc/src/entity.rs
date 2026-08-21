@@ -227,7 +227,16 @@ pub struct EntitySelector {
     /// `deltaX == null ? 0.0 : deltaX`.
     pub volume: Option<[f64; 3]>,
     /// Whether an `@`-selector was used at all, as opposed to a bare name or
-    /// uuid. Vanilla gates this on a permission; see [`EntityArg`].
+    /// uuid. Vanilla's `EntitySelectorParser` refuses to even recognise `@`
+    /// syntax when the command source lacks `Permissions.COMMANDS_ENTITY_SELECTORS`
+    /// (`EntityArgument.parse` constructs the parser with
+    /// `source.permissions().hasPermission(...)` as an `allowSelectors` flag).
+    /// Computed and set here, but genuinely unenforced: `ArgumentType::parse`
+    /// (`lodestone_command`'s trait this crate's [`EntityArg`] implements) has
+    /// no execution-context/permission parameter at all, so nothing in this
+    /// crate or `lodestone-server` can read this field to refuse a selector a
+    /// low-permission source typed. Zero production readers, not a stale
+    /// pointer to enforcement that lives elsewhere.
     pub uses_selectors: bool,
     /// The single entity type `@a`/`@p`/`@r` (or a positive `type=`) narrowed
     /// to, for the resolver's fast path.
