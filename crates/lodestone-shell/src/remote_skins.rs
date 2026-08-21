@@ -313,9 +313,33 @@ pub fn request(url: &str) {
         map.insert(url.to_owned(), FetchState::Pending);
         true
     });
-    if start {
-        spawn_fetch(url.to_owned());
+    if !start {
+        return;
     }
+    // The **same** allow list `lodestone_auth::texture::fetch_texture` applies
+    // before opening a socket, called one layer earlier — not a second
+    // implementation of it, a second application of it.
+    //
+    // Two things this earlier check buys, neither of which is security (the
+    // inner check is what makes the fetch safe and stays where it is). A refused
+    // URL now costs no thread, no runtime and no `reqwest::Client`, which is the
+    // dominant case against any server that decorates with heads from a mirror.
+    // And the refusal is recorded synchronously, so a URL that can never be
+    // fetched is memoised `Failed` on the frame it first appears rather than
+    // whenever a worker gets round to it.
+    #[cfg(not(target_arch = "wasm32"))]
+    if !lodestone_auth::texture::is_allowed_texture_domain(url) {
+        tracing::warn!(
+            target: "assets",
+            "refusing a skin texture url outside the allowed domain; that head or \
+             player draws the default sheet"
+        );
+        with_map(&FETCHED, |map| {
+            map.insert(url.to_owned(), FetchState::Failed);
+        });
+        return;
+    }
+    spawn_fetch(url.to_owned());
 }
 
 /// Start fetching every URL in `urls`, skipping the ones already known.
@@ -398,6 +422,15 @@ fn spawn_fetch(url: String) {
                 }
             };
             rt.block_on(async move {
+                // Without an installed rustls crypto provider `Client::new()`
+                // **panics**, and under this workspace's `panic = "abort"`
+                // release profile that takes the process with it — so a placed
+                // head or a remote player's skin would have killed the game on
+                // any launch where nothing else had installed one first (a
+                // signed-out session joining a server, for instance). Every
+                // `Client::new()` in this tree needs this line; see
+                // `lodestone_auth::tls`'s module doc, which states the rule.
+                lodestone_auth::install_crypto_provider();
                 let client = reqwest::Client::new();
                 // The allow list lives in here, and is applied before a socket
                 // is opened. See this module's gotchas.
