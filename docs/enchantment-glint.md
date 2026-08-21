@@ -27,9 +27,65 @@ v_off = (m %  30000) /  30000                  scrolls POSITIVE
 ```
 
 **3. The matrix.** `glint::glint_texture_matrix` composes
-`T(-u_off, +v_off, 0) · Rz(10°) · S(scale)`, where `scale` is `8.0` for items,
-`0.5` for the trident/shield special models and `0.16` for worn armour. The shader
-applies it as `(M * vec4(uv, 0, 1)).xy`, exactly vanilla's `glint.vsh`.
+`T(-u_off, +v_off, 0) · Rz(10°) · S(scale) · A(atlas)`, where `scale` is `8.0` for
+items, `0.5` for the trident/shield special models and `0.16` for worn armour. The
+shader applies it as `(M * vec4(uv, 0, 1)).xy`, exactly vanilla's `glint.vsh`.
+
+`A(atlas)` is ours and vanilla has nothing corresponding to it. Read the next
+section before changing it — it is the difference between a shimmer and a wash.
+
+## `A(atlas)`: vanilla's scale is not a scale in any unit an item has
+
+`setupGlintTexturing`'s `8.0` multiplies an **atlas** UV. It is therefore
+`8.0` *of the whole sheet*, and what a player actually sees is how many glint
+texels land across a sprite:
+
+```
+glint texels across a sprite = scale · glint_size · sprite_px / atlas_px
+```
+
+The atlas size is inside that number, so vanilla's constants were chosen against
+vanilla's own packing. That size is written down nowhere in the jar — it is
+whatever `Stitcher` produces — so it was recovered by porting `Stitcher`
+(`smallestFittingMinTexel`'s slot rounding, the `-height, -width, name` sort, the
+`expand`/`Region.add` shelf split) and running it over vanilla's own
+`atlases/items.json` and `atlases/blocks.json` sprite lists at the default mip
+level 4 with anisotropy off, i.e. `padding = 1 << 4 = 16`. **Both come out
+2048×2048** — items from 860 sprites, blocks from 1278 — which is
+`glint::VANILLA_ATLAS_PX`. So a 16-px item sprite receives
+`8.0 · 128 · 16 / 2048 = 8` glint texels.
+
+Our stitched model sheet is a single 4096×4096, so an uncorrected `Scale::Item`
+puts **4** texels there instead — and four texels of a 128-px sheet stretched
+over an item is a flat, uniform brightening rather than a moving pattern.
+Measured on a dropped `diamond_sword`: a 4.634-texel window against vanilla's
+9.262 (both are axis-aligned bounding boxes, widened from 4 and 8 by the matrix's
+10° rotation).
+
+Two consequences worth keeping:
+
+- **The sheet is not a fixed size.** The stitcher's gutter is
+  `1 << mipmapLevels`, so the packing — and every baked UV — follows a video
+  setting. Before that gutter landed our sheet was 1024×2048 and the window was
+  17.1 × 10.7 texels, near enough vanilla's that nobody looked. Without
+  `A(atlas)` the shimmer's scale moves when the player drags the slider.
+- **It is a parameter, never a constant.** There is more than one sheet here: the
+  world and hand glints sample the stitched model atlas, the GUI icon glint
+  samples the `ItemAtlas`, and they are different sizes. `glint_texture_matrix`
+  and `GlintUniform::new` take the dimensions of the atlas whose UVs *that draw's*
+  vertices carry, and all three call sites pass their own. The correction is
+  applied innermost so vanilla's uniform scale and its rotation both act on
+  vanilla-equivalent coordinates, and both axes are corrected separately because
+  neither sheet is guaranteed square.
+
+The gate is `crates/lodestone-render/tests/glint_pixels.rs`'s
+`the_real_jar_glint_texture_produces_a_varying_pattern`, which asserts the derived
+texel count and predicts the composited delta range for both hypotheses from
+`enchanted_glint_item.png`'s own bytes. Its predecessor thresholded the spread at
+a round `0.02`, which is a property of how much of the sheet the item covers
+rather than of the glint, and so passed while the atlas was small, failed when the
+gutter landed, and went on failing after the correction — vanilla's window is
+smaller than the one that threshold had been calibrated against.
 
 **4. The pass.** `glint::GlintPipeline` draws the **same vertex and index buffers**
 the model pass drew, with depth `EQUAL` / no write / zero bias, culling off, and
@@ -138,13 +194,15 @@ Four things about it, each of which costs a design cycle to rediscover:
   pass therefore binds **two** textures and discards where the item atlas's alpha
   is below vanilla's own `glint.fsh` threshold of `0.1`. Two textures in one group
   (bindings 0–3) plus the uniform group: 2 of 4 bind groups, same as the 3-D one.
-- **The glint UV is the atlas UV, fed straight in.** An earlier revision of this
+- **The glint UV is the atlas UV, scaled by `A(atlas)`.** An earlier revision of this
   doc claimed it had to be the quad's local `0..1` coords; that is wrong, and
   `glint.wgsl`'s own comment (transcribed from `glint.vsh`) says so: vanilla's
   `texCoord0 = (TextureMat * vec4(UV0, 0, 1)).xy` takes the *baked model's* UVs,
   which for a `item/generated` item are atlas UVs. Using local coords would give
   every item the same phase; atlas UVs give each sprite its own, which is what the
-  game looks like.
+  game looks like. The one thing that is *not* fed straight in is the sheet's own
+  size: this pass samples the `ItemAtlas`, not the stitched model atlas, so it
+  passes its own dimensions — see `A(atlas)` above.
 - **The glint quads are a separate stream, not a flag.** `IconSink::glint` collects
   a copy of each enchanted stack's sprite quad. The blend differs (`SRC_COLOR/ONE`
   versus `ALPHA_BLENDING`) so it must be a separate draw, a separate draw needs a

@@ -109,6 +109,20 @@ Per-cell cost after that plus the biome-tint memo below: **6,629 instructions**,
 2.07× lower, and the output is byte-identical — see
 `crates/lodestone-render/tests/fluid_mesh_identity_gate.rs`.
 
+**That golden pins an input the gate does not own, and it has already gone red
+for it once.** A fluid vertex's `uv` is a rect out of the stitched block atlas,
+whose packing is decided elsewhere; adding the atlas gutter
+(`AtlasBuilder::with_padding(1 << BLOCK_ATLAS_MIP_LEVELS)`, vanilla's
+`Stitcher.padding`) repacked every sprite and so rewrote every UV in the corpus,
+which arrives here as *"the fluid mesher's output changed"* in all eleven water
+scenes at once. Each digest therefore carries a fourth hash, `gh`, over the
+vertices with their UVs zeroed: an atlas repack moves `vh` alone and leaves `v`,
+`i`, `ih` and `gh` untouched, while anything `mesh_fluids` itself does moves `gh`
+too. **Read `gh` before reading anything else when this goes red.** Confirming
+the diagnosis without it cost an experiment — dropping the `with_padding` call in
+`build_complete_atlas` reproduced the pre-repack golden byte-for-byte across all
+fourteen scenes — and that same experiment is now the executed control for `gh`.
+
 ### The largest single term was the biome table, not the neighbourhood
 
 Issue #542's diagnosis named the fifty virtual calls. Measured, **46% of the

@@ -433,7 +433,12 @@ component at night — so the scalar gate's `0.504652` is exactly vanilla's
 **blue** channel, and a scalar model cannot be wrong about the one channel
 it happens to reproduce. `light.rs`'s
 `midnight_blue_matches_the_old_scalar_gate_but_red_does_not` is the direct
-correction, and the ratio-of-ratios gate (`ratio_of_ratios_lands_on_vanillas_
+correction. The same mistake outlived that fix in a *second* place and was
+found later: `entity_night_pixels::a_sky_lit_mob_is_darker_at_midnight_than_at_noon`
+went on predicting `0.504652` while `mob_mean` averages the **red** byte, so it
+reported a shipped bug for eleven days over a shader that was correct. It now
+predicts `0.278411` and keeps `0.504652` as a named wrong hypothesis, which is
+the honest place for it: this is a number that is right about one channel. and the ratio-of-ratios gate (`ratio_of_ratios_lands_on_vanillas_
 hue_not_grey`) is the one CLAUDE.md specifies for this exact failure mode —
 see `docs/fog.md`'s twin fix (the fog colour's own day/night track) for the
 sibling investigation this one shipped alongside.
