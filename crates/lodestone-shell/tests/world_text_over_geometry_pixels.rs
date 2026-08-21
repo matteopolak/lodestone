@@ -21,6 +21,14 @@
 //! realistic viewing distance, with the camera pitched up — the exact
 //! condition the report describes.
 //!
+//! The third arm is a level up again, and its blind spot was the **whole**
+//! pixel corpus rather than one file: every gate in `tests/` uploads
+//! `translucent_blocks: ModelMesh::default()`, so not one of them had ever
+//! put a translucent block on screen. A `text_display`'s alpha-blended
+//! background panel was writing depth and deleting the stained glass behind
+//! it — the owner's own second symptom — with nothing red anywhere. See
+//! [`a_text_display_panel_does_not_delete_the_translucent_geometry_behind_it`].
+//!
 //! Fail-closed: no GPU adapter or no `client.jar` is a failure, never a
 //! silent skip.
 //!
@@ -82,6 +90,10 @@ fn load_vanilla() -> (BlockResources, std::sync::Arc<lodestone_render::BlockAtla
 fn suppress_first_person_arm(state: &mut RenderState) {
     state.set_third_person_body_source(|| {
         Some(ThirdPersonBodyState {
+            // No skin: this fixture installs a body to suppress the first-person
+            // arm, not to assert a sheet. The draw falls back to the model's own
+            // texture, exactly as it did before this field existed.
+            player_skin: None,
             feet: glam::Vec3::new(0.0, -10_000.0, 0.0),
             body_yaw_deg: 0.0,
             anim: AnimInput::default(),
@@ -428,26 +440,71 @@ fn sign_text_survives_the_depth_test_against_its_own_board() {
 
 // --- The `text_display` arm ------------------------------------------------
 
+/// One point of the panel-versus-ink sweep.
+///
+/// `z` is how far down `+Z` the hologram sits from the eye's own column and
+/// `scale` its `Display.DATA_SCALE_ID`. The two move **together** on
+/// purpose: the eye drop is a fixed fraction of `z` (see [`hologram_camera`])
+/// so every case subtends the same angle and contributes the same ~438 px of
+/// ink, which is what makes the ink counts comparable across the row.
+///
+/// # Why the sweep exists at all, and why one point was not enough
+///
+/// The separation between the panel and the ink is a fixed **world**
+/// distance — `-0.01` in local glyph space through the `0.025` text scale, so
+/// `0.00025 · scale` blocks. What it is measured *in* is one ULP of a forward
+/// `[0,1]` `Depth32Float`, and that grows as the **square** of the viewing
+/// distance (`≈6.1e-7 · d²` blocks; the entity-shadow work measured the same
+/// curve at 2.44e-06 / 3.84e-05 / 1.55e-04 blocks at 2 / 8 / 16 blocks).
+/// Headroom in ULP is therefore `410 · scale / d²`, and holding the *angular*
+/// size fixed makes it fall as `1 / d`:
+///
+/// | `z` | `scale` | eye distance | geometric headroom |
+/// |---|---|---|---|
+/// | 6 | 1 | 7.8 | 6.7 ULP |
+/// | 12 | 2 | 15.6 | 3.4 ULP |
+/// | 24 | 4 | 31.2 | 1.7 ULP |
+/// | 48 | 8 | 62.5 | 0.84 ULP |
+/// | 72 | 12 | 93.7 | 0.56 ULP |
+///
+/// The single point this gate used to have was the `z = 24, scale = 4` row.
+/// Its own comment claimed scaling the hologram up "does not paper over the
+/// depth separation this gate is about: that separation scales with it" —
+/// **that reasoning is wrong**, and it is the reason one point was not
+/// enough. The separation does scale with the entity, but the ULP it is
+/// measured against scales with the *camera distance*, which the entity scale
+/// does not touch. A default-scale (`1.0`) hologram — what a `/summon` with
+/// no `transformation` tag gets, and what most server holograms are — has
+/// four times less headroom at the same screen size than the one row that
+/// was being tested.
+#[derive(Debug, Clone, Copy)]
+struct HologramCase {
+    z: f32,
+    scale: f32,
+}
+
+const HOLOGRAM_SWEEP: [HologramCase; 5] = [
+    HologramCase { z: 6.0, scale: 1.0 },
+    HologramCase { z: 12.0, scale: 2.0 },
+    HologramCase { z: 24.0, scale: 4.0 },
+    HologramCase { z: 48.0, scale: 8.0 },
+    HologramCase { z: 72.0, scale: 12.0 },
+];
+
 /// The hologram from the report: two lines of real text, vanilla's own
 /// translucent-black background, `Vertical` billboard (yaw-only — vanilla's
 /// own behaviour for that mode, and what makes the panel oblique when the
 /// camera is pitched, which is precisely when the report says it breaks).
-fn text_display_draw(background: i32) -> DisplayDraw {
+fn text_display_draw(case: HologramCase, background: i32) -> DisplayDraw {
     DisplayDraw {
         id: 1,
         type_path: TEXT_DISPLAY_TYPE_PATH,
-        position: glam::Vec3::new(0.5, 68.0, 24.0),
+        position: glam::Vec3::new(0.5, 68.0, case.z),
         entity_yaw: 0.0,
         entity_pitch: 0.0,
         billboard: BillboardMode::Vertical,
-        // A real hologram is scaled up — the default 0.025 blocks per font
-        // pixel puts a glyph under three screen pixels at this range, which
-        // is too small a sample to measure anything with. Scale changes the
-        // ink's size and the panel's alike, so it does not paper over the
-        // depth separation this gate is about: that separation scales with
-        // it.
         transform: DisplayTransformation {
-            scale: glam::Vec3::splat(4.0),
+            scale: glam::Vec3::splat(case.scale),
             ..DisplayTransformation::default()
         },
         text: Some(lodestone_model::text::Text::literal(
@@ -460,15 +517,23 @@ fn text_display_draw(background: i32) -> DisplayDraw {
         block_state: None,
         item: None,
         item_display_context: 0,
+        brightness_override: None,
     }
 }
 
-/// Eye well below the hologram and 24 blocks away, so the line of sight is
+/// The eye drop as a fraction of the hologram's `z`, chosen so the original
+/// single-point fixture (`z = 24`, eye 20 blocks below) is reproduced exactly
+/// — `20 / 24`, a ~40° upward look. Holding it as a *ratio* is what keeps
+/// every row of [`HOLOGRAM_SWEEP`] at the same viewing angle, so the sweep
+/// varies distance and scale and nothing else.
+const EYE_DROP_RATIO: f32 = 20.0 / 24.0;
+
+/// Eye below the hologram and `z` blocks back, so the line of sight is
 /// pitched **up** — the report's own worst case, and the geometry that makes
 /// a yaw-only billboard's plane oblique to the view.
-fn hologram_camera() -> Camera {
-    let eye = glam::Vec3::new(0.5, 48.0, 0.0);
-    let target = glam::Vec3::new(0.5, 68.0, 24.0);
+fn hologram_camera(case: HologramCase) -> Camera {
+    let eye = glam::Vec3::new(0.5, 68.0 - EYE_DROP_RATIO * case.z, 0.0);
+    let target = glam::Vec3::new(0.5, 68.0, case.z);
     let dir = (target - eye).normalize();
     Camera {
         position: eye,
@@ -496,7 +561,9 @@ fn ink_pixels(pixels: &[u8]) -> usize {
 /// panel alone satisfies. This one measures the **glyph ink** against the
 /// identical text with the panel switched off, so ink lost to the panel in
 /// front of it is visible as a number rather than hidden behind the panel's
-/// own pixels.
+/// own pixels — and it does so across [`HOLOGRAM_SWEEP`], because the one
+/// point it used to measure sat at four times the depth headroom a
+/// default-scale hologram has.
 #[test]
 #[ignore = "requires a GPU adapter and the vanilla client.jar"]
 fn text_display_glyphs_survive_their_own_background_panel() {
@@ -505,51 +572,372 @@ fn text_display_glyphs_survive_their_own_background_panel() {
     let queue = ctx.queue();
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let camera = hologram_camera();
 
-    let mut shoot = |background: i32| -> Vec<u8> {
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+    let mut worst: Option<(HologramCase, usize, usize)> = None;
+    for case in HOLOGRAM_SWEEP {
+        let camera = hologram_camera(case);
+        let mut shoot = |background: i32| -> Vec<u8> {
+            let mut state = RenderState::new(device, queue, format, W, H, None);
+            suppress_first_person_arm(&mut state);
+            state.set_display_draws(vec![text_display_draw(case, background)]);
+            let frame = target.acquire().expect("headless acquire");
+            let _ = state.render(device, queue, frame.view(), &camera, None, &[]);
+            target.read_texels(device, queue)
+        };
+
+        // Vanilla's own default background, `0x40000000` — translucent black.
+        let with_panel = shoot(0x4000_0000_u32 as i32);
+        // `0` is vanilla's own "no panel at all" sentinel
+        // (`TextDisplayRenderer.submitInner`'s `if (backgroundColor != 0)`), so
+        // this reference draws the *same* glyphs with nothing in front of them.
+        let no_panel = shoot(0);
+
+        let reference_ink = ink_pixels(&no_panel);
+        let subject_ink = ink_pixels(&with_panel);
+        println!(
+            "z={:>4} scale={:>4}: glyph ink {subject_ink} px with the panel, \
+             {reference_ink} px without",
+            case.z, case.scale
+        );
+        assert!(
+            reference_ink > 200,
+            "at z={} scale={} the panel-less reference drew only {reference_ink} \
+             ink px — the fixture itself is broken there, so the comparison \
+             below would be vacuous",
+            case.z, case.scale
+        );
+        if worst.is_none_or(|(_, s, r)| subject_ink * r <= s * reference_ink) {
+            worst = Some((case, subject_ink, reference_ink));
+        }
+    }
+
+    // **A magnitude assertion, with both hypotheses computed rather than a
+    // direction.** The panel sits `0.00025 · scale` blocks behind the ink
+    // (vanilla's `-0.01` in local glyph space through the `0.025` text
+    // scale), which is between 6.7 and 0.56 `f32` ULP across the sweep. With
+    // the glyphs on an unbiased pipeline the middle row measured **389** of
+    // **438** px — the wrong hypothesis, watched failing — and with them on
+    // `RenderPipelines.TEXT_POLYGON_OFFSET`'s bias it measures **438**, an
+    // exact match. 99% therefore lands on one hypothesis and not the other,
+    // rather than merely asserting "not much was lost". The verdict is taken
+    // on the **worst** row so a single bad distance cannot be averaged away.
+    let (case, subject_ink, reference_ink) = worst.expect("the sweep is non-empty");
+    assert!(
+        subject_ink * 100 >= reference_ink * 99,
+        "adding the background panel ate the glyphs at z={} scale={}: \
+         {subject_ink} ink px with the panel against {reference_ink} without. \
+         The panel is only 0.00025·scale blocks behind the ink, so the two are \
+         within a few float ULP of each other in this renderer's forward [0,1] \
+         depth buffer and the ink loses wherever the two quads' interpolated \
+         depth diverges. Vanilla submits the glyphs through \
+         `RenderPipelines.TEXT_POLYGON_OFFSET` for exactly this reason, and \
+         can afford to because reversed-Z gives it 53+ ULP of headroom at \
+         every distance where this has under 7",
+        case.z, case.scale
+    );
+}
+
+// --- The translucent-geometry arm ------------------------------------------
+
+/// The glass wall's plane, and the hologram in front of it. All three sit on
+/// the camera's own `+Z` axis so the panel is unambiguously between the eye
+/// and the glass.
+const WALL_Z: i32 = 12;
+const HOLO_Z: f32 = 2.0;
+const EYE_Z: f32 = -8.0;
+/// Well above the (empty) ground so nothing but sky is behind the wall.
+const HOLO_Y: f32 = 68.0;
+
+/// A world holding **one wall of red stained glass** and nothing else — no
+/// floor, no platform, so every non-glass pixel is sky and the glass's own
+/// tint is the largest signal available.
+///
+/// Red rather than blue deliberately: the sky is a mid blue, so a red tint
+/// moves two channels hard in opposite directions and cannot be confused
+/// with the panel's own darkening.
+fn glass_wall_world() -> World {
+    let air = state_id("minecraft:air");
+    let glass = state_id("minecraft:red_stained_glass");
+
+    let mut world = World::new();
+    for cx in -1..=1 {
+        for cz in -1..=1 {
+            let column = ChunkColumn::new(
+                MIN_Y,
+                SECTION_COUNT,
+                PaletteKind::block_states(),
+                PaletteKind::biomes(),
+                air,
+                0,
+            );
+            let mut light = ColumnLight::new(SECTION_COUNT);
+            for i in 0..light.light_section_count() {
+                *light.sky_mut(i) = lodestone_world::LightData::Uniform(15);
+                *light.block_mut(i) = lodestone_world::LightData::Uniform(0);
+            }
+            world.load(
+                ChunkPos::new(cx, cz),
+                LoadedChunk::new(column, light, Heightmaps::new(), Vec::new()),
+            );
+        }
+    }
+    let filled = world.fill_region([-16, 56, WALL_Z], [15, 80, WALL_Z], glass);
+    assert!(
+        filled > 0,
+        "fixture: the glass wall must actually write blocks"
+    );
+    world
+}
+
+/// [`upload_world`]'s sibling that keeps the **translucent** layer instead of
+/// discarding it.
+///
+/// Every other pixel gate in this crate passes
+/// `translucent_blocks: ModelMesh::default()`, which is the shared-blind-spot
+/// species `CLAUDE.md` describes at the level of a whole corpus: no gate here
+/// had ever put a translucent block on screen, so nothing could see a pass
+/// that deletes one. This routes through
+/// [`lodestone::mesher::mesh_snapshot_models_layers`] — the same split
+/// `mesh_one` uses in production — rather than re-deriving one, so the gate
+/// cannot pass against geometry production would never build.
+fn upload_world_with_translucent(
+    world: &World,
+    models: &lodestone_render::BlockModels,
+    state: &mut RenderState,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> usize {
+    let mut translucent_quads = 0usize;
+    for cx in -1..=1 {
+        for cz in -1..=1 {
+            for si in 0..SECTION_COUNT {
+                let key = SectionKey { cx, cz, si, min_y: MIN_Y };
+                let Some(snap) = snapshot_section(world, key) else {
+                    continue;
+                };
+                let (opaque, translucent_blocks) = lodestone::mesher::mesh_snapshot_models_layers(
+                    &snap,
+                    models,
+                    false,
+                    lodestone_render::biome_tint::BLEND_RADIUS,
+                );
+                translucent_quads += translucent_blocks.quad_count();
+                let visibility = snapshot_visibility(&snap, models);
+                let geometry = SectionGeometry::Model {
+                    opaque,
+                    water: ModelMesh::default(),
+                    translucent_blocks,
+                    visibility,
+                };
+                state.upload_section(device, queue, key, &geometry);
+            }
+        }
+    }
+    translucent_quads
+}
+
+/// The hologram that sits in front of the wall: one short line, vanilla's own
+/// translucent-black panel, `Center` billboard so it faces the eye squarely
+/// and the panel's footprint is a clean rect.
+fn wall_hologram(background: i32) -> DisplayDraw {
+    DisplayDraw {
+        id: 7,
+        type_path: TEXT_DISPLAY_TYPE_PATH,
+        position: glam::Vec3::new(0.5, HOLO_Y, HOLO_Z),
+        entity_yaw: 0.0,
+        entity_pitch: 0.0,
+        billboard: BillboardMode::Center,
+        transform: DisplayTransformation {
+            scale: glam::Vec3::splat(3.0),
+            ..DisplayTransformation::default()
+        },
+        text: Some(lodestone_model::text::Text::literal("HOLOGRAM\nOVER GLASS")),
+        text_line_width: 200,
+        text_background_color: background,
+        text_opacity: -1,
+        text_style_flags: 0,
+        block_state: None,
+        item: None,
+        item_display_context: 0,
+        brightness_override: None,
+    }
+}
+
+/// Eye on the wall's own axis, looking straight down `+Z` through the
+/// hologram at the glass behind it.
+fn wall_camera() -> Camera {
+    Camera {
+        position: glam::Vec3::new(0.5, HOLO_Y, EYE_Z),
+        // `Camera::basis`' forward is
+        // `(-sin(yaw)cos(pitch), -sin(pitch), cos(yaw)cos(pitch))`, so yaw 0,
+        // pitch 0 looks along `+Z`.
+        yaw: 0.0,
+        pitch: 0.0,
+        fov_y_degrees: 70.0,
+        aspect: W as f32 / H as f32,
+        near: 0.05,
+        far: Camera::far_for_render_distance(RD_CHUNKS, 0),
+    }
+}
+
+/// Opaque glyph ink — the same "every channel above 200" separator
+/// [`ink_pixels`] uses, per pixel.
+fn is_ink(px: &[u8]) -> bool {
+    px[0] > 200 && px[1] > 200 && px[2] > 200
+}
+
+/// **The gate the whole pixel corpus structurally could not run**: a
+/// `text_display`'s background panel must *blend over* the translucent
+/// geometry behind it, not delete it.
+///
+/// The owner's second symptom — *"some blocks like glass don't render at all
+/// when they're behind the billboard panel"* — is the direct consequence of
+/// `RenderPipelines.TEXT_BACKGROUND`'s depth-write flag being ported
+/// faithfully into a renderer that has neither of the two things vanilla
+/// leans on (reversed-Z, and a separate translucent render target whose
+/// depth is copied before the translucent features draw). Translucent
+/// terrain draws after `gpu/display_text.rs` in `gpu/frame.rs`, so a
+/// depth-writing translucent panel rejects it.
+///
+/// Four renders, so the claim is about the *glass under the panel* and not
+/// about the panel:
+///
+/// | render | glass | hologram |
+/// |---|---|---|
+/// | `sky` | no | no |
+/// | `holo` | no | yes |
+/// | `glass` | yes | no |
+/// | `both` | yes | yes |
+///
+/// `holo` against `sky` **derives** the panel's own footprint rather than
+/// restating a rect, and the ink pixels are excluded from it so the
+/// assertion is about the translucent panel alone. Inside that footprint,
+/// `both` must differ from `holo` — the glass showing through — and the
+/// control that the detector can see anything at all is that `glass` differs
+/// from `sky` on those very same pixels.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_text_display_panel_does_not_delete_the_translucent_geometry_behind_it() {
+    let ctx = gpu();
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let (_resources, atlas) = load_vanilla();
+    let models = atlas.models().expect("vanilla atlas must carry baked models");
+    let world = glass_wall_world();
+
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let camera = wall_camera();
+
+    let mut shoot = |glass: bool, hologram: bool| -> Vec<u8> {
+        let mut state = RenderState::new(device, queue, format, W, H, Some(&atlas));
         suppress_first_person_arm(&mut state);
-        state.set_display_draws(vec![text_display_draw(background)]);
+        state.set_fog(
+            FogSettings::for_render_distance(SKY_COLOR, RD_CHUNKS),
+            RD_CHUNKS,
+        );
+        if glass {
+            let quads = upload_world_with_translucent(&world, models, &mut state, device, queue);
+            assert!(
+                quads > 0,
+                "fixture: the glass wall produced no translucent quads — the \
+                 mesher classified red_stained_glass as something other than \
+                 RenderLayer::Translucent, so this gate would be vacuous"
+            );
+        }
+        if hologram {
+            // `0x40000000` is vanilla's own accessor default for
+            // `Display.TextDisplay`'s background: translucent black.
+            state.set_display_draws(vec![wall_hologram(0x4000_0000_u32 as i32)]);
+        }
+        // **Not optional** — `distant_flat_terrain_holes.rs::render_frame`'s
+        // doc carries the whole measurement. A freshly uploaded section is
+        // stamped with `build_time = section_fade_tick / 20`, the shader
+        // paints `mix(fog_colour, lit_colour, section_visibility(now,
+        // build_time))`, and a harness that renders immediately after
+        // uploading has `now == build_time == 0`, so **every section is pure
+        // fog colour** while `RenderStats` reports it drawn. The first run of
+        // this gate hit exactly that: its control measured the glass wall
+        // changing **0** of 5,949 panel pixels against a bare sky. 200 ticks
+        // is 10 s against a 0.75 s fade — clearing it, not probing its edge.
+        state.update_animation(queue, 200);
         let frame = target.acquire().expect("headless acquire");
         let _ = state.render(device, queue, frame.view(), &camera, None, &[]);
         target.read_texels(device, queue)
     };
 
-    // Vanilla's own default background, `0x40000000` — translucent black.
-    let with_panel = shoot(0x4000_0000_u32 as i32);
-    // `0` is vanilla's own "no panel at all" sentinel
-    // (`TextDisplayRenderer.submitInner`'s `if (backgroundColor != 0)`), so
-    // this reference draws the *same* glyphs with nothing in front of them.
-    let no_panel = shoot(0);
+    let sky = shoot(false, false);
+    let holo = shoot(false, true);
+    let glass = shoot(true, false);
+    let both = shoot(true, true);
 
-    let reference_ink = ink_pixels(&no_panel);
-    let subject_ink = ink_pixels(&with_panel);
-    println!("glyph ink: {subject_ink} px with the panel, {reference_ink} px without");
-
+    // The panel's own footprint, derived rather than restated: every pixel
+    // the hologram changed against a bare sky, minus the opaque ink.
+    let panel: Vec<usize> = holo
+        .chunks_exact(4)
+        .zip(sky.chunks_exact(4))
+        .enumerate()
+        .filter(|(_, (h, s))| differs(h, s) && !is_ink(h))
+        .map(|(i, _)| i)
+        .collect();
     assert!(
-        reference_ink > 200,
-        "the panel-less reference drew only {reference_ink} ink px — the fixture \
-         itself is broken, so the comparison below would be vacuous"
+        panel.len() > 500,
+        "the hologram's panel covered only {} px against a bare sky — the \
+         fixture is too small to measure anything with",
+        panel.len()
     );
-    // **A magnitude assertion, with both hypotheses computed rather than a
-    // direction.** The panel sits 0.00025 blocks behind the ink (vanilla's
-    // `-0.01` in local glyph space through the `0.025` text scale), which is
-    // a couple of `f32` ULP in this depth buffer at this range. With the
-    // glyphs on an unbiased pipeline that measured **389** of **438** px —
-    // the wrong hypothesis, watched failing — and with them on
-    // `RenderPipelines.TEXT_POLYGON_OFFSET`'s bias it measures **438**, an
-    // exact match. 99% therefore lands on one hypothesis and not the other,
-    // rather than merely asserting "not much was lost".
+
+    // **The control, run first**: the population of panel-footprint pixels on
+    // which the glass is visible *at all* against a bare sky. Everything below
+    // is asserted on exactly this set, because a pixel the detector cannot see
+    // the glass on with no hologram present says nothing about whether the
+    // hologram deleted it.
+    let visible: Vec<usize> = panel
+        .iter()
+        .copied()
+        .filter(|&i| differs(&glass[i * 4..i * 4 + 4], &sky[i * 4..i * 4 + 4]))
+        .collect();
+    let (whole_frame, wall_bbox) = changed(&glass, &sky);
+    println!(
+        "panel footprint {} px, glass visible on {} of them; \
+         glass changes {whole_frame} px of the whole frame, bbox {wall_bbox:?}",
+        panel.len(),
+        visible.len()
+    );
     assert!(
-        subject_ink * 100 >= reference_ink * 99,
-        "adding the background panel ate the glyphs: {subject_ink} ink px with \
-         the panel against {reference_ink} without. The panel is only 0.00025 \
-         blocks behind the ink, so the two are within a few float ULP of each \
-         other in the depth buffer and the ink loses wherever the two quads' \
-         interpolated depth diverges — which is everywhere once the plane is \
-         oblique to the view. Vanilla submits the glyphs through \
-         `RenderPipelines.TEXT_POLYGON_OFFSET` for exactly this reason and \
-         `gpu/display_text.rs` must keep doing the same"
+        visible.len() > 500,
+        "control: the glass wall is visible on only {} of {} panel-footprint \
+         pixels against a bare sky (and on {whole_frame} px of the whole frame, \
+         bbox {wall_bbox:?}). The wall is not actually behind the panel, or it \
+         is not being drawn at all, so everything below would be vacuous",
+        visible.len(),
+        panel.len()
+    );
+
+    // **Both hypotheses, computed rather than a direction.** If the panel
+    // blends over the glass, the glass's own tint survives into `both` on
+    // essentially all of `visible` — attenuated by the panel's 0.75 pass-through
+    // but nowhere near erased. If the panel *deletes* the glass, `both` is
+    // byte-identical to `holo` and the count is exactly **0**: the two
+    // hypotheses are separated by the whole range, not by a tuned margin, so
+    // the halfway predicate cannot land on the wrong one. Measured before the
+    // fix: 0. After: see the printed line.
+    let survived = visible
+        .iter()
+        .filter(|&&i| differs(&both[i * 4..i * 4 + 4], &holo[i * 4..i * 4 + 4]))
+        .count();
+    println!(
+        "glass still visible under the panel on {survived} of {} pixels",
+        visible.len()
+    );
+    assert!(
+        survived * 2 > visible.len(),
+        "the background panel deleted the translucent geometry behind it: the \
+         glass is visible on {} panel-footprint pixels with no hologram present \
+         and on only {survived} of them with one. The wrong hypothesis predicts \
+         exactly 0 here. The panel is alpha-blended and writes depth, and \
+         translucent terrain draws after `gpu/display_text.rs` in \
+         `gpu/frame.rs`, so the write rejects it",
+        visible.len()
     );
 }
