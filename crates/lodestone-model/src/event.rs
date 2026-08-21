@@ -5,7 +5,7 @@ use crate::{
     common::{Difficulty, GameMode},
     ids::{DimensionId, Identifier, ResourceKey},
     item::ItemStack,
-    math::{BlockPos, ChunkPos, Rotation, SectionPos, Vec3, Vec3f},
+    math::{BlockPos, ChunkPos, Quat, Rotation, SectionPos, Vec3, Vec3f},
     text::{Text, TextColor},
 };
 
@@ -598,6 +598,105 @@ pub struct EntityMetadataUpdate {
     /// means "not known to be an end crystal", which a consumer must treat as
     /// "draw the base" (vanilla's own default), never as a cleared flag.
     pub crystal_show_bottom: Option<bool>,
+    /// `Display.BillboardConstraints.getId()` (`Display.DATA_BILLBOARD_RENDER_CONSTRAINTS_ID`),
+    /// raw wire ordinal (`0`=fixed, `1`=vertical, `2`=horizontal, `3`=center),
+    /// when present and the entity is known to be one of the three `Display`
+    /// subtypes (`text_display`/`item_display`/`block_display`).
+    ///
+    /// Kept as the raw ordinal rather than a decoded enum because this crate
+    /// carries no renderer-facing billboard type — see
+    /// `lodestone_render::display::BillboardMode::from_wire` for the
+    /// downstream conversion, which reproduces vanilla's own out-of-range
+    /// fallback to `Fixed` (`ByIdMap.OutOfBoundsStrategy.ZERO`).
+    ///
+    /// # Why this can be absent on a packet that carried the byte
+    ///
+    /// Same shape as [`mob_flags`](Self::mob_flags): index 15's `BYTE` is also
+    /// `Mob.DATA_MOB_FLAGS_ID` and `ArmorStand.DATA_CLIENT_FLAGS`. `None`
+    /// means "not known to be a display billboard byte", which a consumer
+    /// must treat as "no billboard reported yet", never as a cleared value.
+    pub display_billboard: Option<u8>,
+    /// `Display.DATA_TRANSLATION_ID`, in blocks — one quarter of the shared
+    /// `Transformation` every `Display` subtype carries (see
+    /// `lodestone_render::display::DisplayTransformation`).
+    ///
+    /// Unlike [`display_billboard`](Self::display_billboard), no class guard
+    /// is needed to surface this: the wire's `VECTOR3` serializer at this
+    /// index is exclusively `Display.DATA_TRANSLATION_ID` in the 26.2 jar
+    /// dump (`tests/support/entity_data_index_jvm.txt` in the version crate),
+    /// so the *value shape* alone disambiguates it — the same reasoning
+    /// [`crystal_beam_target`](Self::crystal_beam_target) already documents
+    /// for its own index.
+    pub display_translation: Option<Vec3f>,
+    /// `Display.DATA_SCALE_ID` — the second quarter of the shared
+    /// `Transformation`, self-identifying by the same `VECTOR3`-at-this-index
+    /// argument as [`display_translation`](Self::display_translation).
+    pub display_scale: Option<Vec3f>,
+    /// `Display.DATA_LEFT_ROTATION_ID` — applied **before** scale
+    /// (`Transformation.compose`). Self-identifying: the wire's `QUATERNION`
+    /// serializer at this index is exclusively this field in the jar dump.
+    pub display_left_rotation: Option<Quat>,
+    /// `Display.DATA_RIGHT_ROTATION_ID` — applied **after** scale. Same
+    /// self-identifying argument as
+    /// [`display_left_rotation`](Self::display_left_rotation), one index over.
+    pub display_right_rotation: Option<Quat>,
+    /// `Display.TextDisplay.DATA_TEXT_ID`, decoded to plain text the same way
+    /// [`custom_name`](Self::custom_name) is. [`Reported::Unreported`] when
+    /// this packet did not mention it; [`Reported::Reported(Some(text))`](Reported::Reported)
+    /// carries the current text. Unlike `custom_name`, a version adapter
+    /// never reports the inner `None` here — vanilla's own accessor default
+    /// is the empty string, not an absent component — so a consumer only
+    /// ever sees `Unreported` or `Reported(Some(_))` in practice, but the
+    /// shape stays `Reported<String>` (not a bespoke wrapper) for the same
+    /// "did this packet mention it" contract every other field here uses.
+    ///
+    /// Present only when the entity is known to be a `text_display` — index
+    /// 23's `COMPONENT` serializer is also `MinecartCommandBlock`'s last
+    /// command output at index 14 (a different index, no collision), but the
+    /// class guard is kept anyway for the same defence-in-depth every other
+    /// `Display` field in this struct uses.
+    pub display_text: Reported<String>,
+    /// `Display.TextDisplay.DATA_LINE_WIDTH_ID`, vanilla's own wrap width in
+    /// pixels (`Display.TextDisplay`'s accessor default is `200`). Present
+    /// only for a `text_display` that has reported it.
+    pub display_line_width: Option<i32>,
+    /// `Display.TextDisplay.DATA_BACKGROUND_COLOR_ID`, a packed ARGB int
+    /// (accessor default `0x40000000`, vanilla's translucent-black panel).
+    /// Present only for a `text_display` that has reported it.
+    pub display_background_color: Option<i32>,
+    /// `Display.TextDisplay.DATA_TEXT_OPACITY_ID`, a signed byte (accessor
+    /// default `-1`, i.e. fully opaque once read as the top byte of an ARGB
+    /// colour: `textOpacity << 24 | 0xFFFFFF`). Present only for a
+    /// `text_display` that has reported it.
+    pub display_text_opacity: Option<i8>,
+    /// `Display.TextDisplay.DATA_STYLE_FLAGS_ID`: bit `0x01` shadow, `0x02`
+    /// see-through, `0x04` use-the-viewer's-own-default-background, bits
+    /// `0x08`/`0x10` alignment (`Display.TextDisplay.getAlign`: neither set is
+    /// centre, `0x08` left, `0x10` right). Present only for a `text_display`
+    /// that has reported it.
+    pub display_text_style_flags: Option<u8>,
+    /// `Display.BlockDisplay.DATA_BLOCK_STATE_ID`, the global block-state id
+    /// this `block_display` is showing — the same id space
+    /// `lodestone_ecs::entity::FallingBlockState` and `World::set_block` use.
+    ///
+    /// # Why this needs a class guard where the transformation fields do not
+    ///
+    /// Index 23's `BLOCK_STATE` serializer decodes to the same plain integer
+    /// shape as several other fields at *other* indices (block state ids are
+    /// carried as a `VarInt`, indistinguishable on the wire from any other
+    /// `INT`), and — unlike [`display_translation`](Self::display_translation)'s
+    /// `VECTOR3` — index 23 has a real second `INT`-shaped claimant:
+    /// `Cat.DATA_COLLAR_COLOR`. Ungated, a cat's dye ordinal (`0..=15`) would
+    /// decode as a wildly out-of-range block-state id. Present only for a
+    /// `block_display` that has reported it.
+    pub display_block_state: Option<u32>,
+    /// `Display.ItemDisplay.DATA_ITEM_DISPLAY_ID`, the raw
+    /// `ItemDisplayContext` ordinal this `item_display` was told to pose its
+    /// item in (vanilla's `NONE` is `0`; `FIXED`, the item-frame-style
+    /// no-perspective context, is what a version adapter's consumer defaults
+    /// to when this is absent — see that consumer's own doc). Present only
+    /// for an `item_display` that has reported it.
+    pub display_item_context: Option<u8>,
 }
 
 impl EntityMetadataUpdate {
@@ -625,6 +724,18 @@ impl EntityMetadataUpdate {
             && self.dragon_phase.is_none()
             && !self.crystal_beam_target.is_reported()
             && self.crystal_show_bottom.is_none()
+            && self.display_billboard.is_none()
+            && self.display_translation.is_none()
+            && self.display_scale.is_none()
+            && self.display_left_rotation.is_none()
+            && self.display_right_rotation.is_none()
+            && !self.display_text.is_reported()
+            && self.display_line_width.is_none()
+            && self.display_background_color.is_none()
+            && self.display_text_opacity.is_none()
+            && self.display_text_style_flags.is_none()
+            && self.display_block_state.is_none()
+            && self.display_item_context.is_none()
     }
 }
 
