@@ -1602,7 +1602,6 @@ impl WindowApp {
                 anim,
             );
         }
-        let effects = EffectsRenderer::new(gpu.device(), format);
 
         // The container screen draws real item icons through the *same* shared
         // pass the hotbar uses (`hud::item_icon`), so both must be attached or
@@ -1795,7 +1794,6 @@ impl WindowApp {
         // billboard channel (issue #161).
         self.install_plugin_billboards_source();
         self.hud = Some(hud);
-        self.effects = Some(effects);
         self.container = Some(container);
         self.menu = Some(menu);
         // Grab only if the chosen screen wants it (menus and loading: no).

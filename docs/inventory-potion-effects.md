@@ -104,6 +104,48 @@ recipe-book shift is already folded into the panel origin
 `ContainerGeometry::build_inner` measures from, so an open book pushes the
 column right along with the panel.
 
+### The HUD's own overlay, and the two things that unblocked it
+
+`Hud.extractEffects` is a **different widget** on the same state (see the table
+at the top of `effects.rs`): no text, a `24x24` plate plus an `18x18` icon, two
+rows, and a flashing icon alpha inside the last 200 ticks. It drew a
+hash-tinted chip with a name and a timer until two things changed.
+
+**One: `GuiAtlas` now reads both of `atlases/gui.json`'s directory sources.**
+The bullet above says any enumeration assuming one source finds none of the
+icons — `GuiAtlas::build` was such an enumeration, which is why
+`ContainerBackground` had to walk `textures/mob_effect/**` a second time for
+itself. It now files that directory under the `mob_effect/` prefix the atlas
+definition declares, so the icons are reachable from every `GuiAtlas` consumer
+and the HUD needs no atlas of its own. The container's own enumeration is still
+there and still independent; folding it onto the shared atlas is a follow-up,
+not a prerequisite.
+
+**Two: the overlay stopped owning a renderer.** `EffectsRenderer` and
+`shaders/effects.wgsl` are deleted. `effects.rs` is now a pure model —
+`hud_icons` returns `HudEffectIcon`s with no colour and no text — and `hud.rs`'s
+own geometry builder emits the two blits through the same GUI-atlas sprite
+pipeline the hearts use. This is the identical move this column made, for the
+identical reason: **draw it where the atlas is.**
+
+Two details worth keeping:
+
+- **Each row counts separately.** `x -= 25 * n` where `n` is that row's own
+  counter, so the first beneficial and the first harmful effect sit in the same
+  column, one above the other. One shared counter staggers them and looks
+  plausible until two of one kind and one of the other are active.
+- **`isBeneficial()` is `category == BENEFICIAL`, not `!= HARMFUL`.**
+  `NEUTRAL` — `glowing`, `bad_omen`, `trial_omen`, `raid_omen` — draws in the
+  *lower* row. `effects::is_beneficial`'s table is transcribed from
+  `MobEffects.java`'s own per-effect category constructor argument, which is
+  the only place the fact is stated: it is not in `registries.json` and not in
+  any generated dump. `every_registry_effect_has_a_category` checks the table
+  against `lodestone_data`'s generated registry names in both directions, and
+  `the_potion_table_agrees_about_harmfulness` checks it against
+  `lodestone_data::potion`'s potion-scoped 20-entry subset of the same fact, so
+  the two tables cannot drift apart unnoticed. The durable home for the full
+  table is `lodestone_data`, beside `mob_effect_color`.
+
 ## How to change it
 
 - Layout constants are named `const`s at the top of `effects.rs`
@@ -119,15 +161,16 @@ column right along with the panel.
   no opinion about which screen is open. Vanilla also shows this column on
   `CreativeModeInventoryScreen`, which this client does not yet route through
   the same frame.
-- **The HUD's own top-right overlay is still an approximation** and is a
-  different widget: `Hud.extractEffects` draws a `24x24` background sprite and
-  an `18x18` icon in two rows (beneficial above, harmful below) with **no text
-  at all**, plus a flashing alpha under 200 ticks remaining.
-  `effects::geometry` draws a coloured chip with a name and a timer instead.
-  Closing that gap needs a sprite atlas at that draw site, which
-  `EffectsRenderer`'s untextured pipeline does not have — the same obstacle
-  this column just stopped having, solved the same way (draw it where the
-  atlas already is).
+- **The HUD's own top-right overlay is a different widget, and it is now a
+  port too** — `Hud.extractEffects`: a `24x24` background sprite and an
+  `18x18` icon in two rows (beneficial above, harmful below), **no text at
+  all**, and a flashing icon alpha inside the last 200 ticks. It reached that
+  the same way this column did: `EffectsRenderer` and its untextured pipeline
+  are gone, `effects.rs` is a pure model (`hud_icons`), and `hud.rs`'s own
+  builder emits the two blits through the GUI-atlas sprite pipeline the hearts
+  already use. Its layout constants are the `HUD_EFFECT_*` `const`s at the top
+  of `effects.rs`, and the beneficial/harmful split is
+  `effects::is_beneficial`. See `docs/status-effects.md`.
 
 ## Configuration
 

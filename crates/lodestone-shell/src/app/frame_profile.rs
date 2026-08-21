@@ -28,7 +28,7 @@
 //! * **HUD, effects and container/menu rendering share one bucket**
 //!   ([`FramePhase::HudUiEncodeSubmit`]) because each of those issues its own
 //!   `device.create_command_encoder`/`queue.submit` pair in sequence
-//!   (`HudRenderer::render_with_item_models`, `EffectsRenderer::render`,
+//!   (`HudRenderer::render_with_item_models`,
 //!   the container/menu draws), and none of them individually costs enough
 //!   to be worth a separate checkpoint per call — the CPU cost here is
 //!   dominated by state gather (colour-stream building), not by the
@@ -468,7 +468,7 @@ pub(crate) struct PhaseSummary {
     /// sourced from `gpu::gpu_timing`'s thread-local bridge. `None` for
     /// every other phase, including `HudUiEncodeSubmit`: that bucket's own
     /// internal calls (`HudRenderer::render_with_item_models`,
-    /// `EffectsRenderer::render`, the container/menu draws) live in files
+    /// the container/menu draws) live in files
     /// outside this instrument's edit scope today, so it is not broken down
     /// further — see `docs/frame-profiling.md`'s "How to change it" section
     /// for where the next checkpoint would go.

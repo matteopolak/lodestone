@@ -203,6 +203,13 @@ link. The same is true of `menu`'s apparent edges to `net::run_session`, `net::L
 itself only into `hud`. The raw occurrence counts badly overstate the coupling, which is why the
 naive read of this crate is "hopelessly entangled" and the measured read is not.
 
+**One correction since that count was taken.** `effects::EffectsRenderer` no longer exists — the HUD's
+status-effect overlay stopped owning a pipeline and is now drawn by `hud.rs` through the shared GUI-atlas
+sprite pass, so `effects.rs` is a pure model. That removes `menu`'s doc-only edge to it and **adds a real
+`hud -> effects` edge** (`hud.rs` reads `effects::HudEffectIcon` and the `HUD_EFFECT_*` layout constants).
+It does not change the grouping this plan argues for: `effects` is a model module with no wgpu of its own,
+so it travels with `hud`.
+
 **The cycle inside the set is real but confined.** `menu ↔ hud ↔ container` genuinely cycle: `hud` and
 `container` call `menu::render::logical_canvas` (11 + 16 sites) and `container` reads
 `menu::advancements::ADVANCEMENT_SPRITES`, while `menu` builds its sprite pipeline through

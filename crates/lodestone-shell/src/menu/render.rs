@@ -4,7 +4,7 @@
 //! ## What it is
 //!
 //! [`MenuRenderer`] owns its own shader, pipeline and vertex buffer, exactly
-//! like [`crate::effects::EffectsRenderer`] and [`crate::container::ContainerRenderer`].
+//! like [`crate::container::ContainerRenderer`] and [`crate::hud::HudRenderer`].
 //! That is a deliberate structural choice, not a stylistic one: `hud.rs` and
 //! `container.rs` are owned by other agents, and folding a fourth surface into
 //! the HUD's single geometry pass would mean editing their files. The only thing

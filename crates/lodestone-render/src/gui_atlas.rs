@@ -33,6 +33,23 @@ use thiserror::Error;
 /// namespace and the sprite id: `assets/<ns>/textures/gui/sprites/<id>.png`.
 const SPRITES_INFIX: &str = "/textures/gui/sprites/";
 
+/// The GUI atlas's **second** source directory, and the prefix its ids carry.
+///
+/// `assets/minecraft/atlases/gui.json` declares two `directory` sources, not
+/// one: `gui/sprites` with an empty prefix, and `mob_effect` under a
+/// `mob_effect/` prefix. So `assets/<ns>/textures/mob_effect/<name>.png`
+/// belongs to this atlas under the id `mob_effect/<name>` — which is exactly
+/// the id vanilla's `Hud.getMobEffectSprite` builds when it blits a status
+/// effect's icon.
+///
+/// Implementing only the first source is what made those icons unreachable
+/// through this type, and a consumer that needed them had to enumerate the
+/// directory a second time for itself. Read the atlas definition, not the
+/// first source in it.
+const MOB_EFFECT_INFIX: &str = "/textures/mob_effect/";
+/// The id prefix `atlases/gui.json` gives [`MOB_EFFECT_INFIX`]'s source.
+const MOB_EFFECT_PREFIX: &str = "mob_effect/";
+
 /// Gutter reserved around every sprite in the stitched GUI atlas.
 ///
 /// The atlas carries no mip pyramid (see [`GuiAtlas::build`]'s doc), so this
@@ -169,7 +186,7 @@ impl GuiAtlas {
         let mut png_paths: Vec<String> = manager
             .list("assets/")
             .into_iter()
-            .filter(|p| is_sprite_png(p))
+            .filter(|p| is_sprite_png(p) || is_mob_effect_png(p))
             .collect();
         // Deterministic packing: sort so a given pack always yields the same
         // atlas layout (stable UVs across runs, easier to reason about in gates).
@@ -183,9 +200,19 @@ impl GuiAtlas {
         let mut sprites: HashMap<String, SpriteEntry> = HashMap::with_capacity(png_paths.len());
 
         for path in &png_paths {
-            let Some((namespace, id)) = split_sprite_path(path) else {
+            // Which of `atlases/gui.json`'s two directory sources this path
+            // came from decides the id it is filed under, and nothing else —
+            // both are decoded, `.mcmeta`-scaled and stitched identically.
+            let Some((namespace, id)) = split_atlas_source_path(path) else {
                 continue;
             };
+            // Two sources, one id space. Vanilla never files a name under both,
+            // but a pack could, and stitching it twice would put two textures
+            // at one synthetic location. First source wins, matching the
+            // `extras` rule below.
+            if sprites.contains_key(&id) {
+                continue;
+            }
 
             let bytes = manager.read(path).ok_or_else(|| GuiAtlasError::Decode {
                 path: path.clone(),
@@ -224,7 +251,7 @@ impl GuiAtlas {
                 })?;
 
             builder.add_texture(location.clone(), image, None);
-            sprites.insert(id.to_string(), SpriteEntry { location, scaling });
+            sprites.insert(id, SpriteEntry { location, scaling });
         }
 
         for (id, path) in extras {
@@ -443,15 +470,45 @@ fn is_sprite_png(path: &str) -> bool {
         && !path.ends_with(".png.mcmeta")
 }
 
+/// True for `assets/<ns>/textures/mob_effect/<name>.png` — the atlas's second
+/// declared source directory. See [`MOB_EFFECT_INFIX`].
+fn is_mob_effect_png(path: &str) -> bool {
+    path.starts_with("assets/")
+        && path.contains(MOB_EFFECT_INFIX)
+        && path.ends_with(".png")
+        && !path.ends_with(".png.mcmeta")
+}
+
 /// Split `assets/<ns>/textures/gui/sprites/<id>.png` into `(ns, id)`.
 fn split_sprite_path(path: &str) -> Option<(&str, &str)> {
+    split_source_path(path, SPRITES_INFIX)
+}
+
+/// `(namespace, atlas id)` for either of `atlases/gui.json`'s two directory
+/// sources, or `None` for a path belonging to neither.
+///
+/// The `gui/sprites` source has an empty prefix, so its id is the path tail as
+/// it stands; the `mob_effect` source carries a `mob_effect/` prefix, so the
+/// id is the tail with that prepended. Returning an *owned* id for the second
+/// case is why this yields `String` rather than borrowing.
+fn split_atlas_source_path(path: &str) -> Option<(&str, String)> {
+    if let Some((namespace, id)) = split_source_path(path, SPRITES_INFIX) {
+        return Some((namespace, id.to_string()));
+    }
+    let (namespace, name) = split_source_path(path, MOB_EFFECT_INFIX)?;
+    Some((namespace, format!("{MOB_EFFECT_PREFIX}{name}")))
+}
+
+/// Shared tail of the two source splits: `(ns, <the part after `infix`, minus
+/// `.png`>)`.
+fn split_source_path<'a>(path: &'a str, infix: &str) -> Option<(&'a str, &'a str)> {
     let rest = path.strip_prefix("assets/")?;
-    let infix_at = rest.find(SPRITES_INFIX)?;
+    let infix_at = rest.find(infix)?;
     let namespace = &rest[..infix_at];
     if namespace.is_empty() || namespace.contains('/') {
         return None;
     }
-    let after = &rest[infix_at + SPRITES_INFIX.len()..];
+    let after = &rest[infix_at + infix.len()..];
     let id = after.strip_suffix(".png")?;
     if id.is_empty() {
         return None;
@@ -511,6 +568,55 @@ mod tests {
             solid_png(2, 2, [1, 2, 3, 255]),
         );
         ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>])
+    }
+
+    /// `atlases/gui.json` declares **two** directory sources, and reading only
+    /// the first is a defect with no symptom in this type: every
+    /// `gui/sprites/**` lookup keeps working and only the effect icons are
+    /// missing, so a consumer that needs them draws nothing and looks like its
+    /// own bug. (It was: the HUD's status-effect overlay drew hash-tinted
+    /// chips, and the container had to walk the directory a second time.)
+    ///
+    /// Three arms, because the id transform is the part that can be wrong:
+    /// the icon is present, it is filed under the **prefixed** id vanilla's
+    /// `Hud.getMobEffectSprite` builds, and the unprefixed name is *not* an
+    /// id — a source enumerated with the wrong prefix passes a presence check
+    /// and fails every real lookup.
+    #[test]
+    fn build_enumerates_the_mob_effect_source_under_its_declared_prefix() {
+        let mut src = MemorySource::default();
+        src.insert(
+            "assets/minecraft/textures/gui/sprites/hud/heart/full.png",
+            solid_png(9, 9, [200, 20, 30, 255]),
+        );
+        src.insert(
+            "assets/minecraft/textures/mob_effect/speed.png",
+            solid_png(18, 18, [124, 175, 198, 255]),
+        );
+        // A `.mcmeta` sibling is metadata, not a sprite, in this source too.
+        src.insert(
+            "assets/minecraft/textures/mob_effect/speed.png.mcmeta",
+            nine_slice_mcmeta(18, 18, 2),
+        );
+        let manager = ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>]);
+        let atlas = GuiAtlas::build(&manager).expect("atlas builds");
+
+        assert_eq!(atlas.sprite_count(), 2, "one gui sprite plus one mob effect");
+        assert!(atlas.contains("hud/heart/full"));
+        assert!(
+            atlas.contains("mob_effect/speed"),
+            "the second source's ids carry the `mob_effect/` prefix the atlas \
+             definition declares"
+        );
+        assert!(
+            !atlas.contains("speed"),
+            "an unprefixed id means the prefix was dropped: every real lookup goes \
+             through `mob_effect/<id>`"
+        );
+        assert!(
+            !atlas.geometry("mob_effect/speed", 0.0, 0.0, 18.0, 18.0).is_empty(),
+            "the icon must resolve to real quads, not merely be listed"
+        );
     }
 
     #[test]

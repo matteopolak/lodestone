@@ -371,7 +371,7 @@ impl MenuRenderer {
     /// clearing it first — for the pause menu (see [`pause_frame`]), which
     /// sits on top of the world, HUD and container passes the caller already
     /// ran this frame rather than replacing them (mirrors
-    /// [`crate::effects::EffectsRenderer`]'s own Load-pass overlay). Every
+    /// [`crate::hud::HudRenderer`]'s own Load-pass overlay). Every
     /// other detail — buffer growth, the vertex layout, the pipeline — is
     /// identical to [`render`](Self::render); only the load op differs, so a
     /// caller must never invoke both in the same frame — `Screen::Paused` is

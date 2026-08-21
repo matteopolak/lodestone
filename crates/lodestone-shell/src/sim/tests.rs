@@ -2000,11 +2000,19 @@ fn mob_effect_applied_for_local_player_reaches_status_effects() {
         Some(2),
         "the wire→StatusEffects seam must fold an effect for the local entity id"
     );
-    // The same event must also reach the display model with its full data.
-    let chips = crate::effects::chips_from(&sim.active_effects());
-    assert_eq!(chips.len(), 1, "the HUD effect model must fold it too");
-    assert_eq!(chips[0].label, "levitation III"); // amplifier 2 → level III
-    assert_eq!(chips[0].time, "0:10"); // 200 ticks → 10 s
+    // The same event must also reach the display models with its full data —
+    // both of them, because the HUD overlay and the inventory column are
+    // separate folds of this one state and either could be the dead one.
+    let icons = crate::effects::hud_icons(&sim.active_effects());
+    assert_eq!(icons.len(), 1, "the HUD effect model must fold it too");
+    assert_eq!(icons[0].icon, "mob_effect/levitation");
+    assert!(
+        !icons[0].beneficial,
+        "levitation is HARMFUL, so it belongs in the overlay's lower row"
+    );
+    let rows = crate::effects::inventory_rows(&sim.active_effects(), &|_| None);
+    assert_eq!(rows.len(), 1, "the inventory column must fold it too");
+    assert_eq!(rows[0].duration, "00:10"); // 200 ticks -> 10 s
 
     feed.send(NetUpdate::EffectRemoved {
         entity_id: 7,

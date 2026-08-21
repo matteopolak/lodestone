@@ -58,7 +58,6 @@ use crate::container::{
     ContainerFrame, ContainerRenderer, MenuButton, MenuContext, MenuHit, MenuInput,
     MenuKey as ContainerMenuKey,
 };
-use crate::effects::EffectsRenderer;
 use crate::gpu::RenderState;
 use crate::hud::{HotbarSlot, HudFrame, HudRenderer};
 use crate::keybinds::{Binding, InputAction, Keybinds};
@@ -499,9 +498,6 @@ struct WindowApp {
     target: Option<lodestone_render::SurfaceTarget<'static>>,
     render: Option<RenderState>,
     hud: Option<HudRenderer>,
-    /// Self-contained overlay for active status effects (owns its own pipeline
-    /// so it composites over the HUD without touching the HUD renderer).
-    effects: Option<EffectsRenderer>,
     container: Option<ContainerRenderer>,
     grabbed: bool,
     /// Frame clock: clamps catch-up and throttles presentation when the window
