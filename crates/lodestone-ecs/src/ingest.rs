@@ -49,10 +49,12 @@ use lodestone_physics::Vec3d;
 
 use crate::entity::{
     ArmorStandFlags, Attributes, AttackSwing, Baby, CreeperSwellDir, CustomName,
-    CustomNameVisible, DeathTime, DisplayItem, EntityFlags, EntityIndex, EntityKind, EntityUuid,
-    Equipment, ExperienceOrbValue, FallingBlockState, HeadYaw, Health, HurtTime, Leashed,
-    MinecraftEntityId, MobState, OnGround, Passengers, Pose, Position, Rotation, Tamed, Variant,
-    Vehicle, Velocity,
+    CustomNameVisible, DeathTime, DisplayBackgroundColor, DisplayBillboard, DisplayBlockState,
+    DisplayItem, DisplayItemContext, DisplayLeftRotation, DisplayLineWidth, DisplayRightRotation,
+    DisplayScale, DisplayStyleFlags, DisplayText, DisplayTextOpacity, DisplayTranslation,
+    EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue,
+    FallingBlockState, HeadYaw, Health, HurtTime, Leashed, MinecraftEntityId, MobState, OnGround,
+    Passengers, Pose, Position, Rotation, Tamed, Variant, Vehicle, Velocity,
 };
 use crate::player::{LocalPlayer, PhysicsState};
 use crate::schedules::{GameTick, NetIngest};
@@ -930,6 +932,82 @@ pub fn apply_entity_metadata(
     }
 }
 
+/// `IngestSet::Apply`: `ClientEvent::EntityMetadataUpdated` → whichever of the
+/// `Display`-family components (`text_display`/`item_display`/`block_display`)
+/// the packet actually carried.
+///
+/// A separate system from [`apply_entity_metadata`] rather than ten more arms
+/// inside it — that system is already the widest fold in this file, and every
+/// field here is unique to one entity family (`Display`) with no other reader,
+/// so splitting it out keeps both functions' `git blame` and diff surface
+/// scoped to what they actually own. Reads the *same* `EntityMetadataUpdated`
+/// batch, id-addressed through [`EntityIndex`] like every other system in this
+/// module, so it relies on the same `.chain()` sync point that lets a metadata
+/// packet in the *same* batch as the entity's own `AddEntity` still resolve.
+///
+/// Before this system existed, `lodestone_v770`'s decoder already produced
+/// every one of these fields — [`crate`]'s own `EntityMetadataUpdated` event
+/// carried them end to end — and nothing here read them: a decoded field with
+/// no component, the metadata-shaped island this repo's evidence standards
+/// call out. `lodestone_render::display`'s billboard/transform geometry has
+/// had zero producers until this system and its protocol-layer half landed.
+pub fn apply_display_metadata(batch: Res<IngestBatch>, index: Res<EntityIndex>, mut commands: Commands) {
+    for event in batch.events() {
+        let ClientEvent::EntityMetadataUpdated {
+            entity_id,
+            metadata,
+        } = event
+        else {
+            continue;
+        };
+        let Some(entity) = index.get(*entity_id) else {
+            continue;
+        };
+        let mut entity = commands.entity(entity);
+        if let Some(billboard) = metadata.display_billboard {
+            entity.insert(DisplayBillboard(billboard));
+        }
+        if let Some(translation) = metadata.display_translation {
+            entity.insert(DisplayTranslation(translation));
+        }
+        if let Some(scale) = metadata.display_scale {
+            entity.insert(DisplayScale(scale));
+        }
+        if let Some(rotation) = metadata.display_left_rotation {
+            entity.insert(DisplayLeftRotation(rotation));
+        }
+        if let Some(rotation) = metadata.display_right_rotation {
+            entity.insert(DisplayRightRotation(rotation));
+        }
+        // `Reported::Reported(_)` is the server speaking about the field —
+        // including the theoretical `Reported(None)` case a version adapter
+        // never actually produces for this field (see
+        // `EntityMetadataUpdate::display_text`'s own doc) — matching
+        // `custom_name`'s handling above rather than `Some(_)`-gating.
+        if let Reported::Reported(text) = &metadata.display_text {
+            entity.insert(DisplayText(text.clone().unwrap_or_default()));
+        }
+        if let Some(width) = metadata.display_line_width {
+            entity.insert(DisplayLineWidth(width));
+        }
+        if let Some(color) = metadata.display_background_color {
+            entity.insert(DisplayBackgroundColor(color));
+        }
+        if let Some(opacity) = metadata.display_text_opacity {
+            entity.insert(DisplayTextOpacity(opacity));
+        }
+        if let Some(flags) = metadata.display_text_style_flags {
+            entity.insert(DisplayStyleFlags(flags));
+        }
+        if let Some(state) = metadata.display_block_state {
+            entity.insert(DisplayBlockState(state));
+        }
+        if let Some(context) = metadata.display_item_context {
+            entity.insert(DisplayItemContext(context));
+        }
+    }
+}
+
 /// `IngestSet::Apply`: `ClientEvent::EntityLeashed` → [`Leashed`].
 /// A dedicated system rather than an arm inside
 /// [`apply_entity_metadata`] immediately above: `EntityLeashed` decodes from
@@ -1291,6 +1369,14 @@ impl Plugin for IngestPlugin {
                 .chain()
                 .in_set(IngestSet::Apply),
         );
+        // A **separate** `add_systems` call rather than a twenty-first slot in the
+        // tuple above: it reads the same `EntityMetadataUpdated` batch
+        // `apply_entity_metadata` does (disjoint components, so relative order
+        // never matters, exactly like `apply_local_player_air_supply`'s own note
+        // two systems up), and the tuple above is already at the arity
+        // `IntoSystemConfigs` is generated for. Still `IngestSet::Apply`, so it
+        // still runs inside the same `NetIngest` schedule pass.
+        app.add_systems(NetIngest, apply_display_metadata.in_set(IngestSet::Apply));
         // `tick_hurt_time`/`tick_entity_swing` live in `GameTick`/`TickSet::Animate`,
         // not `NetIngest` — they age [`HurtTime`]/[`AttackSwing`] once per simulated
         // tick regardless of how many (or how few) packets arrived that tick, the
