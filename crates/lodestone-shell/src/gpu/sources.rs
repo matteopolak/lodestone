@@ -247,13 +247,34 @@ pub struct ThirdPersonBodyState {
     pub swim_amount: f32,
     /// Which rig to draw: `true` for `player_slim` ("Alex" arms), `false` for
     /// `player_wide` ("Steve" arms) — see [`player_model_name`].
-    /// `sim/camera.rs::third_person_body_state` fills this from
-    /// `crate::skin_fetch::current_model`, the same signed-in-profile fetch
-    /// the inventory avatar already draws. The first-person arm
-    /// (`RenderState::prepare_first_person_hand`, in `gpu/first_person.rs`)
-    /// is a separate pass and still draws `player_wide` unconditionally —
-    /// see that method's own doc.
+    ///
+    /// Derived from [`Self::player_skin`] when that resolves, because the rig
+    /// and the sheet have to change together and the skin is the thing that
+    /// declares both. It falls back to `crate::skin_fetch::current_model` — the
+    /// signed-in profile's own rig, which is all that was available before the
+    /// tab-list resolution existed — for a session with no tab-list entry for
+    /// us at all.
     pub slim: bool,
+    /// **Our own** skin, resolved exactly the way every other player's is:
+    /// `entities::player_skin_for_uuid` against the same tab list, filled by
+    /// `sim/camera.rs::third_person_body_state`.
+    ///
+    /// This was `None` at [`Self::into_draw`] for as long as this struct
+    /// existed, and it is the whole of the report *"my own player renders with
+    /// a default skin in the world while other players render theirs
+    /// correctly"*. Nothing about the draw was wrong: the local player has no
+    /// tracked entity (`entities::extract_entity_draws` excludes it
+    /// deliberately), so it reaches none of the fold that resolves a skin, and
+    /// this producer had no resolution of its own. A correct consumer fed a
+    /// constant by its producer.
+    ///
+    /// Carrying the whole [`crate::remote_skins::RemoteSkin`] rather than a
+    /// bare URL is what keeps the rig, the fetched sheet and the built-in
+    /// identity fallback moving together — [`Self::into_draw`] hands all three
+    /// to the same `EntityDraw` fields a remote player's skin lands on, so our
+    /// own body resolves through the identical batch key, bind-group cache and
+    /// fallback ladder rather than a second copy of any of them.
+    pub player_skin: Option<crate::remote_skins::RemoteSkin>,
     /// What the local player is holding/wearing, in the shape
     /// [`EntityDraw::equipment`] carries: main hand, off hand, and all four
     /// armour slots (head/chest/legs/feet), the same as any other entity's
@@ -378,18 +399,26 @@ impl ThirdPersonBodyState {
             invisible: false,
             armor_stand: None,
             // **The rig is already chosen** — `type_path` above is
-            // `player_model_name(self.slim)` — so this field would be redundant
-            // for the rig and is only ever the *sheet*. `None` therefore means
-            // "our own third-person body still draws the pack's default sheet",
-            // which is the gap `docs/player-skins.md` records: our own fetched
-            // skin reaches the inventory avatar, not this body. `ThirdPersonBodyState`
-            // is where the URL would have to be plumbed.
-            player_skin: None,
-            variant_sheet: None,
-            // No cape reaches this draw for the same reason `player_skin`
-            // above is `None`: nothing plumbs our own fetched cape URL to
-            // the third-person body, so there is nothing to sway even if
-            // this were non-zero.
+            // `player_model_name(self.slim)`, and `self.slim` is derived from
+            // this same skin — so what this field contributes here is only the
+            // *sheet*: `prepare_entities` groups by its url, and the draw binds
+            // whatever `player_skins` holds for that url.
+            //
+            // It was a hard `None` until the producer learned to resolve our
+            // own skin, which is why our own body drew the pack default while
+            // every other player wore their real skin. See the field's doc on
+            // `ThirdPersonBodyState`.
+            player_skin: self.player_skin.clone(),
+            // The built-in identity sheet, the same channel a remote player's
+            // takes — so our own body shows its uuid-hash identity while the
+            // fetch is in flight, and forever on an offline-mode server, rather
+            // than falling through to the pack's plain Steve.
+            variant_sheet: self.player_skin.as_ref().map(|skin| skin.default_sheet),
+            // Still no cape sway: the *url* now reaches this draw (it rides
+            // along on `player_skin` above), but nothing ticks a `CapeLag` for
+            // the local player — that state is folded per tracked entity, and
+            // the local player has none — so there is no per-tick lag to
+            // interpolate and a non-zero value here would be invented.
             cape_sway: (0.0, 0.0, 0.0),
         }
     }

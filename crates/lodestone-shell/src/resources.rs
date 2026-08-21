@@ -818,6 +818,16 @@ pub fn load_entity_textures() -> std::collections::HashMap<&'static str, lodesto
 /// `_angry` files, for instance, which nothing asks for while the tame flag does not
 /// reach the client). That is the *cheap* direction of the trade: an unused decoded
 /// image costs memory, whereas a missing one costs a visibly wrong skin.
+///
+/// # The one enumerated set: the built-in player identities
+///
+/// The eighteen `DefaultPlayerSkin` sheets are the exception, and deliberately so.
+/// They are not a variant axis at all — the player rigs carry a `Fixed` texture, so
+/// their directories never appear in `entity_variant_sheet_dirs` — but they resolve
+/// through this same by-reference map, because a player with no declared skin binds
+/// one of them by name. The set is closed and vanilla owns the list, so it is read
+/// from `lodestone_assets::skin::default_skins` by exact path: listing that
+/// directory instead would make any stray sibling PNG a bindable identity.
 #[must_use]
 pub fn load_entity_variant_textures()
 -> std::collections::HashMap<String, lodestone_assets::Image> {
@@ -827,6 +837,42 @@ pub fn load_entity_variant_textures()
     let Some(manager) = open_vanilla_pack_stack() else {
         return out;
     };
+
+    // The eighteen built-in player identities, by **exact path** rather than by
+    // listing. They are not a variant axis — `player_wide`/`player_slim` carry a
+    // `Fixed` texture, so `entity_variant_sheet_dirs` does not name their
+    // directories — but they are consumed through this same by-reference map: a
+    // player with no declared skin resolves `DefaultPlayerSkin.get(uuid)` and the
+    // draw binds that sheet by name. Without these entries every such player falls
+    // through to the model's own sheet and the whole hash pick collapses onto Steve
+    // and Alex.
+    //
+    // Enumerated rather than listed because the set is closed and known: the array
+    // *is* vanilla's `DEFAULT_SKINS`, and a stray sibling PNG under
+    // `entity/player/wide/` must not become a bindable identity.
+    for skin in lodestone_assets::skin::default_skins() {
+        let reference = skin.texture;
+        if out.contains_key(reference) {
+            continue;
+        }
+        let path = format!("assets/minecraft/textures/{reference}.png");
+        let Some(png) = manager.read(&path) else {
+            tracing::warn!(
+                target: "assets",
+                "the pack ships no {path}; players hashing to that identity draw the \
+                 model's own sheet instead"
+            );
+            continue;
+        };
+        match Image::decode_png(&png) {
+            Ok(img) => {
+                out.insert(reference.to_owned(), img);
+            }
+            Err(e) => {
+                tracing::warn!(target: "assets", "decode {path}: {e}");
+            }
+        }
+    }
 
     for dir in lodestone_render::entity_variant_sheet_dirs() {
         for path in manager.list(dir) {

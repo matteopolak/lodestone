@@ -501,6 +501,10 @@ fn freeze_confusion_and_portal_survive_third_person_unlike_the_others() {
     // body is installed at all.
     render.set_third_person_body_source(|| {
         Some(lodestone::gpu::ThirdPersonBodyState {
+            // No skin: this fixture installs a body to suppress the first-person
+            // arm, not to assert a sheet. The draw falls back to the model's own
+            // texture, exactly as it did before this field existed.
+            player_skin: None,
             feet: glam::Vec3::new(0.0, 70.0, 0.0),
             body_yaw_deg: 0.0,
             anim: lodestone_render::AnimInput::default(),

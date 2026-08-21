@@ -658,8 +658,74 @@ impl Sim {
         self.body_anim(&self.interpolated_player(), &self.body_pose.render(partial_tick), partial_tick)
     }
 
+    /// **Our own** skin, resolved through the identical ladder every other
+    /// player's goes through: `entities::player_skin_for_uuid` against the same
+    /// tab list, which is the profile the *server* saw and therefore the same
+    /// evidence a remote client would draw us from.
+    ///
+    /// `None` only before login, or on a server that never told us our own
+    /// uuid — and both are logged, because a skin that quietly declines to
+    /// resolve is invisible at the draw site: a default skin looks exactly like
+    /// a skin. Everything past that point has a real answer, including "this
+    /// account has none", which resolves to its uuid-hash built-in identity
+    /// rather than to a silent fallback.
+    ///
+    /// # Two side effects, and both are the point
+    ///
+    /// It **starts the fetch** (`remote_skins::request`, idempotent and
+    /// memoised per url, so the per-frame call costs one map lookup after the
+    /// first). Nothing else would: `app/redraw.rs`'s per-frame `request_all`
+    /// collects urls off the *entity draws*, and the local player is not among
+    /// them — `extract_entity_draws` excludes it — so our own url would reach
+    /// no fetch at all and our own body would sit on the built-in identity
+    /// forever.
+    ///
+    /// And it **publishes to `remote_skins::set_local`**, which is how the
+    /// first-person arm reads it. The arm and this body are mutually exclusive
+    /// — the arm draws exactly when [`Self::third_person_body_state`] returns
+    /// `None` — so the arm cannot read the body's state and needs the skin
+    /// through a channel that survives the camera-mode gate.
+    ///
+    /// That is why the call site is *above* that gate in
+    /// [`Self::third_person_body_state`], which `app/redraw.rs` invokes every
+    /// frame regardless of camera mode. Moving this below the early return, or
+    /// calling it only when a body is drawn, silently unwires the arm.
+    pub fn local_player_skin(&self) -> Option<crate::remote_skins::RemoteSkin> {
+        let Some(id) = self.local_uuid() else {
+            tracing::debug!(
+                target: "assets",
+                "no local uuid yet, so our own body and arm draw the pack default rig"
+            );
+            return None;
+        };
+        let skin = crate::entities::player_skin_for_uuid(id, &self.tab_list());
+        if skin.url.is_empty() {
+            // Not a failure and not rare — every offline-mode server sends no
+            // `textures` property at all. Logged at debug because it is the
+            // normal path against our own oracles, but logged, because "drew a
+            // default" and "declined to resolve" are indistinguishable on
+            // screen and only one of them is a bug.
+            tracing::debug!(
+                target: "assets",
+                player = %id,
+                sheet = skin.default_sheet,
+                "our own profile declares no skin texture; drawing the uuid-hash identity"
+            );
+        } else {
+            crate::remote_skins::request(&skin.url);
+        }
+        crate::remote_skins::set_local(&skin);
+        Some(skin)
+    }
+
     #[must_use]
     pub fn third_person_body_state(&self) -> Option<ThirdPersonBodyState> {
+        // Resolved **before** the camera-mode gate below, deliberately: this is
+        // the only per-frame call the shell makes into this file whatever the
+        // camera mode, and the first-person arm — which draws precisely when
+        // this returns `None` — reads the published result. See
+        // `local_player_skin`'s own doc.
+        let player_skin = self.local_player_skin();
         // `isFirstPerson()`, so the body draws in **both** detached modes. This
         // is also what suppresses the first-person arm and the pumpkin/underwater
         // overlays in the front view: `gpu/frame.rs` derives both from
@@ -737,7 +803,18 @@ impl Sim {
             // doc for the "stood bolt upright" symptom this fixes.
             swim_amount: interp.swim_amount_o
                 + (interp.swim_amount - interp.swim_amount_o) * partial_tick,
-            slim: crate::skin_fetch::current_model().is_slim(),
+            // The rig comes from the resolved skin when there is one, because
+            // the rig and the sheet must change together — a slim-authored
+            // sheet on the wide rig puts the arm UVs a texel out. The
+            // signed-in profile's own rig is the fallback for a session where
+            // no tab-list entry for us exists yet; it was the *only* source
+            // before the tab-list resolution above existed, which is why our
+            // own body could be the right shape and still the wrong skin.
+            slim: player_skin
+                .as_ref()
+                .map_or_else(|| crate::skin_fetch::current_model(), |skin| skin.model)
+                .is_slim(),
+            player_skin,
             equipment,
         })
     }

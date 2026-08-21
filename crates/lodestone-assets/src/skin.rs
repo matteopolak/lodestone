@@ -225,6 +225,22 @@ const DEFAULT_SKINS: [DefaultSkin; 18] = [
     DefaultSkin { model: PlayerModelType::Wide, texture: "entity/player/wide/zuri" },
 ];
 
+/// Every built-in identity, for a consumer that has to *load* all eighteen
+/// sheets rather than resolve one — the shell's entity-texture loader, which
+/// needs each [`DefaultSkin::texture`] reference up front so the draw can bind
+/// one by name later.
+///
+/// Exists because that field had **zero production readers** for as long as it
+/// existed: the one caller resolving a default skin took `.model` (the rig) and
+/// dropped `.texture` on the floor, so every player without a custom skin drew
+/// the pack's plain `player_wide`/`player_slim` sheet — Steve or Alex — and the
+/// other seven identities were unreachable. A `DEFAULT_SKINS` entry is only
+/// half-ported until something binds its sheet.
+#[must_use]
+pub const fn default_skins() -> &'static [DefaultSkin; 18] {
+    &DEFAULT_SKINS
+}
+
 /// `DefaultPlayerSkin.getDefaultSkin()` — index `6`, `slim/steve` (the array's
 /// first nine entries are slim, so index `6` is still in the slim half) —
 /// vanilla's answer when no uuid is available at all. Distinct from
