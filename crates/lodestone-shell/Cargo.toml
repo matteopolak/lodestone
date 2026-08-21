@@ -341,6 +341,15 @@ harness = false
 name = "render_submit"
 harness = false
 
+# Where a frame goes, CPU *and* GPU, over a fixed camera path on a fixed demo
+# world. The only place in this workspace that reports real TIMESTAMP_QUERY
+# pass timings next to the CPU cost of recording those same passes, which is
+# the one question a frame-time investigation has to answer first. Needs a GPU
+# adapter (skips loudly without one) but no `client.jar`.
+[[bench]]
+name = "frame_profile"
+harness = false
+
 [features]
 # `live` compiles the vanilla-26.2 (protocol 776) family into the registry so
 # `--connect`/`--live` can resolve an adapter. The shell still names no version in

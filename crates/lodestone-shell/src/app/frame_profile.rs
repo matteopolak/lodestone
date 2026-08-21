@@ -137,6 +137,117 @@ impl FramePhase {
     }
 }
 
+/// One checkpoint inside [`FramePhase::HudUiEncodeSubmit`], the counterpart to
+/// `gpu::gpu_timing::WorldSubphase` for the other half of the frame.
+///
+/// # Why these six, and why they are not a `FramePhase`
+///
+/// These are **nested inside** one phase's span rather than sequential
+/// siblings of it, so they cannot share [`FrameProfiler`]'s single
+/// "elapsed since the previous mark" cursor — [`FrameProfiler`] keeps a second
+/// cursor for them, reset automatically whenever
+/// [`FramePhase::WorldEncodeSubmit`] is marked (which is precisely where this
+/// phase begins).
+///
+/// Unlike the world's sub-phases, every boundary here is inside
+/// `app::redraw`, so no thread-local bridge is needed: `redraw` calls
+/// [`FrameProfiler::mark_hud`] directly at seams it already has.
+///
+/// The split is by **what the work is**, not by encoder, because the CPU cost
+/// here turned out not to sit where the phase's name suggests: `redraw` spends
+/// most of this phase *gathering* the state a `HudFrame` needs — chat spans,
+/// the tab list, boss bars, locator dots, effect icons — before any encoder
+/// exists at all. Folding that into a bucket called "hud ui encode submit"
+/// invited exactly the wrong conclusion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HudSubphase {
+    /// The `if self.show_debug` block: building this profiler's own F3 lines
+    /// and the pie-chart snapshot.
+    ///
+    /// **This is the observer-effect number.** It is zero whenever F3 is
+    /// closed, and F3 open is the only state in which anyone reads the frame
+    /// rate off the overlay — so any conclusion drawn from an on-screen fps
+    /// figure has to be read against this line. `summary()` sorts a ring
+    /// buffer per phase, which is why the block is gated at all.
+    DebugGather,
+    /// Everything between that block and the HUD draw: chat span/wrap
+    /// building, tab-list and boss-bar snapshots, locator dots, effect icons,
+    /// hotbar records, and the `HudFrame` field assignment itself. No GPU work
+    /// whatsoever — this is pure state gather.
+    FrameGather,
+    /// `HudRenderer::render_with_item_models` — its own encoder and submit.
+    HudDraw,
+    /// The creative/container/recipe-book renderers, when one is open. Zero
+    /// on an ordinary playing frame, which is what makes it worth separating
+    /// from the HUD draw rather than fusing the two.
+    ContainerDraw,
+    /// Every `menu::render` overlay draw — pause, death, advancements,
+    /// settings, statistics, links, social, command block, sign edit, book
+    /// edit, spectator menu — plus the screenshot copy. Counted as well as
+    /// timed (`HudSubphaseCounts::menu_overlays_drawn`): several of these can
+    /// stack in one frame.
+    MenuOverlays,
+    /// [`RenderState::gpu_timing_end_frame`](crate::gpu::RenderState::gpu_timing_end_frame)
+    /// — the stamp/resolve/submit that closes GPU timing for the frame.
+    ///
+    /// This is the profiler paying for itself, reported rather than hidden:
+    /// it is one extra command-buffer submission per frame that exists only
+    /// because this instrument does. If it ever grows past the phases it
+    /// exists to measure, the instrument is the bug.
+    GpuTimingEnd,
+}
+
+/// [`HudSubphase`] variant count — same one-place rule as [`PHASE_COUNT`].
+pub(crate) const HUD_SUBPHASE_COUNT: usize = 6;
+
+impl HudSubphase {
+    pub(crate) const ALL: [HudSubphase; HUD_SUBPHASE_COUNT] = [
+        HudSubphase::DebugGather,
+        HudSubphase::FrameGather,
+        HudSubphase::HudDraw,
+        HudSubphase::ContainerDraw,
+        HudSubphase::MenuOverlays,
+        HudSubphase::GpuTimingEnd,
+    ];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Short, stable name for the F3 detail line and the CSV header — kept
+    /// separate from `Debug` for the same reason [`FramePhase::name`] is.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            HudSubphase::DebugGather => "hud.debug_gather",
+            HudSubphase::FrameGather => "hud.frame_gather",
+            HudSubphase::HudDraw => "hud.hud_draw",
+            HudSubphase::ContainerDraw => "hud.container_draw",
+            HudSubphase::MenuOverlays => "hud.menu_overlays",
+            HudSubphase::GpuTimingEnd => "hud.gpu_timing_end",
+        }
+    }
+}
+
+/// Counts alongside [`HudSubphase`]'s timings, for the same reason
+/// `gpu::gpu_timing::WorldSubphaseCounts` exists: "2 ms of chat gather" is a
+/// different problem at 10 lines than at 100, and a duration alone cannot tell
+/// the two apart.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct HudSubphaseCounts {
+    /// Chat lines gathered into the `HudFrame` this frame. Jumps roughly
+    /// tenfold when the chat box is open (10 recent lines vs 100), which is
+    /// the single largest swing in `HudSubphase::FrameGather`'s input.
+    pub chat_lines: usize,
+    /// Lines this profiler formatted for the F3 overlay this frame — `0`
+    /// whenever the overlay is closed, so `hud.debug_gather` and this move
+    /// together or one of them is lying.
+    pub debug_lines: usize,
+    /// `menu::render` overlays drawn this frame. Several can stack (a
+    /// settings page over a paused world over a loading screen), so this is a
+    /// count and not a flag.
+    pub menu_overlays_drawn: usize,
+}
+
 /// A fixed-size ring buffer of one phase's per-frame durations, in
 /// milliseconds.
 #[derive(Debug)]
@@ -236,6 +347,25 @@ pub(crate) struct FrameProfiler {
     /// have drifted apart (a renamed/added `WorldSubphase` variant on one
     /// side only, for instance) — never expected to move on a healthy build.
     world_subphase_bridge_misses: u64,
+    /// Rolling windows for `hud_ui_encode_submit`'s own internal breakdown —
+    /// see [`HudSubphase`]'s doc.
+    hud_subphase_windows: [PhaseWindow; HUD_SUBPHASE_COUNT],
+    /// This frame's recorded HUD sub-phase durations, `None` until
+    /// [`Self::mark_hud`] closes each one out. Finalised into
+    /// `hud_subphase_windows` alongside the phases proper, so a frame that
+    /// never opened a container contributes a **skip** to
+    /// `hud.container_draw` rather than a `0.0` sample — a phase that did not
+    /// run and a phase that ran for free must not read the same, exactly as
+    /// for [`FramePhase`].
+    hud_pending: [Option<f32>; HUD_SUBPHASE_COUNT],
+    /// Second cursor, for the sub-phases nested inside
+    /// [`FramePhase::HudUiEncodeSubmit`] — see [`HudSubphase`]'s doc for why
+    /// `cursor` cannot serve. Re-based automatically when
+    /// [`FramePhase::WorldEncodeSubmit`] is marked.
+    hud_cursor: Instant,
+    /// The last frame's [`HudSubphaseCounts`], alongside the timings above —
+    /// not windowed, mirroring `world_subphase_counts`.
+    hud_subphase_counts: Option<HudSubphaseCounts>,
 }
 
 impl FrameProfiler {
@@ -255,6 +385,10 @@ impl FrameProfiler {
                 crate::gpu::gpu_timing::WORLD_SUBPHASE_COUNT],
             world_subphase_counts: None,
             world_subphase_bridge_misses: 0,
+            hud_subphase_windows: [const { PhaseWindow::new() }; HUD_SUBPHASE_COUNT],
+            hud_pending: [None; HUD_SUBPHASE_COUNT],
+            hud_cursor: now,
+            hud_subphase_counts: None,
         }
     }
 
@@ -303,7 +437,29 @@ impl FrameProfiler {
         // `RenderStats`/a `RenderState` field.
         if phase == FramePhase::WorldEncodeSubmit {
             self.drain_world_subphases();
+            // `hud_ui_encode_submit` starts exactly where `world_encode_submit`
+            // ends, so its own cursor re-bases here rather than needing a
+            // `begin_hud` call site in `redraw` that could be forgotten (and
+            // whose absence would silently attribute the whole previous frame
+            // to the first HUD sub-phase).
+            self.hud_cursor = now;
         }
+    }
+
+    /// Close out one [`HudSubphase`] and start the next, exactly as
+    /// [`Self::mark`] does for a [`FramePhase`] — against this profiler's
+    /// separate HUD cursor. A sub-phase never marked this frame becomes a
+    /// skip, never a `0.0` sample.
+    pub(crate) fn mark_hud(&mut self, sub: HudSubphase, now: Instant) {
+        let ms = now.saturating_duration_since(self.hud_cursor).as_secs_f32() * 1000.0;
+        self.hud_pending[sub.index()] = Some(ms);
+        self.hud_cursor = now;
+    }
+
+    /// Record this frame's [`HudSubphaseCounts`]. Overwrites rather than
+    /// accumulating: `redraw` calls it once per frame with the whole set.
+    pub(crate) fn record_hud_counts(&mut self, counts: HudSubphaseCounts) {
+        self.hud_subphase_counts = Some(counts);
     }
 
     fn drain_world_subphases(&mut self) {
@@ -336,6 +492,11 @@ impl FrameProfiler {
         }
         self.frame_count += 1;
         let mut world_encode_ran_this_frame = false;
+        // Captured before `pending` is cleared, because the CSV row below has
+        // to be able to tell a phase that was skipped from one that was
+        // measured — see the `row` binding's own comment for the bug this
+        // replaced.
+        let row: [Option<f32>; PHASE_COUNT] = self.pending;
         for phase in FramePhase::ALL {
             let i = phase.index();
             match self.pending[i].take() {
@@ -348,14 +509,23 @@ impl FrameProfiler {
                 None => self.windows[i].skipped += 1,
             }
         }
+        let hud_row: [Option<f32>; HUD_SUBPHASE_COUNT] = self.hud_pending;
+        for sub in HudSubphase::ALL {
+            let i = sub.index();
+            match self.hud_pending[i].take() {
+                Some(ms) => self.hud_subphase_windows[i].push(ms),
+                None => self.hud_subphase_windows[i].skipped += 1,
+            }
+        }
         if let Some(dump) = &mut self.dump {
-            let row: [Option<f32>; PHASE_COUNT] = std::array::from_fn(|i| {
-                // Read back what was just pushed/skipped rather than the
-                // (already-cleared) `pending`, so the dumped row and the ring
-                // buffers can never disagree about what happened this frame.
-                self.windows[i].samples[(self.windows[i].next + WINDOW - 1) % WINDOW]
-                    .into()
-            });
+            // `row` is this frame's `pending` verbatim, so a skipped phase
+            // writes an empty CSV field. It used to be read back out of the
+            // ring buffer instead — `self.windows[i].samples[last].into()`,
+            // which is `Some(_)` unconditionally, so **every skipped phase
+            // silently inherited the last frame that did run it** and the
+            // "never a fabricated value" contract this module's own doc
+            // states was broken for the dump alone. The tell was that no
+            // dump row ever had an empty field, on any session.
             // Only the frame that actually ran `render_inner` gets a real
             // world-subphase row — `world_subphase_windows` otherwise still
             // holds the *previous* real frame's values (see
@@ -370,7 +540,7 @@ impl FrameProfiler {
                 } else {
                     [None; crate::gpu::gpu_timing::WORLD_SUBPHASE_COUNT]
                 };
-            dump.write_row(self.frame_count, row, world_row);
+            dump.write_row(self.frame_count, row, world_row, hud_row);
         }
     }
 
@@ -395,9 +565,11 @@ impl FrameProfiler {
                 // other phase, and `None` here too until the bridge has a
                 // real reading (never a fabricated empty bracket) — see
                 // `world_subphase_detail`'s doc.
-                detail: (phase == FramePhase::WorldEncodeSubmit)
-                    .then(|| self.world_subphase_detail())
-                    .flatten(),
+                detail: match phase {
+                    FramePhase::WorldEncodeSubmit => self.world_subphase_detail(),
+                    FramePhase::HudUiEncodeSubmit => self.hud_subphase_detail(),
+                    _ => None,
+                },
             }
         })
     }
@@ -445,6 +617,46 @@ impl FrameProfiler {
         }
         if self.world_subphase_bridge_misses > 0 {
             parts.push(format!("bridge_misses: {}", self.world_subphase_bridge_misses));
+        }
+        Some(parts.join(", "))
+    }
+
+    /// `"hud.debug_gather: mean/p95/p99 ms, ... | chat lines: N, ..."` — the
+    /// sub-phase breakdown appended to [`FramePhase::HudUiEncodeSubmit`]'s own
+    /// F3/tracing line, the counterpart to [`Self::world_subphase_detail`].
+    /// `None` until at least one sub-phase window has a real sample.
+    fn hud_subphase_detail(&self) -> Option<String> {
+        if self.hud_subphase_windows.iter().all(|w| w.len == 0) {
+            return None;
+        }
+        let mut parts: Vec<String> = HudSubphase::ALL
+            .into_iter()
+            .zip(&self.hud_subphase_windows)
+            .map(|(sub, w)| {
+                // A sub-phase that has never run — `hud.container_draw` on a
+                // session where no container was ever opened — reports its
+                // skip count rather than a `0.00` mean. Those two are the same
+                // number and mean opposite things, which is exactly the trap
+                // `GpuQueryTimer::have_result` exists for one layer down.
+                if w.len == 0 {
+                    format!("{}: <never ran, {} skip>", sub.name(), w.skipped)
+                } else {
+                    format!(
+                        "{}: {:.2}/{:.2}/{:.2} ms ({} skip)",
+                        sub.name(),
+                        w.mean(),
+                        w.percentile(0.95),
+                        w.percentile(0.99),
+                        w.skipped,
+                    )
+                }
+            })
+            .collect();
+        if let Some(counts) = &self.hud_subphase_counts {
+            parts.push(format!(
+                "chat lines: {}, debug lines: {}, menu overlays: {}",
+                counts.chat_lines, counts.debug_lines, counts.menu_overlays_drawn
+            ));
         }
         Some(parts.join(", "))
     }
@@ -586,6 +798,153 @@ mod tests {
         assert!(p50 <= p95, "p50 {p50} should be <= p95 {p95}");
         assert!(p95 <= p99, "p95 {p95} should be <= p99 {p99}");
         assert_ne!(p95, w.mean(), "chosen fixture must discriminate percentile from mean");
+    }
+
+    /// The magnitude control for the HUD sub-phase breakdown: sleep a
+    /// non-round interval inside one marked sub-phase and require the
+    /// `hud_ui_encode_submit` detail line to land on it — not merely to exist.
+    ///
+    /// **Watched failing**: changing `mark_hud` to record `0.0` instead of the
+    /// real elapsed time makes the parsed mean land at `0.00` and this test's
+    /// range assertion fail immediately; deleting the `hud_cursor` re-base in
+    /// `mark` makes the first sub-phase absorb the whole previous frame and it
+    /// fails the same way from the other side. A version asserting only
+    /// `detail.is_some()` would pass against both.
+    #[test]
+    fn hud_subphase_detail_reports_the_real_sub_phase_time_and_counts() {
+        let now = Instant::now();
+        let mut p = FrameProfiler::new(now, None);
+        p.begin_frame(now);
+        // `mark` on WorldEncodeSubmit is what re-bases the HUD cursor — the
+        // production sequence, not a private setter, so this exercises the
+        // real seam.
+        p.mark(FramePhase::WorldEncodeSubmit, Instant::now());
+        let t0 = Instant::now();
+        std::thread::sleep(Duration::from_millis(21));
+        p.mark_hud(HudSubphase::FrameGather, Instant::now());
+        let slept_ms = t0.elapsed().as_secs_f32() * 1000.0;
+        // Pairwise-distinct so a transposition of the three count fields
+        // cannot survive the assertion below.
+        p.record_hud_counts(HudSubphaseCounts {
+            chat_lines: 37,
+            debug_lines: 12,
+            menu_overlays_drawn: 3,
+        });
+        p.begin_frame(Instant::now());
+
+        let hud = p
+            .summary()
+            .find(|s| s.phase == FramePhase::HudUiEncodeSubmit)
+            .unwrap();
+        let detail = hud
+            .detail
+            .expect("HudUiEncodeSubmit must carry a sub-phase detail once one has a real sample");
+        assert!(
+            detail.contains("chat lines: 37, debug lines: 12, menu overlays: 3"),
+            "detail must carry the exact counts recorded: {detail}"
+        );
+        let mean: f32 = detail
+            .split("hud.frame_gather: ")
+            .nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .expect("detail must contain a mean for the sub-phase that was marked")
+            .parse()
+            .expect("mean figure must be a valid float");
+        assert!(
+            (15.0..=80.0).contains(&mean),
+            "expected ~{slept_ms:.1}ms (wide tolerance for scheduler jitter), got {mean} from \
+             {detail}"
+        );
+    }
+
+    /// A HUD sub-phase that never ran — `hud.container_draw` on a session
+    /// where no container was ever opened — must report as a skip, never as a
+    /// `0.00` mean sitting beside sub-phases that really did cost nothing.
+    /// Those two are the same number and mean opposite things.
+    #[test]
+    fn a_hud_subphase_that_never_ran_reads_as_a_skip_not_as_free() {
+        let now = Instant::now();
+        let mut p = FrameProfiler::new(now, None);
+        for _ in 0..3 {
+            p.begin_frame(Instant::now());
+            p.mark(FramePhase::WorldEncodeSubmit, Instant::now());
+            p.mark_hud(HudSubphase::FrameGather, Instant::now());
+        }
+        p.begin_frame(Instant::now());
+
+        let detail = p
+            .summary()
+            .find(|s| s.phase == FramePhase::HudUiEncodeSubmit)
+            .unwrap()
+            .detail
+            .expect("one sub-phase had real samples, so a detail must exist");
+        assert!(
+            detail.contains("hud.container_draw: <never ran, 3 skip>"),
+            "a sub-phase with no samples must name its skip count rather than showing a mean: \
+             {detail}"
+        );
+        assert!(
+            detail.contains("hud.frame_gather: "),
+            "the sub-phase that did run must still report a mean: {detail}"
+        );
+    }
+
+    /// The control for the CSV dump's skip handling. A phase not reached this
+    /// frame must write an **empty** field, so a spreadsheet cannot average a
+    /// skip into a real cost.
+    ///
+    /// **This test was written against a real defect and observed failing.**
+    /// `finalise` built its row by reading the ring buffer back with
+    /// `self.windows[i].samples[last].into()` — an `f32 -> Option<f32>`
+    /// conversion that is `Some(_)` unconditionally — so every skipped phase
+    /// inherited whatever the last frame that *did* run it recorded, and on
+    /// the very first frames a `0.0000` that had never been measured. No dump
+    /// row on any session had ever had an empty field. Restoring that line
+    /// turns the `sim_tick` assertion below red while the `setup` one stays
+    /// green, which is what makes this a test of the skip and not of the CSV
+    /// writer.
+    #[test]
+    fn a_skipped_phase_writes_an_empty_csv_field_not_a_stale_value() {
+        let path = std::env::temp_dir().join("lodestone-frame-profile-skip-control.csv");
+        let _ = std::fs::remove_file(&path);
+        {
+            let now = Instant::now();
+            let mut p = FrameProfiler::new(now, Some(path.as_path()));
+            // Frame 1: everything marked, so `sim_tick` has a real value the
+            // buggy version could inherit on frame 2. Non-round and distinct
+            // per phase, so a row that transposed two columns could not pass.
+            p.begin_frame(now);
+            p.mark(FramePhase::Setup, now + Duration::from_micros(1_300));
+            p.mark(FramePhase::SimTick, now + Duration::from_micros(9_700));
+            // Frame 2: `Setup` only — every later phase is an early return.
+            let f2 = now + Duration::from_millis(20);
+            p.begin_frame(f2);
+            p.mark(FramePhase::Setup, f2 + Duration::from_micros(2_100));
+            p.begin_frame(f2 + Duration::from_millis(20));
+        }
+        let text = std::fs::read_to_string(&path).expect("dump file must exist");
+        let mut lines = text.lines();
+        let header: Vec<&str> = lines.next().expect("header row").split(',').collect();
+        let setup_col = header.iter().position(|c| *c == "setup").expect("setup column");
+        let tick_col = header.iter().position(|c| *c == "sim_tick").expect("sim_tick column");
+        let rows: Vec<Vec<&str>> = lines.map(|l| l.split(',').collect()).collect();
+        assert_eq!(rows.len(), 2, "two frames were finalised, so two rows: {text}");
+
+        // Frame 1 measured both. `sim_tick` is 8.4 and not 9.7: `mark`
+        // measures elapsed since the *previous* mark, so the second phase's
+        // span starts where `Setup`'s ended — 9.7 - 1.3. Predicting 9.7 here
+        // (the number the fixture literally names) is exactly the
+        // reach-for-the-plausible-figure mistake, and it failed on first run.
+        assert_eq!(rows[0][setup_col], "1.3000");
+        assert_eq!(rows[0][tick_col], "8.4000");
+        // Frame 2 measured only `setup`. The bug reported frame 1's 8.4 here.
+        assert_eq!(rows[1][setup_col], "2.1000");
+        assert_eq!(
+            rows[1][tick_col], "",
+            "a phase not reached this frame must write an empty field, never the last frame that \
+             did reach it: {text}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The end-to-end magnitude control for the `world_encode_submit`

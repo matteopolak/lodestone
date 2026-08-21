@@ -454,21 +454,22 @@ impl RenderState {
             // `None` whenever the device was not granted `Features::TIMESTAMP_QUERY`
             // — see `gpu_timing`'s module doc for why that check reads
             // `device.features()` rather than the adapter's advertised set.
-            // `["world", "first_person"]`: the sky pass, the individual screen
-            // overlays and the HUD's own separate encoder are not separately
-            // GPU-timed (kept out of scope deliberately — see
-            // `docs/frame-profiling.md`), so their cost is absent from every
-            // segment here rather than folded silently into one of them.
-            // `render_inner`'s block pass — terrain, entities,
-            // block entities, particles, weather, the outline/debug/nametag
-            // overlays — is one real `wgpu` render pass, not several, so
-            // `"world"` is reported as one number because that is what it
-            // genuinely is.
+            // Four segments; `gpu_timing`'s module doc carries the table of
+            // what each covers. Two are single passes (`"world"` — one real
+            // `wgpu` pass fusing terrain/entities/block entities/particles/
+            // weather/outline/debug/nametags, reported as one number because
+            // that is genuinely what it is — and `"first_person"`), and two
+            // are spans bracketing whole command buffers (`"world_total"`,
+            // `"hud_total"`) so that **no** GPU pass this shell submits is
+            // unaccounted for. The order here fixes the query-set indices, so
+            // adding a segment is append-only in spirit; nothing reads them
+            // positionally, but a reordering silently rebases every index a
+            // `stamp`/`writes` call resolves.
             gpu_timer: std::cell::RefCell::new(gpu_timing::GpuQueryTimer::new(
                 device,
                 queue,
                 "lodestone-frame-gpu-timer",
-                &["world", "first_person"],
+                &["world_total", "world", "first_person", "hud_total"],
             )),
         }
     }

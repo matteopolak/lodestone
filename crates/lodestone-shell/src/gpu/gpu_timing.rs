@@ -31,19 +31,30 @@
 //!
 //! # What is (and is not) instrumented
 //!
-//! `RenderState` owns one `GpuQueryTimer` with two segments, `"world"` (the
-//! terrain/entities/block-entities/particles/weather/outline/debug/nametag
-//! pass — one real `wgpu` render pass, see `gpu::frame`'s module doc for why
-//! it is not several) and `"first_person"` (the hand/held-item pass). The sky
-//! pass, the seven individual screen-overlay passes and the HUD's own,
-//! separately-submitted encoder are **not** GPU-timed — a deliberate scope
-//! cut, not an oversight, because `"world"` is overwhelmingly the dominant
-//! cost in this renderer and adding a fourth-plus struct's worth of query
-//! plumbing for passes that are typically near-zero cost was not worth the
-//! risk. Their absence is documented rather than silent: see
-//! `docs/frame-profiling.md`'s "what this cannot see" section before reading
-//! a report that sums to less than the CPU-side `world_encode_submit`/
-//! `hud_ui_encode_submit` phases in `app::frame_profile`.
+//! `RenderState` owns one `GpuQueryTimer` with four segments:
+//!
+//! | segment | covers |
+//! |---|---|
+//! | `world_total` | the whole world command buffer — sky pass, block pass, first-person pass, every screen overlay |
+//! | `world` | the block pass alone (terrain/entities/block entities/particles/weather/outline/debug/nametags — one real `wgpu` pass, see `gpu::frame`'s module doc) |
+//! | `first_person` | the hand/held-item pass alone |
+//! | `hud_total` | everything submitted after the world command buffer: the HUD's own encoders, the container/menu renderers, and the screenshot copy |
+//!
+//! The two `*_total` segments are **spans across passes**, stamped with
+//! [`GpuQueryTimer::stamp`] rather than [`GpuQueryTimer::writes`] — see that
+//! method's doc for why an empty bracketing pass is the only mechanism
+//! available here. Between them they account for **every** GPU pass the shell
+//! submits in a frame, which is the point: the first question a frame-time
+//! investigation has to answer is whether the wall being hit is CPU or GPU,
+//! and a per-pass number cannot answer it while any pass is unaccounted for.
+//! `world_total - world - first_person` is the sky pass plus the screen
+//! overlays; that residue is deliberately *not* reported as its own segment,
+//! because reporting a subtraction as though it were a measurement is how a
+//! counter starts lying.
+//!
+//! `hud_total` ends where the frame's own bookkeeping ends, so it excludes
+//! `present` — the GPU cost of compositing the swapchain image is the
+//! window system's, not this timer's, and nothing here can see it.
 //!
 //! # Readback is async and lagged by design
 //!
@@ -52,10 +63,16 @@
 //! actually executed, which is one or more frames after submission on every
 //! backend here. This uses the standard ring-buffered pattern:
 //!
-//! 1. [`GpuQueryTimer::resolve`] — called once the frame's passes are all
-//!    recorded but before `queue.submit` — resolves this frame's queries into
-//!    a `QUERY_RESOLVE` buffer, then copies that into a `MAP_READ` buffer
-//!    belonging to this frame's ring slot (`frame % FRAMES_IN_FLIGHT`).
+//! 1. [`GpuQueryTimer::resolve`] — called from the frame's **last** encoder,
+//!    after every pass that writes into this query set has been recorded and
+//!    before that encoder's `queue.submit` (both are encoder commands) —
+//!    resolves this frame's queries into a `QUERY_RESOLVE` buffer, then copies
+//!    that into a `MAP_READ` buffer belonging to this frame's ring slot
+//!    (`frame % FRAMES_IN_FLIGHT`). "Last encoder" is load-bearing now that
+//!    `hud_total`'s end edge is stamped after the world command buffer has
+//!    already been submitted: a resolve riding the world encoder, as this
+//!    module originally did it, would pair this frame's `begin` with the
+//!    previous frame's `end`.
 //! 2. [`GpuQueryTimer::after_submit`] — called right after `queue.submit` —
 //!    starts an async `map_async` on that slot's buffer and harvests any
 //!    earlier slot whose mapping has already completed.
@@ -107,6 +124,11 @@ pub(crate) struct GpuQueryTimer {
     /// silently swallowed. Surfaced in the debug/tracing output so a real
     /// stall is visible rather than read as "GPU timing is just cheap".
     stalled_frames: u64,
+    /// A 1x1 colour target existing only so [`Self::stamp`] has something to
+    /// attach an otherwise-empty render pass to — see that method's doc for
+    /// why a bracketing pass is the only way to time a *span of passes* on an
+    /// adapter without `TIMESTAMP_QUERY_INSIDE_ENCODERS`.
+    stamp_view: wgpu::TextureView,
 }
 
 impl GpuQueryTimer {
@@ -138,6 +160,23 @@ impl GpuQueryTimer {
             usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
+        // 1x1, and never read back: `stamp` needs a legal colour attachment
+        // and nothing more. Sized this way so the empty bracketing passes it
+        // opens cost a tile-based GPU essentially nothing — a profiling
+        // instrument that materially changes the frame it measures is worse
+        // than no instrument.
+        let stamp_view = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("gpu-timer-stamp-target"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let slots = (0..FRAMES_IN_FLIGHT)
             .map(|_| Slot {
                 readback: device.create_buffer(&wgpu::BufferDescriptor {
@@ -159,6 +198,7 @@ impl GpuQueryTimer {
             results_ms: vec![0.0; segment_count],
             have_result: vec![false; segment_count],
             stalled_frames: 0,
+            stamp_view,
         })
     }
 
@@ -176,6 +216,75 @@ impl GpuQueryTimer {
             beginning_of_pass_write_index: Some((i * 2) as u32),
             end_of_pass_write_index: Some((i * 2 + 1) as u32),
         })
+    }
+
+    /// Write **one** timestamp edge for each of `begin`/`end` into `encoder`,
+    /// through an otherwise-empty render pass on this timer's own 1x1 target.
+    ///
+    /// # Why this exists at all
+    ///
+    /// [`Self::writes`] can only time a span whose two ends are the *same*
+    /// render pass. Answering "how long did the GPU spend on this whole
+    /// frame" needs a span across *many* passes — and on this adapter the
+    /// obvious mechanism for that, `CommandEncoder::write_timestamp`, is
+    /// unavailable (`TIMESTAMP_QUERY_INSIDE_ENCODERS` excludes Apple GPUs by
+    /// name; see the module doc). A pass boundary is the only place a
+    /// timestamp can be written here, so this opens a pass that does nothing
+    /// *but* carry a boundary. The target is 1x1 and never sampled, so the
+    /// pass has no measurable cost of its own.
+    ///
+    /// # Spans may cross command buffers
+    ///
+    /// Queue submissions execute in submission order, so a `begin` stamped in
+    /// one command buffer and an `end` stamped in a later one bracket
+    /// everything submitted between them — which is how the `"world_total"`
+    /// and `"hud_total"` segments cover work recorded in several different
+    /// files. The one hard requirement is that [`Self::resolve`] must execute
+    /// **after** both edges, or the pair read back is a `begin` from this
+    /// frame against an `end` left over from the previous one; the
+    /// `end > begin` guard in [`Self::harvest`] discards such a pair rather
+    /// than reporting a nonsense duration, so getting the order wrong shows
+    /// up as a permanently absent reading, never as a wrong number.
+    ///
+    /// A name this timer does not carry is ignored — a caller naming a
+    /// segment that does not exist gets no stamp rather than a panic, matching
+    /// [`Self::writes`].
+    pub(crate) fn stamp(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        begin: Option<&str>,
+        end: Option<&str>,
+    ) {
+        let beginning_of_pass_write_index = begin.and_then(|n| self.index_of(n)).map(|i| (i * 2) as u32);
+        let end_of_pass_write_index = end.and_then(|n| self.index_of(n)).map(|i| (i * 2 + 1) as u32);
+        if beginning_of_pass_write_index.is_none() && end_of_pass_write_index.is_none() {
+            return;
+        }
+        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("gpu-timer-stamp"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.stamp_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // `Clear`, not `Load`: the target is write-only scratch
+                    // that nothing ever initialises, and loading uninitialised
+                    // contents is exactly the case wgpu's validation exists to
+                    // catch. `Discard` on store for the same reason — nothing
+                    // reads this texture, ever.
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Discard,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: Some(wgpu::RenderPassTimestampWrites {
+                query_set: &self.query_set,
+                beginning_of_pass_write_index,
+                end_of_pass_write_index,
+            }),
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
     }
 
     /// Resolve this frame's queries into the ring slot for `self.frame`.
