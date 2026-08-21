@@ -26,6 +26,11 @@ impl WindowApp {
         // clamped to vanilla's ten-tick catch-up budget, so a long stall is
         // dropped rather than replayed in a burst.
         let frame_start = Instant::now();
+        // Starts this frame's per-phase CPU timing (`app::frame_profile`) and
+        // finalises whatever the *previous* call left pending — see that
+        // module's doc for why finalisation lives here rather than in every
+        // early `return` below.
+        self.frame_profile.begin_frame(frame_start);
         // Issue #613's `PingRequest` remainder — see `WindowApp::last_ping_request`'s
         // own doc for why this is gated on F3 rather than sent every tick the
         // way vanilla's ungated `PingDebugMonitor.tick` is. `send_ping_request`
@@ -62,11 +67,15 @@ impl WindowApp {
         // reason. Before `step` like the pushes above, so the frame that commits
         // it also draws with it.
         self.tick_render_distance(frame_start);
+        self.frame_profile.mark(FramePhase::Setup, Instant::now());
         self.sim.step(dt);
+        self.frame_profile.mark(FramePhase::SimTick, Instant::now());
         if !step.render {
             // Unfocused (throttled to ~30 fps) or occluded: skip presenting
             // only. `acquire()` is the call that stalls on a backgrounded
-            // window, so it is precisely what must not run here.
+            // window, so it is precisely what must not run here. Every phase
+            // from here on is simply never marked this frame — a normal,
+            // frequent outcome the profiler counts as a skip, not a zero.
             return;
         }
 
@@ -216,6 +225,7 @@ impl WindowApp {
         for meshed in self.sim.drain_meshes() {
             render.upload_section(device, queue, meshed.key, &meshed.mesh);
         }
+        self.frame_profile.mark(FramePhase::MeshUpload, Instant::now());
 
         let (w, h) = target.size();
         let frame = match target.acquire() {
@@ -225,10 +235,15 @@ impl WindowApp {
                     target.reconfigure(device);
                     render.resize(device, w, h);
                 }
-                // Transient (timeout/occluded/validation): just skip this frame.
+                // Transient (timeout/occluded/validation): just skip this
+                // frame. `Acquire` is left unmarked — see the module doc: a
+                // stall or a transient failure here is exactly the case this
+                // phase exists to separate from ordinary pacing cost, so it
+                // must show as a skip too, never a fabricated zero.
                 return;
             }
         };
+        self.frame_profile.mark(FramePhase::Acquire, Instant::now());
 
         // The menu background blur reads the pixels already drawn into this
         // frame, so it needs the texture behind `frame.view()` *before* anything
@@ -950,6 +965,7 @@ impl WindowApp {
         // production called the gather, so only the local target ever reached
         // this vec.
         let cracks: Vec<crate::gpu::CrackTarget> = self.sim.crack_targets();
+        self.frame_profile.mark(FramePhase::Prepare, Instant::now());
         let stats = render.render_with_crack_and_effects(
             device,
             queue,
@@ -960,6 +976,9 @@ impl WindowApp {
             &cracks,
             screen_effects,
         );
+        // Record **and** submit, fused — see `app::frame_profile`'s module
+        // doc for why this shell has no seam between them to time separately.
+        self.frame_profile.mark(FramePhase::WorldEncodeSubmit, Instant::now());
 
         // Fold GPU counters + timing into the debug overlay.
         let frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
@@ -1008,6 +1027,33 @@ impl WindowApp {
             use std::sync::atomic::Ordering;
             self.sim.stats.hitboxes_shown = self.debug_hitboxes.load(Ordering::Relaxed);
             self.sim.stats.chunk_borders_shown = self.debug_chunk_borders.load(Ordering::Relaxed);
+        }
+        // Frame-profiling lines for the F3 overlay — see
+        // `docs/frame-profiling.md`. Built only while the overlay is actually
+        // showing: `summary()` sorts a ring buffer per phase, which is wasted
+        // work for a screen nobody is looking at.
+        if self.show_debug {
+            let mut lines: Vec<String> = self.frame_profile.summary().map(|s| s.line()).collect();
+            // `render` (not `self.render`): the destructure above already
+            // holds `&mut RenderState` for the rest of this function, and a
+            // fresh `self.render.as_ref()` here would conflict with it.
+            if render.gpu_timing_available() {
+                for (name, ms) in render.gpu_timing_report() {
+                    lines.push(match ms {
+                        Some(ms) => format!("gpu {name}: {ms:.2} ms"),
+                        None => format!("gpu {name}: <no reading yet>"),
+                    });
+                }
+                let stalled = render.gpu_timing_stalled_frames();
+                if stalled > 0 {
+                    lines.push(format!("gpu timer stalled_frames: {stalled}"));
+                }
+            } else {
+                lines.push("gpu timing: unavailable (device lacks Features::TIMESTAMP_QUERY)".to_string());
+            }
+            self.sim.stats.frame_profile = lines;
+        } else {
+            self.sim.stats.frame_profile.clear();
         }
 
         // The baked 3-D item geometry, shared by the container screen below and the
@@ -2056,14 +2102,58 @@ impl WindowApp {
             }
         }
 
+        // HUD, status effects and the container/menu overlay all drew above
+        // through their own encoder/submit pairs — see `app::frame_profile`'s
+        // module doc for why they share this one bucket rather than each
+        // getting a checkpoint.
+        self.frame_profile.mark(FramePhase::HudUiEncodeSubmit, Instant::now());
+
         if let Some(window) = &self.window {
             window.pre_present_notify();
         }
         frame.present(queue);
+        self.frame_profile.mark(FramePhase::Present, Instant::now());
 
         if self.last_log.elapsed() >= Duration::from_secs(1) {
             self.last_log = Instant::now();
             println!("{}", self.sim.stats.one_line());
+        }
+        // The frame-profile tracing line — see `docs/frame-profiling.md` for
+        // how to read it. On its own once-a-second cadence, not `last_log`'s
+        // (see that field's doc), and gated with `enabled!` so a session with
+        // no interest in this target pays no `summary()`/percentile-sort cost
+        // for a line nothing will read.
+        if self.frame_profile.report_due(Instant::now(), Duration::from_secs(1))
+            && tracing::enabled!(target: "frame_profile", tracing::Level::INFO)
+        {
+            // `render` (not `self.render`): see the identical note above,
+            // near `self.sim.stats.frame_profile`'s own assignment — the
+            // destructure near the top of this function holds `&mut
+            // RenderState` for the whole call.
+            let gpu_line = if render.gpu_timing_available() {
+                let stalled = render.gpu_timing_stalled_frames();
+                render
+                    .gpu_timing_report()
+                    .into_iter()
+                    .map(|(name, ms)| match ms {
+                        Some(ms) => format!("{name}={ms:.2}ms"),
+                        None => format!("{name}=<no reading yet>"),
+                    })
+                    .chain((stalled > 0).then(|| format!("stalled_frames={stalled}")))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                "unavailable (device lacks Features::TIMESTAMP_QUERY)".to_string()
+            };
+            tracing::info!(
+                target: "frame_profile",
+                "cpu: {} | gpu: {gpu_line}",
+                self.frame_profile
+                    .summary()
+                    .map(|s| s.line())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            );
         }
     }
 

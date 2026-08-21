@@ -77,6 +77,8 @@ use lodestone_game::recipe::RecipeBook;
 mod advancements_screen;
 mod container_input;
 mod creative_screen;
+mod frame_profile;
+mod frame_profile_dump;
 mod input;
 mod launch;
 mod lifecycle;
@@ -108,6 +110,8 @@ pub(crate) use launch::{LaunchError, launch_singleplayer};
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(unused_imports)]
 pub(crate) use launch::launch_open_to_lan_online;
+#[allow(unused_imports)]
+use frame_profile::{FramePhase, FrameProfiler};
 #[allow(unused_imports)]
 use launch::{java_string_hash_code, parse_seed, requested_a_connection, resolve_launch_seed};
 #[allow(unused_imports)]
@@ -656,6 +660,13 @@ struct WindowApp {
     /// [`DOUBLE_CLICK_WINDOW`]-based double-click detection.
     last_menu_click: Option<Instant>,
     last_log: Instant,
+    /// Per-phase CPU frame timing — see `app::frame_profile`'s module doc.
+    /// `Setup`'s clock and this struct's own `last_log` are deliberately
+    /// separate instruments: `last_log`'s one-second gate already drives the
+    /// stdout `one_line()` print, and reusing it here would make the frame
+    /// profiler's own tracing line silently inherit whatever cadence that
+    /// print happens to use rather than one this module owns.
+    frame_profile: FrameProfiler,
     /// The fog settings last uploaded to the renderer, so submerged fog is
     /// re-uploaded only when it actually changes (the player crossing a
     /// water/lava surface) rather than every frame. Seeded to the sky fog set at
