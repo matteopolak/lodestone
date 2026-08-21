@@ -478,21 +478,41 @@ fn explode_accepts_the_plain_explosion_particle_too() {
     assert_eq!(directives.len(), 2, "one Particles directive, then one Sound directive");
 }
 
-/// An unmodeled `explosionParticle` (anything but 29/30) must fail loudly
-/// rather than silently misparse the rest of the packet — the same
+/// A **parameterised** `explosionParticle` must fail loudly rather than
+/// silently misparse the rest of the packet: its stream codec reads trailing
+/// arguments this decoder cannot skip byte-accurately, so continuing would
+/// read `explosionSound` out of the middle of the particle's payload. Same
 /// reject-rather-than-guess convention `metadata.rs`'s `SER_PARTICLE` uses.
+///
+/// **This test used to say "anything but 29/30" and pass id `5`.** The guard
+/// it describes was later widened, correctly, from the two ids we happen to
+/// draw to every `SimpleParticleType` — and `5` is `noxious_gas`, which is
+/// simple, so the premise expired and the gate went red without anything
+/// being wrong. The discriminating input is not "an id we do not draw", it is
+/// **an id that carries arguments**: `1` is `minecraft:block`, whose codec
+/// reads a block-state VarInt after the id.
 #[test]
-fn explode_rejects_an_unmodeled_explosion_particle() {
+fn explode_rejects_a_parameterised_explosion_particle() {
     let adapter = V770Adapter::new();
     let mut bytes = explode_bytes();
-    bytes[33] = 5; // an arbitrary, unmodeled particle registry id
+    // `minecraft:block` — `lodestone_data::particle_types` classifies it
+    // `false`, i.e. not skippable. Asserted here rather than assumed, so this
+    // gate reports its own premise expiring instead of silently passing.
+    assert!(
+        !lodestone_data::particle_types::is_simple_particle_type(1),
+        "particle id 1 must be parameterised or this gate proves nothing",
+    );
+    bytes[33] = 1;
     let result = adapter.handle_packet(
         &mut World::new(),
         ConnectionState::Play,
         play::clientbound::EXPLODE,
         &bytes,
     );
-    assert!(result.is_err(), "an unrecognised particle id must not be guessed at");
+    assert!(
+        result.is_err(),
+        "a particle whose trailing arguments cannot be skipped must not be guessed at",
+    );
 }
 
 /// Player knockback, when present, must still leave the reader aligned to
