@@ -3393,6 +3393,30 @@ pub fn fold_entities(world: &mut World) {
         };
         seen.insert(id);
 
+        // **A recycled entity id must not inherit the previous tenant's stack.**
+        // `ItemStacks` is keyed by server id alone, servers reuse ids freely,
+        // and `Unreported` deliberately leaves an existing entry alone — so an
+        // entity whose *kind* has changed since the last fold is the one case
+        // where "leave it alone" is wrong. Dropping the entry here, before this
+        // fold's own report is applied, is what stops a pig that inherits a
+        // dropped stone's id from inheriting its stone.
+        //
+        // This used to be handled implicitly, by `extract_entity_draws`
+        // refusing to read the table for anything but `ITEM_ENTITY_TYPE_PATH`.
+        // That guard also refused it for item frames, framed maps and
+        // projectiles — every other claimant of the same `ITEM_STACK`
+        // serializer — so their contents never reached a pixel. The recycling
+        // hazard is real and the type test was never the right instrument for
+        // it: it answered "is this a drop?" when the question is "is this the
+        // same entity the stack was reported for?".
+        if let Some(entity) = world.resource::<TrackIndex>().0.get(&facts.id).copied()
+            && world
+                .get::<RenderKind>(entity)
+                .is_some_and(|kind| kind.0.as_ref() != facts.type_path)
+        {
+            world.resource_mut::<ItemStacks>().0.remove(&facts.id);
+        }
+
         // Fold the reported identity first, so a drop is never drawn for a frame
         // as a placeholder before its item lands. `Unreported` is "this fold
         // does not know", which must not clear what an earlier one established;
@@ -6835,16 +6859,55 @@ mod tests {
         assert_eq!(draws.iter().find(|d| d.id == 10).unwrap().item, None);
     }
 
+    /// **A recycled entity id must not inherit the previous tenant's stack**,
+    /// and that has to be true without asking whether the new tenant is a
+    /// dropped item — which is the pair below.
+    ///
+    /// This gate used to be one assertion, `a_non_item_entity_never_carries_a
+    /// _stack`, and it passed because `extract_entity_draws` refused to read
+    /// the stack table for any type but `ITEM_ENTITY_TYPE_PATH`. That guard
+    /// answered the wrong question: it also refused it for item frames, framed
+    /// maps and thrown projectiles, all of which sync a stack through the very
+    /// same `ITEM_STACK` serializer, so **their contents reached zero pixels**.
+    /// The recycling hazard is real; the type test was never the instrument
+    /// for it. `fold_entities` now drops the entry when a tracked id's *kind*
+    /// changes, which is the actual invariant.
     #[test]
-    fn a_non_item_entity_never_carries_a_stack() {
-        // A stale entry for a recycled id must not turn a pig into a stone.
-        // Servers reuse entity ids freely, so the type-path guard is what stops
-        // one drop's identity leaking onto the mob that inherits its id.
+    fn a_recycled_id_drops_its_stack_but_a_reported_one_keeps_it() {
+        // Arm 1, the hazard: entity 1 is a drop carrying stone, then the same
+        // id comes back as a pig. Two folds, because one fold has no previous
+        // tenant to inherit from and so cannot discriminate anything.
         let mut interp = EntityInterpolator::new();
         interp.set_item_stack(1, stone());
+        (item_snap(1, Vec3::ZERO)).apply(interp.world_mut());
+        interp.update(0.016);
+        assert_eq!(
+            interp.draws()[0].item,
+            Some(stone()),
+            "control: the drop must carry its stack, or arm 2 proves nothing",
+        );
         (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
         interp.update(0.016);
-        assert_eq!(interp.draws()[0].item, None);
+        assert_eq!(
+            interp.draws()[0].item,
+            None,
+            "a pig inheriting a drop's id must not inherit its stone",
+        );
+
+        // Arm 2, the case the old guard broke: an entity that is *not* a drop
+        // and reports a stack of its own keeps it. An item frame is the real
+        // instance — `ItemFrame.DATA_ITEM` rides the same serializer.
+        let mut interp = EntityInterpolator::new();
+        let mut frame = snap(2, Vec3::ZERO, 0.0);
+        frame.type_path = "item_frame".into();
+        frame.item = Reported::Reported(Some(stone()));
+        frame.apply(interp.world_mut());
+        interp.update(0.016);
+        assert_eq!(
+            interp.draws()[0].item,
+            Some(stone()),
+            "a non-drop that reports its own stack must carry it to the draw",
+        );
     }
 
     #[test]
