@@ -250,6 +250,15 @@ fn canonical_model_name_for_type(entity_type: EntityType) -> Option<&'static str
     match entity_type {
         // `PlayerRenderer` picks a skin model; wide/`steve` is the default.
         EntityType::Player => return Some("player_wide"),
+        // A mannequin is the *same* renderer as a player: the dispatcher's
+        // type switch routes both classes into the avatar renderer and picks
+        // the rig from the entity's own skin, defaulting to wide when the skin
+        // names no model. So this is the player arm's twin, not an
+        // approximation — and it is the reason `renderer_is_avatar` already
+        // lists both paths. Without it a mannequin was classified as an avatar
+        // for arm-pose purposes and resolved no rig at all, which is the
+        // "named all over the draw surface, draws nothing" shape.
+        EntityType::Mannequin => return Some("player_wide"),
         // `BoggedModel` (a skeleton with mushrooms) is not ported yet; the plain
         // skeleton is the closest ported mesh. Unlike the drowned alias this is
         // deliberate and outlives no mesh — remove it when `bogged` is ported.
@@ -5205,9 +5214,16 @@ mod tests {
     /// cannot pass by never exercising the alias table.
     #[test]
     fn canonical_model_name_and_get_agree_with_an_independent_linear_scan() {
+        // The alias arms are restated here rather than shared, which is the whole
+        // point: this function is the pre-index implementation, re-derived. That
+        // costs one line whenever a *genuine* alias lands — a real one has to be
+        // mirrored here, and the mirror going red is the reminder — but it is the
+        // only way the comparison is between two constructions rather than one.
+        // What it is a control for is the **lookup structure** (linear scan vs
+        // `OnceLock` index), not the alias set.
         fn old_canonical_model_name(type_path: &str) -> Option<&'static str> {
             match type_path {
-                "player" => return Some("player_wide"),
+                "player" | "mannequin" => return Some("player_wide"),
                 "bogged" => return Some("skeleton"),
                 "chest_minecart" | "furnace_minecart" | "tnt_minecart" | "hopper_minecart" => {
                     return Some("minecart");

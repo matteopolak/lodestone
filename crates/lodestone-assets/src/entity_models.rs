@@ -5082,6 +5082,71 @@ pub fn trident_model() -> EntityModelDef {
     }
 }
 
+/// Elder guardian: the guardian mesh baked at a 2.35× mesh scale, on its own sheet.
+///
+/// The scale is the only geometric difference — same twelve spikes, same eye, same
+/// three-part tail — which is why this reuses `guardian_model` rather than
+/// restating it. The sheet is not shared, though: an elder is a paler, larger
+/// texture at the same 64×64 UV layout, so the alias is a *corpus entry* rather
+/// than a name mapping onto the guardian's own entry.
+pub fn elder_guardian_model() -> EntityModelDef {
+    scaled(guardian_model(), 2.35)
+}
+
+/// Parched: a skeleton whose every limb carries a second, slightly larger overlay
+/// box on the same part, sheet 64×64.
+///
+/// This is **not** the skeleton rig with a different sheet, and treating it as one
+/// would lose the whole look. Each of the six parts holds two boxes: the ordinary
+/// thin skeleton box, and an overlay a fraction larger at a different texel offset,
+/// which is what gives the mob its ragged second silhouette. Three details in that
+/// second box are load bearing rather than noise, and all three would look like
+/// transcription slop to a tidying reader:
+///
+/// * The arms sit at `±5.5`, not the skeleton's `±5.0`, and their overlays are
+///   offset by `-1.55` on the right and `-1.45` on the left — **not** mirrored
+///   values of one number.
+/// * The overlays start `0.025` texels above their base box (`-2.025` against
+///   `-2.0`), which is what stops the two coplanar tops z-fighting.
+/// * The head's overlay is a `0.2` grow and the body's a `0.025` one; the limbs use
+///   a larger box rather than a grow at all.
+///
+/// The `hat` child is present and empty, matching the part tree the armour layers
+/// pose against; it carries no box of its own.
+pub fn parched_model() -> EntityModelDef {
+    let body = PartDef::new(PartPose::ZERO)
+        .with_cube(cube([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [16.0, 16.0]))
+        .with_cube(cube([-4.0, 10.0, -2.0], [8.0, 1.0, 4.0], [28.0, 0.0]))
+        .with_cube(cube([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [16.0, 48.0]).grown(0.025));
+    let head = PartDef::new(PartPose::ZERO)
+        .with_cube(cube([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0, 0.0]))
+        .with_cube(cube([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0, 32.0]).grown(0.2))
+        .with_child("hat", PartDef::new(PartPose::ZERO));
+    let right_arm = PartDef::new(PartPose::offset(-5.5, 2.0, 0.0))
+        .with_cube(cube([-1.0, -2.0, -1.0], [2.0, 12.0, 2.0], [40.0, 16.0]))
+        .with_cube(cube([-1.55, -2.025, -1.5], [3.0, 12.0, 3.0], [42.0, 33.0]));
+    let left_arm = PartDef::new(PartPose::offset(5.5, 2.0, 0.0))
+        .with_cube(cube([-1.0, -2.0, -1.0], [2.0, 12.0, 2.0], [56.0, 16.0]))
+        .with_cube(cube([-1.45, -2.025, -1.5], [3.0, 12.0, 3.0], [40.0, 48.0]));
+    let right_leg = PartDef::new(PartPose::offset(-2.0, 12.0, 0.0))
+        .with_cube(cube([-1.0, 0.0, -1.0], [2.0, 12.0, 2.0], [0.0, 16.0]))
+        .with_cube(cube([-1.5, 0.0, -1.5], [3.0, 12.0, 3.0], [0.0, 49.0]));
+    let left_leg = PartDef::new(PartPose::offset(2.0, 12.0, 0.0))
+        .with_cube(cube([-1.0, 0.0, -1.0], [2.0, 12.0, 2.0], [0.0, 16.0]))
+        .with_cube(cube([-1.5, 0.0, -1.5], [3.0, 12.0, 3.0], [4.0, 49.0]));
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root: PartDef::new(PartPose::ZERO)
+            .with_child("body", body)
+            .with_child("head", head)
+            .with_child("right_arm", right_arm)
+            .with_child("left_arm", left_arm)
+            .with_child("right_leg", right_leg)
+            .with_child("left_leg", left_leg),
+    }
+}
+
 /// Giant: the plain humanoid mesh baked at a 6× mesh scale, on the zombie sheet.
 ///
 /// The 6× is the whole port. This type's registry hitbox is 3.6 × 12.28 and the
@@ -5971,6 +6036,16 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
         // ---- the "invisible but solid" set: types the hitbox table already
         // knew about while the rig corpus did not, so a player collided with
         // something that drew nothing ----
+        EntityModelEntry {
+            name: "elder_guardian",
+            texture: EntityTexture::Fixed("entity/guardian/guardian_elder"),
+            build: elder_guardian_model,
+        },
+        EntityModelEntry {
+            name: "parched",
+            texture: EntityTexture::Fixed("entity/skeleton/parched"),
+            build: parched_model,
+        },
         EntityModelEntry {
             name: "giant",
             // The giant reuses the zombie's sheet outright; only the mesh scale
