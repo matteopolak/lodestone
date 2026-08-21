@@ -75,7 +75,5 @@ pub use item_entity::{ItemEntityRegistry, ItemLifecycle, ItemMotion, TrackedItem
 pub use metadata::{EntityMetadata, MetadataSchema, MetadataValue, SharedEntityFlags};
 pub use pose::{EntityPose, RenderPose, WalkAnimation};
 pub use projectile::{DragProfile, IntegrationOrder, Projectile, ProjectileRegistry, TrackedProjectile};
-pub use spawn::{
-    DespawnCtx, DespawnDecision, MobCategory, SpawnConditions, check_despawn, mob_cap,
-};
+pub use spawn::{DespawnCtx, DespawnDecision, MobCategory, check_despawn, mob_cap};
 pub use spawn_equipment::{EquipRandom, EquipmentSlots, populate_default_equipment_slots};

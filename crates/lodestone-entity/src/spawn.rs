@@ -19,9 +19,15 @@
 //!   cap formula.
 //!
 //! Per-mob *spawn placement* rules (light level, sky visibility, valid block
-//! below, biome) are per-entity **data** that move between versions, so they are
-//! expressed through the [`SpawnEnvironment`] seam and a version-supplied
-//! [`SpawnRule`]; this crate only defines the seam and the category machinery.
+//! below, biome) are per-entity **data** that move between versions and need
+//! more than a light/Y-band/solid-below triple to express (a per-species sky
+//! requirement, a slime-chunk special case, …), so they live entirely in the
+//! integrated server (`lodestone_server::natural_spawn::SpawnRule` and its
+//! `SPAWN_RULES` table) rather than behind a seam in this crate. An earlier
+//! `SpawnConditions`/`SpawnSample`/`SpawnEnvironment` seam attempted the
+//! version-free version of this and was removed: it had no implementer and
+//! the real placement rules were built independently in `lodestone-server`
+//! because its shape could not express them.
 
 /// Vanilla's eight spawn categories, with their game-rule constants baked in
 /// from the 26.2 `MobCategory` enum.
@@ -226,63 +232,6 @@ pub fn check_despawn(ctx: &DespawnCtx) -> DespawnDecision {
     }
 }
 
-/// Version-free spawn-placement conditions a mob must satisfy where it is being
-/// placed. A version crate supplies the concrete per-mob thresholds; the
-/// integrated server answers them through [`SpawnEnvironment`].
-///
-/// This is deliberately a small, closed set of the checks vanilla's
-/// `Monster.checkMonsterSpawnRules` / `Animal.checkAnimalSpawnRules` share.
-#[derive(Debug, Clone, Copy)]
-pub struct SpawnConditions {
-    /// Inclusive maximum block light for spawning (monsters want darkness; a
-    /// typical value is 0). `None` means "no light ceiling".
-    pub max_block_light: Option<u8>,
-    /// Inclusive `[min, max]` world-Y band the mob may spawn in.
-    pub y_range: (i32, i32),
-    /// Whether a solid block is required directly below the spawn position.
-    pub needs_solid_below: bool,
-}
-
-impl SpawnConditions {
-    /// Evaluates the conditions against an environment sample. A mob spawns only
-    /// if every enabled condition holds.
-    #[must_use]
-    pub fn permits(&self, env: &SpawnSample) -> bool {
-        if let Some(max) = self.max_block_light
-            && env.block_light > max
-        {
-            return false;
-        }
-        if env.y < self.y_range.0 || env.y > self.y_range.1 {
-            return false;
-        }
-        if self.needs_solid_below && !env.solid_below {
-            return false;
-        }
-        true
-    }
-}
-
-/// A sample of the environment at a candidate spawn position, supplied by the
-/// integrated server through the [`SpawnEnvironment`] seam.
-#[derive(Debug, Clone, Copy)]
-pub struct SpawnSample {
-    /// Block light level (0–15) at the position.
-    pub block_light: u8,
-    /// World-Y of the position.
-    pub y: i32,
-    /// Whether the block directly below is solid enough to stand on.
-    pub solid_below: bool,
-}
-
-/// The seam the integrated server implements so spawn checks can sample the
-/// world without this crate depending on world storage. Mirrors how
-/// [`PathWorld`](crate::pathfinding::PathWorld) keeps navigation world-free.
-pub trait SpawnEnvironment {
-    /// Samples the environment at a candidate spawn position.
-    fn sample(&self, x: i32, y: i32, z: i32) -> SpawnSample;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,37 +374,5 @@ mod tests {
         };
         // A tamed/named mob far away is neither discarded nor reset.
         assert_eq!(check_despawn(&ctx), DespawnDecision::Keep);
-    }
-
-    #[test]
-    fn spawn_conditions_gate_light_height_and_ground() {
-        let monster = SpawnConditions {
-            max_block_light: Some(0),
-            y_range: (-64, 100),
-            needs_solid_below: true,
-        };
-        assert!(monster.permits(&SpawnSample {
-            block_light: 0,
-            y: 10,
-            solid_below: true,
-        }));
-        // Too bright.
-        assert!(!monster.permits(&SpawnSample {
-            block_light: 5,
-            y: 10,
-            solid_below: true,
-        }));
-        // No floor.
-        assert!(!monster.permits(&SpawnSample {
-            block_light: 0,
-            y: 10,
-            solid_below: false,
-        }));
-        // Above the band.
-        assert!(!monster.permits(&SpawnSample {
-            block_light: 0,
-            y: 200,
-            solid_below: true,
-        }));
     }
 }

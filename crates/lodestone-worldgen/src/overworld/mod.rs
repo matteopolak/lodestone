@@ -526,11 +526,16 @@ pub struct OverworldGenerator {
     /// Per-biome `MobSpawnSettings` — `spawners` and `spawn_costs` — read out of
     /// the same `Resolver::biome_document` walk as `biome_climates`, so it costs
     /// no extra JSON parse (issue #518, part 1). See
-    /// [`crate::spawners`] for why only the parse landed and what the other three
-    /// parts are blocked on, and [`Self::biome_spawners`] for the accessor.
+    /// [`crate::spawners`] for the parse and [`Self::biome_spawners`] for the
+    /// accessor.
     ///
-    /// **No generation stage reads this.** It is data for a runtime spawner that
-    /// does not exist yet.
+    /// **No production caller reads this field or its accessors.** The runtime
+    /// spawner this was built for (`lodestone_server::natural_spawn`) now
+    /// exists and does read `MobSpawnSettings`, but through its own
+    /// independent `crate::spawners::parse_biome_spawners` call over the
+    /// bundled assets (`lodestone_server::worldgen_data::bundled_biome_spawners`)
+    /// rather than through this generator's already-parsed copy — two parses
+    /// of the same data rather than one, not a missing consumer.
     spawners_by_biome: HashMap<String, crate::spawners::BiomeSpawners>,
     /// Which biomes list `minecraft:freeze_top_layer` in their
     /// `TOP_LAYER_MODIFICATION` step. In vanilla 26.2 that is **every** biome
@@ -814,10 +819,12 @@ impl OverworldGenerator {
     /// table cannot produce).
     ///
     /// Resolved once at construction, so this is a map lookup rather than a JSON
-    /// parse. **Nothing in the generation pipeline calls it** — see
-    /// [`crate::spawners`]'s module doc for what the remaining three parts of #518
-    /// are blocked on, and why a `SPAWN` stage built today would be measuring the
-    /// wrong world.
+    /// parse. **Nothing calls it in production** — `crate::spawn_stage` (issue
+    /// #518 part 2) and `lodestone_server::natural_spawn` (parts 3/4) are wired
+    /// and running, but both read `MobSpawnSettings` through their own copy of
+    /// [`crate::spawners::parse_biome_spawners`] rather than through this
+    /// generator's cache, so this accessor and [`Self::all_biome_spawners`]
+    /// remain the unused half of a duplicate.
     #[must_use]
     pub fn biome_spawners(&self, biome: &str) -> Option<&crate::spawners::BiomeSpawners> {
         self.spawners_by_biome.get(biome)
@@ -826,9 +833,8 @@ impl OverworldGenerator {
     /// Every biome's parsed `MobSpawnSettings`, biome name to settings.
     ///
     /// The whole table, for a runtime spawner that needs it keyed by the biome
-    /// name it reads off a served column rather than one lookup at a time — the
-    /// consumer [`biome_spawners`](Self::biome_spawners)' doc used to say did not
-    /// exist. Borrowed, so a caller that must own it (one holding no generator,
+    /// name it reads off a served column rather than one lookup at a time.
+    /// Borrowed, so a caller that must own it (one holding no generator,
     /// e.g. a server tick loop) clones deliberately.
     #[must_use]
     pub fn all_biome_spawners(&self) -> &HashMap<String, crate::spawners::BiomeSpawners> {

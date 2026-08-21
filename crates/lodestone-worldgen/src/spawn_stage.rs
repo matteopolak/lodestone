@@ -30,8 +30,10 @@
 //! unconditioned on whether the position is actually legal. The consumer
 //! (`lodestone_server::natural_spawn`, which already computes real per-column
 //! light for the tick-driven spawner) re-validates each one through
-//! [`lodestone_entity::spawn::SpawnConditions::permits`] before it becomes a
-//! live mob — see `docs/worldgen-mob-generation-spawn.md`.
+//! `NaturalSpawner::validate_generation_spawns`, the same per-species
+//! `SpawnRule` table and light cache the tick-driven cycle's own validation
+//! uses, before it becomes a live mob — see
+//! `docs/worldgen-mob-generation-spawn.md`.
 //!
 //! ## Deliberately not vanilla-exact, and named rather than hidden
 //!
