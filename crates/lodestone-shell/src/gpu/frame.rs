@@ -166,6 +166,13 @@ impl RenderState {
         cracks: &[CrackTarget],
         screen_effects: ScreenEffects,
     ) -> RenderStats {
+        // Frame-profiling sub-phase timing (`gpu::gpu_timing`): CPU wall time
+        // from here to `begin_render_pass` below is every `prepare_*`/uniform
+        // write this pass needs before the pass opens (a render pass cannot
+        // itself create or write a buffer) — see `WorldSubphase::PrepareBuffers`'s
+        // own doc. A single `Instant::now()` local; nothing else here changes.
+        let world_encode_t0 = crate::platform::Instant::now();
+
         // Cache this frame's camera block position for `upload_section`'s
         // near-distance fade skip — see `RenderState::last_camera_block_pos`'s
         // doc for why this is the one write site rather than a threaded
@@ -448,6 +455,11 @@ impl RenderState {
         // the same reason armour/wool are: no buffer creation mid-pass.
         let flame_batches = self.prepare_flame(device, camera, entities, &mut stats);
 
+        // The entity ground-shadow decal (owner report: "entity shadows are
+        // missing"), over the same instances, for the same reason as
+        // everything above: no buffer creation mid-pass.
+        let shadow_batch = self.prepare_shadows(device, camera, entities, &mut stats);
+
         // Experience-orb billboards, over the same `entities` slice and for the
         // same reason as everything above: no buffer creation mid-pass. An orb has
         // no cuboid rig, so `prepare_entities` above skips it entirely — this is
@@ -625,6 +637,24 @@ impl RenderState {
             false
         };
 
+        // See `world_encode_t0` above: everything before this point is
+        // buffer prep (uniform writes, `prepare_*` calls, the sky pass);
+        // everything from here on is the one "block pass" — see
+        // `gpu::gpu_timing::WorldSubphase`'s own doc.
+        crate::gpu::gpu_timing::record_world_subphase(
+            crate::gpu::gpu_timing::WorldSubphase::PrepareBuffers,
+            world_encode_t0.elapsed().as_secs_f32() * 1000.0,
+        );
+        let world_encode_terrain_t0 = crate::platform::Instant::now();
+        // Set from *inside* the pass block below (after opaque terrain, once
+        // per call — see that checkpoint) and read again after the block
+        // closes (the `pass` drop point) — a `Cell` rather than a plain
+        // `let` because the assignment site is nested one scope deeper than
+        // this declaration and the read site, and a `let` there would not
+        // outlive the block. The placeholder value is always overwritten
+        // before it is ever read.
+        let world_encode_other_t0 = std::cell::Cell::new(world_encode_terrain_t0);
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("block pass"),
@@ -764,6 +794,27 @@ impl RenderState {
                     &mut stats.terrain_camera_bind_group_switches,
                 );
             }
+
+            // Frame-profiling sub-phase timing (`gpu::gpu_timing`): opaque
+            // terrain's own cull-and-draw cost, both loops above, separated
+            // from everything else this pass still has to draw below — see
+            // `WorldSubphase::TerrainCullAndDraw`'s doc. Sections *visited*
+            // (not just drawn) alongside it: the packed loop has no cull
+            // counters of its own, so `self.sections.len()` is its whole
+            // "visited" figure; compare the model side against
+            // `RenderStats::sections_drawn` plus its three `sections_culled_*`
+            // fields, already on the F3 overlay.
+            crate::gpu::gpu_timing::record_world_subphase(
+                crate::gpu::gpu_timing::WorldSubphase::TerrainCullAndDraw,
+                world_encode_terrain_t0.elapsed().as_secs_f32() * 1000.0,
+            );
+            crate::gpu::gpu_timing::record_world_subphase_counts(
+                crate::gpu::gpu_timing::WorldSubphaseCounts {
+                    packed_sections_visited: self.sections.len(),
+                    model_sections_visited: self.model.as_ref().map_or(0, |m| m.sections.len()),
+                },
+            );
+            world_encode_other_t0.set(crate::platform::Instant::now());
 
             // Entities share the terrain depth buffer (depth test + write on, so
             // a mob behind a wall is correctly occluded and vice versa), drawn
@@ -964,6 +1015,25 @@ impl RenderState {
                         stats.draw_calls += 1;
                     }
                 }
+            }
+
+            // The entity ground-shadow decal (owner report: "entity shadows
+            // are missing") — right after the mob-fire billboard and before
+            // block entities, translucent with depth write off: it is a flat
+            // decal painted onto ground that already wrote its own depth
+            // (terrain draws before any entity pass), so it must not write
+            // depth itself or it would fight whatever draws over it next at
+            // the same depth. See `EntityPipeline::shadow_pipeline`'s doc for
+            // the vanilla `RenderPipelines.ENTITY_SHADOW` state this mirrors.
+            if let Some(batch) = &shadow_batch
+                && let Some(texture) = &self.entities.shadow_texture
+            {
+                pass.set_pipeline(&self.entities.shadow_pipeline);
+                pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
+                pass.set_bind_group(1, texture, &[]);
+                pass.set_vertex_buffer(0, batch.buffer.slice(..));
+                pass.draw(0..batch.count, 0..1);
+                stats.draw_calls += 1;
             }
 
             // Block entities (chests, that fix) — after the mob layers and
@@ -1542,6 +1612,21 @@ impl RenderState {
             }
         }
 
+        // Frame-profiling sub-phase timing (`gpu::gpu_timing`): everything
+        // recorded after opaque terrain and before `queue.submit` below —
+        // entities, block entities, particles, weather, water, translucent
+        // geometry, the outline, debug lines, nametags, the first-person
+        // hand's own pass and the screen overlays — see
+        // `WorldSubphase::OtherDraws`'s doc for why these are not split
+        // further (none individually costs enough to be worth its own
+        // checkpoint, mirroring `app::frame_profile`'s own reasoning for why
+        // HUD/effects/container share one bucket).
+        crate::gpu::gpu_timing::record_world_subphase(
+            crate::gpu::gpu_timing::WorldSubphase::OtherDraws,
+            world_encode_other_t0.get().elapsed().as_secs_f32() * 1000.0,
+        );
+        let world_encode_submit_t0 = crate::platform::Instant::now();
+
         // GPU frame profiling: resolve this frame's queries into their ring
         // slot before `finish`/`submit` (both are encoder commands), then
         // kick off the async readback right after submission — see
@@ -1557,6 +1642,17 @@ impl RenderState {
         if let Some(timer) = self.gpu_timer.borrow_mut().as_mut() {
             timer.after_submit(device);
         }
+
+        // Frame-profiling sub-phase timing (`gpu::gpu_timing`): the CPU cost
+        // of `encoder.finish()` + `queue.submit` themselves (plus this
+        // module's own GPU-query resolve/after_submit bookkeeping just
+        // above) — see `WorldSubphase::Submit`'s doc. `queue.submit` only
+        // *enqueues* work, so a healthy frame should show this as the
+        // cheapest of the four sub-phases.
+        crate::gpu::gpu_timing::record_world_subphase(
+            crate::gpu::gpu_timing::WorldSubphase::Submit,
+            world_encode_submit_t0.elapsed().as_secs_f32() * 1000.0,
+        );
 
         // Residency, measured — **not** `vram_bytes(stats.total_quads)`, which is
         // what this was. `total_quads` only accumulates over sections that

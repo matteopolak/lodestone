@@ -287,3 +287,215 @@ impl GpuQueryTimer {
         self.stalled_frames
     }
 }
+
+/// CPU sub-phase timing captured *inside* [`super::RenderState::render`]'s
+/// `render_inner` (`gpu/frame.rs`) for the world pass — the fine breakdown
+/// the owner's frame-profiler run asked for after finding
+/// `world_encode_submit` dominant. See `docs/frame-profiling.md`'s "World
+/// sub-phases" section for what each name covers and why the boundaries sit
+/// where they do.
+///
+/// # Why a thread-local bridge, not a new `RenderStats`/`RenderState` field
+///
+/// `RenderStats` (`gpu/stats.rs`) and `RenderState` (`gpu/state.rs`) were
+/// both under concurrent edit by other work at the time this landed, so
+/// `render_inner` cannot hand this data back to
+/// `app::frame_profile::FrameProfiler` (owned by `WindowApp`, a different
+/// struct with no reference into `RenderState`) through either of those
+/// files. This module owns a thread-local instead: `gpu/frame.rs`'s only
+/// obligation is a handful of one-line [`record_world_subphase`] calls at
+/// checkpoints it already has natural seams for (see that file's own
+/// comments at each call site). The shell is single-threaded for rendering —
+/// `WindowApp::redraw` and `render_inner` always run on the same thread — so
+/// a thread-local needs no synchronisation and cannot race with itself.
+///
+/// [`take_world_subphases`] is called from exactly one place,
+/// `app::frame_profile::FrameProfiler::mark`, at the existing
+/// `FramePhase::WorldEncodeSubmit` checkpoint `app/redraw.rs` already marks
+/// every frame — nothing about that call site needed to change for this to
+/// exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorldSubphase {
+    /// Every `prepare_*` call, the sky pass, and every camera/outline/
+    /// debug-line/plugin-billboard/crack uniform write — everything that
+    /// runs before `begin_render_pass`, because a render pass cannot itself
+    /// create or write a buffer (see `gpu/frame.rs`'s own module doc,
+    /// "Submission order is load-bearing").
+    PrepareBuffers,
+    /// Opaque terrain only: the packed-table loop's per-section frustum-only
+    /// `visible()` check plus its draw, and the model-arena loop's
+    /// `TerrainCull::classify` plus its draw — separated from the rest of
+    /// the pass because this is the loop the strategy.rs/draw-call-count
+    /// question is actually about.
+    TerrainCullAndDraw,
+    /// Everything else this pass records: entities, block entities,
+    /// particles, weather, water, translucent geometry, the outline, debug
+    /// lines, nametags, the first-person hand's own pass, and the seven
+    /// screen overlays — all still before `queue.submit`. Not split further
+    /// for the same reason `app::frame_profile` gives for folding HUD,
+    /// effects and the container/menu into one bucket: none individually
+    /// costs enough on its own to be worth a separate checkpoint, and each
+    /// is a different subsystem's file this instrument does not own.
+    OtherDraws,
+    /// `CommandEncoder::finish` + `Queue::submit`, plus this module's own GPU
+    /// query resolve/`after_submit` bookkeeping immediately around them.
+    /// `queue.submit` only *enqueues* work — see `app::frame_profile`'s
+    /// module doc — so this is deliberately expected to be the smallest of
+    /// the four on a healthy frame; a large reading here points at
+    /// driver/queue contention, not at command-recording cost.
+    Submit,
+}
+
+/// [`WorldSubphase`] variant count, kept in one place for the same reason
+/// `app::frame_profile::PHASE_COUNT` is.
+pub(crate) const WORLD_SUBPHASE_COUNT: usize = 4;
+
+impl WorldSubphase {
+    pub(crate) const ALL: [WorldSubphase; WORLD_SUBPHASE_COUNT] = [
+        WorldSubphase::PrepareBuffers,
+        WorldSubphase::TerrainCullAndDraw,
+        WorldSubphase::OtherDraws,
+        WorldSubphase::Submit,
+    ];
+
+    /// Short, stable name for the F3/tracing detail line and the CSV dump's
+    /// header — kept separate from `Debug` for the same reason
+    /// `FramePhase::name` is.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            WorldSubphase::PrepareBuffers => "world.prepare_buffers",
+            WorldSubphase::TerrainCullAndDraw => "world.terrain_cull_draw",
+            WorldSubphase::OtherDraws => "world.other_draws",
+            WorldSubphase::Submit => "world.submit",
+        }
+    }
+}
+
+/// Counts alongside [`WorldSubphase::TerrainCullAndDraw`]'s timing — this
+/// repo's own evidence standard: "3 ms across 60 draws is a different
+/// problem from 3 ms across 6000," so the timing above means nothing without
+/// these next to it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WorldSubphaseCounts {
+    /// Packed-table sections iterated (`self.sections.len()`) — every one of
+    /// them is visited; that loop has no cull counters of its own, only an
+    /// inline `TerrainCull::visible` check, so this is its entire "visited"
+    /// figure. Compare against `RenderStats::sections_drawn` for that loop's
+    /// visited-vs-drawn (the packed table is the demo world only, never a
+    /// live session — see `gpu.rs`'s own module doc).
+    pub packed_sections_visited: usize,
+    /// Model-arena (live-vanilla) sections iterated (`model.sections.len()`).
+    /// Compare against `RenderStats::sections_drawn` plus its three
+    /// `sections_culled_*` fields (already on the F3 overlay) for
+    /// visited-vs-drawn on the loop that actually matters live.
+    pub model_sections_visited: usize,
+}
+
+thread_local! {
+    static WORLD_SUBPHASES: std::cell::RefCell<[Option<f32>; WORLD_SUBPHASE_COUNT]> =
+        const { std::cell::RefCell::new([None; WORLD_SUBPHASE_COUNT]) };
+    static WORLD_SUBPHASE_COUNTS_CELL: std::cell::RefCell<Option<WorldSubphaseCounts>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Record one sub-phase's elapsed milliseconds for the frame currently being
+/// recorded. Called from `gpu/frame.rs`'s `render_inner` — see that file's
+/// checkpoint comments. Overwrites any previous value for `phase` this frame
+/// rather than accumulating: every sub-phase runs at most once per call to
+/// `render_inner`.
+pub(crate) fn record_world_subphase(phase: WorldSubphase, ms: f32) {
+    let i = WorldSubphase::ALL.iter().position(|p| *p == phase).expect("phase is in ALL");
+    WORLD_SUBPHASES.with(|cell| cell.borrow_mut()[i] = Some(ms));
+}
+
+/// Record the per-frame counts alongside the sub-phase timings above.
+pub(crate) fn record_world_subphase_counts(counts: WorldSubphaseCounts) {
+    WORLD_SUBPHASE_COUNTS_CELL.with(|cell| *cell.borrow_mut() = Some(counts));
+}
+
+/// Drain this frame's sub-phase timings and counts, resetting both to
+/// "not recorded" for the next frame. `None` for a timing slot means
+/// genuinely never recorded this frame — the caller
+/// (`app::frame_profile::FrameProfiler::mark`) must show that as a skip,
+/// never a fabricated `0.0`, exactly like every other phase this instrument
+/// reports.
+pub(crate) fn take_world_subphases()
+-> ([Option<f32>; WORLD_SUBPHASE_COUNT], Option<WorldSubphaseCounts>) {
+    let timings = WORLD_SUBPHASES.with(|cell| cell.replace([None; WORLD_SUBPHASE_COUNT]));
+    let counts = WORLD_SUBPHASE_COUNTS_CELL.with(|cell| cell.borrow_mut().take());
+    (timings, counts)
+}
+
+#[cfg(test)]
+mod world_subphase_tests {
+    use super::*;
+
+    /// The magnitude species this repo's evidence standard asks for: sleep a
+    /// *non-round* interval, record it through the exact same
+    /// `record_world_subphase`/`take_world_subphases` pair `gpu/frame.rs` and
+    /// `FrameProfiler::mark` use, and require the drained figure to land on
+    /// it — not merely be positive. `23` ms rather than a round `20`/`50`,
+    /// for the same reason `frame_profile`'s own control avoids one.
+    ///
+    /// This is the control the task asked to be watched failing: temporarily
+    /// changing `record_world_subphase` to a no-op (commenting out the body)
+    /// makes this assert `Some(_)` against `None` and fail immediately —
+    /// verified by hand before this landed, then restored; a version of this
+    /// test that only checked `> 0.0` would have passed against a stray
+    /// leftover value from a previous test in the same process just as
+    /// easily as against a real measurement, which is exactly the "merely
+    /// positive" failure mode this repo has paid for.
+    #[test]
+    fn record_and_take_round_trip_the_real_elapsed_time_not_a_placeholder() {
+        // Drain first: `take_world_subphases` is process-global state (a
+        // `thread_local`, but this test binary runs its tests on one thread
+        // by default), so a prior test in this module could have left a
+        // stale value behind.
+        let _ = take_world_subphases();
+
+        let t0 = crate::platform::Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(23));
+        let ms = t0.elapsed().as_secs_f32() * 1000.0;
+        record_world_subphase(WorldSubphase::TerrainCullAndDraw, ms);
+        record_world_subphase_counts(WorldSubphaseCounts {
+            packed_sections_visited: 11,
+            model_sections_visited: 4,
+        });
+
+        let (timings, counts) = take_world_subphases();
+        let recorded = timings[WorldSubphase::ALL
+            .iter()
+            .position(|p| *p == WorldSubphase::TerrainCullAndDraw)
+            .unwrap()];
+        assert!(
+            matches!(recorded, Some(ms) if (18.0..=80.0).contains(&ms)),
+            "expected ~23ms (wide tolerance for scheduler jitter), got {recorded:?}"
+        );
+        // Pairwise-distinct fixture values (11 != 4), so a transposition of
+        // the two count fields cannot survive this assertion.
+        let counts = counts.expect("counts recorded above must round-trip");
+        assert_eq!(counts.packed_sections_visited, 11);
+        assert_eq!(counts.model_sections_visited, 4);
+
+        // Draining must reset state for the next frame — a phase not
+        // recorded again must read back as `None`, never a stale `Some` from
+        // this test.
+        let (timings2, counts2) = take_world_subphases();
+        assert!(timings2.iter().all(Option::is_none));
+        assert!(counts2.is_none());
+    }
+
+    /// Every [`WorldSubphase`] variant round-trips through `name()` to a
+    /// distinct, non-empty string, and `ALL`'s order matches each variant's
+    /// own declared position — the same "compiler will not catch a missed
+    /// arm" trap `docs/frame-profiling.md` already calls out for
+    /// `FramePhase`.
+    #[test]
+    fn every_subphase_has_a_distinct_name() {
+        let names: Vec<&str> = WorldSubphase::ALL.iter().map(|p| p.name()).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "every WorldSubphase name must be distinct: {names:?}");
+    }
+}
