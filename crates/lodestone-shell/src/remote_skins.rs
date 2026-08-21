@@ -250,6 +250,7 @@ static SHEETS: Mutex<Option<HashMap<String, Arc<Image>>>> = Mutex::new(None);
 #[cfg(test)]
 static REQUESTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+
 /// Runs `f` over a lazily-created map behind `slot`, ignoring poisoning.
 ///
 /// Poisoning is ignored for [`skin_fetch`](crate::skin_fetch)'s reason: a
@@ -368,6 +369,22 @@ pub fn last_known_name(id: &uuid::Uuid) -> Option<String> {
     with_map(&NAME_LAST_KNOWN, |map| map.get(id).cloned())
 }
 
+/// The cache key **our own** profile skin is stored under — the sheet
+/// `skin_fetch` downloads after sign-in and caches at `<data_dir>/skin.png`.
+///
+/// A key, **not a URL**, and deliberately not one: it names no host and must
+/// never reach [`request`]. The real texture URL would work as a key too, but
+/// only for a session that actually performed the sign-in — a *later* launch
+/// has the cached PNG on disk and no memory of where it came from, so keying on
+/// the URL would make the world body's skin depend on having signed in this run
+/// while the inventory avatar's did not.
+///
+/// It exists because the two URL-keyed caches in this module (`SHEETS` and the
+/// renderer's `player_skins` bind groups) are how a sheet reaches a draw, and
+/// our own cached skin has to enter them somehow. Everything downstream treats
+/// it as an ordinary entry.
+pub const LOCAL_PROFILE_SKIN_KEY: &str = "lodestone-local-profile-skin";
+
 /// Start fetching `url` unless it has already been started, finished or failed.
 ///
 /// Idempotent, so the per-frame call site can hand it the same URLs forever.
@@ -383,7 +400,11 @@ pub fn last_known_name(id: &uuid::Uuid) -> Option<String> {
 /// with no declared skin, which after this change is the common case rather
 /// than the rare one.
 pub fn request(url: &str) {
-    if url.is_empty() {
+    if url.is_empty() || url == LOCAL_PROFILE_SKIN_KEY {
+        // The local-profile key names no host and its sheet is published
+        // directly, so there is nothing to fetch. Refused here rather than
+        // relying on every caller to remember, the same way the empty
+        // sentinel is.
         return;
     }
     let start = with_map(&FETCHED, |map| {
@@ -753,21 +774,32 @@ mod tests {
     /// The ready queue hands each sheet over exactly once — the renderer builds
     /// a bind group from it and keeps that, so a second yield would rebuild the
     /// same texture on every frame.
+    ///
+    /// **Asserted per URL, not on the queue's length.** [`READY`] is
+    /// process-wide and libtest runs a binary's tests on several threads, so any
+    /// other publisher — this file's own sibling gate, `skin_fetch::publish`
+    /// mirroring our profile sheet — legitimately has entries in the same drain.
+    /// `drained.len() == 1` was asserting exclusivity, which is not a property
+    /// this queue has and not the property under test.
     #[test]
     fn the_ready_queue_yields_each_sheet_exactly_once() {
-        let _ = drain_ready();
+        let url = "https://textures.minecraft.net/texture/drained";
         publish(
-            "https://textures.minecraft.net/texture/drained".to_owned(),
+            url.to_owned(),
             Image {
                 width: 64,
                 height: 64,
                 rgba: vec![0u8; 64 * 64 * 4],
             },
         );
-        let drained = drain_ready();
-        assert_eq!(drained.len(), 1);
-        assert_eq!((drained[0].1.width, drained[0].1.height), (64, 64));
-        assert!(drain_ready().is_empty());
+        let mine: Vec<_> = drain_ready().into_iter().filter(|(u, _)| u == url).collect();
+        assert_eq!(mine.len(), 1, "exactly one entry for this url");
+        assert_eq!((mine[0].1.width, mine[0].1.height), (64, 64));
+        assert!(
+            !drain_ready().iter().any(|(u, _)| u == url),
+            "a second drain yielded this url again -- the renderer would rebuild \
+             the same texture every frame"
+        );
     }
 
     /// The **pull** half, and the discriminator against the drain: the world
@@ -794,7 +826,10 @@ mod tests {
             drained.iter().any(|(u, _)| u == url),
             "sanity: the publish must have reached the drain queue too"
         );
-        assert!(drain_ready().is_empty(), "the drain stays one-shot");
+        assert!(
+            !drain_ready().iter().any(|(u, _)| u == url),
+            "the drain stays one-shot for this url"
+        );
 
         let retained = sheet(url).expect(
             "the GUI icon pass must still be able to pull a sheet the world \
