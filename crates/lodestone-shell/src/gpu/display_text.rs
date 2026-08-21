@@ -35,23 +35,20 @@
 //! - **`seeThrough`/`shadow` style-flag bits are decoded and not consumed**
 //!   here — same simplification `gpu/nametag.rs`'s own module doc already
 //!   makes for its background plate and per-glyph shadow.
-//! - **Wrapping aside, per-run style now IS modelled** (colour, bold,
-//!   italic, underline, strikethrough), via `gpu/nametag.rs::layout_styled_ink_runs`
+//! - **Per-run style is modelled** (colour — hex included, bold, italic,
+//!   underline, strikethrough), via `gpu/nametag.rs::layout_styled_ink_runs`
 //!   — the same styled ink-run walk `gpu/nametag.rs`'s own player/mob
-//!   nametags now use. `textOpacity << 24 | 0xFFFFFF`
+//!   nametags use. `DisplayDraw::text` is a real
+//!   [`lodestone_model::Text`] (`crates/protocol/v770`'s decode and
+//!   `crate::display_entities`' extract both carry the full component tree
+//!   through unflattened), and this pass calls `Text::to_spans` on it
+//!   directly — no `to_legacy_string`/`from_legacy` round trip, so a hex
+//!   colour (which legacy `§` codes cannot express) survives all the way to
+//!   the drawn vertex. `textOpacity << 24 | 0xFFFFFF`
 //!   (`TextDisplayRenderer.submitInner`, see
 //!   [`lodestone_render::display::text_glyph_color`]'s doc) is real, but it
-//!   is the **fallback** tint fed to `Font.java::getTextColor` for a span
-//!   whose own colour is unspecified — not, as this file's doc previously
-//!   and incorrectly claimed, a hardcode that discards a styled component's
-//!   colour outright. A colour/bold/italic/underline/strikethrough-bearing
-//!   `text_display` still needs the upstream flatten
-//!   (`crates/protocol/v770`'s `Value::Text` decode, which currently reduces
-//!   the NBT component to plain text via `plain_text_from_nbt_component`
-//!   before this crate ever sees it) to stop discarding style before this
-//!   pass can draw it — see this module's `push_text_display_quads` for the
-//!   `Text::from_legacy` bridge that makes this pass style-ready the moment
-//!   that upstream flatten changes.
+//!   is only the **fallback** tint fed to `Font.java::getTextColor` for a
+//!   span whose own colour is unspecified.
 //! - **A per-line width computed from *unstyled* advances mis-centres a
 //!   line whose real (styled) content is wider — e.g. a bold run.** This was
 //!   the file's own alignment defect: centring used
@@ -65,7 +62,7 @@
 
 use glam::{Mat4, Vec3};
 use lodestone_assets::font::RasterFont;
-use lodestone_model::text::Text;
+use lodestone_model::text::{Text, TextSpan};
 use lodestone_render::display::{
     BillboardMode, DisplayTransformation, display_orientation, display_placement_matrix,
     text_background_color, text_glyph_color, text_glyph_transform,
@@ -241,9 +238,6 @@ impl DisplayTextRenderer {
                 continue;
             }
             let Some(text) = &draw.text else { continue };
-            if text.is_empty() {
-                continue;
-            }
             push_text_display_quads(raster, &self.ink, draw, text, camera, &mut vertices);
         }
         let len = vertices.len().min(MAX_DISPLAY_TEXT_VERTICES);
@@ -267,6 +261,45 @@ impl DisplayTextRenderer {
     }
 }
 
+/// Splits a fully-inherited span list on literal `\n` boundaries into
+/// per-line span lists, preserving each run's own resolved style — the
+/// styled sibling of `text.split('\n')` on a plain string.
+///
+/// A newline can fall *inside* a span's own text (a multi-line literal) or
+/// at a span boundary; either way, this must reproduce exactly the line
+/// count and content `text.to_plain_string().split('\n')` would give, since
+/// `total_height`/background-panel sizing below still counts by *line*, not
+/// by span. The algorithm is the standard incremental split: each span's
+/// first `split('\n')` fragment continues the line already open from the
+/// previous span (or starts the first line), and every subsequent fragment
+/// opens a new line — equivalent to splitting the spans' concatenated text,
+/// because `str::split` is defined by scanning left to right for the
+/// delimiter regardless of where a caller's own chunk boundaries fall.
+fn split_spans_into_lines(spans: &[TextSpan]) -> Vec<Vec<TextSpan>> {
+    let mut lines: Vec<Vec<TextSpan>> = vec![Vec::new()];
+    for span in spans {
+        let mut parts = span.text.split('\n');
+        if let Some(first) = parts.next() {
+            if !first.is_empty() {
+                lines.last_mut().expect("lines is never empty").push(TextSpan {
+                    text: first.to_owned(),
+                    style: span.style,
+                });
+            }
+        }
+        for part in parts {
+            lines.push(Vec::new());
+            if !part.is_empty() {
+                lines.last_mut().expect("just pushed").push(TextSpan {
+                    text: part.to_owned(),
+                    style: span.style,
+                });
+            }
+        }
+    }
+    lines
+}
+
 /// Lowers one `text_display`'s current text into world-space quads (the
 /// background panel, when non-transparent, plus every non-empty line),
 /// appended onto `out`.
@@ -274,19 +307,19 @@ fn push_text_display_quads(
     raster: &RasterFont,
     ink: &super::nametag::StyledInkLayoutCache,
     draw: &DisplayDraw,
-    text: &str,
+    text: &Text,
     camera: &Camera,
     out: &mut Vec<DisplayTextVertex>,
 ) {
-    let lines: Vec<&str> = text.split('\n').collect();
-    // `text` is still plain today (the protocol-layer flatten this pass
-    // receives it from currently discards style before this crate ever sees
-    // it — see the module doc), but `Text::from_legacy` is run unconditionally
-    // rather than assuming plain text, so a `§`-coded line already draws
-    // correctly and the moment the upstream flatten preserves style (as a
-    // legacy-coded string, the same bridge `gpu/nametag.rs::push_entity_quads`
-    // now uses) this pass needs no further change.
-    //
+    // `text` is a real `Text` (the protocol-layer decode and
+    // `crate::display_entities`' extract both carry the full component tree
+    // through unflattened — see the module doc), so `to_spans` reads
+    // colour/bold/italic/underline/strikethrough directly with no
+    // `to_legacy_string`/`from_legacy` round trip to lose a hex colour along
+    // the way. [`split_spans_into_lines`] then breaks the flattened run list
+    // on literal `\n`s while keeping each run's own resolved style.
+    let spans = text.to_spans();
+    let lines = split_spans_into_lines(&spans);
     // Per-line layout up front: needed both to size the background panel
     // (vanilla's own `cachedInfo.width()`/`height()`, computed once before
     // any quad is emitted) and to lay out each line's glyphs afterwards —
@@ -294,13 +327,13 @@ fn push_text_display_quads(
     // `super::nametag::layout_ink_runs`'s plain width) so a bold run's real,
     // wider advance is what centring measures — see the module doc for the
     // alignment defect an unstyled width caused.
-    let line_spans: Vec<_> = lines.iter().map(|line| Text::from_legacy(line).to_spans()).collect();
-    let layouts: Vec<_> = line_spans.iter().map(|spans| ink.layout(raster, spans)).collect();
+    let layouts: Vec<_> = lines.iter().map(|spans| ink.layout(raster, spans)).collect();
     let total_width = layouts.iter().map(|l| l.1).fold(0.0_f32, f32::max);
     let total_height = (lines.len() as f32).mul_add(TEXT_LINE_HEIGHT, -1.0);
     if total_width <= 0.0 {
-        // Every line was empty (e.g. a lone `"\n"`) — vanilla's own
-        // `Font.split` of an empty string contributes no ink either.
+        // Every line was empty (e.g. a lone `"\n"`, or `text` itself empty)
+        // — vanilla's own `Font.split` of an empty string contributes no ink
+        // either.
         return;
     }
 
@@ -407,7 +440,7 @@ mod tests {
             entity_pitch: 0.0,
             billboard: BillboardMode::Fixed,
             transform: DisplayTransformation::default(),
-            text: Some(text.to_owned()),
+            text: Some(Text::from_legacy(text)),
             text_line_width: 200,
             text_background_color: 0,
             text_opacity: -1,
@@ -428,7 +461,14 @@ mod tests {
         };
         let ink = super::super::nametag::StyledInkLayoutCache::default();
         let mut out = Vec::new();
-        push_text_display_quads(&raster, &ink, &draw_with_text(""), "", &Camera::default(), &mut out);
+        push_text_display_quads(
+            &raster,
+            &ink,
+            &draw_with_text(""),
+            &Text::from_legacy(""),
+            &Camera::default(),
+            &mut out,
+        );
         assert!(out.is_empty());
     }
 
@@ -442,7 +482,14 @@ mod tests {
         let ink = super::super::nametag::StyledInkLayoutCache::default();
         let draw = draw_with_text("LODESTONE");
         let mut out = Vec::new();
-        push_text_display_quads(&raster, &ink, &draw, "LODESTONE", &Camera::default(), &mut out);
+        push_text_display_quads(
+            &raster,
+            &ink,
+            &draw,
+            &Text::from_legacy("LODESTONE"),
+            &Camera::default(),
+            &mut out,
+        );
         assert!(!out.is_empty(), "real text must contribute vertices");
     }
 
@@ -459,12 +506,26 @@ mod tests {
         let mut without_bg = draw_with_text("A");
         without_bg.text_background_color = 0;
         let mut no_bg_out = Vec::new();
-        push_text_display_quads(&raster, &ink, &without_bg, "A", &Camera::default(), &mut no_bg_out);
+        push_text_display_quads(
+            &raster,
+            &ink,
+            &without_bg,
+            &Text::from_legacy("A"),
+            &Camera::default(),
+            &mut no_bg_out,
+        );
 
         let mut with_bg = draw_with_text("A");
         with_bg.text_background_color = 0x4000_0000_u32 as i32;
         let mut bg_out = Vec::new();
-        push_text_display_quads(&raster, &ink, &with_bg, "A", &Camera::default(), &mut bg_out);
+        push_text_display_quads(
+            &raster,
+            &ink,
+            &with_bg,
+            &Text::from_legacy("A"),
+            &Camera::default(),
+            &mut bg_out,
+        );
 
         assert_eq!(
             bg_out.len(),
@@ -497,11 +558,12 @@ mod tests {
         camera_b.yaw = 200.0;
         camera_b.pitch = -35.0;
 
+        let hello = Text::from_legacy("HELLO");
         let fixed_draw = draw_with_text("HELLO");
         let mut fixed_a = Vec::new();
-        push_text_display_quads(&raster, &ink, &fixed_draw, "HELLO", &camera_a, &mut fixed_a);
+        push_text_display_quads(&raster, &ink, &fixed_draw, &hello, &camera_a, &mut fixed_a);
         let mut fixed_b = Vec::new();
-        push_text_display_quads(&raster, &ink, &fixed_draw, "HELLO", &camera_b, &mut fixed_b);
+        push_text_display_quads(&raster, &ink, &fixed_draw, &hello, &camera_b, &mut fixed_b);
         assert_eq!(
             fixed_a, fixed_b,
             "Fixed billboard text must not move when only the camera rotates"
@@ -510,9 +572,9 @@ mod tests {
         let mut center_draw = draw_with_text("HELLO");
         center_draw.billboard = BillboardMode::Center;
         let mut center_a = Vec::new();
-        push_text_display_quads(&raster, &ink, &center_draw, "HELLO", &camera_a, &mut center_a);
+        push_text_display_quads(&raster, &ink, &center_draw, &hello, &camera_a, &mut center_a);
         let mut center_b = Vec::new();
-        push_text_display_quads(&raster, &ink, &center_draw, "HELLO", &camera_b, &mut center_b);
+        push_text_display_quads(&raster, &ink, &center_draw, &hello, &camera_b, &mut center_b);
         assert_ne!(
             center_a, center_b,
             "Center billboard text must move when the camera rotates — \
@@ -545,7 +607,14 @@ mod tests {
 
         let coloured = draw_with_text("\u{a7}cRED");
         let mut coloured_out = Vec::new();
-        push_text_display_quads(&raster, &ink, &coloured, "\u{a7}cRED", &Camera::default(), &mut coloured_out);
+        push_text_display_quads(
+            &raster,
+            &ink,
+            &coloured,
+            &Text::from_legacy("\u{a7}cRED"),
+            &Camera::default(),
+            &mut coloured_out,
+        );
         assert!(
             coloured_out.iter().any(|v| is_red(v.color)),
             "a §c-coloured span must reach the draw with red vertex colour, got: {:?}",
@@ -554,7 +623,14 @@ mod tests {
 
         let plain = draw_with_text("RED");
         let mut plain_out = Vec::new();
-        push_text_display_quads(&raster, &ink, &plain, "RED", &Camera::default(), &mut plain_out);
+        push_text_display_quads(
+            &raster,
+            &ink,
+            &plain,
+            &Text::from_legacy("RED"),
+            &Camera::default(),
+            &mut plain_out,
+        );
         assert!(
             !plain_out.iter().any(|v| is_red(v.color)),
             "plain (uncoloured) text must not draw red — the fixture must be \
@@ -618,10 +694,24 @@ mod tests {
         let ink = super::super::nametag::StyledInkLayoutCache::default();
         let plain_draw = draw_with_text("Hi\nWWWWWW");
         let mut plain_out = Vec::new();
-        push_text_display_quads(&raster, &ink, &plain_draw, "Hi\nWWWWWW", &Camera::default(), &mut plain_out);
+        push_text_display_quads(
+            &raster,
+            &ink,
+            &plain_draw,
+            &Text::from_legacy("Hi\nWWWWWW"),
+            &Camera::default(),
+            &mut plain_out,
+        );
         let bold_draw = draw_with_text("Hi\n\u{a7}lWWWWWW");
         let mut bold_out = Vec::new();
-        push_text_display_quads(&raster, &ink, &bold_draw, "Hi\n\u{a7}lWWWWWW", &Camera::default(), &mut bold_out);
+        push_text_display_quads(
+            &raster,
+            &ink,
+            &bold_draw,
+            &Text::from_legacy("Hi\n\u{a7}lWWWWWW"),
+            &Camera::default(),
+            &mut bold_out,
+        );
         let extent = |verts: &[DisplayTextVertex]| -> f32 {
             let xs = verts.iter().map(|v| v.position[0]);
             let max = xs.clone().fold(f32::MIN, f32::max);
@@ -634,6 +724,69 @@ mod tests {
              plain={:.4}, bold={:.4}",
             extent(&plain_out),
             extent(&bold_out)
+        );
+    }
+
+    /// **The hex-colour control.** `DisplayDraw::text` is a real
+    /// [`lodestone_model::Text`] now, and `push_text_display_quads` reads it
+    /// with `Text::to_spans` directly — but [`a_coloured_span_reaches_the_draw_with_its_colour_intact`]'s
+    /// `§c` (legacy-expressible) colour cannot see the bug this guards,
+    /// since `to_legacy_string`/`from_legacy` round-trips it losslessly.
+    /// Only a hex [`lodestone_model::text::TextColor::Rgb`] discriminates:
+    /// legacy `§` codes are a 16-entry palette with no hex form at all.
+    ///
+    /// The control is run first, in this same test, reproducing the exact
+    /// lossy path `DisplayDraw::text` used to bridge through
+    /// (`text.to_legacy_string()` then `Text::from_legacy(..).to_spans()`)
+    /// and asserting it drops the hex colour — watched failing, not assumed
+    /// — before asserting the real, direct `to_spans()` path
+    /// `push_text_display_quads` now takes preserves it end to end, to the
+    /// drawn vertex colour.
+    #[test]
+    fn push_text_display_quads_preserves_a_hex_colour_the_legacy_round_trip_cannot() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
+
+        let hex = 0x00FF_8800_u32;
+        let mut hex_text = Text::literal("HEX");
+        hex_text.style.color = Some(lodestone_model::text::TextColor::Rgb(hex));
+
+        // Control: the round trip `DisplayDraw::text` used to be bridged
+        // through, watched failing on the exact hypothesis it would have
+        // produced.
+        let lossy_spans = Text::from_legacy(&hex_text.to_legacy_string()).to_spans();
+        assert!(
+            lossy_spans
+                .iter()
+                .all(|s| s.style.color != Some(lodestone_model::text::TextColor::Rgb(hex))),
+            "control: a to_legacy_string/from_legacy round trip must lose a \
+             hex colour (legacy `§` codes have no hex form) — this is the bug \
+             `DisplayDraw::text` used to have when it stored a plain \
+             `String`; got {:?}",
+            lossy_spans.iter().map(|s| s.style.color).collect::<Vec<_>>()
+        );
+
+        let draw = draw_with_text("HEX");
+        let mut out = Vec::new();
+        push_text_display_quads(&raster, &ink, &draw, &hex_text, &Camera::default(), &mut out);
+
+        let want_hex = [
+            ((hex >> 16) & 0xff) as f32 / 255.0,
+            ((hex >> 8) & 0xff) as f32 / 255.0,
+            (hex & 0xff) as f32 / 255.0,
+        ];
+        let is_close = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        let has_hex = out
+            .iter()
+            .any(|v| is_close(v.color[0], want_hex[0]) && is_close(v.color[1], want_hex[1]) && is_close(v.color[2], want_hex[2]));
+        assert!(
+            has_hex,
+            "the drawn glyph must carry the hex colour {want_hex:?}, reached \
+             through `DisplayDraw::text`'s direct `to_spans()` (no legacy \
+             round trip): got {:?}",
+            out.iter().map(|v| v.color).collect::<Vec<_>>()
         );
     }
 }

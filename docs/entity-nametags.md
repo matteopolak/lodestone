@@ -108,8 +108,9 @@ floor.
 
 `gpu/nametag.rs::layout_styled_ink_runs` is the styled sibling of
 `layout_ink_runs`: it walks a fully-inherited `Vec<lodestone_model::text::TextSpan>`
-(built from `crate::entities::NameTag::text` via `Text::from_legacy(...)
-.to_spans()`) instead of a bare string, and every emitted `StyledRect` carries
+(`crate::entities::NameTag::text.to_spans()` — `NameTag::text` is a real
+`lodestone_model::Text`, read directly with no legacy-string bridge in
+between) instead of a bare string, and every emitted `StyledRect` carries
 its own resolved RGBA colour — matching `Font.java::getTextColor`, which uses
 a span's own `TextColor` when set and falls back to the pass's own base tint
 (opaque white for both nametag passes) otherwise. Bold draws each ink run
@@ -132,20 +133,16 @@ neither this renderer nor `gpu/display_text.rs` keeps (unlike
 `hud/vanilla_font.rs`, which has one for the 2-D HUD path) — a disclosed gap,
 not a silent one.
 
-**The upstream gap this closes only half of.** `NameTag::text` is still a
-plain `String`: `entities.rs::resolve_entity_facts` resolves a player's tag
-via `TabListEntry::effective_name().to_plain_string()`, and a mob's via the
-metadata-decoded `CustomName`, itself built in
-`crates/protocol/v770/src/packets/metadata.rs` from
-`lodestone_core::plain_text_from_nbt_component` — both flatten the source
-`Text` component to plain text, discarding every colour/bold/italic/
-underline/strikethrough before this module ever sees it. `layout_styled_ink_runs`
-still runs `Text::from_legacy` unconditionally (rather than assuming plain
-input) so a name that already contains legacy `§` codes styles correctly
-today, and so that the moment either upstream flatten is switched to a
-style-preserving one (e.g. `Text::to_legacy_string`, or carrying `TextSpan`s
-through directly), every named entity's colour/bold/italic/underline/
-strikethrough starts rendering with no further change in this file.
+**The upstream gap is closed.** `entities.rs::resolve_entity_facts` resolves
+a player's tag via `TabListEntry::effective_name()` (a `Text`) and a mob's
+via the metadata-decoded `CustomName` (also a `Text`) — neither flattens
+before building `NameTag`, so `NameTag::text` carries the full component tree
+straight through to `push_entity_quads`, which calls `Text::to_spans()` on it
+directly. Colour — a hex `TextColor::Rgb` included — bold, italic, underline
+and strikethrough all survive: a hex colour is the one thing a
+`to_legacy_string`/`Text::from_legacy` round trip could never carry (legacy
+`§` codes are a fixed 16-entry palette with no hex form), which is why this
+module no longer bridges through one.
 
 ### The two depth passes
 

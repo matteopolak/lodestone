@@ -341,16 +341,15 @@ const YAW_EPS: f32 = 1.0e-2;
 /// file:line) and `docs/entity-nametags.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameTag {
-    /// The string to draw, legacy-`§`-coded through
-    /// [`lodestone_model::Text::to_legacy_string`] — colour, bold, italic,
-    /// underline and strikethrough survive that encoding; a *hex* colour does
-    /// not (`to_legacy_string`'s own doc — legacy codes have no hex form),
-    /// the one documented gap left by carrying [`lodestone_model::Text`] this
-    /// far and then bridging into `gpu/nametag.rs`'s existing
-    /// `Text::from_legacy(&tag.text).to_spans()` draw path. A translation-key
-    /// custom name, the rare case, draws its raw key rather than resolving
-    /// through the shell's chat language table; see `docs/entity-nametags.md`.
-    pub text: String,
+    /// The styled component tree to draw. `gpu/nametag.rs`'s
+    /// `push_entity_quads` calls [`lodestone_model::Text::to_spans`] on this
+    /// directly — colour (including a hex [`lodestone_model::text::TextColor::Rgb`],
+    /// which a `to_legacy_string`/`from_legacy` round trip could never carry,
+    /// since legacy `§` codes have no hex form), bold, italic, underline and
+    /// strikethrough all survive intact. A translation-key custom name, the
+    /// rare case, draws its raw key rather than resolving through the
+    /// shell's chat language table; see `docs/entity-nametags.md`.
+    pub text: Text,
     /// Whether the depth-testless, faded pass draws in addition to the normal
     /// depth-tested one — `false` while the entity is sneaking
     /// (`Entity.isDiscrete()`), which is when vanilla suppresses it. See
@@ -3169,16 +3168,12 @@ fn resolve_entity_facts(
         }
     };
     let name_tag = name_tag.map(|text| NameTag {
-        // `NameTag::text` stays a plain `String`: `gpu/nametag.rs`'s existing
-        // styled-draw bridge is `Text::from_legacy(&tag.text).to_spans()`,
-        // fixed at that call site (out of scope for this change — see its
-        // own module doc). `to_legacy_string` is the only encoding that
-        // bridge can read, and it carries colour/bold/italic/underline/
-        // strikethrough through intact; the one documented gap is a *hex*
-        // colour (`to_legacy_string` drops one, since legacy `§` codes have
-        // no hex form), which only a full `Text`-typed `NameTag::text` could
-        // close.
-        text: text.to_legacy_string(),
+        // Carried through as a real `Text` — `gpu/nametag.rs`'s
+        // `push_entity_quads` reads it with `Text::to_spans` directly, so
+        // colour/bold/italic/underline/strikethrough (hex included) survive
+        // all the way to the drawn vertex, with no legacy-string round trip
+        // to lose a hex colour along the way.
+        text,
         // `Entity.isDiscrete()`'s shift-key bit (`0x02`) — unknown (no
         // metadata yet) defaults open, matching every other not-yet-reported
         // boolean here.
@@ -4795,7 +4790,7 @@ mod tests {
             let entity = bare_player_entity(&mut world, id);
             let facts = facts_for(&world, entity, &tabs);
             assert_eq!(
-                facts.name_tag.map(|t| t.text),
+                facts.name_tag.map(|t| t.text.to_plain_string()),
                 Some("Steve".to_string()),
                 "a player entity must show its tab-list name unconditionally"
             );
@@ -4835,7 +4830,7 @@ mod tests {
 
             let listed = facts_for(&world, entity, &tabs);
             assert_eq!(
-                listed.name_tag.map(|t| t.text),
+                listed.name_tag.map(|t| t.text.to_plain_string()),
                 Some("QuestGiver".to_string()),
                 "name must resolve while the entry is listed"
             );
@@ -4845,7 +4840,7 @@ mod tests {
             let unlisted = lodestone_game::tablist::TabList::new();
             let after_removal = facts_for(&world, entity, &unlisted);
             assert_eq!(
-                after_removal.name_tag.map(|t| t.text),
+                after_removal.name_tag.map(|t| t.text.to_plain_string()),
                 Some("QuestGiver".to_string()),
                 "a previously-resolved name must survive a missing tab-list \
                  entry rather than silently dropping the tag"
@@ -4879,7 +4874,7 @@ mod tests {
                 CustomNameVisible(true),
             ));
             let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
-            assert_eq!(facts.name_tag.map(|t| t.text), Some("Babe".to_string()));
+            assert_eq!(facts.name_tag.map(|t| t.text.to_plain_string()), Some("Babe".to_string()));
         }
 
         /// The gate the base `Entity.shouldShowName()` predicate is: a
@@ -4958,7 +4953,7 @@ mod tests {
                 &lodestone_game::tablist::TabList::new(),
             );
             assert_eq!(
-                real_facts.name_tag.map(|t| t.text),
+                real_facts.name_tag.map(|t| t.text.to_plain_string()),
                 Some("<empty> the Cow".to_string()),
                 "the guard must match the sentinel exactly, not merely contain it — \
                  a player who actually named their pet this must still see it"
@@ -4979,7 +4974,7 @@ mod tests {
             ));
             let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
             let tag = facts.name_tag.expect("the tag itself must still draw while sneaking");
-            assert_eq!(tag.text, "Babe");
+            assert_eq!(tag.text.to_plain_string(), "Babe");
             assert!(!tag.see_through, "sneaking must suppress the see-through pass");
         }
 
