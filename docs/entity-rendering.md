@@ -35,6 +35,46 @@ Only types whose registry path differs from a model name are listed explicitly:
 > the day its mesh lands, and any wrong-mesh substitution has to be *written
 > down* rather than left behind.
 
+### The "invisible but solid" rigs, and where each was transcribed from
+
+`cargo xtask world-coverage` names a class this document had no section for: a
+type with a row in the client's hitbox table (`gpu/entity_passes.rs`'s
+`EYE_HEIGHTS`, generated from the registry and therefore complete) and no entry
+in the hand-ported rig corpus. In play that is a mob you collide with and cannot
+see, which reads as a bug rather than as unported work. Ten types were in it.
+
+Source citations live here rather than in `entity_models.rs`, per the repo rule
+that vanilla record definitions are named in `docs/` only. All paths are relative
+to `.cache/mc/26.2/client-src/net/minecraft/client`, and the layer each type
+bakes is registered in `model/geom/LayerDefinitions.java`.
+
+| corpus entry | vanilla layer | renderer | notes |
+|---|---|---|---|
+| `giant` | `HumanoidModel.createMesh` at `MeshTransformer.scaling(6.0F)` | `GiantMobRenderer` | the constructor's `scale` argument is only a shadow radius; the 6× is in the layer |
+| `leash_knot` | `model/object/leash/LeashKnotModel.createBodyLayer` | `LeashKnotRenderer` | extends `EntityRenderer`, so no 1.501 lift — routed through `non_living_vehicle_placement` |
+| `sulfur_cube` | `model/monster/slime/SulfurCubeModel.createOuterBodyLayer` | `SulfurCubeRenderer` | its `scale` hook's constant part is folded into the corpus root pose; see that function's own derivation |
+| `breeze` | `model/monster/breeze/BreezeModel.createBodyLayer` | `BreezeRenderer` | body layer is `retainPartsAndChildren("head", "rods")`; the wind funnel and eyes are separate layers |
+| `creaking` | `model/monster/creaking/CreakingModel.createBodyLayer` | `CreakingRenderer` | keyframe-driven in vanilla; posed here by the humanoid family |
+| `copper_golem` | `model/animal/golem/CopperGolemModel.createBodyLayer` | `CopperGolemRenderer` | the standing pose; running/sitting/star are separate baked layers |
+| `happy_ghast` | `model/animal/ghast/HappyGhastModel.createBodyLayer(false, CubeDeformation.NONE)` at `scaling(4.0F)` | `HappyGhastRenderer` | tentacle lengths are authored, unlike `GhastModel`'s seeded ones |
+| `nautilus`, `zombie_nautilus` | `model/animal/nautilus/NautilusModel.createBodyLayer` | `NautilusRenderer`, `ZombieNautilusRenderer` | one layer, two sheets; the zombie's coral crust is `ZombieNautilusCoralModel`, a separate layer |
+| `camel_husk` | `AdultCamelModel.createBodyLayer` (the same layer `camel` uses) | `CamelHuskRenderer` | one rig, its own sheet |
+
+**What is deliberately absent, and why it is not an oversight.** Every emissive
+eyes layer (`breeze`, `creaking`, `copper_golem`), the breeze's translucent wind
+funnel, the sulfur cube's inner core and carried block, the zombie nautilus's
+coral, the happy ghast's harness and ropes, and every baby variant are *separate
+baked layers on their own sheets*. A corpus entry carries exactly one sheet and
+one mesh, so folding any of them in would paint the second layer with the first
+layer's UVs. They are second-pass work of the same shape as the sheep's wool
+layer, which this document already describes.
+
+`crates/lodestone-render/tests/invisible_but_solid_rigs.rs` is the gate: it
+resolves each of the ten from its registry path and asserts the drawn world AABB
+covers the collision box the registry declares, with three controls reproducing
+the specific ways it could have gone wrong. It also records the breeze's known
+0.619 shortfall, which is the missing wind funnel and nothing else.
+
 ### Model name → texture
 
 `entity_texture_candidates(model_name)` returns in-jar paths in priority order.
