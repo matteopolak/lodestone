@@ -1716,6 +1716,108 @@ mod tests {
              just the advance)"
         );
     }
+
+    /// A hermetic reproduction of the exact composition a "background panel"
+    /// resource-pack font uses: a **custom** font (selected via `Style.font`,
+    /// not `minecraft:default`) declaring both bitmap panel glyphs *and* a
+    /// `space` provider entry for a positive-advance gap character between
+    /// them -- e.g. a Unicode figure/en/thin-space codepoint remapped to a
+    /// specific pixel width, the standard vanilla technique for inserting a
+    /// precise gap that no bitmap cell's own ink-derived advance could
+    /// produce. If a `space` glyph's advance were ever dropped on this path
+    /// (measured but not drawn-through, or resolved against the wrong font,
+    /// or substituted with `MISSING_ADVANCE`), the gap would vanish and the
+    /// second panel's ink would start where the first panel's own advance
+    /// ends -- immediately after the first panel, with no room for the
+    /// intended gap. This is "the gap between them is completely missing"
+    /// reproduced end to end, through the same `draw_spans`/`glyph_styled`
+    /// path production text takes, not a synthetic call into `Font::advance`
+    /// alone.
+    #[test]
+    fn a_positive_space_glyph_between_two_custom_bitmap_panels_opens_a_real_gap() {
+        // Two 8px-wide fully-opaque "panel" cells at pixel_scale 1 (this test
+        // is about the space provider, not pixel_scale -- that is already
+        // covered by `bitmap_draw_extent_respects_pixel_scale_not_just_advance`).
+        let opaque_cell = vec![255u8; 8 * 8 * 4];
+        let mut rgba = Vec::with_capacity(opaque_cell.len() * 2);
+        rgba.extend_from_slice(&opaque_cell);
+        rgba.extend_from_slice(&opaque_cell);
+        let png = encode_png(16, 8, &rgba);
+
+        let mut source = lodestone_assets::MemorySource::new("panel-gap-fixture");
+        source.insert("assets/nameplates/textures/font/panels.png", png);
+        // U+2007 FIGURE SPACE remapped to a real 40px advance -- the
+        // "positive spacer" mechanism; the panels are ordinary ASCII stand-ins
+        // 'A'/'B' since the mechanism under test does not depend on which
+        // codepoints the panels themselves occupy.
+        source.insert(
+            "assets/nameplates/font/default.json",
+            br#"{"providers":[
+                {"type":"space","advances":{"\u2007":40}},
+                {"type":"bitmap","file":"nameplates:font/panels.png","ascent":7,"height":8,"chars":["AB"]}
+            ]}"#
+                .to_vec(),
+        );
+        let manager = ResourceManager::new(vec![Box::new(source)]);
+        let custom_id_loc: ResourceLocation = "nameplates:default".parse().expect("valid id");
+        let custom_raster = FontLoader::new(&manager)
+            .load_raster(&custom_id_loc, &FontOptions::none())
+            .expect("panel+space fixture font loads");
+
+        // A base font that has nothing at all -- the default font must never
+        // be consulted for a codepoint the custom font itself defines.
+        let font = font_with_raster(bitmap_raster("X", 1, &[0, 0, 0, 0]));
+        let custom_id = FontId::intern("nameplates:default");
+        {
+            let mut cache = font.custom.lock().expect("custom cache lock");
+            cache.generation = Some(crate::resources::pack_generation());
+            cache.entries.insert(custom_id, Some(std::sync::Arc::new(custom_raster)));
+        }
+
+        let spans = [span("A\u{2007}B", Some(custom_id))];
+
+        // Measurement side: advance(A) + 40 (the space) + advance(B).
+        // advance(A)/(B) = (0.5 + 8*1.0) as i32 + 1 = 8 + 1 = 9 each (fully
+        // opaque 8px cell, pixel_scale 1).
+        let measured = font.spans_width(&spans, 1.0);
+        assert_eq!(
+            measured, 58.0,
+            "spans_width must include the space glyph's own 40px advance, got {measured}"
+        );
+
+        // Draw side: the panels must not overlap. Isolate ink vertices by
+        // colour (white, [1,1,1,1]) exactly like this module's other
+        // pixel-geometry tests.
+        let mut verts = Vec::new();
+        {
+            let mut cs = ColourStream {
+                verts: &mut verts,
+                w: 400.0,
+                h: 400.0,
+            };
+            font.draw_spans(&mut cs, &spans, 50.0, 50.0, 1.0, [1.0, 1.0, 1.0], 1.0);
+        }
+        let xs: Vec<f32> = verts
+            .chunks_exact(6)
+            .filter(|v| {
+                (v[2] - 1.0).abs() < 1e-4 && (v[3] - 1.0).abs() < 1e-4 && (v[4] - 1.0).abs() < 1e-4
+            })
+            .map(|v| (v[0] + 1.0) * 400.0 * 0.5)
+            .collect();
+        assert!(!xs.is_empty(), "the opaque panels must draw real ink");
+        let max_x = xs.iter().copied().fold(f32::MIN, f32::max);
+        let min_x = xs.iter().copied().fold(f32::MAX, f32::min);
+        // 'A' draws local [0, 8] -> screen [50, 58]. The space glyph itself
+        // draws nothing but advances the pen by 40 -> 'B' starts at pen
+        // 50 + 9 + 40 = 99, drawing local [0, 8] -> screen [99, 107].
+        assert!((min_x - 50.0).abs() < 0.01, "got min_x={min_x}, want 50.0");
+        assert!(
+            (max_x - 107.0).abs() < 0.01,
+            "got max_x={max_x}, want 107.0 (a dropped/zeroed space advance would put \
+             this at 58.0 -- 'B' drawn immediately after 'A' with no gap at all -- \
+             or at 67.0 for a MISSING_ADVANCE substitution)"
+        );
+    }
 }
 
 /// Pixel-geometry gates for issue #117: bold, italic, underline, strikethrough
