@@ -4629,6 +4629,10 @@ impl MenuNav {
                 self.cycle_attack_indicator(1);
                 MenuAction::None
             }
+            SettingsOutcome::Cycle(LiveOption::Particles) => {
+                self.cycle_particle_level(1);
+                MenuAction::None
+            }
         }
     }
 
@@ -4718,6 +4722,28 @@ impl MenuNav {
             .unwrap_or(0) as i32;
         let next = (index + delta).rem_euclid(ORDER.len() as i32) as usize;
         self.options.attack_indicator = ORDER[next];
+        self.persist_options();
+    }
+
+    /// Cycles `particles` through its three declared states (`All`,
+    /// `Decreased`, `Minimal`) and wraps, then persists —
+    /// [`Self::cycle_attack_indicator`]'s shape.
+    ///
+    /// No consumer push: `app/redraw.rs` hands the field to
+    /// `Sim::set_particle_level` every presented frame.
+    fn cycle_particle_level(&mut self, delta: i32) {
+        use crate::config::ParticleLevel;
+        const ORDER: [ParticleLevel; 3] = [
+            ParticleLevel::All,
+            ParticleLevel::Decreased,
+            ParticleLevel::Minimal,
+        ];
+        let index = ORDER
+            .iter()
+            .position(|s| *s == self.options.particles)
+            .unwrap_or(0) as i32;
+        let next = (index + delta).rem_euclid(ORDER.len() as i32) as usize;
+        self.options.particles = ORDER[next];
         self.persist_options();
     }
 

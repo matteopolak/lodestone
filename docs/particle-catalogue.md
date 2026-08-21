@@ -254,6 +254,32 @@ have a `Behaviour`, an `emit::` function and a `spawn_one` dispatch arm:
   `ClientEvent::Particles` already forwards generically into `Particles::spawn_particles` (see
   "The dispatch is reachable independently of any specific gameplay trigger" above).
 
+**`options.particles` is live.** `ClientLevel.doAddParticle` has two filters and this client
+had transcribed only one: the 32-block cutoff with its `overrideLimiter` bypass (`long_distance`
+on the wire) sat in `sim::net_apply`'s `NetUpdate::Particles` arm, and the particle-**level** test
+next to it did not. `config::ParticleLevel` (`All`/`Decreased`/`Minimal`, vanilla's own
+`ParticleStatus` order) now reaches that arm through `Sim::set_particle_level`, polled per
+presented frame in `app/redraw.rs`.
+
+The fold itself is `Particles::particle_level_permits`, a transcription of
+`calculateParticleLevel` — and it is *probabilistic*, which is the part worth knowing before
+changing it: `DECREASED` is folded down to `MINIMAL` one draw in three, so it keeps roughly two
+thirds of eligible spawns rather than a fixed budget. It draws from the particle engine's own
+`JavaRandom`, which is `java.util.Random`-compatible, so `nextInt` matches vanilla exactly (the
+*stream* does not, and does not need to — nothing observes particle randomness across the wire).
+
+The nesting matters: `overrideLimiter` bypasses **both** filters, in one branch. Collapsing that
+into a single `&&` would let a `Minimal` setting suppress exactly the particles the server marked
+un-suppressible.
+
+**Known gap:** vanilla's `MINIMAL` gives an always-show particle a one-in-ten reprieve
+(`calculateParticleLevel`'s first `if`), and `ClientEvent::Particles` does not carry that flag —
+`v770`'s `LevelParticles::always_show` is decoded and then dropped by the adapter, the
+"read off the wire and discarded at the decode site" shape. `particle_level_permits` takes the
+parameter anyway so the transcription is complete; its only caller passes `false`. Until the flag
+is threaded through, `Minimal` drops every non-override packet particle — slightly stronger than
+vanilla, in the direction the option exists for.
+
 **Ambient/environmental: landed.** Fourteen new sheets, two new behaviours, seventeen
 new `spawn_one` arms and — the half this section previously called out as the real gap — a
 client-predicted per-block-state emitter.

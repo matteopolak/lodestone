@@ -372,10 +372,22 @@ impl Sim {
                     let dx = pos.x - feet.x;
                     let dy = pos.y - feet.y;
                     let dz = pos.z - feet.z;
-                    let within_cutoff =
-                        long_distance || dx.mul_add(dx, dy.mul_add(dy, dz * dz)) <= 1024.0;
-                    if within_cutoff {
-                        self.particles_mut(|p| {
+                    let within_cutoff = dx.mul_add(dx, dy.mul_add(dy, dz * dz)) <= 1024.0;
+                    // Vanilla's structure, and the nesting is the point:
+                    // `overrideLimiter` bypasses **both** the distance cutoff
+                    // and the particle-level filter, in that one branch. Only
+                    // the non-override path consults `options.particles`.
+                    // Writing this as one `&&` would let a MINIMAL setting
+                    // suppress the particles the server explicitly marked
+                    // un-suppressible.
+                    let level = self.particle_level;
+                    self.particles_mut(|p| {
+                        let spawn = if long_distance {
+                            true
+                        } else {
+                            within_cutoff && p.particle_level_permits(level, false)
+                        };
+                        if spawn {
                             p.spawn_particles(
                                 &kind,
                                 [pos.x, pos.y, pos.z],
@@ -384,8 +396,8 @@ impl Sim {
                                 count,
                                 options,
                             );
-                        });
-                    }
+                        }
+                    });
                 }
                 // No `Health`/`Experience` arms, and no `NetUpdate` variants for
                 // them either: the net thread folds `ClientEvent::HealthChanged`
