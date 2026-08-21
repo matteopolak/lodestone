@@ -38,11 +38,18 @@ mod debug_lines;
 // `pub(super)`, i.e. `pub(in crate::gpu)`.
 pub(crate) mod entities;
 mod beacon_beam;
+mod display_text;
 mod end_portal;
 mod entity_passes;
 mod first_person;
 mod frame;
 mod glint;
+// `pub(crate)`, not `pub(super)`: `hud::HudRenderer` owns a second, independent
+// `GpuQueryTimer` for its own encoder/passes (a separate `wgpu::QuerySet` —
+// HUD draws through its own `queue.submit`, not `RenderState::render`'s), so
+// this type needs to be visible outside `crate::gpu` too. See
+// `gpu_timing`'s module doc.
+pub(crate) mod gpu_timing;
 mod maps;
 // The moving-block-model seam: block geometry drawn somewhere other than its own
 // cell. Falling blocks today; piston heads are the second intended producer.
@@ -87,6 +94,7 @@ pub use stats::RenderStats;
 
 use beacon_beam::BeaconBeamRenderer;
 use block_entities::BlockEntityRenderer;
+use display_text::DisplayTextRenderer;
 use end_portal::EndPortalRenderer;
 use debug_lines::{DebugLineRenderer, DebugLinesSource};
 use entities::EntityRenderer;
@@ -576,6 +584,20 @@ pub struct RenderState {
     /// Where this frame's signs come from. Same "unset means draw nothing"
     /// convention as [`Self::skull_source`].
     sign_source: SignSource,
+    /// World-space `text_display` glyphs and background panels. Always
+    /// constructed, like [`Self::sign_text`]: it loads the same jar-sourced
+    /// font and fail-opens to drawing nothing. See `gpu/display_text.rs`'s
+    /// module doc for why this needs a per-draw orientation rather than
+    /// sign text's fixed one or a nametag's always-camera-facing one.
+    display_text: DisplayTextRenderer,
+    /// This frame's extracted `Display`-family entities (`text_display`/
+    /// `item_display`/`block_display`), installed by
+    /// [`set_display_draws`](Self::set_display_draws). Unlike
+    /// [`Self::sign_source`]'s poll-by-position closure, this is a plain
+    /// `Vec` — the extract already happened in
+    /// `crate::display_entities::extract_display_draws`, so there is
+    /// nothing left here to poll.
+    display_draws: Vec<crate::display_entities::DisplayDraw>,
     /// The beacon light beam. Always constructed, like [`Self::sign_text`]:
     /// it loads its own jar-sourced texture and fail-opens to drawing
     /// nothing. Not a hole in the world the way chest/skull are — a 26.2
@@ -632,6 +654,13 @@ pub struct RenderState {
     /// enchanted held item renders without its shimmer: the same "no pass
     /// installed, nothing extra drawn" convention [`Self::sky`] uses.
     glint: Option<glint::GlintPass>,
+    /// Coarse per-pass GPU timing (sky / world / first-person), or `None` when
+    /// the device was not granted `Features::TIMESTAMP_QUERY` — see
+    /// `gpu_timing`'s module doc. `RefCell` for the same reason
+    /// [`Self::occlusion`] is: `render`/`render_inner` take `&self`, but a
+    /// query timer's ring-buffer bookkeeping is real per-frame mutation.
+    /// Read through [`RenderState::gpu_timing_report`].
+    gpu_timer: std::cell::RefCell<Option<gpu_timing::GpuQueryTimer>>,
 }
 
 /// Per-part instance accumulation for the sheep wool layer, before upload.
