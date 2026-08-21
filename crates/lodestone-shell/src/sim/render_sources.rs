@@ -615,6 +615,18 @@ impl Sim {
         self.read(crate::entities::extracted_entity_draws)
     }
 
+    /// This frame's extracted `Display`-family entities
+    /// (`text_display`/`item_display`/`block_display`), for
+    /// [`crate::gpu::RenderState::set_display_draws`]. Empty off a live
+    /// server, the same as [`Self::entity_draws`] above — mirrors that
+    /// accessor exactly, reading the sibling `Extract`-schedule resource
+    /// [`crate::display_entities::extracted_display_draws`] populates every
+    /// frame instead of [`crate::entities::extracted_entity_draws`].
+    #[must_use]
+    pub fn display_draws(&self) -> Vec<crate::display_entities::DisplayDraw> {
+        self.read(crate::display_entities::extracted_display_draws)
+    }
+
     /// The progressive-mining crack to draw on the targeted block this frame, or
     /// `None` when no dig is in progress.
     ///

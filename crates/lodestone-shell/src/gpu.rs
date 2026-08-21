@@ -598,6 +598,13 @@ pub struct RenderState {
     /// `crate::display_entities::extract_display_draws`, so there is
     /// nothing left here to poll.
     display_draws: Vec<crate::display_entities::DisplayDraw>,
+    /// Entity ids already warned about by [`set_display_draws`](Self::set_display_draws)'s
+    /// unsupported-`type_path` check, so a whole scene of `item_display`s
+    /// logs once each rather than once per frame. Never removed — a
+    /// despawned entity's id simply stops appearing in `draws` and its slot
+    /// here goes stale and harmless, the same tradeoff
+    /// [`Self::warned_missing_particle_sheet`] makes for a session-scoped flag.
+    warned_unsupported_display: std::collections::HashSet<i32>,
     /// The beacon light beam. Always constructed, like [`Self::sign_text`]:
     /// it loads its own jar-sourced texture and fail-opens to drawing
     /// nothing. Not a hole in the world the way chest/skull are — a 26.2
