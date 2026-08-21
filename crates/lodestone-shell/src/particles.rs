@@ -65,6 +65,15 @@ const WATER_DRIP_COLOUR: [f32; 3] = [0.2, 0.3, 1.0];
 /// `DripParticle.createLavaHang`'s tint, `1.0F, 0.2857F, 0.083F`.
 const LAVA_DRIP_COLOUR: [f32; 3] = [1.0, 0.2857, 0.083];
 
+/// The untinted particle colour.
+///
+/// Named rather than spelled inline at each `emit::spell` call so the three
+/// arms whose real tint arrives in an undecoded `ParticleOptions` payload
+/// (`effect`, `entity_effect`, `instant_effect`) are greppable as one set: this
+/// constant is the placeholder standing in for that payload, not a vanilla
+/// value any of them actually uses.
+const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
+
 /// Which stitched texture a [`ParticleInstance`]'s UVs address.
 ///
 /// This travels *with* the UVs, decided by the same
@@ -536,6 +545,49 @@ impl Particles {
                 )]
                 let size = xa as f32;
                 emit::sweep_attack(&mut self.engine, x, y, z, size);
+            }
+            // The `CritParticle` family. All three share one constructor and
+            // differ only in sheet plus a provider-level tweak; see
+            // `emit::crit_particle`'s callers. `enchanted_hit` is the one this
+            // client's own sprite table already knew about and nothing emitted
+            // — `Sheet::EnchantedHit` has been stitched into the particle atlas
+            // and unreachable since the sheet enum was written.
+            "enchanted_hit" => emit::enchanted_hit(&mut self.engine, x, y, z, xa, ya, za),
+            "damage_indicator" => emit::damage_indicator(&mut self.engine, x, y, z, xa, ya, za),
+            // The `SpellParticle` family, over the four sheets vanilla's own
+            // `particles/*.json` assign it. `witch` (below) is the fifth
+            // member; it draws its tint from the RNG rather than from a
+            // provider constant, so it keeps its own emitter.
+            //
+            // `effect`/`instant_effect` carry a `SpellParticleOption` and
+            // `entity_effect` a `ColorParticleOption`, both of which name the
+            // real tint. No protocol family here decodes either payload, so
+            // `options` is `ParticleOptions::None` for all three and the tint
+            // below is white — an uncoloured mote rather than a missing one.
+            // Threading the colour is a decoder change, not a change here.
+            "effect" | "entity_effect" => {
+                emit::spell(&mut self.engine, x, y, z, xa, ya, za, Sheet::Effect, WHITE);
+            }
+            "instant_effect" => {
+                emit::spell(&mut self.engine, x, y, z, xa, ya, za, Sheet::Spell, WHITE);
+            }
+            "infested" => {
+                emit::spell(&mut self.engine, x, y, z, xa, ya, za, Sheet::Infested, WHITE);
+            }
+            "raid_omen" => {
+                emit::spell(&mut self.engine, x, y, z, xa, ya, za, Sheet::RaidOmen, WHITE);
+            }
+            "trial_omen" => {
+                emit::spell(&mut self.engine, x, y, z, xa, ya, za, Sheet::TrialOmen, WHITE);
+            }
+            // `FlyTowardsPositionParticle`'s two argument-identical providers.
+            // The wire's three velocity words are an **offset** for these, not a
+            // velocity — see `emit::fly_towards_position`.
+            "enchant" => {
+                emit::fly_towards_position(&mut self.engine, x, y, z, xa, ya, za, Sheet::Enchant);
+            }
+            "nautilus" => {
+                emit::fly_towards_position(&mut self.engine, x, y, z, xa, ya, za, Sheet::Nautilus);
             }
             "note" => emit::note(&mut self.engine, x, y, z, xa),
             "heart" => emit::heart(&mut self.engine, x, y, z),
@@ -1363,28 +1415,29 @@ const SHADER: &str = include_str!("shaders/particles.wgsl");
 mod tests {
     use super::*;
 
-    /// Installs a `(Sheet, frame) -> UV` table for every sheet
-    /// `spawn_particles` can dispatch to, mirroring
-    /// `sheet_particle_resolves_with_an_atlas`'s single-sheet fixture but wide
-    /// enough to resolve flame, smoke and crit in the same test.
+    /// Installs a `(Sheet, frame) -> UV` table covering **every frame of every
+    /// sheet**, mirroring `sheet_particle_resolves_with_an_atlas`'s
+    /// single-sheet fixture but wide enough to resolve any type
+    /// `spawn_particles` dispatches.
+    ///
+    /// Built from `Sheet::all()` rather than listed by hand. The hand-written
+    /// version this replaces named thirteen `(sheet, frame)` pairs, so a new
+    /// dispatch arm over a sheet nobody remembered to add read as an
+    /// *unresolved* particle — a fixture gap presenting as a renderer bug, in a
+    /// test whose subject is the dispatch and not the atlas. What the real
+    /// atlas contains is `sheet_uv_table`'s business, and
+    /// `every_sheet_frame_stitches_into_the_particle_atlas` in
+    /// `lodestone-particle` is what asserts a sheet's frames exist at all.
     fn resolvable() -> Particles {
         let mut p = Particles::new(None);
         let rect = [0.0f32, 0.0, 0.0625, 0.0625];
-        p.sheet_uv = Arc::new(HashMap::from([
-            ((Sheet::Flame, 0u16), rect),
-            ((Sheet::Generic, 0u16), rect),
-            ((Sheet::CriticalHit, 0u16), rect),
-            ((Sheet::SweepAttack, 0u16), rect),
-            ((Sheet::SweepAttack, 2u16), rect),
-            ((Sheet::Note, 0u16), rect),
-            ((Sheet::Heart, 0u16), rect),
-            ((Sheet::Angry, 0u16), rect),
-            ((Sheet::Glint, 0u16), rect),
-            ((Sheet::Spell, 0u16), rect),
-            ((Sheet::Glitter, 0u16), rect),
-            ((Sheet::Explosion, 0u16), rect),
-            ((Sheet::Spark, 0u16), rect),
-        ]));
+        let mut table = HashMap::new();
+        for &sheet in Sheet::all() {
+            for frame in 0..sheet.frame_count() {
+                table.insert((sheet, frame), rect);
+            }
+        }
+        p.sheet_uv = Arc::new(table);
         p
     }
 
@@ -1460,6 +1513,18 @@ mod tests {
             // velocity from `gaussian() * max_speed` with `max_speed == 0.0`,
             // so this proves reachability, not a specific spark velocity.
             ("firework", [0.3, 0.1, -0.2]),
+            // The `CritParticle` and `SpellParticle` families, and the two
+            // `FlyTowardsPositionParticle` types.
+            ("enchanted_hit", [0.0, 0.0, 0.0]),
+            ("damage_indicator", [0.0, 0.0, 0.0]),
+            ("effect", [0.0, 0.0, 0.0]),
+            ("entity_effect", [0.0, 0.0, 0.0]),
+            ("instant_effect", [0.0, 0.0, 0.0]),
+            ("infested", [0.0, 0.0, 0.0]),
+            ("raid_omen", [0.0, 0.0, 0.0]),
+            ("trial_omen", [0.0, 0.0, 0.0]),
+            ("enchant", [0.4, 0.7, -0.3]),
+            ("nautilus", [0.4, 0.7, -0.3]),
         ];
         for &(kind, offset) in cases {
             let mut p = resolvable();
@@ -1479,6 +1544,120 @@ mod tests {
                 "{kind:?} must address the particle sheet, not the block atlas"
             );
         }
+    }
+
+    /// Every sheet in `Sheet::all()` must be reachable by spawning some real
+    /// registry particle type through the production dispatch.
+    ///
+    /// `Sheet::all()` is what `sheet_uv_table` walks to build the atlas UV
+    /// table, so a sheet listed there is **stitched into the particle atlas
+    /// whether or not anything can ever emit it**. Three were exactly that —
+    /// `Effect`, `Enchant` and `EnchantedHit` were declared, listed, stitched,
+    /// and constructed by nothing outside a test — and no existing gate could
+    /// see it: the census that found the `enchanted_hit` *type* reads
+    /// `spawn_one`'s arms, which is the subject side, and says nothing about a
+    /// renderer no subject routes to.
+    ///
+    /// This is the reverse query. It drives the **whole particle registry**
+    /// through the same `spawn_particles` entry point the network path uses and
+    /// collects the sheets that come out, so the expectation is not a
+    /// transcribed list that can drift. Adding a `Sheet` variant without an
+    /// emitter fails here by name.
+    #[test]
+    fn no_sheet_is_atlas_resident_and_unreachable_from_the_dispatch() {
+        let mut reached: std::collections::HashSet<Sheet> = std::collections::HashSet::new();
+        for id in 0..lodestone_data::particle_types::PARTICLE_TYPE_COUNT {
+            #[expect(
+                clippy::cast_possible_wrap,
+                reason = "the registry count is far below i32::MAX"
+            )]
+            let Some(name) = lodestone_data::particle_types::particle_type_name(id as i32) else {
+                continue;
+            };
+            let kind = name.split_once(':').map_or(name, |(_, path)| path);
+            let mut p = Particles::new(None);
+            // The two option-carrying types need their payload or they drop;
+            // both sample `Sheet::Generic`, which plain smoke already reaches,
+            // but supplying it keeps this loop a faithful stand-in for the
+            // network path rather than one with two silent holes.
+            let options = match kind {
+                "dust" => ParticleOptions::Dust { color: [1.0, 0.0, 0.0], scale: 1.0 },
+                "dust_color_transition" => ParticleOptions::DustColorTransition {
+                    from_color: [1.0, 0.0, 0.0],
+                    to_color: [0.0, 0.0, 1.0],
+                    scale: 1.0,
+                },
+                _ => ParticleOptions::None,
+            };
+            p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.2, 0.3, 0.4], 0.0, 1, options);
+            for particle in p.engine.particles() {
+                if let SpriteSource::Sheet { sheet, .. } = particle.sprite {
+                    reached.insert(sheet);
+                }
+            }
+        }
+        let orphans: Vec<Sheet> = Sheet::all()
+            .iter()
+            .copied()
+            .filter(|s| !reached.contains(s))
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "these sheets are stitched into the particle atlas and no registry type \
+             reaches them through the dispatch: {orphans:?}"
+        );
+    }
+
+    /// Each type in the `CritParticle`/`SpellParticle`/`FlyTowardsPosition`
+    /// families must sample the sheet **its own `particles/<name>.json` names**,
+    /// not the one its Java class's better-known sibling uses.
+    ///
+    /// Vanilla assigns sheets per registry type, never per class: six types
+    /// share `SpellParticle` across four different sheets, and the damage
+    /// indicator is a `CritParticle` that does *not* share the crit sprite.
+    /// Deriving the sheet from the class is the mistake that would put
+    /// `spell_N` texels on a potion mote and leave `Sheet::Effect` dead a
+    /// second time — and it is invisible at the draw site, since every wrong
+    /// answer here still resolves to a real sprite.
+    ///
+    /// Expectations read out of `.cache/mc/26.2/client-src/assets/minecraft/
+    /// particles/*.json` — the pack's own texture lists, not our `Sheet` enum.
+    /// Mismatches are collected rather than asserted inside the loop, so a
+    /// failing run reports every wrong arm instead of only the first.
+    #[test]
+    fn each_spell_and_crit_type_samples_the_sheet_its_own_definition_names() {
+        // (kind, the sheet whose `frames()` equals that type's `textures` list)
+        let cases: &[(&str, Sheet)] = &[
+            // `crit.json` -> ["critical_hit"], `enchanted_hit.json` ->
+            // ["enchanted_hit"], `damage_indicator.json` -> ["damage"].
+            ("crit", Sheet::CriticalHit),
+            ("enchanted_hit", Sheet::EnchantedHit),
+            ("damage_indicator", Sheet::Damage),
+            // `effect.json` and `entity_effect.json` -> effect_7..effect_0;
+            // `instant_effect.json` and `witch.json` -> spell_7..spell_0.
+            ("effect", Sheet::Effect),
+            ("entity_effect", Sheet::Effect),
+            ("instant_effect", Sheet::Spell),
+            ("witch", Sheet::Spell),
+            // Single-texture sheets of their own, despite sharing
+            // `SpellParticle` with the four above.
+            ("infested", Sheet::Infested),
+            ("raid_omen", Sheet::RaidOmen),
+            ("trial_omen", Sheet::TrialOmen),
+            // `enchant.json` -> sga_a..sga_z; `nautilus.json` -> ["nautilus"].
+            ("enchant", Sheet::Enchant),
+            ("nautilus", Sheet::Nautilus),
+        ];
+        let mut wrong: Vec<String> = Vec::new();
+        for &(kind, want) in cases {
+            let mut p = resolvable();
+            p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.0; 3], 0.0, 1, ParticleOptions::None);
+            match p.engine.particles().first().map(|q| q.sprite) {
+                Some(SpriteSource::Sheet { sheet, .. }) if sheet == want => {}
+                other => wrong.push(format!("{kind}: wanted {want:?}, got {other:?}")),
+            }
+        }
+        assert!(wrong.is_empty(), "wrong sheet for {} type(s): {wrong:#?}", wrong.len());
     }
 
     /// Negative control for the test above: an unrecognised kind must still

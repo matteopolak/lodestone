@@ -349,6 +349,69 @@ fn y_rot((x, y, z): (f64, f64, f64), radians: f32) -> (f64, f64, f64) {
 
 /// `CritParticle` — the sparkle on a critical hit.
 pub fn crit(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let p = crit_particle(engine, x, y, z, xa, ya, za, Sheet::CriticalHit);
+    engine.add(p);
+}
+
+/// `CritParticle.MagicProvider` (`ParticleTypes.ENCHANTED_HIT`) — the sparkle
+/// an enchanted weapon throws instead of the plain white crit.
+///
+/// The same constructor as [`crit`] over [`Sheet::EnchantedHit`]'s own texture,
+/// with the provider's two post-construction tints applied: `rCol *= 0.3F` and
+/// `gCol *= 0.8F`, blue untouched. Since the constructor already drew a grey
+/// `nextFloat() * 0.3F + 0.6F` into all three channels, the result is a violet
+/// mote rather than a recoloured white one — multiplying, not replacing, is the
+/// part that matters.
+pub fn enchanted_hit(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let mut p = crit_particle(engine, x, y, z, xa, ya, za, Sheet::EnchantedHit);
+    p.colour[0] *= 0.3;
+    p.colour[1] *= 0.8;
+    engine.add(p);
+}
+
+/// `CritParticle.DamageIndicatorProvider` (`ParticleTypes.DAMAGE_INDICATOR`) —
+/// the mote thrown by a hit that actually dealt damage.
+///
+/// Two provider-level differences from [`crit`], both easy to lose: the
+/// vertical aux is passed **`ya + 1.0`**, so the indicator is launched upward
+/// regardless of what the packet asked for, and `setLifetime(20)` *replaces*
+/// the constructor's randomised lifetime rather than scaling it. Its sheet is
+/// [`Sheet::Damage`], not [`Sheet::CriticalHit`] — `damage_indicator.json`
+/// names its own texture.
+pub fn damage_indicator(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+) {
+    let mut p = crit_particle(engine, x, y, z, xa, ya + 1.0, za, Sheet::Damage);
+    p.lifetime = 20;
+    engine.add(p);
+}
+
+/// The `CritParticle` constructor, shared by its three providers.
+///
+/// Returned rather than added so each provider can apply its own
+/// post-construction tint or lifetime before the particle goes live — the same
+/// split vanilla gets for free by returning the object from `createParticle`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the `CritParticle` constructor argument for argument, plus the sheet \
+              its own particle definition names"
+)]
+fn crit_particle(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    sheet: Sheet,
+) -> Particle {
     let rng = engine.rng();
     let mut p = Particle::with_velocity(
         x,
@@ -357,10 +420,7 @@ pub fn crit(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f6
         0.0,
         0.0,
         0.0,
-        SpriteSource::Sheet {
-            sheet: Sheet::CriticalHit,
-            frame: 0,
-        },
+        SpriteSource::Sheet { sheet, frame: 0 },
         rng,
     );
     p.friction = 0.7;
@@ -382,7 +442,7 @@ pub fn crit(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f6
     p.lifetime = lifetime.max(1);
     p.has_physics = false;
     p.behaviour = Behaviour::Crit;
-    engine.add(p);
+    p
 }
 
 /// `SmokeParticle` — `BaseAshSmokeParticle` with smoke's parameters
@@ -752,6 +812,66 @@ pub fn happy_villager(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f
     reason = "mirrors the `SpellParticle` constructor argument for argument"
 )]
 pub fn witch(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let mut p = spell_particle(engine, x, y, z, xa, ya, za, Sheet::Spell);
+    let rb = rng_next(engine).mul_add(0.5, 0.35);
+    p.colour = [rb, 0.0, rb];
+    engine.add(p);
+}
+
+/// `SpellParticle` over an arbitrary sheet and a fixed tint — the shared shape
+/// behind `effect`, `entity_effect`, `instant_effect`, `infested`, `raid_omen`
+/// and `trial_omen`.
+///
+/// Vanilla registers six registry types against `SpellParticle`, over **four
+/// different sheets**: `EFFECT`/`ENTITY_EFFECT` name `effect_7…0`,
+/// `INSTANT_EFFECT`/`WITCH` name `spell_7…0`, and `INFESTED`/`RAID_OMEN`/
+/// `TRIAL_OMEN` each name a single texture of their own. The class does not
+/// decide the sheet; the type's own `particles/<name>.json` does, which is why
+/// this takes one.
+///
+/// `colour` is the provider's `setColor` call. The three
+/// `ParticleOptions`-carrying types (`effect` and `instant_effect` read a
+/// `SpellParticleOption`; `entity_effect` reads a `ColorParticleOption`) supply
+/// theirs from the wire — neither payload is decoded by any protocol family
+/// here yet, so the shell passes white and the caller sees an uncoloured mote.
+/// The parameter exists so that gap lives at the decoder rather than in this
+/// transcription.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the `SpellParticle` constructor argument for argument, plus the sheet \
+              and tint its provider supplies"
+)]
+pub fn spell(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    sheet: Sheet,
+    colour: [f32; 3],
+) {
+    let mut p = spell_particle(engine, x, y, z, xa, ya, za, sheet);
+    p.colour = colour;
+    engine.add(p);
+}
+
+/// The `SpellParticle` constructor itself, shared by its four providers.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the `SpellParticle` constructor argument for argument, plus its sheet"
+)]
+fn spell_particle(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    sheet: Sheet,
+) -> Particle {
     let rng = engine.rng();
     let jitter_x = 0.5 - rng.next_double();
     let jitter_z = 0.5 - rng.next_double();
@@ -763,10 +883,7 @@ pub fn witch(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f
         jitter_x,
         ya,
         jitter_z,
-        SpriteSource::Sheet {
-            sheet: Sheet::Spell,
-            frame: 0,
-        },
+        SpriteSource::Sheet { sheet, frame: 0 },
         rng,
     );
     p.friction = 0.96;
@@ -785,14 +902,12 @@ pub fn witch(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f
     let lifetime = (8.0 / f64::from(rng_next(engine).mul_add(0.8, 0.2))) as i32;
     p.lifetime = lifetime;
     p.has_physics = false;
-    let rb = rng_next(engine).mul_add(0.5, 0.35);
-    p.colour = [rb, 0.0, rb];
     p.behaviour = Behaviour::Spell;
     p.sprite = SpriteSource::Sheet {
-        sheet: Sheet::Spell,
-        frame: Sheet::Spell.frame_for_age(0, p.lifetime),
+        sheet,
+        frame: sheet.frame_for_age(0, p.lifetime),
     };
-    engine.add(p);
+    p
 }
 
 /// `TotemParticle` — the burst when a totem of undying saves its holder
@@ -947,11 +1062,11 @@ pub fn huge_explosion(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, size:
 mod tests {
     use super::{
         FULL_CUBE, Face, angry_villager, breaking_block_effect, bubble, crit, destroy_block_effect,
-        explosion_emitter, firework, flame, happy_villager, heart, huge_explosion, note, smoke,
-        splash, sweep_attack, totem_of_undying, witch,
+        explosion_emitter, firework, flame, fly_towards_position, happy_villager, heart,
+        huge_explosion, note, smoke, splash, sweep_attack, totem_of_undying, witch,
     };
     use crate::{Behaviour, ParticleEngine, Sheet, SpriteSource};
-    use lodestone_physics::Aabb;
+    use lodestone_physics::{Aabb, CollisionView};
 
     const STONE: u32 = 1;
     const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
@@ -1672,10 +1787,97 @@ mod tests {
         assert_eq!(run(500), run(500));
         assert_ne!(run(500), run(501));
     }
+
+    /// `fly_towards_position`'s three velocity words are an **offset**, and the
+    /// flight is a quartic sag rather than `Portal`'s linear rise. Both
+    /// readings are evaluated here and the measurement must land on one.
+    ///
+    /// The wrong hypotheses are not hypothetical: `xd` reads as a velocity in
+    /// every other emitter in this file, and the sibling closed-form behaviour
+    /// (`Portal`) really does add a linear `1 - age/lifetime` to `y`. Either
+    /// mistake still produces a live, drawable, plausibly-moving particle, so
+    /// only a predicted value can separate them.
+    #[test]
+    fn an_enchant_glyph_starts_at_the_offset_and_sags_quartically_towards_the_table() {
+        struct Empty;
+        impl CollisionView for Empty {
+            fn collision_boxes(&self, _: i32, _: i32, _: i32, _: &mut Vec<Aabb>) {}
+        }
+        // A pure +x offset with no vertical component, so the sag term is the
+        // only thing that can move `y` at all.
+        let (tx, ty, tz) = (0.0, 64.0, 0.0);
+        let offset = 2.0;
+        let mut e = ParticleEngine::seeded(9);
+        fly_towards_position(&mut e, tx, ty, tz, offset, 0.0, 0.0, Sheet::Enchant);
+
+        let start = &e.particles()[0];
+        let lifetime = start.lifetime;
+        assert!(
+            (30..40).contains(&lifetime),
+            "`(int)(nextFloat() * 10) + 30` must land in 30..=39, got {lifetime}"
+        );
+        assert!(
+            (start.x - (tx + offset)).abs() < 1e-9,
+            "a glyph must be drawn out at the bookshelf on its first frame \
+             (x = {}), not at the table (x = {tx}) as a velocity reading gives",
+            start.x
+        );
+
+        // Halfway through: `pos = 1 - a/L = 0.5`, so x is half the offset and
+        // the sag is `(1 - 0.5)^4 * 1.2`. The linear (`Portal`) reading would
+        // give `0.5 * 1.2 = 0.6` — eight times as deep.
+        let half = lifetime / 2;
+        for _ in 0..half {
+            e.tick(&Empty);
+        }
+        let p = &e.particles()[0];
+        #[expect(clippy::cast_precision_loss, reason = "tick counts are small")]
+        let pos = 1.0 - (half as f64 / f64::from(lifetime));
+        let quartic = ty - (1.0 - pos).powi(4) * 1.2;
+        let linear = ty - (1.0 - pos) * 1.2;
+        assert!(
+            (p.x - offset * pos).abs() < 1e-6,
+            "x must converge linearly on the table: got {}, want {}",
+            p.x,
+            offset * pos
+        );
+        assert!(
+            (p.y - quartic).abs() < 1e-6,
+            "y must follow the quartic sag ({quartic}), not the linear one ({linear}); got {}",
+            p.y
+        );
+
+        // The final live frame is `age == lifetime`, **not** `lifetime - 1`:
+        // the removal test reads the pre-increment `age`, so a particle
+        // survives the tick that takes `age` up to `lifetime` and is dropped on
+        // the one after. `pos` is then exactly `0`, putting the glyph on the
+        // target horizontally while the sag is at its **deepest** — a full
+        // `1.2` blocks, since `(1 - pos)^4` is maximal at `pos == 0`.
+        //
+        // So a glyph finishes its flight diving *into* the table rather than
+        // resting on it, and "it lands on the target" — the plausible round
+        // answer, and this test's first prediction — is wrong by 1.2 blocks.
+        for _ in half..lifetime {
+            e.tick(&Empty);
+        }
+        let last = &e.particles()[0];
+        assert!(
+            last.x.abs() < 1e-9 && (last.y - (ty - 1.2)).abs() < 1e-6,
+            "final live frame must be (0, {}), got ({}, {})",
+            ty - 1.2,
+            last.x,
+            last.y
+        );
+        e.tick(&Empty);
+        assert!(
+            e.particles().is_empty(),
+            "the glyph must be removed the tick `age` reaches `lifetime`"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Ambient and environmental types (issue #178)
+// Ambient and environmental types
 // ---------------------------------------------------------------------------
 //
 // Vanilla's `RisingParticle` is the shared base for `flame`, `soul_fire_flame`
@@ -1969,6 +2171,69 @@ pub fn animated_ambient(
         sheet,
         frame: sheet.frame_for_age(0, p.lifetime),
     };
+    engine.add(p);
+}
+
+/// `FlyTowardsPositionParticle` — the enchanting-table glyphs (`enchant`, over
+/// [`Sheet::Enchant`]'s twenty-six Standard Galactic letters) and the conduit's
+/// homing mote (`nautilus`). Vanilla's `EnchantProvider` and `NautilusProvider`
+/// are byte-identical apart from the sprite set.
+///
+/// `xd/yd/zd` are an **offset**, not a velocity: the caller passes the point the
+/// mote should fly *from*, relative to `x/y/z`, and the constructor immediately
+/// teleports the particle to `pos + offset` so its first drawn frame is already
+/// out at the bookshelf. Getting this backwards puts every glyph inside the
+/// table. [`Behaviour::FlyTowardsPosition`] documents the flight curve.
+///
+/// The frame is drawn once at construction (`sprite.get(random)` — a uniform
+/// pick, not an age ramp), which is what makes a bookshelf emit a spread of
+/// different letters rather than the whole shelf spelling the same one.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the `FlyTowardsPositionParticle` constructor argument for argument, \
+              plus the sheet its provider supplies"
+)]
+pub fn fly_towards_position(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xd: f64,
+    yd: f64,
+    zd: f64,
+    sheet: Sheet,
+) {
+    let rng = engine.rng();
+    let mut p = Particle::new(x, y, z, SpriteSource::Sheet { sheet, frame: 0 }, rng);
+    p.xd = xd;
+    p.yd = yd;
+    p.zd = zd;
+    // `xStart/yStart/zStart` are the *target*, captured before the jump below.
+    p.spawn = [x, y, z];
+    p.set_pos(x + xd, y + yd, z + zd);
+    p.xo = p.x;
+    p.yo = p.y;
+    p.zo = p.z;
+    p.quad_size = 0.1 * rng_next(engine).mul_add(0.5, 0.2);
+    let br = rng_next(engine).mul_add(0.6, 0.4);
+    p.colour = [0.9 * br, 0.9 * br, br];
+    p.has_physics = false;
+    #[expect(clippy::cast_possible_truncation, reason = "Java's `(int)` cast; small")]
+    let lifetime = (rng_next(engine) * 10.0) as i32 + 30;
+    p.lifetime = lifetime;
+    p.behaviour = Behaviour::FlyTowardsPosition;
+    let frame = engine.rng().next_int_bound(i32::from(sheet.frame_count()));
+    #[expect(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        reason = "bounded by the sheet's frame count"
+    )]
+    {
+        p.sprite = SpriteSource::Sheet {
+            sheet,
+            frame: frame as u16,
+        };
+    }
     engine.add(p);
 }
 
