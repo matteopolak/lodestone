@@ -250,6 +250,139 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.04045));
 }
 
+// Vanilla `terrain.fsh`'s `sampleNearest`, the *default* terrain sample in
+// 26.2 (`TextureFilteringMethod.NONE`, `Options.java`'s shipped value, is the
+// `UseRgss == 0` branch of that shader's `main`). It is not a plain
+// `textureSample`, and the difference is the whole point:
+//
+// `uv` is converted to texel coordinates, split into the bilinear tap below
+// it (`texel_center`) and the interpolation weight (`texel_offset`), and that
+// weight is then rescaled about `0.5` by `pixel_size / texel_screen_size` —
+// screen pixels per texel. Magnified (a texel spans many screen pixels) the
+// weight is stretched and clamped, giving point sampling with a one-pixel
+// ramp at each texel edge: sharp, but anti-aliased. Minified (many texels per
+// screen pixel) the weight is compressed toward `0.5`, so the sampled point
+// stops sliding with the sub-texel position of the fragment and locks to the
+// texel lattice.
+//
+// That second regime is why this matters for a **cutout**. `fs_main` turns
+// alpha into a visibility decision at `0.5`, so a filtered alpha that slides
+// continuously with the camera makes texels cross the threshold and wink in
+// and out — most visibly on a ground plate at a grazing angle, the most
+// minified geometry in a scene. Locking the sample to the lattice removes the
+// sliding term.
+//
+// The LOD is untouched: `textureSampleGrad` is handed the *original*
+// derivatives, so the snap moves where we sample, never which mip level.
+//
+// `texel_screen_size` is a length and can be exactly zero on a degenerate
+// fragment; the divide is floored so this cannot produce `inf`/`NaN` (which
+// would survive the `clamp` and reach the atlas as a garbage coordinate).
+// The rotated-grid tap pattern, in texels, from vanilla `terrain.fsh`'s
+// `sampleRGSS`.
+const RGSS_OFFSETS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
+    vec2<f32>(0.125, 0.375),
+    vec2<f32>(-0.125, -0.375),
+    vec2<f32>(0.375, -0.125),
+    vec2<f32>(-0.375, 0.125),
+);
+
+fn snap_uv(uv: vec2<f32>, pixel_size: vec2<f32>, texel_screen_size: vec2<f32>) -> vec2<f32> {
+    let uv_texel_coords = uv / pixel_size;
+    let texel_center = round(uv_texel_coords) - vec2<f32>(0.5, 0.5);
+    var texel_offset = uv_texel_coords - texel_center;
+    let scale = pixel_size / max(texel_screen_size, vec2<f32>(1.0e-12, 1.0e-12));
+    texel_offset = (texel_offset - vec2<f32>(0.5, 0.5)) * scale + vec2<f32>(0.5, 0.5);
+    texel_offset = clamp(texel_offset, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+    return (texel_center + texel_offset) * pixel_size;
+}
+
+// Vanilla `terrain.fsh`'s `sampleRGSS` -- rotated-grid supersampling, the
+// `TextureFilteringMethod.RGSS` branch, and **this shader's only sampling
+// path**. Vanilla ships `NONE` (plain `sample_nearest`) as its default and
+// offers this one as a video setting; we take it unconditionally because it is
+// what actually fixes the reported artefact and there is no live setting to
+// hang it off yet. Measured on a leaf-litter ground plate at a grazing angle,
+// as the fraction of the area a 4x-supersampled render of the same camera
+// says the plate should paint in the most minified band (see
+// `lodestone-shell`'s `cutout_minification_flicker_pixels`):
+//
+//     plain textureSample  0.401     sample_nearest  0.399     sample_rgss  0.779
+//
+// So the vanilla-parity default would have been no improvement at all. If a
+// `textureFiltering` option is ever wired, this is the function it selects and
+// `sample_nearest` is the `NONE` arm; the two already compose exactly as
+// vanilla composes them.
+//
+// Four sub-texel taps on a rotated grid,
+// taken at two adjacent mip levels and blended, then cross-faded with
+// `sample_nearest` over the one-to-two-texels-per-pixel transition so a
+// magnified surface stays crisp.
+//
+// Two things do the anti-aliasing work. The taps are a 4x supersample of the
+// alpha the cutout test below is about to threshold, so a texel that is only
+// marginally over or under the reference contributes a fraction rather than
+// flipping the whole fragment. And the level is chosen from the *geometric
+// mean* of the two derivative lengths rather than the larger of them, which is
+// an anisotropy-aware LOD: a surface seen at a grazing angle lands on a
+// sharper level than a hardware isotropic choice gives it, so there is less
+// mip-to-mip travel as the camera moves.
+fn sample_rgss(
+    uv: vec2<f32>,
+    pixel_size: vec2<f32>,
+    du: vec2<f32>,
+    dv: vec2<f32>,
+    texel_screen_size: vec2<f32>,
+) -> vec4<f32> {
+    let max_texel_size = max(texel_screen_size.x, texel_screen_size.y);
+    let min_pixel_size = min(pixel_size.x, pixel_size.y);
+    let blend_factor = smoothstep(min_pixel_size, min_pixel_size * 2.0, max_texel_size);
+    // Magnified: the cross-fade below would weight the eight taps at zero, so
+    // skip them. Legal inside a branch because every sample here states its own
+    // level or gradient and so needs no implicit derivative -- `du`/`dv` were
+    // taken in uniform control flow by the caller.
+    if (blend_factor <= 0.0) {
+        return sample_nearest(uv, pixel_size, du, dv, texel_screen_size);
+    }
+
+    let du_length = length(du);
+    let dv_length = length(dv);
+    let effective = sqrt(min(du_length, dv_length) * max(du_length, dv_length));
+    let mip_exact = max(0.0, log2(effective / max(min_pixel_size, 1.0e-12)));
+    let mip_low = floor(mip_exact);
+    let mip_blend = fract(mip_exact);
+
+    var low = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    var high = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    for (var i = 0; i < 4; i = i + 1) {
+        let sample_uv = uv + RGSS_OFFSETS[i] * pixel_size;
+        low = low + textureSampleLevel(atlas_tex, atlas_smp, sample_uv, mip_low);
+        high = high + textureSampleLevel(atlas_tex, atlas_smp, sample_uv, mip_low + 1.0);
+    }
+    let rgss = mix(low * 0.25, high * 0.25, mip_blend);
+    return mix(
+        sample_nearest(uv, pixel_size, du, dv, texel_screen_size),
+        rgss,
+        blend_factor,
+    );
+}
+
+fn sample_nearest(
+    uv: vec2<f32>,
+    pixel_size: vec2<f32>,
+    du: vec2<f32>,
+    dv: vec2<f32>,
+    texel_screen_size: vec2<f32>,
+) -> vec4<f32> {
+    return textureSampleGrad(
+        atlas_tex,
+        atlas_smp,
+        snap_uv(uv, pixel_size, texel_screen_size),
+        du,
+        dv,
+    );
+}
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -310,15 +443,27 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Unconditional sample keeps the plain (mipmapped) path in uniform control
-    // flow; static quads (anim_idx == 0) stop here with no extra sampling. Only
-    // animated quads pay for the two frame samples, and they use an explicit LOD
-    // (no derivatives) so the branch is legal.
-    var tex = textureSample(atlas_tex, atlas_smp, in.uv);
+    // Derivatives and the atlas' texel size, resolved once in uniform control
+    // flow so both the static and the animated path below can use them. The
+    // dimensions come from the bound texture rather than a uniform, so nothing
+    // has to be re-uploaded when a resource-pack reload re-stitches the atlas
+    // at a different size -- this is `terrain.fsh`'s `TextureSize`.
+    let pixel_size = vec2<f32>(1.0, 1.0) / vec2<f32>(textureDimensions(atlas_tex, 0));
+    let du = dpdx(in.uv);
+    let dv = dpdy(in.uv);
+    let texel_screen_size = sqrt(du * du + dv * dv);
+    // Unconditional sample keeps the mipmapped path in uniform control flow;
+    // static quads (anim_idx == 0) stop here with no extra sampling. Only
+    // animated quads pay for the two frame samples. Those two use an explicit
+    // LOD, so they are legal inside the branch -- and they are taken at the
+    // *snapped* coordinate, because the frame offsets are whole numbers of
+    // texels and so preserve the lattice `sample_nearest` locked onto.
+    var tex = sample_rgss(in.uv, pixel_size, du, dv, texel_screen_size);
     if (in.anim_idx != 0u) {
         let slot = anim.slots[in.anim_idx];
-        let a = textureSampleLevel(atlas_tex, atlas_smp, in.uv + vec2<f32>(0.0, slot.v_off_a), 0.0);
-        let b = textureSampleLevel(atlas_tex, atlas_smp, in.uv + vec2<f32>(0.0, slot.v_off_b), 0.0);
+        let snapped = snap_uv(in.uv, pixel_size, texel_screen_size);
+        let a = textureSampleLevel(atlas_tex, atlas_smp, snapped + vec2<f32>(0.0, slot.v_off_a), 0.0);
+        let b = textureSampleLevel(atlas_tex, atlas_smp, snapped + vec2<f32>(0.0, slot.v_off_b), 0.0);
         tex = mix(a, b, slot.blend);
     }
     // Cutout: drop near-transparent texels (cross-plants, leaves) so they render

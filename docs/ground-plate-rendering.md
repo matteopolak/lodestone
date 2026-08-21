@@ -99,32 +99,116 @@ horizontal band of the frame, with the horizon row *derived from the camera*
 rather than eyeballed: every ground band shows the plate painting, out to the
 edge of an 8-chunk world.
 
-### Two things that remain divergent from vanilla
+### Alpha-coverage preservation was never missing
 
-Neither is proven to be behind the report, and both are worth knowing:
+An earlier version of this page listed "we do not do vanilla's
+`scaleAlphaToCoverage`" as the leading suspect, on the strength of
+`leaf_litter.png`'s baked coverage running `0.484, 0.495, 0.535, 0.812` down
+levels 0–3. Both halves of that are wrong.
 
-* **Sampling.** Vanilla's `terrain.fsh` never plain-samples the atlas. It uses
-  `sampleNearest` (snap the UV toward the texel centre by the texel's on-screen
-  size, then `textureGrad`) or `sampleRGSS` (four rotated-grid samples across
-  two mip levels). `model.wgsl` does a single `textureSample` with
-  `min_filter: Linear, mipmap_filter: Linear`. For a **cutout** texture that
-  matters more than for an opaque one, because the `tex.a < 0.5` discard turns
-  filtered alpha into a visibility decision: a flat ground plate at a grazing
-  angle is the most minified geometry in the scene, so its discard boundary
-  moves with the mip level. This is the strongest remaining candidate for
-  camera-dependent shimmer on exactly this family.
-* **Cutout alpha down the mip chain.** `leaf_litter.png` is a greyscale PNG
-  with a `tRNS` colour key — 117 of 256 texels opaque, **45.7%**. Its baked
-  alpha-test coverage at the `0.5` reference runs `0.484, 0.495, 0.535, 0.812`
-  down levels 0–3. Vanilla's `MipmapGenerator.scaleAlphaToCoverage` exists to
-  hold that constant, and the drift at level 3 has **not** been compared
-  against a JVM oracle, so it is a lead rather than a finding. (A first probe
-  reported `0.000` at level 4; that was the probe, not the data — vanilla's
-  `alphaTestCoverage` iterates `width - 1` by `height - 1`, which is empty for
-  the 1×1 top level.)
+`lodestone-assets`'s `mipmap.rs` **is** a faithful port of 26.2's
+`MipmapGenerator`, checked clause by clause against the decompiled source: the
+five-iteration bisection on alpha scale, the `+ 0.025` bias added to every
+texel after it, `solidify` before the base coverage is taken, the linear-light
+`meanLinear` downsample, and the `width - 1` by `height - 1` sweep. Every
+cutout sprite in the block atlas goes through it — `AtlasBuilder` passes
+`MipStrategy::Auto`, which resolves to `Cutout` for anything with a fully
+transparent texel.
+
+The drifting numbers are the *estimator*, not the data. `alphaTestCoverage`
+bilinearly supersamples each 2×2 quad, so at level 3 (a 2×2 image) it has
+exactly **one** quad to average and at level 4 (1×1) it has none. Measured on
+the real sprite, the fraction of texels that actually pass the `0.5` discard
+runs:
+
+| level | size | `alphaTestCoverage` | texels passing `alpha >= 0.5` |
+|---|---|---|---|
+| 0 | 16×16 | 0.4844 | 117/256 = 0.457 |
+| 1 | 8×8 | 0.4949 | 36/64 = 0.563 |
+| 2 | 4×4 | 0.5347 | 8/16 = 0.500 |
+| 3 | 2×2 | 0.8125 | 2/4 = 0.500 |
+| 4 | 1×1 | 0.0000 | 1/1 = 1.000 |
+
+Coverage is held. The `0.812` is one sample quad, and the `0.0000` at 1×1 is
+the empty sweep — vanilla reaches the same `bestAlphaScale = 1.0` there via a
+`0.0 / 0` NaN that fails every comparison in its bisection.
+
+One real defect did come out of re-reading that port: `darkened_alpha_blend`
+transcribed vanilla's `ARGB.color(a, r, g, b)` argument order literally and so
+rotated every channel by one, painting alpha into blue. It is fixed. Nothing
+selects `MipStrategy::DarkCutout` today (texture `.mcmeta` carries the
+strategy in vanilla and our `TextureMeta` does not parse it yet), so it never
+reached a pixel — but the same reading is what the strategy will get when it
+is wired.
+
+### Sampling was the mechanism, and vanilla's *default* sampler is not the fix
+
+`model.wgsl` used to take a single plain `textureSample`. Vanilla's
+`terrain.fsh` never does: it takes `sampleNearest` (rescale the bilinear
+weight about `0.5` by screen-pixels-per-texel, then `textureGrad`) when
+`textureFiltering` is `NONE`, and `sampleRGSS` (four rotated-grid sub-texel
+taps at two mip levels, blended, cross-faded back to `sampleNearest` while
+magnified) when it is `RGSS`. `NONE` is vanilla's shipped default.
+
+For a **cutout** the difference is not cosmetic: the `tex.a < 0.5` discard
+turns filtered alpha into a visibility decision, so how the alpha is filtered
+decides which texels exist. A ground plate at a grazing angle is the most
+minified geometry in a scene, which is why the family shows it first — but
+every cutout in the game is on the same path.
+
+Measured on a leaf-litter plate at pitch 12°, as each band's painted area over
+a **4×-supersampled render of the same camera** (see the instrument below);
+`jitter` is that area's mean second difference across a sub-block camera sweep,
+over the area:
+
+| band | plain `textureSample` | `sampleNearest` | `sampleRGSS` |
+|---|---|---|---|
+| 3 (most minified) | 0.401, 0.0130 | 0.399, 0.0102 | **0.779, 0.0089** |
+| 4 | 0.653, 0.0065 | 0.658, 0.0100 | 0.619, 0.0074 |
+| 5 | 0.924, 0.0117 | 0.944, 0.0114 | 0.943, 0.0112 |
+| 6 (magnified) | 0.959, 0.0047 | 0.959, 0.0047 | 0.959, 0.0047 |
+| 7 (nearest) | 1.030, 0.0038 | 1.030, 0.0038 | 1.030, 0.0038 |
+
+So the far plate was painting **40%** of the area it should, and porting
+vanilla's default sampler faithfully moved that by two parts in a thousand.
+Only the supersampling arm helps, and `model.wgsl` therefore takes
+`sample_rgss` unconditionally rather than reproducing vanilla's `NONE`
+default — with an early return to `sample_nearest` while magnified, which is
+the same value the cross-fade would produce and skips eight taps for the
+majority of the screen. If the `textureFiltering` video row is ever wired,
+this is the function it selects and `sample_nearest` is its `NONE` arm; the
+two already compose exactly as vanilla composes them.
+
+Band 4 stays at 0.62–0.66 under every sampler. That is unexplained and is
+recorded as an open residual rather than folded into a threshold.
+
+### The `mipmapLevels` setting was not reaching the atlas terrain samples
+
+Found while building the control above, and it is the reason the first version
+of that control read **byte-identical** for a 4-level and a 0-level atlas.
+There are two stitched atlases. `BlockAtlas::build_with_mip_levels` honours the
+setting and feeds the packed cube pipeline; `BlockModels` built its **own**
+complete atlas at a hardcoded `BLOCK_ATLAS_MIP_LEVELS`, and that is the one the
+model pass binds — which is what draws terrain in a live session. So dragging
+the slider rebuilt an atlas nothing sampled.
+
+`BlockModels::build_with_mip_levels` now takes the depth (it also sets the
+stitcher's gutter, `1 << levels`, so it has to be chosen before packing rather
+than adjusted after), and `resources.rs` passes the same `mipmap_levels()` to
+both. The gate that existed for this asserted on `BlockAtlas`'s `mip_count`,
+which is not the atlas terrain reads — a parity check pointed one object to the
+left of the one that matters.
 
 ## How to change it
 
+* **The sampler is `model.wgsl`'s, not `GpuAtlas`'s.** `sample_rgss` and
+  `sample_nearest` do the filtering the wgpu sampler is not asked to do:
+  `GpuAtlas` binds `mag_filter: Nearest, min_filter: Linear,
+  mipmap_filter: Linear` with `anisotropy_clamp` at 1, and wgpu will not accept
+  anisotropy above 1 unless all three filters are `Linear` — which would make
+  every magnified block blurry were the shader not already doing its own
+  point-sampling. That is the order to change things in if anisotropic
+  filtering is ever wanted: shader first, sampler second.
 * **Do not reach for a depth bias.** The table above says the family's real
   offsets resolve throughout the render distance, so a bias would be tuning
   against a mechanism that is not firing — and `CLAUDE.md` records that a bias
@@ -151,7 +235,24 @@ cargo test -p lodestone-render --test ground_plane_coplanarity_census -- --ignor
 # the same family rendered through the production mesher and pipeline:
 # stability across a second independent upload, and coverage out to range
 cargo test -p lodestone-shell --test ground_plate_z_fight_pixels -- --ignored --nocapture
+
+# the temporal one: a sub-block camera sweep over a leaf-litter plate, per-band
+# painted area against a 4x-supersampled reference, and the no-mip-chain control
+cargo test -p lodestone-shell --test cutout_minification_flicker_pixels -- --ignored --nocapture
 ```
+
+`cutout_minification_flicker_pixels` is the instrument the sampling table above
+came from, and its shape is the point: a **single frame cannot see this bug**.
+One static frame of a shimmering surface and one of a stable surface look
+identical, so the gate sweeps the eye an eighth of a block and measures the
+*second* difference of each band's painted area — a legitimate sub-pixel
+translation moves that area smoothly, and a smooth series has zero second
+difference, so only a quantity that jumps between neighbouring frames survives.
+Its magnitude half compares the 1× area against a 4×-supersampled render of the
+same camera, which is an expectation from outside the sampler under test. Read
+`a_mipless_atlas_flickers` before believing either: it rebuilds the same corpus
+with no mip chain at all and must show materially more jitter, and it is what
+caught the two-atlas island above by reporting a control that changed nothing.
 
 Both are `#[ignore]`d and fail closed — a missing `client.jar` or GPU adapter
 is a panic, not a skip. The pixel gate's control (`a_coplanar_plate_is_detected`)
@@ -170,7 +271,9 @@ to fire in 3 of 3 configurations.
 * `lodestone-assets` — model parsing (`model.rs`), baking (`bake.rs`), atlas
   stitching and vanilla-parity mip generation (`atlas.rs`, `mipmap.rs`).
 * `lodestone-render` — `block_models.rs` (per-state bake, render layer,
-  occlusion), `models.rs` (`mesh_models`), `model_pipeline.rs` (depth and cull
-  state), `shaders/model.wgsl` (the cutout discard).
+  occlusion, and the *complete* atlas the model pass binds), `models.rs`
+  (`mesh_models`), `model_pipeline.rs` (depth and cull state),
+  `texture.rs` (`GpuAtlas`'s sampler and mip upload), `shaders/model.wgsl`
+  (the sampling functions and the cutout discard).
 * `lodestone-shell` — `mesher.rs` (`snapshot_section`, `mesh_snapshot_models`)
   and `gpu` (`RenderState::upload_section`, `render`).
