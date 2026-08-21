@@ -130,7 +130,16 @@ consumer rather than inferred from the group it sits in:
 **`entityShadows` and `weatherRadius` have both left kind C** and they left it for
 opposite reasons, which is why they are named here rather than quietly deleted from
 the row above. `entityShadows`' consumer genuinely did not exist and was built
-(`RenderState::prepare_shadows`). `weatherRadius` was never kind C at all: it is a
+(`RenderState::prepare_shadows`). `menuBackgroundBlurriness` left it the same way `weatherRadius` did: the blur
+pass was built, pixel-gated end to end, and ran at the frozen
+`menu::render::blur::BLUR_RADIUS`, whose own module doc named this row as the
+wiring it was waiting for and gave a reason that had already expired
+(`crate::config::Options` was said to be "outside this crate's file ownership
+boundary" — both are in `lodestone-shell`). `MenuBlur::set_radius` now takes it,
+polled per frame in `app/redraw.rs` beside `MenuRenderer::begin_frame`, and a
+radius of `0` skips the pass, which is vanilla's own `blurRadius >= 1.0F` gate.
+
+`weatherRadius` was never kind C at all: it is a
 **kind A** row that the 2026-08-08 sweep mis-filed — `lodestone_render::extract_columns`
 and `lodestone_render::column_instance` have always taken a `radius`, and
 `app::weather::weather_columns_for_frame` handed both of them the frozen

@@ -178,6 +178,17 @@ impl MenuRenderer {
         self.frame_texture = Some(texture);
     }
 
+    /// The live `options.menuBackgroundBlurriness` for the background-blur pass
+    /// — see [`blur::MenuBlur::set_radius`], which this forwards to verbatim.
+    ///
+    /// A forwarder rather than a public `blur` field for the same reason
+    /// [`Self::begin_frame`] is one call: the option is polled once per
+    /// presented frame at a single site in `app/redraw.rs`, and the pass owns
+    /// the GPU state the value drives.
+    pub fn set_blur_radius(&mut self, radius: f32) {
+        self.blur.set_radius(radius);
+    }
+
     /// Whether the real GUI sprite atlas is bound, i.e. whether the buttons draw
     /// as vanilla's nine-slice `widget/button*` art rather than flat fills.
     ///

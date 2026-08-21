@@ -74,6 +74,23 @@ pub const MIN_WEATHER_RADIUS: i32 = 3;
 /// See [`MIN_WEATHER_RADIUS`].
 pub const MAX_WEATHER_RADIUS: i32 = lodestone_render::DEFAULT_WEATHER_RADIUS;
 
+/// Vanilla's `menuBackgroundBlurriness` bounds and default —
+/// `IntRange(0, 10)` defaulting to `BLURRINESS_DEFAULT_VALUE = 5`
+/// (`Options.java`). The same pair
+/// `menu::options::INT_RANGE_SLIDERS`' `"menuBackgroundBlurriness"` row places
+/// the handle with.
+///
+/// `0` is a real, reachable value rather than a degenerate one: vanilla's
+/// `Screen.extractBlurredBackground` only asks for the pass at
+/// `blurRadius >= 1.0F`, so zero means "no blur", which is why the label is
+/// `genericValueOrOffLabel` and reads **OFF**.
+pub const MIN_MENU_BACKGROUND_BLURRINESS: u32 = 0;
+/// See [`MIN_MENU_BACKGROUND_BLURRINESS`].
+pub const MAX_MENU_BACKGROUND_BLURRINESS: u32 = 10;
+/// See [`MIN_MENU_BACKGROUND_BLURRINESS`] — vanilla's
+/// `Options.BLURRINESS_DEFAULT_VALUE`.
+pub const DEFAULT_MENU_BACKGROUND_BLURRINESS: u32 = 5;
+
 /// Vanilla clamps the auto-picked (and any manual) scale so the resulting
 /// *scaled* GUI resolution never drops below this many logical pixels wide —
 /// `Window.calculateScale`'s `>= 320` check (`Window.java`).
@@ -781,6 +798,19 @@ pub struct Options {
     /// option to only the extraction would draw fewer columns *and* fade them at
     /// the wrong distance.
     pub weather_radius: i32,
+    /// Vanilla's **Menu Background Blur** option
+    /// (`options.menuBackgroundBlurriness`, `Options.java`): `IntRange(0, 10)`,
+    /// default `5`. Placed on **two** pages, Video and Accessibility, exactly as
+    /// vanilla places it — both rows drive this one field.
+    ///
+    /// The box-blur half-width for the pass behind an in-game menu. Reaches
+    /// `menu::render::MenuRenderer::set_blur_radius` →
+    /// `menu::render::blur::MenuBlur::set_radius`, polled once per presented
+    /// frame in `app/redraw.rs` beside `MenuRenderer::begin_frame`. The pass
+    /// existed, was pixel-gated, and ran at a frozen `BLUR_RADIUS` constant
+    /// whose own module doc said wiring the option was "a matter of threading a
+    /// radius into `config_h`/`config_v`" — this is that.
+    pub menu_background_blurriness: u32,
 }
 
 impl Default for Options {
@@ -829,6 +859,7 @@ impl Default for Options {
             mipmap_levels: lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS,
             entity_shadows: true,
             weather_radius: MAX_WEATHER_RADIUS,
+            menu_background_blurriness: DEFAULT_MENU_BACKGROUND_BLURRINESS,
         }
     }
 }
@@ -1105,6 +1136,19 @@ impl Options {
             .map_or(MAX_WEATHER_RADIUS, |v| {
                 v.clamp(MIN_WEATHER_RADIUS, MAX_WEATHER_RADIUS)
             });
+        // Clamped to vanilla's own `IntRange(0, 10)`, `weather_radius`'s reason
+        // above — a hand-edited 200 would reach the blur shader's inner loop as
+        // a 401-tap filter per pass, six passes deep.
+        let menu_background_blurriness = obj
+            .get("menu_background_blurriness")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .map_or(DEFAULT_MENU_BACKGROUND_BLURRINESS, |v| {
+                v.clamp(
+                    MIN_MENU_BACKGROUND_BLURRINESS,
+                    MAX_MENU_BACKGROUND_BLURRINESS,
+                )
+            });
         Self {
             gui_scale,
             keybinds,
@@ -1147,6 +1191,7 @@ impl Options {
             mipmap_levels,
             entity_shadows,
             weather_radius,
+            menu_background_blurriness,
         }
     }
 
@@ -1342,6 +1387,12 @@ impl Options {
         }
         if self.weather_radius != default.weather_radius {
             obj.insert("weather_radius".into(), self.weather_radius.into());
+        }
+        if self.menu_background_blurriness != default.menu_background_blurriness {
+            obj.insert(
+                "menu_background_blurriness".into(),
+                self.menu_background_blurriness.into(),
+            );
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
             .unwrap_or_else(|_| "{}".to_string());
