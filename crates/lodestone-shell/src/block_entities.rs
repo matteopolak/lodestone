@@ -2617,8 +2617,12 @@ fn sign_kind_for_path(path: &str) -> Option<SignKind> {
 
 /// Resolves one block state id into which sign renderer it uses — `None` for
 /// anything that is not a sign (see [`sign_kind_for_path`]).
+///
+/// `pub(crate)` for `crate::sign_diagnostics`, which must ask the *same*
+/// question production asks — a diagnostic with its own copy of this rule
+/// could agree with itself and disagree with the draw.
 #[must_use]
-fn sign_kind_for_state(state_id: u32) -> Option<SignKind> {
+pub(crate) fn sign_kind_for_state(state_id: u32) -> Option<SignKind> {
     let name = lodestone_data::block_states::block_name(state_id)?;
     let path = name.strip_prefix("minecraft:").unwrap_or(name);
     sign_kind_for_path(path)
@@ -2629,8 +2633,11 @@ fn sign_kind_for_state(state_id: u32) -> Option<SignKind> {
 /// a real sign state carries exactly one of the two (`oak_sign.json` has
 /// `rotation`, `oak_wall_sign.json` has `facing`), and `None` for a state
 /// with neither cannot happen for a real sign.
+///
+/// `pub(crate)` for `crate::sign_diagnostics`, for the same reason
+/// [`sign_kind_for_state`] is.
 #[must_use]
-fn sign_orientation(state_id: u32) -> Option<SignOrientation> {
+pub(crate) fn sign_orientation(state_id: u32) -> Option<SignOrientation> {
     let props = lodestone_data::block_states::properties(state_id)?;
     for (name, value) in props {
         match *name {
@@ -2754,6 +2761,12 @@ pub fn sign_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<SignSpawn> {
         }
     }
     out.sort_by_key(|s| s.pos);
+    // Says, per sign, *why* a board is drawing no text. Off unless
+    // `RUST_LOG=signs=debug`, and rate-limited by a call counter once on — see
+    // `crate::sign_diagnostics`. It takes its own read lock, so it must run
+    // after the guard above is dropped, the same lock-ordering rule
+    // `loaded_chunks` obeys.
+    crate::sign_diagnostics::report(handle, eye, &out);
     out
 }
 
