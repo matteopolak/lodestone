@@ -1733,11 +1733,23 @@ mod tests {
         ui.on_escape();
         assert!(ui.quit_requested());
 
-        // Connecting -> no-op (can't pause mid-connect)
+        // Connecting -> cancel the dial, back to where it started.
+        //
+        // This used to assert a no-op ("can't pause mid-connect"), which was
+        // true when it was written and stopped being true when Escape on the
+        // loading screen became a real cancel — see `UiState::cancel_connect`
+        // and the dedicated gate
+        // `escape_while_connecting_cancels_back_to_where_the_dial_started`,
+        // which asserts the *same* case the opposite way. The two disagreed and
+        // this one was the stale half.
+        //
+        // The `quit_requested` half survives the correction and is the part
+        // worth keeping here: whatever Escape does on the loading screen, it
+        // must not be the title screen's "quit the game".
         let mut ui = UiState::new();
         ui.begin(SessionKind::Singleplayer);
         ui.on_escape();
-        assert_eq!(ui.screen(), Screen::Connecting);
+        assert_eq!(ui.screen(), Screen::MainMenu);
         assert!(!ui.quit_requested());
     }
 
