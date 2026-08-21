@@ -153,7 +153,7 @@ fn test_draw() -> DisplayDraw {
         entity_pitch: 0.0,
         billboard: BillboardMode::Center,
         transform: DisplayTransformation::default(),
-        text: Some("LODESTONE".to_owned()),
+        text: Some(lodestone_model::text::Text::literal("LODESTONE")),
         text_line_width: 200,
         // Vanilla's own default background (translucent black) — non-zero,
         // so the panel draws even where the (thin, jar-font-dependent) glyph
