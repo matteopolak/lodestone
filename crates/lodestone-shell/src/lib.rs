@@ -63,6 +63,7 @@ pub mod resources;
 pub mod saves;
 pub mod scoreboard;
 pub mod screenshot;
+pub mod sign_diagnostics;
 pub mod sim;
 /// Fetching the signed-in account's own skin and getting it onto the inventory
 /// avatar in the same session. See `docs/player-skins.md`, and
