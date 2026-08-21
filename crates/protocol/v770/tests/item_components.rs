@@ -55,12 +55,20 @@ fn component_id(name: &str) -> i32 {
 /// comment warned about: it went quietly green under the *old* wrong assertion
 /// until [`the_unmodeled_stand_in_is_still_unmodeled`] caught it by name.
 ///
-/// `minecraft:instrument` is the replacement, chosen for the same property
-/// `profile` had: `Instrument.STREAM_CODEC` is `ByteBufCodecs.holder` over a
-/// `DIRECT_STREAM_CODEC` that is itself a nested holder (`SoundEvent`) plus two
-/// floats plus a full chat component — genuinely expensive, so it is unlikely
-/// to be modeled on a whim and quietly void these gates again.
-const UNMODELED_COMPONENT: &str = "minecraft:instrument";
+/// `minecraft:instrument` was the second replacement, and it went the same way
+/// when the item-component sweep that closed the "62 of 111 unmodelled"
+/// backlog modeled it along with every other component that is genuinely
+/// skippable byte-accurately.
+///
+/// `minecraft:can_place_on` is the third: its `DataComponentMatchers`
+/// payload dispatches through a *second*, independent registry
+/// (`data_component_predicate_type`) whose entries can themselves recurse
+/// into an item/collection predicate that embeds another
+/// `DataComponentMatchers` — a general-purpose predicate interpreter, not
+/// "one more component reader" — so it is a genuine decode cliff rather than
+/// an oversight, and one this crate does not expect to close casually. See
+/// `read_component_patch`'s own `can_place_on`/`can_break` arm.
+const UNMODELED_COMPONENT: &str = "minecraft:can_place_on";
 
 /// One added component, unmodeled, with an arbitrary payload behind it.
 ///
@@ -1568,5 +1576,143 @@ fn enchantment_registry_id_0_is_an_ordinary_reference_not_an_inline_holder() {
         sword.components.enchantments,
         vec![ItemEnchantment { id: 7, level: 3 }],
         "a non-zero id must decode to itself, not to itself minus one"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The batch that closed the "62 of 111 unmodelled" backlog — a component
+// after each newly-modeled one must not be lost
+// ---------------------------------------------------------------------------
+
+/// The discriminating shape for this whole batch: a fixture carrying only the
+/// component under test cannot see a truncation bug, because there is nothing
+/// after it to lose. Each gate below puts a newly-modeled component **first**
+/// and `minecraft:custom_name` — modeled since before this batch — directly
+/// after it, so a wrong byte count anywhere in the new reader shows up as a
+/// mangled or missing name (or `has_unmodeled`), not as a silent pass.
+///
+/// `block_entity_data_does_not_truncate_a_component_after_it` is the one that
+/// matches Matthew's own live report byte-for-byte: `item="minecraft:spawner"
+/// component="minecraft:block_entity_data"`.
+#[test]
+fn block_entity_data_does_not_truncate_a_component_after_it() {
+    let mut patch = Writer::default();
+    patch.var_i32(2); // two added components
+    patch.var_i32(0); // none removed
+
+    // block_entity_data: a bare registry VarInt (BlockEntityType) then a
+    // network-NBT compound tag. The type id's value is irrelevant here — it
+    // is consumed for alignment only — so any small VarInt exercises the
+    // shape.
+    patch.var_i32(component_id("minecraft:block_entity_data"));
+    patch.var_i32(0); // BlockEntityType registry id
+    write_network_nbt(
+        &mut patch,
+        &Nbt::Compound(vec![("SpawnCount".to_owned(), Nbt::Short(4))]),
+    )
+    .unwrap();
+
+    patch.var_i32(component_id("minecraft:custom_name"));
+    write_network_nbt(&mut patch, &Nbt::String("Trapped Spawner".to_owned())).unwrap();
+
+    let payload = set_slot_with_patch("minecraft:spawner", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(
+        !item.components.has_unmodeled,
+        "block_entity_data must not truncate the component after it"
+    );
+    assert_eq!(
+        item.components
+            .custom_name
+            .as_ref()
+            .map(Text::to_plain_string),
+        Some("Trapped Spawner".to_owned()),
+        "the component after block_entity_data must still decode"
+    );
+}
+
+/// Matches Matthew's `item="minecraft:cyan_dye" component="minecraft:consumable"`
+/// report. Exercises the `play_sound` `ConsumeEffect` dispatch arm (registry id
+/// 4) with a reference-form `Holder<SoundEvent>`, plus the non-optional
+/// `Holder<SoundEvent>` `sound` field earlier in the same component.
+#[test]
+fn consumable_does_not_truncate_a_component_after_it() {
+    let mut patch = Writer::default();
+    patch.var_i32(2);
+    patch.var_i32(0);
+
+    patch.var_i32(component_id("minecraft:consumable"));
+    patch.f32(1.6); // consumeSeconds
+    patch.var_i32(2); // ItemUseAnimation ordinal
+    patch.var_i32(5 + 1); // Holder<SoundEvent> reference form: registry id 5
+    patch.bool(true); // hasConsumeParticles
+    patch.var_i32(1); // one ConsumeEffect
+    patch.var_i32(4); // play_sound
+    patch.var_i32(9 + 1); // Holder<SoundEvent> reference form: registry id 9
+
+    patch.var_i32(component_id("minecraft:custom_name"));
+    write_network_nbt(&mut patch, &Nbt::String("Stew".to_owned())).unwrap();
+
+    let payload = set_slot_with_patch("minecraft:suspicious_stew", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(
+        !item.components.has_unmodeled,
+        "consumable must not truncate the component after it"
+    );
+    assert_eq!(
+        item.components
+            .custom_name
+            .as_ref()
+            .map(Text::to_plain_string),
+        Some("Stew".to_owned()),
+        "the component after consumable must still decode"
+    );
+}
+
+/// `minecraft:death_protection`'s `List<ConsumeEffect>` shares
+/// [`read_consume_effects`]'s dispatch with `minecraft:consumable` above;
+/// this fixture instead exercises `apply_effects` (dispatch id 0, a nested
+/// `List<MobEffectInstance>` plus a probability) followed by
+/// `clear_all_effects` (dispatch id 2, no payload), so the two components'
+/// gates together cover four of the five known effect types.
+#[test]
+fn death_protection_does_not_truncate_a_component_after_it() {
+    let mut patch = Writer::default();
+    patch.var_i32(2);
+    patch.var_i32(0);
+
+    patch.var_i32(component_id("minecraft:death_protection"));
+    patch.var_i32(2); // two ConsumeEffect entries
+    patch.var_i32(0); // apply_effects
+    patch.var_i32(1); // one MobEffectInstance
+    patch.var_i32(10); // MobEffect holder id
+    patch.var_i32(1); // amplifier
+    patch.var_i32(900); // duration
+    patch.bool(false); // ambient
+    patch.bool(true); // showParticles
+    patch.bool(true); // showIcon
+    patch.bool(false); // no hidden effect
+    patch.f32(1.0); // probability
+    patch.var_i32(2); // clear_all_effects
+
+    patch.var_i32(component_id("minecraft:custom_name"));
+    write_network_nbt(&mut patch, &Nbt::String("Totem".to_owned())).unwrap();
+
+    let payload = set_slot_with_patch("minecraft:totem_of_undying", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(
+        !item.components.has_unmodeled,
+        "death_protection must not truncate the component after it"
+    );
+    assert_eq!(
+        item.components
+            .custom_name
+            .as_ref()
+            .map(Text::to_plain_string),
+        Some("Totem".to_owned()),
+        "the component after death_protection must still decode"
     );
 }
