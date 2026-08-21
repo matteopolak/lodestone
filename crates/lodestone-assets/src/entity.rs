@@ -798,6 +798,25 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// `HumanoidModel.OVERLAY_SCALE` — the grow every player skin overlay cube
+/// (jacket, both sleeves, both pants legs) sits at relative to its base-layer
+/// cube in [`player_model`].
+///
+/// Named separately from [`crate::equipment::OUTER_ARMOUR_INFLATION`] (`1.0`)
+/// and [`crate::equipment::INNER_ARMOUR_INFLATION`] (`0.5`) on purpose: vanilla
+/// draws the skin's own second layer and a worn armour piece at two
+/// *different* inflations precisely so the two can never be coincident and
+/// z-fight, and a port that let them collapse to the same number would
+/// reintroduce exactly that. See `player_overlay_and_armour_inflations_differ`.
+pub const PLAYER_OVERLAY_INFLATION: f32 = 0.25;
+
+/// `HumanoidModel.HAT_OVERLAY_SCALE` — the player skin's `hat` cube's own grow
+/// (a child of `head`, so this is its *own* extra grow on top of whatever the
+/// head cube itself carries — `0.0` for the bare skin in [`player_model`],
+/// see [`crate::equipment::HAT_OVERLAY_INFLATION`] for the armour-mesh case
+/// where the head cube itself is already grown).
+pub const PLAYER_HAT_OVERLAY_INFLATION: f32 = 0.5;
+
 /// The vanilla player model (`net/minecraft/client/model/player/PlayerModel`)
 /// on a 64×64 sheet, as the concrete case that exercises the whole primitive:
 /// pivots, overlay layers (`grow`), and the wide-vs-slim arm variants.
@@ -817,7 +836,7 @@ pub fn player_model(slim: bool) -> EntityModelDef {
         .with_child(
             "hat",
             PartDef::new(PartPose::ZERO).with_cube(
-                CubeDef::new([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [32.0, 0.0]).grown(0.5),
+                CubeDef::new([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [32.0, 0.0]).grown(PLAYER_HAT_OVERLAY_INFLATION),
             ),
         );
     root = root.with_child("head", head);
@@ -832,7 +851,7 @@ pub fn player_model(slim: bool) -> EntityModelDef {
         .with_child(
             "jacket",
             PartDef::new(PartPose::ZERO).with_cube(
-                CubeDef::new([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [16.0, 32.0]).grown(0.25),
+                CubeDef::new([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [16.0, 32.0]).grown(PLAYER_OVERLAY_INFLATION),
             ),
         );
     root = root.with_child("body", body);
@@ -867,7 +886,7 @@ pub fn player_model(slim: bool) -> EntityModelDef {
             "right_sleeve",
             PartDef::new(PartPose::ZERO).with_cube(
                 CubeDef::new([right_arm_x, -2.0, -2.0], [arm_w, 12.0, 4.0], [40.0, 32.0])
-                    .grown(0.25),
+                    .grown(PLAYER_OVERLAY_INFLATION),
             ),
         );
     let left_arm = PartDef::new(PartPose::offset(5.0, 2.0, 0.0))
@@ -879,7 +898,7 @@ pub fn player_model(slim: bool) -> EntityModelDef {
         .with_child(
             "left_sleeve",
             PartDef::new(PartPose::ZERO).with_cube(
-                CubeDef::new([-1.0, -2.0, -2.0], [arm_w, 12.0, 4.0], [48.0, 48.0]).grown(0.25),
+                CubeDef::new([-1.0, -2.0, -2.0], [arm_w, 12.0, 4.0], [48.0, 48.0]).grown(PLAYER_OVERLAY_INFLATION),
             ),
         );
     root = root.with_child("right_arm", right_arm);
@@ -895,7 +914,7 @@ pub fn player_model(slim: bool) -> EntityModelDef {
         .with_child(
             "right_pants",
             PartDef::new(PartPose::ZERO).with_cube(
-                CubeDef::new([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0.0, 32.0]).grown(0.25),
+                CubeDef::new([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0.0, 32.0]).grown(PLAYER_OVERLAY_INFLATION),
             ),
         );
     let left_leg = PartDef::new(PartPose::offset(1.9, 12.0, 0.0))
@@ -907,7 +926,7 @@ pub fn player_model(slim: bool) -> EntityModelDef {
         .with_child(
             "left_pants",
             PartDef::new(PartPose::ZERO).with_cube(
-                CubeDef::new([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0.0, 48.0]).grown(0.25),
+                CubeDef::new([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0.0, 48.0]).grown(PLAYER_OVERLAY_INFLATION),
             ),
         );
     root = root.with_child("right_leg", right_leg);

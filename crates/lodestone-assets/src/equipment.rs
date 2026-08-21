@@ -566,6 +566,51 @@ mod tests {
         );
     }
 
+    /// The z-fighting this whole module exists to avoid, made an executable
+    /// assertion rather than a doc claim: vanilla's own named constants for
+    /// the player skin's second layer (`HumanoidModel.OVERLAY_SCALE = 0.25F`,
+    /// `HAT_OVERLAY_SCALE = 0.5F`) and for worn armour
+    /// (`LayerDefinitions.OUTER_ARMOR_DEFORMATION = 1.0F`,
+    /// `INNER_ARMOR_DEFORMATION = 0.5F`) must never collapse to the same
+    /// number, on any slot pairing a player can actually wear at once.
+    ///
+    /// A gate comparing only this crate's two constants against each other
+    /// would prove nothing about vanilla — both sides here are independently
+    /// named vanilla fields, transcribed from two different classes
+    /// (`HumanoidModel` and `LayerDefinitions`), not derived from one
+    /// another.
+    #[test]
+    fn player_overlay_and_armour_inflations_differ() {
+        use crate::entity::{PLAYER_HAT_OVERLAY_INFLATION, PLAYER_OVERLAY_INFLATION};
+
+        assert_eq!(PLAYER_OVERLAY_INFLATION, 0.25, "HumanoidModel.OVERLAY_SCALE");
+        assert_eq!(
+            PLAYER_HAT_OVERLAY_INFLATION, 0.5,
+            "HumanoidModel.HAT_OVERLAY_SCALE"
+        );
+        assert_eq!(OUTER_ARMOUR_INFLATION, 1.0, "LayerDefinitions.OUTER_ARMOR_DEFORMATION");
+        assert_eq!(INNER_ARMOUR_INFLATION, 0.5, "LayerDefinitions.INNER_ARMOR_DEFORMATION");
+
+        // jacket/sleeves/pants vs every armour slot a player wears over them.
+        for armour in [OUTER_ARMOUR_INFLATION, INNER_ARMOUR_INFLATION] {
+            assert_ne!(
+                PLAYER_OVERLAY_INFLATION, armour,
+                "the skin's own jacket/sleeve/pants overlay (0.25) must not \
+                 coincide with any armour inflation"
+            );
+        }
+        // the hat overlay vs the helmet's own head-cube inflation (the helmet's
+        // *hat* child sits at head-slot armour inflation + 0.5, i.e. 1.5 —
+        // already provably distinct from the skin hat's own 0.5, but the head
+        // *cube* itself, which is what a helmet visually replaces, is the
+        // pairing that would coincide if a port lost the +0.5/+1.0 split).
+        assert_ne!(
+            PLAYER_HAT_OVERLAY_INFLATION, OUTER_ARMOUR_INFLATION,
+            "the skin's own hat overlay (0.5) must not coincide with the \
+             helmet's head-cube inflation (1.0)"
+        );
+    }
+
     /// Every slot's baked mesh must carry geometry on exactly the parts
     /// `ADULT_ARMOR_PARTS_PER_SLOT` names and on nothing else. A retention bug
     /// is invisible in a screenshot of a fully-armoured mob (some other piece
