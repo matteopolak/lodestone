@@ -421,3 +421,222 @@ fn container_slots_draw_real_item_icons() {
          wrong reason"
     );
 }
+
+/// The **special-renderer** icon stream in a container slot, which the gate
+/// above cannot reach: `container_slots_draw_real_item_icons` measures a block
+/// item (`IconPart::Model`) and a flat sprite (`IconPart::Sprite`), and a
+/// player head is neither — it is `IconPart::Special`, a third stream with its
+/// own pipeline, its own sheets and its own upload path
+/// (`IconRenderer::prepare_special`).
+///
+/// # Why this exists beside `hotbar_special_item_pixels.rs`
+///
+/// That file already pixel-gates a player head, and it is green. It drives
+/// `HudRenderer`. This one drives `ContainerRenderer` through
+/// `render_with_icons`, so the input is a real `Menu` slot holding a real
+/// `ItemStack` — the same hop production takes (`Menu::slot_item` ->
+/// `container::builder::icon_record` -> `draw_item_icon` ->
+/// `IconPart::Special`). The two screens share `item_icon.rs` but not the
+/// geometry that feeds it, and `ContainerGeometry` carries the extra
+/// `slot_special_count` stratum split the hotbar has no equivalent of, so a
+/// head can reach pixels in the hotbar and not in an inventory slot.
+///
+/// # The numbers
+///
+/// The head's silhouette is measured, not asserted at a round figure: the
+/// vanilla `player_head.json` pose composes `display.gui` with the special
+/// node's own transformation, and `hotbar_special_item_pixels.rs`'s
+/// `player_head_silhouette_is_distinguishable_from_a_flat_quad` reports it at
+/// ~110 px^2 of the 256 px cell. The band here is deliberately wide (a third
+/// to three-quarters of the cell): this gate exists to tell "drew" from "drew
+/// nothing", and the exact pose is pinned by that other file against the jar.
+///
+/// # Controls
+///
+/// * **an empty slot** must differ from the chrome baseline by exactly 0 px, so
+///   the count is localised rather than a screen-wide leak;
+/// * **`attach_item_models` never called** must read exactly 0 in the head's
+///   slot. That is a real control for this stream and not a borrowed one:
+///   `IconRenderer::prepare_special` returns early unless `self.models.is_some()`,
+///   so detaching the 3-D pass is what makes the special pass dark;
+/// * ...and the flat sprite slot in that same control frame must still draw, so
+///   the control is not dark for the wrong reason.
+///
+/// Fail-closed like its sibling: a missing GPU or `client.jar` is a failure,
+/// never a skip.
+///
+/// ```text
+/// cargo test -p lodestone-shell --test container_item_pixels -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_player_head_in_a_container_slot_reaches_pixels() {
+    /// The `IconPart::Special` subject. `minecraft:player_head` is its own
+    /// `kind` in vanilla (distinct from the `minecraft:head` mob family)
+    /// because its renderer resolves a profile texture; with no profile it
+    /// draws the default skull sheet, which is all this gate needs.
+    const HEAD_ITEM: &str = "minecraft:player_head";
+    /// Second hotbar cell on the inventory screen — a real `menu_index`.
+    const HEAD_SLOT: usize = 37;
+    /// Third, left empty as the localisation control.
+    const BLANK_SLOT: usize = 38;
+    /// First, holding a flat sprite so the detached control has something that
+    /// must still draw.
+    const FLAT_SLOT: usize = 36;
+
+    assert_eq!(
+        calculate_gui_scale(AUTO_GUI_SCALE, W, H),
+        1,
+        "the cell-area band below is derived for a 16x16 physical cell"
+    );
+
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!(
+            "GPU gate opted in but the vanilla pack did not load; set LODESTONE_ASSETS \
+             to a pack root with client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        )
+    });
+    let models: &BlockModels = atlas
+        .models()
+        .expect("the vanilla load must attach baked block models");
+    let item_atlas =
+        load_item_atlas().expect("the item atlas must build from the same client.jar");
+
+    // The precondition this gate would otherwise silently measure the absence
+    // of: the head must reach the *special* stream, not a sprite fallback.
+    let head_loc: ResourceLocation = HEAD_ITEM.parse().expect("valid item id");
+    let icon = item_atlas
+        .icon(&head_loc)
+        .expect("player_head must resolve to an icon in the item atlas");
+    let kind = icon
+        .parts
+        .iter()
+        .find_map(|part| match part {
+            lodestone_assets::IconPart::Special { kind, .. } => Some(kind.clone()),
+            _ => None,
+        })
+        .expect("player_head's icon must carry an IconPart::Special");
+    assert_eq!(
+        kind, "minecraft:player_head",
+        "the head must resolve through its own special-renderer kind"
+    );
+
+    let empty_menu = Menu::player();
+    let mut menu = Menu::player();
+    menu.set_slot_item(FLAT_SLOT, Some(ItemStack::new(id(SPRITE_ITEM), 1)));
+    menu.set_slot_item(HEAD_SLOT, Some(ItemStack::new(id(HEAD_ITEM), 1)));
+
+    let frame = ContainerFrame::new(Some(&menu), "Inventory");
+    let base_frame = ContainerFrame::new(Some(&empty_menu), "Inventory");
+
+    let head_rect = slot_rect(&menu, &frame, HEAD_SLOT);
+    let flat_rect = slot_rect(&menu, &frame, FLAT_SLOT);
+    let blank_rect = slot_rect(&menu, &frame, BLANK_SLOT);
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+
+    let mut shoot = |r: &mut ContainerRenderer, f: &ContainerFrame<'_>| -> Vec<u8> {
+        let acquired = target.acquire().expect("headless acquire");
+        clear_view(device, queue, acquired.view());
+        r.render_with_icons(
+            device,
+            queue,
+            acquired.view(),
+            Some(render.depth_view()),
+            f,
+            Some(models),
+            W,
+            H,
+        );
+        target.read_texels(device, queue)
+    };
+
+    let mut lit = ContainerRenderer::new(device, format);
+    lit.attach_items(device, queue, format, item_atlas.clone());
+    lit.attach_item_models(
+        device,
+        format,
+        render
+            .model_atlas_view()
+            .expect("the vanilla path must expose a model atlas"),
+        render
+            .model_atlas_sampler()
+            .expect("the vanilla path must expose a model atlas sampler"),
+        render
+            .model_palette_buffer()
+            .expect("the vanilla path must expose a tint palette"),
+        render
+            .model_anim_buffer()
+            .expect("the vanilla path must expose animation slots"),
+    );
+    let chrome = shoot(&mut lit, &base_frame);
+    let subject = shoot(&mut lit, &frame);
+
+    let mut dark = ContainerRenderer::new(device, format);
+    dark.attach_items(device, queue, format, item_atlas.clone());
+    let control = shoot(&mut dark, &frame);
+
+    let head_lit = diff_in(&subject, &chrome, head_rect);
+    let flat_lit = diff_in(&subject, &chrome, flat_rect);
+    let blank_lit = diff_in(&subject, &chrome, blank_rect);
+    let control_head = diff_in(&control, &chrome, head_rect);
+    let control_flat = diff_in(&control, &chrome, flat_rect);
+
+    eprintln!("=== container special-item (player head) pixel gate ===");
+    eprintln!("head slot  {HEAD_SLOT} rect = {head_rect:?} ({HEAD_ITEM})");
+    eprintln!("lit, head slot            = {head_lit} of 256");
+    eprintln!("lit, flat sprite slot     = {flat_lit}");
+    eprintln!("lit, empty slot           = {blank_lit}");
+    eprintln!("lit, head slot (no item-model pass attached) = {control_head}");
+    eprintln!("lit, flat slot (control, atlas still attached) = {control_flat}");
+
+    assert!(
+        head_lit > 0,
+        "nothing drew in the container slot holding a player head. The head resolved \
+         to a real IconPart::Special above, so this is a break below that: either \
+         push_special_icon recorded no draw, prepare_special dropped it, or the \
+         batch never reached the pass"
+    );
+    assert!(
+        (85..=190).contains(&head_lit),
+        "a player head's container icon must cover roughly a third to three-quarters \
+         of its 256 px cell (~110 px^2 for the vanilla composed pose — see \
+         hotbar_special_item_pixels.rs); got {head_lit}. Far below means parts of the \
+         rig are missing, far above means the pose or the slot rect is wrong"
+    );
+    assert!(
+        flat_lit > 100,
+        "the flat sprite slot must still draw ({flat_lit} px); if it does not, this \
+         frame is wrong for a reason that has nothing to do with the head"
+    );
+    assert_eq!(
+        blank_lit, 0,
+        "an empty container slot must be pixel-identical to the chrome baseline; \
+         {blank_lit} changed pixels there means the head's draw is not localised to \
+         its own slot and the count above is not measuring what it claims"
+    );
+    assert_eq!(
+        control_head, 0,
+        "with the 3-D item-model pass detached the special stream is gated off, so \
+         the head's slot must be indistinguishable from an empty one; {control_head} \
+         changed pixels means something else paints there and the positive assertion \
+         is not evidence for the special pass"
+    );
+    assert!(
+        control_flat > 100,
+        "the control keeps the item atlas attached, so its sprite slot must still \
+         draw ({control_flat} px); if it does not, the control is dark for the wrong \
+         reason"
+    );
+}
