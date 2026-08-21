@@ -1066,15 +1066,21 @@ impl<'a> FontLoader<'a> {
                     hex_file,
                     size_overrides,
                 } => {
-                    unihex_count +=
-                        self.load_unihex(hex_file, size_overrides, &mut glyphs, provider_index, traced)?;
+                    unihex_count += self.load_unihex(
+                        hex_file,
+                        size_overrides,
+                        &mut glyphs,
+                        provider_index,
+                        traced,
+                        id,
+                    )?;
                 }
                 ProviderDef::Space { advances } => {
                     for (cp, adv) in advances {
                         let already = glyphs.contains_key(cp);
                         if traced.contains(cp) {
                             eprintln!(
-                                "lodestone-assets: TRACE U+{cp:04X} provider[{provider_index}] \
+                                "lodestone-assets: TRACE font={id} U+{cp:04X} provider[{provider_index}] \
                                  space advance={adv} -> {}",
                                 if already {
                                     "shadowed (an earlier-declared provider already won this codepoint)"
@@ -1092,7 +1098,16 @@ impl<'a> FontLoader<'a> {
                     ascent,
                     chars,
                 } => {
-                    self.load_bitmap(file, *height, *ascent, chars, &mut glyphs, provider_index, traced)?;
+                    self.load_bitmap(
+                        file,
+                        *height,
+                        *ascent,
+                        chars,
+                        &mut glyphs,
+                        provider_index,
+                        traced,
+                        id,
+                    )?;
                 }
                 ProviderDef::Ttf {
                     file,
@@ -1110,6 +1125,7 @@ impl<'a> FontLoader<'a> {
                         &mut glyphs,
                         provider_index,
                         traced,
+                        id,
                     )?;
                 }
                 ProviderDef::Reference { .. } => {}
@@ -1147,6 +1163,7 @@ impl<'a> FontLoader<'a> {
         glyphs: &mut HashMap<u32, Glyph>,
         provider_index: usize,
         traced: &HashSet<u32>,
+        font_id: &ResourceLocation,
     ) -> Result<usize, FontError> {
         let path = format!("assets/{}/{}", hex_file.namespace(), hex_file.path());
         let Some(bytes) = self.manager.read(&path) else {
@@ -1202,7 +1219,7 @@ impl<'a> FontLoader<'a> {
             let already = glyphs.contains_key(&cp);
             if traced.contains(&cp) {
                 eprintln!(
-                    "lodestone-assets: TRACE U+{cp:04X} provider[{provider_index}] unihex                      hex_file={hex_file} advance={:.3} -> {}",
+                    "lodestone-assets: TRACE font={font_id} U+{cp:04X} provider[{provider_index}] unihex hex_file={hex_file} advance={:.3} -> {}",
                     glyph.advance(),
                     if already {
                         "shadowed (an earlier-declared provider already won this codepoint)"
@@ -1268,6 +1285,7 @@ impl<'a> FontLoader<'a> {
         glyphs: &mut HashMap<u32, Glyph>,
         provider_index: usize,
         traced: &HashSet<u32>,
+        font_id: &ResourceLocation,
     ) -> Result<usize, FontError> {
         // `TrueTypeGlyphProviderDefinition.load`: `resourceManager.open(this.location.withPrefix("font/"))`.
         let path = format!("assets/{}/font/{}", file.namespace(), file.path());
@@ -1307,7 +1325,7 @@ impl<'a> FontLoader<'a> {
                     "WINS"
                 };
                 eprintln!(
-                    "lodestone-assets: TRACE U+{cp:04X} provider[{provider_index}] ttf                      file={file} -> {reason}"
+                    "lodestone-assets: TRACE font={font_id} U+{cp:04X} provider[{provider_index}] ttf file={file} -> {reason}"
                 );
             }
             if skip_cp || already {
@@ -1406,6 +1424,7 @@ impl<'a> FontLoader<'a> {
         glyphs: &mut HashMap<u32, Glyph>,
         provider_index: usize,
         traced: &HashSet<u32>,
+        font_id: &ResourceLocation,
     ) -> Result<(), FontError> {
         let rows = chars.len();
         if rows == 0 || chars[0].is_empty() {
@@ -1443,9 +1462,9 @@ impl<'a> FontLoader<'a> {
         let debug = font_metrics_debug_enabled();
         if debug {
             eprintln!(
-                "lodestone-assets: bitmap provider file={file} sheet={}x{} grid={cols}x{rows} \
-                 cell={glyph_width}x{glyph_height}px declared_height={height} ascent={ascent} \
-                 pixel_scale={pixel_scale}",
+                "lodestone-assets: bitmap provider font={font_id} file={file} sheet={}x{} \
+                 grid={cols}x{rows} cell={glyph_width}x{glyph_height}px declared_height={height} \
+                 ascent={ascent} pixel_scale={pixel_scale}",
                 img.width, img.height,
             );
         }
@@ -1485,8 +1504,8 @@ impl<'a> FontLoader<'a> {
                 let advance = (0.5 + actual as f32 * pixel_scale) as i32 + 1;
                 if want_trace {
                     eprintln!(
-                        "lodestone-assets: TRACE U+{cp:04X} provider[{provider_index}] bitmap \
-                         file={file} cell_pos=({slot_x},{slot_y}) advance={advance} -> {}",
+                        "lodestone-assets: TRACE font={font_id} U+{cp:04X} provider[{provider_index}] \
+                         bitmap file={file} cell_pos=({slot_x},{slot_y}) advance={advance} -> {}",
                         if shadowed_by_earlier {
                             "shadowed (an earlier-declared provider already won this codepoint)"
                         } else {
