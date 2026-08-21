@@ -3333,6 +3333,17 @@ pub fn relight_changed_blocks(
         return;
     };
     let base_si = extent.min_y.div_euclid(16);
+    // Re-meshes whose neighbourhood is short a column. `snapshot_section_in` leaves
+    // such a slot's light `None` and `mesh_snapshot` then reads it through
+    // `UniformLight::pre_light_bridge` — **full sky, no block light** — so every
+    // face opening that way is lit at daylight regardless of what the light engine
+    // computed. `route` submits it anyway once the section has been on screen, which
+    // is vanilla's own rule, so this is not by itself a defect; it is the one way a
+    // *correct* relight still reaches bright pixels, and it is invisible from the
+    // relight's own counters. Counted here so a "breaking a block made everything
+    // bright" report can be attributed to the mesh side or ruled out.
+    let mut bridged = 0usize;
+    let mut meshed = 0usize;
     for _ in 0..LIGHT_DIRTY_SECTION_BUDGET {
         let Some((cx, cz, sy)) = terrain.light_dirty_sections.pop_first() else {
             break;
@@ -3347,7 +3358,22 @@ pub fn relight_changed_blocks(
             si: si as usize,
             min_y: extent.min_y,
         };
+        meshed += 1;
+        if (-1..=1).any(|dx| {
+            (-1..=1).any(|dz| !store.contains_column(cx + dx, cz + dz))
+        }) {
+            bridged += 1;
+        }
         terrain.mesh_section(&store, key, extent.section_count);
+    }
+    if bridged > 0 {
+        tracing::debug!(
+            target: "light",
+            bridged,
+            meshed,
+            "relight re-meshed sections whose neighbourhood is short a column; their \
+             absent slots light at full sky"
+        );
     }
 }
 
