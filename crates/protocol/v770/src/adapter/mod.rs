@@ -113,6 +113,7 @@ mod inventory;
 mod player;
 mod scoreboard;
 mod serverbound;
+mod xfer;
 
 // Re-exported so `crate::adapter::{game_mode_from_ordinal, game_mode_to_ordinal,
 // DecodedStack, read_item_stack}` keep resolving after the split — `server_protocol.rs`
@@ -303,6 +304,14 @@ struct MovementSendState {
     /// Ticks since the last full position update; forces one every 20 ticks
     /// even with zero movement, matching `positionReminder >= 20`.
     position_reminder: u32,
+    /// Diagnostic only — the `transfer` tracing target's yardstick. Vanilla has
+    /// no equivalent field; see [`xfer`]'s module doc for what it measures and
+    /// why the answer cannot be read off the packets alone.
+    last_teleport: Option<xfer::AcceptedTeleport>,
+    /// Diagnostic only — outbound movement packets emitted since
+    /// `last_teleport` was recorded. Zero on the *first* move after a teleport,
+    /// which is the only one whose distance from the target is diagnostic.
+    moves_since_teleport: u32,
 }
 
 impl Default for MovementSendState {
@@ -314,6 +323,8 @@ impl Default for MovementSendState {
             last_on_ground: false,
             last_horizontal_collision: false,
             position_reminder: 0,
+            last_teleport: None,
+            moves_since_teleport: 0,
         }
     }
 }
@@ -567,6 +578,55 @@ impl V770Adapter {
             None
         };
 
+        // The `transfer` target's wire-side half. Emitted only when a packet is
+        // actually produced, so the line count matches the packet count rather
+        // than the tick count, and *before* the state updates below so
+        // `moves_since_teleport` still reads zero on the first move after a
+        // teleport — the only one whose distance from the target is diagnostic.
+        // See `xfer`'s module doc for the race this is here to settle.
+        if let Some((packet_id, _)) = packet.as_ref() {
+            let teleport = state.last_teleport;
+            let distance = teleport.map(|teleport| teleport.distance_to(pos));
+            let stale = state.moves_since_teleport == 0
+                && distance.is_some_and(|distance| distance > xfer::STALE_MOVE_BLOCKS);
+            let seq = xfer::next_seq();
+            if stale {
+                tracing::warn!(
+                    target: "transfer",
+                    seq,
+                    packet_id,
+                    x = pos.x,
+                    y = pos.y,
+                    z = pos.z,
+                    yaw = rotation.yaw,
+                    pitch = rotation.pitch,
+                    teleport_seq = teleport.map(|teleport| teleport.seq),
+                    teleport_id = teleport.map(|teleport| teleport.id),
+                    dist_from_teleport = distance,
+                    "xfer: move packet -- FIRST move after a teleport claims a \
+                     position far from the teleport target; the server will read \
+                     this as movement it did not authorise"
+                );
+            } else {
+                tracing::debug!(
+                    target: "transfer",
+                    seq,
+                    packet_id,
+                    x = pos.x,
+                    y = pos.y,
+                    z = pos.z,
+                    yaw = rotation.yaw,
+                    pitch = rotation.pitch,
+                    moves_since_teleport = state.moves_since_teleport,
+                    teleport_seq = teleport.map(|teleport| teleport.seq),
+                    teleport_id = teleport.map(|teleport| teleport.id),
+                    dist_from_teleport = distance,
+                    "xfer: move packet"
+                );
+            }
+            state.moves_since_teleport = state.moves_since_teleport.saturating_add(1);
+        }
+
         if moved {
             state.last_pos = pos;
             state.position_reminder = 0;
@@ -579,6 +639,47 @@ impl V770Adapter {
         state.last_horizontal_collision = horizontal_collision;
 
         Ok(packet)
+    }
+
+    /// Records the teleport `handle_player_position` just answered with
+    /// `ACCEPT_TELEPORTATION`, and emits the `transfer` target's inbound line.
+    ///
+    /// `absolute_target` is `Some` only when every positional component of the
+    /// packet's `relatives` mask was absolute; a relative teleport leaves the
+    /// previous yardstick in place rather than inventing one, because this
+    /// adapter holds no player position to resolve a delta against. See
+    /// [`xfer`]'s module doc.
+    ///
+    /// Diagnostic only: nothing in the encode or decode path reads what this
+    /// stores.
+    pub(super) fn note_accepted_teleport(
+        &self,
+        id: i32,
+        absolute_target: Option<Vec3>,
+        rotation: Rotation,
+        relatives: i32,
+    ) {
+        let seq = xfer::next_seq();
+        tracing::debug!(
+            target: "transfer",
+            seq,
+            teleport_id = id,
+            x = absolute_target.map(|target| target.x),
+            y = absolute_target.map(|target| target.y),
+            z = absolute_target.map(|target| target.z),
+            yaw = rotation.yaw,
+            pitch = rotation.pitch,
+            relatives,
+            "xfer: PLAYER_POSITION received; ACCEPT_TELEPORTATION echoed with the same id"
+        );
+        let mut state = self
+            .movement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.moves_since_teleport = 0;
+        if let Some(target) = absolute_target {
+            state.last_teleport = Some(xfer::AcceptedTeleport { seq, id, target });
+        }
     }
 }
 

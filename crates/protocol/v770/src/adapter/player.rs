@@ -152,7 +152,7 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::PLAYER_POSITION {
-            return handle_player_position(payload);
+            return handle_player_position(self, payload);
         }
         if packet_id == play::clientbound::RESPAWN {
             // A dimension change (or post-death respawn) resets the build-height
@@ -386,7 +386,10 @@ fn teleport_flags(value: i32) -> TeleportFlags {
 /// `player.velocity` unconditionally on every teleport, which is the vanilla
 /// behaviour only for the common all-absolute-delta case. Zero trailing bytes
 /// is the misparse detector.
-fn handle_player_position(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+fn handle_player_position(
+    adapter: &V770Adapter,
+    payload: &[u8],
+) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let id = reader.var_i32().map_err(dec_err)?;
     let x = reader.f64().map_err(dec_err)?;
@@ -416,6 +419,15 @@ fn handle_player_position(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
         relatives,
         "PLAYER_POSITION received; echoing ACCEPT_TELEPORTATION with the same id"
     );
+
+    // The `transfer` target's inbound half. A teleport whose position is fully
+    // absolute becomes the yardstick every subsequent outbound movement packet
+    // is measured against; a relative one is logged and leaves the previous
+    // yardstick alone. See the `xfer` module's doc.
+    let flags = teleport_flags(relatives);
+    let absolute_target = (!flags.relative_x && !flags.relative_y && !flags.relative_z)
+        .then(|| Vec3::new(x, y, z));
+    adapter.note_accepted_teleport(id, absolute_target, Rotation::new(yaw, pitch), relatives);
 
     Ok(vec![
         send(

@@ -10,6 +10,16 @@ impl V770Adapter {
     pub(super) fn handle_play_chunk(&self, world: &mut dyn WorldSink, packet_id: i32, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
         if packet_id == play::clientbound::LOGIN {
             let body: GameLogin = decode_body(payload)?;
+            // A *second* `LOGIN` on a live connection is the other shape a
+            // proxy backend switch takes, and the shell's movement state does
+            // not reset with it. See the `xfer` module's doc.
+            tracing::debug!(
+                target: "transfer",
+                seq = super::xfer::next_seq(),
+                entity_id = body.entity_id,
+                dimension = %body.dimension,
+                "xfer: LOGIN (join game) received"
+            );
             // `dimension_type` is the registry holder id; `dimension` is the
             // level name. The id wins where the registry resolved it, and
             // `enter_dimension` falls back to the name match where it did not.

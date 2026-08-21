@@ -716,6 +716,18 @@ impl<T: Transport> Driver<T> {
                         to = ?next,
                         "connection state transition"
                     );
+                    // The same edge on the `transfer` target, so one filter
+                    // (`RUST_LOG=transfer=debug`) yields the whole rubberband
+                    // chain — the adapter's teleport/move lines, this
+                    // transition, and the shell's own — without turning on
+                    // `info` for everything else. See the `xfer` module in the
+                    // v770 adapter for what the chain is for.
+                    tracing::debug!(
+                        target: "transfer",
+                        from = ?self.state,
+                        to = ?next,
+                        "xfer: state -- connection state transition"
+                    );
                     let entering_configuration = next == ConnectionState::Configuration;
                     self.state = next;
                     // A mid-session reconfigure (dimension change, resource-pack

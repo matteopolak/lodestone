@@ -1914,6 +1914,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (`destroySpeed`, `requiresCorrectToolForDrops`) is the pre-existing hardness census
   documented in [`block-break-timing.md`](./block-break-timing.md). Landed in
   `875f452`.
+- [Transfer tracing](./transfer-tracing.md) — A single `tracing` target, `transfer`,
+  that records every step of the client's position handshake with a server — the
+  teleport arriving, the confirmation going out, the pose reaching the simulation, and
+  each outbound movement packet with the position it claims. It exists to settle, from
+  a real session on a real server, whether the client ever tells a server it is
+  somewhere the server has already overruled: the "rubberbanded after being
+  transferred to another server" report.
 - [Translucent block culling](./translucent-block-culling.md) — Why an interior face
   between two identical translucent blocks (ice, glass, stained glass, honey, slime)
   is not drawn, and why only the camera-facing side of a solid translucent cube's face
