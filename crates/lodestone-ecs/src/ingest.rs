@@ -50,8 +50,9 @@ use lodestone_physics::Vec3d;
 use crate::entity::{
     ArmorStandFlags, Attributes, AttackSwing, Baby, CreeperSwellDir, CustomName,
     CustomNameVisible, DeathTime, DisplayBackgroundColor, DisplayBillboard, DisplayBlockState,
-    DisplayItem, DisplayItemContext, DisplayLeftRotation, DisplayLineWidth, DisplayRightRotation,
-    DisplayScale, DisplayStyleFlags, DisplayText, DisplayTextOpacity, DisplayTranslation,
+    DisplayBrightness, DisplayItem, DisplayItemContext, DisplayLeftRotation, DisplayLineWidth,
+    DisplayRightRotation, DisplayScale, DisplayStyleFlags, DisplayText, DisplayTextOpacity,
+    DisplayTranslation,
     EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue,
     FallingBlockState, HeadYaw, Health, HurtTime, ItemFrameRotation, Leashed, MinecraftEntityId,
     MobState, OnGround,
@@ -1012,6 +1013,15 @@ pub fn apply_display_metadata(batch: Res<IngestBatch>, index: Res<EntityIndex>, 
         }
         if let Some(context) = metadata.display_item_context {
             entity.insert(DisplayItemContext(context));
+        }
+        // Declared on the base `Display` class, so it folds for every subtype
+        // rather than beside one variant's payload above. The `-1` sentinel is
+        // carried through rather than folded to absence here: a consumer has to
+        // be able to tell "explicitly no override" from "never reported", and
+        // both a re-reported `-1` and a first report of `-1` are the server
+        // clearing an override it previously set.
+        if let Some(brightness) = metadata.display_brightness_override {
+            entity.insert(DisplayBrightness(brightness));
         }
     }
 }

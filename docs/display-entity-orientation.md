@@ -8,31 +8,41 @@ that decides which way it faces, and the `translation`/`left_rotation`/
 `scale`/`right_rotation` transformation on top of it. A faithful port of
 `DisplayRenderer.calculateOrientation` and `Transformation.compose` (`26.2`).
 
-**`text_display` is live end to end; `item_display`/`block_display` are
-decoded and extracted but not yet drawn.** The full chain is:
+**All three subtypes are live end to end.** The full chain is:
 `crates/protocol/v770/src/packets/metadata.rs` decodes billboard/
-translation/scale/rotation/text/block-state/item-context off
-`set_entity_data` → `lodestone_ecs::ingest::apply_display_metadata` folds
-them into `Display*` components → `lodestone_shell::display_entities`
+translation/scale/rotation/brightness/text/block-state/item-stack/
+item-context off `set_entity_data` → `lodestone_ecs::ingest::apply_display_metadata`
+folds them into `Display*` components → `lodestone_shell::display_entities`
 extracts a `DisplayDraw` per tracked entity, every field defaulted to
-vanilla's own accessor default when unreported → `gpu/display_text.rs`
-reads the `text_display` ones and draws glyphs and a background panel
-through the real `RenderState::render` path. `crates/lodestone-shell/tests/
-text_display_pixels.rs` is the pixel gate proving that last hop: it renders
-through the entire chain and reads back real pixels, with a
-no-draws-installed control that must paint nothing in the entity's screen
-rect — watched to fail with the draw call itself commented out, restored
-from an md5-checked backup.
+vanilla's own accessor default when unreported → one GPU consumer per
+subtype reads `RenderState::display_draws` and puts geometry on screen:
 
-`item_display`/`block_display` reach `DisplayDraw` (their block state / item
-stack and `ItemDisplayContext` ordinal are decoded and carried all the way
-through) but no GPU pass reads them yet — the same disclosed, "extracted but
-not drawn" state this repo's `EntityDraw::wool` field already documents for
-sheep wool, not a silent gap. `gpu/moving_blocks.rs`'s existing
-`(state id, transform, light) → merge_moving_block` seam is the intended
-`block_display` consumer (posing its transform via `display_placement_matrix`
-instead of `falling_block_pose`); `gpu/world_items.rs`'s
-`mesh_item_quads_with_light` is the intended `item_display` one.
+| subtype | consumer | seam it reuses |
+|---|---|---|
+| `text_display` | `gpu/display_text.rs`'s `push_text_display_quads` | its own glyph/panel pipeline |
+| `block_display` | `gpu/moving_blocks.rs`'s `merge_block_displays` | `merge_moving_block`, shared with the falling block, the piston head, primed TNT and a minecart's contents |
+| `item_display` | `gpu/world_items.rs`'s `merge_item_displays` | the model-pipeline item mesh a dropped, held, framed or campfire item uses |
+
+Neither of the two new ones is new *rendering*: both are producers for a
+consumer that already existed, which is what made them a wiring job rather
+than a port. `DisplayDraw::placement` is the shared
+`T(position) · orientation · transformation` composition, extracted as a
+named symbol so three files cannot apply it three ways — the defect shape
+this repo has already paid for once, in a composition of two individually
+correct halves.
+
+Two pixel gates prove the last hop. `crates/lodestone-shell/tests/text_display_pixels.rs`
+covers the text variant; `crates/lodestone-shell/tests/display_entity_pixels.rs`
+covers the other two, with a control per producer (a real display entity
+whose payload has never been reported must render byte-identically to an
+empty scene) and a scale arm that would still pass for a producer ignoring
+`placement` entirely. Both were **watched to fail**: with each merge call
+neutered in turn and restored from an md5-checked backup, the block arm
+reported `moving_blocks_drawn` 0 against 1, and the item arm reported 0
+changed pixels. Note what those gates do *not* cover — they install their own
+`DisplayDraw`, so they say nothing about the ECS/wire producer above them;
+that half is gated in `display_entities`'s own extract tests and in
+`lodestone_v770::packets::metadata`'s index-16 and index-23 arms.
 
 ## How it works
 
@@ -211,35 +221,77 @@ that more than 100 non-sky pixels land in the entity's rect, which the panel
 alone satisfies. Any gate for this has to measure the **ink** against a
 reference with the panel switched off.
 
-### What would need to exist for `item_display`/`block_display` to draw
+### How the two model consumers are posed
 
-Both already reach `DisplayDraw` (`lodestone_shell::display_entities`) with
-every field decoded — nothing left to add in the protocol or ECS layers for
-either. What is missing is purely a render-side consumer, one per subtype:
+Both compose vanilla's own chain and differ only in what sits on the right of
+it.
 
-1. **`block_display`**: a producer for `gpu/moving_blocks.rs`'s existing
-   `(state id, transform, light)` seam, reading `DisplayDraw::block_state`
-   and posing it with `display_placement_matrix(draw.position,
-   display_orientation(draw.billboard, …), &draw.transform)` in place of
-   `falling_block_pose`. `merge_moving_block` is already generic over the
-   producer — see that file's module doc for the falling-block/piston/TNT
-   precedent this would be a fourth instance of.
-2. **`item_display`**: a producer alongside `gpu/world_items.rs`'s dropped-item
-   path, reading `DisplayDraw::item`/`item_display_context` and calling
-   `mesh_item_quads_with_light(quads, display_placement_matrix(…), gui_light,
-   light)` — the same primitive `vault_display_item_mesh` already wraps for a
-   vault's floating reward, which is the closest existing precedent (an item
-   posed by an arbitrary transform matrix, not a dropped-item bob/spin).
-3. Wiring either into `gpu/state.rs`/`gpu/frame.rs` reads `RenderState::
-   display_draws` (installed by `set_display_draws`, already wired for the
-   text pass) — no new per-frame plumbing needed, only a new merge call
-   alongside the existing falling-block/dropped-item ones.
+**`block_display`** (`DisplayRenderer.BlockDisplayRenderer`) is
+`placement` and nothing else: `submitInner` is one `blockModel.submit` at the
+pose the base `submit` composed, and the block model's quads are block-local
+`0..1`. There is **no `-0.5` shift** — that belongs to the falling block,
+whose entity spawns at the cell *centre*; borrowing it puts every hologram
+half a cell north-west, which reads as a model-origin bug. `merge_block_displays`
+asserts this against the falling-block hypothesis explicitly.
 
-**Do not wire an inert field in the meantime.** Both fields already carry
-real, decoded data all the way to `DisplayDraw` — the remaining gap is
-narrowly "no GPU pass reads this yet", which is the same disclosed state
-`EntityDraw::wool` already documents, not something to paper over with a
-placeholder consumer.
+**`item_display`** (`DisplayRenderer.ItemDisplayRenderer`) is `placement`,
+then `Axis.YP.rotation(PI)`, then the item's own `display` transform for its
+`ItemDisplayContext` — the last applied inside `ItemStackRenderState.submit`,
+which is why `display_matrix` composes on the right exactly as it does for a
+framed or campfire item. The half-turn is easy to drop and nearly invisible,
+since an item model is close to symmetric about its own Y axis.
+
+**`ItemDisplayContext.NONE` is a real context, not a missing one.**
+`Display.ItemDisplay`'s accessor default is `NONE`, and
+`ItemTransforms.getTransform` answers it with `ItemTransform.NO_TRANSFORM` —
+the identity pose. So `/summon item_display {item:{…}}` with no
+`item_display` tag draws its model unscaled and unrotated, filling the whole
+block. An earlier version of this seam defaulted to `FIXED` instead, on a
+stated (and false) belief that `NONE` "draws nothing at all"; that would have
+silently applied the item frame's half-scale pose to every context-less
+hologram. `lodestone_assets::DisplaySlot` deliberately has no `NONE` variant
+for the same reason — that context selects no `display` key — so
+`display_slot_for_context` returns `Option<DisplaySlot>` and the `None` arm
+poses with `DisplayTransform::default()`.
+
+### Brightness override
+
+`Display.DATA_BRIGHTNESS_OVERRIDE_ID` (index 16, `INT`) carries
+`Brightness.pack()`'s `block << 4 | sky << 20`, or `-1` for "none".
+`DisplayRenderer.getSkyLightLevel`/`getBlockLightLevel` take its nibbles
+*instead of* the sampled lightmap whenever it is set — which is what makes a
+server's `brightness:{sky:15,block:15}` hologram readable in a dark room —
+so `DisplayDraw::override_light` repacks it into this renderer's own
+`sky << 4 | block` byte and both merge sites prefer it over
+`EntityLightSource::sample`. The two layouts differ, so this is a repack and
+not a passthrough; the gate uses `(block 7, sky 12)` rather than a symmetric
+`(15, 15)` precisely so a swap cannot pass.
+
+Index 16 has six `INT` claimants in the committed
+`EntityDataIndexOracle` dump (`Creeper.DATA_SWELL_DIR`,
+`EnderDragon.DATA_PHASE`, `Phantom.ID_SIZE`, `Warden.CLIENT_ANGER_LEVEL`,
+`WitherBoss.DATA_TARGET_A`), none of them a `Display`, so the decode arm is
+gated on the whole family rather than per subtype — the field is declared on
+the base class. The `-1` sentinel is carried through to the consumer rather
+than folded to absence at the decode, because "explicitly cleared" and "never
+reported" are different states and a real all-zero override packs to `0`.
+
+### Named deviations, shared by both new consumers
+
+* **No interpolation.** `Display.RenderState`'s getters are read at
+  `interpolationProgress`; this seam has no interpolation clock, so a display
+  told to move over 20 ticks snaps. Disclosed in `display_entities`'s module
+  doc as a fidelity loss, not a correctness one.
+* **No `viewRange` cull.** `Display.shouldRender` scales render distance by
+  `DATA_VIEW_RANGE_ID` (index 17), which nothing decodes yet. The frustum
+  test is the only cull, so a short-view-range display draws further out than
+  vanilla would draw it — more geometry, never less.
+* **No `glowColorOverride` outline**, on either — `MovingBlock` carries no
+  outline channel, the same gap primed TNT's white flash already records.
+* **A `minecraft:special` item in an `item_display` draws its inventory
+  form**, because `ItemVariants::resolve` answers a `Special` output with the
+  GUI fallback. Routing it to a block-entity rig is `entity_passes.rs`'s
+  `special_item_instances`, which this seam does not own.
 
 ## Configuration
 

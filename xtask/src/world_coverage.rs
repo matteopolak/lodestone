@@ -745,14 +745,33 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
         symbol: "prepare_moving_blocks",
         rule: ClaimRule::Explicit(&["falling_block", "tnt"]),
     },
-    // `DisplayRenderer` for the text variant only — the block and item
-    // variants have a snapshot and no GPU consumer, which is why they are
-    // deliberately absent here.
+    // `DisplayRenderer.TextDisplayRenderer`.
     RendererClaim {
         name: "text display glyphs",
         file: "crates/lodestone-shell/src/gpu/display_text.rs",
         symbol: "push_text_display_quads",
         rule: ClaimRule::Explicit(&["text_display"]),
+    },
+    // `DisplayRenderer.BlockDisplayRenderer`: the imitated block state's own
+    // baked quads, posed by the display's billboard + `Transformation`. Its own
+    // claim rather than a second id on the moving-block one above, because the
+    // anchor check is the point: `merge_block_displays` disappearing must fail
+    // this scan, and it would not if `block_display` rode on
+    // `prepare_moving_blocks`' anchor.
+    RendererClaim {
+        name: "block display model",
+        file: "crates/lodestone-shell/src/gpu/moving_blocks.rs",
+        symbol: "merge_block_displays",
+        rule: ClaimRule::Explicit(&["block_display"]),
+    },
+    // `DisplayRenderer.ItemDisplayRenderer`: the stack's own item model, posed
+    // the same way. Separate from the dropped-item claim for the same
+    // anchor-check reason as the block one.
+    RendererClaim {
+        name: "item display model",
+        file: "crates/lodestone-shell/src/gpu/world_items.rs",
+        symbol: "merge_item_displays",
+        rule: ClaimRule::Explicit(&["item_display"]),
     },
 ];
 

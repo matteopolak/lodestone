@@ -304,6 +304,18 @@ const IDX_DISPLAY_RIGHT_ROTATION: u8 = 14;
 /// [`is_display_class`] rather than a single `MetadataClass` variant because
 /// all three `Display` subtypes carry this exact field at this exact index.
 const IDX_DISPLAY_BILLBOARD: u8 = 15;
+/// `Display.DATA_BRIGHTNESS_OVERRIDE_ID`, index 16 — an `INT` carrying
+/// `Brightness.pack()`'s `block << 4 | sky << 20`, or `-1` for "no override".
+///
+/// **Ambiguous, and gated on [`is_display_class`].** The committed jar dump
+/// lists six `INT` claimants at index 16 — `Creeper.DATA_SWELL_DIR`
+/// ([`IDX_CREEPER_SWELL_DIR`]), `EnderDragon.DATA_PHASE`
+/// ([`IDX_DRAGON_PHASE`]), `Phantom.ID_SIZE`, `Warden.CLIENT_ANGER_LEVEL`,
+/// `WitherBoss.DATA_TARGET_A` and this one. None of the other five is a
+/// `Display` subtype, so the *whole-family* guard separates them; a
+/// per-subtype guard would need three arms for one field declared once on the
+/// base class.
+const IDX_DISPLAY_BRIGHTNESS: u8 = 16;
 /// The per-variant payload every `Display` subtype carries at index 23:
 /// `Display.BlockDisplay.DATA_BLOCK_STATE_ID` (`BLOCK_STATE`),
 /// `Display.ItemDisplay.DATA_ITEM_STACK_ID` (`ITEM_STACK`, self-identifying
@@ -1016,6 +1028,15 @@ pub fn read_entity_metadata(
             (IDX_DISPLAY_BILLBOARD, Value::Byte(b)) if is_display_class(class) => {
                 md.display_billboard = Some(b as u8);
             }
+            // `Display.DATA_BRIGHTNESS_OVERRIDE_ID`. Guarded on
+            // [`is_display_class`] for the reason [`IDX_DISPLAY_BRIGHTNESS`]
+            // gives: five other unrelated entities put an `INT` at index 16.
+            // Surfaced packed, sentinel and all — the consumer needs to tell
+            // `-1` ("no override") from a real `(block 0, sky 0)`, which packs
+            // to `0`.
+            (IDX_DISPLAY_BRIGHTNESS, Value::Int(v)) if is_display_class(class) => {
+                md.display_brightness_override = Some(v);
+            }
             // `Display.BlockDisplay.DATA_BLOCK_STATE_ID`. Guarded on class: index
             // 23 is also `Cat.DATA_COLLAR_COLOR`, an unrelated `INT` — see
             // [`IDX_DISPLAY_VARIANT_PAYLOAD`].
@@ -1486,6 +1507,210 @@ mod tests {
         assert_eq!(spans[2].text, "L");
         assert_eq!(spans[2].style.color, Some(TextColor::Blue));
         assert_eq!(spans[2].style.bold, None);
+    }
+
+    /// An `item_display`'s stack arrives at index **23**, not the index 8 a
+    /// dropped item uses, and must still reach `md.item`.
+    ///
+    /// # What the expected value is, and what it is not
+    ///
+    /// This does **not** claim to validate the stack codec — that is what the
+    /// captured-fixture gates in `tests/item_entity_metadata.rs` are for, and
+    /// bytes built here with our own reading of the format could only close
+    /// over a shared misunderstanding of it. The claim under test is purely
+    /// about **routing**: `read_entity_metadata` handles `SER_ITEM_STACK`
+    /// *before* the index match and therefore surfaces it whatever index it
+    /// arrives at, which is the only reason an `item_display` has a stack to
+    /// draw at all. The item id comes from `lodestone_data::items::item_id`,
+    /// which is generated from Mojang's own `registries.json`.
+    ///
+    /// The discriminating half is the trailing field: index 23's `Int` arm is
+    /// gated on `BlockDisplay`, so an `ItemDisplay` subject proves the stack
+    /// took the early return rather than falling into the block-state arm, and
+    /// the following index-24 byte proves the reader stayed aligned.
+    #[test]
+    fn an_item_displays_stack_arrives_at_index_23_and_still_reaches_the_item_field() {
+        let diamond = lodestone_data::items::item_id("minecraft:diamond")
+            .expect("minecraft:diamond is in the generated item registry");
+
+        let mut bytes = Vec::new();
+        bytes.push(IDX_DISPLAY_VARIANT_PAYLOAD);
+        bytes.extend(varint(SER_ITEM_STACK));
+        bytes.extend(varint(1)); // count
+        bytes.extend(varint(diamond)); // item registry id
+        bytes.extend(varint(0)); // components added
+        bytes.extend(varint(0)); // components removed
+        // A second field after it, so a mis-sized stack read shows up as a
+        // decode failure here rather than as a silently truncated list.
+        bytes.push(IDX_DISPLAY_VARIANT_EXTRA);
+        bytes.extend(varint(SER_BYTE));
+        bytes.push(8); // ItemDisplayContext.FIXED
+        bytes.push(EOF_MARKER);
+
+        let mut reader = Reader::new(&bytes);
+        let decoded = read_entity_metadata(
+            &mut reader,
+            TrackedEntity {
+                class: Some(MetadataClass::ItemDisplay),
+                living: false,
+                mob: false,
+            },
+        )
+        .expect("decode");
+        reader.ensure_empty().expect("no trailing bytes");
+        assert!(decoded.complete);
+        let md = decoded.metadata;
+
+        let Reported::Reported(Some(stack)) = &md.item else {
+            panic!("an item_display's index-23 stack never reached md.item: {:?}", md.item);
+        };
+        assert_eq!(stack.item.to_string(), "minecraft:diamond");
+        assert_eq!(stack.count, 1);
+        assert_eq!(
+            md.display_item_context,
+            Some(8),
+            "the field after the stack must still decode, so the reader stayed aligned"
+        );
+        assert_eq!(
+            md.display_block_state, None,
+            "index 23's block-state arm must not also fire for an item_display"
+        );
+    }
+
+    /// Index 16's `INT` is a display's brightness override **only** for a
+    /// `Display` subtype; for anything else it is consumed for alignment and
+    /// deliberately not surfaced.
+    ///
+    /// The three arms are the whole point, and the third is what a "does it
+    /// decode" test would miss:
+    ///
+    /// * an `item_display` surfaces it, and surfaces *only* it;
+    /// * a **creeper** — a real index-16 `INT` claimant
+    ///   (`Creeper.DATA_SWELL_DIR`) whose premise
+    ///   `the_jar_dump_contains_the_collisions_the_guards_exist_for` already
+    ///   asserts — surfaces its own field and **not** the brightness, so the
+    ///   guard is doing work rather than being decorative;
+    ///   without it a creeper mid-swell would report a brightness override.
+    /// * `-1` is a value the field really carries (vanilla's own
+    ///   `NO_BRIGHTNESS_OVERRIDE`), so it must reach the consumer as
+    ///   `Some(-1)` rather than being folded to `None` here — the consumer has
+    ///   to tell "explicitly cleared" from "never reported".
+    ///
+    /// The packed fixture is `Brightness(block 7, sky 12).pack()`, i.e.
+    /// `7 << 4 | 12 << 20` = `12583024`. Deliberately **not** a symmetric
+    /// `(15, 15)`: the two nibbles differ, so an unpack that swaps them cannot
+    /// pass.
+    #[test]
+    fn index_16_int_is_a_brightness_override_only_for_a_display() {
+        const PACKED: i32 = (7 << 4) | (12 << 20);
+        let payload = |value: i32| {
+            let mut bytes = Vec::new();
+            bytes.push(IDX_DISPLAY_BRIGHTNESS);
+            bytes.extend(varint(SER_INT));
+            bytes.extend(varint(value));
+            bytes.push(EOF_MARKER);
+            bytes
+        };
+
+        let bytes = payload(PACKED);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(
+            &mut reader,
+            TrackedEntity {
+                class: Some(MetadataClass::ItemDisplay),
+                living: false,
+                mob: false,
+            },
+        )
+        .expect("decode")
+        .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.display_brightness_override, Some(PACKED));
+        assert_eq!(
+            md.creeper_swell_dir, None,
+            "the same INT also landed in the creeper field"
+        );
+        assert_eq!(md.dragon_phase, None);
+
+        // The control, and its premise is a real collision rather than an
+        // invented one: `Creeper.DATA_SWELL_DIR` is an `INT` at index 16 in the
+        // committed jar dump.
+        let mut reader = Reader::new(&bytes);
+        let control = read_entity_metadata(&mut reader, a_creeper())
+            .expect("a creeper must still decode, not error")
+            .metadata;
+        reader
+            .ensure_empty()
+            .expect("the INT must be consumed for alignment even when it is not surfaced");
+        assert_eq!(
+            control.display_brightness_override, None,
+            "a creeper's swell direction was surfaced as a brightness override"
+        );
+        assert_eq!(
+            control.creeper_swell_dir,
+            Some(PACKED),
+            "the creeper arm must still fire for the same bytes"
+        );
+
+        // `-1` survives as a value, not as an absence.
+        let cleared = payload(-1);
+        let mut reader = Reader::new(&cleared);
+        let md = read_entity_metadata(
+            &mut reader,
+            TrackedEntity {
+                class: Some(MetadataClass::BlockDisplay),
+                living: false,
+                mob: false,
+            },
+        )
+        .expect("decode")
+        .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(
+            md.display_brightness_override,
+            Some(-1),
+            "vanilla's own NO_BRIGHTNESS_OVERRIDE sentinel must reach the consumer"
+        );
+    }
+
+    /// The premise of the arm above, read off the committed jar dump rather
+    /// than hand-counted: `Display.DATA_BRIGHTNESS_OVERRIDE_ID` really is index
+    /// 16 as an `INT`, and it really does share that index with five unrelated
+    /// `INT`s, none of them a `Display`.
+    ///
+    /// Named individually rather than counted, matching
+    /// `the_jar_dump_contains_the_collisions_the_guards_exist_for`: a dump that
+    /// dropped one fails here instead of weakening the guard silently.
+    #[test]
+    fn the_dump_puts_the_brightness_override_at_index_16_beside_five_other_ints() {
+        assert_eq!(
+            dump_row("Display.DATA_BRIGHTNESS_OVERRIDE_ID"),
+            (IDX_DISPLAY_BRIGHTNESS, SER_INT),
+            "IDX_DISPLAY_BRIGHTNESS or its serializer disagrees with the jar"
+        );
+        let at_16 = dump_claimants(16);
+        for owner in [
+            "Creeper.DATA_SWELL_DIR",
+            "EnderDragon.DATA_PHASE",
+            "Phantom.ID_SIZE",
+            "Warden.CLIENT_ANGER_LEVEL",
+            "WitherBoss.DATA_TARGET_A",
+        ] {
+            assert!(
+                at_16.contains(&(owner.to_owned(), SER_INT)),
+                "index 16 does not claim {owner} as an INT in the dump; the is_display_class \
+                 guard's premise is not what this test thinks it is"
+            );
+        }
+        // And none of those five is a Display subtype, which is what makes the
+        // family-wide guard sufficient — a per-subtype guard would need three
+        // arms for one field declared once on the base class.
+        for (owner, _) in &at_16 {
+            assert!(
+                !owner.starts_with("Display.") || owner == "Display.DATA_BRIGHTNESS_OVERRIDE_ID",
+                "a second Display field claims index 16: {owner}"
+            );
+        }
     }
 
     /// Index 1, `INT`, decodes to `air_supply` — the field this seam exists to

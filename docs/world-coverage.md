@@ -147,7 +147,6 @@ What follows is what is left.
 | subject | what already knows about it |
 |---|---|
 | `item_frame`, `glow_item_frame` | `ITEM_FRAME_TYPES`, `EYE_HEIGHTS`, `item_frame_blockstate`, `framed_item_matrix`, a draw counter. These do now draw — through a *block* model rather than a rig, which is the right mechanism for them — so the census still reads them as stranded because its entity detector's subject is the rig corpus. Read this row as a limit of the instrument, not as a hole |
-| `item_display`, `block_display` | their own type-path constants and a full extracted snapshot; `display_entities`'s module doc already says both have no GPU consumer |
 | `wind_charge`, `breeze_wind_charge` | `EYE_HEIGHTS`; `thrown_item_for`'s own doc records that these need a cuboid model and must *not* be added to its table |
 
 The `EYE_HEIGHTS` cluster that used to dominate this table was one shape
