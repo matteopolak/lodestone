@@ -522,7 +522,10 @@ async fn lan_bind_runs_exactly_one_world_tick_loop() {
 /// tick loop must not have broken LAN serving, and a LAN client must still
 /// receive its terrain.
 ///
-/// This also exercises `serve_connection_with_mob_events_shared`'s
+/// This also exercises `serve_connection_with_mob_events_and_commands_shared`'s
+/// (the function `IntegratedServer::bind` actually calls today —
+/// `serve_connection_with_mob_events_shared` was the entry point when this
+/// comment was written, but has since been superseded and is now dead code)
 /// non-blocking generation and the per-connection feed pair the relay arm
 /// hands out — both of which are new on this path and neither of which the rate
 /// gate above touches.

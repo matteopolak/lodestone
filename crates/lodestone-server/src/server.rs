@@ -2328,8 +2328,16 @@ where
 
 /// [`serve_connection_with_mob_events`], but generating chunks off the core
 /// thread (issue #293) — the [`serve_connection_shared`] treatment applied to
-/// the feed-carrying entry point, which is what
-/// [`crate::IntegratedServer::open_in_memory_with_mobs`] (singleplayer) uses.
+/// the feed-carrying entry point.
+///
+/// **Stale as of the command-dispatch landing**: this was
+/// [`crate::IntegratedServer::open_in_memory_with_mobs`]'s (singleplayer)
+/// entry point when written; that constructor now calls
+/// [`serve_connection_with_mob_events_and_commands_shared`] instead (grep
+/// confirms zero callers of this function anywhere, prod or test), so every
+/// comment elsewhere in this file that still names this function as *the*
+/// feed-carrying/singleplayer example is describing this function's shape,
+/// not naming today's live call site.
 ///
 /// # Errors
 ///
@@ -2820,20 +2828,27 @@ where
 /// `MobSim::explode` the tick a creeper's fuse completes) to this
 /// connection, as a real `EXPLODE` packet — through the same
 /// `container_sync_tick` timer arm that already forwards `block_ticks`'
-/// changes. The one caller today is
+/// changes. When production called this directly, the one caller was
 /// [`crate::IntegratedServer::open_in_memory_with_mobs`], the only
 /// constructor that spawns a [`MobSim`]-driven tick loop capable of
-/// producing a detonation in the first place.
+/// producing a detonation in the first place — see the next section for why
+/// that is now history rather than the live wiring.
 ///
 /// # Currently unused, and deliberately kept
 ///
 /// Issue #293 moved both production callers (`crate::integrated`) to
 /// [`serve_connection_with_mob_events_shared`], so nothing calls this today —
 /// and because `mod server` is private and `lib.rs` does not re-export it,
-/// nothing outside the crate can. It is retained rather than deleted because it
-/// is the borrow-shaped twin of the `_shared` entry point: the one way to drive
-/// the *feed-carrying* path down [`SourceRef::Borrowed`], i.e. #293's negative
-/// control with block ticks and explosions attached. Delete it only together
+/// nothing outside the crate can. (That `_shared` entry point has itself
+/// since been superseded by
+/// [`serve_connection_with_mob_events_and_commands_shared`] — see its own
+/// "Stale as of the command-dispatch landing" note — but the reasoning below
+/// for keeping *this* function around is unaffected by which `_shared`
+/// variant production currently calls.) It is retained rather than deleted
+/// because it is the borrow-shaped twin of the `_shared` entry point: the one
+/// way to drive the *feed-carrying* path down [`SourceRef::Borrowed`], i.e.
+/// #293's negative control with block ticks and explosions attached. Delete
+/// it only together
 /// with that control.
 ///
 /// #324: also the only entry point that carries a real [`WeatherFeed`] today —
