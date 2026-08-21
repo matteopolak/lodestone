@@ -606,24 +606,6 @@ struct WindowApp {
     /// immediately before `AcquiredFrame::present`, once world, HUD and every
     /// menu overlay have already written into `frame.view()`.
     pending_screenshot: bool,
-    /// The rebindable action → input table (`docs/keybindings.md`), loaded from
-    /// the persisted [`crate::config::Options`] at construction.
-    ///
-    /// Held here rather than reached for through [`MenuNav`] because this is the
-    /// *consumer*: every input event reads it, and `Keybinds` is `Copy` so the
-    /// read is a field access rather than a borrow that would fight the
-    /// `&mut self` effect calls in `window_event`.
-    ///
-    /// **A Controls menu will need a writer**, and this field is the reason that
-    /// is a small addition rather than a rewrite: `MenuNav` already owns the
-    /// loaded `Options` and the path to persist them to, so the menu's rebind
-    /// call belongs there (a `nav.rebind(action, binding)` that sets the field
-    /// and calls the existing `persist_options`), and this field then becomes
-    /// `*self.nav.keybinds()`, re-read once per frame or on change. Deliberately
-    /// not done yet: `nav.rs` is a shared file and an accessor with no caller is
-    /// the island pattern `CLAUDE.md` §1 warns about. See `docs/keybindings.md`
-    /// for the exact patch.
-    keybinds: Keybinds,
     /// Editable buffer for the chat prompt; only consumed while chat is open.
     chat_input: ChatInput,
     /// Wrapped chat rows, persisted across frames — see

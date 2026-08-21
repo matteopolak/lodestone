@@ -624,7 +624,7 @@ impl ApplicationHandler for WindowApp {
                     // Both default to a mouse button — left and right
                     // respectively — which is exactly why `Binding` has to be
                     // able to hold a mouse button and not just a key.
-                    match (mouse_action_for(&self.keybinds, button), state) {
+                    match (mouse_action_for(&self.keybinds(), button), state) {
                         (Some(InputAction::Attack), ElementState::Pressed) => {
                             self.sim.begin_attack();
                         }
@@ -982,10 +982,13 @@ impl WindowApp {
         let plugin_mode = plugin_key
             .as_ref()
             .and_then(|key| self.sim.plugin_key_intercept_mode(key));
-        // Resolved into a local first so the immutable borrow of
-        // `self.keybinds` ends before the `&mut self` calls below.
+        // Read from `MenuNav`'s live `Options` on every event, **not** from a
+        // copy taken at startup — see `WindowApp::keybinds`. Resolved into a
+        // local first so the immutable borrow of `self` ends before the
+        // `&mut self` calls below.
+        let binds = self.keybinds();
         let outcome = resolve_key(
-            &self.keybinds,
+            &binds,
             gate,
             code,
             pressed,
