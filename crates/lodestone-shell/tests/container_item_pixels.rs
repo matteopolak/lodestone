@@ -1037,3 +1037,165 @@ fn every_special_icon_kind_stands_or_falls_with_the_pass() {
          means the five counts above are not localised to their own cells"
     );
 }
+
+/// A **custom head skin** — a `minecraft:player_head` whose `minecraft:profile`
+/// carries a `textures` property — draws the *default* skull sheet in a
+/// container slot, not its own texture and not nothing.
+///
+/// # What this establishes and why it matters which
+///
+/// "Custom heads don't render" has two shapes that point at different hops: the
+/// slot could be **empty** (the icon never reached the pass) or it could hold a
+/// **plain Steve head** (the icon reached the pass and lost its texture on the
+/// way). This gate measures which, so nobody has to infer it from a screenshot.
+///
+/// The answer is the second: `container::builder::icon_record` builds the slot
+/// record from the stack and carries every other per-stack component a slot
+/// icon needs — `dyed_color`, `potion_color`, `banner_patterns`, `base_color` —
+/// and does not carry `minecraft:profile`. `ItemIcon` has no field for it. So
+/// `lodestone_render::special_item_rig` resolves the head to
+/// `skull_texture_stem(SkullType::Player)`, the default sheet, and a custom head
+/// is drawn as a plain one.
+///
+/// The world and first-person surfaces do not share the gap — a placed head
+/// resolves its profile through `BlockEntityTexture::PlayerSkin` — so the same
+/// head is correct when placed and plain in an inventory.
+///
+/// # The pinned equality is the defect, not the contract
+///
+/// The second assertion below requires the custom head to be **byte-identical**
+/// to a plain one. That is a bug pinned deliberately, and it is written to fail
+/// the moment someone threads the profile through: when the GUI path learns to
+/// resolve a head's own texture, this assertion must be **inverted** to require
+/// a difference. Do not relax it to a range — the point is that today the
+/// difference is exactly zero.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_custom_head_skin_draws_the_default_sheet_in_a_container_slot() {
+    const PLAIN_SLOT: usize = 36;
+    const CUSTOM_SLOT: usize = 37;
+
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    let resources = BlockResources::load(true);
+    let atlas = resources
+        .vanilla_atlas
+        .clone()
+        .expect("the vanilla pack must load; set LODESTONE_ASSETS");
+    let models: &BlockModels = atlas.models().expect("baked block models");
+    let item_atlas = load_item_atlas().expect("the item atlas must build");
+
+    // A real custom head: a full profile carrying a signed `textures` property,
+    // the exact shape `ClientboundContainerSetContent` delivers for a
+    // server-placed decorative head. `lodestone-v770`'s own
+    // `decodes_a_full_profile_with_signed_textures` pins that this is what
+    // arrives off the wire, so the fixture is the wire's shape rather than one
+    // invented here.
+    let mut custom = ItemStack::new(id("minecraft:player_head"), 1);
+    custom.set_profile(Some(lodestone_model::ItemProfile {
+        name: Some("Notch".to_owned()),
+        id: Some(uuid::Uuid::from_u128(0x0699_a79f_444e_9472_6a5b_efca_90e3_8aaf)),
+        properties: vec![lodestone_model::ProfileProperty {
+            name: "textures".to_owned(),
+            value: "eyJ0ZXh0dXJlcyI6e319".to_owned(),
+            signature: Some("sig-bytes".to_owned()),
+        }],
+    }));
+    assert!(
+        custom
+            .profile()
+            .is_some_and(|p| p.properties.iter().any(|q| q.name == "textures")),
+        "the fixture must really carry a textures property, or this gate is \
+         comparing two plain heads and can prove nothing"
+    );
+
+    let empty_menu = Menu::player();
+    let mut menu = Menu::player();
+    menu.set_slot_item(
+        PLAIN_SLOT,
+        Some(ItemStack::new(id("minecraft:player_head"), 1)),
+    );
+    menu.set_slot_item(CUSTOM_SLOT, Some(custom));
+
+    let frame = ContainerFrame::new(Some(&menu), "Inventory");
+    let base_frame = ContainerFrame::new(Some(&empty_menu), "Inventory");
+    let plain_rect = slot_rect(&menu, &frame, PLAIN_SLOT);
+    let custom_rect = slot_rect(&menu, &frame, CUSTOM_SLOT);
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+
+    let mut shoot = |r: &mut ContainerRenderer, f: &ContainerFrame<'_>| -> Vec<u8> {
+        let acquired = target.acquire().expect("headless acquire");
+        clear_view(device, queue, acquired.view());
+        r.render_with_icons(
+            device,
+            queue,
+            acquired.view(),
+            Some(render.depth_view()),
+            f,
+            Some(models),
+            W,
+            H,
+        );
+        target.read_texels(device, queue)
+    };
+
+    let mut lit = ContainerRenderer::new(device, format);
+    lit.attach_items(device, queue, format, item_atlas.clone());
+    lit.attach_item_models(
+        device,
+        format,
+        render.model_atlas_view().expect("a model atlas"),
+        render.model_atlas_sampler().expect("a model atlas sampler"),
+        render.model_palette_buffer().expect("a tint palette"),
+        render.model_anim_buffer().expect("animation slots"),
+    );
+    let chrome = shoot(&mut lit, &base_frame);
+    let subject = shoot(&mut lit, &frame);
+
+    let plain_lit = diff_in(&subject, &chrome, plain_rect);
+    let custom_lit = diff_in(&subject, &chrome, custom_rect);
+
+    // Cell-against-cell, so "the same picture" is checked directly rather than
+    // inferred from two equal counts — two different faces can easily cover the
+    // same number of pixels, which is exactly the coincidence a count-only
+    // comparison would miss.
+    let [px, py, pw, ph] = plain_rect;
+    let [cx, cy, ..] = custom_rect;
+    let mut differing = 0usize;
+    for dy in 0..ph {
+        for dx in 0..pw {
+            let a = (((py + dy) * W + px + dx) * 4) as usize;
+            let b = (((cy + dy) * W + cx + dx) * 4) as usize;
+            if subject[a..a + 3] != subject[b..b + 3] {
+                differing += 1;
+            }
+        }
+    }
+
+    eprintln!("=== a custom head skin in a container slot ===");
+    eprintln!("plain  head slot {PLAIN_SLOT}  lit = {plain_lit} of 256");
+    eprintln!("custom head slot {CUSTOM_SLOT}  lit = {custom_lit} of 256");
+    eprintln!("pixels where the two cells differ = {differing}");
+
+    assert!(
+        custom_lit > 0,
+        "a custom head drew nothing at all in its slot. That would mean the icon \
+         never reached the special pass — a different and worse defect than losing \
+         its texture, and it would move the search upstream of the draw"
+    );
+    assert_eq!(
+        differing, 0,
+        "a custom head is no longer pixel-identical to a plain one ({differing} px \
+         differ). If you have just threaded minecraft:profile through to the GUI \
+         icon path, this is the assertion that was pinning the bug: INVERT it to \
+         require a difference rather than relaxing it"
+    );
+}

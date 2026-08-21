@@ -55,6 +55,48 @@ fn icon_record(stack: &lodestone_game::item::ItemStack) -> Option<HotbarSlot> {
     })
 }
 
+/// Say once, per process, that a **custom head skin** cannot reach a GUI slot.
+///
+/// A `minecraft:player_head` carrying a `minecraft:profile` with a `textures`
+/// property is a *custom* head — a decorative one a server places, whose whole
+/// appearance is that property. [`icon_record`] above carries every other
+/// per-stack component a slot icon needs (dye, potion colour, loom patterns, a
+/// shield's base colour) and does **not** carry this one, so
+/// `lodestone_render::special_item_rig` resolves the head to
+/// `skull_texture_stem(SkullType::Player)` — the default sheet — and the slot
+/// draws a *plain* head instead of the intended one.
+///
+/// The world and first-person surfaces do not have this gap: a placed head
+/// resolves its profile through `BlockEntityTexture::PlayerSkin`. So the same
+/// head can be correct in the world and plain in an inventory, which is exactly
+/// the shape that reads as "custom heads don't render".
+///
+/// This is a warning and not a silent default because the failure is invisible
+/// at the draw site: a plain head *is* a head, so nothing looks broken, nothing
+/// is red, and the only evidence is that it is the wrong face. Naming it costs
+/// one line and turns a pixel hunt into a log grep.
+///
+/// # Once per process, not once per stack
+///
+/// This is reached from the per-slot draw loop, so it runs for every head in
+/// every open container on every frame. `Once` is what keeps it a report rather
+/// than a flood; the message therefore describes the *class*, and names the one
+/// head that happened to be first only as an example.
+fn warn_custom_head_skin_is_dropped(item: &ResourceLocation, profile: &lodestone_model::ItemProfile) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            target: "assets",
+            example_item = %item,
+            owner = profile.name.as_deref().unwrap_or("<unnamed>"),
+            "a custom head skin cannot reach an inventory slot: the GUI icon record \
+             carries no minecraft:profile, so this head draws the DEFAULT skull sheet \
+             rather than its own texture. The world and hand surfaces resolve it \
+             correctly, so the same head looks right when placed and plain in a slot"
+        );
+    });
+}
+
 /// The stack-count ink on the **atlas-less** fallback path (the real path uses
 /// [`item_icon::COUNT_INK`]). Named rather than inline so the recipe-panel
 /// submission-order gate can find a count-digit vertex by the same constant the
@@ -266,6 +308,16 @@ impl<'a> Builder<'a> {
             // The real thing: the shared hotbar icon pass, which also draws
             // the stack count and the durability bar.
             (Some(_), Some(record)) => {
+                // Reported at the one hop that still has the whole stack in
+                // hand. `icon_record` has already dropped the profile by the
+                // time it returns, and every layer below this takes a
+                // `HotbarSlot`, so this is the last place the drop is even
+                // knowable. See the function's own doc.
+                if let Some(profile) = stack.profile()
+                    && profile.properties.iter().any(|p| p.name == "textures")
+                {
+                    warn_custom_head_skin_is_dropped(&record.item, &profile);
+                }
                 self.item_icon_counted(assets, &record, x, y, CELL, count_ink)
             }
             // No atlas (or an item id the atlas could never key): the old
