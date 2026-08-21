@@ -89,6 +89,143 @@ fn item_has_use_animation(id: &str) -> bool {
         || path.ends_with("_bundle")
 }
 
+/// Strip an item id's namespace, so the two swing tables below can be written
+/// against bare paths the way [`item_has_use_animation`] already is.
+fn item_path(id: &str) -> &str {
+    id.rsplit_once(':').map_or(id, |(_, path)| path)
+}
+
+/// Whether a **generic use** of `id` — vanilla's `Item.use`, reached from
+/// `Minecraft.startUseItem`'s per-hand fallback — produces an
+/// `InteractionResult.Success` whose `swingSource()` is `CLIENT`, and so is
+/// one of the uses that swings the arm.
+///
+/// This is the table the "every right-click swings" report was about. Vanilla
+/// does **not** swing on a generic use in general: `InteractionResult.CONSUME`
+/// is `SwingSource.NONE`, and `Item.java`'s base `use()` returns `CONSUME` for
+/// a consumable, for `minecraft:blocks_attacks` (the shield) and for
+/// `minecraft:kinetic_weapon`, `PASS` for everything else — a sword, a
+/// pickaxe, a plain block held at open air. `BowItem`, `CrossbowItem`,
+/// `TridentItem`, `InstrumentItem` and `SpyglassItem` all return `CONSUME`
+/// too. So drawing a bow, raising a shield, eating and aiming a spyglass are
+/// all *silent* in vanilla and were all swinging here.
+///
+/// What is left is the set of `use()` overrides that really do return
+/// `InteractionResult.SUCCESS`. Two of vanilla's return `SUCCESS_SERVER`
+/// instead (`FoodOnAStickItem`, `EnderEyeItem`) — that is
+/// `SwingSource.SERVER`, so the client does not swing for those either, and
+/// they are deliberately absent below.
+///
+/// `equippable`'s branch of the base `use()` is the one remaining `SUCCESS`
+/// and is **not** here: it depends on what is already in the armour slot, so
+/// [`Sim::predict_equip_swap`] answers it from the live menu instead.
+///
+/// # The over-approximation, named
+///
+/// Five of these return `SUCCESS` only for a hit the client would have to
+/// re-cast to know about — `BoatItem`, `BucketItem`, `BottleItem` and
+/// `SpawnEggItem` each run their own fluid-aware `getPlayerPOVHitResult`,
+/// which this shell does not model (its block ray is a separate, non-fluid
+/// one), and all four return `PASS` on a miss. They are listed as swinging,
+/// because the click a player makes with a bucket or a boat in hand is
+/// overwhelmingly the one that lands on water. **The case this gets wrong is
+/// a bucket, boat, glass bottle or spawn egg right-clicked at open sky**,
+/// where vanilla returns `PASS` and stays still and this swings.
+///
+/// `firework_rocket` is *not* in that class: `FireworkRocketItem.use` gates on
+/// `player.isFallFlying()`, which this client tracks, so the caller passes
+/// `fall_flying` and the answer is exact.
+#[must_use]
+fn generic_use_swings(id: &str, fall_flying: bool) -> bool {
+    let path = item_path(id);
+    if path == "firework_rocket" {
+        return fall_flying;
+    }
+    if matches!(
+        path,
+        // Unconditional `SUCCESS` in the jar.
+        "snowball"
+            | "egg"
+            | "ender_pearl"
+            | "wind_charge"
+            | "experience_bottle"
+            | "fishing_rod"
+            | "written_book"
+            | "writable_book"
+            | "knowledge_book"
+            | "map"
+            | "splash_potion"
+            | "lingering_potion"
+            | "bundle"
+            // The over-approximated fluid-ray four.
+            | "bucket"
+            | "glass_bottle"
+    ) {
+        return true;
+    }
+    path.ends_with("_bundle")
+        || path.ends_with("_spawn_egg")
+        || path.ends_with("_boat")
+        || path.ends_with("_raft")
+        // `milk_bucket` is a consumable, not a `BucketItem`: its use is the
+        // base `Item.use`'s `CONSUME` arm, which does not swing.
+        || (path.ends_with("_bucket") && path != "milk_bucket")
+}
+
+/// Whether `id`'s **`Item.useOn`** — vanilla's `case BLOCK` arm, reached
+/// through `MultiPlayerGameMode.performUseItemOn`'s `itemStack.useOn(context)`
+/// — returns a `SUCCESS` that swings.
+///
+/// Needed because [`Placement::use_on`] answers a narrower question than
+/// vanilla's `performUseItemOn` does. Its [`UseOnDecision::Interact`] and
+/// [`UseOnDecision::Place`] cover the block actuating and a `BlockItem`
+/// placing, both `SUCCESS`; its [`UseOnDecision::Nothing`] collapses two
+/// vanilla outcomes that swing differently — the base `Item.useOn`'s `PASS`
+/// (a sword or a pickaxe against stone: no swing, fall through to the generic
+/// use) and the overrides that light, till, strip, shear, wax or place an
+/// entity against that block (`SUCCESS`: swing, and vanilla *returns* rather
+/// than falling through).
+///
+/// The over-approximation is the same shape as [`generic_use_swings`]'s and
+/// it is one-sided the same way: each of these is `SUCCESS` only against the
+/// block it acts on — a hoe on tillable dirt, an axe on strippable log,
+/// honeycomb on unwaxed copper — and this shell does not carry the tags to
+/// test that. **The case this gets wrong is one of these items right-clicked
+/// against a block it cannot act on**, where vanilla is `PASS` and silent.
+///
+/// Four narrow `useOn` overrides are deliberately left out, because for them
+/// the `SUCCESS` arm is the rare one and listing them would swing on the
+/// common `PASS`: `CompassItem` (lodestone only), `MapItem` (lectern only),
+/// `EnderEyeItem` (end portal frame only) and `PotionItem` (a *water* bottle
+/// on a mud-convertible block only).
+#[must_use]
+fn use_on_block_swings(id: &str) -> bool {
+    let path = item_path(id);
+    if matches!(
+        path,
+        "flint_and_steel"
+            | "fire_charge"
+            | "bone_meal"
+            | "shears"
+            | "honeycomb"
+            | "end_crystal"
+            | "armor_stand"
+            | "item_frame"
+            | "glow_item_frame"
+            | "painting"
+            | "minecart"
+            | "debug_stick"
+            | "firework_rocket"
+    ) {
+        return true;
+    }
+    path.ends_with("_axe")
+        || path.ends_with("_hoe")
+        || path.ends_with("_shovel")
+        || path.ends_with("_minecart")
+        || path.ends_with("_spawn_egg")
+}
+
 impl Sim {
     /// Break the currently targeted block (set it to air) and remesh. Returns
     /// whether a block was broken.
@@ -565,13 +702,31 @@ impl Sim {
     /// **`Interact`, never `InteractAt`** — see [`Self::use_item_live`]'s entity
     /// branch for why the entity-local hit position is not fabricated here.
     ///
-    /// The swing is vanilla's too: `MultiPlayerGameMode.interact` is followed by
-    /// `player.swing(hand)` at the `Minecraft.startUseItem` call site whenever the
-    /// result `consumesAction()`. We swing unconditionally, matching what
-    /// [`Self::use_item_live`]'s block path already does with its own
-    /// `SwingArm` — the result is server-side and one round trip away, and a
-    /// suppressed swing on a refused interaction is a smaller error than a
-    /// missing swing on an accepted one.
+    /// # The swing here is unconditional, and that is a known divergence
+    ///
+    /// Vanilla is not: `Minecraft.startUseItem`'s `case ENTITY` swings only
+    /// when `gameMode.interact(...)` returns an `InteractionResult.Success`
+    /// *and* that success's `swingSource()` is `CLIENT`. Every other outcome
+    /// — the overwhelmingly common `PASS` from right-clicking a hostile mob
+    /// with a sword — leaves the arm still.
+    ///
+    /// The client half of that decision is `Player.interactOn` →
+    /// `Entity.interact` → `ItemStack.interactLivingEntity`, run locally
+    /// against the real entity. This shell models **none** of it: it does not
+    /// carry the entity state (`AbstractBoat.outOfControlTicks`, an animal's
+    /// breeding item, a horse's saddle) any of those branches read, and
+    /// [`Self::update_entity_target`] keeps only the winning entity's id.
+    /// There is therefore no local result to gate on, and the two honest
+    /// options are "always" and "never".
+    ///
+    /// It is "always". **The case this gets wrong is right-clicking a mob
+    /// that has no interaction — a zombie, a creeper — where vanilla stays
+    /// still and this swings.** The case it gets right is every deliberate
+    /// entity right-click (boarding a boat or minecart, mounting a saddled
+    /// horse, feeding, shearing, trading), all of which are `SUCCESS` with a
+    /// `CLIENT` swing source. Unlike the block and generic paths — which have
+    /// real local predictions and are now gated on them — closing this one
+    /// needs a client-side `Entity.interact`, not a better guess here.
     fn interact_entity(&mut self, entity_id: i32) {
         let sneaking = self.movement_intent().sneak;
         if let Some(net) = &self.net {
@@ -583,7 +738,7 @@ impl Sim {
             net.send_action(ClientAction::SwingArm { hand: Hand::Main });
         }
         // Client-side animation, so it runs with or without a socket — the same
-        // split `use_item_live` makes for its own unconditional `swing_hand`.
+        // split `use_item_live` makes for its own `swing_hand`.
         self.swing_hand();
     }
 
@@ -1060,7 +1215,12 @@ impl Sim {
         // next to a shield/bow that could never fire at all.
         if let Some(entity_id) = self.entity_target() {
             self.interact_entity(entity_id);
-            self.use_item_generic();
+            // `already_swung`: [`Self::interact_entity`] has just swung (see its
+            // doc for why that is unconditional). Vanilla reaches at most one
+            // `player.swing` per `startUseItem` — its `case ENTITY` *returns*
+            // when it swings — so letting the fall-through swing a second time
+            // would put two `SwingArm` packets on the wire for one click.
+            self.use_item_generic(true);
             return;
         }
         let Some(hit) = self.target() else {
@@ -1071,7 +1231,7 @@ impl Sim {
             // here with **nothing sent at all** — aiming at open air, or at a
             // mob standing just past block reach with nothing behind it,
             // silently dropped the click.
-            self.use_item_generic();
+            self.use_item_generic(false);
             return;
         };
         let clicked = BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
@@ -1139,16 +1299,46 @@ impl Sim {
         let (UseOnDecision::Interact { action }
         | UseOnDecision::Place { action, .. }
         | UseOnDecision::Nothing { action }) = &decision;
+        // **The swing is the block result's, not the click's.**
+        // `Minecraft.startUseItem`'s `case BLOCK` calls `player.swing(hand)`
+        // only when `gameMode.useItemOn(...)` returned an
+        // `InteractionResult.Success` whose `swingSource()` is `CLIENT`, and
+        // `MultiPlayerGameMode.performUseItemOn` computes that result
+        // *locally* — which is exactly what [`Placement::use_on`] is, so
+        // unlike the entity path this decision is one we hold:
+        //
+        // * `Interact` — the block actuated. A door, a lever, a chest, a
+        //   crafting table, a note block all return `InteractionResult.SUCCESS`
+        //   from `useWithoutItem`/`useItemOn`. Swing.
+        // * `Place` — `BlockItem.place` returns `SUCCESS`. Swing.
+        // * `Nothing` — `use_on` could not name an interaction, which covers
+        //   both the base `Item.useOn`'s `PASS` and the overrides that return
+        //   `SUCCESS`. [`use_on_block_swings`] separates them by item id; see
+        //   its doc for the approximation and which case it gets wrong.
+        //
+        // Before this the swing was unconditional here, so right-clicking
+        // plain stone with a sword — vanilla's `PASS`, and silent — swung the
+        // arm and put a `SwingArm` on the wire for every other player to see.
+        let swings = match &decision {
+            UseOnDecision::Interact { .. } | UseOnDecision::Place { .. } => true,
+            UseOnDecision::Nothing { .. } => main
+                .as_ref()
+                .is_some_and(|item| use_on_block_swings(&item.to_string())),
+        };
         if let Some(net) = &self.net {
             net.send_action(action.clone());
-            net.send_action(ClientAction::SwingArm { hand: Hand::Main });
+            if swings {
+                net.send_action(ClientAction::SwingArm { hand: Hand::Main });
+            }
         }
-        // This swing bypasses `ActionQueue` (the two sends above go straight to
-        // the socket so their wire order is fixed), so it also bypasses
+        // This swing bypasses `ActionQueue` (the send above goes straight to
+        // the socket so its wire order is fixed), so it also bypasses
         // `drain_action_queue`'s hook and has to start the animation itself.
-        // Unconditional, not inside the `if let` above: the animation is
-        // client-side and does not need a socket.
-        self.swing_hand();
+        // Outside the `if let` above: the animation is client-side and does
+        // not need a socket.
+        if swings {
+            self.swing_hand();
+        }
 
         // The prediction. `placeable` is `Some` whenever `use_on` could have
         // returned `Place` at all (it is what filled `ctx.placing`), so the only
@@ -1210,8 +1400,15 @@ impl Sim {
         // errs the same safe way: an item our block census cannot name is treated as
         // non-placeable, so at worst a `USE_ITEM` follows a placement the server
         // accepted, where `Item.use` is `PASS` for a plain `BlockItem` anyway.
-        if matches!(decision, UseOnDecision::Nothing { .. }) && placeable.is_none() {
-            self.use_item_generic();
+        //
+        // **`!swings` is the third clause, and it is the same `return` vanilla
+        // takes.** `Nothing` with a non-placeable item is only vanilla's `PASS`
+        // when the item has no `useOn` of its own; when [`use_on_block_swings`]
+        // says it does, the result was `SUCCESS` and `case BLOCK` returns
+        // without ever reaching `gameMode.useItem`. Flint and steel lights the
+        // block and stops there — it does not also generic-use itself.
+        if matches!(decision, UseOnDecision::Nothing { .. }) && placeable.is_none() && !swings {
+            self.use_item_generic(false);
         }
     }
 
@@ -1250,7 +1447,29 @@ impl Sim {
     /// useItem` — this method's send — exactly like a shield raise or a bow
     /// draw. See that method's own doc for why the equip write belongs here
     /// rather than in [`Self::use_item_live`].
-    fn use_item_generic(&mut self) {
+    /// # The swing, and why it is no longer unconditional
+    ///
+    /// `Minecraft.startUseItem`'s fallback swings only when
+    /// `gameMode.useItem(...)` returns an `InteractionResult.Success` whose
+    /// `swingSource()` is `CLIENT`. `MultiPlayerGameMode.useItem` computes
+    /// that by running `itemStack.use(...)` locally, so — as on the block
+    /// path — the decision is one the client owns rather than one it waits a
+    /// round trip for. [`generic_use_swings`] is that decision ported by item
+    /// id, plus [`Self::predict_equip_swap`] for the one branch of the base
+    /// `Item.use` that depends on the live menu rather than on the id.
+    ///
+    /// This is the owner's report — *"right clicking with (i think) any item
+    /// makes me swing my arm"* — and it was: a drawn bow, a raised shield, a
+    /// bite of food, a spyglass and an idle sword all return
+    /// `InteractionResult.CONSUME` or `PASS`, all of which are silent in
+    /// vanilla, and every one of them swung here and put a `SwingArm` on the
+    /// wire. A snowball, an ender pearl, a fishing rod and a book still do
+    /// swing, because those really are `SUCCESS`.
+    ///
+    /// `already_swung` is the entity path's: [`Self::interact_entity`] has
+    /// swung before this is reached and vanilla never swings twice for one
+    /// `startUseItem`.
+    fn use_item_generic(&mut self, already_swung: bool) {
         let held = self
             .player_menu()
             .player_native(self.selected_slot())
@@ -1258,7 +1477,13 @@ impl Sim {
         let Some(held) = held.filter(|stack| !stack.is_empty()) else {
             return;
         };
-        self.predict_equip_swap(&held);
+        // Reported, not assumed: `Equippable.swapWithEquipmentSlot` is
+        // `SUCCESS` only when the swap actually happens (`FAIL` when the
+        // armour slot already holds the same item, `PASS` when the slot is not
+        // usable), and that is precisely the condition this predicts.
+        let equipped = self.predict_equip_swap(&held);
+        let swings = !already_swung
+            && (equipped || generic_use_swings(&held.item().to_string(), self.player().fall_flying));
         let rotation = Rotation::new(self.player().yaw, self.player().pitch);
         let sequence =
             self.write(|w| w.resource_mut::<PlacementPredictor>().0.take_use_sequence());
@@ -1268,11 +1493,15 @@ impl Sim {
                 rotation,
                 sequence,
             });
-            net.send_action(ClientAction::SwingArm { hand: Hand::Main });
+            if swings {
+                net.send_action(ClientAction::SwingArm { hand: Hand::Main });
+            }
         }
         // Client-side animation, so it runs with or without a socket — the
         // same split every other swing site in this method makes.
-        self.swing_hand();
+        if swings {
+            self.swing_hand();
+        }
     }
 
     /// Predicts vanilla's `Item.use()` → `Equippable.swapWithEquipmentSlot`
@@ -1321,17 +1550,34 @@ impl Sim {
     ///   is carried"), so there is no flag here to gate on. A server that
     ///   refuses for either reason is corrected by the same reconcile path
     ///   above, at the cost of one visible snap-back instead of silence.
-    fn predict_equip_swap(&mut self, held: &lodestone_game::item::ItemStack) {
+    ///
+    /// # Return value
+    ///
+    /// Whether the swap was predicted — i.e. whether
+    /// `Equippable.swapWithEquipmentSlot` would have returned
+    /// `InteractionResult.SUCCESS` rather than its `FAIL`/`PASS` arms. This is
+    /// [`Self::use_item_generic`]'s swing predicate for equippables: it is the
+    /// one `SUCCESS` the base `Item.use` can produce, and it cannot be
+    /// answered from the item id alone because it depends on what the armour
+    /// slot already holds. `false` for every early return below, including
+    /// the `already the same item` case vanilla `FAIL`s on — vanilla's test
+    /// there is `ItemStack.isSameItemSameComponents`, which ignores count;
+    /// this compares whole stacks, and the two agree because both sides of a
+    /// same-item comparison are a count-1 armour piece.
+    fn predict_equip_swap(&mut self, held: &lodestone_game::item::ItemStack) -> bool {
         if held.count() > 1 {
-            return;
+            return false;
         }
         let Some(target) = lodestone_game::container::equippable_slot(held) else {
-            return;
+            return false;
         };
         let Some(armor_menu_slot) = target.player_menu_index() else {
-            return;
+            return false;
         };
         let previous = self.player_menu().slot_item(armor_menu_slot).cloned();
+        if previous.as_ref() == Some(held) {
+            return false;
+        }
         let hotbar_menu_slot = 36 + self.selected_slot();
         let held_model = lodestone_model::ItemStack::from(held);
         let previous_model = previous.as_ref().map(lodestone_model::ItemStack::from);
@@ -1355,6 +1601,7 @@ impl Sim {
                 });
             }
         });
+        true
     }
 
     /// Apply a locally predicted block state to the one chunk store and re-mesh.
