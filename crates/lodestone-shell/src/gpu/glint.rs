@@ -183,11 +183,21 @@ pub(super) fn glint_now_ms() -> f64 {
 /// Clamped to `[0, 1]` because both options are `UnitDouble`s and this reaches a
 /// GPU uniform: a hand-edited negative strength would make `dst += src * src`
 /// darken the item instead of shimmering it.
+///
+/// # `atlas_px`
+///
+/// The stitched **model** atlas these draws' vertices carry UVs into. Vanilla's
+/// glint scale is expressed in atlas-normalised units, so it silently means
+/// something different on a sheet of a different size — and ours is not a fixed
+/// size, because the stitcher's gutter follows the `mipmapLevels` video setting.
+/// Pass the live dimensions, never a constant; see
+/// `lodestone_render::glint::atlas_correction`.
 #[must_use]
 pub(super) fn glint_uniform(
     view_proj: [[f32; 4]; 4],
     speed: f64,
     strength: f32,
+    atlas_px: [u32; 2],
 ) -> GlintUniform {
     GlintUniform::new(
         view_proj,
@@ -196,12 +206,17 @@ pub(super) fn glint_uniform(
         clamp_speed(speed),
         clamp_strength(strength),
         Scale::Item,
+        atlas_px,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use lodestone_render::glint::{DEFAULT_SPEED, DEFAULT_STRENGTH, glint_texture_matrix};
+
+    /// Vanilla's own stitched atlas edge, so these assertions stay about the
+    /// speed and strength arguments rather than about the atlas correction.
+    const VANILLA_ATLAS: [u32; 2] = [2048, 2048];
 
     const IDENTITY: [[f32; 4]; 4] = [
         [1.0, 0.0, 0.0, 0.0],
@@ -220,14 +235,14 @@ mod tests {
     /// one a "did anything arrive?" check would confuse with an unwritten buffer.
     #[test]
     fn the_pushed_glint_strength_reaches_glint_alpha() {
-        let quarter = super::glint_uniform(IDENTITY, DEFAULT_SPEED, 0.25);
+        let quarter = super::glint_uniform(IDENTITY, DEFAULT_SPEED, 0.25, VANILLA_ATLAS);
         assert_eq!(quarter.origin_and_alpha[3], 0.25);
         assert!(
             (quarter.origin_and_alpha[3] - DEFAULT_STRENGTH).abs() > 0.4,
             "the uniform is still carrying DEFAULT_STRENGTH"
         );
 
-        let off = super::glint_uniform(IDENTITY, DEFAULT_SPEED, 0.0);
+        let off = super::glint_uniform(IDENTITY, DEFAULT_SPEED, 0.0, VANILLA_ATLAS);
         assert_eq!(
             off.origin_and_alpha[3], 0.0,
             "a strength of zero must arrive as zero, not fall back to the default"
@@ -235,7 +250,7 @@ mod tests {
 
         // The control: the default really is `DEFAULT_STRENGTH`, so the hypothesis
         // the first assertion distances itself from is the right one.
-        let default = super::glint_uniform(IDENTITY, DEFAULT_SPEED, DEFAULT_STRENGTH);
+        let default = super::glint_uniform(IDENTITY, DEFAULT_SPEED, DEFAULT_STRENGTH, VANILLA_ATLAS);
         assert_eq!(default.origin_and_alpha[3], DEFAULT_STRENGTH);
     }
 
@@ -252,9 +267,9 @@ mod tests {
     #[test]
     fn the_speed_argument_changes_the_texture_matrix() {
         const MILLIS: f64 = 5_000.0;
-        let frozen = glint_texture_matrix(MILLIS, 0.0, super::Scale::Item);
-        let shipped = glint_texture_matrix(MILLIS, DEFAULT_SPEED, super::Scale::Item);
-        let full = glint_texture_matrix(MILLIS, 1.0, super::Scale::Item);
+        let frozen = glint_texture_matrix(MILLIS, 0.0, super::Scale::Item, VANILLA_ATLAS);
+        let shipped = glint_texture_matrix(MILLIS, DEFAULT_SPEED, super::Scale::Item, VANILLA_ATLAS);
+        let full = glint_texture_matrix(MILLIS, 1.0, super::Scale::Item, VANILLA_ATLAS);
         assert_ne!(
             frozen.to_cols_array(),
             shipped.to_cols_array(),
@@ -269,10 +284,10 @@ mod tests {
         // than building its own: at a zero speed the translation column is exactly
         // the un-scrolled one whatever the wall clock reads, which is the one
         // property of the live call that is clock-independent.
-        let uniform = super::glint_uniform(IDENTITY, 0.0, DEFAULT_STRENGTH);
+        let uniform = super::glint_uniform(IDENTITY, 0.0, DEFAULT_STRENGTH, VANILLA_ATLAS);
         assert_eq!(
             uniform.tex_matrix,
-            glint_texture_matrix(0.0, 0.0, super::Scale::Item).to_cols_array_2d(),
+            glint_texture_matrix(0.0, 0.0, super::Scale::Item, VANILLA_ATLAS).to_cols_array_2d(),
             "glint_uniform is not passing its speed argument to \
              glint_texture_matrix"
         );

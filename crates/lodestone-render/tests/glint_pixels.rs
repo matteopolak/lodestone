@@ -74,6 +74,7 @@
 
 use lodestone_assets::{Image, ResourceManager, ResourceSource, ZipSource};
 use lodestone_render::entity::{dropped_item_mesh, ground_transform_for};
+use glam::Vec4Swizzles as _;
 use lodestone_render::glint::{
     self, DEFAULT_SPEED, DEFAULT_STRENGTH, GlintPipeline, GlintUniform, Scale,
 };
@@ -303,6 +304,10 @@ fn render(
         DEFAULT_SPEED,
         DEFAULT_STRENGTH,
         Scale::Item,
+        // The sheet these vertices carry UVs into. Not a constant: the stitched
+        // model atlas's size follows the mip gutter, and the glint scale is
+        // expressed in atlas-normalised units — see `glint::atlas_correction`.
+        [models.atlas().width, models.atlas().height],
     );
     let glint_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("glint uniform"),
@@ -693,9 +698,38 @@ fn suppressing_the_glint_pass_leaves_the_frame_byte_identical() {
     );
 }
 
-/// The real jar asset: correct dimensions, and a composited silhouette that
-/// **varies** across itself — the scrolling diagonal pattern. A uniform texture
-/// cannot show this, and a flat wash would fail it.
+/// The real jar asset: correct dimensions, the vanilla-derived number of glint
+/// texels across the item, and a composited silhouette whose added light matches
+/// a **prediction computed from the PNG itself**.
+///
+/// # Why this predicts a range instead of thresholding a spread
+///
+/// The property that matters is that the glint is a *pattern*, not a wash. An
+/// earlier form of this test asserted `max - min > 0.02`, an undecorated round
+/// number, and that predicate turned out to be measuring the wrong thing: the
+/// spread of the added light depends on how large a window of the 128x128 sheet
+/// the item happens to cover, which depends on the atlas packing, which is not a
+/// property of the glint at all. It passed while the atlas was small, then failed
+/// when the atlas grew a mip gutter — and it went on failing after the glint was
+/// corrected back to vanilla's own coverage, because vanilla's window is smaller
+/// than the one the threshold had been calibrated against.
+///
+/// So this predicts the delta range for **both** hypotheses, from outside the
+/// renderer: the PNG's own bytes, bilinearly sampled over the glint-UV rect,
+/// squared through `BlendFunction.GLINT` and scaled by `GlintAlpha`. The two
+/// hypotheses are the atlas-corrected scale and the uncorrected one (vanilla's
+/// `8.0` applied straight to our larger sheet's UVs, which is what shipped), and
+/// the discriminating statistic is the **floor**: a smaller window sits inside
+/// one lobe of the pattern and never reaches its dark side, so an uncorrected
+/// glint has a floor several times higher than a corrected one even though both
+/// have a similar peak. A "did the spread exceed a constant" test cannot see
+/// that; a floor can.
+///
+/// The coverage assertion above it is independent of both: `Scale::Item`'s 8.0
+/// over vanilla's own 2048-texel atlas puts `8.0 * 128 * 16 / 2048 = 8` glint
+/// texels across a 16-px sprite, and the 10 degree rotation widens an axis-aligned
+/// rect's bounding box by `cos 10 + sin 10`. Nothing in that derivation comes
+/// from our renderer.
 #[test]
 #[ignore = "requires a GPU adapter and a fetched vanilla client.jar; run explicitly"]
 fn the_real_jar_glint_texture_produces_a_varying_pattern() {
@@ -720,6 +754,80 @@ fn the_real_jar_glint_texture_produces_a_varying_pattern() {
         .fold(glam::Vec3::ZERO, |a, v| a + glam::Vec3::from(v.position))
         / mesh.vertices.len() as f32;
     let cam = camera(centre);
+
+    let atlas_px = [models.atlas().width, models.atlas().height];
+    let (uv0, uv1) = mesh_uv_rect(&mesh);
+    println!(
+        "atlas {}x{}, sprite uv rect [{:.6},{:.6}]x[{:.6},{:.6}] = {:.2}x{:.2} atlas px",
+        atlas_px[0],
+        atlas_px[1],
+        uv0.x,
+        uv1.x,
+        uv0.y,
+        uv1.y,
+        (uv1.x - uv0.x) * atlas_px[0] as f32,
+        (uv1.y - uv0.y) * atlas_px[1] as f32
+    );
+    assert!(
+        ((uv1.x - uv0.x) * atlas_px[0] as f32 - SPRITE_PX).abs() < 0.5,
+        "the subject is meant to be a plain {SPRITE_PX}-px sprite; if it is not, every derived \
+         glint-texel count below is about a different item"
+    );
+
+    // --- The coverage claim, derived entirely outside this renderer. ---
+    let matrix = glint::glint_texture_matrix(MILLIS, DEFAULT_SPEED, Scale::Item, atlas_px);
+    let (g0, g1) = glint_uv_rect(&mesh, matrix);
+    let measured_texels = (g1.x - g0.x) * f32::from(GLINT_SIZE as u16);
+    let rot = ROTATION_BBOX_WIDENING;
+    let want_texels = VANILLA_SPRITE_GLINT_TEXELS * rot;
+    println!(
+        "glint window {:.3} x {:.3} texels; vanilla's {VANILLA_SPRITE_GLINT_TEXELS} widened by \
+         the 10 degree rotation is {want_texels:.3}",
+        measured_texels,
+        (g1.y - g0.y) * f32::from(GLINT_SIZE as u16)
+    );
+    assert!(
+        (measured_texels - want_texels).abs() < 0.1,
+        "a {SPRITE_PX}-px sprite must receive vanilla's {VANILLA_SPRITE_GLINT_TEXELS} glint \
+         texels ({want_texels:.3} once the 10 degree rotation widens the bounding box), got \
+         {measured_texels:.3}. Our atlas is {}x{} against vanilla's {}, so this is the \
+         atlas-relative correction in `glint::atlas_correction`; without it the count is \
+         {VANILLA_SPRITE_GLINT_TEXELS} * {}/{} of that.",
+        atlas_px[0],
+        atlas_px[1],
+        glint::VANILLA_ATLAS_PX,
+        glint::VANILLA_ATLAS_PX,
+        atlas_px[0]
+    );
+
+    // --- Both predictions, from the PNG's own bytes. ---
+    let correct = predict_delta_range(&sheet, &mesh, matrix);
+    let shipped_bug = predict_delta_range(
+        &sheet,
+        &mesh,
+        // The uncorrected matrix: vanilla's 8.0 straight onto our sheet's UVs,
+        // reproduced by telling the correction our atlas *is* vanilla's.
+        glint::glint_texture_matrix(
+            MILLIS,
+            DEFAULT_SPEED,
+            Scale::Item,
+            [glint::VANILLA_ATLAS_PX as u32, glint::VANILLA_ATLAS_PX as u32],
+        ),
+    );
+    println!(
+        "predicted from the PNG: corrected [{:.5}, {:.5}], uncorrected [{:.5}, {:.5}]",
+        correct.0, correct.1, shipped_bug.0, shipped_bug.1
+    );
+    // Executed control: an input on which the two hypotheses coincide would make
+    // every assertion below vacuous, and the floor is the statistic they are
+    // asserted on.
+    assert!(
+        shipped_bug.0 > correct.0 * 2.0,
+        "the two hypotheses predict floors {:.5} and {:.5}, which are too close to tell apart — \
+         this item/time is not a discriminating input and the assertions below prove nothing",
+        correct.0,
+        shipped_bug.0
+    );
 
     let item_only = render(&gpu, &models, &mesh, &cam, None);
     let with_glint = render(&gpu, &models, &mesh, &cam, Some(&sheet));
@@ -753,21 +861,114 @@ fn the_real_jar_glint_texture_produces_a_varying_pattern() {
         var.sqrt()
     );
 
+    // The peak: predicted from the PNG, not thresholded. The silhouette samples a
+    // subset of the quad's UV rect, so it can fall a little short of the rect's
+    // own peak but must not exceed it.
     assert!(
-        mean > 0.005,
-        "the real glint texture added a mean of only {mean:.5} linear light over the silhouette \
-         (bbox {:?}) — it is not reaching pixels",
+        max <= correct.1 + PREDICTION_TOLERANCE && max >= correct.1 - PREDICTION_TOLERANCE,
+        "the composited peak is {max:.5}, and the PNG over this glint-UV rect predicts \
+         {:.5} (bbox {:?})",
+        correct.1,
         bbox(&pixels)
     );
-    // The discriminating property: the added light must *vary*. A flat wash — the
-    // signature of a broken UV transform collapsing every vertex to one texel, or
-    // of a degenerate texture matrix — has near-zero spread and would pass a
-    // "did it get brighter" assertion.
+    // The floor, which is what separates a pattern from a wash: a window that
+    // fits inside one bright lobe never darkens, and that is exactly what the
+    // uncorrected scale produces.
     assert!(
-        max - min > 0.02,
-        "the real glint added a near-uniform {mean:.5} everywhere (range [{min:.5}, {max:.5}], \
-         bbox {:?}) — that is a flat wash, not a scrolling pattern; suspect the texture matrix \
-         or the UVs",
+        (min - correct.0).abs() < (min - shipped_bug.0).abs(),
+        "the composited floor is {min:.5}, nearer the UNCORRECTED prediction {:.5} than the \
+         corrected one {:.5} (bbox {:?}) — the glint is sitting inside one lobe of the pattern \
+         and never reaching its dark side, i.e. a wash rather than a shimmer. Check \
+         `glint::atlas_correction` and the atlas dimensions handed to \
+         `glint_texture_matrix`.",
+        shipped_bug.0,
+        correct.0,
         bbox(&pixels)
     );
+}
+
+/// A 16x16 item sprite, the size every assertion about glint texels is derived
+/// against. Asserted rather than assumed.
+const SPRITE_PX: f32 = 16.0;
+
+/// `Scale::Item.factor() * GLINT_SIZE * SPRITE_PX / VANILLA_ATLAS_PX`, i.e. how
+/// many glint texels vanilla lands across one item sprite: `8 * 128 * 16 / 2048`.
+/// Written out rather than computed so the arithmetic is visible.
+const VANILLA_SPRITE_GLINT_TEXELS: f32 = 8.0;
+
+/// `cos 10 + sin 10`: how much the glint matrix's 10 degree rotation widens an
+/// axis-aligned UV rect's axis-aligned bounding box.
+const ROTATION_BBOX_WIDENING: f32 = 1.157_691;
+
+/// Peak-prediction tolerance, in linear light. One 8-bit step near the item's own
+/// brightness is worth well under this; the slack is for the silhouette sampling
+/// a subset of the quad's UV rect rather than all of it.
+const PREDICTION_TOLERANCE: f32 = 0.003;
+
+/// The mesh's atlas-UV bounding rect.
+fn mesh_uv_rect(mesh: &ModelMesh) -> (glam::Vec2, glam::Vec2) {
+    mesh.vertices.iter().fold(
+        (glam::Vec2::splat(f32::MAX), glam::Vec2::splat(f32::MIN)),
+        |(lo, hi), v| {
+            let uv = glam::Vec2::from(v.uv);
+            (lo.min(uv), hi.max(uv))
+        },
+    )
+}
+
+/// The same rect after the glint texture matrix.
+fn glint_uv_rect(mesh: &ModelMesh, matrix: glam::Mat4) -> (glam::Vec2, glam::Vec2) {
+    mesh.vertices.iter().fold(
+        (glam::Vec2::splat(f32::MAX), glam::Vec2::splat(f32::MIN)),
+        |(lo, hi), v| {
+            let t = matrix * glam::Vec4::new(v.uv[0], v.uv[1], 0.0, 1.0);
+            (lo.min(t.xy()), hi.max(t.xy()))
+        },
+    )
+}
+
+/// Bilinear `REPEAT` sample of the glint sheet's green channel, matching the
+/// sampler the pass binds. Green because the sheet is grey and the gate reads the
+/// framebuffer's green channel.
+fn sample_sheet(sheet: &Image, u: f32, v: f32) -> f32 {
+    let w = sheet.width as i32;
+    let h = sheet.height as i32;
+    let fx = u * sheet.width as f32 - 0.5;
+    let fy = v * sheet.height as f32 - 0.5;
+    let (x0, y0) = (fx.floor(), fy.floor());
+    let (tx, ty) = (fx - x0, fy - y0);
+    let at = |xi: i32, yi: i32| -> f32 {
+        let x = xi.rem_euclid(w) as usize;
+        let y = yi.rem_euclid(h) as usize;
+        f32::from(sheet.rgba[(y * sheet.width as usize + x) * 4 + 1]) / 255.0
+    };
+    let (xi, yi) = (x0 as i32, y0 as i32);
+    let a = at(xi, yi) * (1.0 - tx) + at(xi + 1, yi) * tx;
+    let b = at(xi, yi + 1) * (1.0 - tx) + at(xi + 1, yi + 1) * tx;
+    a * (1.0 - ty) + b * ty
+}
+
+/// `(min, max)` of the linear light `BlendFunction.GLINT` would add over the
+/// mesh's UV rect under `matrix`, computed from the sheet's own bytes.
+///
+/// `GLINT` is `SRC_COLOR, ONE`, so the added light is the source **squared**, and
+/// the source is the raw texel (the sheet is uploaded `Rgba8Unorm`, uncorrected,
+/// exactly as vanilla samples it) times `GlintAlpha`.
+fn predict_delta_range(sheet: &Image, mesh: &ModelMesh, matrix: glam::Mat4) -> (f32, f32) {
+    let (uv0, uv1) = mesh_uv_rect(mesh);
+    const N: u32 = 256;
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    for i in 0..=N {
+        for j in 0..=N {
+            let u = uv0.x + (uv1.x - uv0.x) * (i as f32 / N as f32);
+            let v = uv0.y + (uv1.y - uv0.y) * (j as f32 / N as f32);
+            let t = matrix * glam::Vec4::new(u, v, 0.0, 1.0);
+            let g = sample_sheet(sheet, t.x.rem_euclid(1.0), t.y.rem_euclid(1.0));
+            let src = g * DEFAULT_STRENGTH;
+            let d = src * src;
+            lo = lo.min(d);
+            hi = hi.max(d);
+        }
+    }
+    (lo, hi)
 }

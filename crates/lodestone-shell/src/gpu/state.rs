@@ -886,9 +886,24 @@ impl RenderState {
                     view_proj,
                     self.glint_speed,
                     self.glint_strength,
+                    self.glint_atlas_px(),
                 )),
             );
         }
+    }
+
+    /// The dimensions of the atlas a glint draw's vertices carry UVs into.
+    ///
+    /// Both glint buffers here shimmer item geometry, which is baked against the
+    /// stitched **model** atlas — the same object
+    /// `self.model.as_ref().map_or(&self.atlas, |m| &m.atlas)` resolves for every
+    /// other consumer of it. It is not a constant: the stitcher's gutter is
+    /// `1 << mipmapLevels`, so the sheet is repacked (and every UV with it)
+    /// whenever that video setting moves, and vanilla's glint scale is expressed
+    /// in atlas-normalised units. See `lodestone_render::glint::atlas_correction`.
+    fn glint_atlas_px(&self) -> [u32; 2] {
+        let atlas = self.model.as_ref().map_or(&self.atlas, |m| &m.atlas);
+        [atlas.width, atlas.height]
     }
 
     /// Push vanilla's **Glint Speed**/**Glint Strength** accessibility options
@@ -971,6 +986,7 @@ impl RenderState {
                     view_proj,
                     self.glint_speed,
                     self.glint_strength,
+                    self.glint_atlas_px(),
                 )),
             );
         }

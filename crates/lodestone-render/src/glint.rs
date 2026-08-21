@@ -225,7 +225,49 @@ pub fn glint_offsets(clock: i64) -> (f32, f32) {
     (u, v)
 }
 
-/// The glint texture matrix: `T(-u_off, +v_off, 0) * Rz(10°) * S(scale)`.
+/// The edge, in texels, of the vanilla atlas every `setupGlintTexturing` scale
+/// was chosen against.
+///
+/// Vanilla's glint samples the *atlas* UV (`glint.vsh`'s `UV0`, and
+/// `ItemFeatureRenderer.prepareFoilSubmit` hands the foil buffer the very same
+/// `BakedQuad`), so a scale expressed in atlas-normalised units carries vanilla's
+/// atlas size inside it. That size is not documented anywhere in the jar as a
+/// number — it is whatever `Stitcher` produces — so this constant was obtained by
+/// porting `Stitcher` (its `smallestFittingMinTexel` slot rounding, its
+/// `-height, -width, name` sort, its `expand`/`Region.add` shelf split) and
+/// running it over vanilla's own `atlases/items.json` and `atlases/blocks.json`
+/// sprite lists at the default mip level 4 with anisotropy off, i.e. padding
+/// `1 << 4 = 16`. **Both come out 2048x2048** — items from 860 sprites, blocks
+/// from 1278 — so one number covers every glint an item can carry.
+///
+/// The consequence worth stating plainly: at vanilla's packing a 16-px item
+/// sprite receives `8.0 * 128 * 16 / 2048 = 8` glint texels across it. That is
+/// the shimmer, and it is what [`atlas_correction`] preserves.
+pub const VANILLA_ATLAS_PX: f32 = 2048.0;
+
+/// Per-axis factor converting one of *our* atlas UVs into the UV vanilla's own
+/// atlas would have carried for the same sprite.
+///
+/// Both axes are corrected separately because neither sheet is guaranteed square
+/// and vanilla's anisotropy over a non-square atlas is a real part of how the
+/// shimmer looks — vanilla gets it from the UVs rather than from the matrix,
+/// which is exactly why the correction belongs on the UVs here too.
+///
+/// This is not cosmetic tuning. Our stitched model sheet is 4096x4096 with the
+/// mip gutter on, so an uncorrected `Scale::Item` puts **4** glint texels across
+/// a 16-px sprite where vanilla puts 8, and four texels of a 128-px sheet
+/// stretched over an item is a flat wash rather than a moving pattern. It also
+/// means the shimmer would change scale when the player moves the mipmap
+/// slider, since the gutter is `1 << levels` and the packing follows it.
+#[must_use]
+pub fn atlas_correction(atlas_px: [u32; 2]) -> glam::Vec2 {
+    glam::Vec2::new(
+        atlas_px[0] as f32 / VANILLA_ATLAS_PX,
+        atlas_px[1] as f32 / VANILLA_ATLAS_PX,
+    )
+}
+
+/// The glint texture matrix: `T(-u_off, +v_off, 0) * Rz(10°) * S(scale) * A(atlas)`.
 ///
 /// # Composition order, which JOML makes easy to get backwards
 ///
@@ -240,12 +282,34 @@ pub fn glint_offsets(clock: i64) -> (f32, f32) {
 ///
 /// The shader applies it as `(M * vec4(uv, 0, 1)).xy`, exactly vanilla's
 /// `glint.vsh`.
+///
+/// # Why there is an `atlas_px` vanilla does not have
+///
+/// The incoming UV is an **atlas** UV, so `scale.factor()` is not a scale in any
+/// unit intrinsic to the item — it is `scale.factor()` *of the whole sheet*, and
+/// what a player sees is how many glint texels land across a sprite. That number
+/// is `factor * glint_size * sprite_px / atlas_px`, so it moves whenever the
+/// atlas is repacked, and vanilla's constants were chosen against vanilla's own
+/// packing. [`atlas_correction`] converts our sheet's UVs into the UVs vanilla's
+/// sheet would have produced for the same sprite, applied innermost so vanilla's
+/// uniform scale and its rotation both act on vanilla-equivalent coordinates.
+///
+/// Pass the dimensions of the atlas whose UVs this draw's vertices carry —
+/// **not** a constant. There is more than one atlas here (the stitched model
+/// sheet, the GUI [`ItemAtlas`](crate::ItemAtlas)) and they are different sizes.
 #[must_use]
-pub fn glint_texture_matrix(millis: f64, speed: f64, scale: Scale) -> glam::Mat4 {
+pub fn glint_texture_matrix(
+    millis: f64,
+    speed: f64,
+    scale: Scale,
+    atlas_px: [u32; 2],
+) -> glam::Mat4 {
     let (u, v) = glint_offsets(glint_clock(millis, speed));
+    let a = atlas_correction(atlas_px);
     glam::Mat4::from_translation(glam::Vec3::new(-u, v, 0.0))
         * glam::Mat4::from_rotation_z(ROTATION_DEGREES.to_radians())
         * glam::Mat4::from_scale(glam::Vec3::splat(scale.factor()))
+        * glam::Mat4::from_scale(glam::Vec3::new(a.x, a.y, 1.0))
 }
 
 /// Vanilla's baked `ENCHANTMENT_GLINT_OVERRIDE` item-prototype flag, for the
@@ -346,6 +410,9 @@ pub struct GlintUniform {
 
 impl GlintUniform {
     /// Build the uniform for one glint draw.
+    ///
+    /// `atlas_px` is the atlas the vertices of *this* draw carry UVs into — see
+    /// [`glint_texture_matrix`] for why it is a parameter and not a constant.
     #[must_use]
     pub fn new(
         view_proj: [[f32; 4]; 4],
@@ -354,10 +421,11 @@ impl GlintUniform {
         speed: f64,
         strength: f32,
         scale: Scale,
+        atlas_px: [u32; 2],
     ) -> Self {
         Self {
             view_proj,
-            tex_matrix: glint_texture_matrix(millis, speed, scale).to_cols_array_2d(),
+            tex_matrix: glint_texture_matrix(millis, speed, scale, atlas_px).to_cols_array_2d(),
             origin_and_alpha: [
                 section_origin[0],
                 section_origin[1],
@@ -599,6 +667,61 @@ pub fn glint_sampler(device: &wgpu::Device) -> wgpu::Sampler {
 mod tests {
     use super::*;
 
+    /// Vanilla's own stitched atlas edge — see [`VANILLA_ATLAS_PX`]. Every
+    /// composition test below uses it, so each still asserts vanilla's matrix
+    /// exactly: at this size [`atlas_correction`] is the identity and the
+    /// expectations are unchanged from before it existed.
+    const VANILLA_ATLAS: [u32; 2] = [2048, 2048];
+
+    /// The correction is the identity at vanilla's own packing, and scales
+    /// linearly away from it — so it can neither silently alter the vanilla case
+    /// nor be a no-op stub.
+    ///
+    /// The second row is the shipped one: our stitched model sheet is 4096x4096
+    /// with the mip gutter on, exactly twice vanilla's edge, so a `Scale::Item`
+    /// draw must sample twice as far across the glint sheet per atlas texel to
+    /// land the same eight glint texels on a 16-px sprite.
+    #[test]
+    fn the_atlas_correction_is_the_identity_at_vanillas_packing_and_linear_away_from_it() {
+        assert_eq!(atlas_correction(VANILLA_ATLAS), glam::Vec2::ONE);
+        assert_eq!(atlas_correction([4096, 4096]), glam::Vec2::new(2.0, 2.0));
+        // Non-square, because neither sheet is guaranteed square and the two
+        // axes must be corrected independently.
+        assert_eq!(atlas_correction([1024, 4096]), glam::Vec2::new(0.5, 2.0));
+    }
+
+    /// The property the correction exists for, stated as the thing a player
+    /// sees: how many glint texels land across one 16-px item sprite.
+    ///
+    /// Vanilla's answer is `8.0 * 128 * 16 / 2048 = 8`, and it must come out 8
+    /// whatever *our* sheet is. The wrong hypothesis — no correction at all — is
+    /// computed alongside it and must be a different number, so this cannot pass
+    /// by both arms agreeing.
+    #[test]
+    fn a_sixteen_pixel_sprite_receives_vanillas_eight_glint_texels_at_any_atlas_size() {
+        const GLINT_PX: f32 = 128.0;
+        const SPRITE_PX: f32 = 16.0;
+        for atlas in [2048.0_f32, 4096.0, 1024.0] {
+            let uv_span = SPRITE_PX / atlas;
+            let corrected = uv_span
+                * Scale::Item.factor()
+                * atlas_correction([atlas as u32, atlas as u32]).x
+                * GLINT_PX;
+            assert!(
+                (corrected - 8.0).abs() < 1e-3,
+                "atlas {atlas}: {corrected} glint texels, want vanilla's 8"
+            );
+            let uncorrected = uv_span * Scale::Item.factor() * GLINT_PX;
+            if (atlas - VANILLA_ATLAS_PX).abs() > f32::EPSILON {
+                assert!(
+                    (uncorrected - 8.0).abs() > 1.0,
+                    "atlas {atlas}: the uncorrected hypothesis also gives \
+                     {uncorrected}, so this input cannot tell the two apart"
+                );
+            }
+        }
+    }
+
     /// Every scale factor against the jar literal.
     #[test]
     fn scale_factors_match_texture_transform() {
@@ -720,7 +843,7 @@ mod tests {
     /// the next test uses a non-zero time.
     #[test]
     fn the_matrix_scales_then_rotates() {
-        let m = glint_texture_matrix(0.0, DEFAULT_SPEED, Scale::Item);
+        let m = glint_texture_matrix(0.0, DEFAULT_SPEED, Scale::Item, VANILLA_ATLAS);
         let out = m * glam::Vec4::new(1.0, 0.0, 0.0, 1.0);
         let a = ROTATION_DEGREES.to_radians();
         assert!((out.x - 8.0 * a.cos()).abs() < 1e-4, "x = {}", out.x);
@@ -749,7 +872,7 @@ mod tests {
         let (u, v) = glint_offsets(clock);
         assert!(u > 0.0 && v > 0.0 && (u - v).abs() > 1e-3, "u={u} v={v}");
 
-        let m = glint_texture_matrix(millis, DEFAULT_SPEED, Scale::Item);
+        let m = glint_texture_matrix(millis, DEFAULT_SPEED, Scale::Item, VANILLA_ATLAS);
         let origin = m * glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
 
         // Hypothesis A: T applied last.
@@ -778,7 +901,7 @@ mod tests {
     /// (`translation(-layerOffset0, layerOffset1, 0)`).
     #[test]
     fn u_scrolls_negative_and_v_positive() {
-        let m = glint_texture_matrix(1_234.0, DEFAULT_SPEED, Scale::Item);
+        let m = glint_texture_matrix(1_234.0, DEFAULT_SPEED, Scale::Item, VANILLA_ATLAS);
         let origin = m * glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
         assert!(origin.x < 0.0, "U offset must be negative: {}", origin.x);
         assert!(origin.y > 0.0, "V offset must be positive: {}", origin.y);
@@ -979,10 +1102,12 @@ mod tests {
             DEFAULT_SPEED,
             DEFAULT_STRENGTH,
             Scale::Item,
+            VANILLA_ATLAS,
         );
         assert_eq!(
             u.tex_matrix,
-            glint_texture_matrix(1_234.0, DEFAULT_SPEED, Scale::Item).to_cols_array_2d()
+            glint_texture_matrix(1_234.0, DEFAULT_SPEED, Scale::Item, VANILLA_ATLAS)
+                .to_cols_array_2d()
         );
         assert_eq!(u.origin_and_alpha, [1.0, 2.0, 3.0, DEFAULT_STRENGTH]);
     }

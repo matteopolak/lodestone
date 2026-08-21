@@ -1944,7 +1944,7 @@ pub(crate) fn build_sprite_pipeline(
 /// *same* pair `gpu::glint::glint_uniform` uses, deliberately, because two copies
 /// of the domain is how the GUI icon and the held item would come to shimmer at
 /// different rates.
-fn gui_glint_uniform(speed: f64, strength: f32) -> GuiGlintUniform {
+fn gui_glint_uniform(speed: f64, strength: f32, atlas_px: [u32; 2]) -> GuiGlintUniform {
     // Same clock as `gpu::glint::glint_now_ms` — deliberately, so the GUI icon and
     // the held item shimmer at one rate — and `crate::platform::epoch_duration` for
     // the same reason it uses it: `SystemTime::now()` traps on wasm32.
@@ -1958,6 +1958,10 @@ fn gui_glint_uniform(speed: f64, strength: f32) -> GuiGlintUniform {
             // `Scale::Item` — the `glint` render type, which is every item form
             // including a GUI slot icon.
             lodestone_render::glint::Scale::Item,
+            // The **item atlas**, not the model atlas the world and hand glints
+            // sample: this pass transforms the icon quad's own item-atlas UV, and
+            // the scale is atlas-relative.
+            atlas_px,
         )
         .to_cols_array_2d(),
         fade: [strength, 0.0, 0.0, 0.0],
@@ -2154,6 +2158,7 @@ impl GuiGlint {
             texture_bind_group,
             buffer,
             capacity_floats,
+            atlas_px: [items.width, items.height],
         }
     }
 }
@@ -2252,6 +2257,14 @@ struct GuiGlint {
     texture_bind_group: wgpu::BindGroup,
     buffer: wgpu::Buffer,
     capacity_floats: usize,
+    /// The **item atlas**'s dimensions, captured at build time.
+    ///
+    /// `hud_glint.wgsl` transforms the icon quad's item-atlas UV, and vanilla's
+    /// glint scale is expressed in atlas-normalised units — so it means something
+    /// different on a sheet of a different size, and this sheet is not the one the
+    /// world and hand glints sample. See
+    /// `lodestone_render::glint::atlas_correction`.
+    atlas_px: [u32; 2],
 }
 
 /// `hud_glint.wgsl`'s group-0 uniform: the glint texture matrix plus
@@ -2483,7 +2496,7 @@ impl IconRenderer {
         queue.write_buffer(
             &g.uniform,
             0,
-            bytemuck::bytes_of(&gui_glint_uniform(g_speed, g_strength)),
+            bytemuck::bytes_of(&gui_glint_uniform(g_speed, g_strength, g.atlas_px)),
         );
         (verts.len() / SPRITE_FLOATS_PER_VERTEX) as u32
     }
