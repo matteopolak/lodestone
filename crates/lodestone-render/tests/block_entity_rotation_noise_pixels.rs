@@ -381,23 +381,14 @@ fn covered(pixels: &[u8]) -> usize {
         .count()
 }
 
-/// One measured configuration, collected rather than asserted in the loop:
-/// an `assert!` inside the sweep would abort on the first failure and leave
-/// every later arm an argument rather than an observation.
-#[derive(Debug)]
-struct Arm {
-    distance: f32,
-    origin: i32,
-    segment: u8,
-    speckle: usize,
-    roughness: u32,
-}
-
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn skull_rotation_segments_are_speckle_free() {
     let gpu = setup();
-    let mut noisy: Vec<Arm> = Vec::new();
+    // Collected rather than asserted inside the sweep: an `assert!` in the loop
+    // would abort on the first failure and leave every later arm an argument
+    // rather than an observation.
+    let mut noisy: Vec<String> = Vec::new();
     for distance in [1.2f32, 8.0] {
         for origin in [
             [0, 0, 0],
@@ -420,18 +411,15 @@ fn skull_rotation_segments_are_speckle_free() {
                 );
                 assert!(covered > 100, "the rig must actually be on screen");
                 if speckle > 0 || roughness > 0 {
-                    noisy.push(Arm {
-                        distance,
-                        origin: origin[0],
-                        segment,
-                        speckle,
-                        roughness,
-                    });
+                    noisy.push(format!(
+                        "dist {distance} origin {} segment {segment}: speckle {speckle}, roughness {roughness}",
+                        origin[0]
+                    ));
                 }
             }
         }
     }
-    assert!(noisy.is_empty(), "speckled configurations: {noisy:#?}");
+    assert!(noisy.is_empty(), "speckled configurations:\n  {}", noisy.join("\n  "));
 }
 
 // ---------------------------------------------------------------------------
