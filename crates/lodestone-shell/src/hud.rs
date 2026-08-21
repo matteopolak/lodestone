@@ -507,6 +507,31 @@ pub struct DebugStats {
     /// the reason [`Self::section_count`] gives. Residency is
     /// `RenderState::total_quads`.
     pub quads: usize,
+    /// Draw calls issued this frame (`RenderStats::draw_calls`), terrain plus a
+    /// small per-frame constant (the first-person arm draws even with no pack).
+    /// Read it against [`Self::section_count`]: this repo's own evidence
+    /// standard is that "3 ms across 60 draws" and "3 ms across 6000" are
+    /// different problems, and no timing on this overlay means anything without
+    /// the count beside it.
+    pub draw_calls: usize,
+    /// Sections the distance cull rejected this frame
+    /// (`RenderStats::sections_culled_distance`).
+    pub sections_culled_distance: usize,
+    /// Sections the frustum cull rejected this frame
+    /// (`RenderStats::sections_culled_frustum`). The first of the three cull
+    /// buckets to move when you turn on the spot, and the one whose *sum* with
+    /// the other two plus [`Self::section_count`] should account for every
+    /// resident section.
+    pub sections_culled_frustum: usize,
+    /// Distinct terrain camera bind-group objects bound across the whole frame
+    /// (`RenderStats::terrain_camera_bind_group_switches`).
+    ///
+    /// Expected to be **1**, and flat regardless of how much terrain is
+    /// resident — the packed and model paths each share one bind group with a
+    /// dynamic offset per section. A number that starts tracking the section
+    /// count is the per-section-bind-group regression returning, which is a
+    /// shape change no frame-time figure would identify on its own.
+    pub terrain_camera_bind_group_switches: usize,
     /// Exact bytes of GPU mesh storage occupied by resident sections
     /// (`RenderStats::vram_bytes`). A pure function of residency: unlike the two
     /// counters above it must **not** move when the camera merely rotates.
@@ -1411,6 +1436,19 @@ pub struct HudFrame<'a> {
     /// call `recent_ages_spans` instead of `recent_ages`, and `app/redraw.rs`
     /// to fill this field instead of [`Self::chat`].
     pub chat_spans: &'a [(&'a [TextSpan], f32)],
+    /// Each [`Self::chat_spans`] row's message trust, for the indicator bar —
+    /// `None` where the row is a system message (no signature, so no verdict),
+    /// `Some` for a player message.
+    ///
+    /// A **parallel** slice rather than a third tuple element on
+    /// `chat_spans`, so every existing caller and every test asserting on that
+    /// tuple's shape is untouched. It is filled by the same slice-and-window
+    /// step in `app/redraw.rs` that builds `chat_spans`, and is therefore
+    /// index-aligned with it — but a consumer must still index defensively:
+    /// empty (the default, see [`HudFrame::new`]) is the honest reading for
+    /// every caller not yet wired, and drawing a badge for a row this slice
+    /// does not cover would be inventing a verdict.
+    pub chat_trust: &'a [Option<lodestone_game::chat::MessageTrust>],
     /// Sound-subtitle captions (issue #198), **oldest first** — vanilla's own
     /// order, with row 0 at the bottom of the stack. Drawn bottom-right, above the
     /// hotbar, and empty whenever `showSubtitles` is off or nothing is audible.
@@ -1719,6 +1757,7 @@ impl<'a> HudFrame<'a> {
             crosshair: true,
             chat: &[],
             chat_spans: &[],
+            chat_trust: &[],
             sound_subtitles: &[],
             chat_input: None,
             chat_caret_visible: true,

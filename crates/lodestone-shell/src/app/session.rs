@@ -45,6 +45,12 @@ impl WindowApp {
             render_distance_apply_at: None,
             tab_held: false,
             pending_screenshot: false,
+            // `0`, not the current generation: a fresh `WindowApp` has built
+            // no icon surface yet, so the first frame must run the refresh.
+            // `crate::resources::pack_generation` starts above zero whenever a
+            // pack was selected before the window existed, and seeding this
+            // with it would skip exactly that case.
+            last_icon_pack_generation: 0,
             chat_input: ChatInput::new(),
             chat_wrap: crate::hud::ChatWrapCache::default(),
             menu_input: MenuInput::new(),

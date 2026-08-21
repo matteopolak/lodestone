@@ -639,6 +639,22 @@ impl Sim {
         })
     }
 
+    /// The most recent `n` chat lines' trust level, **element-for-element
+    /// aligned** with [`Self::recent_chat_spans`] — same `n`, same feed, same
+    /// window — so a caller can zip the two without re-deriving the slice.
+    ///
+    /// `None` for a system line, which carries no signature and so has no
+    /// verdict to badge; see `ChatLog::recent_trust`.
+    #[must_use]
+    pub fn recent_chat_trust(&self, n: usize) -> Vec<Option<lodestone_game::chat::MessageTrust>> {
+        self.read(|w| {
+            w.get::<SessionChat>(self.local)
+                .expect("the local player always carries SessionChat")
+                .0
+                .recent_trust(n)
+        })
+    }
+
     /// The `click`/`hover`-carrying sibling of [`Self::recent_chat_spans`]:
     /// same recent-lines-with-age projection through
     /// `recent_ages_interactive`, so a chat hit-test
