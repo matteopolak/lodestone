@@ -134,6 +134,34 @@ fallback forever. A warning for a name that remains missing after a generation
 change still means the pack did not provide a usable font (or was never
 installed); it is not suppressed by this cache policy.
 
+### What a live reload re-attaches, and the trap in the one that borrows
+
+`WindowApp::redraw`'s reload block is the GPU half. `Sim::reload_resource_pack_atlas`
+has already rebuilt the classifier, the `BlockAtlas` and its `BlockModels` and
+re-meshed every loaded column by the time it returns the new atlas; the redraw
+block then catches up every GPU surface that is a **separate stitch with its own
+owner** — `RenderState::reload_block_atlas` for the terrain/model atlas, the HUD's
+and menu's GUI atlases, the flat `ItemAtlas` plus its glint sheet, and the 3-D
+block-item pass on both `HudRenderer` and `ContainerRenderer`.
+
+That last one is the one to be careful with, and it is why the list has to be kept
+complete rather than trimmed. The GUI item-model pass does not *own* its atlas: it
+borrows `RenderState`'s model atlas view, tint palette buffer and animation buffer
+(that sharing is the point — a second copy of the block atlas to draw nine 16 px
+icons would cost tens of megabytes). `reload_block_atlas` replaces all three with
+new objects. wgpu resources are `Arc`-backed and a bind group holds a strong
+reference, so a pass left un-reattached **does not error** — it goes on sampling the
+dropped atlas while the geometry it draws has been re-baked against the *new* one's
+sprite packing, reads a palette nothing updates any more, and reads an animation
+buffer `update_animation` no longer writes (so an animated block icon freezes). The
+flat sprite stream cannot show this, because its atlas and its UVs come from the
+same `ItemAtlas` object and are replaced together — which makes the symptom look
+like "3-D block icons in menus broke and flat item sprites are fine".
+
+So: **whenever a GPU pass borrows another renderer's atlas/buffer rather than
+owning it, its re-attach belongs in this block**, and a new borrower must be added
+here in the same commit that adds the borrow. Nothing is red when it is not.
+
 ### Single winner vs. merged stack: which resource types get which
 
 `ResourceManager` offers two lookups (`crates/lodestone-assets/src/manager.rs`):
