@@ -123,6 +123,11 @@ pub struct DisplayDraw {
     /// `text_display` or it is one that has never reported the field
     /// (vanilla's own default is the empty string, which draws nothing
     /// either way, so the two collapse to the same "draw nothing" case).
+    ///
+    /// Legacy-`§`-coded through [`lodestone_model::Text::to_legacy_string`],
+    /// not a fully flattened plain string — see this struct's construction
+    /// site for why the encoding stops there rather than carrying
+    /// [`lodestone_model::Text`] itself.
     pub text: Option<String>,
     /// `text_display`'s wrap width in pixels, defaulted to vanilla's own
     /// `200` when unreported. Meaningless for the other two subtypes.
@@ -236,7 +241,15 @@ fn extract_display_draws(
                 lodestone_render::display::BillboardMode::from_wire(b.0)
             }),
             transform,
-            text: text.map(|t| t.0.clone()),
+            // `DisplayText` now carries the styled component tree (see its
+            // own doc); `DisplayDraw::text` stays a plain `String` because
+            // `gpu/display_text.rs`'s existing styled-draw bridge is
+            // `Text::from_legacy(text).to_spans()` (out of scope for this
+            // change — see its own module doc). `to_legacy_string` is the
+            // encoding that bridge reads and carries colour/bold/italic/
+            // underline/strikethrough through it intact; a *hex* colour is
+            // the one documented gap `to_legacy_string` itself cannot close.
+            text: text.map(|t| t.0.to_legacy_string()),
             text_line_width: line_width.map_or(DEFAULT_LINE_WIDTH, |w| w.0),
             text_background_color: background_color.map_or(DEFAULT_BACKGROUND_COLOR, |c| c.0),
             text_opacity: opacity.map_or(DEFAULT_TEXT_OPACITY, |o| o.0),

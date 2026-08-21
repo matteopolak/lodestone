@@ -66,6 +66,7 @@ use std::time::{Duration, Instant};
 use lodestone_client::{ClientBuilder, ClientEvent, LoginProfile, Reported, ServerAddress};
 use lodestone_entity::attribute::default_def;
 use lodestone_entity::{AttributeInstance, Modifier, Operation};
+use lodestone_model::Text;
 use uuid::Uuid;
 
 const GAME_ADDR_HOST: &str = "127.0.0.1";
@@ -537,7 +538,7 @@ async fn entity_metadata_and_attributes_cross_the_client_public_api() {
         probe = handle
             .entities()
             .into_iter()
-            .find(|e| e.custom_name == Reported::Reported(Some(PROBE_NAME.to_string())));
+            .find(|e| e.custom_name == Reported::Reported(Some(Text::literal(PROBE_NAME))));
         // Wait until the attribute packet has also landed, so a single poll sees
         // a fully-populated view rather than metadata-then-attributes racing.
         if probe
@@ -607,7 +608,7 @@ async fn entity_metadata_and_attributes_cross_the_client_public_api() {
     // at least one of these.
     assert_eq!(
         view.custom_name,
-        Reported::Reported(Some(PROBE_NAME.to_string())),
+        Reported::Reported(Some(Text::literal(PROBE_NAME))),
         "custom name mismatch (optional-component / network-NBT decode)"
     );
     assert_eq!(

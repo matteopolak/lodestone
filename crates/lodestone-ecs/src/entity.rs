@@ -47,7 +47,7 @@ use bevy_ecs::entity::Entity;
 use bevy_ecs::resource::Resource;
 use lodestone_model::{
     EntityAttributeSnapshot, EntityEquipment, EntityPose, EntityVariant, ItemStack, Quat,
-    ResourceKey, Vec3, Vec3f,
+    ResourceKey, Text, Vec3, Vec3f,
 };
 use uuid::Uuid;
 
@@ -117,8 +117,13 @@ pub struct EntityFlags(pub u8);
 /// One of the two genuinely three-state fields: **absent** is "never
 /// reported", `CustomName(None)` is "explicitly cleared", `CustomName(Some(s))`
 /// is the name it holds. See the module docs.
+///
+/// Carries the styled component tree (colour, bold, italic, underline,
+/// strikethrough), not a flattened plain string — see
+/// [`lodestone_model::event::EntityMetadataUpdate::custom_name`]'s doc, which
+/// this component folds verbatim.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
-pub struct CustomName(pub Option<String>);
+pub struct CustomName(pub Option<Text>);
 
 /// Whether the custom name renders above the entity. **Absent** until reported.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -604,9 +609,12 @@ pub struct DisplayRightRotation(pub Quat);
 /// folded from [`lodestone_model::event::EntityMetadataUpdate::display_text`].
 /// **Absent** until first reported — vanilla's own accessor default is the
 /// empty string, so a consumer reading absence should draw no text, exactly
-/// as it would for `Some(String::new())`.
+/// as it would for `Some(Text::default())`.
+///
+/// Carries the styled component tree, not a flattened plain string — same
+/// reasoning as [`CustomName`].
 #[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
-pub struct DisplayText(pub String);
+pub struct DisplayText(pub Text);
 
 /// A `text_display`'s wrap width in pixels
 /// (`Display.TextDisplay.DATA_LINE_WIDTH_ID`). **Absent** until first

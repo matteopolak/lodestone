@@ -220,7 +220,11 @@ pub struct EntityView {
     /// The entity's custom name. [`Reported::Reported(None)`](Reported::Reported)
     /// means a name was explicitly cleared; [`Reported::Unreported`] means none
     /// has ever been reported.
-    pub custom_name: Reported<String>,
+    ///
+    /// Styled, not flattened — see
+    /// [`lodestone_model::event::EntityMetadataUpdate::custom_name`]'s doc;
+    /// `lodestone_ecs::entity::CustomName` folds it verbatim into this field.
+    pub custom_name: Reported<Text>,
     /// Whether the custom name renders above the entity, once reported.
     pub custom_name_visible: Option<bool>,
     /// The entity's pose, once reported.
