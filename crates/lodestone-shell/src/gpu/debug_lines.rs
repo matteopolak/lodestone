@@ -227,8 +227,9 @@ pub fn chunk_border_vertices(
     out
 }
 
-/// Fixed capacity for the debug-line pass, in line segments (two vertices
-/// each). A debug overlay does not need to grow without bound the way
+/// Fixed capacity for the debug-line pass, in line segments (two
+/// [`DebugLineVertex`] inputs each — the wire shape callers still build). A
+/// debug overlay does not need to grow without bound the way
 /// [`crate::particles::ParticleRenderer`]'s instance count does — a few
 /// thousand segments is far more than one pathfinder's route — so this stays
 /// a **fixed** buffer, like [`OutlineRenderer`]'s, rather than the
@@ -241,15 +242,45 @@ pub fn chunk_border_vertices(
 /// [`DebugLineRenderer::prepare`] truncates rather than growing.
 pub(super) const MAX_DEBUG_LINE_SEGMENTS: usize = 4096;
 
+/// Vertices the GPU actually draws per input segment: two triangles forming a
+/// screen-space-thickened quad — see [`DebugLineRenderer`]'s module doc for
+/// why this replaced a `LineList` segment.
+const VERTS_PER_SEGMENT: usize = 6;
+/// Floats per ribbon vertex: `position.xyz`, `other.xyz` (the segment's other
+/// endpoint, for the vertex shader's screen-space direction), `side`
+/// (-1.0 / +1.0), `color.rgba`.
+const FLOATS_PER_RIBBON_VERT: usize = 3 + 3 + 1 + 4;
+
+/// Minimum on-screen width for F3 debug-line geometry (entity hitboxes, chunk
+/// borders, and any plugin's [`DebugLinesSource`] segments), in logical
+/// pixels, scaled the same way [`OutlineRenderer`]'s `MIN_LINE_WIDTH_PX` is
+/// (`Window.getAppropriateLineWidth`'s `max(min, windowWidth / reference *
+/// min)` shape) — thinner than the block-highlight box (`2.5`) because this
+/// is a diagnostic wireframe meant to read as a *line*, not a highlighted
+/// edge, but wide enough to survive the failure mode this pass used to have:
+/// a `PrimitiveTopology::LineList` segment rasterizes at exactly one
+/// **physical** pixel regardless of resolution or DPI scale, which is why
+/// F3+B/F3+G read as "too thin" (and, at a real gameplay resolution, close
+/// to invisible) even while the closure feeding them was producing correct
+/// geometry the whole time — see `docs/debug-overlay.md`'s line-width note.
+const MIN_LINE_WIDTH_PX: f32 = 1.5;
+const LINE_WIDTH_REFERENCE_PX: f32 = 1920.0;
+
 /// Draws arbitrary coloured world-space line segments — a pathfinder's
 /// planned route, a reachability probe, anything a plugin wants visible for
 /// debugging (`CLAUDE.md`'s island rule: a subsystem with no way onto the
 /// screen is undebuggable by construction).
 ///
 /// A generalisation of [`OutlineRenderer`] immediately above: the same
-/// `view_proj`-only bind group and line-list topology, but a per-vertex
-/// colour instead of a hardcoded black, and an arbitrary (fixed-capacity)
-/// vertex count instead of one hardcoded unit cube.
+/// `view_proj` + viewport uniform, screen-space-ribbon vertex shader and
+/// triangle-list topology, but a per-vertex colour instead of a hardcoded
+/// black, and an arbitrary (fixed-capacity) segment count instead of one
+/// hardcoded unit cube. [`DebugLineRenderer::prepare`] does the ribbon
+/// expansion — one input [`DebugLineVertex`] pair becomes
+/// [`VERTS_PER_SEGMENT`] output vertices — so every caller of
+/// [`entity_hitbox_vertices`]/[`chunk_border_vertices`]/
+/// [`debug_line_vertices`] is unaffected by this module's own internal wire
+/// format.
 #[derive(Debug)]
 pub(super) struct DebugLineRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -265,11 +296,12 @@ impl DebugLineRenderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/debug_lines.wgsl").into()),
         });
 
-        // Same bind-group-layout shape as `OutlineRenderer`: one `view_proj`
-        // uniform, nothing else. A dedicated pipeline entirely outside the
-        // model shader's four bind groups, so this pass has no bearing on the
-        // 4-bind-group floor `CLAUDE.md` warns about (`gpu.rs`'s own
-        // `BlockPipeline`/`ModelPipeline` are untouched by this addition).
+        // Same bind-group-layout shape as `OutlineRenderer`: one uniform
+        // (`view_proj` plus the viewport/half-width vec4), nothing else. A
+        // dedicated pipeline entirely outside the model shader's four bind
+        // groups, so this pass has no bearing on the 4-bind-group floor
+        // `CLAUDE.md` warns about (`gpu.rs`'s own `BlockPipeline`/
+        // `ModelPipeline` are untouched by this addition).
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lodestone-debug-lines-bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -284,9 +316,11 @@ impl DebugLineRenderer {
             }],
         });
 
+        // 64 bytes for view_proj + 16 bytes for the viewport/half-width vec4
+        // — same layout as `OutlineRenderer`'s uniform.
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lodestone-debug-lines-uniform"),
-            size: 64,
+            size: 80,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -302,7 +336,8 @@ impl DebugLineRenderer {
 
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lodestone-debug-lines-vertices"),
-            size: (MAX_DEBUG_LINE_SEGMENTS * 2 * std::mem::size_of::<DebugLineVertex>()) as u64,
+            size: (MAX_DEBUG_LINE_SEGMENTS * VERTS_PER_SEGMENT * FLOATS_PER_RIBBON_VERT
+                * std::mem::size_of::<f32>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -320,9 +355,30 @@ impl DebugLineRenderer {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<DebugLineVertex>() as u64,
+                    array_stride: (FLOATS_PER_RIBBON_VERT * std::mem::size_of::<f32>()) as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: (3 * std::mem::size_of::<f32>()) as u64,
+                            shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32,
+                            offset: (6 * std::mem::size_of::<f32>()) as u64,
+                            shader_location: 2,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: (7 * std::mem::size_of::<f32>()) as u64,
+                            shader_location: 3,
+                        },
+                    ],
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
@@ -337,7 +393,7 @@ impl DebugLineRenderer {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
+                topology: wgpu::PrimitiveTopology::TriangleList,
                 ..Default::default()
             },
             // Same depth treatment as `OutlineRenderer`: tested against
@@ -365,10 +421,16 @@ impl DebugLineRenderer {
         }
     }
 
-    /// Upload this frame's view-projection and line vertices. Must run before
-    /// the render pass opens — buffers cannot be written mid-pass. Returns the
-    /// vertex count actually written, capped at
-    /// `2 * `[`MAX_DEBUG_LINE_SEGMENTS`] — pass it to [`draw`](Self::draw).
+    /// Upload this frame's view-projection, the viewport/line-width uniform,
+    /// and the ribbon-expanded line vertices. Must run before the render pass
+    /// opens — buffers cannot be written mid-pass. `vertices` is the wire
+    /// shape callers already build (flat, two [`DebugLineVertex`]s per
+    /// segment); this expands each pair into [`VERTS_PER_SEGMENT`] on-screen
+    /// ribbon vertices, capped at [`MAX_DEBUG_LINE_SEGMENTS`] segments.
+    /// `viewport_px` is the render target's size in physical pixels — see
+    /// [`MIN_LINE_WIDTH_PX`]'s doc for how it sizes the on-screen thickness.
+    /// Returns the vertex count actually written — pass it to
+    /// [`draw`](Self::draw).
     ///
     /// Takes `&self`, not `&mut self`: see [`MAX_DEBUG_LINE_SEGMENTS`]'s docs
     /// for why a fixed buffer is what makes that possible.
@@ -376,15 +438,59 @@ impl DebugLineRenderer {
         &self,
         queue: &wgpu::Queue,
         view_proj: &[[f32; 4]; 4],
+        viewport_px: (u32, u32),
         vertices: &[DebugLineVertex],
     ) -> u32 {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(view_proj));
-        let capped = &vertices[..vertices.len().min(MAX_DEBUG_LINE_SEGMENTS * 2)];
-        if capped.is_empty() {
+
+        let width_px = (viewport_px.0.max(1) as f32 / LINE_WIDTH_REFERENCE_PX
+            * MIN_LINE_WIDTH_PX)
+            .max(MIN_LINE_WIDTH_PX);
+        let viewport_uniform: [f32; 4] = [
+            viewport_px.0.max(1) as f32,
+            viewport_px.1.max(1) as f32,
+            width_px * 0.5,
+            0.0,
+        ];
+        queue.write_buffer(&self.uniform, 64, bytemuck::bytes_of(&viewport_uniform));
+
+        // Whole segments only — a dangling odd vertex (should never happen;
+        // every producer in this module emits pairs) contributes nothing
+        // rather than reading past the slice.
+        let segment_count = (vertices.len() / 2).min(MAX_DEBUG_LINE_SEGMENTS);
+        if segment_count == 0 {
             return 0;
         }
-        queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(capped));
-        u32::try_from(capped.len()).unwrap_or(u32::MAX)
+
+        let mut out = vec![0f32; segment_count * VERTS_PER_SEGMENT * FLOATS_PER_RIBBON_VERT];
+        for s in 0..segment_count {
+            let a = vertices[s * 2];
+            let b = vertices[s * 2 + 1];
+            // Two triangles covering the quad: (A-, A+, B-) and (A+, B+,
+            // B-) — the same winding `OutlineRenderer::prepare` uses for its
+            // own edge-to-quad expansion. Both input vertices of a debug-line
+            // segment always carry the same colour (every producer in this
+            // module sets it once per segment), so using `a.color` for the
+            // whole ribbon is not an approximation.
+            let quad: [([f32; 3], [f32; 3], f32); VERTS_PER_SEGMENT] = [
+                (a.position, b.position, -1.0),
+                (a.position, b.position, 1.0),
+                (b.position, a.position, -1.0),
+                (a.position, b.position, 1.0),
+                (b.position, a.position, 1.0),
+                (b.position, a.position, -1.0),
+            ];
+            let base = s * VERTS_PER_SEGMENT * FLOATS_PER_RIBBON_VERT;
+            for (i, (pos, other, side)) in quad.into_iter().enumerate() {
+                let v = base + i * FLOATS_PER_RIBBON_VERT;
+                out[v..v + 3].copy_from_slice(&pos);
+                out[v + 3..v + 6].copy_from_slice(&other);
+                out[v + 6] = side;
+                out[v + 7..v + 11].copy_from_slice(&a.color);
+            }
+        }
+        queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&out));
+        u32::try_from(segment_count * VERTS_PER_SEGMENT).unwrap_or(u32::MAX)
     }
 
     /// Record the draw. No-op when `vertex_count` (the last

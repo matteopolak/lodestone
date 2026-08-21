@@ -659,6 +659,7 @@ regardless of whether the top-level `Text` was built via `literal` or
 | F3+F4 | `key.debug.switchGameMode` | implemented as a cycle rather than `GameModeSwitcherScreen`; no chat feedback, see below |
 | F3+P | `key.debug.focusPause` | implemented: new persisted `Options::pause_on_lost_focus`, gates `WindowEvent::Focused(false)` |
 | F3+C | `key.debug.copyLocation` | implemented: clipboard gets vanilla's `/execute in <dim> run tp @s x y z yaw pitch` |
+| Shift+F3 | (no vanilla `KeyMapping` — see below) | implemented: toggles the profiler pie chart. F3+1..F3+8 drill into a wedge, F3+0 returns to the root — see `docs/frame-profiling.md`'s "Pie chart" section |
 | F3+A, F3+T, F3+D | reload chunks / reload resource packs / clear chat | not implemented — each needs a write path into a file outside this pass's scope (mesher/sim internals, the resource pipeline's reload trigger, or a new `ChatLog` clear method) |
 | F3+I | copy entity/block NBT | not implemented — needs the raycast hit-result and NBT serialisation, out of scope |
 | F3+Q | "show this list" | **not implemented, deliberately** — `Options.java`'s `debugKeys` array has no `keyDebugHelp` entry and `KeyboardHandler.handleDebugKeys` has no arm for it in the 26.2 decompile; the `debug.help.*` `en_us.json` strings appear to be vestigial. There is nothing to port. |

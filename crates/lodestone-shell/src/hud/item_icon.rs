@@ -1043,6 +1043,24 @@ impl ColourStream<'_> {
         v(x0, y1, bottom);
     }
 
+    /// Emit one flat-shaded pixel-space triangle in NDC — the primitive the F3
+    /// profiler pie chart's wedges are built from (`hud::draw_profiler_chart`).
+    /// Deliberately the general case rather than a pie-specific "wedge"
+    /// method: a triangle fan is a sequence of these, and nothing else here
+    /// needs a dedicated non-rectangular shape yet.
+    pub(crate) fn triangle(&mut self, p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), c: [f32; 4]) {
+        debug_assert_eq!(FLOATS_PER_VERTEX, 6);
+        let to_ndc = |px: f32, py: f32| (2.0 * px / self.w - 1.0, 1.0 - 2.0 * py / self.h);
+        let verts = &mut *self.verts;
+        let mut v = |p: (f32, f32)| {
+            let (x, y) = to_ndc(p.0, p.1);
+            verts.extend_from_slice(&[x, y, c[0], c[1], c[2], c[3]]);
+        };
+        v(p0);
+        v(p1);
+        v(p2);
+    }
+
     /// Draw a single glyph with its top-left at `(x, y)`. Space and unknown
     /// handling match [`font::glyph_rows`]; blanks emit no quads.
     pub(crate) fn glyph(&mut self, ch: char, x: f32, y: f32, scale: f32, c: [f32; 4]) {

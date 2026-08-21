@@ -260,10 +260,16 @@ impl RenderState {
         // Same constraint for the debug-line pass: sample and upload before
         // the pass opens. Zero vertices (the default, until a caller installs
         // `set_debug_lines_source`) is a cheap no-op, not a wasted upload —
-        // `prepare` returns early on an empty slice.
-        let debug_line_count =
-            self.debug_lines
-                .prepare(queue, &view_proj, &self.debug_lines_source.sample(camera.position));
+        // `prepare` returns early on an empty slice. `viewport_px` sizes the
+        // on-screen ribbon width the same way `self.outline.prepare` already
+        // does just above — see `DebugLineRenderer`'s module doc for why this
+        // pass stopped being a `LineList`.
+        let debug_line_count = self.debug_lines.prepare(
+            queue,
+            &view_proj,
+            (self.depth.width, self.depth.height),
+            &self.debug_lines_source.sample(camera.position),
+        );
 
         // Same constraint for the plugin-billboard pass (issue #161): sample
         // and upload before the pass opens. Zero instances (the default,

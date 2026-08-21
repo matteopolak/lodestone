@@ -598,6 +598,140 @@ fn no_debug_lines_source_installed_draws_nothing() {
     );
 }
 
+/// The discriminator for the owner's report that F3+B (entity hitboxes) and
+/// F3+G (chunk borders) draw nothing. Every other debug-line gate in this
+/// file installs a *synthetic* closure (`structure_block_outline_vertices`,
+/// a bare billboard) — never [`entity_hitbox_vertices`] or
+/// [`chunk_border_vertices`], the exact two functions
+/// `app::session::WindowApp::install_debug_lines_source`'s closure calls when
+/// `debug_hitboxes`/`debug_chunk_borders` is set. So a break specific to
+/// either one was invisible to the rest of this corpus — the
+/// shared-construction-path blindness this repo's evidence standard already
+/// names for a render frame reached through one factory: every existing gate
+/// reached the debug-line *pipeline*, none reached these two *producers*.
+///
+/// Same differential idiom as the two gates above: render the same open-sky
+/// scene with no source, then with each producer's real output, and require
+/// pixels to move. If this fails, the bug is inside `entity_hitbox_vertices`/
+/// `chunk_border_vertices` (or the census/dimensions data they depend on);
+/// if it passes, the two producers and the pipeline are innocent and the
+/// break is upstream, in `install_debug_lines_source`'s own closure wiring
+/// (the `ecs`/`local`/`Arc<AtomicBool>` capture) or in the toggle path that
+/// feeds it.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn entity_hitbox_and_chunk_border_vertices_draw_visible_pixels() {
+    let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+        "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU (or a software adapter such as \
+         LIBGL_ALWAYS_SOFTWARE=1 / WGPU_BACKEND=gl), don't 'skip' — a silent pass here \
+         would assert nothing",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let (w, h) = (320u32, 240u32);
+    let mut target = HeadlessTarget::new(device, w, h, format);
+
+    let camera = Camera {
+        position: glam::Vec3::new(0.5, 64.5, -2.0),
+        yaw: 0.0,
+        pitch: 0.0,
+        fov_y_degrees: 70.0,
+        aspect: w as f32 / h as f32,
+        near: 0.05,
+        far: Camera::far_for_render_distance(8, 0),
+    };
+
+    let mut state = RenderState::new(device, queue, format, w, h, None);
+    let frame = target.acquire().expect("acquire");
+    state.render(device, queue, frame.view(), &camera, None, &[]);
+    let baseline = target.read_texels(device, queue);
+
+    // F3+B: one zombie standing squarely in frame — same placement idiom as
+    // `structure_block_outline_draws_visible_pixels`'s structure. `"zombie"`
+    // is a real entry in the jar-derived dimension census, so this exercises
+    // the same `entity_type_id_parts` → `base_dimensions` lookup production
+    // makes, not a stubbed box.
+    let zombie = EntityDraw {
+        id: 1,
+        type_path: std::sync::Arc::from("zombie"),
+        variant_sheet: None,
+        item: None,
+        equipment: Vec::new(),
+        equipment_dye: Vec::new(),
+        equipment_trim: Vec::new(),
+        wool: None,
+        block_state: None,
+        count: 1,
+        foil: false,
+        item_dyed_color: None,
+        item_potion_color: None,
+        feet: glam::Vec3::new(0.5, 64.0, 3.0),
+        yaw: 0.0,
+        head_yaw: 0.0,
+        pitch: 0.0,
+        scale: 1.0,
+        anim: AnimInput::default(),
+        name_tag: None,
+        hurt: false,
+        item_use: None,
+        main_arm_left: false,
+        creeper_swelling: 0.0,
+        swim_amount: 0.0,
+        death_time: 0.0,
+        on_fire: false,
+        invisible: false,
+        armor_stand: None,
+        player_skin: None,
+        experience_orb_value: None,
+        cape_sway: (0.0, 0.0, 0.0),
+    };
+    state.set_debug_lines_source(move |_| entity_hitbox_vertices(&[zombie.clone()]));
+    let frame = target.acquire().expect("acquire");
+    state.render(device, queue, frame.view(), &camera, None, &[]);
+    let with_hitbox = target.read_texels(device, queue);
+
+    // F3+G: the chunk-border box around the camera's own position — the
+    // real `(player, min_y, height)` shape `install_debug_lines_source`
+    // passes, not a mock. The near edge of chunk (0, -1) sits 2 blocks in
+    // front of the camera, squarely in frame.
+    state.set_debug_lines_source(move |_| chunk_border_vertices([0.5, 64.5, -2.0], -64, 384));
+    let frame = target.acquire().expect("acquire");
+    state.render(device, queue, frame.view(), &camera, None, &[]);
+    let with_borders = target.read_texels(device, queue);
+
+    let count_changed = |a: &[u8], b: &[u8]| -> usize {
+        a.chunks_exact(4)
+            .zip(b.chunks_exact(4))
+            .filter(|(p, q)| {
+                let d = (i32::from(p[0]) - i32::from(q[0])).abs()
+                    + (i32::from(p[1]) - i32::from(q[1])).abs()
+                    + (i32::from(p[2]) - i32::from(q[2])).abs();
+                d > 20
+            })
+            .count()
+    };
+
+    let hitbox_changed = count_changed(&baseline, &with_hitbox);
+    let border_changed = count_changed(&baseline, &with_borders);
+
+    eprintln!("=== entity hitbox / chunk border pixel readback ===");
+    eprintln!("pixels changed by entity_hitbox_vertices (F3+B) = {hitbox_changed}");
+    eprintln!("pixels changed by chunk_border_vertices (F3+G)  = {border_changed}");
+
+    assert!(
+        hitbox_changed > 20,
+        "F3+B: entity_hitbox_vertices should visibly draw a wireframe box, \
+         only {hitbox_changed} px moved"
+    );
+    assert!(
+        border_changed > 20,
+        "F3+G: chunk_border_vertices should visibly draw the column outline, \
+         only {border_changed} px moved"
+    );
+}
+
 /// Headless proof that HUD **text actually rasterizes to pixels**, not just
 /// that geometry is generated. Renders two frames over the same known clear
 /// colour: an empty HUD (no crosshair/debug/chat) and one carrying chat
@@ -701,6 +835,145 @@ fn hud_chat_text_rasterizes_to_pixels() {
         chat_lit > 200,
         "chat text should rasterize a substantial run of glyph pixels, only {chat_lit} lit — \
          the text path may be a no-op"
+    );
+}
+
+/// The F3+Shift profiler pie chart must actually reach pixels — this repo's
+/// dominant defect class (`CLAUDE.md`'s island rule) is a subsystem that is
+/// individually correct and reaches zero pixels because nothing calls the
+/// draw branch, and a gate that only asserted on `ProfilerChart`'s fields
+/// (or on `hud::draw_profiler_chart` in isolation) could not see that. Same
+/// two-sided shape as [`hud_chat_text_rasterizes_to_pixels`]: an empty HUD
+/// (`profiler_chart: None`) stays background; a HUD carrying a real chart
+/// (eight pairwise-distinct wedge means, two GPU rows) lights a substantial
+/// run of pixels — both the wedge fan and the legend text.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn profiler_chart_draws_visible_pixels() {
+    let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+        "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU (or a software adapter such as \
+         LIBGL_ALWAYS_SOFTWARE=1 / WGPU_BACKEND=gl), don't 'skip' — a silent pass here \
+         would assert nothing",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let (w, h) = (320u32, 240u32);
+    let clear = wgpu::Color {
+        r: 0.04,
+        g: 0.04,
+        b: 0.08,
+        a: 1.0,
+    };
+    let bg = [10i32, 10, 20];
+
+    let lit_pixels = |frame: &crate::hud::HudFrame| -> usize {
+        let mut target = HeadlessTarget::new(device, w, h, format);
+        let mut hud = crate::hud::HudRenderer::new(device, format);
+        let ht_frame = target.acquire().expect("headless acquire");
+        {
+            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("clear"),
+            });
+            {
+                let _pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("hud-clear"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: ht_frame.view(),
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(clear),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+            }
+            queue.submit(std::iter::once(enc.finish()));
+        }
+        hud.render(device, queue, ht_frame.view(), ht_frame.view(), frame, w, h);
+        let pixels = target.read_texels(device, queue);
+        pixels
+            .chunks_exact(4)
+            .filter(|px| {
+                let d = (i32::from(px[0]) - bg[0]).abs()
+                    + (i32::from(px[1]) - bg[1]).abs()
+                    + (i32::from(px[2]) - bg[2]).abs();
+                d > 40
+            })
+            .count()
+    };
+
+    let empty_stats = crate::hud::DebugStats::default();
+    let empty_frame = crate::hud::HudFrame {
+        crosshair: false,
+        show_debug: false,
+        ..crate::hud::HudFrame::new(&empty_stats)
+    };
+    let empty_lit = lit_pixels(&empty_frame);
+
+    // Pairwise-distinct means (`CLAUDE.md`'s evidence standard: two adjacent
+    // same-typed fields must differ, or a transposition survives unnoticed) —
+    // real `FramePhase` names, in `FramePhase::ALL` order, so this exercises
+    // the same eight-wedge shape `app::redraw` actually builds.
+    let names = [
+        "setup",
+        "sim_tick",
+        "mesh_upload",
+        "acquire",
+        "prepare",
+        "world_encode_submit",
+        "hud_ui_encode_submit",
+        "present",
+    ];
+    let slices: Vec<crate::hud::ProfilerChartSlice> = names
+        .iter()
+        .enumerate()
+        .map(|(i, &name)| crate::hud::ProfilerChartSlice {
+            name,
+            mean_ms: 0.4 + i as f32 * 0.31,
+            p95_ms: 0.6 + i as f32 * 0.31,
+            p99_ms: 0.8 + i as f32 * 0.31,
+            samples: 240,
+            window: 240,
+            skipped: 0,
+        })
+        .collect();
+    let chart_stats = crate::hud::DebugStats {
+        profiler_chart: Some(crate::hud::ProfilerChart {
+            slices,
+            selected: None,
+            gpu: vec![("world", Some(2.3)), ("first_person", None)],
+            gpu_unavailable: false,
+            gpu_stalled_frames: 0,
+        }),
+        ..crate::hud::DebugStats::default()
+    };
+    let chart_frame = crate::hud::HudFrame {
+        crosshair: false,
+        show_debug: false,
+        ..crate::hud::HudFrame::new(&chart_stats)
+    };
+    let chart_lit = lit_pixels(&chart_frame);
+
+    eprintln!("=== profiler pie chart rasterization ===");
+    eprintln!("empty HUD lit px = {empty_lit}");
+    eprintln!("chart HUD lit px = {chart_lit}");
+
+    assert!(
+        empty_lit < 20,
+        "an empty HUD should read as background, but {empty_lit} px were lit — \
+         a stray clear or wrong LoadOp is drawing something"
+    );
+    assert!(
+        chart_lit > 500,
+        "the profiler chart should rasterize a substantial run of wedge + legend \
+         pixels, only {chart_lit} lit — the draw branch may not be reached"
     );
 }
 

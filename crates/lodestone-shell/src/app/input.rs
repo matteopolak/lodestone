@@ -150,6 +150,19 @@ pub(crate) enum KeyOutcome {
     ToggleHitboxes,
     /// F3+G — vanilla's `key.debug.showChunkBorders`.
     ToggleChunkBorders,
+    /// Shift+F3 — the profiler pie chart's own visibility toggle. Not a
+    /// vanilla `KeyMapping` (vanilla has no chart of its own to toggle
+    /// separately from the F3 overlay); `docs/frame-profiling.md` records why
+    /// this chord rather than a bindable action.
+    ToggleProfilerChart,
+    /// A number-row key pressed while F3 is held — the profiler pie chart's
+    /// navigation. `Some(i)` drills into wedge `i` (`Digit1..=Digit8` →
+    /// `0..8`, one per [`crate::app::frame_profile::FramePhase`]); `None`
+    /// (`Digit0`) returns to the root. A **chord**, not a bare number press:
+    /// the number row is already the (rebindable) hotbar selector, so this
+    /// only fires while `KeyGate::debug_held` is true, exactly like
+    /// [`Self::ToggleHitboxes`]/[`Self::ToggleChunkBorders`].
+    ProfilerChartSelect(Option<usize>),
     /// A key aimed at the recipe book's focused search box — see
     /// [`KeyGate::recipe_search`].
     ///
@@ -311,6 +324,27 @@ pub(crate) enum KeyOutcome {
     /// plugin has claimed the key (`Consume` or `Observe`), independent of
     /// which `KeyOutcome` this function returns — see the call site.
     PluginConsumed,
+}
+
+/// Maps a physical number-row key to the profiler chart's navigation
+/// payload: `Some(Some(i))` for `Digit1..=Digit8` (wedge index `0..8`, one
+/// per [`crate::app::frame_profile::FramePhase`]), `Some(None)` for `Digit0`
+/// (back to the root), `None` for every other key — including `Digit9`,
+/// since there are only eight phases to drill into. A three-way answer in one
+/// call rather than matching `KeyCode` twice at the call site.
+fn profiler_chart_digit(code: KeyCode) -> Option<Option<usize>> {
+    match code {
+        KeyCode::Digit0 => Some(None),
+        KeyCode::Digit1 => Some(Some(0)),
+        KeyCode::Digit2 => Some(Some(1)),
+        KeyCode::Digit3 => Some(Some(2)),
+        KeyCode::Digit4 => Some(Some(3)),
+        KeyCode::Digit5 => Some(Some(4)),
+        KeyCode::Digit6 => Some(Some(5)),
+        KeyCode::Digit7 => Some(Some(6)),
+        KeyCode::Digit8 => Some(Some(7)),
+        _ => None,
+    }
 }
 
 /// Resolve one key event to at most one [`KeyOutcome`].
@@ -488,6 +522,21 @@ pub(crate) fn resolve_key(
     } else if gate.debug_held && pressed && code == KeyCode::KeyG {
         // `key.debug.showChunkBorders`, vanilla keysym 71.
         Some(KeyOutcome::ToggleChunkBorders)
+    } else if gate.debug_held
+        && pressed
+        && matches!(code, KeyCode::ShiftLeft | KeyCode::ShiftRight)
+    {
+        // Shift+F3 — the profiler pie chart. Both physical shifts, the same
+        // way the shift-click swallow above reads "is a shift modifier
+        // down" rather than a single rebindable key; see
+        // [`KeyOutcome::ToggleProfilerChart`]'s doc for why this is not a
+        // vanilla `KeyMapping`.
+        Some(KeyOutcome::ToggleProfilerChart)
+    } else if gate.debug_held && pressed && let Some(digit) = profiler_chart_digit(code) {
+        // The profiler chart's own number-row navigation — see
+        // [`KeyOutcome::ProfilerChartSelect`]'s doc for why this is chorded
+        // rather than a bare press.
+        Some(KeyOutcome::ProfilerChartSelect(digit))
     } else if gate.debug_held && pressed && code == KeyCode::KeyN {
         // `key.debug.spectate`, vanilla keysym 78.
         Some(KeyOutcome::ToggleSpectator)

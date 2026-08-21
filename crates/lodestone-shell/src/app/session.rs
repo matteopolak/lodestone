@@ -39,6 +39,8 @@ impl WindowApp {
             debug_chord_used: false,
             debug_hitboxes: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             debug_chunk_borders: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            show_profiler_chart: false,
+            profiler_chart_selected: None,
             menu_slider_drag: None,
             render_distance_seen: persisted.render_distance,
             render_distance_apply_at: None,
