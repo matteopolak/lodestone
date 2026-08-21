@@ -16,8 +16,14 @@
 //!
 //! # Depth and blending
 //!
-//! **Two pipelines, because vanilla submits the panel and the glyphs through
-//! two different ones.** `TextDisplayRenderer.submitInner` hands the
+//! **Three pipelines. Two because vanilla submits the panel and the glyphs
+//! through two different ones**, and a third because a `text_display` can ask
+//! for neither: `FLAG_SEE_THROUGH` selects `TEXT_SEE_THROUGH` /
+//! `TEXT_BACKGROUND_SEE_THROUGH`, whose depth state is
+//! `withDepthStencilState(Optional.empty())` — no test, no write. Those two
+//! collapse into one pipeline here because their depth state is identical and
+//! the shader difference is not something this pass ports.
+//! `TextDisplayRenderer.submitInner` hands the
 //! background quad to `RenderTypes.textBackground()` —
 //! `RenderPipelines.TEXT_BACKGROUND`, whose depth state is the plain
 //! `DepthStencilState.DEFAULT` — and every line of text to
@@ -55,9 +61,12 @@
 //!   decoded and carried all the way to this draw site (see
 //!   `crate::display_entities::DisplayDraw::text_line_width`'s own doc) — it
 //!   is read, just not yet applied to a wrap algorithm.
-//! - **`seeThrough`/`shadow` style-flag bits are decoded and not consumed**
-//!   here — same simplification `gpu/nametag.rs`'s own module doc already
-//!   makes for its background plate and per-glyph shadow.
+//! - **`shadow` (`FLAG_SHADOW`) is decoded and not consumed** here — same
+//!   simplification `gpu/nametag.rs`'s own module doc already makes for its
+//!   per-glyph shadow. `seeThrough` and `useDefaultBackground` **are**
+//!   consumed now; they were in this list, and being in it is what kept every
+//!   see-through hologram depth-tested against the geometry it was explicitly
+//!   flagged to ignore.
 //! - **Per-run style is modelled** (colour — hex included, bold, italic,
 //!   underline, strikethrough), via `gpu/nametag.rs::layout_styled_ink_runs`
 //!   — the same styled ink-run walk `gpu/nametag.rs`'s own player/mob
@@ -109,6 +118,48 @@ struct DisplayTextVertex {
 /// [`super::nametag::MAX_NAME_TAG_VERTICES`]/[`super::sign_text::MAX_SIGN_TEXT_VERTICES`].
 const MAX_DISPLAY_TEXT_VERTICES: usize = 40_000;
 
+/// `Display.TextDisplay.FLAG_SEE_THROUGH` — draw with no depth test and no
+/// depth write, so the text is readable through the geometry in front of it.
+const FLAG_SEE_THROUGH: u8 = 2;
+/// `Display.TextDisplay.FLAG_USE_DEFAULT_BACKGROUND` — ignore the synced
+/// background colour and use the client's own text-background shade instead.
+const FLAG_USE_DEFAULT_BACKGROUND: u8 = 4;
+/// `Display.TextDisplay.FLAG_ALIGN_LEFT`.
+const FLAG_ALIGN_LEFT: u8 = 8;
+/// `Display.TextDisplay.FLAG_ALIGN_RIGHT`.
+const FLAG_ALIGN_RIGHT: u8 = 16;
+
+/// The alpha `FLAG_USE_DEFAULT_BACKGROUND` resolves to, as a packed ARGB
+/// black — `(int)(getBackgroundOpacity(0.25F) * 255) << 24`.
+///
+/// `Options.getBackgroundOpacity` returns its *fallback* whenever
+/// `backgroundForChatOnly` is set, and vanilla's own default for that option
+/// is on, so `0.25` is what an unconfigured client uses. That accessibility
+/// pair is not modelled here (this crate's `chat_background_opacity` is the
+/// chat HUD's, and vanilla's chat-only default means it would not feed this
+/// value anyway), so the fallback is used unconditionally rather than
+/// pretending to read an option that does not exist.
+///
+/// **This is not the same number as `display_entities`'
+/// `DEFAULT_BACKGROUND_COLOR`.** That one is `Display.TextDisplay`'s own
+/// accessor default (`1073741824` = `0x40000000`, alpha `64`) — what a
+/// display that has never reported a colour carries. This one is `63 <<
+/// 24`, one step darker, and applies only when the *flag* is set. Two
+/// defaults, one off by one, and folding them together would be invisible.
+const DEFAULT_BACKGROUND_ARGB: i32 = 0x3F00_0000_u32 as i32;
+
+/// Which panel colour this display actually draws, honouring
+/// `FLAG_USE_DEFAULT_BACKGROUND` — `TextDisplayRenderer.submitInner`'s own
+/// first branch, which was missing, so a display asking for the client
+/// default drew whatever colour the server happened to have synced.
+fn resolved_background_argb(draw: &DisplayDraw) -> i32 {
+    if draw.text_style_flags & FLAG_USE_DEFAULT_BACKGROUND != 0 {
+        DEFAULT_BACKGROUND_ARGB
+    } else {
+        draw.text_background_color
+    }
+}
+
 /// Draws world-space `text_display` glyphs and background panels — see the
 /// module doc for why this is neither a pure billboard nor a fixed-orientation
 /// pass, unlike its two nearest relatives.
@@ -122,6 +173,18 @@ pub(super) struct DisplayTextRenderer {
     /// 0.00025 blocks behind them at every viewing angle. See the module
     /// doc for the measurement that made this necessary.
     glyph_pipeline: wgpu::RenderPipeline,
+    /// `RenderPipelines.TEXT_SEE_THROUGH` and `TEXT_BACKGROUND_SEE_THROUGH`,
+    /// which are one pipeline here because the only thing this pass ports of
+    /// either is the depth state and theirs is identical:
+    /// `withDepthStencilState(Optional.empty())` — no test, no write, so the
+    /// text is visible through whatever is in front of it.
+    ///
+    /// A `text_display` picks this with `Display.TextDisplay.FLAG_SEE_THROUGH`,
+    /// which is what most server-side holograms set. Drawing one through the
+    /// depth-tested pipelines instead is not a near-miss: the entity is
+    /// deliberately placed inside or against geometry, so it is occluded or
+    /// fighting for the whole time the flag was asking for neither.
+    see_through_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
     vertices: wgpu::Buffer,
@@ -196,7 +259,7 @@ impl DisplayTextRenderer {
         // `RenderPipelines.TEXT_POLYGON_OFFSET` on our side of the port, so
         // building them from one closure keeps that visible rather than
         // burying it in two near-identical literals.
-        let build = |label: &str, bias: wgpu::DepthBiasState| {
+        let build = |label: &str, depth: wgpu::DepthStencilState| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
@@ -226,35 +289,53 @@ impl DisplayTextRenderer {
                     cull_mode: None,
                     ..Default::default()
                 },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                    stencil: wgpu::StencilState::default(),
-                    bias,
-                }),
+                depth_stencil: Some(depth.clone()),
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
             })
         };
 
+        // `DepthStencilState.DEFAULT` — test, write, no bias.
+        let tested = |bias: wgpu::DepthBiasState| wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias,
+        };
         let background_pipeline = build(
             "lodestone-display-text-background-pipeline",
-            wgpu::DepthBiasState::default(),
+            tested(wgpu::DepthBiasState::default()),
         );
         let glyph_pipeline = build(
             "lodestone-display-text-glyph-pipeline",
-            wgpu::DepthBiasState {
+            tested(wgpu::DepthBiasState {
                 constant: -10,
                 slope_scale: -1.0,
                 clamp: 0.0,
+            }),
+        );
+        // Vanilla's `Optional.empty()` depth state. wgpu still needs the
+        // attachment's format on the pipeline (the render pass has a depth
+        // buffer bound whatever this draw wants), so "no depth state" is
+        // spelled as `Always` plus no write — the same pair of GL calls
+        // `Optional.empty()` compiles down to.
+        let see_through_pipeline = build(
+            "lodestone-display-text-see-through-pipeline",
+            wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
             },
         );
 
         Self {
             background_pipeline,
             glyph_pipeline,
+            see_through_pipeline,
             bind_group,
             uniform,
             vertices,
@@ -267,91 +348,129 @@ impl DisplayTextRenderer {
     /// Must run before the render pass opens, same buffer-creation
     /// constraint as every other pass in this crate.
     ///
-    /// Returns `(background_count, glyph_count)` — the panels occupy the
-    /// front of the one vertex buffer and the glyphs follow immediately
-    /// after, so the two draws the module doc's two pipelines need are two
-    /// ranges of one buffer rather than two buffers. Both counts are already
-    /// clamped so their **sum** fits [`MAX_DISPLAY_TEXT_VERTICES`]. Pass the
-    /// pair straight to [`draw`](Self::draw).
+    /// Returns `(background_count, glyph_count, see_through_count)` — three
+    /// contiguous ranges of the one vertex buffer, one per pipeline, in the
+    /// order they are drawn. The counts are already clamped so their **sum**
+    /// fits [`MAX_DISPLAY_TEXT_VERTICES`]. Pass the triple straight to
+    /// [`draw`](Self::draw).
     pub(super) fn prepare(
         &self,
         queue: &wgpu::Queue,
         view_proj: &[[f32; 4]; 4],
         draws: &[DisplayDraw],
         camera: &Camera,
-    ) -> (u32, u32) {
+    ) -> (u32, u32, u32) {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(view_proj));
         let Some(raster) = &self.font else {
-            return (0, 0);
+            return (0, 0, 0);
         };
 
-        let mut backgrounds = Vec::new();
-        let mut glyphs = Vec::new();
-        for draw in draws {
-            if draw.type_path != TEXT_DISPLAY_TYPE_PATH {
-                continue;
-            }
-            let Some(text) = &draw.text else { continue };
-            push_text_display_quads(
-                raster,
-                &self.ink,
-                draw,
-                text,
-                camera,
-                &mut backgrounds,
-                &mut glyphs,
-            );
-        }
+        let (backgrounds, glyphs, see_through) =
+            partition_display_text(raster, &self.ink, draws, camera);
         // Panels first, then glyphs, so the two ranges are contiguous. The
         // cap is applied to the panels first and to whatever room is left
         // for the glyphs, which is the right way round: a truncated panel
         // list still leaves readable text, a truncated glyph list does not.
-        let background_len = backgrounds.len().min(MAX_DISPLAY_TEXT_VERTICES);
-        let glyph_len = glyphs
-            .len()
-            .min(MAX_DISPLAY_TEXT_VERTICES - background_len);
-        if background_len > 0 {
-            queue.write_buffer(
-                &self.vertices,
-                0,
-                bytemuck::cast_slice(&backgrounds[..background_len]),
-            );
-        }
-        if glyph_len > 0 {
-            let offset = (background_len * std::mem::size_of::<DisplayTextVertex>()) as u64;
-            queue.write_buffer(
-                &self.vertices,
-                offset,
-                bytemuck::cast_slice(&glyphs[..glyph_len]),
-            );
-        }
-        (background_len as u32, glyph_len as u32)
+        // The cap is spent in draw order, which is also the right order of
+        // priority: a truncated panel list still leaves readable text, a
+        // truncated glyph list does not, and see-through ink is the range a
+        // player is most likely to be looking *for*.
+        let mut room = MAX_DISPLAY_TEXT_VERTICES;
+        let mut offset = 0usize;
+        let mut upload = |src: &[DisplayTextVertex]| {
+            let len = src.len().min(room);
+            if len > 0 {
+                queue.write_buffer(
+                    &self.vertices,
+                    (offset * std::mem::size_of::<DisplayTextVertex>()) as u64,
+                    bytemuck::cast_slice(&src[..len]),
+                );
+            }
+            room -= len;
+            offset += len;
+            len as u32
+        };
+        let background_len = upload(&backgrounds);
+        let glyph_len = upload(&glyphs);
+        let see_through_len = upload(&see_through);
+        (background_len, glyph_len, see_through_len)
     }
 
-    /// Records the two draws (a no-op for either range that is empty,
+    /// Records the three draws (a no-op for any range that is empty,
     /// including the no-jar `font: None` state, since
-    /// [`prepare`](Self::prepare) always returns `(0, 0)` there).
+    /// [`prepare`](Self::prepare) always returns all zeroes there).
     ///
     /// Panels **before** glyphs, matching
     /// `TextDisplayRenderer.submitInner`'s own
     /// `submitNodeCollector.order(backgroundColor != 0 ? 1 : 0)` — the text
-    /// is explicitly ordered after the background it sits on.
-    pub(super) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, counts: (u32, u32)) {
-        let (backgrounds, glyphs) = counts;
-        if backgrounds == 0 && glyphs == 0 {
+    /// is explicitly ordered after the background it sits on. The
+    /// see-through range comes last because it neither tests nor writes
+    /// depth, so it must not be able to occlude the two that do.
+    pub(super) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, counts: (u32, u32, u32)) {
+        let (backgrounds, glyphs, see_through) = counts;
+        if backgrounds == 0 && glyphs == 0 && see_through == 0 {
             return;
         }
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
-        if backgrounds > 0 {
-            pass.set_pipeline(&self.background_pipeline);
-            pass.draw(0..backgrounds, 0..1);
-        }
-        if glyphs > 0 {
-            pass.set_pipeline(&self.glyph_pipeline);
-            pass.draw(backgrounds..backgrounds + glyphs, 0..1);
+        let mut start = 0u32;
+        for (count, pipeline) in [
+            (backgrounds, &self.background_pipeline),
+            (glyphs, &self.glyph_pipeline),
+            (see_through, &self.see_through_pipeline),
+        ] {
+            if count > 0 {
+                pass.set_pipeline(pipeline);
+                pass.draw(start..start + count, 0..1);
+            }
+            start += count;
         }
     }
+}
+
+/// This frame's `text_display` vertices, split into the three pipeline ranges
+/// [`DisplayTextRenderer::draw`] records — `(depth-tested panels,
+/// polygon-offset glyphs, see-through everything)`.
+///
+/// Free-standing rather than inlined into `prepare` so the routing is
+/// assertable without a GPU: which pipeline a display lands on is decided
+/// entirely by `Display.TextDisplay.FLAG_SEE_THROUGH`, and a gate that has to
+/// build a device to ask cannot be a unit test.
+fn partition_display_text(
+    raster: &RasterFont,
+    ink: &super::nametag::StyledInkLayoutCache,
+    draws: &[DisplayDraw],
+    camera: &Camera,
+) -> (
+    Vec<DisplayTextVertex>,
+    Vec<DisplayTextVertex>,
+    Vec<DisplayTextVertex>,
+) {
+    let mut backgrounds = Vec::new();
+    let mut glyphs = Vec::new();
+    let mut see_through = Vec::new();
+    for draw in draws {
+        if draw.type_path != TEXT_DISPLAY_TYPE_PATH {
+            continue;
+        }
+        let Some(text) = &draw.text else { continue };
+        let mut panel = Vec::new();
+        let mut line_ink = Vec::new();
+        push_text_display_quads(raster, ink, draw, text, camera, &mut panel, &mut line_ink);
+        // A see-through display puts *both* its panel and its ink into the one
+        // un-depth-tested range, panel first — vanilla submits them through two
+        // see-through pipelines whose depth state is identical and whose only
+        // difference is the shader, so within that range paint order is all
+        // that separates them.
+        if draw.text_style_flags & FLAG_SEE_THROUGH == 0 {
+            backgrounds.append(&mut panel);
+            glyphs.append(&mut line_ink);
+        } else {
+            see_through.append(&mut panel);
+            see_through.append(&mut line_ink);
+        }
+    }
+    (backgrounds, glyphs, see_through)
 }
 
 /// Splits a fully-inherited span list on literal `\n` boundaries into
@@ -451,15 +570,16 @@ fn push_text_display_quads(
     // left, `0x10` is right — ported directly rather than "simplified" to
     // always-centre, since a left/right-aligned sign board reads visibly
     // wrong against a centred one.
-    let align_left = draw.text_style_flags & 0x08 != 0;
-    let align_right = draw.text_style_flags & 0x10 != 0;
+    let align_left = draw.text_style_flags & FLAG_ALIGN_LEFT != 0;
+    let align_right = draw.text_style_flags & FLAG_ALIGN_RIGHT != 0;
 
-    if draw.text_background_color != 0 {
+    let background_argb = resolved_background_argb(draw);
+    if background_argb != 0 {
         push_background_quad(
             matrix,
             total_width,
             total_height,
-            draw.text_background_color,
+            background_argb,
             background_out,
         );
     }
@@ -652,6 +772,72 @@ mod tests {
             no_bg_out.len(),
             bg_out.len()
         );
+    }
+
+    /// **The see-through discriminating pair.** The identical display, twice,
+    /// differing only in `FLAG_SEE_THROUGH`: without it every vertex must land
+    /// in the two depth-tested ranges and none in the third, with it the exact
+    /// reverse. A gate asserting only "the see-through range is non-empty"
+    /// would pass with the routing wired to both.
+    #[test]
+    fn the_see_through_flag_moves_every_vertex_to_the_undepth_tested_range() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
+        let camera = Camera::default();
+
+        let mut tested = draw_with_text("LODESTONE");
+        tested.text_background_color = 0x4000_0000_u32 as i32;
+        let (bg, glyphs, see) = partition_display_text(&raster, &ink, &[tested.clone()], &camera);
+        assert_eq!(bg.len(), 6, "one background quad");
+        assert!(!glyphs.is_empty(), "real ink");
+        assert!(see.is_empty(), "nothing may reach the see-through range unflagged");
+
+        let mut through = tested.clone();
+        through.text_style_flags |= FLAG_SEE_THROUGH;
+        let (bg2, glyphs2, see2) = partition_display_text(&raster, &ink, &[through], &camera);
+        assert!(bg2.is_empty() && glyphs2.is_empty(), "the depth-tested ranges must be empty");
+        assert_eq!(
+            see2.len(),
+            bg.len() + glyphs.len(),
+            "the same geometry, all of it, in the one un-depth-tested range",
+        );
+        // Panel first inside that range, matching the submission order the
+        // depth-tested split enforces with two draws.
+        assert_eq!(&see2[..6], &bg[..]);
+    }
+
+    /// `FLAG_USE_DEFAULT_BACKGROUND` replaces the synced colour with the
+    /// client's own shade — and with a *different* number from the accessor
+    /// default a never-reported display carries, which is the whole reason
+    /// this is a discriminating test and not a smoke test.
+    #[test]
+    fn the_default_background_flag_overrides_a_synced_colour_with_its_own_shade() {
+        // Synced fully-transparent-and-zero (vanilla's "no panel") plus the
+        // flag must still draw a panel: the flag wins.
+        let mut flagged = draw_with_text("A");
+        flagged.text_background_color = 0;
+        flagged.text_style_flags = FLAG_USE_DEFAULT_BACKGROUND;
+        assert_eq!(resolved_background_argb(&flagged), DEFAULT_BACKGROUND_ARGB);
+
+        // A synced colour the flag must *ignore*, chosen to be the accessor
+        // default so the two defaults cannot be confused for each other.
+        let mut both = draw_with_text("A");
+        both.text_background_color = 0x4000_0000_u32 as i32;
+        both.text_style_flags = FLAG_USE_DEFAULT_BACKGROUND;
+        assert_eq!(resolved_background_argb(&both), DEFAULT_BACKGROUND_ARGB);
+        assert_ne!(
+            DEFAULT_BACKGROUND_ARGB, 0x4000_0000_u32 as i32,
+            "the flag's shade and Display.TextDisplay's accessor default are \
+             one alpha step apart; if these ever become equal this gate stops \
+             discriminating",
+        );
+
+        // Unflagged, the synced colour is used verbatim.
+        let mut plain = draw_with_text("A");
+        plain.text_background_color = 0x1234_5678;
+        assert_eq!(resolved_background_argb(&plain), 0x1234_5678);
     }
 
     /// **The billboard-mode discriminating pair**, at the render call site
