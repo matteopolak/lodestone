@@ -17,6 +17,7 @@
 //! the terrain with no depth.
 
 mod anim;
+pub mod debug_overlay;
 mod font;
 pub(crate) mod item_icon;
 pub mod locator;
@@ -109,6 +110,51 @@ const VITALS_ROW_PITCH: f32 = 10.0;
 /// around the text at any chat scale.
 const INPUT_STRIP_PAD: f32 = 2.0;
 
+/// The chat column's left text inset, in chat-pose-scaled pixels: how far the
+/// first glyph of a chat line sits from the left edge of the screen.
+///
+/// **Four, not [`HUD_MARGIN`]'s six.** Both chat surfaces used the shared HUD
+/// margin, which is a different quantity that happens to live nearby, and the
+/// owner reported the result directly: *"all of the text in the chat window
+/// (and my own chat bar) are offset to the right … theres a bigger gap than
+/// there should be on the left"*. Both were wrong together because both read
+/// one wrong constant, not because two mistakes coincided.
+///
+/// Two things follow from it being an inset rather than a margin, and both were
+/// wrong too:
+///
+/// - **The plate is anchored at `0`, not at the inset**, and it is wider than
+///   the text column by this inset on the left and twice it on the right — see
+///   [`CHAT_PLATE_PAD_PX`]. The plate used to be exactly the text column's own
+///   width starting at `0`, so a full-width wrapped line ran off the right end
+///   of its own background: the second half of the same report.
+/// - **It scales with the chat pose scale.** The scrollback's inset is applied
+///   inside chat's own scaled space, so at half chat scale it is two screen
+///   pixels, not four. The input bar's is a flat four in vanilla, because that
+///   screen is not chat-scaled at all; this shell *does* draw the input at the
+///   chat pose scale (see [`chat_input_top`]), so scaling its inset too is what
+///   keeps the input's first glyph in the same column as the scrollback's. At
+///   the default chat scale of 1.0 the two readings coincide.
+///
+/// See `docs/chat.md` for the derivation and the source it came from.
+pub(crate) const CHAT_TEXT_INSET: f32 = 4.0;
+
+/// Extra width the chat scrollback's plate carries beyond the text column, in
+/// chat-pose-scaled pixels: [`CHAT_TEXT_INSET`] of left padding plus twice that
+/// on the right.
+///
+/// The plate starts at screen `x = 0` and the text starts at
+/// [`CHAT_TEXT_INSET`], so the padding is asymmetric by construction — this is
+/// the total, and the plate's own width is the text column's width plus this.
+/// Without it a wrapped line at the configured box width overhangs its own
+/// background. See `docs/chat.md`.
+pub(crate) const CHAT_PLATE_PAD_PX: f32 = 12.0;
+
+/// Where the scrollback's scroll indicator sits, measured from the right edge
+/// of the text column, in chat-pose-scaled pixels — clear of the widest
+/// possible wrapped line rather than on top of it. See `docs/chat.md`.
+const CHAT_SCROLLBAR_GAP: f32 = 8.0;
+
 /// `DebugScreenOverlay.MARGIN_LEFT`/`MARGIN_RIGHT`/`MARGIN_TOP`, all `2`.
 ///
 /// `extractLines` spends them as `left = alignLeft ? 2 : guiWidth() - 2 - width`
@@ -118,7 +164,7 @@ const INPUT_STRIP_PAD: f32 = 2.0;
 /// **Not [`HUD_MARGIN`]**: the F3 overlay is vanilla's own screen with vanilla's
 /// own metrics, and it draws in the already-`gui_scale`-divided logical canvas,
 /// so it needs no HUD-side scaling of any kind.
-pub(crate) const DEBUG_MARGIN: f32 = 2.0;
+pub const DEBUG_MARGIN: f32 = 2.0;
 
 /// The F3 overlay's line pitch — vanilla's literal `int height = 9` in
 /// `DebugScreenOverlay.extractLines`.
@@ -132,7 +178,7 @@ pub(crate) const DEBUG_MARGIN: f32 = 2.0;
 /// own comment records, one screen over. `docs/hud-text-scale.md` has the fuller
 /// history; the ad-hoc pitch itself is gone now that chat (its last consumer)
 /// draws at vanilla's own metrics too.
-pub(crate) const DEBUG_LINE_H: f32 = 9.0;
+pub const DEBUG_LINE_H: f32 = 9.0;
 
 /// The plate behind each F3 overlay line — vanilla's
 /// `fill(left - 1, top - 1, left + width + 1, top + height - 1, -1873784752)`,
@@ -793,14 +839,18 @@ impl DebugStats {
 
     /// The overlay's text lines, in one flat list.
     ///
-    /// Kept as the concatenation of [`Self::left_lines`] and
-    /// [`Self::right_lines`] so nothing that wanted "every line" has to know
-    /// about the column split, and so the two-column draw cannot silently drop
-    /// a line: adding one to either column changes this too.
+    /// Kept as the concatenation of [`Self::left_lines`], [`Self::right_lines`]
+    /// and [`Self::profile_lines`] so nothing that wanted "every line" has to
+    /// know about the block split, and so the draw cannot silently drop a line:
+    /// adding one to any block changes this too. The profile block joined this
+    /// concatenation on the same day it stopped being part of the right column
+    /// — a block that is drawn but not listed here is exactly the island this
+    /// function exists to prevent.
     #[must_use]
     pub fn lines(&self) -> Vec<String> {
         let mut all = self.left_lines();
         all.extend(self.right_lines());
+        all.extend(self.profile_lines());
         all
     }
 
@@ -1072,14 +1122,6 @@ impl DebugStats {
                 self.vram_reserved_bytes / 1024
             ),
         ]);
-        if !self.frame_profile.is_empty() {
-            // The per-phase CPU/GPU frame-profiling lines
-            // (`app::frame_profile`, `gpu::gpu_timing`) — see
-            // `docs/frame-profiling.md`. Its own group, own spacer, same
-            // convention as every engine-internal block above.
-            out.push(String::new());
-            out.extend(self.frame_profile.iter().cloned());
-        }
         if !self.adapter.is_empty() {
             // Vanilla's `system` group — `DebugEntrySystemSpecs` — is `Java:`,
             // `CPU:`, `Display:`, the device name and the backend/driver pair.
@@ -1091,6 +1133,41 @@ impl DebugStats {
             out.push(String::new());
             out.extend(self.adapter.iter().cloned());
         }
+        out
+    }
+
+    /// The **frame-profile block**: where the frame went, as its own group
+    /// below the left column rather than tacked onto the right one.
+    ///
+    /// It moved for a measured reason. These lines are the widest thing on the
+    /// screen by a long way — `world_encode_submit` carries a bracketed
+    /// breakdown of four `world.*` sub-phases with a mean/p95/p99 each plus the
+    /// section counts — and the right column is *right*-aligned, so a long line
+    /// there grows leftwards across the left column and its continuation rows
+    /// come out ragged-left, which is the hardest way to read a table of
+    /// numbers. Left-aligned they grow rightwards into empty canvas, and
+    /// [`debug_overlay::fit_line`] breaks them at the profiler's own `", "`
+    /// separators, so each `world.*` sub-phase lands on its own indented row
+    /// under the phase it belongs to.
+    ///
+    /// The strings themselves are **not** built here: they are
+    /// [`Self::frame_profile`], formatted by `app::redraw` from
+    /// `app::frame_profile`'s summary and the GPU timer. This function only
+    /// decides the group's heading and that it is a group — re-deriving a
+    /// number the profiler already formatted would be a second source of truth
+    /// for it. Empty (no heading, no spacer) until the first frame has run, so
+    /// the block is absent rather than a placeholder.
+    ///
+    /// The heading deliberately names no units: the CPU phase lines and the
+    /// `gpu …` lines below them do not share a format, and a heading that
+    /// described only the first would be wrong about the rest.
+    #[must_use]
+    pub fn profile_lines(&self) -> Vec<String> {
+        if self.frame_profile.is_empty() {
+            return Vec::new();
+        }
+        let mut out = vec![String::new(), "Frame profile:".to_string()];
+        out.extend(self.frame_profile.iter().cloned());
         out
     }
 
@@ -2216,7 +2293,12 @@ pub fn suggestion_layout(
     // char-boundary case cannot reach here because `ChatCompletion::show`
     // rejects it.
     let head_end = popup.start.min(popup.line.len());
-    let anchor = HUD_MARGIN + text_width(popup.line.get(..head_end).unwrap_or(""));
+    // The origin is the input line's own first glyph — [`CHAT_TEXT_INSET`],
+    // scaled, the same expression the draw uses. It read `HUD_MARGIN` while the
+    // comment below already said "the input is at x=4", which is how the popup
+    // came to hang two pixels right of the token it was completing.
+    let anchor =
+        CHAT_TEXT_INSET * pose_scale + text_width(popup.line.get(..head_end).unwrap_or(""));
     // Vanilla clamps to `0 ..= getScreenX(0) + innerWidth - maxWidth`, and for
     // the chat box that collapses to `screenWidth - maxWidth`: the input is at
     // x=4 with `innerWidth == width - 4`. So this is "do not run off the right
@@ -2396,6 +2478,15 @@ impl HudGeometry {
         // the same measure the draw itself uses — a restated constant would
         // misalign the moment the vanilla font is or is not loaded.
         //
+        // **Right-alignment is not a fit guarantee**, which is the defect that
+        // built [`debug_overlay`]: it places a line correctly and says nothing
+        // about whether the line is narrower than the canvas. The frame
+        // profile's `world_encode_submit` line is several times the logical
+        // canvas width at any real GUI scale, so most of it — including the
+        // `world.submit` reading it exists to report — rendered off the edge.
+        // Every row now goes through `debug_overlay::layout_columns`, which
+        // measures and breaks before it positions.
+        //
         // **Vanilla's own metrics, not an ad-hoc HUD-wide one.** The overlay
         // used to draw at double vanilla's size, which is exactly the mistake
         // the XP level number's own comment records one screen over:
@@ -2404,7 +2495,7 @@ impl HudGeometry {
         // everything around it. `DebugScreenOverlay` draws at scale 1 with
         // `MARGIN_LEFT == MARGIN_RIGHT == MARGIN_TOP == 2` and a line height of
         // `9` — see [`DEBUG_MARGIN`] and [`DEBUG_LINE_H`].
-        let debug_scale = 1.0;
+        let debug_scale = debug_overlay::DEBUG_SCALE;
         let debug_margin = DEBUG_MARGIN;
         let debug_line_h = DEBUG_LINE_H;
         if frame.show_debug {
@@ -2446,37 +2537,38 @@ impl HudGeometry {
                 open(&mut left, &mut left_group_open);
                 left.push(format!("Spawn: {} {} {}", spawn.x, spawn.y, spawn.z));
             }
+            // The frame-profile block flows on below the left column — see
+            // `DebugStats::profile_lines` for why it is left-aligned and no
+            // longer part of the right one. It carries its own leading spacer,
+            // so it reads as its own group rather than running on from the
+            // `Debug overlays:` line above it.
+            left.extend(frame.stats.profile_lines());
+            // Every row measured and broken to fit before it is placed. The
+            // measure is `measure_text` at the overlay's own scale, which is
+            // exactly what `Builder::text` advances by below — the same
+            // expression, not a restatement of it.
+            let rows = debug_overlay::layout_columns(
+                w,
+                debug_margin,
+                debug_line_h,
+                &left,
+                &right,
+                &|s: &str| measure_text(font, s, debug_scale),
+            );
             // Vanilla fills a plate behind every non-empty line *before* drawing
             // any text (`extractLines` does two passes for exactly this reason),
             // so a later line's plate cannot cover an earlier line's glyphs.
-            for (column, lines) in [(false, &left), (true, &right)] {
-                for (i, line) in lines.iter().enumerate() {
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let tw = b.text_width(line, debug_scale);
-                    let x = if column {
-                        w - debug_margin - tw
-                    } else {
-                        debug_margin
-                    };
-                    let y = debug_margin + i as f32 * debug_line_h;
-                    b.rect_px(x - 1.0, y - 1.0, tw + 2.0, debug_line_h, DEBUG_LINE_BG);
-                }
+            for row in &rows {
+                b.rect_px(
+                    row.x - 1.0,
+                    row.y - 1.0,
+                    row.width + 2.0,
+                    debug_line_h,
+                    DEBUG_LINE_BG,
+                );
             }
-            for (column, lines) in [(false, &left), (true, &right)] {
-                for (i, line) in lines.iter().enumerate() {
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let x = if column {
-                        w - debug_margin - b.text_width(line, debug_scale)
-                    } else {
-                        debug_margin
-                    };
-                    let y = debug_margin + i as f32 * debug_line_h;
-                    b.text(line, x, y, debug_scale, DEBUG_LINE_INK);
-                }
+            for row in &rows {
+                b.text(&row.text, row.x, row.y, debug_scale, DEBUG_LINE_INK);
             }
         }
 
@@ -2512,6 +2604,18 @@ impl HudGeometry {
         // logical-canvas pixel unit as `b.w`/`b.h` (see their doc comments),
         // so no further conversion is needed to compare them against `b.w`.
         let chat_box_w = chat_width_px(opts.width_pct.clamp(0.0, 1.0)).min(b.w);
+        // The chat column's own left inset — see [`CHAT_TEXT_INSET`]. Every
+        // chat x below is derived from this one expression rather than from
+        // `margin`, which is the HUD-wide constant the two chat surfaces were
+        // wrongly sharing; the hit-test (`chat_interaction_at`) and the
+        // suggestion popup's anchor (`suggestion_layout`) derive it the same
+        // way, because a hit-test built from a second copy of a text origin is
+        // a hit-test that drifts from what the player sees.
+        let chat_inset = CHAT_TEXT_INSET * chat_pose_scale;
+        // The plate is anchored at the screen edge and is wider than the text
+        // column, so a full-width wrapped line cannot overhang its own
+        // background — see [`CHAT_PLATE_PAD_PX`].
+        let chat_plate_w = chat_box_w + CHAT_PLATE_PAD_PX * chat_pose_scale;
         let chat_height_pct = if chat_open {
             opts.height_pct_focused
         } else {
@@ -2546,10 +2650,15 @@ impl HudGeometry {
             // translucent rows end, so the two blacks overlapped and that seam
             // rendered at double opacity while the last rows of the glyph box had
             // no background at all.
+            //
+            // Width is the plate's, not the text column's: the typed line is
+            // inset by `chat_inset` and may run the full column width, so a
+            // strip only as wide as the column would end under the text. Same
+            // defect as the scrollback rows below, same fix.
             b.rect_px(
                 0.0,
                 input_y - INPUT_STRIP_PAD * chat_pose_scale,
-                chat_box_w,
+                chat_plate_w,
                 glyph_h * chat_pose_scale + 2.0 * INPUT_STRIP_PAD * chat_pose_scale,
                 [0.0, 0.0, 0.0, chat_bg_opacity],
             );
@@ -2565,7 +2674,7 @@ impl HudGeometry {
             // flat, non-legacy draw is right, and at **full** opacity — vanilla
             // never multiplies the input `EditBox`'s own text by `chatOpacity`,
             // which only governs the scrollback below.
-            b.text(input, margin, input_y, chat_pose_scale, [1.0, 1.0, 1.0, 1.0]);
+            b.text(input, chat_inset, input_y, chat_pose_scale, [1.0, 1.0, 1.0, 1.0]);
             // The highlighted suggestion, previewed in grey **behind** the
             // caret — `EditBox.extractRenderState`'s
             // `graphics.text(font, suggestion, cursorX - 1, textY, -8355712,
@@ -2624,9 +2733,9 @@ impl HudGeometry {
             // matters even though the width term alone would not have.
             let full = input.chars().count() >= 256;
             let cursor_x = if input.is_empty() {
-                margin
+                chat_inset
             } else {
-                margin + b.text_width(input, chat_pose_scale) + chat_pose_scale
+                chat_inset + b.text_width(input, chat_pose_scale) + chat_pose_scale
             };
             if !full && let Some(ghost) = frame.chat_suggestion_ghost {
                 b.text(
@@ -2711,13 +2820,13 @@ impl HudGeometry {
                     b.rect_px(
                         0.0,
                         y - 1.0,
-                        chat_box_w,
+                        chat_plate_w,
                         chat_line_h,
                         [0.0, 0.0, 0.0, chat_bg_opacity * alpha],
                     );
                     b.text_spans(
                         sub,
-                        margin,
+                        chat_inset,
                         y,
                         chat_pose_scale,
                         [0.92, 0.94, 1.0],
@@ -2775,13 +2884,13 @@ impl HudGeometry {
                     b.rect_px(
                         0.0,
                         y - 1.0,
-                        chat_box_w,
+                        chat_plate_w,
                         chat_line_h,
                         [0.0, 0.0, 0.0, chat_bg_opacity * alpha],
                     );
                     b.text_legacy(
                         sub,
-                        margin,
+                        chat_inset,
                         y,
                         chat_pose_scale,
                         [0.92, 0.94, 1.0],
@@ -2813,7 +2922,12 @@ impl HudGeometry {
                 let thumb_h = (chat_h * chat_h / virtual_h).max(1.0);
                 let thumb_bottom = chat_bottom - bar.scrolled as f32 * chat_h / total;
                 let thumb_top = thumb_bottom - thumb_h;
-                let x = chat_box_w + 2.0 * chat_pose_scale;
+                // Clear of the widest wrapped line rather than 2 px past the
+                // column's right edge — the text now starts at `chat_inset`, so
+                // a full-width row ends at `chat_inset + chat_box_w` and the
+                // old offset put the bar on top of its last glyphs. See
+                // [`CHAT_SCROLLBAR_GAP`].
+                let x = chat_box_w + CHAT_SCROLLBAR_GAP * chat_pose_scale;
                 let rgb = if bar.new_message_since_scroll {
                     [0xCC as f32 / 255.0, 0x33 as f32 / 255.0, 0x33 as f32 / 255.0]
                 } else {
@@ -3832,7 +3946,11 @@ fn draw_profiler_chart(b: &mut Builder, chart: &ProfilerChart) {
     let mut row = |b: &mut Builder, i: usize, swatch: [f32; 4], text: &str| {
         let y = cy - r + i as f32 * DEBUG_LINE_H;
         let tw = b.text_width(text, 1.0);
-        let x = legend_right - tw;
+        // Right-aligned, but clamped so a long legend row cannot run off the
+        // left edge — the same defect the text columns had, one draw site over.
+        // The floor leaves room for the swatch, which is drawn a line-height to
+        // the *left* of the text origin.
+        let x = (legend_right - tw).max(DEBUG_MARGIN + DEBUG_LINE_H);
         b.rect_px(x - 1.0, y - 1.0, tw + 2.0, DEBUG_LINE_H, DEBUG_LINE_BG);
         b.rect_px(x - DEBUG_LINE_H, y, DEBUG_LINE_H - 2.0, DEBUG_LINE_H - 2.0, swatch);
         b.text(text, x, y, 1.0, DEBUG_LINE_INK);
@@ -4617,8 +4735,14 @@ fn draw_command_suggestions(
                 let white = [1.0, 1.0, 1.0, 1.0];
                 // `for (x = 0; x < width; x++) if (x % 2 == 0)` — every other
                 // pixel column, so the stipple pitch scales with the box.
+                // `x + px <= w`, not `x < w`: the loop variable is the dash's
+                // *left* edge and the dash is `px` wide, so the plain `x < w`
+                // form emits a final dash that hangs `px` past the panel's own
+                // right edge. Invisible at chat scale 1 against a one-pixel
+                // tolerance, and the reason the popup's own geometry could sit
+                // outside the rect the hit-test uses for it.
                 let mut x = 0.0;
-                while x < layout.w {
+                while x + px <= layout.w {
                     if has_previous {
                         b.rect_px(layout.x + x, layout.y - px, px, px, white);
                     }
@@ -5329,8 +5453,13 @@ pub fn chat_interaction_at(
     x: f32,
     y: f32,
 ) -> Option<lodestone_game::text::InteractiveSpan> {
+    // `margin` is the *vertical* top clip only, matching the draw's own
+    // `if y < margin` break. The horizontal origin is the chat column's own
+    // inset — a different quantity, and sharing one name for both is how the
+    // two came to be the same number in the first place.
     let margin = HUD_MARGIN;
     let pose_scale = chat_pose_scale(opts);
+    let inset = CHAT_TEXT_INSET * pose_scale;
     let line_h = chat_line_h(opts, pose_scale);
     let box_w = chat_width_px(opts.width_pct.clamp(0.0, 1.0)).min(canvas_w);
     let height_pct = if chat_open { opts.height_pct_focused } else { opts.height_pct_unfocused };
@@ -5338,7 +5467,10 @@ pub fn chat_interaction_at(
     let bottom = chat_bottom(canvas_h, pose_scale);
     let max_visual_rows = (box_h / line_h).floor().max(1.0) as usize;
 
-    if x < margin || x >= box_w || line_h <= 0.0 {
+    // The text column runs from `inset` to `inset + box_w`; the old bound
+    // stopped at `box_w`, so the last `inset` pixels of every wrapped line were
+    // dead to hover and to clicks.
+    if x < inset || x >= inset + box_w || line_h <= 0.0 {
         return None;
     }
 
@@ -5358,7 +5490,7 @@ pub fn chat_interaction_at(
                 return None;
             }
             if y >= row_y - 1.0 && y < row_y - 1.0 + line_h {
-                return interactive_span_at(sub, &measure, x - margin).cloned();
+                return interactive_span_at(sub, &measure, x - inset).cloned();
             }
             row_i += 1;
         }
@@ -5525,7 +5657,10 @@ mod chat_interaction_tests {
         let pose_scale = super::chat_pose_scale(o);
         let line_h = super::chat_line_h(o, pose_scale);
         let bottom = super::chat_bottom(canvas_h, pose_scale);
-        let margin = super::HUD_MARGIN;
+        // The chat column's own text origin, derived exactly as the draw derives
+        // it — not `HUD_MARGIN`, which is a different quantity these two tests
+        // used to borrow and which no longer matches where a glyph lands.
+        let inset = super::CHAT_TEXT_INSET * pose_scale;
 
         // Row 0 (newest, bottom-most) spans y in [bottom - line_h - 1, bottom - 1).
         let newest_row_y = bottom - line_h / 2.0;
@@ -5536,7 +5671,7 @@ mod chat_interaction_tests {
             o,
             true,
             measure,
-            margin + 3.0,
+            inset + 3.0,
             newest_row_y,
         );
         assert_eq!(
@@ -5548,7 +5683,7 @@ mod chat_interaction_tests {
         // Row 1 (older line) sits one full line above — no click there.
         let older_row_y = newest_row_y - line_h;
         let miss = chat_interaction_at(
-            &entries, canvas_w, canvas_h, o, true, measure, margin + 3.0, older_row_y,
+            &entries, canvas_w, canvas_h, o, true, measure, inset + 3.0, older_row_y,
         );
         assert_eq!(miss.and_then(|s| s.click), None, "the older line has no click at all");
 
@@ -5577,12 +5712,14 @@ mod chat_interaction_tests {
         let pose_scale = super::chat_pose_scale(o);
         let line_h = super::chat_line_h(o, pose_scale);
         let bottom = super::chat_bottom(canvas_h, pose_scale);
-        let margin = super::HUD_MARGIN;
+        // See the sibling test: the chat text origin, derived as the draw
+        // derives it rather than borrowed from the HUD-wide margin.
+        let inset = super::CHAT_TEXT_INSET * pose_scale;
         let row_y = bottom - line_h / 2.0;
 
-        // "see " is 4 glyphs = 24px past the margin; "tip" starts there.
+        // "see " is 4 glyphs = 24px past the inset; "tip" starts there.
         let on_word = chat_interaction_at(
-            &entries, canvas_w, canvas_h, o, true, measure, margin + 24.0 + 3.0, row_y,
+            &entries, canvas_w, canvas_h, o, true, measure, inset + 24.0 + 3.0, row_y,
         );
         assert!(
             on_word.is_some_and(|s| s.hover.is_some()),
@@ -5590,7 +5727,7 @@ mod chat_interaction_tests {
         );
 
         let before_word = chat_interaction_at(
-            &entries, canvas_w, canvas_h, o, true, measure, margin + 3.0, row_y,
+            &entries, canvas_w, canvas_h, o, true, measure, inset + 3.0, row_y,
         );
         assert!(
             before_word.is_some_and(|s| s.hover.is_none()),
@@ -7468,29 +7605,50 @@ mod tests {
 
     /// The column structure: vanilla's own category blocks, separated by the
     /// `""` spacers `extractRenderState` inserts, and `lines()` still the exact
-    /// concatenation of the two columns.
+    /// concatenation of every block.
     ///
     /// The concatenation property is the reason `lines()` exists — it is what
-    /// stops a line being added to one column and silently missing from every
+    /// stops a line being added to one block and silently missing from every
     /// consumer of the flat list — so it is asserted directly rather than
-    /// assumed.
+    /// assumed. The fixture carries a `frame_profile` for exactly that reason:
+    /// the profile block moved out of the right column, and a block that draws
+    /// but is not in `lines()` is the island this assertion exists to catch.
     #[test]
     fn debug_overlay_columns_carry_vanillas_spacers_and_concatenate() {
         let stats = DebugStats {
             status: "local world".into(),
             adapter: vec!["Apple M5".into(), "Metal".into()],
+            frame_profile: vec!["setup: 0.12/0.30/0.41 ms (240/240, 0 skip)".into()],
             ..Default::default()
         };
         let left = stats.left_lines();
         let right = stats.right_lines();
+        let profile = stats.profile_lines();
 
         let mut expected = left.clone();
         expected.extend(right.clone());
+        expected.extend(profile.clone());
         assert_eq!(
             stats.lines(),
             expected,
-            "`lines()` must stay the concatenation of the two columns, or a line \
-             added to a column goes missing from every flat-list consumer"
+            "`lines()` must stay the concatenation of every block, or a line \
+             added to one goes missing from every flat-list consumer"
+        );
+        assert!(
+            profile.iter().any(|l| l == "Frame profile:")
+                && profile
+                    .iter()
+                    .any(|l| l.starts_with("setup: 0.12/0.30/0.41 ms")),
+            "the profile block is its heading plus the producer's own lines, \
+             verbatim: {profile:#?}"
+        );
+        assert!(
+            !right.iter().any(|l| l.starts_with("setup: ")),
+            "the profile lines must no longer sit in the right column: {right:#?}"
+        );
+        assert!(
+            DebugStats::default().profile_lines().is_empty(),
+            "no reading yet must draw no heading and no spacer, not a placeholder"
         );
 
         // Vanilla's first priority line goes left and the second goes right,
@@ -8155,11 +8313,11 @@ mod tests {
         // draw site's own bug until now) computes `font.width("he") - 1`
         // instead, landing the ghost one pixel *short*, overlapping into the
         // text's last glyph rather than sitting flush against it.
-        let expected = to_ndc_x(HUD_MARGIN + measure_text(None, "he", pose));
+        let expected = to_ndc_x(CHAT_TEXT_INSET * pose + measure_text(None, "he", pose));
         let missing_caret_width_hypothesis =
-            to_ndc_x(HUD_MARGIN + measure_text(None, "he_", pose) - pose);
+            to_ndc_x(CHAT_TEXT_INSET * pose + measure_text(None, "he_", pose) - pose);
         let missing_plus_one_hypothesis =
-            to_ndc_x(HUD_MARGIN + measure_text(None, "he", pose) - pose);
+            to_ndc_x(CHAT_TEXT_INSET * pose + measure_text(None, "he", pose) - pose);
         for (name, hypothesis) in [
             ("the caret-width bug", missing_caret_width_hypothesis),
             ("the missing `+ 1` bug", missing_plus_one_hypothesis),
@@ -8244,7 +8402,7 @@ mod tests {
             // metric alone (`measure_text`) — not through `cursor_x`, the
             // value the draw itself derives the ghost from, so this cannot
             // pass by restating the code under test.
-            let text_right_edge = HUD_MARGIN + measure_text(None, input, pose);
+            let text_right_edge = CHAT_TEXT_INSET * pose + measure_text(None, input, pose);
             let offset = ghost_x - text_right_edge;
             // The bug this replaces: `font.width(value) - 1` (the missing
             // `+ 1` never reserved, so the ghost lands one pixel *inside* the
@@ -8761,11 +8919,19 @@ mod tests {
             // Row 0's background rect starts at `x == 0`, so its second
             // vertex `(x + w, y)` (`ColourStream::rect`) converted to NDC is
             // `2 * w / b.w - 1` — `verts[6]`.
+            //
+            // That rect is the *plate*, which is deliberately wider than the
+            // text column it sits behind — see [`CHAT_PLATE_PAD_PX`], and note
+            // the pad is the only shared term here: the discriminating part,
+            // the `pct * 280 + 40` slope, is still derived independently of
+            // `chat_width_px`, so a wrong slope cannot cancel out.
+            let pad = CHAT_PLATE_PAD_PX * chat_pose_scale(ChatDisplayOptions::default());
             let x1_ndc = geo.verts[6];
-            let expected_ndc = 2.0 * expected_px / CANVAS_W - 1.0;
+            let expected_ndc = 2.0 * (expected_px + pad) / CANVAS_W - 1.0;
             assert!(
                 (x1_ndc - expected_ndc).abs() < 1e-4,
-                "pct {pct}: expected box width {expected_px}px (x1 {expected_ndc}), got x1 {x1_ndc}"
+                "pct {pct}: expected box width {expected_px}px plus {pad}px of plate \
+                 padding (x1 {expected_ndc}), got x1 {x1_ndc}"
             );
         }
     }

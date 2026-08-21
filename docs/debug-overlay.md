@@ -62,10 +62,34 @@ together.
 ### The text
 
 `DebugStats` (`crates/lodestone-shell/src/hud.rs`) owns the content in
-`left_lines()` and `right_lines()`, with `lines()` as their concatenation — the
-property that stops a line added to one column from going missing from every
-consumer of the flat list. `debug_overlay_columns_carry_vanillas_spacers_and_concatenate`
-asserts it directly.
+`left_lines()`, `right_lines()` and `profile_lines()`, with `lines()` as their
+concatenation — the property that stops a line added to one block from going
+missing from every consumer of the flat list.
+`debug_overlay_columns_carry_vanillas_spacers_and_concatenate` asserts it
+directly, and its fixture carries a `frame_profile` for exactly that reason: the
+profile block left the right column, and a block that draws but is not in
+`lines()` is the island that assertion exists to catch.
+
+**Every row is measured and broken to fit before it is placed.**
+`hud::debug_overlay::layout_columns` is the one path from lines to positioned
+rows, and it guarantees that for every row `x - 1 >= 0` and
+`x + width + 1 <= canvas_w` — the `±1` being the plate, which is two pixels wider
+than its text. `fit_line` does the breaking, preferring a `", "` boundary, then
+any space, then a hard character break; continuation rows carry a two-space
+hanging indent.
+
+That is structural rather than cosmetic, and it was paid for. The overlay
+previously placed a right-column line at `w - margin - text_width(line)`, which
+is a faithful port of vanilla's own arithmetic and **says nothing about whether
+the line fits**. The frame profiler formats `world_encode_submit` as a base
+timing plus a bracketed breakdown of four `world.*` sub-phases and the section
+counts; measured with the fixed-advance debug font that single string is
+**1536 px**, against a logical canvas of 1280 at GUI scale 2 on a 2560-wide
+framebuffer and 853 at scale 3. Most of it, including the `world.submit` reading
+it exists to report, drew past the right edge. Note the defect is
+**scale-dependent** — at scale 1 on the same framebuffer the line fits with room
+to spare — so "it runs off the screen" and "the overlay looks fine" were both
+honest reports.
 
 What the overlay draws, on a live session:
 
@@ -88,6 +112,40 @@ Debug overlays: [F3+B] Hitboxes hidden;                Mesh VRAM: 65536/…
                                                        Apple M5 (Metal)
                                                        …limits…
 ```
+
+Below the left column sits the **frame-profile block**, its own group with its
+own `Frame profile:` heading:
+
+```
+Frame profile:
+setup: 0.12/0.30/0.41 ms (240/240, 0 skip)
+sim_tick: 1.84/3.10/4.02 ms (240/240, 0 skip)
+…
+world_encode_submit: 4.71/8.02/9.63 ms (240/240, 0 skip) [world.prepare_buffers:
+  0.42/0.71/0.88 ms, world.terrain_cull_draw: 3.05/5.90/7.11 ms,
+  world.other_draws: 0.71/1.02/1.30 ms, world.submit: 0.53/0.79/0.94 ms,
+  sections visited: 1284 packed + 96 model]
+hud_ui_encode_submit: 0.77/1.20/1.44 ms (240/240, 0 skip)
+present: 0.31/0.55/0.72 ms (240/240, 0 skip)
+gpu terrain: 3.90 ms
+…
+```
+
+It is **left-aligned and below the left column**, not appended to the right one,
+and that is a layout decision rather than a content one. These are the widest
+lines on the screen; the right column is *right*-aligned, so a long line there
+grows leftwards across the left column and its continuation rows come out
+ragged-left, which is the hardest possible arrangement for a table of numbers.
+Left-aligned they grow rightwards into empty canvas, and `fit_line`'s comma
+preference puts one `world.*` sub-phase on each indented continuation row —
+which is what makes the block answer "where did the frame go?" at a glance.
+
+The strings themselves are **not** built by the overlay. They are
+`DebugStats::frame_profile`, formatted by `app::redraw` from `app::frame_profile`
+and the GPU timer (see `docs/frame-profiling.md`); `profile_lines()` decides only
+the heading and that it is a group. The heading names no units on purpose: the
+CPU phase lines and the `gpu …` lines below them do not share a format, so a
+heading describing the first would be wrong about the rest.
 
 The `Debug overlays:` line is one line, wrapped here only to fit the page.
 Note where the dimension sits: **between `Facing:` and `Section-relative:`**, not
@@ -309,6 +367,16 @@ Toggles are `Arc<AtomicBool>` because the source closure is
 
 ## How to change it, and the gotchas
 
+- **You do not have to make a line fit; you must not defeat the fit.** Adding a
+  line or a sub-phase needs nothing from `debug_overlay` — route it through
+  `layout_columns` like everything else and it is broken to the canvas
+  automatically. What *would* reintroduce the defect is a second draw path that
+  measures a line and positions it directly, which is exactly what the overlay
+  used to do. `debug_overlay_lines_fit_the_canvas.rs` is the guard, and its
+  control is worth reading before changing the layout: neutering `fit_line` back
+  to "return the line unbroken" fails all three of its tests, and the failure
+  names the `world.submit` line at scales 2 and 3 with the plate rect that
+  escaped.
 - **Adding a line means picking a category, not picking a column.** Decide which
   of vanilla's three it is — priority, regular, or a named group — and put it in
   the block that category already occupies, keeping its `""` separator. Do not
@@ -493,7 +561,29 @@ Toggles are `Arc<AtomicBool>` because the source closure is
 
 ## Gates
 
-All three are `hud.rs` unit tests, no adapter needed:
+`crates/lodestone-shell/tests/debug_overlay_lines_fit_the_canvas.rs` is the fit
+guard; the rest are `hud.rs` unit tests. None needs an adapter.
+
+The fit guard drives the **real** producers (`left_lines`/`right_lines`/
+`profile_lines`) through the **real** layout with the **real** measure
+(`debug_overlay::measure`, the same function `Builder::text` advances by), at GUI
+scales 1–4. What it does *not* reach is the profiler's own string: that comes
+from `app::frame_profile::PhaseSummary::line`, which is `pub(crate)` and so
+unreachable from an integration test, and the fixture transcribes its shape.
+So it verifies the **overlay's fit**, not the **profiler's formatting** — if the
+profiler's format changes, this gate keeps passing against the old shape, which
+is fine for a width assertion and would not be for a content one.
+
+Its two controls, both observed firing:
+
+- `the_unwrapped_profile_line_really_does_overflow` measures the raw fixture and
+  requires it to be too wide at GUI scales 2–4, and to *fit* at scale 1 — without
+  that, a corpus of short lines satisfies the fit assertion vacuously.
+- neutering `fit_line` to return every line unbroken fails all three tests, and
+  the fit test's message names the offending line and prints the plate rect that
+  escaped (`plate [1, 1539]` against a canvas of 1280).
+
+The rest:
 
 - `debug_overlay_plate_and_ink_match_vanillas_fill_literals` — transcribes
   `extractLines`' two signed Java `int` colours (`-1873784752`, `-2039584`) and

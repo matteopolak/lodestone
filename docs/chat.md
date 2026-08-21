@@ -248,6 +248,56 @@ unconditionally (open or closed), same as vanilla. See
 which rasterises `HudGeometry::build` and measures the two background bands'
 actual pixel positions rather than asserting on the formula alone.
 
+### Horizontal layout: the text inset, the plate, and the scrollbar
+
+Both chat surfaces sit **four scaled pixels** in from the left edge of the
+screen, not at the shared `hud::HUD_MARGIN` of six. `hud::CHAT_TEXT_INSET` is
+the constant, and it is derived from vanilla two ways that agree:
+
+- the scrollback's own pose is `pose.scale(scale, scale)` followed by
+  `pose.translate(4.0F, 0.0F)` in `ChatComponent.extractRenderState`, so the
+  translate lands *inside* the scaled space and text drawn at local `x = 0`
+  appears at screen `4 * scale`;
+- the input box is `new EditBox(font, 4, height - 12, width - 4, 12, …)` with
+  `setBordered(false)` in `ChatScreen.init`, and `EditBox`'s own
+  `textX = getX() + (bordered ? 4 : 0)` therefore resolves to a flat `4`.
+
+Vanilla's input is a plain `Screen` widget and so is *not* chat-scaled; this
+shell does draw the input at the chat pose scale (see `hud::chat_input_top`), so
+it scales that inset too — which keeps the input's first glyph in the same
+column as the scrollback's. At the default `chatScale` of `1.0` the two readings
+coincide at four.
+
+Two consequences that were wrong alongside the inset, and are wrong in a way
+that the inset alone does not explain:
+
+- **The plate is not the text column.** Vanilla fills it from local `-4` to
+  `maxWidth + 4 + 4`, i.e. screen `0` to `getWidth() + 12 * scale`: four scaled
+  pixels of padding on the left of the text and eight on the right.
+  `hud::CHAT_PLATE_PAD_PX` is that `12`. Ours used to be exactly the text
+  column's width starting at `0`, so a wrapped line at the configured box width
+  overhung its own background by the whole inset.
+- **The scroll indicator sits clear of the widest line.** Vanilla's
+  `scrollBarStartX = maxWidth + 4` resolves to screen `getWidth() + 8 * scale`
+  (`hud::CHAT_SCROLLBAR_GAP`); ours was `+ 2 * scale`, which lands on the last
+  glyphs of a full-width row.
+
+The owner's report was *"all of the text in the chat window (and my own chat
+bar) are offset to the right … theres a bigger gap than there should be on the
+left, which sometimes pushes text to render off the end"*. Both surfaces were
+wrong together because both read one wrong constant — not because two mistakes
+coincided — and the same constant reached two derived sites that must agree with
+the draw or they drift from what the player sees: `hud::suggestion_layout`'s
+anchor (whose own comment already *said* "the input is at x=4" while the code
+used six) and `hud::chat_interaction_at`'s hit-test origin, whose horizontal
+bound also stopped at the column width rather than at `inset + width`, leaving
+the last few pixels of every row dead to hover and clicks.
+
+If you change the inset, change all four together — draw, plate, popup anchor,
+hit-test — and note that `chat_interaction_at` deliberately keeps `HUD_MARGIN`
+for its *vertical* top clip, which is a genuinely different quantity that
+happens to have lived under the same name.
+
 ### Chat Settings
 
 `crate::hud::ChatDisplayOptions` (a small `Copy` struct on `HudFrame`) carries
