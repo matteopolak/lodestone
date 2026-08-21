@@ -54,14 +54,17 @@ fn fixture_bytes(text: &str) -> Vec<u8> {
 const CAPTURED_COMPONENT: &str = "minecraft:repair_cost";
 
 /// A component this build still does not decode. `minecraft:profile` held this
-/// slot until it was modeled (see `lodestone_model::ItemProfile`), which is the
-/// exact failure this file's sibling gates warned about — replaced with
-/// `minecraft:instrument`: `Instrument.STREAM_CODEC` is `ByteBufCodecs.holder`
-/// over a `DIRECT_STREAM_CODEC` that is itself a nested holder (`SoundEvent`)
-/// plus two floats plus a full chat component, so it is genuinely expensive
-/// rather than merely unfinished — a deliberately durable choice, since a cheap
-/// one gets modeled and voids this gate.
-const UNMODELED_COMPONENT: &str = "minecraft:instrument";
+/// slot until it was modeled (see `lodestone_model::ItemProfile`), and
+/// `minecraft:instrument` held it next until the item-component sweep that
+/// closed the "62 of 111 unmodelled" backlog modeled every component that is
+/// genuinely skippable byte-accurately. `minecraft:can_place_on` is the
+/// replacement: its `DataComponentMatchers` payload dispatches through a
+/// second, independent registry whose entries can recurse into another
+/// `DataComponentMatchers` — a general-purpose predicate interpreter, not
+/// "one more component reader" — so it is a genuine decode cliff and a
+/// deliberately durable choice, unlike the two components that held this slot
+/// before it.
+const UNMODELED_COMPONENT: &str = "minecraft:can_place_on";
 
 fn component_id(name: &str) -> i32 {
     (0..)

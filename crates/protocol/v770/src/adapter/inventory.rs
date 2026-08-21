@@ -1196,6 +1196,471 @@ fn read_component_patch(
                 ));
             }
 
+            // `UseEffects.STREAM_CODEC`: two bools (canSprint, interactVibrations)
+            // then a float (speedMultiplier) — an eating/drinking speed-and-motion
+            // modifier with no current consumer here; unframed like the rest of
+            // this group, so a consumable stack carrying it would otherwise
+            // truncate the packet from that slot onward.
+            Some("minecraft:use_effects") => {
+                reader.bool().map_err(dec_err)?;
+                reader.bool().map_err(dec_err)?;
+                reader.f32().map_err(dec_err)?;
+            }
+
+            // `AdventureModePredicate.STREAM_CODEC` is a `List<BlockPredicate>`, and
+            // `BlockPredicate`'s own codec carries a `DataComponentMatchers`, whose
+            // `partial` half dispatches through a *second*, independent registry
+            // (`data_component_predicate_type`, 15 entries) — several of which
+            // (`container`, `bundle_contents`) embed an item/collection predicate
+            // that recurses back into another `DataComponentMatchers`. Walking that
+            // byte-accurately is not "one more component reader"; it is a second,
+            // general-purpose predicate interpreter with no length prefix anywhere
+            // in the chain to fall back on if one of its own 15 sub-types is itself
+            // unrecognised. Genuinely unskippable without building that interpreter,
+            // the same way the `explode` packet's non-simple particle ids are —
+            // every other component in this match *is* modeled; these two are the
+            // one deliberate exception.
+            Some(name @ ("minecraft:can_place_on" | "minecraft:can_break")) => {
+                components.has_unmodeled = true;
+                tracing::warn!(
+                    item,
+                    component = name,
+                    component_id = type_id,
+                    "unmodeled item data component (predicate recursion has no length \
+                     prefix to fall back on); delivering a partial stack and skipping \
+                     the rest of the packet",
+                );
+                let _ = reader.bytes(reader.remaining());
+                return Ok((components, false));
+            }
+
+            // `FoodProperties.DIRECT_STREAM_CODEC`: VarInt nutrition, float
+            // saturation, bool canAlwaysEat.
+            Some("minecraft:food") => {
+                reader.var_i32().map_err(dec_err)?;
+                reader.f32().map_err(dec_err)?;
+                reader.bool().map_err(dec_err)?;
+            }
+
+            // `Consumable.STREAM_CODEC`: float consumeSeconds, `ItemUseAnimation`
+            // (a bare `idMapper` VarInt), a `Holder<SoundEvent>`, bool
+            // hasConsumeParticles, then the same `List<ConsumeEffect>` shape
+            // `minecraft:death_protection` carries — see [`read_consume_effects`].
+            Some("minecraft:consumable") => {
+                reader.f32().map_err(dec_err)?;
+                reader.var_i32().map_err(dec_err)?; // ItemUseAnimation
+                read_sound_event_holder(reader)?;
+                reader.bool().map_err(dec_err)?;
+                if !read_consume_effects(reader)? {
+                    components.has_unmodeled = true;
+                    let _ = reader.bytes(reader.remaining());
+                    return Ok((components, false));
+                }
+            }
+
+            // `UseRemainder.STREAM_CODEC` is a single `ItemStackTemplate` — the
+            // stack an eaten/drunk item converts into (an empty bottle, a bowl).
+            // Unframed like the rest of this group.
+            Some("minecraft:use_remainder") => {
+                let (_, complete) = read_item_stack_template_tolerant(reader)?;
+                if !complete {
+                    components.has_unmodeled = true;
+                    let _ = reader.bytes(reader.remaining());
+                    return Ok((components, false));
+                }
+            }
+
+            // `UseCooldown.STREAM_CODEC`: float seconds, then an optional
+            // `Identifier` cooldown-group override (bool then a bare UTF8 string).
+            Some("minecraft:use_cooldown") => {
+                reader.f32().map_err(dec_err)?;
+                if reader.bool().map_err(dec_err)? {
+                    reader.string(32767).map_err(dec_err)?;
+                }
+            }
+
+            // `DamageResistant.STREAM_CODEC` is a single, non-optional
+            // `HolderSet<DamageType>` — the same wire shape [`read_holder_set`]
+            // already reads for `Repairable`'s item set.
+            Some("minecraft:damage_resistant") => {
+                let _ = read_holder_set(reader)?;
+            }
+
+            // `Weapon.STREAM_CODEC`: VarInt itemDamagePerAttack, float
+            // disableBlockingForSeconds.
+            Some("minecraft:weapon") => {
+                reader.var_i32().map_err(dec_err)?;
+                reader.f32().map_err(dec_err)?;
+            }
+
+            // `DeathProtection.STREAM_CODEC` is a single `List<ConsumeEffect>` — a
+            // totem-of-undying-shaped item's on-death effect list. See
+            // [`read_consume_effects`]; an unrecognised `ConsumeEffect` variant is
+            // itself an unframed dispatch this decoder cannot see past, so the same
+            // truncation applies as for `minecraft:consumable` above.
+            Some("minecraft:death_protection") => {
+                if !read_consume_effects(reader)? {
+                    components.has_unmodeled = true;
+                    let _ = reader.bytes(reader.remaining());
+                    return Ok((components, false));
+                }
+            }
+
+            // `BlocksAttacks.STREAM_CODEC`: float blockDelaySeconds, float
+            // disableCooldownScale, `List<DamageReduction>` (float
+            // horizontalBlockingAngle, `Optional<HolderSet<DamageType>>`, float
+            // base, float factor — four fields, in that order), one
+            // `ItemDamageFunction` (float threshold, float base, float factor — not
+            // a list), `Optional<HolderSet<DamageType>>` bypassedBy, then two
+            // `Optional<Holder<SoundEvent>>` (blockSound, disableSound).
+            Some("minecraft:blocks_attacks") => {
+                reader.f32().map_err(dec_err)?;
+                reader.f32().map_err(dec_err)?;
+                let reductions = read_count(reader, "blocks_attacks damage_reductions")?;
+                if reductions > 256 {
+                    return Err(AdapterError::Decode(format!(
+                        "blocks_attacks declares {reductions} damage reductions, implausibly many"
+                    )));
+                }
+                for _ in 0..reductions {
+                    reader.f32().map_err(dec_err)?; // horizontalBlockingAngle
+                    if reader.bool().map_err(dec_err)? {
+                        let _ = read_holder_set(reader)?; // type
+                    }
+                    reader.f32().map_err(dec_err)?; // base
+                    reader.f32().map_err(dec_err)?; // factor
+                }
+                reader.f32().map_err(dec_err)?; // ItemDamageFunction.threshold
+                reader.f32().map_err(dec_err)?; // ItemDamageFunction.base
+                reader.f32().map_err(dec_err)?; // ItemDamageFunction.factor
+                if reader.bool().map_err(dec_err)? {
+                    let _ = read_holder_set(reader)?; // bypassedBy
+                }
+                if reader.bool().map_err(dec_err)? {
+                    read_sound_event_holder(reader)?; // blockSound
+                }
+                if reader.bool().map_err(dec_err)? {
+                    read_sound_event_holder(reader)?; // disableSound
+                }
+            }
+
+            // `PiercingWeapon.STREAM_CODEC`: two bools (dealsKnockback, dismounts)
+            // then two `Optional<Holder<SoundEvent>>` (sound, hitSound).
+            Some("minecraft:piercing_weapon") => {
+                reader.bool().map_err(dec_err)?;
+                reader.bool().map_err(dec_err)?;
+                if reader.bool().map_err(dec_err)? {
+                    read_sound_event_holder(reader)?;
+                }
+                if reader.bool().map_err(dec_err)? {
+                    read_sound_event_holder(reader)?;
+                }
+            }
+
+            // `KineticWeapon.STREAM_CODEC`: two VarInts (contactCooldownTicks,
+            // delayTicks), three `Optional<Condition>` (each a VarInt
+            // maxDurationTicks then two floats — minSpeed, minRelativeSpeed), two
+            // floats (forwardMovement, damageMultiplier), then two
+            // `Optional<Holder<SoundEvent>>` (sound, hitSound).
+            Some("minecraft:kinetic_weapon") => {
+                reader.var_i32().map_err(dec_err)?;
+                reader.var_i32().map_err(dec_err)?;
+                for _ in 0..3 {
+                    if reader.bool().map_err(dec_err)? {
+                        reader.var_i32().map_err(dec_err)?;
+                        reader.f32().map_err(dec_err)?;
+                        reader.f32().map_err(dec_err)?;
+                    }
+                }
+                reader.f32().map_err(dec_err)?;
+                reader.f32().map_err(dec_err)?;
+                if reader.bool().map_err(dec_err)? {
+                    read_sound_event_holder(reader)?;
+                }
+                if reader.bool().map_err(dec_err)? {
+                    read_sound_event_holder(reader)?;
+                }
+            }
+
+            // `SwingAnimation.STREAM_CODEC`: `SwingAnimationType` (a bare
+            // `idMapper` VarInt) then a VarInt duration.
+            Some("minecraft:swing_animation") => {
+                reader.var_i32().map_err(dec_err)?;
+                reader.var_i32().map_err(dec_err)?;
+            }
+
+            // `SuspiciousStewEffects.STREAM_CODEC`: a list of (`MobEffect` holder —
+            // the same bare `holderRegistry` VarInt `minecraft:potion_contents`'s
+            // custom effects use — then a VarInt duration) pairs.
+            Some("minecraft:suspicious_stew_effects") => {
+                let count = read_count(reader, "suspicious_stew_effects entry")?;
+                if count > 256 {
+                    return Err(AdapterError::Decode(format!(
+                        "suspicious_stew_effects declares {count} entries, implausibly many"
+                    )));
+                }
+                for _ in 0..count {
+                    reader.var_i32().map_err(dec_err)?; // MobEffect holder
+                    reader.var_i32().map_err(dec_err)?; // duration
+                }
+            }
+
+            // `TypedEntityData.streamCodec(EntityType.STREAM_CODEC)`: a bare
+            // registry VarInt (`EntityType`) then a network-NBT compound tag. See
+            // [`read_typed_entity_data`].
+            Some("minecraft:entity_data") => {
+                read_typed_entity_data(reader)?;
+            }
+
+            // `CustomData.STREAM_CODEC` here (unlike plain `minecraft:custom_data`
+            // above, which has no `networkSynchronized` at all) is
+            // `ByteBufCodecs.COMPOUND_TAG` directly — one network-NBT compound tag,
+            // no leading type id.
+            Some("minecraft:bucket_entity_data") => {
+                read_network_nbt(reader).map_err(dec_err)?;
+            }
+
+            // `TypedEntityData.streamCodec(ByteBufCodecs.registry(BLOCK_ENTITY_TYPE))`:
+            // the same shape as `minecraft:entity_data` above, keyed by
+            // `BlockEntityType` instead. Found live: a `minecraft:spawner` stack
+            // truncated the rest of the packet from here on while this was
+            // unmodeled.
+            Some("minecraft:block_entity_data") => {
+                read_typed_entity_data(reader)?;
+            }
+
+            // `Instrument.STREAM_CODEC = ByteBufCodecs.holder(Registries.INSTRUMENT,
+            // DIRECT_STREAM_CODEC)`: `0` for an inline instrument (a
+            // `Holder<SoundEvent>`, then two floats — useDuration, range — then a
+            // network-NBT chat component description), a positive value for a bare
+            // registry reference (`id + 1`, no body) — the same `ByteBufCodecs.holder`
+            // discriminator [`read_sound_event_holder`] already reads.
+            Some("minecraft:instrument") => {
+                if reader.var_i32().map_err(dec_err)? == 0 {
+                    read_sound_event_holder(reader)?;
+                    reader.f32().map_err(dec_err)?;
+                    reader.f32().map_err(dec_err)?;
+                    read_network_nbt(reader).map_err(dec_err)?;
+                }
+            }
+
+            // `TrimMaterial.STREAM_CODEC = ByteBufCodecs.holder(Registries.TRIM_MATERIAL,
+            // DIRECT_STREAM_CODEC)`: same `0`-inline / `id + 1`-reference shape as
+            // `minecraft:instrument` above. The inline body is a
+            // `MaterialAssetGroup` (a base asset-info UTF8 string, then a
+            // resource-key-to-asset-info override table, each entry two UTF8
+            // strings) followed by a network-NBT chat component description.
+            Some("minecraft:provides_trim_material") => {
+                if reader.var_i32().map_err(dec_err)? == 0 {
+                    reader.string(32767).map_err(dec_err)?; // base AssetInfo
+                    let overrides = read_count(reader, "provides_trim_material override")?;
+                    if overrides > 256 {
+                        return Err(AdapterError::Decode(format!(
+                            "provides_trim_material declares {overrides} overrides, implausibly many"
+                        )));
+                    }
+                    for _ in 0..overrides {
+                        reader.string(32767).map_err(dec_err)?; // ResourceKey
+                        reader.string(32767).map_err(dec_err)?; // AssetInfo
+                    }
+                    read_network_nbt(reader).map_err(dec_err)?;
+                }
+            }
+
+            // `JukeboxPlayable.STREAM_CODEC` is a single `Holder<JukeboxSong>`;
+            // `JukeboxSong.STREAM_CODEC` uses the same `ByteBufCodecs.holder`
+            // discriminator again. The inline body is a `Holder<SoundEvent>`, a
+            // network-NBT chat component description, a float lengthInSeconds and
+            // a VarInt comparatorOutput.
+            Some("minecraft:jukebox_playable") => {
+                if reader.var_i32().map_err(dec_err)? == 0 {
+                    read_sound_event_holder(reader)?;
+                    read_network_nbt(reader).map_err(dec_err)?;
+                    reader.f32().map_err(dec_err)?;
+                    reader.var_i32().map_err(dec_err)?;
+                }
+            }
+
+            // `ByteBufCodecs.holderSet(Registries.BANNER_PATTERN)` — the same
+            // `HolderSet<T>` shape [`read_holder_set`] already reads.
+            Some("minecraft:provides_banner_patterns") => {
+                let _ = read_holder_set(reader)?;
+            }
+
+            // `LodestoneTracker.STREAM_CODEC`: an `Optional<GlobalPos>` (bool, then
+            // a `ResourceKey<Level>` — a bare UTF8 identifier string — and a
+            // packed-`i64` `BlockPos`), then a bool `tracked`.
+            Some("minecraft:lodestone_tracker") => {
+                if reader.bool().map_err(dec_err)? {
+                    reader.string(32767).map_err(dec_err)?; // dimension
+                    reader.i64().map_err(dec_err)?; // packed BlockPos
+                }
+                reader.bool().map_err(dec_err)?; // tracked
+            }
+
+            // See [`read_firework_explosion`].
+            Some("minecraft:firework_explosion") => {
+                read_firework_explosion(reader)?;
+            }
+
+            // `Fireworks.STREAM_CODEC`: VarInt flightDuration, then a
+            // `List<FireworkExplosion>` capped at 256 — [`read_firework_explosion`]
+            // per entry.
+            Some("minecraft:fireworks") => {
+                reader.var_i32().map_err(dec_err)?;
+                let count = read_count(reader, "fireworks explosion")?;
+                if count > 256 {
+                    return Err(AdapterError::Decode(format!(
+                        "fireworks declares {count} explosions; ByteBufCodecs.list's max is 256"
+                    )));
+                }
+                for _ in 0..count {
+                    read_firework_explosion(reader)?;
+                }
+            }
+
+            // `ItemContainerContents.STREAM_CODEC`: a `List<Optional<ItemStackTemplate>>`
+            // capped at 256 — a shulker box's, chest boat's or bundle-adjacent
+            // container's slot contents. Each present entry is
+            // [`read_item_stack_template_tolerant`]; an unmodeled component inside
+            // one slot is exactly as unrecoverable as at the top level.
+            Some("minecraft:container") => {
+                let count = read_count(reader, "container item")?;
+                if count > 256 {
+                    return Err(AdapterError::Decode(format!(
+                        "container declares {count} items; ByteBufCodecs.list's max is 256"
+                    )));
+                }
+                for _ in 0..count {
+                    if reader.bool().map_err(dec_err)? {
+                        let (_, complete) = read_item_stack_template_tolerant(reader)?;
+                        if !complete {
+                            components.has_unmodeled = true;
+                            let _ = reader.bytes(reader.remaining());
+                            return Ok((components, false));
+                        }
+                    }
+                }
+            }
+
+            // `BlockItemStateProperties.STREAM_CODEC` is a bare
+            // `Map<String, String>` — property name to serialised value, for a
+            // block item placed with a specific state (`/give … [block_state={…}]`).
+            // No wire-declared cap; bounded defensively — no vanilla block carries
+            // anywhere near this many properties.
+            Some("minecraft:block_state") => {
+                let count = read_count(reader, "block_state property")?;
+                if count > 256 {
+                    return Err(AdapterError::Decode(format!(
+                        "block_state declares {count} properties, implausibly many"
+                    )));
+                }
+                for _ in 0..count {
+                    reader.string(32767).map_err(dec_err)?; // property name
+                    reader.string(32767).map_err(dec_err)?; // property value
+                }
+            }
+
+            // `Bees.STREAM_CODEC`: a `List<Occupant>`, each a
+            // [`read_typed_entity_data`] (`EntityType`-keyed) followed by two
+            // VarInts (ticksInHive, minTicksInHive). No wire-declared cap; a
+            // beehive holds at most three, so bounded defensively.
+            Some("minecraft:bees") => {
+                let count = read_count(reader, "bees occupant")?;
+                if count > 64 {
+                    return Err(AdapterError::Decode(format!(
+                        "bees declares {count} occupants, implausibly many"
+                    )));
+                }
+                for _ in 0..count {
+                    read_typed_entity_data(reader)?;
+                    reader.var_i32().map_err(dec_err)?; // ticksInHive
+                    reader.var_i32().map_err(dec_err)?; // minTicksInHive
+                }
+            }
+
+            // `SulfurCubeContent.STREAM_CODEC` is a single, non-optional
+            // `ItemStackTemplate` — the block item a sulfur cube has absorbed.
+            Some("minecraft:sulfur_cube_content") => {
+                let (_, complete) = read_item_stack_template_tolerant(reader)?;
+                if !complete {
+                    components.has_unmodeled = true;
+                    let _ = reader.bytes(reader.remaining());
+                    return Ok((components, false));
+                }
+            }
+
+            // `SoundEvent.STREAM_CODEC` directly (not optional) — the same
+            // `ByteBufCodecs.holder` discriminator [`read_sound_event_holder`]
+            // already reads.
+            Some("minecraft:break_sound") => {
+                read_sound_event_holder(reader)?;
+            }
+
+            // `PaintingVariant.STREAM_CODEC = ByteBufCodecs.holder(Registries.PAINTING_VARIANT,
+            // DIRECT_STREAM_CODEC)`: same `0`-inline / `id + 1`-reference shape as
+            // `minecraft:instrument` above. The inline body is two VarInts (width,
+            // height), a bare UTF8 identifier (assetId), then two
+            // `Optional<Component>` network-NBT chat components (title, author).
+            Some("minecraft:painting/variant") => {
+                if reader.var_i32().map_err(dec_err)? == 0 {
+                    reader.var_i32().map_err(dec_err)?; // width
+                    reader.var_i32().map_err(dec_err)?; // height
+                    reader.string(32767).map_err(dec_err)?; // assetId
+                    if reader.bool().map_err(dec_err)? {
+                        read_network_nbt(reader).map_err(dec_err)?; // title
+                    }
+                    if reader.bool().map_err(dec_err)? {
+                        read_network_nbt(reader).map_err(dec_err)?; // author
+                    }
+                }
+            }
+
+            // A single bare, 0-based VarInt with no framing beyond it — either
+            // `ByteBufCodecs.holderRegistry` (a synced-registry `Holder<T>`
+            // reference: `damage_type` and every `Holder<…Variant>`/
+            // `Holder<…SoundVariant>` below) or `ByteBufCodecs.idMapper` (a
+            // `StringRepresentable` enum ordinal: every plain, non-`Holder`
+            // `…Variant`/`DyeColor` field below) — both shapes are one VarInt on
+            // the wire with no discriminator, so they share this arm. Consumed for
+            // alignment only, the same as `minecraft:rarity`'s group above: mostly
+            // bucket-item variant fields (`tropical_fish/*`, `salmon/size`,
+            // `axolotl/variant`, …) and mob variant/collar fields, none of which
+            // this client renders from an item stack today.
+            Some(
+                "minecraft:damage_type"
+                | "minecraft:villager/variant"
+                | "minecraft:wolf/variant"
+                | "minecraft:wolf/sound_variant"
+                | "minecraft:wolf/collar"
+                | "minecraft:fox/variant"
+                | "minecraft:salmon/size"
+                | "minecraft:parrot/variant"
+                | "minecraft:tropical_fish/pattern"
+                | "minecraft:tropical_fish/base_color"
+                | "minecraft:tropical_fish/pattern_color"
+                | "minecraft:mooshroom/variant"
+                | "minecraft:rabbit/variant"
+                | "minecraft:pig/variant"
+                | "minecraft:pig/sound_variant"
+                | "minecraft:cow/variant"
+                | "minecraft:cow/sound_variant"
+                | "minecraft:chicken/variant"
+                | "minecraft:chicken/sound_variant"
+                | "minecraft:zombie_nautilus/variant"
+                | "minecraft:frog/variant"
+                | "minecraft:horse/variant"
+                | "minecraft:llama/variant"
+                | "minecraft:axolotl/variant"
+                | "minecraft:cat/variant"
+                | "minecraft:cat/sound_variant"
+                | "minecraft:cat/collar"
+                | "minecraft:sheep/color"
+                | "minecraft:shulker/color",
+            ) => {
+                reader.var_i32().map_err(dec_err)?;
+            }
+
             other => {
                 // An unmodeled component: its payload is not length-prefixed, so
                 // it and everything after it in this packet are unreadable. Keep
@@ -1262,6 +1727,137 @@ fn read_component_patch(
     }
 
     Ok((components, true))
+}
+
+/// Consumes `ConsumeEffect.STREAM_CODEC.apply(ByteBufCodecs.list())` — the
+/// payload shape shared by `minecraft:consumable`'s `onConsumeEffects` and
+/// `minecraft:death_protection`'s `deathEffects`.
+///
+/// Each entry leads with a bare, 0-based VarInt naming one of the five
+/// `minecraft:consume_effect_type` registry entries (`apply_effects`,
+/// `remove_effects`, `clear_all_effects`, `teleport_randomly`, `play_sound`,
+/// in registration order) and dispatches to that type's own composite codec.
+/// A sixth, future/datapack-defined type has no generic fallback — the same
+/// unframed-dispatch cliff [`read_component_patch`]'s own `other` arm
+/// documents — so this returns `false` rather than erroring, letting the
+/// caller apply the same has-unmodeled-component treatment.
+///
+/// Bounded at 1024 entries defensively: the codec itself declares no cap
+/// (`ByteBufCodecs.list()` with no argument).
+fn read_consume_effects(reader: &mut Reader<'_>) -> Result<bool, AdapterError> {
+    let count = read_count(reader, "consume effect")?;
+    if count > 1024 {
+        return Err(AdapterError::Decode(format!(
+            "consume effect list declares {count} entries, implausibly many"
+        )));
+    }
+    for _ in 0..count {
+        let type_id = reader.var_i32().map_err(dec_err)?;
+        match type_id {
+            // apply_effects: List<MobEffectInstance> (the same shape
+            // [`read_mob_effect_instances`] already reads for potion custom
+            // effects) then a float probability.
+            0 => {
+                let _ = read_mob_effect_instances(reader)?;
+                reader.f32().map_err(dec_err)?;
+            }
+            // remove_effects: HolderSet<MobEffect>.
+            1 => {
+                let _ = read_holder_set(reader)?;
+            }
+            // clear_all_effects: no payload — presence alone is the value.
+            2 => {}
+            // teleport_randomly: a float diameter.
+            3 => {
+                reader.f32().map_err(dec_err)?;
+            }
+            // play_sound: Holder<SoundEvent>.
+            4 => {
+                read_sound_event_holder(reader)?;
+            }
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
+/// Consumes a `TypedEntityData<T>.STREAM_CODEC` (`TypedEntityData.streamCodec`):
+/// a bare, 0-based registry VarInt naming the entity/block-entity type, then a
+/// network-NBT compound tag. Shared by `minecraft:entity_data`
+/// (`EntityType`-keyed), `minecraft:block_entity_data`
+/// (`BlockEntityType`-keyed) and each entry of `minecraft:bees`' occupant list
+/// (`EntityType`-keyed) — the leading id's registry differs per caller, but
+/// its wire shape (a plain `ByteBufCodecs.registry` VarInt) does not.
+fn read_typed_entity_data(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
+    reader.var_i32().map_err(dec_err)?;
+    read_network_nbt(reader).map_err(dec_err)?;
+    Ok(())
+}
+
+/// Reads one `ItemStackTemplate` (item id, count, then a nested, recursive
+/// `DataComponentPatch`) and reports whether the nested patch decoded to
+/// completion, instead of [`read_item_stack_template`]'s hard failure on an
+/// unmodeled nested component.
+///
+/// Shared by `minecraft:use_remainder`, `minecraft:container` and
+/// `minecraft:sulfur_cube_content`: an unmodeled component inside one of
+/// these nested stacks is exactly as unrecoverable as one at the top level
+/// (no length prefix either), so the caller applies the same
+/// has-unmodeled-component treatment rather than failing the whole packet —
+/// a shulker box with an unusual item in one slot is not a case this decoder
+/// can afford to treat as fatal.
+fn read_item_stack_template_tolerant(
+    reader: &mut Reader<'_>,
+) -> Result<(ItemStack, bool), AdapterError> {
+    let item_id = reader.var_i32().map_err(dec_err)?;
+    let name = item_name(item_id)
+        .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
+    let count = reader.var_i32().map_err(dec_err)?;
+    let count = u32::try_from(count)
+        .map_err(|_| AdapterError::Decode(format!("invalid item count {count}")))?;
+    let (components, complete) = read_component_patch(reader, name)?;
+    Ok((
+        ItemStack {
+            item: parse_key(name, "item")?,
+            count,
+            components,
+        },
+        complete,
+    ))
+}
+
+/// Consumes one `FireworkExplosion.STREAM_CODEC`: `Shape` (a bare `idMapper`
+/// VarInt), a VarInt-counted `colors` list of fixed-width `i32`s, a
+/// same-shaped `fadeColors` list, then two bools (hasTrail, hasTwinkle).
+/// Shared by the top-level `minecraft:firework_explosion` component and each
+/// entry of `minecraft:fireworks`' explosion list.
+///
+/// Both colour lists are bounded at 256 entries defensively: neither codec
+/// declares a cap (`ByteBufCodecs.INT.apply(ByteBufCodecs.list())`), but no
+/// legitimate firework star carries anywhere near that many colours.
+fn read_firework_explosion(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
+    reader.var_i32().map_err(dec_err)?; // Shape
+    let colors = read_count(reader, "firework_explosion color")?;
+    if colors > 256 {
+        return Err(AdapterError::Decode(format!(
+            "firework_explosion declares {colors} colors, implausibly many"
+        )));
+    }
+    for _ in 0..colors {
+        reader.i32().map_err(dec_err)?;
+    }
+    let fade_colors = read_count(reader, "firework_explosion fade_color")?;
+    if fade_colors > 256 {
+        return Err(AdapterError::Decode(format!(
+            "firework_explosion declares {fade_colors} fade colors, implausibly many"
+        )));
+    }
+    for _ in 0..fade_colors {
+        reader.i32().map_err(dec_err)?;
+    }
+    reader.bool().map_err(dec_err)?; // hasTrail
+    reader.bool().map_err(dec_err)?; // hasTwinkle
+    Ok(())
 }
 
 /// Reads one network-NBT tag and returns the exact bytes it occupied.
