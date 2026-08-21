@@ -145,6 +145,8 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    // Absolute world position, for the distance-fog term only. **Not** for the
+    // normal reconstruction — see `local` below.
     @location(1) world: vec3<f32>,
     // Flat: world light is one lightmap sample for the whole entity (vanilla's
     // granularity), so interpolating it across a mob would be meaningless.
@@ -163,6 +165,33 @@ struct VsOut {
     // by `hasRedOverlay`, never blended together. See
     // `EntityInstanceRaw::white_overlay`'s doc.
     @location(5) @interpolate(flat) white_overlay: f32,
+    // The same position as `world`, minus this instance's own model-matrix
+    // translation — so it carries values of order one block rather than of order
+    // the player's distance from the world origin. `shade_entity` takes its
+    // screen-space derivatives from *this*, never from `world`.
+    //
+    // A derivative is translation-invariant, so the reconstructed normal is
+    // mathematically identical either way; what differs is the precision the
+    // interpolator has to spend on it. Fed absolute world coordinates the varying
+    // quantises to the `f32` ULP at that magnitude — 0.00195 blocks at 30,000 —
+    // against a per-pixel step across a half-block skull of about 0.005, so the
+    // interpolated value climbs in a staircase and the derivative of a staircase
+    // is either zero or one whole step, chosen per 2x2 quad. The normal is then
+    // noise, and the two-light diffuse term paints that noise as dense per-pixel
+    // speckle.
+    //
+    // The signature is what identifies it, and it is the one the owner described:
+    // an **axis-aligned** face holds two of its three world components exactly
+    // constant, so those derivatives are exactly zero and nothing can cancel —
+    // measured speckle-free at every distance — while an off-axis face varies in
+    // all three and speckles. "Static only when the head is not at 0/90/180/270."
+    //
+    // Subtracting in the *vertex* stage is the whole fix. Subtracting in the
+    // fragment would difference two already-quantised large numbers and recover
+    // nothing, which is why `fog_amount`'s own `in.world - camera.fog_eye.xyz`
+    // below is not a precedent to follow here: fog is a smooth, large-scale term
+    // that a staircase does not visibly disturb.
+    @location(6) local: vec3<f32>,
 };
 
 @vertex
@@ -187,7 +216,31 @@ fn vs_main(
     var out: VsOut;
     out.clip = camera.view_proj * world;
     out.uv = uv;
+    // **Eye-relative, not absolute world.** `shade_entity` reconstructs the face
+    // normal from `dpdx`/`dpdy` of this varying, and an interpolator fed absolute
+    // world coordinates quantises to the `f32` ULP at that magnitude: one ULP at
+    // 30,000 blocks is 0.00195, against a per-pixel step across a half-block
+    // skull of about 0.005, so the interpolated value climbs in a staircase and
+    // the derivative of a staircase is 0 or one whole step, chosen per 2x2 quad.
+    // The reconstructed normal is then noise and the two-light diffuse term
+    // paints it as dense per-pixel speckle.
+    //
+    // The signature is what identifies it: an **axis-aligned** face holds two of
+    // the three world components exactly constant, so their derivatives are
+    // exactly zero and no cancellation can occur — measured speckle-free at every
+    // distance — while an off-axis face varies in all three and speckles. That is
+    // the "static only when the head is not at 0/90/180/270" the owner reported.
+    //
+    // Subtracting the eye here rather than in the fragment is the whole fix: the
+    // varying then carries values of order the view distance, so the interpolator
+    // has full mantissa to spend on the small per-pixel step. Doing it in the
+    // fragment would subtract two already-quantised large numbers and recover
+    // nothing. `fog_amount` wants exactly this quantity too, so the fog call
+    // sites below simply pass it through.
     out.world = world.xyz;
+    // `m3.xyz` is the model matrix's translation column — this instance's own
+    // world origin — so `local` is the vertex's offset from it. See `VsOut::local`.
+    out.local = world.xyz - m3.xyz;
     out.light_term = lightmap_color(sky, block);
     // Unpack bits 0-23 as 0x00RRGGBB. These bytes are *gamma-space* sRGB,
     // exactly as vanilla's vertex colour is, and are multiplied inside the
@@ -286,7 +339,7 @@ fn shade_entity(in: VsOut, tex_col: vec4<f32>) -> vec4<f32> {
     // `entity_diffuse_two_lights_pixels.rs`'s `modal_byte_at_edge_row`: the topmost
     // band of a box seen from above must read vanilla's `1.0`, and the bottommost
     // band seen from below must read `0.4`.
-    let n = -normalize(cross(dpdx(in.world), dpdy(in.world)));
+    let n = -normalize(cross(dpdx(in.local), dpdy(in.local)));
     // Vanilla's **two** diffuse lights, not one. Read from the 26.2 client jar:
     // `com.mojang.blaze3d.platform.Lighting.DIFFUSE_LIGHT_0/1` are
     // `(0.2, 1.0, -0.7)` and `(-0.2, 1.0, 0.7)` normalised, and `updateLevel`
