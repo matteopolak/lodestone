@@ -29,7 +29,8 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lodestone::net::NetClient;
-use lodestone::hud::{DebugStats, HudFrame, HudRenderer};
+use lodestone::config::{AUTO_GUI_SCALE, calculate_gui_scale};
+use lodestone::hud::{DebugStats, HudFrame, HudRenderer, TabPanel};
 use lodestone::{scoreboard, tablist};
 use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget};
 use lodestone_testsupport::{RconClient, unique_username};
@@ -123,6 +124,11 @@ fn live_tab_list_and_scoreboard_reach_pixels() {
     );
 
     let empty_view = tablist::TabListView::default();
+    // **One band for both arms**, sized from the *live* view. Sizing each arm
+    // from its own view would give the control a narrower window than the
+    // subject, so "the control saw nothing" would be partly a statement about
+    // where each one looked.
+    let band = tab_row_band(view.len(), h);
     let tab_empty = render_tab_bright_pixels(
         &mut target,
         &mut hud,
@@ -130,11 +136,12 @@ fn live_tab_list_and_scoreboard_reach_pixels() {
         queue,
         &stats,
         &empty_view,
+        band,
         w,
         h,
     );
     let tab_live =
-        render_tab_bright_pixels(&mut target, &mut hud, device, queue, &stats, &view, w, h);
+        render_tab_bright_pixels(&mut target, &mut hud, device, queue, &stats, &view, band, w, h);
     let score_empty =
         render_sidebar_changed_pixels(&mut target, &mut hud, device, queue, &stats, None, w, h);
     let score_live = render_sidebar_changed_pixels(
@@ -155,6 +162,7 @@ fn live_tab_list_and_scoreboard_reach_pixels() {
     eprintln!("tab rows          = {:?}", view.rows);
     eprintln!("sidebar title     = {:?}", sidebar.title);
     eprintln!("sidebar lines     = {:?}", sidebar.lines);
+    eprintln!("tab row band      = rows {}..{}", band.0, band.0 + band.1);
     eprintln!("tab empty bright  = {tab_empty}");
     eprintln!("tab live bright   = {tab_live}");
     eprintln!("score empty px    = {score_empty}");
@@ -197,6 +205,7 @@ fn render_tab_bright_pixels(
     queue: &wgpu::Queue,
     stats: &DebugStats,
     view: &tablist::TabListView,
+    band: (u32, u32),
     w: u32,
     h: u32,
 ) -> usize {
@@ -210,7 +219,38 @@ fn render_tab_bright_pixels(
     };
     hud.render(device, queue, frame.view(), frame.view(), &hud_frame, w, h);
     let pixels = target.read_texels(device, queue);
-    count_bright(&pixels, w, w / 4, h / 4, w / 2, h / 2)
+    count_bright(&pixels, w, 0, band.0, w, band.1)
+}
+
+/// The framebuffer rows the tab overlay's **player rows** occupy, `(y0, height)`.
+///
+/// Derived through [`TabPanel`] — the same constructor the draw lays out from —
+/// rather than restated. The rect this replaced was the centre quarter of the
+/// screen, `(w/4, h/4, w/2, h/2)`, which the overlay has never painted: it hangs
+/// from the top of the *logical* canvas (`yyo = 10`) and the GUI scale then puts
+/// it around row 20 of a 480-row framebuffer, a hundred rows above where the
+/// probe was looking. Both arms therefore read zero and the gate failed
+/// reporting that live rows "must add text pixels" while they were drawing.
+///
+/// Horizontally this spans the whole width on purpose: a single column is only
+/// as wide as its own content, and the width depends on font metrics this test
+/// has no way to measure. Nothing else paints in these rows — the sidebar is
+/// `None` in the tab frames and the hotbar/vitals are off — so the band is
+/// still a location and not a whole-frame count.
+fn tab_row_band(row_count: usize, h: u32) -> (u32, u32) {
+    let scale = calculate_gui_scale(AUTO_GUI_SCALE, 640, h).max(1) as f32;
+    let canvas_w = 640.0 / scale;
+    // `max_name_width`/`widest_banner` size the plates horizontally only; the y
+    // ladder is a pure function of the line counts, so a nominal width is
+    // sound here for exactly the reason the in-crate layout gate gives.
+    let panel = TabPanel::new(canvas_w, row_count.max(1), false, 40.0, 0, 0, 0.0);
+    // One line of headroom above and below, so a row's ink cannot fall outside
+    // the band through rounding.
+    let top = (panel.rows_top - 1.0).max(0.0);
+    let bottom = panel.rows_top + panel.rows as f32 * 9.0 + 1.0;
+    let y0 = (top * scale) as u32;
+    let y1 = ((bottom * scale) as u32).min(h);
+    (y0, y1.saturating_sub(y0))
 }
 
 fn render_sidebar_changed_pixels(

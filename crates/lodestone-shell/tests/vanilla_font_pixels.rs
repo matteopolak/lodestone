@@ -53,18 +53,47 @@
 //! cargo test -p lodestone-shell --test vanilla_font_pixels -- --ignored --nocapture
 //! ```
 
-use lodestone::hud::{DebugStats, HudFrame, HudRenderer};
+use lodestone::config::{AUTO_GUI_SCALE, calculate_gui_scale};
+use lodestone::hud::{
+    ChatDisplayOptions, DebugStats, HudFrame, HudRenderer, chat_bottom, chat_line_h,
+    chat_pose_scale,
+};
+use lodestone::menu::render::logical_canvas;
 use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget};
 
 const W: u32 = 640;
 const H: u32 = 480;
 
-/// The HUD's chat scale, mirroring `hud::build_inner`.
-const SCALE: f32 = 2.0;
-/// The HUD's chat left margin, mirroring `hud::build_inner`.
+/// The HUD's chat left margin (`hud`'s `HUD_MARGIN`), in **logical canvas**
+/// pixels — the units `build_inner` lays out in. Multiply by
+/// [`device_per_logical`] to reach the framebuffer.
+///
+/// This used to be read as a device-pixel constant, alongside a device-pixel
+/// `SCALE` and `LINE_H`. That is the bug this file carried: the HUD lays out
+/// in the logical canvas and the GUI scale then multiplies everything, so
+/// every absolute position here was off by that factor and the row band
+/// pointed at empty screen. The *ratios* below were unaffected, which is
+/// exactly why it survived — a scale factor cancels in a ratio.
 const MARGIN: f32 = 6.0;
-/// Chat line pitch: `(GLYPH_H + 2) * scale`.
-const LINE_H: f32 = 18.0;
+
+/// The chat options the frame carries, so the layout helpers below are asked
+/// the same question the draw asks.
+fn opts() -> ChatDisplayOptions {
+    ChatDisplayOptions::default()
+}
+
+/// Framebuffer pixels per **logical canvas** pixel: the integer GUI scale.
+fn gui_scale() -> f32 {
+    calculate_gui_scale(AUTO_GUI_SCALE, W, H).max(1) as f32
+}
+
+/// Framebuffer pixels per **font** pixel for a chat glyph: the GUI scale times
+/// vanilla's own `ChatComponent.getScale` pose. Both factors are real and
+/// independent — at the defaults they happen to be `2 * 1`, and reading that
+/// `2` as "the chat scale" is what hid the missing GUI-scale factor.
+fn device_per_logical() -> f32 {
+    gui_scale() * chat_pose_scale(opts())
+}
 
 /// Ten `i` against ten `W`, with vanilla's 2 px and 6 px advances at
 /// `scale = 2` and the pen starting at `MARGIN = 6`.
@@ -122,11 +151,25 @@ fn brightness(px: &[u8], x: u32, y: u32) -> u32 {
     u32::from(px[i].max(px[i + 1]).max(px[i + 2]))
 }
 
-/// The chat row band for the single line this gate draws: the line's top, less a
-/// little headroom, through the bottom of its shadow.
+/// The chat row band for the single line this gate draws, in framebuffer rows.
+///
+/// **Derived from the same expressions the draw uses** — `chat_bottom` and
+/// `chat_line_h` over the logical canvas — rather than restated as `H - margin
+/// - line_height`. That restatement was correct when chat sat flush against
+/// the bottom edge and stopped being correct the day `chat_bottom` grew
+/// vanilla's 40-pixel headroom above the input strip: the band then pointed at
+/// blank screen, `span` returned `None`, and the gate failed claiming the text
+/// had not drawn while it was drawing perfectly ~70 rows higher.
 fn band() -> std::ops::Range<u32> {
-    let top = H as f32 - MARGIN - LINE_H;
-    (top as u32 - 2)..(top as u32 + 24).min(H)
+    let scale = gui_scale();
+    let (_, canvas_h) = logical_canvas(AUTO_GUI_SCALE, W, H);
+    let pose = chat_pose_scale(opts());
+    let pitch = chat_line_h(opts(), pose);
+    // Row 0 is the newest line: `chat_bottom - (row + 1) * chat_line_h`.
+    let top = chat_bottom(canvas_h, pose) - pitch;
+    let y0 = ((top - 2.0) * scale).max(0.0) as u32;
+    let y1 = (((top + pitch + 6.0) * scale) as u32).min(H);
+    y0..y1
 }
 
 /// The columns of `band` holding a pixel at or above `min` brightness.
@@ -243,7 +286,9 @@ fn hud_text_draws_vanilla_proportional_glyphs_with_a_drop_shadow() {
     // *exactly* the main set translated one logical pixel down-right, minus
     // whatever the main set covers. A blur would light the four other
     // neighbours too and fail this by inclusion.
-    let off = SCALE as u32;
+    // One *font* pixel, in framebuffer pixels — the GUI scale times the chat
+    // pose, not either factor alone.
+    let off = device_per_logical() as u32;
     let mut main = std::collections::HashSet::new();
     let mut shadow = std::collections::HashSet::new();
     let (bmin, bmax) = (band().start, band().end);
@@ -288,7 +333,8 @@ fn hud_text_draws_vanilla_proportional_glyphs_with_a_drop_shadow() {
 
     // ---- 3. Per-glyph advances, read back one character at a time ----------
     // "<c>W": W's ink starts at column 0 of its cell, so the second run of
-    // *main* pixels begins exactly advance(c) * SCALE px after the first.
+    // *main* pixels begins exactly `advance(c) * device_per_logical()` px after
+    // the first.
     let mut advance_rows = Vec::new();
     for &(ch, want) in PROBE_ADVANCES {
         let px = shoot(&mut hud, &format!("{ch}W"));
@@ -298,7 +344,7 @@ fn hud_text_draws_vanilla_proportional_glyphs_with_a_drop_shadow() {
             "{ch:?}W must draw two separated ink runs; got {groups:?}. If they \
              merged, the first glyph is inking past its advance"
         );
-        let measured = (groups[1].0 as f32 - MARGIN) / SCALE;
+        let measured = (groups[1].0 as f32 - MARGIN * gui_scale()) / device_per_logical();
         advance_rows.push((ch, want, measured, groups[0], groups[1]));
     }
     eprintln!("--- per-glyph advance, measured off the framebuffer ---");

@@ -273,8 +273,13 @@ const TAB_INK_SPECTATOR: [f32; 4] = [1.0, 1.0, 1.0, 0x90 as f32 / 255.0];
 /// Every division below is vanilla's **integer** division, floored here for that
 /// reason: `slot_w` in particular is `min(...) / cols`, and letting it stay
 /// fractional would put column 1 half a pixel off vanilla at most widths.
+/// `pub` rather than `pub(crate)` so an **integration** gate can derive the
+/// overlay's rect from this constructor instead of restating it. That is not a
+/// nicety: `live_tab_scoreboard_pixels` probed a hand-written screen rect the
+/// overlay has never painted, so both of its arms read zero and it failed
+/// claiming live rows drew nothing.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct TabPanel {
+pub struct TabPanel {
     /// Number of columns the rows are split into.
     pub cols: usize,
     /// Rows **per column** — vanilla's `rows`, which is also the stride the
