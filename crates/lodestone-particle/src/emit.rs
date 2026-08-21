@@ -20,7 +20,7 @@
 //! dependency on any particular world representation.
 
 use crate::rng::JavaRandom;
-use crate::{Behaviour, Particle, ParticleEngine, Sheet, SpriteSource};
+use crate::{Behaviour, DripKind, DripPhase, Particle, ParticleEngine, Sheet, SpriteSource};
 use lodestone_physics::Aabb;
 
 /// A face of a block, for the mining-hit emitter.
@@ -1427,11 +1427,11 @@ pub fn huge_explosion(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, size:
 mod tests {
     use super::{
         FULL_CUBE, Face, angry_villager, breaking_block_effect, bubble, crit, destroy_block_effect,
-        ash, explosion_emitter, firework, flame, fly_towards_position, happy_villager, heart,
-        huge_explosion, note, poof, smoke, splash, spore_blossom_air, sweep_attack,
+        ash, drip, explosion_emitter, firework, flame, fly_towards_position, happy_villager,
+        heart, huge_explosion, note, poof, smoke, splash, spore_blossom_air, sweep_attack,
         totem_of_undying, white_smoke, witch,
     };
-    use crate::{Behaviour, ParticleEngine, Sheet, SpriteSource};
+    use crate::{Behaviour, DripKind, DripPhase, ParticleEngine, Sheet, SpriteSource};
     use lodestone_physics::{Aabb, CollisionView};
 
     const STONE: u32 = 1;
@@ -2154,6 +2154,141 @@ mod tests {
         assert_ne!(run(500), run(501));
     }
 
+    /// A hanging drip must let go and become a falling one, and the falling one
+    /// must land as a splash.
+    ///
+    /// This is the property the previous one-shot emitter could not have: it
+    /// spawned whichever phase the packet named, with a hardcoded lifetime, and
+    /// removed it. A cave ceiling grew drips that hung and blinked out. The
+    /// chain lives in `DripParticle.tick`, not in any spawn site, so nothing
+    /// upstream could have supplied it.
+    ///
+    /// The three counts asserted here are the discriminating ones: a hang that
+    /// merely dies leaves **zero** particles, a hang that spawns a fall leaves
+    /// one, and only a fall that reaches the ground leaves a splash.
+    #[test]
+    fn a_hanging_water_drip_falls_and_the_falling_drip_splashes() {
+        // A floor at y = 64 and nothing else, so a released drip has somewhere
+        // to land. No fluid anywhere, so the "dies inside its own fluid" arm
+        // cannot be what removes it.
+        struct Floor;
+        impl CollisionView for Floor {
+            fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
+                if y == 64 {
+                    out.push(Aabb::new(
+                        f64::from(x),
+                        f64::from(y),
+                        f64::from(z),
+                        f64::from(x) + 1.0,
+                        f64::from(y) + 1.0,
+                        f64::from(z) + 1.0,
+                    ));
+                }
+            }
+        }
+
+        let mut e = ParticleEngine::seeded(21);
+        drip(&mut e, DripKind::Water, DripPhase::Hang, [0.5, 70.0, 0.5], [0.0; 3]);
+        let hang = &e.particles()[0];
+        assert_eq!(
+            hang.lifetime, 40,
+            "`DripHangParticle` sets a flat 40, not the `64 / nextFloat` draw the \
+             one-shot emitter used"
+        );
+        assert_eq!(hang.behaviour, Behaviour::Drip { kind: DripKind::Water, phase: DripPhase::Hang });
+
+        // 41 ticks: `lifetime--` is a post-decrement tested against zero, so the
+        // drip lives one tick longer than its lifetime says.
+        for _ in 0..41 {
+            e.tick(&Floor);
+        }
+        let after: Vec<Behaviour> = e.particles().iter().map(|p| p.behaviour).collect();
+        assert_eq!(
+            after,
+            vec![Behaviour::Drip { kind: DripKind::Water, phase: DripPhase::Fall }],
+            "the hanging drip must have been replaced by exactly one falling one"
+        );
+
+        // Now let it fall the ~6 blocks to the floor. Its own lifetime is a
+        // `64 / nextFloat` draw with a floor of 71 ticks, so the landing is what
+        // ends it, not the clock.
+        let fall_lifetime = e.particles()[0].lifetime;
+        let mut landed = None;
+        for tick in 0..fall_lifetime {
+            e.tick(&Floor);
+            if e.particles().iter().any(|p| p.behaviour == Behaviour::WaterDrop) {
+                landed = Some(tick);
+                break;
+            }
+        }
+        assert!(
+            landed.is_some(),
+            "a falling water drip must land as a `splash` (a `WaterDropParticle`) \
+             within its {fall_lifetime}-tick lifetime"
+        );
+        assert!(
+            !e.particles()
+                .iter()
+                .any(|p| matches!(p.behaviour, Behaviour::Drip { .. })),
+            "the falling drip must be gone once it has splashed"
+        );
+    }
+
+    /// A lava drip cools from white-hot to exactly the lava tint over its 40
+    /// hanging ticks.
+    ///
+    /// `CoolingDripHangParticle` is two constants — `g = 16 / (elapsed + 16)`
+    /// and `b = 4 / (elapsed + 8)` — and the check that they are transcribed
+    /// right is that after 40 ticks they arrive on `LavaFallProvider`'s
+    /// **independently specified** `setColor(1.0F, 0.2857143F, 0.083333336F)`.
+    /// That is an outside expectation rather than a restatement: nothing in the
+    /// cooling formula mentions the falling phase's colour, and two different
+    /// vanilla methods have to agree for this to hold.
+    #[test]
+    fn a_hanging_lava_drip_cools_onto_the_falling_phases_own_tint() {
+        struct Empty;
+        impl CollisionView for Empty {
+            fn collision_boxes(&self, _: i32, _: i32, _: i32, _: &mut Vec<Aabb>) {}
+        }
+        let mut e = ParticleEngine::seeded(4);
+        drip(&mut e, DripKind::Lava, DripPhase::Hang, [0.5, 70.0, 0.5], [0.0; 3]);
+        assert_eq!(
+            e.particles()[0].colour,
+            [1.0, 1.0, 0.5],
+            "a fresh lava drip is white-hot: `16/16` and `4/8`"
+        );
+        // The colour is recomputed from the **pre**-decrement `lifetime`, so the
+        // k-th tick sees `elapsed == k - 1`: the first tick recomputes the same
+        // white-hot value it was constructed with, and after 40 ticks the drip
+        // is still alive with `lifetime == 0` and `elapsed == 39`. Counting 40
+        // ticks as 40 steps of the ramp is off by one in the direction that
+        // looks like a wrong constant — this test's first prediction was
+        // `16 / 55` after 39 ticks and measured `16 / 54`.
+        for _ in 0..40 {
+            e.tick(&Empty);
+        }
+        let cooled = e.particles()[0].colour;
+        let want = [1.0, 16.0 / 55.0, 4.0 / 47.0];
+        assert!(
+            (cooled[1] - want[1]).abs() < 1e-6 && (cooled[2] - want[2]).abs() < 1e-6,
+            "cooled to {cooled:?}, want {want:?}"
+        );
+        // One more tick recomputes the ramp at `elapsed == 40` and *then*
+        // removes the drip, handing off to the falling phase — so the arrival
+        // value is the last thing the hanging particle ever holds. Asserting the
+        // identity rather than reading it off a corpse: the point is that
+        // `CoolingDripHangParticle`'s two constants and `LavaFallProvider`'s
+        // `setColor` are transcribed from two different vanilla methods that
+        // never mention each other, and they have to meet.
+        let arrival = [1.0_f32, 16.0 / 56.0, 4.0 / 48.0];
+        let lava_fall = [1.0_f32, 0.285_714_3, 0.083_333_336];
+        assert!(
+            (arrival[1] - lava_fall[1]).abs() < 1e-6 && (arrival[2] - lava_fall[2]).abs() < 1e-6,
+            "the cooling ramp must arrive on `LavaFallProvider`'s tint: {arrival:?} vs \
+             {lava_fall:?}"
+        );
+    }
+
     /// A mob-death puff must be full size on its very first frame.
     ///
     /// This is the whole of the `Animated` vs `AshSmoke` distinction, and the
@@ -2874,39 +3009,131 @@ pub fn fly_towards_position(
     engine.add(p);
 }
 
-/// A `DripParticle` — hanging, falling or landing.
+/// A `DripParticle` — one particle of the hang → fall → land chain.
 ///
-/// The three sheets are the three phases vanilla models as separate particle
-/// types (`dripping_*` hangs under a block, `falling_*` is in free fall,
-/// `landing_*` is the splash), and `colour` is the fluid's own: water is
-/// `0x2389D8`-ish and lava a hot orange, which is the only thing distinguishing a
-/// water drip from a lava drip on screen since both share the sprite.
+/// Every difference between vanilla's seventeen drip registry types is in the
+/// table below: `DripParticle` itself is one constructor and one `tick`, and the
+/// four "subclasses" are two hook methods. Reading it as seventeen classes is
+/// what makes this look like seventeen ports.
+///
+/// `vel` is inherited from the previous phase (a hanging drip hands its own
+/// velocity to the falling one; a falling one hands zero to the landing one) and
+/// is zero for the phase the server itself asked for, which is
+/// `DripParticle`'s own zero-velocity constructor.
+///
+/// **`gravity` here is applied raw, not through the base tick's `0.04` scale**
+/// — see [`crate::Particle::tick_drip`] — which is why a hanging drip's value
+/// is `1.2e-3` and honey's `1.2e-5` rather than the `0.06`-ish numbers the rest
+/// of this file uses.
 pub fn drip(
     engine: &mut ParticleEngine,
-    x: f64,
-    y: f64,
-    z: f64,
-    sheet: Sheet,
-    colour: [f32; 3],
-    gravity: f32,
+    kind: DripKind,
+    phase: DripPhase,
+    [x, y, z]: [f64; 3],
+    [xd, yd, zd]: [f64; 3],
 ) {
+    let sheet = match phase {
+        DripPhase::Hang => Sheet::DripHang,
+        DripPhase::Fall => Sheet::DripFall,
+        DripPhase::Land => Sheet::DripLand,
+    };
     let rng = engine.rng();
     let mut p = Particle::new(x, y, z, SpriteSource::Sheet { sheet, frame: 0 }, rng);
-    p.xd = 0.0;
-    p.yd = 0.0;
-    p.zd = 0.0;
-    p.gravity = gravity;
-    p.colour = colour;
+    p.xd = xd;
+    p.yd = yd;
+    p.zd = zd;
     p.set_size(0.01, 0.01);
-    // `DripParticle`'s own `lifetime = (int)(64.0 / (random.nextDouble() * 0.8 +
-    // 0.2))` — a hanging drip waits a long, *variable* time before it falls,
-    // which is what stops a cave ceiling dripping in lockstep.
+    // Every lifetime in the table below that is not a flat number is
+    // `(int)(n / (nextFloat() * 0.8 + 0.2))`, so the draw happens once here
+    // whether or not it is used — matching vanilla, where the base constructor
+    // has already run by the time the provider overrides it.
+    let spread = f64::from(rng_next(engine)).mul_add(0.8, 0.2);
     #[expect(clippy::cast_possible_truncation, reason = "Java's `(int)` cast; small")]
-    let lifetime = (64.0 / f64::from(rng_next(engine)).mul_add(0.8, 0.2)) as i32;
+    let varying = |n: f64| (n / spread) as i32;
+
+    let (gravity, lifetime, colour) = match (kind, phase) {
+        // `DripHangParticle` sets `gravity *= 0.02F` on the base `0.06F` and a
+        // flat 40-tick lifetime; the honey and obsidian providers then multiply
+        // by a further `0.01F` and raise it to 100.
+        (DripKind::Water | DripKind::DripstoneWater, DripPhase::Hang) => {
+            (0.0012, 40, WATER_DRIP)
+        }
+        // The lava hanging phase's colour is recomputed every tick by
+        // `CoolingDripHangParticle`; this is only its first frame, white-hot.
+        (DripKind::Lava | DripKind::DripstoneLava, DripPhase::Hang) => {
+            (0.0012, 40, [1.0, 1.0, 0.5])
+        }
+        (DripKind::Honey, DripPhase::Hang) => (0.000_012, 100, [0.622, 0.508, 0.082]),
+        (DripKind::ObsidianTear, DripPhase::Hang) => (0.000_012, 100, OBSIDIAN_TEAR),
+
+        // `FallAndLandParticle`'s own `lifetime = (int)(64.0 / …)`, with the
+        // base `0.06F` gravity unless the provider overrides it.
+        (DripKind::Water | DripKind::DripstoneWater, DripPhase::Fall) => {
+            (0.06, varying(64.0), WATER_DRIP)
+        }
+        (DripKind::Lava | DripKind::DripstoneLava, DripPhase::Fall) => {
+            (0.06, varying(64.0), LAVA_DRIP)
+        }
+        (DripKind::Honey, DripPhase::Fall) => (0.01, varying(64.0), [0.582, 0.448, 0.082]),
+        (DripKind::ObsidianTear, DripPhase::Fall) => (0.01, varying(64.0), OBSIDIAN_TEAR),
+        (DripKind::Nectar, DripPhase::Fall) => (0.007, varying(16.0), [0.92, 0.782, 0.72]),
+        // `Mth.randomBetween(random, 0.1F, 0.9F)` rather than the shared
+        // `nextFloat() * 0.8 + 0.2` — a *wider* spread with the same midpoint,
+        // so a spore blossom's fall lasts anywhere from 71 to 640 ticks against
+        // a nectar drip's 17 to 80.
+        (DripKind::SporeBlossom, DripPhase::Fall) => {
+            #[expect(clippy::cast_possible_truncation, reason = "Java's `(int)` cast; small")]
+            let lifetime = (64.0 / rng_next(engine).mul_add(0.8, 0.1)) as i32;
+            (0.005, lifetime, [0.32, 0.5, 0.22])
+        }
+
+        // `DripLandParticle`, whose numerator is the one thing that differs
+        // between the three kinds that have a landing phase: 16 for lava, 128
+        // for honey (a honey splat lingers eight times as long), 28 for an
+        // obsidian tear.
+        (DripKind::Lava | DripKind::DripstoneLava, DripPhase::Land) => {
+            (0.06, varying(16.0), LAVA_DRIP)
+        }
+        (DripKind::Honey, DripPhase::Land) => (0.06, varying(128.0), [0.522, 0.408, 0.082]),
+        (DripKind::ObsidianTear, DripPhase::Land) => (0.06, varying(28.0), OBSIDIAN_TEAR),
+        // The combinations vanilla has **no provider for**: water lands as a
+        // `splash` rather than a drip, and nectar and spore blossom neither
+        // hang nor land. Nothing in this crate constructs them —
+        // `Particle::tick_drip` chains only into phases that exist — so this
+        // arm is reachable only from a caller inventing one, and a one-tick
+        // particle is a truer answer there than a panic or a silent
+        // full-lifetime one. Enumerated rather than wildcarded so adding a
+        // `DripKind` is a compile error listing exactly which phases it needs.
+        (
+            DripKind::Water | DripKind::DripstoneWater,
+            DripPhase::Land,
+        )
+        | (DripKind::Nectar | DripKind::SporeBlossom, DripPhase::Hang | DripPhase::Land) => {
+            (0.06, 1, WATER_DRIP)
+        }
+    };
+
+    p.gravity = gravity;
     p.lifetime = lifetime.max(1);
-    p.behaviour = Behaviour::WaterDrop;
+    p.colour = colour;
+    p.behaviour = Behaviour::Drip { kind, phase };
     engine.add(p);
 }
+
+/// `DripParticle.WaterHangProvider`'s tint — vanilla sets water drips to
+/// `0.2F, 0.3F, 1.0F` rather than the biome water colour, so a cave drip reads
+/// blue everywhere including in swamp water.
+const WATER_DRIP: [f32; 3] = [0.2, 0.3, 1.0];
+
+/// `DripParticle.LavaFallProvider`'s tint, `1.0F, 0.2857143F, 0.083333336F` —
+/// and also exactly where [`crate::Particle::tick_drip`]'s cooling ramp arrives
+/// after 40 ticks, which is the check that the two constants in that formula are
+/// transcribed right.
+const LAVA_DRIP: [f32; 3] = [1.0, 0.285_714_3, 0.083_333_336];
+
+/// `DripParticle.ObsidianTear*Provider`'s tint, `0.51171875F, 0.03125F,
+/// 0.890625F`. All three phases share it, and all three are `isGlowing`.
+const OBSIDIAN_TEAR: [f32; 3] = [0.511_718_75, 0.031_25, 0.890_625];
 
 /// `DustParticleBase.randomizeColor` — a fresh `nextFloat` draw per call, so
 /// three calls (r, g, b) each consume their own random number even though

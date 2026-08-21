@@ -452,6 +452,52 @@ place a wrong frame-naming convention can show. It also names the one legitimate
 undrawn particle (`explosion_emitter`, a `NoRenderParticle`) rather than relaxing the
 `drawn == alive` equality, so a second undrawn type cannot hide behind a `>=`.
 
+### The drip family, and the first particle that spawns another
+
+Seventeen registry types — the largest single family in the registry — over one
+Java class, one `(kind, phase)` table in `emit::drip`, and **a chain that runs
+inside the particle's own tick**.
+
+Five of the seventeen were already wired, as unchained one-shots with a
+hardcoded `64 / nextFloat()` lifetime. What that meant in play: a cave ceiling
+grew drips that hung for the wrong length of time and then **blinked out without
+ever falling**. The chain is `DripParticle.tick`'s business, not any spawn
+site's, so no amount of dispatch-table work upstream could have supplied it — a
+`dripping_water` particle spawns a `falling_water` one when its 40 ticks are up,
+and that spawns a `splash` or a `landing_*` where it hits.
+
+`Particle::tick`'s follow-up channel was `Vec<(f64, f64, f64, f32)>`, serving
+exactly one caller (`HugeExplosionSeed`). It is now `Vec<Spawn>`, a three-variant
+enum, because a drip's successor needs a kind and a phase and a water drip's
+successor is not a drip at all.
+
+Things the transcription turned on:
+
+* **`DripParticle` applies gravity raw** (`yd -= gravity`), not through the base
+  tick's `0.04` scale. A drip therefore falls twenty-five times harder than the
+  same `gravity` number means anywhere else, which is why a hanging phase's value
+  is `1.2e-3` — and honey's `1.2e-5`, because `HoneyHangProvider` multiplies the
+  already-scaled `0.06 * 0.02` by a further `0.01`.
+* **`lifetime--` is a post-decrement tested against zero**, so a drip lives
+  `lifetime + 1` ticks and `lifetime` counts *down*. `CoolingDripHangParticle`
+  reads that counter directly, so modelling it as an incrementing `age` inverts
+  the colour ramp.
+* **A lava drip cools.** `g = 16 / (elapsed + 16)` and `b = 4 / (elapsed + 8)`,
+  recomputed every tick from white-hot `(1, 1, 0.5)`. The check that both
+  constants are right is that at `elapsed == 40` the ramp lands on
+  `LavaFallProvider`'s independently specified `setColor(1.0F, 0.2857143F,
+  0.083333336F)` — two vanilla methods that never mention each other, which have
+  to meet. That is an outside expectation rather than a restatement of the code.
+  The colour is computed from the pre-decrement lifetime, so the k-th tick sees
+  `elapsed == k - 1`; this gate's first prediction was off by exactly that one.
+* **`dripping_dripstone_lava` lands as `landing_lava`.** It borrows plain lava's
+  landing type rather than having one of its own, and `falling_water` /
+  `falling_dripstone_water` land as `splash` — a `SplashParticle`, not a drip
+  phase, which is why `Spawn` needs a third variant.
+
+`a_hanging_water_drip_falls_and_the_falling_drip_splashes` is the gate, observed
+failing under a neuter that removes the hand-off (`left: []`).
+
 ## Verification
 
 - `crates/lodestone-particle/src/emit.rs`: one test per new emitter asserting an **exact**
