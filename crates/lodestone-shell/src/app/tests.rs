@@ -2745,6 +2745,8 @@ fn drive_ui_from_session_refreshes_the_social_roster_from_the_real_tab_list() {
                     listed: Some(true),
                     properties: None,
                     chat_session: None,
+                    list_order: None,
+                    hat_visible: None,
                 },
                 PlayerListEntry {
                     uuid: alice,
@@ -2755,6 +2757,8 @@ fn drive_ui_from_session_refreshes_the_social_roster_from_the_real_tab_list() {
                     listed: Some(true),
                     properties: None,
                     chat_session: None,
+                    list_order: None,
+                    hat_visible: None,
                 },
             ],
         });
