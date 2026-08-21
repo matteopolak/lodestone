@@ -184,6 +184,7 @@ fn a_held_shield_draws_its_own_base_colour_and_a_plain_one_draws_neither() {
                 potion_color: None,
                 banner_patterns: Vec::new(),
                 base_color: base_color.clone(),
+                skin: None,
             })
         });
         let frame = target.acquire().expect("headless acquire");

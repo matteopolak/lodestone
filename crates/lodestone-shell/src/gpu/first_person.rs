@@ -117,6 +117,12 @@ pub(super) struct HeldItemEquip {
     /// the swap-trigger comparison in [`Self::step`] for the same reason the
     /// dye/potion pair is not.
     visible_base_color: Option<String>,
+    /// Mirrors [`Self::visible_base_color`] for `minecraft:profile` — the
+    /// visible stack's own custom-head skin url, for
+    /// [`RenderState::prepare_special_hand`]'s skull sheet. `None` for a plain
+    /// head and for every other item; not part of the swap-trigger comparison
+    /// in [`Self::step`] for the same reason the dye/potion pair is not.
+    visible_skin: Option<std::sync::Arc<str>>,
     /// Vanilla's `mainHandHeight`, `0.0` (fully lowered) to `1.0` (fully raised).
     height: f32,
     /// Vanilla's `oMainHandHeight` — last tick's value, for the partial-tick lerp.
@@ -152,6 +158,7 @@ impl Default for HeldItemEquip {
             visible_potion_color: None,
             visible_banner_patterns: Vec::new(),
             visible_base_color: None,
+            visible_skin: None,
             height: EQUIP_REST_HEIGHT,
             previous: EQUIP_REST_HEIGHT,
             accumulator: 0.0,
@@ -194,6 +201,7 @@ impl HeldItemEquip {
         self.visible_potion_color = expected.and_then(|item| item.potion_color);
         self.visible_banner_patterns = expected.map_or_else(Vec::new, |item| item.banner_patterns.clone());
         self.visible_base_color = expected.and_then(|item| item.base_color.clone());
+        self.visible_skin = expected.and_then(|item| item.skin.clone());
     }
 
     /// [`Self::advance`] with the elapsed time supplied rather than read from the
@@ -328,6 +336,15 @@ impl HeldItemEquip {
     /// means the empty/absent state" contract [`Self::visible_tint`] uses.
     pub(super) fn visible_base_color(&self) -> Option<&str> {
         self.visible_base_color.as_deref()
+    }
+
+    /// [`Self::visible`]'s `minecraft:profile` skin url, for
+    /// [`RenderState::prepare_special_hand`]'s skull sheet. `None` alongside
+    /// `visible == None` (bare arm) and alongside `Some` for every item that is
+    /// not a custom head — the same "no live stack means the empty/absent
+    /// state" contract [`Self::visible_tint`] uses.
+    pub(super) fn visible_skin(&self) -> Option<&std::sync::Arc<str>> {
+        self.visible_skin.as_ref()
     }
 }
 
@@ -769,6 +786,7 @@ impl RenderState {
                 item,
                 self.equip.visible_banner_patterns(),
                 self.equip.visible_base_color(),
+                self.equip.visible_skin(),
                 form,
                 inverse_arm_height,
                 camera,
@@ -850,6 +868,7 @@ impl RenderState {
         item: &ResourceLocation,
         banner_patterns: &[lodestone_model::BannerPatternLayer],
         base_color: Option<&str>,
+        skin: Option<&std::sync::Arc<str>>,
         form: &lodestone_render::SpecialItemForm,
         inverse_arm_height: f32,
         camera: &Camera,
@@ -882,8 +901,20 @@ impl RenderState {
             && let Some(rig) = lodestone_render::banner_item_rig(item.path())
             && let Some(base) = lodestone_render::banner_item_base_color(item.path())
         {
-            let body = self.build_special_hand_draw(device, rig.body, [255, 255, 255], placement, light)?;
-            let flag = self.build_special_hand_draw(device, rig.flag, [255, 255, 255], placement, light)?;
+            let body = self.build_special_hand_draw(
+                device,
+                (rig.body.0, lodestone_render::BlockEntityTexture::Static(rig.body.1)),
+                [255, 255, 255],
+                placement,
+                light,
+            )?;
+            let flag = self.build_special_hand_draw(
+                device,
+                (rig.flag.0, lodestone_render::BlockEntityTexture::Static(rig.flag.1)),
+                [255, 255, 255],
+                placement,
+                light,
+            )?;
             // The flag part's own world matrix — `build_special_hand_draw`
             // resolves it internally via `mesh.part_transforms`, but the layer
             // draws need it again to pose the mask over the very same flag, so
@@ -945,7 +976,13 @@ impl RenderState {
             let has_patterns =
                 lodestone_render::shield_has_patterns(base_color, banner_patterns.len());
             let rig = lodestone_render::shield_item_rig(has_patterns);
-            let base_draw = self.build_special_hand_draw(device, rig, [255, 255, 255], placement, light)?;
+            let base_draw = self.build_special_hand_draw(
+                device,
+                (rig.0, lodestone_render::BlockEntityTexture::Static(rig.1)),
+                [255, 255, 255],
+                placement,
+                light,
+            )?;
 
             let mut layers = Vec::new();
             if has_patterns {
@@ -1015,7 +1052,13 @@ impl RenderState {
                 .parts()
                 .into_iter()
                 .filter_map(|part| {
-                    self.build_special_hand_draw(device, part, [255, 255, 255], placement, light)
+                    self.build_special_hand_draw(
+                        device,
+                        (part.0, lodestone_render::BlockEntityTexture::Static(part.1)),
+                        [255, 255, 255],
+                        placement,
+                        light,
+                    )
                 })
                 .collect();
             if draws.is_empty() {
@@ -1047,9 +1090,18 @@ impl RenderState {
         }
 
         let (model_name, texture_stem) = lodestone_render::special_item_rig(&form.kind, item.path())?;
+        // A custom head's own sheet, replacing the default skull stem
+        // `special_item_rig` resolves — the same substitution the placed-head
+        // pass makes on `SkullSpawn::texture` and the GUI icon pass makes in
+        // `push_special_icon`. `skin` is `None` for every other kind and for a
+        // plain head, which leaves the resolved stem untouched.
+        let texture = match skin {
+            Some(url) => lodestone_render::BlockEntityTexture::PlayerSkin(std::sync::Arc::clone(url)),
+            None => lodestone_render::BlockEntityTexture::Static(texture_stem),
+        };
         let draw = self.build_special_hand_draw(
             device,
-            (model_name, texture_stem),
+            (model_name, texture),
             [255, 255, 255],
             placement,
             light,
@@ -1129,7 +1181,7 @@ impl RenderState {
     fn build_special_hand_draw<'a>(
         &'a self,
         device: &wgpu::Device,
-        (model_name, texture_stem): (&'static str, &'static str),
+        (model_name, texture_id): (&'static str, lodestone_render::BlockEntityTexture),
         tint: [u8; 3],
         placement: glam::Mat4,
         light: u32,
@@ -1139,7 +1191,27 @@ impl RenderState {
         // A missing sheet draws **nothing** rather than an untextured box — the same
         // fail-open the world block-entity pass uses, and for the same reason: a
         // flat-magenta chest-shaped box in the hand reads as a renderer bug.
-        let texture = self.block_entities.textures.get(texture_stem)?;
+        //
+        // A **fetched** custom-head skin resolves through the world entity pass's
+        // own url-keyed cache, exactly as `gpu/frame.rs`'s placed-head loop does —
+        // one fetch, one decode, one bind group, whether that head is in the world,
+        // in a slot or in your hand. A miss there is normal while the fetch is in
+        // flight, so it falls back to the default Steve sheet rather than drawing
+        // nothing, which is the one case where the two fail-opens differ.
+        let texture = match &texture_id {
+            lodestone_render::BlockEntityTexture::Static(stem) => {
+                self.block_entities.textures.get(stem)
+            }
+            lodestone_render::BlockEntityTexture::PlayerSkin(url) => self
+                .entities
+                .player_skins
+                .get(url.as_ref())
+                .or_else(|| {
+                    self.block_entities.textures.get(lodestone_render::skull_texture_stem(
+                        lodestone_render::SkullType::Player,
+                    ))
+                }),
+        }?;
 
         // `&[]` — no pose overrides. A held chest's lid is shut:
         // `ChestSpecialRenderer` carries no `openness` at all, so the rest pose *is*
@@ -1590,6 +1662,7 @@ mod tests {
             potion_color: None,
             banner_patterns: Vec::new(),
             base_color: None,
+            skin: None,
         }
     }
 

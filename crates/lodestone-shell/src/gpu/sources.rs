@@ -593,6 +593,14 @@ pub struct MainHandItem {
     /// `lodestone_game::item::ItemStack::base_color`. `None` for a
     /// never-dyed shield and for every non-shield item.
     pub base_color: Option<String>,
+    /// The texture URL declared by the stack's `minecraft:profile` — a custom
+    /// player head. `None` for every other item and for a plain head.
+    ///
+    /// The same field, and the same loss, as `hud::HotbarSlot::skin`: without it
+    /// a decorative head **held in hand** drew the default skull sheet while the
+    /// identical head drew its own face once placed in the world. Fill it from
+    /// `hud::item_icon::stack_skin_url`, which also starts the fetch.
+    pub skin: Option<std::sync::Arc<str>>,
 }
 
 /// Where the **local player's main-hand item** comes from, polled once per frame
