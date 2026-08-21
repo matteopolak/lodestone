@@ -1410,8 +1410,30 @@ impl SpecialIcons {
             textures.insert(stem, pipeline.texture_bind_group(device, &view, &sampler));
         }
         if textures.is_empty() {
+            // Never a bare `None`. This is the exact point at which the whole
+            // special-icon stream goes dark, and returning `None` here reads at
+            // the call site as "nothing to draw" rather than "could not look" —
+            // the two must never share a value. Name which of the two it was:
+            // an empty `real` means the pack stack itself did not open (or held
+            // none of these sheets), a non-empty one means the stems and the
+            // pack disagree, which is a different bug entirely.
+            tracing::warn!(
+                target: "assets",
+                decoded_by_loader = real.len(),
+                stems_wanted = block_entity_texture_stems().len(),
+                models_baked = gpu_models.len(),
+                "the GUI special-renderer icon pass could not build: no block-entity sheet \
+                 was decoded, so every chest, shulker box, banner, shield and skull icon in \
+                 a slot will be blank"
+            );
             return None;
         }
+        tracing::debug!(
+            target: "assets",
+            sheets = textures.len(),
+            models = gpu_models.len(),
+            "built the GUI special-renderer icon pass"
+        );
 
         // `FogUniform::disabled()` leaves the sky-darken lane at its `0.0`
         // sentinel, which `EntityCameraUniform::sky_darken` reads back as `1.0`
@@ -1945,10 +1967,30 @@ pub(crate) struct IconRenderer {
     /// The block-entity icon pass (chests). Built **lazily**, on the first frame
     /// that actually contains a special icon — see [`Self::upload`].
     special: Option<SpecialIcons>,
-    /// Whether lazy construction has been attempted. Separate from
-    /// `special.is_some()` so a jar-less run (where [`SpecialIcons::new`] returns
-    /// `None`) does not re-decode nothing every frame forever.
-    special_tried: bool,
+    /// How many consecutive frames the lazy build has been *declined* — either
+    /// because there was nowhere to draw (no model pass attached) or because
+    /// [`SpecialIcons::new`] returned `None`. Reset to `0` the moment a build
+    /// succeeds.
+    ///
+    /// # Why a counter and not the `special_tried` bool this replaces
+    ///
+    /// That bool latched. It was set on the *first* attempt and nothing ever
+    /// cleared it, so a build that failed once left the whole special stream
+    /// dark for the rest of the process — every chest, shulker box, banner,
+    /// shield and player-head icon in every slot — with no error, no retry and
+    /// nothing in the log. A permanently dark stream is now unrepresentable:
+    /// the build is retried whenever `special.is_none()`, so recovery needs
+    /// only the next frame on which the underlying reason has gone away.
+    ///
+    /// Retrying is affordable because the expensive case cannot recur: a run
+    /// with no pack has no [`ItemAtlas`] either, so `draw_item_icon` never
+    /// reaches an `IconPart::Special` and this function returns at its
+    /// `special.is_empty()` guard long before any decode is attempted.
+    ///
+    /// The counter exists only to keep the log honest — one line per episode
+    /// rather than one per frame — and to report how long an episode lasted
+    /// when it ends.
+    special_declines: u32,
     /// The colour format [`Self::attach_item_models`] was given, kept for the
     /// lazy build. `None` means the model pass was never attached, which is also
     /// the condition under which the special pass must stay dark: both are the
@@ -2027,7 +2069,7 @@ impl Default for IconRenderer {
             sprites: None,
             models: None,
             special: None,
-            special_tried: false,
+            special_declines: 0,
             color_format: None,
             glint: None,
             glint_speed: lodestone_render::glint::DEFAULT_SPEED,
@@ -2108,20 +2150,35 @@ impl IconRenderer {
     /// therefore reached the world's own block-entity pass and never reached a
     /// GUI slot, with nothing red and nothing dropped.
     ///
-    /// The second reason is the one that can go dark rather than merely stale.
-    /// The lazy build runs **once** and latches: `special_tried` was set on the
-    /// first frame carrying a special icon and never cleared, so if
-    /// [`SpecialIcons::new`] returned `None` that one time — no pack stack, or
-    /// no sheet decoded — the whole stream stayed dark for the rest of the
-    /// process and no later reload could recover it. Clearing the latch is what
-    /// makes that recoverable.
+    /// The lazy build itself no longer latches — see [`Self::special_declines`]
+    /// — so this is now purely about *which pack* the sheets came from, not
+    /// about recovering a stream that failed to build.
     ///
     /// Cheap for the same reason the lazy build is affordable: nothing is
     /// rebuilt here, and the next rebuild only happens on a frame that actually
     /// carries a special icon.
+    /// Log one episode of the special pass declining to draw, and count the
+    /// frames it lasts.
+    ///
+    /// Warns on the **first** frame of an episode and stays quiet after that:
+    /// this runs inside the frame loop, so one line per frame would bury the
+    /// very thing it exists to surface. The paired recovery line is emitted by
+    /// [`Self::prepare_special`] when a later build succeeds, so an episode
+    /// always has both ends in the log and its length is readable from them.
+    fn note_special_decline(&mut self, wanted: usize, why: &'static str) {
+        self.special_declines = self.special_declines.saturating_add(1);
+        if self.special_declines == 1 {
+            tracing::warn!(
+                target: "assets",
+                icons_dropped = wanted,
+                "the GUI special-renderer icon pass drew nothing: {why}"
+            );
+        }
+    }
+
     pub(crate) fn reload_special(&mut self) {
         self.special = None;
-        self.special_tried = false;
+        self.special_declines = 0;
     }
 
     /// Attach the flat item-sprite [`ItemAtlas`] so slots draw real item icons.
@@ -2465,16 +2522,50 @@ impl IconRenderer {
         // Gated on the model pass, not on the format alone: `models_attached`
         // is the one signal both screens branch on, so a special icon can never
         // reach a frame the model pass was excluded from.
+        //
+        // Every `return` from here down is a frame on which real icons were
+        // asked for and none was drawn, so each one says so. Nothing in this
+        // function may decline silently: the stream being dark is invisible at
+        // the draw site (a special item has no flat sprite to fall back to, so
+        // the slot is simply empty) and it cost three investigations to find
+        // by pixel-hunting what one log line names outright.
         let (Some(format), true) = (self.color_format, self.models.is_some()) else {
+            self.note_special_decline(
+                special.len(),
+                if self.color_format.is_none() {
+                    "the 3-D item-model pass was never attached (no colour format recorded), \
+                     so there is nowhere to draw a block-entity icon"
+                } else {
+                    "the 3-D item-model pass is not attached (no ModelIcons), so there is \
+                     nowhere to draw a block-entity icon"
+                },
+            );
             return;
         };
-        if !self.special_tried {
-            self.special_tried = true;
+        // Retried whenever the pass is absent, never latched — see
+        // [`Self::special_declines`].
+        if self.special.is_none() {
             self.special = SpecialIcons::new(device, queue, format);
         }
         let Some(s) = self.special.as_mut() else {
+            self.note_special_decline(
+                special.len(),
+                "SpecialIcons::new decoded no block-entity sheet at all — the vanilla pack \
+                 stack could not be opened, or none of block_entity_texture_stems() resolved \
+                 inside it. Every chest, shulker box, banner, shield and skull icon is dark \
+                 until this succeeds",
+            );
             return;
         };
+        if self.special_declines > 0 {
+            tracing::info!(
+                target: "assets",
+                frames_dark = self.special_declines,
+                sheets = s.sheet_count(),
+                "the GUI special-renderer icon pass built and is drawing again"
+            );
+            self.special_declines = 0;
+        }
 
         let base = build_special_batches(device, s, &special[..carried_from]);
         let carried = build_special_batches(device, s, &special[carried_from..]);
