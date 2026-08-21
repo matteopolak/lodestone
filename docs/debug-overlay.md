@@ -383,6 +383,49 @@ Toggles are `Arc<AtomicBool>` because the source closure is
   asserts pixels move (423 px / 828 px at 320×240 after the width fix).
   Neutered by forcing `debug_line_count` to `0` at the draw call and confirmed
   red before landing the fix above.
+- **The line-width fix above was real but was not the whole story: the owner
+  reported F3+B/F3+G still doing nothing after it landed, with *no chat
+  feedback at all* — not thin lines, no `[Debug] Hitboxes: shown` line
+  either, while F3+H (identical shape, `push_local_chat` call included)
+  worked. That symptom is upstream of rendering entirely, so this repo's own
+  evidence standard applies: instrument rather than reason further.**
+  `app::lifecycle::handle_keyboard_input` was split at its `match outcome`
+  boundary into `WindowApp::apply_key_outcome(outcome, pressed, code, raw)` —
+  `raw: Option<&winit::event::KeyEvent>` rather than a bare `KeyEvent`,
+  because winit's `KeyEvent` has a private `platform_specific` field and
+  cannot be constructed outside winit at all, which is exactly why no test
+  before this one drove anything past `resolve_key`'s pure `KeyOutcome`.
+  `app::tests::f3_b_and_f3_g_flip_their_atomic_and_push_chat_through_the_real_key_path`
+  drives all three chords through this real effect path (the actual
+  `Arc<AtomicBool>` stores and the actual `Sim::push_local_chat` call, not a
+  model of them) and passed: the atomics flip and all three chat lines
+  appear correctly, F3+H included, given a correctly-resolved `KeyOutcome`.
+  That rules out `apply_key_outcome`, the atomics and (under normal
+  conditions) `push_local_chat` as the cause — the two are not where the
+  report's actual defect lives.
+  `Sim::push_local_chat` (`sim/session.rs`) is hardened regardless, per the
+  owner's standing "nothing may be silently skipped" rule: every other
+  accessor of `SessionChat` on the local entity `.expect()`s its presence
+  (`LocalPlayerPlugin` inserts the whole session component set eagerly and
+  nothing ever removes it), so the `if let Some(...)`-with-no-`else` here was
+  inconsistent with the rest of the file even before this report; it now logs
+  a `tracing::warn!` on the `chat` target instead of dropping the line with
+  no trace. **This was not reproduced as the live cause** — the component was
+  never actually observed missing — but the branch is no longer silent.
+  `app::lifecycle::handle_keyboard_input` now also logs
+  `RUST_LOG=debug_keys=debug` once per real key event — the raw
+  `physical_key`, the resolved `code`/`pressed`/`debug_held`/`outcome` — at
+  exactly the seam neither test above can see: whether the *real* event for a
+  B/G press ever carries `Some(KeyCode::KeyB)` with `debug_held` true in the
+  first place. `resolve_key`'s `let code = code?;` returns `None` for
+  *everything* the moment `code` is `None`, and `code` is `None` whenever
+  winit reports `PhysicalKey::Unidentified` for that key — an unusual
+  keyboard/driver/OS-locale combination is a real, if unverified, candidate
+  for "identical code, two adjacent physical keys behave differently, a third
+  one does not." **Open**: the owner needs to reproduce with that log line
+  enabled and report what it printed for a failing B/G press (or its
+  absence, which would mean the OS never delivered the event to the app at
+  all) before this can be closed.
 - **Not built**: the four debug charts, the lightmap blit, vanilla's runtime
   entry-enable screen and its `debug-profile.json`, and the nine `visualize_*`
   world overlays. All are additions; none is a gap in what is here. The

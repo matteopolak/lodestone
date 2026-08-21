@@ -680,6 +680,25 @@ impl Sim {
         self.write(|w| {
             if let Some(mut chat) = w.get_mut::<SessionChat>(local) {
                 chat.0.push_system(text, now);
+            } else {
+                // Every other accessor of this component on this same
+                // `self.local` entity (`Self::vitals`/`Self::hunger`/…, and
+                // this file's own reads a few lines up) treats it as always
+                // present and `.expect()`s it — `LocalPlayerPlugin` inserts
+                // the whole session component set eagerly and nothing ever
+                // removes it, so reaching here means the local player was
+                // somehow despawned, a bug in the caller rather than a state
+                // to route around. The owner's standing rule is that nothing
+                // may be silently skipped: this call site is the one place
+                // in the F3 debug-chord path (`app::lifecycle::apply_key_outcome`)
+                // that could make a chord's toggle succeed while its own
+                // "[Debug] X: shown/hidden" feedback silently never appears,
+                // so a dropped line here must be loud, not a no-op `if let`.
+                tracing::warn!(
+                    target: "chat",
+                    "push_local_chat dropped a line — SessionChat missing on the local entity: {}",
+                    text.to_plain_string()
+                );
             }
         });
     }
