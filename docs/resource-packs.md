@@ -134,6 +134,54 @@ fallback forever. A warning for a name that remains missing after a generation
 change still means the pack did not provide a usable font (or was never
 installed); it is not suppressed by this cache policy.
 
+### Single winner vs. merged stack: which resource types get which
+
+`ResourceManager` offers two lookups (`crates/lodestone-assets/src/manager.rs`):
+`read` (highest-priority pack wins outright, the rest are never even opened)
+and `read_stack`/the pack-aware loaders built on it (every layer that carries
+the path is opened, lowest priority first, and merged). Getting this wrong in
+either direction is silent — nothing errors, a pack just does not do what it
+looks like it should. The rule is per resource type, from vanilla's own
+record definitions, not a blanket policy:
+
+- **Single winner** (`read`) — a whole-document override with no merge
+  concept in vanilla: a texture PNG, a `.mcmeta`, a blockstate JSON, a model
+  JSON, an item definition JSON, a particle definition JSON
+  (`ParticleResources.reload` uses `listMatchingResources`, not a stack). A
+  server pack replacing one of these replaces the whole file, which is
+  correct — changing these to merge would be the regression.
+- **Merged across the stack** — a *list* or *registry* packs are meant to
+  extend, not replace:
+  - Language files (`lang.rs`'s `Language::merged_from_stack`,
+    `ClientLanguage.loadFrom`/`getResourceStack`) — landed first; see its own
+    module doc for the `container.crafting`-on-screen symptom a single-winner
+    read produced.
+  - Fonts (`font.rs`, `read_stack`) — a pack's own `font/<id>.json` adds a
+    provider layer under/over the jar's chain rather than replacing it
+    (`FontManager.reload`/`getResourceStack`).
+  - Atlas source lists — `assets/<ns>/atlases/<id>.json`
+    (`atlas_source.rs`'s `AtlasDefinition::load_stacked`,
+    `SpriteSourceList.load`/`getResourceStack`). Covers `armor_trims.json`,
+    `banner_patterns.json`, `shield_patterns.json` (`trim.rs`,
+    `banner_pattern_atlas.rs`). A pack shipping its own `armor_trims.json`
+    extends the jar's `paletted_permutations` source instead of discarding
+    it. (The block/item atlases this client builds do not go through
+    `atlases/*.json` at all — they enumerate textures directly via
+    `ResourceManager::list`, which already unions paths across the stack, so
+    this class of bug does not apply to them.)
+  - Item tags — `data/<ns>/tags/item/<id>.json`
+    (`resources.rs`'s `merged_tag_json`, `TagLoader.load`/
+    `listMatchingResourceStacks`). Honours each layer's own `"replace"` flag
+    (default `false`: append to the layers below; `true`: reset first) —
+    the same shape `sound.rs`'s `SoundRegistry::merge_from` already models
+    for `sounds.json` events, though that registry is currently fed from the
+    external asset-index object store rather than a live `ResourceManager`
+    stack, so no pack can extend it today.
+
+When adding a new pack-loaded resource type, check the vanilla loader's own
+method name first: `getResource`/`listMatchingResources` is single-winner,
+`getResourceStack`/`listMatchingResourceStacks` merges.
+
 When a span names a custom font, selection happens per codepoint: a glyph the
 custom font declares uses that font's metrics and pixels, while an uncovered
 codepoint falls back to `minecraft:default`. `spans_width` performs the same
