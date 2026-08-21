@@ -1073,6 +1073,23 @@ pub fn upload_flame_instances(
     )
 }
 
+/// The polygon offset [`EntityPipeline::shadow_pipeline`] pulls the ground
+/// shadow toward the camera with, so a decal placed *exactly* coplanar with
+/// the ground wins the depth comparison outright rather than tying it.
+///
+/// Named rather than inlined so a gate can assert the sign without
+/// transcribing the numbers a second time — a wrong sign here pushes the decal
+/// **behind** the ground and it vanishes entirely, which is the one failure
+/// mode that looks like "the feature was never wired". The magnitude, the
+/// reason vanilla's own `ENTITY_SHADOW` carries no bias at all, and why a
+/// world-space lift cannot substitute for a ULP-denominated one are all in
+/// [`EntityPipeline::shadow_pipeline`]'s doc.
+pub const SHADOW_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
+    constant: -10,
+    slope_scale: -1.0,
+    clamp: 0.0,
+};
+
 /// One vertex of the entity ground-shadow decal — world-space position, the
 /// shadow-sprite UV, and this piece's own alpha (vanilla's per-piece
 /// `ARGB.white(alpha)` colour, carried as a bare scalar since the colour
@@ -1732,6 +1749,63 @@ impl EntityPipeline {
     /// entity, almost always well inside the near fog band, so the visible cost
     /// is a shadow that stays a hair too dark at the extreme edge of render
     /// distance rather than one that is wrong up close.
+    ///
+    /// # The one deliberate divergence: a polygon offset vanilla does not carry
+    ///
+    /// Owner report: *"the entity ground-shadow decal z-fights with the
+    /// ground."* Vanilla's `ENTITY_SHADOW` uses the two-argument
+    /// `DepthStencilState`, so it has **no** depth bias at all — and a shadow
+    /// piece is placed *exactly* coplanar with the ground it sits on, by
+    /// construction: `ShadowFeatureRenderer.prepare` emits its quad at
+    /// `piece.relativeY() + shapeBelow().bounds().minY`, and the only blocks
+    /// that reach it are the ones `isCollisionShapeFullBlock` accepted, whose
+    /// bounds are the unit cube. Zero separation. Vanilla can afford that
+    /// because it is **reversed-Z**, which spends float exponent exactly where
+    /// a depth buffer needs it; this renderer's forward `[0, 1]` depth cannot.
+    ///
+    /// Measured, `near = 0.05`, `far = far_for_render_distance(12)`,
+    /// `Depth32Float` — what **one ULP of the depth buffer is worth in blocks
+    /// of world separation**, over the whole range a shadow can physically
+    /// occupy (`pow = (1 - distSq / 256) * strength` must be positive, so a
+    /// piece never exists past 16 blocks):
+    ///
+    /// | distance | forward `[0,1]` (here) | reversed-Z (vanilla) |
+    /// |---|---|---|
+    /// | 2 blocks  | `2.44e-06` | `5.96e-08` |
+    /// | 8 blocks  | `3.84e-05` | `2.38e-07` |
+    /// | 16 blocks | `1.55e-04` | `4.77e-07` |
+    ///
+    /// The **shape** of that column is the point, not its magnitude: here a
+    /// ULP's worth grows as the *square* of the distance — a 64x swing across
+    /// the shadow's own reach — while under reversed-Z it grows linearly and
+    /// stays three orders of magnitude finer throughout. So a fixed world-space
+    /// lift cannot be the fix: any value large enough to resolve at 16 blocks
+    /// visibly floats the decal at 2, and any value discreet enough at 2 blocks
+    /// is unresolvable at 16. That is `CLAUDE.md`'s measured rule about ported
+    /// sub-millimetre depth separations, arriving at this pass.
+    ///
+    /// A **polygon offset** does not have that shape. For a floating-point
+    /// depth format the offset unit is `r = 2^(exponent(z) - 23)` — one ULP of
+    /// the primitive's *own* depth — so `constant: -10` is ten ULPs wherever
+    /// the piece happens to be, which is `4.5e-05` blocks of pull at 2 blocks
+    /// and `2.96e-03` at 16, and never more than that because the shadow's own
+    /// distance cutoff bounds it. Scale-adaptive by construction rather than a
+    /// constant tuned at one distance. The sign is negative for the same reason
+    /// [`crate::crack_pipeline`] documents at length for the block-breaking
+    /// decal, which is this repo's existing shipped solution to the identical
+    /// problem: vanilla's reversed-Z pulls toward the camera with a *positive*
+    /// bias, and `[0, 1]` depth pulls toward the camera with a negative one.
+    ///
+    /// Honest about what was and was not observed: across twelve headless
+    /// configurations spanning distance, world-coordinate magnitude, far plane,
+    /// grazing angle and sub-block feet offsets, the coplanar decal never
+    /// speckled — `LessEqual` lets a tie through and the decal draws after the
+    /// terrain, so the tie resolves in its favour. But that tie rests on two
+    /// *different* shader modules emitting bit-identical clip `z` for
+    /// bit-identical world positions, which nothing in this tree enforces and
+    /// no test can pin; one fused multiply-add chosen differently in either
+    /// shader breaks it, and the table above says there is no precision left to
+    /// absorb that. The offset removes the tie instead of relying on it.
     #[must_use]
     pub fn shadow_pipeline(
         &self,
@@ -1777,7 +1851,12 @@ impl EntityPipeline {
                 depth_write_enabled: Some(false),
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
+                // Ten ULPs of the piece's own depth toward the camera, so a
+                // decal that is exactly coplanar with the ground wins the
+                // comparison outright instead of tying it. See this function's
+                // doc for the measurement and for why a world-space lift
+                // cannot do the same job.
+                bias: SHADOW_DEPTH_BIAS,
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
