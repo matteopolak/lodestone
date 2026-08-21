@@ -243,6 +243,72 @@ fn segment(report: &[(&'static str, Option<f32>)], name: &str) -> Result<Option<
         })
 }
 
+/// A count of *other* compiler and test processes running on this machine — the
+/// thing that makes a millisecond figure here untrustworthy.
+///
+/// `CLAUDE.md` is explicit that a duration gathered while another agent builds
+/// gets attributed to the wrong cause, and that the honest instrument is a
+/// **counter, not a duration**. So this is a count of concurrent `rustc`,
+/// `cargo` and `target/{debug,release}` test-binary processes, sampled at the
+/// start and again at the end of the run and printed with both readings: a
+/// figure that was zero at both ends was measured on a quiet machine, and one
+/// that was not says so in the output rather than in someone's memory of the
+/// session.
+///
+/// Load average is deliberately **not** used. This repo has already recorded it
+/// as the worst available proxy: it is a decayed average over a minute, so it
+/// both lags a build that started ten seconds ago and stays elevated long after
+/// one finished. A live process count has neither property.
+///
+/// `None` when `ps` could not be run or parsed at all — never `Some(0)`, which
+/// would report a quiet machine on the strength of a failed measurement.
+fn concurrent_build_processes() -> Option<usize> {
+    let me = std::process::id().to_string();
+    let out = std::process::Command::new("/bin/ps").args(["-Ao", "pid=,command="]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    Some(
+        text.lines()
+            .filter(|line| {
+                let mut parts = line.trim_start().splitn(2, char::is_whitespace);
+                let (Some(pid), Some(cmd)) = (parts.next(), parts.next()) else {
+                    return false;
+                };
+                // This bench's own process, and the cargo that spawned it, are
+                // not contention — excluding them is what makes `0` mean quiet
+                // rather than merely "nothing besides me and my parent".
+                if pid == me || cmd.contains("frame_profile-") {
+                    return false;
+                }
+                cmd.contains("/rustc")
+                    || cmd.contains("bin/cargo")
+                    || cmd.contains("target/debug/")
+                    || cmd.contains("target/release/")
+            })
+            .count(),
+    )
+}
+
+/// Render a start/end pair from [`concurrent_build_processes`] as one line.
+fn busy_witness(before: Option<usize>, after: Option<usize>) -> String {
+    match (before, after) {
+        (Some(0), Some(0)) => {
+            "quiet machine: no other cargo/rustc/test processes at either end of the run"
+                .to_string()
+        }
+        (Some(b), Some(a)) => format!(
+            "MACHINE WAS BUSY: {b} other cargo/rustc/test processes at the start, {a} at the \
+             end. Every millisecond figure below is a sample taken under contention -- compare \
+             it only against another run with the same witness, never against a quiet one."
+        ),
+        _ => "machine load unknown: `ps` could not be sampled, so nothing here establishes \
+              whether the timings were taken under contention"
+            .to_string(),
+    }
+}
+
 fn bench_frame_profile(c: &mut Criterion) {
     let Ok(ctx) = GpuContext::new_headless_blocking() else {
         println!(
@@ -267,9 +333,16 @@ fn bench_frame_profile(c: &mut Criterion) {
         );
     }
 
+    // Sampled before the first waypoint and again after the last, and printed
+    // at both ends: see `concurrent_build_processes` for why this is a process
+    // count rather than a load average, and why a run under contention has to
+    // announce it in its own output.
+    let busy_before = concurrent_build_processes();
     println!(
         "\n=== frame profile: demo world radius={RADIUS}, {meshed} meshed sections, \
-         {WIDTH}x{HEIGHT}, {ITERS} frames per waypoint after {WARMUP} warm-up ===\n"
+         {WIDTH}x{HEIGHT}, {ITERS} frames per waypoint after {WARMUP} warm-up ===\n\
+         \x20  other cargo/rustc/test processes at the start of this run: {}\n",
+        busy_before.map_or_else(|| "unknown (`ps` unreadable)".to_string(), |n| n.to_string()),
     );
 
     for wp in &PATH {
@@ -527,6 +600,12 @@ fn bench_frame_profile(c: &mut Criterion) {
             black_box(stats)
         });
     });
+
+    // The second half of the busy witness, printed last so it qualifies every
+    // figure above it. Both readings are shown: a run that started quiet and
+    // ended contended is exactly as untrustworthy as one that was busy
+    // throughout, and only the pair can say which happened.
+    println!("\n{}\n", busy_witness(busy_before, concurrent_build_processes()));
 }
 
 /// Does per-frame CPU cost scale with how much terrain is **resident**, or
