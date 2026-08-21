@@ -173,9 +173,9 @@ pub struct TrackedItem {
 /// item drops, call [`tick`](Self::tick) once per server tick and remove
 /// whatever ids it returns from the world/entity tracker, and call
 /// [`merge`](Self::merge) for pairs it has already decided are spatially
-/// adjacent — this crate stays world-free (mirroring
-/// [`SpawnEnvironment`](crate::spawn::SpawnEnvironment)'s seam), so proximity
-/// is the caller's decision, not this registry's.
+/// adjacent — this crate stays world-free the same way the rest of this
+/// crate's spawn/despawn logic does, so proximity is the caller's decision,
+/// not this registry's.
 #[derive(Debug, Default, Clone)]
 pub struct ItemEntityRegistry {
     entries: Vec<TrackedItem>,

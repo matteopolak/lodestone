@@ -22,12 +22,14 @@
 //! does not compute, which is the *world* species of vacuous test in
 //! `CLAUDE.md`'s table — green against the only input it can be handed.
 //!
-//! So: **this module is data, not behaviour.** Its consumer is a runtime spawner
-//! that does not exist yet, and by this repo's own island rule that makes it an
-//! island until one does. It is landed anyway because the alternative — a
-//! bundled asset field that no line of code can even name — is strictly worse,
-//! and because the parse is the one part of #518 whose correctness can be
-//! settled against the record definition rather than against a simulation.
+//! So: **this module is data, not behaviour.** Its consumer, at the time this
+//! was written, was a runtime spawner that did not exist yet; parts 2-4 have
+//! since landed (`crate::spawn_stage` for chunk-generation spawns,
+//! `lodestone_server::natural_spawn` for the tick-driven cycle and the
+//! `SpawnConditions`-equivalent revalidation), so [`parse_biome_spawners`]
+//! is no longer an island — both consumers call it directly rather than
+//! through [`crate::overworld::OverworldGenerator::biome_spawners`], which
+//! stays unused (see that method's own doc).
 //!
 //! ## How it works
 //!
