@@ -2401,6 +2401,37 @@ pub fn soul_fire_flame(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: 
     engine.add(p);
 }
 
+/// `COPPER_FIRE_FLAME` — `FlameParticle.Provider` again, over
+/// [`Sheet::CopperFireFlame`]'s own texture. Three registry types share that
+/// one provider across three different sheets; the class never decides.
+pub fn copper_fire_flame(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xd: f64,
+    yd: f64,
+    zd: f64,
+) {
+    let mut p = rising(engine, x, y, z, xd, yd, zd, Sheet::CopperFireFlame);
+    p.behaviour = Behaviour::Flame;
+    engine.add(p);
+}
+
+/// `FlameParticle.SmallFlameProvider` (`ParticleTypes.SMALL_FLAME`) — a candle
+/// flame. `flame`'s sheet and physics with a single `scale(0.5F)`.
+///
+/// `scale` shrinks the **collision box as well as** the quad
+/// (`setSize(0.2 * scale, 0.2 * scale)`), which is why it is one call rather
+/// than a `quad_size` multiply — and why a small flame does not clip a candle's
+/// wick the way a half-sized quad on a full-sized box would.
+pub fn small_flame(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f64, zd: f64) {
+    let mut p = rising(engine, x, y, z, xd, yd, zd, Sheet::Flame);
+    p.scale(0.5);
+    p.behaviour = Behaviour::Flame;
+    engine.add(p);
+}
+
 /// `SoulParticle` — a rising, sheet-animated mote, 1.5× scale and translucent.
 ///
 /// [`Behaviour::AshSmoke`] is the right behaviour despite the name: what that
@@ -2408,13 +2439,45 @@ pub fn soul_fire_flame(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: 
 /// `SoulParticle.tick`'s `super.tick(); setSpriteFromAge(sprites);` verbatim.
 /// Unlike `flame` it does **not** override `move`, so a soul mote collides.
 pub fn soul(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f64, zd: f64) {
-    let mut p = rising(engine, x, y, z, xd, yd, zd, Sheet::Soul);
+    soul_over(engine, x, y, z, xd, yd, zd, Sheet::Soul);
+}
+
+/// `SoulParticle.EmissiveProvider` (`ParticleTypes.SCULK_SOUL`) — the mote a
+/// sculk catalyst throws.
+///
+/// The same class as [`soul`] over **its own sheet**: `sculk_soul.json` names
+/// `sculk_soul_0`…`sculk_soul_10`, not `soul_N`, and only the eleven-frame
+/// count coincides. The provider's other two acts — `setAlpha(1.0)` and
+/// `isGlowing = true` — are respectively already the constructor's value and
+/// the `LightCoordsUtil.withBlock(…, 15)` boost this crate does not model
+/// (see `ParticleEngine::extract`'s light arm, which records that omission for
+/// the whole family rather than per emitter).
+pub fn sculk_soul(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f64, zd: f64) {
+    soul_over(engine, x, y, z, xd, yd, zd, Sheet::SculkSoul);
+}
+
+/// `SoulParticle`'s constructor, over whichever sheet the registry type names.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the `SoulParticle` constructor argument for argument, plus its sheet"
+)]
+fn soul_over(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xd: f64,
+    yd: f64,
+    zd: f64,
+    sheet: Sheet,
+) {
+    let mut p = rising(engine, x, y, z, xd, yd, zd, sheet);
     p.scale(1.5);
     p.alpha = 1.0;
     p.behaviour = Behaviour::AshSmoke;
     p.sprite = SpriteSource::Sheet {
-        sheet: Sheet::Soul,
-        frame: Sheet::Soul.frame_for_age(0, p.lifetime),
+        sheet,
+        frame: sheet.frame_for_age(0, p.lifetime),
     };
     engine.add(p);
 }
@@ -2527,33 +2590,140 @@ pub fn end_rod(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya:
     engine.add(p);
 }
 
-/// A single-sprite spark: `ELECTRIC_SPARK` and `GLOW`, both `particle/glow`.
+/// `GlowParticle` — the shared base for five registry types, all over
+/// `particle/glow`: `electric_spark`, `glow` (the glow squid's shimmer),
+/// `scrape`, `wax_on` and `wax_off`.
 ///
-/// `ElectricSparkParticle` is a plain `SingleQuadParticle` with `friction = 0.9`,
-/// a 0.25 velocity scale and a short life; `GlowParticle` is a
-/// `SimpleAnimatedParticle`, but over a one-frame sheet the two are visually the
-/// same thing and share this emitter.
-pub fn spark(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+/// Vanilla's own `ParticleResources` registration is the only thing that says
+/// so. `electric_spark`/`glow` were previously emitted here by an
+/// approximation that took `FireworkParticles.SparkParticle`'s shape
+/// (`friction 0.9`, a `8 + nextInt(4)` lifetime, no tint, collision left on) —
+/// close enough to look right in isolation and wrong in every constant:
+/// `GlowParticle` uses `friction 0.96`, `speedUpWhenYMotionIsBlocked`,
+/// `hasPhysics = false`, and a per-provider tint and lifetime that differ by an
+/// order of magnitude between them (2–3 ticks for an electric spark against
+/// 10–39 for a scrape).
+///
+/// Returned rather than added so each provider can set its own speed, tint and
+/// lifetime — which for this family is the *whole* difference between the five.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the `GlowParticle` constructor argument for argument, plus its sheet"
+)]
+pub fn glow_particle(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    sheet: Sheet,
+) -> Particle {
     let rng = engine.rng();
-    let mut p = Particle::new(
-        x,
-        y,
-        z,
-        SpriteSource::Sheet {
-            sheet: Sheet::Glow,
-            frame: 0,
-        },
-        rng,
-    );
-    p.friction = 0.9;
-    p.gravity = 0.0;
-    let scale = 0.25;
-    p.xd = xa * scale;
-    p.yd = ya * scale;
-    p.zd = za * scale;
-    p.lifetime = 8 + engine.rng().next_int_bound(4);
-    p.behaviour = Behaviour::Plain;
+    let mut p =
+        Particle::with_velocity(x, y, z, xa, ya, za, SpriteSource::Sheet { sheet, frame: 0 }, rng);
+    p.friction = 0.96;
+    p.speed_up_when_y_blocked = true;
+    p.quad_size *= 0.75;
+    p.has_physics = false;
+    // `particle/glow` is a single frame, so `setSpriteFromAge` is a no-op —
+    // the behaviour is still `Animated` because the *class* advances its sheet,
+    // and a resource pack is free to give `glow.json` more than one frame.
+    p.behaviour = Behaviour::Animated;
+    p
+}
+
+/// `GlowParticle.ElectricSparkProvider` — the arc a lightning rod throws.
+///
+/// The shortest-lived particle in this family by a wide margin: `nextInt(2) + 2`,
+/// i.e. two or three ticks. Its velocity is the packet's, scaled to a quarter,
+/// assigned outright rather than added to the constructor's scatter.
+pub fn electric_spark(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let mut p = glow_particle(engine, x, y, z, 0.0, 0.0, 0.0, Sheet::Glow);
+    p.colour = [1.0, 0.9, 1.0];
+    p.xd = xa * 0.25;
+    p.yd = ya * 0.25;
+    p.zd = za * 0.25;
+    p.lifetime = 2 + engine.rng().next_int_bound(2);
     engine.add(p);
+}
+
+/// `GlowParticle.GlowSquidProvider` (`ParticleTypes.GLOW`) — the shimmer around
+/// a glow squid.
+///
+/// The one provider in this family that does *not* assign its velocity: it feeds
+/// `0.5 - nextDouble()` horizontally into the constructor's own scatter, damps
+/// `yd` to a fifth, and damps `xd`/`zd` a further tenth when the caller asked
+/// for no horizontal motion — the same shape `SpellParticle` uses, tested
+/// against the **original** arguments rather than the jittered ones.
+///
+/// Its tint is a coin flip between two greens, drawn from a `nextBoolean()`, so
+/// a school of them reads as two populations rather than one colour.
+pub fn glow_squid(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let rng = engine.rng();
+    let jitter_x = 0.5 - rng.next_double();
+    let jitter_z = 0.5 - rng.next_double();
+    let mut p = glow_particle(engine, x, y, z, jitter_x, ya, jitter_z, Sheet::Glow);
+    p.colour = if engine.rng().next_bool() {
+        [0.6, 1.0, 0.8]
+    } else {
+        [0.08, 0.4, 0.4]
+    };
+    p.yd *= f64::from(0.2_f32);
+    if xa == 0.0 && za == 0.0 {
+        p.xd *= f64::from(0.1_f32);
+        p.zd *= f64::from(0.1_f32);
+    }
+    #[expect(clippy::cast_possible_truncation, reason = "Java's `(int)` cast; small")]
+    let lifetime = (8.0 / engine.rng().next_double().mul_add(0.8, 0.2)) as i32;
+    p.lifetime = lifetime.max(1);
+    engine.add(p);
+}
+
+/// The three copper-oxidation sparkles: `scrape`, `wax_on` and `wax_off`.
+///
+/// All `GlowParticle` with a `nextInt(30) + 10` lifetime and a `0.01` speed
+/// factor; they differ only in tint and in whether the horizontal speed is
+/// halved. `scrape` flips a coin between two teals (the oxide it removed);
+/// `wax_on` is honey-orange and `wax_off` the same pale white as an electric
+/// spark.
+fn copper_sparkle(
+    engine: &mut ParticleEngine,
+    (x, y, z): (f64, f64, f64),
+    (xa, ya, za): (f64, f64, f64),
+    colour: [f32; 3],
+    halve_horizontal: bool,
+) {
+    let mut p = glow_particle(engine, x, y, z, 0.0, 0.0, 0.0, Sheet::Glow);
+    p.colour = colour;
+    let horizontal = if halve_horizontal { 0.01 / 2.0 } else { 0.01 };
+    p.xd = xa * horizontal;
+    p.yd = ya * 0.01;
+    p.zd = za * horizontal;
+    p.lifetime = 10 + engine.rng().next_int_bound(30);
+    engine.add(p);
+}
+
+/// `GlowParticle.ScrapeProvider` — an axe stripping oxidation off copper.
+/// Full horizontal speed, unlike its two wax siblings.
+pub fn scrape(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let colour = if engine.rng().next_bool() {
+        [0.29, 0.58, 0.51]
+    } else {
+        [0.43, 0.77, 0.62]
+    };
+    copper_sparkle(engine, (x, y, z), (xa, ya, za), colour, false);
+}
+
+/// `GlowParticle.WaxOnProvider` — honeycomb applied to copper.
+pub fn wax_on(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    copper_sparkle(engine, (x, y, z), (xa, ya, za), [0.91, 0.55, 0.08], true);
+}
+
+/// `GlowParticle.WaxOffProvider` — an axe removing that wax.
+pub fn wax_off(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    copper_sparkle(engine, (x, y, z), (xa, ya, za), [1.0, 0.9, 1.0], true);
 }
 
 /// `FireworkParticles.SparkParticle` via `SparkProvider` — `ParticleTypes.FIREWORK`,
