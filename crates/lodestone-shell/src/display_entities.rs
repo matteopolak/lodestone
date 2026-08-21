@@ -2,12 +2,17 @@
 //! `item_display`/`block_display`, extracted from the ingest ECS into the
 //! plain [`DisplayDraw`] PODs `gpu/display_text.rs` consumes.
 //!
-//! **`item_display`/`block_display` have no GPU consumer yet.** A block/item
-//! merge site in `gpu/moving_blocks.rs`/`gpu/world_items.rs` was the planned
-//! shape and is not built; every `DisplayDraw` still reaches
-//! [`extracted_display_draws`] regardless of `type_path`, and
-//! `RenderState::set_display_draws` logs each unsupported one once so the gap
-//! is visible rather than a silent no-op.
+//! All three subtypes have a GPU consumer. `text_display` draws through
+//! `gpu/display_text.rs`; `block_display` through
+//! `RenderState::merge_block_displays` in `gpu/moving_blocks.rs` (the same
+//! "block model posed by hand" seam a falling block and a piston head use);
+//! `item_display` through `RenderState::merge_item_displays` in
+//! `gpu/world_items.rs` (the same item-model seam a framed or dropped item
+//! uses). Both were a *producer* for an existing consumer, not new rendering.
+//!
+//! [`DisplayDraw::placement`] is the composition all three share, extracted as
+//! a named symbol so the billboard orientation and the synced
+//! `Transformation` cannot be applied two different ways in three files.
 //!
 //! # Why this is a separate extract system from [`crate::entities::extract_entity_draws`]
 //!
@@ -47,10 +52,10 @@ use bevy_ecs::prelude::{IntoScheduleConfigs, Query, ResMut, Resource};
 use glam::{Quat, Vec3};
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::entity::{
-    DisplayBackgroundColor, DisplayBillboard, DisplayBlockState, DisplayItem, DisplayItemContext,
-    DisplayLeftRotation, DisplayLineWidth, DisplayRightRotation, DisplayScale, DisplayStyleFlags,
-    DisplayText, DisplayTextOpacity, DisplayTranslation, EntityKind, MinecraftEntityId, Position,
-    Rotation,
+    DisplayBackgroundColor, DisplayBillboard, DisplayBlockState, DisplayBrightness, DisplayItem,
+    DisplayItemContext, DisplayLeftRotation, DisplayLineWidth, DisplayRightRotation, DisplayScale,
+    DisplayStyleFlags, DisplayText, DisplayTextOpacity, DisplayTranslation, EntityKind,
+    MinecraftEntityId, Position, Rotation,
 };
 use lodestone_ecs::{Extract, ExtractSet};
 use lodestone_model::ItemStack;
@@ -71,21 +76,56 @@ pub const BLOCK_DISPLAY_TYPE_PATH: &str = "block_display";
 const DEFAULT_LINE_WIDTH: i32 = 200;
 const DEFAULT_BACKGROUND_COLOR: i32 = 0x4000_0000_u32 as i32;
 const DEFAULT_TEXT_OPACITY: i8 = -1;
-/// `ItemDisplayContext.FIXED`'s ordinal (`ItemDisplayContext.java`, `26.2`):
-/// the no-perspective context vanilla itself uses for a context-less item
-/// (an item frame's contents, and — per this seam's own simplification —
-/// what an `item_display` with no reported context draws in, rather than
-/// `NONE` (ordinal `0`), which draws nothing at all.
-const DEFAULT_ITEM_DISPLAY_CONTEXT: u8 = ItemDisplayContextOrdinal::FIXED;
+/// `Display.ItemDisplay`'s own accessor default for `DATA_ITEM_DISPLAY_ID`:
+/// `ItemDisplayContext.NONE`, ordinal `0`.
+///
+/// **An earlier version of this constant was `FIXED`, on the stated grounds
+/// that `NONE` "draws nothing at all". That is false.** `ItemTransforms.getTransform`
+/// answers every context it has no `display` key for — `NONE` included — with
+/// `ItemTransform.NO_TRANSFORM`, i.e. the identity pose, so a context-less
+/// `item_display` draws its model *unscaled and unrotated*, which is exactly
+/// what `/summon item_display {item:{…}}` looks like in vanilla. Defaulting to
+/// `FIXED` instead would silently apply the item frame's own half-scale pose to
+/// every hologram that never reported a context. `lodestone_assets::DisplaySlot`
+/// records the same fact from the other side: it deliberately has no `NONE`
+/// variant, because that context selects no `display` key.
+const DEFAULT_ITEM_DISPLAY_CONTEXT: u8 = ItemDisplayContextOrdinal::NONE;
 
-/// The handful of `ItemDisplayContext` ordinals this seam's consumers care
-/// about, named rather than left as bare integers at every call site —
-/// transcribed from `ItemDisplayContext.java`'s enum declaration order
-/// (`NONE, THIRDPERSON_LEFTHAND, THIRDPERSON_RIGHTHAND,
-/// FIRSTPERSON_LEFTHAND, FIRSTPERSON_RIGHTHAND, HEAD, GUI, GROUND, FIXED, …`).
+/// The `ItemDisplayContext` ordinals this seam's consumers name rather than
+/// leave as bare integers — transcribed from `ItemDisplayContext.java`'s own
+/// declaration, which assigns each ordinal explicitly (`NONE(0)`,
+/// `THIRD_PERSON_LEFT_HAND(1)`, `THIRD_PERSON_RIGHT_HAND(2)`,
+/// `FIRST_PERSON_LEFT_HAND(3)`, `FIRST_PERSON_RIGHT_HAND(4)`, `HEAD(5)`,
+/// `GUI(6)`, `GROUND(7)`, `FIXED(8)`, `ON_SHELF(9)`) rather than leaning on
+/// declaration order.
 struct ItemDisplayContextOrdinal;
 impl ItemDisplayContextOrdinal {
-    const FIXED: u8 = 8;
+    const NONE: u8 = 0;
+}
+
+/// The [`lodestone_assets::DisplaySlot`] an `ItemDisplayContext` ordinal
+/// selects, or `None` for `NONE` (and for any out-of-range byte, which
+/// `ItemDisplayContext.BY_ID`'s `ByIdMap.OutOfBoundsStrategy.ZERO` also folds
+/// onto `NONE`).
+///
+/// `None` is a real answer, not a failure: vanilla's `getTransform` returns
+/// `ItemTransform.NO_TRANSFORM` for it, so the caller poses the model with
+/// `DisplayTransform::default()` — see [`DEFAULT_ITEM_DISPLAY_CONTEXT`].
+#[must_use]
+pub fn display_slot_for_context(ordinal: u8) -> Option<lodestone_assets::DisplaySlot> {
+    use lodestone_assets::DisplaySlot;
+    match ordinal {
+        1 => Some(DisplaySlot::ThirdPersonLeftHand),
+        2 => Some(DisplaySlot::ThirdPersonRightHand),
+        3 => Some(DisplaySlot::FirstPersonLeftHand),
+        4 => Some(DisplaySlot::FirstPersonRightHand),
+        5 => Some(DisplaySlot::Head),
+        6 => Some(DisplaySlot::Gui),
+        7 => Some(DisplaySlot::Ground),
+        8 => Some(DisplaySlot::Fixed),
+        9 => Some(DisplaySlot::OnShelf),
+        _ => None,
+    }
 }
 
 /// One `Display`-family entity's draw-ready snapshot for this frame.
@@ -159,8 +199,98 @@ pub struct DisplayDraw {
     pub item: Option<ItemStack>,
     /// `item_display`'s `ItemDisplayContext` ordinal, defaulted to vanilla's
     /// own `FIXED` (the item-frame-style no-perspective context) when
-    /// unreported — **not** `NONE` (ordinal `0`), which draws nothing.
+    /// unreported — see [`DEFAULT_ITEM_DISPLAY_CONTEXT`] for why that default
+    /// is `NONE` rather than `FIXED`.
     pub item_display_context: u8,
+    /// `Display.DATA_BRIGHTNESS_OVERRIDE_ID`, vanilla's **packed** form
+    /// (`Brightness.pack()` — `block << 4 | sky << 20`), or `None` when the
+    /// entity reported no override. Shared by all three subtypes.
+    ///
+    /// `-1` is vanilla's own "no override" sentinel and is folded to `None` at
+    /// the extract, so a consumer never has to know the sentinel; use
+    /// [`Self::override_light`] rather than unpacking this by hand.
+    pub brightness_override: Option<i32>,
+}
+
+impl DisplayDraw {
+    /// The full local-space-to-world matrix every subtype's content is drawn
+    /// through: `T(position) · orientation · transformation`.
+    ///
+    /// Extracted as a named symbol because three consumers in three files
+    /// compose it, and this repo has already paid for a defect that lived in
+    /// the *composition* of two individually-correct halves. It is
+    /// [`lodestone_render::display::display_placement_matrix`] with the
+    /// billboard resolved from this draw's own mode — the two cannot be
+    /// applied out of step because there is one expression.
+    ///
+    /// `text_display` does **not** call this today: `gpu/display_text.rs`
+    /// reaches the same two functions itself, and folding it in is a change to
+    /// a file this seam does not own.
+    #[must_use]
+    pub fn placement(&self, camera_yaw_deg: f32, camera_pitch_deg: f32) -> glam::Mat4 {
+        lodestone_render::display::display_placement_matrix(
+            self.position,
+            lodestone_render::display::display_orientation(
+                self.billboard,
+                self.entity_yaw,
+                self.entity_pitch,
+                camera_yaw_deg,
+                camera_pitch_deg,
+            ),
+            &self.transform,
+        )
+    }
+
+    /// This draw's packed sky/block light byte **if** it carries a brightness
+    /// override, in this renderer's `sky << 4 | block` layout — `None` when the
+    /// caller must sample the world instead.
+    ///
+    /// `DisplayRenderer.getSkyLightLevel`/`getBlockLightLevel` take the
+    /// override's own nibbles in place of the sampled lightmap whenever it is
+    /// not `-1`, per axis; unpacking is `LightCoordsUtil.block`/`sky`
+    /// (`packed >> 4 & 15` and `packed >> 20 & 15`) against
+    /// `Brightness.pack`'s `block << 4 | sky << 20`. The two layouts differ —
+    /// vanilla's is a 32-bit lightmap coordinate and ours is one byte — so this
+    /// is a repack, not a passthrough.
+    #[must_use]
+    pub fn override_light(&self) -> Option<u8> {
+        let packed = self.brightness_override?;
+        if packed == NO_BRIGHTNESS_OVERRIDE {
+            return None;
+        }
+        let block = (packed >> 4) & 15;
+        let sky = (packed >> 20) & 15;
+        Some(((sky << 4) | block) as u8)
+    }
+}
+
+/// `Display.NO_BRIGHTNESS_OVERRIDE` — the sentinel `DATA_BRIGHTNESS_OVERRIDE_ID`
+/// carries when no `brightness` NBT tag is set.
+pub const NO_BRIGHTNESS_OVERRIDE: i32 = -1;
+
+/// The world-space axis-aligned bounds of the unit cube `0..1` carried through
+/// `placement`, for a frustum test.
+///
+/// All eight corners are transformed rather than just two: `placement` carries
+/// an arbitrary rotation, so the transformed min/max of the two extreme corners
+/// alone is **not** the transformed box's bounds. A display's transformation can
+/// also scale by any amount, which is why no fixed one-block slack (what a
+/// falling block and an item frame use) is right here.
+#[must_use]
+pub fn placement_bounds(placement: &glam::Mat4) -> (Vec3, Vec3) {
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for i in 0..8u32 {
+        let corner = Vec3::new(
+            (i & 1) as f32,
+            ((i >> 1) & 1) as f32,
+            ((i >> 2) & 1) as f32,
+        );
+        let p = placement.transform_point3(corner);
+        min = min.min(p);
+        max = max.max(p);
+    }
+    (min, max)
 }
 
 /// Extracted [`DisplayDraw`]s for this frame — cleared and repopulated by
@@ -198,6 +328,7 @@ fn extract_display_draws(
         Option<&DisplayBlockState>,
         Option<&DisplayItem>,
         Option<&DisplayItemContext>,
+        Option<&DisplayBrightness>,
     )>,
     mut out: ResMut<ExtractedDisplayDraws>,
 ) {
@@ -216,6 +347,7 @@ fn extract_display_draws(
         block_state,
         item,
         item_context,
+        brightness,
     ) in &query
     {
         let type_path = match kind.0.path() {
@@ -256,6 +388,7 @@ fn extract_display_draws(
             block_state: block_state.map(|s| s.0),
             item: item.and_then(|i| i.0.clone()),
             item_display_context: item_context.map_or(DEFAULT_ITEM_DISPLAY_CONTEXT, |c| c.0),
+            brightness_override: brightness.map(|b| b.0),
         });
     }
 }
@@ -289,6 +422,7 @@ mod tests {
     use bevy_ecs::world::World;
     use lodestone_ecs::CorePlugin;
     use lodestone_ecs::app::App;
+    use lodestone_ecs::entity::DisplayBrightness;
     use lodestone_model::{Quat as ModelQuat, Rotation as ModelRotation, Vec3 as ModelVec3, Vec3f};
 
     use super::*;
@@ -302,6 +436,30 @@ mod tests {
     fn run_extract(app: &mut App) -> Vec<DisplayDraw> {
         app.world_mut().run_schedule(Extract);
         extracted_display_draws(app.world())
+    }
+
+    /// A `DisplayDraw` at vanilla's own accessor defaults, for the pose gates
+    /// below — the same shape `extract_display_draws` produces for an entity
+    /// that has reported nothing yet.
+    fn a_draw(type_path: &'static str) -> DisplayDraw {
+        DisplayDraw {
+            id: 1,
+            type_path,
+            position: Vec3::ZERO,
+            entity_yaw: 0.0,
+            entity_pitch: 0.0,
+            billboard: lodestone_render::display::BillboardMode::Fixed,
+            transform: lodestone_render::display::DisplayTransformation::default(),
+            text: None,
+            text_line_width: DEFAULT_LINE_WIDTH,
+            text_background_color: DEFAULT_BACKGROUND_COLOR,
+            text_opacity: DEFAULT_TEXT_OPACITY,
+            text_style_flags: 0,
+            block_state: None,
+            item: None,
+            item_display_context: DEFAULT_ITEM_DISPLAY_CONTEXT,
+            brightness_override: None,
+        }
     }
 
     fn spawn_display(world: &mut World, id: i32, type_path: &str) -> bevy_ecs::entity::Entity {
@@ -380,6 +538,166 @@ mod tests {
         assert_eq!(draw.transform.translation, Vec3::new(0.5, 0.25, -0.5));
         assert_eq!(draw.transform.scale, Vec3::new(2.0, 2.0, 2.0));
         assert_eq!(draw.block_state, Some(42));
+    }
+
+    /// A `block_display`'s state and an `item_display`'s stack both reach the
+    /// snapshot, and the brightness override reaches it off **either** — it is
+    /// declared on the base `Display` class, so reading it only on the variant
+    /// whose renderer prompted the port is the inherited-field mistake this
+    /// repo has already shipped once (a shield's model transformation).
+    #[test]
+    fn the_brightness_override_is_read_off_every_subtype_not_just_one() {
+        for (type_path, expected) in [
+            ("minecraft:block_display", BLOCK_DISPLAY_TYPE_PATH),
+            ("minecraft:item_display", ITEM_DISPLAY_TYPE_PATH),
+            ("minecraft:text_display", TEXT_DISPLAY_TYPE_PATH),
+        ] {
+            let mut app = test_app();
+            let entity = spawn_display(app.world_mut(), 7, type_path);
+            app.world_mut()
+                .entity_mut(entity)
+                .insert(DisplayBrightness((7 << 4) | (12 << 20)));
+            let draws = run_extract(&mut app);
+            assert_eq!(draws.len(), 1, "{type_path} was not extracted");
+            assert_eq!(draws[0].type_path, expected);
+            assert_eq!(
+                draws[0].brightness_override,
+                Some((7 << 4) | (12 << 20)),
+                "{type_path} dropped a field declared on the base Display class"
+            );
+        }
+    }
+
+    /// The override unpacks to this renderer's own light byte, and the two
+    /// nibbles do not swap.
+    ///
+    /// # Both hypotheses are computed, not just the right one
+    ///
+    /// Vanilla packs `block << 4 | sky << 20`; this renderer's byte is
+    /// `sky << 4 | block`. The fixture is `Brightness(block 7, sky 12)`, so the
+    /// correct answer is `0xC7` and the *swapped* one is `0x7C` — two different
+    /// numbers, which a symmetric `(15, 15)` fixture could not have separated.
+    /// A raw passthrough of the packed int is a third hypothesis and is
+    /// excluded by the byte width alone.
+    #[test]
+    fn the_brightness_override_unpacks_without_swapping_sky_and_block() {
+        let mut draw = a_draw(BLOCK_DISPLAY_TYPE_PATH);
+        draw.brightness_override = Some((7 << 4) | (12 << 20));
+
+        let correct = (12 << 4) | 7; // sky 12 in the high nibble, block 7 low
+        let swapped = (7 << 4) | 12;
+        assert_ne!(correct, swapped, "the fixture cannot discriminate");
+        assert_eq!(draw.override_light(), Some(correct));
+
+        // `-1` is vanilla's own no-override sentinel and must read as "sample
+        // the world", not as a light value. Unpacked naively it would be
+        // `sky 15, block 15` — full bright — which is a plausible-looking wrong
+        // answer rather than an obviously broken one.
+        draw.brightness_override = Some(NO_BRIGHTNESS_OVERRIDE);
+        assert_eq!(draw.override_light(), None);
+        draw.brightness_override = None;
+        assert_eq!(draw.override_light(), None);
+
+        // And a real all-zero override is *not* the sentinel: it packs to 0.
+        draw.brightness_override = Some(0);
+        assert_eq!(draw.override_light(), Some(0));
+    }
+
+    /// `placement` puts local `(0,0,0)` exactly on the entity position for an
+    /// untransformed display — and the falling block's `translate(-0.5, 0, -0.5)`,
+    /// the nearest wrong hypothesis on this seam, is half a block away.
+    ///
+    /// A `block_display` model is block-local `0..1` and its entity position is
+    /// the model's own origin (`BlockDisplay.updateRenderSubState` applies no
+    /// offset, and neither does `submitInner`), unlike a falling block, whose
+    /// entity spawns at the cell *centre*. Borrowing the falling block's shift
+    /// would leave every hologram plausibly-but-wrongly placed.
+    #[test]
+    fn an_untransformed_placement_puts_local_origin_on_the_entity_position() {
+        // Both signs, and three distinct axes, so an axis swap cannot pass.
+        for position in [Vec3::new(4.0, 70.0, 9.0), Vec3::new(-8.0, -13.0, -3.0)] {
+            let mut draw = a_draw(BLOCK_DISPLAY_TYPE_PATH);
+            draw.position = position;
+            // A camera pointed somewhere arbitrary: `Fixed` must ignore it.
+            let pose = draw.placement(137.0, -22.0);
+            let origin = pose.transform_point3(Vec3::ZERO);
+            let far = pose.transform_point3(Vec3::ONE);
+            assert!(
+                (origin - position).length() < 1e-5,
+                "local origin landed at {origin}, not on the entity at {position}"
+            );
+            assert!(
+                (far - (position + Vec3::ONE)).length() < 1e-5,
+                "the far corner landed at {far}, so the pose is not unit-scale"
+            );
+
+            // The wrong hypothesis, evaluated rather than described.
+            let falling_block_shift = position - Vec3::new(0.5, 0.0, 0.5);
+            assert!(
+                (falling_block_shift - origin).length() > 0.4,
+                "the falling block's -0.5 shift is within 0.4 blocks of the correct \
+                 origin, so this gate cannot tell the two apart"
+            );
+        }
+    }
+
+    /// `Fixed` ignores the camera and `Center` tracks it — the minimum pair
+    /// that separates a billboard mode being read from one being defaulted.
+    ///
+    /// Two camera angles, because one proves nothing: a placement that ignored
+    /// the mode entirely would be constant across cameras for *both*.
+    #[test]
+    fn a_fixed_placement_ignores_the_camera_and_a_center_one_does_not() {
+        let mut fixed = a_draw(BLOCK_DISPLAY_TYPE_PATH);
+        fixed.billboard = lodestone_render::display::BillboardMode::Fixed;
+        let mut center = fixed.clone();
+        center.billboard = lodestone_render::display::BillboardMode::Center;
+
+        let probe = |draw: &DisplayDraw, yaw, pitch| {
+            draw.placement(yaw, pitch).transform_point3(Vec3::ONE)
+        };
+        assert!(
+            (probe(&fixed, 10.0, 5.0) - probe(&fixed, 200.0, -35.0)).length() < 1e-5,
+            "a Fixed display moved when only the camera rotated"
+        );
+        assert!(
+            (probe(&center, 10.0, 5.0) - probe(&center, 200.0, -35.0)).length() > 0.5,
+            "a Center display did not track the camera"
+        );
+    }
+
+    /// `placement_bounds` transforms all eight corners, so a rotated box's
+    /// bounds are not the transformed corner pair.
+    ///
+    /// The discriminating input is a **45° roll about Z**, not the 45° yaw a
+    /// first attempt used: under a yaw the cube's own `(0,0,0)`→`(1,1,1)`
+    /// diagonal projects onto x as `sqrt(2)` too, so the two readings coincide
+    /// exactly and the gate proves nothing. Rolled about Z, the four corners
+    /// that set the x extent are `(1,0)` and `(0,1)` — neither of which the
+    /// two-corner reading touches — so the true width is `sqrt(2)` and the
+    /// naive one is **0**. Both numbers are computed here, so this is a
+    /// prediction rather than a sign check.
+    #[test]
+    fn placement_bounds_covers_a_rotated_box_not_just_two_corners() {
+        let mut draw = a_draw(BLOCK_DISPLAY_TYPE_PATH);
+        draw.position = Vec3::ZERO;
+        draw.transform.left_rotation =
+            Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        let pose = draw.placement(0.0, 0.0);
+        let (min, max) = placement_bounds(&pose);
+        let width = max.x - min.x;
+        assert!(
+            (width - std::f32::consts::SQRT_2).abs() < 1e-4,
+            "a 45-degree rolled box measured {width} wide; the true bound is sqrt(2)"
+        );
+
+        let naive = (pose.transform_point3(Vec3::ZERO), pose.transform_point3(Vec3::ONE));
+        let naive_width = (naive.1.x - naive.0.x).abs();
+        assert!(
+            naive_width < 1e-4,
+            "the two-corner reading measured {naive_width}; it must be 0 here, or this \
+             gate cannot tell the two readings apart"
+        );
     }
 
     /// An out-of-range billboard byte must fall back to `Fixed` rather than

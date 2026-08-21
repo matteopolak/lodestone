@@ -11,6 +11,7 @@
 //! | `PistonHeadRenderer` | the piston head and the block it pushes | **yes** |
 //! | `TntRenderer` | primed TNT's block model | **yes** |
 //! | `AbstractMinecartRenderer`'s `displayBlockModel` branch | a minecart's contents (chest/furnace/TNT/hopper) | **yes** |
+//! | `DisplayRenderer.BlockDisplayRenderer` | a `block_display` entity's imitated block state | **yes** |
 //!
 //! Both renderers have the same shape and it is not the shape the rest of the
 //! entity pass has: **no `bakeLayer` call in the constructor**, so they own no
@@ -71,6 +72,7 @@
 
 use lodestone_render::{Camera, Frustum, GpuModelMesh, ModelMesh, mesh_moving_block_quads};
 
+use crate::display_entities::{BLOCK_DISPLAY_TYPE_PATH, placement_bounds};
 use crate::entities::EntityDraw;
 
 use super::entity_passes::item_frame_light;
@@ -331,6 +333,13 @@ impl RenderState {
         // `BlockStateDefinitions.getItemFrameFakeState`, not through the block
         // registry. See `merge_item_frames`.
         self.merge_item_frames(model, entities, &frustum, &mut combined, stats);
+        // A sixth producer of the same shape, and the first whose requests come
+        // from neither an `EntityDraw` slice nor a block-entity source: a
+        // `block_display` is a `Display`-family entity, extracted by
+        // `crate::display_entities` into `RenderState::display_draws`. See
+        // `merge_block_displays` for why its pose is the only arbitrary one on
+        // this seam.
+        self.merge_block_displays(model, camera, &frustum, &mut combined, stats);
         if combined.quad_count() == 0 {
             return None;
         }
@@ -750,6 +759,105 @@ impl RenderState {
                 item_frame_light(&self.entity_light, draw, glow),
             ));
             stats.item_frame_bodies_drawn += 1;
+        }
+    }
+
+    /// Merge every `block_display` entity on screen — vanilla's
+    /// `DisplayRenderer.BlockDisplayRenderer`, which is the whole of that
+    /// renderer.
+    ///
+    /// # A sixth producer of the same shape, and the only one whose pose is
+    /// arbitrary
+    ///
+    /// `BlockDisplayRenderer` bakes no layer and owns no cuboid rig: its
+    /// `submitInner` is one `blockModel.submit` at whatever pose the base
+    /// `DisplayRenderer.submit` composed, so it belongs on this seam beside the
+    /// falling block and the piston head rather than in the entity pass. What
+    /// separates it from those five is that its transform is **not** a
+    /// translation: a `Display`'s synced `Transformation` carries a per-axis
+    /// scale and two quaternions, so a `block_display` can legally be a
+    /// paper-thin rotated slab or twenty blocks across.
+    ///
+    /// # No `-0.5` shift, unlike a falling block
+    ///
+    /// `FallingBlockEntity.fall` spawns its entity at the block's *centre*, so
+    /// `FallingBlockRenderer` undoes that with `translate(-0.5, 0, -0.5)`. A
+    /// `block_display`'s position is its model's own local origin —
+    /// `BlockDisplay.updateRenderSubState` applies no offset of any kind and
+    /// neither does `submitInner` — so block-local `(0,0,0)` lands exactly on
+    /// the entity position. Borrowing the falling block's shift would put every
+    /// hologram half a cell north-west, which reads as a model-origin bug
+    /// rather than as a wrong producer.
+    ///
+    /// # Culling on the transformed box, not on a fixed one-block slack
+    ///
+    /// Every other producer here is at most a block across and tests a
+    /// `feet ± 1` box. That is wrong for a scaled display, in the direction
+    /// that matters: a large one would be culled while still on screen. The box
+    /// is therefore [`placement_bounds`] of this draw's own matrix.
+    ///
+    /// # Named deviations from `BlockDisplayRenderer`
+    ///
+    /// * **No interpolation.** `Display.RenderState`'s interpolated getters are
+    ///   read at `interpolationProgress`; this seam has no interpolation clock
+    ///   at all — see `crate::display_entities`'s module doc for why that is a
+    ///   disclosed simplification for this family. A display that is told to
+    ///   move over 20 ticks snaps instead.
+    /// * **No `viewRange` cull.** `Display.shouldRender` scales the render
+    ///   distance by `DATA_VIEW_RANGE_ID`, which nothing on this side of the
+    ///   wire decodes. The frustum test above is the only cull, so a display
+    ///   with a deliberately short view range draws further away than vanilla
+    ///   would draw it — more geometry, never less.
+    /// * **No `glowColorOverride` outline.** `MovingBlock` carries no outline
+    ///   channel, the same gap `merge_primed_tnt` records for TNT's white
+    ///   flash.
+    fn merge_block_displays(
+        &self,
+        model: &ModelRenderer,
+        camera: &Camera,
+        frustum: &Frustum,
+        combined: &mut ModelMesh,
+        stats: &mut RenderStats,
+    ) {
+        for draw in &self.display_draws {
+            if draw.type_path != BLOCK_DISPLAY_TYPE_PATH {
+                continue;
+            }
+            // Absence is the switch, exactly as it is for a falling block: a
+            // `block_display` whose index-23 metadata has not arrived yet draws
+            // nothing rather than a stand-in. Vanilla reaches the same place by
+            // a different route — its accessor default is `Blocks.AIR`, whose
+            // `RenderShape` is `INVISIBLE`.
+            let Some(state_id) = draw.block_state else {
+                continue;
+            };
+            let transform = draw.placement(camera.yaw, camera.pitch);
+            let (min, max) = placement_bounds(&transform);
+            if !frustum.intersects_aabb(min, max) {
+                continue;
+            }
+            // `DisplayRenderer.getSkyLightLevel`/`getBlockLightLevel` take the
+            // brightness override's own nibbles *instead of* the sampled
+            // lightmap whenever it is set, which is what makes a server's
+            // `brightness:{sky:15,block:15}` hologram readable in a dark room.
+            // Sampled at the entity position rather than at a hitbox top: a
+            // display's own `width`/`height` are cosmetic culling bounds, not a
+            // model extent, so there is no "top" to probe the way a falling
+            // block has one.
+            let light = draw
+                .override_light()
+                .unwrap_or_else(|| self.entity_light.sample(draw.position));
+            if self.merge_moving_block(
+                model,
+                MovingBlock {
+                    state_id,
+                    transform,
+                    light,
+                },
+                combined,
+            ) {
+                stats.moving_blocks_drawn += 1;
+            }
         }
     }
 

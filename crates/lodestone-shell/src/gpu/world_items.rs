@@ -14,7 +14,9 @@
 //! and no shared geometry between two different items. They are therefore
 //! concatenated into one buffer and one draw call per frame however many items
 //! exist. See [`RenderState::prepare_item_geometry`].
-use lodestone_assets::DisplaySlot;
+use lodestone_assets::{
+    DISPLAY_CONTEXT_PROPERTY, DisplaySlot, ItemPropertyContext, ResourceLocation,
+};
 use lodestone_render::{
     Camera, ENTITY_FULLBRIGHT, GpuModelMesh, ItemStateContext, ModelMesh,
     entity::{
@@ -29,6 +31,72 @@ use lodestone_render::{
 use lodestone_model::event::EquipmentSlot;
 
 use crate::entities::{EntityDraw, ITEM_ENTITY_TYPE_PATH};
+
+/// The `select` context an `item_display` resolves its model tree in.
+///
+/// [`lodestone_assets::DisplayContextItemContext`] is the same idea and is the
+/// thing to reach for anywhere a slot is known; it takes a non-optional
+/// [`DisplaySlot`], and `DisplaySlot` deliberately has no `NONE` variant
+/// (`ItemDisplayContext.NONE` selects no `display` key). A `/summon
+/// item_display` with no `item_display` tag *is* `NONE` — vanilla's own
+/// accessor default — so this seam needs a context that can answer
+/// `minecraft:display_context` with `"none"`, which is
+/// `ItemDisplayContext.NONE.getSerializedName()`.
+///
+/// That matters rather than being pedantic: `spyglass`, `trident`, the spears
+/// and every bundle branch on `minecraft:display_context` at the top of their
+/// definition tree, so answering `"fixed"` for a `NONE` display would pick a
+/// different model.
+///
+/// Everything but that one property delegates to
+/// [`DefaultItemContext`](lodestone_assets::DefaultItemContext), exactly as
+/// `DisplayContextItemContext` does — a display entity has no holder, so there
+/// is no live using-item or numeric state to offer.
+struct DisplayContextProperties(Option<DisplaySlot>);
+
+impl ItemPropertyContext for DisplayContextProperties {
+    fn condition(&self, property: &str, component: Option<&str>) -> bool {
+        lodestone_assets::DefaultItemContext.condition(property, component)
+    }
+
+    fn select(&self, property: &str) -> Option<String> {
+        if property == DISPLAY_CONTEXT_PROPERTY {
+            Some(
+                self.0
+                    .map_or_else(|| "none".to_string(), |slot| slot.json_name().to_string()),
+            )
+        } else {
+            lodestone_assets::DefaultItemContext.select(property)
+        }
+    }
+
+    fn range(&self, property: &str) -> f32 {
+        lodestone_assets::DefaultItemContext.range(property)
+    }
+}
+
+/// [`lodestone_render::mesh_item_quads`] with the world-light override every
+/// world-placed item needs.
+///
+/// The same two lines `lodestone_render::entity`'s own private
+/// `mesh_item_quads_with_light` runs for a dropped, held, framed or campfire
+/// item: the baked geometry nails every vertex to `GUI_ITEM_LIGHT`, because an
+/// inventory slot is full-bright by definition, and a world-placed one is not.
+/// Spelled here rather than reached because that helper is private to its own
+/// module and this is the only caller outside it — a `pub` export would be a
+/// change to a file this seam does not own.
+fn mesh_display_item_quads(
+    quads: &[lodestone_assets::BakedQuad],
+    gui_light: lodestone_assets::GuiLight,
+    pose: glam::Mat4,
+    light: u8,
+) -> ModelMesh {
+    let mut mesh = lodestone_render::mesh_item_quads(quads, pose, gui_light);
+    for vertex in &mut mesh.vertices {
+        vertex.light = light;
+    }
+    mesh
+}
 
 use super::entity_passes::{entity_light, framed_content_light, item_frame_light};
 use super::terrain::ModelRenderer;
@@ -225,6 +293,12 @@ impl RenderState {
         // block-entity rig in `entity_passes.rs` instead, exactly as it does when
         // dropped or held.
         self.merge_framed_items(model, entities, &frustum, &mut combined, &mut foil, stats);
+        // `item_display` entities. Unlike every producer above, these come from
+        // neither the `EntityDraw` slice nor a block-entity source: they are
+        // `Display`-family entities extracted by `crate::display_entities` into
+        // `RenderState::display_draws`. Same seam regardless — an item model
+        // posed by hand, folded into the vertices.
+        self.merge_item_displays(model, camera, &frustum, &mut combined, &mut foil);
         let Some(mesh) = GpuModelMesh::upload(device, &combined) else {
             return (None, None);
         };
@@ -330,6 +404,112 @@ impl RenderState {
             }
             combined.merge(&mesh);
             stats.item_frame_items_drawn += 1;
+        }
+    }
+
+    /// Merge every `item_display` entity on screen — vanilla's
+    /// `DisplayRenderer.ItemDisplayRenderer`, which is the whole of that
+    /// renderer.
+    ///
+    /// # The pose, in vanilla's own composition order
+    ///
+    /// `DisplayRenderer.submit` pushes the billboard orientation and then the
+    /// synced `Transformation` — that pair is
+    /// [`DisplayDraw::placement`](crate::display_entities::DisplayDraw::placement),
+    /// shared with the block-display and text-display consumers so the three
+    /// cannot drift. `ItemDisplayRenderer.submitInner` then pushes
+    /// `Axis.YP.rotation(PI)` before `state.item.submit(…)`, and the item's own
+    /// `display` transform for its context is applied *inside* that submit —
+    /// which is why [`display_matrix`](lodestone_render::display_matrix)
+    /// composes on the right here, exactly as it does for a framed or a
+    /// campfire item.
+    ///
+    /// The half-turn is easy to drop and hard to see: an item model is very
+    /// nearly symmetric about its own Y axis, so omitting it leaves a plausible
+    /// item facing the wrong way rather than an obviously broken one. It is
+    /// asserted separately for that reason.
+    ///
+    /// # `ItemDisplayContext.NONE` is a real context, not a missing one
+    ///
+    /// `Display.ItemDisplay`'s accessor default is `NONE`, and
+    /// `ItemTransforms.getTransform` answers it with `ItemTransform.NO_TRANSFORM`
+    /// — the identity pose. So a `/summon item_display {item:{…}}` with no
+    /// `item_display` tag draws its model unscaled and unrotated, filling the
+    /// whole block. `display_slot_for_context` returns `None` for it and this
+    /// poses with `DisplayTransform::default()`, which *is* `NO_TRANSFORM`.
+    /// Substituting `Fixed` there would silently halve every such hologram.
+    ///
+    /// # Named deviations from `ItemDisplayRenderer`
+    ///
+    /// * **No interpolation and no `viewRange` cull**, for the reasons
+    ///   `gpu/moving_blocks.rs`'s `merge_block_displays` records — the same two
+    ///   gaps, from the same shared base renderer.
+    /// * **A `minecraft:special` item draws its inventory form.** A chest or a
+    ///   skull in an `item_display` resolves to a `Special` output, which
+    ///   [`ItemVariants::resolve`](lodestone_render::ItemVariants::resolve)
+    ///   answers with the GUI fallback rather than a block-entity rig; routing
+    ///   it to one is `entity_passes.rs`'s `special_item_instances`, which this
+    ///   seam does not own. Vanilla draws the rig.
+    fn merge_item_displays(
+        &self,
+        model: &ModelRenderer,
+        camera: &Camera,
+        frustum: &lodestone_render::Frustum,
+        combined: &mut ModelMesh,
+        foil: &mut ModelMesh,
+    ) {
+        for draw in &self.display_draws {
+            if draw.type_path != crate::display_entities::ITEM_DISPLAY_TYPE_PATH {
+                continue;
+            }
+            // Absence *and* an explicitly empty stack are the same "draw
+            // nothing" case here, which is `submitInner`'s own
+            // `if (!state.item.isEmpty())` gate reached by a different route.
+            let Some(item) = draw.item.as_ref() else {
+                continue;
+            };
+            let Ok(id) = ResourceLocation::new(item.item.namespace(), item.item.path()) else {
+                continue;
+            };
+            let slot = crate::display_entities::display_slot_for_context(draw.item_display_context);
+            let ctx = DisplayContextProperties(slot);
+            let Some(geometry) = model.items.get(&id).and_then(|v| v.resolve(&ctx)) else {
+                continue;
+            };
+            // `slot`'s `None` arm is `ItemTransform.NO_TRANSFORM`, which is
+            // exactly `DisplayTransform::default()` — see this function's doc.
+            let item_transform = slot.map_or_else(Default::default, |s| geometry.display.get(s));
+            let pose = draw.placement(camera.yaw, camera.pitch)
+                * glam::Mat4::from_rotation_y(std::f32::consts::PI)
+                * lodestone_render::display_matrix(&item_transform);
+            // The transformed unit cube is the item model's own bounds through
+            // the whole chain, `display_matrix`'s centring included, so this
+            // needs no per-item slack the way a framed item's fixed box does.
+            let (min, max) = crate::display_entities::placement_bounds(&pose);
+            if !frustum.intersects_aabb(min, max) {
+                continue;
+            }
+            let light = draw
+                .override_light()
+                .unwrap_or_else(|| self.entity_light.sample(draw.position));
+            let mut mesh = mesh_display_item_quads(&geometry.quads, geometry.gui_light, pose, light);
+            // The same live-component tint a drop or a framed item gets. The
+            // whole `ItemStack` is on hand here (the wire's index-23 stack, not
+            // a narrowed `EntityDraw` field), so the components are read
+            // straight off it.
+            lodestone_render::stamp_live_item_tint(
+                &mut mesh,
+                &geometry.quads,
+                &geometry.live_tints,
+                &item.components,
+            );
+            if lodestone_render::glint::has_foil_for_stack(
+                &item.item.to_string(),
+                &item.components,
+            ) {
+                foil.merge(&mesh);
+            }
+            combined.merge(&mesh);
         }
     }
 

@@ -675,11 +675,35 @@ pub struct DisplayBlockState(pub u32);
 /// An `item_display`'s `ItemDisplayContext` ordinal
 /// (`Display.ItemDisplay.DATA_ITEM_DISPLAY_ID`) — which perspective (`GUI`,
 /// `GROUND`, `FIXED`, …) the item's own model should be posed in. **Absent**
-/// until first reported; a consumer should default to `FIXED` (the
-/// item-frame-style no-perspective context vanilla itself falls back to for
-/// most non-hand contexts), not `NONE` (ordinal `0`, which draws nothing).
+/// until first reported; a consumer should default to `NONE` (ordinal `0`),
+/// which is vanilla's own accessor default for this field.
+///
+/// `NONE` does **not** mean "draws nothing" — an earlier version of this doc
+/// said so and it is false. `ItemTransforms.getTransform` answers it with
+/// `ItemTransform.NO_TRANSFORM`, the identity pose, so a context-less
+/// `item_display` draws its model unscaled and unrotated. Defaulting to `FIXED`
+/// instead would apply an item frame's half-scale pose to every hologram that
+/// never reported a context.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayItemContext(pub u8);
+
+/// A `Display` entity's packed brightness override
+/// (`Display.DATA_BRIGHTNESS_OVERRIDE_ID`), in vanilla's own
+/// `Brightness.pack()` layout (`block << 4 | sky << 20`) — **not** this
+/// renderer's one-byte `sky << 4 | block`. **Absent** until first reported, and
+/// `-1` (`Display.NO_BRIGHTNESS_OVERRIDE`) when the entity explicitly has no
+/// override.
+///
+/// Shared by all three `Display` subtypes, like the transformation fields
+/// above: it is declared on the base class, so it must be read off every
+/// variant rather than only the one whose renderer prompted the port.
+///
+/// A consumer that draws with it replaces the *sampled* lightmap outright,
+/// which is `DisplayRenderer.getSkyLightLevel`/`getBlockLightLevel` — the
+/// hologram is lit by its own declared brightness rather than by the block it
+/// stands in.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayBrightness(pub i32);
 
 /// Who is riding this entity, in mounting order — `Entity.passengers`, folded
 /// from `ClientboundSetPassengersPacket` by

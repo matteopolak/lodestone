@@ -719,11 +719,26 @@ pub struct EntityMetadataUpdate {
     pub display_block_state: Option<u32>,
     /// `Display.ItemDisplay.DATA_ITEM_DISPLAY_ID`, the raw
     /// `ItemDisplayContext` ordinal this `item_display` was told to pose its
-    /// item in (vanilla's `NONE` is `0`; `FIXED`, the item-frame-style
-    /// no-perspective context, is what a version adapter's consumer defaults
-    /// to when this is absent — see that consumer's own doc). Present only
+    /// item in. Vanilla's own accessor default is `NONE` (`0`), which selects
+    /// `ItemTransform.NO_TRANSFORM` — the identity pose, not "draw nothing" —
+    /// so that is what a consumer applies when this is absent. Present only
     /// for an `item_display` that has reported it.
     pub display_item_context: Option<u8>,
+    /// `Display.DATA_BRIGHTNESS_OVERRIDE_ID`, in vanilla's packed
+    /// `Brightness.pack()` layout (`block << 4 | sky << 20`), or its own
+    /// `-1` no-override sentinel. Carried unpacked so a consumer can tell the
+    /// sentinel from a real `(0, 0)` override, which packs to `0`.
+    ///
+    /// # Why this needs a class guard where the transformation fields do not
+    ///
+    /// Index 16 has six `INT`-shaped claimants in the jar dump —
+    /// `Creeper.DATA_SWELL_DIR`, `EnderDragon.DATA_PHASE`, `Phantom.ID_SIZE`,
+    /// `Warden.CLIENT_ANGER_LEVEL` and `WitherBoss.DATA_TARGET_A` beside this
+    /// one — and none of the other five is a `Display` subtype, so the guard is
+    /// "is this any display", the same one
+    /// [`display_billboard`](Self::display_billboard) uses, rather than a
+    /// per-subtype class.
+    pub display_brightness_override: Option<i32>,
 }
 
 impl EntityMetadataUpdate {
@@ -764,6 +779,7 @@ impl EntityMetadataUpdate {
             && self.display_text_style_flags.is_none()
             && self.display_block_state.is_none()
             && self.display_item_context.is_none()
+            && self.display_brightness_override.is_none()
     }
 }
 
