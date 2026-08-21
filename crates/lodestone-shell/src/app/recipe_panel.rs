@@ -402,6 +402,10 @@ fn toast_icon(id: &lodestone_model::Identifier) -> Option<HotbarSlot> {
         potion_color: None,
         banner_patterns: Vec::new(),
         base_color: None,
+        // And no `minecraft:profile` either, for the same reason: a recipe
+        // toast names an item, so even a `minecraft:player_head` entry here is
+        // the plain one. `None` draws the default skull sheet, which is right.
+        skin: None,
     })
 }
 

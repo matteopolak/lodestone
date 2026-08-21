@@ -3569,10 +3569,12 @@ pub fn special_item_rig(kind: &str, item_path: &str) -> Option<(&'static str, &'
             }
             Some((SHULKER_BOX, shulker_texture_stem(colour)))
         }
-        // Two `kind`s, one rig family: vanilla splits `player_head` out because its
-        // renderer resolves a profile texture, which we do not fetch here — a
-        // player head therefore draws the default Steve sheet, exactly as a placed
-        // one does.
+        // Two `kind`s, one rig family: vanilla splits `player_head` out because
+        // its renderer resolves a profile texture. This function has no stack in
+        // hand, so it answers for a *plain* head and returns the default Steve
+        // stem; a custom head's own sheet is substituted by the caller, which
+        // does — the shell's GUI icon pass and its placed-head pass both replace
+        // this stem with a `BlockEntityTexture::PlayerSkin`.
         "minecraft:head" | "minecraft:player_head" => {
             let ty = SkullType::from_block_path(item_path)?;
             Some((ty.model(), skull_texture_stem(ty)))

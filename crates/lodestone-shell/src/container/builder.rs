@@ -52,49 +52,14 @@ fn icon_record(stack: &lodestone_game::item::ItemStack) -> Option<HotbarSlot> {
         // Same crate-boundary loss as the line above, for a shield's own dye
         // tint rather than its loom patterns.
         base_color: stack.base_color().map(str::to_owned),
+        // A custom head's own skin — the last of this family of losses, and the
+        // one that stayed longest because its symptom is a *plausible* icon
+        // rather than a missing one: without it every decorative head a server
+        // places drew the default skull sheet in a slot while the same head was
+        // correct once placed in the world. `stack_skin_url` also starts the
+        // fetch; see its doc.
+        skin: item_icon::stack_skin_url(stack),
     })
-}
-
-/// Say once, per process, that a **custom head skin** cannot reach a GUI slot.
-///
-/// A `minecraft:player_head` carrying a `minecraft:profile` with a `textures`
-/// property is a *custom* head — a decorative one a server places, whose whole
-/// appearance is that property. [`icon_record`] above carries every other
-/// per-stack component a slot icon needs (dye, potion colour, loom patterns, a
-/// shield's base colour) and does **not** carry this one, so
-/// `lodestone_render::special_item_rig` resolves the head to
-/// `skull_texture_stem(SkullType::Player)` — the default sheet — and the slot
-/// draws a *plain* head instead of the intended one.
-///
-/// The world and first-person surfaces do not have this gap: a placed head
-/// resolves its profile through `BlockEntityTexture::PlayerSkin`. So the same
-/// head can be correct in the world and plain in an inventory, which is exactly
-/// the shape that reads as "custom heads don't render".
-///
-/// This is a warning and not a silent default because the failure is invisible
-/// at the draw site: a plain head *is* a head, so nothing looks broken, nothing
-/// is red, and the only evidence is that it is the wrong face. Naming it costs
-/// one line and turns a pixel hunt into a log grep.
-///
-/// # Once per process, not once per stack
-///
-/// This is reached from the per-slot draw loop, so it runs for every head in
-/// every open container on every frame. `Once` is what keeps it a report rather
-/// than a flood; the message therefore describes the *class*, and names the one
-/// head that happened to be first only as an example.
-fn warn_custom_head_skin_is_dropped(item: &ResourceLocation, profile: &lodestone_model::ItemProfile) {
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    WARNED.call_once(|| {
-        tracing::warn!(
-            target: "assets",
-            example_item = %item,
-            owner = profile.name.as_deref().unwrap_or("<unnamed>"),
-            "a custom head skin cannot reach an inventory slot: the GUI icon record \
-             carries no minecraft:profile, so this head draws the DEFAULT skull sheet \
-             rather than its own texture. The world and hand surfaces resolve it \
-             correctly, so the same head looks right when placed and plain in a slot"
-        );
-    });
 }
 
 /// The stack-count ink on the **atlas-less** fallback path (the real path uses
@@ -307,19 +272,7 @@ impl<'a> Builder<'a> {
         match (assets.items, icon_record(stack)) {
             // The real thing: the shared hotbar icon pass, which also draws
             // the stack count and the durability bar.
-            (Some(_), Some(record)) => {
-                // Reported at the one hop that still has the whole stack in
-                // hand. `icon_record` has already dropped the profile by the
-                // time it returns, and every layer below this takes a
-                // `HotbarSlot`, so this is the last place the drop is even
-                // knowable. See the function's own doc.
-                if let Some(profile) = stack.profile()
-                    && profile.properties.iter().any(|p| p.name == "textures")
-                {
-                    warn_custom_head_skin_is_dropped(&record.item, &profile);
-                }
-                self.item_icon_counted(assets, &record, x, y, CELL, count_ink)
-            }
+            (Some(_), Some(record)) => self.item_icon_counted(assets, &record, x, y, CELL, count_ink),
             // No atlas (or an item id the atlas could never key): the old
             // hash-derived swatch plus a letter, so an occupied cell still
             // reads as occupied on a jar-less run.
@@ -363,6 +316,100 @@ mod tests {
         let stick = ItemStack::new("minecraft:stick".parse().expect("static id parses"), 1);
         let record = icon_record(&stick).expect("stick is a valid ResourceLocation");
         assert!(!record.enchanted, "a plain stick must not set enchanted");
+    }
+
+    /// The **producer** half of the custom-head fix, which no pixel gate can
+    /// reach: a pixel gate installs its own `ItemIcon` and so proves the draw
+    /// and nothing about what builds the record in production. `icon_record` is
+    /// that builder for every container surface, so this is where a dropped
+    /// `minecraft:profile` would be invisible — and was, for as long as the
+    /// field did not exist.
+    ///
+    /// Three claims, each with its own control:
+    ///
+    /// * a head carrying a `textures` property resolves to **that payload's**
+    ///   URL, not merely to `Some`;
+    /// * a **plain** head resolves to `None` — the control that makes the first
+    ///   claim mean something, since a record that filled `skin` unconditionally
+    ///   would pass a `Some`-only assertion;
+    /// * the URL reaches `remote_skins::request`. Without the fetch the record
+    ///   is correct and the head still draws the default sheet forever, which is
+    ///   exactly the island shape that produced this bug one layer down.
+    #[test]
+    fn icon_record_carries_a_custom_heads_profile_skin_and_starts_its_fetch() {
+        use lodestone_game::item::ItemStack;
+
+        const URL: &str = "https://textures.minecraft.net/texture/icon-record-custom-head";
+
+        // A local base64 encoder, so the fixture does not depend on which
+        // base64 crate the workspace happens to expose — the same reason
+        // `remote_skins`' own tests carry one.
+        fn base64(bytes: &[u8]) -> String {
+            const TABLE: &[u8; 64] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut out = String::new();
+            for chunk in bytes.chunks(3) {
+                let b = [
+                    chunk[0],
+                    chunk.get(1).copied().unwrap_or(0),
+                    chunk.get(2).copied().unwrap_or(0),
+                ];
+                let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+                for i in 0..4 {
+                    if i <= chunk.len() {
+                        out.push(char::from(TABLE[((n >> (18 - 6 * i)) & 0x3f) as usize]));
+                    } else {
+                        out.push('=');
+                    }
+                }
+            }
+            out
+        }
+
+        let payload = base64(
+            format!(r#"{{"textures":{{"SKIN":{{"url":"{URL}"}}}}}}"#).as_bytes(),
+        );
+
+        let mut custom = ItemStack::new(
+            "minecraft:player_head".parse().expect("static id parses"),
+            1,
+        );
+        custom.set_profile(Some(lodestone_model::ItemProfile {
+            name: Some("Notch".to_owned()),
+            id: None,
+            properties: vec![lodestone_model::ProfileProperty {
+                name: "textures".to_owned(),
+                value: payload,
+                signature: None,
+            }],
+        }));
+
+        let record = icon_record(&custom).expect("player_head is a valid ResourceLocation");
+        assert_eq!(
+            record.skin.as_deref(),
+            Some(URL),
+            "a custom head's icon record must carry its own texture url"
+        );
+
+        let plain = ItemStack::new(
+            "minecraft:player_head".parse().expect("static id parses"),
+            1,
+        );
+        assert!(
+            icon_record(&plain)
+                .expect("player_head is a valid ResourceLocation")
+                .skin
+                .is_none(),
+            "control: a plain head declares no profile, so it must resolve to \
+             None and draw the default skull sheet"
+        );
+
+        assert!(
+            crate::remote_skins::requested_urls().iter().any(|u| u == URL),
+            "the record carried the url but nothing started its fetch, so the \
+             skin could never arrive and the head would draw the default sheet \
+             forever"
+        );
     }
 
     /// [`Builder::shadowed_label_spans`] — the tooltip title's real draw
