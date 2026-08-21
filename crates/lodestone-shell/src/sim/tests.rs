@@ -6835,7 +6835,10 @@ fn a_real_text_display_folded_through_ingest_and_extract_reaches_sim_display_dra
         .find(|d| d.id == 9)
         .unwrap_or_else(|| panic!("entity 9 never reached Sim::display_draws: {draws:?}"));
     assert_eq!(draw.type_path, crate::display_entities::TEXT_DISPLAY_TYPE_PATH);
-    assert_eq!(draw.text.as_deref(), Some("hello"));
+    assert_eq!(
+        draw.text.as_ref().map(lodestone_model::Text::to_plain_string),
+        Some("hello".to_string())
+    );
 }
 
 // -- world border + spawn point + game rules (issue #436) --------------

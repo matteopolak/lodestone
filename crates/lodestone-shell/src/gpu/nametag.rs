@@ -383,9 +383,10 @@ fn resolved_rgb(color: Option<TextColor>, base: [f32; 3]) -> [f32; 3] {
 }
 
 /// The styled sibling of [`layout_ink_runs`]: walks a fully-inherited span
-/// list (`Text::to_spans`'s own output — see [`Text::from_legacy`] for the
-/// bridge every current caller here needs, since [`crate::entities::NameTag::text`]/
-/// `crate::display_entities::DisplayDraw::text` are still plain `String`s)
+/// list (`Text::to_spans`'s own output — [`crate::entities::NameTag::text`]/
+/// `crate::display_entities::DisplayDraw::text` are real
+/// [`lodestone_model::text::Text`] values now, so both callers here call
+/// `to_spans` on them directly with no legacy-string bridge in between)
 /// instead of a bare string, so a coloured/bold/italic/underlined/struck-through
 /// run reaches world-space geometry with its own style intact.
 ///
@@ -622,9 +623,6 @@ fn push_entity_quads(
     let Some(tag) = &draw.name_tag else {
         return;
     };
-    if tag.text.is_empty() {
-        return;
-    }
     if camera_position.distance_squared(draw.feet) > MAX_DISTANCE * MAX_DISTANCE {
         return;
     }
@@ -632,22 +630,23 @@ fn push_entity_quads(
     let height = entity_base_height(&draw.type_path) * draw.scale;
     let anchor = draw.feet + Vec3::new(0.0, height + ATTACHMENT_PADDING, 0.0);
 
-    // `NameTag::text` is a plain `String`, but the resolution that produces
-    // it (`crate::entities`' tab-list/custom-name lookup) flattens through
-    // `Text::to_plain_string`/`plain_text_from_nbt_component`, which drops
-    // every `§` code and every component-tree colour before this module ever
-    // sees it — see this crate's own report on that gap. `Text::from_legacy`
-    // still runs here (rather than assuming plain text) so the moment that
-    // upstream flatten is switched to a style-preserving one (e.g.
-    // `to_legacy_string`), colour/bold/italic/underline/strikethrough start
-    // rendering with no further change on this side.
-    let spans = Text::from_legacy(&tag.text).to_spans();
+    // `NameTag::text` is a real `Text` (`crate::entities`' tab-list/
+    // custom-name resolution now carries the full component tree, not a
+    // flattened plain string), so `to_spans` reads colour — hex included,
+    // which no `to_legacy_string`/`from_legacy` round trip could carry, since
+    // legacy `§` codes have no hex form — bold, italic, underline and
+    // strikethrough straight off it with no bridge in between.
+    let spans = tag.text.to_spans();
 
     // Cached: the walk depends only on `(spans, font)`, and this is called
     // once per visible named entity per frame.
     let layout = ink.layout(raster, &spans);
     let (rects, total_width) = (&layout.0, layout.1);
     if rects.is_empty() {
+        // Covers both "no name tag text at all" and "every span was empty"
+        // — `Text::to_spans` never emits an empty-text span (`collect_spans`
+        // skips `own.is_empty()`), so an all-empty tree yields zero spans and
+        // this is reached with no texel walk performed.
         return;
     }
     let half_width = total_width / 2.0;
@@ -1035,7 +1034,7 @@ mod tests {
             item_dyed_color: None,
             item_potion_color: None,
             name_tag: Some(crate::entities::NameTag {
-                text: "Babe".to_owned(),
+                text: Text::literal("Babe"),
                 see_through: true,
             }),
             item_use: None,
@@ -1118,7 +1117,7 @@ mod tests {
             item_dyed_color: None,
             item_potion_color: None,
             name_tag: Some(crate::entities::NameTag {
-                text: "Babe".to_owned(),
+                text: Text::literal("Babe"),
                 see_through: true,
             }),
             item_use: None,
@@ -1167,7 +1166,7 @@ mod tests {
         let mut see_through2 = Vec::new();
         let sneaking = EntityDraw {
             name_tag: Some(crate::entities::NameTag {
-                text: "Babe".to_owned(),
+                text: Text::literal("Babe"),
                 see_through: false,
             }),
             ..draw
@@ -1223,7 +1222,7 @@ mod tests {
             item_dyed_color: None,
             item_potion_color: None,
             name_tag: Some(crate::entities::NameTag {
-                text: String::new(),
+                text: Text::default(),
                 see_through: true,
             }),
             item_use: None,
@@ -1491,7 +1490,7 @@ mod tests {
             item_dyed_color: None,
             item_potion_color: None,
             name_tag: Some(crate::entities::NameTag {
-                text: "\u{a7}cA".to_owned(),
+                text: Text::from_legacy("\u{a7}cA"),
                 see_through: false,
             }),
             item_use: None,
@@ -1538,6 +1537,111 @@ mod tests {
             has_red_shadow,
             "the shadow copy must be a quarter-brightness *red*, not flat \
              grey: wanted {shadow_rgb:?}, got {:?}",
+            normal.iter().map(|v| v.color).collect::<Vec<_>>()
+        );
+    }
+
+    /// **The hex-colour control.** `NameTag::text` is a real
+    /// [`lodestone_model::text::Text`] now, and `push_entity_quads` reads it
+    /// with `Text::to_spans` directly — but a *legacy*-expressible colour
+    /// (like [`TextColor::Red`] above) cannot see the bug this guards, since
+    /// `to_legacy_string`/`from_legacy` round-trips those losslessly. Only a
+    /// [`TextColor::Rgb`] hex colour discriminates: legacy `§` codes are a
+    /// 16-entry palette with no hex form at all.
+    ///
+    /// The control is run first, in this same test, reproducing the exact
+    /// lossy path `NameTag::text` used to bridge through
+    /// (`text.to_legacy_string()` then `Text::from_legacy(..).to_spans()`)
+    /// and asserting it drops the hex colour — watched failing, not assumed
+    /// — before asserting the real, direct `to_spans()` path
+    /// `push_entity_quads` now takes preserves it end to end, to the drawn
+    /// vertex colour.
+    #[test]
+    fn push_entity_quads_preserves_a_hex_nametag_colour_the_legacy_round_trip_cannot() {
+        let opaque_cell = vec![255u8; 32 * 32 * 4];
+        let mut rgba = Vec::with_capacity(opaque_cell.len() * 2);
+        rgba.extend_from_slice(&opaque_cell);
+        rgba.extend_from_slice(&opaque_cell);
+        let raster = scaled_raster("AB", 32, 20, &rgba);
+        let ink = StyledInkLayoutCache::default();
+
+        let hex = 0x00FF_8800_u32;
+        let mut hex_text = Text::literal("A");
+        hex_text.style.color = Some(TextColor::Rgb(hex));
+
+        // Control: the round trip `NameTag::text` used to be bridged
+        // through, watched failing on the exact hypothesis it would have
+        // produced.
+        let lossy_spans = Text::from_legacy(&hex_text.to_legacy_string()).to_spans();
+        assert!(
+            lossy_spans
+                .iter()
+                .all(|s| s.style.color != Some(TextColor::Rgb(hex))),
+            "control: a to_legacy_string/from_legacy round trip must lose a \
+             hex colour (legacy `§` codes have no hex form) — this is the bug \
+             `NameTag::text` used to have when it stored a plain `String`; \
+             got {:?}",
+            lossy_spans.iter().map(|s| s.style.color).collect::<Vec<_>>()
+        );
+
+        let draw = EntityDraw {
+            hurt: false,
+            id: 1,
+            type_path: std::sync::Arc::from("pig"),
+            item: None,
+            main_arm_left: false,
+            equipment: Vec::new(),
+            equipment_dye: Vec::new(),
+            equipment_trim: Vec::new(),
+            feet: Vec3::ZERO,
+            yaw: 0.0,
+            head_yaw: 0.0,
+            pitch: 0.0,
+            scale: 1.0,
+            anim: lodestone_render::AnimInput::REST,
+            wool: None,
+            block_state: None,
+            count: 1,
+            foil: false,
+            item_dyed_color: None,
+            item_potion_color: None,
+            name_tag: Some(crate::entities::NameTag {
+                text: hex_text,
+                see_through: false,
+            }),
+            item_use: None,
+            creeper_swelling: 0.0,
+            swim_amount: 0.0,
+            death_time: 0.0,
+            on_fire: false,
+            invisible: false,
+            armor_stand: None,
+            player_skin: None,
+            variant_sheet: None,
+            experience_orb_value: None,
+            cape_sway: (0.0, 0.0, 0.0),
+        };
+        let mut normal = Vec::new();
+        let mut see_through = Vec::new();
+        push_entity_quads(&raster, &ink, &draw, Vec3::ZERO, Vec3::X, Vec3::Y, &mut normal, &mut see_through);
+
+        let want_hex = [
+            ((hex >> 16) & 0xff) as f32 / 255.0,
+            ((hex >> 8) & 0xff) as f32 / 255.0,
+            (hex & 0xff) as f32 / 255.0,
+        ];
+        let is_close = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        let has_hex_at_alpha_one = normal.iter().any(|v| {
+            is_close(v.color[0], want_hex[0])
+                && is_close(v.color[1], want_hex[1])
+                && is_close(v.color[2], want_hex[2])
+                && is_close(v.color[3], 1.0)
+        });
+        assert!(
+            has_hex_at_alpha_one,
+            "the normal pass must draw the hex-coloured span in its real \
+             colour {want_hex:?}, reached through `NameTag::text`'s direct \
+             `to_spans()` (no legacy round trip): got {:?}",
             normal.iter().map(|v| v.color).collect::<Vec<_>>()
         );
     }

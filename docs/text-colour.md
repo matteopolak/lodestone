@@ -123,7 +123,7 @@ The full census. "raw `§`" means the two characters reached a quad as glyphs.
 | **tab list entry names** | `Vec<TextSpan>` (`to_spans`) | spans, but unexpanded → **raw `§`** | expanded at the seam |
 | **kick / disconnect reason** | `Vec<TextSpan>` (`to_spans`) | spans, but unexpanded → **raw `§`** | expanded at the seam |
 | server-list MOTD | `Vec<TextSpan>` | already opted in | unchanged, new name |
-| **entity nametags** | `String` (`effective_name().to_plain_string()`) | `layout_ink_runs` → **raw `§`** | pair consumed; colour still uniform, see below |
+| **entity nametags** | `Text` (`NameTag::text`) | `layout_ink_runs` → **raw `§`** | `layout_styled_ink_runs` via `to_spans()`; per-run colour (hex included), bold, italic, underline, strikethrough |
 | **sign text** | `String` (`SignText::parse`) | `layout_ink_runs` → **raw `§`** | pair consumed; colour still uniform, see below |
 | death screen message | `String` (`to_plain_string`) | `Builder::text` → **raw `§`** | decomposed |
 | menus, toasts, advancement titles, sound subtitles | `&str` (local corpus) | plain `run` | decomposed; no `§` in practice, but no longer a trap |
@@ -140,11 +140,23 @@ expanding, and `nametag::layout_ink_runs` consuming pairs.
 measure and draw cannot disagree. Without that, a jar-less run would show `§7` where the real
 font shows grey.
 
-**Nametags and sign text consume the pair but do not apply the colour.** Both callers paint
-every `LocalRect` in one uniform colour supplied at the draw site (nametags white, sign lines
-the sign's dye), so a per-run colour would need `LocalRect` to carry one and the vertex buffers
-to split per run. Consuming the pair is the half that has to be right either way: a dropped
-colour reads as plain text, an emitted pair reads as a bug.
+**Nametags and `text_display` now apply per-run colour (hex included); sign text still does
+not.** `gpu/nametag.rs::layout_styled_ink_runs` is the styled sibling of `layout_ink_runs`:
+`StyledRect` carries its own resolved colour, so `push_entity_quads` (nametags) and
+`push_text_display_quads` (`text_display`, `gpu/display_text.rs`) draw a real per-run colour —
+and, because `NameTag::text`/`DisplayDraw::text` are `lodestone_model::Text` carried through
+unflattened rather than a `to_legacy_string()`-encoded `String`, a `TextColor::Rgb` hex colour
+survives too (legacy `§` codes are a fixed 16-entry palette with no hex form, so any
+`to_legacy_string`/`Text::from_legacy` round trip would still lose one).
+
+**Sign text is still the one uniform-colour case, and the reason is one layer further
+upstream than the draw.** `lodestone_world::sign_text::SignSide::lines` is `[String; 4]`
+by design — `resolve_message` deliberately discards a message component's formatting at
+NBT-parse time, drawing every line in the sign's own dye colour instead
+(`crates/lodestone-world/src/sign_text.rs`'s own module doc). So `gpu/sign_text.rs::push_side_quads`
+has no per-run style to read even if it called `layout_styled_ink_runs`: closing this one
+needs `SignSide::lines` to carry `Text` (or `Vec<TextSpan>`) from `lodestone-world` down,
+not a change in this file.
 
 ### Hex, and why fixing the renderer was never going to be enough
 

@@ -111,21 +111,19 @@ Two things specific to this pass:
   reads as shifted toward one side — this was a real, reported defect here,
   fixed by switching the width computation (not just the glyph colour) to
   `layout_styled_ink_runs`.
-- **`DisplayDraw::text` is still a plain `String`.** `push_text_display_quads`
-  runs `Text::from_legacy(line).to_spans()` unconditionally per line before
-  laying it out, so a line that already contains legacy `§` codes styles
-  correctly today — but the upstream decode
-  (`crates/protocol/v770/src/packets/metadata.rs`'s `Value::Text` arm, built
-  from `lodestone_core::plain_text_from_nbt_component`) flattens the source
-  NBT component to plain text first, discarding every colour/bold/italic/
-  underline/strikethrough the component actually carried. Until that decode
-  preserves style (e.g. by emitting a legacy-coded string via
-  `Text::to_legacy_string`, or by threading `TextSpan`s through `DisplayDraw`
-  directly), a real server's styled `text_display` still renders in the
-  fallback white this file's own `text_glyph_color` supplies. That function's
-  doc previously (incorrectly) described the white as an unconditional
-  vanilla hardcode; it is only the *fallback* `Font.java::getTextColor` uses
-  when a span's own colour is unset.
+- **`DisplayDraw::text` is a real `lodestone_model::Text`.** The upstream
+  decode (`crates/protocol/v770/src/packets/metadata.rs`'s `Value::Text` arm)
+  and `crate::display_entities::extract_display_draws` both carry the
+  component tree through unflattened, so `push_text_display_quads` calls
+  `Text::to_spans()` on it directly and `split_spans_into_lines` (this file)
+  breaks the result on literal `\n`s while keeping each run's own resolved
+  style. Colour — a hex `TextColor::Rgb` included — bold, italic, underline
+  and strikethrough all reach the drawn glyph: a hex colour is the one thing
+  a `to_legacy_string`/`Text::from_legacy` round trip could never carry
+  (legacy `§` codes are a fixed 16-entry palette with no hex form), which is
+  why this pass no longer bridges through one. `text_glyph_color`'s white is
+  only the *fallback* `Font.java::getTextColor` uses when a span's own
+  colour is unset, not an unconditional hardcode.
 
 ## How to change it
 
