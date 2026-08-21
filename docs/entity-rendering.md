@@ -1071,6 +1071,20 @@ data this pass does not have cheap access to:
   rather than vanilla's ~90 individual per-species registrations
   (`EntityRenderers.java`: a chicken is `0.15`, a cow `0.7`, a boat `0.8`…).
   Every entity casts a shadow sized for a roughly player-sized mob.
+
+  Worth knowing before anyone budgets this as cheap: it is **not** one table
+  to transcribe. Counted in the 26.2 client source, only **13** renderers
+  assign `shadowRadius` directly (`TntRenderer` `0.5`, `ExperienceOrbRenderer`
+  and `ItemEntityRenderer` `0.15`, `CaveSpiderRenderer` `0.56`,
+  `AbstractBoatRenderer` `0.8`, `AbstractMinecartRenderer` `0.7`, …); every
+  other value arrives as a **constructor argument** to
+  `LivingEntityRenderer`, one per subclass, so the real list is spread across
+  the whole renderer package and has no single declaration site to read. The
+  tractable route is an oracle in `EntityDataIndexOracle.java`'s shape —
+  construct the renderers through `EntityRenderers` and dump each one's
+  `shadowRadius`/`shadowStrength` field — rather than 90 hand transcriptions,
+  each of which is a chance to put a number on the wrong species. The same
+  run yields `shadowStrength`, which has the same shape.
 * **Ground detection is "does the collision shape fill the whole cell",
   not the block's real sub-shape.** Vanilla paints a shadow shaped like the
   slab or stair it sits on; this pass gates on
@@ -1115,6 +1129,52 @@ same way every other entity pipeline here does (`GREATER_THAN_OR_EQUAL` →
 it) — a shadow piece sits within a few blocks of its casting entity and the
 radius is capped at 32, so the visible cost is a shadow that stays a hair
 too dark at the extreme edge of render distance, never a wrong one up close.
+
+**One deliberate divergence: a polygon offset vanilla does not carry.** Owner
+report: "the entity ground-shadow decal z-fights with the ground". A shadow
+piece is placed *exactly* coplanar with the ground — `ShadowFeatureRenderer.
+prepare` emits it at `piece.relativeY() + shapeBelow().bounds().minY`, and the
+only blocks reaching it are the ones `isCollisionShapeFullBlock` accepted,
+whose bounds are the unit cube. Zero separation, and vanilla's `ENTITY_SHADOW`
+uses the two-argument `DepthStencilState`, so it carries no bias either.
+Vanilla can afford that because it is reversed-Z. This renderer's forward
+`[0,1]` depth cannot. Measured (`near = 0.05`, `far =
+far_for_render_distance(12)`, `Depth32Float`), one ULP of the depth buffer is
+worth, in blocks of world separation:
+
+| distance | forward `[0,1]` (here) | reversed-Z (vanilla) |
+|---|---|---|
+| 2 blocks | `2.44e-06` | `5.96e-08` |
+| 8 blocks | `3.84e-05` | `2.38e-07` |
+| 16 blocks | `1.55e-04` | `4.77e-07` |
+
+16 blocks is the whole reach of the feature — `pow = (1 - distSq / 256) *
+strength` must be positive — so that is the full range, not a slice of it.
+The *shape* of the left column is the finding: a ULP's worth grows as the
+**square** of the distance, a 64x swing across the feature's own reach, so no
+fixed world-space lift can work. Anything large enough to resolve at 16 blocks
+visibly floats the decal at 2; anything discreet at 2 is unresolvable at 16.
+
+`EntityPipeline::SHADOW_DEPTH_BIAS` is a polygon offset instead, which does not
+have that shape: for a floating-point depth format the offset unit is one ULP
+of the *primitive's own* depth, so `constant: -10` is ten ULPs wherever the
+piece happens to be — `4.5e-05` blocks of pull at 2 blocks, `2.96e-03` at 16,
+and never more, because the feature's own distance cutoff bounds it. Negative
+because `[0,1]` depth puts *nearer* at *lower*; this is the same translation
+`crack_pipeline` documents at length for the block-breaking decal, which is
+this repo's other coplanar-decal pass. Measured effect at fixed camera and
+fixture: the decal's footprint grows `348 → 366` px at 7.8 blocks, `146 → 160`
+at 10.3 and `78 → 88` at 13.0, and is unchanged at 5.4 — pixels that were
+losing the depth comparison to the coplanar ground, in a fraction that grows
+with distance exactly as the table predicts.
+
+Note what was *not* observed, because it changes what a future reader should
+expect: across twelve headless configurations (distance, world-coordinate
+magnitude, far plane, grazing angle, sub-block feet offsets) the unbiased
+decal never **speckled**. Coplanar surfaces in this renderer flip wholesale or
+lose a fringe, not per pixel — `ground_plate_z_fight_pixels.rs` measured the
+same for ground plates. So a report of "shadow z-fighting" here means a decal
+that is partly or wholly missing, not one that shimmers.
 
 The `entityShadows` video option (`menu/options.rs`'s `LiveOption::
 EntityShadows`) gates the whole pass — `RenderState::

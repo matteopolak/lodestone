@@ -17,6 +17,16 @@
 //! shadow-covered texel the camera can see past the mob's own silhouette
 //! reads as a fresh non-sky pixel against the plain sky clear.
 //!
+//! **Read that as scope, not as reassurance.** No terrain also means no depth
+//! competition, so this gate is structurally blind to whether the decal
+//! *survives* the depth test against the ground it is coplanar with —
+//! measured, not argued: with `EntityPipeline::SHADOW_DEPTH_BIAS` inverted,
+//! which makes every ground shadow in a real world invisible, this file still
+//! reports its usual `7703 / 6699 / delta 1004` and passes. That question
+//! belongs to `entity_shadow_z_fight_pixels.rs`, which stands the same mob on
+//! real meshed terrain; this one answers "does the pass reach pixels at all",
+//! and only that.
+//!
 //! # The ground and the camera
 //!
 //! `prepare_shadows` needs a `ShadowGroundSource`, which nothing in this
