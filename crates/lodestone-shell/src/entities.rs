@@ -486,7 +486,7 @@ struct EntityFacts {
     /// How many items the stack named by [`Self::item`] represents, as last
     /// reported. Meaningless when [`Self::item`] is [`Reported::Unreported`]
     /// or an explicit empty stack; `1` in both of those cases, and whenever
-    /// [`Self::type_path`] is not [`ITEM_ENTITY_TYPE_PATH`].
+    /// the server has never reported a stack for this entity at all.
     ///
     /// Narrowed from `DisplayItem`'s full `ItemStack::count` in
     /// [`resolve_entity_facts`]; unlike the data components dropped there, it
@@ -629,11 +629,19 @@ pub struct EntityDraw {
     /// component's doc for why a refcount bump replaced a heap allocation
     /// here.
     pub type_path: Arc<str>,
-    /// For a dropped item ([`ITEM_ENTITY_TYPE_PATH`]), which item's model to
-    /// draw. `None` for every other entity type, and also for an item entity
-    /// whose stack has not been reported — see
-    /// [`EntityInterpolator::set_item_stack`] for why that is currently every
-    /// one of them.
+    /// Which item's model to draw, for any entity whose server metadata
+    /// carried an `ITEM_STACK` field — a dropped item
+    /// ([`ITEM_ENTITY_TYPE_PATH`]), an item frame's contents
+    /// (`ItemFrame.DATA_ITEM`, including a framed `filled_map`), and a thrown
+    /// projectile's stack (`ThrowableItemProjectile`/`Fireball`/`EyeOfEnder`
+    /// all sync through the same serializer). `None` for an entity that has
+    /// never reported one.
+    ///
+    /// **This used to be narrowed to [`ITEM_ENTITY_TYPE_PATH`] in
+    /// `extract_entity_draws`, which is what made the other three consumers
+    /// dead**; the draw sites each gate on their own entity type, so the
+    /// narrowing bought nothing and cost every framed item, every framed map
+    /// and every projectile's live tint.
     pub item: Option<ResourceLocation>,
     /// What this entity is holding/wearing, narrowed to the slots that actually
     /// have something in them: an entry here means "there is an item in this
@@ -677,16 +685,17 @@ pub struct EntityDraw {
     /// draw anything by itself.
     pub wool: Option<SheepWool>,
     /// How many items [`Self::item`] represents, when it is `Some`.
-    /// Meaningless (and left at the neutral `1`) for every entity that is not
-    /// a dropped item with a known stack.
+    /// Meaningless (and left at the neutral `1`) for every entity with no
+    /// reported stack, and for the consumers that draw one copy whatever the
+    /// count — an item frame holds a stack and draws it once.
     ///
     /// `prepare_item_geometry` turns this into vanilla's 1–5 copies via
     /// `lodestone_render::entity::rendered_amount`, scattered by
     /// `item_cluster_jitter` — see `docs/dropped-items.md`.
     pub count: u32,
     /// Whether the carried stack is enchanted, so the drop gets the glint second
-    /// pass (issue #452). `false` for every entity that is not a dropped item
-    /// with a reported stack.
+    /// pass. `false` for every entity with no reported stack. Read by the
+    /// framed-item pass too, not only the drop pass.
     pub foil: bool,
     /// [`Self::item`]'s `minecraft:dyed_color`, mirroring
     /// [`EntityFacts::item_dyed_color`] narrowed the same way [`Self::count`]
@@ -2513,9 +2522,21 @@ pub fn extract_entity_draws(
         // One lookup, not two: `item` and `count` both come from the same
         // recorded stack, and a drop with no stack yet must not manufacture a
         // count out of nowhere.
-        let stack = (kind.0.as_ref() == ITEM_ENTITY_TYPE_PATH)
-            .then(|| stacks.0.get(&id.0))
-            .flatten();
+        //
+        // **Not narrowed to `ITEM_ENTITY_TYPE_PATH`, and that narrowing is what
+        // made three consumers dead code.** `ItemStacks` is only ever written
+        // for an entity whose server metadata actually carried the `ITEM_STACK`
+        // serializer, so keying it on the entity *type* as well added nothing
+        // and silently answered `None` for every other claimant of that same
+        // serializer: an item frame's contents (`ItemFrame.DATA_ITEM`), a
+        // framed filled map, and a thrown projectile's real stack. Each of
+        // those consumers is written, tested and reachable — and each is
+        // guarded by its own entity-type check at the draw site, so widening
+        // here cannot make anything draw twice. Every gate for them built its
+        // own `EntityDraw` with `item: Some(..)` by hand and so could not see
+        // the producer refusing to supply one; `live_framed_item_wire.rs` is
+        // the gate that obtains this value the way production does.
+        let stack = stacks.0.get(&id.0);
         // `0.0` for an id with no ingest entity (shouldn't happen — a render
         // track only exists once the entity has been spawned) or one that has
         // never swung (`AttackSwing` absent, like `HurtTime`).
