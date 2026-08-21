@@ -62,8 +62,17 @@ use lodestone_render::entity_pipeline::{
     EntityPipeline, GpuEntityModel, InstanceTint, upload_instances_tinted,
 };
 
-const W: u32 = 256;
-const H: u32 = 256;
+/// 512, not 256, and that is sensitivity rather than taste: the defect this
+/// file gates against is a *per-pixel step versus `f32` ULP* race, so halving
+/// the step by doubling the resolution halves the world coordinate at which it
+/// bites. Measured on the neutered shader, at `dist 1.2`, speckled pixels at
+/// 67.5 degrees: at 256 the first non-zero arm is 30,000; at 1024 it is
+/// **4,096** (320 px, against 0 at every axis-aligned rotation). A real
+/// window is larger than either, so a frame that is clean here is not proof of
+/// a frame that is clean on the owner's screen — only of the same inequality
+/// with more margin.
+const W: u32 = 512;
+const H: u32 = 512;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const CLEAR: wgpu::Color = wgpu::Color { r: 0.0, g: 0.5, b: 0.0, a: 1.0 };
 
@@ -394,6 +403,7 @@ fn skull_rotation_segments_are_speckle_free() {
             [0, 0, 0],
             [512, 0, 512],
             [2_000, 0, 2_000],
+            [4_096, 0, 4_096],
             [8_000, 0, 8_000],
             [30_000, 0, 30_000],
             [100_000, 0, 100_000],

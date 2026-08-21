@@ -1468,6 +1468,15 @@ spatial variation at all is geometry or shading and never texel data
 All zero after the change; putting the one line back to `dpdx(in.world)` fails
 that gate and only that gate, which is the control.
 
+**The coordinate at which it bites depends on the render resolution**, because
+the race is the per-pixel step against the ULP and doubling the resolution
+halves the step. On the neutered shader, speckled pixels at 67.5° with the rig
+1.2 blocks from the eye: the first non-zero arm is at world 30,000 in a 256²
+frame and at **4,096** in a 1024² one (320 px, against 0 at every axis-aligned
+rotation at both). A real window is larger still, so a clean headless frame is
+evidence of the same inequality with more margin, never of a clean frame on
+someone's screen. The gate runs at 512² and sweeps out to 100,000.
+
 **Two things this does not fix.** The subtraction has to happen in the vertex
 stage — differencing two already-quantised large numbers in the fragment
 recovers nothing, which is why `fog_amount`'s own `in.world - camera.fog_eye.xyz`
