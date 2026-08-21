@@ -171,6 +171,25 @@ pub enum Sheet {
     /// so — as with [`Self::PortalGeneric`] — a sheet's identity here is its
     /// **frame sequence**, not its pixels.
     Generic0,
+    /// `particle/copper_fire_flame` — copper fire's own single-frame flame,
+    /// **not** a tint of [`Self::Flame`]. `copper_fire_flame.json` names its own
+    /// texture even though the type is registered against the same
+    /// `FlameParticle.Provider` as `flame` and `soul_fire_flame`.
+    CopperFireFlame,
+    /// `particle/small_gust_0` … `small_gust_6` — seven frames, ascending.
+    ///
+    /// **A different physical sheet from [`Self::Gust`]**, despite
+    /// `ParticleTypes.SMALL_GUST` being registered against the same
+    /// `GustParticle` class. `small_gust.json` names `small_gust_N`, not
+    /// `gust_N`, and it has seven frames rather than twelve — so a small gust
+    /// pointed at `Gust` samples the wrong texture *and* runs off the end of a
+    /// sequence it does not have.
+    SmallGust,
+    /// `particle/sculk_soul_0` … `sculk_soul_10` — eleven frames, ascending.
+    ///
+    /// Its own sheet, not [`Self::Soul`]'s: `sculk_soul.json` names
+    /// `sculk_soul_N`, and only the frame *count* coincides.
+    SculkSoul,
 }
 
 impl Sheet {
@@ -286,6 +305,16 @@ impl Sheet {
             Self::TrialOmen => &["trial_omen"],
             Self::Nautilus => &["nautilus"],
             Self::Generic0 => &["generic_0"],
+            Self::CopperFireFlame => &["copper_fire_flame"],
+            Self::SmallGust => &[
+                "small_gust_0", "small_gust_1", "small_gust_2", "small_gust_3", "small_gust_4",
+                "small_gust_5", "small_gust_6",
+            ],
+            Self::SculkSoul => &[
+                "sculk_soul_0", "sculk_soul_1", "sculk_soul_2", "sculk_soul_3", "sculk_soul_4",
+                "sculk_soul_5", "sculk_soul_6", "sculk_soul_7", "sculk_soul_8", "sculk_soul_9",
+                "sculk_soul_10",
+            ],
         }
     }
 
@@ -361,6 +390,9 @@ impl Sheet {
             Self::TrialOmen,
             Self::Nautilus,
             Self::Generic0,
+            Self::CopperFireFlame,
+            Self::SmallGust,
+            Self::SculkSoul,
         ]
     }
 

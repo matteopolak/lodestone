@@ -410,6 +410,48 @@ Four of these (`underwater`, `crimson_spore`, `warped_spore`, `ash`) deliberatel
 the packet's three velocity words: their vanilla providers *draw* the velocity rather
 than taking it from the caller, so that is the class's shape and not a dropped field.
 
+### The `GlowParticle` family, and three sheet/provider bugs
+
+Eight types, three of which were **already wired and wired wrong**. This is the
+group where the sheet-comes-from-the-JSON rule paid for itself repeatedly.
+
+| type | class | sheet |
+|---|---|---|
+| `electric_spark`, `glow`, `scrape`, `wax_on`, `wax_off` | `GlowParticle` | `glow` |
+| `copper_fire_flame`, `small_flame` | `FlameParticle` | `copper_fire_flame`, `flame` |
+| `sculk_soul` | `SoulParticle.EmissiveProvider` | `sculk_soul_0…10` |
+
+The three fixes:
+
+* **`electric_spark` and `glow` shared one approximation of the wrong class.** They
+  were emitted by an `emit::spark` that took `FireworkParticles.SparkParticle`'s
+  shape: `friction 0.9` against `GlowParticle`'s `0.96`, an `8 + nextInt(4)` lifetime
+  against `nextInt(2) + 2`, no tint, no `speedUpWhenYMotionIsBlocked`, and collision
+  left on where `hasPhysics` is false. The sheet was right, which is why it looked
+  fine. `glow` is additionally its *own* provider — a glow squid's two-population
+  green shimmer, drawn from a `nextBoolean()` — and had been collapsed into
+  `electric_spark`'s.
+* **`small_gust` pointed at `Sheet::Gust`.** `GustParticle.SmallProvider` shares the
+  class, and `small_gust.json` names `small_gust_0…6` — **seven** frames of its own,
+  against `gust_N`'s twelve. It sampled the wrong texture and indexed past the end of
+  a sequence it does not have.
+* **`sculk_soul` would have taken `Sheet::Soul`.** `sculk_soul.json` names
+  `sculk_soul_N`; only the eleven-frame count coincides. `emit::soul` hard-coded its
+  sheet, so the sheet became a parameter — a producer feeding a constant, one layer in.
+
+`emit::spark` is deleted rather than left beside its replacement: two plausible-looking
+emitters for one family is worse than none.
+
+**The jar-backed gate is now registry-driven.** `sheet_particle_resolves_against_the_real_particle_atlas`
+used to call a hand-listed set of ~20 `emit::` functions, extended by hand per sheet —
+the fixture corpus that certifies "the sheets I remembered". It now walks all 125
+registry entries through `spawn_particles`. Measured against the real 26.2 jar:
+**112 definitions, 285 sprites, a 512×512 atlas, 65 wired types, 0 unresolved.** A
+hermetic `(Sheet, frame) -> UV` fixture resolves *any* frame name, so this is the only
+place a wrong frame-naming convention can show. It also names the one legitimate
+undrawn particle (`explosion_emitter`, a `NoRenderParticle`) rather than relaxing the
+`drawn == alive` equality, so a second undrawn type cannot hide behind a `>=`.
+
 ## Verification
 
 - `crates/lodestone-particle/src/emit.rs`: one test per new emitter asserting an **exact**

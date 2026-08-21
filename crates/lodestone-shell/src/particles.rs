@@ -640,7 +640,25 @@ impl Particles {
                 emit::campfire_smoke(&mut self.engine, x, y, z, xa, ya, za, true);
             }
             "end_rod" => emit::end_rod(&mut self.engine, x, y, z, xa, ya, za),
-            "electric_spark" | "glow" => emit::spark(&mut self.engine, x, y, z, xa, ya, za),
+            // The `GlowParticle` family, all five over `particle/glow`. These
+            // two shared one approximation of `FireworkParticles.SparkParticle`
+            // until this pass — a plausible-looking spark with the wrong
+            // friction, the wrong lifetime, no tint and collision left on, and
+            // `glow`'s own provider (a glow squid's two-population shimmer)
+            // collapsed into `electric_spark`'s.
+            "electric_spark" => emit::electric_spark(&mut self.engine, x, y, z, xa, ya, za),
+            "glow" => emit::glow_squid(&mut self.engine, x, y, z, xa, ya, za),
+            "scrape" => emit::scrape(&mut self.engine, x, y, z, xa, ya, za),
+            "wax_on" => emit::wax_on(&mut self.engine, x, y, z, xa, ya, za),
+            "wax_off" => emit::wax_off(&mut self.engine, x, y, z, xa, ya, za),
+            // `FlameParticle.Provider`'s other two registry types, and
+            // `SmallFlameProvider`. Each names its own sheet; the shared
+            // provider decides nothing.
+            "copper_fire_flame" => {
+                emit::copper_fire_flame(&mut self.engine, x, y, z, xa, ya, za);
+            }
+            "small_flame" => emit::small_flame(&mut self.engine, x, y, z, xa, ya, za),
+            "sculk_soul" => emit::sculk_soul(&mut self.engine, x, y, z, xa, ya, za),
             // `FireworkParticles.SparkParticle` via `SparkProvider` -- the plain
             // wire particle a `LEVEL_PARTICLES` packet can name directly, not the
             // rocket-explosion burst a `Starter`/`NoRenderParticle` spawns
@@ -657,9 +675,13 @@ impl Particles {
             "gust" => {
                 emit::animated_ambient(&mut self.engine, x, y, z, 0.0, 0.0, 0.0, Sheet::Gust, 3.0, 12)
             }
-            "small_gust" => {
-                emit::animated_ambient(&mut self.engine, x, y, z, 0.0, 0.0, 0.0, Sheet::Gust, 1.0, 12)
-            }
+            // `Sheet::SmallGust`, not `Sheet::Gust`: `GustParticle.SmallProvider`
+            // shares the class but `small_gust.json` names `small_gust_0`…`_6`,
+            // seven frames of its own. Pointed at `Gust` this sampled the wrong
+            // texture and indexed a twelve-frame sequence it does not have.
+            "small_gust" => emit::animated_ambient(
+                &mut self.engine, x, y, z, 0.0, 0.0, 0.0, Sheet::SmallGust, 1.0, 12,
+            ),
             "sonic_boom" => emit::animated_ambient(
                 &mut self.engine, x, y, z, 0.0, 0.0, 0.0, Sheet::SonicBoom, 3.0, 16,
             ),
@@ -1579,6 +1601,15 @@ mod tests {
             ("white_smoke", [0.0, 0.0, 0.0]),
             ("poof", [0.0, 0.0, 0.0]),
             ("spit", [0.0, 0.0, 0.0]),
+            // The `GlowParticle` family and the flame/soul siblings.
+            ("electric_spark", [0.0, 0.0, 0.0]),
+            ("glow", [0.0, 0.0, 0.0]),
+            ("scrape", [0.0, 0.0, 0.0]),
+            ("wax_on", [0.0, 0.0, 0.0]),
+            ("wax_off", [0.0, 0.0, 0.0]),
+            ("copper_fire_flame", [0.0, 0.0, 0.0]),
+            ("small_flame", [0.0, 0.0, 0.0]),
+            ("sculk_soul", [0.0, 0.0, 0.0]),
         ];
         for &(kind, offset) in cases {
             let mut p = resolvable();
@@ -2415,49 +2446,49 @@ mod tests {
         assert!(report.missing_textures.is_empty(), "{:?}", report.missing_textures);
 
         let mut p = Particles::new(None).with_particle_atlas(Some(&atlas));
-        emit::flame(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.05, 0.0);
-        emit::smoke(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0, 1.0);
-        emit::crit(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
-        // The particle batch (several closed fixes, plus the sweep-attack particle split
-        // out of an earlier one): every one of these names a *new* `Sheet` variant, so
-        // this is the only test in the tree that proves the `stem()` chosen
-        // for each (`sweep`, `spell`, `angry`, `glint`) actually matches a
-        // real file under `textures/particle/` in the jar, rather than a
-        // plausible-looking guess. `Sheet::Note`/`Heart`/`Glitter` already
-        // existed but had no emitter ever exercising them either.
-        emit::sweep_attack(p.engine_mut(), 0.5, 65.0, 0.5, 0.0);
-        emit::note(p.engine_mut(), 0.5, 65.0, 0.5, 0.5);
-        emit::heart(p.engine_mut(), 0.5, 65.0, 0.5);
-        emit::angry_villager(p.engine_mut(), 0.5, 65.0, 0.5);
-        emit::happy_villager(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
-        emit::witch(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
-        emit::totem_of_undying(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.2, 0.0);
-        // `explosion`: `Sheet::Explosion` is `explosion_0`
-        // through `explosion_15` — the one sheet in this whole list with a
-        // 16-frame stem rather than the usual 8, so this is also the proof
-        // that `frame_count()`'s per-frame `explosion_N` naming resolves
-        // every one of those sixteen files, not just frame 0.
-        emit::huge_explosion(p.engine_mut(), 0.5, 65.0, 0.5, 0.0);
-        // The ambient/environmental batch. Ten more `Sheet`
-        // variants, and this is the only place that proves each names real files:
-        // `soul` is 11 frames, `enchant` is alphabetic (`sga_a`…`sga_z`) rather
-        // than numbered at all, `big_smoke` is 12, `sonic_boom` is 16, and the
-        // drip phases are three separate single-frame sheets. A hermetic fixture
-        // cannot see any of that.
-        emit::soul(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.05, 0.0);
-        emit::soul_fire_flame(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.05, 0.0);
-        emit::portal(p.engine_mut(), 0.5, 65.0, 0.5, 0.25, 0.0, 0.25);
-        emit::campfire_smoke(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.07, 0.0, false);
-        emit::end_rod(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
-        emit::spark(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
-        for sheet in [Sheet::SculkCharge, Sheet::Gust, Sheet::SonicBoom, Sheet::Enchant] {
-            emit::animated_ambient(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0, sheet, 1.0, 15);
-        }
-        for sheet in [Sheet::DripHang, Sheet::DripFall, Sheet::DripLand] {
-            emit::drip(p.engine_mut(), 0.5, 65.0, 0.5, sheet, [1.0, 1.0, 1.0], 0.0);
+        // Every wired registry type, driven through the same `spawn_particles`
+        // entry the network path uses — not a hand-listed set of `emit::` calls.
+        //
+        // The list this replaces named twenty-odd emitters and had to be
+        // extended by hand for each new sheet, which makes it exactly the
+        // fixture corpus that certifies "the sheets I remembered" rather than
+        // "the sheets that exist". Driving the registry means a new dispatch arm
+        // over a sheet whose frame names are wrong fails *here*, against the
+        // real jar, which is the only place a naming-convention mistake shows:
+        // a hermetic `(Sheet, frame) -> UV` fixture resolves any name at all.
+        let mut wired = 0usize;
+        for id in 0..lodestone_data::particle_types::PARTICLE_TYPE_COUNT {
+            #[expect(
+                clippy::cast_possible_wrap,
+                reason = "the registry count is far below i32::MAX"
+            )]
+            let Some(name) = lodestone_data::particle_types::particle_type_name(id as i32) else {
+                continue;
+            };
+            let kind = name.split_once(':').map_or(name, |(_, path)| path);
+            let options = match kind {
+                "dust" => ParticleOptions::Dust { color: [1.0, 0.0, 0.0], scale: 1.0 },
+                "dust_color_transition" => ParticleOptions::DustColorTransition {
+                    from_color: [1.0, 0.0, 0.0],
+                    to_color: [0.0, 0.0, 1.0],
+                    scale: 1.0,
+                },
+                _ => ParticleOptions::None,
+            };
+            let before = p.engine.particles().len();
+            p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.2, 0.3, 0.4], 0.05, 1, options);
+            if p.engine.particles().len() > before {
+                wired += 1;
+            }
         }
         let alive = p.engine.particles().len();
-        assert!(alive >= 24, "every emitter must have added a particle, got {alive}");
+        eprintln!("wired particle types: {wired}/{}", lodestone_data::particle_types::PARTICLE_TYPE_COUNT);
+        assert!(
+            wired >= 60,
+            "far fewer types produced a particle than expected ({wired}); either the \
+             dispatch regressed or the registry moved"
+        );
+        assert!(alive >= wired, "every wired type must have added a particle, got {alive}");
 
         let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
             Some(lodestone_particle::FULL_BRIGHT)
@@ -2471,7 +2502,19 @@ mod tests {
             "every emitted sheet must name a real vanilla texture and resolve \
              against the stitched atlas"
         );
-        assert_eq!(frame.drawn, frame.alive);
+        // Exactly one live particle legitimately draws nothing:
+        // `explosion_emitter` is a `NoRenderParticle` (`Behaviour::
+        // HugeExplosionSeed`), excluded from `extract` by construction. Naming
+        // it rather than relaxing the equality keeps a *second* undrawn type
+        // from hiding behind a `>=`.
+        let seeds = p
+            .engine
+            .particles()
+            .iter()
+            .filter(|q| q.behaviour == lodestone_particle::Behaviour::HugeExplosionSeed)
+            .count();
+        assert_eq!(seeds, 1, "only `explosion_emitter` may be a no-render seed");
+        assert_eq!(frame.drawn, frame.alive - seeds);
     }
 }
 
