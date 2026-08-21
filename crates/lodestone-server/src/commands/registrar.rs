@@ -512,11 +512,23 @@ impl<'a> Ctx<'a> {
     ) -> Result<Vec<PlayerCandidate>, SelectorError> {
         let scoreboard = self.world.state.scoreboard();
         let teams = self.world.state.team();
+        // `sort=random`'s seed. `game_time` is a monotonic per-tick counter
+        // (`WorldTime`'s own doc), so two `@r` resolutions inside the same
+        // tick — e.g. two selectors in one `/execute` chain — draw the same
+        // permutation; two resolutions a tick apart do not. That is weaker
+        // than a fresh draw per call, but it is what is available without
+        // threading a persistent, mutable RNG handle through every
+        // `CommandWorld` construction site the way `crate::server`'s
+        // `drops_rng` is (a wider, separately-scoped change) — and it closes
+        // the actual bug this replaces: `no_shuffle` here made every `@r`
+        // resolution the *same* permutation forever, not merely within a
+        // tick.
+        let shuffle = super::source::seeded_shuffle(self.world.state.tick_time().game_time as u64);
         super::source::resolve_players(
             selector,
             &self.source,
             self.world.players,
-            &super::source::no_shuffle,
+            &shuffle,
             &|holder, objective| scoreboard.get_score(holder, objective).ok(),
             &|holder| teams.team_of(holder),
         )
