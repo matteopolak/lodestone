@@ -1073,6 +1073,77 @@ pub fn upload_flame_instances(
     )
 }
 
+/// One vertex of the entity ground-shadow decal — world-space position, the
+/// shadow-sprite UV, and this piece's own alpha (vanilla's per-piece
+/// `ARGB.white(alpha)` colour, carried as a bare scalar since the colour
+/// itself is always white — see [`EntityPipeline::shadow_pipeline`]'s doc for
+/// why this is not built through the shared static-mesh-plus-instance path
+/// every sibling pipeline uses).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ShadowVertex {
+    /// World-space position — already the ground surface a shadow piece sits
+    /// on, not a model-local offset needing a per-instance matrix.
+    pub position: [f32; 3],
+    /// UV into `textures/misc/shadow.png`, computed per-piece from the
+    /// piece's position relative to the casting entity and the entity's own
+    /// shadow radius — `ShadowFeatureRenderer.prepare`'s
+    /// `-x / 2.0 / radius + 0.5` (and the `z` sibling), transcribed on the
+    /// Rust side in `lodestone_shell`'s `prepare_shadows`.
+    pub uv: [f32; 2],
+    /// This piece's own opacity, already folding in vanilla's
+    /// `powerAtDepth * 0.5 * Lightmap.getBrightness(...)` and the
+    /// `Mth.clamp(.., 0.0, 1.0)` around it.
+    pub alpha: f32,
+}
+
+impl ShadowVertex {
+    /// One plain (non-instanced) vertex buffer: `Float32x3` position at
+    /// location 0, `Float32x2` uv at location 1, `Float32` alpha at location
+    /// 2 — matching `entity_shadow.wgsl`'s `VertexInput`.
+    #[must_use]
+    pub const fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+        const ATTRS: [wgpu::VertexAttribute; 3] = [
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 12,
+                shader_location: 1,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32,
+                offset: 20,
+                shader_location: 2,
+            },
+        ];
+        wgpu::VertexBufferLayout {
+            array_stride: core::mem::size_of::<ShadowVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &ATTRS,
+        }
+    }
+}
+
+/// Upload a frame's worth of shadow-piece quads (six [`ShadowVertex`]es each,
+/// two triangles) as one plain vertex buffer — `None` if there is nothing to
+/// draw this frame, the same "no buffer, no draw call" convention every other
+/// `upload_*` helper here follows.
+#[must_use]
+pub fn upload_shadow_vertices(device: &wgpu::Device, vertices: &[ShadowVertex]) -> Option<wgpu::Buffer> {
+    if vertices.is_empty() {
+        return None;
+    }
+    Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("lodestone-entity-shadow-vertices"),
+        contents: bytemuck::cast_slice(vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    }))
+}
+
 /// The one place the entity pipeline's raster/depth/vertex state is spelled out,
 /// parameterised by the things that vary across callers: the label, the depth
 /// comparison, the colour-target blend state and whether the pass writes depth.
@@ -1623,6 +1694,97 @@ impl EntityPipeline {
         )
     }
 
+    /// A sixth pipeline over this pipeline's own bind-group layouts, for the
+    /// entity ground-shadow decal (owner report: "entity shadows are missing").
+    ///
+    /// This one does **not** go through [`build_entity_pipeline`]: every sibling
+    /// above shares that helper's "static [`ModelVertex`] mesh plus a
+    /// per-instance transform buffer" shape, but a shadow quad has no shared
+    /// mesh to instance — each piece is a *unique* quad, positioned, sized and
+    /// coloured freshly on the CPU every frame from the ground scan
+    /// (`lodestone_shell`'s `prepare_shadows`), exactly the way vanilla's own
+    /// `VertexConsumer`-based `ShadowFeatureRenderer` builds it. So this pipeline
+    /// takes a single plain (non-instanced) [`ShadowVertex`] buffer, the same
+    /// shape a debug-line or block-outline draw already uses elsewhere in this
+    /// engine — see that call site's doc for the precedent.
+    ///
+    /// Reuses [`Self::camera_layout`]/[`Self::texture_layout`] like every
+    /// sibling here (the `textures/misc/shadow.png` sprite bound fresh over the
+    /// shared texture layout), so this pass still spends exactly two bind
+    /// groups.
+    ///
+    /// # State, from vanilla's own `RenderPipelines.ENTITY_SHADOW`
+    ///
+    /// `.cache/mc/26.2/client-src/net/minecraft/client/renderer/RenderPipelines.java`:
+    /// `ColorTargetState(BlendFunction.TRANSLUCENT)`,
+    /// `DepthStencilState(GREATER_THAN_OR_EQUAL, writeDepth = false)`. Under this
+    /// engine's `[0,1]` DirectX-style depth (vanilla is reversed-Z, per
+    /// `CLAUDE.md`), `GREATER_THAN_OR_EQUAL` is `LessEqual` — the same
+    /// translation every other pipeline in this file applies. `writeDepth =
+    /// false` carries straight through: a shadow is a flat decal painted onto
+    /// the ground that already wrote its own depth, so writing again would only
+    /// invite it to z-fight whatever draws after it at the same depth.
+    ///
+    /// Vanilla's shadow render type also inherits `MATRICES_FOG_SNIPPET`
+    /// (distance fog). This port's `entity_shadow.wgsl` does not apply it — a
+    /// disclosed simplification: `shadowRadius` is capped at 32 blocks and every
+    /// piece this renderer builds sits within a few blocks of its casting
+    /// entity, almost always well inside the near fog band, so the visible cost
+    /// is a shadow that stays a hair too dark at the extreme edge of render
+    /// distance rather than one that is wrong up close.
+    #[must_use]
+    pub fn shadow_pipeline(
+        &self,
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("lodestone-entity-shadow-shader"),
+            source: wgpu::ShaderSource::Wgsl(SHADOW_WGSL.into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("lodestone-entity-shadow-layout"),
+            bind_group_layouts: &[Some(&self.camera_layout), Some(&self.texture_layout)],
+            immediate_size: 0,
+        });
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("lodestone-entity-shadow-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(ShadowVertex::vertex_layout())],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    }
+
     /// Build the group-0 uniform buffer for the entity pass with fog
     /// **disabled**. `view_proj` is taken from the camera; `section_origin` is
     /// unused (zero) because an entity's world position lives in its instance
@@ -1801,6 +1963,7 @@ pub fn entity_camera_buffer(
 }
 
 const ENTITY_WGSL: &str = include_str!("shaders/entity.wgsl");
+const SHADOW_WGSL: &str = include_str!("shaders/entity_shadow.wgsl");
 
 #[cfg(test)]
 mod tests {

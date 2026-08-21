@@ -194,7 +194,7 @@ pub use cull::{
 pub use device::{GpuContext, GpuError};
 pub use driver::{InstanceTable, WorldMesher};
 pub use entity::{
-    ENTITY_FULLBRIGHT, EXPERIENCE_ORB_ICON_COUNT, EXPERIENCE_ORB_TEXTURE, ArmourMesh,
+    ENTITY_FULLBRIGHT, EXPERIENCE_ORB_ICON_COUNT, EXPERIENCE_ORB_TEXTURE, SHADOW_TEXTURE, ArmourMesh,
     ArmourModelSet, CapeMesh, EntityBatch, EntityCullStats, EntityFrame, EntityInstance,
     EntityMesh, EntityModelSet, EntitySpawn, MODEL_FEET_OFFSET, PartRange, SheepWoolModelSet,
     WoolMesh, armour_layer_tint, armour_layers, cape_local_rotation, dying_entity_model_matrix,
