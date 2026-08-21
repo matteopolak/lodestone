@@ -191,12 +191,15 @@ fn load_pattern_directory(
     prefix: &str,
     exclude: &[&str],
 ) -> Result<(HashMap<String, Image>, BannerPatternAtlasReport), BannerPatternAtlasError> {
-    let bytes = manager
-        .read(atlas_path)
-        .ok_or_else(|| BannerPatternAtlasError::DescriptorMissing {
+    // Stacked, not single-winner: a server pack shipping its own
+    // `banner_patterns.json`/`shield_patterns.json` must extend the jar's
+    // `directory` source, not replace it outright
+    // (`AtlasDefinition::load_stacked`'s own doc).
+    let definition = AtlasDefinition::load_stacked(manager, atlas_path).ok_or_else(|| {
+        BannerPatternAtlasError::DescriptorMissing {
             path: atlas_path.to_string(),
-        })?;
-    let definition = AtlasDefinition::parse(&bytes)?;
+        }
+    })?;
 
     let mut sprites = HashMap::new();
     let mut report = BannerPatternAtlasReport::default();

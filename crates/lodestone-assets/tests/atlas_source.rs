@@ -256,6 +256,117 @@ fn directory_and_multiple_sources_compose_in_order() {
     assert!(ids.contains(&"minecraft:entity/extra".to_string()));
 }
 
+// --- Pack-stacking: `atlases/<id>.json` is a merged list, not a single winner -
+
+/// The bug this reproduces: a server pack ships its own
+/// `atlases/banner_patterns.json` carrying only a `single` source for one new
+/// sprite. A single-winner `manager.read()` load discards the jar's own
+/// `directory` source entirely, so the discriminating input is two packs
+/// whose descriptors are **not identical** — a single-pack fixture cannot see
+/// this, and neither can two packs with the same contents.
+#[test]
+fn load_stacked_merges_a_server_packs_descriptor_with_the_jars() {
+    let vanilla = pack(
+        "vanilla",
+        &[
+            (
+                "assets/minecraft/atlases/banner_patterns.json",
+                br#"{"sources":[{"type":"minecraft:directory","prefix":"entity/banner/","source":"entity/banner"}]}"#.as_slice(),
+            ),
+            ("assets/minecraft/textures/entity/banner/creeper.png", b"c"),
+        ],
+    );
+    let server_pack = pack(
+        "server",
+        &[(
+            "assets/minecraft/atlases/banner_patterns.json",
+            br#"{"sources":[{"type":"minecraft:single","resource":"mypack:entity/banner/custom_logo"}]}"#.as_slice(),
+        )],
+    );
+    let mgr = manager(vec![vanilla, server_pack]);
+
+    let def = AtlasDefinition::load_stacked(&mgr, "assets/minecraft/atlases/banner_patterns.json")
+        .expect("descriptor present in at least one layer");
+    let ids: Vec<String> = def
+        .resolve(&mgr)
+        .into_iter()
+        .map(|e| e.sprite.to_string())
+        .collect();
+
+    assert!(
+        ids.contains(&"minecraft:entity/banner/creeper".to_string()),
+        "the jar's directory source must survive a server pack's own \
+         descriptor — a winner-take-all read discards it entirely; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"mypack:entity/banner/custom_logo".to_string()),
+        "the server pack's own source must also be present; got {ids:?}"
+    );
+
+    // The control: a naive single-winner read (what this replaced) sees only
+    // the highest-priority layer's descriptor and therefore only its source.
+    let winner_only = AtlasDefinition::parse(
+        &mgr.read("assets/minecraft/atlases/banner_patterns.json")
+            .unwrap(),
+    )
+    .unwrap();
+    let winner_ids: Vec<String> = winner_only
+        .resolve(&mgr)
+        .into_iter()
+        .map(|e| e.sprite.to_string())
+        .collect();
+    assert_eq!(
+        winner_ids,
+        vec!["mypack:entity/banner/custom_logo".to_string()],
+        "control: single-winner read must NOT see the jar's directory source \
+         (this is the exact bug `load_stacked` fixes) — got {winner_ids:?}"
+    );
+}
+
+/// Missing from every layer is still the caller's "no descriptor at all"
+/// case, unchanged by stacking.
+#[test]
+fn load_stacked_returns_none_when_no_layer_has_the_path() {
+    let mgr = manager(vec![pack("empty", &[])]);
+    assert!(
+        AtlasDefinition::load_stacked(&mgr, "assets/minecraft/atlases/banner_patterns.json")
+            .is_none()
+    );
+}
+
+/// Companion fix in the same function: when two sources — whether two entries
+/// in one file or two stacked layers — name the *same* sprite id, vanilla's
+/// `Output.add` is a plain map `put`, so the **later** source wins. The old
+/// `seen.insert` here kept the *first* writer, backwards from
+/// `SpriteSourceList.list`. Two sources producing the same id with
+/// *different* texture paths is the discriminating input; two sources naming
+/// the same texture cannot tell first-wins from last-wins apart.
+#[test]
+fn resolve_lets_the_later_source_override_an_earlier_one_for_the_same_sprite_id() {
+    let def = AtlasDefinition {
+        sources: vec![
+            AtlasSource::Single {
+                resource: ResourceLocation::parse("minecraft:entity/banner/creeper").unwrap(),
+                sprite: ResourceLocation::parse("minecraft:entity/banner/creeper").unwrap(),
+            },
+            AtlasSource::Single {
+                resource: ResourceLocation::parse("mypack:entity/banner/creeper_override")
+                    .unwrap(),
+                sprite: ResourceLocation::parse("minecraft:entity/banner/creeper").unwrap(),
+            },
+        ],
+    };
+    let entries = def.resolve(&manager(vec![]));
+    assert_eq!(entries.len(), 1, "the id must be deduplicated, not doubled");
+    assert_eq!(
+        entries[0].texture_path,
+        "assets/mypack/textures/entity/banner/creeper_override.png",
+        "the later (higher-priority) source must win — first-wins is backwards \
+         from `SpriteSourceList.list`'s `Map.put`; got {:?}",
+        entries[0].texture_path
+    );
+}
+
 // --- Task A3: pre-1.13 implicit terrain atlas (no atlases/*.json) -------------
 //
 // 1.8.9/1.12.2 have no declarative atlas index. The block sheet was every
