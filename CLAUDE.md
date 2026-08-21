@@ -1167,6 +1167,23 @@ Three corollaries, all paid for (§12.160):
   render gate obtained its frame through `frame_for`, so the whole corpus was blind to any caller that did not.
   Measured on the same page and canvas: `frame_for` → chrome rect `(0, 33, 320, 174)`, raw → `None`.
 
+  **A pixel gate is not exempt from this, and believing otherwise cost a whole session.** Reaching
+  rasterised pixels answers "does the renderer draw this", which is genuinely the question a model-level
+  assertion cannot reach — so a pixel gate reads as the strongest evidence available and gets trusted
+  accordingly. It is still blind to the *producer* whenever it installs its own input, and these gates
+  almost always do: they build their own `EntityDraw` list, their own scene, their own `RenderState`,
+  because that is the only tractable way to make one hermetic. Measured in one day: three fixes each
+  shipped with a run-and-passing pixel gate — framed item contents at 1334 px, `text_display` glyphs at
+  438/438, a styled-sign parse — and **all three were still broken in real play**, because production
+  derives the same input from the ECS extract step and the wire, and the gates never touched either.
+
+  So the honest form is: **a pixel gate proves the draw, and proves nothing past the edge of its own
+  fixture.** State in the gate's doc which half it covers. When a fix is for something the owner reported
+  seeing, obtain the gate's input the way production obtains it — or say plainly that you could not, and
+  what you did instead. And treat "the gate passed" as a claim about the renderer only: the question
+  *what constructs this input in production, and does it contain what my fixture contained* has to be
+  asked separately, every time.
+
   Two habits follow. **Ask what constructs the fixture, not just what is in it** — if every gate in a subsystem
   reaches the subject through one factory, a second caller of that factory's *output type* is unguarded by
   construction. And **when one field of a shared stamp is missing at a second call site, audit every field in
