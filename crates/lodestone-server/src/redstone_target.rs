@@ -60,10 +60,8 @@ pub const TICK_TARGET_DECAY: &str = "redstone:target_decay";
 /// which axis the hit **face** lies on, not which way the projectile was
 /// travelling.
 ///
-/// `#[allow(dead_code)]` on this and everything below through [`apply_hit`]:
-/// ready for a projectile-hit producer this crate does not have yet — see
-/// this module's own doc comment.
-#[allow(dead_code)]
+/// Wired in from `crate::tick::run_tick_loop`, which resolves each
+/// projectile-block hit `MobSim::resolve_projectile_impacts` found that tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitAxis {
     X,
@@ -80,7 +78,6 @@ pub enum HitAxis {
 /// face's edge); the result is `ceil(15 * clamp((0.5 - distance) / 0.5, 0, 1))`,
 /// floored at `1` so a hit that never returns `0` — an arrow that grazes the
 /// very edge of the target still lights it, if only to level `1`.
-#[allow(dead_code)]
 #[must_use]
 pub fn redstone_strength(hit_axis: HitAxis, frac_x: f64, frac_y: f64, frac_z: f64) -> u8 {
     let dist_x = (frac_x - 0.5).abs();
@@ -98,7 +95,6 @@ pub fn redstone_strength(hit_axis: HitAxis, frac_x: f64, frac_y: f64, frac_z: f6
 /// `TargetBlock.ACTIVATION_TICKS_ARROWS` (20) / `ACTIVATION_TICKS_OTHER` (8) —
 /// how long [`apply_hit`]'s written power stays up before
 /// [`run_scheduled_tick`] decays it back to `0`.
-#[allow(dead_code)]
 #[must_use]
 pub fn activation_duration(is_arrow: bool) -> u32 {
     if is_arrow {
@@ -111,7 +107,6 @@ pub fn activation_duration(is_arrow: bool) -> u32 {
 /// What a projectile hit resolved to — the state to write and the decay tick
 /// to schedule after it, or `None` when vanilla's own guard suppresses the
 /// write entirely (a decay is already pending).
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HitOutcome {
     pub new_state: String,
@@ -132,7 +127,6 @@ pub struct HitOutcome {
 /// own `power` is left untouched and no new decay is scheduled — this
 /// function returns `None` in that case since a caller only wanted to know
 /// "how to change the world", not the advancement side-channel.
-#[allow(dead_code)]
 #[must_use]
 pub fn apply_hit(state: &str, strength: u8, is_arrow: bool, has_pending_decay: bool) -> Option<HitOutcome> {
     if base_name(state) != TARGET || has_pending_decay {

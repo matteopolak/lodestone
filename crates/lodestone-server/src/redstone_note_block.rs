@@ -133,6 +133,43 @@ impl Instrument {
                 | Instrument::CustomHead
         )
     }
+
+    /// The `INSTRUMENT` block-state property's wire value — the exact reverse
+    /// of [`instrument_property`], so a value this crate writes always reads
+    /// back to the same variant. `crate::block_placement::placement`'s
+    /// `minecraft:note_block` arm is the writer.
+    #[must_use]
+    pub fn state_name(self) -> &'static str {
+        match self {
+            Instrument::Harp => "harp",
+            Instrument::Basedrum => "basedrum",
+            Instrument::Snare => "snare",
+            Instrument::Hat => "hat",
+            Instrument::Bass => "bass",
+            Instrument::Flute => "flute",
+            Instrument::Bell => "bell",
+            Instrument::Guitar => "guitar",
+            Instrument::Chime => "chime",
+            Instrument::Xylophone => "xylophone",
+            Instrument::IronXylophone => "iron_xylophone",
+            Instrument::CowBell => "cow_bell",
+            Instrument::Didgeridoo => "didgeridoo",
+            Instrument::Bit => "bit",
+            Instrument::Banjo => "banjo",
+            Instrument::Pling => "pling",
+            Instrument::Trumpet => "trumpet",
+            Instrument::TrumpetExposed => "trumpet_exposed",
+            Instrument::TrumpetOxidized => "trumpet_oxidized",
+            Instrument::TrumpetWeathered => "trumpet_weathered",
+            Instrument::Zombie => "zombie",
+            Instrument::Skeleton => "skeleton",
+            Instrument::Creeper => "creeper",
+            Instrument::Dragon => "dragon",
+            Instrument::WitherSkeleton => "wither_skeleton",
+            Instrument::Piglin => "piglin",
+            Instrument::CustomHead => "custom_head",
+        }
+    }
 }
 
 /// `BlockState.instrument()`'s per-block table, for exactly the blocks this
@@ -152,11 +189,8 @@ impl Instrument {
 /// literal `Blocks.<NAME> = register(..., instrument(NoteBlockInstrument.X)
 /// ...)` call, not guessed.
 ///
-/// `#[allow(dead_code)]`: ready for a placement-time caller
-/// ([`instrument_for_note_block`] is the composition it feeds), but nothing
-/// in this crate's block-placement pipeline (owned elsewhere) calls it yet —
-/// see this module's own doc comment.
-#[allow(dead_code)]
+/// Wired in from `crate::block_placement::placement`'s `minecraft:note_block`
+/// arm via [`instrument_for_note_block`].
 #[must_use]
 pub fn block_instrument(block: &str) -> Instrument {
     match base_name(block) {
@@ -197,9 +231,6 @@ pub fn block_instrument(block: &str) -> Instrument {
 /// top), otherwise the block below is read, with its own
 /// `worksAboveNoteBlock` guarded back to [`Instrument::Harp`] (vanilla's
 /// defensive case for a head somehow ending up *below* a note block).
-/// `#[allow(dead_code)]`: same reason as [`block_instrument`] — no
-/// placement-time caller yet.
-#[allow(dead_code)]
 #[must_use]
 pub fn instrument_for_note_block(above: &str, below: &str) -> Instrument {
     let above_instrument = block_instrument(above);
@@ -305,10 +336,7 @@ pub fn cycle_note(state: &str) -> Option<String> {
 
 /// The `INSTRUMENT` property already written onto a note block's own state
 /// string — read back with the same `Instrument::Harp` default
-/// [`instrument_for_note_block`] would have written for an unresolved block,
-/// so a bare `minecraft:note_block` (this crate's placement default — see
-/// this module's own doc comment on what it does not yet own) behaves exactly
-/// like a freshly placed one over nothing but air.
+/// [`instrument_for_note_block`] would have written for an unresolved block.
 fn instrument_property(state: &str) -> Instrument {
     match crate::redstone::get_str_property(state, "instrument") {
         Some("basedrum") => Instrument::Basedrum,
