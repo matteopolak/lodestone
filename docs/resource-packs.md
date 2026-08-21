@@ -215,9 +215,18 @@ the winner. Example, tracing the space character where a `space` provider and
 a blank ascii cell both declare it:
 
 ```text
-lodestone-assets: TRACE U+0020 provider[0] space advance=4 -> WINS
-lodestone-assets: TRACE U+0020 provider[1] bitmap file=minecraft:font/ascii.png cell_pos=(0,2) advance=1 -> shadowed (an earlier-declared provider already won this codepoint)
+lodestone-assets: TRACE font=minecraft:default U+0020 provider[0] space advance=4 -> WINS
+lodestone-assets: TRACE font=minecraft:default U+0020 provider[1] bitmap file=minecraft:font/ascii.png cell_pos=(0,2) advance=1 -> shadowed (an earlier-declared provider already won this codepoint)
 ```
+
+Every line names the font id being loaded (`font=`), because the tool fires
+once per `FontLoader::load` call and a process typically loads several fonts
+(`minecraft:default` for ordinary HUD text, plus one per distinct
+`Style.font` a message actually uses) — three different `WINS` lines for one
+codepoint is routine and expected when they belong to three different font
+ids, and would be a real same-font contention bug if they ever shared one.
+Read the `font=` field before drawing any conclusion from a multi-line
+trace.
 
 **Provider order across multiple packs is a merge, not an override.**
 `FontLoader::flatten` reads every active pack's own copy of `font/<id>.json`
@@ -235,6 +244,54 @@ the jar's entire provider chain outright — every glyph the jar's `default.json
 would otherwise have supplied for that font, not just the ones the pack's own
 file also names, silently vanished, which is a much bigger blast radius than
 the codepoints the pack actually intended to add.
+
+### Watching a whole drawn string, not one codepoint at a time (`LODESTONE_TEXT_TRACE`)
+
+`LODESTONE_FONT_METRICS` and `LODESTONE_FONT_TRACE` can only ever speak about
+one codepoint's own numbers in isolation — neither can show a *sequence*
+problem (glyphs that should sit apart touching, in a string with several
+different fonts/providers in play), and neither can show a codepoint that
+never reached this layer at all: a spacer character stripped or lost
+somewhere between the packet and the `TextSpan` it should have become prints
+nothing, because there is nothing to print for a glyph that was never in the
+list. `LODESTONE_TEXT_TRACE` is the layer above both: it hooks
+`VanillaFont::draw_resolved`, the one function every styled draw path
+(`draw_legacy`, `draw_spans`, `draw_plain` — chat, tab list, boss bar
+titles, container labels, everything) funnels through, so it needs no
+per-screen wiring of its own.
+
+Set it to `all` to trace every styled string drawn that frame, or to a
+substring the drawn text must contain (checked against the codepoints
+actually reaching this function, after component flattening and bidi
+reordering) to isolate one. Each drawn string prints a `begin`/`end` pair
+bracketing one line per glyph:
+
+```text
+lodestone-shell: TEXT_TRACE begin glyphs=3 x0=87.000 y0=12.000 scale=1.000
+lodestone-shell: TEXT_TRACE cp=U+753C font=nameplates:default provider=bitmap:nameplates/font/backgrounds/b1.png advance=2.000 pen_x_before=87.000 pen_x_after=89.000 drawn_w=1.000
+lodestone-shell: TEXT_TRACE cp=U+2007 font=nameplates:default provider=space advance=0.000 pen_x_before=89.000 pen_x_after=89.000 drawn_w=0.000
+lodestone-shell: TEXT_TRACE cp=U+753D font=minecraft:default provider=unihex advance=9.000 pen_x_before=89.000 pen_x_after=98.000 drawn_w=4.500
+lodestone-shell: TEXT_TRACE end total_width=11.000
+```
+
+Read it left to right: `font=` is which font's cell actually won this
+codepoint — compare it against the `Style.font` a message intended, and
+against a same-codepoint `LODESTONE_FONT_TRACE` run's `WINS` line, to catch
+a font resolving differently at draw time than expected. `provider=` and
+`drawn_w=` are read from *that* same font, so a measure/draw font mismatch
+(a real hypothesis this tool exists to rule in or out, not just an example)
+would show up as `drawn_w` disagreeing with `advance` for no reason a
+fixture would explain. Most directly for a missing-gap report: read
+`pen_x_after` of one line against `pen_x_before` of the next — they must be
+equal, and a run where a glyph's own `drawn_w` reaches past the *next*
+line's `pen_x_before` is the overlap, named exactly. And if the codepoint
+you expected between two panels never appears as its own line at all, it
+did not reach `draw_resolved` — the loss is upstream of this file entirely,
+in component flattening or packet decode, not in anything font-shaped.
+
+Only the main pass is traced, never the drop-shadow copy: the shadow's
+positions are a fixed per-glyph offset from the main pass's own, so tracing
+it would double every line without adding information.
 
 ### The per-server policy (`menu::servers::ServerPackPolicy`)
 
@@ -304,6 +361,10 @@ connect.
 - `LODESTONE_FONT_TRACE` (comma/whitespace-separated codepoints) — per-
   codepoint provider-precedence trace to stderr; see "Which provider
   actually wins a codepoint" above.
+- `LODESTONE_TEXT_TRACE` (`all`, or a substring the drawn text must
+  contain) — per-glyph layout trace to stderr for a whole drawn styled
+  string; see "Watching a whole drawn string, not one codepoint at a time"
+  above.
 
 ## Dependencies
 
