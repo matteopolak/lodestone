@@ -193,6 +193,8 @@
 //! `WidgetSprites` record and `argb_to_rgba`; [`super::focus`] for
 //! [`super::focus::FocusTarget`] and the GLFW key codes.
 
+use crate::hud::vanilla_font::VanillaFont;
+
 use super::focus::{
     ComponentPath, KeyEvent, ScreenRectangle, KEY_BACKSPACE, KEY_DELETE, KEY_END, KEY_HOME,
     KEY_LEFT, KEY_RIGHT,
@@ -266,6 +268,18 @@ pub const TEXT_COLOR_UNEDITABLE_ARGB: i32 = -9_408_400;
 
 /// `EditBox.maxLength`'s initialiser (`EditBox.java`).
 pub const DEFAULT_MAX_LENGTH: usize = 32;
+
+/// A practically-unbounded [`EditBox::max_length`] for a field whose real
+/// vanilla cap is proportional (see [`EditBox::max_pixel_width`]) rather than
+/// a character count — vanilla's own `TextFieldHelper` (the sign editor's
+/// field type, distinct from `EditBox.java`) has no `maxLength` at all, only
+/// its pixel-width `stringValidator`. `usize::MAX` itself is not safe here:
+/// [`EditBox::insert_text`]'s budget arithmetic casts `max_length` to
+/// `isize`, and `usize::MAX as isize` wraps to `-1`. `usize::MAX / 2` casts
+/// to exactly `isize::MAX` on a 64-bit target (both are `2^63 - 1`), so the
+/// budget check never spuriously rejects an insertion — the width check is
+/// what actually governs.
+pub const UNBOUNDED_LENGTH: usize = usize::MAX / 2;
 
 /// `EditBox(Font, Component)`'s default size (`EditBox.java`): 150×20 —
 /// which is `Button.DEFAULT_WIDTH` × `Button.DEFAULT_HEIGHT`.
@@ -405,6 +419,24 @@ pub struct EditBox {
     /// Width of one character, in the units the text is drawn in. See
     /// [`MENU_TEXT_ADVANCE`] and the module docs on why this is not a `Font`.
     pub advance: f32,
+    /// An additional, proportional cap on top of [`Self::max_length`]'s
+    /// character count — real jar-sourced glyph widths in font pixels
+    /// (`VanillaFont::width(s, 1.0)`), checked against the *whole* resulting
+    /// value the way vanilla's `TextFieldHelper.insertText` checks its own
+    /// `stringValidator`: an insertion that would push the value over this
+    /// width is rejected outright, not truncated to fit (unlike
+    /// [`Self::max_length`]'s own truncate-to-fit behaviour — the two fields
+    /// port two different vanilla types, `EditBox.java` and
+    /// `TextFieldHelper.java`, which disagree on this). `None` (the default)
+    /// means no proportional cap — every existing field keeps
+    /// [`Self::max_length`]'s plain character-count behaviour unchanged.
+    /// `menu::sign_edit` is the one caller that sets this, matching
+    /// `AbstractSignEditScreen.init`'s `font.width(s) <=
+    /// sign.getMaxTextLineWidth()`. A missing jar-sourced font (headless/test
+    /// runs) fails **open** — no width check is possible, so nothing is
+    /// rejected on that basis — the same fail-open contract every other
+    /// jar-optional path in this crate has.
+    pub max_pixel_width: Option<f32>,
 }
 
 impl EditBox {
@@ -428,6 +460,7 @@ impl EditBox {
             display_pos: 0,
             hint: None,
             advance: MENU_TEXT_ADVANCE,
+            max_pixel_width: None,
         }
     }
 
@@ -493,6 +526,16 @@ impl EditBox {
     #[must_use]
     pub fn with_max_length(mut self, max_length: usize) -> Self {
         self.set_max_length(max_length);
+        self
+    }
+
+    /// Sets [`Self::max_pixel_width`] as a builder step, for a field declared
+    /// inline. Does not retroactively reject the field's current value —
+    /// same "only gates future insertions" contract vanilla's own
+    /// `TextFieldHelper` has (it has no `setValue`-time check either).
+    #[must_use]
+    pub fn with_max_pixel_width(mut self, max_pixel_width: f32) -> Self {
+        self.max_pixel_width = Some(max_pixel_width);
         self
     }
 
@@ -696,8 +739,22 @@ impl EditBox {
         if text.chars().count() > budget {
             text = text.chars().take(budget).collect();
         }
-        let insertion_len = text.chars().count();
         let (sb, eb) = (self.byte_of(start), self.byte_of(end));
+        // `TextFieldHelper.insertText`'s `stringValidator.test(newPageText)`:
+        // built and checked against the *whole* prospective value, and
+        // rejected outright (not truncated) if it fails — see
+        // `max_pixel_width`'s own doc for why this is a second, different
+        // rule from the character-budget truncation above.
+        if let Some(max_width) = self.max_pixel_width {
+            let mut prospective = self.value.clone();
+            prospective.replace_range(sb..eb, &text);
+            let fits = VanillaFont::shared()
+                .is_none_or(|font| font.width(&prospective, 1.0) <= max_width);
+            if !fits {
+                return;
+            }
+        }
+        let insertion_len = text.chars().count();
         self.value.replace_range(sb..eb, &text);
         self.set_cursor_position(start + insertion_len);
         self.set_highlight_pos(self.cursor_pos);

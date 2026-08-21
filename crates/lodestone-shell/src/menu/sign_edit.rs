@@ -17,23 +17,49 @@
 //!
 //! ## What is deliberately simplified, named rather than hidden
 //!
-//! - **No pseudo-3D sign face.** `AbstractSignEditScreen.extractSign` poses the
-//!   camera-space sign mesh and draws each line in its own rotated/scaled
-//!   transform (`getSignYOffset`, `getSignTextScale`). This shell's menu
-//!   renderer is a flat 2D quad/text pipeline with no such transform, so the
-//!   four lines are drawn as a plain stacked column of [`super::edit_box::EditBox`]
-//!   rows instead — see [`super::render::screens::sign_edit_frame`]. The *text
-//!   flow* (which line is active, Up/Down/Enter navigation, the outbound
-//!   packet) is a faithful port; only the background art is not.
-//! - **No per-line pixel-width cap.** `TextFieldHelper`'s filter in vanilla is
-//!   `font.width(s) <= sign.getMaxTextLineWidth()`, a *proportional* measure.
-//!   [`super::edit_box::EditBox`] has no `Font` dependency by design (see its
-//!   own module doc), so each line keeps the box's ordinary
-//!   [`super::edit_box::DEFAULT_MAX_LENGTH`] character cap instead of a pixel
-//!   budget. That is strictly more permissive than vanilla for wide glyphs and
-//!   strictly less permissive for narrow ones (an all-`i` line hits 32 chars
-//!   here well before it would hit vanilla's pixel budget) — a named fidelity
-//!   gap, not a silent one.
+//! - **No sign-shaped background art — a real, still-missing gap, narrower
+//!   than an earlier version of this doc claimed.** `AbstractSignEditScreen
+//!   .extractSign` poses a *flat 2D* GUI transform
+//!   (`graphics.pose().translate/scale` — **not** a camera-space 3D mesh; an
+//!   earlier reading of this doc said otherwise and was wrong) and draws a
+//!   real `textures/gui/signs/<wood_type>.png` background, then the four
+//!   lines proportionally centred on top (`getSignYOffset`,
+//!   `getSignTextScale`, `extractSignText`). **The caret, selection and
+//!   per-line text *are* already proportionally accurate** — every
+//!   [`super::edit_box::EditBox`] row (this screen's four lines included)
+//!   draws through `super::render::draw::draw_edit_box`, which has measured
+//!   cursor/selection/glyph positions against the real jar-sourced
+//!   [`crate::hud::vanilla_font::VanillaFont`] since before this change (see
+//!   that function's own doc on the "cursor gap grows while typing" bug its
+//!   `font_measure` seam fixed) — so nothing about *this* change needed to
+//!   touch that path. What is still missing is purely visual: `<wood_type>
+//!   .png` lives outside this crate's `GuiAtlas` (which only covers the
+//!   modern sprite-atlas subtree, `textures/gui/sprites/**` — see
+//!   `super::render::draw`'s own "loose `textures/gui/` PNGs outside the
+//!   sprite atlas" note, the same gap `resources.rs` already records
+//!   elsewhere), so there is no texture to blit a sign board from, and the
+//!   four lines still draw as a plain stacked column of bordered
+//!   [`super::edit_box::EditBox`] rows instead of centred over a picture of a
+//!   sign — see [`super::render::screens::sign_edit_frame`]. Closing this
+//!   needs a loose-PNG GUI texture loader (an existing, separately-tracked
+//!   infrastructure gap, not a sign-specific one) before this screen can draw
+//!   through it.
+//! - **The per-line pixel-width cap is real, but uses the plain sign's 90 px
+//!   budget for every sign, including hanging ones.** `TextFieldHelper`'s
+//!   filter in vanilla is `font.width(s) <= sign.getMaxTextLineWidth()` —
+//!   `90` for a plain sign, `60` for a hanging one
+//!   (`lodestone_render::SignKind::max_text_line_width`). This screen's
+//!   [`SignEditOpen`] carries no [`lodestone_render::SignKind`] (the block
+//!   state that would resolve it lives behind `crate::sim`/
+//!   `crate::block_entities`, both outside this file's ownership for this
+//!   change), so [`SignEditState::new`] always applies the wider, plain
+//!   budget via [`super::edit_box::EditBox::with_max_pixel_width`] — a
+//!   hanging sign's editor is up to 1.36× more permissive than vanilla's own
+//!   (the same ratio `docs/block-entity-renderers.md`'s hanging-sign section
+//!   measures for the *render* scale), never stricter. Threading `SignKind`
+//!   through would need `SignEditOpen`/`PendingSignEdit`/`ClientEvent::
+//!   SignEditorOpened`'s handling in `sim/net_apply.rs` to resolve the block
+//!   state the way `crate::block_entities::sign_kind_for_state` already does.
 //! - **No IME preedit overlay, no bidirectional shaping.** Neither exists
 //!   anywhere else in this shell's text widgets either.
 //!
@@ -164,8 +190,15 @@ impl SignEditState {
     /// [`SignEditOpen`].
     #[must_use]
     pub fn new(open: SignEditOpen) -> Self {
-        let mut lines: [EditBox; LINE_COUNT] =
-            std::array::from_fn(|_| EditBox::new(0.0, 0.0, LINE_W, LINE_H, "Sign line"));
+        let mut lines: [EditBox; LINE_COUNT] = std::array::from_fn(|_| {
+            // `super::edit_box::UNBOUNDED_LENGTH`: vanilla's own
+            // `TextFieldHelper` for a sign has no character-count cap at all,
+            // only the pixel-width one — see the module doc's "per-line
+            // pixel-width cap" section for the `SignKind` caveat.
+            EditBox::new(0.0, 0.0, LINE_W, LINE_H, "Sign line")
+                .with_max_length(super::edit_box::UNBOUNDED_LENGTH)
+                .with_max_pixel_width(lodestone_render::SignKind::Plain.max_text_line_width())
+        });
         for (line, value) in lines.iter_mut().zip(open.lines.iter()) {
             line.set_value(value);
         }
